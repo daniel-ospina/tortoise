@@ -150,26 +150,56 @@ def _counter_val(counter) -> int:
     return 0
 
 
-def metrics() -> dict:
+def metrics(sdk=None) -> dict:
     """Return {status, db, falkordb, graph_size, last_ingest, errors, uptime}.
 
     ``db`` is the deep-check result ({ok, latency_ms, error}) added by
     #1384; ``falkordb`` keeps the legacy message form for backward compat.
+
+    #2202 (health-truthful): the probe target is ``sdk`` when the caller
+    passes one, otherwise the module-global handle registered by
+    ``register()``. Serving surfaces pass the SDK whose graph they actually
+    serve (mcp_server.tortoise_health passes the request-scoped team SDK), so
+    the report reflects the REAL graph. The pre-#2202 code probed ONLY the
+    module-global, which the stdio entrypoint registers but the HTTP
+    daemon/hosted surfaces never do — tortoise_health reported
+    degraded/no_sdk_registered while the same daemon's /health (fresh SDK
+    probe of the same DB) said ok.
+
+    A missing probe target (no ``sdk=`` and nothing registered — reachable
+    only from the standalone serve_health server or bare direct calls) is an
+    HONEST intermediate state: ``status="unknown"`` with ``db.ok=None`` —
+    never "degraded". "degraded" means an observed probe FAILURE (a real
+    component failing); an absent registration is an unverified handle, not
+    a broken DB, so reporting degraded there is the lie #2202 removes.
+
+    ``graph_size`` is counted ONLY on a successful probe (review fix, #2202):
+    a dead/hung DB must degrade fast (the bounded RETURN-1 probe, ~1.5s) and
+    never drag an extra unbounded taxonomy round-trip onto the health call,
+    and its failure must not inflate the very ``errors`` field this response
+    reports. A degraded report carries graph_size 0 with the probe error.
     """
-    if _sdk is None:
-        db = {"ok": False, "latency_ms": 0.0, "error": "no_sdk_registered"}
+    target = sdk if sdk is not None else _sdk
+    if target is None:
+        db = {"ok": None, "latency_ms": 0.0, "error": "no_sdk_registered"}
     else:
-        db = probe_db(_sdk)
+        db = probe_db(target)
+    if db["ok"] is True:
+        status = "ok"
+    elif db["ok"] is False:
+        status = "degraded"
+    else:
+        status = "unknown"
     graph_size = 0
     try:
-        if _sdk:
-            graph_size = sum(_sdk.taxonomy().values())
+        if target is not None and db["ok"] is True:
+            graph_size = sum(target.taxonomy().values())
     except Exception:
         record_error()
     return {
-        "status": "ok" if db["ok"] else "degraded",
+        "status": status,
         "db": db,
-        "falkordb": "connected" if db["ok"] else db["error"] or "unreachable",
+        "falkordb": "connected" if db["ok"] is True else db["error"] or "unreachable",
         "graph_size": graph_size,
         "last_ingest": _last_ingest,
         "errors": _counter_val(ERROR_COUNT),

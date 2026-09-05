@@ -158,7 +158,7 @@ Running Tortoise yourself and moving to hosted? The primary path is **`tortoise 
    ```
 
    Re-importing the same artifact is idempotent (`{"imported":false,"already":true}`); a failed/tampered artifact is quarantined (422) and never touches the live graph.
-5. **Verify parity** — the import response's `restored` counts should match your source graph; `tortoise team info` and `tortoise context` confirm the team and its memory digest, and the MCP tools `tortoise_check_structure` (chain integrity) and `tortoise_summarize_structure` (counts per gate) confirm the imported graph. Once hosted reaches parity, decommission the daemon at your leisure.
+5. **Verify parity** — the import response's `restored` counts should match your source graph; `tortoise team info` and `tortoise context` confirm the team and its memory digest, and the MCP tools `tortoise_check_structure` (chain integrity) and `tortoise_summarize_structure` (counts: total points + per-gate breakdown) confirm the imported graph. Once hosted reaches parity, decommission the daemon at your leisure.
 
 ### Fallback: manual replay
 

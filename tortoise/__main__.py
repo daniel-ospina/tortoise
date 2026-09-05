@@ -1,9 +1,45 @@
 """CLI entry point: python -m tortoise <command>"""
-from __future__ import annotations  # noqa: I001
+from __future__ import annotations
 
 import argparse
 import sys
 from pathlib import Path
+
+# #2201: single source of truth for markdown discovery. The "Found N markdown
+# files" count announced during `tortoise init` and `tortoise onboard` (whose
+# step-3 index runs the REAL indexer, so the indexer's own line is the one
+# announce) comes from the SAME walk the indexer performs — count == walk
+# always. In-repo paths beneath a _NON_CONTENT_DIRS component are excluded:
+# they are never repo content, so counting them made the onboard announce
+# hundreds of files it would never index (652 announced vs 527 walked in the
+# #2201 repro). Exclusion matches in-repo components only — never checkout
+# ancestors.
+
+# #2201: directory names that never hold repo content. Matched as in-repo
+# path COMPONENTS only (see _markdown_files) — `docs/venv/` is dropped while
+# a repo merely LIVING under an ancestor dir named venv/ is not.
+_NON_CONTENT_DIRS = frozenset({".venv", "venv", ".git", "node_modules", "__pycache__"})
+
+
+def _markdown_files(root: Path | str) -> list[Path]:
+    """Sorted *.md files under `root` that the indexer will walk (and
+    init/onboard announce).
+
+    Discoverability is the membership criterion, not readability — unreadable
+    entries (e.g. a dangling symlink) are deliberately retained and skipped
+    at read time (#2201); pre-filtering them here would silently re-break
+    the count == walk invariant. Excludes anything beneath a non-content
+    directory (_NON_CONTENT_DIRS — component match against in-repo paths
+    only, so `docs/venv/` is dropped the way the indexer always dropped it,
+    while `docs/venv-setup/` is kept). Used by the init/onboard counts AND
+    the indexer walk so the announced count always matches the walk.
+    """
+    root = Path(root)
+    return sorted(
+        f for f in root.rglob("*.md")
+        if not _NON_CONTENT_DIRS.intersection(f.relative_to(root).parts)
+    )
+
 
 def _cmd_rebuild(args):
     print(f"Rebuilding from {args.dir} → {args.db}")
@@ -540,6 +576,20 @@ def _cmd_init(args):
             from tortoise.sdk import _mark_embedded_opened
             _mark_embedded_opened(db_path)
             print(f"  ✅ Embedded mode initialized at {db_path} (single-writer, eval only — docker compose for durable multi-writer)")
+            # #2200: a URI-less run that lands on the canonical embedded
+            # default is a SILENT fallback onto the eval-only engine — gate
+            # it loudly (stderr, EMBEDDED_EVAL_BANNER precedent #942) instead
+            # of proceeding as if a durable system came up. Explicit embedded
+            # choices (--path / TORTOISE_DB_PATH) keep the eval-only label on
+            # the success line but are not this fallback.
+            if (_is_embedded_default_fallback(db_path, getattr(args, "path", None))
+                    and getattr(args, "from_onboard", False) is not True):
+                # #2200: the standalone gate is suppressed when _cmd_onboard
+                # runs init in-process (from_onboard=True) — the wizard's
+                # completion gate prints the notice once, next to
+                # "Onboarding complete."
+                from tortoise._embedded import EMBEDDED_FALLBACK_NOTICE
+                print(EMBEDDED_FALLBACK_NOTICE, file=sys.stderr)
             graph_ready = True
         except ImportError:
             # Reachable when falkordblite is actually missing: tortoise/__init__
@@ -618,7 +668,9 @@ def _cmd_init(args):
         )
         if result.returncode == 0:
             repo_root = result.stdout.strip()
-            md_count = len(list(__import__("pathlib").Path(repo_root).rglob("*.md")))
+            # #2201: share the indexer's discovery so the count excludes .venv
+            # and other non-content dirs (previously counted everything).
+            md_count = len(_markdown_files(repo_root))
             auto_index = getattr(args, 'yes', False)
             if md_count > 0:
                 if auto_index:
@@ -2730,6 +2782,44 @@ def _projection_for(target: str):
     return FalkorProjection(path=target)
 
 
+def _is_embedded_default_fallback(target: str,
+                                  explicit_path: str | None,
+                                  db_path_env_set: bool | None = None) -> bool:
+    """True when a resolved target is the UNCHOSEN canonical embedded default.
+
+    #2200: the silent-default case — TORTOISE_DB_URI unset and no explicit
+    --path / TORTOISE_DB_PATH, so init/onboard land on embedded FalkorDBLite
+    (single-writer, eval only) without the user picking it. Explicit embedded
+    choices (--path, TORTOISE_DB_PATH, or a set TORTOISE_DB_URI — including
+    the legacy file-path form resolve_db_path treats as embedded) are labeled
+    eval-only by init's success line but are NOT this fallback — the user
+    chose them (quickstart Option C).
+
+    db_path_env_set: pass a SNAPSHOT taken before init ran. init's embedded
+    branch records the resolved path with os.environ.setdefault(...) (#715
+    conf 60), so an onboard completion gate reading the LIVE env after init
+    would see the var as set and misjudge a default fallback as an explicit
+    choice (the completion gate would never fire on a real run). None = read
+    the live env — the _cmd_init call site, where the gate runs BEFORE that
+    setdefault. Do not drift.
+    """
+    import os  # noqa: I001
+    from tortoise.config import is_db_uri
+
+    if is_db_uri(target):
+        return False
+    if explicit_path:
+        return False
+    # A SET TORTOISE_DB_URI is an explicit choice even when it carries no
+    # supported scheme (resolve_db_path treats an absolute file path there as
+    # embedded, backward compat) — "TORTOISE_DB_URI is unset" would be a lie.
+    if (os.environ.get("TORTOISE_DB_URI") or "").strip():
+        return False
+    if db_path_env_set is None:
+        db_path_env_set = bool((os.environ.get("TORTOISE_DB_PATH") or "").strip())
+    return not db_path_env_set
+
+
 def _cmd_onboard(args) -> int:
     """Guided onboarding: init → index → demo → doctor.
 
@@ -2737,6 +2827,7 @@ def _cmd_onboard(args) -> int:
     Non-interactive — skips prompts, just runs.
     Idempotent — re-running skips already-done steps.
     """
+    import os as _os
     import subprocess as _sp
     import sys as _sys
     from pathlib import Path
@@ -2764,9 +2855,19 @@ def _cmd_onboard(args) -> int:
     # #715 P2 conf 70: no_index=True disables init's own background
     # auto-index — onboard indexes ONCE, inline in step 3 below. Without it
     # a git repo gets indexed twice (init spawn + inline run).
+    # #2200: snapshot whether TORTOISE_DB_PATH was set BEFORE init runs —
+    # init's embedded branch records the resolved path via
+    # os.environ.setdefault(TORTOISE_DB_PATH), which would make the live env
+    # look user-chosen by the time the completion gate below reads it. The
+    # completion gate must distinguish a genuine default fallback (URI
+    # unset, nothing chosen) from an explicit embedded choice (Option C;
+    # --path is handled by the helper's explicit_path argument).
+    embedded_db_path_env_set = bool(
+        (_os.environ.get("TORTOISE_DB_PATH") or "").strip())
     banner("Initialize graph")
     rc = _cmd_init(argparse.Namespace(
-        path=getattr(args, 'path', None), yes=True, no_index=True))
+        path=getattr(args, 'path', None), yes=True, no_index=True,
+        from_onboard=True))
     if rc != 0:
         print("  ❌ Init failed")
         return rc
@@ -2780,9 +2881,13 @@ def _cmd_onboard(args) -> int:
     )
     if result.returncode == 0:
         repo_root = result.stdout.strip()
-        md_count = len(list(Path(repo_root).rglob("*.md")))
-        if md_count > 0:
-            print(f"  Found {md_count} markdown files. Indexing…")
+        # #2201: count only what the indexer will walk — .venv and other
+        # non-content dirs are excluded (previously inflated the count).
+        md_files = _markdown_files(repo_root)
+        if md_files:
+            # The inline indexer below announces its OWN "Found N markdown
+            # files. Indexing…" (same shared discovery) — the onboard path
+            # must have exactly ONE announce, so no duplicate count line here.
             # #1362: frontmatter validation is OPTIONAL + warn-only — surface
             # the shared flag so onboard users know the gate is on.
             from tortoise.frontmatter_validator import validation_enabled
@@ -2842,6 +2947,17 @@ def _cmd_onboard(args) -> int:
 
     print(f"\n{'='*50}")
     print("Onboarding complete.")
+    # #2200: a no-Docker wizard run that defaulted onto the canonical
+    # embedded path must never read as a durable setup — gate the completion
+    # the same way init gates the fallback (the eval-only engine is a
+    # clearly-labeled fallback, never the silent default). Explicit embedded
+    # choices keep init's eval-only success label; no extra gate here.
+    if _is_embedded_default_fallback(
+            db_target, getattr(args, "path", None),
+            db_path_env_set=embedded_db_path_env_set):
+        from tortoise._embedded import EMBEDDED_FALLBACK_NOTICE
+        print()
+        print(EMBEDDED_FALLBACK_NOTICE)
     print()
     print("Tortoise is ready. Agents can now:")
     print("  • Query the graph via tortoise_suggest_entry_points()")
@@ -3649,13 +3765,10 @@ def _cmd_index_github(args):
             print(f"Clone failed: {result.stderr}", file=sys.stderr)
             return 1
 
-    # Walk .md files
-    md_files = sorted(repo_path.rglob("*.md"))
-    # ponytail: skip node_modules, .git, venv
-    md_files = [f for f in md_files if ".git/" not in str(f)
-                and "node_modules/" not in str(f)
-                and "venv/" not in str(f)
-                and "__pycache__" not in str(f)]
+    # Walk .md files — shared discovery (#2201): skips non-content dirs
+    # (.venv, venv, .git, node_modules, __pycache__) the same way the
+    # init/onboard counts do, so what we announce is what we read.
+    md_files = _markdown_files(repo_path)
     total = len(md_files)
     if total == 0:
         print("No markdown files found.")
@@ -3710,11 +3823,19 @@ def _cmd_index_github(args):
     # Users can swap to LLM models via tortoise ingest for richer extraction.
     point_model = MockModel("cheap")
     relation_model = MockModel("reason")
-    indexed, skipped, errors = 0, 0, 0
+    indexed, skipped, unreadable, errors = 0, 0, 0, 0
 
     for i, fp in enumerate(md_files, 1):
         rel = fp.relative_to(repo_path)
-        raw_text = fp.read_text(encoding="utf-8")
+        try:
+            raw_text = fp.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as e:
+            # #2201: one unreadable file (dangling symlink, permission error,
+            # bad encoding) must never abort the whole run — skip it with a
+            # warning and keep indexing the rest.
+            unreadable += 1
+            print(f"  [{i}/{total}] {rel}… ⚠ skipped (unreadable: {e})", flush=True)
+            continue
         # ponytail: strip frontmatter before hashing — extractor may add
         # frontmatter, which would change the hash on the next run.
         text_for_hash = raw_text
@@ -3761,7 +3882,8 @@ def _cmd_index_github(args):
         pass
 
     print()
-    print(f"Done: {indexed} indexed, {skipped} skipped, {errors} errors")
+    print(f"Done: {indexed} indexed, {skipped} skipped, "
+          f"{unreadable} unreadable, {errors} errors")
     if indexed > 0:
         print(f"  Log: {log_path}")
         print(f"  Graph: query with tortoise_suggest_entry_points()")  # noqa: F541
@@ -3769,7 +3891,18 @@ def _cmd_index_github(args):
     # Cleanup (only if we cloned)
     if tmpdir:
         __import__("shutil").rmtree(tmpdir, ignore_errors=True)
-    return 0 if errors == 0 else 1
+    # #32/#39 lineage: index failures must stay VISIBLE to callers/CI — the
+    # onboard step-3 gates "Onboarding complete." on this rc (#39 killed the
+    # silent-failure false-green). An all-unreadable run (0 indexed but
+    # unreadable files skipped) is the same failure class #2201 fixes, so it
+    # must exit 1 too; a partial run (some indexed) keeps exit 0. `skipped >
+    # 0` keeps an idempotent RE-run green: on re-runs the already-indexed
+    # skips prove prior success (a repo with a permanent unreadable file
+    # indexes 0 on re-run — readable docs are hash-skipped — yet must return
+    # the same rc 0 its first run returned). An all-unreadable FRESH run has
+    # skipped == 0 and still exits 1. No-claims skips are the pre-existing
+    # "nothing to extract" success class, unchanged from before #2201.
+    return 0 if errors == 0 and (indexed > 0 or unreadable == 0 or skipped > 0) else 1
 
 
 def _cmd_doctor(args):
@@ -3877,51 +4010,107 @@ def _cmd_doctor(args):
     # can never diverge, #720 conf 78). URI → from_uri projection, plain
     # path → embedded projection via _projection_for.
     if target is not None:
-        try:
-            from tortoise.sdk import TortoiseSDK
-            sdk = TortoiseSDK()
-            sdk._proj = _projection_for(target)
+        # #2204 pre-init guard: an EMBEDDED target with no Tortoise DB FILE is
+        # a never-initialized machine (e.g. `tortoise init` never ran). Probe-
+        # skipping is what makes doctor side-effect-free here: pre-#2204,
+        # starting the embedded server on a missing data dir printed a raw
+        # "*** FATAL CONFIG FILE ERROR" (redislite writes `dir <db-parent>`
+        # into its config); since the choke-point makedirs fix (#2204, in
+        # tortoise/__init__.py) that failure mode became a SILENT dir+DB
+        # creation — which is exactly the side effect the guard must prevent
+        # on a machine the user has not set up.
+        #
+        # "Initialized" = the DB FILE exists (`tortoise init` creates both
+        # the data dir and the file): a leftover dir with no DB file is still
+        # never-initialized, and probing it would silently spawn the server
+        # and mint a fresh tortoise.db as a side effect of a diagnostic
+        # (#720 review round 4 — doctor must not create state on a target it
+        # only inspects).
+        #
+        # Verdict split (review #2204): a missing DEFAULT target is the
+        # expected fresh-machine first-run state (⚠️, rc 0 — "doctor passes
+        # pre-init"), while a missing EXPLICITLY CONFIGURED target
+        # (TORTOISE_DB_URI / TORTOISE_DB_PATH / --db / --path resolved
+        # somewhere other than the canonical default) keeps the pre-#2204
+        # loud failure (❌, rc 1) — a typo'd/renamed path must never read as
+        # a healthy first-run, it reads as a config error with the target
+        # named.
+        _initialized = True
+        if not is_db_uri(target) and target != ":memory:":
             try:
-                status = sdk.status()
-                points = status.get("counts", {}).get("Point", 0)
-                total = status.get("total_entities", 0)
-                if points > 0:
-                    results.append(("Graph: health", "✅", f"{points} Points, {total} entities"))
-                else:
-                    results.append(("Graph: health", "⚠️", "0 Points — graph is empty (expected for new setups)"))
-                # #280 check 4: session-indexing health runs HERE, while the
-                # projection is still open — #720's finally-close would kill
-                # the embedded server before the session check could connect.
-                try:
-                    _chk4 = sdk.session_index_health()
-                    _fc = _chk4["file_count"]
-                    if _fc == 0:
-                        results.append(("Session indexing", "⚠️",
-                                        "corpus empty — nothing indexed (expected for new setups)"))
+                _p = Path(target).expanduser()
+                if not _p.is_file():
+                    _initialized = False
+                    if not _p.parent.is_dir():
+                        _missing = f"missing data dir {_p.parent}"
                     else:
-                        _delta = len(_chk4["unindexed"]) + len(_chk4["stale"])
-                        _dup = (f" — {len(_chk4.get('duplicates', []))} duplicate "
-                                f"sessionId(s) surfaced (merge/remove copies)"
-                                if _chk4.get("duplicates") else "")
-                        if _delta == 0:
-                            results.append(("Session indexing", "✅",
-                                            f"{_fc} corpus files all indexed "
-                                            f"({_chk4['indexed_events']} AgentSession Events total){_dup}"))
+                        _missing = (f"data dir {_p.parent} exists but no "
+                                    f"Tortoise DB file — `tortoise init` never "
+                                    f"completed")
+                else:
+                    _missing = None
+            except Exception:
+                # unparseable path — let the real probe below surface it
+                _initialized = True
+                _missing = None
+        if not _initialized:
+            from tortoise.config import DEFAULT_DB_PATH, _abs
+            _is_default_target = target == _abs(DEFAULT_DB_PATH)
+            _icon = "⚠️" if _is_default_target else "❌"
+            _detail = (
+                f"not set up yet — no Tortoise DB at {target}"
+                + (f" ({_missing})" if _missing else "")
+                + ". Run `tortoise init` to create it, or point "
+                "doctor at your setup with TORTOISE_DB_URI / "
+                "TORTOISE_DB_PATH / --db."
+            )
+            results.append(("Graph: health", _icon, _detail))
+        else:
+            try:
+                from tortoise.sdk import TortoiseSDK
+                sdk = TortoiseSDK()
+                sdk._proj = _projection_for(target)
+                try:
+                    status = sdk.status()
+                    points = status.get("counts", {}).get("Point", 0)
+                    total = status.get("total_entities", 0)
+                    if points > 0:
+                        results.append(("Graph: health", "✅", f"{points} Points, {total} entities"))
+                    else:
+                        results.append(("Graph: health", "⚠️", "0 Points — graph is empty (expected for new setups)"))
+                    # #280 check 4: session-indexing health runs HERE, while the
+                    # projection is still open — #720's finally-close would kill
+                    # the embedded server before the session check could connect.
+                    try:
+                        _chk4 = sdk.session_index_health()
+                        _fc = _chk4["file_count"]
+                        if _fc == 0:
+                            results.append(("Session indexing", "⚠️",
+                                            "corpus empty — nothing indexed (expected for new setups)"))
                         else:
-                            results.append(("Session indexing", "❌",
-                                            f"{_fc} files vs {_chk4['indexed_events']} Events — {_delta} unindexed/stale "
-                                            f"(run `tortoise index sessions`){_dup}"))
-                except Exception as _e:
-                    results.append(("Session indexing", "⚠️",
-                                    f"check unavailable: {str(_e)[:60]}"))
+                            _delta = len(_chk4["unindexed"]) + len(_chk4["stale"])
+                            _dup = (f" — {len(_chk4.get('duplicates', []))} duplicate "
+                                    f"sessionId(s) surfaced (merge/remove copies)"
+                                    if _chk4.get("duplicates") else "")
+                            if _delta == 0:
+                                results.append(("Session indexing", "✅",
+                                                f"{_fc} corpus files all indexed "
+                                                f"({_chk4['indexed_events']} AgentSession Events total){_dup}"))
+                            else:
+                                results.append(("Session indexing", "❌",
+                                                f"{_fc} files vs {_chk4['indexed_events']} Events — {_delta} unindexed/stale "
+                                                f"(run `tortoise index sessions`){_dup}"))
+                    except Exception as _e:
+                        results.append(("Session indexing", "⚠️",
+                                        f"check unavailable: {str(_e)[:60]}"))
 
-            finally:
-                # conf 52: close the projection in BOTH branches — the URI
-                # branch's from_uri projection must not leak.
-                if sdk._proj:
-                    sdk._proj.close()
-        except Exception as e:
-            results.append(("Graph: health", "❌", str(e)[:60]))
+                finally:
+                    # conf 52: close the projection in BOTH branches — the URI
+                    # branch's from_uri projection must not leak.
+                    if sdk._proj:
+                        sdk._proj.close()
+            except Exception as e:
+                results.append(("Graph: health", "❌", str(e)[:60]))
 
     # 5. MCP server
     mcp_running = False
@@ -4878,7 +5067,12 @@ def _cmd_serve_http(args) -> int:
     wrapper = FastAPI(lifespan=_local_lifespan)
     wrapper.mount("/mcp", app)
     print(f"Tortoise MCP (streamable-http) → http://{args.bind}:{args.port}/mcp")
-    uvicorn.run(wrapper, host=args.bind, port=args.port, log_level="info")
+    # #2203: bound the graceful drain so a `kill`/docker-stop SIGKILL at ~10s
+    # cannot preempt the interpreter-exit atexit teardown that closes an
+    # embedded redis-server child (long-lived MCP SSE streams would otherwise
+    # hold an unbounded drain open).
+    uvicorn.run(wrapper, host=args.bind, port=args.port, log_level="info",
+                timeout_graceful_shutdown=5)
     return 0
 
 
@@ -5277,6 +5471,14 @@ def main(argv: list[str] | None = None) -> int:
         p.print_usage()
         print(f"error: {e}", file=sys.stderr)
         return 2
+    # #2203: terminating signals (SIGTERM/SIGHUP, plus SIGINT when the
+    # process started with it ignored — non-tty stdin) must close the CLI's
+    # embedded redis-server children before the parent dies (killed
+    # daemon/stdio server, `index github` Ctrl-C/kill). The guard's handler
+    # closes every live embedded server then re-raises the signal.
+    # Idempotent; a no-op for commands that never open an embedded server.
+    from tortoise.embedded_lifecycle import install_embedded_signal_cleanup
+    install_embedded_signal_cleanup()
     if args.cmd == "rebuild":
         _cmd_rebuild(args)
         return 0

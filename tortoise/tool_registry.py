@@ -108,7 +108,12 @@ TOOL_REGISTRY: list[ToolDefinition] = [
     ),
     ToolDefinition(
         name="tortoise_summarize_structure",
-        description="Count points per Gate (by pointKind). Returns {gateN_*, total}.",
+        description="Structure summary — points on the graph across ALL point "
+                    "kinds (#2205). Returns {total, operators, gate0_jtbds.."
+                    "gate4_requirements, gate_total}: total counts non-operator "
+                    "Points of every kind (not just the product-strategy gates), "
+                    "operators is reported separately, gate keys stay the "
+                    "gate-kind breakdown, gate_total is the gate subtotal.",
         annotations=_ro(),
         http_policy=True,
         sdk_method="summarize_structure",
@@ -1042,6 +1047,10 @@ class FastMCPAdapter:
     this adapter wraps each via FunctionTool.from_function() and registers
     them through mcp.add_tool().
 
+    Registration is additive-only: entries whose name is ALREADY on the mcp
+    instance (stale @mcp.tool() decorators, other registration paths) are
+    skipped, never replaced — see register_all (#2204 dedupe).
+
     Usage (in mcp_server.py):
         adapter = FastMCPAdapter(mcp)
         adapter.register_all(TOOL_REGISTRY, _handler_map)
@@ -1051,7 +1060,15 @@ class FastMCPAdapter:
         self._mcp = mcp
 
     def register_all(self, registry: list[ToolDefinition], handlers: dict[str, Callable]) -> None:
-        """Register every registry entry as an MCP tool.
+        """Register every registry entry as an MCP tool, skipping names that
+        are already registered on the mcp instance.
+
+        The skip (#2204 dedupe) covers stale @mcp.tool() decorator
+        registrations and any other registration path that ran first —
+        fastmcp's default on_duplicate="warn" would otherwise log
+        "Component already exists" and REPLACE the existing tool at import
+        time. Skipped entries are still served; they are simply served by
+        whichever registration happened first.
 
         Args:
             registry: TOOL_REGISTRY list of ToolDefinition entries.
@@ -1070,6 +1087,26 @@ class FastMCPAdapter:
             handler = handlers.get(entry.name)
             if handler is None:
                 continue
+            # #2204: skip names already registered on the mcp instance (stale
+            # @mcp.tool() decorators / other registration paths). fastmcp's
+            # default on_duplicate="warn" logs "Component already exists" and
+            # REPLACES — double registration at import is pure noise, and
+            # replacing a live tool is never intended when the first
+            # registration came from an identical decorator. Sync existence
+            # check via the local provider's component store (get_tool is
+            # async; _components is keyed "tool:<name>@..." — scanning by
+            # component name avoids the key format). getattr-guarded so an
+            # upstream layout change degrades to a duplicate warning, never
+            # a crash.
+            _provider = getattr(self._mcp, "_local_provider", None)
+            _components = getattr(_provider, "_components", None)
+            if _components is not None:
+                _dup = any(
+                    getattr(c, "name", None) == entry.name
+                    for c in _components.values()
+                )
+                if _dup:
+                    continue
             tool = FunctionTool.from_function(
                 handler,
                 name=entry.name,

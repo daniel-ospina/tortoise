@@ -278,3 +278,211 @@ def _gc_close(db_ref) -> None:
         client._cleanup()
     except Exception:
         pass
+
+
+# ── Issue #2203: terminating-signal teardown guard ────────────────────────
+#
+# redislite's redis-server child DAEMONIZES at startup (`daemonize yes` in
+# the config redislite writes; empirically ppid=1 in its own session), so it
+# is never in the Python parent's process group: a terminating signal that
+# kills the parent can never reach the server by process-group delivery.
+# Python's DEFAULT disposition for SIGTERM/SIGHUP is immediate process death
+# WITHOUT running atexit handlers — and SIGINT is IGNORED for the whole
+# process lifetime when the interpreter started with stdin not a tty
+# (CPython sets SIG_IGN; the reported "tortoise index github ignores
+# Ctrl-C/kill -INT" symptom). Every OTHER exit path (normal return, sys.exit,
+# uncaught exception, interactive KeyboardInterrupt) runs the registered
+# atexit teardown — redislite's own `_cleanup` and the
+# register_atexit_close / register_gc_close seams above — which shuts each
+# server down with last-client semantics (SAVE on the last client,
+# disconnect-only for a shared server). A process killed with
+# SIGTERM/SIGHUP, or SIGINT-ed while ignored, skipped all of it and orphaned
+# its redis-server: the 2026-09-03 first-run trial left orphans outliving
+# (a) the selfhost daemon (SIGTERM), (b) the stdio MCP server (client
+# disconnect → harness kill), and (c) `tortoise index github`. Orphans hold
+# the single-writer embedded file for the next run.
+#
+# The guard below closes the gap. It does NOT raise SystemExit from the
+# handler (the obvious "unwind to atexit" move): inside an asyncio event
+# loop the raised exception can land inside a task and be swallowed as a
+# never-retrieved task exception, leaving the server process running with
+# its embedded server still open (observed against the MCP stdio transport).
+# Instead the handler (1) closes every live embedded client INLINE — the
+# pool lock redis-py uses is an RLock, so a handler preempting the main
+# thread mid-command re-acquires it reentrantly instead of deadlocking, and
+# redislite's cleanup falls back to pid SIGTERM/SIGKILL if the shutdown
+# command errors — then (2) restores the default disposition and re-raises
+# the signal, so the process dies with the conventional signal semantics
+# (WIFSIGNALED; shell status 143/130/129) regardless of what the preempted
+# code was doing. No reliance on unwinding, no asyncio task to swallow the
+# exception, no dependency on atexit running.
+#
+# To close the clients the guard tracks them in a process-wide weak registry
+# (`register_embedded_client`, called from the guarded tortoise.FalkorDB
+# subclass at construction). Weak refs keep the #1475 close-on-GC semantics
+# intact (a leaked client is still collectable; the finalizer still closes
+# it) — the registry is only a liveness view, not a pin.
+#
+# Coverage (idempotent install — call from the entry points that own the
+# process; NEVER from client construction — see
+# tests/test_projection_lifecycle.py::test_no_per_instance_signal_handlers):
+#   SIGTERM, SIGHUP — replaced while still at the default disposition. A
+#       host that installed its OWN handler keeps it during its run — e.g.
+#       uvicorn replaces SIGTERM with its graceful-shutdown handler while
+#       serving, then RESTORES the pre-existing disposition (this guard) and
+#       re-raises the signal at the end of the drain, so the embedded close
+#       still runs before the final death. The drain is bounded by
+#       timeout_graceful_shutdown so a `docker stop` cannot SIGKILL the
+#       process before that close finishes.
+#   SIGINT — only when the interpreter started with it IGNORED. Interactive
+#       SIGINT keeps raising KeyboardInterrupt, which reaches atexit.
+#
+# Residual boundary (unchanged by design): SIGKILL and hard crashes cannot
+# run Python, so nothing in-process can clean up — those orphans are the
+# reaper's job (embedded_reaper + the conftest/CI hygiene sweeps, #2052;
+# reaper pidfile-identity work, #1448).
+import signal as _signal  # noqa: E402
+import weakref as _weakref_registry  # noqa: E402
+
+_TERM_HANDLED_SIGNALS = ("SIGTERM", "SIGHUP")
+_signal_guard_installed = False
+# Live embedded redislite clients this process opened (weak: never pins a
+# client — #1475 close-on-GC stays intact; dead referents vanish on
+# iteration). Registered by tortoise.FalkorDB.__init__ (the guarded subclass
+# every embedded construction funnels through).
+_embedded_clients: _weakref_registry.WeakSet = _weakref_registry.WeakSet()
+
+
+def register_embedded_client(client) -> None:
+    """Track a live embedded redislite client for the #2203 signal teardown.
+
+    Weak (WeakSet) — registration must never pin the client alive (that
+    would defeat the #1475 close-on-GC finalizer for leaked clients). Called
+    from the guarded ``tortoise.FalkorDB`` subclass after the server starts;
+    never registers host/port (server-mode) constructions — they have no
+    redis child to reap and their pools belong to a live remote server.
+    """
+    try:  # noqa: SIM105
+        _embedded_clients.add(client)
+    except TypeError:
+        pass  # unweakrefable client — teardown just skips it
+
+
+def close_embedded_clients() -> int:
+    """Close every live embedded client this process opened (issue #2203).
+
+    Routes each client through the SAME idempotent seams normal teardown
+    uses (redislite last-client semantics: the final close shuts the server
+    down with a save; shared servers survive for their other clients):
+      1. the #1371 ephemeral fast-close (NOSAVE, only under
+         TORTOISE_FAST_ATEXIT=1 for test-tree servers) and
+      2. the guarded subclass ``_t_close`` (``FalkorDB.close`` →
+         redislite ``_cleanup``) — the raw-client fallback mirrors that.
+    Signal-handler-safe in practice: redis-py's pool lock is an RLock, so a
+    handler that preempted the main thread mid-command re-enters instead of
+    deadlocking, and ``_cleanup`` escalates to pid SIGTERM/SIGKILL when the
+    shutdown command itself errors. Never raises. Returns the number of
+    clients closed.
+    """
+    closed = 0
+    for client in list(_embedded_clients):
+        # The registry holds the guarded ``tortoise.FalkorDB`` wrapper; the
+        # #1371 fast-close probe reads ``dbdir``/``socket_file`` off the
+        # INNER redislite client (the wrapper has neither — it only owns
+        # ``close()`` → ``client._cleanup()``).
+        inner = getattr(client, "client", client)
+        try:
+            if atexit_fast_close(inner):
+                closed += 1
+                continue
+        except Exception:
+            pass  # probe/gating failure -> fall through to the normal close
+        t_close = getattr(client, "_t_close", None)
+        if t_close is not None:
+            try:  # noqa: SIM105
+                t_close()
+            except Exception:
+                pass  # teardown context: never raise
+            closed += 1
+            continue
+        cleanup = getattr(client, "_cleanup", None)
+        if cleanup is not None:
+            try:  # noqa: SIM105
+                cleanup()
+            except Exception:
+                pass
+            closed += 1
+    return closed
+
+
+def _embedded_term_handler(signum, _frame) -> None:
+    """Terminating-signal handler (issue #2203).
+
+    Restore the default disposition FIRST (a second signal during teardown
+    means "hurry up and die" — instant default death), then close every
+    live embedded client (see close_embedded_clients — inline, never
+    raises), then re-raise the original signal so the process dies with the
+    conventional signal semantics (WIFSIGNALED; shell status 128+signum)
+    no matter what the preempted code was doing. The re-raised signal is
+    blocked while the handler runs (Python installs handlers without
+    SA_NODEFER), so the default-action death lands the moment this handler
+    returns.
+    """
+    try:  # noqa: SIM105
+        _signal.signal(signum, _signal.SIG_DFL)
+    except (ValueError, OSError, RuntimeError):
+        pass
+    try:
+        close_embedded_clients()
+    finally:
+        try:
+            os.kill(os.getpid(), signum)
+        except (OSError, ValueError):
+            # Signal delivery failed (e.g. signum became invalid) — never
+            # leave the process alive after a termination request.
+            os._exit(128 + signum)
+
+
+def install_embedded_signal_cleanup() -> bool:
+    """Wire terminating signals to embedded-server teardown (issue #2203).
+
+    Installs the #2203 guard on the signals whose DEFAULT disposition would
+    kill the process without closing its embedded redis-server children:
+      - SIGTERM / SIGHUP: replaced only while still SIG_DFL — a host that
+        installed its own handler keeps it (its graceful path also ends in
+        interpreter exit → atexit).
+      - SIGINT: replaced only when the interpreter started with SIG_IGN
+        (stdin not a tty) — a real Ctrl-C on a tty keeps raising
+        KeyboardInterrupt (which already reaches atexit).
+
+    Idempotent per process. Safe to call from every owning entry point (CLI
+    main, MCP stdio main, selfhost daemon import) — the second call no-ops.
+    Never raises; returns True when at least one disposition was replaced
+    (False when everything was already handled or the platform lacks the
+    signal).
+    """
+    global _signal_guard_installed
+    if _signal_guard_installed:
+        return False
+
+    replaced = False
+    for name in _TERM_HANDLED_SIGNALS:
+        signum = getattr(_signal, name, None)
+        if signum is None:
+            continue  # platform lacks the signal (e.g. SIGHUP on Windows)
+        try:
+            if _signal.getsignal(signum) in (_signal.SIG_DFL, None):
+                _signal.signal(signum, _embedded_term_handler)
+                replaced = True
+        except (ValueError, OSError, RuntimeError):
+            pass  # non-main thread or unsupported — skip, never raise
+    # SIGINT: only the ignored-at-startup case (non-tty). Interactive SIGINT
+    # (KeyboardInterrupt) is left alone — it already reaches atexit.
+    try:
+        if _signal.getsignal(_signal.SIGINT) is _signal.SIG_IGN:
+            _signal.signal(_signal.SIGINT, _embedded_term_handler)
+            replaced = True
+    except (ValueError, OSError, RuntimeError):
+        pass
+    _signal_guard_installed = True
+    return replaced

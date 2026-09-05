@@ -175,3 +175,35 @@ class TestIssueInsightSDK:
         assert result["has_prior"] is False
         assert result["data_points"] == []
         assert "No graph matches" in result["insight"]
+
+
+# ── #2206: relevance gate — unmeasured neutral 0.5 is NOT "we already decided" ─
+
+class TestIssueInsightRelevanceGate:
+    """Post-#2206 confidence_mean is the belief mean; an unmeasured point reads
+    the neutral Beta(1,1) mean 0.5 with has_ep=False. The EP-confirmed branch of
+    _issue_insight_relevant must therefore require has_ep — otherwise every
+    never-measured hit would qualify as 'we already decided this'."""
+
+    # query tokens share nothing with the hit content below → token floor inert
+    _Q = "quagga zebroid"
+
+    def test_unmeasured_neutral_not_ep_confirmed(self, tmp_path):
+        sdk = _sdk(tmp_path)
+        hit = {"content": "entirely unrelated sentence body", "ep": {"has_ep": False, "confidence_mean": 0.5}}
+        assert sdk._issue_insight_relevant(hit, self._Q) is False
+
+    def test_measured_high_posterior_is_ep_confirmed(self, tmp_path):
+        sdk = _sdk(tmp_path)
+        hit = {"content": "entirely unrelated sentence body", "ep": {"has_ep": True, "confidence_mean": 0.9}}
+        assert sdk._issue_insight_relevant(hit, self._Q) is True
+
+    def test_measured_but_low_belief_not_confirmed(self, tmp_path):
+        sdk = _sdk(tmp_path)
+        hit = {"content": "entirely unrelated sentence body", "ep": {"has_ep": True, "confidence_mean": 0.4}}
+        assert sdk._issue_insight_relevant(hit, self._Q) is False
+
+    def test_unmeasured_still_counts_on_two_token_overlap(self, tmp_path):
+        sdk = _sdk(tmp_path)
+        hit = {"content": "quagga zebroid live here", "ep": {"has_ep": False, "confidence_mean": 0.5}}
+        assert sdk._issue_insight_relevant(hit, self._Q) is True

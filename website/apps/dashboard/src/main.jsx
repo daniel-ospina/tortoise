@@ -3252,7 +3252,8 @@ function claimIntentInFlight() {
     // #1877: create-team dialog submit — validation mirrors POST /v1/teams
     // (≤64 chars, [a-zA-Z0-9_-], spaces rejected); 402 → gated-on-click
     // upgrade UX (the dialog explains "upgrade a team, then create" — the
-    // new team doesn't exist until the gate passes).    const name = createTeamName.trim()
+    // new team doesn't exist until the gate passes).
+    const name = createTeamName.trim()
     if (!name) { setCreateTeamError('Organization name required'); return }
     if (name.length > 64 || !/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/.test(name)) {
       setCreateTeamError('Invalid team name — letters, numbers, dash, underscore only')
@@ -3788,11 +3789,21 @@ function claimIntentInFlight() {
     setGraphMsg('')
     const _teamAtCall = currentTeamId
     try {
-      await api(`/v1/team/keys/${keyId}`, { method: 'DELETE', useSession: true })
+      // #2230: pin the SELECTED team on the panel revoke (session mode) —
+      // the panel lives on the Graphs tab whose keys are per-graph rows of
+      // the selected team; without the pin the server resolves the session
+      // team from memberships[0], so a multi-membership user on a non-first
+      // team 403s revoking their own panel key (same shape revokeKey had —
+      // #2230). Key-mode (no session JWT) stays unpinned.
+      const q = (sessionTokenRef.current && _teamAtCall) ? `?team_id=${encodeURIComponent(_teamAtCall)}` : ''
+      await api(`/v1/team/keys/${keyId}${q}`, { method: 'DELETE', useSession: true })
       if (teamIdRef.current !== _teamAtCall) return
       await refreshPanelAndCounts(panelGraphId, seq)
     } catch (e) {
-      if (teamIdRef.current === _teamAtCall) setGraphMsg('Could not revoke key — try again.')
+      if (teamIdRef.current === _teamAtCall) {
+        const detail = e && e.detail ? e.detail : (e && e.message)
+        setGraphMsg(detail || 'Could not revoke key — try again.')
+      }
     }
   }
 
@@ -4225,18 +4236,31 @@ function claimIntentInFlight() {
     setCapNotice('')
     setError('')
     const next = !currentEnabled
+    // Round-20: capture the team at call — a mid-flight switch must not land
+    // the response/error under the new team's header (mirrors renameKey).
+    const _teamAtCall = currentTeamId
     setKeys((prev) => prev.map((k) => k.id === keyId ? { ...k, enabled: next } : k))
     try {
-      const updated = await api(`/v1/team/keys/${keyId}`, {
+      // #2230: session-mode key-management PATCH pins the SELECTED team —
+      // the server PATCH honors ?team_id= membership-checked (fail-closed on
+      // a key outside the pinned team), so a multi-membership user on a
+      // non-first team toggles the key their table shows, never the default
+      // membership's (mirrors #2167 rule-4 create-side pin). The endpoint is
+      // session-only (#1148 — a raw key 401s here), so the session-gated
+      // pin covers the only reachable auth surface.
+      const q = (sessionTokenRef.current && _teamAtCall) ? `?team_id=${encodeURIComponent(_teamAtCall)}` : ''
+      const updated = await api(`/v1/team/keys/${keyId}${q}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         useSession: true,  // #1148: management → session JWT when signed in
         body: JSON.stringify({ enabled: next }),
       })
+      if (teamIdRef.current !== _teamAtCall) return // stale switch — don't touch the new team's state
       if (updated && (updated.id || updated.key_id)) {
         setKeys((prev) => prev.map((k) => k.id === keyId ? { ...k, enabled: updated.enabled !== false } : k))
       }
     } catch (e) {
+      if (teamIdRef.current !== _teamAtCall) return // stale switch — error belongs to the old team
       setKeys((prev) => prev.map((k) => k.id === keyId ? { ...k, enabled: currentEnabled } : k))
       setError((e && e.message) || `Couldn't toggle the key — try again.`)
     }
@@ -4262,7 +4286,12 @@ function claimIntentInFlight() {
     const prevName = cur.name || null
     setKeys((ks) => ks.map((k) => k.id === keyId ? { ...k, name: next } : k))
     try {
-      const updated = await api(`/v1/team/keys/${keyId}`, {
+      // #2230: pin the SELECTED team on the rename PATCH (session mode) —
+      // the URL is built from the at-call team so a mid-flight switch can
+      // never target the new team's key nor the default membership's (the
+      // post-await staleness guard below then drops the stale response).
+      const q = (sessionTokenRef.current && _teamAtCall) ? `?team_id=${encodeURIComponent(_teamAtCall)}` : ''
+      const updated = await api(`/v1/team/keys/${keyId}${q}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         useSession: true,  // #1148: management → session JWT when signed in
@@ -4295,9 +4324,16 @@ function claimIntentInFlight() {
     try {
       // #2246 (ADR-010): the rule-7 slot-aware clear (heldKeyClearState) is
       // DELETED — the browser never holds key material, so a revoke has
-      // nothing to clear: plain DELETE + keys reload. (The KEY_STORAGE slot
-      // was purged at session resolution; logout wipes it.)
-      await api(`/v1/team/keys/${keyId}`, { method: 'DELETE', useSession: true })
+      // nothing to clear (the KEY_STORAGE slot was purged at session
+      // resolution; logout wipes it). #2230: pin the SELECTED team on the
+      // revoke DELETE (session mode) — the server resolves the session team
+      // from memberships[0] without it, so a multi-membership user whose
+      // selected team ≠ first membership got 403 "Not your API key"
+      // revoking their own key (mirrors #2167 rule-4 create-side pin + the
+      // toggle/rename PATCH pins; the session lane honors it
+      // membership-checked). Key-mode (no session JWT) stays unpinned.
+      const q = (sessionTokenRef.current && _teamAtCall) ? `?team_id=${encodeURIComponent(_teamAtCall)}` : ''
+      await api(`/v1/team/keys/${keyId}${q}`, { method: 'DELETE', useSession: true })
       // Round-20: bail after the DELETE — a switch already reloaded the new
       // team's state; skip the stale loadAll entirely.
       if (teamIdRef.current !== _teamAtCall) return

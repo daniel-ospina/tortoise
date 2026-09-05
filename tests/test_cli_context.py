@@ -84,6 +84,32 @@ class TestCliContext:
         assert "Use FalkorDB as primary graph store" in out
         assert "file new decisions with tortoise_create_point" in out
 
+    def test_digest_omits_rule_noise_from_recent_points(self, db_env, capsys):
+        """#2207: the session-start digest (session-start.sh → `tortoise
+        context`) lists genuine recent decisions/claims only — markdown rule
+        lines ('---', '*Gate: filed as child issue…') and list/config fragments
+        never surface as 'recent decisions'."""
+        db_env.create_point(kind="decision", content="We decided to adopt BSL 1.1 for the engine")
+        db_env.create_point(kind="statement", content="---")
+        db_env.create_point(kind="statement", content="*Gate: filed as child issue via "
+                             "`issue-creation` — number recorded in the epic plan doc "
+                             "(Stage 4).")
+        db_env.create_point(kind="statement", content="| Trigger | Must invoke |")
+        db_env.create_point(kind="statement", content="model: gpt-5")
+
+        rc = _run_context()
+        assert rc == 0
+        out = capsys.readouterr().out
+        # Genuine decision present, token intact.
+        assert "We decided to adopt BSL 1.1 for the engine" in out
+        # Rule/config noise absent from the digest body.
+        assert "Gate:" not in out
+        assert "| Trigger" not in out
+        assert "model: gpt-5" not in out
+        # '---' separators never appear as digest lines (only '-' bullets).
+        assert "\n---\n" not in out
+        print("PASS test_digest_omits_rule_noise_from_recent_points")
+
     def test_empty_prints_to_stdout_not_stderr(self, db_env, capsys):
         """Empty notice goes to stdout (so it's injected, not swallowed)."""
         _run_context()
@@ -215,6 +241,181 @@ class TestCliOnboardDbTarget:
         assert "Embedded mode initialized" in out
         assert "single-writer, eval only" in out
 
+    def test_init_embedded_default_prints_fallback_notice(self, monkeypatch, capsys, tmp_path):
+        """#2200: with TORTOISE_DB_URI unset and no explicit --path /
+        TORTOISE_DB_PATH, `tortoise init` lands on the canonical embedded
+        default — it must print the embedded-fallback notice (eval-only
+        fallback; supported path = docker compose up -d, quickstart Option A)
+        instead of silently defaulting onto the eval-only engine."""
+        # Point the canonical default at tmp so the run never touches a real
+        # ~/.tortoise DB (DEFAULT_DB_PATH is resolved at call time).
+        import tortoise.config as cfg
+        default_db = str(tmp_path / "default.db")
+        monkeypatch.setattr(cfg, "DEFAULT_DB_PATH", default_db)
+        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+        monkeypatch.delenv("TORTOISE_DB_PATH", raising=False)
+        _delenv_falkordb(monkeypatch)
+        from tortoise import __main__ as m
+
+        rc = m._cmd_init(mock.Mock(
+            path=None, cmd="init", yes=True, api_key=None, no_index=True))
+
+        captured = capsys.readouterr()
+        out = captured.out + captured.err
+        assert rc == 0
+        assert "Embedded mode initialized" in out
+        # The #2200 fallback gate — wording pinned by the shared constant.
+        assert "Embedded engine active" in out
+        assert "eval-only fallback" in out
+        assert "docker compose up -d" in out
+        assert "quickstart-selfhosted Option A" in out
+        # The init gate is stderr-only (stdout carries the machine-readable
+        # init report; #942 EMBEDDED_EVAL_BANNER precedent).
+        assert "Embedded engine active" in captured.err
+        assert "Embedded engine active" not in captured.out
+
+    def test_init_embedded_no_fallback_notice_when_uri_set_as_path(self, monkeypatch, capsys, tmp_path):
+        """#2200 negative: a SET TORTOISE_DB_URI is an explicit choice even
+        when it carries no supported scheme — resolve_db_path treats an
+        absolute file path there as the embedded DB (backward compat), so the
+        run honors a user-configured target: no 'TORTOISE_DB_URI is unset'
+        fallback notice (that sentence would be a lie on this path)."""
+        chosen = str(tmp_path / "via-uri.db")
+        monkeypatch.setenv("TORTOISE_DB_URI", chosen)
+        monkeypatch.delenv("TORTOISE_DB_PATH", raising=False)
+        _delenv_falkordb(monkeypatch)
+        from tortoise import __main__ as m
+
+        rc = m._cmd_init(mock.Mock(
+            path=None, cmd="init", yes=True, api_key=None, no_index=True))
+
+        captured = capsys.readouterr()
+        out = captured.out + captured.err
+        assert rc == 0
+        assert "Embedded mode initialized" in out
+        assert "Embedded engine active" not in out  # explicit choice — no gate
+
+    def test_init_explicit_embedded_path_no_fallback_notice(self, monkeypatch, capsys, tmp_path):
+        """#2200 negative: an EXPLICIT embedded choice (TORTOISE_DB_PATH)
+        keeps init's eval-only success label but does not fire the fallback
+        gate — the user chose the embedded engine (quickstart Option C)."""
+        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+        monkeypatch.setenv("TORTOISE_DB_PATH", str(tmp_path / "init.db"))
+        _delenv_falkordb(monkeypatch)
+        from tortoise import __main__ as m
+
+        rc = m._cmd_init(mock.Mock(
+            path=None, cmd="init", yes=True, api_key=None, no_index=True))
+
+        captured = capsys.readouterr()
+        out = captured.out + captured.err
+        assert rc == 0
+        assert "Embedded mode initialized" in out
+        assert "Embedded engine active" not in out  # no fallback gate — explicit choice
+
+    def test_onboard_completion_gates_embedded_default(self, tmp_path, monkeypatch, capsys):
+        """#2200: the `tortoise onboard` wizard completion must gate the
+        canonical embedded default too — a no-Docker run never reaches
+        'Onboarding complete.' reading as a durable setup. (index finds no
+        git repo / no markdown in tmp_path, so only init+doctor run.)
+
+        The init stub mirrors production's side effect: init's embedded
+        branch RECORDS the resolved path via os.environ.setdefault
+        (TORTOISE_DB_PATH) after gating (#715 conf 60) — the completion gate
+        must still fire (it snapshots the user's explicit choice before
+        init runs), or a real no-Docker onboard would never carry the gate.
+        """
+        import os as _os
+
+        import tortoise.config as cfg
+        default_db = str(tmp_path / "default.db")
+        monkeypatch.setattr(cfg, "DEFAULT_DB_PATH", default_db)
+        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+        monkeypatch.delenv("TORTOISE_DB_PATH", raising=False)
+        _delenv_falkordb(monkeypatch)
+        from tortoise import __main__ as m
+
+        def fake_init(args):
+            # Production _cmd_init embedded side effect: record the resolved
+            # path in the env AFTER its own gate (setdefault is a no-op if
+            # the user already chose a TORTOISE_DB_PATH).
+            _os.environ.setdefault("TORTOISE_DB_PATH", default_db)
+            seen["init_ns"] = args
+            return 0
+
+        seen: dict = {}
+        with mock.patch.object(m, "_cmd_init", side_effect=fake_init), \
+             mock.patch.object(m, "_cmd_demo", return_value=0), \
+             mock.patch.object(m, "_cmd_doctor", return_value=0), \
+             mock.patch("subprocess.run") as fake_run:
+            fake_run.return_value.returncode = 1  # not a git repo
+            rc = m._cmd_onboard(mock.Mock(path=None, cmd="onboard"))
+
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert "Onboarding complete." in out
+        # init was invoked with the wizard's in-process marker so its own gate
+        # stays silent (the completion gate below is the ONE loud gate).
+        assert getattr(seen["init_ns"], "from_onboard", False) is True
+        # Wizard completion carries the fallback gate (never a silent durable
+        # claim on the eval-only engine) even after init recorded the path.
+        assert "Embedded engine active" in out
+        assert "eval-only fallback" in out
+        assert "docker compose up -d" in out
+        assert "quickstart-selfhosted Option A" in out
+
+    def test_onboard_real_init_prints_fallback_notice_once(self, tmp_path, monkeypatch, capsys):
+        """#2200: a REAL no-Docker onboard run (production path — init is NOT
+        stubbed) prints the fallback notice exactly ONCE. init's in-process
+        gate is suppressed (from_onboard=True), so the wizard's completion
+        gate next to 'Onboarding complete.' is the single loud gate — never a
+        duplicated wall of text mid-flow (review F2)."""
+        import tortoise.config as cfg
+        default_db = str(tmp_path / "default.db")
+        monkeypatch.setattr(cfg, "DEFAULT_DB_PATH", default_db)
+        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+        monkeypatch.delenv("TORTOISE_DB_PATH", raising=False)
+        _delenv_falkordb(monkeypatch)
+        from tortoise import __main__ as m
+
+        with mock.patch.object(m, "_cmd_demo", return_value=0), \
+             mock.patch.object(m, "_cmd_doctor", return_value=0), \
+             mock.patch("subprocess.run") as fake_run:
+            fake_run.return_value.returncode = 1  # not a git repo
+            rc = m._cmd_onboard(mock.Mock(path=None, cmd="onboard"))
+
+        captured = capsys.readouterr()
+        out = captured.out + captured.err
+        assert rc == 0
+        assert "Onboarding complete." in out
+        assert out.count("Embedded engine active") == 1
+        assert "Embedded engine active" in captured.out  # completion gate
+        assert "Embedded engine active" not in captured.err  # init gate suppressed
+
+    def test_onboard_completion_skips_gate_when_db_path_user_set(self, tmp_path, monkeypatch, capsys):
+        """#2200 negative: a user who EXPLICITLY set TORTOISE_DB_PATH before
+        onboard (quickstart Option C embedded) keeps init's eval-only success
+        label but never sees the completion fallback gate — they chose the
+        embedded engine. Covers the env-snapshot branch of the gate."""
+        import tortoise.config as cfg
+        default_db = str(tmp_path / "default.db")
+        monkeypatch.setattr(cfg, "DEFAULT_DB_PATH", default_db)
+        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+        monkeypatch.setenv("TORTOISE_DB_PATH", str(tmp_path / "chosen.db"))
+        _delenv_falkordb(monkeypatch)
+        from tortoise import __main__ as m
+
+        with mock.patch.object(m, "_cmd_init", return_value=0), \
+             mock.patch.object(m, "_cmd_demo", return_value=0), \
+             mock.patch.object(m, "_cmd_doctor", return_value=0), \
+             mock.patch("subprocess.run") as fake_run:
+            fake_run.return_value.returncode = 1  # not a git repo
+            rc = m._cmd_onboard(mock.Mock(path=None, cmd="onboard"))
+
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert "Onboarding complete." in out
+        assert "Embedded engine active" not in out  # explicit choice — no gate
     def test_init_status_failure_never_prints_points_placeholder(self, monkeypatch, capsys, tmp_path):
         """#2210: when the post-init status read fails, `tortoise init` must
         not print 'Points: ?' (a placeholder the user can't act on) — it
@@ -901,4 +1102,84 @@ def test_index_sessions_constructor_failure_clean_error(monkeypatch, capsys, tmp
     assert rc == 1
     assert "graph unreachable" in err
     assert "Traceback" not in err
+
+
+class TestOnboardCountExcludesNonContentDirs:
+    """#2201: the 'Found N markdown files' ANNOUNCE sites (init auto-index and
+    the indexer itself — the onboard step-3 index runs the REAL indexer, its
+    duplicate count line was removed) share the indexer's discovery — .venv
+    and other non-content dirs must not inflate the announced count (the
+    652-announced vs 527-walked divergence from the issue repro)."""
+
+    @staticmethod
+    def _repo_with_junk(tmp_path):
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        (repo / "README.md").write_text("# readme\n\ncontent\n")
+        junk = repo / ".venv"
+        junk.mkdir()
+        (junk / "junk.md").write_text("# junk\n\nbody\n")
+        return repo
+
+    @staticmethod
+    def _embedded_env(monkeypatch, tmp_path):
+        monkeypatch.setenv("TORTOISE_DB_PATH", str(tmp_path / "onboard.db"))
+        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+        _delenv_falkordb(monkeypatch)
+
+    def test_onboard_announce_count_excludes_venv(self, tmp_path, monkeypatch, capsys):
+        """`tortoise onboard` step 3 runs the REAL indexer, which announces
+        only the README (1 md file — the .venv/junk.md must not inflate the
+        count). The README has no ## headers, so nothing is indexed; the
+        all-empty run still exits 0 and onboard completes."""
+        from tortoise import __main__ as m
+        repo = self._repo_with_junk(tmp_path)
+        self._embedded_env(monkeypatch, tmp_path)
+
+        with mock.patch.object(m, "_cmd_init", return_value=0), \
+             mock.patch.object(m, "_cmd_demo", return_value=0), \
+             mock.patch.object(m, "_cmd_doctor", return_value=0), \
+             mock.patch("subprocess.run") as fake_run:
+            fake_run.return_value.returncode = 0  # git repo detected
+            fake_run.return_value.stdout = str(repo)
+            # #715 P2 (prescription): dispatch through the REAL argparse
+            # parser, not a hand-built Namespace/bare Mock — those drift.
+            rc = m.main(["onboard"])
+
+        out = capsys.readouterr().out
+        assert rc == 0, out
+        # Exactly ONE announce: the real indexer's bare line. The two-space
+        # pre-announce was removed from _cmd_onboard — a revert would print
+        # "  Found N markdown files. Indexing…" again (count N, whether the
+        # shared count of 1 or a raw-rglob count of 2) and fail the regex.
+        assert out.count("Found 1 markdown files. Indexing…") == 1, out
+        assert not re.search(
+            r"^  Found \d+ markdown files\. Indexing…", out, re.M), out
+        assert "junk.md" not in out, "non-content files must not be announced"
+        assert "Onboarding complete." in out, out
+
+    def test_init_autoindex_announce_count_excludes_venv(self, tmp_path,
+                                                        monkeypatch, capsys):
+        """`tortoise init --yes` auto-index announce counts the README only —
+        same shared discovery as the indexer (#2201)."""
+        from tortoise import __main__ as m
+        repo = self._repo_with_junk(tmp_path)
+        self._embedded_env(monkeypatch, tmp_path)
+
+        with mock.patch("subprocess.run") as fake_run, \
+             mock.patch("subprocess.Popen") as fake_popen, \
+             mock.patch("tortoise.projection.FalkorProjection"), \
+             mock.patch("tortoise.sdk.TortoiseSDK") as fake_sdk:
+            fake_run.return_value.returncode = 0  # git repo detected
+            fake_run.return_value.stdout = str(repo)
+            fake_sdk.return_value.status.return_value = {"counts": {"Point": 1}}
+            # #715 P2 (prescription): dispatch through the REAL argparse
+            # parser, not a hand-built Namespace/bare Mock — those drift.
+            rc = m.main(["init", "--yes"])
+
+        out = capsys.readouterr().out
+        assert rc == 0, out
+        assert "Found 1 markdown files in this repo. Auto-indexing…" in out, out
+        assert "junk.md" not in out, "non-content files must not be announced"
+        assert fake_popen.called
 

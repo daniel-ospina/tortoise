@@ -15,7 +15,6 @@ from typing import Any, Literal
 from fastmcp import FastMCP
 from fastmcp.exceptions import (AuthorizationError, FastMCPError, ToolError,
                                 ValidationError as FastMCPValidationError)
-from mcp.types import ToolAnnotations
 from pydantic import ValidationError as PydanticValidationError
 from tortoise.auth import is_dev_mode as _is_dev_mode
 from tortoise.config import is_db_uri as _is_db_uri
@@ -388,11 +387,6 @@ def _get_sdk():
         _sdk = TortoiseSDK(db_path=_resolve_db_path())
     return _sdk
 
-# Announce auth mode at startup
-if _is_dev_mode():
-    _log.warning("TORTOISE_API_KEY not set — running in dev mode (no auth)")
-
-
 # #329: node/edge-creating MCP write tools that MUST be quota-gated. Completeness
 # is enforced by an introspective test (tests/test_mcp_http.py) that scans every
 # HTTP_ALLOWED tool body for node/edge-creating SDK calls and asserts membership.
@@ -699,7 +693,8 @@ ERR_INVALID = -32003
 # denylist. The MCP tools reject these AT THE BOUNDARY (before the `**props`
 # unpack can bind the SDK's explicit server-managed params); the SDK's
 # _sanitize_props reject is the fail-closed backstop.
-_SERVER_MANAGED_PROPS = frozenset({"is_episodic", "sourcePath", "source_path", "id"})
+_SERVER_MANAGED_PROPS = frozenset({
+    "is_episodic", "sourcePath", "source_path", "id", "_server_id"})
 
 
 def _reject_server_managed_props(props: dict) -> str | None:
@@ -746,12 +741,24 @@ def _parse(v: Any) -> Any:
 
 def tortoise_create_point(kind: str, content: str,
                           authoredBy: str | None = None,
+                          credibility: str | int | float | None = None,
                           props: Any = None,
                           dedup: bool = True) -> dict:
     """Create a Point node (statement, decision, vision, hypothesis, etc.).
 
     dedup=True (default): idempotent — returns existing Point if content matches.
     dedup=False: force-create even if content is identical.
+
+    Decision parts (#2199) — pointKind option/criterion/evidence/decision
+    created WITHOUT an explicit status land LIVE with an explicit starting
+    belief, so the documented decide flow ranks on the first attempt (no
+    promote/calibrate chores): omit ``credibility`` for the system starting
+    belief 'medium' (provenance 'system-default', visible in
+    tortoise_calibrate_summary), or pass your own via the plain-language
+    ladder — gold / high / medium / low / unverified (also T0-T4 or numeric
+    0-4) — stamped 'set-by-author'. Pass an explicit status=... via props to
+    keep full manual control (capture/extraction paths use status='draft').
+    Unknown ladder words are rejected (never a silent Beta(1,1) fallback).
 
     → See /skill:tortoise-graph-reasoning for pointKind guidance:
       evidence is a role (not a kind), use Source for provenance.
@@ -763,6 +770,8 @@ def tortoise_create_point(kind: str, content: str,
     merged = dict(props or {})
     if authoredBy:
         merged["authoredBy"] = authoredBy
+    if credibility is not None:
+        merged["credibility"] = credibility
     # #329 tag batch cap + value validation
     from tortoise.quota import MAX_TAGS_PER_POINT
     tags = merged.get("tags") or []
@@ -912,8 +921,11 @@ def tortoise_audit(point_kinds: list[str] | None = None) -> dict:
 
 
 def tortoise_summarize_structure() -> dict:
-    """Count points per Gate (by pointKind). Returns {gateN_*, total}.
-    Alias → overview(section='structure') (epic #888 W3)."""
+    """Structure summary — points on the graph across ALL point kinds (#2205).
+    Returns {total, operators, gate0_jtbds..gate4_requirements, gate_total}.
+    total counts every non-operator kind (statements, observations, decisions,
+    ...), not just the product-strategy gates; operators is reported
+    separately. Alias → overview(section='structure') (epic #888 W3)."""
     return _safe(_get_team_sdk().summarize_structure)
 
 
@@ -1071,8 +1083,12 @@ def tortoise_search(query: str | None = None, kind: str | None = None,
     include_terminal=True for the complete supersede-structure view).
     Best-match mode: provide query → RRF fusion of FTS + vector + structural.
 
-    Point results annotated with EP breakdown (confidence_mean + variance + contested + contention).
-    min_confidence defaults to 0.0 (no filter).
+    Point results annotated with EP breakdown. confidence_mean is THE point's
+    confidence (belief mean α/(α+β): persisted posterior when EP has run,
+    else persisted prior mean, else neutral 0.5) — agrees with
+    tortoise_get_confidence / recall for the same point. contention is the
+    structural edge-ratio family (a different quantity). min_confidence
+    filters on confidence_mean (belief); defaults to 0.0 (no filter).
 
     relationship_filter: 'predicate:target_id' — only return points connected to
         target_id via an operator with label=predicate
@@ -1082,8 +1098,8 @@ def tortoise_search(query: str | None = None, kind: str | None = None,
 
     order_by (#25, #560):
       - 'relevance' (default): pure RRF fusion order (FTS + vector + structural).
-      - 'confidence': sort by the PERSISTED EP confidence (n.confidence), not the
-        structural edge ratio.
+      - 'confidence': sort by the PERSISTED EP confidence (n.confidence — the
+        same belief mean ep.confidence_mean carries, post-#2206).
       - 'graph': graph-informed rerank — weighted fusion of similarity +
         persisted EP confidence + operator connectivity + 30-day recency decay
         (tortoise.ranking.GraphRanker). Results annotated with a
@@ -1513,14 +1529,28 @@ def tortoise_get_operator(id: str) -> dict:
     return point
 
 
-def tortoise_mitigate_operator(id: str, reason: str, strength: float = 0.5) -> dict:
+def tortoise_mitigate_operator(id: str, reason: str, strength: float = 0.5,
+                               credibility: str | int | float | None = None) -> dict:
     """Create a mitigation Point that modulates an operator's edge strength.
+
+    MITIGATION STRENGTH SEMANTICS (single-sourced — issue #2199 knock-on
+    decision 3): ``strength`` means how much this reason reduces the edge —
+    0 = fully neutralized, 1 = fully intact (default 0.5). It is NOT a
+    statement of how true the reason is and is NOT fused into the mitigation
+    point's prior. Strength is currently ADVISORY metadata (EP does not read
+    mitigation_strength yet); the decide tooling clamps to [0.10, 0.50] for
+    relevance edges.
 
     reason: Why the edge is weaker than it appears.
     strength: 0-1 — 0=fully neutralized, 1=fully intact (default 0.5).
+    credibility: optional starting belief for the mitigation reason itself
+      (plain-language ladder gold/high/medium/low/unverified, T0-T4, or
+      numeric 0-4) — stamped 'set-by-author'. Omit for the #2199 system
+      starting belief ('medium', provenance 'system-default') so the
+      mitigation is a calibrated live evidence point (no CalibrationError).
     Idempotent — second call updates existing mitigation.
     """
-    return _safe(_quota_gated(_get_team_sdk().mitigate_operator, "points", abuse_weight=1), id, reason, strength)
+    return _safe(_quota_gated(_get_team_sdk().mitigate_operator, "points", abuse_weight=1), id, reason, strength, credibility)
 
 
 def tortoise_file_decision(options: Any, evidence: Any,
@@ -1673,6 +1703,27 @@ def tortoise_traverse(entity_id: str, max_hops: int = 2,
 
 def main():
     _transport_mode.set("stdio")
+    # #2203: the stdio server must terminate its embedded redis-server child
+    # when the parent is killed — SIGTERM from the harness/session teardown,
+    # SIGHUP on terminal/session death, SIGINT when the process started with
+    # it ignored (non-tty stdin). The guard's handler closes every live
+    # embedded server INLINE (registry of guarded FalkorDB clients) and then
+    # re-raises the signal, so the server dies with the parent on any of
+    # those kills — no dependence on atexit or on unwinding the event loop.
+    # (Client disconnect = stdin EOF → mcp.run returns → the explicit close
+    # after it below.) Idempotent.
+    from tortoise.embedded_lifecycle import (
+        close_embedded_clients,
+        install_embedded_signal_cleanup,
+    )
+    install_embedded_signal_cleanup()
+    # #2204: announce dev mode (no auth) at the actual serve start, NOT at
+    # module import — incidental importers (hosted_api, doctor, tests) must
+    # stay quiet. Stdio is the only path that cannot carry auth headers, so
+    # the announcement lives here (python -m tortoise.mcp_server and
+    # `tortoise serve` both funnel through main()).
+    if _is_dev_mode():
+        _log.warning("TORTOISE_API_KEY not set — running in dev mode (no auth)")
     monitoring.register(_get_sdk())
     uri = os.environ.get("TORTOISE_DB_URI")
     db_path = os.environ.get("TORTOISE_DB_PATH")
@@ -1701,7 +1752,15 @@ def main():
         from tortoise._embedded import EMBEDDED_EVAL_BANNER
 
         print(EMBEDDED_EVAL_BANNER, file=sys.stderr)
-    mcp.run(transport="stdio")
+    try:
+        mcp.run(transport="stdio")
+    finally:
+        # #2203: deterministic teardown when the stdio session ends (client
+        # disconnect / stdin EOF / abnormal session end) — close every
+        # embedded server this process opened NOW instead of relying on
+        # atexit ordering; a no-op when nothing was opened (docker-URI
+        # mode), idempotent (already-closed clients skip).
+        close_embedded_clients()
 
 
 # ── P0 Group 3: Checkpoint, Diary, Status, Ingest ──────────────
@@ -1769,10 +1828,22 @@ def tortoise_status() -> dict:
 
 def tortoise_health() -> dict:
     """Health check + basic metrics: graph_size, last_ingest, error_count, uptime.
-    Alias → overview(section='health') (epic #888 W3)."""
+    Alias → overview(section='health') (epic #888 W3).
+
+    #2202 (health-truthful): probes the SDK THIS server actually serves —
+    the request-scoped team SDK over HTTP (selfhost daemon: the team_selfhost
+    graph, the SAME namespace /health probes; hosted: the calling team's
+    graph on the SAME FalkorDB server /health deep-checks) and the base SDK
+    over stdio — so tool and /health can never disagree about DB reachability.
+    The pre-#2202 code probed monitoring's module-global handle, which ONLY
+    the stdio entrypoint (main()) registers: on the HTTP daemon/hosted
+    surfaces it stayed None and every call reported degraded/no_sdk_registered
+    while /health (fresh SDK probe) said ok — the first call every onboarding
+    script makes lied. graph_size likewise counts the SERVED graph, never an
+    empty unregistered handle."""
     # #236: route through _safe() so every tool is gated (defense-in-depth;
     # reachable only post-auth over HTTP).
-    return _safe(monitoring.metrics)
+    return _safe(lambda: monitoring.metrics(sdk=_get_team_sdk()))
 
 
 def tortoise_session_context() -> dict:
@@ -2173,7 +2244,6 @@ def tortoise_create_document(title: str, documentKind: str, props: Any = None) -
         return {"error": _reject, "code": ERR_INVALID}
     return _safe(_quota_gated(_get_team_sdk().create_document, "points"), title, documentKind, **(props or {}))
 
-@mcp.tool(annotations=ToolAnnotations(idempotentHint=True))
 def tortoise_create_source(url: str, sourceKind: str, tier: str | None = None,
                            sourceDate: str | None = None, props: Any = None) -> dict:
     """Create a Source node for provenance (document, web, db, etc.).
@@ -2195,7 +2265,10 @@ def tortoise_create_source(url: str, sourceKind: str, tier: str | None = None,
                  tier=tier, sourceDate=sourceDate, **props)
 
 
-@mcp.tool()
+# #2204: decorator removed — the tool is registered by the registry adapter
+# (TOOL_REGISTRY entry carries the same annotations; see module bottom). The
+# stale @mcp.tool() decorator double-registered the name with fastmcp's local
+# provider ("Component already exists" noise at import).
 def tortoise_get_source_reliability(url: str) -> dict:
     """Derive a Source's reliability (0-1) — query-time, cache-consistency-checked.
 
@@ -2207,7 +2280,8 @@ def tortoise_get_source_reliability(url: str) -> dict:
     return _safe(_get_team_sdk().get_source_reliability, url)
 
 
-@mcp.tool(annotations=ToolAnnotations(destructiveHint=True))
+# #2204: decorator removed — registry adapter owns registration (see
+# tortoise_create_source note).
 def tortoise_assess_source(url: str, assessor: str, score: float,
                            rationale: str) -> dict:
     """Record an agent's assessment of a Source (0-1 score + rationale).
@@ -2222,7 +2296,8 @@ def tortoise_assess_source(url: str, assessor: str, score: float,
                  url, assessor, score, rationale)
 
 
-@mcp.tool(annotations=ToolAnnotations(destructiveHint=True))
+# #2204: decorator removed — registry adapter owns registration (see
+# tortoise_create_source note).
 def tortoise_set_source_tier(url: str, tier: str) -> dict:
     """Set (or change) a Source's credibility tier (T0-T4). Non-destructive.
 
@@ -2589,15 +2664,12 @@ def tortoise_belief_timeline(topic: str, limit: int = 50) -> dict:
 # defined below) — so the adapter resolves a handler for every registry
 # entry from globals() (#2210: entries defined after this point used to be
 # logged "no handler — skipped" while decorators half-registered them).
-
-
-
 # ── Onboarding MCP tools (#498/#499/#500) ───────────────────────
 # Wrappers for the hosted onboarding flow. These call the team-scoped SDK
 # directly (same pattern as all tools) — the REST endpoints in hosted_api.py
 # expose the same operations to the welcome page.
 
-# Epic #888 no-regret: once a team's onboarding completes, the six
+# Epic #888 no-regret: once a team's onboarding completes, the seven
 # tortoise_onboarding_* tools retire from that team's steady-state MCP
 # surface (tools/list) — the REST /v1/onboarding/* endpoints remain for the
 # web onboarding flow. Function bodies are untouched; only the listing hides
@@ -2729,7 +2801,6 @@ def tortoise_onboarding_seed(org_name: str | None = None,
         return {"error": f"seed failed: {exc}"}
 
 
-@mcp.tool(annotations=ToolAnnotations(destructiveHint=True))
 def tortoise_onboarding_session_recording(enabled: bool) -> dict:
     """Toggle automatic session recording for this team (Q3 / dashboard
     Memory sources sessions toggle).
@@ -3110,7 +3181,7 @@ def create_http_app(*, allowed_origins: list[str] | None = None,
 
 # ── Tool Registry Adapter (#454) — registration (module bottom) ──
 # Executes after EVERY module-level tool function definition above, so the
-# handlers dict covers the whole registry: the six onboarding tools and
+# handlers dict covers the whole registry: the seven onboarding tools and
 # tortoise_session_capture used to be logged "no handler — skipped" (they
 # were defined after this block's old mid-module position) — #2210.
 from tortoise.tool_registry import TOOL_REGISTRY, GROUP_BY_NAME, FastMCPAdapter  # noqa: E402, I001

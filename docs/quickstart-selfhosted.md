@@ -79,7 +79,7 @@ Point Tortoise at it with `TORTOISE_DB_URI=docker://:falkordb@localhost:6379/tor
 
 ### Option C — Embedded (single-agent eval only, no Docker)
 
-`tortoise init` auto-creates `~/.tortoise/tortoise.db` using **falkordblite** (a self-contained, SQLite-backed FalkorDB). Nothing to run, nothing to manage — the CLI handles it.
+`tortoise init` auto-creates `~/.tortoise/tortoise.db` using **falkordblite** (a self-contained, SQLite-backed FalkorDB). Nothing to run, nothing to manage — the CLI handles it. Explicit form (recommended, suppresses the fallback notice): `tortoise init --path ~/.tortoise/tortoise.db`, or set `TORTOISE_DB_PATH` in the MCP client's `env` block per step 3.
 
 > ⚠️ **Embedded FalkorDBLite is SINGLE-WRITER / EVAL ONLY.** Concurrent writers (multiple agents) lose data on this engine. Fine for one agent evaluating Tortoise; for a team or production use Option A/B or Cloud.
 
@@ -99,7 +99,7 @@ tortoise init          # interactive — creates the graph, writes a welcome Poi
 tortoise init --yes    # same, no prompts (auto-indexes the repo you're inside, if any)
 ```
 
-`tortoise init` resolves the DB target from `TORTOISE_DB_URI` (Docker) or `TORTOISE_DB_PATH` (embedded); the embedded success line labels itself single-writer eval only.
+`tortoise init` resolves the DB target from `TORTOISE_DB_URI` (Docker) or `TORTOISE_DB_PATH` (embedded); the embedded success line labels itself single-writer eval only. Running bare `tortoise init` with neither var set also works — the CLI defaults to the embedded engine and prints a one-line "embedded engine active — eval-only fallback" notice first. That is expected on Option C; the Docker path (Option A) never sees it.
 
 To index an existing repo's markdown files:
 
@@ -301,6 +301,14 @@ your active packs.
 
 ## 5. Connect your agent (MCP)
 
+One transport per setup (mirrors README §2): hosted + the Docker path talk
+to the **daemon over HTTP** (`http://localhost:8000/mcp`); the no-Docker
+single-agent eval path talks **stdio** (a local `python3 -m
+tortoise.mcp_server`) — the eval path connects over stdio by default and
+never needs a daemon (running the embedded daemon yourself via `selfhost` /
+`serve --http` is optional and still eval-only; see below). Never the
+other way around — the Docker path has no stdio config.
+
 ### Docker path (recommended) — connect to the daemon
 
 The compose daemon serves MCP at `http://localhost:8000/mcp`:
@@ -449,7 +457,7 @@ Tortoise ships a first-class migration path: **`tortoise export` → hosted impo
    tortoise team info       # hosted team + usage
    ```
 
-   Then call the structure tools over MCP on each surface — `tortoise_check_structure` (chain integrity) and `tortoise_summarize_structure` (counts per gate) — and compare the hosted counts to your selfhost graph. When hosted reaches parity and answers your queries, decommission the daemon at your leisure.
+   Then call the structure tools over MCP on each surface — `tortoise_check_structure` (chain integrity) and `tortoise_summarize_structure` (counts: total points + per-gate breakdown) — and compare the hosted counts to your selfhost graph. When hosted reaches parity and answers your queries, decommission the daemon at your leisure.
 
 ### Fallback: manual replay
 

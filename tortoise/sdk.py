@@ -261,6 +261,70 @@ register_kind("evidence")  # used by file_decision (#133)
 # edge on a live point), NOT a stored status.
 POINT_STATUS_VALUES = frozenset({'draft', 'live', 'retracted', 'superseded', 'outdated', 'archived'})
 
+# ── #2199 decide-part calibration + baseline provenance ────────────────
+# Decision parts filed through the decide tooling (create_point / commit_ops /
+# mitigate_operator) are HUMAN-AUTHORED judgment — they carry no document
+# Source to inherit belief from (a Source only imparts belief when tiered
+# T0-T4, at EP-run time). They are born LIVE with an EXPLICIT, provenance-
+# recorded starting belief so the documented decide flow ranks on the first
+# attempt (no promote + calibrate chores, no CalibrationError). The default
+# prior is the ladder's middle rung 'medium' = Beta(3,1), mean 0.75 (issue
+# #2199 knock-on decision 2: reuse the ladder, do not invent a new number).
+DECIDE_PART_KINDS = frozenset({"decision", "option", "criterion", "evidence"})
+DECIDE_DEFAULT_CREDIBILITY = "medium"  # → Beta(3,1) via source_credibility
+
+
+def _baseline_create_fields() -> str:
+    """Extra CREATE-map fields for the #2199 baseline (see create_point)."""
+    return ", ep_alpha:$ba, ep_beta:$bb, baseline_set:true, baseline_source:$bsrc"
+
+
+def _baseline_create_params(baseline: tuple[float, float, str]) -> dict:
+    """CREATE params for a resolved (#2199) baseline: (alpha, beta, source)."""
+    return {"ba": baseline[0], "bb": baseline[1], "bsrc": baseline[2]}
+
+# baseline_source token family (issue #2199 direction, 2026-09-03):
+#   set-by-author         — belief stated directly by whoever filed the point
+#                           (human OR agent; the species is already tracked in
+#                           authoredBy, so the token stays author-agnostic)
+#   inherited-from-source — belief inherited from the source's trust rating at
+#                           confidence time
+#   system-default        — no belief stated when filed; the system applied its
+#                           standard starting belief (decide-part default)
+# Renamed from the pre-#2199 spellings 'explicit' → 'set-by-author' and
+# 'inherited' → 'inherited-from-source' (one-time upgrade migration:
+# graph-scripts/2199_baseline_source_rename.py — old and new spellings never
+# coexist). system-default is new (no deployed data, no migration needed).
+BASELINE_SOURCE_SET_BY_AUTHOR = "set-by-author"
+BASELINE_SOURCE_INHERITED = "inherited-from-source"
+BASELINE_SOURCE_SYSTEM_DEFAULT = "system-default"
+BASELINE_SOURCE_TOKENS = frozenset({
+    BASELINE_SOURCE_SET_BY_AUTHOR,
+    BASELINE_SOURCE_INHERITED,
+    BASELINE_SOURCE_SYSTEM_DEFAULT,
+})
+
+# Human display copy for the provenance tokens — ONE shared anchor phrase
+# ('Starting belief:') with per-token full form (issue #2199 design pin).
+# calibrate_summary and audits route every token through this map so the copy
+# never drifts per surface.
+BASELINE_SOURCE_DISPLAY: dict[str, str] = {
+    BASELINE_SOURCE_SET_BY_AUTHOR: (
+        "Starting belief: stated by the author when this was filed."
+    ),
+    BASELINE_SOURCE_INHERITED: (
+        "Starting belief: inherited from its source's trust rating "
+        "(e.g. high), applied when confidence is computed."
+    ),
+    BASELINE_SOURCE_SYSTEM_DEFAULT: (
+        "Starting belief: none was stated when this was filed, so the system "
+        "applied its standard starting belief (medium). You can set your own "
+        "any time — e.g. recreate with credibility=, or call "
+        "set_point_baseline()."
+    ),
+}
+
+
 # #913: statuses that make a Point STALE for review_connections(mode=prune)
 # — terminal states plus the legacy outdated flag (supersede/invalidate set
 # status='superseded'/'outdated' AND/OR outdated=true). draft/live are the
@@ -827,6 +891,28 @@ def _content_hash(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+def _session_capture_event_id(session_id: str) -> str:
+    """Deterministic sessionCaptured Event id (W5 Phase F #2104).
+
+    Content-addressed from the session_id (``ev_<sha256 hex>`` — the same
+    ``ev_`` prefix family as the derived-commit decision/issue event ids),
+    so two concurrent FRESH-session captures of ONE session_id converge on
+    a SINGLE Event node: the Event projection MERGEs on ``eventId``
+    (``_upsert_event`` plain path), so the second concurrent writer's mint
+    is an idempotent no-op — never a duplicate node and never a
+    duplicate-key error. This closes the #1727 TOCTOU residue (two
+    concurrent POSTs both observing ``session_existed=False`` and minting
+    two fresh-ULID Events): sequential retries already converged via the
+    session_existed replay skip (0 new nodes); the deterministic id makes
+    the CONCURRENT race idempotent too. Shared by the hosted impl
+    (byte-parity). Distinct session_ids hash to distinct ids (the
+    session_id is the idempotency key — one Event per session).
+    """
+    digest = hashlib.sha256(
+        f"sessionCaptured:{session_id}".encode()).hexdigest()[:62]
+    return f"ev_{digest}"
+
+
 def _capture_minted_ids(extracted: list[dict]) -> list[str]:
     """Ids of the points THIS capture actually minted (W5 Phase D #2104).
 
@@ -1339,6 +1425,45 @@ def _decorate_fallback_hits(results: list[dict], graph) -> list[dict]:
             if st.get(key):
                 r[key] = st[key]
     return results
+
+
+# ── Session-context digest noise filter (#2207) ─────────────────────────
+# The session-start digest (`tortoise context` → TortoiseSDK.session_context(),
+# mirrored by hosted /v1/context) must surface GENUINE decision/claim points.
+# Rule/config noise and markdown fragments that reach the graph via
+# document/transcript extraction — HR separators ('---'), label-led rule
+# bullets ('*Gate: filed as child issue…'), heading/table/quote/fence lines,
+# bare 'Label: value' config residue — are filtered out at digest time
+# (display-layer defense only; the extractor itself is unchanged).
+_DIGEST_STRUCTURE_RE = re.compile(r"^(?:[-*=~_`|#>]{2,}|\.{2,}|[-*+]\s*)$")
+_DIGEST_MD_LEAD_RE = re.compile(r"^(?:#{1,6}\s|>{1,}|`{3,}|~{3,}|\|)")
+# Label-led rule/config lines: an optional list/number marker and optional
+# emphasis, then a label ending in ':' before the value — '*Gate: filed as
+# child issue…', '- model: gpt-5', '* HARD RULE: Skill Compliance',
+# 'TORTOISE_DB_URI: docker://…'. All-caps continuations keep multi-word rule
+# labels ('HARD RULE', 'DO NOT EDIT') together; prose claims starting
+# mid-sentence are never label-led.
+_DIGEST_LABEL_RE = re.compile(
+    r"^(?:[-*+]\s+|\d+[.)]\s+)?(?:[*_]{1,2})?"
+    r"[A-Za-z0-9][A-Za-z0-9_.-]*(?:\s+[A-Z][A-Z0-9_.-]*)*"
+    r"\s*:(?:[*_]{1,2})?\s+\S"
+)
+
+
+def _is_digest_noise(content) -> bool:
+    """True when a Point's content is rule/config noise rather than a
+    digest-worthy decision/claim (#2207). Pure function over content so the
+    local digest, hosted /v1/context and the CLI share one definition."""
+    if not isinstance(content, str):
+        return True
+    t = content.strip()
+    if not t:
+        return True
+    if _DIGEST_STRUCTURE_RE.fullmatch(t):
+        return True
+    if _DIGEST_MD_LEAD_RE.match(t):
+        return True
+    return bool(_DIGEST_LABEL_RE.match(t))
 
 
 class TortoiseSDK:
@@ -1911,6 +2036,7 @@ class TortoiseSDK:
             )
 
     def create_point(self, kind: str, content: str, *, is_episodic: bool | None = None,
+                      credibility: str | int | float | None = None,
                       **props) -> dict:
         # #1486 (code-review P1): is_episodic is a SERVER-MANAGED flag — bound
         # to this explicit param (never the props passthrough, which
@@ -1920,6 +2046,21 @@ class TortoiseSDK:
         """Create a new Point node. Raises ValueError if kind is invalid.
 
         Set dedup=True for idempotent creation (matches by content hash).
+
+        Decision parts (#2199) — pointKind in {decision, option, criterion,
+        evidence} created WITHOUT an explicit status — land LIVE (not draft)
+        with an explicit, provenance-recorded starting belief: the default
+        prior 'medium' = Beta(3,1) stamped ``system-default`` unless the
+        author passes ``credibility`` (plain-language ladder word
+        gold/high/medium/low/unverified, T0-T4 form, or numeric 0-4), which
+        is stamped ``set-by-author``. Decision parts are human-authored
+        judgment with no document Source to inherit belief from; the explicit
+        default keeps the documented decide flow rankable on the first try
+        with zero promote/calibrate chores and no silent Beta(1,1)-as-
+        calibrated (the #7478 guard). Author-set baselines on any kind are
+        unchanged. Callers that explicitly pass a status (e.g. the capture/
+        extraction paths, which pass status="draft" + extractedFrom) keep
+        full manual control — no system default is applied.
         """
         self._validate_kind(kind)
         _coerce_props(props)
@@ -1942,8 +2083,27 @@ class TortoiseSDK:
 
         if is_episodic is not None:
             props["is_episodic"] = is_episodic  # server-managed (explicit param only)
-        # Calibration: pop credibility before storing as node property
-        credibility = props.pop("credibility", None)
+        # Calibration: pop credibility before storing as node property. The
+        # explicit ``credibility`` kwarg binds at the signature; a caller may
+        # also reach it through a nested props dict (flattened by _coerce_props
+        # above) — the explicit kwarg wins, the pop covers the nested path.
+        credibility = credibility if credibility is not None \
+            else props.pop("credibility", None)
+        # #2199: resolve + validate an author-stated belief BEFORE any graph
+        # write — a bad ladder word fails loud with nothing created (never a
+        # silent Beta(1,1) fallback, #7478; and never an uncalibrated live
+        # orphan left behind by a mid-create raise). The resolved Beta is
+        # applied below once the point id exists.
+        cred_prior: tuple[float, float] | None = None
+        if credibility is not None:
+            from tortoise.source_credibility import credibility_prior
+            cred_prior = credibility_prior(credibility)
+            if cred_prior is None:
+                raise ValueError(
+                    f"Unknown credibility {credibility!r}. Ladder words: "
+                    "gold / high / medium / low / unverified "
+                    "(or the T0-T4 / numeric forms)."
+                )
         # Always compute and store content hash — dedup flag only gates the
         # existing-point lookup, not hash persistence (fix #80).
         ch = _content_hash(content)
@@ -1956,7 +2116,16 @@ class TortoiseSDK:
         explicit_id = props.pop("id", None)
         # Idempotency guard: dedup by content hash when requested
         dedup = props.pop("dedup", False)
-        # Points enter as draft, go live when first edge is created (#131).
+        # Points enter as draft, go live when first edge is created (#131) —
+        # EXCEPT decision parts (#2199): a decision-part kind created without
+        # an explicit status is born live (matching how the decide skill's
+        # protocol is written), so EP factor extraction sees the option /
+        # criterion / finding right away. "Was status given?" is decided
+        # BEFORE the pop so a caller that explicitly passes a status (the
+        # capture/extraction paths pass status="draft" + extractedFrom, or a
+        # decide flow staging drafts deliberately) keeps full manual control
+        # and the #344/#1212 fail-closed posture.
+        explicit_status = "status" in props
         # Status is popped+validated BEFORE the dedup branch (#1905): a dedup
         # hit must never forward the caller's status into update_point (which
         # rejects any non-'live' status — a gated re-ingest of the same draft
@@ -1964,7 +2133,10 @@ class TortoiseSDK:
         # items as committed). Popping up front also keeps vocabulary
         # validation uniform for both paths: an invalid status raises even
         # when the point already exists (no silent-ignore asymmetry).
-        status = props.pop("status", "draft")
+        if not explicit_status and kind in DECIDE_PART_KINDS:
+            status = props.pop("status", "live")
+        else:
+            status = props.pop("status", "draft")
         # Fail-closed vocabulary validation (mirrors update_point): a
         # non-canonical status (case variant, junk, non-str, typo) would
         # otherwise be stored verbatim and treated as EP-LIVE by _live_only
@@ -2050,12 +2222,35 @@ class TortoiseSDK:
         except Exception:
             pass  # Graceful — embedding is optional
 
+        # #2199 baseline — resolved BEFORE the CREATE so the ep_* provenance
+        # fields land in the node's FIRST write. Embedded (FalkorDB Lite)
+        # fulltext reindexes on a post-CREATE SET: a later baseline write
+        # delete+re-adds the doc and silently drops its indexed content terms
+        # (score -> 0, ranking collapse — the #2206/issue-insight E2E caught
+        # it: the seeded decision fell below the observation hits). One write,
+        # one index entry, on every engine.
+        _create_baseline: tuple[float, float, str] | None = None
+        if cred_prior is not None:
+            _alpha, _beta = cred_prior
+            _create_baseline = (_alpha, _beta, BASELINE_SOURCE_SET_BY_AUTHOR)
+        elif not explicit_status and kind in DECIDE_PART_KINDS:
+            # #2199: system default applies ONLY to decide parts that were
+            # BORN live (no explicit status in the call) — see the tail
+            # comment block below for the full rationale.
+            from tortoise.source_credibility import credibility_prior
+            _alpha, _beta = credibility_prior(DECIDE_DEFAULT_CREDIBILITY)
+            _create_baseline = (_alpha, _beta, BASELINE_SOURCE_SYSTEM_DEFAULT)
+
+        _create_params: dict = {"id": pid, "c": content, "k": kind, "st": status,
+                                "now": now, "embedding": embedding}
+        if _create_baseline is not None:
+            _create_params.update(_baseline_create_params(_create_baseline))
         proj.g.query(
             "CREATE (n:Point {id:$id, content:$c, pointKind:$k, "
-            "is_operator:false, status:$st, createdAt:$now, updatedAt:$now}) "
+            "is_operator:false, status:$st, createdAt:$now, updatedAt:$now"
+            + (_baseline_create_fields() if _create_baseline is not None else "") + "}) "
             "SET n.embedding = vecf32($embedding)",
-            params={"id": pid, "c": content, "k": kind, "st": status, "now": now,
-                    "embedding": embedding},
+            params=_create_params,
         )
         # Tag handling: create :Tag nodes + TAGGED edges (#215, #485)
         tags = props.get("tags") or []
@@ -2073,17 +2268,40 @@ class TortoiseSDK:
             # inherit-eligible on the next EP run (no interval wait, #398).
             self._invalidate_inheritance_gate([pid])
 
-        # Apply credibility baseline (only on new creation, not dedup)
-        if credibility is not None:
-            tier_map = {
-                "gold": (10, 1), "T0": (10, 1), 0: (10, 1),
-                "high": (5, 1), "T1": (5, 1), 1: (5, 1),
-                "medium": (3, 1), "T2": (3, 1), 2: (3, 1),
-                "low": (2, 1), "T3": (2, 1), 3: (2, 1),
-                "unverified": (1.1, 1), "T4": (1.1, 1), 4: (1.1, 1),
-            }
-            alpha, beta = tier_map.get(credibility, (1, 1))
-            self.set_point_baseline(pid, alpha, beta)
+        # Apply the starting belief (only on new creation, not dedup).
+        #
+        # #2199: decision parts (kind in DECIDE_PART_KINDS) that were born
+        # live get an EXPLICIT, provenance-recorded prior so the documented
+        # decide flow ranks on the first try with zero undocumented
+        # promote/calibrate chores. The author can override the default with
+        # ``credibility`` (plain-language ladder word gold/high/medium/low/
+        # unverified, T0-T4 form, or numeric 0-4 → Beta via the single-sourced
+        # ladder); an override stamps provenance 'set-by-author'. No belief
+        # stated → the standard starting belief 'medium' = Beta(3,1), stamped
+        # 'system-default' — an EXPLICIT default with labeled provenance, never
+        # a silent Beta(1,1)-as-calibrated uniform (the #7478 guard).
+        # Author-set credibility on ANY kind/status is unchanged.
+        #
+        # The graph write already happened inside the CREATE (above) — this
+        # block only records the in-memory evidence cache + EP message
+        # invalidation, so the fresh-create path never issues the separate
+        # post-CREATE SET (embedded fulltext reindex hazard, above).
+        # System-default note: it applies ONLY to decide parts that were BORN
+        # live (no explicit status in the call) — a caller that explicitly
+        # passed a status keeps full manual control per the docstring: no
+        # auto default. This matters for sourced decide parts filed live from
+        # a capture/commit receiver: they must stay inherit-eligible
+        # (baseline_source IS NULL) so a tiered source's belief is applied at
+        # EP time instead of being frozen at the flat medium default (which
+        # would silently overwrite source belief — never-write-source-
+        # inheritance class).
+        if _create_baseline is not None:
+            _b_a, _b_b, _b_src = _create_baseline
+            self._evidence[pid] = (_b_a, _b_b)
+            # Epic 903-C4 (#1242): a prior change alters factor behavior
+            # WITHOUT a topology change — warm-start seeds computed under the
+            # OLD prior are stale. Full drop (cheap) per the plan's W3 rule.
+            self._get_ep().invalidate_messages()
         # Dreaming (#85): a new point can carry confidence-affecting props;
         # mark it dirty so the next dream/lazy-read stabilizes it.
         self._mark_dirty([pid])
@@ -2352,7 +2570,11 @@ class TortoiseSDK:
         conversation has no extractable content — always with ok=False and an
         errors entry — and "error" when extraction failed), errors/warnings
         are additive and never clobbered, and an empty/blank conversation is
-        rejected BEFORE any write (no Session stub, turns=0).
+        rejected BEFORE any write (no Session stub, turns=0). W5 Phase F
+        (#2104): a re-capture of an EXISTING session_id reports
+        "extraction_mode": "replayed" (ok=True, 0 points, additive warning —
+        the hosted #1727 replay skip; a replay is a no-op on the first
+        capture's Event + Source).
 
         Requires an LLM provider key (OPENROUTER/DEEPSEEK/OPENAI/GEMINI_API_KEY)
         or the TORTOISE_SESSION_LLM_MOCK=1 test seam — raises ValueError
@@ -2419,6 +2641,21 @@ class TortoiseSDK:
         if harness:
             _merge_sets.append("s.harness=$harness")
             _merge_params["harness"] = harness
+        # W5 Phase F (#2104, indicator 8 — SDK mirror replay parity): probe
+        # session_existed BEFORE the Session MERGE, mirroring the hosted
+        # #1727 replay skip — a re-capture of an EXISTING session_id skips
+        # extraction (the M2 lane mints non-deterministic time-ULID claim
+        # ids; a naive re-extract would mint DUPLICATE claims) AND skips the
+        # sessionCaptured Event mint + provenance stamp (hosted byte-parity;
+        # the deterministic event id below makes the CONCURRENT fresh race
+        # converge too). The Session MERGE + turn loop stay unconditional
+        # (idempotent no-ops for an identical-payload re-POST — 0 new nodes;
+        # a LONGER replay payload extends the stored turn list, the hosted
+        # #1727 scope).
+        session_existed = bool(proj.g.query(
+            "MATCH (s:Session {id:$sid}) RETURN count(s)",
+            params={"sid": session_id},
+        ).result_set[0][0])
         proj.g.query(
             f"MERGE (s:Session {{id:$sid}}) SET {', '.join(_merge_sets)}",
             params=_merge_params,
@@ -2485,7 +2722,19 @@ class TortoiseSDK:
         # structured contract — the M2 branch's meta now carries
         # errors/warnings/mode (no fabricated empty meta) so the assembly is
         # branch-independent and fails closed on either extractor.
-        if os.environ.get("TORTOISE_SESSION_EXTRACTOR") == "m2":
+        # W5 Phase F (#2104): the #1727 replay skip — a re-capture of an
+        # existing session_id is a NO-OP replay (extraction_mode "replayed",
+        # 0 new non-episodic nodes), byte-parity with hosted_api's replay
+        # branch (meta mode "replayed" + the additive warning).
+        if session_existed:
+            extracted = []
+            meta = {
+                "provider": None, "route": None, "failover_used": False,
+                "errors": [], "warnings": [
+                    "session already captured (same session_id) — no new "
+                    "extraction"], "mode": "replayed",
+            }
+        elif os.environ.get("TORTOISE_SESSION_EXTRACTOR") == "m2":
             extracted, meta = self._extract_session_llm(
                 windowed, session_id, now)
         else:
@@ -2503,76 +2752,114 @@ class TortoiseSDK:
         # extracted point's provenance surface; aboutEvent stays clean for
         # content (B3's event slot).
         event_id: str | None = None
-        try:
-            event = self.create_event(
-                f"session_{session_id}", "sessionCaptured",
-                startedAt=now, endedAt=now, sessionId=session_id,
-                is_episodic=True,
-            )
-            event_id = event.get("id") or event.get("eventId")
-            if event_id:
-                # W5 (#2104, S1): the SDK mirror stamps the full write
-                # provenance alongside the ontology-compliant eventId —
-                # byte-parity with hosted_api's capture stamp (the W2
-                # benchmark grades provenance_accuracy over these fields).
-                # W5 Phase D (#2104): the stamp gates over the MINTED ids —
-                # a dedup-folded entry (content_hash_hit/rephrase_linked)
-                # resolved to an existing node whose provenance belongs to
-                # its original ingest; re-stamping would clobber the first
-                # session's single-eventId provenance.
-                source_harness = harness or "unknown"
-                proj.g.query(
-                    "MATCH (n:Point) WHERE n.id IN $ids "
-                    "SET n.eventId=$eid, n.source_session=$sid, "
-                    "    n.source_harness=$harness, n.ingested_at=$ing",
-                    params={"ids": _capture_minted_ids(extracted),
-                            "eid": event_id, "sid": session_id,
-                            "harness": source_harness, "ing": now},
+        # W5 Phase F (#2104, indicator 8 — hosted #1727 byte-parity): the
+        # sessionCaptured Event mint + provenance stamp run ONLY on a genuine
+        # capture — a REPLAY of an existing session_id SKIPS them, exactly
+        # like hosted_api._capture_session_impl (re-running the mint would
+        # converge on the SAME deterministic Event node, but the projection's
+        # ON MATCH SET would refresh the first capture's startedAt/endedAt and
+        # the _emit_event journal would append a duplicate EventRecorded). The
+        # Session MERGE + turn loop above stay unconditional (idempotent
+        # no-ops for an identical-payload re-POST — 0 new nodes).
+        # Known limitation (review r3/r6, accepted — hosted #1727 mirrors it):
+        # a GENUINE capture whose mint/stamp failed mid-write (non-fatal catch
+        # below) leaves the Session with an un-stamped Event gap; a same-
+        # session retry observes session_existed=True and replays (never
+        # re-mints), so the gap does not self-heal. The replay skip also masks
+        # a retry after a FAILED EXTRACTION (a first capture that committed the
+        # Session + turn points but errored in the extractor: a same-session
+        # retry is a no-op "replayed" — recovery requires a fresh session_id).
+        # Byte-parity with hosted; heal-on-replay would diverge the two
+        # surfaces.
+        if not session_existed:
+            try:
+                # W5 Phase F (#2104): the mint uses the DETERMINISTIC id
+                # derived from session_id (_server_id channel — the
+                # server-only explicit-id convention, mirroring the explicit
+                # ``is_episodic`` param) so two concurrent FRESH-session
+                # captures of the same session_id (per-thread SDKs / two
+                # POSTs — the #1727 TOCTOU: both observe
+                # session_existed=False) MERGE onto ONE Event node instead of
+                # minting two fresh-ULID Events. The Event projection MERGEs
+                # on eventId, so the second concurrent writer's create is an
+                # idempotent no-op.
+                event = self.create_event(
+                    f"session_{session_id}", "sessionCaptured",
+                    _server_id=_session_capture_event_id(session_id),
+                    startedAt=now, endedAt=now, sessionId=session_id,
+                    is_episodic=True,
                 )
-            else:
-                # P1 #1529 (D4): create_event returning no id/eventId silently
-                # skips stamping — surface as an additive warning.
+                event_id = event.get("id") or event.get("eventId")
+                if event_id:
+                    # W5 (#2104, S1): the SDK mirror stamps the full write
+                    # provenance alongside the ontology-compliant eventId —
+                    # byte-parity with hosted_api's capture stamp (the W2
+                    # benchmark grades provenance_accuracy over these fields).
+                    # W5 Phase D (#2104): the stamp gates over the MINTED ids —
+                    # a dedup-folded entry (content_hash_hit/rephrase_linked)
+                    # resolved to an existing node whose provenance belongs to
+                    # its original ingest; re-stamping would clobber the first
+                    # session's single-eventId provenance.
+                    source_harness = harness or "unknown"
+                    proj.g.query(
+                        "MATCH (n:Point) WHERE n.id IN $ids "
+                        "SET n.eventId=$eid, n.source_session=$sid, "
+                        "    n.source_harness=$harness, n.ingested_at=$ing",
+                        params={"ids": _capture_minted_ids(extracted),
+                                "eid": event_id, "sid": session_id,
+                                "harness": source_harness, "ing": now},
+                    )
+                else:
+                    # P1 #1529 (D4): create_event returning no id/eventId
+                    # silently skips stamping — surface as an additive warning.
+                    _logger.warning(
+                        "capture_session: sessionCaptured Event write returned "
+                        "no id/eventId for session %s — extracted points not "
+                        "stamped",
+                        session_id,
+                    )
+                    extraction_warnings.append(
+                        "sessionCaptured Event write returned no id/eventId — "
+                        "extracted points not stamped")
+            except Exception as e:
+                # Non-fatal — mirrors hosted behavior, but surface the failure
+                # so silent event-log loss is visible (#721). P1 #1529 (D4):
+                # also append an additive warnings entry (never
+                # indistinguishable from a clean capture).
                 _logger.warning(
-                    "capture_session: sessionCaptured Event write returned no "
-                    "id/eventId for session %s — extracted points not stamped",
-                    session_id,
+                    "capture_session: sessionCaptured Event/EventRecorded write "
+                    "failed (non-fatal) for session %s: %s", session_id, e,
+                    exc_info=True,
                 )
                 extraction_warnings.append(
-                    "sessionCaptured Event write returned no id/eventId — "
-                    "extracted points not stamped")
-        except Exception as e:
-            # Non-fatal — mirrors hosted behavior, but surface the failure so
-            # silent event-log loss is visible (#721). P1 #1529 (D4): also
-            # append an additive warnings entry (never indistinguishable from
-            # a clean capture).
-            _logger.warning(
-                "capture_session: sessionCaptured Event/EventRecorded write "
-                "failed (non-fatal) for session %s: %s", session_id, e,
-                exc_info=True,
-            )
-            extraction_warnings.append(
-                f"sessionCaptured Event write failed: {type(e).__name__}: {e}")
-
-        # #1352: the extraction projection auto-created a document-typed Source
-        # stub at `session:{id}` (default sourceKind in _link_source) — the
-        # ontology v3.6 §4.6 session source kind is agentSession. Materialize
-        # the typed Source (capture metadata + sessionId + capturedAt + eventId)
-        # and wire (Source)-[:references]->(sessionCaptured Event). Always runs:
-        # the Source upgrade is independent of the Event write's health; the
-        # references edge is skipped when no Event landed (event_id None).
-        # P1 #1529 (D4): a Source materialization failure is non-fatal and
-        # surfaced as an additive warning — never a raw exception after
-        # partial writes.
-        try:
-            self._materialize_session_source(
-                session_id, event_id, now, conversation)
-        except Exception as e:
-            _logger.warning(
-                "capture_session: session Source materialization failed "
-                "(non-fatal) for session %s: %s", session_id, e, exc_info=True,
-            )
-            extraction_warnings.append(
-                f"session Source materialization failed: {type(e).__name__}: {e}")
+                    f"sessionCaptured Event write failed: {type(e).__name__}: {e}")
+            # #1352: the extraction projection auto-created a document-typed
+            # Source stub at `session:{id}` (default sourceKind in _link_source)
+            # — the ontology v3.6 §4.6 session source kind is agentSession.
+            # Materialize the typed Source (capture metadata + sessionId +
+            # capturedAt + eventId) and wire (Source)-[:references]->(sessionCaptured
+            # Event). W5 Phase F (#2104, review r1): runs ONLY on a genuine
+            # capture — inside the mint gate (hosted #1727 parity) — a REPLAY
+            # must not re-SET the first capture's Source capturedAt/contentHash
+            # (a replay is a true no-op). Still runs when the mint itself
+            # failed: the Source upgrade is independent of the Event write's
+            # health; the references edge is skipped when no Event landed
+            # (event_id None).
+            # P1 #1529 (D4): a Source materialization failure is non-fatal and
+            # surfaced as an additive warning — never a raw exception after
+            # partial writes.
+            try:
+                self._materialize_session_source(
+                    session_id, event_id, now, conversation)
+            except Exception as e:
+                _logger.warning(
+                    "capture_session: session Source materialization failed "
+                    "(non-fatal) for session %s: %s", session_id, e,
+                    exc_info=True,
+                )
+                extraction_warnings.append(
+                    f"session Source materialization failed: "
+                    f"{type(e).__name__}: {e}")
 
         # P1 #1529 (D2): truthful extraction_mode + ok/errors/warnings on every
         # response. "empty" always co-occurs with an error entry; belt-and-
@@ -2582,6 +2869,11 @@ class TortoiseSDK:
             effective_mode = "empty"
         elif not ok:
             effective_mode = "error"
+        elif meta.get("mode") == "replayed":
+            # W5 Phase F (#2104): SDK mirror replay parity — a re-capture of
+            # an existing session_id reports extraction_mode "replayed"
+            # (hosted byte-parity; 0 new non-episodic nodes).
+            effective_mode = "replayed"
         elif meta.get("route"):
             effective_mode = f"llm:{meta['route']}"
         else:
@@ -4812,15 +5104,35 @@ class TortoiseSDK:
             annotator_bias=bias, annotator_precision=precision,
             annotator_consistency=consistency, annotator_directness=directness)
 
-    def mitigate_operator(self, id: str, reason: str, strength: float = 0.5) -> dict:
+    def mitigate_operator(self, id: str, reason: str, strength: float = 0.5,
+                          credibility: str | int | float | None = None) -> dict:
         """Create a mitigation Point that modulates an operator's edge strength.
+
+        MITIGATION STRENGTH SEMANTICS (single-sourced — issue #2199 knock-on
+        decision 3): ``strength`` means how much this reason reduces the
+        edge — 0 = fully neutralized, 1 = fully intact (default 0.5). It is
+        NOT a statement of how true the reason is, and it is NOT fused into
+        the mitigation point's Beta prior (that would invert the meaning).
+        Strength is currently ADVISORY metadata: EP does not read
+        ``mitigation_strength`` / ``mitigated_by`` yet (nothing in ep.py
+        references either) — a future issue may wire it as edge modulation;
+        until then the decide tooling clamps to [0.10, 0.50] and the number
+        is auditable metadata on the mitigation point.
 
         Args:
             id: Operator Point ID to mitigate.
             reason: Why the edge is weaker than it appears.
-            strength: 0-1, 0=fully neutralized, 1=fully intact (default 0.5).
+            strength: 0-1 edge-modulation hint (advisory — see above).
+            credibility: optional plain-language starting belief for the
+                mitigation reason itself (gold/high/medium/low/unverified,
+                T0-T4 form, or numeric 0-4) — stamped 'set-by-author'.
+                Default None → the #2199 system starting belief ('medium',
+                Beta(3,1), provenance 'system-default') so the mitigation
+                point is a calibrated live evidence point and the decide
+                flow ranks on the first try (no CalibrationError).
 
-        Raises ValueError if id not found or not an operator.
+        Raises ValueError if id not found, not an operator, strength out of
+        [0, 1], or credibility outside the ladder.
         Idempotent: second call updates existing mitigation (reason + strength),
         does not create a duplicate.
         """
@@ -4831,6 +5143,18 @@ class TortoiseSDK:
             raise ValueError(f"Operator {id!r} not found")
         if not point.get("is_operator"):
             raise ValueError(f"Point {id!r} is not an operator")
+        from tortoise.source_credibility import credibility_prior
+        # Resolve the author-stated belief up front so a bad ladder word
+        # fails before any write (never a silent Beta(1,1) fallback, #7478).
+        author_prior = None
+        if credibility is not None:
+            author_prior = credibility_prior(credibility)
+            if author_prior is None:
+                raise ValueError(
+                    f"Unknown credibility {credibility!r}. Ladder words: "
+                    "gold / high / medium / low / unverified "
+                    "(or the T0-T4 / numeric forms)."
+                )
         # Idempotency: check for existing mitigation
         proj = self._get_proj()
         existing = proj.g.query(
@@ -4839,8 +5163,26 @@ class TortoiseSDK:
         ).result_set
         if existing:
             mid = existing[0][0]
-            return self.update_point(mid, content=f"[MITIGATION] {reason}",
-                                     mitigation_strength=strength)
+            self.update_point(mid, content=f"[MITIGATION] {reason}",
+                              mitigation_strength=strength)
+            # An explicit belief on the idempotent-update path re-baselines
+            # (never silently ignored). No credibility → keep whatever the
+            # mitigation already carries — EXCEPT a legacy pre-#2199
+            # mitigation with NO baseline at all: that is the exact
+            # uncalibrated-live-evidence case the decide flow must not leave
+            # behind (it would trip the fail-closed CalibrationError on the
+            # documented first-run EP). Heal it with the system default so a
+            # legacy mitigation becomes rankable on the next re-mitigation.
+            if author_prior is not None:
+                self.set_point_baseline(
+                    mid, author_prior[0], author_prior[1],
+                    source=BASELINE_SOURCE_SET_BY_AUTHOR)
+            elif not self.get_point(mid).get("baseline_set"):
+                alpha, beta = credibility_prior(DECIDE_DEFAULT_CREDIBILITY)
+                self.set_point_baseline(
+                    mid, alpha, beta,
+                    source=BASELINE_SOURCE_SYSTEM_DEFAULT)
+            return self.get_point(mid)
         # Create new mitigation Point
         mid = ulid()
         from datetime import datetime, timezone
@@ -4856,6 +5198,17 @@ class TortoiseSDK:
             "CREATE (m)-[:IMPL]->(op), (op)-[:mitigated_by]->(m)",
             params={"mid": mid, "oid": id},
         )
+        # #2199: mitigation reasons are human-authored judgment — give the
+        # fresh live point its explicit, provenance-recorded starting belief
+        # (author override or the documented system default) so the decide
+        # flow's EP run never trips the fail-closed CalibrationError.
+        if author_prior is not None:
+            alpha, beta = author_prior
+            source = BASELINE_SOURCE_SET_BY_AUTHOR
+        else:
+            alpha, beta = credibility_prior(DECIDE_DEFAULT_CREDIBILITY)
+            source = BASELINE_SOURCE_SYSTEM_DEFAULT
+        self.set_point_baseline(mid, alpha, beta, source=source)
         # Dreaming (#85): new mitigation + IMPL edge change propagation.
         self._mark_dirty([mid, id])
         # #548: emit events for rebuild parity
@@ -5080,12 +5433,37 @@ class TortoiseSDK:
         return audit_graph(proj, point_kinds=point_kinds).to_dict()
 
     def summarize_structure(self) -> dict:
-        """Count points per Gate (by pointKind). Returns {gate: count, ..., total}.
+        """Structure summary — counts over the WHOLE graph (#2205), not just
+        the product-strategy gate kinds.
 
-        P1 #49: re-keyed from context strings (tortoise-wf-gate0..4) to pointKind
-        (jobToBeDone, useCase, userJourney, workflow, requirement). Pre-existing
-        experimental points that had context but no matching pointKind may show 0
-        — expected under the #49 re-home (pointKind is the target vocabulary).
+        Pre-#2205 this tallied the five gate kinds only, so on evidence-heavy
+        graphs (statements/observations/hypotheses, decisions, events, pack
+        kinds, ...) the returned 'total' read 0 or near-0 while the graph was
+        full — 'Demo graph created — N points' and per-kind stats lied on real
+        graphs (self-host and hosted). Now returns flat {key: int} counts:
+
+          total      — non-operator Points across EVERY pointKind present
+                       ('N points' — the real graph size). Operators are
+                       reported separately (Tortoise surfaces treat operators
+                       as their own category, never as 'points').
+          operators  — operator Points ('M operators'): modern is_operator
+                       nodes AND legacy op_type-only bridges (the codebase's
+                       canonical operator predicate, #943 parity).
+          gate0_jtbds … gate4_requirements — the product-strategy gate-kind
+                       counts (keys unchanged; a SUBSET of total).
+          gate_total — the gate-kind subtotal (the pre-#2205 meaning of
+                       'total', kept under an honest label).
+
+        The non-operator predicate is absence-or-false PLUS op_type IS NULL:
+        plain Points may carry no is_operator property at all (only operators
+        set it) and legacy operators carry op_type without it — a bare
+        `n.is_operator = false` drops the first from every count and leaks the
+        second into 'total'. list_pointkinds() uses the SAME predicate, so the
+        per-kind stats add up to 'total' whenever every Point carries a
+        pointKind (untyped legacy Points are counted by total only).
+
+        P1 #49: gate keys are pointKind-based (jobToBeDone, useCase,
+        userJourney, workflow, requirement) after the context-string re-key.
         """
         proj = self._get_proj()
         gates = [
@@ -5095,15 +5473,30 @@ class TortoiseSDK:
             ("gate3_workflows", "workflow"),
             ("gate4_requirements", "requirement"),
         ]
+        # Canonical non-operator / operator predicates (parity with ep.py
+        # count_claims and the #943 legacy operator detection).
+        not_operator = ("(n.is_operator IS NULL OR n.is_operator = false) "
+                        "AND n.op_type IS NULL")
+        is_operator = "(n.is_operator = true OR n.op_type IS NOT NULL)"
         result: dict[str, int] = {}
         for key, kind in gates:
             result[key] = proj.g.query(
                 "MATCH (n:Point {pointKind:$k}) "
-                "WHERE n.is_operator = false "
+                f"WHERE {not_operator} "
                 "RETURN count(n)",
                 params={"k": kind},
             ).result_set[0][0]
-        result["total"] = sum(result.values())
+        result["total"] = proj.g.query(
+            "MATCH (n:Point) "
+            f"WHERE {not_operator} "
+            "RETURN count(n)",
+        ).result_set[0][0]
+        result["operators"] = proj.g.query(
+            "MATCH (n:Point) "
+            f"WHERE {is_operator} "
+            "RETURN count(n)",
+        ).result_set[0][0]
+        result["gate_total"] = sum(result[key] for key, _ in gates)
         return result
 
     # ── Taxonomy ─────────────────────────────────────────────────
@@ -5114,11 +5507,19 @@ class TortoiseSDK:
         return _taxonomy(self._get_proj())
 
     def list_pointkinds(self) -> list[dict]:
-        """All pointKinds present in the graph with counts. Returns [{kind, count, pack}]."""
+        """All pointKinds present in the graph with counts. Returns [{kind, count, pack}].
+
+        #2205: same non-operator predicate as summarize_structure (absence-or-
+        false + op_type IS NULL) so per-kind stats never drop legacy Points
+        that predate the is_operator property — a bare `n.is_operator = false`
+        made per-kind stats lie on imported graphs.
+        """
         proj = self._get_proj()
+        not_operator = ("(n.is_operator IS NULL OR n.is_operator = false) "
+                        "AND n.op_type IS NULL")
         rows = proj.g.query(
             "MATCH (n:Point) "
-            "WHERE n.is_operator = false "
+            f"WHERE {not_operator} "
             "AND n.pointKind IS NOT NULL "
             "RETURN n.pointKind, count(n) ORDER BY count(n) DESC"
         ).result_set
@@ -5293,6 +5694,17 @@ class TortoiseSDK:
             violations.append({
                 "section": section, "index": index,
                 "message": f"ingest: {section}[{index}] is_episodic is "
+                           f"server-managed and cannot be set on bundle items",
+            })
+        # W5 Phase F (#2104, review r3): _server_id is the server-ONLY
+        # explicit Event-id channel (capture mints) — a tenant bundle item
+        # carrying it would splat-bind create_event's keyword-only param below
+        # (the _coerce_props reject never sees it: the key binds the param, it
+        # never lands in props). Same shape-time reject as batch_id/is_episodic.
+        if "_server_id" in item:
+            violations.append({
+                "section": section, "index": index,
+                "message": f"ingest: {section}[{index}] _server_id is "
                            f"server-managed and cannot be set on bundle items",
             })
         if section == "points":
@@ -9001,16 +9413,35 @@ class TortoiseSDK:
                 self._evidence[pid] = (alpha, beta)
 
     def set_point_baseline(self, claim_id: str, alpha: float, beta: float, *,
-                           source: str = "explicit") -> dict:
+                           source: str = BASELINE_SOURCE_SET_BY_AUTHOR) -> dict:
         """Set Beta prior evidence for a claim. Persists to graph immediately.
 
         ``source`` records the baseline's provenance (``baseline_source`` graph
-        property): "explicit" (default) — manual/hosted baseline, NEVER
-        recomputed by ``_apply_source_inheritance``; "inherited" — derived from
-        Source evidence, recomputed per EP run subject to the per-point time
-        gate (``n.inherited_at``). Explicit baselines are always distinguishable
-        from legacy ``baseline_set=true`` rows (issue #398 2x2 mapping).
+        property) — the #2199 token family, ONE of:
+          - "set-by-author" (default): belief stated directly by whoever filed
+            the point (human OR agent — species is tracked in authoredBy).
+            NEVER recomputed by ``_apply_source_inheritance``.
+          - "inherited-from-source": derived from Source evidence, recomputed
+            per EP run subject to the per-point time gate (``n.inherited_at``).
+          - "system-default": no belief was stated when filed; the system
+            applied its standard starting belief (decide-part default, #2199).
+            Never recomputed — same persistence class as set-by-author.
+
+        Pre-#2199 spellings ('explicit' / 'inherited') are rejected with a
+        migration pointer — run graph-scripts/2199_baseline_source_rename.py
+        so old and new spellings never coexist. Set baselines are always
+        distinguishable from legacy ``baseline_set=true`` rows with no source
+        token (issue #398 2x2 mapping — calibrate_summary renders those as
+        set-by-author legacy).
         """
+        if source not in BASELINE_SOURCE_TOKENS:
+            raise ValueError(
+                f"Unknown baseline source {source!r}. Valid provenance tokens: "
+                f"{sorted(BASELINE_SOURCE_TOKENS)}. Pre-#2199 spellings "
+                "'explicit'/'inherited' were renamed — run "
+                "graph-scripts/2199_baseline_source_rename.py against the graph "
+                "before writing new baselines."
+            )
         self._evidence[claim_id] = (alpha, beta)
         # Persist to graph so baselines survive SDK restarts
         proj = self._get_proj()
@@ -9091,12 +9522,13 @@ class TortoiseSDK:
             lands — Task 5).
           - Positive-only: NAND contradiction is EP's factor domain — inheritance
             never folds negative pseudo-counts (double-count guard).
-          - Baseline provenance (2x2 mapping): explicit baselines (baseline_source
-            = 'explicit' or legacy baseline_set=true) are NEVER recomputed;
-            inherited baselines (baseline_source='inherited') recompute per run
-            subject to the per-point time gate (``n.inherited_at``); points with
-            no baseline (baseline_source IS NULL AND baseline_set IS NOT true)
-            are ALWAYS eligible.
+          - Baseline provenance (2x2 mapping): author-set/system-default
+            baselines (baseline_source = 'set-by-author' / 'system-default', or
+            legacy baseline_set=true with no token) are NEVER recomputed;
+            inherited baselines (baseline_source='inherited-from-source')
+            recompute per run subject to the per-point time gate
+            (``n.inherited_at``); points with no baseline (baseline_source IS
+            NULL AND baseline_set IS NOT true) are ALWAYS eligible.
           - Gate: recompute at most once per ``recompute_interval`` (default 3600s,
             env TORTOISE_EP_REINHERIT_INTERVAL; 0 = always), unless the gate was
             dirty-marked by a write event. Epsilon guard (rel 1e-9) suppresses
@@ -9148,13 +9580,13 @@ class TortoiseSDK:
 
         # Inherit-eligible points:
         #   (baseline_source IS NULL AND baseline_set IS NOT true)  → always eligible
-        #   (baseline_source = 'inherited')                          → gated by inherited_at
+        #   (baseline_source = 'inherited-from-source')              → gated by inherited_at
         where = (
             "WHERE n.is_operator = false "
             "AND (n.pointKind IS NULL OR n.pointKind <> 'assessment') "
             "AND ("
             "  (n.baseline_source IS NULL AND (n.baseline_set IS NULL OR n.baseline_set = false)) "
-            "  OR n.baseline_source = 'inherited'"
+            "  OR n.baseline_source = 'inherited-from-source'"
             ") "
             "AND (s.credibilityTier IS NOT NULL OR s.sourceKind IS NOT NULL) "
         )
@@ -9185,7 +9617,7 @@ class TortoiseSDK:
         else:
             sourced_ids = set()
         revert_rows = proj.g.query(
-            "MATCH (n:Point) WHERE n.baseline_source = 'inherited' "
+            "MATCH (n:Point) WHERE n.baseline_source = 'inherited-from-source' "
             "AND (n.pointKind IS NULL OR n.pointKind <> 'assessment') "
             "RETURN n.id, n.inherited_at",
             params={},
@@ -9227,7 +9659,7 @@ class TortoiseSDK:
             ).result_set
             bl_src, inherited_at, cur_a, cur_b = row[0] if row else (None, None, 1.0, 1.0)
 
-            is_inherited = bl_src == "inherited"
+            is_inherited = bl_src == BASELINE_SOURCE_INHERITED
             if is_inherited and inherited_at is not None and recompute_interval > 0:
                 try:
                     last = datetime.fromisoformat(str(inherited_at).replace("Z", "+00:00"))
@@ -9257,7 +9689,7 @@ class TortoiseSDK:
                 self._touch_inherited_at(pid, now)
                 continue
 
-            self.set_point_baseline(pid, alpha, beta, source="inherited")
+            self.set_point_baseline(pid, alpha, beta, source=BASELINE_SOURCE_INHERITED)
             self._touch_inherited_at(pid, now)
 
     def _touch_inherited_at(self, point_id: str, now) -> None:
@@ -9273,6 +9705,16 @@ class TortoiseSDK:
         
         Checks baseline_set flag on non-operator Points. For uncalibrated
         points, traverses extractedFrom→Source to check for inherited credibilityTier.
+
+        #2199 provenance: calibrated rows carry ``baseline_source`` — the raw
+        graph provenance token (one of ``set-by-author`` /
+        ``inherited-from-source`` / ``system-default``; None for legacy
+        ``baseline_set=true`` rows written before the token family) — plus a
+        human ``provenance`` phrase routed through the single BASELINE_SOURCE_
+        DISPLAY map (auto-assigned system-default priors are VISIBLE here,
+        never a silent uniform: issue #2199 indicator 3). Legacy token-less
+        rows render as set-by-author (the #398 2x2 mapping — their persistence
+        class is author-set: never recomputed by inheritance).
         """
         proj = self._get_proj()
         where = "WHERE n.is_operator = false"
@@ -9285,16 +9727,38 @@ class TortoiseSDK:
             "OPTIONAL MATCH (n)-[:extractedFrom]->(s:Source) "
             "RETURN n.id, n.content, n.pointKind, "
             "coalesce(n.baseline_set, false) AS calibrated, "
-            "n.status, "
+            "n.status, n.baseline_source AS bl_source, "
             "s.credibilityTier, s.sourceKind, s.url AS src_url",
             params=params,
         ).result_set
         
         results = []
         for row in rows:
-            pid, content, pk, calibrated, status, ctier, skind, src_url = row
+            (pid, content, pk, calibrated, status,
+             bl_source, ctier, skind, src_url) = row
             item = {"id": pid, "content": content, "pointKind": pk,
-                    "calibrated": calibrated, "status": status}
+                    "calibrated": calibrated, "status": status,
+                    "baseline_source": bl_source}
+            # #2199: every calibrated row routes through the single provenance
+            # display map so the copy never drifts per surface. Legacy
+            # token-less rows (pre-#2199 baseline_set=true) render as
+            # set-by-author — same persistence class (never recomputed).
+            if calibrated:
+                if bl_source in BASELINE_SOURCE_DISPLAY:
+                    item["provenance"] = BASELINE_SOURCE_DISPLAY[bl_source]
+                elif bl_source is None:
+                    item["provenance"] = BASELINE_SOURCE_DISPLAY[
+                        BASELINE_SOURCE_SET_BY_AUTHOR]
+                else:
+                    # Unrecognized token (pre-#2199 'explicit'/'inherited'
+                    # spelling on a graph the rename migration has not run
+                    # against) — surface it loudly with the fix path so old
+                    # and new spellings never silently coexist.
+                    item["provenance"] = (
+                        f"Legacy baseline_source token {bl_source!r} — run "
+                        "graph-scripts/2199_baseline_source_rename.py to "
+                        "rename to the #2199 token family."
+                    )
             # Effective tier: explicit credibilityTier > sourceKind tier-form >
             # registry default (issue #398 Task 6 — legacy-inherited advisory).
             eff_tier = resolve_tier(ctier, skind)
@@ -10180,7 +10644,13 @@ class TortoiseSDK:
 
     def session_context(self) -> dict:
         """Return 'what happened last session' — diary entries, Points, Events, confidence changes.
-        Returns structured dict with explicit 'no_prior_sessions' when graph is empty."""
+        Returns structured dict with explicit 'no_prior_sessions' when graph is empty.
+
+        #2207: recent_points / confidence_changes are digest surfaces — rule/config
+        noise and markdown fragments ('---', '*Gate: filed as child issue…', table
+        rows, 'Label: value' lines) are excluded so the session-start digest lists
+        actual decisions/claims only.
+        """
         proj = self._get_proj()
         diary_entries = [r[0] for r in proj.g.query(
             "MATCH (n:Point {pointKind:'diary'}) "
@@ -10205,6 +10675,11 @@ class TortoiseSDK:
                 "ORDER BY n.updatedAt DESC LIMIT 20"
             ).result_set
         ]
+        # #2207: rule/config noise must not reach the digest as 'recent decisions'.
+        recent_points = [p for p in recent_points
+                         if not _is_digest_noise(p.get("content"))]
+        confidence_changes = [c for c in confidence_changes
+                              if not _is_digest_noise(c.get("content"))]
         no_prior = not diary_entries and not recent_points and not recent_events
         return {
             "no_prior_sessions": no_prior,
@@ -10216,8 +10691,11 @@ class TortoiseSDK:
 
     # ── Issue Insight (#1196) ────────────────────────────────────
     # Review c70: the semantic stage must not report unrelated hits as
-    # "relates to this issue". Gate: EP-confirmed claims (confidence_mean
-    # >= 0.5) count, and so do hits sharing >= 2 tokens with the query text
+    # "relates to this issue". Gate: EP-confirmed claims count — measured
+    # (has_ep: persisted posterior OR prior/evidence α/β) AND belief
+    # confidence_mean >= 0.5 (post-#2206 confidence_mean is the belief mean;
+    # the unmeasured neutral 0.5 is NOT a 'we already decided this' signal)
+    # — and so do hits sharing >= 2 tokens with the query text
     # (a single-token TF-IDF coincidence — e.g. one shared word like
     # "unrelated" — is a false positive, not prior knowledge). Works across
     # both retrieval modes: FTS/RRF (EP-annotated) and TF-IDF fallback
@@ -10234,7 +10712,7 @@ class TortoiseSDK:
         BEFORE filing. Two stages:
           * Semantic (always): hybrid search on title+body for cross-session
             decisions / EP-tagged claims ('we already decided this'). Hits must
-            clear a relevance gate (EP confidence >= 0.5, or >= 2 shared tokens
+            clear a relevance gate (measured belief >= 0.5, or >= 2 shared tokens
             with the query) — otherwise the stage reports no matches instead of
             counting false positives.
           * Repo (when repo= given): structural count of indexed GitHub
@@ -10349,13 +10827,16 @@ class TortoiseSDK:
         """#1196 review c70 — semantic-stage relevance gate.
 
         A hit counts as "relates to this issue" when it is EP-confirmed
-        (confidence_mean >= 0.5 — the 'we already decided this' signal) OR it
-        shares >= 2 tokens with the query text. The token floor protects the
+        (has_ep AND confidence_mean >= 0.5 — the 'we already decided this'
+        signal) OR it shares >= 2 tokens with the query text. has_ep is
+        required post-#2206 because an unmeasured point reads the neutral
+        Beta(1,1) mean 0.5 — a bare >= 0.5 floor would count every
+        never-measured hit as "confirmed". The token floor protects the
         TF-IDF fallback path (ep=None) from single-token coincidences and
         keeps unmeasured FTS hits out unless they show real lexical overlap.
         """
         ep = hit.get("ep")
-        if ep is not None and ep.get("confidence_mean") is not None \
+        if ep is not None and ep.get("has_ep") and ep.get("confidence_mean") is not None \
                 and ep["confidence_mean"] >= self._ISSUE_INSIGHT_MIN_EP_CONFIDENCE:
             return True
         q_tokens = set(self._ISSUE_INSIGHT_TOKEN_RE.findall(query_text.lower()))
@@ -10492,9 +10973,14 @@ class TortoiseSDK:
         #1348. Resolution is the product's
         (tortoise/retrieval.py::resolve_pool_size).
 
-        Point results annotated with EP breakdown (confidence_mean + evidence + contention).
-        Non-Point entities skip EP annotation.
-        min_confidence defaults to 0.0 (no filter).
+        Point results annotated with EP breakdown. confidence_mean is THE
+        point's confidence (issue #2206 contract): the belief mean α/(α+β) of
+        the persisted posterior when EP has run, else the persisted prior
+        mean, else the neutral Beta(1,1) mean 0.5 — identical to
+        get_confidence/recall for the same point. contention/evidence stay
+        the structural edge-ratio family (a different quantity). Non-Point
+        entities skip EP annotation. min_confidence filters on
+        confidence_mean (belief); defaults to 0.0 (no filter).
 
         relationship_filter: 'predicate:target_id' — only return points connected to
             target_id via an operator with label=predicate (e.g., 'addresses:customerSegment-1').
@@ -11156,9 +11642,12 @@ class TortoiseSDK:
                 ranked = w4_enrich_items(proj, ranked)
             return ranked
         if order_by == "confidence":
-            # #25: sort by the PERSISTED EP confidence (n.confidence, written
-            # by compute_confidence), not the structural impl/(impl+nand) proxy
-            # from annotate_ep_batch (which is edge-ratio, not belief).
+            # #25/#2206: sort by the PERSISTED EP confidence (n.confidence,
+            # written by compute_confidence). Post-#2206 this is the SAME
+            # belief mean α/(α+β) that ep.confidence_mean carries
+            # (annotate_ep_batch reads the same coalesce of
+            # posterior_alpha/ep_alpha); n.confidence is read directly here so
+            # the sort never depends on the result-window annotation pass.
             from .ranking import GraphRanker
             ranker = graph_ranker or GraphRanker(proj)
             signals = ranker._fetch_signals([r.id for r in results], entity_type)
@@ -14086,6 +14575,29 @@ class TortoiseSDK:
         # #329: id + sourcePath/source_path are server-managed — reject
         props = _sanitize_props(props, reject_id=True)
         proj = self._get_proj()
+        # W5 Phase F (#2104, review r4): eventId is the EVENT node's identity
+        # (the projection MERGEs on it; capture Events carry the DETERMINISTIC
+        # _session_capture_event_id(session_id) id — ev_<sha256("sessionCaptured:"
+        # +session_id)[:62]>) — a tenant renaming it via update_entity
+        # would desync the live node from its EventRecorded journal entry
+        # (rebuild re-MERGEs a duplicate at the old id) and break Phase F's
+        # one-Event-per-eventId convergence premise. No sanctioned internal
+        # re-keying path exists. LABEL-AWARE (review r6): Point eventId is a
+        # WRITABLE provenance property with an established authoring path
+        # (create_point/update_point/update_entity-on-a-Point — #1417
+        # semantics, pinned by test_operator_route_point_with_eventid_prop_not
+        # _resolvable); the reject fires ONLY when the update targets an Event
+        # node (matched by id or eventId).
+        if "eventId" in props:
+            ev_hits = proj.g.query(
+                "MATCH (e:Event) WHERE e.eventId = $id OR e.id = $id "
+                "RETURN count(e)",
+                params={"id": id_val},
+            ).result_set[0][0]
+            if ev_hits:
+                raise ValueError(
+                    "'eventId' is server-managed (Event identity) and cannot "
+                    "be set via props.")
         # NOTE (issue #327): like _get_entity, entity mutation covers only the
         # canonical labels (Point/Subject/Object/Document/Source/Event).
         # Session/APIKey/Team/Tag nodes are intentionally NOT updated — legacy
@@ -14117,7 +14629,7 @@ class TortoiseSDK:
         return bool(total)
 
     def create_entity(self, type: str, name: str, *, is_episodic: bool | None = None,
-                       **props) -> dict:
+                       _server_id: str | None = None, **props) -> dict:
         """Create an entity — consolidated surface (epic #888 W2, PR #912).
 
         ``type`` routes to the right entity kind:
@@ -14135,6 +14647,15 @@ class TortoiseSDK:
         a suggested IMPL/NAND/mitigate relation — advisory only, never enforced.
         """
         _coerce_props(props)  # accept MCP-style nested props= dict (#218)
+        # W5 Phase F (#2104, review r1): the explicit ``_server_id`` param must
+        # never be reachable through the props passthrough — the MCP boundary
+        # denylist catches top-level keys, this catches the nested-props
+        # flatten (a props={"props": {...}} dict would otherwise splat-bind the
+        # keyword-only param after _coerce_props).
+        if "_server_id" in props:
+            raise ValueError(
+                "'_server_id' is a server-managed field and cannot be set "
+                "via props.")
         t = (type or "").strip().lower()
         if t == "subject":
             node = self._create_entity(
@@ -14154,7 +14675,23 @@ class TortoiseSDK:
                 raise ValueError(
                     "create_entity(type='event') requires eventKind")
             # Legacy create_event about* wiring — preserved verbatim (#888 W2).
-            eid = self.ulid()
+            # W5 Phase F (#2104, TOCTOU): an explicit deterministic id
+            # (server-ONLY channel via the ``_server_id`` keyword — the
+            # sessionCaptured capture mints pass
+            # ``_session_capture_event_id(session_id)`` so two concurrent
+            # fresh-session captures converge on ONE Event node) wins over
+            # the fresh ULID. The Event projection MERGEs on ``eventId``
+            # (``_upsert_event`` plain path), so a repeated id is an
+            # idempotent no-op — never a duplicate node, never a
+            # duplicate-key error. Mirrors the explicit ``is_episodic`` param
+            # convention (never the props passthrough): an ``id`` arriving via
+            # props is REJECTED fail-closed by ``_create_entity``'s
+            # ``_sanitize_props(reject_id=True)`` backstop — the MCP boundary
+            # rejects top-level server-managed props and the backstop catches
+            # nested-props flattens (pre-Phase F behavior restored).
+            eid = _server_id
+            if not isinstance(eid, str) or not eid:
+                eid = self.ulid()
             about_subject = props.pop("aboutSubject", None)
             about_object = props.pop("aboutObject", None)
             about_point = props.pop("aboutPoint", None)
@@ -14275,7 +14812,7 @@ class TortoiseSDK:
                                   objectKind=objectKind, **props)["node"]
 
     def create_event(self, name: str, eventKind: str, *, is_episodic: bool | None = None,
-                      **props) -> dict:
+                      _server_id: str | None = None, **props) -> dict:
         """Create an Event node (alias for create_entity(type='event')).
 
         If aboutSubject, aboutObject, aboutPoint, or aboutDocument are provided
@@ -14294,10 +14831,20 @@ class TortoiseSDK:
         if "is_episodic" in props:
             raise ValueError(
                 "'is_episodic' is a server-managed field and cannot be set via props.")
+        # W5 Phase F (#2104, review r1): the explicit ``_server_id`` param must
+        # never be reachable through the props passthrough — the MCP boundary
+        # denylist catches top-level keys, this catches the nested-props
+        # flatten (a props={"props": {...}} dict would otherwise splat-bind the
+        # keyword-only param after _coerce_props).
+        if "_server_id" in props:
+            raise ValueError(
+                "'_server_id' is a server-managed field and cannot be set "
+                "via props.")
         if is_episodic is not None:
             props["is_episodic"] = is_episodic  # server-managed (explicit param only)
         return self.create_entity("event", name,
-                                  eventKind=eventKind, **props)["node"]
+                                  eventKind=eventKind, _server_id=_server_id,
+                                  **props)["node"]
 
 
     # ── Session Indexing (AgentSession) ─────────────────────────
