@@ -435,7 +435,14 @@ def test_capture_session_event_recorded_write_lands(sdk):
     ).result_set
     assert len(rows) == 1
     event_id, node_id, started_at, ended_at = rows[0]
-    assert re.match(r"^[0-9a-f]+-[0-9a-f]{12}$", event_id), "create_event mints a ULID eventId"
+    # W5 Phase F (#2104): the sessionCaptured Event id is now DETERMINISTIC
+    # (_session_capture_event_id(session_id) = ev_<sha256("sessionCaptured:"+
+    # session_id)[:62]> — derived from the capture's idempotency key) so two
+    # concurrent fresh-session captures converge on ONE Event node.
+    # The old per-capture ULID made the #1727 TOCTOU mint two Events.
+    assert event_id.startswith("ev_") and len(event_id) > 40, event_id
+    assert not re.match(r"^[0-9a-f]+-[0-9a-f]{12}$", event_id), \
+        "the deterministic Event id replaces the per-capture ULID (Phase F)"
     assert node_id == event_id, "Event node id mirrors the EventRecorded eventId"
     assert started_at and ended_at, "timestamps populated from the capture write"
 
@@ -2423,17 +2430,18 @@ def test_capture_session_two_warnings_sources_no_clobber(sdk, monkeypatch):
 
 
 def test_capture_session_recapture_never_clobbers_source_turn_id(sdk, monkeypatch):
-    """E3 (#1529 note): (a) turn-point source_turn_id survives re-capture
-    (MERGE SET list excludes it — turn-stream idempotency only; extraction
-    points/Event fresh per capture BY DESIGN); (b) eventId stamping touches
-    only extracted points; (c) per-capture provenance: each capture's points
-    carry that capture's fresh Event eventId.
+    """E3 (#1529 note) + W5 Phase F (#2104): (a) turn-point source_turn_id
+    survives re-capture (MERGE SET list excludes it); (b) eventId stamping
+    touches only extracted points; (c) provenance identity per CAPTURE.
 
-    Runs the M2 branch (fresh ULIDs per capture): the v2 branch's content-
-    addressed ids are deterministic across captures, so a re-capture RE-stamps
-    the same point nodes to the new Event — per-capture set-identity
-    provenance is an M2 property (v2's re-stamp is intended content-addressed
-    semantics, locked separately by the re-capture turn tests)."""
+    W5 Phase F (#2104, SDK mirror replay parity): a re-capture of the SAME
+    session_id is now the #1727 REPLAY (extraction_mode "replayed") — it
+    re-MERGEs the Session + turn Points (0 new) and SKIPS extraction + mint,
+    so it does NOT mint a second Event or duplicate claims. The M2 mock's
+    time-ULID claim ids made a naive re-extract mint DUPLICATES (the leak
+    the replay skip closes). Per-capture provenance is therefore asserted
+    across two DIFFERENT sessions: each genuine capture's points share that
+    capture's deterministic eventId, and the two sessions' eventIds differ."""
     monkeypatch.setenv("TORTOISE_SESSION_EXTRACTOR", "m2")
     res1 = sdk.capture_session(CONV)
     sid = res1["session_id"]
@@ -2443,24 +2451,33 @@ def test_capture_session_recapture_never_clobbers_source_turn_id(sdk, monkeypatc
         "MATCH (p:Point {id:$id}) SET p.source_turn_id='turn-42'",
         params={"id": turn_id})
     res2 = sdk.capture_session(CONV, session_id=sid)  # re-capture same session
+    assert res2["extraction_mode"] == "replayed", res2
+    assert res2["points"] == [], "replay must not re-extract (0 new claims)"
     rows = proj.g.query(
         "MATCH (p:Point {id:$id}) RETURN p.source_turn_id, p.eventId",
         params={"id": turn_id}).result_set
     assert rows and rows[0][0] == "turn-42", "re-capture must not clobber source_turn_id"
     assert rows[0][1] is None, "turn points carry no eventId (extracted only)"
+    # Replay skipped the mint: ONE sessionCaptured Event for this session
+    # (the deterministic id from the FIRST capture).
     evs = proj.g.query(
         "MATCH (e:Event {eventKind:'sessionCaptured'}) RETURN e.eventId"
     ).result_set
-    assert len(evs) == 2, "one fresh Event per capture (intended)"
-    eids = {ev[0] for ev in evs}
-    stamps = set()
-    for res in (res1, res2):
+    assert len(evs) == 1, f"replay must not mint a second Event: {evs}"
+    # Per-capture provenance across DIFFERENT sessions: capture session B,
+    # assert its claims share B's eventId and it differs from A's.
+    res3 = sdk.capture_session(CONV)  # fresh session B
+    evs_b = proj.g.query(
+        "MATCH (e:Event {eventKind:'sessionCaptured'}) RETURN e.eventId"
+    ).result_set
+    assert len(evs_b) == 2, "a second genuine capture mints its own Event"
+    assert {ev[0] for ev in evs_b} != {ev[0] for ev in evs}, \
+        "distinct sessions must carry distinct deterministic eventIds"
+    for res in (res1, res3):
         stamped = proj.g.query(
             "MATCH (n:Point) WHERE n.id IN $ids RETURN collect(DISTINCT n.eventId)",
             params={"ids": [p["id"] for p in res["points"]]}).result_set[0][0]
         assert len(stamped) == 1, f"points of one capture share one eventId: {stamped}"
-        stamps.add(stamped[0])
-    assert stamps == eids, f"per-capture provenance broken: {stamps} vs {eids}"
 
 
 def test_capture_session_recapture_shorter_conversation_pins_state(sdk):
@@ -3511,3 +3528,183 @@ def test_phase_e_sdk_mirror_verification_fail_open_omits_marker(sdk, monkeypatch
     assert res["surfaced"] == [], (
         "a failed verification read must omit the marker, never fabricate it")
     assert any("marker omitted" in w for w in res["warnings"]), res["warnings"]
+
+
+# ── W5 Phase F (#2104): concurrent session_id idempotency ──────────────────
+
+
+def test_phase_f_deterministic_event_id_converges_two_mints(tmp_path):
+    """W5 Phase F (#2104): the sessionCaptured Event id is DETERMINISTIC
+    (derived from session_id) — two writers minting the same session's
+    capture Event (the #1727 TOCTOU: two concurrent POSTs both observing
+    session_existed=False) converge on ONE Event node, never two."""
+    import hashlib
+
+    from tortoise.sdk import _session_capture_event_id
+
+    sid = "session_phase_f"
+    eid = _session_capture_event_id(sid)
+    # Byte-parity format lock: ev_<sha256("sessionCaptured:"+session_id)>
+    # truncated to 62 hex chars — the SDK and hosted mint sites share this
+    # exact value (a drift would mint two different Event nodes for one
+    # session under the concurrent race).
+    expected = "ev_" + hashlib.sha256(
+        f"sessionCaptured:{sid}".encode()).hexdigest()[:62]
+    assert eid == expected, (eid, expected)
+    sdk = TortoiseSDK(db_path=str(tmp_path / "t.db"))
+    try:
+        sdk.create_event(f"session_{sid}", "sessionCaptured", _server_id=eid,
+                         startedAt="now", endedAt="now", sessionId=sid,
+                         is_episodic=True)
+        sdk.create_event(f"session_{sid}", "sessionCaptured", _server_id=eid,
+                         startedAt="now", endedAt="now", sessionId=sid,
+                         is_episodic=True)
+        proj = sdk._get_proj()
+        n = proj.g.query(
+            "MATCH (e:Event {eventId:$eid}) RETURN count(e)",
+            params={"eid": eid},
+        ).result_set
+        assert n[0][0] == 1, f"two mints must converge on ONE Event (got {n[0][0]})"
+    finally:
+        sdk.close()
+
+
+def test_phase_f_event_id_is_server_only_channel(tmp_path):
+    """W5 Phase F (#2104): the deterministic Event id is a SERVER-ONLY
+    channel — an ``id`` arriving via the props passthrough (flat kwarg or
+    MCP-style nested props dict) is rejected fail-closed by the
+    ``_sanitize_props(reject_id=True)`` backstop, restoring the pre-Phase F
+    posture (create_point's #52 pop is the only id-through-props surface).
+    The ``_server_id`` keyword (internal capture mints) is the only way in."""
+    from tortoise.sdk import _session_capture_event_id
+
+    sdk = TortoiseSDK(db_path=str(tmp_path / "t.db"))
+    try:
+        sid = "session_server_only"
+        eid = _session_capture_event_id(sid)
+        # Genuine capture mint still works through the internal channel.
+        ev = sdk.create_event(f"session_{sid}", "sessionCaptured",
+                              _server_id=eid, is_episodic=True)
+        assert ev.get("id") == eid, ev
+        # Flat id kwarg — rejected (previously popped + accepted).
+        try:
+            sdk.create_event("x", "meeting", id="ev_forced")
+            raise AssertionError("flat id kwarg must be rejected")
+        except ValueError as ex:
+            assert "server-managed" in str(ex), ex
+        # MCP-style nested props id — flattened by _coerce_props, rejected by
+        # the backstop (the MCP boundary only inspects top-level keys).
+        try:
+            sdk.create_event("x", "meeting", props={"id": "ev_forced"})
+            raise AssertionError("nested props id must be rejected")
+        except ValueError as ex:
+            assert "server-managed" in str(ex), ex
+        # create_entity event branch — same reject.
+        try:
+            sdk.create_entity("event", "x", eventKind="meeting",
+                              id="ev_forced")
+            raise AssertionError("create_entity id must be rejected")
+        except ValueError as ex:
+            assert "server-managed" in str(ex), ex
+        # The server-only _server_id kwarg must NOT be reachable through the
+        # props passthrough — the MCP boundary denylist catches top-level keys;
+        # the post-_coerce_props reject catches nested-props flattens (a
+        # props={"props": {...}} dict would otherwise splat-bind the
+        # keyword-only param).
+        try:
+            sdk.create_event("x", "meeting",
+                             props={"_server_id": "ev_forced"})
+            raise AssertionError("nested _server_id props must be rejected")
+        except ValueError as ex:
+            assert "server-managed" in str(ex), ex
+        try:
+            sdk.create_entity("event", "x", eventKind="meeting",
+                              props={"_server_id": "ev_forced"})
+            raise AssertionError("nested _server_id props must be rejected")
+        except ValueError as ex:
+            assert "server-managed" in str(ex), ex
+        # The EXPLICIT internal param stays the one working channel.
+        ev3 = sdk.create_event("x", "meeting", _server_id="ev_internal_ok")
+        assert ev3.get("id") == "ev_internal_ok", ev3
+        # The ingest-bundle surface (Phase-2 **item splat into create_event)
+        # must also reject _server_id at shape time — a tenant entity item
+        # would otherwise bind the keyword-only param directly (it never lands
+        # in props, so the post-coerce reject cannot see it).
+        from tortoise.exceptions import BundleValidationError
+        try:
+            sdk.ingest({"entities": [{"type": "event", "name": "ing",
+                                      "eventKind": "meeting",
+                                      "_server_id": "ev_forced_ingest"}]})
+            raise AssertionError("ingest _server_id item must be rejected")
+        except BundleValidationError as ex:
+            assert "_server_id" in str(ex), ex
+        n_events = sdk._get_proj().g.query(
+            "MATCH (e:Event {eventId:'ev_forced_ingest'}) RETURN count(e)"
+        ).result_set[0][0]
+        assert n_events == 0, "a rejected ingest must mint nothing"
+        # A fresh ULID is still minted when no _server_id is supplied.
+        ev2 = sdk.create_event("x", "meeting", is_episodic=False)
+        assert ev2.get("id"), ev2
+        assert ev2.get("id") != eid, "no _server_id must not reuse a prior id"
+        # eventId is server-managed on the ENTITY-update surface (an Event
+        # rename desyncs the live node from its EventRecorded journal entry).
+        # Point eventId is a WRITABLE provenance property (create_point /
+        # update_point authoring path, #1417) — only Event identity is guarded.
+        try:
+            sdk.update_entity(ev2.get("id"), eventId="ev_renamed")
+            raise AssertionError("update_entity eventId must be rejected")
+        except ValueError as ex:
+            assert "server-managed" in str(ex), ex
+        # ...while update_point still allows provenance property authoring.
+        pt = sdk.create_point("statement", "a point")
+        upd = sdk.update_point(pt["id"], eventId="ev_authorable")
+        assert sdk._get_proj().g.query(
+            "MATCH (p:Point {id:$i}) RETURN p.eventId",
+            params={"i": pt["id"]}).result_set[0][0] == "ev_authorable", upd
+        # The _update_entity reject is LABEL-AWARE: a Point target (matched by
+        # id) keeps eventId authoring; only Event targets reject.
+        sdk.update_entity(pt["id"], eventId="ev_authorable_2")
+        assert sdk._get_proj().g.query(
+            "MATCH (p:Point {id:$i}) RETURN p.eventId",
+            params={"i": pt["id"]}).result_set[0][0] == "ev_authorable_2"
+    finally:
+        sdk.close()
+
+
+def test_phase_f_sweep_event_delete_session_guard(tmp_path):
+    """W5 Phase F (#2104, review r3): the orphaned-writes sweep's Event delete
+    carries a session-absence guard (deterministic eventIds are shared by
+    every capture of a session — a concurrent same-session re-capture must not
+    lose its Event under the delete-during-capture race). Executes the EXACT
+    production Cypher (_SWEEP_EVENT_DELETE_CYPHER) against the real graph in
+    both states."""
+    from tortoise import hosted_api
+    from tortoise.sdk import _session_capture_event_id
+
+    sdk = TortoiseSDK(db_path=str(tmp_path / "t.db"))
+    try:
+        sid = "session_sweep_guard"
+        eid = _session_capture_event_id(sid)
+        proj = sdk._get_proj()
+        # Stage a Session + its deterministic capture Event (real graph).
+        ev = sdk.create_event(f"session_{sid}", "sessionCaptured",
+                              _server_id=eid, startedAt="now",
+                              endedAt="now", sessionId=sid,
+                              is_episodic=True)
+        assert ev.get("id") == eid, ev
+        proj.g.query("MERGE (s:Session {id:$sid})", params={"sid": sid})
+        q = lambda: proj.g.query(  # noqa: E731
+            "MATCH (e:Event {eventId:$eid}) RETURN count(e)",
+            params={"eid": eid}).result_set[0][0]
+        # Live Session present (the concurrent re-capture) → Event survives.
+        proj.g.query(hosted_api._SWEEP_EVENT_DELETE_CYPHER,
+                     params={"sid": sid, "eid": eid})
+        assert q() == 1, "a live Session must protect its deterministic Event"
+        # Session absent (true orphan) → Event is deleted.
+        proj.g.query("MATCH (s:Session {id:$sid}) DETACH DELETE s",
+                     params={"sid": sid})
+        proj.g.query(hosted_api._SWEEP_EVENT_DELETE_CYPHER,
+                     params={"sid": sid, "eid": eid})
+        assert q() == 0, "an absent Session must let the orphaned Event through"
+    finally:
+        sdk.close()
