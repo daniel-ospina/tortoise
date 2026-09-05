@@ -73,6 +73,7 @@ from tortoise.sdk import (
     _capture_turn_window,  # #1532 D1: shared stored-window truncation
     _content_hash,
     _normalize_turn_role,  # #1532 D2: shared role normalization (None->unknown)
+    _session_capture_event_id,  # W5 Phase F (#2104): deterministic sessionCaptured Event id
     _session_extraction_estimate,  # #1532 D4: v2-aware pre-write quota estimate
     _session_llm_transcript,  # P1 #1529: the shared empty/blank conversation gate
 )
@@ -5965,6 +5966,23 @@ async def capture_session(body: SessionRequest, request: Request, team: dict = D
         raise
 
 
+# W5 Phase F (#2104, review r3/r4): the sweep's Event delete carries the same
+# session-absence guard as the Point/Source deletes — a live Session (a
+# concurrent same-session re-capture owns the shared deterministic eventId)
+# makes the delete a no-op. Guard shape: aggregated present-count (the
+# ``OPTIONAL MATCH ... WITH s WHERE s IS NULL`` shape does NOT filter on
+# FalkorDB — docker AND embedded fold the NULL predicate into the optional
+# match and keep the row; verified by execution, review r4). Module-level so
+# the real-graph regression test executes the EXACT production Cypher (no
+# drift) on both lanes.
+_SWEEP_EVENT_DELETE_CYPHER = (
+    "OPTIONAL MATCH (s:Session {id:$sid}) "
+    "WITH count(s) AS present "
+    "WHERE present = 0 "
+    "MATCH (e:Event) WHERE e.eventId = $eid DETACH DELETE e"
+)
+
+
 async def _capture_session_impl(body: SessionRequest, request: Request | None,
                                 team: dict) -> dict:
     """The capture pipeline (gates + writes). Shared by the REST endpoint and
@@ -6069,8 +6087,10 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # FRESH session_id can both observe session_existed=False and mint a
     # sessionCaptured Event (narrow race) — sequential retries converge
     # correctly (the second POST sees the Session and replays, 0 new nodes).
-    # Follow-up: a deterministic Event id (derived from session_id) would
-    # make even the concurrent race idempotent. Do NOT reimplement here.
+    # W5 Phase F (#2104): the concurrent race is now idempotent too — the
+    # sessionCaptured Event mint below uses a DETERMINISTIC id derived from
+    # session_id (_session_capture_event_id), so both writers MERGE onto
+    # ONE Event node instead of minting two.
     session_existed = bool(proj.g.query(
         "MATCH (s:Session {id:$sid}) RETURN count(s)",
         params={"sid": session_id},
@@ -6304,14 +6324,27 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # provenance via the points' eventId.
     # #1727 Slice 2 (T2-P2c): the sessionCaptured Event mint + typed Source
     # materialization run ONLY on a genuine capture — a re-POST of an
-    # existing session_id skips them (the Event id is a fresh ULID per
-    # create_event, so running it would mint a new node — violating the
-    # "0 new nodes" idempotency contract).
+    # existing session_id is a pure NO-OP replay. W5 Phase F (#2104): the
+    # skip is NOT because a mint would duplicate the Event (the deterministic
+    # ``_session_capture_event_id(session_id)`` id — ev_<sha256("sessionCaptured:"
+    # +session_id)[:62]> — converges on the SAME node) — it is
+    # because re-running the mint would MUTATE the first capture's Event
+    # (the projection's ON MATCH SET refreshes startedAt/endedAt) and append
+    # a duplicate EventRecorded journal entry; a replay must never touch the
+    # first capture's Event or Source (SDK mirror byte-parity).
+    # W5 Phase F (#2104): when the mint DOES run, the Event id is the
+    # DETERMINISTIC ``_session_capture_event_id(session_id)``
+    # (ev_<sha256("sessionCaptured:"+session_id)[:62]>, NOT a fresh ULID) so
+    # two concurrent fresh-session POSTs of the same session_id — the #1727
+    # TOCTOU: both observe session_existed=False — MERGE onto ONE Event
+    # node (the Event projection MERGEs on eventId; the second concurrent
+    # writer's create is an idempotent no-op).
     if not session_existed:
         try:
             event = sdk.create_event(
                 f"session_{session_id}",
                 "sessionCaptured",
+                _server_id=_session_capture_event_id(session_id),
                 startedAt=now,
                 endedAt=now,
                 sessionId=session_id,
@@ -6507,24 +6540,47 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
             # Session (C's re-capture owns the shared {sid}_t{i} id-space) makes
             # the query a no-op and the re-capture re-absorbs the turns; only a
             # truly absent Session lets the orphans through.
+            # W5 Phase F (#2104, review r4): the guard is an AGGREGATED present
+            # count (``WHERE present = 0``), NOT the ``OPTIONAL MATCH ... WITH s
+            # WHERE s IS NULL`` shape — FalkorDB (docker AND embedded) folds a
+            # NULL-predicate WHERE into the OPTIONAL MATCH failure and KEEPS the
+            # row, so the old shape never filtered (verified by execution: the
+            # delete ran with a live Session present).
             with suppress(Exception):
                 proj.g.query(
-                    "OPTIONAL MATCH (s:Session {id:$sid}) WITH s "
-                    "WHERE s IS NULL "
+                    "OPTIONAL MATCH (s:Session {id:$sid}) "
+                    "WITH count(s) AS present "
+                    "WHERE present = 0 "
                     "MATCH (p:Point) WHERE p.id IN $ids DETACH DELETE p",
                     params={"sid": session_id, "ids": point_ids},
                 )
         if minted_event and event_id:
-            # no session guard needed — a minted eventId is a per-capture ULID
+            # W5 Phase F (#2104, review r3): the session guard is REQUIRED —
+            # the minted eventId is now DETERMINISTIC
+            # (_session_capture_event_id(session_id) =
+            # ev_<sha256("sessionCaptured:"+session_id)[:62]>) and shared by
+            # every capture of the same session. Under the delete-during-
+            # capture race a concurrent same-session re-capture (which
+            # re-MERGEs a fresh Session and mints the SAME eventId) must NOT
+            # have its Event deleted by this sweep — the re-capture's
+            # extracted Points would
+            # dangle with no live Event for their eventId provenance and the
+            # EventRecorded journal entry would point at a deleted node (the
+            # per-capture ULID premise the old comment relied on is gone).
+            # Guard shape: aggregated present-count (see the Point delete
+            # above — the NULL-predicate WHERE shape does not filter on
+            # FalkorDB). Shared with tests via _SWEEP_EVENT_DELETE_CYPHER
+            # (real-graph pin, both lanes).
             with suppress(Exception):
                 proj.g.query(
-                    "MATCH (e:Event) WHERE e.eventId = $eid DETACH DELETE e",
-                    params={"eid": event_id},
+                    _SWEEP_EVENT_DELETE_CYPHER,
+                    params={"sid": session_id, "eid": event_id},
                 )
         with suppress(Exception):
             proj.g.query(
-                "OPTIONAL MATCH (s:Session {id:$sid}) WITH s "
-                "WHERE s IS NULL "
+                "OPTIONAL MATCH (s:Session {id:$sid}) "
+                "WITH count(s) AS present "
+                "WHERE present = 0 "
                 "MATCH (src:Source {url:$url}) DETACH DELETE src",
                 params={"sid": session_id, "url": f"session:{session_id}"},
             )
