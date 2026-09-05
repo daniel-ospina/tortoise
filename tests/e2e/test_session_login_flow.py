@@ -207,4 +207,6 @@ def test_anon_team_error_funnels_to_claim(page: Page) -> None:
                                                  "message": "unclaimed"}})
     _submit_api_key(page, "tt_anon_key_abcdef0123456789")
     expect(page).to_have_url(re.compile(r"^https://app\.premiselabs\.co/\?claim=1"), timeout=20_000)
-    expect(page.locator("body")).to_contain_text("Claim your team", timeout=20_000)
+    # W1 (#1997 team→Organization rename): the claim-paste card heading is
+    # 'Claim your organization' (main.jsx protect-banner).
+    expect(page.locator("body")).to_contain_text("Claim your organization", timeout=20_000)

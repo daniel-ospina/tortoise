@@ -1427,6 +1427,45 @@ def _decorate_fallback_hits(results: list[dict], graph) -> list[dict]:
     return results
 
 
+# ── Session-context digest noise filter (#2207) ─────────────────────────
+# The session-start digest (`tortoise context` → TortoiseSDK.session_context(),
+# mirrored by hosted /v1/context) must surface GENUINE decision/claim points.
+# Rule/config noise and markdown fragments that reach the graph via
+# document/transcript extraction — HR separators ('---'), label-led rule
+# bullets ('*Gate: filed as child issue…'), heading/table/quote/fence lines,
+# bare 'Label: value' config residue — are filtered out at digest time
+# (display-layer defense only; the extractor itself is unchanged).
+_DIGEST_STRUCTURE_RE = re.compile(r"^(?:[-*=~_`|#>]{2,}|\.{2,}|[-*+]\s*)$")
+_DIGEST_MD_LEAD_RE = re.compile(r"^(?:#{1,6}\s|>{1,}|`{3,}|~{3,}|\|)")
+# Label-led rule/config lines: an optional list/number marker and optional
+# emphasis, then a label ending in ':' before the value — '*Gate: filed as
+# child issue…', '- model: gpt-5', '* HARD RULE: Skill Compliance',
+# 'TORTOISE_DB_URI: docker://…'. All-caps continuations keep multi-word rule
+# labels ('HARD RULE', 'DO NOT EDIT') together; prose claims starting
+# mid-sentence are never label-led.
+_DIGEST_LABEL_RE = re.compile(
+    r"^(?:[-*+]\s+|\d+[.)]\s+)?(?:[*_]{1,2})?"
+    r"[A-Za-z0-9][A-Za-z0-9_.-]*(?:\s+[A-Z][A-Z0-9_.-]*)*"
+    r"\s*:(?:[*_]{1,2})?\s+\S"
+)
+
+
+def _is_digest_noise(content) -> bool:
+    """True when a Point's content is rule/config noise rather than a
+    digest-worthy decision/claim (#2207). Pure function over content so the
+    local digest, hosted /v1/context and the CLI share one definition."""
+    if not isinstance(content, str):
+        return True
+    t = content.strip()
+    if not t:
+        return True
+    if _DIGEST_STRUCTURE_RE.fullmatch(t):
+        return True
+    if _DIGEST_MD_LEAD_RE.match(t):
+        return True
+    return bool(_DIGEST_LABEL_RE.match(t))
+
+
 class TortoiseSDK:
     """Layer 1 facade for Tortoise epistemic graph interaction.
 
@@ -10605,7 +10644,13 @@ class TortoiseSDK:
 
     def session_context(self) -> dict:
         """Return 'what happened last session' — diary entries, Points, Events, confidence changes.
-        Returns structured dict with explicit 'no_prior_sessions' when graph is empty."""
+        Returns structured dict with explicit 'no_prior_sessions' when graph is empty.
+
+        #2207: recent_points / confidence_changes are digest surfaces — rule/config
+        noise and markdown fragments ('---', '*Gate: filed as child issue…', table
+        rows, 'Label: value' lines) are excluded so the session-start digest lists
+        actual decisions/claims only.
+        """
         proj = self._get_proj()
         diary_entries = [r[0] for r in proj.g.query(
             "MATCH (n:Point {pointKind:'diary'}) "
@@ -10630,6 +10675,11 @@ class TortoiseSDK:
                 "ORDER BY n.updatedAt DESC LIMIT 20"
             ).result_set
         ]
+        # #2207: rule/config noise must not reach the digest as 'recent decisions'.
+        recent_points = [p for p in recent_points
+                         if not _is_digest_noise(p.get("content"))]
+        confidence_changes = [c for c in confidence_changes
+                              if not _is_digest_noise(c.get("content"))]
         no_prior = not diary_entries and not recent_points and not recent_events
         return {
             "no_prior_sessions": no_prior,
@@ -10641,8 +10691,11 @@ class TortoiseSDK:
 
     # ── Issue Insight (#1196) ────────────────────────────────────
     # Review c70: the semantic stage must not report unrelated hits as
-    # "relates to this issue". Gate: EP-confirmed claims (confidence_mean
-    # >= 0.5) count, and so do hits sharing >= 2 tokens with the query text
+    # "relates to this issue". Gate: EP-confirmed claims count — measured
+    # (has_ep: persisted posterior OR prior/evidence α/β) AND belief
+    # confidence_mean >= 0.5 (post-#2206 confidence_mean is the belief mean;
+    # the unmeasured neutral 0.5 is NOT a 'we already decided this' signal)
+    # — and so do hits sharing >= 2 tokens with the query text
     # (a single-token TF-IDF coincidence — e.g. one shared word like
     # "unrelated" — is a false positive, not prior knowledge). Works across
     # both retrieval modes: FTS/RRF (EP-annotated) and TF-IDF fallback
@@ -10659,7 +10712,7 @@ class TortoiseSDK:
         BEFORE filing. Two stages:
           * Semantic (always): hybrid search on title+body for cross-session
             decisions / EP-tagged claims ('we already decided this'). Hits must
-            clear a relevance gate (EP confidence >= 0.5, or >= 2 shared tokens
+            clear a relevance gate (measured belief >= 0.5, or >= 2 shared tokens
             with the query) — otherwise the stage reports no matches instead of
             counting false positives.
           * Repo (when repo= given): structural count of indexed GitHub
@@ -10774,13 +10827,16 @@ class TortoiseSDK:
         """#1196 review c70 — semantic-stage relevance gate.
 
         A hit counts as "relates to this issue" when it is EP-confirmed
-        (confidence_mean >= 0.5 — the 'we already decided this' signal) OR it
-        shares >= 2 tokens with the query text. The token floor protects the
+        (has_ep AND confidence_mean >= 0.5 — the 'we already decided this'
+        signal) OR it shares >= 2 tokens with the query text. has_ep is
+        required post-#2206 because an unmeasured point reads the neutral
+        Beta(1,1) mean 0.5 — a bare >= 0.5 floor would count every
+        never-measured hit as "confirmed". The token floor protects the
         TF-IDF fallback path (ep=None) from single-token coincidences and
         keeps unmeasured FTS hits out unless they show real lexical overlap.
         """
         ep = hit.get("ep")
-        if ep is not None and ep.get("confidence_mean") is not None \
+        if ep is not None and ep.get("has_ep") and ep.get("confidence_mean") is not None \
                 and ep["confidence_mean"] >= self._ISSUE_INSIGHT_MIN_EP_CONFIDENCE:
             return True
         q_tokens = set(self._ISSUE_INSIGHT_TOKEN_RE.findall(query_text.lower()))
@@ -10917,9 +10973,14 @@ class TortoiseSDK:
         #1348. Resolution is the product's
         (tortoise/retrieval.py::resolve_pool_size).
 
-        Point results annotated with EP breakdown (confidence_mean + evidence + contention).
-        Non-Point entities skip EP annotation.
-        min_confidence defaults to 0.0 (no filter).
+        Point results annotated with EP breakdown. confidence_mean is THE
+        point's confidence (issue #2206 contract): the belief mean α/(α+β) of
+        the persisted posterior when EP has run, else the persisted prior
+        mean, else the neutral Beta(1,1) mean 0.5 — identical to
+        get_confidence/recall for the same point. contention/evidence stay
+        the structural edge-ratio family (a different quantity). Non-Point
+        entities skip EP annotation. min_confidence filters on
+        confidence_mean (belief); defaults to 0.0 (no filter).
 
         relationship_filter: 'predicate:target_id' — only return points connected to
             target_id via an operator with label=predicate (e.g., 'addresses:customerSegment-1').
@@ -11581,9 +11642,12 @@ class TortoiseSDK:
                 ranked = w4_enrich_items(proj, ranked)
             return ranked
         if order_by == "confidence":
-            # #25: sort by the PERSISTED EP confidence (n.confidence, written
-            # by compute_confidence), not the structural impl/(impl+nand) proxy
-            # from annotate_ep_batch (which is edge-ratio, not belief).
+            # #25/#2206: sort by the PERSISTED EP confidence (n.confidence,
+            # written by compute_confidence). Post-#2206 this is the SAME
+            # belief mean α/(α+β) that ep.confidence_mean carries
+            # (annotate_ep_batch reads the same coalesce of
+            # posterior_alpha/ep_alpha); n.confidence is read directly here so
+            # the sort never depends on the result-window annotation pass.
             from .ranking import GraphRanker
             ranker = graph_ranker or GraphRanker(proj)
             signals = ranker._fetch_signals([r.id for r in results], entity_type)
