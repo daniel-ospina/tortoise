@@ -587,7 +587,7 @@ class TestExcludedTools:
 # ── Epic #888: onboarding tool retirement ────────────────────────
 
 class TestOnboardingToolGating:
-    """Epic #888 no-regret item 2: the six tortoise_onboarding_* tools must
+    """Epic #888 no-regret item 2: the seven tortoise_onboarding_* tools must
     NOT appear in a team's tools/list once that team's onboarding is complete
     (onboarding_state.onboarding_complete). The onboarding flow itself is
     unchanged — only the steady-state listing hides them.
@@ -795,7 +795,7 @@ class TestOnboardingToolGating:
 
 # ── #2210: advertised == served ─────────────────────────────────
 # First-run trial observation: the FastMCPAdapter logged "7 registry entries
-# have no handler — skipped" (the six onboarding tools + tortoise_session_capture
+# have no handler — skipped" (the seven onboarding tools + tortoise_session_capture
 # were defined AFTER the mid-module register_all call) while the HTTP tool list
 # still advertised them. register_all now runs at module bottom, after every
 # tool def — every registry-advertised tool must be registered and servable.
