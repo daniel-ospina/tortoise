@@ -45,4 +45,4 @@ EXPOSE 8000
 RUN mkdir -p /data
 ENV TORTOISE_DB_PATH=/data/tortoise.db
 
-CMD ["uvicorn", "tortoise.selfhost:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "tortoise.selfhost:app", "--host", "0.0.0.0", "--port", "8000", "--timeout-graceful-shutdown", "5"]
