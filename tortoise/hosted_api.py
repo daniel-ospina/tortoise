@@ -6554,8 +6554,10 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         STATUS_OK,
         STATUS_PARTIAL,
         build_write_verb,
+        surfaced_marker,
     )
     skipped = 0
+    facts: dict = {}
     if extracted:
         try:
             # P1 (review round 1): the enrichment read runs AFTER the writes
@@ -6618,8 +6620,21 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         # skipped: at least one extracted point could not be verified
         # post-write — the verb is partial, never an unqualified ok.
         verb_status = STATUS_PARTIAL
+    # W5 Phase E (#2104, S11): disclosure marker DATA on the capture
+    # receipt — ``surfaced`` uses the §3.2.2 marker vocabulary (one entry
+    # per memory item THIS capture added; N = len = the disclosure count,
+    # the same "N = len(surfaced)" rule the volunteer/recall marker uses,
+    # #2103). Graph-truth only (anti-gaming): an entry appears ONLY for an
+    # id the post-write enrichment read verified in the graph (``facts``)
+    # AND whose seam verdict is ``new`` (a content_hash_hit/rephrase_linked
+    # fold added no item — the canonical pre-existed). A replay
+    # (session_existed → extraction skipped) or an enrichment-read failure
+    # yields []: nothing was added, never a fabricated count. UI rendering
+    # of the marker is #1976's — this is the engine data exposure only.
+    surfaced = surfaced_marker(extracted, verified_ids=set(facts))
     resp = {"session_id": session_id, "turns": len(body.conversation),
             "extracted": len(extracted), "points": extracted,
+            "surfaced": surfaced,
             "extraction_mode": effective_mode,
             "errors": extraction_errors, "warnings": extraction_warnings,
             # #2002 (W6): first_capture=true exactly once per org — the

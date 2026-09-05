@@ -35,8 +35,21 @@ phase.  The per-point entries on the capture surface are the ENRICHED raw
 extractor dicts (``id``-keyed, plus additive ``point_id``/``status``/
 ``ep_updated``/``dedup``) — ``point_entry`` is the canonical factory for
 write surfaces that build their own point lists.
+
+Disclosure marker data (W5 Phase E, issue #2104 S11): the capture receipt
+additionally carries an additive ``surfaced`` list built by
+``surfaced_marker`` — one entry per memory item THIS capture actually
+added (``{point_id, label}``; N = len(surfaced) is the disclosure count,
+the §3.2.2 marker-vocabulary rule shared with the volunteer/recall
+surface). The list is GRAPH-TRUTH only: an entry appears only for a
+point the post-write verification read returned AND whose seam verdict is
+``new`` (content_hash_hit/rephrase_linked folds and replays add no item).
+UI rendering of the marker is #1976's; this module exposes the engine
+data only.
 """
 from __future__ import annotations
+
+import re
 
 MEMORY_WRITE_V1 = "memory_write_v1"
 
@@ -141,6 +154,72 @@ def build_write_verb(
                 continue  # protocol keys always win
             verb[k] = v
     return verb
+
+
+def _capture_surfaced_label(content: str | None, point_id: str) -> str:
+    """Deterministic disclosure label for one captured memory item.
+
+    Same GRAMMAR rule as the recall marker labels (``tortoise/volunteer.py``
+    ``_label_from_content`` — leading whitespace tokens, <= 48 chars,
+    zero-LLM, deterministic): the capture receipt's ``surfaced`` entries and
+    the recall surface's ``surfaced`` entries stay one vocabulary (issue
+    #2104 S11 — "a capture/recall surface that shows ingested memory must
+    carry the same marker semantics"). Falls back to the point id when the
+    content yields nothing (a label is deterministic, never empty).
+    """
+    tokens = re.findall(r"\S+", content or "")[:6]
+    label = " ".join(tokens).rstrip(",:;. ")
+    label = label[:48]
+    return label or point_id
+
+
+def surfaced_marker(points: list[dict] | None,
+                    *, verified_ids: set[str]) -> list[dict]:
+    """Disclosure marker data for a capture write-back receipt (issue #2104
+    S11 / epic §3.2.2 ``surfaced`` vocabulary, capture side).
+
+    One entry PER memory item THIS capture actually added, entry =
+    ``{point_id, label}``; N = len(return) is the disclosure count (the
+    plan's pinned "N = len(surfaced) drives the marker" rule — same marker
+    semantics as the volunteer/recall ``surfaced`` list, #2103).
+
+    Anti-gaming — the marker counts ONLY graph-truth additions, never the
+    raw extractor count.  ``verified_ids`` is REQUIRED and fail-closed: an
+    id the caller cannot verify present in the graph post-write is never
+    counted (both capture surfaces always pass the post-write verification
+    read's id set — omitting verification is a programming error, never a
+    "trust me" escape that could fabricate counts):
+
+    * an entry appears ONLY when the post-write graph verification returned
+      the id (``verified_ids`` — a swept/deleted/missing point is never
+      counted; hosted passes the Phase-A enrichment ``facts`` key set, the
+      SDK mirror passes its own verification read);
+    * entries whose seam verdict is a dedup FOLD (``content_hash_hit`` /
+      ``rephrase_linked``) are EXCLUDED — a fold added no memory item (the
+      canonical pre-existed and its provenance belongs to its original
+      ingest); the fold's honest verdict still rides the per-point entry;
+    * a replay / empty extraction contributes zero entries (``[]`` —
+      nothing was added).
+    """
+    out: list[dict] = []
+    for p in points or []:
+        pid = p.get("point_id") or p.get("id")
+        if not pid:
+            continue
+        # A folded claim resolved to an existing node — no item added.
+        if p.get("dedup", DEDUP_NEW) != DEDUP_NEW:
+            continue
+        if pid not in verified_ids:
+            # Not verified present in the graph post-write — never counted.
+            continue
+        content = p.get("content")
+        if content is None:
+            content = p.get("text")
+        out.append({
+            "point_id": pid,
+            "label": _capture_surfaced_label(content, pid),
+        })
+    return out
 
 
 def assert_provenance(provenance: dict | None) -> dict | None:
