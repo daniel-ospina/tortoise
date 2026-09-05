@@ -151,6 +151,14 @@ claude mcp add --transport http tortoise https://api.premiselabs.co/mcp/ \
 (`export TORTOISE_API_KEY=<key>` in `~/.zshrc` / `~/.bashrc`). Validate the
 config was written (`claude mcp list` shows `tortoise`).
 
+> ⏸ **One-time approval (not a failure):** servers registered at **project
+> scope** (`.mcp.json` — `claude mcp add --scope project`, the default in
+> older clients) show as **Pending approval** in `claude mcp list` until the
+> human approves once — have them start `claude` in the project and allow
+> the prompt (or use `/mcp`). The tools stay disabled until then. (The
+> current `claude mcp add` default is *local* scope — active immediately,
+> no approval.)
+
 ### Cursor (self-install)
 
 Create/merge `.cursor/mcp.json` in the project:
