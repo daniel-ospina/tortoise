@@ -746,6 +746,52 @@ def _content_hash(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+def _capture_minted_ids(extracted: list[dict]) -> list[str]:
+    """Ids of the points THIS capture actually minted (W5 Phase D #2104).
+
+    A dedup-folded entry (``dedup=content_hash_hit``/``rephrase_linked``)
+    resolved to an EXISTING node whose provenance + EP calibration belong to
+    its original ingest — re-stamping/re-calibrating on every re-ingest
+    would clobber the first session's single-``eventId`` provenance and
+    churn the canonical's EP.  The provenance stamp and the ingest EP pass
+    must therefore gate over the MINTED subset, never raw ``extracted``.
+    Shared by the hosted impl (byte-parity).
+    """
+    from tortoise.write_verb import DEDUP_NEW
+    return [p["id"] for p in extracted
+            if p.get("dedup", DEDUP_NEW) == DEDUP_NEW and p.get("id")]
+
+
+def _capture_ep_target_ids(extracted: list[dict], proj) -> list[str]:
+    """Ids the ingest EP pass must calibrate for one capture (Phase D).
+
+    Normally the MINTED ids (every minted claim is promoted + calibrated by
+    its own ingest pass).  A FOLDED-ONLY ingest (every claim resolved to an
+    existing node) still needs a FIRST-TIME calibration when the canonical
+    never got one — its own ingest's EP pass failed fail-open and left it
+    draft/uncalibrated — otherwise the point stays uncalibrated forever
+    (a folded re-ingest would never re-run the pass).  A canonical that is
+    live + calibrated is NEVER re-calibrated (no EP churn on re-ingest).
+    Shared by the hosted impl (byte-parity).
+    """
+    from tortoise.write_verb import DEDUP_NEW
+    minted = _capture_minted_ids(extracted)
+    if minted:
+        return minted
+    folded = [p["id"] for p in extracted
+              if p.get("id") and p.get("dedup", DEDUP_NEW) != DEDUP_NEW]
+    if not folded:
+        return []
+    rows = proj.g.query(
+        "MATCH (n:Point) WHERE n.id IN $ids AND "
+        "(coalesce(n.status, '') = 'draft' OR "
+        "(n.posterior_alpha IS NULL AND n.ep_alpha IS NULL)) "
+        "RETURN n.id",
+        params={"ids": folded},
+    ).result_set
+    return [r[0] for r in rows]
+
+
 def _apply_capture_ingest_ep(sdk, claim_ids: list[str], *,
                              warn=None) -> None:
     """W5 Phase C (#2104, indicator 3): EP-on-ingest for one capture.
@@ -2388,12 +2434,17 @@ class TortoiseSDK:
                 # provenance alongside the ontology-compliant eventId —
                 # byte-parity with hosted_api's capture stamp (the W2
                 # benchmark grades provenance_accuracy over these fields).
+                # W5 Phase D (#2104): the stamp gates over the MINTED ids —
+                # a dedup-folded entry (content_hash_hit/rephrase_linked)
+                # resolved to an existing node whose provenance belongs to
+                # its original ingest; re-stamping would clobber the first
+                # session's single-eventId provenance.
                 source_harness = harness or "unknown"
                 proj.g.query(
                     "MATCH (n:Point) WHERE n.id IN $ids "
                     "SET n.eventId=$eid, n.source_session=$sid, "
                     "    n.source_harness=$harness, n.ingested_at=$ing",
-                    params={"ids": [p["id"] for p in extracted],
+                    params={"ids": _capture_minted_ids(extracted),
                             "eid": event_id, "sid": session_id,
                             "harness": source_harness, "ing": now},
                 )
@@ -2476,12 +2527,18 @@ class TortoiseSDK:
         # impl via _apply_capture_ingest_ep (byte-parity; hosted reflects the
         # post-EP state in the write-verb enrichment read). Fail-open: a
         # promotion/EP hiccup never fails a committed capture — additive
-        # warning only.
+        # warning only.  W5 Phase D (#2104): the pass gates over
+        # ``_capture_ep_target_ids`` (minted ids — folded entries resolved
+        # to nodes already calibrated at their original ingest are never
+        # re-calibrated; a folded canonical still draft/uncalibrated from a
+        # fail-open first ingest gets its FIRST calibration here).
         if extracted:
-            _apply_capture_ingest_ep(
-                self, [p["id"] for p in extracted],
-                warn=extraction_warnings.append,
-            )
+            ep_ids = _capture_ep_target_ids(extracted, proj)
+            if ep_ids:
+                _apply_capture_ingest_ep(
+                    self, ep_ids,
+                    warn=extraction_warnings.append,
+                )
         return resp
 
     def _extract_session_llm(
@@ -2552,15 +2609,76 @@ class TortoiseSDK:
 
         extracted: list[dict] = []
         proj = self._get_proj()
+        warnings: list[str] = []
         try:
             statements, _operators = split(fold(log.read_all()))
+            # W5 Phase D (#2104, indicator 4): in-capture dedup — a claim
+            # the extractor minted MORE THAN ONCE in this capture (the M2
+            # mock echo repeats a sentence verbatim; a real M2 extractor can
+            # restate the same claim) must land as ONE point.  Fold order is
+            # the resolution order: each statement resolves against claims
+            # already accepted by THIS capture (never cross-session — a
+            # collapsed cross-session node would orphan/clobber the
+            # single-eventId per-session provenance; see dedup_classify.py).
+            # Verdicts are graph-truthful: the resolution actually compared
+            # the content — ``dedup=content_hash_hit`` (byte-identical) or
+            # ``dedup=rephrase_linked`` (the committed token-overlap
+            # paraphrase band — zero LLM, zero embeddings: the m2 lane runs
+            # keyless).
+            from tortoise.dedup_classify import (
+                DEDUP_CONTENT_HASH_HIT,
+                DEDUP_NEW,
+                DEDUP_REPHRASE_LINKED,
+                exact_hit_id,
+                rephrase_hit,
+            )
+            canonical_by_hash: dict[str, str] = {}
+            canonical_contents: list[tuple[str, str]] = []
             for p in statements:
                 pid = p["id"]
-                proj.g.query(
-                    "MATCH (s:Session {id:$sid}), (p:Point {id:$pid}) "
-                    "MERGE (s)-[:CONTAINS]->(p)",
-                    params={"sid": session_id, "pid": pid},
-                )
+                content = str(p.get("content") or "")
+                dedup = DEDUP_NEW
+                resolved = (exact_hit_id(canonical_by_hash, content)
+                            if content else None)
+                if resolved is None and content:
+                    rh = rephrase_hit(canonical_contents, content)
+                    if rh is not None:
+                        resolved, _overlap = rh
+                        dedup = DEDUP_REPHRASE_LINKED
+                elif resolved is not None:
+                    dedup = DEDUP_CONTENT_HASH_HIT
+                if resolved is not None and resolved != pid:
+                    # Fold ONLY when the duplicate node carries no operator
+                    # wiring — a cue-gated consecutive-utterance edge is a
+                    # real relation of THIS occurrence and folding would
+                    # orphan it.  (CONTAINS is wired below for accepted
+                    # claims only; the dup node has no session edges yet.)
+                    engaged = proj.g.query(
+                        "MATCH (n:Point {id:$id})-[:INPUT|IMPL|NAND]-"
+                        "(o:Point) WHERE o.is_operator = true "
+                        "RETURN count(o)",
+                        params={"id": pid},
+                    ).result_set[0][0]
+                    if engaged:
+                        # Honest residual, never a fabricated fold: the
+                        # duplicate stays a distinct point and says so.
+                        dedup = DEDUP_NEW
+                        warnings.append(
+                            f"repeated claim '{content[:60]}' kept distinct — "
+                            "operator-wired duplicate not deduped")
+                    else:
+                        proj.g.query(
+                            "MATCH (n:Point {id:$id}) DETACH DELETE n",
+                            params={"id": pid})
+                        pid = resolved
+                if dedup == DEDUP_NEW:
+                    canonical_by_hash[_content_hash(content)] = pid
+                    canonical_contents.append((pid, content))
+                    proj.g.query(
+                        "MATCH (s:Session {id:$sid}), (p:Point {id:$pid}) "
+                        "MERGE (s)-[:CONTAINS]->(p)",
+                        params={"sid": session_id, "pid": pid},
+                    )
                 props = {k: v for k, v in p.items()
                          if k in _CAPTURE_PASSTHROUGH_PROPS}
                 extracted.append({
@@ -2568,12 +2686,12 @@ class TortoiseSDK:
                     "kind": p.get("pointKind") or "statement",
                     "text": p.get("content", "")[:200],
                     "props": props,
+                    "dedup": dedup,
                 })
         except Exception as e:
             errors.append(f"{type(e).__name__}: {e}")
 
-        warnings: list[str] = []
-        if not errors and not extracted:
+        if not errors and not extracted and not warnings:
             # P1 #1529 (D6): completed-but-empty output is an additive
             # warning (nothing extractable ≠ failure), never a silent 0.
             warnings.append("LLM extraction produced no points")
@@ -2707,6 +2825,28 @@ class TortoiseSDK:
         # ── points + aboutObject edges + session CONTAINS ──
         extracted: list[dict] = []
         skipped = 0
+        # W5 Phase D (#2104, indicator 4): per-point dedup classification on
+        # the v2 seam.  Payload point ids are deterministic ``pt_<sha>``
+        # keys; the seam honors the #1727 content-addressed idempotency
+        # contract (create_point dedup=True — a same-id write can NEVER
+        # double-CREATE a node pair) and classifies each claim against
+        # canonicals already accepted by THIS capture (in-capture fold) and
+        # against an existing node holding the same content under any id
+        # (content-hash resolution with create_point's own semantics — a
+        # re-ingest resolves to the existing node: ``content_hash_hit``, 0
+        # new points, no prop churn on the canonical).  Folded entries are
+        # NOT re-stamped/re-calibrated (they carry their original session's
+        # provenance; the stamp/EP gates run over
+        # ``_capture_minted_ids``/``_capture_ep_target_ids``).  Paraphrase
+        # classification on the v2 lane stays in the extractor's
+        # consolidation fold (not surfaced cross-session — deferred) — the
+        # seam never guesses beyond byte-identical content.
+        from tortoise.dedup_classify import (
+            DEDUP_CONTENT_HASH_HIT,
+            DEDUP_NEW,
+            exact_hit_id,
+        )
+        canonical_by_hash: dict[str, str] = {}
         for pt in payload.get("points", []) or []:
             pid = str(pt.get("id", "")).strip()
             content = str(pt.get("content", "")).strip()
@@ -2714,21 +2854,67 @@ class TortoiseSDK:
                 skipped += 1
                 continue
             try:
-                self.create_point(
-                    str(pt.get("pointKind", "statement")), content,
-                    id=pid, session_id=session_id, is_episodic=False,
-                    status="draft",
-                    # #1350: link the extracted point to the session Source
-                    # (mirrors the M2 EventAPI provenance; create_point wires
-                    # the extractedFrom edge).
-                    extractedFrom=f"session:{session_id}",
-                )
-                for name in (pt.get("about_entities") or []):
-                    if isinstance(name, str) and name.strip():
-                        proj.g.query(
-                            "MATCH (p:Point {id:$pid}), (o:Object {name:$n}) "
-                            "MERGE (p)-[:aboutObject]->(o)",
-                            params={"pid": pid, "n": name.strip()})
+                # 1) in-capture fold: same content minted earlier this seam
+                #    run (extractor payload assembly normally folds these;
+                #    the seam is the backstop).
+                resolved = exact_hit_id(canonical_by_hash, content)
+                dedup = DEDUP_CONTENT_HASH_HIT if resolved else DEDUP_NEW
+                if resolved is None:
+                    # 2) graph-level content-hash resolution — the SAME
+                    #    semantics create_point(dedup=True) would apply
+                    #    (content_hash + pointKind + non-operator, with the
+                    #    A10 hash-less content fallback), run BEFORE the
+                    #    create so a re-ingest resolves to the EXISTING node
+                    #    under WHATEVER id it carries (pt_<sha> from an
+                    #    earlier capture OR an older ULID/m2 node).  On a hit
+                    #    nothing is created and nothing is re-written — the
+                    #    canonical's props/provenance stay untouched
+                    #    (first-writer).  Never report a phantom id: the
+                    #    response id is the id the graph actually holds.
+                    kind = str(pt.get("pointKind", "statement"))
+                    hit = proj.g.query(
+                        "MATCH (n:Point {content_hash:$ch}) "
+                        "WHERE n.is_operator = false "
+                        "AND n.pointKind = $kind "
+                        "RETURN n.id",
+                        params={"ch": _content_hash(content), "kind": kind},
+                    ).result_set
+                    if not hit:
+                        # A10 fallback: a hash-less same-kind node with the
+                        # exact content (create_point's own fallback).
+                        hit = proj.g.query(
+                            "MATCH (n:Point) "
+                            "WHERE n.is_operator = false "
+                            "AND n.pointKind = $kind "
+                            "AND n.content_hash IS NULL "
+                            "AND n.content = $content "
+                            "RETURN n.id",
+                            params={"kind": kind, "content": content},
+                        ).result_set
+                    if hit:
+                        resolved = hit[0][0]
+                        dedup = DEDUP_CONTENT_HASH_HIT
+                if resolved is None:
+                    resolved = pid
+                    self.create_point(
+                        kind, content,
+                        id=pid, dedup=True, session_id=session_id,
+                        is_episodic=False, status="draft",
+                        # #1350: link the extracted point to the session
+                        # Source (mirrors the M2 EventAPI provenance;
+                        # create_point wires the extractedFrom edge).
+                        extractedFrom=f"session:{session_id}",
+                    )
+                pid = resolved
+                if dedup == DEDUP_NEW:
+                    canonical_by_hash[_content_hash(content)] = pid
+                    for name in (pt.get("about_entities") or []):
+                        if isinstance(name, str) and name.strip():
+                            proj.g.query(
+                                "MATCH (p:Point {id:$pid}), "
+                                "(o:Object {name:$n}) "
+                                "MERGE (p)-[:aboutObject]->(o)",
+                                params={"pid": pid, "n": name.strip()})
                 proj.g.query(
                     "MATCH (s:Session {id:$sid}), (p:Point {id:$pid}) "
                     "MERGE (s)-[:CONTAINS]->(p)",
@@ -2741,7 +2927,7 @@ class TortoiseSDK:
                          if k in _CAPTURE_PASSTHROUGH_PROPS}
                 extracted.append({
                     "id": pid, "kind": "statement", "text": content[:200],
-                    "props": props})
+                    "props": props, "dedup": dedup})
             except Exception as e:  # noqa: BLE001, RUF100 — P1 #1529: counted
                 # (was a silent `except: pass`) — a per-point write failure
                 # surfaces with its class name + id, never an invisible
@@ -2751,6 +2937,68 @@ class TortoiseSDK:
                     f"{type(e).__name__}: point write failed for {pid}: {e}")
         if skipped:
             warnings.append(f"{skipped} extracted point(s) failed to write")
+
+        # W5 Phase D (#2104): surface the extractor's consolidation noops —
+        # claims the S3/FTS fold resolved to an EXISTING node were
+        # previously DROPPED from the response silently.  They now ride the
+        # response as classified folded entries + a session CONTAINS link
+        # (the claim is part of this session's memory; no duplicate point
+        # was minted).  Canonical provenance is never re-stamped (folded
+        # entries are excluded from the minted-only stamp/EP gates).
+        #
+        # Phase D scope gate (review fix, PR round): surfaced ONLY when the
+        # fold is the sanctioned content-addressed re-ingest — reason
+        # ``identical`` AND the canonical is a capture-minted ``pt_`` node
+        # carrying an ``eventId`` (its provenance is real, its session
+        # memory membership is unambiguous).  Anything else — paraphrase
+        # folds (cross-session REPHRASE-linked dedup is deferred) and
+        # priors without capture provenance (mined/commit/m2 nodes) — stays
+        # extractor-side with an additive warning: never a fabricated
+        # verdict, never a phantom id, never an unprovenanced memory join.
+        noops = out.get("noops") or []
+        if noops:
+            nop_ids = [str(n.get("point_id") or "") for n in noops
+                       if n.get("point_id")]
+            canonical_rows: dict[str, tuple[str, str]] = {}
+            if nop_ids:
+                try:
+                    rows = proj.g.query(
+                        "MATCH (n:Point) WHERE n.id IN $ids "
+                        "RETURN n.id, n.content, n.eventId",
+                        params={"ids": nop_ids},
+                    ).result_set
+                    canonical_rows = {
+                        r[0]: ((r[1] or ""), r[2]) for r in rows}
+                except Exception as e:  # noqa: BLE001, RUF100 — additive
+                    warnings.append(
+                        f"{type(e).__name__}: noop content read failed")
+            skipped_noops = 0
+            for nop in noops:
+                nid = str(nop.get("point_id") or "")
+                if not nid:
+                    continue
+                reason = str(nop.get("reason") or "")
+                row = canonical_rows.get(nid)
+                if (reason != "identical" or not nid.startswith("pt_")
+                        or row is None or not row[1]):
+                    # Deleted prior (W6 race), paraphrase fold, or a prior
+                    # without capture provenance — never surfaced.
+                    skipped_noops += 1
+                    continue
+                content_txt, _event_id = row
+                proj.g.query(
+                    "MATCH (s:Session {id:$sid}), (p:Point {id:$pid}) "
+                    "MERGE (s)-[:CONTAINS]->(p)",
+                    params={"sid": session_id, "pid": nid})
+                extracted.append({
+                    "id": nid, "kind": "statement",
+                    "text": content_txt[:200], "props": {},
+                    "dedup": DEDUP_CONTENT_HASH_HIT})
+            if skipped_noops:
+                warnings.append(
+                    f"{skipped_noops} consolidation fold(s) not surfaced "
+                    "(non-capture canonical / paraphrase fold / missing "
+                    "node — deferred surface)")
 
         # ── events ──
         for ev in payload.get("events", []) or []:
