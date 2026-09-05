@@ -404,7 +404,15 @@ class BackupWatcher:
         # the team surface). Mirrors the per-team table's classes. ──
         per_graph: dict[str, str] = {}
         for t in sorted(set(teams + r2_teams)):
-            for gid in self._graphs_for(t):
+            gids = self._graphs_for(t)
+            if gids is None:
+                # Control-plane read failed — the custom surface is
+                # UNCONFIRMED for this team: never open/resolve custom
+                # incidents off a fabricated-empty surface, and never crash
+                # the poll (the team-level default surface is the never-
+                # silent core and must keep evaluating).
+                continue
+            for gid in gids:
                 key = f"{t}:{gid}"
                 newest = graph_newest.get(key)
                 if newest is None:

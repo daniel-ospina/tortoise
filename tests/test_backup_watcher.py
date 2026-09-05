@@ -454,9 +454,14 @@ def test_watcher_shrink_does_not_resolve_on_unconfirmed_surface():
     w.poll()
     assert any("STALE — team_a:g_x" in t for t in list(ch.issues.values()))
 
-    # CP blip → provider returns None (unconfirmed). Issue must SURVIVE.
+    # CP blip → provider returns None (unconfirmed). Issue must SURVIVE and
+    # the poll must NOT crash — the team-level surface keeps evaluating
+    # (per_team present, no poll_error, per_graph empty not fabricated).
     w._graphs_for = lambda t: None  # noqa: SLF001
-    w.poll()
+    s2 = w.poll()
+    assert not s2.get("poll_error"), s2
+    assert s2.get("per_team", {}) is not None
+    assert s2.get("per_graph") == {}
     assert any("STALE — team_a:g_x" in t for t in list(ch.issues.values())), \
         "an unconfirmed surface must not resolve real incidents"
 
