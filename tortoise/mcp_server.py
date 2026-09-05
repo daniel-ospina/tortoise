@@ -15,7 +15,6 @@ from typing import Any, Literal
 from fastmcp import FastMCP
 from fastmcp.exceptions import (AuthorizationError, FastMCPError, ToolError,
                                 ValidationError as FastMCPValidationError)
-from mcp.types import ToolAnnotations
 from pydantic import ValidationError as PydanticValidationError
 from tortoise.auth import is_dev_mode as _is_dev_mode
 from tortoise.config import is_db_uri as _is_db_uri
@@ -2654,7 +2653,7 @@ def tortoise_belief_timeline(topic: str, limit: int = 50) -> dict:
 # directly (same pattern as all tools) — the REST endpoints in hosted_api.py
 # expose the same operations to the welcome page.
 
-# Epic #888 no-regret: once a team's onboarding completes, the six
+# Epic #888 no-regret: once a team's onboarding completes, the seven
 # tortoise_onboarding_* tools retire from that team's steady-state MCP
 # surface (tools/list) — the REST /v1/onboarding/* endpoints remain for the
 # web onboarding flow. Function bodies are untouched; only the listing hides
@@ -2786,7 +2785,6 @@ def tortoise_onboarding_seed(org_name: str | None = None,
         return {"error": f"seed failed: {exc}"}
 
 
-@mcp.tool(annotations=ToolAnnotations(destructiveHint=True))
 def tortoise_onboarding_session_recording(enabled: bool) -> dict:
     """Toggle automatic session recording for this team (Q3 / dashboard
     Memory sources sessions toggle).
@@ -3167,7 +3165,7 @@ def create_http_app(*, allowed_origins: list[str] | None = None,
 
 # ── Tool Registry Adapter (#454) — registration (module bottom) ──
 # Executes after EVERY module-level tool function definition above, so the
-# handlers dict covers the whole registry: the six onboarding tools and
+# handlers dict covers the whole registry: the seven onboarding tools and
 # tortoise_session_capture used to be logged "no handler — skipped" (they
 # were defined after this block's old mid-module position) — #2210.
 from tortoise.tool_registry import TOOL_REGISTRY, GROUP_BY_NAME, FastMCPAdapter  # noqa: E402, I001
