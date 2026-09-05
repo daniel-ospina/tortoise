@@ -99,14 +99,13 @@ class TestNANDCalibrationAtRealWeights:
         claim_a = sdk.create_point("evidence", "Claim A: high-confidence finding", status="live")
         claim_b = sdk.create_point("evidence", "Claim B: contradictory finding", status="live")
 
-        # Set T0 baselines directly on the graph (persistent evidence).
-        proj = sdk._get_proj()
-        proj.g.query(
-            "MATCH (n:Point) WHERE n.id IN $ids "
-            "SET n.ep_alpha = $a, n.ep_beta = $b, n.baseline_set = true",
-            params={"ids": [claim_a["id"], claim_b["id"]],
-                    "a": self.T0_ALPHA, "b": self.T0_BETA},
-        )
+        # Set T0 baselines via the SDK (persistent evidence). #2199: live
+        # decide-part claims now carry an explicit system-default prior from
+        # creation, and set_point_baseline is the API path that replaces it —
+        # a raw graph overwrite would leave the SDK's in-memory evidence cache
+        # stale (the cache is hydrated additively from the graph).
+        for claim in (claim_a, claim_b):
+            sdk.set_point_baseline(claim["id"], self.T0_ALPHA, self.T0_BETA)
 
         # Create bidirectional NAND operator: mutual contradiction between
         # both claims. Bidirectional is required for the "both claims drop"
