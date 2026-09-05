@@ -63,6 +63,22 @@ def _make_point(sdk: TortoiseSDK, kind: str = "statement", content: str = "test"
     return sdk.create_point(kind, content, **kw)
 
 
+def _create_raw_point(sdk: TortoiseSDK, pid: str, kind: str, content: str,
+                      *, op_type: str | None = None) -> None:
+    """Write a bare Point node via raw Cypher — simulates a legacy/imported
+    node that predates the is_operator property (#2205): plain points then
+    carried NO is_operator property, and legacy operators carried op_type
+    without it (canonical operator detection = is_operator OR op_type, #943)."""
+    props = ["id:$pid", "content:$content", "pointKind:$kind"]
+    params = {"pid": pid, "content": content, "kind": kind}
+    if op_type:
+        props.append("op_type:$op")
+        params["op"] = op_type
+    sdk._get_proj().g.query(
+        "CREATE (p:Point {" + ", ".join(props) + "})", params=params
+    )
+
+
 # ── list_pointkinds ───────────────────────────────────────────────────
 
 
@@ -116,6 +132,20 @@ class TestListPointKinds:
         # The key assertion: no operator-only kind should appear
         kinds = {r["kind"] for r in result}
         assert "statement" in kinds  # the 2 real points + operator
+
+    def test_legacy_property_absent_points_listed(self, sdk):
+        """#2205: a legacy Point with NO is_operator property is a real point
+        and shows in per-kind stats — a bare `n.is_operator = false` dropped
+        it, so per-kind stats lied on imported graphs. Legacy op_type-only
+        operators stay excluded."""
+        _create_raw_point(sdk, "legacy_stmt_1", "statement", "legacy s1")
+        _create_raw_point(sdk, "legacy_stmt_2", "statement", "legacy s2")
+        _create_raw_point(sdk, "legacy_op", "statement", "legacy op",
+                         op_type="IMPL")
+
+        result = sdk.list_pointkinds()
+        by_kind = {r["kind"]: r for r in result}
+        assert by_kind["statement"]["count"] == 2  # legacy op excluded
 
     def test_pack_field_from_colon_kind(self, sdk):
         """When pointKind has colon prefix, pack field is extracted."""
@@ -231,36 +261,39 @@ class TestListNamespaces:
             assert p["kind_count"] > 0
 
 
-# ── summarize_structure (re-keyed) ─────────────────────────────────────
+# ── summarize_structure (re-keyed; #2205 total-vs-gate) ───────────────
+
+
+_GATE_KEYS = ("gate0_jtbds", "gate1_use_cases", "gate2_user_journeys",
+               "gate3_workflows", "gate4_requirements")
 
 
 class TestSummarizeStructureRekeyed:
     def test_expected_keys(self, sdk):
-        """Returns all expected gate keys + total."""
+        """Returns gate keys + full-graph total + operators + gate_total."""
         status = sdk.summarize_structure()
-        for key in ("gate0_jtbds", "gate1_use_cases", "gate2_user_journeys",
-                     "gate3_workflows", "gate4_requirements", "total"):
+        for key in (*_GATE_KEYS, "total", "operators", "gate_total"):
             assert key in status, f"missing key: {key}"
             assert isinstance(status[key], int), f"{key} should be int"
 
-    def test_total_matches_sum(self, sdk):
-        """Total equals sum of gate counts."""
+    def test_gate_total_is_gate_subtotal(self, sdk):
+        """gate_total is the sum of the five gate-kind counts — the honest
+        label for the pre-#2205 'total' semantics (which was gate-scoped)."""
         status = sdk.summarize_structure()
-        gate_sum = sum(v for k, v in status.items() if k != "total")
-        assert status["total"] == gate_sum
+        assert status["gate_total"] == sum(status[k] for k in _GATE_KEYS)
 
     def test_empty_graph_returns_zeros(self, sdk):
-        """Empty graph returns 0 for all gates (no error)."""
+        """Empty graph returns 0 everywhere (no error)."""
         status = sdk.summarize_structure()
         assert status["total"] == 0
-        assert status["gate0_jtbds"] == 0
-        assert status["gate1_use_cases"] == 0
-        assert status["gate2_user_journeys"] == 0
-        assert status["gate3_workflows"] == 0
-        assert status["gate4_requirements"] == 0
+        assert status["operators"] == 0
+        assert status["gate_total"] == 0
+        for key in _GATE_KEYS:
+            assert status[key] == 0, f"{key} should be 0"
 
     def test_counts_by_pointkind(self, sdk):
-        """Points of gate kinds increment the correct gate counters."""
+        """Points of gate kinds increment the correct gate counters; total
+        counts them too (nothing else is on the graph)."""
         _make_point(sdk, kind="jobToBeDone", content="JTBD 1")
         _make_point(sdk, kind="jobToBeDone", content="JTBD 2")
         _make_point(sdk, kind="useCase", content="UC 1")
@@ -274,17 +307,112 @@ class TestSummarizeStructureRekeyed:
         assert status["gate3_workflows"] == 0  # none created
         assert status["gate4_requirements"] == 1
         assert status["total"] == 5
+        assert status["gate_total"] == 5
 
-    def test_operators_excluded_from_gates(self, sdk):
-        """Operators should NOT be counted in gate totals."""
+    # ── #2205 regressions: total must reflect the WHOLE graph ─────
+    def test_total_includes_non_gate_kinds(self, sdk):
+        """#2205: on a mixed-kind graph total counts points of EVERY kind
+        (evidence, decisions, events, ...), not just the gate kinds. The old
+        gate-only 'total' read 0/near-0 on real graphs ('Demo graph created
+        — N points' and stats lied)."""
+        seeds = [
+            ("statement", "s1"), ("statement", "s2"),
+            ("observation", "o1"), ("hypothesis", "h1"),
+            ("decision", "d1"), ("event", "e1"),
+            ("workflow", "wf1"), ("jobToBeDone", "j1"),
+        ]
+        for kind, content in seeds:
+            _make_point(sdk, kind=kind, content=content)
+
+        status = sdk.summarize_structure()
+        # Kind-accurate after seeds of any kinds (indicator 3): every seeded
+        # non-operator point lands in total, whatever its kind.
+        assert status["total"] == len(seeds)
+        assert status["operators"] == 0
+        assert status["gate0_jtbds"] == 1
+        assert status["gate3_workflows"] == 1
+        assert status["gate_total"] == 2  # j1 + wf1 are the gate kinds
+        assert status["total"] > status["gate_total"]  # the pre-#2205 lie
+
+    def test_legacy_property_absent_points_counted(self, sdk):
+        """#2205 regression: legacy/imported Points that carry NO is_operator
+        property must count — a bare `n.is_operator = false` filter dropped
+        them from every count (the 'N points read 0' root cause on imported
+        graphs). Legacy op_type-only operators are operators, never points."""
+        # legacy plain points (no is_operator property, no op_type)
+        _create_raw_point(sdk, "legacy_stmt", "statement", "legacy s")
+        _create_raw_point(sdk, "legacy_jtbd", "jobToBeDone", "legacy j")
+        # legacy operator (op_type set, no is_operator property, #943)
+        _create_raw_point(sdk, "legacy_op", "statement", "legacy op",
+                          op_type="IMPL")
+
+        status = sdk.summarize_structure()
+        assert status["total"] == 2        # both legacy PLAIN points only
+        assert status["operators"] == 1    # op_type-only legacy operator
+        assert status["gate0_jtbds"] == 1  # legacy jtbd lands in its gate
+        assert status["gate_total"] == 1
+
+    def test_operators_reported_separately(self, sdk):
+        """Operators are NOT 'points': excluded from gate counts AND from
+        total, and reported under their own operators key (N points, M
+        operators)."""
         p1 = _make_point(sdk, kind="jobToBeDone", content="real jtbd")
         p2 = _make_point(sdk, kind="jobToBeDone", content="another jtbd")
         # Create operator linking the two JTBDs
         sdk.create_operator("IMPL", p1["id"], [p2["id"]])
 
         status = sdk.summarize_structure()
-        # Only the 2 real jtbds count, operator excluded
+        # Only the 2 real jtbds count; operator excluded from gates AND total
         assert status["gate0_jtbds"] == 2
+        assert status["total"] == 2
+        assert status["operators"] == 1
+
+    def test_total_matches_list_pointkinds_sum(self, sdk):
+        """Cross-surface agreement (#2205): summary total == the sum of
+        list_pointkinds counts (both enumerate the same non-operator Points),
+        so any surface rendering per-kind stats adds up to 'N points'."""
+        p1 = _make_point(sdk, kind="statement", content="s-a")
+        _make_point(sdk, kind="decision", content="d-b")
+        _make_point(sdk, kind="jobToBeDone", content="j-c")
+        p4 = _make_point(sdk, kind="goal", content="g-e")
+        sdk.create_operator("IMPL", p1["id"], [p4["id"]])
+
+        status = sdk.summarize_structure()
+        per_kind_sum = sum(r["count"] for r in sdk.list_pointkinds())
+        assert status["total"] == per_kind_sum == 4
+        assert status["operators"] == 1
+        assert status["gate_total"] == 1
+
+    def test_total_matches_list_pointkinds_sum_with_legacy(self, sdk):
+        """#2205: the cross-surface equality holds on legacy nodes too — a
+        kined legacy Point (no is_operator property) counts in BOTH total and
+        list_pointkinds, and a legacy op_type operator counts in neither."""
+        _create_raw_point(sdk, "legacy_stmt", "statement", "legacy s")
+        _make_point(sdk, kind="decision", content="d-b")
+        _create_raw_point(sdk, "legacy_op", "statement", "legacy op",
+                          op_type="IMPL")
+
+        status = sdk.summarize_structure()
+        per_kind_sum = sum(r["count"] for r in sdk.list_pointkinds())
+        assert status["total"] == per_kind_sum == 2
+        assert status["operators"] == 1
+
+    def test_untyped_legacy_point_in_total_only(self, sdk):
+        """#2205 docstring caveat: an untyped legacy Point (no pointKind, no
+        is_operator) is a real point — it counts in total but cannot appear in
+        the per-kind list (kinds only), so sum(list_pointkinds) may be < total."""
+        _create_raw_point(sdk, "legacy_untyped", "statement", "legacy u",
+                          op_type=None)
+        # The helper always sets pointKind — write one truly kind-less node:
+        sdk._get_proj().g.query(
+            "CREATE (p:Point {id:$pid, content:$content})",
+            params={"pid": "legacy_kindless", "content": "no kind"},
+        )
+
+        status = sdk.summarize_structure()
+        per_kind_sum = sum(r["count"] for r in sdk.list_pointkinds())
+        assert status["total"] == 2
+        assert per_kind_sum == 1  # only the kined legacy point is listable
 
 
 # ── MCP wrappers (direct call) ────────────────────────────────────────
