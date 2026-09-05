@@ -229,7 +229,15 @@ class TestStubAdoption:
         CREATE, connector produces-edge shape) adopted by an SDK create must
         journal the canonical registration (probe by canonical id+name misses)
         AND adopt createdAt on the live node (ON MATCH coalesce), so rebuild
-        restores the canonical node byte-identically."""
+        restores the canonical node with the journaled id + createdAt.
+
+        Byte-identity scope on the stub path is id + createdAt (what the ON
+        MATCH adoption clause guarantees). status/title diverge by accepted
+        design: the #1350 clobber guard forbids ON MATCH status writes, so the
+        LIVE adopted node keeps the stub's absent status/title, while rebuild's
+        ON CREATE writes status='live' + title='' from the journaled line —
+        the plan-accepted stub status/title asymmetry (pre-existing for live;
+        #2194 makes the rebuilt twin honest about the registration)."""
         events = tmp_path / "events"
         events.mkdir()
         sdk = TortoiseSDK(str(tmp_path / "t5.db"),
@@ -256,11 +264,90 @@ class TestStubAdoption:
                 "stub must be canonicalized to the obj-<sha26> id")
             assert rows[0][1] == line["createdAt"], (
                 "live adopted createdAt must equal the journaled value")
+            # Accepted stub status/title asymmetry (see docstring): the LIVE
+            # adopted node keeps the stub's absent status/title; rebuild's ON
+            # CREATE writes them from the journaled line.
+            live_props = _object_row(proj, "connector-name")[0][0]
+            assert "status" not in live_props, live_props
             proj.rebuild_all(str(events))
             rows = _object_row(proj, "connector-name", "id", "createdAt")
             assert rows and rows[0][0] == line["id"], (
                 "rebuild must restore the canonical id, not the stub ulid")
             assert rows[0][1] == line["createdAt"], rows[0]
+            rebuilt_props = _object_row(proj, "connector-name")[0][0]
+            assert rebuilt_props.get("status") == "live", rebuilt_props
+        finally:
+            sdk.close()
+
+
+# ── Tests 14-15 (green-pins, post-review): delete non-durability ──────────
+
+
+class TestDeleteNonDurability:
+    """Green-pins for the plan-accepted delete asymmetry (#2194 code review).
+
+    _delete_entity is a bare DETACH DELETE — the journal vocabulary has no
+    Object-delete event, so a deleted canonical Object's ObjectRegistered line
+    still replays. Consequences (documented-by-test, accepted; #2296 scope
+    hook — the durability write-surface invariant must cover deletion):
+    - test 14: a deleted Object RESURRECTS on the next rebuild_all.
+    - test 15: delete→recreate journals TWO first-registrations; replay
+      first-wins the earlier line's createdAt (≠ the live node's second).
+    """
+
+    def test_deleted_object_resurrects_on_rebuild(self, tmp_path):
+        events = tmp_path / "events"
+        events.mkdir()
+        sdk = TortoiseSDK(str(tmp_path / "t14.db"),
+                          event_log_path=str(events / "events.jsonl"))
+        try:
+            proj = sdk._get_proj()
+            sdk.create_entity("object", "delete-me-A",
+                              objectKind="core:other", is_episodic=False)
+            oid = _entity_name_id("Object", "delete-me-A")
+            journal = _journaled(sdk, events)
+            assert len(_name_ors(journal, "delete-me-A")) == 1
+            assert sdk._delete_entity(oid) is True, "node must be deleted"
+            rows = _object_row(proj, "delete-me-A")
+            assert not rows, "live node must be gone after delete"
+            # delete mints no journal line — rebuild replays the OR line and
+            # resurrects the deleted Object (accepted divergence, #2296 hook).
+            proj.rebuild_all(str(events))
+            rows = _object_row(proj, "delete-me-A", "status", "createdAt")
+            assert rows and rows[0][0] == "live", (
+                "deleted Object resurrects live on rebuild "
+                "(no delete tombstone in the journal vocabulary)")
+            assert rows[0][1] == journal[0]["createdAt"], (
+                "resurrected node carries the journaled createdAt")
+        finally:
+            sdk.close()
+
+    def test_delete_recreate_replays_first_incarnation(self, tmp_path):
+        events = tmp_path / "events"
+        events.mkdir()
+        sdk = TortoiseSDK(str(tmp_path / "t15.db"),
+                          event_log_path=str(events / "events.jsonl"))
+        try:
+            proj = sdk._get_proj()
+            sdk.create_entity("object", "delete-me-B",
+                              objectKind="core:other", is_episodic=False)
+            oid = _entity_name_id("Object", "delete-me-B")
+            assert sdk._delete_entity(oid) is True
+            sdk.create_entity("object", "delete-me-B",
+                              objectKind="core:other", is_episodic=False)
+            journal = _journaled(sdk, events)
+            ors = _name_ors(journal, "delete-me-B")
+            assert len(ors) == 2, (
+                "delete→recreate must journal a second first-registration "
+                "(the probe misses post-delete)")
+            live_rows = _object_row(proj, "delete-me-B", "createdAt")
+            assert live_rows and live_rows[0][0] == ors[1]["createdAt"], (
+                "live node carries the SECOND registration's createdAt")
+            proj.rebuild_all(str(events))
+            rows = _object_row(proj, "delete-me-B", "createdAt")
+            assert rows and rows[0][0] == ors[0]["createdAt"], (
+                "replay first-wins the FIRST registration's createdAt — "
+                "accepted delete→recreate divergence (#2296 hook)")
         finally:
             sdk.close()
 

@@ -14039,13 +14039,23 @@ class TortoiseSDK:
         # a skip would silently re-open the node-loss bug). Accepted
         # divergences (only-on-create mandate): re-mention prop mutations and
         # pre-#2194-history re-mentions are live-only / never registered —
-        # byte-identity holds for the first canonical registration.
+        # byte-identity holds for the first canonical registration. Deletes
+        # are NOT journaled (_delete_entity is a bare graph delete — the
+        # journal vocabulary cannot represent deletion): a deleted canonical
+        # Object resurrects on the next rebuild, and delete→recreate mints a
+        # second "first registration" whose replay first-wins over the live
+        # incarnation (pinned as accepted by tests 14-15; #2296 scope hook).
         _journal_object_registration = False
         # Truthy-name gate mirrors _upsert_object's persistence predicate (it
         # no-ops on falsy names) — a falsy-name create must not mint a
         # phantom ObjectRegistered line (junk-line journal growth on a no-op
-        # path).
-        if label == "Object" and self._event_log_path and event.get("name"):
+        # path). The event-type conjunct mirrors the rebuild dispatcher: pass
+        # 1b replays ONLY the literal "ObjectRegistered" (projection/
+        # __init__.py pass-1b dispatch), so a future label==Object event_type
+        # must never journal a line replay cannot fold (a no-row probe on a
+        # non-OR type would otherwise emit an unreplayable registration).
+        if (label == "Object" and self._event_log_path
+                and event.get("name") and event.get("type") == "ObjectRegistered"):
             try:
                 _journal_object_registration = not proj.g.query(
                     "MATCH (o:Object {id:$cid, name:$name}) RETURN o.id",
@@ -14107,15 +14117,19 @@ class TortoiseSDK:
             # exact applied dict (minus type/id + envelope-reserved keys) so
             # replay upserts a byte-identical Object. ObjectRegistered is NOT
             # in _GRAPH_EVENT_TYPES → JSONL-only emission; _emit_event no-ops
-            # when the log is unset (S1 bound). event["type"] is
-            # "ObjectRegistered" for every Object create — kept coupled to the
-            # branch rather than hardcoded so a future label==Object
-            # event_type stays self-consistent. Emission is post-apply
-            # (phantom-event ordering — a journaled registration whose live
-            # apply never happened would replay-create a node that never
-            # existed live). Best-effort: a lost ObjectRegistered line leaves
-            # the Object live-but-not-durable (≡ pre-fix for that write); the
-            # #2296 follow-up tracks an Object loss backstop.
+            # when the log is unset (S1 bound). The probe gate above enforces
+            # event["type"] == "ObjectRegistered" — rebuild pass 1b
+            # dispatches on that literal, so the journal can never carry an
+            # unreplayable Object-label line. Emission is post-apply and
+            # DELIBERATELY diverges from the EventAPI lane (api._emit appends
+            # the log line BEFORE projection.apply — api.py:52-54): here an
+            # apply failure must not leave a journaled registration whose live
+            # write never happened (phantom-event hazard — a log-first order
+            # would replay-create a node that never existed live). The
+            # complementary hazard (append failure → live-but-not-durable) is
+            # pinned by test 11. Best-effort: a lost ObjectRegistered line
+            # leaves the Object live-but-not-durable (≡ pre-fix for that
+            # write); the #2296 follow-up tracks an Object loss backstop.
             self._emit_event(
                 event["type"],
                 id=event["id"],

@@ -247,9 +247,14 @@ uv run pytest tests/test_entity_stage.py tests/test_semantic_extractor.py tests/
 - **Durability write-surface invariant / Object loss backstop (extend the #548 pre-wipe snapshot or journal repair)** + capture aboutObject/CONTAINS/session-link edge durability → **#2296**.
 - **EventAPI `add_object` unconditional journaling** — a different producer (own `_emit`), relied on by mining/connector lanes; unchanged.
 - **Backfill of pre-#2194 live Objects** — no backfill in scope; the first post-fix rebuild loses the pre-fix population (disaster-recovery journal semantics) — documented in the fold-sweep comment (T4.4) and the #2194 scoping comment.
-
+- **Object deletion is not durable (#2309 code-review round 1)** — `_delete_entity` is a bare DETACH DELETE (no tombstone; the journal vocabulary has no Object-delete event): a deleted canonical Object **resurrects** on the next rebuild, and delete→recreate journals a second first-registration whose replay **first-wins** the earlier incarnation's `createdAt`/fold state over the live one. Accepted + documented-by-test (**tests 14-15**, TestDeleteNonDurability) + ONTOLOGY §4.3 residual-class note; **#2296 scope hook** — the durability write-surface invariant must cover the delete side of the lifecycle.
+- **Stub-adoption status/title asymmetry (sharpened #2309 review)** — the LIVE adopted node keeps the stub's absent status/title (#1350 forbids ON MATCH status writes); rebuild's ON CREATE writes `status='live'`/`title=''` from the journaled line. Test 5's byte-identity claim scoped to id + createdAt and the asymmetry pinned explicitly.
+- **Probe gate is event-type-scoped (#2309 review)** — the whole journal block fires only when `event["type"] == "ObjectRegistered"` (pass 1b replays that literal); a future Object-label event_type never journals an unreplayable line.
+- **Emission ordering vs EventAPI (#2309 review)** — post-apply emission DELIBERATELY diverges from `api._emit`'s log-first order (api.py:52-54): apply failure must not leave a journaled registration whose live write never happened. Mirrors/comment corrected; the EventAPI phantom exposure is a pre-existing producer asymmetry (same family as #2296).
+- **Ontology/catalog qualifications (#2309 review)** — ONTOLOGY §4.3 durability note qualified (event_log_path gate, node-property byte-identity scope, residual non-durable classes incl. delete resurrection); docs/event-catalog.md ObjectSuperseded row refreshed (in-tree JSONL producers exist since #2194).
 
 ---
 
 <!-- plan-review: cycles=5, status=clean, version=2.3.0 -->
 <!-- 🔍 second-model final gate: clean (deepseek-v4-pro) — 0 P0/P1/P2; P3 (acceptance wording) + P4s resolved in the final fix cycle -->
+<!-- 🔍 code-review round 1 (PR #2309): findings resolved in-session — delete-durability documented-by-test (t14-15) + #2296 hook; event-type gate; ordering-comment correction; ONTOLOGY/event-catalog qualifications; stub-asymmetry honest-scope. Re-review + second-model gate pending. -->

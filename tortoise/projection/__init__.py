@@ -1418,13 +1418,15 @@ class FalkorProjection(
         # creation events (see the branch above). Warn on 0-row folds — a
         # fold that matched nothing during rebuild means the journal claims
         # a supersession whose Object never re-existed. Since #2194,
-        # capture-created Objects ARE journaled as ObjectRegistered, so the
-        # residual 0-row sources are: pre-#2194 journals (no backfill),
-        # legacy/raw unjournaled producers (they apply without journaling),
-        # and delete races. The fold is idempotent — a superseded Object
-        # that is later re-created by a future event is caught on the NEXT
-        # rebuild, but this rebuild's graph is honest about what it could
-        # not fold.
+        # capture-created Objects ARE journaled as ObjectRegistered when the
+        # capture SDK is built with an event_log_path, so the residual
+        # 0-row sources are: pre-#2194 journals (no backfill), an
+        # unjournaled capture SDK / legacy raw producers (they apply without
+        # journaling), and delete races (a deleted Object's registration
+        # line — deletes leave no tombstone). The fold is idempotent — a
+        # superseded Object that is later re-created by a future event is
+        # caught on the NEXT rebuild, but this rebuild's graph is honest
+        # about what it could not fold.
         for ev in supersede_folds:
             matched = self._fold_object_superseded(ev)
             if matched == 0:
@@ -1432,7 +1434,8 @@ class FalkorProjection(
                     "rebuild: ObjectSuperseded fold matched no Object "
                     "(event_id=%s supersedes_by=%r) — object not "
                     "re-created by any journaled event (pre-#2194 journal, "
-                    "legacy unjournaled Object, or delete race)",
+                    "unjournaled capture SDK, legacy unjournaled Object, or "
+                    "delete race)",
                     ev.get("event_id"), ev.get("supersedes_by"))
 
         # Pass 1b tail: restore :Batch marker nodes AND the Point.batch_id
