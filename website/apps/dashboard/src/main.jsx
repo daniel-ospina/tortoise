@@ -16,7 +16,7 @@ import { setupGuide } from './setupGuide.js'
 import { overviewConnection, overviewDigest, overviewNextAction } from './overview.js'
 // #1997 (W1): the 5 human onboarding steps — pure structure + copy + fork
 // options + org-name validation, node --test unit-tested (wizardFlow.test.js).
-import { WIZARD_STEPS, WIZARD_FORK_OPTIONS, resolveBuildCatalog, orgNameError } from './wizardFlow.js'
+import { WIZARD_STEPS, WIZARD_FORK_OPTIONS, resolveBuildCatalog, orgNameError, durableKeyName } from './wizardFlow.js'
 // #1894: indexed-state + job-progress derivations — pure, node --test
 // unit-tested (memorySourcesStatus.test.js).
 import { docsIndexedLabel, formatRelativeTime, jobStatusLine } from './memorySourcesStatus.js'
@@ -1727,6 +1727,11 @@ function claimIntentInFlight() {
   // 402-cap loop — a user at max_api_keys regenerates in the API Keys tab and
   // pastes the shown-once replacement here instead of dead-ending).
   const [wizardDurablePaste, setWizardDurablePaste] = React.useState('')
+  // #2325: paste-your-own is an ESCAPE behind a disclosure for owner/admin
+  // (their primary is the mint CTA below) — never a parallel third
+  // affordance sitting next to the primary action. Members (no in-dashboard
+  // mint) always see the paste box: it is their only path.
+  const [wizardShowPaste, setWizardShowPaste] = React.useState(false)
   // #1997 (W1): catalog-presented is marked when the build catalog
   // RENDERS (not just on pick) — re-entry with fork=build already set must
   // still mark it (launch-slice build-fork gate evaluable). Ref-guarded:
@@ -2241,6 +2246,7 @@ function claimIntentInFlight() {
     setWizardDurableKey('')
     setWizardDurablePaste('')
     setWizardDurableError('')
+    setWizardShowPaste(false)
     // #1997 (W1): the legacy jsonb completion write is REMOVED — the done
     // step hands off to the graph (accept-and-drop makes a client PATCH
     // inert on node-present orgs; the node's fork-aware gate owns
@@ -3074,6 +3080,7 @@ function claimIntentInFlight() {
     setWizardDurableKey('')
     setWizardDurablePaste('')
     setWizardDurableError('')
+    setWizardShowPaste(false)
     // #2246 (review, P1): hygiene — the shown-once welcome plaintext is
     // session-scoped; drop it with the other key state on logout.
     setWelcomeKey('')
@@ -3442,7 +3449,20 @@ function claimIntentInFlight() {
       // alone resolves the first membership, wrong team for multi-team users.
       // #2246: mintKey rides the session JWT (rule 4) — no held key involved.
       const _teamAtCall = currentTeamId
-      const keyVal = await mintKey('', 'Setup command')
+      // #2325/#2333: name the mint org + date so every connect key is a
+      // DISTINGUISHABLE row (the old fixed 'Setup command' label made
+      // rotate/regenerate rows identical under the free cap of 2). The org
+      // resolves like the CTA label's shownOrgName (welcome name right after
+      // provision → pinned team → first membership) so the row name always
+      // agrees with the org the key actually lands on (code-review P3).
+      const orgForKey =
+        (welcomeTeamReady && welcomeTeamName) ||
+        (team && team.team_name) ||
+        (Array.isArray(teams) && teams.length
+          ? ((teams.find((t) => t.team_id === teamIdRef.current) || teams[0] || {}).team_name || '')
+          : '') || ''
+      const keyName = durableKeyName(orgForKey, new Date(), (Array.isArray(keys) ? keys : []).map((k) => k && k.name))
+      const keyVal = await mintKey('', keyName)
       // #2326: a team switch during the POST must NOT silently swallow the
       // mint — surface it so the user isn't left believing connect produced
       // a usable key. The key was created on the PREVIOUS org (mintKey pinned
@@ -3469,9 +3489,12 @@ function claimIntentInFlight() {
     } catch (e) {
       // #1147: a tier-cap 402 is a LIMIT, not an error — surface the upgrade /
       // regenerate path (the API Keys tab's regenerateKey does not grow the
-      // key count). Free tier max_api_keys = 2.
+      // key count). Free tier max_api_keys = 2. The remedy ends at the paste
+      // box, which for owner/admin sits behind the disclosure (#2325 review
+      // P2) — open it so the error's "paste it below" lands on a visible field.
       if (e?.status === 402) {
-        setWizardDurableError('You\'ve reached your plan\'s limit of API keys — regenerate one in the API Keys tab (shown once there), then paste it below.')
+        setWizardShowPaste(true)
+        setWizardDurableError('You\'ve reached your plan\'s limit of API keys — revoke or regenerate one in the API Keys tab (shown once there), then paste a key below.')
       } else {
         // #2246 (review): reachable mint failures here are the 402 cap above,
         // a suspension 403, or transport — the server POST /v1/team/keys has
@@ -3481,7 +3504,7 @@ function claimIntentInFlight() {
         // connect-step member copy + API Keys tab notice) and this handler's
         // callers are owner/admin-gated renders. A suspension 403 falls
         // through to its own message.
-        setWizardDurableError(e?.message || 'Could not create a new setup key — try again.')
+        setWizardDurableError(e?.message || 'Could not create a new key — try again.')
       }
     } finally {
       setWizardDurableBusy(false)
@@ -3534,6 +3557,7 @@ function claimIntentInFlight() {
     setWizardDurableKey('')
     setWizardDurablePaste('')
     setWizardDurableError('')
+    setWizardShowPaste(false)
     // #2246 (review, P1): welcomeKey is TEAM-scoped shown-once plaintext — a
     // switch must not leak the previous team's plaintext into the new team's
     // snippet/connect surfaces (welcomeKey feeds snippetKey, the re-entry/
@@ -4796,7 +4820,7 @@ function claimIntentInFlight() {
           <button
             className="ghost small"
             disabled={welcomeProvisioning || welcomeProvisionError || !welcomeHasOrg}
-            onClick={() => { window.history.replaceState({}, '', '/'); setWelcomeMode(false); setWizardDurableKey(''); setWizardDurablePaste(''); setWizardDurableError(''); finishWelcomeLoads() }}
+            onClick={() => { window.history.replaceState({}, '', '/'); setWelcomeMode(false); setWizardDurableKey(''); setWizardDurablePaste(''); setWizardDurableError(''); setWizardShowPaste(false); finishWelcomeLoads() }}
           >
             Open my dashboard →
           </button>
@@ -5041,22 +5065,52 @@ function claimIntentInFlight() {
                             <div className="wizard-nav-actions">
                               {isOwnerAdmin && (
                                 <button type="button" className="btn-primary" onClick={wizardMintDurableKey} disabled={wizardDurableBusy}>
-                                  {wizardDurableBusy ? 'Creating…' : 'Create a new setup key'}
+                                  {wizardDurableBusy ? 'Creating…' : `Create a key for ${shownOrgName || 'your organization'}`}
                                 </button>
                               )}
-                              <button type="button" className="ghost" onClick={() => { window.history.replaceState({}, '', '/'); setWelcomeMode(false); setTab('keys'); finishWelcomeLoads() }}>Go to API Keys →</button>
                             </div>
                           </div>
-                          {/* #1998 fold-in: paste-your-own escape — a user at
-                              the max_api_keys cap regenerates a durable key in
-                              the API Keys tab (shown once there) and pastes it
-                              here instead of dead-ending on 402. */}
-                          <div style={{ marginTop: '1rem', display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+                          {/* #2325: the affordances below are ESCAPES, not a
+                              second path — a muted contextual 'Manage keys'
+                              link (the API Keys tab keeps its role as the
+                              management surface, never a parallel exit) and
+                              the paste box collapsed behind a disclosure for
+                              owner/admin so the mint CTA above is the ONE
+                              obvious primary action. Members see paste
+                              directly: it is their only in-dashboard path
+                              (server mint is owner/admin dashboard policy,
+                              #2246). */}
+                          <div style={{ marginTop: '0.85rem', display: 'flex', flexWrap: 'wrap', gap: '0.9rem', alignItems: 'center' }}>
+                            <button type="button" className="ghost small" onClick={() => { window.history.replaceState({}, '', '/'); setWelcomeMode(false); setTab('keys'); finishWelcomeLoads() }}>
+                              {isOwnerAdmin ? `Manage keys for ${shownOrgName || 'your organization'} →` : `View keys for ${shownOrgName || 'your organization'} →`}
+                            </button>
+                            {isOwnerAdmin && (
+                              <button type="button" aria-expanded={wizardShowPaste} aria-controls="wizard-paste-row"
+                                onClick={() => {
+                                  // #2325 (review P2): opening the disclosure must NOT
+                                  // clear the active error (the 402 copy explains the
+                                  // paste remedy the box is about to show) — only
+                                  // closing it (or typing) does.
+                                  if (wizardShowPaste) { setWizardShowPaste(false); setWizardDurableError('') }
+                                  else { setWizardShowPaste(true) }
+                                }}
+                                style={{ background: 'none', border: 'none', padding: 0, color: 'var(--dim,#7d8ea3)', fontSize: 13, textDecoration: 'underline', cursor: 'pointer' }}>
+                                {wizardShowPaste ? 'Hide paste field' : "I already have a key — paste it instead"}
+                              </button>
+                            )}
+                          </div>
+                          {(!isOwnerAdmin || wizardShowPaste) && (
+                          // #1998 fold-in: paste-your-own escape — a user at
+                          // the max_api_keys cap regenerates a durable key in
+                          // the API Keys tab (shown once there) and pastes it
+                          // here instead of dead-ending on 402.
+                          <div id="wizard-paste-row" style={{ marginTop: '0.75rem', display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
                             <input
                               type="password"
                               aria-label="Paste an API key"
                               placeholder="…or paste an API key (tt_…)"
                               value={wizardDurablePaste}
+                              autoFocus={!!(wizardShowPaste && isOwnerAdmin)}
                               onChange={(e) => { setWizardDurablePaste(e.target.value); setWizardDurableError('') }}
                               style={{ flex: 1, minWidth: 0, padding: '0.5rem 0.65rem', background: 'var(--surface,#0d1a2d)', border: '1px solid var(--border,#1e293b)', borderRadius: 8, fontSize: 13, color: 'inherit' }}
                             />
@@ -5124,6 +5178,7 @@ function claimIntentInFlight() {
                                 // completion/logout/team switch.
                               }}>Use this key</button>
                           </div>
+                          )}
                         </>
                       ) : (
                         <>
