@@ -1376,8 +1376,9 @@ def _validate_mint_expiry(body: dict) -> str | None:
                 detail="expires_at must be an ISO-8601 date or datetime",
             )
         text = raw.strip()
+        is_date_only = len(text) == 10 and text.count("-") == 2
         try:
-            if len(text) == 10 and text.count("-") == 2:
+            if is_date_only:
                 # Date-only → end of that UTC day (valid through the date).
                 parsed = datetime.fromisoformat(text + "T23:59:59+00:00")
             else:
@@ -1395,7 +1396,22 @@ def _validate_mint_expiry(body: dict) -> str | None:
                 status_code=422,
                 detail="expires_at must be in the future",
             )
-        if parsed > now + timedelta(days=_KEY_MAX_EXPIRY_DAYS):
+        # #2426 code-review P2: an explicit non-UTC offset (e.g. +05:00) must
+        # not survive into the stored expires_at — every registry-lane expiry
+        # predicate compares LEXICOGRAPHIC ISO strings against a +00:00 now
+        # (auth, MCP apikey_verify, session-key caps, quota), so an offset
+        # expiry would authenticate ~offset-hours late/early and diverge from
+        # the supabase lane's instant compare. Normalize to UTC here.
+        parsed = parsed.astimezone(UTC)
+        # Ceiling: date-only inputs compare on the DATE — end-of-UTC-day can
+        # cross the 366-day instant for part of the day, and the date-only
+        # contract is "valid through the chosen date", so comparing the date
+        # keeps it symmetric with `expires_in: 366` always passing.
+        if is_date_only:
+            within = parsed.date() <= (now + timedelta(days=_KEY_MAX_EXPIRY_DAYS)).date()
+        else:
+            within = parsed <= now + timedelta(days=_KEY_MAX_EXPIRY_DAYS)
+        if not within:
             raise HTTPException(
                 status_code=422,
                 detail=(
@@ -5462,6 +5478,22 @@ async def create_api_key(request: Request, response: Response, team: dict = Depe
     except HTTPException:
         raise
     except Exception:
+        # Legacy-tolerant default: mint bodies are usually `{}` (dashboard/
+        # CLI), so a parse failure of the EMPTY path degrades to the legacy
+        # owner mint, never a failure mode. #2426 code-review P2: a body that
+        # REQUESTED expiry must never silently degrade to a Never key
+        # (fail-open on a security property) — if the raw body hints at the
+        # expiry keys and parsing/validation failed (e.g. a >4300-digit
+        # expires_in trips the json int guard, or malformed JSON), raise 422
+        # instead of minting unbounded.
+        if raw and (b"expires_in" in raw or b"expires_at" in raw):
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "expires_in/expires_at could not be read — send expires_in "
+                    "(1-366 days) or an ISO-8601 expires_at"
+                ),
+            ) from None
         name = None
 
     is_key_caller = team.get("key_id") is not None

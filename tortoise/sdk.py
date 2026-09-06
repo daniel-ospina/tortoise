@@ -14094,12 +14094,17 @@ class TortoiseSDK:
                         "now": now_iso},
             )
             # re-count AFTER the insert; only revoke when over cap (and a row
-            # genuinely existed to revoke)
+            # genuinely existed to revoke). #2426 code-review P2: expired-but-
+            # unrevoked durables are excluded from the count AND the revoke-
+            # target scan (expired keys don't count — never wedge, and never
+            # let the oldest-LIVE key be the revoke collateral for expired
+            # rows above the cap; matches the session-key recovery lanes).
             rows = reg.query(
                 "MATCH (k:APIKey {team_id:$tid}) WHERE k.revoked_at IS NULL "
+                "AND (k.expires_at IS NULL OR k.expires_at > $now) "
                 "AND (k.created_via IS NULL OR k.created_via <> 'bootstrap') "
                 "RETURN k.id, k.created_at ORDER BY k.created_at ASC",
-                params={"tid": team_id},
+                params={"tid": team_id, "now": now_iso},
             ).result_set
             if len(rows) > max_keys and rows:
                 reg.query(

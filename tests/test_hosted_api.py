@@ -1013,6 +1013,24 @@ class TestKeysExpiry2426:
         assert r2.status_code == 200, r2.text
         assert self._approx_days(r2.json()["expires_at"], later) == 0.0
 
+    def test_expires_at_offset_normalized_to_utc(self, client):
+        """#2426 code-review P2: an explicit non-UTC offset (e.g. +05:00)
+        must be stored UTC-normalized — every registry-lane expiry predicate
+        compares lexicographic ISO strings against a +00:00 now, so an offset
+        expiry would authenticate hours late/early and diverge from the
+        supabase lane's instant compare."""
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        # 5 days out at +05:00 → stored form must be the SAME instant as the
+        # equivalent +00:00 datetime (offset stripped, not preserved).
+        inst = datetime.now(UTC) + timedelta(days=5)
+        local = inst.astimezone(ZoneInfo("Asia/Karachi"))  # +05:00, no DST
+        r = client.post("/v1/team/keys", json={"expires_at": local.isoformat()})
+        assert r.status_code == 200, r.text
+        stored = r.json()["expires_at"]
+        assert stored.endswith("+00:00"), f"must be UTC-normalized: {stored}"
+        assert self._approx_days(stored, inst.isoformat()) == 0.0
+
     def test_never_body_keeps_legacy_shape_and_lists_never(self, client):
         # #2426: absent expiry = Never — no expires_at key in the response
         # (legacy byte-identical envelope) and the listed row has expires_at
