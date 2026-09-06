@@ -630,7 +630,14 @@ class TestInvitesEndpointFlip:
 
     def test_invites_fail_closed_on_control_plane_error(self, monkeypatch,
                                                         team_tier, as_user):
-        """A Supabase error is a 500 — never a registry fallback (#851)."""
+        """#2380 (P2): the seam's own membership read (inside
+        _require_owner_admin) is now wrapped — a control-plane outage is a
+        503 control_plane_unavailable (#1719 class, mirroring the #2401
+        toggle/dashboard-login precedent), never a registry fallback and
+        never the raw 500 this test previously pinned (the RuntimeError
+        escaped the seam to the global handler). Fail-closed preserved:
+        invite_to_team's `except HTTPException: raise` re-raises the 503.
+        """
         import tortoise.supabase_control as sc
         monkeypatch.setattr(sc, "get_control_plane", lambda: ErrorControlPlane())
         tc, _ = team_tier
@@ -638,7 +645,8 @@ class TestInvitesEndpointFlip:
         r = tc.post("/v1/invites", json={
             "team_id": "team-team-001", "email": "bob@example.com",
             "role": "member"})
-        assert r.status_code == 500
+        assert r.status_code == 503
+        assert r.json().get("detail", {}).get("error_code") == "control_plane_unavailable"
 
 
 # ── MCP flip ────────────────────────────────────────────────────────────────
