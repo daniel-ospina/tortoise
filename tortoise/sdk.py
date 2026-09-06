@@ -8848,9 +8848,6 @@ class TortoiseSDK:
             pass
         if not point_ids:
             return
-        # The mutated points themselves are always dirty (their baseline
-        # priors / properties changed).
-        self._dirty_roots.update(point_ids)
         proj = self._get_proj()
         # #1163: advance the graph-wide EP epoch FIRST — the new value is the
         # ordering stamp for this write's dirty markings (and the stale-run
@@ -8871,43 +8868,61 @@ class TortoiseSDK:
         # _sweep_dirty_roots can never clear its ep_dirty flag — it would sit
         # in _dirty_roots forever, pinning _auto_dream_mode to 'local' and
         # accumulating ep_dirty=true across retracts/invalidates/supersedes.
-        # Only the point's LIVE reverse-BFS neighbors need recompute. Filter
-        # terminal statuses/flag from the persisted set (the mutated
-        # terminalizing point itself is excluded; its live neighbors below
-        # are retained).
-        rows = proj.g.query(
-            "MATCH (n:Point) WHERE n.id IN $ids "
-            "RETURN n.id, coalesce(n.status, 'live'), coalesce(n.outdated, false)",
-            params={"ids": dirty_ids},
+        # Only the point's LIVE reverse-BFS neighbors need recompute. The
+        # terminal exclusion is folded into the PERSIST query's WHERE (read
+        # at persist time) so a point terminalized by a concurrent writer
+        # between the filter read and the persist cannot be re-flagged — the
+        # exclusion is atomic with the marking.
+        persisted_rows = proj.g.query(
+            "UNWIND $ids AS pid "
+            "MATCH (n:Point {id: pid}) "
+            "WHERE NOT coalesce(n.status, 'live') IN $terminal "
+            "AND coalesce(n.outdated, false) = false "
+            "SET n.ep_dirty = true, n.ep_dirty_at = $ep "
+            "RETURN pid",
+            params={"ids": dirty_ids,
+                    "terminal": sorted(TERMINAL_EXCLUDED_STATUSES),
+                    "ep": ep_version},
         ).result_set
-        if rows:
-            terminal = {
-                r[0] for r in rows
-                if r[1] in TERMINAL_EXCLUDED_STATUSES or r[2]
-            }
-            if terminal:
-                dirty_ids = [i for i in dirty_ids if i not in terminal]
-                self._dirty_roots.difference_update(terminal)
-                # A terminal point may carry a PRE-EXISTING ep_dirty flag
-                # (from its live-era create/write marking) — clear it so the
-                # flag cannot strand (terminal points never enter an affected
-                # set, so _sweep_dirty_roots would never clear them).
+        persisted = {r[0] for r in persisted_rows} if persisted_rows else set()
+        # Classify the non-persisted input ids: a point that NO LONGER EXISTS
+        # is a delete zombie (delete_point marks the pre-deleted id dirty —
+        # #1916; _prune_nonexistent_dirty_roots removes it post-dream) — it
+        # stays in the in-memory mirror. An EXISTING point that failed the
+        # persist WHERE is TERMINAL — clear any pre-existing ep_dirty flag
+        # (from its live-era marking) and drop it from the mirror: terminal
+        # points never enter an affected set, so _sweep_dirty_roots would
+        # never clear them and they would strand (pinning _auto_dream_mode to
+        # 'local' forever).
+        retained_ids = list(dirty_ids)
+        terminal_ids: set[str] = set()
+        zombies: set[str] = set()
+        if set(dirty_ids) - persisted:
+            rows = proj.g.query(
+                "MATCH (n:Point) WHERE n.id IN $ids RETURN n.id",
+                params={"ids": retained_ids},
+            ).result_set
+            existing = {r[0] for r in rows}
+            non_persisted = set(dirty_ids) - persisted
+            terminal_ids = non_persisted & existing
+            zombies = non_persisted - existing  # delete zombies (#1916)
+            if terminal_ids:
                 proj.g.query(
                     "MATCH (n:Point) WHERE n.id IN $ids AND n.ep_dirty = true "
                     "SET n.ep_dirty = null, n.ep_dirty_at = null",
-                    params={"ids": list(terminal)},
+                    params={"ids": list(terminal_ids)},
                 )
+                self._dirty_roots.difference_update(terminal_ids)
         # #1163: persist the dirty markings (points + reverse-BFS claims) so
         # any process/request can see them — the graph is the source of
-        # truth, the in-memory set above is the mirror.
-        if dirty_ids:
-            proj.g.query(
-                "UNWIND $ids AS pid "
-                "MATCH (n:Point {id: pid}) "
-                "SET n.ep_dirty = true, n.ep_dirty_at = $ep",
-                params={"ids": dirty_ids, "ep": ep_version},
-            )
-            self._dirty_roots.update(dirty_ids)
+        # truth, the in-memory set above is the mirror. The in-memory mirror
+        # syncs from what the persist ACTUALLY flagged (terminal-excluded ids
+        # never enter it) PLUS delete zombies (nonexistent ids that
+        # _prune_nonexistent_dirty_roots clears post-dream).
+        if persisted:
+            self._dirty_roots.update(persisted)
+        if zombies:
+            self._dirty_roots.update(zombies)
 
     #: Accepted explicit dream modes (epic 903-C6 #1244, I1 precedence table).
     _DREAM_MODES = ("local", "stale-first", "full")

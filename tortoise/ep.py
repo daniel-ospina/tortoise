@@ -1007,9 +1007,11 @@ class TortoiseEP:
         # operators (pre-existing behavior: _update_factor no-ops <2 inputs).
         op_inputs: dict[str, list[str]] = {op_id: [] for op_id in op_info}
         op_input_live: dict[str, list[bool]] = {op_id: [] for op_id in op_info}
-        # Raw input statuses (None/live/draft) for diagnostic surfacing (#992):
-        # when an operator goes degenerate we name every input's status so the
-        # silent-confidence-zero is traceable to the offending draft inputs.
+        # Raw input statuses for diagnostic surfacing (#992): when an operator
+        # goes degenerate we name every input's status (incl. the legacy
+        # outdated=true flag — #2422 review: a flag-dead input shows status
+        # 'live' but is EP-dead, so the display must distinguish flag-dead)
+        # so the silent-confidence-zero is traceable to the offending inputs.
         op_input_status: dict[str, list[str | None]] = {op_id: [] for op_id in op_info}
         # idx_known flags operators whose EVERY input edge carries an idx —
         # create_operator always writes idx (source=0 first). Legacy/migrated
@@ -1038,7 +1040,12 @@ class TortoiseEP:
             is_terminal = status in TERMINAL_EXCLUDED_STATUSES or bool(outdated)
             participates = not is_terminal and (status != "draft" or include_draft)
             op_input_live[op_id].append(participates)
-            op_input_status[op_id].append(status)
+            # Display: status + flag marker so the #992 diagnostic names a
+            # flag-dead input accurately (status 'live' + outdated flag shows
+            # as "live(outdated)").
+            op_input_status[op_id].append(
+                f"{status or 'live'}(outdated)" if outdated else (status or 'live')
+            )
             if idx is None:
                 op_idx_known[op_id] = False
 
@@ -1088,7 +1095,7 @@ class TortoiseEP:
                         "(degenerate, #780/#2422). Inputs: [%s]",
                         op_id, stripped, len(full_inputs),
                         ", ".join(
-                            f"{cid.split('-')[-1]}={s or 'live'}"
+                            f"{cid.split('-')[-1]}={s}"
                             for cid, s in zip(full_inputs, op_input_status[op_id])  # noqa: B905
                         ),
                     )
