@@ -65,3 +65,19 @@ CI half stands.
   (judge_pin_mismatch) against the v1 main.json until then. The sealed v1 run
   w2b-phaseg-llm-2026-09-06c.json (5/5 emitting, captures ok=True; macro 0.375;
   verdict regression on distractor leakage 1) is the last comparable v1 number.
+
+## Addendum 2 (2026-09-06) — v2 measurement landed; blessing blocked on leakage
+
+- **v2 llm-lane sealed run** `w2b-phaseg-llm-2026-09-06d.json` (5/5 emitting,
+  captures ok=True; judge pin w2-write-path-mechanical-v2; verdict
+  inconclusive / judge_pin_mismatch vs the still-v1 main.json — the enforced
+  protocol path): **macro 0.4722 / strict 0.4722** under the paraphrase-aware
+  rule (vs 0.375 verbatim-only) — the measurement fix rescued ~7 paraphrased
+  units (wp01 2/16 -> 6/16, wp05 3/15 -> 6/15). True content retention is
+  materially higher than the v1 number.
+- **Binding blocker: distractor leakage 4 > tolerance 1** (standing quality
+  bar — cannot be blessed away by re-pinning). Run-to-run extractor variance
+  (sealed v1 run c: leakage 1; this run: 4). Root cause: S2 has no
+  anti-routine gate — true-but-routine asides surface as memory points.
+  Filed as a follow-up (S2 relevance/exclusion gate) — product-side fix, then
+  re-run to leakage <= 1 and protocol-bless main.json (#2338).
