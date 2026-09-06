@@ -216,6 +216,23 @@ class TestDrRebaseline:
         r = client.post("/v1/internal/backups/re-baseline", headers=INTERNAL_HEADERS, json={})
         assert r.status_code == 400
 
+    def test_rebaseline_rejects_malformed_ids(self, client, dr_env, mem_storage):
+        """#2377: team_id/graph_id flow into R2 state keys — charset-gate the
+        shape before any write (defense in depth; rows are server-generated
+        today, but this endpoint must never mint keys off an attacker-shaped
+        id)."""
+        bad = [
+            {"team_id": "team_x", "graph_id": "../esc"},
+            {"team_id": "team_x", "graph_id": "g_a/b"},
+            {"team_id": "../team", "graph_id": "default"},
+        ]
+        for body in bad:
+            r = client.post("/v1/internal/backups/re-baseline",
+                            headers=INTERNAL_HEADERS, json=body)
+            assert r.status_code == 400, body
+        # no state object was written under any escaped key
+        assert mem_storage.list("ops/teams/") == []
+
     def test_rebaseline_updates_state(self, client, dr_env, mem_storage):
         _seed_team("team_x", nodes=3)
         mem_storage.upload(
