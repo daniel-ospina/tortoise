@@ -6136,7 +6136,8 @@ class TortoiseSDK:
         proj = self._get_proj()
         rows = proj.g.query(
             "MATCH (n:Point {content_hash:$ch}) WHERE n.is_operator = false "
-            "AND n.pointKind = $kind AND n.status IN $terminal RETURN n.id LIMIT 1",
+            "AND n.pointKind = $kind AND n.status IN $terminal "
+            "AND coalesce(n.outdated, false) = false RETURN n.id LIMIT 1",
             params={"ch": _content_hash(content), "kind": kind,
                     "terminal": sorted(self._INGEST_TERMINAL_STATUSES)},
         ).result_set
