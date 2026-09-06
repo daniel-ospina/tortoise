@@ -34,11 +34,13 @@ class _FakeChannels:
         if comment:
             self.comments.append((number, comment))
 
-    def search_open(self, kind):
-        self.search_calls.append(kind)
+    def search_open(self, kind, team_id=""):
+        self.search_calls.append((kind, team_id))
         return [
             n for n, t in self.issues.items()
-            if f"[DR] {kind}" in t and n not in self.closed
+            if f"[DR] {kind}" in t
+            and (team_id == "" or t.endswith(f" — {team_id}"))
+            and n not in self.closed
         ]
 
     def push_telegram(self, text):
@@ -331,3 +333,38 @@ def test_resolved_incident_pending_push_not_fired():
     assert store.retry_pending() == 0
     assert ch.telegram == []
     assert storage.list("ops/pending-push/") == []
+
+
+def test_search_fallback_is_subject_scoped():
+    """#2313 Task 4: create-then-die adoption via GH-search must match the
+    incident's OWN subject. A kind-only search would let team_b's adopter bind
+    team_a's pre-existing open issue number — and resolving team_b would then
+    close team_a's issue (silent-loss cross-talk)."""
+    ch = _FakeChannels()
+    storage = MemoryStorage()
+    store = _store(ch, storage)
+    # Pre-existing open STALE for team_a (issue #1 on the board).
+    assert store.open_incident("STALE", "team_a") is True
+    assert len(ch.issues) == 1
+    # team_b's winner died between create and backfill: its dedup key exists
+    # as an issue_number-less placeholder (the exact create-then-die window).
+    storage.upload(
+        "ops/alerts/STALE/team_b.json",
+        json.dumps({"kind": "STALE", "team_id": "team_b", "detail": {},
+                    "filed_at": "2026-08-08T00:00:00+00:00",
+                    "issue_number": None, "telegram_pushed": False}).encode(),
+    )
+    # Adopter for team_b: the search must be scoped to team_b (no match — the
+    # only open issue belongs to team_a), so team_b files its OWN issue.
+    store.open_incident("STALE", "team_b")
+    assert ("STALE", "team_b") in ch.search_calls
+    titles = list(ch.issues.values())
+    assert len(titles) == 2
+    assert any("team_a" in t for t in titles)
+    assert any("team_b" in t for t in titles)
+    # Resolving team_b closes ONLY team_b's issue (#2); team_a's (#1) stays
+    # open (the channels fake marks closed rather than popping issues).
+    store.resolve_incident("STALE", "team_b")
+    assert ch.closed == [2]
+    store.resolve_incident("STALE", "team_a")
+    assert ch.closed == [2, 1]

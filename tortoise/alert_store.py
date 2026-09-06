@@ -41,7 +41,7 @@ _SUPPRESSION_KEY = "ops/suppression.json"
 
 FileIssue = Callable[[str, str], int]      # (title, body) -> issue number
 CloseIssue = Callable[[int, str | None], None]
-SearchOpen = Callable[[str], list[int]]    # kind -> open issue numbers
+SearchOpen = Callable[[str, str], list[int]]  # (kind, team_id) -> open issue numbers
 PushTelegram = Callable[[str], None]
 
 
@@ -148,7 +148,12 @@ class AlertStore:
     def _become_filer(self, kind, team_id, detail, key, state) -> bool:
         issue_number = None
         try:
-            hits = self._search(kind)  # GH-search fallback dedup
+            # Subject-scoped search (#2313 Task 4): the query must match the
+            # incident's OWN title (kind + team/graph subject). A kind-only
+            # search lets a same-kind incident of a DIFFERENT subject adopt
+            # this one's issue number — and recovery would then close the
+            # other subject's issue (silent-loss cross-talk).
+            hits = self._search(kind, team_id)  # GH-search fallback dedup
             if hits:
                 issue_number = hits[0]
         except Exception as e:
