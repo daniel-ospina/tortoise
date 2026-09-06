@@ -226,3 +226,105 @@ class TestCrossSurfaceAgreement:
             assert stored is None or stored == pytest.approx(0.5, abs=1e-3)
         finally:
             sdk.close()
+
+
+class TestGraphRankerPriorOnlyParity:
+    """Post-batch regression (#2286 contract × #2262 exposure): a point that
+    carries a persisted PRIOR but has never been flushed by an EP run (the
+    #2199/#2262 auto-baselined decide part — ep_alpha/ep_beta written in the
+    CREATE, n.confidence NULL until the first flush) must read its prior mean
+    on EVERY confidence surface — including the ranking ones.
+
+    GraphRanker._fetch_point_signals (and therefore order_by="confidence")
+    previously read the raw n.confidence property: absent until an EP flush,
+    the coalesce(n.confidence, 0.5) fell to neutral 0.5 while
+    annotate_ep_batch / EpBreakdown read the posterior→prior coalesce mean
+    0.75 — one search response displayed 0.75 while ranking the claim as
+    unmeasured 0.5.
+    """
+
+    def _baseline_only_decision(self, sdk, content):
+        # #2199/#2262: a decide part born WITHOUT an explicit status lands
+        # LIVE with the system-default prior Beta(3,1) (mean 0.75) — and no
+        # n.confidence until an EP run flushes it.
+        return sdk.create_point("decision", content)["id"]
+
+    def test_graphranker_signal_reads_prior_mean_before_any_flush(self):
+        """GraphRanker's signal read (the order_by='confidence' sort key and
+        order_by='graph' boost source) returns the persisted prior mean 0.75
+        for a never-EP'd auto-baselined decision — NOT the raw-property 0.5."""
+        sdk = _fresh_sdk()
+        try:
+            pid = self._baseline_only_decision(
+                sdk, "Quokka patrol prioronly zzqx")
+            proj = sdk._get_proj()
+            # Fixture shape: persisted prior, NEVER flushed (no n.confidence,
+            # no posterior), status live.
+            stored = proj.g.query(
+                "MATCH (n:Point {id:$id}) RETURN n.confidence, n.ep_alpha, "
+                "n.ep_beta, n.posterior_alpha, n.status",
+                params={"id": pid},
+            ).result_set[0]
+            assert stored[1] == pytest.approx(3.0), "auto-baseline ep_alpha"
+            assert stored[2] == pytest.approx(1.0), "auto-baseline ep_beta"
+            assert stored[0] is None, \
+                "no EP flush → n.confidence must be absent (regression shape)"
+            assert stored[3] is None, "no EP flush → no posterior"
+            assert stored[4] == "live"
+            # (1) Annotation read — the parity oracle (posterior→prior mean).
+            ann = annotate_ep_batch(proj.g, [pid])[pid]
+            assert ann.confidence_mean == pytest.approx(0.75, abs=1e-4)
+            # (2) GraphRanker signal — THE regression: pre-fix 0.5.
+            from tortoise.ranking import GraphRanker
+            sig = GraphRanker(proj)._fetch_signals([pid], "point")[pid]
+            assert sig["confidence"] == pytest.approx(0.75, abs=1e-6), (
+                f"GraphRanker read {sig['confidence']} for a 0.75-prior claim")
+            # Prior-only (has_ep) but far below the contestation variance
+            # threshold — reads as a calm, believed claim.
+            assert sig["contested"] is False
+        finally:
+            sdk.close()
+
+    def test_order_by_confidence_ranks_prior_only_claim_by_prior_mean(self):
+        """order_by='confidence' must lift the 0.75 prior-only decision ABOVE
+        a 0.5-neutral decision even when the neutral claim is strictly MORE
+        relevant — the sort key (0.75) and the annotated ep.confidence_mean
+        (0.75) must agree inside one API response (pre-fix the claim sorted
+        as unmeasured 0.5 despite displaying 0.75)."""
+        sdk = _fresh_sdk()
+        try:
+            high = self._baseline_only_decision(
+                sdk, "Quokka patrol prioronly zzqx")
+            # Explicit status → no #2199 auto-baseline → Beta(1,1) neutral
+            # (0.5). Repeated query tokens make it strictly more relevant, so
+            # the relevance base-order puts it first — only the confidence
+            # sort can lift the prior-only claim above it.
+            low = sdk.create_point(
+                "decision",
+                "quokka patrol prioronly zzqx quokka patrol prioronly zzqx "
+                "quokka patrol prioronly zzqx neutral",
+                status="live",
+            )["id"]
+            proj = sdk._get_proj()
+            from tortoise.ranking import GraphRanker
+            signals = GraphRanker(proj)._fetch_signals([high, low], "point")
+            assert signals[high]["confidence"] == pytest.approx(0.75, abs=1e-6)
+            assert signals[low]["confidence"] == pytest.approx(0.5, abs=1e-6)
+            hits = sdk.tortoise_fts_query(
+                "quokka patrol prioronly zzqx", entity_type="point",
+                limit=50, order_by="confidence", w4_enrich=False,
+            )
+            ids = [h.get("id") for h in hits]
+            assert high in ids and low in ids, f"both claims must surface: {ids}"
+            assert ids.index(high) < ids.index(low), (
+                "prior-only 0.75 claim ranked at/below 0.5-neutral claim: "
+                f"order={ids}")
+            by_id = {h.get("id"): h for h in hits}
+            # The displayed annotation agrees with the rank order on the SAME
+            # response (parity contract the pre-fix sort violated).
+            assert by_id[high]["ep"]["confidence_mean"] == pytest.approx(
+                0.75, abs=1e-4)
+            assert by_id[low]["ep"]["confidence_mean"] == pytest.approx(
+                0.5, abs=1e-4)
+        finally:
+            sdk.close()
