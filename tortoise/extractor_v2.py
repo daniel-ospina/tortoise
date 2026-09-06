@@ -1369,8 +1369,10 @@ def _complete_parsed(model, system: str, user: str, *,
                     # D3 residual — still truncated after the ONE escalation:
                     # fail-loud, NO parse-acceptance path (a balanced
                     # complete-but-shorter section-boundary cut is STILL
-                    # truncated via finish; _parse_canonical_strict runs only
-                    # to enrich the excerpt, never to accept — P1-7).
+                    # truncated via finish). The residual raise carries NO
+                    # acceptance parse at all — only the `_error_excerpt`
+                    # string tail; `_parse_canonical_strict` is used solely
+                    # on the ABORT arm's head-reparse (P1-7).
                     # WHY residual never accepts while the ABORT arm (above)
                     # reparses the retained base-cap head: the escalated
                     # response is the LONGEST emission this pipeline ever

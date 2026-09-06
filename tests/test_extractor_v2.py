@@ -3915,6 +3915,71 @@ class TestEscalation2134:
         # the recovered call's spend IS captured by the D6 delta
         assert rec["escalation_output_tokens"] == 6000
 
+    def test_escalated_call_abort_on_reprompt_path_reparses_truncating_response(self):
+        """Plan Task 3 arm (second-model-gate): [base stop-unparseable →
+        error-informed re-prompt at base → attempt-2 LENGTH → esc RAISES]
+        must reparse the attempt-2 (length) response's head — the retained
+        response is the LATEST truncating emission, and the session
+        llm.calls roll-up counts all 4 calls (1 base + 1 re-prompt + 2 esc
+        attempts)."""
+        class _M:
+            last_finish_reason = "stop"
+            def __init__(self):
+                self.calls = 0
+            def complete(self, *, system, user, max_tokens=None):
+                self.calls += 1
+                if self.calls == 1:  # base: stop-garbage
+                    self.last_finish_reason = "stop"
+                    return "not json"
+                if self.calls == 2:  # re-prompt at base: length cut
+                    self.last_finish_reason = "length"
+                    return ('{"entities": [], "events": [], "operators": '
+                            '[], "points": [{"content": "p2head", '
+                            '"pointKind": "statement"}, {"content": "tail"')
+                # escalated call: raises
+                raise TimeoutError("model call exceeded deadline")
+
+        m = _M()
+        stats: dict = {}
+        out = v2.run_s2(m, "STORY", stats=stats)
+        assert m.calls == 4  # base + re-prompt + 2 escalated attempts
+        contents = [p["content"] for p in out["points"]]
+        assert contents == ["p2head"]  # attempt-2's head was reparsed
+        rec = stats["recovery"]
+        assert rec["escalated"] == 1 and rec["escalated_abort"] == 1
+        assert stats["attempts"] == 4  # 1 base + 1 re-prompt + 2 esc
+        assert stats.get("partial") is True
+
+    def test_escalated_call_stall_detection_bounded(self):
+        """Plan Task 3 arm (P1-6/P2-12b): the escalated _complete call passes
+        NO read-timeout kwarg (model_adapters stays at its (10, 60) stall
+        bound — only the deadline auto-scales with the esc budget)."""
+        seen = {}
+        import tortoise.extractor_v2 as _v2
+        orig = _v2._complete
+
+        class _M:
+            last_finish_reason = "length"
+            def complete(self, *, system, user, max_tokens=None):
+                self.last_finish_reason = "length"
+                return '{"entities": []'
+
+        def spy(model, system, user, *, max_tokens=None, retries=None,
+                **kw):
+            if max_tokens == 32000:
+                seen["kw"] = kw
+            return orig(model, system, user, max_tokens=max_tokens,
+                        retries=retries, **kw)
+        _v2._complete = spy
+        try:
+            stats: dict = {}
+            with pytest.raises(ValueError):
+                v2.run_s2(_M(), "STORY", stats=stats)
+        finally:
+            _v2._complete = orig
+        assert seen.get("kw") is not None
+        assert "read_timeout" not in seen["kw"]  # stall bound unscaled (P1-6)
+
     def test_escalation_token_accumulation_single_call(self):
         """D6/R3: the escalation delta == the escalated call's post-return
         in-stats tokens; the base call's wasted output is the separate
