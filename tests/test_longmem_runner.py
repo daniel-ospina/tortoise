@@ -316,11 +316,15 @@ def test_outcomes_to_report_golden_shape():
     # the golden outcome carries no escalation fields → all-zero projection.
     esc = integ["escalation"]
     assert esc["n_escalated_questions"] == 0
+    assert esc["n_escalations"] == 0
     assert esc["n_escalations_recovered"] == 0
     assert esc["n_escalations_residual"] == 0
     assert esc["n_escalations_abort"] == 0
     assert esc["n_escalations_partial"] == 0
     assert esc["escalation_output_tokens_max"] == 0
+    assert esc["escalation_prompt_tokens_max"] == 0
+    assert esc["escalation_base_output_tokens_max"] == 0
+    assert esc["escalation_base_prompt_tokens_max"] == 0
     assert esc["escalated_valid_qids"] == []
     assert esc["escalated_residual_qids"] == []
 
@@ -441,7 +445,9 @@ def test_outcomes_to_report_golden_shape():
         "llm_escalations_abort": None,
         "llm_escalations_partial": None,
         "escalation_tokens_output_max": None,
+        "escalation_tokens_prompt_max": None,
         "escalation_tokens_base_output_max": None,
+        "escalation_tokens_base_prompt_max": None,
     }
     assert report["failures"] == []
     assert report["n_failed"] == 0
@@ -563,13 +569,22 @@ def test_report_escalation_readout_2134():
         dataset_semantics_audit=_trusted_audit(), integrity_threshold=1.0)
     esc = report["integrity"]["escalation"]
     assert esc["n_escalated_questions"] == 2  # legacy excluded (or 0)
+    # event-level invariant: n_escalations == the 4-bucket sum (literal per
+    # outcome; question-level sums here: rec 1 event + residual 1 event)
+    assert esc["n_escalations"] == 2
+    assert esc["n_escalations"] == (esc["n_escalations_recovered"]
+                                    + esc["n_escalations_residual"]
+                                    + esc["n_escalations_abort"]
+                                    + esc["n_escalations_partial"])
     assert esc["n_escalations_recovered"] == 1
     assert esc["n_escalations_residual"] == 1
     assert esc["n_escalations_abort"] == 0
     assert esc["n_escalations_partial"] == 0
-    # D6 marginal-cost numerator maxes
+    # D6 marginal-cost numerator maxes (output AND prompt terms)
     assert esc["escalation_output_tokens_max"] == 31800
     assert esc["escalation_base_output_tokens_max"] == 16000
+    assert esc["escalation_prompt_tokens_max"] == 0  # fixture sets output only
+    assert esc["escalation_base_prompt_tokens_max"] == 0
     assert esc["escalated_valid_qids"] == ["q"]
     assert esc["escalated_residual_qids"] == ["q-residual"]
     # criterion-3 cross-read: the recovered question is ALSO in the

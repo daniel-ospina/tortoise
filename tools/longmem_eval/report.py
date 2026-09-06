@@ -1442,21 +1442,31 @@ def build_report(
         o.get("question_id") for o in outcomes
         if (o.get("llm_truncated") or 0) > 0 and _outcome_grade(o) == "clean"
     ]
-    # #2134 (Task 5): the ONE-SHOT ESCALATION readout — question counts by
-    # bucket (each escalated question is exactly ONE mechanism call: a clean
-    # outcome may carry recovered; residual/abort questions grade invalid
-    # via truncated_parse_error at the callers — the buckets name the
-    # mechanism, error_classes name the outcome). Criterion 3's escalation
-    # arm: an escalation that RECOVERED is never an unrecorded truncation
-    # (truncated_valid_qids above already lists every clean+truncated
-    # question — an escalated-recovered question appears in BOTH, by
-    # design). Legacy checkpoints without the fields project None → ``or 0``.
+    # #2134 (Task 5): the ONE-SHOT ESCALATION readout. UNITS: a question is
+    # a multi-session haystack — ingest_v2 SUMS the per-session escalation
+    # counters, so one question can carry MULTIPLE escalation events
+    # (llm_escalations is an EVENT count per outcome; the 4-bucket invariant
+    # escalated == recovered + residual + abort + partial is literal PER
+    # OUTCOME and — as sums — at the event level below via n_escalations).
+    # A clean outcome may carry recovered events; residual/abort questions
+    # grade invalid via truncated_parse_error at the callers — the buckets
+    # name the mechanism, error_classes name the outcome. Criterion 3's
+    # escalation arm: an escalation that RECOVERED is never an unrecorded
+    # truncation (truncated_valid_qids above already lists every
+    # clean+truncated question — an escalated-recovered question appears in
+    # BOTH, by design). Legacy checkpoints without the fields project
+    # None → ``or 0``.
     escalated_qids = {
         bucket: [o.get("question_id") for o in outcomes
                  if (o.get(f"llm_escalations_{bucket}") or 0) > 0]
         for bucket in ("recovered", "residual", "abort", "partial")
     }
     escalation_summary = {
+        # event-level totals — n_escalations == the 4-bucket sum BY
+        # CONSTRUCTION (each outcome's own invariant sums), so the report's
+        # escalation block is literally assertable at the event level.
+        "n_escalations": sum(
+            o.get("llm_escalations") or 0 for o in outcomes),
         "n_escalated_questions": sum(
             1 for o in outcomes if (o.get("llm_escalations") or 0) > 0),
         "n_escalations_recovered": sum(
@@ -1467,14 +1477,24 @@ def build_report(
             o.get("llm_escalations_abort") or 0 for o in outcomes),
         "n_escalations_partial": sum(
             o.get("llm_escalations_partial") or 0 for o in outcomes),
-        # the marginal-cost numerator maxes (D6): the LARGEST single
-        # escalated call's output + its wasted base call (read from the
-        # ingest max-preserving captures)
+        # the D6 marginal-cost numerator maxes, read from the ingest
+        # max-preserving captures. SEMANTICS: the values are per-QUESTION
+        # maxes of the per-SESSION escalation-output TOTAL (a session that
+        # escalated in multiple stages — e.g. an S1 chunk + S2 — sums its
+        # stages before the ingest max) — an honest upper bound on "the
+        # biggest escalated emission this run paid for", NOT a per-call
+        # max. Both cost-delta terms (output AND prompt) are surfaced.
         "escalation_output_tokens_max": max(
             (o.get("escalation_tokens_output_max") or 0 for o in outcomes),
             default=0),
+        "escalation_prompt_tokens_max": max(
+            (o.get("escalation_tokens_prompt_max") or 0 for o in outcomes),
+            default=0),
         "escalation_base_output_tokens_max": max(
             (o.get("escalation_tokens_base_output_max") or 0
+             for o in outcomes), default=0),
+        "escalation_base_prompt_tokens_max": max(
+            (o.get("escalation_tokens_base_prompt_max") or 0
              for o in outcomes), default=0),
         "escalated_valid_qids": escalated_qids["recovered"],
         "escalated_residual_qids": escalated_qids["residual"],

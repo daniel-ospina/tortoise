@@ -654,9 +654,14 @@ def run_s1(model, transcript: str, *,
     Task-1 measurement showed firing. The wrap mirrors the S2/S4 net with
     three buckets (S1 has no parse ladder → no ``partial`` bucket):
     ``escalated == recovered + residual + abort``. Escalation is narrative
-    (not list-bearing): a residual OR an abort KEEPS attempt-1's retained
-    truncated summary (the chunk is never dropped — a raise would convert a
-    benign tail-drop into a chunk failure for zero gain, P2-14a/P1-21)."""
+    (not list-bearing): a residual returns the ESCALATED response when one
+    exists (the longer emission — fewer facts dropped); an abort (the
+    escalated call itself raised) keeps attempt-1's retained truncated
+    summary. The chunk is never dropped — a raise would convert a benign
+    tail-drop into a chunk failure for zero gain (P2-14a/P1-21). An
+    un-escalatable truncation (esc <= base, P2-15) records the per-seam
+    truncation keys only — NO escalation episode (the S2/S4 seam's
+    ordering; ``escalated`` counts calls that actually fired)."""
     system = (S1_TMPL
               .replace("{memory_granularity}", _granularity_text(master))
               .replace("{date_anchor}", _date_anchor(session_date)))
@@ -670,29 +675,38 @@ def run_s1(model, transcript: str, *,
     if not truncated:
         return response
     _rec = stats.setdefault("recovery", {}) if stats is not None else None
+    # The base call WAS length-truncated — record the per-seam s1
+    # truncation-token keys (Task 0 R3-6: the S1 overage stays separable
+    # from S2/S4's 16K-capped values). This is truncation accounting and is
+    # independent of the escalation episode below (an un-escalatable
+    # truncation is still a truncation).
     if _rec is not None:
-        _rec["escalated"] = _rec.get("escalated", 0) + 1
-        # per-seam s1 truncation-token keys (Task 0 R3-6 — the S1 overage
-        # stays separable from S2/S4's 16K-capped values)
         _rec["truncation_prompt_tokens_s1"] = (
             _rec.get("truncation_prompt_tokens_s1", 0)
             + int(stats.get("prompt_tokens") or 0))
         _rec["truncation_completion_tokens_s1"] = (
             _rec.get("truncation_completion_tokens_s1", 0)
             + int(stats.get("completion_tokens") or 0))
-        # the truncating base call's wasted output (marginal-cost numerator)
+    esc = _extractor_escalation_tokens(base)
+    if esc <= base:
+        # P2-15: no headroom → the truncated summary stands (S1 narrative is
+        # never a list-damage class; the truncation is already recorded).
+        # NO escalation episode is counted (matches _complete_parsed's
+        # esc<=base ordering: `escalated` counts calls that actually fired —
+        # the 3-bucket invariant stays literal under the no-headroom config).
+        return response
+    retained = response
+    if _rec is not None:
+        _rec["escalated"] = _rec.get("escalated", 0) + 1
+        # the truncating base call's wasted output (marginal-cost numerator,
+        # D6) — snapshotted after the guard, before the escalated call
+        # overwrites the in-stats token fields.
         _rec["escalation_base_prompt_tokens"] = (
             _rec.get("escalation_base_prompt_tokens", 0)
             + int(stats.get("prompt_tokens") or 0))
         _rec["escalation_base_output_tokens"] = (
             _rec.get("escalation_base_output_tokens", 0)
             + int(stats.get("completion_tokens") or 0))
-    esc = _extractor_escalation_tokens(base)
-    if esc <= base:
-        # P2-15: no headroom → the truncated summary stands (S1 narrative is
-        # never a list-damage class; the truncation is already recorded).
-        return response
-    retained = response
     base_attempts = stats.get("attempts") if stats is not None else 0
     base_retries = stats.get("retries") if stats is not None else 0
     try:
@@ -735,27 +749,32 @@ def run_s1(model, transcript: str, *,
         # the escalation RECOVERED is still RECORDED (never valid=true with
         # an unrecorded truncation).
         stats["truncated"] = True
+        # D6 cost delta — the escalated call's post-return in-stats tokens
+        # (any finish: this is the spend numerator, not an overage read).
         _rec["escalation_prompt_tokens"] = (
             _rec.get("escalation_prompt_tokens", 0)
             + int(stats.get("prompt_tokens") or 0))
         _rec["escalation_output_tokens"] = (
             _rec.get("escalation_output_tokens", 0)
             + int(stats.get("completion_tokens") or 0))
-        # per-seam accumulation for the escalated call's overage too
-        _rec["truncation_prompt_tokens_s1"] = (
-            _rec.get("truncation_prompt_tokens_s1", 0)
-            + int(stats.get("prompt_tokens") or 0))
-        _rec["truncation_completion_tokens_s1"] = (
-            _rec.get("truncation_completion_tokens_s1", 0)
-            + int(stats.get("completion_tokens") or 0))
     finish = stats.get("finish_reason") if stats is not None else (
         getattr(model, "last_finish_reason", None))
     if finish == "length":
-        # P2-14a residual: keep the truncated summary (S1 is narrative — a
-        # fail-loud raise converts a benign tail-drop into a chunk failure)
+        # P2-14a residual: keep the escalated (still-truncated) response —
+        # longer than attempt-1, fewer facts dropped. The per-seam s1 keys
+        # accumulate the ESCALATED call's overage ONLY here (a recovered
+        # escalated call was never length-truncated — R3-6 keys measure
+        # truncation, not spend; the spend already landed in the
+        # escalation_*_tokens delta above).
         if _rec is not None:
             _rec["escalated_residual"] = (
                 _rec.get("escalated_residual", 0) + 1)
+            _rec["truncation_prompt_tokens_s1"] = (
+                _rec.get("truncation_prompt_tokens_s1", 0)
+                + int(stats.get("prompt_tokens") or 0))
+            _rec["truncation_completion_tokens_s1"] = (
+                _rec.get("truncation_completion_tokens_s1", 0)
+                + int(stats.get("completion_tokens") or 0))
         return response
     if _rec is not None:
         _rec["escalated_recovered"] = _rec.get("escalated_recovered", 0) + 1
@@ -1136,11 +1155,23 @@ def _complete_parsed(model, system: str, user: str, *,
     FIRST parse-failing attempt's ``finish_reason`` decides the class —
     ``length`` → the truncation hypothesis, else sloppiness/contamination).
 
-    Retry policy (#1746 D3): a first parse-failing attempt with
-    ``finish_reason == "length"`` SKIPS the retry — same prompt + same cap
-    is deterministic failure (the ladder's rung-4 partial-accept already
-    ran in-process on attempt 1); a ``stop``/``None`` failure re-prompts
-    with the bounded parse-error block (``_error_informed_reprompt``).
+    Retry policy (#1746 D3): with ``escalate=True`` (the S2/S4 default,
+    #2134 Task 3), a ``finish_reason == "length"`` fires the ONE-SHOT
+    ESCALATION instead — one escalated ``_complete`` at
+    ``_extractor_escalation_tokens(max_tokens)`` (default 32000), whose
+    response is handled ONCE on a TERMINAL path (residual → fail-loud
+    ``_ParseError(truncated=True)``; clean → ``escalated_recovered``;
+    malformed-with-prefix → ``escalated_partial``; escalated-call raise →
+    ``escalated_abort`` + head-reparse of the retained truncating
+    response). The #1746 error-informed re-prompt is DISABLED
+    post-escalation (R3-1: it would re-call at the ORIGINAL base cap and
+    re-truncate). With ``escalate=False`` (the kind-classifier adjudication
+    seam), the pre-#2134 ladder is preserved verbatim: a first parse-
+    failing attempt with ``finish_reason == "length"`` SKIPS the retry
+    (same prompt + same cap is deterministic failure; rung-4
+    partial-accept ran in-process on attempt 1); a ``stop``/``None``
+    failure re-prompts with the bounded parse-error block
+    (``_error_informed_reprompt``).
 
     #2134 Task 0 (R3-6): ``seam`` names the calling stage (run_s2 passes
     ``"s2"``, run_s4 ``"s4"``; the kind_classifier adjudication path leaves
@@ -1266,6 +1297,19 @@ def _complete_parsed(model, system: str, user: str, *,
                     if _rec is not None:
                         _rec["escalated_abort"] = (
                             _rec.get("escalated_abort", 0) + 1)
+                    # R3-3/P1-39 (code-review round): the escalated call's
+                    # except-branch stats.update(attempts=...) OVERWROTE the
+                    # running total with the escalated call's own per-call
+                    # count before raising — re-accumulate base + esc so the
+                    # session `llm.calls`/`llm_retries` roll-up counts BOTH
+                    # calls on the abort arm too (the run_s1 mirror; without
+                    # this, _rollup_llm undercounts by exactly the
+                    # pre-escalation attempts).
+                    if stats is not None:
+                        total_attempts += int(stats.get("attempts") or 0)
+                        total_retries += int(stats.get("retries") or 0)
+                        stats["attempts"] = total_attempts
+                        stats["retries"] = total_retries
                     head = (_parse_canonical_strict(retained_response)
                             or _longest_valid_prefix(retained_response))
                     if head is None:
@@ -1312,6 +1356,21 @@ def _complete_parsed(model, system: str, user: str, *,
                     # complete-but-shorter section-boundary cut is STILL
                     # truncated via finish; _parse_canonical_strict runs only
                     # to enrich the excerpt, never to accept — P1-7).
+                    # WHY residual never accepts while the ABORT arm (above)
+                    # reparses the retained base-cap head: the escalated
+                    # response is the LONGEST emission this pipeline ever
+                    # held — accepting any shorter prefix of it as
+                    # "recovered" would silently drop the tail on exactly the
+                    # failure class #2134 exists to eliminate (the R2 fail-
+                    # loud tripwire; a double-residual on S2+S4 is the
+                    # #1987/#2335 mega-session signal and grades
+                    # empty_embed_list — hard — so the migration from the
+                    # #1746 recoverable-partial net to hard-fail pre-#2335 is
+                    # a conscious, reviewed decision, pinned by
+                    # test_over_32k_residual_census_killer_not_partial_parse).
+                    # The abort arm only reparses because the escalated call
+                    # was LOST (a raise) — otherwise ZERO data would embed;
+                    # a returned-truncated response keeps data loss VISIBLE.
                     if _rec is not None:
                         _rec["escalated_residual"] = (
                             _rec.get("escalated_residual", 0) + 1)
@@ -1399,11 +1458,15 @@ def run_s2(model, story: str, master: dict | None = None, *,
            core_only: bool | None = None) -> dict:
     """S2: story → embed list (draft prompt v1, owner-in-the-loop pending).
 
-    Output is bounded at ``_S2_S4_MAX_TOKENS`` (M3 #1524, D2); a truncated
-    or unparseable response raises ``_ParseError`` → census ``parse_error``
-    (the tail-cut tolerance of ``_parse_json`` still recovers truncated
-    JSON; the census records the truncation for the fix loop). S2 retries
-    once on parse failure (``_complete_parsed`` — pilot #1549 fix).
+    Output is bounded at ``_S2_S4_MAX_TOKENS`` (M3 #1524, D2). #2134
+    (Task 3): a length-truncated emit escalates ONCE to
+    ``_extractor_escalation_tokens`` (default 32000) and recovers the full
+    list (``escalated_recovered``) when it fits the knob; a response STILL
+    truncated after the one escalation (or an un-escalatable
+    ``esc <= base``) raises ``_ParseError(truncated=True)`` → census
+    ``truncated_parse_error`` (fail-loud residual — never a silent shorter
+    list). An unparseable (stop/None) response follows the #1746 ladder —
+    error-informed re-prompt once, then ``parse_error``.
 
     ``story`` threads into the render (A′ #1695 Task 2): the label-order
     shuffle seed derives from the story, so a paired canonical re-run under
@@ -4511,7 +4574,9 @@ def _rollup_recovery(recovery_stats: dict, stage_stats: dict) -> None:
 
 
 def _call_once(model, system: str, user: str, *, deadline_s: int,
-               max_tokens: int | None, stats: dict | None) -> tuple[str | None, object | None]:
+               max_tokens: int | None,
+               stats: dict | None
+               ) -> tuple[str | None, object | None, int, int]:
     """One wall-clock-bounded completion attempt (M3 D1: each retry attempt
     gets its OWN deadline — a wedged call cannot stay wedged across retries).
 

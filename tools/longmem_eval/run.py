@@ -3656,7 +3656,9 @@ def run_evaluation(
                         "llm_escalations_abort": (ingest_stats.get("recovery") or {}).get("escalated_abort", 0),
                         "llm_escalations_partial": (ingest_stats.get("recovery") or {}).get("escalated_partial", 0),
                         "escalation_tokens_output_max": (ingest_stats.get("recovery") or {}).get("escalation_output_tokens_max", 0),
+"escalation_tokens_prompt_max": (ingest_stats.get("recovery") or {}).get("escalation_prompt_tokens_max", 0),
                         "escalation_tokens_base_output_max": (ingest_stats.get("recovery") or {}).get("escalation_base_output_tokens_max", 0),
+"escalation_tokens_base_prompt_max": (ingest_stats.get("recovery") or {}).get("escalation_base_prompt_tokens_max", 0),
                         "llm_calls": (ingest_stats.get("llm") or {}).get("calls", 0),
                         "llm_retries": (ingest_stats.get("llm") or {}).get("retries", 0),
                         "llm_truncated": (ingest_stats.get("llm") or {}).get("truncated", 0),
@@ -4263,7 +4265,9 @@ def outcomes_to_report(
                 "llm_escalations", "llm_escalations_recovered",
                 "llm_escalations_residual", "llm_escalations_abort",
                 "llm_escalations_partial", "escalation_tokens_output_max",
+                "escalation_tokens_prompt_max",
                 "escalation_tokens_base_output_max",
+                "escalation_tokens_base_prompt_max",
                 "context_tokens",
                 # #1349 vector arm: the gate's per-question metrics ride the
                 # Layer-1 projection (extract_report in gate_1349.py reads

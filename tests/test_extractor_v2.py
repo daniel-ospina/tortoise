@@ -3398,6 +3398,83 @@ def test_multi_session_haystack_truncation_escalates_or_fails_loud(
     assert census_loud.get("partial_parse", 0) == 0
 
 
+def test_over_32k_residual_census_killer_not_partial_parse(monkeypatch):
+    """#2134 (plan Task 3 arm): a genuine >32K mega-session — S2 AND S4
+    BOTH still length-truncated after the ONE 32000 escalation — is
+    DOUBLE-RESIDUAL fail-loud: census truncated_parse_error per stage AND
+    the empty_embed_list killer class (the #1987/#2335 signal grades HARD
+    per report.py, never a silent partial-accept of the truncating
+    attempt, never partial_parse from a truncation-attributed response —
+    the conscious, reviewed migration from the #1746 recoverable-partial
+    net, pinned here)."""
+    monkeypatch.delenv("TORTOISE_EXTRACTOR_MAX_TOKENS", raising=False)
+    from tests.test_extractor_reliability import _conv
+
+    class _MegaSession:
+        """S2 + S4 truncate at EVERY budget (a >32K list never completes)."""
+        last_finish_reason = "length"
+        def complete(self, *, system, user, max_tokens=None):
+            if "STORY SUMMARIZER" in system:
+                self.last_finish_reason = "stop"
+                return "A narrative."
+            self.last_finish_reason = "length"
+            return ('{"entities": [], "events": [], "operators": [], '
+                    '"points": [{"content": "p1", '
+                    '"pointKind": "statement"}')
+
+    out = v2.extract_session_v2(_MegaSession(), _conv())
+    census = out["error_census"]
+    assert census.get("partial_parse", 0) == 0       # never a silent partial
+    assert census.get("truncated_parse_error", 0) == 2  # S2 + S4 residuals
+    assert census.get("empty_embed_list", 0) == 1    # killer class: HARD
+    rec = out["stats"]["recovery"]
+    assert rec["escalated"] == 2 and rec["escalated_residual"] == 2
+    assert rec["escalated"] == (rec.get("escalated_recovered", 0)
+                                + rec["escalated_residual"]
+                                + rec.get("escalated_abort", 0)
+                                + rec.get("escalated_partial", 0))
+    assert out["stats"]["llm"]["truncated"] == 2  # both recorded
+
+
+def test_s2_residual_then_s4_recovers(monkeypatch):
+    """#2134 (plan Task 3 arm): the designed rescue net — S2's emit is a
+    genuine >32K truncation (residual fail-loud, truncated_parse_error,
+    NO partial_parse) but S4's gap review fits the 32000 knob and RECOVERS
+    the list — the session still embeds (never an empty_embed_list on the
+    S2-only case)."""
+    monkeypatch.delenv("TORTOISE_EXTRACTOR_MAX_TOKENS", raising=False)
+    from tests.test_extractor_reliability import _conv
+
+    class _Rescue:
+        last_finish_reason = "stop"
+        def complete(self, *, system, user, max_tokens=None):
+            if "STORY SUMMARIZER" in system:
+                self.last_finish_reason = "stop"
+                return "A narrative."
+            if "GAP REVIEWER" in system and max_tokens and max_tokens > 16000:
+                self.last_finish_reason = "stop"
+                pts = [{"content": f"gp{i}",
+                        "pointKind": "statement"} for i in range(3)]
+                return ('{"entities": [], "events": [], "operators": '
+                        '[], "points": ' + json.dumps(pts) + '}')
+            self.last_finish_reason = "length"
+            return ('{"entities": [], "events": [], "operators": [], '
+                    '"points": [{"content": "p1", '
+                    '"pointKind": "statement"}')
+
+    out = v2.extract_session_v2(_Rescue(), _conv())
+    census = out["error_census"]
+    assert census.get("partial_parse", 0) == 0
+    assert census.get("truncated_parse_error", 0) == 1  # S2 residual only
+    assert census.get("empty_embed_list", 0) == 0       # S4 rescued
+    contents = [p["content"] for p in out["embed_list"]["points"]]
+    assert "gp0" in contents and "gp2" in contents  # S4 recovery embedded
+    rec = out["stats"]["recovery"]
+    assert rec["escalated"] == 2  # S2 (residual) + S4 (recovered)
+    assert rec["escalated_residual"] == 1
+    assert rec["escalated_recovered"] == 1
+
+
 def test_s4_dense_emit_completes_at_16k(monkeypatch):
     """#1787 P1-C (cycle 5) — the S4 re-emit surface (output ≈ 2× S2 — the
     DOMINANT truncation source) must be exercised by a genuinely dense S4
@@ -3701,6 +3778,109 @@ class TestEscalation2134:
         assert stats.get("partial") is True
         contents = [p["content"] for p in out["points"]]
         assert contents == ["p1"]  # the recoverable head was used
+        # R3-3/P1-39 (review round): the escalated call's except-branch
+        # overwrote stats["attempts"] before raising (retries=1 → 2 esc
+        # attempts) — the abort arm re-accumulates base + esc so the session
+        # llm.calls roll-up counts all 3 calls (1 base + 2 esc).
+
+    def test_escalated_abort_llm_calls_counts_all_calls(self):
+        """R3-3/P1-39 (code-review round 2): the escalated-call RAISE path
+        re-accumulates base + esc attempts into the running totals — the
+        abort arm is not allowed to undercount `llm.calls` (base 1 + esc
+        retries=1 → 2 esc attempts = 3 total at the roll-up)."""
+        class _EscRaises:
+            last_finish_reason = "length"
+            def complete(self, *, system, user, max_tokens=None):
+                if max_tokens == 32000:
+                    raise TimeoutError("model call exceeded deadline")
+                self.last_finish_reason = "length"
+                return ('{"entities": [], "events": [], "operators": [], '
+                        '"points": [{"content": "p1", '
+                        '"pointKind": "statement"}, {"content": "p2"')
+
+        stats: dict = {}
+        v2.run_s2(_EscRaises(), "STORY", stats=stats)
+        assert stats["attempts"] == 3  # 1 base + 2 escalated (retries=1)
+        assert stats["recovery"]["escalated_abort"] == 1
+
+    def test_length_truncation_at_base_ge_esc_still_fails_loud(
+            self, monkeypatch):
+        """#2134: when the base cap is RAISED to >= the escalation knob
+        (the #1787 cap lever not in lockstep with the escalation budget),
+        an S2/S4 length is RESIDUAL fail-loud with NO escalation episode
+        recorded (escalated stays 0 — the guard fires before any counter
+        bump, matching the invariant)."""
+        monkeypatch.setattr(v2, "_extractor_escalation_tokens",
+                            lambda b: 20000)
+
+        class _M:
+            last_finish_reason = "length"
+            def complete(self, *, system, user, max_tokens=None):
+                self.last_finish_reason = "length"
+                return '{"entities": []'
+
+        stats: dict = {}
+        with pytest.raises(ValueError) as ei:
+            v2._complete_parsed(_M(), "sys", "usr", max_tokens=20000,
+                                stats=stats)
+        assert ei.value.truncated is True
+        rec = stats["recovery"]
+        assert rec.get("escalated", 0) == 0  # no episode fired
+        assert rec.get("escalated_residual", 0) == 0
+
+    def test_s1_esc_le_base_no_escalation_event(self, monkeypatch):
+        """run_s1 with no escalation headroom records NO escalation episode
+        (escalated == 0 == buckets — the 3-bucket invariant stays literal
+        under the no-headroom config; the per-seam s1 truncation keys DO
+        record the base truncation, matching _complete_parsed's ordering)."""
+        monkeypatch.setattr(v2, "_extractor_escalation_tokens",
+                            lambda b: b)  # esc == base -> no headroom
+        calls = {"n": 0}
+
+        class _M:
+            last_finish_reason = "length"
+            def complete(self, *, system, user, max_tokens=None):
+                calls["n"] += 1
+                self.last_finish_reason = "length"
+                self.last_completion_tokens = 1500
+                return "A truncated narrative."
+
+        stats: dict = {}
+        out = v2.run_s1(_M(), "CONV", stats=stats)
+        assert calls["n"] == 1  # no escalated call
+        assert out == "A truncated narrative."
+        rec = stats["recovery"]
+        assert rec.get("escalated", 0) == 0
+        assert rec.get("escalated_residual", 0) == 0
+        assert rec.get("escalated_recovered", 0) == 0
+        # the truncation itself IS recorded per-seam (R3-6) + combined
+        assert rec["truncation_completion_tokens_s1"] == 1500
+
+    def test_s1_recovered_escalation_does_not_inflate_seam_overage(self):
+        """R3-6/plan contract: the per-seam s1 keys measure TRUNCATED calls
+        only — a RECOVERED escalated call's full output lands in the
+        escalation_*_tokens delta, never in the truncation overage (a
+        recovered call was never length-truncated)."""
+        class _M:
+            last_finish_reason = "length"
+            def complete(self, *, system, user, max_tokens=None):
+                if max_tokens == 32000:
+                    self.last_finish_reason = "stop"
+                    self.last_completion_tokens = 6000
+                    return "A full recovered narrative."
+                self.last_finish_reason = "length"
+                self.last_completion_tokens = 1500
+                return "A truncated narrative."
+
+        stats: dict = {}
+        out = v2.run_s1(_M(), "CONV", stats=stats)
+        assert out == "A full recovered narrative."
+        rec = stats["recovery"]
+        assert rec["escalated_recovered"] == 1
+        # seam keys: base truncation only (1500), NEVER base + recovered
+        assert rec["truncation_completion_tokens_s1"] == 1500
+        # the recovered call's spend IS captured by the D6 delta
+        assert rec["escalation_output_tokens"] == 6000
 
     def test_escalation_token_accumulation_single_call(self):
         """D6/R3: the escalation delta == the escalated call's post-return
