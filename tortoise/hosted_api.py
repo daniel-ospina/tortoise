@@ -18097,6 +18097,18 @@ async def backups_rebaseline(request: Request, body: dict):
     graph_id = body.get("graph_id", "default")
     if not team_id:
         raise HTTPException(status_code=400, detail="team_id required")
+    from tortoise.hosted_backup import _validate_graph_id, _validate_team_id
+    try:
+        # #2377 (defense in depth): team_id/graph_id flow into R2 state keys
+        # (_graph_state_key + the legacy team-file write below) — apply the
+        # same charset gate every create/prune backup write got, so a
+        # future non-server-generated row id can never mint keys outside the
+        # team's prefix. resolve_active_graph gates against enumerated rows;
+        # this gates the shape first.
+        _validate_team_id(team_id)
+        _validate_graph_id(graph_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=f"Re-baseline rejected: {e}")  # noqa: B904
     from tortoise.backup_sweep import (
         _graph_state_key,
         _write_json,
