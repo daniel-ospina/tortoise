@@ -104,7 +104,9 @@ Default-graph semantics (the no-migration contract):
   (`backups/{team}/{graph}/{ts}_{rnd}/…`; default graph segment = the
   literal `default`), per-graph state
   (`ops/teams/{team}/graphs/{graph_id}/state.json`), independent retention
-  (24 hourly + 7 daily + 4 weekly) and per-graph staleness incidents.
+  (24 hourly + 7 daily + 4 weekly ≈35 objects/pool: all <24 h + newest per
+  UTC day within 7 d + 4 weekly — #2373 day-bucket anchors) and per-graph
+  staleness incidents.
   Deleted (tombstoned) graphs are never swept and their archives are
   restore-refused (tombstone guard; #2304 trash semantics). Their nested
   archive pools are therefore NEVER pruned and accumulate until #2304's
