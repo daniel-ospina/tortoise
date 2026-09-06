@@ -300,8 +300,10 @@ class TestRecoveryGateSupabase:
         _sb_membership(fake, "team-a-001", _U1, "owner")
         _sb_membership(fake, "team-b-001", _U1, "member")
         as_user(_U1)
-        # team B first in insertion order = memberships[0] — the 403 must
-        # come from the RESOLVED team, not the memberships[0] role.
+        # A (owner) is inserted first = memberships[0] — the B-attempt 403
+        # must come from the RESOLVED-team role check, NOT the memberships[0]
+        # role (which is owner): a memberships[0]-blind gate would 200 the
+        # B pin and fail this assert.
         _assert_role_403(tc.post("/v1/session/key", json={
             "purpose": "recovery", "team_id": "team-b-001"}))
         assert not [k for k in fake.tables["api_keys"]
@@ -572,6 +574,32 @@ class TestOwnerAdminGateOutage:
                 class _R:
                     def query(self, *_a, **_k):
                         raise RuntimeError("FalkorDB unreachable (simulated)")
+
+                return _R()
+
+        monkeypatch.setattr(ha, "_registry_anchor", lambda: _BoomAnchor())
+        with pytest.raises(HTTPException) as ei:
+            asyncio.run(_require_owner_admin(_U1, "team-r"))
+        exc = ei.value
+        assert exc.status_code == 503
+        assert exc.detail.get("error_code") == "control_plane_unavailable"
+
+    def test_registry_membership_read_redis_family_503(self, monkeypatch):
+        """The falkordb/redis client's REAL transport family (incl.
+        InvalidResponse — a garbage/version-skewed reply) degrades to 503
+        too; a bare RuntimeError wrap would never fire on these (#2380
+        P2, code-review catch)."""
+        from redis.exceptions import InvalidResponse
+
+        monkeypatch.delenv("TORTOISE_CONTROL_PLANE", raising=False)
+        monkeypatch.delenv("SUPABASE_URL", raising=False)
+        monkeypatch.delenv("SUPABASE_SERVICE_ROLE_KEY", raising=False)
+
+        class _BoomAnchor:
+            def _get_registry(self):
+                class _R:
+                    def query(self, *_a, **_k):
+                        raise InvalidResponse("wrong port / version skew")
 
                 return _R()
 

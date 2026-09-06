@@ -2224,9 +2224,12 @@ async def get_current_team_gated(request: Request) -> dict:
 
 # #2297/#2380: the session_user_id dict key is the auth-lane discriminator
 # the role gates predicate on — attached ONLY on the JWT branch of
-# get_current_team_session (see below); key-auth and dependency-override
-# team dicts carry no session_user_id. Named constant = single source of the
-# literal (the _require_owner_admin_if_session helper reads it once).
+# get_current_team_session (see below). Key-auth team dicts carry none;
+# dependency-override dicts are returned UNCHANGED (the test seam carries
+# session_user_id only when the override supplies it — ~8 files inject
+# dict(TEST_TEAM, session_user_id=...) to emulate a session face). Named
+# constant = single source of the literal (the
+# _require_owner_admin_if_session helper reads it once).
 _SESSION_USER_ID_KEY = "session_user_id"
 
 
@@ -9302,8 +9305,6 @@ async def _require_owner_admin(user_id: str, team_id: str) -> dict:
     )
     if is_supabase_enabled():
         try:
-            membership = _sb_membership(get_control_plane(), user_id, team_id)
-        except RuntimeError:
             # #2380 (P2, #1719 class): this seam's OWN membership read is a
             # control-plane call — an outage/schema-cache failure degrades to
             # the repo-standard 503 control_plane_unavailable (mirrors the
@@ -9311,12 +9312,22 @@ async def _require_owner_admin(user_id: str, team_id: str) -> dict:
             # mint-path map), never a raw 500 from the global handler. The
             # seam is shared by invites / members / key-toggle /
             # dashboard-login / create / revoke — all inherit 503 parity.
-            # Non-RuntimeError exceptions propagate untouched (a schema/dialect
+            # Non-outage exceptions propagate untouched (a schema/dialect
             # bug must stay loud, not masquerade as an outage).
-            raise _control_plane_unavailable() from None
+            membership = _sb_membership(get_control_plane(), user_id, team_id)
+        except Exception as _exc:
+            _raise_503_if_cp_outage(_exc)
+            raise
         if not membership or membership["role"] not in ("owner", "admin"):
             raise HTTPException(status_code=403, detail="Requires owner or admin role in team")
-        _ensure_not_suspended(await _team_node(team_id))
+        try:
+            # The suspension-stamp read (teams row, _team_node) is a SECOND
+            # control-plane call AFTER the role check (#1853 ordering — role
+            # 403 precedes SUSPENDED) — same outage class, same 503.
+            _ensure_not_suspended(await _team_node(team_id))
+        except Exception as _exc:
+            _raise_503_if_cp_outage(_exc)
+            raise
         return {"team_id": team_id, "role": membership["role"]}
     # #1853: registry reads use the KEEPALIVE anchor (#1607 pattern — a
     # fresh _make_sdk is GC'd with close-on-GC + SHUTDOWN NOSAVE, killing
@@ -9329,39 +9340,49 @@ async def _require_owner_admin(user_id: str, team_id: str) -> dict:
             "RETURN m.role",
             params={"uid": user_id, "tid": team_id},
         ).result_set
-    except RuntimeError:
-        # #2380: registry-branch transport failure degrades the same way (503
-        # control_plane_unavailable — never a raw 500). Non-RuntimeError
-        # exceptions propagate untouched.
-        raise _control_plane_unavailable() from None
     except Exception as _exc:
-        # The falkordb/redis client raises its own exception family on a
-        # registry outage (ConnectionError / TimeoutError / BusyLoadingError /
-        # ResponseError — the same classes sdk._classify_db_failure buckets,
-        # sdk.py ~1368); a bare `except RuntimeError` never fires on those, so
-        # the wrap would be dead code. Catch the family explicitly (lazy
-        # import — redis is not a hosted_api import-time dependency) and
-        # re-raise anything else untouched.
-        from redis.exceptions import (
-            BusyLoadingError,
-        )
-        from redis.exceptions import (
-            ConnectionError as _RedisConnectionError,
-        )
-        from redis.exceptions import (
-            ResponseError as _RedisResponseError,
-        )
-        from redis.exceptions import (
-            TimeoutError as _RedisTimeoutError,
-        )
-        if isinstance(_exc, (_RedisConnectionError, _RedisTimeoutError,
-                             BusyLoadingError, _RedisResponseError)):
-            raise _control_plane_unavailable() from None
+        _raise_503_if_cp_outage(_exc)
         raise
     if not rows or rows[0][0] not in ("owner", "admin"):
         raise HTTPException(status_code=403, detail="Requires owner or admin role in team")
-    _ensure_not_suspended(await _team_node(team_id))
+    try:
+        # #1853 ordering preserved: role 403 precedes the SUSPENDED check;
+        # the teams-node read is a second store call — same outage class.
+        _ensure_not_suspended(await _team_node(team_id))
+    except Exception as _exc:
+        _raise_503_if_cp_outage(_exc)
+        raise
     return {"team_id": team_id, "role": rows[0][0]}
+
+
+def _raise_503_if_cp_outage(exc: BaseException) -> None:
+    """#2380 (#1719 class): raise 503 control_plane_unavailable when exc is a
+    control-plane transport outage; otherwise return and let the caller
+    re-raise untouched.
+
+    Supabase mode raises RuntimeError on transport (the supabase_control
+    contract). Registry mode raises the redis exception family the falkordb
+    client surfaces (ConnectionError / TimeoutError / BusyLoadingError /
+    ResponseError / InvalidResponse — the classes sdk._classify_db_failure
+    buckets, sdk.py ~1368); RuntimeError is kept for the outage-simulating
+    test seams. A non-outage exception (schema/dialect bug, authz 403 from a
+    caller's own read) stays loud — it must never masquerade as an outage.
+    """
+    if isinstance(exc, RuntimeError):
+        raise _control_plane_unavailable() from None
+    try:
+        from redis.exceptions import (  # lazy — redis is not an import-time dep
+            BusyLoadingError,
+            ConnectionError,
+            InvalidResponse,
+            ResponseError,
+            TimeoutError,
+        )
+    except ImportError:  # redis absent (hosted-only install) — no registry
+        return
+    if isinstance(exc, (BusyLoadingError, ConnectionError, InvalidResponse,
+                        ResponseError, TimeoutError)):
+        raise _control_plane_unavailable() from None
 
 
 async def _require_owner_admin_if_session(team: dict) -> None:

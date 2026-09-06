@@ -633,10 +633,13 @@ class TestInvitesEndpointFlip:
         """#2380 (P2): the seam's own membership read (inside
         _require_owner_admin) is now wrapped — a control-plane outage is a
         503 control_plane_unavailable (#1719 class, mirroring the #2401
-        toggle/dashboard-login precedent), never a registry fallback and
-        never the raw 500 this test previously pinned (the RuntimeError
-        escaped the seam to the global handler). Fail-closed preserved:
-        invite_to_team's `except HTTPException: raise` re-raises the 503.
+        toggle/dashboard-login precedent), never a registry fallback. The
+        RuntimeError previously fell out of the seam into invite_to_team's
+        fail-closed `except Exception` catch-all → the raw 500 this test
+        pinned (detail "Invites unavailable (control plane error)"); it now
+        becomes HTTPException(503) inside the seam, which invite_to_team's
+        `except HTTPException: raise` re-raises as-is. Fail-closed
+        preserved.
         """
         import tortoise.supabase_control as sc
         monkeypatch.setattr(sc, "get_control_plane", lambda: ErrorControlPlane())
