@@ -1682,11 +1682,18 @@ async def get_current_team(request: Request) -> dict:
                 break
         # Fallback: legacy provision_tenant keys (key_prefix=team_id[:8])
         # won't match the token[:10] prefix. In that case scan all keys.
+        # #2426: the scan carries the SAME expires_at filter as the two
+        # lookups above — an expired key whose prefix scan came back empty
+        # must not be rescued here (an expired #2426 durable or bootstrap
+        # stops authenticating in BOTH lanes; #742 intent). Legacy nodes
+        # lack the prop → expires_at NULL → pass the filter unchanged.
         if team_id is None:
             key_result = sdk._get_registry().query(
                 "MATCH (k:APIKey) WHERE k.revoked_at IS NULL "
+                "AND (k.expires_at IS NULL OR k.expires_at > $now) "
                 "RETURN k.team_id, k.id, k.key_hash, k.created_by, "
-                "k.graph_id, k.scopes, k.delegation_depth, k.created_by_key_id"
+                "k.graph_id, k.scopes, k.delegation_depth, k.created_by_key_id",
+                params={"now": now_iso},
             ).result_set
             for k_team_id, k_id, stored_hash, k_created_by, k_gid, k_sc, k_dd, k_cbk in key_result:
                 if verify_api_key(token, stored_hash):
