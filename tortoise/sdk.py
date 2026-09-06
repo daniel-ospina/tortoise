@@ -14499,7 +14499,7 @@ class TortoiseSDK:
                 event["eventId"] = id_val
         if label == "Source":
             event["url"] = id_val
-        if label in ("Event", "Object"):
+        if label in ("Event", "Object", "Subject"):
             # #2061: 'point'/'payload' are JSONL-envelope-reserved names (the
             # rebuild journal uses 'point' for full point snapshots, and
             # _emit_event reserves both as kwargs) — drop them from the node
@@ -14509,11 +14509,12 @@ class TortoiseSDK:
             # tenant passing point/payload on create_object would otherwise
             # persist them live via _persist_extra_props (they are not in
             # _OBJECT_HANDLED) while the journal mirror drops them → divergent
-            # live/replay persistence. The pop is UNCONDITIONAL (both lanes,
-            # like the Event branch): a journal-gated pop would make live
-            # persistence depend on journal config — the same divergence
-            # class this fights. (Tenant-visible narrowing — see docs/
-            # ONTOLOGY.md §4.3 Object-registration note.)
+            # live/replay persistence. #2295: extended to Subject — same
+            # divergence class (subject props are not in _SUBJECT_HANDLED).
+            # The pop is UNCONDITIONAL (both lanes, like the Event branch): a
+            # journal-gated pop would make live persistence depend on journal
+            # config — the same divergence class this fights.
+            # (Tenant-visible narrowing — see docs/ONTOLOGY.md §4.2/§4.3.)
             event.pop("point", None)
             event.pop("payload", None)
         # (#2194) Journal ObjectRegistered on FIRST canonical registration
@@ -14536,6 +14537,7 @@ class TortoiseSDK:
         # second "first registration" whose replay first-wins over the live
         # incarnation (pinned as accepted by tests 14-15; #2296 scope hook).
         _journal_object_registration = False
+        _journal_subject_registration = False
         # Truthy-name gate mirrors _upsert_object's persistence predicate (it
         # no-ops on falsy names) — a falsy-name create must not mint a
         # phantom ObjectRegistered line (junk-line journal growth on a no-op
@@ -14559,14 +14561,41 @@ class TortoiseSDK:
                     "journaling optimistically (id=%s)",
                     event.get("name"), id_val)
                 _journal_object_registration = True
-        if _journal_object_registration and "createdAt" not in event:
-            # (#2194) Synthesize createdAt BEFORE apply ONLY on the
+        # (#2295) Subject mirror of the #2194 Object block above — same probe-
+        # gated first-registration design (Subjects ride the same generic
+        # _create_entity funnel and had the identical durability hole: SDK-
+        # created Subjects were live-graph-only, so a journaled-SDK Subject
+        # vanished silently on rebuild_all — no fold vocabulary to warn).
+        # Keep in sync with the Object block above (label constant, probe
+        # node letter, event-type literal, flag name differ; everything else
+        # is byte-identical). Subjects have no fold/sweep — the round-trip
+        # byte-identity tests are the only guard.
+        if (label == "Subject" and self._event_log_path
+                and event.get("name") and event.get("type") == "SubjectAdded"):
+            try:
+                _journal_subject_registration = not proj.g.query(
+                    "MATCH (s:Subject {id:$cid, name:$name}) RETURN s.id",
+                    params={"cid": id_val, "name": event["name"]},
+                ).result_set
+            except Exception:
+                # Fail-open to journaling: a duplicate registration line is
+                # replay-safe; a silent skip would re-open the node-loss bug.
+                _logger.warning(
+                    "SubjectAdded existence probe failed for %s — "
+                    "journaling optimistically (id=%s)",
+                    event.get("name"), id_val)
+                _journal_subject_registration = True
+        if ((_journal_object_registration or _journal_subject_registration)
+                and "createdAt" not in event):
+            # (#2194/#2295) Synthesize createdAt BEFORE apply ONLY on the
             # journaling path (probe-no-row), so live + journal + replay
             # carry the identical value (replay would otherwise stamp rebuild
-            # time — the #2164-P4 drift class; EventAPI add_object precedent
+            # time — the #2164-P4 drift class; EventAPI add_subject precedent
             # stamps createdAt=now_iso()). Re-mentions (skip path) and
             # journal-less SDKs keep the projection's coalesce($now) behavior
-            # byte-identical to pre-#2194.
+            # byte-identical to pre-fix. The OR-term is provably Object/Event-
+            # inert: each flag is only set under its own label gate, so on any
+            # Object/Event call (False or existing_flag) ≡ base behavior.
             from .ids import now_iso
             event["createdAt"] = now_iso()
         # Apply through projection (writes to FalkorDB)
@@ -14620,6 +14649,27 @@ class TortoiseSDK:
             # pinned by test 11. Best-effort: a lost ObjectRegistered line
             # leaves the Object live-but-not-durable (≡ pre-fix for that
             # write); the #2296 follow-up tracks an Object loss backstop.
+            self._emit_event(
+                event["type"],
+                id=event["id"],
+                **{k: v for k, v in event.items()
+                   if k not in ("type", "id", "point", "payload",
+                                "event_id", "ts", "initiated_by",
+                                "projection_version")},
+            )
+        if label == "Subject" and _journal_subject_registration:
+            # (#2295) Subject mirror of the ObjectRegistered block above —
+            # payload = the exact applied dict (minus type/id + envelope-
+            # reserved keys) so replay upserts a byte-identical Subject.
+            # SubjectAdded is NOT in _GRAPH_EVENT_TYPES → JSONL-only
+            # emission. The probe gate above enforces event["type"] ==
+            # "SubjectAdded" — pass-1b dispatches on that literal, so the
+            # journal can never carry an unreplayable Subject-label line.
+            # Emission is post-apply (phantom-event ordering — same rationale
+            # as the Object block; EventAPI add_subject appends FIRST via
+            # api._emit, this lane deliberately diverges). Best-effort: a
+            # lost SubjectAdded line leaves the Subject live-but-not-durable
+            # (≡ pre-fix for that write); #2296 tracks the loss backstop.
             self._emit_event(
                 event["type"],
                 id=event["id"],
