@@ -48,13 +48,22 @@ class BaselineMissingError(Exception):
 
 
 def _sha256(text: str) -> str:
-    #: 16-hex = 64-bit collision domain. Collision policy: a truncated-hash
-    #: collision on a methodology element is indistinguishable from an
-    #: unchanged methodology (the unchanged-check only TRIPS parity — the
-    #: #1144 baseline re-record is the recovery path), and the elements are
-    #: compared INDEPENDENTLY (no concatenation), so a collision on one
-    #: element never hides drift on another.
+    #: 16-hex = 64-bit collision domain (reader-prompt + rubric hashes —
+    #: #1414 back-compat). Collision policy: a truncated-hash collision on a
+    #: methodology element is indistinguishable from an unchanged methodology
+    #: (the unchanged-check only TRIPS parity — the #1144 baseline re-record
+    #: is the recovery path), and the elements are compared INDEPENDENTLY
+    #: (no concatenation), so a collision on one element never hides drift
+    #: on another.
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+
+
+def _sha256_full(text: str) -> str:
+    #: FULL sha256 (64-hex) for the PROTOCOL leg (round-4 P2 #2284 Task 6
+    #: parity): the protocol element is NEW (no #1414 back-compat domain),
+    #: so full-length is safe and strictly more collision-resistant than
+    #: the 16-hex methodology hashes.
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 #: Tool-surface ids the parity protocol exercises — the schema-v1.1
@@ -71,12 +80,14 @@ TOOL_SURFACE_IDS: tuple[str, ...] = (
 def protocol_hash(*, seed: int, model: dict[str, str | float],
                   event_schema: str,
                   tool_surface: tuple[str, ...]) -> str:
-    """16-hex protocol hash over the decide-loop protocol inputs: seed,
-    model pin (``model["model_id"]``) + temperature, the event-log schema
-    version (artifacts.SCHEMA_VERSION) and the tool-surface ids (sorted —
-    order-insensitive, membership-sensitive). Every input is normalized to
-    a canonical line so equivalent floats hash identically (0 == 0.0).
-    """
+    """FULL-sha256 protocol hash (round-4 P2 — the round-3 protocol leg
+    reused the 16-hex ``_sha256``; the protocol element is new, so
+    full-length is safe and back-compat-free) over the decide-loop protocol
+    inputs: seed, model pin (``model["model_id"]``) + temperature, the
+    event-log schema version (artifacts.SCHEMA_VERSION) and the tool-surface
+    ids (sorted — order-insensitive, membership-sensitive). Every input is
+    normalized to a canonical line so equivalent floats hash identically
+    (0 == 0.0)."""
     lines = [
         f"seed:{seed}",
         f"model:{model.get('model_id', '')}",
@@ -84,7 +95,7 @@ def protocol_hash(*, seed: int, model: dict[str, str | float],
         f"event_schema:{event_schema}",
     ]
     lines += [f"tool_surface:{t}" for t in sorted(tool_surface)]
-    return _sha256("\n".join(lines))
+    return _sha256_full("\n".join(lines))
 
 
 @dataclass(frozen=True)

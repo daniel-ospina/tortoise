@@ -345,8 +345,12 @@ def run_battery(config: RunConfig, *, stdout: Callable[[str], None] = print,
             )
             # Expected set computed on the episode BEFORE scoring via the
             # scorer seam (default HarnessScorer -> empty expected => gap
-            # empty, mock/real neutral).
-            expected = _expected_coverage(scorer, scenario, run_mode)
+            # empty, mock/real neutral). The episode log threads through the
+            # seam (round-4 P2) so the FP-control verdict term is expected
+            # only when the executor derived a verdict (fail-closed once
+            # Task 9 emits bct verdicts).
+            expected = _expected_coverage(scorer, scenario, run_mode,
+                                          log=episode.event_log)
             if run_mode == "real":
                 # Emitter gate NON-VACUOUS for real episodes regardless of
                 # scorer (PR #2341 review P2): in real mode the MANDATORY
@@ -472,16 +476,23 @@ def _build_scorer(config: RunConfig, thresholds: ThresholdsConfig) -> Scorer:
     return _CompositeScorer(scorers)
 
 
-def _expected_coverage(scorer: Scorer, scenario, run_mode: str) -> set[str]:
+def _expected_coverage(scorer: Scorer, scenario, run_mode: str,
+                       log: list[dict] | None = None) -> set[str]:
     """Per-episode expected set via the scorer seam (empty for the default
-    HarnessScorer => gap empty, mock/real neutral)."""
+    HarnessScorer => gap empty, mock/real neutral). ``log`` threads the
+    episode's event log so verdict-gated expected terms (round-4 P2
+    false_positive on control episodes) are only expected when the verdict
+    was derived."""
     fn = getattr(scorer, "expected_coverage", None)
     if not callable(fn):
         return set()
     try:
-        return set(fn(scenario, run_mode=run_mode))
+        return set(fn(scenario, run_mode=run_mode, log=log))
     except TypeError:
-        return set(fn(scenario))
+        try:
+            return set(fn(scenario, run_mode=run_mode))
+        except TypeError:
+            return set(fn(scenario))
 
 
 def _family_payloads(scorer: Scorer) -> list[dict[str, Any]]:
@@ -581,16 +592,22 @@ class _CompositeScorer:
         self.has_probe = any(getattr(s, "is_probe", False)
                              for s in scorers)
 
-    def expected_coverage(self, scenario, *, run_mode: str = "mock") -> set:
-        """Union over member scorers (harness members contribute empty)."""
+    def expected_coverage(self, scenario, *, run_mode: str = "mock",
+                          log: list[dict] | None = None) -> set:
+        """Union over member scorers (harness members contribute empty).
+        ``log`` threads to probe members that accept it (round-4 P2 FP
+        verdict term); members with the older 2-arg seam are unchanged."""
         out: set = set()
         for s in self._scorers:
             fn = getattr(s, "expected_coverage", None)
             if callable(fn):
                 try:
-                    out |= set(fn(scenario, run_mode=run_mode))
+                    out |= set(fn(scenario, run_mode=run_mode, log=log))
                 except TypeError:
-                    out |= set(fn(scenario))
+                    try:
+                        out |= set(fn(scenario, run_mode=run_mode))
+                    except TypeError:
+                        out |= set(fn(scenario))
         return out
 
     def family_reports(self) -> list[dict]:

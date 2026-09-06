@@ -151,9 +151,29 @@ def profile_status(profile: dict) -> str:
 
 def read_cells(path: Path):
     """Per-family cells dict (measured|insufficient_n per metric); None when
-    the family file is corrupt/partial (never readable as measured)."""
+    the family file is corrupt/partial (never readable as measured).
+    Container-aware (round-4 P2): a live writer file is an arm-keyed
+    container; a single-arm container/legacy flat file reads its cells."""
     payload = read_family_file(path)
-    return payload["cells"] if payload else None
+    if payload is None:
+        return None
+    arms = payload.get("arms")
+    if isinstance(arms, dict) and arms:
+        return next(iter(arms.values()))["cells"]
+    return payload["cells"]
+
+
+def read_payload(path: Path) -> dict:
+    """Per-arm payload dict out of a family file (round-4 P2): the single
+    arm's payload for the arm-keyed container shape, or the flat legacy
+    payload dict itself (pre-round files {family,n,values,cells,arm,
+    primary})."""
+    data = json.loads(path.read_text(encoding="utf-8"))
+    arms = data.get("arms")
+    if isinstance(arms, dict) and arms:
+        (arm_id,) = arms
+        return {**arms[arm_id], "arm": arms[arm_id].get("arm", arm_id)}
+    return data
 
 
 def run_battery_guard(config: RunConfig) -> ExitCode:
@@ -358,7 +378,7 @@ class TestEmitterGapHonesty:
         art = _run_artifacts(attempt)[0]
         assert art["run_mode"] == "real"
         assert art["emitter_gap"]                       # uncovered consumed fields
-        payload = json.loads((attempt / "family_R1.json").read_text())
+        payload = read_payload(attempt / "family_R1.json")
         assert payload["cells"] == {"false-positive-rate": "insufficient_n"}
         profile = invoke_report(out, cfg)
         assert profile_status(profile) == "incomplete_emitter_gap"
@@ -377,7 +397,7 @@ class TestEmitterGapHonesty:
         out = tmp_path / "out"
         attempt = _run(out, cfg, families={"R1"}, mock=True, arms=["a0"],
                        monkeypatch=monkeypatch)
-        payload = json.loads((attempt / "family_R1.json").read_text())
+        payload = read_payload(attempt / "family_R1.json")
         assert payload["cells"] == {"false-positive-rate": "insufficient_n"}
         assert payload["values"]["false-positive-rate"] == []
         for art in _run_artifacts(attempt):
@@ -386,14 +406,17 @@ class TestEmitterGapHonesty:
         profile = invoke_report(out, cfg)
         assert profile_status(profile) == "incomplete_missing_metrics"
 
-    def test_excluded_real_episode_exempt_with_snapshot(self, tmp_path,
-                                                        monkeypatch):
-        """An EXCLUDED real episode is exempt from the mandatory gap (its
-        artifact emitter_gap stays empty) but its expected-vs-emitted
-        snapshot is recorded in the exclusion record — an honest exclusion
-        is never mislabeled an emission bug, and the exemption cannot
-        become a gap-gate bypass. All-excluded real run ->
-        incomplete_real_no_episodes."""
+    def test_excluded_real_episode_gapped_snapshot_surfaces_run_gap(
+            self, tmp_path, monkeypatch):
+        """An EXCLUDED real episode is exempt from the ARTIFACT-level gap
+        (its emitter_gap stays empty — an honest exclusion is never
+        mislabeled an emission bug) but its expected-vs-emitted snapshot is
+        recorded in the exclusion record. Round-4 P2: a snapshot with a
+        non-empty expected - emitted gap is CONSUMED at run level — the
+        compose ctx threads excluded expected/emitted (CLI loader
+        excluded_gap) and the run flips to incomplete_emitter_gap, so an
+        exclusion can never hide an emitter that stopped covering expected
+        fields."""
         import battery.runner.run as run_mod
         from battery.arms.base import ArmUnavailable
         cfg = _config_dir(tmp_path)
@@ -426,7 +449,52 @@ class TestEmitterGapHonesty:
             assert art["excluded"]["count"] == 1
             assert art["excluded"]["expected"] == sorted(MANDATORY)
             assert art["excluded"]["emitted"] == []
-            assert art["emitter_gap"] == []          # exempt, not gapped
+            assert art["emitter_gap"] == []          # artifact-exempt, not gapped
+        profile = invoke_report(out, cfg)
+        # gapped snapshot -> run-level emitter-gap state (round-4 P2)
+        assert profile_status(profile) == "incomplete_emitter_gap"
+
+    def test_excluded_real_episode_clean_snapshot_is_no_gap(
+            self, tmp_path, monkeypatch):
+        """Round-4 P2 companion: a REAL excluded episode whose exclusion
+        snapshot is CLEAN (expected - emitted empty — the executor covered
+        the expected fields before the terminal failure) is NOT a run-level
+        gap: the all-excluded run stays incomplete_real_no_episodes."""
+        import battery.runner.run as run_mod
+        from battery.arms.base import ArmUnavailable
+        cfg = _config_dir(tmp_path)
+        out = tmp_path / "out"
+
+        class _UnavailableRealArm:
+            arm_id = "a0"
+            model_id = "fixed"
+            temperature = 0.0
+
+            def setup_scenarios(self, scenarios):
+                return None
+
+            def retrieve(self, context):
+                raise ArmUnavailable("db down")
+
+            def record(self, context, item):
+                return None
+
+            def isolation_namespace(self):
+                return "unavailable-real"
+
+        monkeypatch.setattr(run_mod, "_resolve_arm",
+                            lambda *a, **k: _UnavailableRealArm())
+        # Executor emitted the full MANDATORY set before the failure -> the
+        # exclusion snapshot is clean (expected - emitted empty).
+        attempt = _run(out, cfg, families={"R1"}, mock=False, arms=["a0"],
+                       executor="real", emit_only=set(MANDATORY),
+                       monkeypatch=monkeypatch, expect=ExitCode.ARM_FAILED)
+        for art in _run_artifacts(attempt):
+            assert art["run_mode"] == "real"
+            assert art["excluded"]["count"] == 1
+            assert set(art["excluded"]["expected"]) - \
+                set(art["excluded"]["emitted"]) == set()
+            assert art["emitter_gap"] == []
         profile = invoke_report(out, cfg)
         assert profile_status(profile) == "incomplete_real_no_episodes"
 
@@ -506,7 +574,11 @@ class TestR1PopulationSplit:
         assert rep["cells"]["surfaced-rate"] == "measured"
         # full rate: planted-only denominator, both flawless -> 1.0 each
         assert rep["values"]["surfaced-rate"] == [1.0, 1.0]
-        assert rep["n"] == 3
+        # per-metric n (round-4 P2): the round-3 top-level n summed BOTH
+        # populations (3); n is now the additive per-metric map — the
+        # planted surfaced-rate count never mixes with the bct FP-control
+        # count, and the primary-metric count is n["surfaced-rate"].
+        assert rep["n"] == {"surfaced-rate": 2, "false-positive-rate": 1}
         assert rep["cells"]["false-positive-rate"] == "measured"
         assert rep["values"]["false-positive-rate"] == [1.0]
         assert rep["primary"] == "surfaced-rate"  # headline stamp (RC2/P2)
@@ -542,15 +614,18 @@ class TestR1PopulationSplit:
 
 
 class TestPrimaryMetricHeadline:
-    """PR #2341 review round 3, P2 (both reviewers): the family payload
-    stamps its PRIMARY headline metric (family_report "primary" field), and
-    the CLI report refuses ANY payload whose only measured metric is not
-    that declared primary — a secondary-only-measured payload (planted
-    surfaced-rate population sentinelled, bct FP-control verdict measured)
-    must never have its false-positive-rate mean silently promoted to the
-    family R1 headline and classified against surfaced-rate [cal]
-    semantics (round 2 refused only TWO measured metrics; with the primary
-    cell insufficient_n the means list had length 1 and no refusal fired)."""
+    """Primary-headline semantics (PR #2341 review rounds 3+4, P2): the
+    family payload stamps its PRIMARY headline metric (family_report
+    "primary" field). Round-4 P2 metric-aware selection: when TWO metrics
+    measured (the round-3 hard refusal case — now NORMAL once Task 9 emits
+    bct control verdicts), the declared primary selects the family HEADLINE
+    and each measured secondary is ROUTED to its own control record
+    (profile.json control_records; FP gate path) with a loud warning —
+    never a silent mean-of-means. A payload whose ONLY measured metric is
+    not its declared primary (secondary-only-measured: planted surfaced-
+    rate population sentinelled, bct FP-control verdict measured) is STILL
+    refused loudly — with no primary value there is nothing honest to
+    headline."""
 
     @staticmethod
     def _r1_refusal_payload() -> dict:
@@ -604,21 +679,51 @@ class TestPrimaryMetricHeadline:
         assert "not its declared primary" in err
         assert not (out / "profile.json").exists()  # never a measured R1 value
 
-    def test_two_measured_metrics_still_refused(self, tmp_path, capsys):
-        """Round-2 refusal preserved: a payload with BOTH cells measured is
-        still refused loudly (never a silent mean-of-means)."""
+    def test_two_measured_metrics_select_primary_and_route_control(
+            self, tmp_path, capsys):
+        """Round-4 P2 metric-aware selection (the round-3 hard crash on TWO
+        measured metrics is gone — two measured metrics is NORMAL once Task
+        9 emits control verdicts): the payload's declared primary selects
+        the family HEADLINE and the measured secondary (false-positive-rate)
+        routes to its OWN control record (profile.json control_records — the
+        FP gate path consumes it). Loud warning, no crash, no profile-less
+        refusal."""
         cfg = _config_dir(tmp_path)
         out = tmp_path / "out"
         payload = self._r1_refusal_payload()
-        payload["values"] = {"surfaced-rate": [1.0],
+        payload["values"] = {"surfaced-rate": [1.0, 1.0],
                               "false-positive-rate": [0.0]}
         payload["cells"] = {"surfaced-rate": "measured",
                              "false-positive-rate": "measured"}
+        payload["n"] = {"surfaced-rate": 2, "false-positive-rate": 1}
         _plant_attempt(out, [payload])
-        rc = main(["report", "--config", str(cfg), "--out", str(out)])
-        assert rc is ExitCode.OPERATIONAL
-        assert "2 measured metrics" in capsys.readouterr().err
-        assert not (out / "profile.json").exists()
+        profile = invoke_report(out, cfg)
+        # primary selects the family headline (never a mean-of-means)
+        assert profile["matrix"]["R1"]["a0"]["value"] == 1.0
+        # secondary routed to its own control record for the FP gate path
+        assert profile["control_records"]["R1"]["a0"] == \
+            {"false-positive-rate": 0.0}
+        err = capsys.readouterr().err
+        assert "2 measured metrics" in err          # loud warning
+        assert "false-positive-rate" in err
+        assert "control record" in err
+
+    def test_single_metric_payload_has_empty_control_records(self, tmp_path,
+                                                            capsys):
+        """No secondary metric -> no control records: the single-primary
+        lane reports the headline value with an empty control map (additive
+        — nothing else changes)."""
+        cfg = _config_dir(tmp_path)
+        out = tmp_path / "out"
+        _plant_attempt(out, [{
+            "family": "R1", "primary": "surfaced-rate", "arm": "a0",
+            "n": {"surfaced-rate": 2},
+            "values": {"surfaced-rate": [1.0, 1.0]},
+            "cells": {"surfaced-rate": "measured"}}])
+        profile = invoke_report(out, cfg)
+        assert profile["matrix"]["R1"]["a0"]["value"] == 1.0
+        assert profile["control_records"] == {}
+        assert capsys.readouterr().err == ""
 
     def test_primary_only_measured_payload_reports_value(self, tmp_path):
         """The normal single-primary lane is untouched: a payload whose only
@@ -645,6 +750,157 @@ class TestPrimaryMetricHeadline:
                               "cells": {"surfaced-rate": "measured"}}])
         profile = invoke_report(out, cfg)
         assert profile["matrix"]["R1"]["a0"]["value"] == 0.9
+
+
+class TestFPControlVerdictGate:
+    """Round-4 P2 (SCENARIO_CONDITIONAL live + fix-2 gate): the FP-control
+    verdict term (false_positive) joins a CONTROL-population episode's
+    expected set ONLY when the episode is real AND the derived control
+    verdict was actually emitted (post-derivation phase-2 gate) — wired so
+    the bct FP-control verdict is fail-closed once Task 9 emits it. A
+    verdict-less control log that only CLAIMS a verdict (entry without an
+    explicit BOOL value) never passes — bool("yes") coercion must never
+    fabricate a measured pass."""
+
+    def test_control_episode_expected_includes_fp_when_verdict_derived(self):
+        from battery.runner.probe_scorer import (
+            expected_coverage_for,
+            phase1_expected,
+        )
+        ct, bct = _r1_pop_scenarios()
+        verdict_log = covered_log()
+        verdict_log.append({"type": "derived", "event": "control_verdict",
+                            "at": 99, "field": "false_positive",
+                            "payload": {"value": True}})
+        # control episode + derived verdict -> false_positive IS expected
+        exp = expected_coverage_for(bct, family="R1", log=verdict_log)
+        assert "false_positive" in exp
+        # ... but it is a derived term: the phase-1 (pre-scoring) slice
+        # strips it, so it never gaps the pre-scoring gate (Task-9 verdicts
+        # exist only post-derivation).
+        assert "false_positive" not in phase1_expected(exp)
+        # no verdict in the log -> never expected (keeps the no-verdict
+        # sentinel — insufficient_n, never a fabricated pass)
+        assert "false_positive" not in expected_coverage_for(
+            bct, family="R1")
+        # planted ct episodes NEVER expect a control verdict — even when a
+        # stray verdict entry exists, the gate is control-population-scoped.
+        assert "false_positive" not in expected_coverage_for(
+            ct, family="R1", log=verdict_log)
+
+    def test_verdict_claim_without_explicit_bool_never_passes(self):
+        """A control log that CLAIMS a verdict but carries no explicit bool
+        value (payload value coerces under bool() in the pre-fix helper) is
+        not a verdict: the probe records the no-data sentinel
+        (insufficient_n), never a measured FP value."""
+        from battery.probes.r1_contradiction import R1ContradictionProbe
+        from battery.runner.probe_scorer import ProbeScorer
+        _, bct = _r1_pop_scenarios()
+        scorer = ProbeScorer(
+            probe=R1ContradictionProbe(),
+            thresholds=ThresholdsConfig(
+                cal_rows=(("surfaced-rate", "a0", 0.90),)))
+        log = covered_log()
+        log.append({"type": "derived", "event": "control_verdict",
+                    "at": 99, "field": "false_positive",
+                    "payload": {"value": "yes"}})  # claim, not a verdict
+        scorer.score(_real_episode(bct.id, log), bct)
+        rec = scorer.last_record()
+        assert rec is not None and not rec.measured
+        assert rec.value is None                     # no-data sentinel
+        rep = scorer.family_report()
+        assert rep["cells"] == {"false-positive-rate": "insufficient_n"}
+        # never a surfaced-rate value from a control claim either
+        assert "surfaced-rate" not in rep["values"]
+
+    def test_verdict_absent_control_episode_sentinels_not_gaps(self):
+        """The verdict-less control episode keeps the round-3 no-verdict
+        sentinel (insufficient_n on the FP-control cell) — the round-4 gate
+        does not phase-2-gap it (false_positive is never expected without a
+        derived verdict) and it never produces a measured cell."""
+        from battery.probes.r1_contradiction import R1ContradictionProbe
+        from battery.runner.probe_scorer import ProbeScorer
+        _, bct = _r1_pop_scenarios()
+        scorer = ProbeScorer(
+            probe=R1ContradictionProbe(),
+            thresholds=ThresholdsConfig(
+                cal_rows=(("surfaced-rate", "a0", 0.90),)))
+        scorer.score(_real_episode(bct.id, covered_log()), bct)
+        rep = scorer.family_report()
+        assert rep["cells"] == {"false-positive-rate": "insufficient_n"}
+        assert rep["n"] == {"false-positive-rate": 0}
+
+
+class TestFamilyFilePerArmAggregation:
+    """Round-4 P2 (fix-4): the writer named family_<F>.json from the family
+    alone while the reader keyed payload["arm"] — a second arm's payload
+    silently OVERWROTE the first. write_family_files now aggregates per-arm
+    payloads into ONE arm-keyed CONTAINER per family
+    (family_<F>.json = {"schema_version": "1.1", "family": F, "arms":
+    {arm_id: payload}}), and the CLI readers flatten containers with legacy
+    flat single-arm payload back-compat (pre-round files
+    {family,n,values,cells,arm,primary} still readable)."""
+
+    def _r1_payload(self, arm: str, value: float) -> dict:
+        return {"family": "R1", "primary": "surfaced-rate", "arm": arm,
+                "n": {"surfaced-rate": 1},
+                "values": {"surfaced-rate": [value]},
+                "cells": {"surfaced-rate": "measured"}}
+
+    def test_two_payloads_same_family_different_arms_aggregate(self,
+                                                               tmp_path):
+        """Two payloads for the SAME family from DIFFERENT arms land in ONE
+        family file (arm-keyed) — no overwrite, both arms readable."""
+        attempt = tmp_path / "attempt"
+        attempt.mkdir(parents=True)
+        written = write_family_files(
+            attempt, [self._r1_payload("a0", 0.9),
+                      self._r1_payload("a4", 0.95)])
+        assert len(written) == 1 and written[0].name == "family_R1.json"
+        data = read_family_file(written[0])
+        assert data is not None
+        assert set(data["arms"]) == {"a0", "a4"}
+        assert data["arms"]["a0"]["values"]["surfaced-rate"] == [0.9]
+        assert data["arms"]["a4"]["values"]["surfaced-rate"] == [0.95]
+        # CLI report reads BOTH arms of the container (per-arm flatten)
+        cfg = _config_dir(tmp_path)
+        out = tmp_path / "out"
+        out.mkdir()
+        attempt2 = out / "99999999-999999-999998"
+        attempt2.mkdir()
+        write_family_files(attempt2, [self._r1_payload("a0", 0.9),
+                                      self._r1_payload("a4", 0.95)])
+        (attempt2 / "summary.json").write_text(json.dumps({
+            "schema_version": "1.1",
+            "run": {"run_mode": "mock", "exit_code": 0, "run_ids": []},
+            "arms": []}), encoding="utf-8")
+        profile = invoke_report(out, cfg)
+        assert set(profile["matrix"]["R1"]) == {"a0", "a4"}
+        assert profile["matrix"]["R1"]["a0"]["value"] == 0.9
+        assert profile["matrix"]["R1"]["a4"]["value"] == 0.95
+
+    def test_legacy_flat_single_arm_file_still_reads(self, tmp_path):
+        """Pre-round (legacy) flat single-arm family files —
+        {family,n,values,cells,arm,primary} with NO arms map — stay
+        readable through the CLI report (back-compat)."""
+        cfg = _config_dir(tmp_path)
+        out = tmp_path / "out"
+        out.mkdir()
+        attempt = out / "99999999-999999-999998"
+        attempt.mkdir()
+        legacy = {"family": "R1", "primary": "surfaced-rate", "arm": "a0",
+                  "n": 2, "values": {"surfaced-rate": [0.9, 0.9]},
+                  "cells": {"surfaced-rate": "measured"}}
+        (attempt / "family_R1.json").write_text(
+            json.dumps(legacy), encoding="utf-8")
+        (attempt / "summary.json").write_text(json.dumps({
+            "schema_version": "1.1",
+            "run": {"run_mode": "mock", "exit_code": 0, "run_ids": []},
+            "arms": []}), encoding="utf-8")
+        assert read_family_file(attempt / "family_R1.json") == legacy
+        profile = invoke_report(out, cfg)
+        assert profile["matrix"]["R1"]["a0"]["value"] == 0.9
+        assert profile["control_records"] == {}
 
 
 class TestRunModeHonesty:

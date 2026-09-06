@@ -76,6 +76,38 @@ def validate_event_entry(entry: dict[str, Any]) -> None:
         raise ValueError(
             f"field {field!r} must be emitted as {FIELD_EMITTERS.get(field)!r}, "
             f"got {entry['type']!r}")
+    if field is not None and FIELD_SUBTYPES.get(field) is not None \
+            and entry["event"] != FIELD_SUBTYPES[field]:
+        # Round-4 P2: field->KIND was enforced but field->SUBTYPE was not —
+        # a state_event "retrieve" tagged ep_outcome (canonical subtype
+        # ep_snapshot) or a derived "flip_flop" tagged false_positive
+        # (canonical control_verdict) passed the registry check. Every
+        # emitter field has exactly one canonical emission subtype (see
+        # _FIELD_DEFAULTS); a registry field emitted under another subtype
+        # is an integrity violation, never a silent pass.
+        raise ValueError(
+            f"field {field!r} must be emitted as subtype "
+            f"{FIELD_SUBTYPES[field]!r}, got {entry['event']!r}")
+    if field is not None:
+        # Payload-shape checks for the list-typed envelope fields (round-4
+        # P2): a declared scalar under the wrong type is an integrity
+        # violation. stated_defeat_conditions carries a LIST, stated_
+        # confidence a real number (never a bool), stated_undecided a bool.
+        value = (entry.get("payload") or {}).get("value")
+        if field == "stated_defeat_conditions":
+            if not isinstance(value, list):
+                raise ValueError(
+                    f"stated_defeat_conditions payload value must be a list, "
+                    f"got {value!r}: {entry}")
+        elif field == "stated_confidence":
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise ValueError(
+                    f"stated_confidence payload value must be a real number, "
+                    f"got {value!r}: {entry}")
+        elif field == "stated_undecided" and not isinstance(value, bool):
+            raise ValueError(
+                f"stated_undecided payload value must be a bool, "
+                f"got {value!r}: {entry}")
 
 #: mandatory on every real episode (envelope/derived/state-terminal); all
 #: other registered fields are CONDITIONAL (absence = legitimate non-
@@ -89,6 +121,11 @@ MANDATORY: frozenset[str] = frozenset({
 #: CONDITIONAL = legitimate non-occurrence: absence NEVER gaps, even when the
 #: field sits in `expected` (measured 0.00 — the a0 comparator + bct FP pool
 #: depend on this). Behavioral tool actions + contested EP marker only.
+#: (Round-4 P2 DEFERRAL note: the [SECOND-MODEL-GATE] P1 — R1 surfaced_rate
+#: derives from CONDITIONAL fields with absence-as-0.0 as the sanctioned
+#: a0/bct comparator semantics — stands; the executor-era emission-loss-proof
+#: requirement is a Task-9 acceptance item, NOT a phase-1 change, because
+#: real mode is unreachable without a real emission seam.)
 CONDITIONAL: frozenset[str] = frozenset({
     "contradiction_surfaced", "explicit_resolution", "surfaced_within_turn",
     "ep_contested",
@@ -99,6 +136,16 @@ CONDITIONAL: frozenset[str] = frozenset({
 #: bct twins; outcome_correct/confidences/outcomes for calibration/decision;
 #: coverage_subscore for R2 judge legs). Absence gaps when expected. The
 #: scorer seam builds the per-episode `expected` set from these rules.
+#:
+#: LIVE (round-4 P2): consumed by battery/runner/probe_scorer.py —
+#: ``expected_coverage_for`` unions (family-truth ∩ SCENARIO_CONDITIONAL)
+#: so every expected truth term is a member of this set, plus the scenario
+#: rule (injection_turn when planted). ``false_positive`` is the FP-control
+#: verdict term: expected ONLY for CONTROL-population episodes (benign bct)
+#: whose derived control verdict was actually emitted (post-derivation
+#: phase-2 gate in probe_scorer) — planted ct episodes never expect a
+#: control verdict, and an absent verdict on a control episode keeps the
+#: no-verdict sentinel (never a fabricated pass).
 SCENARIO_CONDITIONAL: frozenset[str] = frozenset({
     "injection_turn", "outcome_correct", "confidences", "outcomes",
     "coverage_subscore", "false_positive", "update_correct_direction",
@@ -120,6 +167,8 @@ def validate_emitter_coverage(log: list[dict[str, Any]],
 #: per-kind default entry factory (schema tests consume; every registry field
 #: appears exactly once => validate_emitter_coverage(log) == set()).
 _FIELD_DEFAULTS: dict[str, dict[str, str]] = {
+    # NOTE: keep 1:1 with FIELD_EMITTERS — every registry field carries a
+    # canonical default subtype; validate_event_entry enforces it.
     "contradiction_surfaced": {"type": "tool_event", "event": "file_nand"},
     "explicit_resolution": {"type": "tool_event", "event": "supersede"},
     "ep_outcome": {"type": "state_event", "event": "ep_snapshot"},
@@ -141,10 +190,28 @@ _FIELD_DEFAULTS: dict[str, dict[str, str]] = {
     "confidences": {"type": "gold_store", "event": "expected"},
 }
 
+#: field -> canonical SUBTYPE (derived from the _FIELD_DEFAULTS event
+#: values — every emitter field has exactly ONE canonical emission subtype;
+#: round-4 P2 field->subtype enforcement, see validate_event_entry).
+FIELD_SUBTYPES: dict[str, str] = {
+    field: spec["event"] for field, spec in _FIELD_DEFAULTS.items()}
+
 def build_full_log() -> list[dict[str, Any]]:
     log: list[dict[str, Any]] = []
     for i, (field, spec) in enumerate(sorted(_FIELD_DEFAULTS.items())):
-        payload = {"value": True} if spec["event"] == "declared" else {}
+        if spec["event"] == "declared":
+            # payload-shape-correct fixture scalars (validate_event_entry
+            # now checks the envelope shapes below).
+            if field == "stated_defeat_conditions":
+                payload = {"value": []}
+            elif field == "stated_confidence":
+                payload = {"value": 0.8}
+            elif field == "stated_undecided":
+                payload = {"value": False}
+            else:
+                payload = {"value": True}
+        else:
+            payload = {}
         if spec["type"] == "tool_event":
             payload = {"event_ref": f"ns:seq:{i}"}
         if spec["event"] == "ep_snapshot" and field == "ep_contested":

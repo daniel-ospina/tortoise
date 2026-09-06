@@ -47,14 +47,17 @@ def _baseline(reader_prompt="rp", judge_rubric_id="jr", *, protocol=None):
 
 # ── protocol_hash: composition + sensitivity ──────────────────────────────
 class TestProtocolHash:
-    def test_16hex_stable_and_seed_sensitive(self):
+    def test_full_sha256_stable_and_seed_sensitive(self):
+        """Round-4 P2: the PROTOCOL leg uses the FULL sha256 (64-hex —
+        the protocol element is new, so full-length is safe; the reader-
+        prompt/rubric methodology hashes stay 16-hex per #1414 back-compat)."""
         h1 = protocol_hash(seed=7, model=_model(), event_schema="1.1",
                            tool_surface=TOOL_SURFACE_IDS)
         h2 = protocol_hash(seed=7, model=_model(), event_schema="1.1",
                            tool_surface=TOOL_SURFACE_IDS)
         h3 = protocol_hash(seed=8, model=_model(), event_schema="1.1",
                            tool_surface=TOOL_SURFACE_IDS)
-        assert h1 == h2 and len(h1) == 16
+        assert h1 == h2 and len(h1) == 64
         assert all(c in "0123456789abcdef" for c in h1)
         assert h1 != h3  # seed change trips
 
@@ -112,7 +115,9 @@ class TestMethodologyHashes3Tuple:
         protocol = protocol_hash(seed=7, model=_model(), event_schema="1.1",
                                  tool_surface=TOOL_SURFACE_IDS)
         rp, jr, ph = methodology_hashes("rp", "jr", protocol=protocol)
-        assert len(rp) == 16 and len(jr) == 16 and len(ph) == 16
+        # reader/rubric hashes stay 16-hex (#1414 back-compat); the NEW
+        # protocol element is FULL sha256 (64-hex — round-4 P2).
+        assert len(rp) == 16 and len(jr) == 16 and len(ph) == 64
         # fixed element order: reader_prompt, judge_rubric_id, protocol
         assert (rp, jr, ph) == (methodology_hashes("rp", "jr",
                                                    protocol=protocol))
@@ -232,7 +237,11 @@ class TestCliParityProtocol:
         """Locked warn path: an old 2-tuple baseline runs the parity leg →
         the warn is SURFACED on stdout and the parity record PERSISTS the
         protocol-unknown state (forcing the #1144 re-record — drift can
-        never stay invisible)."""
+        never stay invisible). Round-4 P2: the persisted per-benchmark
+        methodology_matched is FORCED False under protocol_unknown — an
+        unverified protocol leg must never carry methodology_matched=True
+        (the two persisted fields would contradict), even though the legacy
+        2-tuple compare matched at RUNNER level."""
         cfg = _config_dir(tmp_path)
         out = tmp_path / "out"
         code = main(["parity", "--config", str(cfg), "--out", str(out)])
@@ -242,9 +251,12 @@ class TestCliParityProtocol:
         assert "re-record" in captured.lower()  # #1144 forced re-record
         rec = json.loads((out / "parity_record.json").read_text())
         assert rec["protocol_unknown"] is True
-        assert len(rec["protocol_hash"]) == 16  # backfilled on read
-        # methodology still matched on the 2-tuple compare (migration)
-        assert all(b["methodology_matched"] for b in rec["benchmarks"].values())
+        assert len(rec["protocol_hash"]) == 64  # backfilled on read (full sha)
+        # the 2-tuple compare MATCHED at runner level (migration), but the
+        # persisted record never claims methodology under an unverified
+        # protocol leg.
+        assert all(b["methodology_matched"] is False
+                   for b in rec["benchmarks"].values())
 
     def test_protocol_derived_from_pinned_arm_config(self, tmp_path):
         """_cmd_parity loads arms.yaml (no more hardcoded config-less arm):
@@ -260,8 +272,11 @@ class TestCliParityProtocol:
         # Placeholder pin => protocol leg UNVERIFIED (no real model measured
         # under flash-class-placeholder) — never a certified protocol.
         assert rec["protocol_unknown"] is True
-        # methodology (reader-prompt + rubric 2-tuple) still compared
-        assert all(b["methodology_matched"]
+        # Round-4 P2: the persisted per-benchmark record never carries
+        # methodology_matched=True under protocol_unknown (the runner's
+        # 2-tuple compare matched, but an unverified protocol leg cannot
+        # certify methodology in the persisted record).
+        assert all(b["methodology_matched"] is False
                    for b in rec["benchmarks"].values())
         # recompute the protocol from the fixture config independently
         from battery.runner.artifacts import SCHEMA_VERSION

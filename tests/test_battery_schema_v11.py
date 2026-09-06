@@ -79,6 +79,56 @@ def test_kind_must_match_registry_field():
     with pytest.raises(ValueError):
         emit.validate_emitter_coverage(log, expected=set(emit.MANDATORY))
 
+def test_field_subtype_must_match_canonical_registry():
+    # Round-4 P2: field->KIND was enforced but field->SUBTYPE was not — a
+    # state_event "retrieve" tagged ep_outcome (canonical subtype
+    # ep_snapshot) or a derived "flip_flop" tagged false_positive (canonical
+    # control_verdict) passed the registry check. Canonical subtypes now
+    # come from the _FIELD_DEFAULTS event values (FIELD_SUBTYPES).
+    emit.validate_event_entry({"type": "state_event", "event": "ep_snapshot",
+        "at": 4, "payload": {}, "field": "ep_outcome"})
+    emit.validate_event_entry({"type": "derived", "event": "control_verdict",
+        "at": 5, "payload": {"value": False}, "field": "false_positive"})
+    with pytest.raises(ValueError, match="subtype"):
+        emit.validate_event_entry({"type": "state_event", "event": "retrieve",
+            "at": 4, "payload": {}, "field": "ep_outcome"})
+    with pytest.raises(ValueError, match="subtype"):
+        emit.validate_event_entry({"type": "derived", "event": "flip_flop",
+            "at": 5, "payload": {"value": True}, "field": "false_positive"})
+
+def test_envelope_payload_shapes_validated():
+    # Round-4 P2: list-typed envelope fields carry payload-shape checks —
+    # stated_defeat_conditions must be a LIST, stated_confidence a REAL
+    # number (never a bool), stated_undecided a BOOL.
+    emit.validate_event_entry({"type": "envelope", "event": "declared",
+        "at": 1, "field": "stated_defeat_conditions",
+        "payload": {"value": ["cond A", "cond B"]}})
+    emit.validate_event_entry({"type": "envelope", "event": "declared",
+        "at": 1, "field": "stated_confidence",
+        "payload": {"value": 0.7}})
+    emit.validate_event_entry({"type": "envelope", "event": "declared",
+        "at": 1, "field": "stated_undecided",
+        "payload": {"value": False}})
+    # scalar defeat conditions (a str / a number where a list is declared)
+    for bad in ("not-a-list", 5, True):
+        with pytest.raises(ValueError, match="must be a list"):
+            emit.validate_event_entry({"type": "envelope",
+                "event": "declared", "at": 1,
+                "field": "stated_defeat_conditions",
+                "payload": {"value": bad}})
+    with pytest.raises(ValueError, match="real number"):
+        emit.validate_event_entry({"type": "envelope", "event": "declared",
+            "at": 1, "field": "stated_confidence",
+            "payload": {"value": "high"}})
+    with pytest.raises(ValueError, match="real number"):
+        emit.validate_event_entry({"type": "envelope", "event": "declared",
+            "at": 1, "field": "stated_confidence",
+            "payload": {"value": True}})  # bool is not a confidence scalar
+    with pytest.raises(ValueError, match="must be a bool"):
+        emit.validate_event_entry({"type": "envelope", "event": "declared",
+            "at": 1, "field": "stated_undecided",
+            "payload": {"value": "yes"}})
+
 def test_mandatory_coverage_complete():
     # expectation-scoped: a real episode log emitting all MANDATORY fields +
     # its family/arm-required conditionals is covered

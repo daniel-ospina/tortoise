@@ -31,6 +31,10 @@ cal:
   # reviewable table change (calibration mode prints, never silently tunes).
   # The differential classification margin (STRONG/WEAK vs best comparator)
   # is itself [cal]-locked (issue #1415 P2-3).
+  # NOTE (PR #2341 round 4, deferred): the false-positive-rate [cal] row is
+  # pending sibling B (#2292 cal re-locks) — no row is added here; the FP
+  # gate path consumes profile.json control_records once Task 9 emits bct
+  # control verdicts.
   classification-delta: 0.10
   surfaced-rate: {a4: 0.90, a0: 0.00}
   coverage-subscore: {a4: 0.50, a0: 0.35}

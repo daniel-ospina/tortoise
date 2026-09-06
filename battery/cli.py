@@ -249,7 +249,17 @@ def _cmd_parity(args: argparse.Namespace) -> ExitCode:
                 "benchmarks": {
                     c.benchmark: {
                         "version": c.version,
-                        "methodology_matched": c.methodology_matched,
+                        # Round-4 P2 (consistency): a protocol-UNKNOWN
+                        # record must NEVER carry methodology_matched=True —
+                        # the two persisted fields would contradict (an
+                        # unverified protocol leg cannot certify
+                        # methodology, even when the legacy 2-tuple compare
+                        # matched at runner level). Force False; the
+                        # #1144 re-record restores a verifiable compare.
+                        "methodology_matched": (
+                            False if bool(
+                                c.protocol_unknown or placeholder_pinned)
+                            else c.methodology_matched),
                     } for c in cells},
             }, indent=2, sort_keys=True), encoding="utf-8")
         print(f"parity record: {record_path}")
@@ -287,11 +297,23 @@ def _cmd_report(args: argparse.Namespace) -> ExitCode:
         compose_run_status,
         save_profile,
     )
-    artifacts, run_ctx = _load_report_inputs(args)
+    artifacts, run_ctx, control = _load_report_inputs(args)
     if not artifacts:
         print("WARNING: zero measured families found — no sweep artifacts "
               "in the out dir; the verdict below is a NO-DATA state, not a "
               "substantive claim.")
+    if control:
+        # Round-4 P2 loud warning: a family payload carried >1 measured
+        # metric — the declared primary selected the family headline and
+        # each measured secondary was routed to its own control record
+        # (profile.json control_records; the FP gate path consumes it).
+        for fam, arms in sorted(control.items()):
+            for arm, metrics in sorted(arms.items()):
+                print(
+                    f"WARNING family {fam!r} arm {arm!r}: 2 measured "
+                    f"metrics — headline = declared primary; secondary "
+                    f"{sorted(metrics)} routed to the family control "
+                    f"record (FP-gate path)", file=sys.stderr)
     mitigation = _load_mitigations(args)
     recall = _load_recall(args)
     thresholds = load_thresholds(
@@ -304,7 +326,8 @@ def _cmd_report(args: argparse.Namespace) -> ExitCode:
     run_status = (compose_run_status(**run_ctx) if run_ctx is not None
                   else None)
     profile = assemble(artifacts, METRIC_FAMILIES, mitigation, recall,
-                       delta_threshold=delta, run_status=run_status)
+                       delta_threshold=delta, run_status=run_status,
+                       control_records=control)
     out = save_profile(profile, _Path(args.out or _DEFAULT_OUT) / "profile.json")
     print(f"verdict: {profile.verdict.outcome} "
           f"(families {profile.families_measured}/"
@@ -353,15 +376,45 @@ def _attempt_base(args) -> tuple[_Path, bool]:
 
 
 def _family_payloads(base: _Path) -> list[dict]:
-    """Readable family_<F>.json payloads (corrupt/partial files are
-    skipped — never readable as measured cells)."""
+    """Readable per-arm family payloads (corrupt/partial files are
+    skipped — never readable as measured cells). Round-4 P2: live writer
+    files are arm-keyed CONTAINERS (family_<F>.json -> {"family", "arms":
+    {arm_id: payload}}) so each per-arm payload is flattened out; legacy
+    flat single-arm payloads (pre-round files {family,n,values,cells,arm,
+    primary}) are yielded as-is (back-compat)."""
     from battery.report.assemble import read_family_file
     payloads: list[dict] = []
     for f in sorted(base.glob("family_*.json")):
-        payload = read_family_file(f)
-        if payload is not None:
-            payloads.append(payload)
+        data = read_family_file(f)
+        if data is None:
+            continue
+        arms = data.get("arms")
+        if isinstance(arms, dict) and arms:
+            for arm_id, payload in arms.items():
+                if not isinstance(payload, dict):
+                    continue
+                payloads.append({**payload, "family": data["family"],
+                                 "arm": payload.get("arm", arm_id)})
+        else:
+            payloads.append(data)
     return payloads
+
+
+def _excluded_snapshot_gap(art: dict) -> bool:
+    """Round-4 P2: a REAL excluded artifact whose exclusion snapshot
+    (excluded.expected vs excluded.emitted — recorded by run.py for real
+    excluded episodes) shows a non-empty expected - emitted gap. Legacy
+    artifacts without the snapshot never gap."""
+    if art.get("run_mode") != "real":
+        return False
+    ex = art.get("excluded") or {}
+    if not ex.get("count"):
+        return False
+    expected = ex.get("expected")
+    emitted = ex.get("emitted")
+    if not isinstance(expected, list) or not isinstance(emitted, list):
+        return False  # legacy exclusion record (no snapshot)
+    return bool(set(expected) - set(emitted))
 
 
 def _run_artifacts(base: _Path) -> list[dict]:
@@ -380,30 +433,36 @@ def _run_artifacts(base: _Path) -> list[dict]:
     return out
 
 
-def _load_report_inputs(args) -> tuple[dict, dict | None]:
+def _load_report_inputs(args) -> tuple[dict, dict | None, dict]:
     """Report inputs from the LATEST attempt dir: (run_artifacts
-    family -> arm -> value|None) + the run-level status context. A family
-    whose cells are all insufficient_n contributes a None value (reported
-    as an insufficient_n cell — never a measured value, never vacuous).
+    family -> arm -> value|None, run-level status context, control records
+    family -> arm -> {metric: mean}). A family whose cells are all
+    insufficient_n contributes a None value (reported as an insufficient_n
+    cell — never a measured value, never vacuous).
 
-    Family-level value semantics (PR #2341 review rounds 2+3, P2): a family
-    payload stamps its PRIMARY cal metric (``payload["primary"]``) by
+    Family-level value semantics (round-4 P2 metric-aware selection — the
+    round-3 hard crash on TWO measured metrics is gone): a family payload
+    stamps its PRIMARY cal metric (``payload["primary"]``) by
     construction — R1's population split adds a SECOND cell
     (false-positive-rate, benign bct verdicts) that must never be averaged
-    into the family's surfaced-rate headline. A payload with TWO measured
-    metrics is refused loudly, AND a payload whose ONLY measured metric is
-    not its declared primary (planted population sentinelled while the bct
-    control verdict measured — secondary-only-measured) gets the SAME
-    refusal (the metric-aware family-value selection lands with the Task-9
-    judge/executor leg that makes bct verdicts measurable) — never a
-    silent mean-of-means conflating surfaced-rate with FP rate, never a
-    silent secondary-mean headline. Pre-stamp (legacy) single-metric
-    payloads carry the primary by construction and stay readable."""
+    into the family's surfaced-rate headline. When TWO metrics measured,
+    the declared primary selects the family HEADLINE value and each
+    measured secondary is ROUTED to its own control record (returned
+    separately + warned loudly by the caller) — never a silent
+    mean-of-means, never a crash. A payload whose ONLY measured metric is
+    NOT its declared primary (planted population sentinelled while the bct
+    control verdict measured — secondary-only-measured) is STILL refused
+    loudly: with no primary value there is nothing honest to headline.
+    Unstamped legacy single-metric payloads carry the primary by
+    construction and stay readable; an unstamped payload with TWO measured
+    metrics is refused (no declared primary to select with)."""
     base, is_attempt = _attempt_base(args)
     matrix: dict[str, dict[str, float | None]] = {}
+    control: dict[str, dict[str, dict[str, float]]] = {}
     measured_cells = 0
     insufficient_cells = 0
     for payload in _family_payloads(base):
+        family = payload["family"]
         arm = payload.get("arm", "?")
         primary = payload.get("primary")
         measured: list[tuple[str, float]] = []
@@ -414,39 +473,51 @@ def _load_report_inputs(args) -> tuple[dict, dict | None]:
                     (metric, sum(float(v) for v in vals) / len(vals)))
             else:
                 insufficient_cells += 1
-        if len(measured) > 1:
-            raise ValueError(
-                f"family {payload.get('family')!r} payload carries "
-                f"{len(measured)} measured metrics "
-                f"{[m for m, _ in measured]} — the family-level report "
-                "value is single-metric; metric-aware family-value "
-                "selection lands with the Task-9 judge/executor leg (never "
-                "a silent mean-of-means conflating the primary metric with "
-                "a secondary control metric)")
-        if measured and primary is not None and measured[0][0] != primary:
-            # Secondary-only-measured ⇒ same loud refusal as a two-measured
-            # payload: with the ONLY measured metric on the secondary/
-            # control cell (e.g. a bct false-positive-rate verdict while
-            # the planted surfaced-rate population sentinelled), the
-            # round-2 gate (len(means) > 1) did NOT fire — the FP mean
-            # silently became the family headline, classified against the
-            # primary metric's [cal] semantics.
-            raise ValueError(
-                f"family {payload.get('family')!r} payload's only measured "
-                f"metric {measured[0][0]!r} is not its declared primary "
-                f"metric {primary!r} (the primary cell is insufficient_n) — "
-                "a secondary-only-measured payload must never become the "
-                "family headline; metric-aware family-value selection "
-                "lands with the Task-9 judge/executor leg (never a silent "
-                "secondary-mean headline)")
-        if measured:
+        if primary is not None:
+            primary_means = [mean for m, mean in measured if m == primary]
+            secondaries = [(m, mean) for m, mean in measured
+                           if m != primary]
+            if not primary_means and secondaries:
+                # Secondary-only-measured ⇒ loud refusal: with the ONLY
+                # measured metric on the secondary/control cell (e.g. a bct
+                # false-positive-rate verdict while the planted
+                # surfaced-rate population sentinelled), the FP mean must
+                # never become the family headline, classified against the
+                # primary metric's [cal] semantics.
+                raise ValueError(
+                    f"family {family!r} payload's only measured "
+                    f"metric {secondaries[0][0]!r} is not its declared "
+                    f"primary metric {primary!r} (the primary cell is "
+                    "insufficient_n) — a secondary-only-measured payload "
+                    "must never become the family headline; the FP gate "
+                    "path (Task-9 executor + sibling-B cal row) owns the "
+                    "control metric")
+            if secondaries:
+                # Two (or more) measured metrics — NORMAL once Task 9 emits
+                # control verdicts (round-4 P2): the primary selects the
+                # family headline; each secondary routes to its own control
+                # record consumed by the FP gate path. The caller warns
+                # loudly when both are measured.
+                for sec_metric, sec_mean in secondaries:
+                    control.setdefault(family, {}).setdefault(
+                        arm, {})[sec_metric] = sec_mean
+            headline = primary_means[0] if primary_means else None
+        else:
+            if len(measured) > 1:
+                raise ValueError(
+                    f"family {family!r} payload carries "
+                    f"{len(measured)} measured metrics "
+                    f"{[m for m, _ in measured]} and no declared primary "
+                    "to select the family headline with — metric-aware "
+                    "selection needs the payload's primary stamp")
+            headline = measured[0][1] if measured else None
+        if headline is not None:
             measured_cells += 1
-        matrix.setdefault(payload["family"], {})[arm] = (
-            measured[0][1] if measured else None)
+        matrix.setdefault(family, {})[arm] = headline
     if not is_attempt:
         # Legacy root fallback: family files at the out root carry no
         # summary/run artifacts — no run-level status context.
-        return matrix, None
+        return matrix, None, control
     arts = _run_artifacts(base)
     summary = json.loads((base / "summary.json").read_text(encoding="utf-8"))
     # Run-level mode prefers the mode the runner RESOLVED at write time
@@ -467,11 +538,16 @@ def _load_report_inputs(args) -> tuple[dict, dict | None]:
         "emitter_gap": any(
             a.get("run_mode") == "real" and a.get("emitter_gap")
             for a in arts),
+        # Round-4 P2: a real excluded episode whose expected-vs-emitted
+        # snapshot shows a gap surfaces the run-level emitter-gap state
+        # (the artifact exemption is retained; an honest exclusion can
+        # never hide an emitter that stopped covering expected fields).
+        "excluded_gap": any(_excluded_snapshot_gap(a) for a in arts),
         "over_budget": any(
             "budget" in str(a.get("excluded", {}).get("reason", "")).lower()
             for a in arts),
     }
-    return matrix, ctx
+    return matrix, ctx, control
 
 
 def _load_cal_measured(args) -> dict:

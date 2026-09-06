@@ -47,6 +47,7 @@ from battery.exceptions import ConfigError
 from battery.runner.emit import (
     FIELD_EMITTERS,
     MANDATORY,
+    SCENARIO_CONDITIONAL,
     validate_emitter_coverage,
 )
 from battery.runner.scorers import ScorerResult
@@ -77,15 +78,19 @@ _FAMILY_DOMAINS: dict[str, frozenset[str]] = {
 #: `expected` for THIS episode). This is the inverse of the old
 #: task_type-keyed map: R2 and R4 are BOTH task_type=decision yet need
 #: different truth terms, R3 spans calibration + loopy_contested, and
-#: task_type alone could never express that. Fields no probe consumes
-#: (outcome_correct, over_reacted, flip_flopped, false_positive) are
-#: never expected — nothing downstream reads them, so requiring them
-#: would gap episodes no probe measures (the old decision ->
-#: {outcome_correct, confidences, outcomes} phantom always-gapped R2).
+#: task_type alone could never express that. Terms are intersected with
+#: SCENARIO_CONDITIONAL (round-4 P2 — every expected truth term is a
+#: member of the emit-level constant, which is now LIVE). Fields no probe
+#: consumes (outcome_correct, over_reacted, flip_flopped) are never
+#: expected — requiring them would gap episodes no probe measures.
 _FAMILY_TRUTH_FIELDS: dict[str, frozenset[str]] = {
     # R1 surfaced-rate reads CONDITIONAL tool_event/state fields only
-    # (absence = measured non-occurrence, never a gap).
-    "R1": frozenset(),
+    # (absence = measured non-occurrence, never a gap). false_positive is
+    # R1's FP-CONTROL truth term: expected ONLY for CONTROL-population
+    # benign-bct episodes whose derived control verdict was emitted (the
+    # round-4 gate below) — planted ct episodes NEVER expect a verdict,
+    # and a verdict-less control episode keeps the no-verdict sentinel.
+    "R1": frozenset({"false_positive"}),
     # R2 coverage_subscore = judge_annotation (Task-9 judge leg; sibling B
     # rubric) — derive cannot emit it in phase 1, so a real R2 episode is
     # an honest insufficient/emitter-gap until the judge leg lands.
@@ -127,16 +132,19 @@ def episode_population(scenario) -> str:
 def _control_verdict(log: list[dict]) -> bool | None:
     """The episode's FP-control verdict from the schema-v1.1 log: the
     derived ``false_positive`` entry (control_verdict subtype) carries an
-    explicit payload value — True (the arm wrongly flagged the benign
+    explicit BOOL payload value — True (the arm wrongly flagged the benign
     surface) or False (it correctly stayed quiet). None when no verdict
-    entry with an explicit value exists: verdict emission is executor-owned
-    (Task 9) — an absent verdict is the no-data sentinel, never a
-    fabricated 0.0 pass."""
+    entry with an explicit bool value exists: verdict emission is
+    executor-owned (Task 9) — an absent verdict is the no-data sentinel,
+    never a fabricated 0.0 pass. Round-4 P2: a verdict-less log that only
+    CLAIMS a verdict (entry with no explicit value, or a non-bool value)
+    is not a verdict — ``bool("yes")`` coercion must never fabricate a
+    measured pass from a malformed claim."""
     for entry in log:
         if entry.get("field") == "false_positive":
-            payload = entry.get("payload") or {}
-            if "value" in payload:
-                return bool(payload["value"])
+            value = (entry.get("payload") or {}).get("value")
+            if isinstance(value, bool):
+                return value
     return None
 
 
@@ -154,11 +162,27 @@ class ProbeRecord:
 
 
 def expected_coverage_for(scenario, *, run_mode: str = "real",
-                          family: str | None = None) -> set[str]:
+                          family: str | None = None,
+                          log: list[dict] | None = None) -> set[str]:
     """Per-episode expected set (MANDATORY x scenario/family-conditional per
     the Task-1 expectation rule — no arms.yaml capability term). Mock runs
     are neutral (empty expected -> gap empty). injection_turn is expected
     only when the scenario actually plants a ¬A k-turn (never bct twins).
+
+    Round-4 P2 (SCENARIO_CONDITIONAL live): family truth terms are bounded
+    by (family-truth ∩ SCENARIO_CONDITIONAL) — the emit-level constant is
+    the single source for which scenario/family terms can ever be expected.
+    The FP-control verdict term (``false_positive``) is added ONLY for
+    CONTROL-population episodes of an FP-family (R1) whose derived control
+    verdict is present in ``log`` (post-derivation phase-2 gate): once Task
+    9 emits the bct verdict the gate verifies it is covered (fail-closed);
+    a verdict-less control episode never expects it and keeps the no-data
+    sentinel (insufficient_n), never a fabricated pass.
+
+    ``log`` threads the post-execution event log (the runner computes the
+    pre-scoring expected set from the executor's pre-derivation log; the
+    probe scorer passes the episode log again so the FP gate can see a
+    derived verdict). None (log-less callers) never adds the FP term.
 
     ``family`` threads the SCORED probe family through the seam (Task 5
     acceptance): the episode's expected set is computed for the family that
@@ -173,7 +197,20 @@ def expected_coverage_for(scenario, *, run_mode: str = "real",
     if getattr(scenario, "contradiction_pairs", ()):
         expected |= {"injection_turn"}
     if family is not None and scenario.family in probe_domain(family):
-        expected |= set(_FAMILY_TRUTH_FIELDS.get(family, ()))
+        truth = (set(_FAMILY_TRUTH_FIELDS.get(family, ()))
+                 & set(SCENARIO_CONDITIONAL))
+        # false_positive is the FP-control verdict term — never part of a
+        # PLANTED (or foreign-population) episode's expected set: a planted
+        # ct episode has no control verdict to emit, so expecting one would
+        # gap every planted episode at phase 2.
+        expected |= (truth - {"false_positive"})
+        if ("false_positive" in truth
+                and episode_population(scenario) == "control"
+                and log is not None
+                and _control_verdict(log) is not None):
+            # Control episode of an FP-family AND the derived verdict is
+            # actually in the log (post-derivation): require it covered.
+            expected |= {"false_positive"}
     return expected
 
 
@@ -269,13 +306,16 @@ class ProbeScorer:
         return self.probe.cal_metric
 
     # -- scorer-seam API ---------------------------------------------------
-    def expected_coverage(self, scenario, *, run_mode: str = "real") -> set[str]:
+    def expected_coverage(self, scenario, *, run_mode: str = "real",
+                          log: list[dict] | None = None) -> set[str]:
         """The per-episode expected set the runner computes BEFORE scoring
         (scoring precedes artifact construction). The scored family is
         threaded through the seam (Task 5 acceptance) so the runner's
-        expected set matches what this probe will actually require."""
+        expected set matches what this probe will actually require. ``log``
+        (round-4 P2) carries the episode event log so the FP-control
+        verdict term is expected only when the derived verdict was emitted."""
         return expected_coverage_for(scenario, run_mode=run_mode,
-                                     family=self.family)
+                                     family=self.family, log=log)
 
     def score(self, episode, scenario,
               rubric_id: str | None = None) -> ScorerResult:
@@ -302,7 +342,8 @@ class ProbeScorer:
             self._record(None, episode, metric=self._metric_for(scenario))
             return ScorerResult(metrics=())
         expected = expected_coverage_for(scenario, run_mode="real",
-                                         family=self.family)
+                                         family=self.family,
+                                         log=episode.event_log)
         # Phase 1: pre-scoring gate over the pre-derivation log.
         uncovered = validate_emitter_coverage(
             episode.event_log, expected=phase1_expected(expected))
@@ -408,13 +449,20 @@ class ProbeScorer:
             for m in metrics}
         cells = {m: ("measured" if values[m] else "insufficient_n")
                  for m in metrics}
+        counts = {m: len(values[m]) for m in metrics}
         return {
             "family": self.family,
             #: Headline cal metric (RC2/P2): the family-level report value
             #: is the PRIMARY metric by construction.
             "primary": self.probe.cal_metric,
             "arm": arm,
-            "n": sum(len(v) for v in values.values()),
+            #: Per-metric measured counts (round-4 P2): the round-3
+            #: top-level ``n`` SUMMED both populations (a two-cell R1
+            #: payload's n mixed planted surfaced-rate episodes with bct
+            #: FP controls). No reader consumed the numeric top-level n
+            #: (checked round 4), so ``n`` is now the additive per-metric
+            #: map; the primary-metric count is ``n[payload["primary"]]``.
+            "n": counts,
             "values": values,
             "cells": cells,
         }

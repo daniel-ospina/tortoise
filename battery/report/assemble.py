@@ -21,6 +21,12 @@ exit_code + per-episode statuses — never conflated with the mock status):
   false-flags an emitter gap);
 - a non-empty post-derivation emitter_gap on a REAL artifact →
   ``incomplete_emitter_gap``;
+- a REAL EXCLUDED episode whose exclusion snapshot shows expected -
+  emitted non-empty (round-4 P2 ``excluded_gap``) ALSO →
+  ``incomplete_emitter_gap`` (the artifact-level exemption is retained —
+  excluded artifacts carry no emitter_gap — but the run-level emitter
+  state is surfaced so an honest exclusion can never hide an emitter that
+  stopped covering expected fields);
 - an over-budget stop → ``incomplete_real_over_budget``;
 - a real run with zero measured cells (all-excluded/cap-stopped) →
   ``incomplete_real_no_episodes``;
@@ -33,7 +39,7 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass, field  # noqa: F401
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -58,8 +64,10 @@ REPORT_STATUSES = (
 #: Writer file names (glob contract for the CLI readers).
 FAMILY_FILE_PREFIX = "family_"
 RECALL_FILE = "recall.json"
-#: Live-writer family-file schema (v1.1 — family/cells shape; legacy
-#: root-level v1.0 files lack the stamp and the cells map).
+#: Live-writer family-file schema (v1.1 — arm-keyed CONTAINER shape
+#: {"family", "arms": {arm_id: payload}}, round-4 P2; legacy flat
+#: single-arm payloads + root-level v1.0 files stay readable via the
+#: reader back-compat).
 FAMILY_FILE_SCHEMA = "1.1"
 SUMMARY_FILE = "summary.json"
 
@@ -72,6 +80,12 @@ class Profile:
     report_status: str
     families_measured: int
     families_expected: int
+    #: Family control records (round-4 P2 metric-aware selection): measured
+    #: SECONDARY/control metrics (e.g. R1's false-positive-rate) routed to
+    #: their own record, keyed family -> arm -> {metric: mean}. The FP gate
+    #: path (Task-9 executor + sibling-B cal re-lock) consumes these — a
+    #: secondary mean never becomes the family headline.
+    control_records: dict[str, Any] = field(default_factory=dict)
 
 
 def assemble(run_artifacts: dict[str, dict[str, float | None]],
@@ -79,7 +93,8 @@ def assemble(run_artifacts: dict[str, dict[str, float | None]],
              mitigation_paths: dict[str, str],
              matched_recall: dict[str, Any] | None = None,
              delta_threshold: float = 0.10,
-             run_status: str | None = None) -> Profile:
+             run_status: str | None = None,
+             control_records: dict[str, Any] | None = None) -> Profile:
     """run_artifacts: family -> arm -> value (from the run's family files;
     None = attempted-but-insufficient_n cell). ``run_status`` overrides the
     base missing-family rule when the CLI composed a run-level status
@@ -131,26 +146,36 @@ def assemble(run_artifacts: dict[str, dict[str, float | None]],
                    matched_recall=matched_recall or {},
                    report_status=status,
                    families_measured=len(measured),
-                   families_expected=len(expected_families))
+                   families_expected=len(expected_families),
+                   control_records=control_records or {})
 
 
 def compose_run_status(*, run_mode: str, exit_code: int,
                        measured_cells: int, insufficient_cells: int,
                        excluded_episodes: int,
                        emitter_gap: bool = False,
+                       excluded_gap: bool = False,
                        over_budget: bool = False) -> str | None:
     """Run-level report_status precedence (Task 5 acceptance — each branch
     driven by run_mode + summary exit_code + per-episode statuses). Returns
     None when the base missing-family rule in ``assemble`` should decide
-    (a real run whose measured families are simply incomplete)."""
+    (a real run whose measured families are simply incomplete).
+
+    ``excluded_gap`` (round-4 P2): a REAL excluded episode whose exclusion
+    snapshot (excluded.expected vs excluded.emitted — recorded by run.py)
+    is non-empty ALSO composes ``incomplete_emitter_gap``: the artifact
+    exemption is retained, but an exclusion can never hide an emitter that
+    stopped covering the episode's expected fields."""
     if run_mode != "real":
         # Mock runs stay incomplete_missing_metrics even with a probe scorer
         # wired (all cells insufficient_n) — never the emitter-gap/real-*
         # statuses, never complete.
         return REPORT_STATUS_INCOMPLETE
-    if emitter_gap:
+    if emitter_gap or excluded_gap:
         # A real artifact with a non-empty post-derivation emitter gap —
-        # probes never measured from an uncovered log.
+        # probes never measured from an uncovered log. An excluded real
+        # episode with a gapped expected-vs-emitted snapshot surfaces the
+        # same run-level state (round-4 P2).
         return REPORT_STATUS_EMITTER_GAP
     if over_budget:
         return REPORT_STATUS_REAL_OVER_BUDGET
@@ -209,19 +234,37 @@ def _atomic_write(path: Path, payload: Any) -> None:
 
 def write_family_files(attempt_dir: str | Path,
                        payloads: list[dict[str, Any]]) -> list[Path]:
-    """One JSON per scored family (pinned Task-5 schema: family, n, values:
-    {metric: [v...]}, cells: {metric: measured|insufficient_n} + the arm
-    that produced it). Stamped with schema_version (v1.1 live-writer shape)
-    so a legacy root-level family file is never silently misread as a
-    current no-data cell. Written atomically into the attempt dir."""
-    written: list[Path] = []
+    """Aggregate the run's per-arm family payloads into ONE container file
+    per family (round-4 P2 — the round-3 writer named ``family_<F>.json``
+    from the family alone while the reader keyed on ``payload["arm"]``, so a
+    second arm's payload silently OVERWROTE the first). Container shape:
+
+    ``family_<F>.json`` = ``{"schema_version": "1.1", "family": F,
+    "arms": {arm_id: payload}}`` — arm-keyed, collision-free. run.py still
+    refuses multi-arm probe runs pre-flight (unchanged); the file contract
+    is now safe for the Task-9 multi-arm executor. Each per-arm payload is
+    the pinned Task-5 payload (family, primary, arm, n, values, cells).
+    Written atomically into the attempt dir. Legacy flat single-arm files
+    (pre-round files) remain readable via the reader back-compat."""
+    grouped: dict[str, dict[str, dict[str, Any]]] = {}
     for payload in payloads:
         family = payload.get("family")
         if not family:
             raise ValueError(f"family payload missing 'family': {payload}")
-        stamped = {**payload, "schema_version": FAMILY_FILE_SCHEMA}
+        arm = payload.get("arm")
+        if not arm:
+            raise ValueError(f"family payload missing 'arm': {payload}")
+        arms = grouped.setdefault(family, {})
+        arms[arm] = payload  # same-arm duplicates: last write wins
+    written: list[Path] = []
+    for family, arms in grouped.items():
+        container = {
+            "schema_version": FAMILY_FILE_SCHEMA,
+            "family": family,
+            "arms": arms,
+        }
         path = Path(attempt_dir) / f"{FAMILY_FILE_PREFIX}{family}.json"
-        _atomic_write(path, stamped)
+        _atomic_write(path, container)
         written.append(path)
     return written
 
@@ -235,7 +278,11 @@ def write_recall_file(attempt_dir: str | Path, recall: dict[str, Any]) -> Path:
 
 def read_family_file(path: str | Path) -> dict[str, Any] | None:
     """Read one family_<F>.json; None when the file is corrupt/partial (a
-    torn write or manual tamper is NEVER readable as a measured cell). A
+    torn write or manual tamper is NEVER readable as a measured cell). Two
+    readable shapes (round-4 P2): the live CONTAINER
+    (``{"family", "arms": {arm_id: payload}}`` — arm-keyed aggregation) and
+    the LEGACY flat single-arm payload (``{family, cells, ...}`` — pre-round
+    files ``{family,n,values,cells,arm,primary}`` stay readable). A
     versioned file whose schema_version does not match the live-writer
     schema is refused (a future-shape family file is never misread as the
     current no-data shape); unversioned legacy files (root-level v1.0
@@ -244,7 +291,11 @@ def read_family_file(path: str | Path) -> dict[str, Any] | None:
         data = json.loads(Path(path).read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError):
         return None
-    if not isinstance(data, dict) or "family" not in data or "cells" not in data:
+    if not isinstance(data, dict) or "family" not in data:
+        return None
+    arms = data.get("arms")
+    is_container = isinstance(arms, dict) and bool(arms)
+    if not is_container and ("cells" not in data or "values" not in data):
         return None
     if ("schema_version" in data
             and data["schema_version"] != FAMILY_FILE_SCHEMA):
@@ -275,6 +326,10 @@ def save_profile(profile: Profile, path: str | Path) -> Path:
             "artifacts_changed": list(profile.verdict.artifacts_changed),
         },
         "matched_recall": profile.matched_recall,
+        #: Family control records (round-4 P2): measured secondary/control
+        #: metrics routed to their own records (never the family headline) —
+        #: the FP gate path consumes these once Task 9 emits bct verdicts.
+        "control_records": profile.control_records,
         "report_status": profile.report_status,
         "families": {"measured": profile.families_measured,
                      "expected": profile.families_expected},
