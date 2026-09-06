@@ -3433,12 +3433,12 @@ function claimIntentInFlight() {
   // uses — created_via 'provisioned', durable, counts vs max_api_keys).
   // #2246 (ADR-010): the mint rides the session JWT (rule 4 — mintKey sends
   // NO key header + pins ?team_id=); the session IS the authenticator — no
-  // browser-held key is involved. Verified server fact (hosted_api.py): POST
-  // /v1/team/keys has NO owner/admin role gate (members CAN mint server-side)
-  // — this affordance is owner/admin-only as DASHBOARD policy (render-gated),
-  // never a server role check. The plaintext is shown ONCE — the connect
-  // command embeds it (the reveal); afterwards the key is managed/regenerable
-  // from the API Keys tab.
+  // browser-held key is involved. #2297 POLICY A: the server POST
+  // /v1/team/keys session lane IS owner/admin-gated (_require_owner_admin,
+  // same as PATCH toggle since #1148) — this affordance renders only for
+  // owner/admin, matching the server contract. The plaintext is shown ONCE —
+  // the connect command embeds it (the reveal); afterwards the key is
+  // managed/regenerable from the API Keys tab.
   async function wizardMintDurableKey() {
     if (wizardDurableBusy) return
     setWizardDurableBusy(true)
@@ -5045,10 +5045,11 @@ function claimIntentInFlight() {
                         // at creation and is unrecoverable from the table —
                         // create here or rotate there); 'none' = create one.
                         // Role-aware: key creation is owner/admin DASHBOARD
-                        // policy — the server POST /v1/team/keys has no role
-                        // gate (members CAN mint server-side; verified
-                        // hosted_api.py), so the member gate here is client-
-                        // side: paste an existing key or ask an owner/admin.
+                        // policy — the server POST /v1/team/keys session lane
+                        // IS owner/admin-gated (#2297 POLICY A; list stays
+                        // member-open, #1828), matching the client isOwnerAdmin
+                        // gate here — a member pastes an existing key or asks
+                        // an owner/admin.
                         <>
                           <p className="dim" style={{ margin: '0.9rem 0 0', lineHeight: 1.6 }}>
                             {!isOwnerAdmin
@@ -5137,11 +5138,13 @@ function claimIntentInFlight() {
                                   // state-branched. Rotate/trash/create are
                                   // owner/admin-only as DASHBOARD policy
                                   // (client isOwnerAdmin render gates) —
-                                  // server-side, only PATCH /v1/team/keys/{id}
-                                  // (toggle/rename) and the dashboard-login
-                                  // toggle are _require_owner_admin-gated;
-                                  // mint (POST) and revoke (DELETE) are
-                                  // ungated for member sessions. Only owners
+                                  // server-side, the key-management WRITEs
+                                  // (POST mint, DELETE revoke, PATCH
+                                  // toggle/rename) are _require_owner_admin-
+                                  // gated on the session lane since #2297
+                                  // (#1148 for PATCH; list stays member-open
+                                  // #1828). Only owners
+
                                   // get the create/rotate path. The
                                   // REMEDY must also match the SOURCE:
                                   // bootstrap/expiring rows are FILTERED from
@@ -6132,14 +6135,13 @@ function claimIntentInFlight() {
             <div className="row">
               <h2>API Keys</h2>
               {/* #2246 (review, P1/P2): member key creation is gated
-                  CLIENT-side as dashboard policy — the server POST
-                  /v1/team/keys has NO role gate (members CAN mint
-                  server-side). Owner/admin-only key management is a CLIENT
-                  policy: every row action + the create form are isOwnerAdmin
-                  render-gated; server role-gates cover ONLY PATCH
-                  /v1/team/keys/{id} (toggle/rename) and the dashboard-login
-                  toggle (_require_owner_admin) — mint (POST) and revoke
-                  (DELETE) pass for member sessions. The dashboard treats key
+                  CLIENT-side as dashboard policy AND server-side since #2297
+                  POLICY A: the POST /v1/team/keys session lane is
+                  owner/admin-gated (_require_owner_admin, as are DELETE
+                  revoke and PATCH toggle — #1148; list stays member-open
+                  #1828). Every row action + the create form are isOwnerAdmin
+                  render-gated; members get a notice + the paste-into-setup
+                  escape instead of the create form. The dashboard treats key
                   management as owner/admin-managed
                   (Members tab + wizard member gate precedent), so members get
                   a notice + the paste-into-setup escape instead of the create

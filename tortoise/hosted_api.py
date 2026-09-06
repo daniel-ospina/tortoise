@@ -5172,10 +5172,14 @@ async def create_api_key(request: Request, response: Response, team: dict = Depe
     # role is checked on the RESOLVED team (team["team_id"] — the ?team_id=
     # pin's membership-checked team for multi-membership callers, #2230/#2248).
     # The KEY-auth lane is deliberately untouched (the C2 deleg guard above +
-    # the D13 caller-class gates below govern minting WITH keys); override/
-    # registry lanes never carry session_user_id and are likewise unchanged.
-    # #2299: this gate + the inline pin checks in the sibling handlers are
-    # consolidation candidates — keep this block liftable into a helper.
+    # the D13 caller-class gates below govern minting WITH keys). The
+    # dependency-override lane (test seam) DOES carry session_user_id when a
+    # test supplies it — emulated session faces there are role-gated too and
+    # must seed owner/admin memberships; production key-auth never carries
+    # session_user_id (attached only on the JWT branch of
+    # get_current_team_session). #2299: this gate + the inline pin checks in
+    # the sibling handlers are consolidation candidates — keep this block
+    # liftable into a helper.
     if team.get("session_user_id") is not None:
         await _require_owner_admin(team["session_user_id"], team["team_id"])
     # Key label + C3 (#2112) scoped-mint body: {name?, graph_id?, scopes?}.
@@ -5220,9 +5224,11 @@ async def create_api_key(request: Request, response: Response, team: dict = Depe
     child_mint = is_key_caller and not caller_legacy_full
     try:
         if not scoped_request:
-            # Legacy {} mint — D13 caller-class gate: SESSION faces and
-            # legacy full-access (deleg-NULL, scopes=[]) OWNER-class keys
-            # mint the byte-identical pre-C3 tt_ key (402 key-cap, D3). A
+            # Legacy {} mint — D13 caller-class gate: SESSION faces
+            # (owner/admin-only since #2297 POLICY A — a member session 403s
+            # above) and legacy full-access (deleg-NULL, scopes=[]) OWNER-
+            # class keys mint the byte-identical pre-C3 tt_ key (402 key-cap,
+            # D3). A
             # scoped deleg-NULL key (even WITH keys:manage) may NOT mint a
             # full-access owner key — its {} mint routes the row-3/row-4
             # semantics: 403 without keys:manage (no mint capability); a
@@ -5270,8 +5276,9 @@ async def create_api_key(request: Request, response: Response, team: dict = Depe
                                     detail="Missing keys:manage scope to mint keys")
             # Key caller WITH mint capability → deleg=0 child (one-level-deep):
             # scopes ∩ child policy; an escalation-scope REQUEST from a key is a
-            # 403 (§6.3 — never silently stripped). SESSION faces and legacy
-            # full-access (owner-class) callers fail the `not caller_legacy_full`
+            # 403 (§6.3 — never silently stripped). SESSION faces (owner/admin-
+            # only since #2297 POLICY A) and legacy full-access (owner-class)
+            # callers fail the `not caller_legacy_full`
             # term and fall through to the else → owner-class deleg-NULL mint
             # with the full allowlist (D13 rows 1-2).
             if is_key_caller and not caller_legacy_full:
@@ -5566,10 +5573,12 @@ async def revoke_api_key(key_id: str, request: Request, team: dict = Depends(get
     # team for multi-membership callers, #2230/#2248) BEFORE any key lookup,
     # so a non-owner member sees the same 403 on every reachable key id (no
     # existence/ownership differentiation, no partial revoke). KEY-auth
-    # callers keep the key-class gate above unchanged; override/registry
-    # lanes never carry session_user_id and are likewise unchanged. #2299:
-    # this gate + the inline pin checks are consolidation candidates — keep
-    # this block liftable into a helper.
+    # callers keep the key-class gate above unchanged; production key-auth
+    # never carries session_user_id (attached only on the JWT branch of
+    # get_current_team_session) — the dependency-override lane (test seam)
+    # DOES when a test supplies it (emulated session faces there are
+    # role-gated too). #2299: this gate + the inline pin checks are
+    # consolidation candidates — keep this block liftable into a helper.
     if team.get("session_user_id") is not None:
         await _require_owner_admin(team["session_user_id"], team["team_id"])
     if is_supabase_enabled():

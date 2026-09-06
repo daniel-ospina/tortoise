@@ -841,6 +841,10 @@ class TestKeyManagementOwnerAdminGate:
                          json={"enabled": False})
         assert r.status_code == 403, r.text
         assert r.json()["detail"] == "Requires owner or admin role in team"
+        # no partial write (the #2248 no-write-on-403-leg convention)
+        row = fake.query("api_keys", select=["enabled"],
+                         filters=[("id", "eq", kid)])[0]
+        assert row["enabled"] is not False
 
     # ── owner-role session: all four verbs keep working ────────────────────
     def test_owner_session_all_four_verbs_200(self, client, fake, monkeypatch):
