@@ -62,6 +62,11 @@ class ArmAdapter(Protocol):
       - record(context, item) — persist one memory item.
       - isolation_namespace() -> str — the arm's per-arm namespace; distinct
         from the harness's per-scenario setup namespace.
+
+    Seed contract (#2284 I-1): contradiction scenarios seed in seed_mode by
+    default — claim_a + evidence ONLY, never claim_b/k/NAND (¬A arrives
+    in-context at turn k at run time). The verb channel itself (sdk.ingest)
+    is sibling A's (#2291) — applied over the same seed_mode contract.
     """
 
     arm_id: str
