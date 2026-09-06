@@ -76,6 +76,7 @@ Post-GREEN: tests 1-11 all pass (REDs + pins); Object suite (16) + status-projec
 - **Mixed-producer id churn**: EventAPI random-ulid `add_subject` between SDK creates → by-design second canonical line + re-id (delta 4, pinned by test 10); pre-existing #1918/#330 class.
 - **Ownership/org edges not replayed** for Subjects (node-property byte-identity scope — SDK `create_subject(org_of=...)`-class edges are SDK-layer, EventAPI parity).
 - **Cross-file replay reorder** (separate producer logs in ONE rebuild dir): `rebuild_all` replays filename-sorted, so a random-ulid EventAPI line can replay before the SDK canonical line and first-win createdAt on rebuild ≠ live. Accepted (test 10 rebuilds the SDK log only; same class as the documented Source reversed-order limitation #330).
+- **Concurrent same-name creates reverse-append (second-model P2, inherited from #2194)**: the probe→synth→apply→emit sequence is non-atomic — two concurrent same-name SDK creates can interleave so the journal holds [B, A] while live first-won A. Replay converges to one node but createdAt may first-win differently live vs replay. Accepted (same class as #2194 Object TOCTOU; note for the #2296 durability audit — no code change in this PR).
 - **EventAPI-first-then-SDK (separate logs, second-model P1)**: `api.add_subject("S")` creates the node first (random ulid + its own createdAt=T_api, API's log) → the later SDK create probe-misses (live id is the ulid) → journals a line with a SYNTHESIZED createdAt=T_sdk → live ON MATCH keeps T_api (existing-wins) while an SDK-log-only rebuild stamps T_sdk → createdAt diverges. Accepted (mixed-producer family — the default whenever EventAPI touches a Subject before the SDK, since `add_subject` has no canonical id override; same first-wins class as delete→recreate test 9b). Tested indirectly by the test-3v stub variant ONLY for createdAt-LESS stubs — a createdAt-carrying EventAPI-first stub is intentionally unpinned (documented deferral).
 - **Unjournaled/journal-less producers** in a shared graph: rebuild drops their Subjects regardless (no canonical registration ever journaled).
 - **`status:'live'` extra-prop regime** stays as-is (projection-owned Subject status is a planned ontology follow-up, NOT this issue).
@@ -86,7 +87,7 @@ Post-GREEN: tests 1-11 all pass (REDs + pins); Object suite (16) + status-projec
 |---|---|
 | Probe raise (DB hiccup) | fail-open-to-journal + warning asserted (test 7) — duplicate replay-safe |
 | Log append failure | warn + live node kept; rebuild omits (test 8) — ≡ pre-fix for that write |
-| Duplicate lines (probe TOCTOU / by-design EventAPI class) | idempotent MERGE + first-wins createdAt (test 4, 10) |
+| Duplicate lines (probe TOCTOU / by-design EventAPI class) | idempotent MERGE + first-wins createdAt (test 4, 10) — convergence to ONE node guaranteed; see the reverse-append accepted-divergence note below |
 | Falsy name | truthy-name gate (no phantom line) — mirrors `_upsert_subject` early-return entities.py:274-276 (test 9c green-pin) |
 | Future Subject-label event_type ≠ SubjectAdded | event-type conjunct in gate (C8) — never journals an unreplayable line |
 | SubjectAdded added to `_GRAPH_EVENT_TYPES` later | test 5 GraphEvent count == 0 pin |
