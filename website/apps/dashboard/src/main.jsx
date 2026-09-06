@@ -3531,12 +3531,12 @@ function claimIntentInFlight() {
   // uses — created_via 'provisioned', durable, counts vs max_api_keys).
   // #2246 (ADR-010): the mint rides the session JWT (rule 4 — mintKey sends
   // NO key header + pins ?team_id=); the session IS the authenticator — no
-  // browser-held key is involved. Verified server fact (hosted_api.py): POST
-  // /v1/team/keys has NO owner/admin role gate (members CAN mint server-side)
-  // — this affordance is owner/admin-only as DASHBOARD policy (render-gated),
-  // never a server role check. The plaintext is shown ONCE — the connect
-  // command embeds it (the reveal); afterwards the key is managed/regenerable
-  // from the API Keys tab.
+  // browser-held key is involved. #2297 POLICY A: the server POST
+  // /v1/team/keys session lane IS owner/admin-gated (_require_owner_admin,
+  // same as PATCH toggle since #1148) — this affordance renders only for
+  // owner/admin, matching the server contract. The plaintext is shown ONCE —
+  // the connect command embeds it (the reveal); afterwards the key is
+  // managed/regenerable from the API Keys tab.
   async function wizardMintDurableKey() {
     if (wizardDurableBusy) return
     setWizardDurableBusy(true)
@@ -3594,14 +3594,12 @@ function claimIntentInFlight() {
         setWizardShowPaste(true)
         setWizardDurableError('You\'ve reached your plan\'s limit of API keys — revoke or regenerate one in the API Keys tab (shown once there), then paste a key below.')
       } else {
-        // #2246 (review): reachable mint failures here are the 402 cap above,
-        // a suspension 403, or transport — the server POST /v1/team/keys has
-        // NO owner/admin role gate (verified hosted_api.py: create_api_key
-        // only checks _check_team_limit), so a member never 403s server-side;
-        // member key creation is gated CLIENT-side as dashboard policy (the
-        // connect-step member copy + API Keys tab notice) and this handler's
-        // callers are owner/admin-gated renders. A suspension 403 falls
-        // through to its own message.
+        // #2246 (review) + #2297 POLICY A: reachable mint failures here are
+        // the 402 cap above, a suspension 403, or transport — the server POST
+        // /v1/team/keys session lane IS owner/admin-gated
+        // (_require_owner_admin since #2297), so a member 403s server-side;
+        // this handler's callers are owner/admin render-gated, matching the
+        // server contract. A suspension 403 falls through to its own message.
         setWizardDurableError(e?.message || 'Could not create a new key — try again.')
       }
     } finally {
@@ -5163,10 +5161,11 @@ function claimIntentInFlight() {
                         // at creation and is unrecoverable from the table —
                         // create here or rotate there); 'none' = create one.
                         // Role-aware: key creation is owner/admin DASHBOARD
-                        // policy — the server POST /v1/team/keys has no role
-                        // gate (members CAN mint server-side; verified
-                        // hosted_api.py), so the member gate here is client-
-                        // side: paste an existing key or ask an owner/admin.
+                        // policy — the server POST /v1/team/keys session lane
+                        // IS owner/admin-gated (#2297 POLICY A; list stays
+                        // member-open, #1828), matching the client isOwnerAdmin
+                        // gate here — a member pastes an existing key or asks
+                        // an owner/admin.
                         <>
                           <p className="dim" style={{ margin: '0.9rem 0 0', lineHeight: 1.6 }}>
                             {!isOwnerAdmin
@@ -5202,8 +5201,10 @@ function claimIntentInFlight() {
                               obvious primary action. Members see paste
                               directly: it is their only in-dashboard key path
                               (the mint CTA is owner/admin-only by DASHBOARD
-                              render policy — the server POST /v1/team/keys
-                              has NO role gate, #2246 — see
+                              render policy matching the server contract — the
+                              POST /v1/team/keys session lane IS owner/admin-
+                              gated (#2297 POLICY A; the #2246-era claim that
+                              it was ungated predates that) — see
                               wizardMintDurableKey). */}
                           <div style={{ marginTop: '0.85rem', display: 'flex', flexWrap: 'wrap', gap: '0.9rem', alignItems: 'center' }}>
                             <button type="button" className="ghost small" onClick={() => { window.history.replaceState({}, '', '/'); setWelcomeMode(false); setTab('keys'); finishWelcomeLoads() }}>
@@ -5271,11 +5272,12 @@ function claimIntentInFlight() {
                                   // state-branched. Rotate/trash/create are
                                   // owner/admin-only as DASHBOARD policy
                                   // (client isOwnerAdmin render gates) —
-                                  // server-side, only PATCH /v1/team/keys/{id}
-                                  // (toggle/rename) and the dashboard-login
-                                  // toggle are _require_owner_admin-gated;
-                                  // mint (POST) and revoke (DELETE) are
-                                  // ungated for member sessions. Only owners
+                                  // server-side, the key-management WRITEs
+                                  // (POST mint, DELETE revoke, PATCH
+                                  // toggle/rename) are _require_owner_admin-
+                                  // gated on the session lane since #2297
+                                  // (#1148 for PATCH; list stays member-open
+                                  // #1828). Only owners/admins (isOwnerAdmin)
                                   // get the create/rotate path. The
                                   // REMEDY must also match the SOURCE:
                                   // bootstrap/expiring rows are FILTERED from
@@ -6277,21 +6279,18 @@ function claimIntentInFlight() {
             <div className="row">
               <h2>API Keys</h2>
               {/* #2246 (review, P1/P2): member key creation is gated
-                  CLIENT-side as dashboard policy — the server POST
-                  /v1/team/keys has NO role gate (members CAN mint
-                  server-side). Owner/admin-only key management is a CLIENT
-                  policy: every row action + the create form are isOwnerAdmin
-                  render-gated; server role-gates cover ONLY PATCH
-                  /v1/team/keys/{id} (toggle/rename) and the dashboard-login
-                  toggle (_require_owner_admin) — mint (POST) and revoke
-                  (DELETE) pass for member sessions. The dashboard treats key
-                  management as owner/admin-managed
-                  (Members tab + wizard member gate precedent), so members get
-                  a notice + the paste-into-setup escape instead of the create
-                  form. P2 (layout): the member notice renders as a FULL-WIDTH
-                  paragraph BELOW this .row (Members-tab precedent) — as a
-                  span inside the flex .row it wrapped badly beside the h2 on
-                  narrow viewports. */}
+                  CLIENT-side as dashboard policy AND server-side since #2297
+                  POLICY A: the POST /v1/team/keys session lane is
+                  owner/admin-gated (_require_owner_admin — POST/DELETE since
+                  #2297, PATCH since #1148; list stays member-open #1828).
+                  Every row action + the create form are isOwnerAdmin
+                  render-gated; the dashboard treats key management as
+                  owner/admin-managed (Members tab + wizard member gate
+                  precedent), so members get a notice + the paste-into-setup
+                  escape instead of the create form. P2 (layout): the member
+                  notice renders as a FULL-WIDTH paragraph BELOW this .row
+                  (Members-tab precedent) — as a span inside the flex .row it
+                  wrapped badly beside the h2 on narrow viewports. */}
               {isOwnerAdmin && (
                 <div className="inline-form">
                   <input
