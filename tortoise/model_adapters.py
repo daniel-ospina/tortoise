@@ -701,6 +701,12 @@ class RoutingModel:
         self.model: str = getattr(primary, "id", "")
         self.last_prompt_tokens: int = 0
         self.last_completion_tokens: int = 0
+        # #2339: the adapter CURRENTLY being called (set in _call before
+        # adapter.complete, cleared on success). An external deadline abort
+        # kills the worker thread while this is set — note_stall() reads it
+        # to attribute the stall to the WEDGED adapter, never to the last
+        # successful one (stale ``route``).
+        self._in_flight = None
 
     def complete(self, *, system: str, user: str,
                  max_tokens: int | None = None) -> str:
@@ -723,8 +729,12 @@ class RoutingModel:
 
     def _call(self, adapter, system: str, user: str, *, failover: bool,
               max_tokens: int | None = None) -> str:
-        out = adapter.complete(system=system, user=user,
-                               max_tokens=max_tokens)
+        self._in_flight = adapter  # #2339: who is serving right now
+        try:
+            out = adapter.complete(system=system, user=user,
+                                   max_tokens=max_tokens)
+        finally:
+            self._in_flight = None
         self.last_route = adapter.provider
         self.last_finish_reason = getattr(adapter, "last_finish_reason", None)
         # #1987 Task 3: per-call usage + resolved-spec forwards.
@@ -746,6 +756,42 @@ class RoutingModel:
             if close is not None:
                 with contextlib.suppress(Exception):
                     close()
+
+    def note_stall(self, provider: str | None = None) -> None:
+        """Provider-level stall signal from an EXTERNAL deadline abort.
+
+        The extractor's per-call deadline kills a hung read in a worker
+        thread and raises TimeoutError OUTSIDE ``complete()`` — so the
+        normal in-complete failover path (and its cooldown) never fires and
+        every retry would re-hit the stalled provider. ``note_stall``
+        records the failure for the WEDGED adapter (the one ``_in_flight``
+        when the worker was killed — never the stale ``route`` from the
+        last success) and interrupts only that adapter's session. The next
+        ``complete()`` then routes to the healthy alternative. Best-effort:
+        never raises (the deadline path calls it fire-and-forget).
+        """
+        target = None
+        if provider is not None:
+            for adapter in (self.primary, self.fallback):
+                if adapter is not None and adapter.provider == provider:
+                    target = adapter
+                    break
+        else:
+            target = self._in_flight or self.primary
+        if target is None:
+            return
+        _note_failure(target.provider, self.cooldown_s)
+        self.errors.append(f"{target.provider}: stalled (deadline abort)")
+        # Sticky failover only when the PRIMARY wedged — a fallback-served
+        # stall must NOT lock the session onto the wedged fallback
+        # forward-only (that would strand it for the whole extraction).
+        if (self.fallback is not None
+                and target is not None and target is self.primary):
+            self._failed_over = True
+        close = getattr(target, "close", None)
+        if close is not None:
+            with contextlib.suppress(Exception):
+                close()
 
 
 def _prompt_requests_json(system: str | None, user: str | None) -> bool:
@@ -859,6 +905,11 @@ class RotatingModel:
                            if providers else (model or ""))
         self.last_prompt_tokens: int = 0
         self.last_completion_tokens: int = 0
+        # #2339: the adapter currently being called (set before p.complete in
+        # the rotation loop, cleared on success). A deadline abort kills the
+        # worker mid-call with this set — note_stall() cools THIS adapter,
+        # never the stale ``route`` (last success).
+        self._in_flight = None
 
     @property
     def provider(self) -> str:
@@ -878,7 +929,9 @@ class RotatingModel:
             if self._cooldowns.get(p.provider, 0.0) > now:
                 continue
             try:
+                self._in_flight = p
                 out = p.complete(system=system, user=user, max_tokens=max_tokens)
+                self._in_flight = None
                 self.route = p.provider
                 self.last_finish_reason = getattr(p, "last_finish_reason", None)
                 # #1987 Task 3: per-call usage + resolved-spec forwards.
@@ -888,6 +941,7 @@ class RotatingModel:
                 return out
             except Exception as e:
                 last_err = e
+                self._in_flight = None  # no longer mid-call on this adapter
                 billing = is_billing_exhausted(e)
                 if is_fatal(e) and not billing:
                     raise  # auth (401/403) + config 4xx — never rotate (#1951)
@@ -920,6 +974,31 @@ class RotatingModel:
                     close()
                 except Exception:
                     pass
+
+    def note_stall(self) -> None:
+        """Cooldown the WEDGED provider after an external deadline abort
+        (mirrors RoutingModel.note_stall) + interrupt only its session.
+        Attribution uses the in-flight adapter (set when the worker was
+        killed) — never the stale ``route`` from the last success — so a
+        persistent wedge cools the right farm and the next ``complete()``
+        rotates onto the healthy ones. A single stalled GPU farm no longer
+        sinks a whole session."""
+        target = self._in_flight
+        if target is None:
+            for p in self.providers:
+                if p.provider == self.route:
+                    target = p
+                    break
+        if target is None:
+            return
+        self._cooldowns[target.provider] = time.time() + self.cooldown_s
+        self.errors.append(f"{target.provider}: stalled (deadline abort)")
+        close = getattr(target, "close", None)
+        if close is not None:
+            try:  # noqa: SIM105
+                close()
+            except Exception:
+                pass
 
 
 # Eval CLI extractor-registry keys (MODELS) → the real DeepSeek/OpenRouter
