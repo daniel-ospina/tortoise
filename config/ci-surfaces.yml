@@ -446,6 +446,8 @@ surfaces:
   - test_invites.py
   - test_invites_email_http.py
   - test_invites_http.py
+  - test_invite_fusion_http.py      # #2003 (W7): 3-path + OTP + admin resend/expire (registry lane)
+  - test_invite_fusion_docker.py   # #2003 (W7): DE2E-7/8 docker-lane fusion journeys
   - test_onboard_prompt_ref.py
   - test_capabilities_endpoint.py  # #2004 (W8): docker-lane catalog endpoint + build-fork gate tests
   - test_capability_catalog.py     # #2004 (W8): lane-agnostic catalog registry + W8b note inventory
