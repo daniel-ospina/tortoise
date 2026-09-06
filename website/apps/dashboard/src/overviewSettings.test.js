@@ -83,9 +83,9 @@ test('DE2E-2 copy sweep: new Overview/Settings copy says Organization, never wor
   assert.ok(src.includes('Connect GitHub to bring issues and repo docs into your Organization as memory sources.'), 'GitHub home copy')
   assert.ok(src.includes('Issues and docs index to this Organization'), 'GitHub connected copy')
   assert.ok(src.includes('filed to this Organization as memory'), 'capture home copy')
-  assert.ok(src.includes('Your agent takes over from here — connect it, and it files your decisions and findings to this Organization'), 'wizard done copy')
+  assert.ok(src.includes("Your agent is connected — it files your decisions and findings to this Organization"), 'wizard done copy')
   assert.ok(src.includes('Open Settings → Setup guide to follow what happens next.'), 'wizard done copy points at Settings')
-  assert.ok(src.includes('Your Organization is live — create a key on the API Keys tab'), 'overview graph-missing copy')
+  assert.ok(src.includes('Your Organization is live — connect your agent below'), 'overview graph-missing copy')
   // no workspace in the SettingsTab component or the populated-Overview
   // branch (user-facing surfaces only; code comments elsewhere are out of
   // the DE2E-2 Overview/Settings surface scope)

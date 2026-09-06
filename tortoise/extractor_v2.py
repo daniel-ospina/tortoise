@@ -4654,10 +4654,41 @@ def _call_once(model, system: str, user: str, *, deadline_s: int,
     t.start()
     t.join(timeout=deadline_s)
     if t.is_alive():
+        # #2384: sample the WEDGED adapter BEFORE any close() — close makes
+        # the worker unwind and clear _in_flight, so sampling after close
+        # misattributes the stall (a healthy provider gets cooled, the
+        # wedged one escapes and is re-hit every retry). The whole block is
+        # inside one swallow-guard (R2): a duck-typed adapter whose
+        # .provider is a raising property must never escape the deadline
+        # path — every failure here degrades to the bare close() below.
+        try:
+            wedged_provider = None
+            _inflight = getattr(model, "_in_flight", None)
+            if _inflight is not None:
+                _pv = getattr(_inflight, "provider", None)
+                if _pv is not None:
+                    wedged_provider = _pv
+            # #2339/#2384: a deadline abort fires OUTSIDE the wrapper's
+            # complete() (this thread kills the worker, so RoutingModel/
+            # RotatingModel never see an exception and never fail over) —
+            # every retry would re-hit the SAME stalled provider. Signal
+            # the stall (note_stall cools the wedged provider + interrupts
+            # its session) so the NEXT attempt routes to the healthy
+            # fallback and the session survives. Best-effort: a model
+            # without note_stall falls through to the bare close() below.
+            note_stall = getattr(model, "note_stall", None)
+            if note_stall is not None:
+                if wedged_provider is not None:
+                    note_stall(provider=wedged_provider)
+                else:
+                    note_stall()
+        except Exception:
+            pass
         # Pilot #1549: kill the hung request so the daemon thread's blocking
         # socket read raises and dies (was: abandoned thread leaked the
         # socket + kept billing; the API stalls mid-chunked-response and a
-        # trickle defeats the requests read timeout). close() is best-effort.
+        # trickle defeats the requests read timeout). close() is best-effort
+        # and idempotent (note_stall already closed the wedged adapter).
         close = getattr(model, "close", None)
         if close is not None:
             try:  # noqa: SIM105
@@ -4673,21 +4704,9 @@ def _call_once(model, system: str, user: str, *, deadline_s: int,
         if stats is not None:
             with _DEADLINE_ABORTS_LOCK:
                 stats["deadline_aborts"] = stats.get("deadline_aborts", 0) + 1
-        # #2339: a deadline abort fires OUTSIDE the wrapper's complete()
-        # (this thread kills the worker, so RoutingModel/RotatingModel never
-        # see an exception and never fail over) — every retry would re-hit
-        # the SAME stalled provider. Signal the stall (cooldown + interrupt
-        # only the stalled adapter) so the NEXT attempt routes to the
-        # healthy fallback and the session survives. Best-effort: a model
-        # without note_stall keeps the pre-#2339 behavior (bare close +
-        # raise).
-        note_stall = getattr(model, "note_stall", None)
-        if note_stall is not None:
-            try:  # noqa: SIM105
-                note_stall()
-            except Exception:
-                pass
         raise TimeoutError(f"model call exceeded {deadline_s}s")
+
+
     if "exc" in box:
         raise box["exc"]
     return (box.get("resp"), box.get("finish_reason"),

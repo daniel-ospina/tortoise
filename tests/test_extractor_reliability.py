@@ -1061,3 +1061,133 @@ def test_deadline_aborts_threaded_exact_count():
         t.join()
     assert len(results) == 8              # every thread hit the deadline kill
     assert stats["deadline_aborts"] == 8  # exact injected count — lock held
+
+
+
+# ── #2384: deadline attribution race regression ───────────────────────────
+# The deadline path must sample the wedged adapter BEFORE close() (close
+# unblocks the worker, which clears _in_flight) and pass it to note_stall —
+# otherwise a wedged provider escapes the cooldown / a healthy one is cooled.
+
+def test_call_once_deadline_snapshot_before_close_cools_wedged_primary():
+    """ORDER-assertion: _call_once must invoke note_stall(provider=<wedged>)
+    BEFORE close(), with the provider sampled from _in_flight pre-close.
+    Deterministic (no worker-unwind timing): the pre-fix order (close then
+    no-arg note_stall) fails this on both counts."""
+    import threading
+
+    calls = []
+    got_here = threading.Event()
+
+    class _Wedged:
+        provider = "deepseek-direct"
+
+        def complete(self, *, system, user, max_tokens=None):
+            got_here.wait(5.0)  # wedged until released
+            return "late"
+
+    class _RecordingRouting:
+        def __init__(self):
+            self._in_flight = _Wedged()
+
+        def complete(self, *, system, user, max_tokens=None):
+            return self._in_flight.complete(system=system, user=user,
+                                            max_tokens=max_tokens)
+
+        def note_stall(self, provider=None):
+            calls.append(("note_stall", provider))
+
+        def close(self):
+            calls.append(("close", None))
+            got_here.set()  # unblock the worker (as a real close does)
+
+    model = _RecordingRouting()
+    with pytest.raises(TimeoutError):
+        v2._call_once(model, "s", "u", deadline_s=0.05, max_tokens=None,
+                      stats=None)
+    assert calls and calls[0] == ("note_stall", "deepseek-direct"), calls
+    # close must come AFTER the stall signal, and the provider is the
+    # pre-close in-flight snapshot, not a no-arg guess.
+    assert ("close", None) in calls
+    assert calls.index(("close", None)) > calls.index(
+        ("note_stall", "deepseek-direct")), calls
+
+
+def test_call_once_deadline_cools_wedged_primary_end_to_end():
+    """A RoutingModel whose primary wedges past the deadline: _call_once
+    must cool the PRIMARY (sampled pre-close) so the NEXT complete() routes
+    to the fallback."""
+    import threading
+
+    from tortoise.model_adapters import RoutingModel, _primary_in_cooldown, _reset_failover_cooldown
+
+    _reset_failover_cooldown()
+    fired = threading.Event()
+
+    class _SlowPrimary:
+        provider = "deepseek-direct"
+
+        def complete(self, *, system, user, max_tokens=None):
+            fired.wait(5.0)
+            return "late"
+
+    class _GoodFallback:
+        provider = "openrouter"
+        calls = 0
+
+        def complete(self, *, system, user, max_tokens=None):
+            self.calls += 1
+            return f"fallback:{system}:{user}"
+
+    primary = _SlowPrimary()
+    fallback = _GoodFallback()
+    model = RoutingModel(primary, fallback, cooldown_s=300)
+    model._in_flight = primary
+    with pytest.raises(TimeoutError):
+        v2._call_once(model, "s", "u", deadline_s=0.05, max_tokens=None,
+                      stats=None)
+    assert _primary_in_cooldown("deepseek-direct", 300) is True
+    assert model._failed_over is True
+    out = model.complete(system="s", user="u")
+    assert out.startswith("fallback:"), out
+    assert fallback.calls == 1
+
+
+def test_routingmodel_unsicks_from_cooled_fallback_to_healthy_primary():
+    """R2: a sticky _failed_over must NOT strand the session on a FALLBACK
+    that was itself cooled by a note_stall deadline abort — complete()
+    returns to the healthy primary."""
+    from tortoise.model_adapters import RoutingModel, _note_failure, _reset_failover_cooldown
+
+    _reset_failover_cooldown()
+
+    class _Primary:
+        provider = "deepseek-direct"
+        calls = 0
+
+        def complete(self, *, system, user, max_tokens=None):
+            self.calls += 1
+            return "primary-ok"
+
+    class _CooledFallback:
+        provider = "openrouter"
+        calls = 0
+
+        def complete(self, *, system, user, max_tokens=None):
+            self.calls += 1
+            return "fallback-ok"
+
+    primary = _Primary()
+    fallback = _CooledFallback()
+    model = RoutingModel(primary, fallback, cooldown_s=300)
+    model._failed_over = True          # sticky failover in effect
+    _note_failure("openrouter", 300)   # ...and the fallback just wedged
+    out = model.complete(system="s", user="u")
+    assert out == "primary-ok", out
+    assert primary.calls == 1 and fallback.calls == 0
+    # Healthy fallback path is untouched: no cooldown -> fallback serves.
+    _reset_failover_cooldown()
+    model2 = RoutingModel(_Primary(), _CooledFallback(), cooldown_s=300)
+    model2._failed_over = True
+    out = model2.complete(system="s", user="u")
+    assert out == "fallback-ok", out
