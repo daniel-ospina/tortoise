@@ -4244,6 +4244,37 @@ class TestSeamOutTokens2408:
         assert "s2_out_tokens" not in stats2.get("recovery", {})
         assert out  # partial-accepted head still returned
 
+    def test_escalated_partial_arm_records_no_out_tokens(self):
+        """The escalated call returns stop-but-malformed with a valid prefix
+        head → rung-4 partial-accept on the ESCALATED response (escalated_
+        partial bucket, stats[partial]=True) — the partial head must NOT be
+        recorded as a healthy out-token total."""
+        PARTIAL_ESC = ('{"entities": [{"name": "X", "kind": "core:plan", '
+                       '"lifecycle": "created", "supersedes": null, "note": null}], '
+                       '"events": [], "operators": [], "points": [{"content": "p1", '
+                       '"pointKind": "statement", "about_entities": [], "slots": null}],')
+        calls = {"n": 0}
+
+        class _M:
+            last_finish_reason = "length"
+            def complete(self, *, system, user, max_tokens=None):
+                calls["n"] += 1
+                if max_tokens == 32000:
+                    self.last_finish_reason = "stop"
+                    self.last_completion_tokens = 31000
+                    return PARTIAL_ESC  # malformed-but-valid-prefix
+                self.last_finish_reason = "length"
+                self.last_completion_tokens = 16000
+                return '{"entities": []'
+
+        stats: dict = {}
+        v2.run_s2(_M(), "STORY", stats=stats)
+        assert calls["n"] == 2
+        rec = stats["recovery"]
+        assert rec["escalated"] == 1 and rec["escalated_partial"] == 1
+        assert stats.get("partial") is True
+        assert "s2_out_tokens" not in rec  # partial head never a healthy total
+
     def test_seam_none_no_out_tokens(self):
         """The kind_classifier adjudication shape (seam=None) contributes
         no per-seam out-token key."""
@@ -4255,7 +4286,7 @@ class TestSeamOutTokens2408:
         assert "s4_out_tokens" not in stats.get("recovery", {})
 
 
-
+class TestS1Escalation2134:
     """#2134 Task 4 — the S1 one-shot escalation wrap (three buckets:
     recovered/residual/abort; no partial bucket — S1 has no parse ladder)."""
 

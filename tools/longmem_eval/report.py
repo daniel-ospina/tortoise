@@ -1514,12 +1514,21 @@ def build_report(
     # only (grade == "clean": runner valid flag AND no error_classes — a
     # partial-accept session grades recoverable (valid=false) and is
     # excluded, so a truncated list's verbatim counts can never pollute the
-    # unchanged-share; an S4-empty graceful-degradation session also grades
-    # invalid via its error string). R_b is reported twice: over all clean
-    # outcomes AND excluding escalation-recovered sessions (the recovered
-    # band carries the escalated 32K emission — the #1789 with/without
-    # fallback convention, I-2-14). Every div-by-zero → None.
-    _clean = [o for o in outcomes if _outcome_grade(o) == "clean"]
+    # unchanged-share) AND whose S4 merge actually RAN (a non-empty
+    # s4_merge dict — the 7-key shape is produced ONLY by the merge path;
+    # an S4-empty graceful-degradation session leaves s4_merge={} with a
+    # warning (never an error string, so it would otherwise grade clean and
+    # dilute r_b with a near-empty S4 emission — excluded here, per the
+    # #2408 plan-review D3 fix). Legacy/pre-#2408 outcomes without the
+    # fields are likewise excluded (nothing measured). R_b is reported
+    # twice: over all census outcomes AND excluding escalation-recovered
+    # sessions (the recovered band carries the escalated 32K emission —
+    # the #1789 with/without fallback convention, I-2-14). Every
+    # div-by-zero → None.
+    _clean = [
+        o for o in outcomes
+        if (_outcome_grade(o) == "clean"
+            and isinstance(o.get("s4_merge"), dict) and o.get("s4_merge"))]
     _clean_no_esc = [
         o for o in _clean if not (o.get("llm_escalations") or 0)]
     _s2_total = sum(o.get("s2_out_tokens") or 0 for o in _clean)
@@ -1552,10 +1561,14 @@ def build_report(
             "token-weighted PROXY sum (verbatim-fraction x call total — no "
             "tokenizer exists; item-count shares are exact, token "
             "attribution is the labeled proxy). Computed over "
-            "extraction-CLEAN outcomes only (grade clean + valid); "
-            "escalation-recovered sessions reported separately via "
-            "r_b_excl_escalated. Feed for the #1789 delta-contract gate "
-            "and the #2335 emission-contract decision."),
+            "extraction-CLEAN outcomes only (grade clean + valid) whose S4 "
+            "merge RAN (non-empty s4_merge — S4-empty graceful-degradation "
+            "and legacy/no-field outcomes excluded; question-level "
+            "granularity: a multi-session haystack question enters as a "
+            "whole when any session merged); escalation-recovered sessions "
+            "reported separately via r_b_excl_escalated. Feed for the "
+            "#1789 delta-contract gate and the #2335 emission-contract "
+            "decision."),
         "n_clean_questions": len(_clean),
         "s2_out_tokens_total": _s2_total,
         "s4_out_tokens_total": _s4_total,

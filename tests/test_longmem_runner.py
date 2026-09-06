@@ -685,6 +685,31 @@ def test_report_s4_reemit_readout():
     assert "q-partial" not in rows  # partial excluded from the census
 
 
+def test_report_s4_reemit_s4_empty_degradation_excluded():
+    """#2408 (plan-review D3 fix): an S4-empty graceful-degradation session
+    (S4 emitted nothing → warning only, never an error string; s4_merge={})
+    grades clean but is EXCLUDED from the census — its near-empty S4
+    emission must not dilute r_b."""
+    empty = _s4_clean_outcome(
+        "q-s4empty", s2_tok=1000, s4_tok=60,
+        verbatim=0, corrected=0, s2_items=0, s4_items=0)
+    empty["s4_merge"] = {}  # the graceful-degradation shape
+    normal = _s4_clean_outcome(
+        "q-normal", s2_tok=1000, s4_tok=2500,
+        verbatim=8, corrected=2, s2_items=10, s4_items=14)
+    report = outcomes_to_report(
+        [empty, normal], reader_model="r", judge_model="j",
+        ks=(5,), top_k=5, split="s",
+        dataset_semantics_audit=_trusted_audit(), integrity_threshold=1.0)
+    sr = report["integrity"]["s4_reemit"]
+    # the S4-empty session is excluded; only q-normal enters
+    assert sr["n_clean_questions"] == 1
+    assert sr["s2_out_tokens_total"] == 1000
+    assert sr["s4_out_tokens_total"] == 2500
+    rows = {r["question_id"] for r in sr["per_question"]}
+    assert rows == {"q-normal"}
+
+
 def test_report_s4_reemit_legacy_renders():
     """#2408 (Task 2): a pre-#2408 outcome (no s2/s4 out-tokens, no
     s4_merge) renders an empty-but-present readout — never a KeyError."""
@@ -699,14 +724,11 @@ def test_report_s4_reemit_legacy_renders():
     sr = report["integrity"]["s4_reemit"]
     assert sr["s2_out_tokens_total"] == 0
     assert sr["r_b"] is None  # 0-denominator, no div-by-zero
-    # the legacy outcome IS a clean question — it appears in per_question
-    # with the missing fields projected to 0 / None (plan: "or 0 / or {}"),
-    # never a KeyError
-    assert len(sr["per_question"]) == 1
-    row = sr["per_question"][0]
-    assert row["question_id"] == "q-legacy"
-    assert row["s2_out_tokens"] == 0 and row["s4_out_tokens"] == 0
-    assert row["r_b"] is None
+    # a legacy outcome (no s4_merge, no out-tokens) is EXCLUDED — nothing
+    # was measured (plan-review D3 fix: only outcomes whose S4 merge ran
+    # enter the census); the block still renders, never a KeyError
+    assert sr["n_clean_questions"] == 0
+    assert sr["per_question"] == []
     assert report["integrity"]["valid"] is True
 
 
