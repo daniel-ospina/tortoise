@@ -2422,7 +2422,12 @@ def soft_delete_graph(cp, team_id: str, graph_id: str) -> bool:
     """Soft-delete a graphs row (status='deleted' tombstone — the v1
     lifecycle). Returns True when a non-default row was tombstoned, False
     when nothing matched (unknown graph OR the default — callers
-    distinguish by a prior kind lookup for the 403 default-guard)."""
+    distinguish by a prior kind lookup for the 403 default-guard).
+
+    #2304: stamps ``deleted_at`` (the trash grace window's start — the
+    purge enforces the 7-day recovery period off it; legacy tombstones
+    (deleted_at NULL) predate the column and are treated as past-grace).
+    """
     rows = cp.query(
         "graphs", select=["kind"],
         filters=[("id", "eq", graph_id), ("team_id", "eq", team_id)],
@@ -2434,9 +2439,51 @@ def soft_delete_graph(cp, team_id: str, graph_id: str) -> bool:
     cp.query(
         "graphs", method="PATCH",
         filters=[("id", "eq", graph_id), ("team_id", "eq", team_id)],
-        json_body={"status": "deleted"},
+        json_body={"status": "deleted",
+                   "deleted_at": _now_iso()},
     )
     return True
+
+
+def restore_graph(cp, team_id: str, graph_id: str) -> bool:
+    """#2304 trash restore: flip a tombstoned custom row back to active and
+    clear the deletion stamp. Returns False when nothing matched (unknown /
+    active / default — callers 404/403). Keys stay dead (revoked at delete;
+    restore never resurrects them) — the owner mints fresh keys after."""
+    rows = cp.query(
+        "graphs", select=["kind", "status"],
+        filters=[("id", "eq", graph_id), ("team_id", "eq", team_id)],
+    )
+    if not rows or rows[0].get("kind") == "default" \
+            or rows[0].get("status") != "deleted":
+        return False
+    cp.query(
+        "graphs", method="PATCH",
+        filters=[("id", "eq", graph_id), ("team_id", "eq", team_id)],
+        json_body={"status": "active", "deleted_at": None},
+    )
+    return True
+
+
+def trash_graphs(cp, team_id: str) -> list[dict]:
+    """#2304: tombstoned custom rows of a team (the trash list) — the owner
+    restore surface. ``deleted_at`` NULL = legacy tombstone (predates the
+    column; purge treats it as past-grace). Never includes the default
+    (derived — no row, or a kind='default' override row which is excluded
+    by kind)."""
+    rows = cp.query(
+        "graphs",
+        select=["id", "name", "namespace", "deleted_at"],
+        filters=[("team_id", "eq", team_id), ("status", "eq", "deleted"),
+                 ("kind", "eq", "custom")],
+        order="deleted_at",
+    )
+    return [
+        {"graph_id": r["id"], "name": r.get("name"),
+         "namespace": r.get("namespace"),
+         "deleted_at": r.get("deleted_at")}
+        for r in rows
+    ]
 
 
 def set_graph_recording(cp, team_id: str, graph_id: str,

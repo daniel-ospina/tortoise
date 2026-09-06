@@ -13409,7 +13409,12 @@ class TortoiseSDK:
         """Soft-delete a Graph node (status='deleted' tombstone — the v1
         lifecycle, C2 #2111). Returns True when a non-default node was
         tombstoned; False when unknown OR the default (callers map to
-        404/403). Pre-C1 nodes without status gain it on delete."""
+        404/403). Pre-C1 nodes without status gain it on delete.
+
+        #2304: stamps ``deleted_at`` (the trash grace window's start — the
+        purge enforces the 7-day recovery period off it; legacy tombstones
+        (deleted_at absent) predate the prop and are treated as past-grace).
+        """
         reg = self._get_registry()
         rows = reg.query(
             "MATCH (g:Graph {id:$gid, team_id:$tid}) RETURN g.kind",
@@ -13419,12 +13424,51 @@ class TortoiseSDK:
             return False
         if rows[0][0] == "default":
             return False
+        from datetime import datetime
         reg.query(
             "MATCH (g:Graph {id:$gid, team_id:$tid}) "
-            "SET g.status = 'deleted'",
+            "SET g.status = 'deleted', g.deleted_at = $ts",
+            params={"gid": graph_id, "tid": team_id,
+                    "ts": datetime.now(UTC).isoformat()},
+        )
+        return True
+
+    def graph_restore(self, team_id: str, graph_id: str) -> bool:
+        """#2304 trash restore: flip a tombstoned custom node back to active
+        and clear the deletion stamp. Returns False when nothing matched
+        (unknown / active / default). Keys stay dead (revoked at delete;
+        restore never resurrects them) — the owner mints fresh keys after."""
+        reg = self._get_registry()
+        rows = reg.query(
+            "MATCH (g:Graph {id:$gid, team_id:$tid}) "
+            "RETURN g.kind, coalesce(g.status, 'active')",
+            params={"gid": graph_id, "tid": team_id},
+        ).result_set
+        if not rows or rows[0][0] == "default" or rows[0][1] != "deleted":
+            return False
+        reg.query(
+            "MATCH (g:Graph {id:$gid, team_id:$tid}) "
+            "SET g.status = 'active' REMOVE g.deleted_at",
             params={"gid": graph_id, "tid": team_id},
         )
         return True
+
+    def trash_graphs(self, team_id: str) -> list[dict]:
+        """#2304: tombstoned custom nodes of a team (the trash list) — the
+        owner restore surface. ``deleted_at`` absent = legacy tombstone
+        (predates the prop; purge treats it as past-grace)."""
+        reg = self._get_registry()
+        rows = reg.query(
+            "MATCH (g:Graph {team_id:$tid, status:'deleted'}) "
+            "WHERE coalesce(g.kind, 'custom') <> 'default' "
+            "RETURN g.id, g.name, g.namespace, g.deleted_at",
+            params={"tid": team_id},
+        ).result_set
+        return [
+            {"graph_id": r[0], "name": r[1], "namespace": r[2],
+             "deleted_at": r[3]}
+            for r in rows
+        ]
 
     def graph_set_recording(self, team_id: str, graph_id: str,
                             value: bool | None) -> bool:
@@ -16273,14 +16317,14 @@ class TortoiseSDK:
         """Targeted marker SET (pin (a) cycle-7): e.embeddingRepairFailedAt =
         $ts touching NO other Event key (NOT a partial-prop re-write — the
         E2E-11(d) prop-snapshot guard asserts preservation)."""
-        from datetime import datetime, timezone
+        from datetime import datetime
         try:
             proj = self._get_proj()
             proj.g.query(
                 "MATCH (e:Event {eventId:$eid}) "
                 "SET e.embeddingRepairFailedAt = $ts",
                 params={"eid": event_id,
-                        "ts": datetime.now(timezone.utc).isoformat()},  # noqa: UP017
+                        "ts": datetime.now(UTC).isoformat()},
             )
         except Exception:  # noqa: BLE001, RUF100
             pass
