@@ -23,6 +23,7 @@ from typing import Any
 from .domain_loader import known_kinds, register_kind
 from .cross_lens import DEFAULT_THRESHOLD
 from .ids import ulid
+from .live import TERMINAL_EXCLUDED_STATUSES  # EP terminal vocabulary (shared)
 from .embedded_lifecycle import atexit_fast_close  # #1371: registers the batch flush
 from .retrieval import DEFAULT_POOL_SIZE, resolve_pool_size
 from . import monitoring
@@ -648,7 +649,8 @@ def _first_non_draft_status(points: list) -> tuple[int, object] | None:
     mirrored here). Only the exact canonical string "draft" is storable under
     promotion_policy='gated': case/whitespace variants ("Draft", "draft "),
     terminal statuses, and non-str values are all rejected (EP _live_only
-    excludes only exact 'draft', so every other value would be EP-live).
+    excludes 'draft' AND terminal statuses/flag — #2422; junk outside the
+    closed vocabulary is the residual EP-live surface).
 
     Shared by TortoiseSDK.ingest and tortoise_ingest so the two layers
     cannot drift. Returns None when every item is draft/absent.
@@ -2171,7 +2173,9 @@ class TortoiseSDK:
         # Fail-closed vocabulary validation (mirrors update_point): a
         # non-canonical status (case variant, junk, non-str, typo) would
         # otherwise be stored verbatim and treated as EP-LIVE by _live_only
-        # (which excludes only exact 'draft') — a silent-promotion hole
+        # (which excludes 'draft' and terminal statuses/flag — #2422; junk
+        # outside the closed vocabulary is the residual EP-live surface) —
+        # a silent-promotion hole
         # (PR #1073 review P0/P1). isinstance guard keeps the error a
         # ValueError for unhashable values (list/dict) too.
         if not isinstance(status, str) or status not in POINT_STATUS_VALUES:
@@ -3825,11 +3829,19 @@ class TortoiseSDK:
             params={"new_id": corrected_by_id, "old_id": id},
         )
         # Dreaming (#85): invalidation changes the propagation graph.
-        self._mark_dirty([id, corrected_by_id])
+        # #2422 ORDERING: message drops BEFORE _mark_dirty's epoch bump (see
+        # supersede_point — concurrent EP must see drops with the new epoch).
         # Epic 903-C9 (#1247): edge TRANSFER — invalidate warm-start seeds on
         # both endpoints' edges (a transfer is not a new/deleted edge; the
         # C4 topology hooks don't fire here).
         self._get_ep().invalidate_messages([id, corrected_by_id])
+        # #2422 (ghost-vote leg): the invalidated (outdated=true) claim's
+        # operators may go DEGENERATE (skipped as factors — never re-run to
+        # zero their sibling-edge messages), so drop every operator-connected
+        # edge's message too (op1→B carries the dead claim's influence into B
+        # on an edge that does not touch the dead claim).
+        self._get_ep().invalidate_factor_messages([id])
+        self._mark_dirty([id, corrected_by_id])
         return {"invalidated": True, "id": id, "corrected_by": corrected_by_id}
 
     # ── Supersede / Invalidate consolidation (epic #888 W2) ───────────
@@ -4166,11 +4178,25 @@ class TortoiseSDK:
         )
 
         # Dreaming (#85): supersede changes the propagation graph around both.
-        self._mark_dirty([old_id, new_id])
+        # #2422 ORDERING: the message drops run BEFORE _mark_dirty's epoch
+        # bump — a concurrent EP run that observes the new epoch must also
+        # observe the dropped messages (a run loading its message cache after
+        # the version bump but before the drops would hydrate the stale
+        # sibling message and flush a ghost-contaminated posterior past the
+        # stale-run guard).
         # Epic 903-C9 (#1247): edge TRANSFER — invalidate warm-start seeds on
         # both endpoints' edges (supersede transfers edges with their msg_*
         # properties; the seeds are computed under the old factor context).
         self._get_ep().invalidate_messages([old_id, new_id])
+        # #2422 (ghost-vote leg): a superseded point's influence also rides
+        # the SIBLING edges of its operators (op1→B carries A's message into
+        # B on an edge touching neither old nor new) — and the #1080
+        # alreadyDecided carve-out keeps some operators attached to the dead
+        # old point permanently. A draft successor (legal) makes the operator
+        # degenerate: it never re-runs to zero the stale sibling message. Drop
+        # every operator-connected edge's message for both endpoints.
+        self._get_ep().invalidate_factor_messages([old_id, new_id])
+        self._mark_dirty([old_id, new_id])
 
         return {
             "invalidated": True,
@@ -4224,6 +4250,26 @@ class TortoiseSDK:
         if not r.result_set:
             raise ValueError(
                 f"Point {id!r} is already terminal — retraction is terminal")
+        # #2422: retraction changes the propagation graph — the retracted
+        # claim must stop voting, so its neighborhood must be recomputed.
+        # (supersede_point / invalidate_point already mark dirty; retraction
+        # was the missing write surface — without it, EP posteriors that the
+        # retracted claim supported stayed stale.)
+        # #2422 ORDERING: the message drops run BEFORE _mark_dirty's epoch
+        # bump — a concurrent EP run that observes the new epoch must also
+        # observe the dropped messages (see supersede_point for the full
+        # stale-run-guard rationale). The drops kill the dead claim's ghost
+        # votes: WITHOUT them, warm-start seeds reuse the pre-retraction
+        # messages on the dead claim's IMPL|NAND edges — the claim's operator
+        # factor is excluded (degenerate) and never re-runs to zero them, but
+        # _update_claim_posterior still consumes the stale message on the
+        # neighbor side (the 0.5503 ghost in the E2E repro). BOTH the claim's
+        # own edges AND its operators' sibling edges carry its influence —
+        # drop both (invalidate_messages covers the former,
+        # invalidate_factor_messages the latter).
+        self._get_ep().invalidate_messages([id])
+        self._get_ep().invalidate_factor_messages([id])
+        self._mark_dirty([id])
         return r.result_set[0][0]  # updated node props (no trailing get_point round trip)
 
     # ── Promotion (Phase-4 EP-safe lifecycle, #785) ────────────────
@@ -5691,7 +5737,12 @@ class TortoiseSDK:
     # live — A9 #1059). The RETAINED piece: gated + explicit status:"live"
     # on a point item is a violation (no bypass of the gated contract).
 
-    _INGEST_TERMINAL_STATUSES = frozenset(("superseded", "retracted"))
+    # Ingest-terminal statuses — endpoints/refs resolving to these reject new
+    # direct connections. #2422 (second-model gate): derived from the shared
+    # EP/read-surface vocabulary (live.TERMINAL_EXCLUDED_STATUSES) so the
+    # write guard cannot drift from what EP treats as dead — a flag-outdated
+    # (outdated=true, status untouched) point must equally refuse new edges.
+    _INGEST_TERMINAL_STATUSES = TERMINAL_EXCLUDED_STATUSES
     _INGEST_DIRECTION_VALUES = frozenset(("bidirectional", "unidirectional"))
     _INGEST_LEGACY_WRITE_KINDS = frozenset((
         "decision", "vision", "strategy", "plan", "goal", "target",
@@ -6083,7 +6134,7 @@ class TortoiseSDK:
             "OR n.eventId IN $vals "
             "RETURN coalesce(n.id, n.url, n.eventId) AS key, "
             "head(labels(n)) AS label, n.is_operator, n.status, "
-            "n.id, n.eventId",
+            "coalesce(n.outdated, false) AS outdated, n.id, n.eventId",
             params={"vals": sorted(values)},
         ).result_set
         # Key the result so a lookup by the raw endpoint value finds the
@@ -6098,9 +6149,10 @@ class TortoiseSDK:
         # key resolve deterministically: an id-owner row (node_id == key)
         # wins over a row matched by another property.
         out: dict[str, dict] = {}
-        for key, label, is_op, status, node_id, event_id in rows:
+        for key, label, is_op, status, outdated, node_id, event_id in rows:
             entry = {"label": label, "is_operator": bool(is_op),
-                     "status": status, "id": node_id}
+                     "status": status, "outdated": bool(outdated),
+                     "id": node_id}
             if key not in out or node_id == key:
                 out[key] = entry
             if label == "Event" and event_id:
@@ -6114,7 +6166,8 @@ class TortoiseSDK:
         proj = self._get_proj()
         rows = proj.g.query(
             "MATCH (n:Point {content_hash:$ch}) WHERE n.is_operator = false "
-            "AND n.pointKind = $kind AND n.status IN $terminal RETURN n.id LIMIT 1",
+            "AND n.pointKind = $kind AND n.status IN $terminal "
+            "AND coalesce(n.outdated, false) = false RETURN n.id LIMIT 1",
             params={"ch": _content_hash(content), "kind": kind,
                     "terminal": sorted(self._INGEST_TERMINAL_STATUSES)},
         ).result_set
@@ -6205,12 +6258,16 @@ class TortoiseSDK:
                                        f"{v!r} must be a plain Point — got a "
                                        f"{got} endpoint",
                         })
-                    elif route == "direct" and info["status"] in self._INGEST_TERMINAL_STATUSES:
+                    elif route == "direct" and (
+                            info["status"] in self._INGEST_TERMINAL_STATUSES
+                            or info.get("outdated")):
                         violations.append({
                             "section": "connections", "index": i,
                             "message": f"ingest: connections[{i}] endpoint "
-                                       f"{v!r} is {info['status']} — new direct "
-                                       f"edges to terminal points are rejected",
+                                       f"{v!r} is {info['status']}"
+                                       f"{' (outdated)' if info.get('outdated') else ''}"
+                                       f" — new direct edges to terminal points "
+                                       f"are rejected (#2422)",
                         })
         # Bundle-local dedup-hit terminal guard (cycle-17/18) — Phase-1 ONLY.
         for i, conn, route, vals in conns:  # noqa: B007
@@ -6283,12 +6340,16 @@ class TortoiseSDK:
                                f"{v!r} must be a plain Point — got a {got} "
                                f"endpoint",
                 })
-            elif route == "direct" and info_i["status"] in self._INGEST_TERMINAL_STATUSES:
+            elif route == "direct" and (
+                    info_i["status"] in self._INGEST_TERMINAL_STATUSES
+                    or info_i.get("outdated")):
                 violations.append({
                     "section": "connections", "index": index,
                     "message": f"ingest: connections[{index}] endpoint "
-                               f"{v!r} is {info_i['status']} — new direct edges "
-                               f"to terminal points are rejected",
+                               f"{v!r} is {info_i['status']}"
+                               f"{' (outdated)' if info_i.get('outdated') else ''}"
+                               f" — new direct edges to terminal points are "
+                               f"rejected (#2422)",
                 })
 
     def _connections_conflict(self, ca: dict, cb: dict) -> bool:
@@ -6505,7 +6566,8 @@ class TortoiseSDK:
           no bypass of the gated contract; the sanctioned routes are
           promotion_policy='auto' or update_point(status='live') after ingest;
           case variants, nested props={...}, and canonical terminal statuses
-          are rejected too — EP _live_only excludes only exact 'draft').
+          are rejected too — EP _live_only excludes 'draft' and terminal
+          statuses/flag (#2422)).
           Connection-driven promotion (source → live on first edge) only
           happens under promotion_policy='auto', and only for draft/null-status sources
           (retracted/deprecated terminal sources are never resurrected).
@@ -7259,29 +7321,37 @@ class TortoiseSDK:
 
         proj = self._get_proj()
         # Endpoint validation: exist, plain Points, non-terminal.
+        # #2422 (second-model gate): the terminal set derives from the shared
+        # EP/read vocabulary AND the legacy outdated=true flag is rejected —
+        # a flag-outdated point (status untouched by invalidate_point) must
+        # equally refuse new direct edges.
         rows = proj.g.query(
             "MATCH (p:Point) WHERE p.id IN $ids "
-            "RETURN p.id, coalesce(p.is_operator, false), p.status",
+            "RETURN p.id, coalesce(p.is_operator, false), p.status, "
+            "coalesce(p.outdated, false)",
             params={"ids": [source_id, target_id]},
         ).result_set
-        found = {r[0]: (bool(r[1]), r[2]) for r in rows}
+        found = {r[0]: (bool(r[1]), r[2], bool(r[3])) for r in rows}
         for pid in (source_id, target_id):
             if pid not in found:
                 raise ValueError(
                     f"create_direct_edge: endpoint {pid!r} does not exist or "
                     f"is not a Point"
                 )
-            is_op, status = found[pid]
+            is_op, status, outdated = found[pid]
             if is_op:
                 raise ValueError(
                     f"create_direct_edge: endpoint {pid!r} is an operator — "
                     f"direct edges connect plain Points only"
                 )
-            if status in ("superseded", "retracted"):
+            if status in TERMINAL_EXCLUDED_STATUSES or outdated:
+                marker = "outdated" if outdated and (
+                    status not in TERMINAL_EXCLUDED_STATUSES) else (status or "live")
                 raise ValueError(
                     f"create_direct_edge: endpoint {pid!r} is terminal "
-                    f"({status!r}) — a direct edge incident to a terminal "
-                    f"point is rejected (terminal-point propagation hazard)"
+                    f"({marker}) — a direct edge incident to a terminal "
+                    f"point is rejected (terminal-point propagation hazard, "
+                    f"#2422)"
                 )
 
         # BARE-pattern MERGE + attribute SET (last-writer-wins; exactly one
@@ -8737,7 +8807,11 @@ class TortoiseSDK:
             return set()
         try:
             rows = self._get_proj().g.query(
-                "MATCH (n:Point) WHERE n.ep_dirty = true RETURN n.id"
+                "MATCH (n:Point) WHERE n.ep_dirty = true "
+                "AND NOT coalesce(n.status, 'live') IN $terminal "
+                "AND coalesce(n.outdated, false) = false "
+                "RETURN n.id",
+                params={"terminal": sorted(TERMINAL_EXCLUDED_STATUSES)},
             ).result_set
             loaded = {r[0] for r in rows}
             self._dirty_roots |= loaded
@@ -8827,9 +8901,6 @@ class TortoiseSDK:
             pass
         if not point_ids:
             return
-        # The mutated points themselves are always dirty (their baseline
-        # priors / properties changed).
-        self._dirty_roots.update(point_ids)
         proj = self._get_proj()
         # #1163: advance the graph-wide EP epoch FIRST — the new value is the
         # ordering stamp for this write's dirty markings (and the stale-run
@@ -8845,16 +8916,66 @@ class TortoiseSDK:
         # pre-delete neighbor capture uses the same helper, #1916).
         _op_ids, claim_ids = self._reverse_bfs_neighbors(proj, point_ids)
         dirty_ids = list(point_ids) + claim_ids
-        # #1163: persist the dirty markings (points + reverse-BFS claims) so
-        # any process/request can see them — the graph is the source of
-        # truth, the in-memory set above is the mirror.
-        proj.g.query(
+        # #2422 (dirty-root retention): a TERMINAL point can never enter an
+        # EP affected set (every admission point terminal-excludes), so
+        # _sweep_dirty_roots can never clear its ep_dirty flag — it would sit
+        # in _dirty_roots forever, pinning _auto_dream_mode to 'local' and
+        # accumulating ep_dirty=true across retracts/invalidates/supersedes.
+        # Only the point's LIVE reverse-BFS neighbors need recompute. The
+        # terminal exclusion is folded into the PERSIST query's WHERE (read
+        # at persist time) so a point terminalized by a concurrent writer
+        # between the filter read and the persist cannot be re-flagged — the
+        # exclusion is atomic with the marking.
+        persisted_rows = proj.g.query(
             "UNWIND $ids AS pid "
             "MATCH (n:Point {id: pid}) "
-            "SET n.ep_dirty = true, n.ep_dirty_at = $ep",
-            params={"ids": dirty_ids, "ep": ep_version},
-        )
-        self._dirty_roots.update(dirty_ids)
+            "WHERE NOT coalesce(n.status, 'live') IN $terminal "
+            "AND coalesce(n.outdated, false) = false "
+            "SET n.ep_dirty = true, n.ep_dirty_at = $ep "
+            "RETURN pid",
+            params={"ids": dirty_ids,
+                    "terminal": sorted(TERMINAL_EXCLUDED_STATUSES),
+                    "ep": ep_version},
+        ).result_set
+        persisted = {r[0] for r in persisted_rows} if persisted_rows else set()
+        # Classify the non-persisted input ids: a point that NO LONGER EXISTS
+        # is a delete zombie (delete_point marks the pre-deleted id dirty —
+        # #1916; _prune_nonexistent_dirty_roots removes it post-dream) — it
+        # stays in the in-memory mirror. An EXISTING point that failed the
+        # persist WHERE is TERMINAL — clear any pre-existing ep_dirty flag
+        # (from its live-era marking) and drop it from the mirror: terminal
+        # points never enter an affected set, so _sweep_dirty_roots would
+        # never clear them and they would strand (pinning _auto_dream_mode to
+        # 'local' forever).
+        retained_ids = list(dirty_ids)
+        terminal_ids: set[str] = set()
+        zombies: set[str] = set()
+        if set(dirty_ids) - persisted:
+            rows = proj.g.query(
+                "MATCH (n:Point) WHERE n.id IN $ids RETURN n.id",
+                params={"ids": retained_ids},
+            ).result_set
+            existing = {r[0] for r in rows}
+            non_persisted = set(dirty_ids) - persisted
+            terminal_ids = non_persisted & existing
+            zombies = non_persisted - existing  # delete zombies (#1916)
+            if terminal_ids:
+                proj.g.query(
+                    "MATCH (n:Point) WHERE n.id IN $ids AND n.ep_dirty = true "
+                    "SET n.ep_dirty = null, n.ep_dirty_at = null",
+                    params={"ids": list(terminal_ids)},
+                )
+                self._dirty_roots.difference_update(terminal_ids)
+        # #1163: persist the dirty markings (points + reverse-BFS claims) so
+        # any process/request can see them — the graph is the source of
+        # truth, the in-memory set above is the mirror. The in-memory mirror
+        # syncs from what the persist ACTUALLY flagged (terminal-excluded ids
+        # never enter it) PLUS delete zombies (nonexistent ids that
+        # _prune_nonexistent_dirty_roots clears post-dream).
+        if persisted:
+            self._dirty_roots.update(persisted)
+        if zombies:
+            self._dirty_roots.update(zombies)
 
     #: Accepted explicit dream modes (epic 903-C6 #1244, I1 precedence table).
     _DREAM_MODES = ("local", "stale-first", "full")
@@ -17603,14 +17724,29 @@ class TortoiseSDK:
                 "createdAt": now,
             },
         )
-        proj.g.query(
+        # Capture which older assessments get the outdated flag (#2422) and
+        # mark them in ONE statement (no TOCTOU between capture and set):
+        # flagged assessments become EP-dead exactly like invalidated claims —
+        # if their operator neighborhood isn't recomputed their influence
+        # lingers in neighbor posteriors.
+        old_rows = proj.g.query(
             "MATCH (p:Point {pointKind:'assessment'}) "
             "WHERE p.targetSource = $url AND p.assessor = $assessor "
             "  AND p.id <> $new_id "
             "  AND (p.outdated IS NULL OR p.outdated = false) "
-            "SET p.outdated = true",
+            "SET p.outdated = true "
+            "RETURN p.id",
             params={"url": url, "assessor": str(assessor), "new_id": p["id"]},
-        )
+        ).result_set
+        old_ids = [r[0] for r in old_rows]
+        if old_ids:
+            # #2422: the superseded assessments' influence rides their
+            # operators' sibling edges (same ghost class as invalidate) —
+            # drop their messages so the next warm-start recomputes instead
+            # of reusing seeds computed under the dead assessment's context.
+            # (Ordering: drops BEFORE _mark_dirty's epoch bump.)
+            self._get_ep().invalidate_factor_messages(old_ids)
+            self._mark_dirty(old_ids)
         # Refresh reliability cache (clear → next read recomputes) + dirty-mark
         # the inheritance gate so EP recomputes promptly.
         self._invalidate_inheritance_gate_for_source(url)
