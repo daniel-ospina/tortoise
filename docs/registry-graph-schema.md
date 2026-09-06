@@ -106,7 +106,9 @@ Default-graph semantics (the no-migration contract):
   (`ops/teams/{team}/graphs/{graph_id}/state.json`), independent retention
   (24 hourly + 7 daily + 4 weekly) and per-graph staleness incidents.
   Deleted (tombstoned) graphs are never swept and their archives are
-  restore-refused (tombstone guard; #2304 trash semantics).
+  restore-refused (tombstone guard; #2304 trash semantics). Their nested
+  archive pools are therefore NEVER pruned and accumulate until #2304's
+  purge decision lands (mechanism recorded post-#2313 audit, #2378).
 
 ### APIKey
 

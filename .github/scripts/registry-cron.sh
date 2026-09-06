@@ -45,11 +45,26 @@ r2_put_once() { # key body_file
 r2_get() { # key -> body (empty on failure)
   aws s3api get-object --endpoint-url "$R2_ENDPOINT" --bucket "$R2_BUCKET" --key "$1" /dev/stdout 2>/dev/null || true
 }
-gh_find_open() { # kind -> first open issue number (or empty)
+gh_find_open() { # kind id(subject) -> first open issue number whose TITLE subject matches exactly (or empty)
+  # #2375: subject-scoped — a bare kind search lets a per-graph issue
+  # ("[DR] STALE — team_a:g_x") be adopted by a team-level file ("… team_a")
+  # and vice versa (the bare team subject is a PREFIX of the per-graph
+  # subject); recovery then closes the WRONG issue and orphans its dedup
+  # object (silent-loss cross-talk — the server side is subject-scoped since
+  # #2313; the driver must match). Global alerts (id="global") keep the
+  # kind-only match (their titles carry prose, not the id).
   [ -n "$GH_TOKEN" ] || return 0
+  local kind="$1" id="${2:-}"
+  if [ "$id" = "global" ] || [ -z "$id" ]; then
+    curl -sS -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
+      "https://api.github.com/search/issues?q=repo:${REPO}+is:issue+is:open+label:%22dr:backup%22+in:title+%22%5BDR%5D+$kind%22" \
+      | jq -r '.items[0].number // empty' 2>/dev/null || true
+    return 0
+  fi
   curl -sS -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
-    "https://api.github.com/search/issues?q=repo:${REPO}+is:issue+is:open+label:%22dr:backup%22+in:title+%22%5BDR%5D+$1%22" \
-    | jq -r '.items[0].number // empty' 2>/dev/null || true
+    "https://api.github.com/search/issues?q=repo:${REPO}+is:issue+is:open+label:%22dr:backup%22+in:title+%22%5BDR%5D+$kind%22&per_page=20" \
+    | jq -r --arg suf " — $id" \
+      '[.items[] | select(.title | endswith($suf))][0].number // empty' 2>/dev/null || true
 }
 gh_close() { # number comment
   [ -n "$GH_TOKEN" ] || return 0
@@ -69,7 +84,7 @@ file_alert() { # kind title body dedup_id
   tmp="$(mktemp)"
   printf '{"kind":"%s","issue_number":null,"filed_at":"%s"}' "$kind" "$(date -u +%FT%TZ)" > "$tmp"
   if r2_put_once "ops/alerts/${kind}/${id}.json" "$tmp"; then
-    num="$(gh_find_open "$kind")"
+    num="$(gh_find_open "$kind" "$id")"
     if [ -z "$num" ]; then
       num="$(curl -sS -X POST -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
         "https://api.github.com/repos/${REPO}/issues" \
@@ -84,7 +99,7 @@ file_alert() { # kind title body dedup_id
     local existing
     existing="$(r2_get "ops/alerts/${kind}/${id}.json")"
     if [ -n "$existing" ] && [ "$(printf '%s' "$existing" | jq -r '.issue_number // "null"')" = "null" ]; then
-      num="$(gh_find_open "$kind")"
+      num="$(gh_find_open "$kind" "$id")"
       if [ -z "$num" ]; then
         num="$(curl -sS -X POST -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
           "https://api.github.com/repos/${REPO}/issues" \
@@ -122,9 +137,41 @@ if [ "$R2_OK" = "1" ]; then
   if [ -n "$TEAMS" ]; then
     for prefix in $TEAMS; do
       team="$(basename "$prefix")"
+      # #2375: DEFAULT-graph freshness ONLY — nested default segment
+      # (backups/{team}/default/) + legacy flat (pre-#2313 default dumps;
+      # flat keys start with the dump year "2xxx" so the 2-prefix never
+      # matches custom nested gids g_*). The pre-#2375 leg took the newest
+      # dump.enc under the WHOLE team prefix, so a team whose DEFAULT failed
+      # for > STALE_MIN while a custom graph backed up fresh read "not
+      # stale" — exactly the app-down case this leg exists to cover. A
+      # legacy-flat classification index (#2370) additionally excludes
+      # C5-era custom flat dumps when present (flat-only fallback is parity
+      # pre-index).
       newest="$(aws s3api list-objects-v2 --endpoint-url "$R2_ENDPOINT" \
-        --bucket "$R2_BUCKET" --prefix "backups/${team}/" --query "Contents[?ends_with(Key, 'dump.enc')] | sort_by(@, &LastModified) | [-1].LastModified" \
+        --bucket "$R2_BUCKET" --prefix "backups/${team}/default/" \
+        --query "Contents[?ends_with(Key, 'dump.enc')] | sort_by(@, &LastModified) | [-1].LastModified" \
         --output text 2>/dev/null || true)"
+      flat_list="$(aws s3api list-objects-v2 --endpoint-url "$R2_ENDPOINT" \
+        --bucket "$R2_BUCKET" --prefix "backups/${team}/2" \
+        --query "Contents[?ends_with(Key, 'dump.enc')].[Key,LastModified]" \
+        --output json 2>/dev/null || true)"
+      if [ -n "$flat_list" ] && [ "$flat_list" != "[]" ]; then
+        idx="$(r2_get "ops/legacy-flat-index/${team}.json")"
+        if [ -n "$idx" ] && [ "$(printf '%s' "$idx" | jq -r 'type' 2>/dev/null)" = "object" ]; then
+          flat_newest="$(printf '%s' "$flat_list" | jq -r --argjson idx "$idx" \
+            '[.[] | select((($idx[(.[0] | split("/")[1] + "/" + split("/")[2])].graph_id) // "") == "" or ($idx[(.[0] | split("/")[1] + "/" + split("/")[2])].graph_id) == "default") | .[1]] | max // empty' 2>/dev/null || true)"
+        else
+          # no index (pre-#2370) — flat pool is default parity
+          flat_newest="$(printf '%s' "$flat_list" | jq -r '[.[] | .[1]] | max // empty' 2>/dev/null || true)"
+        fi
+        if [ -n "$flat_newest" ]; then
+          if [ -n "$newest" ]; then
+            newest="$(printf '%s\n%s' "$newest" "$flat_newest" | sort | tail -1)"
+          else
+            newest="$flat_newest"
+          fi
+        fi
+      fi
       if [ -n "$newest" ]; then
         newest_ts="$(date -d "$newest" +%s 2>/dev/null || echo 0)"
         if [ "$newest_ts" != "0" ]; then
@@ -216,7 +263,7 @@ curl -sS -m 20 -X POST -H "Authorization: Bearer $KEY" -H "Content-Type: applica
 # ── 6. self-heal: close open APP_DOWN / WATCHER_DOWN / R2_DOWN on health ─────
 if [ "$RUN_STATUS" = "backed_up" ] || [ "$RUN_STATUS" = "no_teams" ]; then
   for kind in APP_DOWN WATCHER_DOWN R2_DOWN; do
-    num="$(gh_find_open "$kind")"
+    num="$(gh_find_open "$kind" "global")"
     [ -n "$num" ] && gh_close "$num" "Resolved — sweep succeeded ($RUN_STATUS)."
   done
   log "self-heal: closed open incidents for a healthy run"
