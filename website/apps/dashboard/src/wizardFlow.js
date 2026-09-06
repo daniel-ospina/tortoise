@@ -98,6 +98,23 @@ export function resolveBuildCatalog(modules, fallback = BUILD_CATALOG_PLACEHOLDE
   return wellFormed ? modules : fallback
 }
 
+// #2325/#2333: connect-step mint names must be DISTINGUISHABLE — the old
+// fixed 'Setup command' label made rotate/regenerate rows identical under
+// the free cap of 2. Every connect mint is named org + date (+ a same-minute
+// collision guard), so repeated connects never produce two identically-
+// named rows. Pure helper (node --test unit-tested). UTC stamp → sortable
+// and unambiguous across timezones.
+export function durableKeyName(orgName, date = new Date(), existingNames = []) {
+  const org = (orgName && String(orgName).trim()) || 'your organization'
+  const pad = (n) => String(n).padStart(2, '0')
+  const stamp = `${date.getUTCFullYear()}-${pad(date.getUTCMonth() + 1)}-${pad(date.getUTCDate())} ${pad(date.getUTCHours())}:${pad(date.getUTCMinutes())} UTC`
+  let name = `key for ${org} ${stamp}`
+  const seen = new Set(Array.isArray(existingNames) ? existingNames.filter(Boolean) : [])
+  let n = 2
+  while (seen.has(name)) name = `key for ${org} ${stamp} (${n++})`
+  return name
+}
+
 // Org-create name validation — mirrors the server (POST /v1/onboarding/team:
 // non-empty, ≤64 chars, /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/). REQUIRED with
 // editable prefill, never a silent username (DE2E-3). Returns an error

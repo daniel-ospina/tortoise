@@ -5,6 +5,7 @@ import assert from 'node:assert/strict'
 import {
   WIZARD_STEPS, WIZARD_FORK_OPTIONS, BUILD_CATALOG_PLACEHOLDER,
   resolveBuildCatalog, orgNameError, LEGACY_LABELS, forkStepState,
+  durableKeyName,
 } from './wizardFlow.js'
 
 test('EXACTLY 5 human steps in the plan order (orientation → org-create → fork → connect → done)', () => {
@@ -96,4 +97,25 @@ test('#1998 DE2E-12: an INHERITED fork (org B) is a SET summary — never re-ask
   // org B's node carries the inherited fork at creation (server-side
   // resolve_init_fork_compact); the client renders a read-only summary.
   assert.equal(forkStepState('build'), 'set')
+})
+
+test('#2325/#2333: durableKeyName carries org + date and is collision-guarded — repeated connects never collide', () => {
+  const date = new Date('2026-09-06T14:32:07Z')
+  // org-anchored, UTC date+minute, sortable
+  const n1 = durableKeyName('acme', date)
+  assert.equal(n1, 'key for acme 2026-09-06 14:32 UTC')
+  // two mints in the same minute against the same existing name → distinct
+  const n2 = durableKeyName('acme', date, [n1])
+  assert.ok(n2 !== n1, 'same-minute mint must not collide')
+  assert.match(n2, /\(2\)$/)
+  const n3 = durableKeyName('acme', date, [n1, n2])
+  assert.match(n3, /\(3\)$/)
+  // fallback org label when the org name is missing
+  assert.match(durableKeyName('', date), /^key for your organization /)
+  assert.match(durableKeyName(null, date), /^key for your organization /)
+  // a different minute stamps differently (no false collision across mints)
+  const later = new Date('2026-09-06T15:01:00Z')
+  assert.notEqual(durableKeyName('acme', later), n1)
+  // existingNames that are null/empty never force a suffix
+  assert.equal(durableKeyName('acme', date, [null, '', undefined]), n1)
 })
