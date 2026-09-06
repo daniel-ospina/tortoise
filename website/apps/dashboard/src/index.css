@@ -292,23 +292,6 @@ button.tier-badge:disabled { opacity: 0.6; cursor: wait; }
 }
 .billing .row { flex-wrap: wrap; gap: 8px; }
 /* #1148-ux: graph selector moved into the API Keys page (page-scoped context) */
-.page-graph-selector {
-  display: inline-flex; align-items: center; gap: 10px;
-  margin-bottom: 16px; padding: 10px 14px;
-  border: 1px solid var(--border); border-radius: 10px;
-  background: var(--surface); max-width: 360px;
-}
-.page-graph-selector label {
-  font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em;
-  color: var(--text-dim); white-space: nowrap;
-}
-.page-graph-selector select {
-  flex: 1; font-size: 13px; color: var(--text);
-  background: var(--surface-hover); border: 1px solid var(--border);
-  border-radius: 6px; padding: 5px 8px;
-}
-.page-graph-selector select:focus { border-color: var(--accent); }
-
 /* #1845: source-scope selector (repo + branch) inside the Memory-sources rows.
    Shares the page-graph-selector look: uppercase label + accent-focus select,
    wrapped in a subtle surface pill. Inline-flex so repo + branch + preview sit
@@ -555,6 +538,15 @@ button:focus-visible, select:focus-visible, a:focus-visible, input:focus-visible
 .harness-tabs { display: flex; gap: 6px; flex-wrap: wrap; }
 .harness-tab { padding: 6px 12px; font-size: 13px; background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.12); border-radius: 6px; color: var(--text, #e2e8f0); cursor: pointer; }
 .harness-tab.active { background: var(--accent, #38bdf8); color: #04121a; border-color: var(--accent, #38bdf8); }
+/* #2361 review-r2 (a11y P1): fork-option had NO rule — it fell through to
+   the global button color (#04121a) on the dark surface → ~1.09:1 invisible
+   labels on the core choice UI. Fix + give .active a real highlight. */
+.fork-option { color: var(--text, #e2e8f0); }
+.fork-option.active {
+  border-color: var(--accent, #38bdf8) !important;
+  background: rgba(6, 182, 212, 0.12) !important;
+}
+.fork-option:disabled { cursor: default; opacity: 0.85; }
 .wizard-actions { display: flex; gap: 10px; margin-top: 1rem; flex-wrap: wrap; }
 .wizard-actions .btn-primary, .wizard-actions button.btn-primary { background: var(--accent, #38bdf8); color: #04121a; }
 .wizard-actions .ghost, .wizard-actions a.ghost { background: none; border: 1px solid rgba(255,255,255,0.12); color: var(--text, #e2e8f0); padding: 8px 14px; border-radius: 8px; text-decoration: none; font-size: 13px; }
