@@ -1435,14 +1435,34 @@ def _decorate_fallback_hits(results: list[dict], graph) -> list[dict]:
 # bullets ('*Gate: filed as child issue…'), heading/table/quote/fence lines,
 # bare 'Label: value' config residue — are filtered out at digest time
 # (display-layer defense only; the extractor itself is unchanged).
+#
+# #2225 (post-batch bug hunt): the filter must NOT drop the SDK's OWN
+# decision-writer shapes, which are label-led by construction but are
+# genuine decisions — 'Decision: …' (file_decision), 'Approved: …' (human
+# approval), 'Option N: …' (file_decision rows), the decide flows'
+# 'Reason:'/'Finding:' leads, and date-led '2026-09-06: …' diary lines. They
+# are exempted from the label-noise arm before it runs (see
+# _DIGEST_GENUINE_LABEL_RE); a decisions-only graph must not read as
+# "no prior sessions".
 _DIGEST_STRUCTURE_RE = re.compile(r"^(?:[-*=~_`|#>]{2,}|\.{2,}|[-*+]\s*)$")
 _DIGEST_MD_LEAD_RE = re.compile(r"^(?:#{1,6}\s|>{1,}|`{3,}|~{3,}|\|)")
+# Genuine decision content that LOOKS label-led but must survive the digest:
+# date-led lines and the SDK/decide-flow label families. Case-insensitive so
+# a capture path that lowercases content still keeps its decisions.
+_DIGEST_GENUINE_LABEL_RE = re.compile(
+    r"^(?:\d{4}-\d{2}-\d{2}\s*:"            # '2026-09-06: we decided…'
+    r"|(?:[-*+]\s+|\d+[.)]\s+)?"             # optional list/number marker
+    r"(?:Decision|Approved|Reason|Finding|Option)\s*\d*\s*:"
+    r")",
+    re.IGNORECASE,
+)
 # Label-led rule/config lines: an optional list/number marker and optional
 # emphasis, then a label ending in ':' before the value — '*Gate: filed as
 # child issue…', '- model: gpt-5', '* HARD RULE: Skill Compliance',
 # 'TORTOISE_DB_URI: docker://…'. All-caps continuations keep multi-word rule
 # labels ('HARD RULE', 'DO NOT EDIT') together; prose claims starting
-# mid-sentence are never label-led.
+# mid-sentence are never label-led. Genuine decision shapes above never
+# reach this arm (_DIGEST_GENUINE_LABEL_RE short-circuits first).
 _DIGEST_LABEL_RE = re.compile(
     r"^(?:[-*+]\s+|\d+[.)]\s+)?(?:[*_]{1,2})?"
     r"[A-Za-z0-9][A-Za-z0-9_.-]*(?:\s+[A-Z][A-Z0-9_.-]*)*"
@@ -1463,6 +1483,11 @@ def _is_digest_noise(content) -> bool:
         return True
     if _DIGEST_MD_LEAD_RE.match(t):
         return True
+    # #2225: the SDK's own label-led decision shapes are genuine content —
+    # exempt them BEFORE the rule/config label arm so 'Decision: …' /
+    # 'Approved: …' points never vanish from the digest.
+    if _DIGEST_GENUINE_LABEL_RE.match(t):
+        return False
     return bool(_DIGEST_LABEL_RE.match(t))
 
 

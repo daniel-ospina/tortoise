@@ -167,6 +167,102 @@ class TestSessionContext:
                       "Alpha in production", "we decided X",
                       "claim A", "decision X",
                       "We chose BSL 1.1 because it converts to MPL-2.0 later.",
-                      "1. We decided to adopt BFS because it is simpler to operate."):
+                      "1. We decided to adopt BFS because it is simpler to operate.",
+                      # #2225: the SDK's own label-led decision-writer shapes
+                      # are genuine decisions, never digest noise.
+                      "Decision: adopt FalkorDB as the primary graph store",
+                      "Approved: scanner-release-2.4.1",
+                      "Finding: FalkorDB survives the 10k-node benchmark",
+                      "Reason: the migration cost is low",
+                      "Option 1: JSON",
+                      "2026-09-06: we decided to pin v2.5.1"):
             assert _is_digest_noise(clean) is False, clean
         print("PASS test_digest_filter_shared_pure_function")
+
+
+# ── #2225 (post-batch bug hunt): SDK decision-writer shapes survive ───
+# The digest noise filter (#2207/#2225) must NOT drop the SDK's own
+# label-led decision content — 'Decision: …' (file_decision), 'Approved: …'
+# (file_human_approval) and 'Option N: …' rows are genuine decisions, not
+# rule/config residue. Pre-fix a decisions-only graph read as
+# "no prior sessions" because the decision points were filtered out.
+
+def _digest_contents(sdk) -> list[str]:
+    return [p.get("content", "") for p in sdk.session_context()["recent_points"]]
+
+
+class TestDigestKeepsSdkDecisionShapes:
+    def test_file_decision_surfaces_decision_and_options(self, sdk):
+        """A file_decision() call leaves its 'Decision: …' point AND its
+        'Option N: …' rows in session recent_points (pre-fix the decision
+        point was filtered as rule noise; only options/evidence survived)."""
+        res = sdk.file_decision(
+            ["adopt FalkorDB as the primary graph store",
+             "keep the current store"],
+            ["FalkorDB survives the 10k-node benchmark",
+             "the current store times out on write bursts"],
+            choice=0,
+        )
+        contents = _digest_contents(sdk)
+        assert any(c.startswith("Decision: adopt FalkorDB") for c in contents), (
+            f"decision point missing from digest: {contents}")
+        assert any("Option 1: adopt FalkorDB" in c for c in contents), contents
+        assert any("Option 2: keep the current store" in c for c in contents), \
+            contents
+        # The decision point itself is the point file_decision created.
+        assert any(
+            p.get("id") == res["decision_id"]
+            for p in sdk.session_context()["recent_points"]), contents
+
+    def test_human_approval_surfaces_approved_point(self, sdk):
+        """file_human_approval()'s default 'Approved: <artifact>' decision
+        point appears in recent_points (pre-fix: filtered as rule noise)."""
+        claim = sdk.create_point("decision", "ship the scanner build to internal testing")
+        subj = sdk.create_subject("daniel", "engineer")
+        doc = sdk.create_document("scanner-release-2.4.1", "artifact")
+        res = sdk.file_human_approval(
+            approver_id=subj["id"],
+            artifact_id=doc["id"],
+            point_ids=[claim["id"]],
+        )
+        contents = _digest_contents(sdk)
+        assert any(c.startswith("Approved: ") and doc["id"] in c
+                   for c in contents), (
+            f"approval point missing from digest: {contents}")
+        assert any(p.get("id") == res["decision_point_id"]
+                   for p in sdk.session_context()["recent_points"]), contents
+
+    def test_decisions_only_graph_is_not_no_prior_sessions(self, sdk):
+        """Second-order regression: a graph whose recent points are ALL
+        SDK decision/approval shapes must NOT report 'no prior sessions' —
+        no_prior_sessions is computed AFTER the noise filter, so dropping
+        the decisions made an all-decision graph read as empty."""
+        sdk.file_decision(
+            ["adopt BSL 1.1"], ["it converts to MPL-2.0 later"], choice=0)
+        claim = sdk.create_point("decision", "pin tortoise at v2.5.1")
+        subj = sdk.create_subject("daniel", "engineer")
+        doc = sdk.create_document("tortoise-v2.5.1", "artifact")
+        sdk.file_human_approval(
+            approver_id=subj["id"], artifact_id=doc["id"],
+            point_ids=[claim["id"]],
+        )
+        ctx = sdk.session_context()
+        assert ctx["no_prior_sessions"] is False, (
+            "all-decision graph must not read as empty")
+        assert len(ctx["recent_points"]) >= 3, ctx["recent_points"]
+
+    def test_rule_noise_still_filtered_beside_decision_shapes(self, sdk):
+        """The #2207 filter keeps working: rule/config residue created in
+        the SAME graph as decision shapes never reaches the digest."""
+        sdk.file_decision(["adopt YAML"], ["schemas validate"], choice=0)
+        for content in ("---", "*Gate: filed as child issue via `issue-creation`.",
+                        "| Trigger | Must invoke |", "model: gpt-5",
+                        "TORTOISE_DB_URI: docker://:x@localhost:6379/t",
+                        "* HARD RULE: Skill Compliance"):
+            sdk.create_point("statement", content)
+        contents = _digest_contents(sdk)
+        assert any(c.startswith("Decision: adopt YAML") for c in contents), contents
+        for noise in ("Gate:", "| Trigger", "model: gpt-5", "TORTOISE_DB_URI",
+                      "HARD RULE"):
+            assert not any(noise in c for c in contents), (noise, contents)
+        assert not any(c.strip() == "---" for c in contents), contents
