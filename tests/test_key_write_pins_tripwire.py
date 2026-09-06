@@ -407,7 +407,11 @@ class TestKeyWritePinsTripwireBehavior:
 
     def test_dashboard_login_non_member_pin_403(self, client, fake, monkeypatch):
         """A non-member pin fails closed 403 via the shared membership gate —
-        never a memberships[0] fallback write on the caller's own team."""
+        never a memberships[0] fallback write on the caller's own team. The
+        detail assert discriminates the membership gate from the role gate's
+        independent 403 ("Requires owner or admin role in team"): dropping or
+        reordering _session_pinned_team past _require_owner_admin must fail
+        this test, not silently pass via the role gate."""
         _keyA, teamA = _provision_anon(client, fake)
         _keyC, teamC = _provision_anon(client, fake)
         user_id = str(uuid.uuid4())
@@ -419,6 +423,7 @@ class TestKeyWritePinsTripwireBehavior:
             json={"enabled": False},
         )
         assert r.status_code == 403, r.text
+        assert "No membership in team" in str(r.json())
         flagA = fake.query("teams", select=["dashboard_key_login"], filters=[("id", "eq", teamA)])[
             0
         ]
