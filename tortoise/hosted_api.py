@@ -14820,7 +14820,25 @@ async def create_onboarding_team(body: dict,
     # provision + the team_created write all run under the per-user lock so
     # a concurrent double-call cannot both read team_created absent and mint
     # two sub-teams.
+    # #2323 (Option B backstop): the person-level #1877 entitlement now binds
+    # this lane too. A free user (>=1 active free membership) can no longer
+    # mint a second org through the onboarding lane; paid users pass through
+    # (the count helper excludes paid teams) — the sanctioned org-B door
+    # survives for subscribers. Order pinned: marker-409 (anti-re-entry) →
+    # count-402 → dup-name → mint, all under the per-user lock. The lane
+    # re-checks the marker (belt) but never the count (single source: here).
     async with _team_create_lock(owner_user_id):
+        onboarding_state = _get_onboarding_state(team["team_id"])
+        if onboarding_state.get("team_created"):
+            raise HTTPException(status_code=409, detail="Sub-team already created")
+        # #2323: mode-aware helper (supabase subscription_status; registry
+        # tier='free' proxy) — same gate POST /v1/teams enforces lane-uniform
+        # (hosted_api.py:8199-8203 supabase / :8304-8306 registry).
+        if await _count_active_free_memberships(owner_user_id) >= 1:
+            raise HTTPException(
+                status_code=402,
+                detail="Create another organization requires a paid plan",
+            )
         return _create_onboarding_team_lane(team, name, owner_user_id)
 
 
@@ -14842,9 +14860,12 @@ def _create_onboarding_team_lane(team: dict, name: str,
     # state); a second call is blocked (409). Read the persisted state
     # (teams.onboarding_state jsonb / Team node) — the dependency dict's
     # onboarding_state key is never populated by any production auth path
-    # (review P0: reading the dict left the guard inert). The free-team
-    # entitlement is enforced at POST /v1/teams + this one-shot state, NOT
-    # here (the onboarding sub-team is a sanctioned second team for Q5).
+    # (review P0: reading the dict left the guard inert).
+    # #2323: the person-level free-tier entitlement is enforced in the
+    # caller (create_onboarding_team, count-402 under the lock) — this lane
+    # keeps the one-shot marker as the anti-re-entry guard only. (The old
+    # "sanctioned second team for Q5" carve-out is closed: /v1/onboarding/team
+    # reached the entitlement parity of POST /v1/teams; see #2323.)
     onboarding_state = _get_onboarding_state(team["team_id"])
     if onboarding_state.get("team_created"):
         raise HTTPException(status_code=409, detail="Sub-team already created")
