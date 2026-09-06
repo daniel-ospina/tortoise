@@ -244,7 +244,7 @@ Fleshes out the 7 high-level E2Es from scope into executable scenarios (setup / 
 ### Parity + gates (scope E2E-4, E2E-5)
 
 **E2E-4.1 — Parity leg on released benchmarks**
-**Setup:** LongMemEval (commit pinned at implementation), LoCoMo (vY), MemoryArena (HF dataset+rev pinned), MemoryAgentBench (rev pinned), **ForgetEval-class staleness/drift probe (pinned rev — scope in-scope #6)** — exact values recorded in run_artifact; 6 arms; **methodology-unchanged check: judge rubric id + reader prompt hash identical to the #1144 baseline record (stored hash, not "unchanged" prose)**.
+**Setup:** LongMemEval (commit pinned at implementation), LoCoMo (vY), MemoryArena (HF dataset+rev pinned), MemoryAgentBench (rev pinned), **ForgetEval-class staleness/drift probe (pinned rev — scope in-scope #6)** — exact values recorded in run_artifact; 6 arms; **methodology-unchanged check: judge rubric id + reader prompt + PROTOCOL hash (seed/model_pin/temperature/event-schema/tool-surface — #2284 Task 6) identical to the #1144 baseline record (stored hash, not "unchanged" prose)**. The #1144 baseline record MUST carry all three hashes: an old 2-tuple record keeps matching on reader+rubric (back-compat) but the run is protocol-unknown and the parity record forces a #1144 re-record — a decide-loop/protocol change (schema bump, model pin change) trips the check end-to-end.
 **Assert:** per-benchmark parity table incl. staleness/drift probe (supersession-vs-stale answers, per research brief Strategy Context); runner refuses to run on version mismatch (interface §6); saturation context cross-referenced to published baselines.
 
 **E2E-5.1 — Judge validation gate**
@@ -267,8 +267,8 @@ Fleshes out the 7 high-level E2Es from scope into executable scenarios (setup / 
 **Assert:** report_status=incomplete_missing_metrics; no fabricated values; claim shipping blocked (report_status gate).
 
 **E2E-7.1 — Determinism**
-**Setup:** same run twice, seed S.
-**Assert:** metric values identical within tolerance |Δ| ≤ 1e-6 (per-metric epsilon in thresholds.yaml; compared across the two run_artifact.json files); calibration mode prints deltas without asserting (re-lock is a reviewable table change).
+**Setup:** same run twice, seed S. Scope split by field class: **transcript-locked derived/objective fields** (n_turns / n_tool_calls / re_derivations / total_tokens / outcome_* — computed deterministically from the locked transcript) are compared across the two run_artifact.json files under `determinism.tolerances` per metric (fallback `determinism.epsilon`); **model-text/judged fields** are NOT bit-comparable (temp-0 ≠ bit-deterministic; arXiv 2606.26185/2602.14349) — each run records a **nondeterminism fingerprint** of its model-generated/judged content, and derived-field comparisons are annotated by fingerprint (a deterministic metric can never be compared across non-matching model legs unnoticed).
+**Assert:** transcript-locked derived/objective |Δ| ≤ 1e-6 (measured |Δ| = 0.0 over the mock determinism lane — the tolerance table in thresholds.yaml is SEEDED from those measured deltas, #2284 Task 7; never a test-local constant); per-metric model-text/judged tolerances are re-locked by sibling #2292 over that seed from exposure-measured numbers — values stay **TBD(EXPOSURE)** until exposure part 1 (#2284 Task 8) measures them; token-budget numbers (arms.yaml `expected_tokens_per_episode`, the 800 tok/ep guess) are annotated `measured_after_exposure` and stay provisional until then; calibration mode prints deltas without asserting (re-lock is a reviewable table change; determinism tolerance rows fold into the same cal-table hash the `calibrate --print` route prints — a tolerance re-lock drifts the hash, so it is never silent tuning). **Coordination:** this seed + §7 wording must merge before sibling #2292 re-locks measured values over it — no parallel silent edits to the same thresholds.yaml/04-plan rows.
 
 **E2E-7.2 — Weakness mitigation loop (scope item #9, J3/W5)**
 **Setup:** verdict WEAK-UNMITIGATED on R5 (fixture); mitigation path documented.
@@ -301,7 +301,7 @@ Fleshes out the 7 high-level E2Es from scope into executable scenarios (setup / 
 | Falsification outcome (claim fails) | Medium | Pre-committed branches (MECHANISM-NOT-UNIQUE / WEAK-UNMITIGATED / INCONCLUSIVE); retention story independent |
 | Recall mismatch → INCONCLUSIVE | Medium | Symmetric trigger pre-committed; driven test (E2E-3.7); re-scope comparator branch defined |
 | Token-trajectory gate single-source (SEA-Eval) | Medium | ⚠️ provisional label; corroboration sought; gate stays but flagged |
-| Compute cost (500–1,000 episodes) | Medium | Batch scenario setup (N+1 flag); within #1144 budget; budget.yaml guard |
+| Compute cost (500–1,000 episodes) | Medium | Batch scenario setup (N+1 flag); within #1144 budget; budget.yaml guard; token numbers = 800 tok/ep guess **TBD(EXPOSURE)** → arms.yaml `expected_tokens_per_episode` re-locked from measured probe data (exposure part 1, #2284 Task 8) |
 | EP calibration discipline violated | Medium | [cal] table reviewable-only; calibration mode prints (W6); ep_outcome honest-UNDEC (E2E-1.3) |
 | Report fabricated on missing data | Medium | report_status=incomplete gate (E2E-6.2); never fabricated |
 
