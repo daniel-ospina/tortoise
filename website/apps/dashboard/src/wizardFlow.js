@@ -44,7 +44,7 @@ export const WIZARD_STEPS = Object.freeze([
   {
     id: 'connect',
     label: 'Connect your agent',
-    sub: 'One command for your tool — copy it, run or paste it, and your agent can reach your organization graph.',
+    sub: "One command for your agent — copy it, run or paste it, and it can reach your Organization.",
   },
   {
     id: 'done',

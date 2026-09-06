@@ -50,7 +50,7 @@ export function overviewConnection(state) {
   return {
     kind: 'disconnected',
     value: 'Not connected',
-    detail: 'Run the setup command from Settings → Setup guide, and your agent reports back here.',
+    detail: 'Run the setup command from Settings → Setup guide — your agent confirms the connection there, and you mark it connected in the wizard.',
   }
 }
 

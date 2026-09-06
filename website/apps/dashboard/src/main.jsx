@@ -300,7 +300,7 @@ function SettingsTab(props) {
           the fork-aware step-mapped resume. ── */}
       <section className="settings-home" aria-labelledby="settings-setup-guide-heading">
         <h3 id="settings-setup-guide-heading">Setup guide</h3>
-        <p className="dim small">Where your Organization is in setup — pick up from the step you're on.</p>
+        <p className="dim small">Where your Organization is in setup — reopen the wizard any time; what you've done is saved.</p>
         <SetupGuideCard state={state} loading={loading} onResume={onResumeSetup} />
       </section>
 
@@ -928,8 +928,12 @@ function claimIntentInFlight() {
   // account menu opened — a resumer in welcome mode never saw an invitation
   // on the org-create step. Fetch on welcome entry (once per session).
   React.useEffect(() => {
-    if (welcomeMode && authed && sessionRef.current && !pendingInvitesLoadedRef.current) {
-      pendingInvitesLoadedRef.current = true
+    // #2361 review-r2 (P1): sessionRef is only set for teamless first-timers
+    // — org-holders resuming welcome never fetched. sessionTokenRef holds the
+    // JWT for every authed account. Re-fetch on each welcome entry so a
+    // mid-session invite shows up; no once-per-session latch (a failed fetch
+    // must retry, not persist a broken row).
+    if (welcomeMode && authed && sessionTokenRef.current) {
       loadPendingInvites().catch(() => {})
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -940,6 +944,30 @@ function claimIntentInFlight() {
   // re-enabled 'Seed my graph' button. Cleared on every attempt.
   const [wizardSeedError, setWizardSeedError] = React.useState('')
   const [wizardDone, setWizardDone] = React.useState(false)
+  // #2361 review-r2 (P2): done-step honesty — a user who SKIPPED the connect
+  // step is 'set up but not connected'; track it so the done step doesn't
+  // claim an agent is taking over.
+  const [wizardPaused, setWizardPaused] = React.useState(false)
+  const wizardCardRef = React.useRef(null)
+  const wizardFocusInit = React.useRef(false)
+  const [wizardStepAnnounce, setWizardStepAnnounce] = React.useState('')
+
+  // #2361 review-r2 (a11y P1): announce + move focus on wizard step change.
+  // Step 1 (org input) and step 3 (paste field / copy button) carry their own
+  // autofocus targets — the container must not steal from them, so those two
+  // steps only announce.
+  React.useEffect(() => {
+    if (!(welcomeMode && authed)) return
+    const label = wizardStep === 4 && wizardPaused
+      ? 'Setup paused — your agent is not connected yet'
+      : (wizardStep === 1 && welcomeHasOrg ? 'Your Organization' : WIZARD_STEPS[wizardStep].label)
+    setWizardStepAnnounce(`Step ${wizardStep + 1} of 5: ${label}`)
+    if (!wizardFocusInit.current) { wizardFocusInit.current = true; return }
+    if (wizardStep === 1 && !welcomeHasOrg) return
+    if (wizardStep === 3) return
+    if (wizardCardRef.current) wizardCardRef.current.focus()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [wizardStep, welcomeMode, authed, wizardPaused])
   const [onboardingComplete, setOnboardingComplete] = React.useState(false)
   const [welcomeOriented, setWelcomeOriented] = React.useState(false)
   const [wizardSubject, setWizardSubject] = React.useState('')
@@ -1117,7 +1145,7 @@ function claimIntentInFlight() {
     scopeReadyRef.current = true
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [reposLoaded, onboarding, reposList, currentTeamId, reposLoadFailed])
-  const [currentGraphId, setCurrentGraphId] = React.useState(null)
+
   const [accountMenuOpen, setAccountMenuOpen] = React.useState(false) // #1148-ux: account blob dropdown
   // #1877: create-team dialog state (gated-on-click upgrade UX)
   const [createTeamOpen, setCreateTeamOpen] = React.useState(false)
@@ -2274,7 +2302,11 @@ function claimIntentInFlight() {
     setWizardDurableKey('')
     setWizardDurablePaste('')
     setWizardDurableError('')
-    setWizardShowPaste(false)
+    setWizardShowPaste(false)    // #2361 review-r2: welcomeKey is the first-timer provisioned plaintext
+    // (owner-only by construction — members never mint) — drop it here too so
+    // a later resume re-gates to the rows-aware copy instead of re-showing a
+    // 'shown once' key under a fresh 'shown once' disclosure.
+    setWelcomeKey('')
     // #1997 (W1): the legacy jsonb completion write is REMOVED — the done
     // step hands off to the graph (accept-and-drop makes a client PATCH
     // inert on node-present orgs; the node's fork-aware gate owns
@@ -3126,7 +3158,6 @@ function claimIntentInFlight() {
     setMembers(null)
     setMembersStatus('loading')
     setCurrentTeamId(null)
-    setCurrentGraphId(null)
     setTeams([])                       // Round-4: drop the previous session's teams
     // #1893 (code-review P2): a fresh login is a NEW team session — reset
     // the hydration latch + persist gate + scope state so the next session
@@ -3444,6 +3475,7 @@ function claimIntentInFlight() {
         method: 'POST', useSession: true,
         body: JSON.stringify({ step: 'harness-connected' }),
       })
+      setWizardPaused(false)
       setWizardStep(4)
     } catch (e) {
       if (e?.status === 503) {
@@ -3564,7 +3596,6 @@ function claimIntentInFlight() {
     setGraphMsg('')
     setConfirmDeleteId(null)
     setRevealKey(null)
-    setCurrentGraphId(null)
     setTeam(null)          // Fix B: clear key-scoped overview state too
     setStaleFired(false)   // #1858: reset the per-load stale latch on EVERY switch — incl. null→null from the terminal '—' state, where the reset effect's team dep doesn't fire
     setKeys([])
@@ -3708,10 +3739,6 @@ function claimIntentInFlight() {
         setGraphs(list)
         setGraphsLoaded(true) // Round-26
         setGraphsStatus('ok')
-        // Fix E (review round 2): auto-select first graph so the dropdown
-        // shows a selection after switch; Round-3: only when nothing is
-        // selected yet (don't clobber a manual pick on re-load).
-        setCurrentGraphId((prev) => prev ?? list[0]?.graph_id ?? null)
       }
     } catch {
       // #1842 P2-1: transport/parse failure → terminal 'error', never eternal shimmer
@@ -4867,7 +4894,7 @@ function claimIntentInFlight() {
             {welcomeProvisioning ? (
               <>
                 <h1 style={{ fontFamily: 'var(--serif, Georgia, serif)', fontWeight: 400, marginBottom: '0.5rem' }}>
-                  Provisioning your Tortoise…
+                  Creating your Organization…
                 </h1>
                 <p className="dim">Creating your Organization and API key — one moment.</p>
               </>
@@ -4895,6 +4922,9 @@ function claimIntentInFlight() {
                     ? (shownOrgName ? `${shownOrgName} is set up` : 'Your organization is set up')
                     : 'Welcome to Tortoise'}
                 </h1>
+                <span className="sr-only" role="status" aria-live="polite">
+                  {welcomeProvisioning ? 'Creating your organization' : (welcomeHasOrg && shownOrgName ? `${shownOrgName} is set up` : '')}
+                </span>
                 <p className="dim" style={{ marginBottom: '1.25rem' }}>
                   {welcomeHasOrg
                     ? 'Your Organization is set up. Choose how you\'ll use it and connect your agent — your API key is shown once at the connect step.'
@@ -4905,7 +4935,8 @@ function claimIntentInFlight() {
                     All other steps (install/seed/decide) are agent-side or
                     archived. Copy from wizardFlow.js (DE2E-2: 'Organization',
                     never 'team'/'workspace' in user-facing labels). */}
-                <div className="wizard">
+                <div className="wizard" ref={wizardCardRef} tabIndex={-1}>
+                  <span className="sr-only" role="status" aria-live="polite">{wizardStepAnnounce}</span>
                   <div className="wizard-progress">
                     {WIZARD_STEPS.map((s, i) => (
                       <span key={s.id} className={'wizard-step' + (i === wizardStep ? ' active' : (i < wizardStep ? ' done' : ''))} />
@@ -4924,10 +4955,10 @@ function claimIntentInFlight() {
                   {wizardStep === 0 && (
                     <div className="wizard-orient">
                       <ol className="wizard-intro" style={{ margin: '0 0 1rem 1.1rem', padding: 0, lineHeight: 1.7 }}>
-                        <li><strong>Install the tools</strong> — an MCP server so your agent can reach Tortoise, plus the skills so it knows how to use them.</li>
-                        <li><strong>Create your Organization</strong> — the first Subject on your graph, with you linked to it.</li>
+                        <li><strong>Create your Organization</strong> — the shared memory space your agent writes to. Name it, and it's created.</li>
                         <li><strong>Choose how you'll use it</strong> — for your own agents, or to build an application on top.</li>
-                        <li><strong>Connect your agent</strong> — one universal command; your agent takes over from there.</li>
+                        <li><strong>Connect your agent</strong> — one command installs the connector and skills your agent needs; your API key is shown once here.</li>
+                        <li><strong>Your agent takes it from there</strong> — it files your decisions and findings to this Organization as you make them.</li>
                       </ol>
                       <div className="wizard-nav">
                         <div className="wizard-nav-actions">
@@ -4993,15 +5024,20 @@ function claimIntentInFlight() {
                       {pendingInvites && pendingInvites.length > 0 && (
                         <div className="pending-invites" style={{ marginTop: '1.25rem', paddingTop: '1rem', borderTop: '1px solid var(--border,#1e293b)' }}>
                           <p className="dim small" style={{ margin: '0 0 0.5rem' }}>Or accept an invitation to join an existing organization:</p>
-                          {pendingInvites.map((inv) => (
+                          {pendingInvites[0] && pendingInvites[0]._loadError ? (
+                            // #2361 review-r2 (P3): a failed load must NOT render
+                            // as an actionable 'Invitation' row — mirror the
+                            // account-menu error branch.
+                            <p className="dim small" role="alert">{pendingInvites[0]._loadError}</p>
+                          ) : pendingInvites.map((inv) => (
                             <div key={inv.invitation_id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.4rem' }}>
                               <span className="small">{inv.team_name || 'Invitation'}</span>
                               {inv.error && <span className="account-invite-error small" role="alert">{inv.error}</span>}
                               <div style={{ display: 'flex', gap: '0.4rem' }}>
-                                <button type="button" className="ghost small" onClick={() => acceptPendingInvite(inv)} disabled={pendingInvitesBusy === inv.invitation_id}>
+                                <button type="button" className="ghost small" onClick={() => acceptPendingInvite(inv)} disabled={pendingInvitesBusy !== ''}>
                                   {pendingInvitesBusy === inv.invitation_id ? 'Joining…' : 'Accept'}
                                 </button>
-                                <button type="button" className="ghost small" onClick={() => declinePendingInvite(inv)}>Decline</button>
+                                <button type="button" className="ghost small" onClick={() => declinePendingInvite(inv)} disabled={pendingInvitesBusy !== ''}>Decline</button>
                               </div>
                             </div>
                           ))}
@@ -5027,7 +5063,7 @@ function claimIntentInFlight() {
                             type="button"
                             className={(wizardForkChosen === opt.id || (onboarding && onboarding.fork === opt.id)) ? 'fork-option active' : 'fork-option'}
                             aria-pressed={wizardForkChosen === opt.id || (onboarding && onboarding.fork === opt.id)}
-                            disabled={wizardForkBusy || (onboarding && !!onboarding.fork)}
+                            disabled={wizardForkBusy || !!wizardForkChosen || (onboarding && !!onboarding.fork)}
                             onClick={() => handleWizardFork(opt.id)}
                             style={{ display: 'flex', flexDirection: 'column', gap: '0.25rem', textAlign: 'left', padding: '0.7rem 0.9rem', border: '1px solid var(--border,#1e293b)', borderRadius: 8, background: 'var(--surface,#0d1a2d)', cursor: wizardForkBusy || (onboarding && !!onboarding.fork) ? 'default' : 'pointer' }}
                           >
@@ -5113,7 +5149,7 @@ function claimIntentInFlight() {
                                 no key yet) must never be trapped on the connect
                                 step — Skip defers; the done step's copy stays
                                 honest ('connect it later'). */}
-                            <button type="button" className="ghost" onClick={() => setWizardStep(4)}>Skip for now</button>
+                            <button type="button" className="ghost" onClick={() => { setWizardPaused(true); setWizardStep(4) }}>Skip for now</button>
                           </div>
                           {/* #2325: the affordances below are ESCAPES, not a
                               second path — a muted contextual 'Manage keys'
@@ -5132,7 +5168,7 @@ function claimIntentInFlight() {
                               {isOwnerAdmin ? `Manage keys for ${shownOrgName || 'your organization'} →` : `View keys for ${shownOrgName || 'your organization'} →`}
                             </button>
                             {isOwnerAdmin && (
-                              <button type="button" aria-expanded={wizardShowPaste} aria-controls="wizard-paste-row"
+                              <button type="button" aria-expanded={wizardShowPaste} aria-controls={wizardShowPaste ? 'wizard-paste-row' : undefined}
                                 onClick={() => {
                                   // #2325 (review P2): opening the disclosure must NOT
                                   // clear the active error (the 402 copy explains the
@@ -5170,6 +5206,7 @@ function claimIntentInFlight() {
                               style={{ flex: 1, minWidth: 0, padding: '0.5rem 0.65rem', background: 'var(--surface,#0d1a2d)', border: '1px solid var(--border,#1e293b)', borderRadius: 8, fontSize: 13, color: 'inherit' }}
                             />
                             <button
+                              data-paste-use
                               type="button"
                               className="ghost"
                               disabled={!wizardDurablePaste.trim()}
@@ -5260,6 +5297,7 @@ function claimIntentInFlight() {
                               the embedded key plaintext is not recoverable
                               from the keys table (server keeps hashes). */}
                           <p className="dim small" style={{ margin: '0.9rem 0 0', lineHeight: 1.6 }}>
+                            <span className="sr-only" role="status">Your key is shown once — copy the setup command now.</span>
                             The key below is shown once — copy the command now. Skipping means this key won't be shown again — you can reconnect later from the Setup guide (you may need to create a new key). If you lose it, rotate it in the API Keys tab.
                           </p>
                           <pre className="snippet" style={{ marginTop: '0.75rem' }}>
@@ -5273,9 +5311,11 @@ function claimIntentInFlight() {
                               install line above fetches it. */}
                           {!['codexDesktop', 'claude-desktop', 'claude-web'].includes(wizardConnectHarness) && (
                           <p className="dim small" style={{ margin: '0.75rem 0 0', lineHeight: 1.6 }}>
-                            Run the command, then tell your agent “Set up Tortoise” —
-                            it confirms the connection with <code>tortoise_health</code>
-                            and reports back here when it's done.
+                            Run the command, then tell your agent “Set up Tortoise”.
+                            When your agent says the connection check passed, click
+                            “My agent confirmed it — Continue →” below. The wizard
+                            itself doesn't watch the agent — its report comes in
+                            your terminal or chat.
                           </p>
                           )}
                           <div className="wizard-nav">
@@ -5293,7 +5333,7 @@ function claimIntentInFlight() {
                                   {wizardConnectBusy ? 'Saving…' : (HARNESS_CONTINUE_LABEL[wizardHarness] || (HARNESS_SELF_INSTALL.includes(wizardHarness) ? 'My agent confirmed it — Continue →' : "I've set it up — Continue →"))}
                                 </button>
                               )}
-                              <button type="button" className="ghost" onClick={() => setWizardStep(4)}>Skip for now</button>
+                              <button type="button" className="ghost" onClick={() => { setWizardPaused(true); setWizardStep(4) }}>Skip for now</button>
                             </div>
                           </div>
                         </>
@@ -5303,7 +5343,11 @@ function claimIntentInFlight() {
 
                   {wizardStep === 4 && (
                     <div className="done">
-                      <p className="dim">Your agent takes over from here — connect it, and it files your decisions and findings to this Organization's graph. Open Settings → Setup guide to follow what happens next.</p>
+                      {wizardPaused ? (
+                        <p className="dim">You're set up, but your agent isn't connected yet — nothing was installed on the connect step. Open Settings → Setup guide to follow what happens next — the setup command there creates a fresh key when you do.</p>
+                      ) : (
+                        <p className="dim">Your agent is connected — it files your decisions and findings to this Organization's graph from here on. Open Settings → Setup guide to follow what happens next.</p>
+                      )}
                       <div className="wizard-nav">
                         <button type="button" className="ghost" onClick={() => setWizardStep(3)}>← Back</button>
                       </div>
@@ -6018,13 +6062,14 @@ function claimIntentInFlight() {
                 </div>
               </>
             ) : (
-              // #2167 (step 6): the "…the dashboard re-keys once a key can
-              // be minted" clause dies with the login mint — the dashboard
-              // never auto-mints. One prompt + an IN-APP action (the API
-              // Keys tab is one click away); the external Connect link stays
-              // secondary.
+              // #2361 review-r2: role-aware — a member can't create keys and
+              // a second fresh create would 402 once the 2-key allowance is
+              // used. Members get the ask-owner path; the keys tab is still
+              // one click away for owners (their only first-party surface).
               <p className="dim">
-                Your Organization is live — create a key on the API Keys tab to connect your agent.
+                {isOwnerAdmin
+                  ? 'Your Organization is live — connect your agent below (its key is created on the connect step, or in the API Keys tab).'
+                  : "Your Organization is live — connect your agent below. You'll need an API key to paste: ask an owner or admin to share one."}
               </p>
             )}
             <div className="empty-actions">
