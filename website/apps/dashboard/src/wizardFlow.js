@@ -105,13 +105,27 @@ export function resolveBuildCatalog(modules, fallback = BUILD_CATALOG_PLACEHOLDE
 // named rows. Pure helper (node --test unit-tested). UTC stamp → sortable
 // and unambiguous across timezones.
 export function durableKeyName(orgName, date = new Date(), existingNames = []) {
-  const org = (orgName && String(orgName).trim()) || 'your organization'
+  const orgRaw = (orgName && String(orgName).trim()) || 'your organization'
   const pad = (n) => String(n).padStart(2, '0')
   const stamp = `${date.getUTCFullYear()}-${pad(date.getUTCMonth() + 1)}-${pad(date.getUTCDate())} ${pad(date.getUTCHours())}:${pad(date.getUTCMinutes())} UTC`
-  let name = `key for ${org} ${stamp}`
+  // #2325 (code-review P2): the server clamps key labels to 64 chars
+  // (hosted_api KEY_NAME_MAX, _clean_key_label s[:64] — silent), so the
+  // stamp + (n) suffix must never sit in the truncated tail. Bound the org
+  // segment first, keep the label ≤ 64, and run the collision guard against
+  // the clamped names the table actually stores.
+  const MAX = 64
+  const head = 'key for '
+  const tail = ` ${stamp}` // ~21 chars
+  const orgMax = MAX - head.length - tail.length - 4 // reserve room for " (n)"
+  const org = orgRaw.length > orgMax ? orgRaw.slice(0, orgMax).replace(/[_-]+$/, '') : orgRaw
+  const base = `${head}${org}${tail}`
   const seen = new Set(Array.isArray(existingNames) ? existingNames.filter(Boolean) : [])
+  let name = base
   let n = 2
-  while (seen.has(name)) name = `key for ${org} ${stamp} (${n++})`
+  while (seen.has(name)) {
+    const suffix = ` (${n++})`
+    name = `${base.slice(0, MAX - suffix.length)}${suffix}`
+  }
   return name
 }
 

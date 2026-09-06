@@ -119,3 +119,19 @@ test('#2325/#2333: durableKeyName carries org + date and is collision-guarded â€
   // existingNames that are null/empty never force a suffix
   assert.equal(durableKeyName('acme', date, [null, '', undefined]), n1)
 })
+
+test('#2325 (review P2): labels never exceed the server\'s 64-char clamp, and the date survives long org names', () => {
+  // max-length legal org name (server + orgNameError allow 64)
+  const date = new Date('2026-09-06T14:32:07Z')
+  const orgs = ['a'.repeat(64), 'a'.repeat(38), 'very-long-organization-name-which-is-forty-plus-chars', 'abcdefghijklmnopqrstuvwxyz0123456789-ABCDEFGHIJKLMN']
+  for (const org of orgs) {
+    const n = durableKeyName(org, date)
+    assert.ok(n.length <= 64, `label ${n.length} > 64 for org len ${org.length}: ${n}`)
+    assert.ok(n.includes('2026-09-06 14:32 UTC'), `date must survive truncation: ${n}`)
+  }
+  // two same-minute mints for a long org stay distinct even after the clamp
+  const m1 = durableKeyName('a'.repeat(38), date)
+  const m2 = durableKeyName('a'.repeat(38), date, [m1])
+  assert.notEqual(m1, m2, 'long-org same-minute mints must stay distinct')
+  assert.ok(m2.length <= 64)
+})
