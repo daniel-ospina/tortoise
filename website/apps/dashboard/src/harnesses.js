@@ -76,6 +76,8 @@ export const HARNESS_INTRO = {
   claude: 'Run these commands in your terminal:',
   'claude-desktop': 'Edit ~/Library/Application Support/Claude/claude_desktop_config.json (macOS) — or Claude > Settings > Developer in the app — and add the tortoise block below. Merge into an existing mcpServers section — don\'t replace the whole file. The key stays literal here — keep the file private. Restart Claude after saving.',
   codex: 'Run these commands in your terminal:',
+  // #2328: Desktop variant intro (no terminal).
+  codexDesktop: 'Edit ~/.codex/config.toml (create it if missing) — Codex Desktop and the CLI share this file. Copy the block, paste it in, then fully quit and reopen Codex Desktop:',
   pi: 'Paste this into your Pi agent:',
 }
 
@@ -160,6 +162,7 @@ export const HARNESS_SKILLS = (harness) =>
 export const HARNESS_COPY_LABEL = {
   'claude-web': 'Copy prompt',
   pi: 'Copy prompt',
+  codexDesktop: 'Copy instructions',
 }
 
 // #1694: per-harness label for the post-copy Continue affordance — for
@@ -247,7 +250,55 @@ export const UNIVERSAL_COMMAND = {
   claude: (key) =>
     `# Tortoise — universal setup command (Claude Code)\n# The same command covers all 6 harnesses — your agent self-adjudicates which\n# it is from the tortoise-onboarding skill's harness table.\nexport TORTOISE_API_KEY=${key}\nclaude mcp add --transport http tortoise ${MCP_URL} --header "Authorization: Bearer ${'${TORTOISE_API_KEY}'}"\n\n${SKILL_INSTALL('claude')}\n\n# Then tell your agent: "Set up Tortoise" — it verifies with tortoise_health\n# and reports the harness-connected checkpoint.`,
   codex: (key) =>
-    `# Tortoise — universal setup command (Codex)\nexport TORTOISE_API_KEY=${key}\ncodex mcp add tortoise --url ${MCP_URL} --bearer-token-env-var TORTOISE_API_KEY\n\n${SKILL_INSTALL('codex')}\n\n# Then tell your agent: "Set up Tortoise" — it verifies with tortoise_health\n# and reports the harness-connected checkpoint.`,
+    `# Tortoise — universal setup command (Codex CLI)
+export TORTOISE_API_KEY=${key}
+codex mcp add tortoise --url ${MCP_URL} --bearer-token-env-var TORTOISE_API_KEY
+
+${SKILL_INSTALL('codex')}
+
+# Then tell your agent: "Set up Tortoise" — it verifies with tortoise_health
+# and reports the harness-connected checkpoint.
+# First-time calls may prompt for approval in Codex — tortoise_health and the
+# read-only tools are safe to allow (granular auto-approve for read tools).
+# On Codex Desktop (no terminal)? Use the Desktop variant on the dashboard
+# tab instead — it configures ~/.codex/config.toml with no shell.`,
+  // #2328/#2329/#2330: Codex Desktop (the GUI app) has NO terminal and does
+  // not inherit shell exports — `codex mcp add` is a CLI subcommand it cannot
+  // run. Desktop shares ~/.codex/config.toml with the CLI, so the terminal-
+  // less path is a config-file block: bearer_token_env_var (with the var
+  // placed into the app's environment via launchctl/setx) OR the literal
+  // http_headers fallback (private file, chmod 600 — never committed).
+  // Skills live in .agents/skills (Codex's documented skill root, #2329) and
+  // load when the project folder is open — the Desktop flow defers the
+  // installer to a one-time terminal (or the agent itself inside the project).
+  codexDesktop: (key) =>
+    `# Tortoise — Codex Desktop (no terminal needed)
+# Codex Desktop shares ~/.codex/config.toml with the CLI. Add this block to
+# that file (create it if missing — never put the key in a committed file):
+
+[mcp_servers.tortoise]
+url = "${MCP_URL}"
+bearer_token_env_var = "TORTOISE_API_KEY"
+
+# TORTOISE_API_KEY must exist in Codex Desktop's environment — GUI apps do
+# not read your shell profile. Pick ONE:
+#   macOS:    launchctl setenv TORTOISE_API_KEY ${key}   (then fully quit +
+#             reopen Codex Desktop; lasts until logout)
+#   Windows:  setx TORTOISE_API_KEY ${key}   (System env; relaunch Codex)
+# No shell available at all? Put the key in the config directly instead
+# (private file — chmod 600, never commit it):
+#   [mcp_servers.tortoise]
+#   url = "${MCP_URL}"
+#   http_headers = { Authorization = "Bearer ${key}" }
+
+# Skills: Codex loads skills from .agents/skills in the project folder you
+# have open (not .codex/skills). Run this once from any terminal (or ask
+# your agent to run it inside the project):
+#   curl -fsSL ${SKILLS_INSTALL_URL} | bash -s -- --harness codex
+
+# Then say "Set up Tortoise" in Codex Desktop — it verifies with
+# tortoise_health and reports the checkpoint. First-time MCP calls may prompt
+# for approval — tortoise_health and the read-only tools are safe to allow.`,
   cursor: () =>
     `# Tortoise — universal setup command (Cursor)\n# 1. Export the key — add this line to your shell profile so it persists:\nexport TORTOISE_API_KEY=<your-tortoise-api-key>\n# 2. Create .cursor/mcp.json in this project with:\n${JSON.stringify(CURSOR_MCP_CONFIG_ENV, null, 2)}\n# 3. Install the Tortoise skills (run in a terminal):\ncurl -fsSL ${SKILLS_INSTALL_URL} | bash -s -- --harness cursor\n# 4. Restart Cursor, then tell your agent: "Set up Tortoise" — it verifies\n#    with tortoise_health and reports the harness-connected checkpoint.\n#    (The config references the env var, never the key.)`,
   pi: (key) =>

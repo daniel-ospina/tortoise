@@ -792,6 +792,10 @@ function claimIntentInFlight() {
   const setWizardStep = React.useCallback((n) => { setWizardStepRaw(n); setWizardCopied((c) => (c === 'harness' ? '' : c)) }, [])
   const [wizardHarness, setWizardHarness] = React.useState('claude')
   const [wizardCopied, setWizardCopied] = React.useState('')
+  // #2328: Codex has two surfaces — CLI (shell) and Desktop (GUI app, NO
+  // terminal, does not inherit shell exports). The connect step toggles so a
+  // Desktop user never faces an export-command they cannot run.
+  const [wizardCodexDesktop, setWizardCodexDesktop] = React.useState(false)
   const [wizardGithub, setWizardGithub] = React.useState({ connected: false, repos: null, busy: false, org: null })
   const wizardGithubPollRef = React.useRef(null)  // #1643 review P1: the status poll handle (hoisted so Cancel/unmount can stop it)
   // #1728 Slice 3: the Memory-sources surface (wizard step-1 + Overview
@@ -4801,6 +4805,9 @@ function claimIntentInFlight() {
     (Array.isArray(teams)
       ? ((teams.find((t) => t.team_id === teamIdRef.current) || teams[0] || {}).team_name || '')
       : '') || ''
+  // #2328: the Codex connect step renders one of two surfaces — 'codex'
+  // (CLI) or 'codexDesktop' (GUI). Other harnesses pass through unchanged.
+  const wizardConnectHarness = (wizardHarness === 'codex' && wizardCodexDesktop) ? 'codexDesktop' : wizardHarness
 
   if (welcomeMode && authed) {
     // #1566: first-timers are provisioned IN-APP — show the provisioning
@@ -5027,7 +5034,7 @@ function claimIntentInFlight() {
                         {HARNESS_ORDER.map((h) => (
                           <button key={h} type="button"
                             className={'harness-tab' + (wizardHarness === h ? ' active' : '')}
-                            onClick={() => { setWizardHarness(h); setWizardCopied('') }}>
+                            onClick={() => { setWizardHarness(h); setWizardCopied(''); if (h !== 'codex') setWizardCodexDesktop(false) }}>
                             {HARNESS_NAMES[h]}
                           </button>
                         ))}
@@ -5182,9 +5189,23 @@ function claimIntentInFlight() {
                         </>
                       ) : (
                         <>
-                          {HARNESS_INTRO[wizardHarness] && (
+                          {wizardHarness === 'codex' && (
+                            // #2328: CLI vs Desktop surface toggle — a Codex
+                            // Desktop user must never see an export command
+                            // they cannot run (no terminal in the GUI).
+                            <div role="group" aria-label="Codex setup surface"
+                              style={{ marginTop: '0.9rem', display: 'inline-flex', border: '1px solid var(--border,#1e293b)', borderRadius: 8, overflow: 'hidden' }}>
+                              <button type="button" className={wizardCodexDesktop ? 'ghost small' : 'ghost small codex-variant-on'}
+                                style={wizardCodexDesktop ? {} : { background: 'rgba(6,182,212,0.12)', color: 'var(--accent,#06b6d4)' }}
+                                onClick={() => { setWizardCodexDesktop(false); setWizardCopied('') }}>CLI (terminal)</button>
+                              <button type="button" className="ghost small"
+                                style={wizardCodexDesktop ? { background: 'rgba(6,182,212,0.12)', color: 'var(--accent,#06b6d4)' } : {}}
+                                onClick={() => { setWizardCodexDesktop(true); setWizardCopied('') }}>Desktop (no terminal)</button>
+                            </div>
+                          )}
+                          {HARNESS_INTRO[wizardConnectHarness] && (
                             <p className="dim small" style={{ margin: '0.9rem 0 0', lineHeight: 1.6 }}>
-                              {HARNESS_INTRO[wizardHarness]}
+                              {HARNESS_INTRO[wizardConnectHarness]}
                             </p>
                           )}
                           {/* #2246: shown-once reminder above the snippet —
@@ -5194,7 +5215,7 @@ function claimIntentInFlight() {
                             The key below is shown once — copy the command now. If you lose the key, rotate it in the API Keys tab (the replacement is shown once there too).
                           </p>
                           <pre className="snippet" style={{ marginTop: '0.75rem' }}>
-                            {UNIVERSAL_COMMAND[wizardHarness](harnessKey)}
+                            {UNIVERSAL_COMMAND[wizardConnectHarness](harnessKey)}
                           </pre>
                           {/* #1998 (W2): the universal command covers all 6
                               harnesses — 4 self-install (Claude Code, Cursor,
@@ -5215,8 +5236,8 @@ function claimIntentInFlight() {
                                 <p className="error" role="alert" style={{ margin: '0 0.5rem 0 0', fontSize: 13 }}>{wizardConnectError}</p>
                               )}
                               <button type="button" className={wizardCopied === 'harness' ? 'ghost' : 'btn-primary'}
-                                onClick={() => wizardCopy(UNIVERSAL_COMMAND[wizardHarness](harnessKey), 'harness')}>
-                                {wizardCopied === 'harness' ? 'Copied ✓' : (HARNESS_COPY_LABEL[wizardHarness] || 'Copy setup')}
+                                onClick={() => wizardCopy(UNIVERSAL_COMMAND[wizardConnectHarness](harnessKey), 'harness')}>
+                                {wizardCopied === 'harness' ? 'Copied ✓' : (HARNESS_COPY_LABEL[wizardConnectHarness] || 'Copy setup')}
                               </button>
                               {wizardCopied === 'harness' && (
                                 <button type="button" className="btn-primary" onClick={wizardHarnessContinue} disabled={wizardConnectBusy}>
