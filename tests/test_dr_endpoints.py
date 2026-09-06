@@ -162,6 +162,26 @@ class TestDrStatus:
         assert body["enabled"] is True
         assert "watcher" in body and "driver" in body
 
+    def test_status_surfaces_last_sweep_rollup(self, client, dr_env, mem_storage):
+        """#2372: /status surfaces the sweep's per-graph roll-up (totals,
+        failures, streaks) from ops/state.json — not just the watcher's
+        per-team tri-state."""
+        mem_storage.upload("ops/state.json", json.dumps({
+            "last_team_count": 2,
+            "last_sweep_at": "2026-09-06T10:00:00+00:00",
+            "graph_totals": {"attempted": 3, "backed_up": 2, "errors": 1},
+            "graph_failures": [{"team_id": "team_x", "graph_id": "g_a",
+                                "error": "boom", "streak": 2}],
+            "graph_error_streaks": {"team_x:g_a": 2},
+        }).encode())
+        r = client.get("/v1/internal/backups/status", headers=INTERNAL_HEADERS)
+        assert r.status_code == 200
+        ls = r.json()["last_sweep"]
+        assert ls["last_sweep_at"] == "2026-09-06T10:00:00+00:00"
+        assert ls["graph_totals"]["errors"] == 1
+        assert ls["graph_failures"][0]["streak"] == 2
+        assert ls["graph_error_streaks"] == {"team_x:g_a": 2}
+
 
 class TestDrSimulate:
     def test_simulate_403_when_disabled(self, client, dr_env, mem_storage):

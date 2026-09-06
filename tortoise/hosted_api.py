@@ -17989,6 +17989,25 @@ async def backups_status(request: Request):
         pass  # not-yet-written heartbeat is benign, not an error
     except Exception as e:  # R2 hiccup must never 500 /status (live-E2E fix)
         storage_error = f"heartbeat read: {e}"
+    # #2372: surface the SWEEP's own run roll-up (ops/state.json — written
+    # every run) so an operator sees per-graph totals/failures/streaks, not
+    # just the watcher's archive-age tri-state.
+    sweep_state = {}
+    try:
+        parsed = _json.loads(storage.download("ops/state.json"))
+        if isinstance(parsed, dict):
+            sweep_state = parsed
+    except KeyError:
+        pass  # sweep never ran yet — benign
+    except Exception as e:
+        storage_error = f"{storage_error}; ops-state read: {e}" if storage_error else f"ops-state read: {e}"
+    last_sweep = {
+        key: sweep_state.get(key)
+        for key in ("last_sweep_at", "last_team_count", "graph_totals",
+                    "graph_failures", "graph_error_streaks")
+    }
+    if not last_sweep.get("last_sweep_at"):
+        last_sweep = None  # sweep never ran — omit the block
     driver_hb = {}
     try:
         parsed = _json.loads(storage.download(_DRIVER_HEARTBEAT_KEY))
@@ -18019,6 +18038,7 @@ async def backups_status(request: Request):
         "per_team": watcher_status.get("per_team", {}),
         "no_teams": watcher_status.get("no_teams", False),
         "unknown": watcher_status.get("unknown", False),
+        "last_sweep": last_sweep,
         "watcher": {
             "running": bool(watcher and watcher._thread and watcher._thread.is_alive()),
             "last_poll_at": hb.get("last_poll_at"),
