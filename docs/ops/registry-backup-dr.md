@@ -114,3 +114,8 @@ curl -sS -X POST -H "Authorization: Bearer $FASTAPI_INTERNAL_KEY" \
 - **NEVER detection while the app is down** — daemon-only; a never-backed-up team during an outage is silent until recovery.
 - **GH single-provider scheduling axis** — the driver terminates in GitHub; a GH incident delays backup triggers (the daemon still alerts).
 - **R2 outage** — neither fabricates (UNKNOWN on fresh boot) nor silences (GH-search fallback + driver R2_DOWN) once a known-good baseline exists.
+
+### Post-#2313 residuals (recorded 2026-09-06 audit — #2378)
+- **Watcher heartbeat is per-team only** — `ops/watcher-heartbeat.json` carries the per-team tri-state; the watcher's per-graph states live in the daemon's in-process last-status (not persisted). Per-graph SWEEP outcomes (totals, failures, consecutive-error streaks) surface on `GET /v1/internal/backups/status` → `last_sweep` (#2372). A daemon restart loses the in-process per-graph watch until the next poll.
+- **Legacy-flat mislabel under control-plane failure** — with the control plane down (or before a team's first legacy-flat classification index exists, ≤1 sweep after #2370 deploys), legacy flat archives on `GET /backups` fall back to the DEFAULT graph bucket even when they were C5-era custom dumps (#2370 index makes this the exception). Restore of a legacy flat custom archive is refused regardless (cross-graph guard).
+- **Tombstoned-graph archive pools are never pruned** — per-graph prune runs only for enumerated ACTIVE graphs and the team-wide drain skips nested keys, so a deleted graph's `backups/{team}/{gid}/` pool accumulates until #2304's purge decision lands (its research item 4 covers backup-artifact disposition; the mechanism is recorded here).
