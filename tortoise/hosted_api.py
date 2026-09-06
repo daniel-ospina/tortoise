@@ -17537,7 +17537,7 @@ async def backups_create(team: dict = Depends(get_current_team_gated)):  # noqa:
         # (SDK team creation names graphs team_{name}, NOT team_{id}; #768/#770),
         # registry mode is the deterministic team_{id}. Fail-closed: a
         # resolution error 503s rather than backing up a wrong/nonexistent graph.
-        from tortoise.backup_sweep import team_graph_name
+        from tortoise.backup_sweep import resolve_active_graph, team_graph_name
         # C5 #2114: a graph-bound key backs up ITS OWN graph (graph_namespace
         # is the resolved FULL name — custom team_{tid}_{gid} or the default);
         # team-wide keys/session back up the team default (today's path).
@@ -17553,11 +17553,28 @@ async def backups_create(team: dict = Depends(get_current_team_gated)):  # noqa:
                     status_code=403,
                     detail={"error_code": "GRAPH_NOT_FOUND",
                             "message": "graph not found for key"})
-            # #2313: canonical key segment — the DEFAULT graph (graph-bound
-            # default keys carry the default namespace) keys under the
-            # literal "default", never a lane-specific raw gid; custom graphs
-            # key under their control-plane id (the sweep's enum id).
-            graph_id = ("default" if graph_name == default_name
+            # #2376: the canonical key segment is decided by graph KIND
+            # through the ACTIVE-graph seam (resolve_active_graph — the same
+            # tombstone guard restore/re-baseline use), NEVER by namespace
+            # string-equality. A default-kind binding must key under the
+            # literal "default" even if its namespace no longer equals the
+            # current default name (graph_name change / stale binding); a
+            # custom always keys under its control-plane id. Custom-bound
+            # keys are the only mintable shape today (the default rides
+            # team-wide keys, _mint_graph_key rejects default bindings), so
+            # this is defense-in-depth for a future default-bound binding or
+            # non-conforming row id — but the classification must not be
+            # hostage to namespace spelling. Unresolved (vanished) graphs
+            # fail closed 403, mirroring the ghost-key guard above.
+            try:
+                g_row = resolve_active_graph(cp_source, team_id,
+                                             team.get("graph_id"))
+            except ValueError as e:
+                raise HTTPException(
+                    status_code=403,
+                    detail={"error_code": "GRAPH_NOT_FOUND",
+                            "message": "graph not found for key"}) from e
+            graph_id = ("default" if g_row["kind"] == "default"
                         else team.get("graph_id"))
         else:
             graph_name = default_name
