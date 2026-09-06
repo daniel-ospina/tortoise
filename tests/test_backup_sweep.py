@@ -1566,3 +1566,26 @@ def test_sweep_degraded_headline_and_error_streaks(shared_proj, monkeypatch):
         assert r3["graph_error_streaks"] == {}
         assert r3["graph_totals"]["errors"] == 0
         assert r3["graph_totals"]["backed_up"] == 2
+
+
+def test_classify_flat_pool_keys_by_listing_not_manifest_bid():
+    """#2414: the flat classification index keys by the R2 LISTING key — a
+    manifest whose self-declared backup_id names a DIFFERENT team/key must
+    not redirect the index (or the failing-default drain's delete, which
+    deletes backups/{index-key}/…) to another backup's objects (prune_backups'
+    untrusted-manifest parity)."""
+    store = MemoryStorage()
+    real = _seed_flat_for_sweep(store, "team_a", "team_team_a_g_custom", 0.1)
+    # forge the manifest's backup_id to point elsewhere
+    forged_key = f"backups/{real}/manifest.json"
+    m = json.loads(store.download(forged_key))
+    m["backup_id"] = "team_other/20200101T000000Z_forged"
+    store.upload(forged_key, json.dumps(m).encode())
+    rows = [{"graph_id": "g_custom", "kind": "custom",
+             "namespace": "team_team_a_g_custom"}]
+    from tortoise.backup_sweep import _classify_flat_pool
+    idx = _classify_flat_pool(store, "team_a", rows)
+    # keyed under the LISTING backup_id (team_a/<real-key>), not the forged id
+    assert set(idx) == {real}, idx
+    assert idx[real]["graph_id"] == "g_custom"
+    assert not any("team_other" in k for k in idx)
