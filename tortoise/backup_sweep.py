@@ -817,21 +817,78 @@ def run_backup_sweep(
             }
         )
 
+    # ── #2372: per-graph run roll-up — a green headline must never mask
+    # custom-graph failures. Aggregate every active graph's outcome (the
+    # team surface only reflects the DEFAULT graph); graph errors ride the
+    # error-streak map across runs so an operator can distinguish "healthy"
+    # from "graph X errored N consecutive runs" without duplicating the
+    # watcher's STALE/NEVER path (they fire on ARCHIVE AGE, these on RUN
+    # outcome).
+    prev_state = ops_state if isinstance(ops_state, dict) else {}
+    prev_streaks = prev_state.get("graph_error_streaks") or {}
+    try:
+        prev_streaks = {str(k): int(v) for k, v in prev_streaks.items()}
+    except (TypeError, ValueError):
+        prev_streaks = {}
+    graphs_attempted = 0
+    graphs_backed_up = 0
+    graph_errors = 0
+    graph_failures: list[dict[str, Any]] = []
+    streaks: dict[str, int] = {}
+    for team_id, res in results.items():
+        team_graphs = res.get("graphs") if isinstance(res, dict) else None
+        if not isinstance(team_graphs, dict):
+            continue  # resolution/error results carry no graph map
+        graphs_attempted += len(team_graphs)
+        for gid, gr in team_graphs.items():
+            st = gr.get("status") if isinstance(gr, dict) else None
+            if st == "backed_up":
+                graphs_backed_up += 1
+                streaks.pop(f"{team_id}:{gid}", None)
+            elif st == "error":
+                graph_errors += 1
+                key = f"{team_id}:{gid}"
+                streak = int(prev_streaks.get(key) or 0) + 1
+                streaks[key] = streak
+                graph_failures.append({
+                    "team_id": team_id, "graph_id": gid,
+                    "error": str(gr.get("error") or "")[:300],
+                    "streak": streak,
+                })
+    if len(streaks) > 500:  # bounded — drop oldest under pathological churn
+        for _ in range(len(streaks) - 500):
+            streaks.pop(next(iter(streaks)), None)
+    graph_totals = {"attempted": graphs_attempted,
+                    "backed_up": graphs_backed_up,
+                    "errors": graph_errors}
     _write_json(
         storage, OPS_STATE_KEY,
         {
             "last_team_count": len(team_ids),
             "last_sweep_at": now.isoformat(),
             "updated_at": now.isoformat(),
+            "graph_totals": graph_totals,
+            "graph_failures": graph_failures[:20],
+            "graph_error_streaks": streaks,
         },
     )
 
     backed_up = sum(
         1 for r in results.values() if r.get("status") == "backed_up"
     )
+    # #2372 headline truthfulness: teams whose DEFAULT backed up are green,
+    # but a run where any ACTIVE graph errored is degraded — never a bare
+    # "backed_up". (Custom-only failures with a failing default already
+    # read no_work via the team surface; graph_totals carries the detail.)
+    status = "backed_up" if backed_up else "no_work"
+    if graph_errors and backed_up:
+        status = "degraded"
     return {
-        "status": "backed_up" if backed_up else "no_work",
+        "status": status,
         "teams_backed_up": backed_up,
+        "graph_totals": graph_totals,
+        "graph_failures": graph_failures,
+        "graph_error_streaks": streaks,
         "results": results,
         "incidents": incidents,
     }

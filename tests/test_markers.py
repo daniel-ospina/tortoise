@@ -80,6 +80,8 @@ ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
                            "e2e-900": "redirect-derived per-path"},
     "test_invites_email_http.py": {"registry": "prod-coupled"},
     "test_invites_http.py": {"registry": "prod-coupled"},
+    "test_invite_fusion_http.py": {"registry": "prod-coupled"},    # #2003 (W7): registry lane invite-fusion HTTP tests
+    "test_invite_fusion_docker.py": {"registry": "prod-coupled"}, # #2003 (W7): docker-lane fusion journeys
     "test_mcp_http.py": {"registry": "prod-coupled"},
     "test_mcp_server_auth_modes.py": {"registry": "prod-coupled"},   # C2 #2111 TestTenantModeDefault tk_ resolve mirrors test_mcp_http's registry pattern
     "test_metering.py": {"registry": "prod-coupled"},
