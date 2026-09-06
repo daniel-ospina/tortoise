@@ -3663,6 +3663,12 @@ def run_evaluation(
                         "llm_retries": (ingest_stats.get("llm") or {}).get("retries", 0),
                         "llm_truncated": (ingest_stats.get("llm") or {}).get("truncated", 0),
                         "recovery": ingest_stats.get("recovery", {}),
+                        # #2408 Task 2: the healthy-path per-seam output
+                        # tokens + S4 merge composition ride the outcome
+                        # (the integrity.s4_reemit census readout's source).
+                        "s2_out_tokens": (ingest_stats.get("recovery") or {}).get("s2_out_tokens", 0),
+                        "s4_out_tokens": (ingest_stats.get("recovery") or {}).get("s4_out_tokens", 0),
+                        "s4_merge": ingest_stats.get("s4_merge", {}),
                         "session_recall@k": ret["session_recall@k"],
                         "turn_recall@k": ret["turn_recall@k"],
                         "evidence_recall@k": ret.get("evidence_recall@k"),
@@ -4316,6 +4322,10 @@ def outcomes_to_report(
                 # R5 (#1544): TR-constraint surface — read via o.get so a
                 # pre-R5 checkpoint resumes with the defaults (None/False).
                 "tr_constraint",
+                # #2408 Task 2: the healthy-path S2/S4 output tokens + S4
+                # merge composition ride the Layer-1 projection (integrity.
+                # s4_reemit reads them from the published outcomes).
+                "s2_out_tokens", "s4_out_tokens", "s4_merge",
             )} | {"legs": list(o.get("legs") or []),
                   # False default: a pre-R5 checkpoint had no TR path — no
                   # filter ran, so the fallback flag is honestly False.

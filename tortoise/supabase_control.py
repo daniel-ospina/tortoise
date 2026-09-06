@@ -2175,10 +2175,15 @@ def team_api_keys(cp, team_id: str,
     ephemeral session keys from API data instead of a prefix heuristic.
     C3 (#2112): optional graph_id filter (surface 12 — per-graph key panel)
     + the C1 tenancy columns ride the select (scopes/delegation/graph_id/
-    created_by_key_id) so the list renders scope state."""
+    created_by_key_id) so the list renders scope state. #2380 (P2): the
+    minting USER (created_by) rides the select too — hosted_api's supabase
+    branch maps row.get("created_by") and would otherwise always see None
+    in production (PostgREST only returns selected columns).
+    """
     select = ["id", "key_prefix", "created_at", "last_used_at",
               "revoked_at", "enabled", "name", "created_via", "expires_at",
-              "graph_id", "scopes", "delegation_depth", "created_by_key_id"]
+              "graph_id", "scopes", "delegation_depth", "created_by_key_id",
+              "created_by"]
     filters = [("team_id", "eq", team_id)]
     if graph_id is not None:
         filters.append(("graph_id", "eq", graph_id))
