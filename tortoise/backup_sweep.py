@@ -789,6 +789,23 @@ def resolve_active_graph(source, team_id: str, graph_id: str) -> dict[str, Any]:
     )
 
 
+def _noop_ops_state(ops_state: Any, now: datetime) -> dict[str, Any]:
+    """#2412: a no-op run (0 eligible / 0 teams) must NOT erase the last real
+    run's roll-up — merge-preserve the #2372 sweep fields (last_sweep_at,
+    graph_totals, graph_failures, graph_error_streaks) so /status last_sweep
+    keeps showing the last REAL sweep and the cross-run error-streak
+    bookkeeping survives no-op runs (the pre-#2412 code replaced the whole
+    object, rendering last_sweep: None "sweep never ran" right after a
+    healthy run)."""
+    prev = ops_state if isinstance(ops_state, dict) else {}
+    out = {"last_team_count": 0, "updated_at": now.isoformat()}
+    for key in ("last_sweep_at", "graph_totals", "graph_failures",
+                "graph_error_streaks"):
+        if key in prev:
+            out[key] = prev[key]
+    return out
+
+
 def run_backup_sweep(
     *,
     db,
@@ -838,8 +855,7 @@ def run_backup_sweep(
                 }
             )
             _write_json(
-                storage, OPS_STATE_KEY,
-                {"last_team_count": 0, "updated_at": now.isoformat()},
+                storage, OPS_STATE_KEY, _noop_ops_state(ops_state, now),
             )
             return {
                 "status": "no_eligible_teams",
@@ -849,12 +865,12 @@ def run_backup_sweep(
             }
         # ── Legacy path: 0 ALL teams ──
         if prev_team_count > 0 and not _enum_delta_suppressed():
-            # A wiped enumeration source must not degrade silently to the
-            # chronic NO_TEAMS state — this is an incident, not a signal.
-            # (#669 flip window P3-4: suppressed while the operator sets
-            # TORTOISE_SUPPRESS_ENUM_DELTA=1 — the registry delete makes the
-            # 0→0 drop legitimate; the pre-deploy gate guarantees both stores
-            # are empty before the flip.)
+                # A wiped enumeration source must not degrade silently to the
+                # chronic NO_TEAMS state — this is an incident, not a signal.
+                # (#669 flip window P3-4: suppressed while the operator sets
+                # TORTOISE_SUPPRESS_ENUM_DELTA=1 — the registry delete makes the
+                # 0→0 drop legitimate; the pre-deploy gate guarantees both stores
+                # are empty before the flip.)
             incidents.append(
                 {
                     "kind": "ENUM_DELTA",
@@ -863,8 +879,7 @@ def run_backup_sweep(
                 }
             )
         _write_json(
-            storage, OPS_STATE_KEY,
-            {"last_team_count": 0, "updated_at": now.isoformat()},
+            storage, OPS_STATE_KEY, _noop_ops_state(ops_state, now),
         )
         return {
             "status": "no_teams",
@@ -872,7 +887,6 @@ def run_backup_sweep(
             "results": {},
             "incidents": incidents,
         }
-
     results: dict[str, Any] = {}
     resolution_failures = 0
     for team_id in sorted(team_ids):
