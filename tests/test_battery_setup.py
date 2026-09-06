@@ -79,7 +79,9 @@ class TestBatchSetup:
         for sid, n in rounds.items():
             assert n <= 2, f"{sid} took {n} round trips"
         # ≤2 per scenario (operator-less scenarios legitimately take 1 —
-        # the #1407 production corpus has 21 operator-bearing of 134).
+        # under the seed_mode default only the lp-* graph_script triangles
+        # carry operators (12 of 140); the planted-pair NAND operators live
+        # in the legacy full graph the relocked tests exercise).
         assert counter.count <= 2 * len(scenarios)
 
     def test_batch_is_idempotent(self, fresh_db):
@@ -158,23 +160,34 @@ class TestEquivalence:
         assert naive_rounds > 4 * n_items
 
     def test_promote_source_live(self, fresh_db):
+        # RELOCK (#2284 T4): seed_mode is now the batch DEFAULT — ct-* plant
+        # NO NAND operators pre-k, so nothing promotes in the default graph.
+        # The promotion invariant lives on the operator path, so this test
+        # seeds the LEGACY full graph (seed_mode=False — the pre-fix
+        # derivation kept for operator canonicalization/promotion coverage;
+        # the seed_mode default is locked operator-less + claim_a-only by
+        # test_battery_r1_seed).
         proj = fresh_db._get_proj()
         scenarios = _scenarios()
-        batch_setup(proj, scenarios, embedding_fn=_embedding_fn)
+        batch_setup(proj, scenarios, embedding_fn=_embedding_fn, seed_mode=False)
         state = graph_state_equivalence(proj, scenarios)
         statuses = {v["status"] for v in state["points"].values()}
         assert "live" in statuses  # contradiction sources promoted
 
     def test_nand_unidirectional_both_paths(self, fresh_db, tmp_path):
+        # RELOCK (#2284 T4): same seed_mode-default re-anchor as
+        # test_promote_source_live — the planted-pair NAND canonicalization
+        # invariant (direction=unidirectional on BOTH paths) needs the LEGACY
+        # full graph where the ct-*/xs-* NAND operators exist.
         from tortoise.sdk import TortoiseSDK
         scenarios = _scenarios()
         proj = fresh_db._get_proj()
-        batch_setup(proj, scenarios, embedding_fn=_embedding_fn)
+        batch_setup(proj, scenarios, embedding_fn=_embedding_fn, seed_mode=False)
         state_b = graph_state_equivalence(proj, scenarios)
         sdk_n = TortoiseSDK(str(tmp_path / "n.db"))
         try:
             for s in scenarios:
-                naive_setup(sdk_n, s)
+                naive_setup(sdk_n, s, seed_mode=False)
             state_n = graph_state_equivalence(sdk_n._get_proj(), scenarios)
         finally:
             sdk_n.close()

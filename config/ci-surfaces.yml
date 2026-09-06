@@ -5,6 +5,12 @@ surfaces:
   - test_abuse.py
   - test_abuse_integration.py
   - test_acl_graph_users.py   # C4 #2113: per-graph FalkorDB ACL layer (docker-lane; skipif no URI)
+  - test_battery_corpus_v11.py
+  - test_battery_loader_fidelity.py
+  - test_battery_parity_hash.py
+  - test_battery_r1_seed.py
+  - test_battery_report_writers.py
+  - test_battery_schema_v11.py
   - test_delivery_tenancy.py  # C6 #2115: delivery-shape tenancy + session_recording per-graph override
   - test_tenancy_spine.py     # C5 #2114: data-plane tenancy spine (cross-graph suite)
   - test_agent_signup.py
@@ -146,6 +152,7 @@ surfaces:
   - test_hosted_volunteer_context.py   # volunteer §3.2 hosted transport (docker-lane; skipif no URI)
   - test_selfhost_volunteer_context.py # volunteer §3.2 selfhost transport (embedded)
   - test_volunteer_reflex_harness_seam.py  # W3 reflex graded seam (volunteer.decide)
+  - test_platform_seams.py            # epic #2080 end-state seams wave-1: per-turn volunteer CLI + install + shipped hook (embedded, lane-agnostic)
   battery:
   - test_battery_arms.py
   - test_battery_judge.py
@@ -178,6 +185,8 @@ surfaces:
   - test_backup.py
   - test_backup_config.py
   - test_backup_e2e.py
+  - test_backup_graph_enum.py
+  - test_backup_multigraph_e2e.py
   - test_backup_sweep.py
   - test_backup_watcher.py
   - test_bfs_audit.py
@@ -306,6 +315,7 @@ surfaces:
   - test_navigation.py
   - test_no_tests_imports_in_production.py
   - test_notify.py
+  - test_object_registered_journal.py   # #2194 ObjectRegistered journaling (docker lane)
   - test_open_kinds.py
   - test_operator_source_search.py
   - test_operator_source_unit.py

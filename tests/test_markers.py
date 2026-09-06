@@ -135,6 +135,10 @@ ROUTED_SELECT_GRAPH_SITES: dict[str, dict[str, str]] = {
     "test_dr_endpoints.py": {
         'f"team_{team_id}"': "endpoint-constrained",  # seed write — drill/backup resolve team_{id}
         '"team_team_x"': "read-only",                  # post-drill count assert
+        # #2313 custom-graph drill seeds (per-graph sweep/restore E2E); the
+        # server-lane _clean_team_graphs fixture drops team_* graphs per test
+        '"team_team_x_g_c1"': "endpoint-constrained",  # custom drill seed write
+        '"team_team_x_g_x"': "endpoint-constrained",   # custom drill seed write
     },
     "test_writer_inventory.py": {
         '"team_myapp"': "endpoint-constrained",  # seed write — backup dumps teams.graph_name
