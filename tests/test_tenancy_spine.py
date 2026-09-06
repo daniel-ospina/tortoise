@@ -222,6 +222,63 @@ def test_backup_vanished_graph_fails_closed(spine_env):
         assert detail.get("error_code") == "GRAPH_NOT_FOUND", detail
 
 
+class _CaptureStorage:
+    """Minimal dict-backed storage stub that records every object key."""
+
+    def __init__(self):
+        self.objects: dict[str, bytes] = {}
+
+    def upload(self, key, data, content_type=None):
+        self.objects[key] = data
+
+    def list(self, prefix=""):
+        return sorted(k for k in self.objects if k.startswith(prefix))
+
+    def download(self, key):
+        return self.objects[key]
+
+    def delete(self, key):
+        self.objects.pop(key, None)
+
+
+def test_backup_graph_bound_custom_keys_under_gid_via_seam(spine_env):
+    """#2376 regression: a graph-bound key on a CUSTOM graph keys its
+    on-demand archive under the custom gid segment through the ACTIVE-graph
+    seam (kind-based classification), never a namespace-equality heuristic —
+    so a custom can never be bucketed under the default segment and a
+    default-kind binding keys under "default" regardless of namespace
+    spelling. (A default-bound binding cannot be minted today —
+    _mint_graph_key rejects kind='default' — so the drift scenario is
+    defense-in-depth; this test pins the custom path end-to-end.)"""
+    sdk, tid, g, tc, _def_pt = spine_env
+    import tortoise.hosted_api as ha_mod
+    from tortoise import pricing as _pricing
+
+    cap = _CaptureStorage()
+    try:
+        _orig_gate = _pricing.daily_backups_enabled
+        _pricing.daily_backups_enabled = lambda tier: tier == "pro"
+        _orig_key = ha_mod._backup_storage
+        ha_mod._backup_storage = lambda: cap
+        # hosted create requires the backup key (encryption) — provide one.
+        _bak_key = os.environ.pop("TORTOISE_BACKUP_KEY", None)
+        os.environ["TORTOISE_BACKUP_KEY"] = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+        token = _mint_key(sdk, tid, scopes=["graphs:read"],
+                          graph_id=g["graph_id"])
+        r = tc.post("/backups", headers={"Authorization": f"Bearer {token}"})
+    finally:
+        _pricing.daily_backups_enabled = _orig_gate
+        ha_mod._backup_storage = _orig_key
+        if _bak_key is None:
+            os.environ.pop("TORTOISE_BACKUP_KEY", None)
+        else:
+            os.environ["TORTOISE_BACKUP_KEY"] = _bak_key
+    assert r.status_code == 201, r.text
+    prefix = f"backups/{tid}/{g['graph_id']}/"
+    keys = [k for k in cap.objects if k.startswith(prefix)]
+    assert keys, f"no archive under the custom gid segment: {list(cap.objects)}"
+
+
 def test_team_level_surface_rejects_graph_bound(spine_env):
     """D-C5-2 team surfaces: a graph-bound key on /v1/team (overview reads
     the DEFAULT graph) is rejected outright — no default-graph leak via a
