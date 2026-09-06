@@ -24,12 +24,17 @@ export const WIZARD_STEPS = Object.freeze([
   {
     id: 'orientation',
     label: 'Orientation',
-    sub: "Here's what's about to happen: install → connect → add your organization and you → make your first decision.",
+    // #2361 review-r1: this sub used to promise 'install → connect → add
+    // your organization and you → make your first decision' — the live 5-step
+    // wizard creates the org first, connects second, and never adds the user
+    // or makes a decision (both are agent-side after connect). State the real
+    // order; the numbered bullets below carry the detail.
+    sub: "Here's what happens next: name your organization, choose how you'll use Tortoise, then connect your agent — your agent takes it from there.",
   },
   {
     id: 'org-create',
     label: 'Create your Organization',
-    sub: 'Name your organization — it becomes the first Subject on your graph. Or accept an invitation to join one.',
+    sub: "Name your organization — it's the memory space your agent files decisions and findings into. Or accept an invitation to join one.",
   },
   {
     id: 'fork',

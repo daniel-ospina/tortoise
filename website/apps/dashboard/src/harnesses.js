@@ -75,6 +75,9 @@ export const HARNESS_STEPS = (harness, key) => ({
 export const HARNESS_INTRO = {
   claude: 'Run these commands in your terminal:',
   'claude-desktop': 'Edit ~/Library/Application Support/Claude/claude_desktop_config.json (macOS) — or Claude > Settings > Developer in the app — and add the tortoise block below. Merge into an existing mcpServers section — don\'t replace the whole file. The key stays literal here — keep the file private. Restart Claude after saving.',
+  // #2361 review-r1 (UX-3): Claude Web had no intro — the copy button said
+  // 'Copy prompt' but nothing explained where the prompt goes.
+  'claude-web': 'Start a new chat at claude.ai (or the Claude web app) and paste the prompt below into it — that conversation becomes your connected agent. The prompt keeps the key literal: do not share the chat or the key.',
   codex: 'Run these commands in your terminal:',
   // #2328: Desktop variant intro (no terminal).
   codexDesktop: 'Edit ~/.codex/config.toml (create it if missing) — Codex Desktop and the CLI share this file. Copy the block, paste it in, then fully quit and reopen Codex Desktop:',
