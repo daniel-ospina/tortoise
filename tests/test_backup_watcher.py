@@ -523,3 +523,79 @@ def test_watcher_custom_per_graph_state_does_not_mask_missing_default_mirror():
     # ...but the default's missing mirror still fires METADATA_LOST.
     assert status["per_team"]["team_a"] == "stamp_missing"
     assert list(ch.issues.values()) == ["[DR] METADATA_LOST — team_a"]
+
+
+def _seed_flat_manifest(storage, team: str, graph_name: str,
+                        hours_ago: float) -> str:
+    """Seed a legacy FLAT manifest (pre-#2313 key shape) and return its
+    backup_id (team/key)."""
+    ts = _ts(hours_ago)
+    key = (f"{ts.strftime('%Y%m%dT%H%M%S')}"
+           f"{ts.microsecond // 1000:03d}Z_{secrets.token_hex(4)}")
+    backup_id = f"{team}/{key}"
+    m = {"backup_id": backup_id, "team_id": team, "graph_name": graph_name,
+         "created_at": ts.isoformat(), "node_count": 1, "edge_count": 0,
+         "sha256": "0" * 64}
+    storage.upload(f"backups/{backup_id}/manifest.json",
+                   json.dumps(m).encode())
+    storage.upload(f"backups/{backup_id}/dump.enc", b"x")
+    return backup_id
+
+
+def _seed_legacy_flat_index(storage, team: str,
+                            entries: dict[str, dict]) -> None:
+    from tortoise.backup_sweep import _legacy_flat_index_key
+    storage.upload(_legacy_flat_index_key(team),
+                   json.dumps(entries).encode())
+
+
+def test_watcher_legacy_flat_index_is_authoritative():
+    """#2370: the sweep-written legacy-flat index decides flat classification
+    — a flat the index marks DEFAULT counts toward team freshness even though
+    its manifest names a custom namespace; the same R2 content with an index
+    entry marking it CUSTOM is excluded. (Pre-index the manifest read decided
+    by graph_name vs the default name; the index is the sweep's once-only
+    classification.)"""
+    from tortoise.backup_watcher import _newest_backup_ts
+    for index_kind, counts in (("default", True), ("custom", False)):
+        storage = MemoryStorage()
+        bid = _seed_flat_manifest(storage, "team_a",
+                                  "team_team_a_g_custom", 0.2)
+        gid = "default" if index_kind == "default" else "g_custom"
+        _seed_legacy_flat_index(storage, "team_a",
+                                {bid: {"graph_name": "team_team_a_g_custom",
+                                       "graph_id": gid}})
+        newest = _newest_backup_ts(storage, "team_a")
+        if counts:
+            assert newest is not None, index_kind
+            age_min = (FIXED - newest).total_seconds() / 60.0
+            assert age_min < 90, index_kind
+        else:
+            assert newest is None, index_kind
+
+
+class _ManifestBoomStorage(MemoryStorage):
+    """MemoryStorage whose flat-manifest downloads raise — simulates a
+    transient object-read failure (the #2370 fabricated-STALE trigger)."""
+
+    def download(self, key):
+        if key.endswith("/manifest.json"):
+            raise RuntimeError("transient r2 read failure")
+        return super().download(key)
+
+
+def test_watcher_transient_manifest_read_failure_no_fabricated_stale():
+    """#2370 P2-2 regression: an unreadable flat manifest must NOT drop the
+    newest archive from freshness (pre-fix `except Exception: continue`
+    excluded it → fabricated spurious STALE). Count-as-default is the
+    pre-#2313 key-derived parity — exists ⇒ counts this cycle."""
+    ch = _Channels()
+    storage = _ManifestBoomStorage()
+    _seed_default_state_with_name(storage, "team_a", "team_team_a")
+    _seed_state(storage, "team_a")  # team mirror (team surface)
+    _seed_archive(storage, "team_a", 0.5)  # fresh flat default (0.5 h)
+    w = _watcher(storage, ch)
+    status = w.poll()
+    # fresh (0.5 h < 90 min) — NOT stale, no incident
+    assert status["per_team"]["team_a"] == "ok"
+    assert not any("STALE" in t for t in list(ch.issues.values()))

@@ -666,6 +666,28 @@ class TestBackupsSurfaceUnits:
         ])
         assert over == {"team_x/20260101T000000Z_x": "g_c1"}
 
+    def test_legacy_overrides_from_index(self):
+        """#2370: GET /backups derives legacy-flat graph identity from the
+        sweep-written classification index — no control-plane query. A legacy
+        flat the index resolves to a custom graph overrides to that graph;
+        default/unresolvable entries keep the default bucket."""
+        _ov = ha_mod._legacy_overrides_from_index
+        listed = [
+            {"backup_id": "team_x/20260101T000000Z_x"},          # legacy flat
+            {"backup_id": "team_x/20260102T000000Z_x"},          # legacy flat
+            {"backup_id": "team_x/g_c1/20260103T000000Z_x",
+             "graph_id": "g_c1"},                                # nested
+        ]
+        index = {
+            "team_x/20260101T000000Z_x": {"graph_name": "team_team_x_g_c1",
+                                          "graph_id": "g_c1"},
+            "team_x/20260102T000000Z_x": {"graph_name": "team_team_x",
+                                          "graph_id": "default"},
+        }
+        assert _ov(listed, index) == {"team_x/20260101T000000Z_x": "g_c1"}
+        # empty/missing index → no overrides (CP fallback path, no query)
+        assert _ov(listed, {}) == {}
+
     def test_incident_subject_mapping(self):
         _sub = ha_mod._incident_subject
         assert _sub({"kind": "STALE", "team_id": "team_x"}) == "team_x"

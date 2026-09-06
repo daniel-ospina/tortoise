@@ -17340,6 +17340,29 @@ def _require_backup_tier(team: dict) -> None:
         )
 
 
+def _legacy_overrides_from_index(listed: list[dict],
+                                 index: dict) -> dict[str, str]:
+    """#2370: pure Q6-override derivation from the sweep-written legacy-flat
+    classification index (backup_id → {graph_name, graph_id}). Legacy flat
+    manifests whose index entry resolves to a CUSTOM graph (graph_id set and
+    ≠ default) list under that graph; everything else keeps the default
+    bucket. Returns {backup_id: graph_id}."""
+    if not index:
+        return {}
+    out: dict[str, str] = {}
+    for m in listed:
+        if m.get("graph_id") is not None:
+            continue
+        bid = str(m.get("backup_id") or "")
+        if len(bid.split("/")) != 2:
+            continue
+        meta = index.get(bid)
+        gid = str((meta or {}).get("graph_id") or "")
+        if gid and gid != "default":
+            out[bid] = gid
+    return out
+
+
 def _manifest_graph(manifest: dict, override_gid: str | None = None) -> dict:
     """#2313: derive the graph identity of a backup manifest for listing.
 
@@ -17433,21 +17456,38 @@ async def backups_list(team: dict = Depends(get_current_team_session_ungated)): 
         # custom namespace (pre-#2313 C5-era on-demand custom dumps) lists
         # under that custom graph. Fail-soft — the default bucket stands on
         # any control-plane error.
+        # #2370: the reverse lookup now reads the sweep-written legacy-flat
+        # classification index (one R2 object) instead of running a
+        # control-plane query per request. The CP path remains only as the
+        # pre-first-sweep / index-miss fallback.
         overrides: dict[str, str] = {}
         if any(m.get("graph_id") is None for m in listed):
-            from tortoise.supabase_control import (
-                get_control_plane,
-                is_supabase_enabled,
-            )
-            try:
-                cp = (get_control_plane() if is_supabase_enabled()
-                      else _registry_sdk()._get_registry())
-            except Exception as e:
-                _logger.warning("backups list cp unavailable: %s", e)
-                cp = None
-            if cp is not None:
-                overrides = await asyncio.to_thread(
-                    _legacy_graph_overrides, cp, team_id, listed)
+            storage_obj = _backup_storage()
+            from tortoise.backup_sweep import read_legacy_flat_index
+            idx = await asyncio.to_thread(
+                read_legacy_flat_index, storage_obj, team_id)
+            if idx:
+                overrides = _legacy_overrides_from_index(listed, idx)
+            # legacy flats the index could not classify (or no index yet) →
+            # pre-#2313 CP reverse lookup (fail-soft on any error).
+            unresolved = [m for m in listed
+                          if m.get("graph_id") is None
+                          and len(str(m.get("backup_id", "")).split("/")) == 2
+                          and m.get("backup_id") not in (idx or {})]
+            if unresolved:
+                from tortoise.supabase_control import (
+                    get_control_plane,
+                    is_supabase_enabled,
+                )
+                try:
+                    cp = (get_control_plane() if is_supabase_enabled()
+                          else _registry_sdk()._get_registry())
+                except Exception as e:
+                    _logger.warning("backups list cp unavailable: %s", e)
+                    cp = None
+                if cp is not None:
+                    overrides.update(await asyncio.to_thread(
+                        _legacy_graph_overrides, cp, team_id, listed))
         return {"backups": [
             _manifest_graph(m, override_gid=overrides.get(m.get("backup_id")))
             for m in listed
