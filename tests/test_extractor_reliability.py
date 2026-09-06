@@ -172,6 +172,46 @@ def test_complete_deadline_aborts_attempt():
         v2._complete(_Slow(), "s", "u", deadline_s=0.05, retries=0)
 
 
+def test_call_once_deadline_signals_note_stall():
+    """#2339: a deadline abort fires outside the wrapper's complete(), so the
+    deadline path must signal note_stall() — otherwise RoutingModel/
+    RotatingModel never fail over and every retry re-hits the stalled
+    provider (whole sessions died empty)."""
+    import threading
+
+    fired = threading.Event()
+
+    class _Hang:
+        provider = "openrouter"
+
+        def complete(self, *, system, user, max_tokens=None):
+            fired.wait(5.0)  # wedged until the deadline kills us
+            return "late"
+
+    class _Wrapped:
+        def __init__(self, inner):
+            self.inner = inner
+            self.note_calls = 0
+            self.closed = 0
+
+        def complete(self, *, system, user, max_tokens=None):
+            return self.inner.complete(system=system, user=user,
+                                       max_tokens=max_tokens)
+
+        def note_stall(self):
+            self.note_calls += 1
+
+        def close(self):
+            self.closed += 1
+
+    wrapped = _Wrapped(_Hang())
+    with pytest.raises(TimeoutError):
+        v2._call_once(wrapped, "s", "u", deadline_s=0.05, max_tokens=None,
+                      stats=None)
+    assert wrapped.note_calls == 1, "deadline path must signal note_stall"
+    assert wrapped.closed == 1, "the hung read must still be interrupted"
+
+
 # ── Task 2: bounded max_tokens + truncation detection ─────────────────────
 
 def test_complete_passes_stage_cap(monkeypatch):
