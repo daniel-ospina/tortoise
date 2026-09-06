@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import os
 import tempfile
+from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
 from fastapi.testclient import TestClient
@@ -959,6 +960,134 @@ class TestKeysCreate:
         assert r.status_code == 200, r.text
         assert r.json()["name"] == "x" * 64
         assert _listed_key(client, r.json()["id"])["name"] == "x" * 64
+
+
+class TestKeysExpiry2426:
+    """#2426: configurable API-key expiration on mint — REGISTRY lane.
+
+    POST /v1/team/keys accepts optional {expires_in (days 1-366) XOR
+    expires_at (ISO)}; the registry APIKey node stores expires_at and the
+    response echoes it. Absent = Never — the legacy byte-identical shape
+    ({id,key,key_prefix,created_at,name}) is preserved (exact-equality pin
+    in test_writer_inventory). Enforcement already lives in auth (~1558-1570);
+    these tests pin the WRITE + echo + 422 matrix + cap-accounting
+    (expired-but-unrevoked durables stop counting against max_api_keys) +
+    the expired-key-does-not-authenticate behavior for a MINTED expiry.
+    """
+
+    @staticmethod
+    def _approx_days(iso_a: str, iso_b: str) -> float:
+        """Whole days between two ISO timestamps (server clock = client
+        clock in-test; a 30d mint should land within ~2 minutes of now+30d)."""
+        from datetime import datetime
+        ta = datetime.fromisoformat(iso_a.replace("Z", "+00:00"))
+        tb = datetime.fromisoformat(iso_b.replace("Z", "+00:00"))
+        return (ta - tb).total_seconds() / 86400.0
+
+    def test_expires_in_mint_echoes_and_lists(self, client):
+        r = client.post("/v1/team/keys", json={"expires_in": 30})
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert "expires_at" in body, "an expiring mint must echo expires_at"
+        exp = body["expires_at"]
+        # expires_at ≈ now + 30 days (±2 min for handler/clock skew)
+        skew = self._approx_days(exp, datetime.now(UTC).isoformat())
+        assert 29.9 <= skew <= 30.1, f"expires_at not ~now+30d: {exp} ({skew:.3f}d)"
+        # the stored registry node carries the same expiry (list round-trip)
+        listed = _listed_key(client, body["id"])
+        assert listed.get("expires_at") == exp
+        # minted key still authenticates (expiry in the future)
+        assert r.status_code == 200
+
+    def test_expires_at_iso_mint(self, client):
+        from datetime import datetime
+        # date-only expires_at → end of that UTC day (valid through the date)
+        target = (datetime.now(UTC) + timedelta(days=5)).date().isoformat()
+        r = client.post("/v1/team/keys", json={"expires_at": target})
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["expires_at"].startswith(target + "T23:59:59"), body["expires_at"]
+        # full ISO datetime with Z normalizes too
+        later = (datetime.now(UTC) + timedelta(days=10)).isoformat()
+        r2 = client.post("/v1/team/keys", json={"expires_at": later})
+        assert r2.status_code == 200, r2.text
+        assert self._approx_days(r2.json()["expires_at"], later) == 0.0
+
+    def test_never_body_keeps_legacy_shape_and_lists_never(self, client):
+        # #2426: absent expiry = Never — no expires_at key in the response
+        # (legacy byte-identical envelope) and the listed row has expires_at
+        # null. The pre-#2426 client never sees a new response key.
+        for body in (None, {"name": "forever"}):
+            r = client.post("/v1/team/keys", json=body) if body else client.post("/v1/team/keys")
+            assert r.status_code == 200, r.text
+            assert "expires_at" not in r.json(), f"Never mint must not echo expires_at: {r.json()}"
+            assert _listed_key(client, r.json()["id"]).get("expires_at") is None
+
+    @pytest.mark.parametrize("body", [
+        {"expires_in": 0},
+        {"expires_in": -1},
+        {"expires_in": 367},
+        {"expires_in": "30"},        # string days — reject
+        {"expires_in": 1.5},          # float days — reject
+        {"expires_in": True},         # bool is not a day count
+        {"expires_at": "not-a-date"},
+        {"expires_at": "2026-13-45"},
+        {"expires_at": 12345},
+        {"expires_at": "2020-01-01"},  # past — would mint a dead key
+        {"expires_in": 30, "expires_at": "2030-01-01"},  # both — exclusive
+        {"expires_at": "2099-01-01"},  # beyond the 366-day ceiling
+    ])
+    def test_validation_422_matrix(self, client, body):
+        r = client.post("/v1/team/keys", json=body)
+        assert r.status_code == 422, f"body={body} → {r.status_code}: {r.text}"
+
+    def test_expired_durable_frees_a_cap_slot(self, client):
+        """#2426 cap accounting: an expired-but-unrevoked durable stops
+        counting against max_api_keys — a team at cap with an expired key
+        can mint again (never wedged). Without the fix the third mint 402s
+        forever."""
+        from datetime import datetime
+
+        import tortoise.hosted_api as ha_mod
+        a = client.post("/v1/team/keys", json={"name": "expiring", "expires_in": 30})
+        b = client.post("/v1/team/keys", json={"name": "keeper"})
+        assert a.status_code == 200 and b.status_code == 200
+        # at cap (free max_api_keys=2) → 402 control
+        assert client.post("/v1/team/keys").status_code == 402
+        # expire key `a` (direct node write — mint-time validation forbids
+        # past expiries by construction)
+        past = (datetime.now(UTC) - timedelta(days=1)).isoformat()
+        ha_mod._make_sdk(namespace="registry")._get_registry().query(
+            "MATCH (k:APIKey {id:$id}) SET k.expires_at = $ea",
+            params={"id": a.json()["id"], "ea": past},
+        )
+        # expired durable no longer counts → the cap slot is free
+        r = client.post("/v1/team/keys", json={"name": "replacement"})
+        assert r.status_code == 200, r.text
+
+    def test_expired_key_does_not_authenticate(self, client):
+        """#2426 pin: a minted expiry is ENFORCED by the existing auth layer
+        (hosted_api ~1558-1570, registry lane) — once expires_at passes, the
+        key 401s even though it is unrevoked and counted nowhere."""
+        from datetime import datetime
+
+        import tortoise.hosted_api as ha_mod
+        r = client.post("/v1/team/keys", json={"expires_in": 30})
+        assert r.status_code == 200, r.text
+        kid, key = r.json()["id"], r.json()["key"]
+        app.dependency_overrides.clear()  # real auth (registry lookup)
+        try:
+            live = client.get("/v1/team", headers={"Authorization": f"Bearer {key}"})
+            assert live.status_code == 200, live.text
+            past = (datetime.now(UTC) - timedelta(hours=1)).isoformat()
+            ha_mod._make_sdk(namespace="registry")._get_registry().query(
+                "MATCH (k:APIKey {id:$id}) SET k.expires_at = $ea",
+                params={"id": kid, "ea": past},
+            )
+            dead = client.get("/v1/team", headers={"Authorization": f"Bearer {key}"})
+            assert dead.status_code == 401, dead.text
+        finally:
+            app.dependency_overrides.clear()
 
 
 class TestKeysList:
@@ -1994,7 +2123,7 @@ class TestSessionDetail:
         namespace) is invisible to the endpoint which resolves
         ``TEST_TEAM_ID`` (``team-001``).
         """
-        from datetime import datetime, timezone  # noqa: I001
+        from datetime import datetime  # noqa: I001
         from tortoise.hosted_api import _make_sdk
 
         sdk_b = _make_sdk(namespace=f"test_hosted_other_team_999_{os.urandom(4).hex()}")
@@ -2026,7 +2155,7 @@ class TestSessionDetail:
 
     def test_detail_role_parsing_no_brackets(self, client):
         """Content without [role] prefix → role 'unknown'."""
-        from datetime import datetime, timezone  # noqa: I001
+        from datetime import datetime  # noqa: I001
         from tortoise.hosted_api import _make_sdk
 
         sdk = _make_sdk(namespace=TEST_TEAM_ID)
