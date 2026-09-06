@@ -1,0 +1,189 @@
+{
+  "receipt_version": 1,
+  "run_id": "w2b-4f9e68500bb2",
+  "date": "2026-09-06T13:17:28Z",
+  "run_status": "completed",
+  "verdict": "inconclusive",
+  "failure_origin": "judge_pin_mismatch",
+  "commit": "08f6b69a",
+  "corpus_hash": "sha256:52d4a742e7cea21ce9f1147cc3ec46a10436a6dd9e7fbc7ad22701d851d90dc8",
+  "judge_pin": "w2-write-path-mechanical-v2",
+  "resolved_config": {
+    "lanes": [
+      "verbatim",
+      "facts",
+      "dream"
+    ],
+    "mode": "BPRE",
+    "harness": "all",
+    "seed": 42,
+    "extractor_posture": "m2"
+  },
+  "cost_usd": 0.0,
+  "metrics": {
+    "salient_unit_survival_macro": 1.0,
+    "salient_unit_survival_strict": 1.0,
+    "distractor_leakage_per_run": 11,
+    "sessions_emitting": 1.0,
+    "quote_fidelity": 1.0,
+    "provenance_accuracy": 1.0
+  },
+  "quote_spans_total": 0,
+  "justification": null,
+  "session_results": [
+    {
+      "session_id": "wp01_quarry_debug",
+      "emitted": true,
+      "macro": {
+        "survived": 16,
+        "total": 16
+      },
+      "strict": {
+        "survived": 16,
+        "total": 16
+      },
+      "leaked": [
+        "wp01_quarry_debug_d_01",
+        "wp01_quarry_debug_d_02",
+        "wp01_quarry_debug_d_03"
+      ],
+      "quotes": {
+        "grounded": 0,
+        "total": 0
+      },
+      "provenance": {
+        "provenanced": 61,
+        "total": 61
+      },
+      "memory_points": 61,
+      "operator_counts": {},
+      "failed_units": []
+    },
+    {
+      "session_id": "wp02_lumen_refactor",
+      "emitted": true,
+      "macro": {
+        "survived": 13,
+        "total": 13
+      },
+      "strict": {
+        "survived": 13,
+        "total": 13
+      },
+      "leaked": [
+        "wp02_lumen_refactor_d_01",
+        "wp02_lumen_refactor_d_02"
+      ],
+      "quotes": {
+        "grounded": 0,
+        "total": 0
+      },
+      "provenance": {
+        "provenanced": 52,
+        "total": 52
+      },
+      "memory_points": 52,
+      "operator_counts": {},
+      "failed_units": []
+    },
+    {
+      "session_id": "wp03_ember_design",
+      "emitted": true,
+      "macro": {
+        "survived": 15,
+        "total": 15
+      },
+      "strict": {
+        "survived": 15,
+        "total": 15
+      },
+      "leaked": [
+        "wp03_ember_design_d_01",
+        "wp03_ember_design_d_02"
+      ],
+      "quotes": {
+        "grounded": 0,
+        "total": 0
+      },
+      "provenance": {
+        "provenanced": 52,
+        "total": 52
+      },
+      "memory_points": 52,
+      "operator_counts": {},
+      "failed_units": []
+    },
+    {
+      "session_id": "wp04_aurora_perf",
+      "emitted": true,
+      "macro": {
+        "survived": 13,
+        "total": 13
+      },
+      "strict": {
+        "survived": 13,
+        "total": 13
+      },
+      "leaked": [
+        "wp04_aurora_perf_d_01",
+        "wp04_aurora_perf_d_02"
+      ],
+      "quotes": {
+        "grounded": 0,
+        "total": 0
+      },
+      "provenance": {
+        "provenanced": 46,
+        "total": 46
+      },
+      "memory_points": 46,
+      "operator_counts": {},
+      "failed_units": []
+    },
+    {
+      "session_id": "wp05_retro_writeup",
+      "emitted": true,
+      "macro": {
+        "survived": 15,
+        "total": 15
+      },
+      "strict": {
+        "survived": 15,
+        "total": 15
+      },
+      "leaked": [
+        "wp05_retro_writeup_d_01",
+        "wp05_retro_writeup_d_02"
+      ],
+      "quotes": {
+        "grounded": 0,
+        "total": 0
+      },
+      "provenance": {
+        "provenanced": 49,
+        "total": 49
+      },
+      "memory_points": 49,
+      "operator_counts": {},
+      "failed_units": []
+    }
+  ],
+  "notes": [
+    "wp01_quarry_debug: capture ok=True extraction_mode=llm extracted=62",
+    "wp02_lumen_refactor: capture ok=True extraction_mode=llm extracted=52",
+    "wp03_ember_design: capture ok=True extraction_mode=llm extracted=52",
+    "wp04_aurora_perf: capture ok=True extraction_mode=llm extracted=46",
+    "wp05_retro_writeup: capture ok=True extraction_mode=llm extracted=49",
+    "dream EP pass: total_affected=209 coverage=1.0 converged_all=True",
+    "quote_fidelity 1.0 is VACUOUS: the corpus gold contains no double-quoted spans (quote_spans_total=0) \u2014 this number is a floor, not a fidelity bar; it will not hold under a future corpus that quotes",
+    "cost not tracked: the extractor seam reported no llm_cost_usd in any session (mock/unknown adapter) \u2014 receipt cost_usd is 0.0 with this note, never a silently-fake measured figure"
+  ],
+  "log": [
+    "parser round-trip ok (codex, 26 turns)",
+    "parser round-trip ok (codex, 22 turns)",
+    "parser round-trip ok (pi, 24 turns)",
+    "parser round-trip ok (pi, 20 turns)",
+    "parser round-trip ok (claude-desktop, 23 turns)",
+    "metrics: {\"salient_unit_survival_macro\": 1.0, \"salient_unit_survival_strict\": 1.0, \"distractor_leakage_per_run\": 11, \"sessions_emitting\": 1.0, \"quote_fidelity\": 1.0, \"provenance_accuracy\": 1.0}"
+  ]
+}
