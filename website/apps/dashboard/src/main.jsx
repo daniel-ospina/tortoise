@@ -5569,7 +5569,7 @@ function claimIntentInFlight() {
           <button className="ghost small" onClick={() => { setClaimError(''); try { sessionStorage.removeItem(CLAIM_KEY_STORAGE) } catch { /* best-effort */ } window.history.replaceState({}, '', window.location.pathname) }} aria-label="Dismiss">✕</button>
         </div>
       )}
-      <header>
+      <header className="dash-header">
         <div className="logo">Tortoise</div>
         <nav>
           <button className={tab === 'overview' ? 'active' : ''} onClick={() => { setTab('overview'); setSelectedSessionId(null); setSessionDetail(null); }}>Overview</button>
@@ -5584,6 +5584,10 @@ function claimIntentInFlight() {
               homes (P3). W6/W9 consume (single-owner R2-10). */}
           <button className={tab === 'settings' ? 'active' : ''} data-tab="settings" onClick={() => setTab('settings')}>Settings</button>
         </nav>
+        {/* #2332: the right-side controls (Setup + account blob) are one
+            atomic cluster — the CSS keeps them grouped at every width and
+            never lets them scatter onto separate wrapped rows. */}
+        <div className="header-cluster">
         {/* #1689: always-visible — OUTSIDE the nav; reopens the wizard at
             step 0 (skills). (The nav wraps via flex-wrap on narrow windows
             since #1874, so Setup is no longer displaced by nav overflow.) */}
@@ -5731,6 +5735,7 @@ function claimIntentInFlight() {
               </button>
             </div>
           )}
+        </div>
         </div>
         {/* #1877: create-team dialog — gated-on-click upgrade UX. The 402
             state explains "upgrade a team, then create" (the new team
