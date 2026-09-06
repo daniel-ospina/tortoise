@@ -1448,9 +1448,15 @@ def build_report(
     # (llm_escalations is an EVENT count per outcome; the 4-bucket invariant
     # escalated == recovered + residual + abort + partial is literal PER
     # OUTCOME and — as sums — at the event level below via n_escalations).
-    # A clean outcome may carry recovered events; residual/abort questions
-    # grade invalid via truncated_parse_error at the callers — the buckets
-    # name the mechanism, error_classes name the outcome. Criterion 3's
+    # MECHANISM vs OUTCOME: the buckets name the mechanism; the OUTCOME
+    # grading lives in error_classes. A residual/abort event grades invalid
+    # via truncated_parse_error ONLY on the S2/S4 seams (extract_session_v2
+    # callers) — an S1-seam residual/abort is benign by design (run_s1 keeps
+    # the truncated narrative, never raises), so an S1-only escalation
+    # question carries valid=true + escalated_*_qids membership + truncated
+    # recording with NO census entry. Cross-reference error_census when the
+    # question-level verdict matters; the qid lists below are mechanism-
+    # level (seam-agnostic) by design. Criterion 3's
     # escalation arm: an escalation that RECOVERED is never an unrecorded
     # truncation (truncated_valid_qids above already lists every
     # clean+truncated question — an escalated-recovered question appears in

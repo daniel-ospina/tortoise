@@ -769,12 +769,17 @@ def run_s1(model, transcript: str, *,
         if _rec is not None:
             _rec["escalated_residual"] = (
                 _rec.get("escalated_residual", 0) + 1)
-            _rec["truncation_prompt_tokens_s1"] = (
-                _rec.get("truncation_prompt_tokens_s1", 0)
-                + int(stats.get("prompt_tokens") or 0))
-            _rec["truncation_completion_tokens_s1"] = (
-                _rec.get("truncation_completion_tokens_s1", 0)
-                + int(stats.get("completion_tokens") or 0))
+            # PER-LIST MAX, not `+=` (same semantics as the S2/S4 seam's
+            # post-escalation accumulation): base + escalated are the SAME
+            # summary emission — the R3-6 seam key is the per-list lower
+            # bound (the longest truncated emission), never a sum that
+            # exceeds the true summary size.
+            _rec["truncation_prompt_tokens_s1"] = max(
+                _rec.get("truncation_prompt_tokens_s1", 0),
+                int(stats.get("prompt_tokens") or 0))
+            _rec["truncation_completion_tokens_s1"] = max(
+                _rec.get("truncation_completion_tokens_s1", 0),
+                int(stats.get("completion_tokens") or 0))
         return response
     if _rec is not None:
         _rec["escalated_recovered"] = _rec.get("escalated_recovered", 0) + 1
@@ -1346,10 +1351,20 @@ def _complete_parsed(model, system: str, user: str, *,
                         _rec = stats.setdefault("recovery", {})
                         _pk = f"truncation_prompt_tokens_{seam}"
                         _ck = f"truncation_completion_tokens_{seam}"
-                        _rec[_pk] = (_rec.get(_pk, 0)
-                                     + int(stats.get("prompt_tokens") or 0))
-                        _rec[_ck] = (_rec.get(_ck, 0)
-                                     + int(stats.get("completion_tokens") or 0))
+                        # PER-LIST MAX, not `+=`: the base and the escalated
+                        # emissions are overlapping prefixes of the SAME
+                        # list — summing them (16K + 32K = 48K) would break
+                        # the R3-6/Task-1 "per-list lower bound" contract
+                        # #2335 sizes segments from (the correct lower bound
+                        # for a residual episode is the LONGEST truncated
+                        # emission, ~32K). The loop-top `+=` already holds
+                        # the base emission; the combined seam-less keys
+                        # (`_complete`'s) keep the total-spend SUM semantics.
+                        _rec[_pk] = max(_rec.get(_pk, 0),
+                                        int(stats.get("prompt_tokens") or 0))
+                        _rec[_ck] = max(_rec.get(_ck, 0),
+                                        int(stats.get("completion_tokens")
+                                            or 0))
                 if finish == "length":
                     # D3 residual — still truncated after the ONE escalation:
                     # fail-loud, NO parse-acceptance path (a balanced
@@ -1371,6 +1386,9 @@ def _complete_parsed(model, system: str, user: str, *,
                     # The abort arm only reparses because the escalated call
                     # was LOST (a raise) — otherwise ZERO data would embed;
                     # a returned-truncated response keeps data loss VISIBLE.
+                    # (The P1-7 canonical parse note lives on the ABORT arm's
+                    # reparse — the residual raise carries no acceptance
+                    # parse at all, only the fail-loud excerpt.)
                     if _rec is not None:
                         _rec["escalated_residual"] = (
                             _rec.get("escalated_residual", 0) + 1)
@@ -1395,10 +1413,12 @@ def _complete_parsed(model, system: str, user: str, *,
                         str(e2), truncated=False, attempt=attempts,
                         excerpt=getattr(e2, "excerpt", None)
                         or _error_excerpt(response, e2)) from e2
-                # a terminal FULL parse overrides any earlier partial flag
-                # (structurally unreachable post-simplification, but the
-                # recovered-bucket predicate is `not stats["partial"]` —
-                # R3-5 belt-and-braces).
+                # The terminal-parse CLASSIFIER arm: a stop-but-malformed
+                # escalated response whose rung-4 prefix was partial-accepted
+                # leaves stats["partial"] True from the in-call parse →
+                # escalated_partial; a clean terminal full parse → the
+                # recovered bucket. (The recovered-bucket predicate is
+                # `not stats["partial"]` — R3-5.)
                 if stats is not None and stats.get("partial"):
                     if _rec is not None:
                         _rec["escalated_partial"] = (
@@ -4736,9 +4756,14 @@ def _complete(model, system: str, user: str, *, deadline_s: int | None = None,
                 # stats["prompt_tokens"]/["completion_tokens"] are transient;
                 # _rollup_llm copies only attempts/retries/truncated/
                 # deadline_aborts). The seam-less COMBINED keys count every
-                # truncating call across all seams (S1 chunks, S2, S4, the
-                # kind_classifier adjudication path); the per-seam keys are
-                # accumulated at the _complete_parsed/run_s1 seams (R3-6).
+                # truncating call across the extractor seams (S1 chunks, S2,
+                # S4 — the kind_classifier adjudication seam does NOT reach
+                # this surface: its finally forwards only
+                # attempts/retries/truncated/deadline_aborts, and escalation
+                # is scoped out there via escalate=False, so its 1500-cap
+                # truncations are counted in llm.truncated only). The
+                # per-seam keys are accumulated at the
+                # _complete_parsed/run_s1 seams (R3-6).
                 if truncated:
                     _rec = stats.setdefault("recovery", {})
                     _rec["truncation_prompt_tokens"] = (

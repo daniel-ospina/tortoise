@@ -355,8 +355,10 @@ class TestParseLadder:
         string cut mid-item — no complete embed item boundary exists after
         it) records ``sanitize_insufficient`` and falls through to raise —
         never corrupting (the D5 schema gate backstops any mis-tracked
-        scan). A length-finish model skips the deterministic retry (D3),
-        keeping this to one call."""
+        scan). #2134 (Task 0 Step 5): escalation fires BEFORE the ladder on
+        a pre-escalation ``length``, so the rung is driven with a ``stop``
+        contaminated input — the #1746 error-informed re-prompt on a stop
+        parse-failure re-calls once (2 calls total)."""
         # #2134 migration (Task 0 Step 5): escalation fires BEFORE the ladder
         # on a pre-escalation `length`, so sanitize never runs on a length
         # input — the rung is driven with a `stop` contaminated input (the
@@ -655,7 +657,9 @@ class TestParseLadder:
             def complete(self, *, system, user, max_tokens=None):
                 self.calls += 1
                 self.last_prompt_tokens = 400
-                self.last_completion_tokens = 16000
+                self.last_completion_tokens = (16000
+                                               if max_tokens == 16000
+                                               else 32000)
                 # no recoverable prefix (mirrors the reject-empty-prefix
                 # fixture) → _parse_json_robust raises; the seam accumulation
                 # fired BEFORE the parse (right after finish is read).
@@ -672,7 +676,7 @@ class TestParseLadder:
         # in the combined + per-seam s2 keys; s4 never fires.
         assert model.calls == 2
         rec = stats["recovery"]
-        assert rec["truncation_completion_tokens"] == 32000
+        assert rec["truncation_completion_tokens"] == 48000
         assert rec["truncation_completion_tokens_s2"] == 32000
         assert "truncation_completion_tokens_s4" not in rec
         assert rec["escalated"] == 1 and rec["escalated_residual"] == 1
@@ -3827,6 +3831,35 @@ class TestEscalation2134:
         rec = stats["recovery"]
         assert rec.get("escalated", 0) == 0  # no episode fired
         assert rec.get("escalated_residual", 0) == 0
+
+    def test_residual_seam_keys_are_per_list_max_not_sum(self):
+        """R3-6/plan contract (code-review round 2): on a residual episode
+        the base and escalated emissions are overlapping prefixes of the
+        SAME list — the per-seam key is the per-list LOWER BOUND (the
+        longest truncated emission, max), never a sum that exceeds the true
+        list size; the combined seam-less key keeps the total-spend SUM
+        semantics (both billed calls)."""
+        class _M:
+            last_finish_reason = "length"
+            def complete(self, *, system, user, max_tokens=None):
+                self.last_finish_reason = "length"
+                self.last_prompt_tokens = 500
+                self.last_completion_tokens = (16000 if max_tokens == 16000
+                                               else 32000)
+                return '{"entities": []'
+
+        stats: dict = {}
+        with pytest.raises(ValueError) as ei:
+            v2.run_s2(_M(), "STORY", stats=stats)
+        assert ei.value.truncated is True
+        rec = stats["recovery"]
+        # per-seam: max(16000 base, 32000 esc) == 32000 — a true list
+        # between 32K and 48K is bounded BELOW by 32K, never "48K+"
+        assert rec["truncation_completion_tokens_s2"] == 32000
+        assert rec["truncation_prompt_tokens_s2"] == 500
+        # combined: total truncation spend — both billed calls
+        assert rec["truncation_completion_tokens"] == 48000
+        assert rec["escalated"] == 1 and rec["escalated_residual"] == 1
 
     def test_s1_esc_le_base_no_escalation_event(self, monkeypatch):
         """run_s1 with no escalation headroom records NO escalation episode
