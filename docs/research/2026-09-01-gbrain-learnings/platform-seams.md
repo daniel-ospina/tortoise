@@ -38,8 +38,12 @@ coverage lands first; per-harness registration files follow demand.
   graph, nothing above the confidence gate) → the hook emits NOTHING and
   exits 0. The agent turn proceeds untouched.
 - **Auth fail-closed**: hosted capture/auth channels keep their own deny
-  rules; the hook never carries credentials (it inherits the shell env /
-  local `.tortoise` config only).
+  rules. The hook process carries no credentials of its own, BUT the reflex
+  it invokes transmits a file-sourced Bearer key to the endpoint resolved
+  from the config file or env `TORTOISE_API_URL` — the trust boundary of
+  that destination (env override + repo-shipped `.tortoise`) is tracked in
+  #2369 and is NOT yet hardened. Do not rely on this posture until #2369
+  lands.
 - W4 user-exposure opt-in: per-turn injection ships behind the `install`
   command — nothing auto-registers.
 

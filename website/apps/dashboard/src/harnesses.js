@@ -75,6 +75,9 @@ export const HARNESS_STEPS = (harness, key) => ({
 export const HARNESS_INTRO = {
   claude: 'Run these commands in your terminal:',
   'claude-desktop': 'Edit ~/Library/Application Support/Claude/claude_desktop_config.json (macOS) — or Claude > Settings > Developer in the app — and add the tortoise block below. Merge into an existing mcpServers section — don\'t replace the whole file. The key stays literal here — keep the file private. Restart Claude after saving.',
+  // #2361 review-r1 (UX-3): Claude Web had no intro — the copy button said
+  // 'Copy prompt' but nothing explained where the prompt goes.
+  'claude-web': 'Start a new chat at claude.ai (or the Claude web app) and paste the prompt below into it — that conversation becomes your connected agent. The prompt keeps the key literal: do not share the chat or the key.',
   codex: 'Run these commands in your terminal:',
   // #2328: Desktop variant intro (no terminal).
   codexDesktop: 'Edit ~/.codex/config.toml (create it if missing) — Codex Desktop and the CLI share this file. Copy the block, paste it in, then fully quit and reopen Codex Desktop:',
@@ -248,7 +251,7 @@ const SKILL_INSTALL = (harness) =>
 // One copyable block per harness. The wizard renders + copies exactly this.
 export const UNIVERSAL_COMMAND = {
   claude: (key) =>
-    `# Tortoise — universal setup command (Claude Code)\n# The same command covers all 6 harnesses — your agent self-adjudicates which\n# it is from the tortoise-onboarding skill's harness table.\nexport TORTOISE_API_KEY=${key}\nclaude mcp add --transport http tortoise ${MCP_URL} --header "Authorization: Bearer ${'${TORTOISE_API_KEY}'}"\n\n${SKILL_INSTALL('claude')}\n\n# Then tell your agent: "Set up Tortoise" — it verifies with tortoise_health\n# and reports the harness-connected checkpoint.`,
+    `# Tortoise — universal setup command (Claude Code)\n# Works with every supported agent — your agent figures out which one it is\n# during setup. You can re-run this in any new project folder.\nexport TORTOISE_API_KEY=${key}\nclaude mcp add --transport http tortoise ${MCP_URL} --header "Authorization: Bearer ${'${TORTOISE_API_KEY}'}"\n\n${SKILL_INSTALL('claude')}\n\n# Then tell your agent: "Set up Tortoise" — it verifies with tortoise_health\n# and reports the harness-connected checkpoint.`,
   codex: (key) =>
     `# Tortoise — universal setup command (Codex CLI)
 export TORTOISE_API_KEY=${key}
@@ -310,9 +313,9 @@ bearer_token_env_var = "TORTOISE_API_KEY"
   pi: (key) =>
     `Set up Tortoise for this project (universal setup command — Pi):\n1. Add TORTOISE_API_KEY=${key} to my shell profile (~/.zshrc or ~/.bashrc).\n2. Create or merge .mcp.json in this project with (the file references the\n   env var, never the key):\n${JSON.stringify(PI_MCP_CONFIG_ENV, null, 2)}\n3. Run: curl -fsSL ${SKILLS_INSTALL_URL} | bash -s -- --harness pi\n4. Verify the Tortoise MCP server is configured, then call tortoise_health —\n   when it passes, tell me "Tortoise is connected" and checkpoint\n   harness-connected (I've set it up — Continue on the dashboard covers it).`,
   'claude-desktop': (key) =>
-    `# Tortoise — universal setup command (Claude Desktop — teach-human)\n# Claude Desktop has no local shell, so YOU complete the manual steps and the\n# agent verifies after:\n# 1. Open ~/Library/Application Support/Claude/claude_desktop_config.json\n#    (macOS) — or Claude > Settings > Developer in the app.\n# 2. MERGE the mcpServers block below into the existing config (never replace\n#    the whole file; the key stays literal here — keep the file private):\n${JSON.stringify({ mcpServers: { tortoise: { url: MCP_URL, headers: { Authorization: `Bearer ${key}` } } } }, null, 2)}\n# 3. Restart Claude Desktop, then say "Set up Tortoise" in a chat — the agent\n#    verifies with tortoise_health. Click "I've set it up — Continue" in the\n#    dashboard connect step when it passes (that writes the checkpoint).`,
+    `# Tortoise — universal setup command (Claude Desktop — manual setup)\n# Claude Desktop has no local shell, so YOU complete the steps below, then the\n# agent verifies after:\n# 1. Open ~/Library/Application Support/Claude/claude_desktop_config.json\n#    (macOS) — or Claude > Settings > Developer in the app.\n# 2. MERGE the mcpServers block below into the existing config (never replace\n#    the whole file; the key stays literal here — keep the file private):\n${JSON.stringify({ mcpServers: { tortoise: { url: MCP_URL, headers: { Authorization: `Bearer ${key}` } } } }, null, 2)}\n# 3. Restart Claude Desktop, then say "Set up Tortoise" in a chat — the agent\n#    verifies with tortoise_health. Click "I've set it up — Continue" in the\n#    dashboard connect step when it passes (that writes the checkpoint).`,
   'claude-web': (key) =>
-    `Tortoise — universal setup command (Claude Web — teach-human)\nClaude Web runs in Anthropic's cloud — no local files. Complete the connector\nsteps, then the agent (with the connector's tortoise_* tools) verifies:\n1. Go to claude.ai > Settings > Connectors > Add custom connector, name it "Tortoise".\n2. Server URL: ${MCP_URL}\n3. Request headers (advanced): Authorization: Bearer ${key}  (stored by Anthropic)\n4. In a Claude Web chat, say "Set up Tortoise" — the agent calls tortoise_health\n   to verify, then click "I've pasted it — Continue" in the dashboard connect\n   step (that writes the harness-connected checkpoint).`,
+    `Tortoise — universal setup command (Claude Web — manual setup)\nClaude Web runs in Anthropic's cloud — no local files. Complete the connector\nsteps below, then the agent (with the connector's tortoise_* tools) verifies:\n1. Go to claude.ai > Settings > Connectors > Add custom connector, name it "Tortoise".\n2. Server URL: ${MCP_URL}\n3. Request headers (advanced): Authorization: Bearer ${key}  (stored by Anthropic)\n4. In a Claude Web chat, say "Set up Tortoise" — the agent calls tortoise_health\n   to verify, then click "I've pasted it — Continue" in the dashboard connect\n   step (that writes the harness-connected checkpoint).`,
 }
 
 export const UNIVERSAL_COMMAND_HARNESSES = HARNESS_ORDER

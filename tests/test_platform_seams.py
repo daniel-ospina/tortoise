@@ -415,3 +415,150 @@ def test_volunteer_turn_hook_fail_open_empty_graph(tmp_path):
     r = _hook_run(env, "codex", json.dumps({"prompt": "hi there"}), tmp_path)
     assert r.returncode == 0
     assert r.stdout.strip() == ""
+
+
+# ── #2383 post-merge bug-hunt regressions ─────────────────────────────────
+# (found by fresh-context reviewers on the merged wave-1 code)
+
+def test_install_uninstall_when_absent_is_clean_noop(tmp_path):
+    """--uninstall with NO registration must be a clean no-op — it must NOT
+    invert into a fresh install (the pre-#2383 bug registered a per-turn
+    hook on double-uninstall)."""
+    env = {**os.environ, "TORTOISE_SECRET_PEPPER": "test-static-pepper"}
+    for harness, rel in (("codex", ".codex/hooks.json"),
+                         ("claude", ".claude/settings.json"),
+                         ("cline", ".cline/hooks/UserPromptSubmit")):
+        target = tmp_path / rel
+        r = _run(["install", harness, "--dir", str(tmp_path), "--uninstall"],
+                 env)
+        assert r.returncode == 0, (harness, r.stderr)
+        assert "nothing to remove" in r.stdout, (harness, r.stdout)
+        assert "Installed" not in r.stdout, harness  # the inversion bug
+        assert not target.exists(), (harness, "no file may be created")
+        # Double-uninstall after a real install also stays a clean no-op.
+        _run(["install", harness, "--dir", str(tmp_path)], env)
+        assert target.exists(), harness
+        _run(["install", harness, "--dir", str(tmp_path), "--uninstall"], env)
+        if harness == "cline":
+            assert not target.exists(), harness  # cline unlinks its file
+        else:
+            cfg = json.loads(target.read_text())
+            assert "UserPromptSubmit" not in (cfg.get("hooks") or {}), harness
+        r = _run(["install", harness, "--dir", str(tmp_path), "--uninstall"],
+                 env)
+        assert r.returncode == 0 and "nothing to remove" in r.stdout, harness
+        if harness == "cline":
+            assert not target.exists(), harness
+
+
+def test_install_cline_uninstall_absent_no_traceback(tmp_path):
+    """cline --uninstall with no hook file: clean message, no FileNotFound
+    traceback (the pre-#2383 raw traceback path)."""
+    env = {**os.environ, "TORTOISE_SECRET_PEPPER": "test-static-pepper"}
+    r = _run(["install", "cline", "--dir", str(tmp_path), "--uninstall"], env)
+    assert r.returncode == 0, r.stderr
+    assert "Traceback" not in r.stderr
+    assert "nothing to remove" in r.stdout
+
+
+def test_install_codex_repairs_stale_script_path(tmp_path):
+    """A registration pointing at a STALE (moved/dead) volunteer-turn.sh
+    path is repaired in place on reinstall — not left as a silent dead hook
+    while install reports success."""
+    env = {**os.environ, "TORTOISE_SECRET_PEPPER": "test-static-pepper"}
+    stale = "/old/vanished/path/volunteer-turn.sh codex"
+    cfg = {"hooks": {"UserPromptSubmit": [{"hooks": [{"type": "command",
+                                                      "command": stale}]}]}}
+    target = tmp_path / ".codex" / "hooks.json"
+    target.parent.mkdir(parents=True)
+    target.write_text(json.dumps(cfg))
+    r = _run(["install", "codex", "--dir", str(tmp_path)], env)
+    assert r.returncode == 0, r.stderr
+    assert "Repaired" in r.stdout
+    cfg = json.loads(target.read_text())
+    cmd = cfg["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"]
+    assert cmd != stale
+    assert cmd.endswith("volunteer-turn.sh codex")
+    assert Path(cmd.split()[0]).exists()  # points at the live shipped hook
+
+
+def test_install_claude_repairs_stale_script_path(tmp_path):
+    """Same stale-path repair for the claude wrapper shape."""
+    env = {**os.environ, "TORTOISE_SECRET_PEPPER": "test-static-pepper"}
+    stale = "/gone/volunteer-turn.sh claude"
+    cfg = {"hooks": {"UserPromptSubmit": [
+        {"hooks": [{"type": "command", "command": stale}]}]}}
+    target = tmp_path / ".claude" / "settings.json"
+    target.parent.mkdir(parents=True)
+    target.write_text(json.dumps(cfg))
+    r = _run(["install", "claude", "--dir", str(tmp_path)], env)
+    assert r.returncode == 0, r.stderr
+    cfg = json.loads(target.read_text())
+    cmd = cfg["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"]
+    assert cmd != stale and cmd.endswith("volunteer-turn.sh claude")
+
+
+def test_install_uninstall_dangling_symlink_no_inversion(tmp_path):
+    """R2 P1: --uninstall against a DANGLING in-root symlink target must be
+    a clean no-op — the R1 guard's is_symlink() carve-out let it fall
+    through to the fresh-install write (re-inverting the #2383 bug)."""
+    env = {**os.environ, "TORTOISE_SECRET_PEPPER": "test-static-pepper"}
+    for harness, rel in (("codex", ".codex/hooks.json"),
+                         ("claude", ".claude/settings.json")):
+        target = tmp_path / rel
+        target.parent.mkdir(parents=True)
+        target.symlink_to(target.parent / "real-config" / "hooks.json")
+        assert target.is_symlink() and not target.exists()  # dangling
+        r = _run(["install", harness, "--dir", str(tmp_path), "--uninstall"],
+                 env)
+        assert r.returncode == 0, (harness, r.stderr)
+        assert "nothing to remove" in r.stdout, (harness, r.stdout)
+        assert "Installed" not in r.stdout, (harness, "inversion bug")
+        dest = target.parent / "real-config" / "hooks.json"
+        assert not dest.exists(), (harness, "no registration may be created")
+
+
+def test_install_codex_leaves_user_wrapper_untouched(tmp_path):
+    """R2 (security): an entry that WRAPS our script (firejail/venv-pinned)
+    — merely CONTAINING the substring — must NEVER be rewritten on
+    reinstall; the pre-R2 repair replaced the whole command and silently
+    stripped the security wrapper."""
+    env = {**os.environ, "TORTOISE_SECRET_PEPPER": "test-static-pepper"}
+    wrapped = ("'/usr/local/bin/firejail' "
+               "'/opt/tortoise/volunteer-turn.sh' codex")
+    cfg = {"hooks": {"UserPromptSubmit": [{"hooks": [{"type": "command",
+                                                      "command": wrapped}]}]}}
+    target = tmp_path / ".codex" / "hooks.json"
+    target.parent.mkdir(parents=True)
+    target.write_text(json.dumps(cfg))
+    r = _run(["install", "codex", "--dir", str(tmp_path)], env)
+    assert r.returncode == 0, r.stderr
+    cfg = json.loads(target.read_text())
+    cmd = cfg["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"]
+    assert cmd == wrapped  # untouched — wrapper preserved
+    assert "Repaired" not in r.stdout
+    assert len(cfg["hooks"]["UserPromptSubmit"]) == 1  # no duplicate
+
+
+def test_install_codex_leaves_foreign_volunteer_hook_untouched(tmp_path):
+    """R2 (security): another product's OWN live volunteer-turn.sh hook at a
+    different path must not be hijacked by the repair."""
+    env = {**os.environ, "TORTOISE_SECRET_PEPPER": "test-static-pepper"}
+    # A LIVE foreign volunteer engine hook at another path (still running) —
+    # structurally identical to ours (2 tokens, harness word) but serving a
+    # different engine: must not be hijacked by the repair.
+    foreign_dir = tmp_path / "gbrain"
+    foreign_dir.mkdir()
+    (foreign_dir / "volunteer-turn.sh").write_text("#!/usr/bin/env bash\n")
+    foreign = f"'{foreign_dir / 'volunteer-turn.sh'}' codex"
+    cfg = {"hooks": {"UserPromptSubmit": [{"hooks": [{"type": "command",
+                                                      "command": foreign}]}]}}
+    target = tmp_path / ".codex" / "hooks.json"
+    target.parent.mkdir(parents=True)
+    target.write_text(json.dumps(cfg))
+    r = _run(["install", "codex", "--dir", str(tmp_path)], env)
+    assert r.returncode == 0, r.stderr
+    cfg = json.loads(target.read_text())
+    cmd = cfg["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"]
+    assert cmd == foreign  # live foreign hook untouched
+    assert len(cfg["hooks"]["UserPromptSubmit"]) == 1

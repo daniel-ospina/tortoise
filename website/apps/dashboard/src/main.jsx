@@ -3,7 +3,7 @@ import { createRoot } from 'react-dom/client'
 import './index.css'
 // #1623: plan display data (build-time import of product/pricing.json).
 import { planOptions, STATUS_LABELS, TIER_LABELS } from './pricing.js'
-import { HARNESS_CAPTURE_INSTALL, HARNESS_CAPTURE_REASON, HARNESS_CAPTURE_STATUS_LABEL, HARNESS_CAPTURE_SUPPORT, HARNESS_CONTINUE_LABEL, HARNESS_COPY_LABEL, HARNESS_INSTALL, HARNESS_INTRO, HARNESS_NAMES, HARNESS_ORDER, HARNESS_PERSIST, HARNESS_SKILLS, HARNESS_SKILLLESS, HARNESS_SKILLS_IN_PROMPT, HARNESS_SKILLS_IN_STEPS, HARNESS_STEPS, UNIVERSAL_COMMAND } from './harnesses.js'
+import { HARNESS_CAPTURE_INSTALL, HARNESS_CAPTURE_REASON, HARNESS_CAPTURE_STATUS_LABEL, HARNESS_CAPTURE_SUPPORT, HARNESS_CONTINUE_LABEL, HARNESS_COPY_LABEL, HARNESS_INSTALL, HARNESS_INTRO, HARNESS_NAMES, HARNESS_ORDER, HARNESS_PERSIST, HARNESS_SELF_INSTALL, HARNESS_SKILLS, HARNESS_SKILLLESS, HARNESS_SKILLS_IN_PROMPT, HARNESS_SKILLS_IN_STEPS, HARNESS_STEPS, UNIVERSAL_COMMAND } from './harnesses.js'
 // #1728 Slice 3 (Tasks 16-17): the SHARED 4-state capture-status derivation
 // (off → install-pending → waiting → active, probe-driven) — pure, node --test
 // unit-tested (captureStatus.test.js). #1927: the re-ask gate predicate was
@@ -300,7 +300,7 @@ function SettingsTab(props) {
           the fork-aware step-mapped resume. ── */}
       <section className="settings-home" aria-labelledby="settings-setup-guide-heading">
         <h3 id="settings-setup-guide-heading">Setup guide</h3>
-        <p className="dim small">Where your Organization is in setup — resumes exactly where it left off.</p>
+        <p className="dim small">Where your Organization is in setup — reopen the wizard any time; what you've done is saved.</p>
         <SetupGuideCard state={state} loading={loading} onResume={onResumeSetup} />
       </section>
 
@@ -764,7 +764,9 @@ function claimIntentInFlight() {
   // #1566: in-app provisioning (first-timers) — the reveal is atomic (A13),
   // so the key is displayed here and never elsewhere.
   const [welcomeProvisioning, setWelcomeProvisioning] = React.useState(false)
+  const pendingInvitesLoadedRef = React.useRef(false)  // #2361 review-r1 (Bug-1)
   const [welcomeKey, setWelcomeKey] = React.useState('')
+
   // #1591: the first-data snippet (graph-missing card) — full command with
   // the user's own key (their dashboard, their key; copy-able).
   // #2246 (ADR-010): session mode holds no apiKey — the snippet's key source
@@ -922,11 +924,50 @@ function claimIntentInFlight() {
   }
   const [wizardSeedDone, setWizardSeedDone] = React.useState(false)
   const [wizardSeeding, setWizardSeeding] = React.useState(false)
+  // #2361 review-r1 (Bug-1): pending invites were only fetched when the
+  // account menu opened — a resumer in welcome mode never saw an invitation
+  // on the org-create step. Fetch on welcome entry (once per session).
+  React.useEffect(() => {
+    // #2361 review-r2 (P1): sessionRef is only set for teamless first-timers
+    // — org-holders resuming welcome never fetched. sessionTokenRef holds the
+    // JWT for every authed account. Re-fetch on each welcome entry so a
+    // mid-session invite shows up; no once-per-session latch (a failed fetch
+    // must retry, not persist a broken row).
+    if (welcomeMode && authed && sessionTokenRef.current) {
+      loadPendingInvites().catch(() => {})
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [welcomeMode, authed])
+
   // #1907: seed-step failure must surface INLINE (the global error banner
   // only renders post-welcome) — the message lives here and the retry is the
   // re-enabled 'Seed my graph' button. Cleared on every attempt.
   const [wizardSeedError, setWizardSeedError] = React.useState('')
   const [wizardDone, setWizardDone] = React.useState(false)
+  // #2361 review-r2 (P2): done-step honesty — a user who SKIPPED the connect
+  // step is 'set up but not connected'; track it so the done step doesn't
+  // claim an agent is taking over.
+  const [wizardPaused, setWizardPaused] = React.useState(false)
+  const wizardCardRef = React.useRef(null)
+  const wizardFocusInit = React.useRef(false)
+  const [wizardStepAnnounce, setWizardStepAnnounce] = React.useState('')
+
+  // #2361 review-r2 (a11y P1): announce + move focus on wizard step change.
+  // Step 1 (org input) and step 3 (paste field / copy button) carry their own
+  // autofocus targets — the container must not steal from them, so those two
+  // steps only announce.
+  React.useEffect(() => {
+    if (!(welcomeMode && authed)) return
+    const label = wizardStep === 4 && wizardPaused
+      ? 'Setup paused — your agent is not connected yet'
+      : (wizardStep === 1 && welcomeHasOrg ? 'Your Organization' : WIZARD_STEPS[wizardStep].label)
+    setWizardStepAnnounce(`Step ${wizardStep + 1} of 5: ${label}`)
+    if (!wizardFocusInit.current) { wizardFocusInit.current = true; return }
+    if (wizardStep === 1 && !welcomeHasOrg) return
+    if (wizardStep === 3) return
+    if (wizardCardRef.current) wizardCardRef.current.focus()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [wizardStep, welcomeMode, authed, wizardPaused])
   const [onboardingComplete, setOnboardingComplete] = React.useState(false)
   const [welcomeOriented, setWelcomeOriented] = React.useState(false)
   const [wizardSubject, setWizardSubject] = React.useState('')
@@ -1104,7 +1145,7 @@ function claimIntentInFlight() {
     scopeReadyRef.current = true
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [reposLoaded, onboarding, reposList, currentTeamId, reposLoadFailed])
-  const [currentGraphId, setCurrentGraphId] = React.useState(null)
+
   const [accountMenuOpen, setAccountMenuOpen] = React.useState(false) // #1148-ux: account blob dropdown
   // #1877: create-team dialog state (gated-on-click upgrade UX)
   const [createTeamOpen, setCreateTeamOpen] = React.useState(false)
@@ -1725,6 +1766,17 @@ function claimIntentInFlight() {
   // /v1/team/keys) — held HERE in-memory, shown once in the command snippet;
   // cap error routes to the API Keys tab (regenerate).
   const [wizardDurableKey, setWizardDurableKey] = React.useState('')
+
+  // #2361 review-r1 (I6): the connect-step key is shown ONCE — an accidental
+  // close right after copy loses it. Warn while a fresh plaintext is live.
+  React.useEffect(() => {
+    if (!(welcomeMode && (welcomeKey || wizardDurableKey))) return undefined
+    const warn = (e) => { e.preventDefault(); e.returnValue = '' }
+    window.addEventListener('beforeunload', warn)
+    return () => window.removeEventListener('beforeunload', warn)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [welcomeMode, welcomeKey, wizardDurableKey])
+
   const [wizardDurableBusy, setWizardDurableBusy] = React.useState(false)
   const [wizardDurableError, setWizardDurableError] = React.useState('')
   // #1998 fold-in: optional paste-your-own-durable-key fallback (closes the
@@ -2250,7 +2302,11 @@ function claimIntentInFlight() {
     setWizardDurableKey('')
     setWizardDurablePaste('')
     setWizardDurableError('')
-    setWizardShowPaste(false)
+    setWizardShowPaste(false)    // #2361 review-r2: welcomeKey is the first-timer provisioned plaintext
+    // (owner-only by construction — members never mint) — drop it here too so
+    // a later resume re-gates to the rows-aware copy instead of re-showing a
+    // 'shown once' key under a fresh 'shown once' disclosure.
+    setWelcomeKey('')
     // #1997 (W1): the legacy jsonb completion write is REMOVED — the done
     // step hands off to the graph (accept-and-drop makes a client PATCH
     // inert on node-present orgs; the node's fork-aware gate owns
@@ -3102,7 +3158,6 @@ function claimIntentInFlight() {
     setMembers(null)
     setMembersStatus('loading')
     setCurrentTeamId(null)
-    setCurrentGraphId(null)
     setTeams([])                       // Round-4: drop the previous session's teams
     // #1893 (code-review P2): a fresh login is a NEW team session — reset
     // the hydration latch + persist gate + scope state so the next session
@@ -3298,6 +3353,7 @@ function claimIntentInFlight() {
   // already hold an org never mint here (the step renders read-only). Name
   // REQUIRED (DE2E-3); claim-guard errors route to the claim card.
   async function handleWizardCreateOrg() {
+    if (wizardOrgBusy) return  // #2361 review-r1 (Bug-2): double-submit guard
     const name = wizardOrgName.trim()
     const nameErr = orgNameError(name)
     if (nameErr) { setWizardOrgError(nameErr); return }
@@ -3419,6 +3475,7 @@ function claimIntentInFlight() {
         method: 'POST', useSession: true,
         body: JSON.stringify({ step: 'harness-connected' }),
       })
+      setWizardPaused(false)
       setWizardStep(4)
     } catch (e) {
       if (e?.status === 503) {
@@ -3539,7 +3596,6 @@ function claimIntentInFlight() {
     setGraphMsg('')
     setConfirmDeleteId(null)
     setRevealKey(null)
-    setCurrentGraphId(null)
     setTeam(null)          // Fix B: clear key-scoped overview state too
     setStaleFired(false)   // #1858: reset the per-load stale latch on EVERY switch — incl. null→null from the terminal '—' state, where the reset effect's team dep doesn't fire
     setKeys([])
@@ -3683,10 +3739,6 @@ function claimIntentInFlight() {
         setGraphs(list)
         setGraphsLoaded(true) // Round-26
         setGraphsStatus('ok')
-        // Fix E (review round 2): auto-select first graph so the dropdown
-        // shows a selection after switch; Round-3: only when nothing is
-        // selected yet (don't clobber a manual pick on re-load).
-        setCurrentGraphId((prev) => prev ?? list[0]?.graph_id ?? null)
       }
     } catch {
       // #1842 P2-1: transport/parse failure → terminal 'error', never eternal shimmer
@@ -4810,9 +4862,14 @@ function claimIntentInFlight() {
   const wizardConnectHarness = (wizardHarness === 'codex' && wizardCodexDesktop) ? 'codexDesktop' : wizardHarness
 
   if (welcomeMode && authed) {
-    // #1566: first-timers are provisioned IN-APP — show the provisioning
-    // spinner, then the revealed key (exactly once, A13), or an actionable
-    // error. Returning users (welcomeKey empty) get the ready card.
+    // #2323 (Option B): name-first first-run — the welcome card renders the
+    // W1 wizard, never the key. There is NO mount provisioning (#1566's
+    // mount-time provision + ready-card reveal are deleted): the provisioning
+    // spinner + inline error below wrap ONLY the org-create step submit, and
+    // the provisioned plaintext is held in-memory (welcomeKey) and shown
+    // exactly once at the CONNECT step. Teamless first-timers land here from
+    // the session gate; org-holding accounts only via re-entry/resume (the
+    // read-only steps below).
     return (
       <div className="app">
         <header>
@@ -4837,7 +4894,7 @@ function claimIntentInFlight() {
             {welcomeProvisioning ? (
               <>
                 <h1 style={{ fontFamily: 'var(--serif, Georgia, serif)', fontWeight: 400, marginBottom: '0.5rem' }}>
-                  Provisioning your Tortoise…
+                  Creating your Organization…
                 </h1>
                 <p className="dim">Creating your Organization and API key — one moment.</p>
               </>
@@ -4865,6 +4922,9 @@ function claimIntentInFlight() {
                     ? (shownOrgName ? `${shownOrgName} is set up` : 'Your organization is set up')
                     : 'Welcome to Tortoise'}
                 </h1>
+                <span className="sr-only" role="status" aria-live="polite">
+                  {welcomeProvisioning ? 'Creating your organization' : (welcomeHasOrg && shownOrgName ? `${shownOrgName} is set up` : '')}
+                </span>
                 <p className="dim" style={{ marginBottom: '1.25rem' }}>
                   {welcomeHasOrg
                     ? 'Your Organization is set up. Choose how you\'ll use it and connect your agent — your API key is shown once at the connect step.'
@@ -4875,7 +4935,8 @@ function claimIntentInFlight() {
                     All other steps (install/seed/decide) are agent-side or
                     archived. Copy from wizardFlow.js (DE2E-2: 'Organization',
                     never 'team'/'workspace' in user-facing labels). */}
-                <div className="wizard">
+                <div className="wizard" ref={wizardCardRef} tabIndex={-1}>
+                  <span className="sr-only" role="status" aria-live="polite">{wizardStepAnnounce}</span>
                   <div className="wizard-progress">
                     {WIZARD_STEPS.map((s, i) => (
                       <span key={s.id} className={'wizard-step' + (i === wizardStep ? ' active' : (i < wizardStep ? ' done' : ''))} />
@@ -4894,10 +4955,10 @@ function claimIntentInFlight() {
                   {wizardStep === 0 && (
                     <div className="wizard-orient">
                       <ol className="wizard-intro" style={{ margin: '0 0 1rem 1.1rem', padding: 0, lineHeight: 1.7 }}>
-                        <li><strong>Install the tools</strong> — an MCP server so your agent can reach Tortoise, plus the skills so it knows how to use them.</li>
-                        <li><strong>Create your Organization</strong> — the first Subject on your graph, with you linked to it.</li>
+                        <li><strong>Create your Organization</strong> — the shared memory space your agent writes to. Name it, and it's created.</li>
                         <li><strong>Choose how you'll use it</strong> — for your own agents, or to build an application on top.</li>
-                        <li><strong>Connect your agent</strong> — one universal command; your agent takes over from there.</li>
+                        <li><strong>Connect your agent</strong> — one command installs the connector and skills your agent needs; your API key is shown once here.</li>
+                        <li><strong>Your agent takes it from there</strong> — it files your decisions and findings to this Organization as you make them.</li>
                       </ol>
                       <div className="wizard-nav">
                         <div className="wizard-nav-actions">
@@ -4963,14 +5024,20 @@ function claimIntentInFlight() {
                       {pendingInvites && pendingInvites.length > 0 && (
                         <div className="pending-invites" style={{ marginTop: '1.25rem', paddingTop: '1rem', borderTop: '1px solid var(--border,#1e293b)' }}>
                           <p className="dim small" style={{ margin: '0 0 0.5rem' }}>Or accept an invitation to join an existing organization:</p>
-                          {pendingInvites.map((inv) => (
+                          {pendingInvites[0] && pendingInvites[0]._loadError ? (
+                            // #2361 review-r2 (P3): a failed load must NOT render
+                            // as an actionable 'Invitation' row — mirror the
+                            // account-menu error branch.
+                            <p className="dim small" role="alert">{pendingInvites[0]._loadError}</p>
+                          ) : pendingInvites.map((inv) => (
                             <div key={inv.invitation_id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.4rem' }}>
                               <span className="small">{inv.team_name || 'Invitation'}</span>
+                              {inv.error && <span className="account-invite-error small" role="alert">{inv.error}</span>}
                               <div style={{ display: 'flex', gap: '0.4rem' }}>
-                                <button type="button" className="ghost small" onClick={() => acceptPendingInvite(inv)} disabled={pendingInvitesBusy === inv.invitation_id}>
+                                <button type="button" className="ghost small" onClick={() => acceptPendingInvite(inv)} disabled={pendingInvitesBusy !== ''}>
                                   {pendingInvitesBusy === inv.invitation_id ? 'Joining…' : 'Accept'}
                                 </button>
-                                <button type="button" className="ghost small" onClick={() => declinePendingInvite(inv)}>Decline</button>
+                                <button type="button" className="ghost small" onClick={() => declinePendingInvite(inv)} disabled={pendingInvitesBusy !== ''}>Decline</button>
                               </div>
                             </div>
                           ))}
@@ -4994,8 +5061,9 @@ function claimIntentInFlight() {
                           <button
                             key={opt.id}
                             type="button"
-                            className={onboarding && onboarding.fork === opt.id ? 'fork-option active' : 'fork-option'}
-                            disabled={wizardForkBusy || (onboarding && !!onboarding.fork)}
+                            className={(wizardForkChosen === opt.id || (onboarding && onboarding.fork === opt.id)) ? 'fork-option active' : 'fork-option'}
+                            aria-pressed={wizardForkChosen === opt.id || (onboarding && onboarding.fork === opt.id)}
+                            disabled={wizardForkBusy || !!wizardForkChosen || (onboarding && !!onboarding.fork)}
                             onClick={() => handleWizardFork(opt.id)}
                             style={{ display: 'flex', flexDirection: 'column', gap: '0.25rem', textAlign: 'left', padding: '0.7rem 0.9rem', border: '1px solid var(--border,#1e293b)', borderRadius: 8, background: 'var(--surface,#0d1a2d)', cursor: wizardForkBusy || (onboarding && !!onboarding.fork) ? 'default' : 'pointer' }}
                           >
@@ -5034,6 +5102,7 @@ function claimIntentInFlight() {
                         {HARNESS_ORDER.map((h) => (
                           <button key={h} type="button"
                             className={'harness-tab' + (wizardHarness === h ? ' active' : '')}
+                            aria-pressed={wizardHarness === h}
                             onClick={() => { setWizardHarness(h); setWizardCopied(''); if (h !== 'codex') setWizardCodexDesktop(false) }}>
                             {HARNESS_NAMES[h]}
                           </button>
@@ -5061,7 +5130,7 @@ function claimIntentInFlight() {
                             {!isOwnerAdmin
                               ? 'Only owners and admins can create or rotate keys in this dashboard. Paste an API key below (from your agents or an owner/admin), or ask an owner/admin to share the setup command.'
                               : (durableConnect.source === 'rows-durable'
-                                  ? 'This Organization already has API key(s) — each plaintext was shown once when created and the table can\'t reveal it again. Create a fresh key here (shown once), or rotate an existing key in the API Keys tab and use its replacement.'
+                                  ? 'This Organization already has API key(s) — each key\'s full text was shown once when created and the table can\'t reveal it again. Create a fresh key here (shown once), or rotate an existing key in the API Keys tab and use its replacement.'
                                   : 'The setup command embeds an API key for this Organization. Keys are shown once when created — create a new key now (shown once), or create/regenerate one in the API Keys tab.')}
                           </p>
                           {wizardDurableError && (
@@ -5076,6 +5145,11 @@ function claimIntentInFlight() {
                                 </button>
                               )}
                             </div>
+                            {/* #2361 review-r1 (Bug-5): no-key users (member with
+                                no key yet) must never be trapped on the connect
+                                step — Skip defers; the done step's copy stays
+                                honest ('connect it later'). */}
+                            <button type="button" className="ghost" onClick={() => { setWizardPaused(true); setWizardStep(4) }}>Skip for now</button>
                           </div>
                           {/* #2325: the affordances below are ESCAPES, not a
                               second path — a muted contextual 'Manage keys'
@@ -5084,15 +5158,17 @@ function claimIntentInFlight() {
                               the paste box collapsed behind a disclosure for
                               owner/admin so the mint CTA above is the ONE
                               obvious primary action. Members see paste
-                              directly: it is their only in-dashboard path
-                              (server mint is owner/admin dashboard policy,
-                              #2246). */}
+                              directly: it is their only in-dashboard key path
+                              (the mint CTA is owner/admin-only by DASHBOARD
+                              render policy — the server POST /v1/team/keys
+                              has NO role gate, #2246 — see
+                              wizardMintDurableKey). */}
                           <div style={{ marginTop: '0.85rem', display: 'flex', flexWrap: 'wrap', gap: '0.9rem', alignItems: 'center' }}>
                             <button type="button" className="ghost small" onClick={() => { window.history.replaceState({}, '', '/'); setWelcomeMode(false); setTab('keys'); finishWelcomeLoads() }}>
                               {isOwnerAdmin ? `Manage keys for ${shownOrgName || 'your organization'} →` : `View keys for ${shownOrgName || 'your organization'} →`}
                             </button>
                             {isOwnerAdmin && (
-                              <button type="button" aria-expanded={wizardShowPaste} aria-controls="wizard-paste-row"
+                              <button type="button" aria-expanded={wizardShowPaste} aria-controls={wizardShowPaste ? 'wizard-paste-row' : undefined}
                                 onClick={() => {
                                   // #2325 (review P2): opening the disclosure must NOT
                                   // clear the active error (the 402 copy explains the
@@ -5107,10 +5183,17 @@ function claimIntentInFlight() {
                             )}
                           </div>
                           {(!isOwnerAdmin || wizardShowPaste) && (
-                          // #1998 fold-in: paste-your-own escape — a user at
-                          // the max_api_keys cap regenerates a durable key in
-                          // the API Keys tab (shown once there) and pastes it
-                          // here instead of dead-ending on 402.
+                          // #1998/#2325: the paste box is the member path AND
+                          // the owner/admin cap-escape. #1998 history: a user
+                          // at the max_api_keys cap (free = 2) regenerates a
+                          // durable key in the API Keys tab (shown once there)
+                          // and pastes it here instead of dead-ending on 402.
+                          // Members get NO mint CTA (owner/admin-only by
+                          // dashboard render policy) — for them this box
+                          // renders unconditionally as their only in-dashboard
+                          // key path; for owner/admin it sits behind the
+                          // disclosure above (mint CTA is primary) and the
+                          // 402 handler opens it (#2325).
                           <div id="wizard-paste-row" style={{ marginTop: '0.75rem', display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
                             <input
                               type="password"
@@ -5119,9 +5202,11 @@ function claimIntentInFlight() {
                               value={wizardDurablePaste}
                               autoFocus={!!(wizardShowPaste && isOwnerAdmin)}
                               onChange={(e) => { setWizardDurablePaste(e.target.value); setWizardDurableError('') }}
+                              onKeyDown={(e) => { if (e.key === 'Enter' && wizardDurablePaste.trim()) { e.preventDefault(); document.querySelector('[data-paste-use]')?.click() } }}
                               style={{ flex: 1, minWidth: 0, padding: '0.5rem 0.65rem', background: 'var(--surface,#0d1a2d)', border: '1px solid var(--border,#1e293b)', borderRadius: 8, fontSize: 13, color: 'inherit' }}
                             />
                             <button
+                              data-paste-use
                               type="button"
                               className="ghost"
                               disabled={!wizardDurablePaste.trim()}
@@ -5212,7 +5297,8 @@ function claimIntentInFlight() {
                               the embedded key plaintext is not recoverable
                               from the keys table (server keeps hashes). */}
                           <p className="dim small" style={{ margin: '0.9rem 0 0', lineHeight: 1.6 }}>
-                            The key below is shown once — copy the command now. If you lose the key, rotate it in the API Keys tab (the replacement is shown once there too).
+                            <span className="sr-only" role="status">Your key is shown once — copy the setup command now.</span>
+                            The key below is shown once — copy the command now. Skipping means this key won't be shown again — you can reconnect later from the Setup guide (you may need to create a new key). If you lose it, rotate it in the API Keys tab.
                           </p>
                           <pre className="snippet" style={{ marginTop: '0.75rem' }}>
                             {UNIVERSAL_COMMAND[wizardConnectHarness](harnessKey)}
@@ -5225,10 +5311,11 @@ function claimIntentInFlight() {
                               install line above fetches it. */}
                           {!['codexDesktop', 'claude-desktop', 'claude-web'].includes(wizardConnectHarness) && (
                           <p className="dim small" style={{ margin: '0.75rem 0 0', lineHeight: 1.6 }}>
-                            One universal command, all 6 harnesses — your agent
-                            self-adjudicates which it is and verifies the
-                            connection with <code>tortoise_health</code> before
-                            you continue.
+                            Run the command, then tell your agent “Set up Tortoise”.
+                            When your agent says the connection check passed, click
+                            “My agent confirmed it — Continue →” below. The wizard
+                            itself doesn't watch the agent — its report comes in
+                            your terminal or chat.
                           </p>
                           )}
                           <div className="wizard-nav">
@@ -5243,10 +5330,10 @@ function claimIntentInFlight() {
                               </button>
                               {wizardCopied === 'harness' && (
                                 <button type="button" className="btn-primary" onClick={wizardHarnessContinue} disabled={wizardConnectBusy}>
-                                  {wizardConnectBusy ? 'Saving…' : (HARNESS_CONTINUE_LABEL[wizardHarness] || "I've set it up — Continue →")}
+                                  {wizardConnectBusy ? 'Saving…' : (HARNESS_CONTINUE_LABEL[wizardHarness] || (HARNESS_SELF_INSTALL.includes(wizardHarness) ? 'My agent confirmed it — Continue →' : "I've set it up — Continue →"))}
                                 </button>
                               )}
-                              <button type="button" className="ghost" onClick={() => setWizardStep(4)}>Skip for now</button>
+                              <button type="button" className="ghost" onClick={() => { setWizardPaused(true); setWizardStep(4) }}>Skip for now</button>
                             </div>
                           </div>
                         </>
@@ -5256,7 +5343,11 @@ function claimIntentInFlight() {
 
                   {wizardStep === 4 && (
                     <div className="done">
-                      <p className="dim">Your agent takes over from here — connect it, and it files your decisions and findings to this Organization's graph. Open Settings → Setup guide to follow what happens next.</p>
+                      {wizardPaused ? (
+                        <p className="dim">You're set up, but your agent isn't connected yet — nothing was installed on the connect step. Open Settings → Setup guide to follow what happens next — the setup command there creates a fresh key when you do.</p>
+                      ) : (
+                        <p className="dim">Your agent is connected — it files your decisions and findings to this Organization's graph from here on. Open Settings → Setup guide to follow what happens next.</p>
+                      )}
                       <div className="wizard-nav">
                         <button type="button" className="ghost" onClick={() => setWizardStep(3)}>← Back</button>
                       </div>
@@ -5913,7 +6004,7 @@ function claimIntentInFlight() {
           // the getting-started wizard (harness → integrations → skills →
           // seed), not a raw-curl dead end.
           <section className="overview empty-state graph-missing">
-            <h2>Your graph is ready for its first data point</h2>
+            <h2>Continue setting up {shownOrgName || 'your organization'}</h2>
             {/* #2167 (step 6, phase-7 reviewer 2 P1) / #2246: the re-entry
                 card's "and API key are live" claim needs a real key in
                 hand — (snippetKey || apiKey) truthiness: the first-timer
@@ -5923,8 +6014,8 @@ function claimIntentInFlight() {
                 the keyless prompt + in-app Go to API Keys action. */}
             <p className="dim">
               {snippetKey
-                ? 'Your Organization and API key are live. Finish the setup to connect your tool, learn the three skills, and seed your graph — it only takes a minute.'
-                : 'Your Organization is live — finish setup to connect your agent. Create a key on the API Keys tab, or continue setup below.'}
+                ? 'Your Organization and API key are live. Finish the setup to connect your tool — your agent installs its skills and files the first decision for you.'
+                : 'Your Organization is live — finish the setup below to connect your agent. No API key yet? Create one on the API Keys tab first.'}
             </p>
             <div className="empty-actions">
               <button className="btn-primary" onClick={() => { setWizardStep(0); setWelcomeMode(true) }}>
@@ -5942,7 +6033,7 @@ function claimIntentInFlight() {
           // #1591 (UX design): a clear first-data card — plain copy, a
           // styled copyable snippet, and a single primary action.
           <section className="overview empty-state graph-missing">
-            <h2>Your graph is ready for its first data point</h2>
+            <h2>Continue setting up {shownOrgName || 'your organization'}</h2>
             {snippetKey ? (
               // #1831 P2-1: only show the copyable snippet when a real key
               // exists — after a recoverable mint failure (#1830) the state
@@ -5971,13 +6062,14 @@ function claimIntentInFlight() {
                 </div>
               </>
             ) : (
-              // #2167 (step 6): the "…the dashboard re-keys once a key can
-              // be minted" clause dies with the login mint — the dashboard
-              // never auto-mints. One prompt + an IN-APP action (the API
-              // Keys tab is one click away); the external Connect link stays
-              // secondary.
+              // #2361 review-r2: role-aware — a member can't create keys and
+              // a second fresh create would 402 once the 2-key allowance is
+              // used. Members get the ask-owner path; the keys tab is still
+              // one click away for owners (their only first-party surface).
               <p className="dim">
-                Your Organization is live — create a key on the API Keys tab to connect your agent.
+                {isOwnerAdmin
+                  ? 'Your Organization is live — connect your agent below (its key is created on the connect step, or in the API Keys tab).'
+                  : "Your Organization is live — connect your agent below. You'll need an API key to paste: ask an owner or admin to share one."}
               </p>
             )}
             <div className="empty-actions">
@@ -6099,21 +6191,6 @@ function claimIntentInFlight() {
         )}
         {tab === 'keys' && (
           <section>
-            {/* #1148-ux review: graph selector restyled — page-scoped context
-                control, dark theme. */}
-            <div className="page-graph-selector">
-              <label htmlFor="page-graph-select">Graph</label>
-              <select
-                id="page-graph-select"
-                value={currentGraphId || ''}
-                onChange={(e) => e.target.value && setCurrentGraphId(e.target.value)}
-              >
-                {graphs.length === 0 && <option value="">No graph</option>}
-                {graphs.map((g) => (
-                  <option key={g.graph_id} value={g.graph_id}>{g.name}</option>
-                ))}
-              </select>
-            </div>
             {/* #1148: dashboard API-login toggle — claimed teams only.
                 Anon teams get the prominent Protect banner instead (above
                 the tabs); this toggle lets a claimed owner stop using a raw
