@@ -103,6 +103,53 @@ class TestGlobalConfigCommands:
         assert urlopen.call_args.args[0].headers["Authorization"] == "Bearer tt_global"
         assert "remembered" in capsys.readouterr().out
 
+    def test_context_hosted_digest_header_names_hosted_source(self, tmp_path, monkeypatch, capsys):
+        """#2209: with a stored global key the digest header must say the
+        hosted memory is answering — not silently swap local → hosted."""
+        _seed_global(tmp_path)
+        with mock.patch("urllib.request.urlopen", return_value=_ok(
+                {"diary_entries": [], "recent_points": [
+                    {"content": "remembered", "pointKind": "observation"}],
+                 "recent_events": []})) as urlopen:
+            rc = main(["context"])
+        assert rc == 0
+        assert urlopen.called  # served by the hosted API
+        out = capsys.readouterr().out
+        assert "# Tortoise memory (from previous sessions) — hosted (api.premiselabs.co)" in out
+        assert "local" not in out
+
+    def test_context_hosted_empty_notice_names_hosted_source(self, tmp_path, monkeypatch, capsys):
+        """#2209: even an empty hosted digest must name the hosted source — a
+        local-first user signing up for cloud sees the switch immediately."""
+        _seed_global(tmp_path)
+        with mock.patch("urllib.request.urlopen", return_value=_ok(
+                {"no_prior_sessions": True})) as urlopen:
+            rc = main(["context"])
+        assert rc == 0
+        assert urlopen.called
+        out = capsys.readouterr().out
+        assert "no prior sessions" in out
+        assert "Source: hosted (api.premiselabs.co)" in out
+        assert "local" not in out
+
+    def test_context_hosted_header_uses_configured_api_url(self, tmp_path, monkeypatch, capsys):
+        """#2209: a self-hosted api_url in the stored config is what the header
+        names — never a hardcoded Premise host."""
+        _seed_global(tmp_path)
+        cfg_path = tmp_path / ".tortoise" / "credentials.json"
+        cfg = json.loads(cfg_path.read_text())
+        cfg["api_url"] = "https://tortoise.example.com"
+        cfg_path.write_text(json.dumps(cfg))
+        with mock.patch("urllib.request.urlopen", return_value=_ok(
+                {"diary_entries": [], "recent_points": [
+                    {"content": "remembered", "pointKind": "observation"}],
+                 "recent_events": []})) as urlopen:
+            rc = main(["context"])
+        assert rc == 0
+        assert urlopen.call_args.args[0].full_url.startswith("https://tortoise.example.com/v1/context")
+        out = capsys.readouterr().out
+        assert "# Tortoise memory (from previous sessions) — hosted (tortoise.example.com)" in out
+
 
 class TestConfigErrorCommandHandling:
     """D6 per-site _ConfigError handling: a corrupt/unreadable global config
