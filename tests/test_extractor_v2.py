@@ -3067,8 +3067,169 @@ class TestS4Merge:
         merged = v2.merge_embed_lists(s2, s4)
         stats = v2._s4_merge_stats(s2, s4, merged)
         assert stats == {"s2_items": 2, "s4_items": 2, "merged_items": 3,
-                         "corrected_by_s4": 1, "kept_from_s2": 1,
-                         "added_by_s4": 1}
+                         "corrected_by_s4": 1, "verbatim_reemissions": 1,
+                         "kept_from_s2": 1, "added_by_s4": 1}
+
+
+    def test_verbatim_reemissions_pure_reemit(self):
+        """S2 items re-emitted identical → every collision is verbatim."""
+        s2 = {"entities": [], "events": [], "points": [_pt("A"), _pt("B")],
+              "operators": [], "chain_notes": [], "link_before_create": []}
+        s4 = {"entities": [], "events": [], "points": [_pt("A"), _pt("B")],
+              "operators": [], "chain_notes": [], "link_before_create": []}
+        merged = v2.merge_embed_lists(s2, s4)
+        stats = v2._s4_merge_stats(s2, s4, merged)
+        assert stats["corrected_by_s4"] == 2
+        assert stats["verbatim_reemissions"] == 2
+
+    def test_verbatim_reemissions_correction_not_verbatim(self):
+        """S2 entity re-emitted with a changed lifecycle (name/kind/content
+        identical) → collision counts corrected_by_s4 but NOT verbatim."""
+        def ent(**kw):
+            return {"name": "auth-gate", "kind": "core:plan",
+                    "lifecycle": "created", "supersedes": None,
+                    "note": None, **kw}
+        s2 = {"entities": [ent()], "events": [], "points": [],
+              "operators": [], "chain_notes": [], "link_before_create": []}
+        s4 = {"entities": [ent(lifecycle="superseded")], "events": [],
+              "points": [], "operators": [], "chain_notes": [],
+              "link_before_create": []}
+        merged = v2.merge_embed_lists(s2, s4)
+        stats = v2._s4_merge_stats(s2, s4, merged)
+        assert stats["corrected_by_s4"] == 1
+        assert stats["verbatim_reemissions"] == 0
+
+    def test_verbatim_reemissions_event_kind_change_is_correction(self):
+        """Same event content with a changed eventKind → correction (NOT
+        verbatim — eventKind is not in the events merge key, so this IS a
+        collision the classifier must distinguish)."""
+        def ev(kind="deployment"):
+            return {"content": "v2 shipped", "eventKind": kind,
+                    "date": "2026-01-01"}
+        s2 = {"entities": [], "events": [ev()], "points": [],
+              "operators": [], "chain_notes": [], "link_before_create": []}
+        s4 = {"entities": [], "events": [ev(kind="rollback")], "points": [],
+              "operators": [], "chain_notes": [], "link_before_create": []}
+        merged = v2.merge_embed_lists(s2, s4)
+        stats = v2._s4_merge_stats(s2, s4, merged)
+        assert stats["corrected_by_s4"] == 1   # content collision
+        assert stats["verbatim_reemissions"] == 0  # eventKind changed
+
+    def test_verbatim_reemissions_optional_field_drop_stays_verbatim(self):
+        """S4 re-emits a point with identical content but drops the optional
+        confidence/quote fields → STILL a verbatim re-emission."""
+        p_full = {"content": "the fix shipped", "pointKind": "statement",
+                  "about_entities": [], "slots": None,
+                  "confidence": 0.9, "quote": "original quote"}
+        p_min = {"content": "the fix shipped", "pointKind": "statement",
+                 "about_entities": [], "slots": None}
+        s2 = {"entities": [], "events": [], "points": [p_full],
+              "operators": [], "chain_notes": [], "link_before_create": []}
+        s4 = {"entities": [], "events": [], "points": [p_min],
+              "operators": [], "chain_notes": [], "link_before_create": []}
+        merged = v2.merge_embed_lists(s2, s4)
+        stats = v2._s4_merge_stats(s2, s4, merged)
+        assert stats["corrected_by_s4"] == 1
+        assert stats["verbatim_reemissions"] == 1
+
+    def test_verbatim_reemissions_gap_not_counted(self):
+        """S4-only item (no S2 collision) → counts as added_by_s4, not
+        verbatim, not corrected."""
+        s2 = {"entities": [], "events": [], "points": [_pt("A")],
+              "operators": [], "chain_notes": [], "link_before_create": []}
+        s4 = {"entities": [], "events": [], "points": [_pt("C")],
+              "operators": [], "chain_notes": [], "link_before_create": []}
+        merged = v2.merge_embed_lists(s2, s4)
+        stats = v2._s4_merge_stats(s2, s4, merged)
+        assert stats["added_by_s4"] == 1
+        assert stats["verbatim_reemissions"] == 0
+        assert stats["corrected_by_s4"] == 0
+
+    def test_verbatim_reemissions_scoped_to_4_sections(self):
+        """chain_notes / link_before_create / retractions collisions are NOT
+        re-emission surfaces — never counted verbatim."""
+        s2 = {"entities": [], "events": [], "points": [],
+              "operators": [], "chain_notes": [{"chain": "c", "finding": "f"}],
+              "link_before_create": [{"searched_for": "x", "found": False}],
+              "retractions": []}
+        s4 = {"entities": [], "events": [], "points": [],
+              "operators": [], "chain_notes": [{"chain": "c", "finding": "f"}],
+              "link_before_create": [{"searched_for": "x", "found": True}],
+              "retractions": []}
+        merged = v2.merge_embed_lists(s2, s4)
+        stats = v2._s4_merge_stats(s2, s4, merged)
+        assert stats["verbatim_reemissions"] == 0
+
+    def test_verbatim_reemissions_entity_kind_lens(self):
+        """Entity kind folds through the KEY's kind lens: S4 re-emits the
+        same entity writing "plan" where S2 wrote "core:plan" → same merge
+        key (bare kind), verbatim (not a correction)."""
+        s2 = {"entities": [{"name": "gate", "kind": "core:plan",
+                            "lifecycle": "created", "supersedes": None,
+                            "note": None}], "events": [], "points": [],
+              "operators": [], "chain_notes": [], "link_before_create": []}
+        s4 = {"entities": [{"name": "gate", "kind": "plan",
+                            "lifecycle": "created", "supersedes": None,
+                            "note": None}], "events": [], "points": [],
+              "operators": [], "chain_notes": [], "link_before_create": []}
+        merged = v2.merge_embed_lists(s2, s4)
+        stats = v2._s4_merge_stats(s2, s4, merged)
+        assert stats["corrected_by_s4"] == 1
+        assert stats["verbatim_reemissions"] == 1
+
+    def test_verbatim_reemissions_pointkind_drift_is_not_verbatim(self):
+        """PR #2430 review A/B basis pin: the conservative full-equality
+        basis means a drift on ANY non-optional field (here pointKind on
+        same content) is NOT a verbatim re-emission — under the delta
+        contract the item WOULD be re-emitted, so it is not pure savings.
+        (Stricter than the #1789 field pin; documented on #1789.)"""
+        p1 = {"content": "the fix shipped", "pointKind": "statement",
+              "about_entities": [], "slots": None}
+        p2 = {"content": "the fix shipped", "pointKind": "decision",
+              "about_entities": [], "slots": None}
+        s2 = {"entities": [], "events": [], "points": [p1],
+              "operators": [], "chain_notes": [], "link_before_create": []}
+        s4 = {"entities": [], "events": [], "points": [p2],
+              "operators": [], "chain_notes": [], "link_before_create": []}
+        merged = v2.merge_embed_lists(s2, s4)
+        stats = v2._s4_merge_stats(s2, s4, merged)
+        assert stats["corrected_by_s4"] == 1    # same content → collision
+        assert stats["verbatim_reemissions"] == 0  # pointKind drift
+
+    def test_verbatim_reemissions_dup_key_capped_semantics(self):
+        """A duplicate merge key WITHIN one S2 list counts per-S2-item
+        (corrected_by_s4/verbatim can exceed s4_items) — the report clamps
+        the redundant proxy factor to [0,1]; the classifier itself stays a
+        per-item count (matches corrected_by_s4's basis)."""
+        ent = {"name": "gate", "kind": "core:plan", "lifecycle": "created",
+               "supersedes": None, "note": None}
+        s2 = {"entities": [ent, dict(ent)], "events": [], "points": [],
+              "operators": [], "chain_notes": [], "link_before_create": []}
+        s4 = {"entities": [dict(ent)], "events": [], "points": [],
+              "operators": [], "chain_notes": [], "link_before_create": []}
+        merged = v2.merge_embed_lists(s2, s4)
+        stats = v2._s4_merge_stats(s2, s4, merged)
+        assert stats["s2_items"] == 2
+        assert stats["s4_items"] == 1
+        assert stats["corrected_by_s4"] == 2  # per-S2-item vs S4 key set
+        assert stats["verbatim_reemissions"] == 2
+        # merge dedupes the dup to ONE entity (first-wins semantics)
+        assert len(merged["entities"]) == 1
+
+    def test_verbatim_reemissions_supersedes_change_is_correction(self):
+        """A supersedes change on a colliding operator → correction."""
+        def op(**kw):
+            return {"src": "a", "dst": "b", "op_type": "IMPL",
+                    "target_edge": None, **kw}
+        s2 = {"entities": [], "events": [], "points": [],
+              "operators": [op()], "chain_notes": [], "link_before_create": []}
+        s4 = {"entities": [], "events": [], "points": [],
+              "operators": [op(supersedes="q")], "chain_notes": [],
+              "link_before_create": []}
+        merged = v2.merge_embed_lists(s2, s4)
+        stats = v2._s4_merge_stats(s2, s4, merged)
+        assert stats["corrected_by_s4"] == 1
+        assert stats["verbatim_reemissions"] == 0
 
 
 class TestE4Orchestrator:
@@ -4024,6 +4185,144 @@ class TestEscalation2134:
         finally:
             _v2._complete = orig
         assert seen["deadline"] >= 0.05 * 32000  # 1600s scaled
+
+class TestSeamOutTokens2408:
+    """#2408 Task 0 — the healthy-path per-seam output-token accumulator
+    (s2_out_tokens / s4_out_tokens): recorded ONLY on clean terminal success
+    (the final call whose list was embedded), never on abort/residual/
+    partial arms, never on seam=None."""
+
+    def _stop_model(self, tokens=1234, body=None):
+        class _M:
+            last_finish_reason = "stop"
+            def complete(self, *, system, user, max_tokens=None):
+                self.last_finish_reason = "stop"
+                self.last_prompt_tokens = 400
+                self.last_completion_tokens = tokens
+                return (body if body is not None else
+                        '{"entities": [], "events": [], "operators": [], '
+                        '"points": [{"content": "p1", "pointKind": "statement"}]}')
+        return _M()
+
+    def test_s2_success_records_out_tokens(self):
+        m = self._stop_model(tokens=1234)
+        stats: dict = {}
+        out = v2.run_s2(m, "STORY", stats=stats)
+        assert out["points"][0]["content"] == "p1"
+        rec = stats["recovery"]
+        assert rec["s2_out_tokens"] == 1234
+        assert "s4_out_tokens" not in rec
+        assert "truncation_completion_tokens_s2" not in rec
+
+    def test_s4_success_records_out_tokens(self):
+        m = self._stop_model(tokens=777)
+        stats: dict = {}
+        v2.run_s4(m, "STORY", {"degraded": False},
+                        {"entities": [], "events": [], "operators": [],
+                         "points": []}, stats=stats)
+        rec = stats["recovery"]
+        assert rec["s4_out_tokens"] == 777
+        assert "s2_out_tokens" not in rec
+
+    def test_escalation_recovered_records_out_tokens(self):
+        """A length-then-escalate-and-recover S2 call records the ESCALATED
+        call's tokens as s2_out_tokens (the list that got embedded); the
+        base call's truncated tokens stay in truncation_completion_tokens_s2.
+        No double count of a single concept."""
+        class _M:
+            last_finish_reason = "length"
+            def complete(self, *, system, user, max_tokens=None):
+                if max_tokens == 32000:
+                    self.last_finish_reason = "stop"
+                    self.last_completion_tokens = 31000
+                    return ('{"entities": [], "events": [], "operators": [], '
+                            '"points": [{"content": "p1", "pointKind": "statement"}, '
+                            '{"content": "p2", "pointKind": "statement"}]}')
+                self.last_finish_reason = "length"
+                self.last_completion_tokens = 16000
+                return ('{"entities": [], "events": [], "operators": [], '
+                        '"points": [{"content": "p1", "pointKind": "statement"}')
+        stats: dict = {}
+        out = v2.run_s2(_M(), "STORY", stats=stats)
+        assert len(out["points"]) == 2  # recovered
+        rec = stats["recovery"]
+        assert rec["s2_out_tokens"] == 31000       # the escalated list
+        assert rec["truncation_completion_tokens_s2"] == 16000  # the base
+        assert rec["escalated_recovered"] == 1
+
+    def test_residual_abort_partial_no_out_tokens(self):
+        """Residual (fail-loud), abort (escalated raise → head-reparse),
+        and rung-4 partial arms record NO sX_out_tokens — a partial-list
+        size must never masquerade as a healthy total."""
+        # residual: both calls length, no recoverable prefix
+        class _Residual:
+            last_finish_reason = "length"
+            def complete(self, *, system, user, max_tokens=None):
+                self.last_finish_reason = "length"
+                self.last_completion_tokens = max_tokens or 16000
+                return '{"entities": []'
+        stats: dict = {}
+        with pytest.raises(ValueError):
+            v2.run_s2(_Residual(), "STORY", stats=stats)
+        assert "s2_out_tokens" not in stats.get("recovery", {})
+        # rung-4 partial: stop-reason malformed with a schema-valid prefix
+        # head → _parse_json_robust partial-accepts (stats["partial"]=True)
+        PARTIAL_HEAD = ('{"entities": [{"name": "X", "kind": "core:plan", '
+                        '"lifecycle": "created", "supersedes": null, "note": null}], '
+                        '"events": [], "operators": [], "points": [{"content": "p1", '
+                        '"pointKind": "statement", "about_entities": [], "slots": null}],')
+        class _Partial:
+            last_finish_reason = "stop"
+            def complete(self, *, system, user, max_tokens=None):
+                self.last_finish_reason = "stop"
+                self.last_completion_tokens = 9000
+                return PARTIAL_HEAD  # truncated-malformed but valid prefix
+        stats2: dict = {}
+        out = v2.run_s2(_Partial(), "STORY", stats=stats2)
+        assert stats2.get("partial") is True
+        assert "s2_out_tokens" not in stats2.get("recovery", {})
+        assert out  # partial-accepted head still returned
+
+    def test_escalated_partial_arm_records_no_out_tokens(self):
+        """The escalated call returns stop-but-malformed with a valid prefix
+        head → rung-4 partial-accept on the ESCALATED response (escalated_
+        partial bucket, stats[partial]=True) — the partial head must NOT be
+        recorded as a healthy out-token total."""
+        PARTIAL_ESC = ('{"entities": [{"name": "X", "kind": "core:plan", '
+                       '"lifecycle": "created", "supersedes": null, "note": null}], '
+                       '"events": [], "operators": [], "points": [{"content": "p1", '
+                       '"pointKind": "statement", "about_entities": [], "slots": null}],')
+        calls = {"n": 0}
+
+        class _M:
+            last_finish_reason = "length"
+            def complete(self, *, system, user, max_tokens=None):
+                calls["n"] += 1
+                if max_tokens == 32000:
+                    self.last_finish_reason = "stop"
+                    self.last_completion_tokens = 31000
+                    return PARTIAL_ESC  # malformed-but-valid-prefix
+                self.last_finish_reason = "length"
+                self.last_completion_tokens = 16000
+                return '{"entities": []'
+
+        stats: dict = {}
+        v2.run_s2(_M(), "STORY", stats=stats)
+        assert calls["n"] == 2
+        rec = stats["recovery"]
+        assert rec["escalated"] == 1 and rec["escalated_partial"] == 1
+        assert stats.get("partial") is True
+        assert "s2_out_tokens" not in rec  # partial head never a healthy total
+
+    def test_seam_none_no_out_tokens(self):
+        """The kind_classifier adjudication shape (seam=None) contributes
+        no per-seam out-token key."""
+        m = self._stop_model(tokens=500)
+        stats: dict = {}
+        v2._complete_parsed(m, "s", "u", max_tokens=16000, stats=stats,
+                            seam=None)
+        assert "s2_out_tokens" not in stats.get("recovery", {})
+        assert "s4_out_tokens" not in stats.get("recovery", {})
 
 
 class TestS1Escalation2134:
