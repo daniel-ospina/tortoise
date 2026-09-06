@@ -292,12 +292,6 @@ button.tier-badge:disabled { opacity: 0.6; cursor: wait; }
 }
 .billing .row { flex-wrap: wrap; gap: 8px; }
 /* #1148-ux: graph selector moved into the API Keys page (page-scoped context) */
-.page-graph-selector {
-  display: inline-flex; align-items: center; gap: 10px;
-  margin-bottom: 16px; padding: 10px 14px;
-  border: 1px solid var(--border); border-radius: 10px;
-  background: var(--surface); max-width: 360px;
-}
 /* #1845: source-scope selector (repo + branch) inside the Memory-sources rows.
    Shares the page-graph-selector look: uppercase label + accent-focus select,
    wrapped in a subtle surface pill. Inline-flex so repo + branch + preview sit
