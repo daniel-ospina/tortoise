@@ -29,11 +29,9 @@ usage() {
 Usage: install-tortoise-skills.sh --harness claude|codex|cursor|pi
 
 Installs the official Tortoise skills into the harness's skills directory:
-  claude -> .claude/skills    (project)
-  codex  -> .agents/skills    (project)  — Codex's documented skill root (#2329);
-                                       (Codex also scans ~/.agents/skills — this
-                                       installer writes the project root only)
-  cursor -> .cursor/skills   (project)
+  claude -> .claude/skills (project)
+  codex  -> .codex/skills  (project)
+  cursor -> .cursor/skills (project)
   pi     -> ~/.pi/agent/skills (personal)
 
 Run: curl -fsSL https://app.premiselabs.co/install-tortoise-skills.sh | bash -s -- --harness <harness>
@@ -58,7 +56,7 @@ fi
 
 case "$HARNESS" in
   claude) DEST=".claude/skills" ;;
-  codex)  DEST=".agents/skills" ;;
+  codex)  DEST=".codex/skills" ;;
   cursor) DEST=".cursor/skills" ;;
   pi)     DEST="$HOME/.pi/agent/skills" ;;
   *) echo "Unknown harness: $HARNESS (expected claude|codex|cursor|pi)" >&2; exit 2 ;;
@@ -81,63 +79,6 @@ for s in "${SKILLS[@]}"; do
   fi
 done
 
-# #2329/#2330 (codex): Codex reads repo-root AGENTS.md as its standing
-# instructions (it auto-loads per session; there is NO skills-declaration
-# syntax in AGENTS.md). Emit a Tortoise block so every session knows when and
-# how to use the graph — idempotent (marker-delimited replace).
-emit_codex_agents_block() {
-  local file="AGENTS.md"
-  local ms="<!-- tortoise:start -->"
-  local me="<!-- tortoise:end -->"
-  local tmpdir block pre post target
-  tmpdir="$(mktemp -d)" || return 1
-  block="$tmpdir/block"; pre="$tmpdir/pre"; post="$tmpdir/post"
-  # Resolve a symlinked AGENTS.md (monorepos point AGENTS.md at a shared
-  # file) — refresh the TARGET, never clobber the link.
-  target="$file"
-  [ -L "$file" ] && target="$(readlink "$file")"
-  printf '%s\n' \
-"${ms}
-# Tortoise — agent memory (this project is connected to Tortoise Cloud)
-- If the Tortoise MCP tools are available in this session (search/query/health +
-  graph-write tools) and these skills (how-to-use-tortoise, tortoise-decide,
-  tortoise-file-finding, tortoise-onboarding) are installed, use the graph without
-  being asked to: after a decision or a research finding, file it; search the graph
-  before answering from memory; say plainly when nothing relevant is stored.
-- When the user says \"Set up Tortoise\", run the tortoise-onboarding flow and verify
-  with tortoise_health before reporting done.
-- First-time MCP calls may prompt for approval — tortoise_health and the read tools
-  are safe to allow.
-${me}" > "$block"
-  if [ -f "$target" ]; then
-    if grep -qF "$ms" "$target" && grep -qF "$me" "$target"; then
-      # In-place replace between the markers (idempotent refresh) — never
-      # touches content outside the marked block. Markers must sit on their
-      # own line (tolerating a trailing CR) so content merely mentioning the
-      # marker text is preserved.
-      : > "$pre"; : > "$post"
-      awk -v ms="$ms" -v me="$me" -v pre="$pre" -v post="$post" '
-        BEGIN { inmarker = 0; ended = 0 }
-        $0 ~ ("^" ms "\r?$") { inmarker = 1; next }
-        inmarker && $0 ~ ("^" me "\r?$") { inmarker = 0; ended = 1; next }
-        { if (ended) print > post; else if (!inmarker) print > pre }
-      ' "$target"
-      # cp -p first preserves the file's mode (a 0600 AGENTS.md stays 0600)
-      # and ownership; cat then overwrites content in place.
-      cp -p "$target" "$target.tmp"
-      cat "$pre" "$block" "$post" > "$target.tmp"
-      mv "$target.tmp" "$target"
-    else
-      printf '\n\n' >> "$target"
-      cat "$block" >> "$target"
-    fi
-  else
-    cat "$block" > "$target"
-  fi
-  rm -rf "$tmpdir"
-  echo "  ✓ AGENTS.md — Tortoise standing instructions refreshed/created"
-}
-
 # Verify the target dir — we KNOW where we wrote, so this is a local check.
 missing=()
 for s in "${SKILLS[@]}"; do
@@ -152,17 +93,10 @@ if [ ${#missing[@]} -eq 0 ]; then
   echo "Next: restart your agent, then confirm the skills are listed:"
   case "$HARNESS" in
     claude) echo "   claude — the skills appear under /skills" ;;
-    codex)  echo "   codex — open the project in Codex and check /skills, or ask the agent \"Set up Tortoise\"" ;;
+    codex)  echo "   codex — check the skills list in the agent" ;;
     cursor) echo "   cursor — skills load from .cursor/skills" ;;
     pi)     echo "   pi — ~/.pi/agent/skills is scanned on startup" ;;
   esac
-
-  # #2329/#2330: Codex standing instructions — only for the codex harness
-  # (other harnesses have their own memory mechanisms; a stray AGENTS.md
-  # would change every agent's behavior in this project).
-  if [ "$HARNESS" = "codex" ]; then
-    emit_codex_agents_block
-  fi
 else
   echo ""
   echo "⚠️  Some skills did not verify in $DEST: ${missing[*]}" >&2
