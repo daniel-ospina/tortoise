@@ -253,12 +253,13 @@ def test_fresh_session_login_renders_session_only_with_zero_mint(page: Page) -> 
 
 
 def test_welcome_mode_provisions_and_reveals_key_once(page: Page) -> None:
-    """#1566: a first-timer (valid session, NO teams) landing on the app is
-    provisioned IN-APP — tenant-provision → membership poll → reveal — and
-    the key is shown in the welcome card exactly once (A13). A returning
-    visit (onboarding complete) lands on the dashboard's first-run card
-    with NO re-reveal (#1885: the welcome-card reveal only fires on the
-    provisioning path)."""
+    """#1566/#2323: a first-timer (valid session, NO teams) lands on the
+    welcome card + W1 orientation — NOT auto-provisioned at mount (the
+    mount-time provisioning was removed by #2323 Option B). The org-create
+    step provisions in-app (tenant-provision → 201 carries the plaintext,
+    ADR-010: in-memory only) and the key is shown exactly once, at the
+    CONNECT step (A13). A returning visit (onboarding complete) lands on the
+    dashboard's first-run card with NO key (#1885)."""
     import time as _time
     import urllib.parse as _up
     user_id = "u-welcome1566"
@@ -324,10 +325,27 @@ def test_welcome_mode_provisions_and_reveals_key_once(page: Page) -> None:
 
     page.route("**/*", handle)
     page.goto(APP_HOST + "/", wait_until="domcontentloaded", timeout=30_000)
-    expect(page.locator("body")).to_contain_text("tt_welcome_key_1234567890abcdef", timeout=20_000)
-    assert reveal_calls["n"] == 1, f"reveal must fire exactly once, got {reveal_calls['n']}"
-    # The raw key must be displayed (a revealed-once key is never shown again).
-    expect(page.locator("body")).to_contain_text("copy it now", timeout=10_000)
+    # #2323 (Option B): teamless first-timer → welcome card + orientation,
+    # no key anywhere yet.
+    expect(page.locator("body")).to_contain_text("Welcome to Tortoise", timeout=20_000)
+    expect(page.locator("body")).not_to_contain_text("tt_welcome_key_1234567890abcdef")
+    page.get_by_role("button", name="Continue →").click()
+    expect(page.locator("body")).to_contain_text("Create your Organization", timeout=10_000)
+    page.get_by_label("Organization name").fill("acme")
+    expect(page.locator("body")).not_to_contain_text("tt_welcome_key_1234567890abcdef")
+    # Provision fires on the SUBMIT (the typed name is the provisioning
+    # door). The key is NOT shown on the org-create step.
+    page.get_by_role("button", name="Create Organization").click()
+    expect(page.locator("body")).to_contain_text("Choose how you'll use Tortoise", timeout=20_000)
+    expect(page.locator("body")).not_to_contain_text("tt_welcome_key_1234567890abcdef")
+    # Fork card → connect step: the in-memory provisioned plaintext is
+    # displayed EXACTLY ONCE here. No reveal RPC — the edge returned the key
+    # in the 201 body (ADR-010 single-consumption).
+    page.get_by_role("button", name="Use it for your own agents").click()
+    expect(page.locator("body")).to_contain_text("Connect your agent", timeout=15_000)
+    expect(page.locator("body")).to_contain_text("tt_welcome_key_1234567890abcdef", timeout=15_000)
+    assert reveal_calls["n"] == 0, \
+        f"first-run plaintext rides the 201 body — no reveal RPC: {reveal_calls['n']}"
     # Returning visit: the key is consumed (reveal returns 'pending') → the
     # ready card, no re-reveal.
     reveal_calls["n"] = 0
@@ -376,9 +394,10 @@ def test_welcome_mode_provisions_and_reveals_key_once(page: Page) -> None:
 
 
 def test_welcome_mode_provision_failure_shows_error_card(page: Page) -> None:
-    """#1566: an edge-function provisioning failure shows the actionable
-    error card with a retry — never the silent stuck shell (the #1559
-    pattern applied to the welcome mode)."""
+    """#1566/#2323: a tenant-provision failure on the org-create SUBMIT
+    shows the inline step-1 error with the submit button recovered (busy
+    flags reset in `finally`) — never a silent stuck shell or a wedged
+    spinner (the #1559 pattern applied to the name-first flow)."""
     import time as _time
     import urllib.parse as _up
     user_id = "u-wfail"
@@ -414,14 +433,23 @@ def test_welcome_mode_provision_failure_shows_error_card(page: Page) -> None:
 
     page.route("**/*", handle)
     page.goto(APP_HOST + "/", wait_until="domcontentloaded", timeout=30_000)
+    # #2323: provisioning fires on the org-create SUBMIT (mount no longer
+    # provisions) — the 500 surfaces the inline step-1 error; the busy flags
+    # reset so the submit button recovers and a retry is possible.
+    expect(page.locator("body")).to_contain_text("Welcome to Tortoise", timeout=20_000)
+    page.get_by_role("button", name="Continue →").click()
+    expect(page.locator("body")).to_contain_text("Create your Organization", timeout=10_000)
+    page.get_by_label("Organization name").fill("acme")
+    page.get_by_role("button", name="Create Organization").click()
     expect(page.locator("body")).to_contain_text("Could not create your organization — try again.", timeout=20_000)
-    expect(page.locator("body")).to_contain_text("Try again", timeout=10_000)
+    # Recovered: the submit button is enabled again (not a full-card wedge).
+    expect(page.get_by_role("button", name="Create Organization")).to_be_enabled(timeout=5_000)
 
 
 def test_welcome_mode_provision_401_clears_session_and_redirects(page: Page) -> None:
-    """#1566/#1511 semantic: a 401 from tenant-provision means the session is
-    stale — the app clears it and goes to /auth (never an error card or a
-    stuck state)."""
+    """#1566/#1511/#2323: a 401 from tenant-provision on the org-create
+    SUBMIT means the session is stale — the app clears it and goes to /auth
+    (never an error card or a stuck state)."""
     import time as _time
     import urllib.parse as _up
     user_id = "u-w401"
@@ -462,6 +490,13 @@ def test_welcome_mode_provision_401_clears_session_and_redirects(page: Page) -> 
 
     page.route("**/*", handle)
     page.goto(APP_HOST + "/", wait_until="domcontentloaded", timeout=30_000)
+    # #2323: the stale-session 401 now surfaces on the org-create SUBMIT
+    # (mount no longer provisions). Drive to it, then expect the /auth bounce.
+    expect(page.locator("body")).to_contain_text("Welcome to Tortoise", timeout=20_000)
+    page.get_by_role("button", name="Continue →").click()
+    expect(page.locator("body")).to_contain_text("Create your Organization", timeout=10_000)
+    page.get_by_label("Organization name").fill("acme")
+    page.get_by_role("button", name="Create Organization").click()
     expect(page).to_have_url(re.compile(rf"^{re.escape(AUTH_HOST)}/auth"), timeout=20_000)
 
 
