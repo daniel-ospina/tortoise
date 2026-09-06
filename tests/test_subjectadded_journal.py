@@ -525,6 +525,44 @@ class TestDeleteNonDurability:
 
 # ── Green-pin: falsy-name no-phantom-line ──────────────────────────────────
 
+
+class TestCreatedAtNoneGate:
+    def test_explicit_created_at_none_is_synthesized_on_first_registration(
+            self, tmp_path):
+        """Green-pin for the review-round hardening: an explicit createdAt=None
+        caller prop on a journaled first registration must NOT slip a NULL
+        onto the journal line (replay ON CREATE would then stamp rebuild time
+        ≠ live create time — the #2164-P4 drift class). The gate is
+        `event.get("createdAt") is None` (not key-absence), so None is
+        synthesized pre-apply. Discriminates the is-None gate: under the old
+        key-absence gate the line would carry createdAt null and this fails."""
+        events = tmp_path / "events"
+        events.mkdir()
+        sdk = TortoiseSDK(str(tmp_path / "t9d.db"),
+                          event_log_path=str(events / "events.jsonl"))
+        try:
+            proj = sdk._get_proj()
+            sdk.create_entity("subject", "none-person",
+                              subjectKind="core:other", is_episodic=False,
+                              createdAt=None)
+            journal = _journaled(sdk, events)
+            sas = _name_sas(journal, "none-person")
+            assert len(sas) == 1, sas
+            line = sas[0]
+            assert line.get("createdAt"), (
+                "explicit createdAt=None must be synthesized on the first "
+                f"registration, not journaled as null: {line!r}")
+            rows = _subject_row(proj, "none-person", "createdAt")
+            assert rows and rows[0][0] == line["createdAt"], rows
+            proj.rebuild_all(str(events))
+            rows = _subject_row(proj, "none-person", "createdAt")
+            assert rows and rows[0][0] == line["createdAt"], (
+                "rebuilt createdAt must equal the synthesized journaled "
+                "value (no rebuild-time drift from a null line)")
+        finally:
+            sdk.close()
+
+
 class TestFalsyName:
     def test_empty_name_create_does_not_mint_a_phantom_line(self, tmp_path):
         """Green-pin: an empty-name Subject create on a journaled SDK mints
