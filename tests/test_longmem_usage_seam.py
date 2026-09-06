@@ -406,8 +406,9 @@ def test_call_once_runs_model_in_caller_context():
             return "ok"
 
     cv.set("caller-value")
-    resp, finish = _call_once(
+    resp, finish, ptok, ctok = _call_once(
         StubModel(), "s", "u", deadline_s=30, max_tokens=None, stats=None)
+    assert ptok == 0 and ctok == 0  # #2134 Task 0: no token attrs -> 0
     assert resp == "ok"
     assert finish == "stop"
     assert seen["ctx_value"] == "caller-value", (

@@ -6247,3 +6247,89 @@ class TestGraphHasTeamNamespaceExceptionPath:
 
         monkeypatch.setattr(ha_mod, "_make_sdk", _boom)
         assert ha_mod._graph_has_team_namespace("team-busy") is True
+
+
+class TestSupabaseLaneV2AcceptErrorShape:
+    """W7 merge review P2 (supabase lane): the v2 mismatch accept's OTP
+    reject must return the DOCUMENTED invite_otp_invalid dict shape on the
+    supabase lane too — the seam's reachable wrong-code message is
+    "Invalid or expired verification code" (lowercase "verification"), and
+    a case-sensitive matcher on the capital-V defense-branch text missed it,
+    so a supabase-hosted wrong code fell through to a plain-string 403
+    (diverging from the registry lane's dict, which the HTTP fusion tests
+    pin). Registry-lane coverage exists in test_invite_fusion_http.py; the
+    supabase lane had none — this pins the mapping directly."""
+
+    def test_wrong_code_maps_to_invite_otp_invalid_dict(self, monkeypatch):
+        """Drive _accept_mismatch_v2 in supabase mode with a seam that
+        raises the reachable lowercase-message InvitationError — the handler
+        must translate it to the documented {error_code: invite_otp_invalid}
+        HTTP 403 dict (not a plain-string detail)."""
+        import asyncio
+
+        import tortoise.supabase_control as sc_mod
+        from tortoise.hosted_api import _accept_mismatch_v2
+        from tortoise.supabase_control import InvitationError
+
+        def _sb_accept_v2_stub(*args, **kwargs):
+            # the REACHABLE supabase OTP reject (lowercase "verification")
+            raise InvitationError("Invalid or expired verification code",
+                                  status=403)
+
+        async def _run():
+            return await _accept_mismatch_v2(
+                {"path": "fuse", "otp": "000000",
+                 "token": "tok-race"},
+                request=None,  # error path never touches request
+                user={"user_id": _U2, "email": "alice@example.com"},
+                invite={"email": "bob@example.com", "token": "tok-race"})
+
+        # _accept_mismatch_v2 binds _sb_accept_v2 / get_control_plane /
+        # is_supabase_enabled lazily from tortoise.supabase_control at call
+        # time — patch the SOURCE module, not ha_mod.
+        monkeypatch.setattr(sc_mod, "is_supabase_enabled", lambda: True)
+        monkeypatch.setattr(sc_mod, "get_control_plane",
+                            lambda: object())
+        monkeypatch.setattr(sc_mod, "invitation_accept", _sb_accept_v2_stub)
+        from fastapi import HTTPException
+        with pytest.raises(HTTPException) as ei:
+            asyncio.run(_run())
+        assert ei.value.status_code == 403
+        detail = ei.value.detail
+        assert isinstance(detail, dict), (
+            f"supabase-lane OTP reject must be the dict shape, got: {detail!r}")
+        assert detail["error_code"] == "invite_otp_invalid"
+        assert "verification code" in detail["message"].lower()
+
+    def test_code_required_defense_branch_also_dict(self, monkeypatch):
+        """The seam's other OTP 403 (capital-V "Verification code required"
+        defense-in-depth text) maps to the same dict shape — case-insensitive
+        matcher covers both messages."""
+        import asyncio
+
+        import tortoise.supabase_control as sc_mod
+        from tortoise.hosted_api import _accept_mismatch_v2
+        from tortoise.supabase_control import InvitationError
+
+        def _sb_accept_v2_stub(*args, **kwargs):
+            raise InvitationError(
+                "Verification code required to accept on a mismatched email",
+                status=403)
+
+        async def _run():
+            return await _accept_mismatch_v2(
+                {"path": "fuse", "otp": "000000",
+                 "token": "tok-race"},
+                request=None,
+                user={"user_id": _U2, "email": "alice@example.com"},
+                invite={"email": "bob@example.com", "token": "tok-race"})
+
+        monkeypatch.setattr(sc_mod, "is_supabase_enabled", lambda: True)
+        monkeypatch.setattr(sc_mod, "get_control_plane",
+                            lambda: object())
+        monkeypatch.setattr(sc_mod, "invitation_accept", _sb_accept_v2_stub)
+        from fastapi import HTTPException
+        with pytest.raises(HTTPException) as ei:
+            asyncio.run(_run())
+        assert ei.value.status_code == 403
+        assert ei.value.detail["error_code"] == "invite_otp_invalid"
