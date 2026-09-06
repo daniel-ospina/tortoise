@@ -62,6 +62,7 @@ from __future__ import annotations
 import logging
 import os
 import tempfile
+from datetime import UTC, datetime
 
 _logger = logging.getLogger(__name__)
 
@@ -348,7 +349,15 @@ def _count_resource(team_id: str, resource: str, sdk=None) -> int:
             # the count reads Supabase via the seam — post-flip the registry
             # is DELETED, so a registry count would fail-open (0 nodes) or
             # 500. Mirrors the registry predicates exactly:
-            #   api_keys: revoked_at IS NULL (expired rows still count)
+            #   api_keys: revoked_at IS NULL AND not expired (#2426 — an
+            #             expired-but-unrevoked key must never wedge a team
+            #             at its cap; the auth layer already refuses it, so
+            #             counting it would hold a slot for a dead
+            #             credential. Pre-#2426 durable keys never carried
+            #             expiry. The expiry filter (expires_at IS NULL OR
+            #             > now) mirrors the bootstrap cap queries' own
+            #             predicate; live rows of every created_via count
+            #             exactly as before.),
             #   users:    status IS NULL OR status = 'active'
             #   graphs:   the default graph derived from teams.graph_name
             #             PLUS custom graph rows from the ``graphs`` table
@@ -362,17 +371,21 @@ def _count_resource(team_id: str, resource: str, sdk=None) -> int:
             #             provisioning INSERT lands (review P2, recorded).
             # Selfhost (registry mode) keeps the registry count.
             from tortoise.supabase_control import (  # noqa: I001
-                get_control_plane, graph_metadata, is_supabase_enabled,
+                _parse_ts, get_control_plane, graph_metadata,
+                is_supabase_enabled,
             )
             if is_supabase_enabled():
                 cp = get_control_plane()
                 if resource == "api_keys":
                     rows = cp.query(
-                        "api_keys", select=["id"],
+                        "api_keys", select=["id", "expires_at"],
                         filters=[("team_id", "eq", team_id),
                                  ("revoked_at", "is", None)],
                     )
-                    return len(rows)
+                    now = datetime.now(UTC)
+                    return len([r for r in rows
+                                if (exp := _parse_ts(r.get("expires_at")))
+                                is None or exp > now])
                 if resource == "users":
                     rows = cp.query(
                         "team_memberships", select=["status"],
@@ -385,9 +398,12 @@ def _count_resource(team_id: str, resource: str, sdk=None) -> int:
             reg = (sdk if sdk is not None and getattr(sdk, "_namespace", None) == "registry"
                    else _make_sdk(namespace="registry"))
             if resource == "api_keys":
+                # #2426: expiry filter mirrors the supabase lane — expired
+                # durable keys never count against max_api_keys.
                 rows = reg._get_registry().query(
-                    "MATCH (k:APIKey {team_id: $tid}) WHERE k.revoked_at IS NULL RETURN count(k)",
-                    params={"tid": team_id},
+                    "MATCH (k:APIKey {team_id: $tid}) WHERE k.revoked_at IS NULL "
+                    "AND (k.expires_at IS NULL OR k.expires_at > $now) RETURN count(k)",
+                    params={"tid": team_id, "now": datetime.now(UTC).isoformat()},
                 ).result_set
             elif resource == "users":
                 rows = reg._get_registry().query(

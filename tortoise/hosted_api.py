@@ -1317,6 +1317,96 @@ def _clean_key_label(value: object) -> str | None:
     return s[:KEY_NAME_MAX] if s else None
 
 
+# #2426: configurable API-key expiration. Market-standard (GitHub/Azure/
+# Anthropic/Vercel/DigitalOcean/Cloudflare) mint-time expiry: the key's
+# lifetime is fixed AT CREATION and immutable afterwards (no PATCH-expiry —
+# Anthropic rule). Body may carry EITHER ``expires_in`` (integer days,
+# 1-366 — GitHub's ceiling; a 366-day span = the 1y preset) OR
+# ``expires_at`` (ISO-8601 date or datetime). Absent = Never (existing
+# behavior, now an explicit choice). Validation is 422 — never a silent
+# degradation (unlike a label, expiry is a security property).
+_KEY_MAX_EXPIRY_DAYS = 366
+
+
+def _validate_mint_expiry(body: dict) -> str | None:
+    """Resolve a mint body's optional expiry to a normalized ``expires_at``
+    ISO timestamp (None = Never). Raises HTTPException(422) on:
+    - both ``expires_in`` and ``expires_at`` present (mutually exclusive),
+    - ``expires_in`` not an int in 1..366 (bool/float/str/non-int reject),
+    - ``expires_at`` not ISO-8601 parseable, not a future date, or more than
+      ``_KEY_MAX_EXPIRY_DAYS`` out (Never is the escape hatch for longer).
+
+    ``expires_in`` is the dashboard path (presets + Custom date → days):
+    the timestamp is mint-time + N days, so a 1-day key lives ~24h and a
+    date-only ``expires_at`` is normalized to END of that UTC day (the key
+    stays valid through the chosen date — auth refuses at expires_at <= now).
+    Naive datetimes are interpreted as UTC (the auth layer compares against
+    aware ``datetime.now(UTC)``; every store timestamp is UTC).
+    """
+    has_in = body.get("expires_in") is not None
+    has_at = body.get("expires_at") is not None
+    if has_in and has_at:
+        raise HTTPException(
+            status_code=422,
+            detail="expires_in and expires_at are mutually exclusive — send one",
+        )
+    now = datetime.now(UTC)
+    if has_in:
+        raw = body.get("expires_in")
+        # bool is an int subclass — a JSON true would pass isinstance; reject.
+        if isinstance(raw, bool) or not isinstance(raw, int):
+            raise HTTPException(
+                status_code=422,
+                detail="expires_in must be an integer number of days (1-366)",
+            )
+        if not 1 <= raw <= _KEY_MAX_EXPIRY_DAYS:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "expires_in must be between 1 and 366 days"
+                    f" ({_KEY_MAX_EXPIRY_DAYS})"
+                ),
+            )
+        return (now + timedelta(days=raw)).isoformat()
+    if has_at:
+        raw = body.get("expires_at")
+        if not isinstance(raw, str):
+            raise HTTPException(
+                status_code=422,
+                detail="expires_at must be an ISO-8601 date or datetime",
+            )
+        text = raw.strip()
+        try:
+            if len(text) == 10 and text.count("-") == 2:
+                # Date-only → end of that UTC day (valid through the date).
+                parsed = datetime.fromisoformat(text + "T23:59:59+00:00")
+            else:
+                parsed = datetime.fromisoformat(
+                    text[:-1] + "+00:00" if text.endswith("Z") else text)
+                if parsed.tzinfo is None:
+                    parsed = parsed.replace(tzinfo=UTC)
+        except ValueError:
+            raise HTTPException(
+                status_code=422,
+                detail="expires_at must be an ISO-8601 date or datetime",
+            ) from None
+        if parsed <= now:
+            raise HTTPException(
+                status_code=422,
+                detail="expires_at must be in the future",
+            )
+        if parsed > now + timedelta(days=_KEY_MAX_EXPIRY_DAYS):
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "expires_at must be within 366 days"
+                    " — choose No expiration for longer-lived keys"
+                ),
+            )
+        return parsed.isoformat()
+    return None
+
+
 def _probe_db() -> dict:
     """Deep-check the graph DB through the shared/default connection (#1384).
 
@@ -5061,6 +5151,7 @@ def _mint_key(team_id: str, *, graph_id: str | None = None,
               prefix: str | None = None,
               created_via: str = "provisioned",
               name: str | None = None,
+              expires_at: str | None = None,
               acl_strict: bool = False) -> dict:
     """C3 (#2112) — the ONE low-level key write (registry + Supabase).
     Generalized from C2's _mint_graph_key (D14 — never re-implemented):
@@ -5069,10 +5160,15 @@ def _mint_key(team_id: str, *, graph_id: str | None = None,
     carry escalation; key mint ∩ child policy), delegation_depth is 0 for
     key-minted children or None for owner-minted keys.
 
+    #2426: optional ``expires_at`` (normalized ISO timestamp or None = Never,
+    resolved by _validate_mint_expiry at the endpoint) rides BOTH lanes —
+    the supabase api_keys row and the registry APIKey node prop. The mint
+    caller echoes it in the response envelope.
+
     Returns {id, key_plaintext, key_prefix, scopes, delegation_depth,
-    graph_id, created_by_key_id, created_at}. key_plaintext appears ONLY
-    in this return (reveal-once: the caller puts it in the 201 envelope /
-    mint response and nowhere else; hash-only stored). Raises
+    graph_id, created_by_key_id, created_at, expires_at}. key_plaintext
+    appears ONLY in this return (reveal-once: the caller puts it in the 201
+    envelope / mint response and nowhere else; hash-only stored). Raises
     _KeyCapExceeded when the team is at max_api_keys (caller maps 409).
     C4 (#2113) ACL seam fires for graph-bound mints (fail-soft no-op).
     """
@@ -5133,7 +5229,7 @@ def _mint_key(team_id: str, *, graph_id: str | None = None,
             "created_by": created_by,
             "created_at": now,
             "revoked_at": None,
-            "expires_at": None,
+            "expires_at": expires_at,
             "name": name,
             # C1 columns: graph scope + allowlist + mint lineage
             "graph_id": graph_id,
@@ -5152,6 +5248,7 @@ def _mint_key(team_id: str, *, graph_id: str | None = None,
             graph_id=graph_id, scopes=final_scopes or None,
             created_by_key_id=caller_key_id, delegation_depth=delegation_depth,
             prefix=prefix, name=name, created_via=created_via,
+            expires_at=expires_at,
         )
         kid = created["id"]
         api_key = created["api_key"]
@@ -5166,6 +5263,7 @@ def _mint_key(team_id: str, *, graph_id: str | None = None,
         "graph_id": graph_id,
         "created_by_key_id": caller_key_id,
         "created_at": now,
+        "expires_at": expires_at,
     }
 
 
@@ -5283,6 +5381,12 @@ async def create_api_key(request: Request, response: Response, team: dict = Depe
     deleg=0 child ∩ child policy, escalation request 403; deleg=0 caller
     → 403). Bodies default to {} (legacy clients) → the byte-identical
     pre-C3 owner mint (tt_, deleg NULL, no scopes).
+    #2426: the body may additionally carry {expires_in? (days 1-366) XOR
+    expires_at? (ISO date/datetime)} on ANY mint class — the stored
+    expires_at is written in both auth lanes and echoed in the response
+    when set (absent = Never, response shape byte-identical). Expiry is
+    immutable after creation (no PATCH-expiry); enforcement already lives
+    in the auth layer (~1558-1570, both lanes).
 
     #765 (plan Task 8 writer inventory): Supabase mode inserts the api_keys
     row via the seam (lookup_hash + key_prefix + created_via='provisioned'),
@@ -5330,13 +5434,16 @@ async def create_api_key(request: Request, response: Response, team: dict = Depe
     # _require_owner_admin_if_session helper (fires only when the team dict
     # carries session_user_id).
     await _require_owner_admin_if_session(team)
-    # Key label + C3 (#2112) scoped-mint body: {name?, graph_id?, scopes?}.
+    # Key label + C3 (#2112) scoped-mint body: {name?, graph_id?, scopes?}
+    # + #2426 expiry: {expires_in? (days 1-366) XOR expires_at? (ISO)}.
     # Read the body defensively — mint bodies are usually `{}` (dashboard/
     # CLI), so parse failures degrade to the legacy owner mint, never a
-    # failure mode.
+    # failure mode. Expiry validation is 422 (a security property, never a
+    # silent degradation); the HTTPException propagates via the except below.
     name = None
     graph_id = None
     requested_scopes = None
+    expires_at = None
     try:
         raw = await _read_capped_body(request, _BODY_MAX_BYTES, _BODY_413_DETAIL)
         payload = _json.loads(raw)
@@ -5344,6 +5451,7 @@ async def create_api_key(request: Request, response: Response, team: dict = Depe
             name = _clean_key_label(payload.get("name"))
             graph_id = payload.get("graph_id")
             requested_scopes = payload.get("scopes")
+            expires_at = _validate_mint_expiry(payload)
     except HTTPException:
         raise
     except Exception:
@@ -5395,13 +5503,14 @@ async def create_api_key(request: Request, response: Response, team: dict = Depe
                     team["team_id"], scopes=["graphs:read"],
                     delegation_depth=0, caller_key_id=team["key_id"],
                     session_user_id=team.get("session_user_id"),
-                    prefix="tk_", name=name,
+                    prefix="tk_", name=name, expires_at=expires_at,
                 )
             else:
                 _check_team_limit(team, "api_keys")
                 minted = _mint_key(
                     team["team_id"], name=name,
                     session_user_id=team.get("session_user_id"),
+                    expires_at=expires_at,
                 )
         else:
             if not isinstance(requested_scopes, list):
@@ -5470,7 +5579,7 @@ async def create_api_key(request: Request, response: Response, team: dict = Depe
                 team["team_id"], graph_id=graph_id, scopes=final_scopes,
                 delegation_depth=delegation_depth, caller_key_id=caller_key_id,
                 session_user_id=team.get("session_user_id"),
-                prefix=prefix, name=name,
+                prefix=prefix, name=name, expires_at=expires_at,
             )
     except _KeyCapExceeded:
         # D3 asymmetry (pinned): the LEGACY owner mint keeps the historical
@@ -5549,6 +5658,14 @@ async def create_api_key(request: Request, response: Response, team: dict = Depe
         "created_at": now,
         "name": name,
     }
+    if expires_at is not None:
+        # #2426: expiry echo. Deliberately ABSENT on the Never (no expiry
+        # param) mint so the byte-identical legacy shape ({id,key,
+        # key_prefix,created_at,name} — exact-equality pin in
+        # test_writer_inventory) survives for pre-#2426 clients; a mint that
+        # requested expiry always echoes the authoritative stored timestamp
+        # (the dashboard's show-once card + table read it back).
+        resp["expires_at"] = expires_at
     if scoped_request or child_mint:
         # C3 (#2112) scoped/delegated-mint fields — ABSENT on the legacy {}
         # owner-class path so pre-C3 clients see the byte-identical shape
@@ -14258,21 +14375,35 @@ async def session_key(body: dict, request: Request, user: dict = Depends(get_cur
             # #750.8: .get() so a pricing.json key drift never 500s the mint
             # (pricing.py validates required keys at load; belt-and-braces).
             max_keys = lim.get("max_api_keys")
+            # #2426: the durable-count predicate excludes EXPIRED keys
+            # (expires_at past) as well as bootstrap rows — an expired key
+            # never authenticates (#742), so counting it against
+            # max_api_keys would wedge the team at its cap with no recourse.
+            # Mirrors the bootstrap cap query's expiry filter (bootstrap
+            # precedent) and the supabase lane's active_api_keys helper
+            # (which has always excluded expired rows).
             active_keys = reg.query(
                 "MATCH (k:APIKey {team_id:$tid}) WHERE k.revoked_at IS NULL "
-                "AND (k.created_via IS NULL OR k.created_via <> 'bootstrap') RETURN count(k)",
-                params={"tid": tid},
+                "AND (k.created_via IS NULL OR k.created_via <> 'bootstrap') "
+                "AND (k.expires_at IS NULL OR k.expires_at > $now) RETURN count(k)",
+                params={"tid": tid, "now": now},
             ).result_set[0][0]
             if max_keys is not None and active_keys >= max_keys:
                 # #750.10: never auto-revoke a key the current user created
                 # (created_by = their user_id) — recovery must not dead-end by
                 # killing the user's own session key. Oldest OTHER key wins.
+                # #2426: the candidate scan carries the same expiry filter as
+                # the count — only LIVE (non-expired) others are revocable
+                # rotation targets, because revoking an expired key (which no
+                # longer counts) would free no slot and the others branch does
+                # not re-check (cap+1 hazard).
                 oldest = reg.query(
                     "MATCH (k:APIKey {team_id:$tid}) WHERE k.revoked_at IS NULL "
                     "AND (k.created_via IS NULL OR k.created_via <> 'bootstrap') "
                     "AND k.created_by <> $uid "
+                    "AND (k.expires_at IS NULL OR k.expires_at > $now) "
                     "RETURN k.id ORDER BY k.created_at ASC LIMIT 1",
-                    params={"tid": tid, "uid": user_id},
+                    params={"tid": tid, "uid": user_id, "now": now},
                 ).result_set
                 if oldest:
                     reg.query(
@@ -14354,11 +14485,14 @@ async def session_key(body: dict, request: Request, user: dict = Depends(get_cur
                         )
                         # P2-1: only mint when a persistent slot actually opened
                         # (legacy rotation frees one; a modern bootstrap never
-                        # counted against max_api_keys).
+                        # counted against max_api_keys). #2426: the recheck
+                        # mirrors the cap count exactly (expiry filter included)
+                        # so an expired-key rotation cannot 402 or overshoot.
                         recheck = reg.query(
                             "MATCH (k:APIKey {team_id:$tid}) WHERE k.revoked_at IS NULL "
-                            "AND (k.created_via IS NULL OR k.created_via <> 'bootstrap') RETURN count(k)",
-                            params={"tid": tid},
+                            "AND (k.created_via IS NULL OR k.created_via <> 'bootstrap') "
+                            "AND (k.expires_at IS NULL OR k.expires_at > $now) RETURN count(k)",
+                            params={"tid": tid, "now": now},
                         ).result_set[0][0]
                         if max_keys is not None and recheck >= max_keys:
                             raise HTTPException(status_code=402, detail="Key limit reached — revoke an existing key")

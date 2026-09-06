@@ -13817,7 +13817,8 @@ class TortoiseSDK:
                       delegation_depth: int | None = None,
                       prefix: str = "tt_",
                       name: str | None = None,
-                      created_via: str | None = None) -> dict:
+                      created_via: str | None = None,
+                      expires_at: str | None = None) -> dict:
         """Generate an API key for a team.
 
         Stores SHA-256 hash (never plaintext). Plaintext returned once.
@@ -13832,7 +13833,12 @@ class TortoiseSDK:
         20260825000001 parity — the hosted create_api_key lane passes it)
         and ``created_via`` (mint-source classification — "provisioned" /
         "agent_signup" etc.) ride the node as optional props; absent =
-        legacy nodes without them.
+        legacy nodes without them. #2426: optional ``expires_at`` (ISO
+        timestamp, None = never) rides the same optional-props pattern — the
+        registry node is graph-property-additive, and the auth/expiry filter
+        (hosted_api ~1558-1570) and cap predicates already read the prop on
+        LEGACY nodes (expires_at absent = NULL = never), so an expiring mint
+        is a pure CREATE-side addition.
 
         Registry-side invariant (code-review #2b, mirrors the Supabase DB
         CHECK chk_minted_key_no_escalation): a MINTED key (delegation_depth
@@ -13888,6 +13894,8 @@ class TortoiseSDK:
             extra += ", name:$nm"; params["nm"] = name  # noqa: E702 (baseline #1503)
         if created_via is not None:
             extra += ", created_via:$cv"; params["cv"] = created_via  # noqa: E702 (baseline #1503)
+        if expires_at is not None:
+            extra += ", expires_at:$ea"; params["ea"] = expires_at  # noqa: E702 (baseline #1503)
         reg.query(
             "CREATE (k:APIKey {id:$id, team_id:$tid, key_hash:$kh, "
             "key_prefix:$kp, created_by:$cb, created_at:$now"
