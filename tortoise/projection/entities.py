@@ -301,6 +301,17 @@ class _EntityHandlers:
             "            s.embedding=CASE WHEN $embedding IS NOT NULL THEN vecf32($embedding) ELSE s.embedding END "
             "ON MATCH SET s.id=coalesce($id, s.id), "
             "            s.subjectKind=coalesce($sk, s.subjectKind), "
+            # #2295: ON MATCH createdAt ADOPTS only when absent
+            # (coalesce(s.createdAt, $ca) — existing value wins): mirrors the
+            # #2194 Object clause (_upsert_object) for the Subject stub-
+            # adoption path. A name-stub minted by a raw/connector producer
+            # (no createdAt) adopted by a journaled SDK create (or any
+            # EventAPI add_subject mention) must carry the journaled/mention
+            # createdAt so live == journal == replay (the #2164-P4 drift
+            # class). Byte-identity is guaranteed only for createdAt-LESS
+            # stubs — a createdAt-CARRYING EventAPI-first node keeps its own
+            # value under existing-wins (accepted divergence, #2295 plan).
+            "            s.createdAt=coalesce(s.createdAt, $ca), "
             "            s.embedding=CASE WHEN $embedding IS NOT NULL THEN vecf32($embedding) ELSE s.embedding END",
             params={"id": sid, "name": name,
                     "sk": ev.get("subject_kind", "other"),
