@@ -5159,8 +5159,10 @@ function claimIntentInFlight() {
                               obvious primary action. Members see paste
                               directly: it is their only in-dashboard key path
                               (the mint CTA is owner/admin-only by DASHBOARD
-                              render policy — the server POST /v1/team/keys
-                              has NO role gate, #2246 — see
+                              render policy matching the server contract — the
+                              POST /v1/team/keys session lane IS owner/admin-
+                              gated (#2297 POLICY A; the #2246-era claim that
+                              it was ungated predates that) — see
                               wizardMintDurableKey). */}
                           <div style={{ marginTop: '0.85rem', display: 'flex', flexWrap: 'wrap', gap: '0.9rem', alignItems: 'center' }}>
                             <button type="button" className="ghost small" onClick={() => { window.history.replaceState({}, '', '/'); setWelcomeMode(false); setTab('keys'); finishWelcomeLoads() }}>
