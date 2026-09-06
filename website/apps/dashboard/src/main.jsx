@@ -1001,7 +1001,15 @@ function claimIntentInFlight() {
     if (step3PasteAutofocus) return
     if (wizardCardRef.current) wizardCardRef.current.focus()
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [wizardStep, welcomeMode, authed, wizardPaused, welcomeHasOrg, wizardShowPaste])
+  }, [wizardStep, welcomeMode, authed, wizardPaused, wizardShowPaste])
+  // ⛔ #2426 e2e catch: welcomeHasOrg is declared ~3900 lines below (after
+  // `teams`), so it CANNOT be an eager dependency here — the deps array
+  // evaluates during render and threw "Cannot access 'welcomeHasOrg' before
+  // initialization", blanking the whole authenticated dashboard on main. The
+  // effect BODY is a closure that runs post-render (safe to read it there);
+  // only the dep was illegal. Org-status flips coincide with authed/welcome
+  // transitions, so the remaining deps still re-run the announce on every
+  // real step change.
   const [onboardingComplete, setOnboardingComplete] = React.useState(false)
   const [welcomeOriented, setWelcomeOriented] = React.useState(false)
   const [wizardSubject, setWizardSubject] = React.useState('')
