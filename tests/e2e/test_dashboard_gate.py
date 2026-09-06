@@ -362,11 +362,12 @@ def test_welcome_mode_provisions_and_reveals_key_once(page: Page) -> None:
     # displayed EXACTLY ONCE here. The reveal_api_key RPC fired exactly ONCE
     # at the org-create SUBMIT — provisionInApp's canonical post-write
     # membership poll → atomic reveal+null (A13, #1566); the 201-body
-    # plaintext is only the 3-poll fallback. The membership-poll mock below
-    # returns an active row on attempt 1, so the canonical channel is the one
-    # exercised: exactly one reveal, and the connect step renders welcomeKey
-    # with no further reveal (ADR-010 single-consumption). If a future
-    # delivery change makes the 201 body primary, this pin fails loudly.
+    # plaintext is only the 3-poll fallback. The membership-poll mock above
+    # (in handle()) returns an active row on EVERY attempt, so the poll
+    # succeeds on attempt 1 — the canonical channel is the one exercised:
+    # exactly one reveal, and the connect step renders welcomeKey with no
+    # further reveal (ADR-010 single-consumption). If a future delivery
+    # change makes the 201 body primary, this pin fails loudly.
     page.get_by_role("button", name="Use it for your own agents").click()
     expect(page.locator("body")).to_contain_text("Connect your agent", timeout=15_000)
     expect(page.locator("body")).to_contain_text("tt_welcome_key_1234567890abcdef", timeout=15_000)
@@ -375,6 +376,8 @@ def test_welcome_mode_provisions_and_reveals_key_once(page: Page) -> None:
     # The fork advance rides the set-once checkpoint write — pin that the app
     # actually sent fork=self before the connect step rendered (W1 contract;
     # the #2323-era drift survived because nothing pinned the write).
+    # Verified single-fire: the fork buttons disable while busy and the build/
+    # harness-connected checkpoint writes are gated off this self path.
     assert fork_payloads == [{"fork": "self"}], \
         f"the fork pick checkpoints fork=self exactly once (W1 set-once write), got {fork_payloads}"
     # Returning visit: the key is consumed (reveal returns 'pending') → the
@@ -419,9 +422,106 @@ def test_welcome_mode_provisions_and_reveals_key_once(page: Page) -> None:
     expect(page.locator("body")).to_contain_text("Welcome to your Tortoise graph", timeout=20_000)
     assert reveal_calls["n"] == 0, f"no re-reveal on the returning dashboard path, got {reveal_calls['n']}"
     assert mint_calls == [], f"zero-mint: POST /v1/session/key on the returning visit: {mint_calls}"
-    expect(page.locator("body")).not_to_contain_text("copy it now")
-    # no mint → no recoverable-mint banner (the #2167 deletion)
-    expect(page.locator("body")).not_to_contain_text("Couldn't create an agent key")
+    # #2356 (test-review): pin the KEYLESS outcome concretely — the welcome
+    # key plaintext must be ABSENT from the returning DOM (any source: card,
+    # snippet, curl sample) and the empty-state card copy must render. The
+    # old "copy it now"/"Couldn't create an agent key" negations were
+    # vacuous — those strings exist nowhere in the app sources.
+    expect(page.locator("body")).not_to_contain_text("tt_welcome_key_1234567890abcdef")
+    expect(page.locator("body")).to_contain_text("Connect your agent so it remembers why, not just what.")
+
+
+def test_welcome_mode_fork_503_stays_and_recovers(page: Page) -> None:
+    """#1566/#2323/#2356: a 503 from the fork checkpoint POST (the graph is
+    temporarily unavailable) leaves the wizard ON the fork step with the
+    inline error + the fork buttons recovered — never a strand. The #2356
+    root cause was exactly a non-2xx checkpoint response aborting the fork →
+    connect advance, so the failure lane is pinned: the same click retried
+    against a 2xx advances to the connect step."""
+    import time as _time
+    import urllib.parse as _up
+    user_id = "u-wf503"
+    sess = {"access_token": "fake.eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.sig",
+            "refresh_token": "rt", "expires_in": 3600,
+            "expires_at": int(_time.time()) + 3600, "token_type": "bearer",
+            "user": {"id": user_id, "email": "wf503@premise-labs.dev"}}
+    page.context.add_cookies([{"name": "sb-tortoise-auth-token",
+                               "value": _up.quote(json.dumps(sess)),
+                               "domain": ".premiselabs.co", "path": "/"}])
+    checkpoint_calls = {"n": 0}
+
+    def handle(route):
+        url = route.request.url
+        if "api.premiselabs.co" in url:
+            if url.split("?", 1)[0].endswith("/v1/onboarding/state") and route.request.method == "GET":
+                route.fulfill(status=200, content_type="application/json",
+                              body=json.dumps({"onboarding": {}}))
+                return
+            if url.split("?", 1)[0].endswith("/v1/onboarding/state/checkpoint") and route.request.method == "POST":
+                # First fork pick: 503 (graph unavailable) — the app must stay
+                # on the fork step with the error + recovered buttons. The
+                # retried pick gets the 2xx and advances.
+                checkpoint_calls["n"] += 1
+                if checkpoint_calls["n"] == 1:
+                    route.fulfill(status=503, content_type="application/json",
+                                  body=json.dumps({"detail": "graph unavailable"}))
+                else:
+                    route.fulfill(status=200, content_type="application/json", body="{}")
+                return
+            if url.endswith("/v1/teams"):
+                route.fulfill(status=200, content_type="application/json", body="[]")
+                return
+            if url.endswith("/v1/user/identity") and route.request.method == "GET":
+                route.fulfill(status=200, content_type="application/json",
+                              body=json.dumps({"methods": [], "login_methods": 0,
+                                               "keys_tier": 0, "banner": {"show": False}}))
+                return
+            if _mock_bootstrap_200(route, url, json):
+                return
+            route.fulfill(status=401, content_type="application/json", body="{}")
+            return
+        if "functions/v1/tenant-provision" in url and route.request.method == "POST":
+            route.fulfill(status=201, content_type="application/json",
+                          body=json.dumps({"team_id": "team_w", "team_name": "Welcome Team",
+                                           "api_key": "tt_welcome_key_1234567890abcdef"}))
+            return
+        if "team_memberships" in url and route.request.method == "GET":
+            route.fulfill(status=200, content_type="application/json",
+                          body=json.dumps({"team_id": "team_w", "team_name": "Welcome Team",
+                                           "graph_name": "team_w", "status": "active"}))
+            return
+        if "rpc/reveal_api_key" in url and route.request.method == "POST":
+            route.fulfill(status=200, content_type="application/json",
+                          body=json.dumps("tt_welcome_key_1234567890abcdef"))
+            return
+        if url.startswith(AUTH_HOST):
+            local = AUTH_ORIGIN + url[len(AUTH_HOST):]
+            _proxy_body(route, local, page)
+            return
+        if url.startswith(APP_HOST):
+            local = DASHBOARD_URL.rstrip("/") + url[len(APP_HOST):]
+            _proxy_body(route, local, page)
+            return
+        route.continue_()
+
+    page.route("**/*", handle)
+    page.goto(APP_HOST + "/", wait_until="domcontentloaded", timeout=30_000)
+    expect(page.locator("body")).to_contain_text("Welcome to Tortoise", timeout=20_000)
+    page.get_by_role("button", name="Continue →").click()
+    expect(page.locator("body")).to_contain_text("Create your Organization", timeout=10_000)
+    page.get_by_label("Organization name").fill("acme")
+    page.get_by_role("button", name="Create Organization").click()
+    expect(page.locator("body")).to_contain_text("Choose how you'll use Tortoise", timeout=20_000)
+    # 503 on the fork checkpoint: STAY on the fork step, surface the inline
+    # error, recover the buttons — no advance, no strand.
+    page.get_by_role("button", name="Use it for your own agents").click()
+    expect(page.locator("body")).to_contain_text("The graph is temporarily unavailable — try again in a moment.", timeout=10_000)
+    expect(page.locator("body")).not_to_contain_text("Connect your agent")
+    expect(page.get_by_role("button", name="Use it for your own agents")).to_be_enabled(timeout=5_000)
+    # Retry against the 2xx: the fork persists and the wizard advances.
+    page.get_by_role("button", name="Use it for your own agents").click()
+    expect(page.locator("body")).to_contain_text("Connect your agent", timeout=15_000)
+    assert checkpoint_calls["n"] == 2, f"exactly one 503 + one 2xx checkpoint write, got {checkpoint_calls['n']}"
 
 
 def test_welcome_mode_provision_failure_shows_error_card(page: Page) -> None:
