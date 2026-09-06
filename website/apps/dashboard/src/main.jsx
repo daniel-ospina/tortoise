@@ -3496,14 +3496,12 @@ function claimIntentInFlight() {
         setWizardShowPaste(true)
         setWizardDurableError('You\'ve reached your plan\'s limit of API keys — revoke or regenerate one in the API Keys tab (shown once there), then paste a key below.')
       } else {
-        // #2246 (review): reachable mint failures here are the 402 cap above,
-        // a suspension 403, or transport — the server POST /v1/team/keys has
-        // NO owner/admin role gate (verified hosted_api.py: create_api_key
-        // only checks _check_team_limit), so a member never 403s server-side;
-        // member key creation is gated CLIENT-side as dashboard policy (the
-        // connect-step member copy + API Keys tab notice) and this handler's
-        // callers are owner/admin-gated renders. A suspension 403 falls
-        // through to its own message.
+        // #2246 (review) + #2297 POLICY A: reachable mint failures here are
+        // the 402 cap above, a suspension 403, or transport — the server POST
+        // /v1/team/keys session lane IS owner/admin-gated
+        // (_require_owner_admin since #2297), so a member 403s server-side;
+        // this handler's callers are owner/admin render-gated, matching the
+        // server contract. A suspension 403 falls through to its own message.
         setWizardDurableError(e?.message || 'Could not create a new key — try again.')
       }
     } finally {
@@ -5143,8 +5141,7 @@ function claimIntentInFlight() {
                                   // toggle/rename) are _require_owner_admin-
                                   // gated on the session lane since #2297
                                   // (#1148 for PATCH; list stays member-open
-                                  // #1828). Only owners
-
+                                  // #1828). Only owners/admins (isOwnerAdmin)
                                   // get the create/rotate path. The
                                   // REMEDY must also match the SOURCE:
                                   // bootstrap/expiring rows are FILTERED from
@@ -6137,18 +6134,16 @@ function claimIntentInFlight() {
               {/* #2246 (review, P1/P2): member key creation is gated
                   CLIENT-side as dashboard policy AND server-side since #2297
                   POLICY A: the POST /v1/team/keys session lane is
-                  owner/admin-gated (_require_owner_admin, as are DELETE
-                  revoke and PATCH toggle — #1148; list stays member-open
-                  #1828). Every row action + the create form are isOwnerAdmin
-                  render-gated; members get a notice + the paste-into-setup
-                  escape instead of the create form. The dashboard treats key
-                  management as owner/admin-managed
-                  (Members tab + wizard member gate precedent), so members get
-                  a notice + the paste-into-setup escape instead of the create
-                  form. P2 (layout): the member notice renders as a FULL-WIDTH
-                  paragraph BELOW this .row (Members-tab precedent) — as a
-                  span inside the flex .row it wrapped badly beside the h2 on
-                  narrow viewports. */}
+                  owner/admin-gated (_require_owner_admin — POST/DELETE since
+                  #2297, PATCH since #1148; list stays member-open #1828).
+                  Every row action + the create form are isOwnerAdmin
+                  render-gated; the dashboard treats key management as
+                  owner/admin-managed (Members tab + wizard member gate
+                  precedent), so members get a notice + the paste-into-setup
+                  escape instead of the create form. P2 (layout): the member
+                  notice renders as a FULL-WIDTH paragraph BELOW this .row
+                  (Members-tab precedent) — as a span inside the flex .row it
+                  wrapped badly beside the h2 on narrow viewports. */}
               {isOwnerAdmin && (
                 <div className="inline-form">
                   <input
