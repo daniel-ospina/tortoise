@@ -23,11 +23,11 @@ aboutObjects:
 ## Architecture
 - **Driver:** `.github/workflows/registry-backup-cron.yml` (hourly, GH Actions) → internal-key endpoints. Independent failure domain — an OOM crash-loop (#545) must not blind the pipeline.
 - **Watcher (driver-disabled leg):** in-process read-only staleness daemon (spawned in `_lifespan`) that files GitHub issues + pushes Telegram ITSELF — covered by construction when the workflow is disabled.
-- **Direct R2 leg (app-down leg):** the driver computes per-team freshness from R2 prefixes (aws CLI) — independent of `/status`.
+- **Direct R2 leg (app-down leg):** the driver computes the DEFAULT graph's freshness from R2 prefixes (aws CLI) — nested `backups/{team}/default/` + legacy flat (`backups/{team}/2…`, the pre-#2313 default dumps; a legacy-flat classification index #2370 excludes C5-era custom flats when present) — independent of `/status`. A fresh CUSTOM graph can never mask a stale default (#2375).
 - **Alert sink (dual-channel):** GitHub issue (agent) + Telegram push (human), R2 create-once per-incident dedup (`ops/alerts/{KIND}/{team}.json`, delete-to-resolve), GH-search fallback, pending-push retries.
 
 ## R2 layout
-- `backups/{team}/{graph}/{ts}_{rnd}/dump.enc` + `manifest.json` — per-GRAPH archives (#2313; the default graph uses the literal `default` segment; custom graphs their control-plane id). Retention per graph: 24 hourly + 7 daily + 4 weekly (`keep_hourly`). Pre-#2313 team-level flat objects (`backups/{team}/{ts}_{rnd}/…`) are the DEFAULT graph's legacy archives — read-bucketed as default, drained by the sweep's per-team legacy prune.
+- `backups/{team}/{graph}/{ts}_{rnd}/dump.enc` + `manifest.json` — per-GRAPH archives (#2313; the default graph uses the literal `default` segment; custom graphs their control-plane id). Retention per graph: 24 hourly + 7 daily + 4 weekly (`keep_hourly`) ≈ **35 objects/pool** — keep ALL dumps younger than 24 h, then the NEWEST per UTC day within the 7-day horizon, then the newest per ISO week (4). #2373: day-bucket anchors — the pre-#2373 implementation kept one anchor per UTC HOUR-bucket (~172 objects/pool over the horizon); #2319's lock-window math uses the ~35 figure. Pre-#2313 team-level flat objects (`backups/{team}/{ts}_{rnd}/…`) are the DEFAULT graph's legacy archives — read-bucketed as default, drained by the sweep's per-team legacy prune.
 - `ops/teams/{team}/state.json` — legacy transition-guard counts (mirror of the default graph's per-graph state; pre-#2313 consumers).
 - `ops/teams/{team}/graphs/{graph_id}/state.json` — per-graph transition-guard counts (#2313).
 - `ops/state.json` — team count (enumeration-delta guard) + sweep timestamps.
@@ -114,3 +114,8 @@ curl -sS -X POST -H "Authorization: Bearer $FASTAPI_INTERNAL_KEY" \
 - **NEVER detection while the app is down** — daemon-only; a never-backed-up team during an outage is silent until recovery.
 - **GH single-provider scheduling axis** — the driver terminates in GitHub; a GH incident delays backup triggers (the daemon still alerts).
 - **R2 outage** — neither fabricates (UNKNOWN on fresh boot) nor silences (GH-search fallback + driver R2_DOWN) once a known-good baseline exists.
+
+### Post-#2313 residuals (recorded 2026-09-06 audit — #2378)
+- **Watcher heartbeat is per-team only** — `ops/watcher-heartbeat.json` carries the per-team tri-state; the watcher's per-graph states live in the daemon's in-process last-status (not persisted). Per-graph SWEEP outcomes (totals, failures, consecutive-error streaks) surface on `GET /v1/internal/backups/status` → `last_sweep` (#2372). A daemon restart loses the in-process per-graph watch until the next poll.
+- **Legacy-flat mislabel under control-plane failure** — with the control plane down (or before a team's first legacy-flat classification index exists, ≤1 sweep after #2370 deploys), legacy flat archives on `GET /backups` fall back to the DEFAULT graph bucket even when they were C5-era custom dumps (#2370 index makes this the exception). Restore of a legacy flat custom archive is refused regardless (cross-graph guard).
+- **Tombstoned-graph archive pools are never pruned** — per-graph prune runs only for enumerated ACTIVE graphs and the team-wide drain skips nested keys, so a deleted graph's `backups/{team}/{gid}/` pool accumulates until #2304's purge decision lands (its research item 4 covers backup-artifact disposition; the mechanism is recorded here).

@@ -365,6 +365,7 @@ surfaces:
   - test_status_projection.py
   - test_stop_writes.py
   - test_structural_leg_r4.py
+  - test_subjectadded_journal.py        # #2295 SubjectAdded journaling (docker lane)
   - test_suggest_entry_points.py
   - test_supabase_control.py
   - test_suspension_parity.py
