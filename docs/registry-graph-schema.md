@@ -1,3 +1,16 @@
+---
+title: "Registry Graph Schema"
+type: engineering
+domain: platform
+doc_status: live
+created: 2025-08-01
+ownedBy: epistemic-team
+subjects:
+  team: epistemic-team
+aboutObjects:
+- tortoise-hosted-platform
+---
+
 # Registry Graph Schema
 
 The registry graph is a dedicated FalkorDB namespace (`registry`) storing control-plane entities for the Tortoise Hosted Platform. It is separate from tenant namespaces. Control-plane data migrates to Supabase under #669 (managed backups + PITR); until then it has no operator-controlled backup — see #596/#669.
@@ -86,6 +99,14 @@ Default-graph semantics (the no-migration contract):
   NOT deletable (delete_graph 403s; the UI locks the row).
 - Tenant namespaces carry their own `:Point`/graph data; only the registry
   namespace holds `:Graph` control-plane rows.
+- **Backups are per-graph since #2313:** every active graph (default +
+  custom) is swept hourly with its own archive pool
+  (`backups/{team}/{graph}/{ts}_{rnd}/…`; default graph segment = the
+  literal `default`), per-graph state
+  (`ops/teams/{team}/graphs/{graph_id}/state.json`), independent retention
+  (24 hourly + 7 daily + 4 weekly) and per-graph staleness incidents.
+  Deleted (tombstoned) graphs are never swept and their archives are
+  restore-refused (tombstone guard; #2304 trash semantics).
 
 ### APIKey
 
