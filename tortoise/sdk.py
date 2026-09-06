@@ -1447,14 +1447,19 @@ def _decorate_fallback_hits(results: list[dict], graph) -> list[dict]:
 _DIGEST_STRUCTURE_RE = re.compile(r"^(?:[-*=~_`|#>]{2,}|\.{2,}|[-*+]\s*)$")
 _DIGEST_MD_LEAD_RE = re.compile(r"^(?:#{1,6}\s|>{1,}|`{3,}|~{3,}|\|)")
 # Genuine decision content that LOOKS label-led but must survive the digest:
-# date-led lines and the SDK/decide-flow label families. Case-insensitive so
-# a capture path that lowercases content still keeps its decisions.
+# date-led lines and the SDK/decide-flow label families in their authored
+# spelling — 'Decision: …'/'Option N: …' (file_decision), 'Approved: …'
+# (file_human_approval), 'Reason:'/'Finding:' leads (decide flows). Every SDK
+# writer capitalizes the label and no capture/extraction path lowercases point
+# content before persisting (all .lower() uses are tokenization/dedup/classi-
+# fication keys), so the match is EXACT-case: a generic lowercase
+# 'decision: pending'-style line is config/transcript residue — NOT a decision
+# — and still hits _DIGEST_LABEL_RE below (review #2434 P2-2).
 _DIGEST_GENUINE_LABEL_RE = re.compile(
     r"^(?:\d{4}-\d{2}-\d{2}\s*:"            # '2026-09-06: we decided…'
     r"|(?:[-*+]\s+|\d+[.)]\s+)?"             # optional list/number marker
     r"(?:Decision|Approved|Reason|Finding|Option)\s*\d*\s*:"
     r")",
-    re.IGNORECASE,
 )
 # Label-led rule/config lines: an optional list/number marker and optional
 # emphasis, then a label ending in ':' before the value — '*Gate: filed as
