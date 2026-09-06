@@ -35,7 +35,8 @@ body { background: var(--bg); color: var(--text); font-family: -apple-system, Bl
 
 /* Layout */
 .app { max-width: 960px; margin: 0 auto; padding: 0 20px 60px; }
-header { display: flex; align-items: center; gap: 12px 16px; flex-wrap: wrap; padding: 16px 0; border-bottom: 1px solid rgba(255,255,255,0.06); margin-bottom: 24px; }
+header { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; padding: 16px 0; border-bottom: 1px solid rgba(255,255,255,0.06); margin-bottom: 24px; }
+header.dash-header { gap: 12px 16px; }
 header .logo { font-weight: 700; font-size: 18px; }
 header nav { flex: 1; min-width: 200px; display: flex; flex-wrap: wrap; gap: 8px; }
 header nav button { background: none; border: none; color: var(--text-dim); padding: 6px 12px; border-radius: 6px; cursor: pointer; font-size: 14px; }
@@ -52,8 +53,14 @@ header nav button.active { color: var(--accent); background: rgba(6,182,212,0.1)
 @media (max-width: 920px) {
   header.dash-header { display: grid; grid-template-areas: "logo cluster" "nav nav"; align-items: center; row-gap: 10px; }
   header.dash-header .logo { grid-area: logo; }
-  header.dash-header .header-cluster { grid-area: cluster; justify-self: end; margin-left: 0; }
+  header.dash-header .header-cluster { grid-area: cluster; justify-self: end; margin-left: 0; max-width: 62vw; }
   header.dash-header nav { grid-area: nav; flex: none; min-width: 0; width: 100%; }
+  /* #2332 (review P1): the tier-badge pills (Upgrade / Manage subscription /
+     flagged / Team tier) are direct header children after the cluster —
+     without an area they would auto-place into an implicit narrow track and
+     overflow. Span them across the full header on their own rows below the
+     nav. */
+  header.dash-header > .tier-badge { grid-column: 1 / -1; justify-self: start; }
 }
 
 /* Buttons */
@@ -224,7 +231,7 @@ button.tier-badge:disabled { opacity: 0.6; cursor: wait; }
 .switch[data-on='true']::after { left: 20px; }
 
 /* #1148-ux: account blob (workspace switcher — GitHub/Vercel/Linear pattern) */
-.account-blob { position: relative; margin-left: auto; }
+.account-blob { position: relative; }
 .account-blob-btn {
   display: inline-flex; align-items: center; gap: 8px;
   padding: 5px 10px; border-radius: 8px;
