@@ -476,7 +476,9 @@ def test_welcome_mode_fork_503_stays_and_recovers(page: Page) -> None:
                               body=json.dumps({"methods": [], "login_methods": 0,
                                                "keys_tier": 0, "banner": {"show": False}}))
                 return
-            if _mock_bootstrap_200(route, url, json):
+            if _mock_bootstrap_200(route, url, json,
+                                   team={"team_id": "team_w", "team_name": "Welcome Team",
+                                         "tier": "free", "anon": False}):
                 return
             route.fulfill(status=401, content_type="application/json", body="{}")
             return
