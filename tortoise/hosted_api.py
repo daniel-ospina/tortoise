@@ -1811,6 +1811,10 @@ async def _get_current_team_supabase(request: Request, token: str) -> dict:
 #       POST   /v1/session/key          session_key (E1 mint) carries the
 #     team selector in the BODY (required when multi-membership) and
 #     membership-checks it inline; the client tripwire never pins it.
+#     #2380: the recovery purpose additionally carries an owner/admin ROLE
+#     gate (the #2297 POLICY A seam) on the RESOLVED tid — body team_id
+#     when multi-membership, else memberships[0]; bootstrap is member-open.
+#     Not a pin seam — a role gate layered on the body's resolved team.
 #   * internal cascades (team-delete revoke_team_api_keys, graph-delete key
 #     cascade) derive the team from the deleted entity — no caller pin.
 #   * token-driven agent routes (signup/recover/token-revoke) resolve the
@@ -2218,6 +2222,14 @@ async def get_current_team_gated(request: Request) -> dict:
     return await get_current_team(request)
 
 
+# #2297/#2380: the session_user_id dict key is the auth-lane discriminator
+# the role gates predicate on — attached ONLY on the JWT branch of
+# get_current_team_session (see below); key-auth and dependency-override
+# team dicts carry no session_user_id. Named constant = single source of the
+# literal (the _require_owner_admin_if_session helper reads it once).
+_SESSION_USER_ID_KEY = "session_user_id"
+
+
 async def get_current_team_session(request: Request, gate_key_login: bool = True) -> dict:
     """Management-endpoint dependency: accept a session JWT (verified
     identity) OR an API key. Key-auth goes through get_current_team + the
@@ -2278,7 +2290,15 @@ async def get_current_team_session(request: Request, gate_key_login: bool = True
     # exchange); the key-auth/override branches return before this, so
     # their team dicts carry no session_user_id (create_api_key falls back
     # to "api").
-    team["session_user_id"] = user["user_id"]
+    team[_SESSION_USER_ID_KEY] = user["user_id"]
+    # #2380 (Task 4): explicit auth_lane marker — documentation-in-code for
+    # the session-vs-key distinction the #2297/#2380 role gates predicate
+    # on. THE GATE PREDICATE STAYS ON session_user_id PRESENCE, NOT this
+    # marker: the dependency-override seam returns override dicts unchanged
+    # (~15+ suites inject dict(TEST_TEAM, session_user_id=...)), so a
+    # marker-required predicate would silently stop gating the override
+    # seam. auth_lane absent = key-auth / override lane.
+    team["auth_lane"] = "session"
     return team
 
 
@@ -5302,10 +5322,11 @@ async def create_api_key(request: Request, response: Response, team: dict = Depe
     # session_user_id (attached only on the JWT branch of
     # get_current_team_session). #2299 (landed): the sibling inline ?team_id=
     # pin checks consolidated into _session_pinned_team /
-    # _ensure_key_in_pinned_team; this #2297 owner/admin gate stays here (a
-    # role-gate helper would be a separate consolidation).
-    if team.get("session_user_id") is not None:
-        await _require_owner_admin(team["session_user_id"], team["team_id"])
+    # _ensure_key_in_pinned_team; this #2297 owner/admin gate stays here —
+    # #2380 (Task 4): consolidated into the shared
+    # _require_owner_admin_if_session helper (fires only when the team dict
+    # carries session_user_id).
+    await _require_owner_admin_if_session(team)
     # Key label + C3 (#2112) scoped-mint body: {name?, graph_id?, scopes?}.
     # Read the body defensively — mint bodies are usually `{}` (dashboard/
     # CLI), so parse failures degrade to the legacy owner mint, never a
@@ -5561,7 +5582,10 @@ async def list_api_keys(graph_id: str | None = None,
     selfhost. #1708 D7: additive created_via/expires_at in BOTH lanes
     (agent_signup #1709, create_api_key #1753 and session_key mints all
     write them at mint time; the registry list stays None-tolerant for
-    LEGACY nodes minted before those fixes). C3 (#2112): optional
+    LEGACY nodes minted before those fixes). #2380 (P2): the minting USER
+    (created_by, additive) rides both lanes' rows so owners can identify +
+    revoke legacy member-minted owner-class keys — created_by_key_id
+    (delegation) is distinct; legacy NULL rows → None. C3 (#2112): optional
     ?graph_id= filter (per-graph key panel — surface 12) + the C1 tenancy
     columns ride the rows (scopes/delegation_depth/graph_id/created_by_key_id).
     """
@@ -5600,6 +5624,13 @@ async def list_api_keys(graph_id: str | None = None,
                     "scopes": row.get("scopes") or [],
                     "delegation_depth": row.get("delegation_depth"),
                     "created_by_key_id": row.get("created_by_key_id"),
+                    # #2380 (P2): the minting USER (created_by, additive)
+                    # rides the rows so owners can identify + revoke legacy
+                    # member-minted owner-class keys. created_by_key_id
+                    # (delegation attribution) is distinct — this is the
+                    # user_id that minted. Legacy rows (created_by NULL →
+                    # absent key on the row) degrade to None, no error.
+                    "created_by": row.get("created_by"),
                 }
                 for row in keys
             ]
@@ -5611,7 +5642,8 @@ async def list_api_keys(graph_id: str | None = None,
                 "MATCH (k:APIKey {team_id: $tid, graph_id: $gid}) "
                 "RETURN k.id, k.key_prefix, k.created_at, k.last_used_at, "
                 "k.revoked_at, k.name, k.created_via, k.expires_at, "
-                "k.graph_id, k.scopes, k.delegation_depth, k.created_by_key_id "
+                "k.graph_id, k.scopes, k.delegation_depth, k.created_by_key_id, "
+                "k.created_by "
                 "ORDER BY k.created_at DESC",
                 params={"tid": team["team_id"], "gid": graph_id},
             )
@@ -5620,7 +5652,8 @@ async def list_api_keys(graph_id: str | None = None,
                 "MATCH (k:APIKey {team_id: $tid}) "
                 "RETURN k.id, k.key_prefix, k.created_at, k.last_used_at, k.revoked_at, "
                 "k.name, k.created_via, k.expires_at, "
-                "k.graph_id, k.scopes, k.delegation_depth, k.created_by_key_id "
+                "k.graph_id, k.scopes, k.delegation_depth, k.created_by_key_id, "
+                "k.created_by "
                 "ORDER BY k.created_at DESC",
                 params={"tid": team["team_id"]},
             )
@@ -5650,6 +5683,12 @@ async def list_api_keys(graph_id: str | None = None,
                 "scopes": row[9] or [],
                 "delegation_depth": row[10],
                 "created_by_key_id": row[11],
+                # #2380 (P2): minting USER (additive; row[12] appended to
+                # BOTH SELECT variants — graph-filtered AND unfiltered — so
+                # a parity test pins both). None-tolerant: LEGACY nodes
+                # minted before created_by existed lack the prop → JSON
+                # null, no error.
+                "created_by": row[12],
             }
             for row in keys.result_set
         ]
@@ -5703,11 +5742,12 @@ async def revoke_api_key(key_id: str, request: Request, team: dict = Depends(get
     # never carries session_user_id (attached only on the JWT branch of
     # get_current_team_session) — the dependency-override lane (test seam)
     # DOES when a test supplies it (emulated session faces there are
-    # role-gated too). #2299 (landed): the sibling inline pin checks
-    # consolidated into the shared helpers; this #2297 owner/admin gate stays
-    # here (role-gate helper = separate consolidation).
-    if team.get("session_user_id") is not None:
-        await _require_owner_admin(team["session_user_id"], team["team_id"])
+    # role-gated too). #2380 (Task 4): consolidated into the shared
+    # _require_owner_admin_if_session helper (fires only when the team dict
+    # carries session_user_id; predicate unchanged — override seam keeps
+    # gating). #2299 (landed): the sibling inline pin checks consolidated
+    # into the shared helpers; this #2297 owner/admin gate stays here.
+    await _require_owner_admin_if_session(team)
     if is_supabase_enabled():
         try:
             row = api_key_by_id(get_control_plane(), key_id)
@@ -9261,7 +9301,19 @@ async def _require_owner_admin(user_id: str, team_id: str) -> dict:
         membership_for_user_team as _sb_membership,
     )
     if is_supabase_enabled():
-        membership = _sb_membership(get_control_plane(), user_id, team_id)
+        try:
+            membership = _sb_membership(get_control_plane(), user_id, team_id)
+        except RuntimeError:
+            # #2380 (P2, #1719 class): this seam's OWN membership read is a
+            # control-plane call — an outage/schema-cache failure degrades to
+            # the repo-standard 503 control_plane_unavailable (mirrors the
+            # lazy _session_pinned_team read wrapped by #2401 and the
+            # mint-path map), never a raw 500 from the global handler. The
+            # seam is shared by invites / members / key-toggle /
+            # dashboard-login / create / revoke — all inherit 503 parity.
+            # Non-RuntimeError exceptions propagate untouched (a schema/dialect
+            # bug must stay loud, not masquerade as an outage).
+            raise _control_plane_unavailable() from None
         if not membership or membership["role"] not in ("owner", "admin"):
             raise HTTPException(status_code=403, detail="Requires owner or admin role in team")
         _ensure_not_suspended(await _team_node(team_id))
@@ -9271,15 +9323,71 @@ async def _require_owner_admin(user_id: str, team_id: str) -> dict:
     # the shared embedded server and losing un-saved cascade writes; the
     # anchor is process-lifetime and sees them).
     sdk = _registry_anchor()
-    rows = sdk._get_registry().query(
-        "MATCH (m:Membership {user_id:$uid, team_id:$tid, status:'active'}) "
-        "RETURN m.role",
-        params={"uid": user_id, "tid": team_id},
-    ).result_set
+    try:
+        rows = sdk._get_registry().query(
+            "MATCH (m:Membership {user_id:$uid, team_id:$tid, status:'active'}) "
+            "RETURN m.role",
+            params={"uid": user_id, "tid": team_id},
+        ).result_set
+    except RuntimeError:
+        # #2380: registry-branch transport failure degrades the same way (503
+        # control_plane_unavailable — never a raw 500). Non-RuntimeError
+        # exceptions propagate untouched.
+        raise _control_plane_unavailable() from None
+    except Exception as _exc:
+        # The falkordb/redis client raises its own exception family on a
+        # registry outage (ConnectionError / TimeoutError / BusyLoadingError /
+        # ResponseError — the same classes sdk._classify_db_failure buckets,
+        # sdk.py ~1368); a bare `except RuntimeError` never fires on those, so
+        # the wrap would be dead code. Catch the family explicitly (lazy
+        # import — redis is not a hosted_api import-time dependency) and
+        # re-raise anything else untouched.
+        from redis.exceptions import (
+            BusyLoadingError,
+        )
+        from redis.exceptions import (
+            ConnectionError as _RedisConnectionError,
+        )
+        from redis.exceptions import (
+            ResponseError as _RedisResponseError,
+        )
+        from redis.exceptions import (
+            TimeoutError as _RedisTimeoutError,
+        )
+        if isinstance(_exc, (_RedisConnectionError, _RedisTimeoutError,
+                             BusyLoadingError, _RedisResponseError)):
+            raise _control_plane_unavailable() from None
+        raise
     if not rows or rows[0][0] not in ("owner", "admin"):
         raise HTTPException(status_code=403, detail="Requires owner or admin role in team")
     _ensure_not_suspended(await _team_node(team_id))
     return {"team_id": team_id, "role": rows[0][0]}
+
+
+async def _require_owner_admin_if_session(team: dict) -> None:
+    """#2297/#2380 POLICY A gate helper: owner/admin role gate that fires
+    ONLY when the team dict was resolved from a SESSION JWT (it carries
+    session_user_id — attached solely on the JWT branch of
+    get_current_team_session). Key-auth team dicts (and dependency-override
+    dicts that emulate key-auth) carry no session_user_id → pass-through
+    UNCHANGED (their class gates govern: C2 deleg + D13 caller-class for
+    mint, keys:manage for revoke). An override dict that DOES carry
+    session_user_id (the test seam's emulated session — ~15+ suites inject
+    dict(TEST_TEAM, session_user_id=...)) is role-gated exactly like a real
+    session face.
+
+    Predicate is the EXISTING invariant (session_user_id presence — read
+    through the named _SESSION_USER_ID_KEY constant), deliberately NOT a new
+    marker: the override seam returns override dicts unchanged, so a marker-
+    required predicate would silently stop gating the seam and the whole
+    member matrix would go ungated while tests stayed green.
+
+    Role checked on the RESOLVED team (team["team_id"] — the ?team_id= pin's
+    membership-checked team for multi-membership callers, #2230/#2248).
+    """
+    session_user_id = team.get(_SESSION_USER_ID_KEY)
+    if session_user_id is not None:
+        await _require_owner_admin(session_user_id, team["team_id"])
 
 
 async def _require_owner(user_id: str, team_id: str, *,
@@ -14028,6 +14136,13 @@ async def session_key(body: dict, request: Request, user: dict = Depends(get_cur
       included) — with a RE-CHECK so a rotation that doesn't free a
       persistent slot fails CLOSED (402, never cap+1); 402 when nothing at
       all is rotatable.
+
+    #2380 (P1, Option A): purpose semantics are role-gated — RECOVERY is
+    owner/admin-only (the #2297 POLICY A seam: a member session must not
+    mint a persistent deleg-NULL owner-class key; role checked on the
+    RESOLVED team — body team_id when multi-membership, else
+    memberships[0] — in BOTH auth lanes, see the gates below); BOOTSTRAP
+    (24h ephemeral) stays member-open per product posture.
     """
     import uuid as _uuid
     from datetime import datetime, timedelta
@@ -14079,6 +14194,19 @@ async def session_key(body: dict, request: Request, user: dict = Depends(get_cur
     # #308 (R5): a suspended team cannot re-mint keys (scoping delta 12).
     if team_row and team_row[0][1] is not None:
         raise HTTPException(status_code=403, detail=_suspended_detail())
+    # #2380 (P1, Option A): owner/admin-gate the RECOVERY purpose — a
+    # member-role session must not mint a persistent deleg-NULL owner-class
+    # key here (the #2297 POLICY A escalation root, recovery flavor — the
+    # member-at-cap auto-revoke side-effect is killed with it). bootstrap
+    # (24h ephemeral, cap-exempt) stays member-open per product posture.
+    # Ordering pinned by design review: AFTER this lane's OWN suspension
+    # check (a member on a SUSPENDED team gets this lane's existing
+    # SUSPENDED detail first — cross-lane byte parity) and BEFORE the mint
+    # lock below (the gate awaits _team_node; the lock section forbids
+    # awaits). Role is checked on the RESOLVED tid (body team_id when
+    # multi-membership, else memberships[0]) — never memberships[0] blindly.
+    if purpose == "recovery":
+        await _require_owner_admin(user_id, tid)
 
     api_key = f"tt_{_uuid.uuid4().hex}"
     key_hash = _hash(api_key)
@@ -14248,7 +14376,10 @@ async def _session_key_supabase(body: dict, request: Request, user: dict) -> dic
     get_current_team / MCP resolve it via the unique lookup_hash index, and
     api_keys.revoked_at is the authoritative revoke. #1855: the whole
     cap/revoke/recheck/insert section runs under the per-team in-process lock
-    (see _team_mint_lock above — same lock as the registry lane).
+    (see _team_mint_lock above — same lock as the registry lane). #2380 (P1):
+    the registry-lane recovery role gate has its byte-parity twin here
+    (owner/admin on the RESOLVED tid, after THIS lane's own suspension check
+    — see the gate below); bootstrap stays member-open.
     """
     import uuid as _uuid
     from datetime import datetime, timedelta
@@ -14287,6 +14418,16 @@ async def _session_key_supabase(body: dict, request: Request, user: dict) -> dic
     # #308 (R5): a suspended team cannot re-mint keys (scoping delta 12).
     if (team_row or {}).get("suspended_at") is not None:
         raise HTTPException(status_code=403, detail=_suspended_detail())
+    # #2380 (P1, Option A): owner/admin-gate the RECOVERY purpose — the
+    # registry-lane gate's byte-parity twin (same ordering: AFTER this
+    # lane's OWN suspension check above, so a member on a SUSPENDED team
+    # gets THIS lane's existing SUSPENDED detail — never the role detail —
+    # identical to the registry lane; BEFORE the mint lock below — the gate
+    # awaits _team_node and the lock section forbids awaits). bootstrap stays
+    # member-open. Role checked on the RESOLVED tid (body team_id when
+    # multi-membership, else memberships[0]).
+    if purpose == "recovery":
+        await _require_owner_admin(user_id, tid)
 
     api_key = f"tt_{_uuid.uuid4().hex}"
     kid = _short_id()
