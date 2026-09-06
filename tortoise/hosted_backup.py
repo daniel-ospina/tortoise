@@ -1004,10 +1004,14 @@ def prune_backups(
 
     ``keep_hourly>0`` (sub-daily cadence) REPLACES the daily keep-all rule:
     keep ALL backups younger than ``keep_hourly`` hours, then one anchor per
-    UTC hour-bucket for ages between ``keep_hourly`` and ``keep_daily`` days
+    UTC DAY-bucket for ages between ``keep_hourly`` and ``keep_daily`` days
     (bounded by the daily horizon), then the ``keep_weekly`` weekly anchors.
     This bounds a team at hourly cadence to ~24 hourly + ~7 daily-anchors + 4
-    weekly instead of ~168 objects/week.
+    weekly (≈35 objects/pool) — #2373: the anchor granularity was hour-
+    buckets (retaining ~172/pool over 7 days), contradicting this docstring,
+    the DR runbook, and #2319's lock-window premise; day anchors restore the
+    documented intent. Newest-first iteration keeps the newest backup of each
+    bucket.
 
     Delete-path trust: objects are keyed by the STORAGE KEY they were found
     under, never by a manifest's self-declared ``backup_id`` — a forged or
@@ -1026,7 +1030,7 @@ def prune_backups(
     now = datetime.now(timezone.utc)  # noqa: UP017
     deleted: list[str] = []
     kept_weekly: set[tuple[int, int]] = set()
-    kept_hour_buckets: set[tuple[int, int, int, int]] = set()
+    kept_day_buckets: set[tuple[int, int, int]] = set()
     hourly_mode = keep_hourly > 0
 
     prefix = f"backups/{team_id}/{graph_id}/" if graph_id is not None \
@@ -1081,11 +1085,16 @@ def prune_backups(
 
         if (now - created).days < keep_daily:
             if hourly_mode:
-                # Hour anchor: keep the newest per UTC hour-bucket within the
-                # daily horizon (bounded — no anchors beyond keep_daily days).
-                bucket = (created.year, created.month, created.day, created.hour)
-                if bucket not in kept_hour_buckets:
-                    kept_hour_buckets.add(bucket)
+                # Day anchor (#2373): keep the newest per UTC DAY-bucket
+                # within the daily horizon (bounded — no anchors beyond
+                # keep_daily days). Iteration is newest-first, so the first
+                # backup seen per bucket is the newest and the rest are
+                # deleted. Hour-bucket granularity over-retained (~172/pool
+                # vs the documented ~35); day anchors implement the
+                # docstring/runbook intent.
+                bucket = (created.year, created.month, created.day)
+                if bucket not in kept_day_buckets:
+                    kept_day_buckets.add(bucket)
                     continue
             else:
                 continue  # inside daily window — keep (legacy keep-all)
