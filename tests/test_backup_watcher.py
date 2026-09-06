@@ -374,6 +374,29 @@ def test_watcher_custom_never_and_stamp_missing():
     assert any("METADATA_LOST" in t and "team_a:g_stamp" in t for t in ch2.telegram)
 
 
+def test_watcher_custom_state_without_archives_is_backup_set_missing():
+    """#2374 regression: per-graph state that EXISTS with NO archives
+    classifies as the backup-set-missing class (archives lost/pruned) — not
+    "never" (never backed up is impossible once state exists: state is
+    written only after a successful dump). Wrong kind sends triage astray
+    after a bulk archive deletion."""
+    ch = _Channels()
+    storage = MemoryStorage()
+    _seed_state(storage, "team_a")
+    # g_x: per-graph state present, NO archives on a CONFIRMED scan.
+    _seed_graph_state(storage, "team_a", "g_x")
+    w = _watcher(storage, ch, graph_provider=lambda t: ["g_x"])
+    status = w.poll()
+    assert status["per_graph"]["team_a:g_x"] == "backup_set_missing"
+    assert any("BACKUP_SET_MISSING" in t and "team_a:g_x" in t
+               for t in list(ch.issues.values()))
+    # Recovery: a fresh default + custom archive land → ok, incidents resolved.
+    _seed_archive(storage, "team_a", 0.5)
+    _seed_graph_archive(storage, "team_a", "g_x", 0.5)
+    w.poll()
+    assert ch.issues == {}
+
+
 def test_watcher_custom_graph_removal_resolves_incidents():
     ch = _Channels()
     storage = MemoryStorage()

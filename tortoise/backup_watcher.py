@@ -455,7 +455,19 @@ class BackupWatcher:
                     # stale (same as the team table's cache-miss handling) so
                     # an unseen graph at worst reads as "can't confirm a
                     # fresh archive".
-                    per_graph[key] = "never" if graph_r2_ok else "stale"
+                    if not graph_r2_ok:
+                        per_graph[key] = "stale"
+                    elif key in graph_state:
+                        # #2374: per-graph state EXISTS but no archives —
+                        # mirror the team surface's backup-set-missing class
+                        # (archives lost/pruned), NOT "never" (never backed
+                        # up is impossible once state exists: state is
+                        # written only after a successful dump). Bulk-deleted
+                        # archives must triage as a missing set, not as a
+                        # graph that never produced a backup.
+                        per_graph[key] = "backup_set_missing"
+                    else:
+                        per_graph[key] = "never"
                     continue
                 age_min = (now - newest).total_seconds() / 60.0
                 per_graph[key] = "stale" if age_min > self._stale_min else "ok"
@@ -471,7 +483,8 @@ class BackupWatcher:
             prev_graph_keys = set(getattr(self, "_last_graph_keys", set()))
             cur_graph_keys = set(per_graph)
             for key in prev_graph_keys - cur_graph_keys:
-                for kind in ("STALE", "NEVER_BACKED_UP", "METADATA_LOST"):
+                for kind in ("STALE", "NEVER_BACKED_UP", "METADATA_LOST",
+                             "BACKUP_SET_MISSING"):
                     self._alerts.resolve_incident(kind, key)
             self._last_graph_keys = cur_graph_keys
         status = dict(status)
@@ -508,10 +521,13 @@ class BackupWatcher:
                     self._alerts.open_incident("STALE", key)
                 elif state == "stamp_missing":
                     self._alerts.open_incident("METADATA_LOST", key)
+                elif state == "backup_set_missing":
+                    self._alerts.open_incident("BACKUP_SET_MISSING", key)
                 else:
                     self._alerts.resolve_incident("STALE", key)
                     self._alerts.resolve_incident("NEVER_BACKED_UP", key)
                     self._alerts.resolve_incident("METADATA_LOST", key)
+                    self._alerts.resolve_incident("BACKUP_SET_MISSING", key)
             for team in status.get("backup_set_missing", []):
                 self._alerts.open_incident("BACKUP_SET_MISSING", team)
             # BACKUP_SET_MISSING resolves when the team's archives reappear.
