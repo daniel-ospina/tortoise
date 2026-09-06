@@ -17836,21 +17836,15 @@ def _boot_gc_drill_graphs(db, max_age_hours: float = 6.0) -> None:
             continue
 
 
-@app.post("/v1/internal/backups/acl-reconcile")
-async def backups_acl_reconcile(request: Request):
-    """Post-restore ACL rebuild/verification (#2313 folded delta): every
-    ACTIVE graph of every team must have its per-graph ACL user.
-
-    A full-platform restore (disaster recovery into a fresh FalkorDB server)
-    restores graph DATA from R2 — ACL server users do NOT live in the graph
-    namespace and are lost with the old server. ``create_acl_user`` is the
-    idempotent rebuild primitive (full-reset upsert; registry/selfhost mode
-    reuses the stored credential, hosted create-once verifies without
-    password churn). This reconcile replays it per ACTIVE graph — the DR
-    runbook's post-restore step. Idempotent + fail-soft: ACL-layer absence
-    (no server URI / bare redis) is reported, never a 500.
-    """
-    _check_internal(request)
+def _reconcile_acl_users_sync() -> dict:
+    """Sync body of backups_acl_reconcile — MUST run off the event loop
+    (#2371): per ACTIVE graph ``create_acl_user`` issues several blocking
+    redis/FalkorDB round-trips (3s/5s timeouts); inline in the async handler
+    a slow-but-reachable ACL server would stall the single-worker API event
+    loop for every tenant during the exact post-restore window this endpoint
+    exists for. Runs in its own worker thread — no lock needed (the old
+    ``threading.Lock`` guarded nothing: a single event loop has no
+    concurrency)."""
     cfg = _backup_config_safe()
     if cfg is None:
         raise HTTPException(status_code=503, detail="Backup sweep disabled")
@@ -17864,13 +17858,11 @@ async def backups_acl_reconcile(request: Request):
         raise HTTPException(status_code=503,
                             detail=f"team enumeration failed: {e}") from e
 
-    import threading as _threading
     from typing import Any as _Any
 
     from tortoise.acl_graph_users import create_acl_user  # type: ignore[import-not-found]
 
     results: dict[str, _Any] = {}
-    lock = _threading.Lock()
     for team_id in sorted(team_ids):
         try:
             graphs = _sweep_graph_list(registry, team_id)
@@ -17891,8 +17883,7 @@ async def backups_acl_reconcile(request: Request):
                 defaults += 1
                 continue
             try:
-                with lock:
-                    r = create_acl_user(row["graph_id"], team_id)
+                r = create_acl_user(row["graph_id"], team_id)
                 if r is None:
                     skipped += 1  # ACL layer absent — fail-soft, reported
                 else:
@@ -17908,6 +17899,25 @@ async def backups_acl_reconcile(request: Request):
                             "default_skipped": defaults,
                             "errors": errors}
     return {"status": "reconciled", "teams": len(results), "results": results}
+
+
+@app.post("/v1/internal/backups/acl-reconcile")
+async def backups_acl_reconcile(request: Request):
+    """Post-restore ACL rebuild/verification (#2313 folded delta): every
+    ACTIVE graph of every team must have its per-graph ACL user.
+
+    A full-platform restore (disaster recovery into a fresh FalkorDB server)
+    restores graph DATA from R2 — ACL server users do NOT live in the graph
+    namespace and are lost with the old server. ``create_acl_user`` is the
+    idempotent rebuild primitive (full-reset upsert; registry/selfhost mode
+    reuses the stored credential, hosted create-once verifies without
+    password churn). This reconcile replays it per ACTIVE graph — the DR
+    runbook's post-restore step. Idempotent + fail-soft: ACL-layer absence
+    (no server URI / bare redis) is reported, never a 500. Runs off the
+    event loop via ``asyncio.to_thread`` (#2371).
+    """
+    _check_internal(request)
+    return await asyncio.to_thread(_reconcile_acl_users_sync)
 
 
 @app.post("/v1/internal/backups/sweep")
