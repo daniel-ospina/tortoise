@@ -1144,6 +1144,30 @@ def _error_excerpt(response: str, err: BaseException) -> str:
     return excerpt[:500]
 
 
+def _accumulate_seam_out_tokens(stats: dict | None, seam: str | None) -> None:
+    """#2408 Task 0: healthy-path per-seam output-token accumulator.
+
+    Records ``stats["recovery"][f"{seam}_out_tokens"]`` = the FINAL
+    successful call's ``completion_tokens`` on the terminal success returns
+    of ``_complete_parsed``. Guard: ``not stats.get("partial")`` — the rung-4
+    partial-accept arms (escalated_partial via ``return parsed``; plain-path
+    rung-4 head via ``return _parse_json_robust``) both flow through the same
+    two returns with ``stats["partial"]=True`` and their whole-call tokens;
+    a partial list must never masquerade as a healthy total. Abort/residual
+    arms never reach the returns. ``seam=None`` (the kind_classifier
+    adjudication path) contributes nothing.
+    """
+    if stats is not None and seam and not stats.get("partial"):
+        _tokens = int(stats.get("completion_tokens") or 0)
+        if _tokens > 0:  # absent-when-no-data: a real success always reports
+            # tokens; a tokenless mock must not fabricate a 0 entry that
+            # creates a recovery dict where none existed (pre-existing pin:
+            # a clean rung-1 parse leaves stats["recovery"] empty).
+            _rec = stats.setdefault("recovery", {})
+            _rec[f"{seam}_out_tokens"] = (
+                _rec.get(f"{seam}_out_tokens", 0) + _tokens)
+
+
 def _complete_parsed(model, system: str, user: str, *,
                      max_tokens: int | None, stats: dict | None,
                      seam: str | None = None,
@@ -1429,9 +1453,20 @@ def _complete_parsed(model, system: str, user: str, *,
                     if _rec is not None:
                         _rec["escalated_recovered"] = (
                             _rec.get("escalated_recovered", 0) + 1)
+                # #2408 Task 0: terminal success — record the escalated
+                # call's output tokens (the full list that got embedded).
+                # parsed was already returned by _parse_json_robust above,
+                # so stats["partial"] reflects the rung-4 outcome.
+                _accumulate_seam_out_tokens(stats, seam)
                 return parsed
+        # #2408 Task 0: terminal success on the normal path — capture the
+        # parsed result FIRST so the helper sees stats["partial"] as set by
+        # _parse_json_robust's internal rung-4 accept (a partial head must
+        # never be recorded as a healthy total).
         try:
-            return _parse_json_robust(response, stats=stats)
+            _parsed = _parse_json_robust(response, stats=stats)
+            _accumulate_seam_out_tokens(stats, seam)
+            return _parsed
         except ValueError as e:
             # _ParseError IS a ValueError subclass — the only exception the
             # ladder raises; ``_complete`` sits OUTSIDE this try, so a raw
@@ -1973,8 +2008,90 @@ def merge_embed_lists(s2: dict, s4: dict) -> dict:
     return out
 
 
+# #2408 Task 1: fields whose change marks a CORRECTION (never verbatim) vs
+# optional noise fields a faithful re-emitter may drop/abbreviate while the
+# item is STILL a verbatim re-emission (the #1789 I-2-13 pin).
+_VERBATIM_CORRECTION_FIELDS = frozenset({
+    "lifecycle", "supersedes", "slots", "kind", "eventKind",
+})
+_VERBATIM_OPTIONAL_FIELDS = frozenset({
+    "source_ref", "confidence", "search_keys", "quote", "source_turn_id",
+})
+
+
+def _verbatim_norm_value(value):
+    """Normalize one item field for verbatim comparison. Strings fold through
+    ``_norm`` (whitespace/case — the SAME identity normalization the merge
+    key uses, so an S4 re-emission that dedupes against S2 under ``_merge_key``
+    also compares verbatim under the same lens); ``kind`` folds through
+    ``_norm_kind`` (``core:plan`` vs ``plan`` are the same entity); dict/list
+    values recurse; scalars pass through. A ``_verbatim_match`` between two
+    items that MERGE as one (same key) and carry the same content modulo this
+    normalization is a pure unchanged re-emission."""
+    if isinstance(value, dict):
+        return {k: _verbatim_norm_value(v) for k, v in value.items()
+                if k not in _VERBATIM_OPTIONAL_FIELDS}
+    if isinstance(value, list):
+        return [_verbatim_norm_value(v) for v in value]
+    if isinstance(value, str):
+        return _norm(value)
+    return value
+
+
+def _verbatim_match(section: str, s2_item: dict, s4_item: dict) -> bool:
+    """True when S4's collision copy of an S2 item is a PURE unchanged
+    re-emission: identical on the merge key AND on every non-optional field
+    (a change to lifecycle/supersedes/slots/kind/eventKind → correction, not
+    verbatim; a dropped/abbreviated optional field stays verbatim)."""
+    def _fold(item: dict) -> dict:
+        out = {}
+        for k, v in item.items():
+            if k in _VERBATIM_OPTIONAL_FIELDS:
+                continue
+            nv = _verbatim_norm_value(v)
+            # Entity kind folds through the key's OWN kind lens (_norm_kind):
+            # "core:plan" vs "plan" collide under _merge_key, so a re-emission
+            # that keeps the same bare kind is verbatim, not a correction.
+            if k == "kind" and section == "entities" and nv is not None:
+                nv = _norm_kind(nv)
+            out[k] = nv
+        return out
+    return _fold(s2_item) == _fold(s4_item)
+
+
+def _verbatim_reemissions(s2: dict, s4: dict) -> int:
+    """#2408 Task 1: count of S2 items S4 re-emitted UNCHANGED.
+
+    Scope: the 4 ``_EMBED_SECTIONS`` (entities/events/points/operators — the
+    same ``sections`` tuple ``_s4_merge_stats`` uses); chain_notes /
+    link_before_create / retractions are NOT re-emission surfaces. An S2 item
+    counts only when S4 emitted a colliding copy (``_merge_key``) that is a
+    verbatim match. Dict-only population (``isinstance(i, dict)``), matching
+    ``_s4_merge_stats``'s ``corrected_by_s4`` basis.
+    """
+    sections = ("entities", "events", "points", "operators")
+    n = 0
+    for section in sections:
+        s4_by_key = {_merge_key(section, i): i
+                     for i in (s4.get(section) or []) if isinstance(i, dict)}
+        for item in (s2.get(section) or []):
+            if not isinstance(item, dict):
+                continue
+            k = _merge_key(section, item)
+            s4_item = s4_by_key.get(k)
+            if s4_item is not None and _verbatim_match(section, item, s4_item):
+                n += 1
+    return n
+
+
 def _s4_merge_stats(s2: dict, s4: dict, merged: dict) -> dict:
-    """E4 observability: prove 'no silent drops' in a live run (M7-adjacent)."""
+    """E4 observability: prove 'no silent drops' in a live run (M7-adjacent).
+
+    #2408 Task 1 (additive): ``verbatim_reemissions`` — of the items S4
+    collided with (``corrected_by_s4``), how many are PURE unchanged
+    re-emissions vs true corrections (``corrections = corrected_by_s4 -
+    verbatim_reemissions``). The census readout's unchanged-share numerator.
+    """
     sections = ("entities", "events", "points", "operators")
     s2_n = sum(len(s2.get(s) or []) for s in sections)
     s4_n = sum(len(s4.get(s) or []) for s in sections)
@@ -1989,6 +2106,7 @@ def _s4_merge_stats(s2: dict, s4: dict, merged: dict) -> dict:
         "s4_items": s4_n,
         "merged_items": merged_n,
         "corrected_by_s4": corrected,
+        "verbatim_reemissions": _verbatim_reemissions(s2, s4),
         "kept_from_s2": max(0, s2_n - corrected),   # no-silent-drop counter
         "added_by_s4": max(0, merged_n - s2_n),
     }
