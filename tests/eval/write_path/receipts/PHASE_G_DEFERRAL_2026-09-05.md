@@ -49,3 +49,19 @@ completion — a run with 5/5 sessions emitting is REQUIRED before blessing a
 revised main.json; also fix the lane's usage-attribution zero (cost_usd).
 Until then Phase G's product-lane blessing stays deferred; the epic gate's
 CI half stands.
+
+## Addendum (2026-09-06) — mechanical-v2 pin + next steps
+
+- **Mechanical judge pin bumped to `w2-write-path-mechanical-v2`** (#2405): the
+  survival rule gained a paraphrase leg (`grading.survival_match`, gated on
+  `accepts_rephrase_linked`, 0.45 anchor-coverage band + shared-token floor +
+  polarity gate). Runs under v2 are NOT comparable to the v1 baselines.
+- **m2.json protocol-re-blessed to v2** (macro 1.0 / strict 1.0 — the v1 09-03
+  baseline predated the Phase C ep_update_missing fix-wave; 70/72 v1 strict
+  failures were ep_update_missing, 2 content_missing now verbatim-written;
+  repro'd, PASS receipt w2b-m2-lane-2026-09-06-v2-pass.json).
+- **PENDING: main.json must protocol-re-bless under v2 after the next llm-lane
+  run** — the next product-lane run records v2 and will verdict `inconclusive`
+  (judge_pin_mismatch) against the v1 main.json until then. The sealed v1 run
+  w2b-phaseg-llm-2026-09-06c.json (5/5 emitting, captures ok=True; macro 0.375;
+  verdict regression on distractor leakage 1) is the last comparable v1 number.
