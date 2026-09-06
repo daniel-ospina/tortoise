@@ -230,6 +230,44 @@ def test_sweep_no_teams_is_signal_not_incident(shared_proj):
         assert read_ops_state(store).get("last_team_count") == 0
 
 
+def test_sweep_noop_run_preserves_previous_rollup(shared_proj):
+    """#2412: a no-op run (0 eligible teams) must NOT erase the previous
+    real run's per-graph roll-up from ops/state.json — /status last_sweep
+    must keep showing the last REAL sweep and the error-streak bookkeeping
+    survives no-op runs (pre-#2412 the early-return wrote a bare 2-key
+    object, rendering last_sweep: None right after a healthy run)."""
+    with tempfile.TemporaryDirectory() as tmp:  # noqa: F841
+        proj = shared_proj
+        if proj is None:
+            return
+        wipe(proj)
+        reg = proj.db.select_graph(_REGISTRY_GRAPH)
+        store = MemoryStorage()
+        prior = {
+            "last_team_count": 2,
+            "last_sweep_at": "2026-09-06T10:00:00+00:00",
+            "graph_totals": {"attempted": 3, "backed_up": 2, "errors": 1},
+            "graph_failures": [{"team_id": "team_x", "graph_id": "g_a",
+                                "error": "boom", "streak": 2}],
+            "graph_error_streaks": {"team_x:g_a": 2},
+            "updated_at": "2026-09-06T10:00:00+00:00",
+        }
+        store.upload(OPS_STATE_KEY, json.dumps(prior).encode())
+        # no eligible Pro teams -> no-op run (no_teams branch)
+        res = run_backup_sweep(
+            db=proj.db, registry=reg, storage=store, config=_config(
+                team_sweep_enabled=False),
+        )
+        assert res["status"] == "no_teams"
+        state = read_ops_state(store)
+        # the previous real sweep's roll-up SURVIVES the no-op run
+        assert state["last_sweep_at"] == prior["last_sweep_at"]
+        assert state["graph_totals"] == prior["graph_totals"]
+        assert state["graph_failures"] == prior["graph_failures"]
+        assert state["graph_error_streaks"] == prior["graph_error_streaks"]
+        assert state["last_team_count"] == 0
+
+
 def test_sweep_enum_delta_fires_incident(shared_proj):
     """A prior team count > 0 → 0 is an incident, not chronic NO_TEAMS."""
     with tempfile.TemporaryDirectory() as tmp:  # noqa: F841
