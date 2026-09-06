@@ -105,21 +105,47 @@ def _default_graph_newest(storage, team_id: str, newest: datetime | None) -> dat
     — it is NOT the default graph and does not gate team freshness. Before
     any per-graph state exists (first post-#2313 sweep not yet run) every
     flat manifest is treated as the default (pre-#2313 parity, ≤1h window).
+
+    #2370: classification is read from the sweep-written legacy-flat index
+    (ops/legacy-flat-index/{team}.json) — ONE object read per team per poll
+    replaces downloading every flat manifest. The index is authoritative
+    while present: flats it marks custom (graph_id set, ≠ default) never
+    gate team freshness; default/unresolvable flats count. Index absent
+    (pre-first-sweep) falls back to the per-manifest read. Transient read
+    failures NEVER exclude an archive: an unreadable manifest/index counts
+    as default for the cycle (pre-#2313 key-derived parity) — excluding it
+    fabricated spurious STALE on a one-off read error.
     """
     default_name = _default_graph_name(storage, team_id)
+    from tortoise.backup_sweep import read_legacy_flat_index
+    try:
+        index = read_legacy_flat_index(storage, team_id)
+    except Exception:
+        index = {}  # index read failure → per-manifest fallback below
     for k in storage.list(f"backups/{team_id}/"):
         if not k.endswith("/manifest.json"):
             continue
         parts = k.split("/")
         if len(parts) == 4:
-            # legacy flat — default unless it names a custom graph
-            if default_name is not None:
+            # legacy flat — default unless classified custom
+            meta = index.get(f"{parts[1]}/{parts[2]}")
+            if index and meta is not None:
+                gid = str(meta.get("graph_id") or "")
+                if gid and gid != "default":
+                    continue  # C5-era custom on-demand artifact (index)
+            elif default_name is not None:
+                # Pre-index fallback: per-manifest read (round-1
+                # disambiguation). An unreadable manifest is counted as the
+                # default — NEVER excluded (#2370: exclusion fabricated
+                # spurious STALE on a transient read failure; a manifest
+                # that lists exists, and counting it is the pre-#2313
+                # key-derived parity).
                 try:
                     m = json.loads(storage.download(k))
                     if isinstance(m, dict) and m.get("graph_name") != default_name:
                         continue  # C5-era custom on-demand artifact
                 except Exception:
-                    continue  # unreadable manifest — cannot confirm default
+                    pass  # unreadable → count as default this cycle
             parsed = _parse_backup_ts(parts[2])
         elif len(parts) == 5 and parts[2] == "default":
             parsed = _parse_backup_ts(parts[3])  # default nested

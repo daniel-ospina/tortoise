@@ -305,6 +305,73 @@ def read_team_state(storage, team_id: str) -> dict[str, Any]:
     return _read_json(storage, f"{_TEAM_STATE_PREFIX}{team_id}/state.json")
 
 
+# ── #2370: legacy flat classification index ────────────────────────────────
+# Pre-#2313 team-level ("flat") archives (backups/{team}/{ts}_{rnd}/…) carry
+# their graph in the manifest graph_name but no graph_id key segment. The
+# sweep classifies the flat pool ONCE per run (it already lists the team)
+# and persists {backup_id: {graph_name, graph_id}} under
+# ops/legacy-flat-index/{team}.json — flat manifest KEYS are immutable
+# (prune only deletes, nothing rewrites an existing manifest), so a written
+# classification never goes stale while the key exists. Consumers:
+#   • the watcher's per-poll freshness reads ONE index object instead of
+#     downloading every flat manifest per poll;
+#   • GET /backups buckets legacy flats from the index instead of running a
+#     control-plane reverse lookup per request;
+#   • the legacy drain can tell default archives from C5-era custom flats.
+# graph_id: the ACTIVE graph's id when the manifest names a custom namespace
+# (list under that graph), "default" when it names the default namespace,
+# or "" when unresolvable (deleted graph / drifted name — the default
+# bucket stands, fail-soft).
+_LEGACY_FLAT_INDEX_PREFIX = "ops/legacy-flat-index/"
+_LEGACY_FLAT_INDEX_MAX = 2000
+
+
+def _legacy_flat_index_key(team_id: str) -> str:
+    return f"{_LEGACY_FLAT_INDEX_PREFIX}{team_id}.json"
+
+
+def read_legacy_flat_index(storage, team_id: str) -> dict[str, Any]:
+    return _read_json(storage, _legacy_flat_index_key(team_id))
+
+
+def _classify_flat_pool(storage, team_id: str,
+                        rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """#2370: read the team's legacy FLAT manifests and classify each by its
+    manifest graph_name against the ACTIVE graph rows (namespace → graph_id).
+    Only flat keys (backups/{team}/{key}/manifest.json — 4 segments) are
+    indexed; nested (default + custom) manifests never appear here. Keys whose
+    manifest read fails are skipped (retried next run; a classification is
+    never guessed). Returns {backup_id: {graph_name, graph_id}}."""
+    ns_to_gid = {
+        str(r.get("namespace") or ""): r.get("graph_id")
+        for r in rows if not r.get("_invalid")
+    }
+    out: dict[str, Any] = {}
+    try:
+        for k in storage.list(f"backups/{team_id}/"):
+            parts = k.split("/")
+            if len(parts) != 4 or not k.endswith("/manifest.json"):
+                continue
+            try:
+                m = json.loads(storage.download(k))
+            except Exception:
+                continue  # transient — retried next run
+            if not isinstance(m, dict):
+                continue
+            bid = str(m.get("backup_id") or "")
+            name = str(m.get("graph_name") or "")
+            if not bid:
+                continue
+            out[bid] = {"graph_name": name,
+                        "graph_id": str(ns_to_gid.get(name) or "")}
+            if len(out) >= _LEGACY_FLAT_INDEX_MAX:
+                break
+    except Exception as e:
+        logger.warning("legacy flat classification failed for %s: %s",
+                       team_id, e)
+    return out
+
+
 def _graph_state_key(team_id: str, graph_id: str) -> str:
     return f"{_TEAM_STATE_PREFIX}{team_id}/graphs/{graph_id}/state.json"
 
@@ -642,7 +709,13 @@ def _sweep_team(
     # successful default dump. A default stuck in data-loss/error keeps its
     # last-known-good flat archives for restore/forensics instead of the
     # drain time-eroding the recovery source.
-    if graph_results.get("default", {}).get("status") == "backed_up":
+    default_status = graph_results.get("default", {}).get("status")
+    # #2370: classify the flat pool every run and persist the index (one
+    # object the watcher/list read instead of per-manifest downloads / CP
+    # reverse lookups). Classification itself lists + reads the flats once
+    # per run — cheap at hourly cadence.
+    flats = _classify_flat_pool(storage, team_id, graphs)
+    if default_status == "backed_up":
         try:
             prune_backups(
                 storage, team_id,
@@ -653,6 +726,31 @@ def _sweep_team(
         except Exception as e:
             logger.warning("legacy team-level prune failed for %s: %s",
                            team_id, e)
+    else:
+        # #2370 indicator 4: while the default is failing (drain frozen to
+        # protect its last-good archives), C5-era custom FLAT dumps are pure
+        # duplicates of the custom's own nested pool (kept under the same
+        # retention in _backup_graph) — prune them regardless of default
+        # health. Only flats of ACTIVE customs that backed up this pass are
+        # touched (nested copy confirmed); unresolvable/deleted-graph flats
+        # stay (their disposition is #2304's purge decision).
+        for bid, meta in list(flats.items()):
+            gid = meta.get("graph_id") or ""
+            if (gid and gid != "default"
+                    and graph_results.get(gid, {}).get("status") == "backed_up"):
+                for suffix in ("dump.enc", "manifest.json"):
+                    try:
+                        storage.delete(f"backups/{bid}/{suffix}")
+                    except Exception as e:
+                        logger.warning(
+                            "custom-era flat cleanup of %s/%s failed: %s",
+                            team_id, bid, e)
+                flats.pop(bid, None)
+    try:
+        _write_json(storage, _legacy_flat_index_key(team_id), flats)
+    except Exception as e:
+        logger.warning("legacy flat index write failed for %s: %s",
+                       team_id, e)
 
     default = graph_results.get("default", {})
     team_res = dict(default)

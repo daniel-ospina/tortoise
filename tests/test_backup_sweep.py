@@ -145,6 +145,25 @@ def _config(**over) -> BackupConfig:
     return BackupConfig(**base)
 
 
+def _seed_flat_for_sweep(storage, team: str, graph_name: str,
+                          hours_ago: float) -> str:
+    """Seed a pre-#2313 legacy FLAT dump (backups/{team}/{key}/…) — the flat
+    pool the sweep classifies (#2370). Returns its backup_id (team/key)."""
+    import secrets as _secrets
+    from datetime import timedelta
+    ts = datetime.now(UTC) - timedelta(hours=hours_ago)
+    key = (f"{ts.strftime('%Y%m%dT%H%M%S')}"
+           f"{ts.microsecond // 1000:03d}Z_{_secrets.token_hex(4)}")
+    backup_id = f"{team}/{key}"
+    m = {"backup_id": backup_id, "team_id": team, "graph_name": graph_name,
+         "created_at": ts.isoformat(), "node_count": 1, "edge_count": 0,
+         "sha256": "0" * 64}
+    storage.upload(f"backups/{backup_id}/manifest.json",
+                   json.dumps(m).encode())
+    storage.upload(f"backups/{backup_id}/dump.enc", b"x")
+    return backup_id
+
+
 def _make_env(monkeypatch, proj) -> FalkorProjection:
     """Seed the (shared) projection with a registry Team node + team graph."""
     wipe(proj)
@@ -1424,6 +1443,65 @@ def test_sweep_legacy_drain_skipped_when_default_fails(shared_proj):
         flat = [k for k in store.list("backups/team_keep/")
                 if k.endswith("manifest.json") and len(k.split("/")) == 4]
         assert len(flat) == 1, "drain must not erode last-good archives on failure"
+
+
+@pytest.mark.skipif(_DOCKER_LANE, reason="custom namespaces leak on docker lane (T7 E2E covers)")
+def test_sweep_writes_flat_index_and_prunes_custom_flats_on_default_failure(shared_proj, monkeypatch):
+    """#2370: the sweep classifies the legacy flat pool into the persistent
+    index; while the DEFAULT is failing (drain frozen to protect its last-good
+    archives), C5-era CUSTOM flat dumps are still pruned (they are duplicates
+    of the custom's nested pool) and the index stays current."""
+    with tempfile.TemporaryDirectory() as tmp:  # noqa: F841
+        if shared_proj is None:
+            return
+        wipe(shared_proj)
+        proj = shared_proj
+        reg = proj.db.select_graph(_REGISTRY_GRAPH)
+        reg.query("CREATE (t:Team {id:'team_fi', tier:'pro'})")
+        team_g = proj.db.select_graph(_team_graph("team_fi"))
+        team_g.query("CREATE (p:Point {id:'pt-d', content:'d', pointKind:'claim'})")
+        ns = "team_team_fi_g_c1"
+        g = proj.db.select_graph(ns)
+        g.query("CREATE (p:Point {id:'pt-1', content:'c', pointKind:'claim'})")
+        reg.query(
+            "CREATE (g:Graph {id:'g_c1', team_id:'team_fi', kind:'custom', "
+            "namespace:$ns, status:'active'})",
+            params={"ns": ns},
+        )
+        store = MemoryStorage()
+        # Pre-#2313 C5-era flat dumps: one for the DEFAULT, one for the CUSTOM
+        default_bid = _seed_flat_for_sweep(store, "team_fi", _team_graph("team_fi"), 0.1)
+        custom_bid = _seed_flat_for_sweep(store, "team_fi", ns, 0.1)
+
+        r1 = run_backup_sweep(db=proj.db, registry=reg, storage=store,
+                              config=_config())
+        assert r1["results"]["team_fi"]["status"] == "backed_up"
+        from tortoise.backup_sweep import read_legacy_flat_index
+        idx1 = read_legacy_flat_index(store, "team_fi")
+        assert idx1[default_bid]["graph_id"] == "default"
+        assert idx1[custom_bid]["graph_id"] == "g_c1"
+
+        # Default starts failing every run → flat drain freezes for the
+        # DEFAULT's archives, but the CUSTOM-era flat is pruned.
+        import tortoise.backup_sweep as bs_mod
+        real_backup_graph = bs_mod._backup_graph
+
+        def _default_fails(*a, **kw):
+            if kw["graph"].get("graph_id") == "default":
+                raise RuntimeError("injected default failure")
+            return real_backup_graph(*a, **kw)
+
+        monkeypatch.setattr(bs_mod, "_backup_graph", _default_fails)
+        r2 = run_backup_sweep(db=proj.db, registry=reg, storage=store,
+                              config=_config())
+        team_res = r2["results"]["team_fi"]
+        assert team_res["graphs"]["default"]["status"] == "error"
+        assert team_res["graphs"]["g_c1"]["status"] == "backed_up"
+        # custom-era flat gone; default flat retained (recovery source)
+        assert store.list(f"backups/{default_bid}/"), "default flat drained while failing"
+        assert store.list(f"backups/{custom_bid}/") == []
+        idx2 = read_legacy_flat_index(store, "team_fi")
+        assert default_bid in idx2 and custom_bid not in idx2
 
 
 @pytest.mark.skipif(_DOCKER_LANE, reason="custom namespaces leak on docker lane (T7 E2E covers)")
