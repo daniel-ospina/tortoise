@@ -11673,12 +11673,14 @@ class TortoiseSDK:
                 ranked = w4_enrich_items(proj, ranked)
             return ranked
         if order_by == "confidence":
-            # #25/#2206: sort by the PERSISTED EP confidence (n.confidence,
-            # written by compute_confidence). Post-#2206 this is the SAME
-            # belief mean α/(α+β) that ep.confidence_mean carries
-            # (annotate_ep_batch reads the same coalesce of
-            # posterior_alpha/ep_alpha); n.confidence is read directly here so
-            # the sort never depends on the result-window annotation pass.
+            # #25/#2206/#2286: sort by the PERSISTED EP belief mean α/(α+β)
+            # that ep.confidence_mean carries. GraphRanker reads the
+            # n.confidence flush-mirror when present and falls back to the
+            # SAME coalesce of posterior_alpha/ep_alpha that annotate_ep_batch
+            # reads — so the sort key and the result-window annotation can
+            # never disagree (notably for prior-only claims: an auto-baselined
+            # decide part with no EP flush has no n.confidence but a persisted
+            # 0.75 prior — the pre-fix read ranked it as unmeasured 0.5).
             from .ranking import GraphRanker
             ranker = graph_ranker or GraphRanker(proj)
             signals = ranker._fetch_signals([r.id for r in results], entity_type)
