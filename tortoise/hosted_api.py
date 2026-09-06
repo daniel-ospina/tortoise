@@ -1798,6 +1798,15 @@ async def _get_current_team_supabase(request: Request, token: str) -> dict:
 #       PATCH  /v1/team/dashboard-login toggle_dashboard_login (no key_id —
 #       the pin IS the write target; the membership gate here + the
 #       _require_owner_admin role gate on the pinned team enforce it).
+#     Server gate on the dashboard-login route = enforcement-WHEN-PINNED +
+#     fail-closed non-member 403 (defense-in-depth and the contract for
+#     PINNED clients). The first-party client caller TODAY
+#     (website/apps/dashboard/src/main.jsx toggleDashboardKeyLogin) sends NO
+#     ?team_id= on this route and the client tripwire (WRITE_FNS) boundary
+#     excludes it — unpinned toggles resolve memberships[0] (the
+#     long-standing default), so the wrong-team-write class is NOT closed
+#     end-to-end for this route YET; closing that client gap is a separate
+#     client-side change (this server contract is ready for it).
 #   * body-pin seam (documented — NOT query-pinned, different contract):
 #       POST   /v1/session/key          session_key (E1 mint) carries the
 #     team selector in the BODY (required when multi-membership) and
@@ -1843,25 +1852,47 @@ def _session_pinned_team(cp: object, user_id: str, pinned: str | None, *,
         return None
     if memberships is None:
         from tortoise.supabase_control import user_memberships
-        memberships = user_memberships(cp, user_id)
+
+        try:
+            memberships = user_memberships(cp, user_id)
+        except RuntimeError:
+            # #1719/#2299: the lazy membership read is a control-plane call —
+            # an outage/schema-cache failure degrades to the repo-standard
+            # 503 control_plane_unavailable (the mint-path map), never a raw
+            # 500 from the global handler. Only this lazy read is wrapped;
+            # the precomputed-membership callers (DI seam) run their own
+            # earlier read — pre-existing, left as-is.
+            raise _control_plane_unavailable() from None
     if pinned not in {m["team_id"] for m in memberships}:
         raise HTTPException(status_code=403, detail="No membership in team")
     return pinned
 
 
 def _ensure_key_in_pinned_team(pinned_team_id: str | None,
-                               key_team_id: str) -> None:
+                               key_team_id: str | None, *,
+                               required: bool = False) -> None:
     """#2230/#2299: fail-closed half of the ?team_id= pin — a TRUTHY pinned
-    team must own the target key or the call 403s "Not your API key",
-    byte-identical to revoke_api_key's team-mismatch detail (the DI seam
-    compares against the DI-resolved team — pinned ?team_id= or the
-    memberships[0] default; revoke passes that resolved team here).
+    team must own the target key or the call 403s "Not your API key" (the
+    same detail revoke_api_key's team-mismatch raises; the DI seam compares
+    against the DI-resolved team — pinned ?team_id= or the memberships[0]
+    default — and revoke passes that resolved team here).
 
-    pinned_team_id None (no pin) → no-op — the intrinsic-team default
-    governs (the #2230 pinless-PATCH contract). Callers run this AFTER the
-    key lookup; the membership gate (_session_pinned_team) always precedes
-    the lookup."""
-    if pinned_team_id is not None and key_team_id != pinned_team_id:
+    required=False (default — the optional-pin PATCH contract): a None
+    pinned_team_id means "no pin" and no-ops — the key's intrinsic team
+    governs. A truthy pinned team must equal the key's team or the call 403s.
+
+    required=True (the DI/authority lanes — revoke): pinned_team_id is the
+    RESOLVED team and must own the key UNCONDITIONALLY — a None resolved
+    team still fails closed against any non-None key team (the old strict
+    `!=` compare at the None edge), so an authority that fails to resolve a
+    team can never silently widen the revoke. Both None is the sole no-raise
+    edge (None != None → False, matching the old compare).
+
+    Callers run this AFTER the key lookup; the membership gate
+    (_session_pinned_team) always precedes the lookup."""
+    if pinned_team_id is None and not required:
+        return
+    if pinned_team_id != key_team_id:
         raise HTTPException(status_code=403, detail="Not your API key")
 
 
@@ -5681,8 +5712,10 @@ async def revoke_api_key(key_id: str, request: Request, team: dict = Depends(get
             # #2299: consolidated fail-closed — the DI-resolved team (pinned
             # ?team_id= or memberships[0] default) must own the key, via the
             # shared helper (byte-identical detail to the PATCH lane's pin
-            # mismatch).
-            _ensure_key_in_pinned_team(team["team_id"], row.get("team_id"))
+            # mismatch). required=True: the resolved team is the AUTHORITY and
+            # must own the key unconditionally — a None team fails closed
+            # (the old strict `!=` behavior), never a silent revoke widen.
+            _ensure_key_in_pinned_team(team["team_id"], row.get("team_id"), required=True)
             if row.get("revoked_at") is not None:
                 return {"revoked": True, "already": True, "key_id": key_id}
             from datetime import datetime
@@ -5705,7 +5738,10 @@ async def revoke_api_key(key_id: str, request: Request, team: dict = Depends(get
             raise HTTPException(status_code=404, detail="API key not found")
         # #2299: same consolidated fail-closed (registry lane — the resolved
         # team is the authority; keys are team-scoped by the key there).
-        _ensure_key_in_pinned_team(team["team_id"], rows[0][0])
+        # required=True, same as the supabase lane: the resolved team must
+        # own the key unconditionally (a None team fails closed, matching
+        # the old strict `!=`).
+        _ensure_key_in_pinned_team(team["team_id"], rows[0][0], required=True)
         if rows[0][1] is not None:
             return {"revoked": True, "already": True, "key_id": key_id}
         from datetime import datetime
@@ -5822,6 +5858,14 @@ async def toggle_api_key_enabled(
     mismatch. No pin → the key's intrinsic team governs (backwards
     compatible). The registry/selfhost lane below is deliberately
     unchanged (keys are team-scoped by the key there).
+
+    #2230 divergence note (pinless PATCH vs pinless DELETE): session-lane
+    DELETE without a pin resolves memberships[0] (the DI default) and fails
+    closed 403 "Not your API key" when the key lives in ANOTHER team; this
+    PATCH without a pin acts on the key's INTRINSIC team (200) instead —
+    each lane keeps its pre-#2230 legacy default. The dashboard always pins
+    (the client keyTeamPinsTripwire), so the divergence is unreachable from
+    the dashboard — it only surfaces to direct-API callers sending no pin.
     #2299: the pin enforcement now routes through the SHARED helpers
     (_session_pinned_team membership gate + _ensure_key_in_pinned_team
     fail-closed) — the same predicate the DI seam runs for DELETE/create —

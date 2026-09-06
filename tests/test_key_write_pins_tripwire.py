@@ -1,6 +1,6 @@
 """#2299: server-side parity/tripwire for session key-write ?team_id= pins.
 
-The server mirror of the client static tripwire
+The server counterpart of the client static tripwire
 (website/apps/dashboard/src/keyTeamPinsTripwire.test.js, #2230): that file
 guards the DASHBOARD's key-management writes (every revoke/rename/toggle/mint
 URL must append the `?team_id=` pin); this file guards the SERVER's honoring
@@ -9,12 +9,18 @@ of that pin — every session-capable key-WRITE route must honor a truthy
 the pin again (the pre-#2230 PATCH failure mode; #2297's session gates landed
 in 1b22c56c and must stay intact).
 
-Two layers, mirroring the client file:
-  1. TestKeyWritePinsTripwireStatic — a source scan of tortoise/hosted_api.py
-     asserting every session key-write route still resolves ?team_id= through
+Two layers:
+  1. TestKeyWritePinsTripwireStatic — a route-prefix+verb-scoped source scan
+     of tortoise/hosted_api.py: every @app WRITE-verb route whose decorator
+     path contains /v1/team/keys or /v1/team/dashboard-login (the same URL
+     boundary the client tripwire scans) must still resolve ?team_id= through
      a recognized seam (the get_current_team_session DI, or the shared
-     _session_pinned_team / _ensure_key_in_pinned_team helpers). A route that
-     drops its seam fails here loudly, like the client's whole-file sentinel.
+     _session_pinned_team / _ensure_key_in_pinned_team helpers), and every
+     such route must be enumerated in KEY_WRITE_HANDLERS. NOT a whole-file
+     scan: a FUTURE session key-write endpoint on a NEW prefix must
+     deliberately extend KEY_WRITE_HANDLERS + the route-coverage matrix + the
+     client tripwire — a convention guarded by review, not by this scan. A
+     route that drops its seam fails here loudly.
   2. TestKeyWritePinsTripwireBehavior — a behavioral matrix driving each
      route with a multi-membership session (A first → memberships[0]=A, B
      second): the pin must govern the write (pin-B lands in B), and a
@@ -30,6 +36,16 @@ Route-coverage matrix (also documented above the helpers in hosted_api.py):
 | PATCH  /v1/team/keys/{key_id}    | toggle_api_key_enabled| inline helpers        |
 | DELETE /v1/team/keys/{key_id}    | revoke_api_key        | DI + fail-closed      |
 | PATCH  /v1/team/dashboard-login  | toggle_dashboard_login| inline membership gate|
+
+The dashboard-login arm is a SERVER-CONTRACT test, not a client-mirror
+parity claim: the first-party client does NOT send ?team_id= on that route
+today (website/apps/dashboard/src/main.jsx toggleDashboardKeyLogin) and the
+client tripwire's WRITE_FNS boundary excludes it. Its behavioral tests assert
+the server contract — a pin, WHEN PRESENT, is honored and governs the write,
+and a non-member pin fails closed 403 — so a server regression (pin ignored /
+memberships[0] fallback) still fails loudly; no test here asserts that any
+client pins the route. Closing that client gap is a separate client-side
+change.
 
 POST /v1/session/key (session_key) carries its team selector in the BODY
 (required when multi-membership) — a different client contract, documented in
@@ -59,8 +75,10 @@ from tests.fake_control_plane import FakeControlPlane
 
 _SUPABASE_URL = "https://pinparity.supabase.co"
 
-# The session-lane key-WRITE handlers (server mirror of the client tripwire's
-# WRITE_FNS). Each maps to the pin seam that MUST appear in its source body.
+# The session-lane key-WRITE handlers (counterpart of the client tripwire's
+# WRITE_FNS — same /v1/team/keys URL boundary, plus the server-contract
+# dashboard-login entry the client boundary excludes). Each maps to the pin
+# seam that MUST appear in its source body.
 KEY_WRITE_HANDLERS: dict[str, tuple[str, ...]] = {
     # DI seam — get_current_team_session → _session_user_team membership-gates
     # the pin and resolves the team from it.
@@ -143,11 +161,15 @@ def _keys_of(fake, team_id: str) -> list[dict]:
 
 
 class TestKeyWritePinsTripwireStatic:
-    """#2299 layer 1 — source tripwire (the client keyTeamPinsTripwire's
-    server mirror). Every session-lane key-write handler in hosted_api.py must
-    keep resolving ?team_id= through a recognized pin seam; adding a handler
-    or dropping a seam fails loudly and forces a deliberate table extension
-    (same rule as WRITE_FNS in the client tripwire)."""
+    """#2299 layer 1 — source tripwire over the enumerated session key-write
+    surface. Route-prefix+verb-scoped: the scan covers @app write-verb routes
+    whose decorator path contains /v1/team/keys or /v1/team/dashboard-login
+    (the same URL boundary as the client tripwire's WRITE_FNS). Each handler
+    must keep resolving ?team_id= through a recognized pin seam; dropping a
+    seam fails loudly and forces a deliberate table extension. A FUTURE
+    session key-write endpoint on a NEW prefix must deliberately extend
+    KEY_WRITE_HANDLERS + the route-coverage matrix + the client tripwire — a
+    convention guarded by review, not by this scan."""
 
     def _handler_source(self, source: str, name: str) -> str:
         """Body of one route handler: from `async def <name>(` to the next
@@ -186,10 +208,14 @@ class TestKeyWritePinsTripwireStatic:
             pass  # partial-fragment edge — keep whatever parsed cleanly
         return names
     def test_key_write_handlers_all_enumerated(self):
-        """Whole-file sentinel: every session-lane key-write route whose
-        decorator matches a key-write path prefix must be enumerated in
-        KEY_WRITE_HANDLERS — a NEW key-write route fails here until someone
-        deliberately extends the table (and, per the matrix, wires a seam)."""
+        """Route-prefix+verb-scoped sentinel: every session key-write route
+        whose decorator path matches a key-write prefix must be enumerated in
+        KEY_WRITE_HANDLERS — a NEW route on these prefixes fails here until
+        someone deliberately extends the table (and, per the matrix, wires a
+        seam). NOT a whole-file scan: a future key-write endpoint on a NEW
+        prefix must extend KEY_WRITE_HANDLERS + the route-coverage matrix +
+        the client tripwire deliberately — review-guarded, not provable by
+        this scan."""
         source = _hosted_api_source()
         lines = source.split("\n")
         found = []
@@ -313,6 +339,8 @@ class TestKeyWritePinsTripwireBehavior:
     def test_toggle_wrong_team_pin_403_no_write(self, client, fake, monkeypatch):
         teamA, teamB = self._two_claimed_teams(client, fake, monkeypatch)
         kid = self._key_id(fake, teamB)  # key lives in B
+        before_row = fake.query("api_keys", select=["enabled"], filters=[("id", "eq", kid)])
+        before = before_row[0]["enabled"]
         r = client.patch(
             f"/v1/team/keys/{kid}?team_id={teamA}",
             headers={"Authorization": "Bearer eyJ.sess"},
@@ -321,21 +349,37 @@ class TestKeyWritePinsTripwireBehavior:
         assert r.status_code == 403, r.text
         assert r.json()["detail"] == "Not your API key"
         row = fake.query("api_keys", select=["enabled"], filters=[("id", "eq", kid)])[0]
-        assert row["enabled"] is not False  # no partial write
+        # #2248 P3 shape guard (mirrors the DELETE leg's untouched assert):
+        # the fake's api_keys rows store no `enabled` field, so the untouched
+        # projection is {"enabled": None} and an `is not False` assert passes
+        # vacuously. The == before compare fails on ANY mutation — absent→set
+        # or an opposite-direction write — not just enabled is False.
+        assert row["enabled"] == before  # no partial write
 
     # ── DELETE /v1/team/keys/{id} (revoke): wrong-team pin fails closed ─────
     def test_revoke_wrong_team_pin_403_no_write(self, client, fake, monkeypatch):
+        # Discriminating shape (tripwire): the key lives in the FIRST
+        # membership (A = memberships[0]) while the pin targets the NON-first
+        # team (B). A pin-honoring server resolves B and fails closed 403
+        # "Not your API key" (the key is not in B); a pin-IGNORING server
+        # falls back to memberships[0] (A), finds the key IN-scope and
+        # REVOKES it (200) — the asserts below fail, firing the tripwire.
+        # (The old key-in-B / pin-A shape resolved A either way, so honoring
+        # and ignoring were indistinguishable on this lane.)
         teamA, teamB = self._two_claimed_teams(client, fake, monkeypatch)
-        kid = self._key_id(fake, teamB)
+        kid = self._key_id(fake, teamA)  # key lives in A (memberships[0])
         r = client.delete(
-            f"/v1/team/keys/{kid}?team_id={teamA}", headers={"Authorization": "Bearer eyJ.sess"}
+            f"/v1/team/keys/{kid}?team_id={teamB}", headers={"Authorization": "Bearer eyJ.sess"}
         )
         assert r.status_code == 403, r.text
         assert r.json()["detail"] == "Not your API key"
         row = fake.query("api_keys", select=["revoked_at"], filters=[("id", "eq", kid)])[0]
-        assert row["revoked_at"] is None  # untouched
+        assert row["revoked_at"] is None  # untouched (revoke never ran)
 
-    # ── PATCH /v1/team/dashboard-login: the pin IS the write target ─────────
+    # ── PATCH /v1/team/dashboard-login: SERVER-contract arm ────────────────
+    # The first-party client does not pin this route today (module docstring),
+    # so these tests assert the SERVER contract — a pin WHEN PRESENT governs
+    # the write; a non-member pin fails closed 403. Not a client-parity claim.
     def test_dashboard_login_honors_pin_flips_pinned_team(self, client, fake, monkeypatch):
         """Pinning the non-first membership (B) must flip B's
         dashboard_key_login — a pin-ignoring server flips memberships[0] (A)
