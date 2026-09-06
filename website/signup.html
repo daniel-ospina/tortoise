@@ -38,6 +38,41 @@
     .hidden {
       display: none;
     }
+
+    /* ── TEMP BETA GATE (#beta-gate) ─────────────────────────────── */
+    .beta-gate {
+      position: fixed; inset: 0; z-index: 500;
+      display: flex; align-items: center; justify-content: center;
+      background: var(--bg, #060b14);
+      padding: 1.5rem;
+    }
+    html.beta-unlocked .beta-gate { display: none; }
+    .beta-gate-card {
+      width: 100%; max-width: 400px;
+      background: var(--surface, #0d1a2d);
+      border: 1px solid var(--border, #1e293b);
+      border-radius: 12px; padding: 1.75rem;
+    }
+    .beta-gate-card h2 { font-size: 1.2rem; margin: 0 0 0.5rem; color: var(--text, #cbd5e1); }
+    .beta-gate-card p { font-size: 13px; color: var(--text-dim, #94a3b8); line-height: 1.6; margin: 0 0 1rem; }
+    .beta-gate-card input {
+      width: 100%; box-sizing: border-box; padding: 0.6rem 0.7rem;
+      background: var(--bg, #060b14); color: var(--text, #cbd5e1);
+      border: 1px solid var(--border, #1e293b); border-radius: 8px; font-size: 14px;
+      margin-bottom: 0.6rem;
+    }
+    .beta-gate-actions { display: flex; gap: 0.6rem; }
+    .beta-gate-actions .btn-primary {
+      flex: 1; background: var(--accent, #06b6d4); color: #04121a;
+      border: none; padding: 0.6rem 0.8rem; border-radius: 8px;
+      font-weight: 600; cursor: pointer; font-size: 14px;
+    }
+    .beta-gate-actions .btn-cancel {
+      background: none; border: 1px solid rgba(255,255,255,0.15);
+      color: var(--text-dim, #94a3b8); padding: 0.6rem 0.8rem; border-radius: 8px;
+      cursor: pointer; font-size: 14px;
+    }
+    .beta-gate-error { color: var(--red, #ef4444); font-size: 13px; margin: 0 0 0.6rem; min-height: 1.1em; }
     .checkmark {
       width: 48px; height: 48px;
       margin: 0 auto 1rem;
@@ -383,6 +418,17 @@
   </style>
 </head>
 <body>
+  <!-- ══ TEMP PRIVATE-BETA GATE (#beta-gate) ════════════════════════════════════
+       Gate the whole auth funnel until the visitor enters the beta access code
+       (or has a stored flag). REMOVE when Tortoise goes public: delete the
+       <section id="beta-gate"> markup, the #beta-gate CSS, and the BETA_* code
+       in the main script below. The dashboard app / welcome page already bounce
+       to /auth, so this single overlay covers login, signup, OAuth and
+       connect-your-agent entry points. -->
+  <script>
+    // Early flag check so returning (unlocked) visitors never see the gate flash.
+    try { if (localStorage.getItem('tortoise_beta_access') === '1') document.documentElement.classList.add('beta-unlocked'); } catch (e) {}
+  </script>
   <div class="topbar">
     <a class="logo" href="/"><img src="/logo.png" alt="Premise Labs" onerror="this.style.display='none'"></a>
     <nav>
@@ -391,6 +437,27 @@
     </nav>
     <a class="login" href="/auth" onclick="setAuthMode(false); return false;">Login</a>
   </div>
+
+  <!-- TEMP BETA GATE (#beta-gate): covers every sign-in option until the code
+       is confirmed. Remove with the CSS + BETA_* JS when public. -->
+  <section class="beta-gate" id="beta-gate" aria-label="Private beta access">
+    <div class="beta-gate-card">
+      <h2>Tortoise is in private beta</h2>
+      <p>
+        We're letting people in gradually while we finish onboarding. Request
+        access at <a href="mailto:hello@premiselabs.co">hello@premiselabs.co</a>
+        and we'll send you an access code.
+      </p>
+      <label for="beta-code" style="font-size:12px;color:var(--text-dim,#94a3b8);display:block;margin-bottom:0.3rem;">Access code</label>
+      <input id="beta-code" type="password" autocomplete="off" placeholder="Enter your access code"
+             onkeydown="if (event.key === 'Enter') { event.preventDefault(); window.confirmBetaAccess && window.confirmBetaAccess(); }" />
+      <div class="beta-gate-error" id="beta-error" role="alert"></div>
+      <div class="beta-gate-actions">
+        <button class="btn-primary" id="beta-confirm" onclick="window.confirmBetaAccess && window.confirmBetaAccess()">Confirm</button>
+        <button class="btn-cancel" onclick="window.location.replace('https://tortoise.premiselabs.co/')">Cancel</button>
+      </div>
+    </div>
+  </section>
 
   <div class="container">
     <div class="logo">
@@ -530,6 +597,44 @@
           onerror="(function(){var e=document.getElementById('error');if(e){e.textContent='Signup is temporarily unavailable (script blocked). Please try again later.';e.classList.add('visible');}})()"></script>
   <!-- #1225: the session bridge now loads in <head> (before the gate). -->
   <script>
+    // ── TEMP PRIVATE-BETA GATE (#beta-gate) ────────────────────────────────
+    // REMOVE with the markup + CSS when Tortoise goes public. The access code
+    // is intentionally simple (a courtesy gate against random signups, not a
+    // security boundary): the dashboard app and /welcome bounce to /auth, so
+    // this is the single funnel for login, signup, OAuth and connect flows.
+    const BETA_ACCESS_KEY = "tortoise_beta_access";
+    const BETA_ACCESS_CODE = "betatester";
+    function unlockBeta() {
+      try { localStorage.setItem(BETA_ACCESS_KEY, "1"); } catch (e) {}
+      document.documentElement.classList.add("beta-unlocked");
+      const gate = document.getElementById("beta-gate");
+      if (gate) gate.style.display = "none";
+      const code = document.getElementById("beta-code");
+      if (code) code.value = "";
+    }
+    window.confirmBetaAccess = function () {
+      const input = document.getElementById("beta-code");
+      const err = document.getElementById("beta-error");
+      const code = (input && input.value ? input.value : "").trim().toLowerCase();
+      if (code === BETA_ACCESS_CODE.toLowerCase()) {
+        if (err) err.textContent = "";
+        unlockBeta();
+      } else {
+        if (err) err.textContent = "That code isn't right — contact hello@premiselabs.co to request access.";
+        if (input) { input.select(); input.focus(); }
+      }
+    };
+    // Unlocked visitor (flag set in the early head script) → hide the gate now
+    // that the DOM exists; never leave it covering the auth card.
+    (function () {
+      let unlocked = false;
+      try { unlocked = localStorage.getItem(BETA_ACCESS_KEY) === "1"; } catch (e) {}
+      if (unlocked) {
+        const gate = document.getElementById("beta-gate");
+        if (gate) gate.style.display = "none";
+      }
+    })();
+
     // ── Configuration ──────────────────────────────────────────────────────
     const SUPABASE_URL = "https://ybetwichurajbfswfeqa.supabase.co";
     const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InliZXR3aWNodXJhamJmc3dmZXFhIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODUyNzgzNDYsImV4cCI6MjEwMDg1NDM0Nn0.YHysJAebPualDNDQTU5bnGBUHg5guLe8eBadm0LiEiY";

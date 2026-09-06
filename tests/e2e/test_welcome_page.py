@@ -212,6 +212,7 @@ def test_live_signup_no_429_confirmation_required(page: Page) -> None:
     email = f"e2e-live-{uuid.uuid4().hex[:8]}@premise-labs.dev"
     password = f"E2eLivePass-{uuid.uuid4().hex[:8]}!"
     try:
+        page.add_init_script("localStorage.setItem('tortoise_beta_access','1');")  # TEMP beta-gate unlock (#beta-gate)
         page.goto(
             "https://tortoise.premiselabs.co/signup", wait_until="domcontentloaded", timeout=30_000
         )
