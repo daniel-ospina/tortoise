@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "fixtures_hash": "sha256:52d4a742e7cea21ce9f1147cc3ec46a10436a6dd9e7fbc7ad22701d851d90dc8",
-  "judge_pin": "w2-write-path-mechanical-v1",
+  "judge_pin": "w2-write-path-mechanical-v2",
   "config": {
     "lanes": [
       "verbatim",
@@ -13,10 +13,10 @@
     "seed": 42,
     "extractor_posture": "m2"
   },
-  "justification": "first m2 deterministic-lane baseline (CI can-fail gate): echo lane macro 0.972/strict 0.0/leakage 11 (structural on echo \u2014 the product leakage bar does not apply to m2; its gate is determinism) / sessions 1.0 / quote 1.0 (vacuous, no quotes in gold) / provenance 1.0",
+  "justification": "mechanical-v2 pin + fix-wave re-baseline (#2405, 2026-09-06): (1) judge pin v1->v2 = the mechanical survival rule gained the paraphrase leg (grading.survival_match, gated on accepts_rephrase_linked). (2) Metrics moved INDEPENDENTLY of that leg: the v1 baseline (09-03, macro 0.9722 / strict 0.0) predates the Phase C ep_update_missing fix-wave. Of v1's 72 strict failures, 70 were ep_update_missing (now stamped by EP-on-ingest on current main) and 2 were content_missing (wp04_aurora_perf_u_01, wp05_retro_writeup_u_12 \u2014 both accepts_rephrase_linked=false, verbatim-only): those 2 now verbatim-written by the post-fix-wave m2 lane (memory-point counts shifted between the runs), which moves macro 0.9722->1.0. The paraphrase leg cannot fire for either (verbatim-only units). Deterministic echo lane; product leakage bar does not apply (leakage 11 structural). Result repro'd twice (receipts w2b-m2-lane-2026-09-06-v2.json inconclusive vs the still-v1 baseline at run time, then PASS under the re-pinned v2 baseline).",
   "metrics": {
-    "salient_unit_survival_macro": 0.9722222222222222,
-    "salient_unit_survival_strict": 0.0,
+    "salient_unit_survival_macro": 1.0,
+    "salient_unit_survival_strict": 1.0,
     "distractor_leakage_per_run": 11,
     "sessions_emitting": 1.0,
     "quote_fidelity": 1.0,
@@ -108,6 +108,20 @@
         "ep_update_missing"
       ],
       "justification": "first m2 deterministic-lane baseline (CI can-fail gate): echo lane macro 0.972/strict 0.0/leakage 11 (structural on echo \u2014 the product leakage bar does not apply to m2; its gate is determinism) / sessions 1.0 / quote 1.0 (vacuous, no quotes in gold) / provenance 1.0 Receipt: receipts/w2b-m2-lane-2026-09-03.json (run w2b-076cbbdfcf6d, clean-head replay reproduced these numbers byte-identically, verdict PASS)."
+    },
+    {
+      "date": "2026-09-06T13:17:28Z",
+      "values": {
+        "salient_unit_survival_macro": 1.0,
+        "salient_unit_survival_strict": 1.0,
+        "distractor_leakage_per_run": 11,
+        "sessions_emitting": 1.0,
+        "quote_fidelity": 1.0,
+        "provenance_accuracy": 1.0
+      },
+      "failure_classes": [],
+      "justification": "mechanical-v2 pin + fix-wave re-baseline (#2405, 2026-09-06): (1) judge pin v1->v2 = the mechanical survival rule gained the paraphrase leg (grading.survival_match, gated on accepts_rephrase_linked). (2) Metrics moved INDEPENDENTLY of that leg: v1 baseline (09-03, macro 0.9722 / strict 0.0) predates the Phase C ep_update_missing fix-wave \u2014 all 72 v1 strict failures were ep_update_missing; current main's EP-on-ingest stamps every qualifying point (v2: 0 failed units, macro 1.0 / strict 1.0, repro'd twice). Deterministic echo lane; product leakage bar does not apply (leakage 11 structural).",
+      "protocol_change": true
     }
   ]
 }

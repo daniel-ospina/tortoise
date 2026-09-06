@@ -78,6 +78,74 @@ _TURN_ECHO_PREFIX = re.compile(r"^\[(user|assistant|unknown)\]\s")
 
 SessionPoint = dict[str, Any]
 
+# #2405: the paraphrase-survival band. A salient unit flagged
+# ``accepts_rephrase_linked`` ALSO survives when a memory Point token-covers
+# its ``via_anchor`` at >= SURVIVAL_PARAPHRASE_OVERLAP (anchor-coverage
+# recall semantics: the extractor distills, and verbatim-only grading
+# converted paraphrase into false content_missing — measured on wp01: 2/16
+# verbatim survivors vs ~12/16 semantically present). 0.45 requires roughly
+# half of the anchor's content tokens to be present in the point. NOT a
+# product-parity claim: the product's own symmetric dedup band
+# (extractor_v2._token_overlap, NOOP_MIN_OVERLAP = 0.45 over max-length) is
+# deliberately stricter — this is a RECALL band for the retention metric,
+# with precision guarded by the shared-token floor + the polarity gate below.
+SURVIVAL_PARAPHRASE_OVERLAP = 0.45
+# Precision floor: against a multi-token anchor, a < 2-token coincidence
+# never passes the band (a 1-content-token anchor is the len()==1 carve-out
+# below — dead on this corpus, whose anchors carry >= 3 content tokens).
+SURVIVAL_MIN_SHARED = 2
+# Polarity gate (R1 P1-2): an anchor asserting a negation is only retained
+# by a point that ALSO carries a negator — a point asserting the OPPOSITE of
+# a negated claim must never "retain" it ("no lease rows at all" is NOT
+# retained by "we found lease rows in the table"). Scope note (R2): the gate
+# is one-directional + membership-anywhere — it does NOT catch an incidental
+# negator elsewhere in the point ("no lease rows at all" vs "we found lease
+# rows with no errors at all" passes), and the mirror direction (a point
+# negating a POSITIVE anchor) is intentionally not gated (lexically
+# unsolvable without false-rejecting "we shipped the fix, no rollback
+# needed"). Both limits are accepted precision trade-offs of a lexical band.
+_NEGATORS = frozenset({"no", "not", "never", "none", "neither", "nor",
+                       "zero", "nothing", "nobody", "without"})
+# Local stopword snapshot: the shared filler set (identical to
+# tools/longmem_eval/evidence.py _STOPWORDS as of 2026-09-06) MINUS
+# {no, not} — negators stay visible to the survival band (polarity
+# precision). Deliberately LOCAL: M6's list is that benchmark's calibration
+# knob; the write-path survival band must not ride it silently (R1 P2-3).
+# tests/eval/write_path/test_write_path_grading.py::test_survival_stopword_set_pinned
+# cross-checks this snapshot against evidence.py so drift is caught.
+_SURVIVAL_STOPWORDS = frozenset({
+    "the", "a", "an", "is", "are", "was", "were", "to", "of", "and", "or",
+    "in", "on", "at", "for", "with", "it", "its", "this", "that", "i",
+    "you", "he", "she", "we", "they", "my", "your", "me", "him", "her",
+    "us", "them", "do", "did", "does", "have", "has", "had", "be", "been",
+    "yes", "ok", "okay", "so", "but", "if", "then", "there", "here",
+    "what", "when", "why", "how", "just", "very", "really"})
+
+
+def _survival_tokens(text: str) -> set[str]:
+    """Content tokens for the survival band (lowercased, punctuation
+    stripped, len > 1, filler stopwords removed — negators KEPT)."""
+    return {t for t in re.sub(r"[^a-z0-9 ]", " ", (text or "").lower()).split()
+            if t not in _SURVIVAL_STOPWORDS and len(t) > 1}
+
+
+def survival_match(point_content: str, anchor: str) -> bool:
+    """The #2405 paraphrase leg: does ``point_content`` retain ``anchor``?
+
+    Anchor-coverage recall band + shared-token floor + polarity gate (see the
+    constants above). Verbatim containment is NOT required here — the caller
+    runs ``schema.anchor_present`` first as the high-precision leg."""
+    pa = _survival_tokens(anchor)
+    pp = _survival_tokens(point_content)
+    if not pa or not pp:
+        return False
+    shared = pa & pp
+    if len(shared) < min(SURVIVAL_MIN_SHARED, len(pa)):
+        return False
+    if pa & _NEGATORS and not (pp & _NEGATORS):
+        return False
+    return len(shared) / len(pa) >= SURVIVAL_PARAPHRASE_OVERLAP
+
 
 def is_turn_echo(content: str) -> bool:
     """True when a Point content is an episodic turn echo (excluded from the
@@ -96,12 +164,16 @@ def _candidate_points(
     """Every session memory Point that satisfies the unit's content predicate.
 
     The point-level survival rule (plan DM-12: a salient unit survives at the
-    POINT level — verbatim-anchor substring in a surviving Point, or a
-    REPHRASE-linked Point when the unit accepts the link).  ``rephrase_edges``
+    POINT level — verbatim-anchor substring in a surviving Point, OR a
+    paraphrase-band token coverage of the anchor for flagged units (#2405),
+    OR a REPHRASE-linked Point when the unit accepts the link).
+    ``rephrase_edges``
     name Point ids within the session; a rephrase-linked Point only counts
     when the ANCHOR hits its linked counterpart (dedup-without-deletion: the
     new wording is linked to the verbatim original — the link alone never
-    rubber-stamps a hit).
+    rubber-stamps a hit). Units NOT flagged ``accepts_rephrase_linked``
+    (dates/numbers/names/mechanics — the corpus demands near-verbatim
+    fidelity) keep the verbatim-only bar.
     """
     via = unit.get("survival", {}).get("via_anchor") or unit.get("verbatim_anchor") or ""
     if not via:
@@ -122,6 +194,14 @@ def _candidate_points(
             hits.append(point)
             continue
         if not accepts_rephrase:
+            continue
+        # #2405: paraphrase-survival leg — a FLAGGED unit survives when the
+        # point retains its anchor under the anchor-coverage band (see
+        # survival_match). Verbatim stays the high-precision leg and runs
+        # first; this leg rescues meaning-retention units ONLY, with the
+        # shared-token floor + polarity gate guarding precision.
+        if survival_match(content, via):
+            hits.append(point)
             continue
         # REPHRASE-linked acceptance (dedup-without-deletion): the point is a
         # paraphrase deduped onto the verbatim original via a REPHRASE
