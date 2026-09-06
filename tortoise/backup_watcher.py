@@ -315,7 +315,12 @@ class BackupWatcher:
             state_teams = [
                 k.split("/")[2]
                 for k in self._storage.list("ops/teams/")
-                if k.endswith("/state.json") and len(k.split("/")) >= 4
+                # ONLY the 4-segment team mirror (ops/teams/{team}/state.json)
+                # is the team surface. The #2313 per-graph states
+                # (ops/teams/{team}/graphs/{gid}/state.json — 6 segments) ride
+                # the per-graph surface and must not suppress the default
+                # graph's METADATA_LOST when its mirror is missing (#2367).
+                if k.endswith("/state.json") and len(k.split("/")) == 4
             ]
             r2_ok = True
             # Cache the last-known-good surface for degraded polls.

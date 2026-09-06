@@ -499,3 +499,27 @@ def test_watcher_legacy_custom_flat_does_not_gate_team_freshness():
     age_min = (FIXED - newest).total_seconds() / 60.0
     assert age_min > 10000, f"custom-era flat masked default staleness ({age_min})"
     assert age_min > 5000
+
+
+def test_watcher_custom_per_graph_state_does_not_mask_missing_default_mirror():
+    """#2367 regression: the team-level state scan must match ONLY the team
+    mirror (ops/teams/{t}/state.json). The pre-fix len>=4 filter absorbed the
+    #2313 per-graph state keys (ops/teams/{t}/graphs/{gid}/state.json), so a
+    present custom per-graph state silently suppressed the DEFAULT graph's
+    METADATA_LOST when its team mirror was missing (the default rides ONLY the
+    team surface — no other loop compensates)."""
+    ch = _Channels()
+    storage = MemoryStorage()
+    # Default graph: FRESH archive, team-level state mirror ABSENT.
+    _seed_archive(storage, "team_a", 0.5)
+    # Custom graph: fresh archive + per-graph state present (healthy #2313
+    # surface) — its 6-segment key must not stand in for the team mirror.
+    _seed_graph_archive(storage, "team_a", "g_x", 0.5)
+    _seed_graph_state(storage, "team_a", "g_x")
+    w = _watcher(storage, ch, graph_provider=lambda t: ["g_x"])
+    status = w.poll()
+    # The custom graph is healthy on its own per-graph surface...
+    assert status["per_graph"]["team_a:g_x"] == "ok"
+    # ...but the default's missing mirror still fires METADATA_LOST.
+    assert status["per_team"]["team_a"] == "stamp_missing"
+    assert list(ch.issues.values()) == ["[DR] METADATA_LOST — team_a"]
