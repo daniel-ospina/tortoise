@@ -32,7 +32,7 @@ relatedIssues: "#2409"
   - *Feature* → agent drafts spec → **founder plan approval** → issue → build lane.
   - *Question* → agent answers from docs/graph (drafted, audit-visible; founder sets voice, reviews sample).
   - *Other / low-confidence* → founder digest.
-- **R5 — GitHub relay (close-and-queue).** New external issues/PRs on the public repo → bot comments ("thanks — queued for triage, you'll be notified"), labels `queued-for-triage`, closes, relays the record to the store. Author notification is automatic (GitHub notifies on comments). **Fork-PR safety rule:** the relay runs on `pull_request_target` and NEVER checks out PR code (only REST: label/comment/close + relay metadata). PRs reopen on approval. Contribution policy is a separate issue **#2437** (BSL / BSD-3 donation note, MariaDB pattern) — prerequisite before welcoming external PRs.
+- **R5 — GitHub relay (close-and-queue).** New external issues/PRs on the public repo → bot comments ("thanks — queued for triage, you'll be notified"), labels `queued-for-triage`, closes, relays the record to the store. Author notification is automatic (GitHub notifies on comments). **Fork-PR safety rule:** the relay runs on `pull_request_target` and NEVER checks out PR code (only REST: label/comment/close + relay metadata). **v1 = close-only for PRs; PR reopen-on-approval is gated on #2437 (contribution policy) landing.** Contribution policy is a separate issue **#2437** (BSL / BSD-3 donation note, MariaDB pattern) — prerequisite before welcoming external PRs.
 - **R6 — Founder interface.** Reliable push notification via a **Telegram bot (standard Bot API — no daemon, bot created in ~2 min with BotFather, hosted by Telegram; founder preference; ntfy is the fallback if the delivery spike disappoints)** on: new items needing a gate, digest-ready, urgent class. Digest cadence. Founder acts **in GitHub** (PR review = approve; comments = correct/respond; close = reject) — no custom UI in v1. Telegram inline-button approvals (approve/dismiss from the phone) are a later rung (bearer-action security + audit needed). Operational rules: founder starts the bot once (bots can't message first), token lives server-side. **Founder = scope/priority/brand decisions, never the routing layer.**
 - **R7 — Safety by design.** Untrusted inbound content is DATA, never instructions (instruction boundary, not prompt armor); fixed report schema; reproduce-first; handling agent is read-only + draft-PR, **no merge**; human approval gate before any code/behavior change (`commit-workflow`); zero unauthored action path; external code never auto-merged.
 - **R8 — Feedback loop.** Founder corrections feed the triage classifier's labeled set; every report carries a context ref so the fixing agent pulls ground truth.
@@ -60,7 +60,7 @@ relatedIssues: "#2409"
 
 **Intake sources v1 — decided:** GitHub relay, in-product hook (#2335-dependent), Sentry (product-side instrumentation in scope — build item 6: Sentry SDK on hosted capture/commit error paths → issue-alert webhooks → auth forwarder → intake), email (dedicated address via CloudMailin-class service — free tier ~10k/mo is ample; alternatives: InboxBridge/JsonHook/Mailhooks paid, Cloudflare Email Routing + self-built parser cheaper-but-more-work, Gmail-API polling of the personal inbox fragile). **Email v1 = dedicated address the founder forwards unknowns to, PLUS known sources (Sentry/GitHub) re-routed native so they stop arriving as email at all.**
 
-**Relay behavior — decided:** close-with-message for public issues (clean surface, single record in the store); PRs close + reopen-on-approval (code reviewed only in the sandboxed lane, never in the relay).
+**Relay behavior — decided:** close-with-message for public issues (clean surface, single record in the store); **PRs close-only in v1 — reopen-on-approval is gated on #2437 landing** (code reviewed only in the sandboxed lane, never in the relay).
 
 **Founder approval surface — decided:** GitHub-native (PR review + comments) with Telegram push notification; no custom UI v1.
 
@@ -95,7 +95,7 @@ relatedIssues: "#2409"
 
 1. Raw store + intake endpoint + canonical record + idempotent ingestion.
 2. Processing agent: poll → classify/dedupe/decide + shadow-mode eval set (≥90% gate).
-3. GitHub relay: label/comment/close + relay, fork-safe (R5).
+3. GitHub relay: label/comment/close + relay, fork-safe (R5). **v1 = close-only for PRs** (reopen-on-approval gated on #2437).
 4. Founder notification: Telegram spike (founder starts bot, delivery test) → bot push + digest; ntfy fallback.
 5. Email intake: dedicated address → webhook service wiring.
 6. **Product-side Sentry instrumentation** (Sentry SDK on hosted capture/commit error paths; coordinate with #2335's shared surfaces) → issue-alert webhooks → forwarder → intake. Requires a Sentry project/DSN.
