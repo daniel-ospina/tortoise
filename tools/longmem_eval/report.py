@@ -1546,21 +1546,28 @@ def build_report(
     _s4_items = sum((o.get("s4_merge") or {}).get("s4_items", 0)
                     for o in _clean)
     _redun = [((o.get("s4_out_tokens") or 0)
-               * ((o.get("s4_merge") or {}).get("verbatim_reemissions", 0)
-                  / (o.get("s4_merge") or {}).get("s4_items", 0)
-                  if (o.get("s4_merge") or {}).get("s4_items", 0) else 0.0))
-              for o in _clean]
+               * min(1.0, ((o.get("s4_merge") or {}).get("verbatim_reemissions", 0)
+                           / (o.get("s4_merge") or {}).get("s4_items", 0)
+                           if (o.get("s4_merge") or {}).get("s4_items", 0)
+                           else 0.0)))
+              for o in _clean]  # factor clamped to [0,1]: a dup-key S2 list
+    # can carry verbatim > s4_items (per-S2-item count vs an S4 key set) —
+    # the proxy must never exceed the question's whole S4 emission
     s4_reemit: dict[str, Any] = {
         "criterion": (
             "#2408 S4 re-emit-tax census (DIAGNOSTIC — never a gate limb): "
             "R_b = S4/S2 healthy-path output-token ratio; unchanged_share = "
             "verbatim_reemissions/s2_items (the #1789-I-2-11 S2-centric "
-            "view); corrections_share = corrected_by_s4/s4_items and "
-            "gaps_share = (s4_items - corrected_by_s4)/s4_items (the S4-"
-            "output-composition view); redundant_s4_tokens_total = the "
-            "token-weighted PROXY sum (verbatim-fraction x call total — no "
-            "tokenizer exists; item-count shares are exact, token "
-            "attribution is the labeled proxy). Computed over "
+            "view); corrections_share = (corrected_by_s4 - verbatim_"
+            "reemissions)/s4_items and gaps_share = (s4_items - "
+            "corrected_by_s4)/s4_items — unchanged + true-corrections + "
+            "gaps decompose over s4_items (verbatim is NOT double-counted "
+            "as a correction); redundant_s4_tokens_total = the "
+            "token-weighted PROXY sum (verbatim-fraction x call total, "
+            "fraction clamped to [0,1] — a dup-key S2 list can carry "
+            "verbatim > s4_items; no tokenizer exists; item-count shares "
+            "are exact, token attribution is the labeled proxy). Computed "
+            "over "
             "extraction-CLEAN outcomes only (grade clean + valid) whose S4 "
             "merge RAN (non-empty s4_merge — S4-empty graceful-degradation "
             "and legacy/no-field outcomes excluded; question-level "
@@ -1582,7 +1589,12 @@ def build_report(
         "unchanged_share": (
             round(_verb / _s2_items, 4) if _s2_items else None),
         "corrections_share": (
-            round(_corr / _s4_items, 4) if _s4_items else None),
+            # true corrections exclude verbatim re-emissions (corrected_by_s4
+            # counts ALL collisions incl. unchanged re-types) — otherwise
+            # verbatim would be double-counted and the composition shares
+            # would not decompose over s4_items
+            round(max(0, _corr - _verb) / _s4_items, 4)
+            if _s4_items else None),
         "gaps_share": (
             round(max(0, _s4_items - _corr) / _s4_items, 4)
             if _s4_items else None),
@@ -1610,9 +1622,10 @@ def build_report(
                     if (o.get("s4_merge") or {}).get("s2_items", 0) else None),
                 "redundant_s4_tokens": round(
                     (o.get("s4_out_tokens") or 0)
-                    * ((o.get("s4_merge") or {}).get("verbatim_reemissions", 0)
-                       / (o.get("s4_merge") or {}).get("s4_items", 0)
-                       if (o.get("s4_merge") or {}).get("s4_items", 0) else 0.0),
+                    * min(1.0, ((o.get("s4_merge") or {}).get("verbatim_reemissions", 0)
+                                / (o.get("s4_merge") or {}).get("s4_items", 0)
+                                if (o.get("s4_merge") or {}).get("s4_items", 0)
+                                else 0.0)),
                     2),
                 "llm_escalations": o.get("llm_escalations") or 0,
             }

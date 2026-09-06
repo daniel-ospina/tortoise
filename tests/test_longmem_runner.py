@@ -640,18 +640,22 @@ def test_report_s4_reemit_readout():
     div-by-zero-guarded (None); redundant tokens = the labeled token-weighted
     proxy; legacy outcomes project zero/empty; DIAGNOSTIC — a high R_b never
     flips integrity.valid."""
+    # physical invariant (review B): verbatim <= corrected <= s2_items;
+    # gaps = s4_items - corrected (corrected counts only S2 collisions)
     clean = _s4_clean_outcome(
         "q-clean", s2_tok=1000, s4_tok=2500,
-        verbatim=8, corrected=2, s2_items=10, s4_items=14)  # r_b 2.5
+        verbatim=8, corrected=10, s2_items=10, s4_items=14)  # 2 corr, 4 gaps
     partial = _s4_clean_outcome(
         "q-partial", s2_tok=1000, s4_tok=900,
-        verbatim=5, corrected=3, s2_items=8, s4_items=10)
+        verbatim=3, corrected=5, s2_items=8, s4_items=10)
     partial["valid"] = False
     partial["error_classes"] = {"partial_parse": 1}
     partial["n_ingest_errors"] = 1
     escal = _s4_clean_outcome(
         "q-escal", s2_tok=31000, s4_tok=60000,
-        verbatim=9, corrected=1, s2_items=10, s4_items=12, escalations=1)
+        verbatim=9, corrected=10, s2_items=10, s4_items=12, escalations=1)
+    # S2-empty-but-clean: S4 added all 5 (no S2 base); r_b is degenerate
+    # (s2_tok=0) but the question is a real gap-only emission
     zero_s2 = _s4_clean_outcome(
         "q-zero", s2_tok=0, s4_tok=500,
         verbatim=0, corrected=0, s2_items=0, s4_items=5)
@@ -674,6 +678,24 @@ def test_report_s4_reemit_readout():
     # unchanged-share over the 3 clean: verbatim (8+9+0)=17 / s2_items
     # (10+10+0)=20 → 0.85
     assert sr["unchanged_share"] == round(17 / 20, 4)
+    # composition totals + shares (value-pinned per review B):
+    # corrected total 10+10+0=20; s4_items 14+12+5=31; verbatim 17
+    assert sr["corrected_by_s4_total"] == 20
+    assert sr["s4_items_total"] == 31
+    assert sr["verbatim_reemissions_total"] == 17
+    # corrections_share = (corrected - verbatim)/s4_items = 3/31 (verbatim
+    # is NOT double-counted as a correction — the review-B fix)
+    assert sr["corrections_share"] == round(3 / 31, 4)
+    # gaps_share = (s4_items - corrected)/s4_items = 11/31
+    assert sr["gaps_share"] == round(11 / 31, 4)
+    # decomposition: unchanged + corrections + gaps == 1 over s4_items
+    assert round(sr["corrections_share"] + sr["gaps_share"]
+                 + round(17 / 31, 4), 4) == 1.0
+    # redundant proxy = 2500*(8/14) + 60000*(9/12) + 500*(0/5) (clamped)
+    assert sr["redundant_s4_tokens_total"] == round(
+        2500 * (8 / 14) + 60000 * (9 / 12), 2)
+    # proxy sanity bound: total <= s4_out_tokens_total
+    assert sr["redundant_s4_tokens_total"] <= sr["s4_out_tokens_total"]
     # legacy outcomes without the fields → the block still renders (the
     # report above has none, so the s2_total of 32000 proves no KeyError)
     # DIAGNOSTIC: a high-r_b clean run still grades valid
@@ -682,6 +704,10 @@ def test_report_s4_reemit_readout():
     rows = {r["question_id"]: r for r in sr["per_question"]}
     assert rows["q-clean"]["r_b"] == 2.5
     assert rows["q-clean"]["unchanged_share"] == 0.8
+    assert rows["q-clean"]["redundant_s4_tokens"] == round(2500 * 8 / 14, 2)
+    # row-level zero-s2 denominator: r_b None, unchanged None, gaps 1.0
+    assert rows["q-zero"]["r_b"] is None
+    assert rows["q-zero"]["unchanged_share"] is None
     assert "q-partial" not in rows  # partial excluded from the census
 
 
@@ -696,7 +722,7 @@ def test_report_s4_reemit_s4_empty_degradation_excluded():
     empty["s4_merge"] = {}  # the graceful-degradation shape
     normal = _s4_clean_outcome(
         "q-normal", s2_tok=1000, s4_tok=2500,
-        verbatim=8, corrected=2, s2_items=10, s4_items=14)
+        verbatim=8, corrected=10, s2_items=10, s4_items=14)
     report = outcomes_to_report(
         [empty, normal], reader_model="r", judge_model="j",
         ks=(5,), top_k=5, split="s",

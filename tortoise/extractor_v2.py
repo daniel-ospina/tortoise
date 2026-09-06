@@ -2068,6 +2068,17 @@ def _verbatim_reemissions(s2: dict, s4: dict) -> int:
     counts only when S4 emitted a colliding copy (``_merge_key``) that is a
     verbatim match. Dict-only population (``isinstance(i, dict)``), matching
     ``_s4_merge_stats``'s ``corrected_by_s4`` basis.
+
+    BASIS NOTE (code-review A/B, PR #2430): ``_verbatim_match`` compares EVERY
+    non-optional field (full-fold equality), which is STRICTER than the #1789
+    Task-1 Step-5 field pin (content fields + correction fields only). This is
+    deliberate and CONSERVATIVE: the delta contract's savings pool is items
+    that need NO emission at all — a drift on any non-optional field (note /
+    pointKind / startedAt / about_entities order) means the item WOULD be
+    re-emitted under the delta and is not pure savings. Counting it verbatim
+    would overstate the savings; excluding it undercounts verbatim and biases
+    unchanged_share LOW (conservative for a build decision). Documented on
+    #1789 so Task-6's s4_delta_reemit_suspect consumes the same basis.
     """
     sections = ("entities", "events", "points", "operators")
     n = 0

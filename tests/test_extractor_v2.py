@@ -3177,6 +3177,45 @@ class TestS4Merge:
         assert stats["corrected_by_s4"] == 1
         assert stats["verbatim_reemissions"] == 1
 
+    def test_verbatim_reemissions_pointkind_drift_is_not_verbatim(self):
+        """PR #2430 review A/B basis pin: the conservative full-equality
+        basis means a drift on ANY non-optional field (here pointKind on
+        same content) is NOT a verbatim re-emission — under the delta
+        contract the item WOULD be re-emitted, so it is not pure savings.
+        (Stricter than the #1789 field pin; documented on #1789.)"""
+        p1 = {"content": "the fix shipped", "pointKind": "statement",
+              "about_entities": [], "slots": None}
+        p2 = {"content": "the fix shipped", "pointKind": "decision",
+              "about_entities": [], "slots": None}
+        s2 = {"entities": [], "events": [], "points": [p1],
+              "operators": [], "chain_notes": [], "link_before_create": []}
+        s4 = {"entities": [], "events": [], "points": [p2],
+              "operators": [], "chain_notes": [], "link_before_create": []}
+        merged = v2.merge_embed_lists(s2, s4)
+        stats = v2._s4_merge_stats(s2, s4, merged)
+        assert stats["corrected_by_s4"] == 1    # same content → collision
+        assert stats["verbatim_reemissions"] == 0  # pointKind drift
+
+    def test_verbatim_reemissions_dup_key_capped_semantics(self):
+        """A duplicate merge key WITHIN one S2 list counts per-S2-item
+        (corrected_by_s4/verbatim can exceed s4_items) — the report clamps
+        the redundant proxy factor to [0,1]; the classifier itself stays a
+        per-item count (matches corrected_by_s4's basis)."""
+        ent = {"name": "gate", "kind": "core:plan", "lifecycle": "created",
+               "supersedes": None, "note": None}
+        s2 = {"entities": [ent, dict(ent)], "events": [], "points": [],
+              "operators": [], "chain_notes": [], "link_before_create": []}
+        s4 = {"entities": [dict(ent)], "events": [], "points": [],
+              "operators": [], "chain_notes": [], "link_before_create": []}
+        merged = v2.merge_embed_lists(s2, s4)
+        stats = v2._s4_merge_stats(s2, s4, merged)
+        assert stats["s2_items"] == 2
+        assert stats["s4_items"] == 1
+        assert stats["corrected_by_s4"] == 2  # per-S2-item vs S4 key set
+        assert stats["verbatim_reemissions"] == 2
+        # merge dedupes the dup to ONE entity (first-wins semantics)
+        assert len(merged["entities"]) == 1
+
     def test_verbatim_reemissions_supersedes_change_is_correction(self):
         """A supersedes change on a colliding operator → correction."""
         def op(**kw):
