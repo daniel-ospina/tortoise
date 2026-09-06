@@ -146,6 +146,7 @@ surfaces:
   - test_hosted_volunteer_context.py   # volunteer §3.2 hosted transport (docker-lane; skipif no URI)
   - test_selfhost_volunteer_context.py # volunteer §3.2 selfhost transport (embedded)
   - test_volunteer_reflex_harness_seam.py  # W3 reflex graded seam (volunteer.decide)
+  - test_platform_seams.py            # epic #2080 end-state seams wave-1: per-turn volunteer CLI + install + shipped hook (embedded, lane-agnostic)
   battery:
   - test_battery_arms.py
   - test_battery_judge.py

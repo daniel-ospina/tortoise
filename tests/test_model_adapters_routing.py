@@ -13,6 +13,7 @@ import requests
 
 from tortoise.model_adapters import (
     MODELS,
+    RotatingModel,
     RoutingModel,
     _primary_in_cooldown,
     _reset_failover_cooldown,
@@ -1336,3 +1337,150 @@ def test_rotation_recovery(monkeypatch):
     finally:
         import random as _r
         _r.random = _orig
+
+
+
+# ── #2339: external deadline-abort → note_stall failover ────────────────
+# The extractor's per-call deadline kills a hung read in a worker thread and
+# raises TimeoutError OUTSIDE the wrapper's complete() — RoutingModel never
+# sees an exception, so the normal in-complete failover never fired and every
+# retry re-hit the stalled primary (whole sessions died empty). note_stall()
+# is the wrapper-side signal the deadline path fires: cooldown + interrupt
+# ONLY the stalled provider so the next complete() routes to the fallback.
+
+class _ClosingStub:
+    """_StubAdapter + a close() recorder (deadline interrupt semantics)."""
+    def __init__(self, provider: str):
+        self.provider = provider
+        self.calls = 0
+        self.close_calls = 0
+
+    def complete(self, *, system, user, max_tokens: int | None = None):
+        self.calls += 1
+        return f"{self.provider}:{system}:{user}"
+
+    def close(self):
+        self.close_calls += 1
+
+
+def test_deadline_stall_routes_next_call_to_fallback():
+    """After an external note_stall on the primary, the NEXT complete() runs
+    on the fallback and stays there (D5 forward-only) — the healthy provider
+    carries the session."""
+    _reset_failover_cooldown()
+    primary = _ClosingStub("deepseek-direct")
+    fallback = _ClosingStub("openrouter")
+    model = RoutingModel(primary, fallback, cooldown_s=300)
+    assert model.complete(system="s", user="u").startswith("deepseek-direct:")
+    assert primary.calls == 1 and fallback.calls == 0
+    # The extractor's deadline path calls note_stall() (fire-and-forget).
+    model.note_stall()
+    assert primary.close_calls == 1      # only the stalled provider interrupted
+    assert fallback.close_calls == 0
+    assert model.errors and "stalled" in model.errors[0]
+    out = model.complete(system="s", user="u")
+    assert out.startswith("openrouter:"), out
+    assert primary.calls == 1            # primary never re-hit
+    assert fallback.calls == 1
+    assert model.route == "openrouter" and model.failover_used is True
+    # Sticky: a later call still avoids the stalled primary.
+    out2 = model.complete(system="s2", user="u2")
+    assert out2.startswith("openrouter:")
+    assert primary.calls == 1
+
+
+def test_note_stall_no_fallback_keeps_primary():
+    """Without a fallback, note_stall() must not raise and the primary is
+    still retried (the pre-#2339 behavior for single-provider pools)."""
+    _reset_failover_cooldown()
+    primary = _ClosingStub("openrouter")
+    model = RoutingModel(primary, fallback=None, cooldown_s=300)
+    model.note_stall()  # must not raise
+    assert model.complete(system="s", user="u").startswith("openrouter:")
+    assert primary.calls == 1
+
+
+def test_note_stall_targets_named_provider():
+    """note_stall(provider=...) cools the NAMED adapter, not the primary —
+    AND a fallback-targeted stall must NOT flip sticky failover (that would
+    lock the session onto the wedged fallback forward-only)."""
+    _reset_failover_cooldown()
+    primary = _ClosingStub("deepseek-direct")
+    fallback = _ClosingStub("openrouter")
+    model = RoutingModel(primary, fallback, cooldown_s=300)
+    # Fallback stall (post-failover edge): named note cools the fallback only.
+    model.note_stall(provider="openrouter")
+    assert fallback.close_calls == 1
+    assert primary.close_calls == 0
+    assert model._failed_over is False, "fallback stall must not flip failover"
+    out = model.complete(system="s", user="u")  # primary still tried first
+    assert out.startswith("deepseek-direct:"), out
+    assert primary.calls == 1
+
+
+def test_rotating_note_stall_cooldowns_active_provider(monkeypatch):
+    """RotatingModel.note_stall() cools the WEDGED provider (the one
+    in-flight when a deadline kills the worker) — never the stale ``route``
+    from the last success. Scenario: b serves a call fine (route=b); the
+    NEXT pick lands on a, which wedges; note_stall must cool a, not b."""
+    import random as _random
+    import threading
+    import time as _time
+
+    wedge = threading.Event()
+    entered = threading.Event()
+
+    class _Wedge:
+        provider = "deepseek-direct"
+        calls = 0
+        close_calls = 0
+
+        def complete(self, *, system, user, max_tokens=None):
+            self.calls += 1
+            entered.set()      # deterministic: we are INSIDE the call now
+            wedge.wait(5.0)    # wedged until released (deadline would kill us)
+            return "deepseek-direct:late"
+
+        def close(self):
+            self.close_calls += 1
+
+    a = _Wedge()
+    b = _ClosingStub("openrouter")
+    model = RotatingModel([a, b], cooldown_s=300)
+    # 1) b serves a call fine (route=b, b is the last SUCCESS).
+    monkeypatch.setattr(_random, "random", lambda: 0.9)  # picks b (idx 1)
+    assert model.complete(system="s", user="u").startswith("openrouter:")
+    assert model.route == "openrouter"
+    # 2) next pick lands on a (idx 0), which wedges in a worker thread.
+    monkeypatch.setattr(_random, "random", lambda: 0.1)  # picks a (idx 0)
+    box = {}
+    def _run():
+        try:
+            box["out"] = model.complete(system="s", user="u")
+        except Exception as e:
+            box["exc"] = e
+    t = threading.Thread(target=_run)
+    t.start()
+    assert entered.wait(5.0), "worker must enter a.complete"
+    _time.sleep(0.05)  # let the wrapper set _in_flight before note_stall
+    assert model._in_flight is a, "a must be the in-flight adapter"
+    # 3) the extractor's deadline path fires note_stall() from the caller
+    #    thread while a is wedged.
+    model.note_stall()
+    assert a.close_calls == 1            # the WEDGED adapter interrupted
+    assert b.close_calls == 0            # the healthy last-success untouched
+    assert model._cooldowns.get("deepseek-direct", 0) > _time.time()
+    assert "deepseek-direct" not in model._cooldowns or (
+        model._cooldowns.get("openrouter", 0) <= _time.time())
+    # 4) release the wedge; the in-flight call finishes late (returns a's
+    #    content — the kill happened at the wrapper boundary in production).
+    wedge.set()
+    t.join(timeout=5)
+    # 5) subsequent calls SKIP the cooled a (cooldown is unconditional) and
+    #    rotate onto b: alternate picks — 0.1 selects a first (cooled →
+    #    skipped → loop continues), then 0.9 selects b (serves).
+    seq = iter([0.1, 0.9, 0.1, 0.9])
+    monkeypatch.setattr(_random, "random", lambda: next(seq))
+    out = model.complete(system="s", user="u")
+    assert out.startswith("openrouter:"), out
+    assert a.calls <= 1, "cooled provider must not be re-called after the stall"
