@@ -31,7 +31,9 @@ from .corpus_loader import (
 
 _ID_PATTERNS = {
     "decision": r"d-\d{3}",
-    "contradiction": r"ct-\d{3}",
+    # bct-* benign FP surface twins (#2284 T3) share the contradiction pack —
+    # the alternation applies to every contradiction task_type id.
+    "contradiction": r"(?:ct|bct)-\d{3}",
     "calibration": r"cal-\d{3}",
     "retraction": r"ret-\d{3}",
     "loopy_contested": r"lp-\d{3}",
@@ -447,7 +449,28 @@ def validate_scenario(
     elif task_type == "contradiction":
         if scenario.get("family") != "R1":
             errors.append(f"{sid}: contradiction family must be R1")
-        _validate_contradiction_bindings(scenario, errors)
+        control_set = scenario.get("control_set")
+        if control_set is not None and control_set not in schema.CONTROL_SET_VALUES:
+            # PR #2341 review round 2, P2: a non-empty control_set outside
+            # the sanctioned enum fails validation — a typo (BCT / "bct " /
+            # benign) must never silently key the exemption (truthiness) or
+            # silently drop out of the population sweep (exact == "bct").
+            errors.append(
+                f"{sid}: control_set {control_set!r} not in "
+                f"{schema.CONTROL_SET_VALUES} — benign FP surface twins must "
+                f"use schema.CONTROL_SET_BCT")
+        if control_set == schema.CONTROL_SET_BCT:
+            # #2284 T3: benign FP surface twin (control_set == "bct") — NO
+            # planted pair / no counter-claim at k-1 by construction, so the
+            # contradiction bindings do not apply. A planted pair on a
+            # control-set scenario is self-contradictory (a benign twin is
+            # never planted) — refuse it.
+            if scenario.get("planted_contradictions"):
+                errors.append(
+                    f"{sid}: control_set scenario is benign — "
+                    "planted_contradictions forbidden")
+        else:
+            _validate_contradiction_bindings(scenario, errors)
     elif task_type == "calibration":
         if scenario.get("family") != "R3":
             errors.append(f"{sid}: calibration family must be R3")
@@ -541,32 +564,59 @@ def validate_id_uniqueness(scenarios: list[dict]) -> list[str]:
 
 
 def validate_controls(scenarios: list[dict]) -> list[str]:
-    """matched_control_for bijection: exactly 15 decision controls ↔ the 15
-    ct- ids, each referenced exactly once (E2E-1.2 FP gate)."""
+    """matched_control_for bijection, per control set (#1407 E2E-1.2 +
+    #2284 T3). Two control populations reference ct-* scenarios:
+
+    * DECISION controls (task_type decision): 1:1 exactly-once over the
+      PLANTED ct population (the 15 ct-* scenarios that carry a planted
+      pair). The d-* ct-domain NEVER includes benign bct ids — bct
+      scenarios are controls themselves (never decision targets) and must
+      not inflate the decision completeness domain.
+    * BCT benign controls (control_set == schema.CONTROL_SET_BCT): surface
+      twins of the six smoke ct seeds ct-001..ct-006 — each references
+      exactly one seed and the referenced-seed set == {ct-001..ct-006}
+      exactly-once (completeness sweep over the twin population).
+
+    Ownership ceiling: a planted ct may be referenced at most TWICE across
+    all sets (its decision control + its optional bct twin).
+    """
     errors: list[str] = []
-    ct_ids = sorted(
-        sc["id"] for sc in scenarios if sc.get("task_type") == "contradiction")
-    controls = [
-        sc.get("matched_control_for") for sc in scenarios
-        if sc.get("task_type") == "decision" and sc.get("matched_control_for")
-    ]
-    if len(controls) != len(ct_ids):
+    planted_ct = sorted(
+        sc["id"] for sc in scenarios
+        if sc.get("task_type") == "contradiction"
+        and sc.get("planted_contradictions"))
+    bct_seeds = [f"ct-{n:03d}" for n in range(1, 7)]
+
+    decision = sorted(
+        str(sc.get("matched_control_for")) for sc in scenarios
+        if sc.get("task_type") == "decision"
+        and sc.get("matched_control_for"))
+    bct = sorted(
+        str(sc.get("matched_control_for")) for sc in scenarios
+        if sc.get("control_set") == schema.CONTROL_SET_BCT)
+
+    if decision != planted_ct:
         errors.append(
-            f"controls bijection broken: {len(controls)} decision controls vs "
-            f"{len(ct_ids)} contradiction scenarios")
-    seen: dict[str, list[str]] = {}
+            "decision controls must reference the planted ct population "
+            f"exactly once ({len(decision)} controls vs {len(planted_ct)} "
+            f"planted): {decision} != {planted_ct}")
+    if bct != bct_seeds:
+        errors.append(
+            "bct benign controls must reference the six smoke ct seeds "
+            f"(ct-001..ct-006) exactly once: {bct} != {bct_seeds}")
+
+    owners: dict[str, list[str]] = {}
     for sc in scenarios:
         mcf = sc.get("matched_control_for")
         if mcf:
-            seen.setdefault(str(mcf), []).append(str(sc.get("id")))
-    for cid, owners in sorted(seen.items()):
-        if cid not in ct_ids:
-            errors.append(f"matched_control_for {cid} does not resolve to a contradiction id")
-        if len(owners) != 1:
-            errors.append(f"matched_control_for {cid} referenced {len(owners)} times: {owners}")
-    missing = [c for c in ct_ids if c not in seen]
-    if missing:
-        errors.append(f"contradiction scenarios without a matched control: {missing}")
+            owners.setdefault(str(mcf), []).append(str(sc.get("id")))
+    for cid, owner_ids in sorted(owners.items()):
+        if cid not in planted_ct:
+            errors.append(f"matched_control_for {cid} does not resolve to a planted ct")
+        if len(owner_ids) > 2:
+            errors.append(
+                f"matched_control_for {cid} referenced {len(owner_ids)} times "
+                f"(ceiling 2: decision control + bct twin): {owner_ids}")
     return errors
 
 

@@ -170,14 +170,36 @@ Create/merge `.cursor/mcp.json` in the project:
 Set `TORTOISE_API_KEY` in your environment (Cursor settings or shell
 profile). Restart Cursor so it picks up the config.
 
-### Codex (self-install)
+### Codex CLI (self-install)
 
 ```bash
 export TORTOISE_API_KEY=<key>
 codex mcp add tortoise --url https://api.premiselabs.co/mcp/ --bearer-token-env-var TORTOISE_API_KEY
 ```
 
-Persist the export in your shell profile. Verify with `codex mcp list`.
+Persist the export in your shell profile. The skill installer writes Codex
+skills to `.agents/skills` (Codex's documented skill root — NOT `.codex/skills`,
+which Codex never loads) and adds a repo-root AGENTS.md standing-instructions
+block:
+
+```bash
+curl -fsSL https://app.premiselabs.co/install-tortoise-skills.sh | bash -s -- --harness codex
+```
+
+Verify with `codex mcp list`, then check `/skills` in a Codex session.
+
+### Codex Desktop (GUI, no terminal)
+
+The Desktop app shares `~/.codex/config.toml` with the CLI and does NOT read
+shell exports. Onboarding from the dashboard's connect step selects **Desktop
+(no terminal)** and shows the terminal-less path: add an `[mcp_servers.tortoise]`
+block to `~/.codex/config.toml` (`bearer_token_env_var = "TORTOISE_API_KEY"`,
+with the variable placed into the app's environment via `launchctl setenv` /
+`setx`), or the literal `http_headers` fallback for a fully shell-less machine
+(private file — never commit). Skills load from `.agents/skills` when the
+project folder is open; the Desktop flow defers the installer to a one-time
+terminal or the agent running it inside the project. First-time MCP calls may
+prompt for approval — `tortoise_health` and the read tools are safe to allow.
 
 ### Pi (self-install)
 
