@@ -705,7 +705,7 @@ def test_report_s4_reemit_readout():
     assert rows["q-clean"]["r_b"] == 2.5
     assert rows["q-clean"]["unchanged_share"] == 0.8
     assert rows["q-clean"]["redundant_s4_tokens"] == round(2500 * 8 / 14, 2)
-    # row-level zero-s2 denominator: r_b None, unchanged None, gaps 1.0
+    # row-level zero-s2 denominator: r_b None, unchanged_share None
     assert rows["q-zero"]["r_b"] is None
     assert rows["q-zero"]["unchanged_share"] is None
     assert "q-partial" not in rows  # partial excluded from the census

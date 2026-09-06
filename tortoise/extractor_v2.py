@@ -2008,12 +2008,12 @@ def merge_embed_lists(s2: dict, s4: dict) -> dict:
     return out
 
 
-# #2408 Task 1: fields whose change marks a CORRECTION (never verbatim) vs
-# optional noise fields a faithful re-emitter may drop/abbreviate while the
-# item is STILL a verbatim re-emission (the #1789 I-2-13 pin).
-_VERBATIM_CORRECTION_FIELDS = frozenset({
-    "lifecycle", "supersedes", "slots", "kind", "eventKind",
-})
+# #2408 Task 1: optional noise fields a faithful re-emitter may
+# drop/abbreviate while the item is STILL a verbatim re-emission. NOTE: every
+# OTHER non-optional field is compared full-fold (the conservative basis —
+# see the BASIS NOTE in _verbatim_reemissions); the earlier correction-fields
+# pin (lifecycle/supersedes/slots/kind/eventKind) was deliberately NOT
+# implemented, so no separate correction-field set exists here.
 _VERBATIM_OPTIONAL_FIELDS = frozenset({
     "source_ref", "confidence", "search_keys", "quote", "source_turn_id",
 })
