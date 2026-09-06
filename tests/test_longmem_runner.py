@@ -448,6 +448,11 @@ def test_outcomes_to_report_golden_shape():
         "escalation_tokens_prompt_max": None,
         "escalation_tokens_base_output_max": None,
         "escalation_tokens_base_prompt_max": None,
+        # #2408 (Task 2): healthy-path out tokens + s4_merge ride the
+        # Layer-1 projection — absent on a legacy outcome → None.
+        "s2_out_tokens": None,
+        "s4_out_tokens": None,
+        "s4_merge": None,
     }
     assert report["failures"] == []
     assert report["n_failed"] == 0
@@ -599,6 +604,110 @@ def test_report_escalation_readout_2134():
     leg = next(o for o in report["outcomes"]
                if o.get("question_id") == "q-legacy")
     assert leg.get("llm_escalations") is None  # legacy renders, no KeyError
+
+
+def _s4_clean_outcome(qid, *, s2_tok, s4_tok, verbatim, corrected, s2_items,
+                      s4_items, escalations=0):
+    """Task-2 fixture: an extraction-CLEAN outcome carrying the #2408
+    healthy-path fields (what run.py now emits after ingest)."""
+    return {
+        "question_id": qid, "question_type": "single-session-user",
+        "question_date": "2024-01-15", "label": True, "hypothesis": "h",
+        "session_recall@k": {"5": 1.0}, "turn_recall@k": {"5": 1.0},
+        "evidence_recall@k": {"5": 1.0},
+        "chunk_evidence_recall@k": {"5": 0.5},
+        "n_ingest_errors": 0, "ingest_error_text": None,
+        "llm_calls": 4, "llm_retries": 0, "llm_truncated": 0,
+        "recovery": {},
+        "context_tokens": 100, "context_point_count": 2,
+        "retrieval_latency_ms": 1.0, "reader_latency_ms": 2.0,
+        "judge_latency_ms": 3.0, "total_ms": 6.0,
+        "valid": True, "error_classes": {},
+        "leg_mix": {"tfidf": 2}, "leg_mix@k": {"5": {"tfidf": 2}},
+        "pool_size": 5, "evidence_written": 1,
+        "evidence_retrieved@k": {"5": 1}, "ingest_latency_ms": 1.0,
+        "s2_out_tokens": s2_tok, "s4_out_tokens": s4_tok,
+        "s4_merge": {"s2_items": s2_items, "s4_items": s4_items,
+                     "corrected_by_s4": corrected,
+                     "verbatim_reemissions": verbatim},
+        "llm_escalations": escalations,
+    }
+
+
+def test_report_s4_reemit_readout():
+    """#2408 (Task 2): ``integrity.s4_reemit`` — the re-emit-tax census
+    readout. Computed over extraction-CLEAN outcomes only; R_b + shares are
+    div-by-zero-guarded (None); redundant tokens = the labeled token-weighted
+    proxy; legacy outcomes project zero/empty; DIAGNOSTIC — a high R_b never
+    flips integrity.valid."""
+    clean = _s4_clean_outcome(
+        "q-clean", s2_tok=1000, s4_tok=2500,
+        verbatim=8, corrected=2, s2_items=10, s4_items=14)  # r_b 2.5
+    partial = _s4_clean_outcome(
+        "q-partial", s2_tok=1000, s4_tok=900,
+        verbatim=5, corrected=3, s2_items=8, s4_items=10)
+    partial["valid"] = False
+    partial["error_classes"] = {"partial_parse": 1}
+    partial["n_ingest_errors"] = 1
+    escal = _s4_clean_outcome(
+        "q-escal", s2_tok=31000, s4_tok=60000,
+        verbatim=9, corrected=1, s2_items=10, s4_items=12, escalations=1)
+    zero_s2 = _s4_clean_outcome(
+        "q-zero", s2_tok=0, s4_tok=500,
+        verbatim=0, corrected=0, s2_items=0, s4_items=5)
+    report = outcomes_to_report(
+        [clean, partial, escal, zero_s2], reader_model="r", judge_model="j",
+        ks=(5,), top_k=5, split="s",
+        dataset_semantics_audit=_trusted_audit(), integrity_threshold=1.0)
+    sr = report["integrity"]["s4_reemit"]
+    # the partial question is EXCLUDED (grades recoverable — a partial list
+    # must never pollute the healthy measurement): only 3 clean outcomes.
+    assert sr["n_clean_questions"] == 3
+    # totals over the 3 clean (q-clean 1000/2500 + q-escal 31000/60000 +
+    # q-zero 0/500)
+    assert sr["s2_out_tokens_total"] == 32000
+    assert sr["s4_out_tokens_total"] == 63000
+    # r_b overall = 63000/32000 = 1.96875
+    assert sr["r_b"] == round(63000 / 32000, 4)
+    # r_b excluding escalation-recovered (q-clean + q-zero): 3000/1000 = 3.0
+    assert sr["r_b_excl_escalated"] == 3.0
+    # unchanged-share over the 3 clean: verbatim (8+9+0)=17 / s2_items
+    # (10+10+0)=20 → 0.85
+    assert sr["unchanged_share"] == round(17 / 20, 4)
+    # legacy outcomes without the fields → the block still renders (the
+    # report above has none, so the s2_total of 32000 proves no KeyError)
+    # DIAGNOSTIC: a high-r_b clean run still grades valid
+    assert report["integrity"]["valid"] is True
+    # per-question rows carry the readout source
+    rows = {r["question_id"]: r for r in sr["per_question"]}
+    assert rows["q-clean"]["r_b"] == 2.5
+    assert rows["q-clean"]["unchanged_share"] == 0.8
+    assert "q-partial" not in rows  # partial excluded from the census
+
+
+def test_report_s4_reemit_legacy_renders():
+    """#2408 (Task 2): a pre-#2408 outcome (no s2/s4 out-tokens, no
+    s4_merge) renders an empty-but-present readout — never a KeyError."""
+    base = _s4_clean_outcome("q-legacy", s2_tok=1, s4_tok=1,
+                             verbatim=1, corrected=0, s2_items=1, s4_items=1)
+    for k in ("s2_out_tokens", "s4_out_tokens", "s4_merge"):
+        base.pop(k)
+    report = outcomes_to_report(
+        [base], reader_model="r", judge_model="j", ks=(5,), top_k=5,
+        split="s", dataset_semantics_audit=_trusted_audit(),
+        integrity_threshold=1.0)
+    sr = report["integrity"]["s4_reemit"]
+    assert sr["s2_out_tokens_total"] == 0
+    assert sr["r_b"] is None  # 0-denominator, no div-by-zero
+    # the legacy outcome IS a clean question — it appears in per_question
+    # with the missing fields projected to 0 / None (plan: "or 0 / or {}"),
+    # never a KeyError
+    assert len(sr["per_question"]) == 1
+    row = sr["per_question"][0]
+    assert row["question_id"] == "q-legacy"
+    assert row["s2_out_tokens"] == 0 and row["s4_out_tokens"] == 0
+    assert row["r_b"] is None
+    assert report["integrity"]["valid"] is True
 
 
 def test_census_s1_chunk_summary_recoverable_grade():
@@ -2357,6 +2466,68 @@ def test_ingest_truncation_tokens_max_preserving(tmp_path, monkeypatch):
         assert rec["truncation_completion_tokens_s4_max"] == 25000
         # non-truncation recovery counters stay SUMS (unchanged semantics)
         assert rec["repaired"] == 3
+    finally:
+        sdk.close()
+
+
+def test_v2_ingest_surfaces_s4_merge_composition(tmp_path, monkeypatch):
+    """#2408 (Task 2): ingest_v2 surfaces the extractor's s4_merge
+    composition dict as a scalar SUM across sessions (each field is a count
+    over DISTINCT per-session items), and the healthy-path s2/s4 out-token
+    recovery keys ride the else-branch SUM (NOT max — total-spend, distinct
+    from the truncation keys' per-list max convention)."""
+    import tortoise.extractor_v2 as ev2
+    from tools.longmem_eval.ingest_v2 import ingest_haystack_v2
+
+    per_session = [
+        {"s2_out_tokens": 1000, "s4_out_tokens": 2500},
+        {"s2_out_tokens": 500, "s4_out_tokens": 1500},
+        {"s2_out_tokens": 2000, "s4_out_tokens": 4000},
+    ]
+    per_merge = [
+        {"s2_items": 10, "s4_items": 14, "corrected_by_s4": 10,
+         "verbatim_reemissions": 8},
+        {"s2_items": 8, "s4_items": 10, "corrected_by_s4": 5,
+         "verbatim_reemissions": 3},
+        {"s2_items": 12, "s4_items": 16, "corrected_by_s4": 12,
+         "verbatim_reemissions": 9},
+    ]
+    _idx = {"n": 0}
+
+    def _fake_extract(model, conversation, **kw):
+        i = _idx["n"] % 3
+        _idx["n"] += 1
+        return {"payload": {"entities": [], "events": [], "points": [],
+                             "operators": []},
+                "minted_kinds": [], "supersessions": [],
+                "errors": [], "warnings": [],
+                "stats": {"recovery": per_session[i],
+                          "s4_merge": per_merge[i]}}
+
+    monkeypatch.setattr(ev2, "extract_session_v2", _fake_extract)
+    sdk = _fresh_sdk(tmp_path)
+    try:
+        question = {
+            "question_id": "test_s4merge_q",
+            "haystack_session_ids": ["sess-1", "sess-2", "sess-3"],
+            "haystack_dates": ["2026-08-01"] * 3,
+            "haystack_sessions": [[
+                {"role": "user", "content": "hi", "has_answer": False},
+            ]] * 3,
+        }
+        stats = ingest_haystack_v2(sdk, question, model=object(),
+                                   chunk_turns=2)
+        rec = stats["recovery"]
+        # healthy-path out tokens SUM across sessions (total-spend) — the
+        # else branch, NOT max-preserving
+        assert rec["s2_out_tokens"] == 3500   # 1000+500+2000
+        assert rec["s4_out_tokens"] == 8000   # 2500+1500+4000
+        # the s4_merge composition dict SUMS across sessions
+        sm = stats["s4_merge"]
+        assert sm["s2_items"] == 30
+        assert sm["s4_items"] == 40
+        assert sm["corrected_by_s4"] == 27
+        assert sm["verbatim_reemissions"] == 20
     finally:
         sdk.close()
 
