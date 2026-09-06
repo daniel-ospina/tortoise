@@ -1818,8 +1818,12 @@ async def _get_current_team_supabase(request: Request, token: str) -> dict:
 #     the pin (no query seam exists).
 # A FUTURE session-lane key-write endpoint MUST resolve its ?team_id= through
 # the DI seam or these helpers; the parity tripwire test
-# (tests/test_key_write_pins_tripwire.py, the server mirror of the client
-# keyTeamPinsTripwire.test.js) guards regressions on this matrix.
+# (tests/test_key_write_pins_tripwire.py — the server counterpart of the
+# client keyTeamPinsTripwire.test.js) guards regressions on the four
+# enumerated /v1/team/keys + /v1/team/dashboard-login routes. The body-pin /
+# cascade / token rows above are documented, NOT scanned; a FUTURE endpoint
+# on a NEW prefix must deliberately extend KEY_WRITE_HANDLERS + this matrix +
+# the client tripwire (review-guarded, not test-provable by this file).
 
 
 def _session_pinned_team(cp: object, user_id: str, pinned: str | None, *,
@@ -1843,10 +1847,10 @@ def _session_pinned_team(cp: object, user_id: str, pinned: str | None, *,
     in toggle_api_key_enabled's docstring).
 
     memberships: optional precomputed user_memberships rows. The DI seam
-    passes its list (it queried it anyway for the empty-check + memberships[0]
-    default — avoids a second control-plane query on the hot session path);
-    inline lanes omit it and the helper queries lazily (only paid when a pin
-    is actually present).
+    (_session_user_team) and the dashboard-login lane pass their list (they
+    queried it anyway for the empty-check + memberships[0] default — avoids
+    a second control-plane query); the toggle-PATCH lane omits it and the
+    helper queries lazily (only paid when a pin is actually present).
     """
     if not pinned:
         return None

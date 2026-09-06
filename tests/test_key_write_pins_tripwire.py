@@ -12,8 +12,10 @@ in 1b22c56c and must stay intact).
 Two layers:
   1. TestKeyWritePinsTripwireStatic — a route-prefix+verb-scoped source scan
      of tortoise/hosted_api.py: every @app WRITE-verb route whose decorator
-     path contains /v1/team/keys or /v1/team/dashboard-login (the same URL
-     boundary the client tripwire scans) must still resolve ?team_id= through
+     path contains /v1/team/keys or /v1/team/dashboard-login (the
+     /v1/team/keys half matching the client tripwire's URL boundary, plus
+     the server-contract dashboard-login entry the client boundary excludes)
+     must still resolve ?team_id= through
      a recognized seam (the get_current_team_session DI, or the shared
      _session_pinned_team / _ensure_key_in_pinned_team helpers), and every
      such route must be enumerated in KEY_WRITE_HANDLERS. NOT a whole-file
