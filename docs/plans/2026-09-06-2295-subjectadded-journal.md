@@ -1,0 +1,131 @@
+<!-- research-path: in-repo (#2194 merged A1 design as the template + #2295 scoping comment 5555938610) -->
+
+# #2295 — journal SubjectAdded for SDK-created Subjects
+
+> **Pipeline:** project-workflow (Level: project, complexity: standard). Scope approved by human gate. **Template:** the merged #2194 fix (PR #2309) — same `_create_entity` funnel, probe-gated A1 design, test suite shape. This plan is the Subject twin; deltas vs #2194 are enumerated in §Delta and are the ONLY places this plan differs from the fully-reviewed Object work.
+> **Base:** worktree `feat/2295-subjectadded-journaling` @ origin/main (83d96301 — #2194 IS in this tree).
+> **Scope comment:** #2295 comment 5555938610 (3-agent scope, all converged, no P0/P1).
+
+## Problem (confirmed, verified against code)
+
+SDK Subject creates (`create_entity("subject")` → `_create_entity` sdk.py:14459 with `"SubjectAdded"` + canonical `sub-<sha26>` id via `_entity_name_id("Subject", name)` sdk.py:1081-1093) are **live-graph-only** on journal-enabled SDKs. `rebuild_all` pass-1b HAS the replay consumer (`SubjectAdded → _upsert_subject`, projection/__init__.py:1135-1136 apply + :1387-1388 pass-1b — pre-existing because EventAPI `add_subject` journals unconditionally, api.py:240-246) — but no SDK write ever produces the record → journaled-SDK Subjects **vanish silently on rebuild**. Subjects have no fold/supersede vocabulary → no fold-miss warning surfaces the loss (total + silent; worse than the pre-fix Object case). `SubjectAdded ∉ _GRAPH_EVENT_TYPES` (sdk.py:718-728) → JSONL-only emission, no GraphEvent-store double-write.
+
+## Architecture (A1-mirror — 3 code edits)
+
+When an event log is configured, `label == "Subject"`, `event["name"]` truthy, and `event["type"] == "SubjectAdded"` (conjunct mirrors pass-1b's literal dispatch — a future Subject-label event type can never journal an unreplayable line): pre-apply probe `MATCH (s:Subject {id:$cid, name:$name}) RETURN s.id` discriminates first canonical registration (no row → fresh create OR stub adoption → journal) from canonical re-mention (row → skip; the issue's only-on-create mandate). Probe failure → warning + fail-open-to-journal (durable bias). On the journaling path only, synthesize `event["createdAt"] = now_iso()` pre-apply (live == journal == replay; #2164-P4 drift class closed). Post-apply `_emit_event(event["type"], id=event["id"], **mirror-minus-exclusion)` with the identical exclusion tuple as the Object block. Journal-less SDKs (hosted/MCP/CLI — no `event_log_path`) stay byte-identical EXCEPT the unconditional `point`/`payload` drop (delta 2 — same S1 bound as #2061/#2164/#2193/#2194).
+
+### Δ Deltas vs #2194 (the places the mirror differs — all verified)
+
+1. **entities.py `_upsert_subject` ON MATCH createdAt adoption is MISSING** — #2194 added `o.createdAt=coalesce(o.createdAt, $ca)` to `_upsert_object` (entities.py:353) for stub-adoption byte-identity, but `_upsert_subject` (entities.py:271-313) never got it: ON CREATE sets `s.createdAt=coalesce($ca,$now)` (:300-301), ON MATCH sets only `id`/`subjectKind`/`embedding` (:302-304). **Load-bearing**: a raw-created name-stub under a random ulid (the real connector shape, `_event_plain_merge` entities.py:657-666 — no createdAt) adopted by an SDK create would keep a createdAt-less live node while replay's ON CREATE stamps the journaled value → byte-identity (indicator 2) fails on the stub path. **Edit: add `s.createdAt=coalesce(s.createdAt, $ca)` to the ON MATCH clause** (+ the #2194-style comment; idempotent — existing value wins; EventAPI-mention parity: a createdAt-LESS stub adopted by any mention gets stamped — the clause guarantees byte-identity for createdAt-less stubs only; a createdAt-CARRYING EventAPI-first node keeps its own createdAt under existing-wins, the accepted divergence below).
+2. **The `point`/`payload` reserved-pop tuple widens** from `("Event", "Object")` to `("Event", "Object", "Subject")` (sdk.py:14502) — unconditional, both lanes (the #2194 divergence rationale: without it a tenant passing `point`/`payload` on `create_subject` persists them live via `_persist_extra_props` while the journal mirror drops them → divergent live/replay). Tenant-visible narrowing → ONTOLOGY note.
+3. **`status` is an extra-prop for Subject, NOT projection-owned** — `_SUBJECT_HANDLED` (entities.py:74-76) lacks `status` (contrast `_OBJECT_HANDLED` :77-82, #1350 clobber guard). SDK `create_entity("subject")` always injects `status: "live"` (sdk.py:14753) → persists via `_persist_extra_props` (`SET n += $extra`, monotone-union, order-independent) on BOTH live and replay lanes. Consequences: (a) the stub-adoption test asserts **status PRESENT live** (INVERTED from #2194 Object test 5's status-absent); (b) ONTOLOGY §4.2 status row (docs/ONTOLOGY.md:351 — "❌ planned, not implemented") is stale — SDK subjects already carry `status:'live'`; updated.
+4. **EventAPI `add_subject` has no canonical id override** (api.py:240-246 mints a random ulid; contrast `add_object`'s deterministic `id=` at api.py:248-257). A random-ulid SubjectAdded mention landing between SDK creates re-ids the live node (#1918 accepted trade-off, entities.py:283-291) → the next SDK create probe-misses → a second canonical line. Replay converges (id coalesce last-write-wins on both lanes; `_persist_extra_props` union order-independent). **Pinned as by-design** (net-new test — the Object suite has no precedent because Object producers use canonical ids). The #2194 mirror exclusion tuple is reused unchanged.
+5. **No fold vocabulary** → #2194's fold-specific machinery/tests deliberately NOT ported (ObjectSuperseded sweep, fold-miss warning, registration-before-fold line order, fold-side append failure).
+
+## Constraints (verified anchors, current tree)
+
+| # | Constraint | Anchor |
+|---|---|---|
+| C1 | Probe: canonical id + name conjunct (`MATCH (s:Subject {id:$cid, name:$name})`), truthy-name gate, event-log guard, fail-open-to-journal on exception | sdk.py probe block mirrors :14547-14561 |
+| C2 | createdAt synthesized INTO the event dict pre-apply ONLY on the journaling path | sdk.py :14562-14572 pattern |
+| C3 | Emission post-apply, JSONL-only (`SubjectAdded ∉ _GRAPH_EVENT_TYPES` — no GraphEvent double-write) | sdk.py :14605-14631 pattern; `_emit_event` :1948+ |
+| C4 | Exclusion tuple identical to Object: `("type","id","point","payload","event_id","ts","initiated_by","projection_version")` | sdk.py :14627 |
+| C5 | ON MATCH createdAt coalesce added to `_upsert_subject` (existing value wins — never clobbers) | entities.py :302-304 (delta 1) |
+| C6 | Replay consumers pre-exist (apply + pass-1b) — no projection/__init__.py change | projection/__init__.py :1135-1136, :1387-1388 |
+| C7 | Journal-less SDKs: probe never fires (no `event_log_path`); `point`/`payload` pop unconditional both lanes (S1 bound) | sdk.py :14502 gate + `_event_log_path` |
+| C8 | `event["type"] == "SubjectAdded"` conjunct in the gate (pass-1b dispatches the literal) | sdk.py :14547 pattern / projection :1387 |
+| C9 | status rides extra-props on both lanes → no MERGE status clause (C3 delta); stub test asserts status PRESENT | entities.py :74-76, :117-133 |
+| C10 | `create_entity("subject")` always sets `subjectKind` (default `"other"`) + `subject_kind` snake injected pre-apply | sdk.py :14750-14756, normalize :14490-14491 |
+
+## Test plan (Subject twin → `tests/test_subjectadded_journal.py`)
+
+Docker lane (`TORTOISE_DB_URI='docker://:falkordb@localhost:6379/tortoise_test_matrix'`); helpers generalize from the Object file (`_journaled` generic; add `_name_sas(journal, name)`, `_subject_row(proj, name, *props)` — `RETURN properties(o)` row-shape quirk noted; per-test `tmp_path` + distinct DB names; `==` not `is` on DB bools).
+
+**T1 — RED + green-pin tests (13 methods / 18 pytest cases: test 1 = 2 names × 3 is_episodic legs = 6, the other 12 = 1 each). RED = fails at base for the right reason (no SubjectAdded line exists pre-fix → node vanishes on rebuild). Green-pins = pass at base BY CONSTRUCTION but discriminate a wrong/missing fix (mirror the Object suite's TestDuplicateReplay/TestDeleteNonDurability taxonomy — they are NOT RED):**
+
+**RED (missing-line class):**
+1. `test_plain_subject_survives_rebuild_all_byte_identical` — parametrized over (name × is_episodic): ASCII + `estrategia-ñ-日本語-💡`, and `is_episodic=True`/`False` (driven via `create_entity` — `create_subject` rejects is_episodic in props, sdk.py:14888-14892) + one not-passed leg: exactly one `SubjectAdded`; `line["id"] == _entity_name_id("Subject", name)` (sub- prefix); line `subject_kind` (snake) + `subjectKind` (camel, both skipped by `_SUBJECT_HANDLED`); `status == "live"`; `is_episodic` on the line == passed value when passed, key absent when not; synthesized `createdAt`; live props == rebuilt props minus `embedding` (bool leg exercises the extras-lane bool round-trip); `createdAt == line["createdAt"]` (no rebuild-time drift). RED at base (no journal line → node vanishes).
+2. `test_remenion_does_not_double_journal_and_prop_churn_is_live_only` — second create of same name with a DIFFERENT subjectKind → still one line; casing pins: live node `subjectKind` == second value, line `subject_kind` == FIRST value, rebuilt node `subjectKind` == FIRST value (journal keeps the first registration); rebuild reverts churn.
+3. `test_stub_adoption_journals_canonicalization` — raw `CREATE (s:Subject {name, id:ulid})` (faithful to the `_event_plain_merge` Subject stub mint, entities.py:644-655 — no createdAt) → SDK create → ONE line first (this assert fails first at base: zero lines exist), then live `id == line["id"]`, **live `createdAt == line["createdAt"]`** (delta-1 discriminator — reachable only after the journal-gate edit lands; a missing/reversed delta-1 fails it post-fix), **live `status == "live"` PRESENT** (delta-3 inversion — asserted AFTER the line/id asserts so failure modes don't shadow), post-rebuild id/createdAt/status match. The journaled line carries `status:"live"` (SDK always injects it, sdk.py:14754) — status-free would be the raw stub pre-adoption, NOT the journal line. **Plus the base-RED-for-delta-1-only variant** `test_eventapi_mention_adopts_created_at_on_stub`: raw stub → `api.add_subject(name)` (journals unconditionally at base) → live `createdAt == journaled createdAt` — RED at base for delta 1 ALONE (line exists, live stub stays createdAt-less), post-fix pins the "EventAPI-mention parity" clause in delta 1's edit comment.
+5-10 below are RED again (the missing-line class) — the numbering continues from the GREEN-pin item 4; item markers are authoritative.
+**Green-pin (passes at base by construction — do NOT file under RED):** 4. `test_duplicate_registration_lines_replay_idempotently` — two manual canonical lines with different createdAt + rebuild → one node, createdAt == FIRST. Green at base (ON MATCH has no createdAt clause at base → first wins trivially) but NOT vacuous: a reversed delta-1 coalesce (`coalesce($ca, s.createdAt)`) makes it fail. Direction is load-bearing beyond replay: reversed would also churn LIVE createdAt on every EventAPI mention (api.add_subject always sends fresh createdAt) — an only-on-create violation on the live lane.
+**RED (missing-line class, cont.):** 5. `test_journaled_line_and_live_node_drop_reserved_props` — scalar `point="x"`/`payload="y"` props: journal line excludes them AND live node lacks them (delta 2); envelope keys top-level only; post-rebuild no envelope pollution; **GraphEvent pin: `MATCH (e:GraphEvent {type:'SubjectAdded'}) RETURN count(e)` == 0**.
+6. `test_no_log_sdk_no_journal_and_unconditional_pop` — journal-less SDK: no journal dir; `point`/`payload` still dropped live (delta 2 unconditional); no synthesis.
+7. `test_probe_failure_fails_open_to_journal` — monkeypatch `proj.g.query` raising when the cypher contains the label-scoped fragment `"s:Subject {id:$cid, name:$name}"` (matches the C1 probe literal — T2 restates it as the code contract) → **assert the caplog WARNING fired** (level + "probe failed" text — the Object suite's analog never asserts the warning and can false-green if the fragment silently never matches; do not inherit that) + optimistic journal; create succeeds; rebuild restores. (Fragment is label-scoped to match the Subject literal; the Object file's `"id:$cid"` predicate is label-agnostic and lives in a separate file — no cross-file isolation issue.)
+8. `test_log_append_failure_warns_and_keeps_live` — class-level `EventLog.append` raise → warning; live node present; rebuild omits (accepted: live-but-not-durable ≡ pre-fix for that write).
+9. `test_deleted_subject_resurrects_on_rebuild` + `test_delete_recreate_replays_first_incarnation` — accepted-divergence pins (no tombstone; `_delete_entity` covers Subject id): delete → rebuild resurrects live with journaled createdAt; delete→recreate → 2 lines, live carries second createdAt, replay first-wins first. (#2296 hook.)
+10. `test_eventapi_random_ulid_mention_between_sdk_creates_is_by_design` — **net-new**: SDK create S (line A) → `api.add_subject(S)` random ulid (re-ids live node) → SDK re-mention S (probe misses → line C). **Layout pin (review P1-1):** `rebuild_all` replays *.jsonl files in SORTED-FILENAME order (projection/__init__.py:1297) — if the API log shared the rebuild dir and sorted before the SDK file, B would replay first and B's createdAt would first-win → byte-identity breaks. So: rebuild against the SDK log only (B must NOT be replayed: replayed FIRST it first-wins B's createdAt ≠ live; replayed LAST it re-ids the node to the ulid. A + C alone reproduce live — C already re-converged B's transient re-id live; do NOT rebuild the API's dir), assert rebuilt node == canonical id + createdAt == the SDK A-line value specifically; assert exactly 2 SubjectAdded lines on the SDK log (B lives on the API's own log, outside the rebuilt dir). Documents the by-design double-registration class (delta 4). Cross-file replay reorder (separate producer logs in ONE rebuild dir) added to Accepted divergences — same class as the documented Source reversed-order limitation (#330); never assert cross-file byte-identity in this test.
+
+**Green-pin:** 9c. `test_falsy_name_create_does_not_mint_a_phantom_line` — empty-name `create_entity("subject", "")` on a journaled SDK → zero SubjectAdded lines AND zero Subject nodes (probe gate `event.get("name")` never fires; `_upsert_subject` early-returns entities.py:274-276). Closes the failure-modes "falsy name" row, which the Object suite never guarded. (Drive via `sdk._create_entity` if the empty-name tail raises.)
+
+**T2 — GREEN (3 edits):** 
+- **DUPLICATE the Object gate/emit block** keyed on `label == "Subject"`, `event["type"] == "SubjectAdded"`, flag `_journal_subject_registration` — do NOT factor a shared routine (review P2-2). Rationale: the Object block carries #2194 review scar-tissue (the event-type conjunct arrived mid-review); the labels' semantics already diverge (status-as-extra, no fold, random-ulid producers — a shared routine needs per-label params anyway); duplication drift is already tolerated in-tree (EventRecorded + ObjectRegistered inline the same exclusion tuple twice) and test 5 pins the Subject half structurally. #2296 (Document) is the natural 3-consumer dedup moment.
+- The ONLY shared lines that change are provably Object-inert: (a) the pop-condition widening `if label in ("Event", "Object")` → `("Event", "Object", "Subject")` (sdk.py:14502); (b) the createdAt-synthesis condition widened to `if (_journal_object_registration or _journal_subject_registration) and "createdAt" not in event:` (sdk.py:14562). State this two-line inertness argument in the T2 commit; the Object suite (16) + status-projection (19) rerun in T4 is then an adequate regression guard. Add a "keep in sync with the Object block" comment at the Subject exclusion tuple. IF a shared routine is chosen against this direction, an in-file Object+Subject cross-label test becomes a merge requirement (T4 reruns alone don't localize a label-scoping bug).
+- entities.py ON MATCH createdAt coalesce (C5/delta 1) with the #2194-style comment incl. the EventAPI-mention-parity clause.
+Post-GREEN: tests 1-11 all pass (REDs + pins); Object suite (16) + status-projection baseline (19) still pass.
+
+**T3 — docs sweep:** ONTOLOGY §4.2 Subject "registration durability (#2295)" note mirroring §4.3 (:371 — probe gate/fail-open/EventAPI-random-ulid by-design class/node-property byte-identity scope/residual non-durable classes incl. delete resurrection + first-wins/reserved narrowing); §4.2 status-row correction at **:351** (the row's parenthetical "(only createdAt/subjectKind/embedding are written by _upsert_subject)" is doubly stale post-fix: status:'live' rides extras AND delta-1 writes createdAt ON MATCH — reword to name the extra-prop path + the planned projection-owned status follow-up); **§4.7 cross-entity map Subject status cell (:438 "❌ (planned)") → "⚠️ SDK extra-prop (projection-owned planned)"** (review P2-7); §4.3 residual-class cross-ref ("and Subjects, #2295"); sdk.py `_create_entity` docstring + `event_log_path` class comment mention Subjects. event-catalog.md: NO change (GraphEvent catalog only; SubjectAdded has no row — verified). Grep-sweep acceptance: `grep -rn "journal EventRecorded for Events only\|Objects are NOT journaled\|SDK capture-created Objects" tortoise/ tests/ docs/` → only historical/plan text remains.
+
+**T4 — verification:** Subject twin + test_object_registered_journal.py (16) + test_status_projection.py (19) + test_projection.py + test_semantic_extractor.py + test_p1_differentiators.py + test_entity_stage.py + capture/ingest/commit suites (docker lane) + embedded carve-out spot check + ruff clean on touched files + `config/ci-surfaces.yml` registration (drift gate #1262 — new test file MUST be registered or python-ci's Manifest integrity check fails).
+
+## Accepted divergences (documented, not silently expanded — mirror #2194's list, Subject-shaped)
+
+- **Pre-#2295-history ghost**: canonical Subjects created pre-fix + first post-fix re-mention probe-skips (no registration in this journal) → rebuild drops pre-fix population. No backfill in scope (#2296: Object/Subject backstop).
+- **Re-mention prop mutations live-only** (only-on-create mandate); journal keeps first registration.
+- **Delete non-durability**: `_delete_entity` leaves no tombstone → deleted Subjects resurrect on rebuild; delete→recreate replay first-wins the earlier incarnation's createdAt. Pinned as accepted by tests 9a/9b; **#2296 scope hook** (write-surface invariant must cover deletion).
+- **Mixed-producer id churn**: EventAPI random-ulid `add_subject` between SDK creates → by-design second canonical line + re-id (delta 4, pinned by test 10); pre-existing #1918/#330 class.
+- **Ownership/org edges not replayed** for Subjects (node-property byte-identity scope — SDK `create_subject(org_of=...)`-class edges are SDK-layer, EventAPI parity).
+- **Cross-file replay reorder** (separate producer logs in ONE rebuild dir): `rebuild_all` replays filename-sorted, so a random-ulid EventAPI line can replay before the SDK canonical line and first-win createdAt on rebuild ≠ live. Accepted (test 10 rebuilds the SDK log only; same class as the documented Source reversed-order limitation #330).
+- **Concurrent same-name creates reverse-append (second-model P2, inherited from #2194)**: the probe→synth→apply→emit sequence is non-atomic — two concurrent same-name SDK creates can interleave so the journal holds [B, A] while live first-won A. Replay converges to one node but createdAt may first-win differently live vs replay. Accepted (same class as #2194 Object TOCTOU; note for the #2296 durability audit — no code change in this PR).
+- **EventAPI-first-then-SDK (separate logs, second-model P1)**: `api.add_subject("S")` creates the node first (random ulid + its own createdAt=T_api, API's log) → the later SDK create probe-misses (live id is the ulid) → journals a line with a SYNTHESIZED createdAt=T_sdk → live ON MATCH keeps T_api (existing-wins) while an SDK-log-only rebuild stamps T_sdk → createdAt diverges. Accepted (mixed-producer family — the default whenever EventAPI touches a Subject before the SDK, since `add_subject` has no canonical id override; same first-wins class as delete→recreate test 9b). Tested indirectly by the test-3v stub variant ONLY for createdAt-LESS stubs — a createdAt-carrying EventAPI-first stub is intentionally unpinned (documented deferral).
+- **Unjournaled/journal-less producers** in a shared graph: rebuild drops their Subjects regardless (no canonical registration ever journaled).
+- **`status:'live'` extra-prop regime** stays as-is (projection-owned Subject status is a planned ontology follow-up, NOT this issue).
+
+## Failure modes (each → guarded)
+
+| Mode | Guard |
+|---|---|
+| Probe raise (DB hiccup) | fail-open-to-journal + warning asserted (test 7) — duplicate replay-safe |
+| Log append failure | warn + live node kept; rebuild omits (test 8) — ≡ pre-fix for that write |
+| Duplicate lines (probe TOCTOU / by-design EventAPI class) | idempotent MERGE + first-wins createdAt (test 4, 10) — convergence to ONE node guaranteed; see the reverse-append accepted-divergence note below |
+| Falsy name | truthy-name gate (no phantom line) — mirrors `_upsert_subject` early-return entities.py:274-276 (test 9c green-pin) |
+| Future Subject-label event_type ≠ SubjectAdded | event-type conjunct in gate (C8) — never journals an unreplayable line |
+| SubjectAdded added to `_GRAPH_EVENT_TYPES` later | test 5 GraphEvent count == 0 pin |
+| ON MATCH createdAt clause direction flipped | test 4 first-wins pin (a reversed coalesce would fail it — and would churn LIVE createdAt on every EventAPI mention) |
+| Shared-path refactor perturbing Object behavior | Object suite (16) + status-projection (19) green after T2 |
+
+## Acceptance criteria ↔ indicators
+
+| Indicator (issue) | Proof |
+|---|---|
+| 1. `_create_entity` journals SubjectAdded on first canonical registration (probe-gated, createdAt/is_episodic parity) | T2 edits; tests 1-3, 7 |
+| 2. SDK-created Subject survives `rebuild_all` byte-identically | tests 1 (full prop-set), 3 (stub path), 4 (dups) |
+| 3. Existing rebuild tests green | T4 suites (Object 16 + status-projection 19 + projection/semantic/p1/entity/capture/ingest/commit) |
+
+## Out of scope (documented — filed/known follow-ups)
+
+- **SDK DocumentCreated journaling** — the ONLY remaining unjournaled canonical create: `create_document` (sdk.py:17106-17117) routes `_create_entity("Document", …, "DocumentCreated")` with no journal emission (the file-indexing path's DocumentCreated emit at sdk.py:16303-16318 is never reached by SDK creates). **Source is NOT a gap** — `create_source` journals SourceCreated on every write itself (sdk.py:17217-17225, "emit-on-every-write"), pre-existing. Document can NOT blind-mirror the A1 design: it mints a **random ulid** (no deterministic probe key) and `_upsert_document` MERGEs by **id** (entities.py:500), not name → needs its own probe design. **Tracked via a #2296 scoping comment** (posted in T3): add "SDK DocumentCreated journaling (create_document ulid + id-keyed MERGE — needs probe design)" to #2296's indicator-2 gaps-to-close list, so the follow-up-for-the-follow-up is committed.
+- **Edges durability** (Object/Subject ownership edges, capture aboutObject/CONTAINS) → #2296.
+- **Projection-owned Subject status** (ontology marks planned) — future feature.
+- **EventAPI `add_subject` canonical id override** — #1918 accepted trade-off; blast-radius limited.
+
+## Runtime prerequisites
+
+- Docker FalkorDB up on localhost:6379; `TORTOISE_DB_URI='docker://:falkordb@localhost:6379/tortoise_test_matrix'` for docker-lane runs.
+- Worktree `feat/2295-subjectadded-journaling` @ 83d96301; `.venv` symlinked.
+
+## Commit plan (mirror #2194's history shape)
+
+1. `test(#2295): RED + green-pins — SubjectAdded journaling behaviors (tests 1-11)` — **ci-surfaces.yml registration (core surface list, between test_structural_leg_r4.py and test_suggest_entry_points.py) MUST land in THIS commit** (the drift gate #1262 is unconditional on every push — a later commit fails integrity). Test helpers are **self-contained copies** (copy-and-rename `_journaled`/`_name_sas`/`_subject_row` from the Object file's patterns; tests/ is not a package — never import from or edit the reviewed test_object_registered_journal.py).
+2. `feat(#2295): journal SubjectAdded on first canonical registration (probe-gated, createdAt-synthesized, post-apply) + pop widening + _upsert_subject ON MATCH createdAt adoption` (duplicated Subject block; two inert shared-line edits)
+3. `docs(#2295): ONTOLOGY §4.2/§4.3/§4.7 durability notes + status corrections + docstring sweep + #2296 scoping comment (SDK DocumentCreated journaling)`
+4. `chore(#2295): ruff` (if needed)
+5. commit-workflow: PR + code-review gates + merge.
+
+## Plan-review fix cycle log
+
+**Cycle 1 (3 parallel reviewers, 2026-09-06):** 2 P1 (test-10 replay-layout trap — sorted-filename rebuild order vs "B on the API's own log"; test-4 mislabeled RED — green at base by construction) + P2s (duplication decision pinned; is_episodic parametrized spec; falsy-name guard test added; probe-fail warning assert; subjectKind casing pins; §4.7 status cell; Source-is-NOT-a-gap correction + #2296 Document hook; ci-surfaces in commit 1; self-contained helpers; anchor corrections :351/:644-655/:14751-14756) — all applied in this revision.
+
+<!-- plan-review: cycles=2, status=clean, version=1.1.0 -->
+<!-- 🔍 second-model gate (deepseek-v4-pro): P1 (api-first-then-SDK createdAt divergence — added to accepted divergences + delta-1 clause-scope sentence) + P2 anchors (:351/:438) — resolved in cycle 2 -->
+**Cycle 2 (scoped re-review + second-model):** re-review found 4 P2 plan-text defects (RED/green grouping markers, test-10 parenthetical contradiction, test-count math 13/18, anchor drift :438/:1297/:14754) — applied. Second-model found 1 P1 — EventAPI-first-then-SDK createdAt divergence NOT in the accepted list (distinct from mixed-producer id churn and cross-file reorder) — added as an accepted-divergence bullet + delta-1 clause-scope sentence; 1 P2 anchor duplicate — applied. Status: clean.

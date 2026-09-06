@@ -1734,15 +1734,17 @@ def test_list_backups_sorted_newest_first():
     assert listed[0]["created_at"] > listed[1]["created_at"]
 
 
-def test_prune_keep_hourly_bounded_semantics(monkeypatch):
+def test_prune_keep_hourly_day_anchor_semantics(monkeypatch):
     """keep_hourly>0 REPLACES the daily keep-all rule with a bounded retention:
 
     keep ALL backups younger than keep_hourly hours; one anchor per UTC
-    hour-bucket for ages within the daily horizon; then weekly anchors.
+    DAY-bucket for ages within the daily horizon; then weekly anchors.
 
-    This is the discriminating test: the stacked keep-all variant (retains
-    every backup < keep_daily days) and the unbounded-anchor variant (one
-    anchor per hour-bucket forever) must BOTH fail it.
+    #2373: the anchor granularity is the UTC DAY (not hour) — hour-bucket
+    anchors over-retained ~172 objects/pool over the 7-day horizon vs the
+    documented ~35. This test discriminates: two backups in the SAME
+    calendar day but DIFFERENT UTC hours, both older than keep_hourly, must
+    collapse to the newest (an hour-bucket implementation keeps both).
     """
     _freeze_clock(monkeypatch)
     from datetime import timedelta as _td
@@ -1751,14 +1753,12 @@ def test_prune_keep_hourly_bounded_semantics(monkeypatch):
     team_id = "team_hourly"
     fixed = datetime(2026, 8, 7, 12, 0, 0, tzinfo=timezone.utc)  # noqa: UP017
 
-    # (hours_ago, minutes_ago). NEGATIVE minutes = created AFTER the hour mark,
-    # keeping both backups inside the SAME (day, hour) bucket — that is what
-    # makes the anchor dedup bite (hour anchors keep one per bucket).
     seeds = [
         (1, 0), (23, 0),       # hourly window (< 24h) → kept
-        (25, 0), (25, -5),     # same bucket (Aug 6, 11h) → newest kept, dup deleted
-        (49, 0), (49, -10), (49, -20),  # same bucket (Aug 5, 11h) → newest kept, dups deleted
-        (100, 0),              # hour anchor (< 7d) → kept
+        (30, 0), (36, 0),      # SAME calendar day (Aug 6), different hours →
+                               # newest (30h) kept, 36h deleted (#2373)
+        (55, 0), (55, -10),    # same day (Aug 5) → newest kept, dup deleted
+        (100, 0),              # day anchor (< 7d) → kept
         (200, 0),              # weekly zone (8.3d) → weekly anchor kept
         (500, 0), (501, 0),    # weekly zone, same ISO week → newest kept
     ]
@@ -1782,11 +1782,12 @@ def test_prune_keep_hourly_bounded_semantics(monkeypatch):
     deleted = prune_backups(store, team_id, keep_daily=7, keep_weekly=4, keep_hourly=24)
 
     assert sorted(deleted) == sorted(
-        [ids["25:0"], ids["49:0"], ids["49:-10"], ids["501:0"]]
+        [ids["36:0"], ids["55:0"], ids["501:0"]]
     ), f"deleted={deleted}"
-    remaining = [k for k in store.list(f"backups/{team_id}/") if k.endswith("manifest.json")]
+    remaining = [k for k in store.list(f"backups/{team_id}/")
+                 if k.endswith("manifest.json")]
     assert len(remaining) == 7
-    for h, m in [(1, 0), (23, 0), (25, -5), (49, -20), (100, 0), (200, 0), (500, 0)]:
+    for h, m in [(1, 0), (23, 0), (30, 0), (55, -10), (100, 0), (200, 0), (500, 0)]:
         assert any(ids[f"{h}:{m}"] in k for k in remaining), f"{h}:{m} should be kept"
 
 

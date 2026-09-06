@@ -17340,6 +17340,29 @@ def _require_backup_tier(team: dict) -> None:
         )
 
 
+def _legacy_overrides_from_index(listed: list[dict],
+                                 index: dict) -> dict[str, str]:
+    """#2370: pure Q6-override derivation from the sweep-written legacy-flat
+    classification index (backup_id → {graph_name, graph_id}). Legacy flat
+    manifests whose index entry resolves to a CUSTOM graph (graph_id set and
+    ≠ default) list under that graph; everything else keeps the default
+    bucket. Returns {backup_id: graph_id}."""
+    if not index:
+        return {}
+    out: dict[str, str] = {}
+    for m in listed:
+        if m.get("graph_id") is not None:
+            continue
+        bid = str(m.get("backup_id") or "")
+        if len(bid.split("/")) != 2:
+            continue
+        meta = index.get(bid)
+        gid = str((meta or {}).get("graph_id") or "")
+        if gid and gid != "default":
+            out[bid] = gid
+    return out
+
+
 def _manifest_graph(manifest: dict, override_gid: str | None = None) -> dict:
     """#2313: derive the graph identity of a backup manifest for listing.
 
@@ -17433,21 +17456,38 @@ async def backups_list(team: dict = Depends(get_current_team_session_ungated)): 
         # custom namespace (pre-#2313 C5-era on-demand custom dumps) lists
         # under that custom graph. Fail-soft — the default bucket stands on
         # any control-plane error.
+        # #2370: the reverse lookup now reads the sweep-written legacy-flat
+        # classification index (one R2 object) instead of running a
+        # control-plane query per request. The CP path remains only as the
+        # pre-first-sweep / index-miss fallback.
         overrides: dict[str, str] = {}
         if any(m.get("graph_id") is None for m in listed):
-            from tortoise.supabase_control import (
-                get_control_plane,
-                is_supabase_enabled,
-            )
-            try:
-                cp = (get_control_plane() if is_supabase_enabled()
-                      else _registry_sdk()._get_registry())
-            except Exception as e:
-                _logger.warning("backups list cp unavailable: %s", e)
-                cp = None
-            if cp is not None:
-                overrides = await asyncio.to_thread(
-                    _legacy_graph_overrides, cp, team_id, listed)
+            storage_obj = _backup_storage()
+            from tortoise.backup_sweep import read_legacy_flat_index
+            idx = await asyncio.to_thread(
+                read_legacy_flat_index, storage_obj, team_id)
+            if idx:
+                overrides = _legacy_overrides_from_index(listed, idx)
+            # legacy flats the index could not classify (or no index yet) →
+            # pre-#2313 CP reverse lookup (fail-soft on any error).
+            unresolved = [m for m in listed
+                          if m.get("graph_id") is None
+                          and len(str(m.get("backup_id", "")).split("/")) == 2
+                          and m.get("backup_id") not in (idx or {})]
+            if unresolved:
+                from tortoise.supabase_control import (
+                    get_control_plane,
+                    is_supabase_enabled,
+                )
+                try:
+                    cp = (get_control_plane() if is_supabase_enabled()
+                          else _registry_sdk()._get_registry())
+                except Exception as e:
+                    _logger.warning("backups list cp unavailable: %s", e)
+                    cp = None
+                if cp is not None:
+                    overrides.update(await asyncio.to_thread(
+                        _legacy_graph_overrides, cp, team_id, listed))
         return {"backups": [
             _manifest_graph(m, override_gid=overrides.get(m.get("backup_id")))
             for m in listed
@@ -17537,7 +17577,7 @@ async def backups_create(team: dict = Depends(get_current_team_gated)):  # noqa:
         # (SDK team creation names graphs team_{name}, NOT team_{id}; #768/#770),
         # registry mode is the deterministic team_{id}. Fail-closed: a
         # resolution error 503s rather than backing up a wrong/nonexistent graph.
-        from tortoise.backup_sweep import team_graph_name
+        from tortoise.backup_sweep import resolve_active_graph, team_graph_name
         # C5 #2114: a graph-bound key backs up ITS OWN graph (graph_namespace
         # is the resolved FULL name — custom team_{tid}_{gid} or the default);
         # team-wide keys/session back up the team default (today's path).
@@ -17553,11 +17593,28 @@ async def backups_create(team: dict = Depends(get_current_team_gated)):  # noqa:
                     status_code=403,
                     detail={"error_code": "GRAPH_NOT_FOUND",
                             "message": "graph not found for key"})
-            # #2313: canonical key segment — the DEFAULT graph (graph-bound
-            # default keys carry the default namespace) keys under the
-            # literal "default", never a lane-specific raw gid; custom graphs
-            # key under their control-plane id (the sweep's enum id).
-            graph_id = ("default" if graph_name == default_name
+            # #2376: the canonical key segment is decided by graph KIND
+            # through the ACTIVE-graph seam (resolve_active_graph — the same
+            # tombstone guard restore/re-baseline use), NEVER by namespace
+            # string-equality. A default-kind binding must key under the
+            # literal "default" even if its namespace no longer equals the
+            # current default name (graph_name change / stale binding); a
+            # custom always keys under its control-plane id. Custom-bound
+            # keys are the only mintable shape today (the default rides
+            # team-wide keys, _mint_graph_key rejects default bindings), so
+            # this is defense-in-depth for a future default-bound binding or
+            # non-conforming row id — but the classification must not be
+            # hostage to namespace spelling. Unresolved (vanished) graphs
+            # fail closed 403, mirroring the ghost-key guard above.
+            try:
+                g_row = resolve_active_graph(cp_source, team_id,
+                                             team.get("graph_id"))
+            except ValueError as e:
+                raise HTTPException(
+                    status_code=403,
+                    detail={"error_code": "GRAPH_NOT_FOUND",
+                            "message": "graph not found for key"}) from e
+            graph_id = ("default" if g_row["kind"] == "default"
                         else team.get("graph_id"))
         else:
             graph_name = default_name
@@ -17836,21 +17893,15 @@ def _boot_gc_drill_graphs(db, max_age_hours: float = 6.0) -> None:
             continue
 
 
-@app.post("/v1/internal/backups/acl-reconcile")
-async def backups_acl_reconcile(request: Request):
-    """Post-restore ACL rebuild/verification (#2313 folded delta): every
-    ACTIVE graph of every team must have its per-graph ACL user.
-
-    A full-platform restore (disaster recovery into a fresh FalkorDB server)
-    restores graph DATA from R2 — ACL server users do NOT live in the graph
-    namespace and are lost with the old server. ``create_acl_user`` is the
-    idempotent rebuild primitive (full-reset upsert; registry/selfhost mode
-    reuses the stored credential, hosted create-once verifies without
-    password churn). This reconcile replays it per ACTIVE graph — the DR
-    runbook's post-restore step. Idempotent + fail-soft: ACL-layer absence
-    (no server URI / bare redis) is reported, never a 500.
-    """
-    _check_internal(request)
+def _reconcile_acl_users_sync() -> dict:
+    """Sync body of backups_acl_reconcile — MUST run off the event loop
+    (#2371): per ACTIVE graph ``create_acl_user`` issues several blocking
+    redis/FalkorDB round-trips (3s/5s timeouts); inline in the async handler
+    a slow-but-reachable ACL server would stall the single-worker API event
+    loop for every tenant during the exact post-restore window this endpoint
+    exists for. Runs in its own worker thread — no lock needed (the old
+    ``threading.Lock`` guarded nothing: a single event loop has no
+    concurrency)."""
     cfg = _backup_config_safe()
     if cfg is None:
         raise HTTPException(status_code=503, detail="Backup sweep disabled")
@@ -17864,13 +17915,11 @@ async def backups_acl_reconcile(request: Request):
         raise HTTPException(status_code=503,
                             detail=f"team enumeration failed: {e}") from e
 
-    import threading as _threading
     from typing import Any as _Any
 
     from tortoise.acl_graph_users import create_acl_user  # type: ignore[import-not-found]
 
     results: dict[str, _Any] = {}
-    lock = _threading.Lock()
     for team_id in sorted(team_ids):
         try:
             graphs = _sweep_graph_list(registry, team_id)
@@ -17891,8 +17940,7 @@ async def backups_acl_reconcile(request: Request):
                 defaults += 1
                 continue
             try:
-                with lock:
-                    r = create_acl_user(row["graph_id"], team_id)
+                r = create_acl_user(row["graph_id"], team_id)
                 if r is None:
                     skipped += 1  # ACL layer absent — fail-soft, reported
                 else:
@@ -17908,6 +17956,25 @@ async def backups_acl_reconcile(request: Request):
                             "default_skipped": defaults,
                             "errors": errors}
     return {"status": "reconciled", "teams": len(results), "results": results}
+
+
+@app.post("/v1/internal/backups/acl-reconcile")
+async def backups_acl_reconcile(request: Request):
+    """Post-restore ACL rebuild/verification (#2313 folded delta): every
+    ACTIVE graph of every team must have its per-graph ACL user.
+
+    A full-platform restore (disaster recovery into a fresh FalkorDB server)
+    restores graph DATA from R2 — ACL server users do NOT live in the graph
+    namespace and are lost with the old server. ``create_acl_user`` is the
+    idempotent rebuild primitive (full-reset upsert; registry/selfhost mode
+    reuses the stored credential, hosted create-once verifies without
+    password churn). This reconcile replays it per ACTIVE graph — the DR
+    runbook's post-restore step. Idempotent + fail-soft: ACL-layer absence
+    (no server URI / bare redis) is reported, never a 500. Runs off the
+    event loop via ``asyncio.to_thread`` (#2371).
+    """
+    _check_internal(request)
+    return await asyncio.to_thread(_reconcile_acl_users_sync)
 
 
 @app.post("/v1/internal/backups/sweep")
@@ -17989,6 +18056,25 @@ async def backups_status(request: Request):
         pass  # not-yet-written heartbeat is benign, not an error
     except Exception as e:  # R2 hiccup must never 500 /status (live-E2E fix)
         storage_error = f"heartbeat read: {e}"
+    # #2372: surface the SWEEP's own run roll-up (ops/state.json — written
+    # every run) so an operator sees per-graph totals/failures/streaks, not
+    # just the watcher's archive-age tri-state.
+    sweep_state = {}
+    try:
+        parsed = _json.loads(storage.download("ops/state.json"))
+        if isinstance(parsed, dict):
+            sweep_state = parsed
+    except KeyError:
+        pass  # sweep never ran yet — benign
+    except Exception as e:
+        storage_error = f"{storage_error}; ops-state read: {e}" if storage_error else f"ops-state read: {e}"
+    last_sweep = {
+        key: sweep_state.get(key)
+        for key in ("last_sweep_at", "last_team_count", "graph_totals",
+                    "graph_failures", "graph_error_streaks")
+    }
+    if not last_sweep.get("last_sweep_at"):
+        last_sweep = None  # sweep never ran — omit the block
     driver_hb = {}
     try:
         parsed = _json.loads(storage.download(_DRIVER_HEARTBEAT_KEY))
@@ -18019,6 +18105,7 @@ async def backups_status(request: Request):
         "per_team": watcher_status.get("per_team", {}),
         "no_teams": watcher_status.get("no_teams", False),
         "unknown": watcher_status.get("unknown", False),
+        "last_sweep": last_sweep,
         "watcher": {
             "running": bool(watcher and watcher._thread and watcher._thread.is_alive()),
             "last_poll_at": hb.get("last_poll_at"),
@@ -18087,6 +18174,18 @@ async def backups_rebaseline(request: Request, body: dict):
     graph_id = body.get("graph_id", "default")
     if not team_id:
         raise HTTPException(status_code=400, detail="team_id required")
+    from tortoise.hosted_backup import _validate_graph_id, _validate_team_id
+    try:
+        # #2377 (defense in depth): team_id/graph_id flow into R2 state keys
+        # (_graph_state_key + the legacy team-file write below) — apply the
+        # same charset gate every create/prune backup write got, so a
+        # future non-server-generated row id can never mint keys outside the
+        # team's prefix. resolve_active_graph gates against enumerated rows;
+        # this gates the shape first.
+        _validate_team_id(team_id)
+        _validate_graph_id(graph_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=f"Re-baseline rejected: {e}")  # noqa: B904
     from tortoise.backup_sweep import (
         _graph_state_key,
         _write_json,
