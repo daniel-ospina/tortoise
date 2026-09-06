@@ -256,10 +256,12 @@ def test_welcome_mode_provisions_and_reveals_key_once(page: Page) -> None:
     """#1566/#2323: a first-timer (valid session, NO teams) lands on the
     welcome card + W1 orientation — NOT auto-provisioned at mount (the
     mount-time provisioning was removed by #2323 Option B). The org-create
-    step provisions in-app (tenant-provision → 201 carries the plaintext,
-    ADR-010: in-memory only) and the key is shown exactly once, at the
-    CONNECT step (A13). A returning visit (onboarding complete) lands on the
-    dashboard's first-run card with NO key (#1885)."""
+    step submit provisions in-app (tenant-provision → 201; the canonical
+    delivery is the post-write membership poll → reveal_api_key RPC, atomic
+    reveal+null A13 — the 201-body plaintext is only the 3-poll fallback).
+    The key is shown exactly once, at the CONNECT step (ADR-010: in-memory
+    only). A returning visit (onboarding complete) lands on the dashboard's
+    first-run card with NO key (#1885)."""
     import time as _time
     import urllib.parse as _up
     user_id = "u-welcome1566"
@@ -285,6 +287,17 @@ def test_welcome_mode_provisions_and_reveals_key_once(page: Page) -> None:
                 # 401 catch-all shows the generic error card before the flow.
                 route.fulfill(status=200, content_type="application/json",
                               body=json.dumps({"onboarding": {}}))
+                return
+            if url.split("?", 1)[0].endswith("/v1/onboarding/state/checkpoint") and route.request.method == "POST":
+                # #2356: the fork pick persists the set-once fork via this
+                # checkpoint write BEFORE the wizard advances (handleWizardFork
+                # — #1997 W1: self picks advance only after the 2xx; the api
+                # catch-all 401 below used to abort the advance and strand the
+                # page on the fork step). 200 no-op is the keyed-MERGE replay
+                # shape. Query-strip (the shell pins ?team_id= once a team
+                # exists — #1828) like the onboarding-state branch above.
+                route.fulfill(status=200, content_type="application/json",
+                              body="{}")
                 return
             if url.endswith("/v1/user/identity") and route.request.method == "GET":
                 # #1885: post-#1765 bootstrap also reads the identity inventory.
@@ -339,13 +352,16 @@ def test_welcome_mode_provisions_and_reveals_key_once(page: Page) -> None:
     expect(page.locator("body")).to_contain_text("Choose how you'll use Tortoise", timeout=20_000)
     expect(page.locator("body")).not_to_contain_text("tt_welcome_key_1234567890abcdef")
     # Fork card → connect step: the in-memory provisioned plaintext is
-    # displayed EXACTLY ONCE here. No reveal RPC — the edge returned the key
-    # in the 201 body (ADR-010 single-consumption).
+    # displayed EXACTLY ONCE here. The reveal_api_key RPC fired exactly ONCE
+    # at the org-create SUBMIT — provisionInApp's canonical post-write
+    # membership poll → atomic reveal+null (A13, #1566); the 201-body
+    # plaintext is only the 3-poll fallback, so the connect step renders
+    # welcomeKey with no further reveal (ADR-010 single-consumption).
     page.get_by_role("button", name="Use it for your own agents").click()
     expect(page.locator("body")).to_contain_text("Connect your agent", timeout=15_000)
     expect(page.locator("body")).to_contain_text("tt_welcome_key_1234567890abcdef", timeout=15_000)
-    assert reveal_calls["n"] == 0, \
-        f"first-run plaintext rides the 201 body — no reveal RPC: {reveal_calls['n']}"
+    assert reveal_calls["n"] == 1, \
+        f"first-run plaintext rides the canonical provision reveal (exactly once), got {reveal_calls['n']}"
     # Returning visit: the key is consumed (reveal returns 'pending') → the
     # ready card, no re-reveal.
     reveal_calls["n"] = 0

@@ -4810,9 +4810,14 @@ function claimIntentInFlight() {
   const wizardConnectHarness = (wizardHarness === 'codex' && wizardCodexDesktop) ? 'codexDesktop' : wizardHarness
 
   if (welcomeMode && authed) {
-    // #1566: first-timers are provisioned IN-APP — show the provisioning
-    // spinner, then the revealed key (exactly once, A13), or an actionable
-    // error. Returning users (welcomeKey empty) get the ready card.
+    // #2323 (Option B): name-first first-run — the welcome card renders the
+    // W1 wizard, never the key. There is NO mount provisioning (#1566's
+    // mount-time provision + ready-card reveal are deleted): the provisioning
+    // spinner + inline error below wrap ONLY the org-create step submit, and
+    // the provisioned plaintext is held in-memory (welcomeKey) and shown
+    // exactly once at the CONNECT step. Teamless first-timers land here from
+    // the session gate; org-holding accounts only via re-entry/resume (the
+    // read-only steps below).
     return (
       <div className="app">
         <header>
@@ -5084,9 +5089,11 @@ function claimIntentInFlight() {
                               the paste box collapsed behind a disclosure for
                               owner/admin so the mint CTA above is the ONE
                               obvious primary action. Members see paste
-                              directly: it is their only in-dashboard path
-                              (server mint is owner/admin dashboard policy,
-                              #2246). */}
+                              directly: it is their only in-dashboard key path
+                              (the mint CTA is owner/admin-only by DASHBOARD
+                              render policy — the server POST /v1/team/keys
+                              has NO role gate, #2246 — see
+                              wizardMintDurableKey). */}
                           <div style={{ marginTop: '0.85rem', display: 'flex', flexWrap: 'wrap', gap: '0.9rem', alignItems: 'center' }}>
                             <button type="button" className="ghost small" onClick={() => { window.history.replaceState({}, '', '/'); setWelcomeMode(false); setTab('keys'); finishWelcomeLoads() }}>
                               {isOwnerAdmin ? `Manage keys for ${shownOrgName || 'your organization'} →` : `View keys for ${shownOrgName || 'your organization'} →`}
@@ -5107,10 +5114,17 @@ function claimIntentInFlight() {
                             )}
                           </div>
                           {(!isOwnerAdmin || wizardShowPaste) && (
-                          // #1998 fold-in: paste-your-own escape — a user at
-                          // the max_api_keys cap regenerates a durable key in
-                          // the API Keys tab (shown once there) and pastes it
-                          // here instead of dead-ending on 402.
+                          // #1998/#2325: the paste box is the member path AND
+                          // the owner/admin cap-escape. #1998 history: a user
+                          // at the max_api_keys cap (free = 2) regenerates a
+                          // durable key in the API Keys tab (shown once there)
+                          // and pastes it here instead of dead-ending on 402.
+                          // Members get NO mint CTA (owner/admin-only by
+                          // dashboard render policy) — for them this box
+                          // renders unconditionally as their only in-dashboard
+                          // key path; for owner/admin it sits behind the
+                          // disclosure above (mint CTA is primary) and the
+                          // 402 handler opens it (#2325).
                           <div id="wizard-paste-row" style={{ marginTop: '0.75rem', display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
                             <input
                               type="password"
