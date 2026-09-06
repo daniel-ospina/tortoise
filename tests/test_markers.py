@@ -104,6 +104,7 @@ ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
         "team-a": "assertion", "team-b": "assertion",
     },
     "test_session_key_http.py": {"registry": "prod-coupled"},
+    "test_session_key_recovery_gate.py": {"registry": "prod-coupled"},  # #2380 — recovery-gate registry-lane parity via TortoiseSDK(namespace="registry")
     "test_signup_token_revoke.py": {"registry": "prod-coupled"},
     "test_suspension_parity.py": {
         "registry": "prod-coupled", "reg-team-1": "team-identity",
