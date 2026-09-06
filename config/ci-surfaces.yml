@@ -414,6 +414,7 @@ surfaces:
   - test_ep_draft_filter.py
   - test_ep_dirty_persist.py
   - test_ep_local_395.py
+  - test_ep_terminal_ghost.py
   - test_ep_nary_falsification.py
   - test_ep_operatorless.py
   - test_ep_projections.py
