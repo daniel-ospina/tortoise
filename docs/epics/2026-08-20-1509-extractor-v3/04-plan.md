@@ -171,6 +171,12 @@ landing in the same wave):
 - **Integrity readouts:** `integrity.truncated_valid_qids` (warning-only,
   D7) + census equality (`n_ingest_errors == sum(error_classes)`;
   `integrity.error_census == Σ per-question classes`, D9).
+- **S4 re-emit-tax census (#2408):** the closing run records the per-stage
+  S2/S4 output-token ratio columns from `integrity.s4_reemit` — `r_b`
+  (overall + excluding escalation-recovered), `unchanged_share`,
+  `redundant_s4_tokens_total` — DIAGNOSTIC-only (never a gate limb; the
+  #1789 delta-contract revive gate reads the census #2408 output, not this
+  run). The parse-family census above is NOT re-added here.
 
 ## 8. Coherence Review + Risk Analysis
 
