@@ -13,7 +13,7 @@ import math
 import random
 
 from .quadrature import tilted_moments, moments_to_beta, phi_nand, phi_impl
-from .live import _live_only
+from .live import _live_only, TERMINAL_EXCLUDED_STATUSES
 
 logger = logging.getLogger(__name__)
 
@@ -760,32 +760,22 @@ class TortoiseEP:
                     # (1) operator-mediated bridges — operator detection and
                     # draft filters match _live_neighbors (#780: draft
                     # operators never bridge, draft targets never admitted;
-                    # include_draft=True keeps proj._neighbors' legacy
-                    # {is_operator:true}-only bridge detection), and
+                    # the include_draft hatch re-includes drafts — and the
+                    # operator-detection predicate is IDENTICAL to
+                    # _live_neighbors' under both modes so legacy
+                    # op_type-only operators bridge consistently at every
+                    # hop), and
                     # (2) operator-less direct edges (#888 W5) with the same
                     # live-endpoint filters.
-                    if include_draft:
-                        # Escape hatch (#780): drafts ARE allowed to bridge —
-                        # but terminal points never are (#2422): the hatch
-                        # re-includes drafts only, never the dead.
-                        nbr_rows = self.g.query(
-                            "MATCH (n:Point)-[r]-(op:Point {is_operator:true})-[r2]-(m:Point) "
-                            "WHERE n.id IN $ids AND m.id <> n.id "
-                            f"AND {_live_only('op.status', include_draft)} "
-                            f"AND {_live_only('m.status', include_draft)} "
-                            "RETURN DISTINCT n.id, m.id",
-                            params={"ids": list(frontier)},
-                        ).result_set
-                    else:
-                        nbr_rows = self.g.query(
-                            "MATCH (n:Point)-[r]-(op:Point)-[r2]-(m:Point) "
-                            "WHERE n.id IN $ids AND m.id <> n.id "
-                            "AND (op.is_operator = true OR op.op_type IS NOT NULL) "
-                            f"AND {_live_only('op.status', include_draft)} "
-                            f"AND {_live_only('m.status', include_draft)} "
-                            "RETURN DISTINCT n.id, m.id",
-                            params={"ids": list(frontier)},
-                        ).result_set
+                    nbr_rows = self.g.query(
+                        "MATCH (n:Point)-[r]-(op:Point)-[r2]-(m:Point) "
+                        "WHERE n.id IN $ids AND m.id <> n.id "
+                        "AND (op.is_operator = true OR op.op_type IS NOT NULL) "
+                        f"AND {_live_only('op.status', include_draft)} "
+                        f"AND {_live_only('m.status', include_draft)} "
+                        "RETURN DISTINCT n.id, m.id",
+                        params={"ids": list(frontier)},
+                    ).result_set
                     for _nid, mid in nbr_rows:
                         if mid not in affected:
                             affected.add(mid)
@@ -1036,13 +1026,16 @@ class TortoiseEP:
         ).result_set
         for op_id, claim_id, idx, status, outdated in rows:
             op_inputs[op_id].append(claim_id)
-            # Participation is UNCONDITIONAL on status (#2422): a retracted /
-            # superseded / archived input (or the legacy outdated=true flag
-            # that invalidate_point writes without touching status) is DEAD
-            # for EP and NEVER participates — include_draft=True re-includes
-            # DRAFTS only (the #780 escape hatch), never terminal points. A
-            # None status = legacy live node. Mirror of _live_only.
-            is_terminal = (status not in (None, "live", "draft")) or bool(outdated)
+            # Participation is UNCONDITIONAL on status (#2422): a terminal
+            # input (retracted / superseded / outdated / archived /
+            # deprecated status — the SAME vocabulary as the Cypher
+            # predicate, derived from TERMINAL_EXCLUDED_STATUSES so the two
+            # cannot drift) or the legacy outdated=true flag (which
+            # invalidate_point writes without touching status) is DEAD for EP
+            # and NEVER participates — include_draft=True re-includes DRAFTS
+            # only (the #780 escape hatch), never terminal points. A None
+            # status = legacy live node.
+            is_terminal = status in TERMINAL_EXCLUDED_STATUSES or bool(outdated)
             participates = not is_terminal and (status != "draft" or include_draft)
             op_input_live[op_id].append(participates)
             op_input_status[op_id].append(status)

@@ -25,11 +25,13 @@ from __future__ import annotations
 
 # Terminal statuses — a Point in any of these is dead for EP factor
 # extraction (ontology §5: retracted/superseded are terminal; outdated is the
-# legacy flag-status supersede/invalidate write; archived is reserved).
-# Mirrors the read-surface vocabulary (search_engine.TERMINAL_EXCLUDED_STATUSES
-# minus 'deprecated', which no Point write path stores).
+# legacy flag-status supersede/invalidate write; archived is reserved;
+# deprecated is written by legacy/assessment paths and already excluded from
+# every read surface — search_engine + recall_state — so EP must not let it
+# vote either). Mirrors the read-surface vocabulary
+# (search_engine.TERMINAL_EXCLUDED_STATUSES).
 TERMINAL_EXCLUDED_STATUSES = frozenset(
-    {"retracted", "superseded", "outdated", "archived"})
+    {"retracted", "superseded", "outdated", "archived", "deprecated"})
 
 
 def _terminal_excluded(clause: str) -> str:

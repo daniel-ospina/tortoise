@@ -234,3 +234,133 @@ def test_include_draft_hatch_does_not_resurrect_terminal_ghost(sdk, tmp_path):
         "include_draft=True must not resurrect the retracted ghost: "
         f"C={c_mean} (live was {live_mean})"
     )
+
+
+# ── #2422 review-fix regressions ─────────────────────────────────────
+
+def test_supersede_into_draft_successor_no_ghost(sdk, tmp_path):
+    """Review P1 (#2422): superseding into a DRAFT successor is legal, but it
+    makes the operator degenerate (draft excluded) — its stale sibling message
+    (op1→B) kept voting pre-fix (C stayed 0.5503). invalidate_factor_messages
+    on supersede must kill it."""
+    ids = build_chain(sdk)
+    run_ep(sdk, [ids["op1"], ids["op2"]])
+    live_mean = posterior_mean(sdk, ids["c"])
+    assert live_mean > 0.51
+
+    # Supersede A into a draft (never-promoted) successor.
+    succ = sdk.create_point("statement", "draft successor")["id"]  # draft
+    assert sdk.get_point(succ)["status"] == "draft"
+    sdk.supersede_point(ids["a"], succ)
+    run_ep(sdk, [ids["op1"], ids["op2"]])
+    c_mean = posterior_mean(sdk, ids["c"])
+    assert c_mean <= 0.505, (
+        "supersede into a draft successor must not leave the ghost voting: "
+        f"C={c_mean} (live was {live_mean})"
+    )
+
+
+def test_deprecated_status_claim_excluded_from_factors(sdk, tmp_path):
+    """Review P2 (#2422): 'deprecated' is written by legacy/assessment paths
+    and excluded from every read surface (search_engine/recall_state) — EP
+    must not let it vote either. The Python mirror in _affected_factors must
+    derive from the SAME TERMINAL_EXCLUDED_STATUSES set as the Cypher
+    predicate (pre-fix the mirror treated any out-of-vocabulary status as
+    terminal while the Cypher predicate admitted deprecated → the claim
+    voted through Cypher paths but was stripped in Python — a within-run
+    inconsistency)."""
+    ids = build_chain(sdk)
+
+    # Set A's status to deprecated directly (no SDK write path for it).
+    sdk._get_proj().g.query(
+        "MATCH (n:Point {id:$id}) SET n.status = 'deprecated'",
+        params={"id": ids["a"]},
+    )
+    assert sdk.get_point(ids["a"])["status"] == "deprecated"
+    ep = sdk._get_ep()
+    affected = ep._affected_claims([ids["b"]], include_draft=False)
+    factors = ep._affected_factors(affected, include_draft=False)
+    for f in factors:
+        if f[0] == ids["op1"]:
+            assert ids["a"] not in f[2], (
+                "deprecated input must be stripped from the operator's "
+                "input_ids (Python mirror == Cypher vocabulary)"
+            )
+    # The Cypher-side _live_only predicate must exclude deprecated too.
+    proj = sdk._get_proj()
+    rows = proj.g.query(
+        "MATCH (n:Point {id:$id}) WHERE "
+        "n.status IS NULL OR n.status <> 'draft' AND "
+        "(n.status IS NULL OR (n.status <> 'retracted' AND n.status <> 'superseded' "
+        " AND n.status <> 'outdated' AND n.status <> 'archived' "
+        " AND n.status <> 'deprecated')) AND coalesce(n.outdated,false)=false "
+        "RETURN n.id",
+        params={"id": ids["a"]},
+    ).result_set
+    assert not rows, (
+        "_live_only Cypher predicate must exclude a deprecated-status claim"
+    )
+
+
+def test_retract_does_not_strand_terminal_dirty_root(sdk, tmp_path):
+    """Review P2 (#2422): a terminal point can never enter an EP affected
+    set, so marking it ep_dirty strands the flag forever (pins auto-dream to
+    'local', accumulates dirty flags). _mark_dirty must exclude terminal
+    points from the persisted dirty set."""
+    ids = build_chain(sdk)
+    sdk.retract_point(ids["a"])
+    dirty = sdk._get_proj().g.query(
+        "MATCH (n:Point) WHERE n.ep_dirty = true AND n.id = $id RETURN count(n)",
+        params={"id": ids["a"]},
+    ).result_set
+    assert int(dirty[0][0]) == 0, (
+        "retracted claim must not be ep_dirty (terminal roots are never "
+        "swept — #2422 review)"
+    )
+    # Its LIVE reverse-BFS neighbor B must still be dirty (recompute needed).
+    b_dirty = sdk._get_proj().g.query(
+        "MATCH (n:Point) WHERE n.ep_dirty = true AND n.id = $id RETURN count(n)",
+        params={"id": ids["b"]},
+    ).result_set
+    assert int(b_dirty[0][0]) == 1, (
+        "the retracted claim's live neighbor must remain dirty for recompute"
+    )
+    # Hydration must not resurrect the terminal root.
+    sdk._dirty_roots = set()
+    sdk._hydrate_dirty_roots()
+    assert ids["a"] not in sdk._dirty_roots
+
+
+# ── SVBP / analyze extraction families (review P2 test-gap) ─────────
+
+def test_svbp_factors_exclude_retracted_input(sdk, tmp_path):
+    """Review P2: extract_svbp_factors (projection/__init__.py — the graph-
+    wide SVBP path) independently had the retracted/outdated leak pre-fix.
+    Assert it now excludes a retracted claim's operator."""
+    ids = build_chain(sdk)
+    sdk.retract_point(ids["a"])
+    proj = sdk._get_proj()
+    factors = proj.extract_svbp_factors()
+    for f in factors:
+        # factor tuple shape: (op_id, rel, [input...], weight, ...)
+        input_ids = f[2] if len(f) > 2 else []
+        assert ids["a"] not in input_ids, (
+            "extract_svbp_factors must exclude a retracted input (#2422)"
+        )
+
+
+def test_stale_first_claims_exclude_terminal(sdk, tmp_path):
+    """Review P2: analyze._stale_first_claims previously returned terminal
+    claims (its stale-first dirty window feeds dreaming). Assert a retracted
+    claim is not returned."""
+    ids = build_chain(sdk)
+    sdk.retract_point(ids["a"])
+    from tortoise.analyze import _stale_first_claims
+    stale = _stale_first_claims(sdk._get_proj())
+    assert ids["a"] not in stale, (
+        "a retracted claim must never enter the stale-first dream window "
+        "(it can never be swept — #2422)"
+    )
+    assert ids["b"] in stale, (
+        "the retracted claim's LIVE neighbor stays in the stale window"
+    )
