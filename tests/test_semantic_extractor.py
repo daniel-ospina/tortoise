@@ -180,9 +180,10 @@ def test_semantic_stage_mock():
 def test_projection_subject_object():
     """add_subject/add_object emit events to the log.
 
-    Projection's apply() only handles PointAdded/OperatorAdded/etc —
-    SubjectAdded/ObjectRegistered events are logged but not materialized
-    as graph nodes. This test verifies the log events exist.
+    Projection's apply() handles the entity events (SubjectAdded →
+    _upsert_subject, ObjectRegistered → _upsert_object); this test's API
+    builds no projection, so the events are logged but not materialized.
+    This test verifies the log events exist.
     """
     import tempfile, os  # noqa: E401, I001
     from tortoise.projection import FalkorProjection

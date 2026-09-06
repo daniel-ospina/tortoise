@@ -1474,7 +1474,7 @@ class TortoiseSDK:
         namespace: Optional namespace for graph-name isolation.
         event_log_path: Optional path to JSONL event log. When set, SDK write
             paths append events so rebuild_all can restore SDK-created points
-            (#548), Events (#2061), and Objects (#2194).
+            (#548), Events (#2061), Objects (#2194), and Subjects (#2295).
             If None, no events are emitted (backward-compatible).
 
     Precedence: an explicitly-provided db_path wins over the TORTOISE_DB_URI
@@ -14463,7 +14463,10 @@ class TortoiseSDK:
         (FalkorDB); SDK-created Events additionally journal EventRecorded
         via ``_emit_event`` (#2061); SDK-created Objects journal
         ``ObjectRegistered`` on first canonical registration (probe-gated,
-        #2194 — a canonical re-mention never double-journals).
+        #2194 — a canonical re-mention never double-journals); SDK-created
+        Subjects journal ``SubjectAdded`` the same way (probe-gated, #2295 —
+        the #2296 durability audit tracks the remaining Document/Source
+        surfaces).
 
         ``_skip_sanitize=True`` (epic #900 T3, create_source's sanctioned
         source_path route): the caller has already extracted the server-
