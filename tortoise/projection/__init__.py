@@ -120,7 +120,7 @@ class _GuardedGraph:
         return getattr(self._g, name)
 
 from tortoise.config import RELATIVE_PATH_ERROR, SUPPORTED_URI_SCHEMES, LOOPBACK_HOSTS  # noqa: E402, I001
-from tortoise.live import _live_only  # noqa: E402
+from tortoise.live import _live_only, _terminal_excluded  # noqa: E402
 from tortoise.embedded_lifecycle import (  # noqa: E402
     atexit_fast_close,  # #1371: registers the batch flush
     register_atexit_close,
@@ -2164,18 +2164,23 @@ class FalkorProjection(
 
         With include_draft=False (default, #780): draft operators and draft
         claim inputs are excluded — the shared live-only filter applied at
-        ALL four factor-extraction call sites.
+        ALL four factor-extraction call sites. Terminal points are excluded
+        UNCONDITIONALLY (#2422): ``_live_only`` returns the terminal-exclusion
+        fragment even under the include_draft escape hatch, so drafts are
+        re-included but retracted/superseded/outdated/archived points (and
+        the ``outdated=true`` flag) never feed SVBP factors.
         """
         # Query 1: all operator IDs and types (single query, O(1) round-trip).
-        # #689: retracted operators never feed EP factors.
+        # #689/#2422: terminal operators never feed EP factors (retracted /
+        # superseded / outdated flag).
         # #780: draft operators never feed EP factors (unless opted in).
         # Shared predicate from tortoise/live.py — one definition of the
         # live-only rule across all four factor-extraction call sites.
-        draft_o = f"AND {_live_only('o.status', include_draft)}" if not include_draft else ""
-        draft_c = f"AND {_live_only('c.status', include_draft)}" if not include_draft else ""
+        draft_o = f"AND {_live_only('o.status', include_draft)}"
+        draft_c = f"AND {_live_only('c.status', include_draft)}"
         op_rows = self.g.query(
             "MATCH (o:Point) WHERE o.is_operator = true "
-            "AND (o.status IS NULL OR o.status <> 'retracted') "
+            f"AND {_terminal_excluded('o.status')} "
             f"{draft_o} "
             "RETURN o.id, o.op_type"
         ).result_set
@@ -2189,7 +2194,7 @@ class FalkorProjection(
         input_rows = self.g.query(
             "MATCH (o:Point)-[r:IMPL|NAND]->(c:Point) "
             "WHERE o.is_operator = true "
-            "AND (c.status IS NULL OR c.status <> 'retracted') "
+            f"AND {_terminal_excluded('c.status')} "
             f"{draft_c} {draft_o} "
             "RETURN o.id, c.id "
             "ORDER BY o.id, c.id"

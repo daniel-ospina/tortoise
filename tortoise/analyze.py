@@ -403,11 +403,11 @@ directions ALWAYS; IMPL edges traversed both directions ONLY when the
     visited: set[str] = set(anchors)
     rel_types = set(rel_filter.split("|"))
 
-    live_op = f"AND {_live_only('op.status', include_draft)}" if not include_draft else ""
-    live_t = f"AND {_live_only('target.status', include_draft)}" if not include_draft else ""
-    live_p = f"AND {_live_only('p.status', include_draft)}" if not include_draft else ""
-    live_b = f"AND {_live_only('b.status', include_draft)}" if not include_draft else ""
-    live_a = f"AND {_live_only('a.status', include_draft)}" if not include_draft else ""
+    live_op = f"AND {_live_only('op.status', include_draft)}"
+    live_t = f"AND {_live_only('target.status', include_draft)}"
+    live_p = f"AND {_live_only('p.status', include_draft)}"
+    live_b = f"AND {_live_only('b.status', include_draft)}"
+    live_a = f"AND {_live_only('a.status', include_draft)}"
 
     # derived-liveness (GATE-2 Q3): operator participates IFF >=2 of its
     # connected points (IMPL|NAND neighbors, both directions) are live.
@@ -420,13 +420,16 @@ directions ALWAYS; IMPL edges traversed both directions ONLY when the
 
         GATE-2 Q3 derived-liveness: an operator participates in EP iff >=2 of
         its connected points (IMPL|NAND neighbors, both directions) are live.
-        "Live" matches the shared #780 ``_live_only`` semantics (live.py):
-        ``status IS NULL OR status <> 'draft'`` — legacy pre-#780 nodes
-        without a stored status are LIVE (the entity write path defaults
+        "Live" matches the shared #780/#2422 ``_live_only`` semantics
+        (live.py): ``status IS NULL OR status <> 'draft'`` AND NOT terminal
+        (retracted/superseded/outdated/archived status or the
+        ``outdated=true`` flag) — legacy pre-#780 nodes without a stored
+        status are LIVE (the entity write path defaults
         ``coalesce($st, n.status, 'live')``). The predicate is UNCONDITIONAL
-        (draft endpoints never count toward the >=2, even under the
-        include_draft escape hatch — the E2E-13.1 1-live/1-draft boundary
-        pins the operator INERT).
+        (draft AND terminal endpoints never count toward the >=2, even under
+        the include_draft escape hatch — the E2E-13.1 1-live/1-draft
+        boundary pins the operator INERT; #2422 extends the same exclusion
+        to terminal endpoints).
         """
         if not ids:
             return set()
@@ -434,7 +437,7 @@ directions ALWAYS; IMPL edges traversed both directions ONLY when the
             "MATCH (op:Point {is_operator:true})-[:IMPL|NAND]-(t:Point) "
             "WHERE op.id IN $ids "
             "AND (t.is_operator = false AND t.op_type IS NULL) "
-            "AND (t.status IS NULL OR t.status <> 'draft') "
+            f"AND {_live_only('t.status')} "
             "WITH op, count(DISTINCT t) AS live_conn "
             "WHERE live_conn >= 2 "
             "RETURN op.id",
@@ -613,7 +616,7 @@ def _stale_first_claims(proj, limit: int | None = None) -> list[str]:
     base = (
         "MATCH (n:Point) "
         "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
-        "AND (n.status IS NULL OR n.status <> 'draft') "
+        f"AND {_live_only('n.status')} "
         "WITH n, coalesce(n.lastDreamedAt, '') AS _freshness "
         "ORDER BY _freshness ASC, n.id ASC "
         "RETURN n.id"
@@ -635,7 +638,7 @@ def _stale_first_count_stamped(proj) -> int:
     rows = proj.g.query(
         "MATCH (n:Point) "
         "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
-        "AND (n.status IS NULL OR n.status <> 'draft') "
+        f"AND {_live_only('n.status')} "
         "AND n.lastDreamedAt IS NOT NULL "
         "RETURN count(n)"
     ).result_set

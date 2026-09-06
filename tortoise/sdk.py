@@ -3800,6 +3800,12 @@ class TortoiseSDK:
         # both endpoints' edges (a transfer is not a new/deleted edge; the
         # C4 topology hooks don't fire here).
         self._get_ep().invalidate_messages([id, corrected_by_id])
+        # #2422 (ghost-vote leg): the invalidated (outdated=true) claim's
+        # operators may go DEGENERATE (skipped as factors — never re-run to
+        # zero their sibling-edge messages), so drop every operator-connected
+        # edge's message too (op1→B carries the dead claim's influence into B
+        # on an edge that does not touch the dead claim).
+        self._get_ep().invalidate_factor_messages([id])
         return {"invalidated": True, "id": id, "corrected_by": corrected_by_id}
 
     # ── Supersede / Invalidate consolidation (epic #888 W2) ───────────
@@ -4194,6 +4200,24 @@ class TortoiseSDK:
         if not r.result_set:
             raise ValueError(
                 f"Point {id!r} is already terminal — retraction is terminal")
+        # #2422: retraction changes the propagation graph — the retracted
+        # claim must stop voting, so its neighborhood must be recomputed.
+        # (supersede_point / invalidate_point already mark dirty; retraction
+        # was the missing write surface — without it, EP posteriors that the
+        # retracted claim supported stayed stale.)
+        self._mark_dirty([id])
+        # #2422 (stale-message leg): drop the retracted claim's persisted
+        # edge messages — a terminal claim's ghost must not vote. Without
+        # this, warm-start seeds reuse the pre-retraction messages on the
+        # dead claim's IMPL|NAND edges: the claim's operator factor is
+        # excluded (degenerate) and never re-runs to zero them, but
+        # _update_claim_posterior still consumes the stale message on the
+        # neighbor side (the 0.5503 ghost in the E2E repro).
+        # invalidate_point already drops messages via invalidate_messages;
+        # retraction was the missing surface. BOTH the claim's own edges AND
+        # its operators' sibling edges carry its influence — drop both.
+        self._get_ep().invalidate_messages([id])
+        self._get_ep().invalidate_factor_messages([id])
         return r.result_set[0][0]  # updated node props (no trailing get_point round trip)
 
     # ── Promotion (Phase-4 EP-safe lifecycle, #785) ────────────────

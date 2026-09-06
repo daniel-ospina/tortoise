@@ -765,9 +765,14 @@ class TortoiseEP:
                     # (2) operator-less direct edges (#888 W5) with the same
                     # live-endpoint filters.
                     if include_draft:
+                        # Escape hatch (#780): drafts ARE allowed to bridge —
+                        # but terminal points never are (#2422): the hatch
+                        # re-includes drafts only, never the dead.
                         nbr_rows = self.g.query(
                             "MATCH (n:Point)-[r]-(op:Point {is_operator:true})-[r2]-(m:Point) "
                             "WHERE n.id IN $ids AND m.id <> n.id "
+                            f"AND {_live_only('op.status', include_draft)} "
+                            f"AND {_live_only('m.status', include_draft)} "
                             "RETURN DISTINCT n.id, m.id",
                             params={"ids": list(frontier)},
                         ).result_set
@@ -776,8 +781,8 @@ class TortoiseEP:
                             "MATCH (n:Point)-[r]-(op:Point)-[r2]-(m:Point) "
                             "WHERE n.id IN $ids AND m.id <> n.id "
                             "AND (op.is_operator = true OR op.op_type IS NOT NULL) "
-                            "AND (op.status IS NULL OR op.status <> 'draft') "
-                            "AND (m.status IS NULL OR m.status <> 'draft') "
+                            f"AND {_live_only('op.status', include_draft)} "
+                            f"AND {_live_only('m.status', include_draft)} "
                             "RETURN DISTINCT n.id, m.id",
                             params={"ids": list(frontier)},
                         ).result_set
@@ -881,7 +886,21 @@ class TortoiseEP:
         expansion must not reach live claims via a draft bridge.
         """
         if include_draft:
-            return self.proj._neighbors(node_id)
+            # Escape hatch (#780): drafts ARE allowed as bridge endpoints —
+            # but terminal points never are (#2422). ``_live_only`` with
+            # include_draft=True returns the terminal-exclusion fragment only,
+            # so drafts pass while retracted/superseded/outdated/archived
+            # nodes (and the ``outdated=true`` flag) stay excluded.
+            rows = self.g.query(
+                "MATCH (n:Point {id:$id})-[r]-(op:Point)-[r2]-(m:Point) "
+                "WHERE m.id <> $id "
+                "AND (op.is_operator = true OR op.op_type IS NOT NULL) "
+                f"AND {_live_only('op.status', include_draft)} "
+                f"AND {_live_only('m.status', include_draft)} "
+                "RETURN DISTINCT m.id",
+                params={"id": node_id},
+            ).result_set
+            return [r[0] for r in rows]
         # Operator detection matches Batch 1 (_affected_factors): a Point is
         # an operator when is_operator=true OR op_type is set (legacy nodes —
         # projection/__init__.py treats bool(is_operator or op_type) as
@@ -891,8 +910,8 @@ class TortoiseEP:
             "MATCH (n:Point {id:$id})-[r]-(op:Point)-[r2]-(m:Point) "
             "WHERE m.id <> $id "
             "AND (op.is_operator = true OR op.op_type IS NOT NULL) "
-            "AND (op.status IS NULL OR op.status <> 'draft') "
-            "AND (m.status IS NULL OR m.status <> 'draft') "
+            f"AND {_live_only('op.status', include_draft)} "
+            f"AND {_live_only('m.status', include_draft)} "
             "RETURN DISTINCT m.id",
             params={"id": node_id},
         ).result_set
@@ -1011,15 +1030,21 @@ class TortoiseEP:
         rows = self.g.query(
             "MATCH (o:Point)-[r:IMPL|NAND]->(c:Point) "
             "WHERE o.id IN $ids "
-            "RETURN o.id, c.id, r.idx, c.status "
+            "RETURN o.id, c.id, r.idx, c.status, coalesce(c.outdated, false) "
             "ORDER BY coalesce(r.idx, 0), c.id",
             params={"ids": list(op_info.keys())},
         ).result_set
-        for op_id, claim_id, idx, status in rows:
+        for op_id, claim_id, idx, status, outdated in rows:
             op_inputs[op_id].append(claim_id)
-            op_input_live[op_id].append(
-                include_draft or status is None or status != "draft"
-            )
+            # Participation is UNCONDITIONAL on status (#2422): a retracted /
+            # superseded / archived input (or the legacy outdated=true flag
+            # that invalidate_point writes without touching status) is DEAD
+            # for EP and NEVER participates — include_draft=True re-includes
+            # DRAFTS only (the #780 escape hatch), never terminal points. A
+            # None status = legacy live node. Mirror of _live_only.
+            is_terminal = (status not in (None, "live", "draft")) or bool(outdated)
+            participates = not is_terminal and (status != "draft" or include_draft)
+            op_input_live[op_id].append(participates)
             op_input_status[op_id].append(status)
             if idx is None:
                 op_idx_known[op_id] = False
@@ -1035,44 +1060,46 @@ class TortoiseEP:
                     op_id,
                 )
             full_inputs = op_inputs.get(op_id, [])
-            if not include_draft:
-                input_ids = [
-                    cid for cid, live in zip(full_inputs, op_input_live[op_id])  # noqa: B905
-                    if live
-                ]
-                stripped = len(full_inputs) - len(input_ids)
-                if stripped:
-                    if (direction != "bidirectional"
-                            and op_idx_known[op_id]
-                            and full_inputs
-                            and not op_input_live[op_id][0]):
-                        # The idx-0 SOURCE was a draft — keeping this factor
-                        # would renumber a live target into the source slot
-                        # and invert directional semantics (#780 review-fix).
-                        logger.warning(
-                            "Operator %s: draft source stripped — factor skipped "
-                            "(non-bidirectional with draft source, #780)",
-                            op_id,
-                        )
-                        continue
-                    if len(input_ids) < 2 <= len(full_inputs):
-                        # Draft-caused degradation below 2 live inputs — a
-                        # draft-connected operator must change NO live
-                        # posterior (#780); matches the SVBP-path convention.
-                        # Name the operator + every input's status so the
-                        # silent zero-confidence is traceable (#992).
-                        logger.warning(
-                            "Operator %s: %d/%d inputs draft — factor skipped "
-                            "(degenerate, #780). Inputs: [%s]",
-                            op_id, stripped, len(full_inputs),
-                            ", ".join(
-                                f"{cid.split('-')[-1]}={s or 'live'}"
-                                for cid, s in zip(full_inputs, op_input_status[op_id])  # noqa: B905
-                            ),
-                        )
-                        continue
-            else:
-                input_ids = full_inputs
+            # Always filter to participating inputs. Drafts are stripped only
+            # under the default (include_draft=False, #780); terminal inputs
+            # are stripped under BOTH modes (#2422 — a terminal claim's ghost
+            # must not vote even on the include_draft escape-hatch path).
+            input_ids = [
+                cid for cid, live in zip(full_inputs, op_input_live[op_id])  # noqa: B905
+                if live
+            ]
+            stripped = len(full_inputs) - len(input_ids)
+            if stripped:
+                if (direction != "bidirectional"
+                        and op_idx_known[op_id]
+                        and full_inputs
+                        and not op_input_live[op_id][0]):
+                    # The idx-0 SOURCE was stripped (a draft under the
+                    # default, or a terminal point under either mode) —
+                    # keeping this factor would renumber a live target into
+                    # the source slot and invert directional semantics
+                    # (#780 review-fix; #2422 extends to terminal sources).
+                    logger.warning(
+                        "Operator %s: source stripped — factor skipped "
+                        "(non-bidirectional with stripped source, #780/#2422)",
+                        op_id,
+                    )
+                    continue
+                if len(input_ids) < 2 <= len(full_inputs):
+                    # Degradation below 2 participating inputs — the factor
+                    # must change NO live posterior (#780); matches the SVBP-
+                    # path convention. Name every input's status so the
+                    # silent zero-confidence is traceable (#992).
+                    logger.warning(
+                        "Operator %s: %d/%d inputs stripped — factor skipped "
+                        "(degenerate, #780/#2422). Inputs: [%s]",
+                        op_id, stripped, len(full_inputs),
+                        ", ".join(
+                            f"{cid.split('-')[-1]}={s or 'live'}"
+                            for cid, s in zip(full_inputs, op_input_status[op_id])  # noqa: B905
+                        ),
+                    )
+                    continue
             weight = compute_operator_weight(self.proj, op_id)
             factors.append((op_id, op_type, input_ids, weight, label, direction))
         return factors
@@ -1167,6 +1194,38 @@ class TortoiseEP:
         rows = self.g.query(
             "MATCH (p:Point)-[r:IMPL|NAND]-() "
             "WHERE p.id IN $ids "
+            "REMOVE r.msg_alpha, r.msg_beta, "
+            "       r.back_msg_alpha, r.back_msg_beta "
+            "RETURN count(DISTINCT r)",
+            params={"ids": list(point_ids)},
+        ).result_set
+        return int(rows[0][0]) if rows else 0
+
+    def invalidate_factor_messages(self, point_ids: list[str]) -> int:
+        """Drop messages on ALL edges of every operator connected to a point.
+
+        #2422: terminalization (retract / invalidate / supersede) must kill the
+        dead claim's GHOST votes. ``invalidate_messages`` drops only edges
+        touching the point — but a claim's influence reaches its neighbors
+        through its operators' SIBLING edges (op1→B carries A's message into
+        B; the edge does not touch A). After A is terminal, op1 is degenerate
+        (skipped as a factor) so it never re-runs to zero op1→B — yet
+        _update_claim_posterior consumes the stale persisted message and B
+        stays boosted (the 0.5503 ghost in the #2422 E2E repro). Dropping
+        every operator-connected edge's message makes warm-start recompute the
+        whole neighborhood instead of reusing seeds computed under the dead
+        claim's factor context.
+
+        Returns the number of edges whose messages were dropped.
+        """
+        if not point_ids:
+            return 0
+        rows = self.g.query(
+            "MATCH (op:Point)-[conn:IMPL|NAND]->(p:Point) "
+            "WHERE p.id IN $ids "
+            "AND (op.is_operator = true OR op.op_type IS NOT NULL) "
+            "WITH DISTINCT op "
+            "MATCH (op)-[r:IMPL|NAND]->(x:Point) "
             "REMOVE r.msg_alpha, r.msg_beta, "
             "       r.back_msg_alpha, r.back_msg_beta "
             "RETURN count(DISTINCT r)",
