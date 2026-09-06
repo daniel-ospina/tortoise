@@ -256,6 +256,8 @@ codex mcp add tortoise --url ${MCP_URL} --bearer-token-env-var TORTOISE_API_KEY
 
 ${SKILL_INSTALL('codex')}
 
+# Run from your project root — the installer writes skills to .agents/skills
+# here (Codex's project skill root) and AGENTS.md for this repo.
 # Then tell your agent: "Set up Tortoise" — it verifies with tortoise_health
 # and reports the harness-connected checkpoint.
 # First-time calls may prompt for approval in Codex — tortoise_health and the
@@ -284,17 +286,21 @@ bearer_token_env_var = "TORTOISE_API_KEY"
 # not read your shell profile. Pick ONE:
 #   macOS:    launchctl setenv TORTOISE_API_KEY ${key}   (then fully quit +
 #             reopen Codex Desktop; lasts until logout)
-#   Windows:  setx TORTOISE_API_KEY ${key}   (System env; relaunch Codex)
-# No shell available at all? Put the key in the config directly instead
-# (private file — chmod 600, never commit it):
-#   [mcp_servers.tortoise]
-#   url = "${MCP_URL}"
+#   Windows:  setx TORTOISE_API_KEY ${key}   (sets your user environment;
+#             relaunch Codex Desktop)
+# No shell available at all? Then don't use the env var — REPLACE the
+# bearer_token_env_var line above with a literal header (private file —
+# chmod 600, never commit it). Keep ONE key line, never both:
 #   http_headers = { Authorization = "Bearer ${key}" }
+# (Settings → Integrations → MCP servers can also add Tortoise, but stores
+# the token literally — the env-var form above is preferred.)
 
 # Skills: Codex loads skills from .agents/skills in the project folder you
 # have open (not .codex/skills). Run this once from any terminal (or ask
 # your agent to run it inside the project):
 #   curl -fsSL ${SKILLS_INSTALL_URL} | bash -s -- --harness codex
+# Restart Codex Desktop (or start a new session) after the skills install so
+# the new skills appear.
 
 # Then say "Set up Tortoise" in Codex Desktop — it verifies with
 # tortoise_health and reports the checkpoint. First-time MCP calls may prompt

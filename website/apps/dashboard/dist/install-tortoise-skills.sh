@@ -31,7 +31,8 @@ Usage: install-tortoise-skills.sh --harness claude|codex|cursor|pi
 Installs the official Tortoise skills into the harness's skills directory:
   claude -> .claude/skills    (project)
   codex  -> .agents/skills    (project)  — Codex's documented skill root (#2329);
-                                       also scanned at ~/.agents/skills (personal)
+                                       (Codex also scans ~/.agents/skills — this
+                                       installer writes the project root only)
   cursor -> .cursor/skills   (project)
   pi     -> ~/.pi/agent/skills (personal)
 
@@ -88,41 +89,50 @@ emit_codex_agents_block() {
   local file="AGENTS.md"
   local ms="<!-- tortoise:start -->"
   local me="<!-- tortoise:end -->"
-  local tmpdir block pre post
+  local tmpdir block pre post target
   tmpdir="$(mktemp -d)" || return 1
   block="$tmpdir/block"; pre="$tmpdir/pre"; post="$tmpdir/post"
+  # Resolve a symlinked AGENTS.md (monorepos point AGENTS.md at a shared
+  # file) — refresh the TARGET, never clobber the link.
+  target="$file"
+  [ -L "$file" ] && target="$(readlink "$file")"
   printf '%s\n' \
 "${ms}
 # Tortoise — agent memory (this project is connected to Tortoise Cloud)
-- Tortoise is an epistemic memory graph. You have its MCP tools (tortoise_search,
-  tortoise_query, tortoise_health, plus graph-write tools) AND these skills
-  (how-to-use-tortoise, tortoise-decide, tortoise-file-finding, tortoise-onboarding).
-- When the user says \\"Set up Tortoise\\", run the tortoise-onboarding flow and verify
-  with tortoise_health before reporting done.
-- Use the graph without being asked to: after a decision or a research finding, file
-  it (tortoise-file-finding / tortoise-decide handle the mechanics). Search the graph
+- If the Tortoise MCP tools are available in this session (search/query/health +
+  graph-write tools) and these skills (how-to-use-tortoise, tortoise-decide,
+  tortoise-file-finding, tortoise-onboarding) are installed, use the graph without
+  being asked to: after a decision or a research finding, file it; search the graph
   before answering from memory; say plainly when nothing relevant is stored.
+- When the user says \"Set up Tortoise\", run the tortoise-onboarding flow and verify
+  with tortoise_health before reporting done.
 - First-time MCP calls may prompt for approval — tortoise_health and the read tools
   are safe to allow.
 ${me}" > "$block"
-  if [ -f "$file" ]; then
-    if grep -qF "$ms" "$file" && grep -qF "$me" "$file"; then
+  if [ -f "$target" ]; then
+    if grep -qF "$ms" "$target" && grep -qF "$me" "$target"; then
       # In-place replace between the markers (idempotent refresh) — never
-      # touches content outside the marked block.
+      # touches content outside the marked block. Markers must sit on their
+      # own line (tolerating a trailing CR) so content merely mentioning the
+      # marker text is preserved.
       : > "$pre"; : > "$post"
       awk -v ms="$ms" -v me="$me" -v pre="$pre" -v post="$post" '
         BEGIN { inmarker = 0; ended = 0 }
-        index($0, ms) { inmarker = 1; next }
-        inmarker && index($0, me) { inmarker = 0; ended = 1; next }
+        $0 ~ ("^" ms "\r?$") { inmarker = 1; next }
+        inmarker && $0 ~ ("^" me "\r?$") { inmarker = 0; ended = 1; next }
         { if (ended) print > post; else if (!inmarker) print > pre }
-      ' "$file"
-      cat "$pre" "$block" "$post" > "$file.tmp" && mv "$file.tmp" "$file"
+      ' "$target"
+      # cp -p first preserves the file's mode (a 0600 AGENTS.md stays 0600)
+      # and ownership; cat then overwrites content in place.
+      cp -p "$target" "$target.tmp"
+      cat "$pre" "$block" "$post" > "$target.tmp"
+      mv "$target.tmp" "$target"
     else
-      printf '\n\n' >> "$file"
-      cat "$block" >> "$file"
+      printf '\n\n' >> "$target"
+      cat "$block" >> "$target"
     fi
   else
-    cat "$block" > "$file"
+    cat "$block" > "$target"
   fi
   rm -rf "$tmpdir"
   echo "  ✓ AGENTS.md — Tortoise standing instructions refreshed/created"

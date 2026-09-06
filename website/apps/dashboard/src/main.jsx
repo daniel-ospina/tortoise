@@ -5223,12 +5223,14 @@ function claimIntentInFlight() {
                               Web). The agent self-adjudicates its harness from
                               the tortoise-onboarding skill's table; the skill
                               install line above fetches it. */}
+                          {!['codexDesktop', 'claude-desktop', 'claude-web'].includes(wizardConnectHarness) && (
                           <p className="dim small" style={{ margin: '0.75rem 0 0', lineHeight: 1.6 }}>
                             One universal command, all 6 harnesses — your agent
                             self-adjudicates which it is and verifies the
                             connection with <code>tortoise_health</code> before
                             you continue.
                           </p>
+                          )}
                           <div className="wizard-nav">
                             <button type="button" className="ghost" onClick={() => setWizardStep(2)}>← Back</button>
                             <div className="wizard-nav-actions">
