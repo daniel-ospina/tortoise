@@ -11,8 +11,12 @@ The judge model is configured via env, never hardcoded:
 
     TORTOISE_LME_JUDGE_MODEL   judge model spec (default
                                ``openai:gpt-4o-2024-08-06`` — the official
-                               judge model)
-    OPENAI_API_KEY             (or another configured provider key)
+                               judge model). The same official model is
+                               served by OpenRouter: with only
+                               ``OPENROUTER_API_KEY`` set, use
+                               ``openrouter:openai/gpt-4o-2024-08-06``
+    OPENAI_API_KEY             direct OpenAI key (NOT required when the
+                               official model runs through OpenRouter etc.)
 
 Abstention questions (``_abs`` in question_id) use the unanswerable-template.
 
@@ -455,7 +459,13 @@ def build_judge(spec: str | None = None, *, mock: bool = False) -> Judge:
     """Build the judge from env/config. ``mock=True`` returns MockJudge.
 
     Default model: ``openai:gpt-4o-2024-08-06`` (the official judge model).
-    Fails closed when no provider key is set and mock is off.
+    That default names OpenAI as the provider, but the SAME model is served
+    by OpenRouter too — set
+    ``TORTOISE_LME_JUDGE_MODEL=openrouter:openai/gpt-4o-2024-08-06`` to run
+    the official judge through OpenRouter (the model id is what makes the
+    judge official; the transport is a routing detail — external
+    comparability is unchanged). Fails closed when no provider key is set
+    and mock is off.
     """
     if mock:
         return MockJudge()
@@ -465,9 +475,12 @@ def build_judge(spec: str | None = None, *, mock: bool = False) -> Judge:
     if resolved is None:
         raise RuntimeError(
             "no LLM provider key configured for the LongMemEval judge "
-            "(set OPENROUTER_API_KEY / DEEPSEEK_API_KEY / OPENAI_API_KEY / "
-            "GEMINI_API_KEY — the official judge is gpt-4o via OPENAI_API_KEY — "
-            "or pass --mock for the offline mock judge)")
+            "(set OPENROUTER_API_KEY / OPENAI_API_KEY / DEEPSEEK_API_KEY / "
+            "GEMINI_API_KEY). The official judge model is gpt-4o-2024-08-06; "
+            "OpenRouter serves it — with only OPENROUTER_API_KEY set, point "
+            "the spec there via "
+            "TORTOISE_LME_JUDGE_MODEL=openrouter:openai/gpt-4o-2024-08-06. "
+            "Or pass --mock for the offline mock judge.")
     _resolved_provider, base_url, key_env = resolved
     if provider is not None:
         if provider not in _PROVIDERS:
@@ -475,9 +488,13 @@ def build_judge(spec: str | None = None, *, mock: bool = False) -> Judge:
                 f"unknown provider {provider!r} in {raw_spec!r}; "
                 f"known: {sorted(_PROVIDERS)}")
         if not os.environ.get(_PROVIDERS[provider][1]):
+            hint = ("" if provider != "openai" else
+                    " — the SAME official model is served by OpenRouter; set "
+                    "TORTOISE_LME_JUDGE_MODEL=openrouter:openai/gpt-4o-2024-08-06 "
+                    "to run it with only OPENROUTER_API_KEY set")
             raise ValueError(
                 f"model spec names provider {provider!r} but its key is not "
-                f"set ({_PROVIDERS[provider][1]})")
+                f"set ({_PROVIDERS[provider][1]}){hint}")
     # Dedicated transport: the official judge call shape (no response_format,
     # no system message, max_tokens=10) — see OfficialJudgeModel.
     model = OfficialJudgeModel(
