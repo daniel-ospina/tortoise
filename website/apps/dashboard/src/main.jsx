@@ -3,7 +3,7 @@ import { createRoot } from 'react-dom/client'
 import './index.css'
 // #1623: plan display data (build-time import of product/pricing.json).
 import { planOptions, STATUS_LABELS, TIER_LABELS } from './pricing.js'
-import { HARNESS_CAPTURE_INSTALL, HARNESS_CAPTURE_REASON, HARNESS_CAPTURE_STATUS_LABEL, HARNESS_CAPTURE_SUPPORT, HARNESS_CONTINUE_LABEL, HARNESS_COPY_LABEL, HARNESS_INSTALL, HARNESS_INTRO, HARNESS_NAMES, HARNESS_ORDER, HARNESS_PERSIST, HARNESS_SKILLS, HARNESS_SKILLLESS, HARNESS_SKILLS_IN_PROMPT, HARNESS_SKILLS_IN_STEPS, HARNESS_STEPS, UNIVERSAL_COMMAND } from './harnesses.js'
+import { HARNESS_CAPTURE_INSTALL, HARNESS_CAPTURE_REASON, HARNESS_CAPTURE_STATUS_LABEL, HARNESS_CAPTURE_SUPPORT, HARNESS_CONTINUE_LABEL, HARNESS_COPY_LABEL, HARNESS_INSTALL, HARNESS_INTRO, HARNESS_NAMES, HARNESS_ORDER, HARNESS_PERSIST, HARNESS_SELF_INSTALL, HARNESS_SKILLS, HARNESS_SKILLLESS, HARNESS_SKILLS_IN_PROMPT, HARNESS_SKILLS_IN_STEPS, HARNESS_STEPS, UNIVERSAL_COMMAND } from './harnesses.js'
 // #1728 Slice 3 (Tasks 16-17): the SHARED 4-state capture-status derivation
 // (off → install-pending → waiting → active, probe-driven) — pure, node --test
 // unit-tested (captureStatus.test.js). #1927: the re-ask gate predicate was
@@ -16,7 +16,7 @@ import { setupGuide } from './setupGuide.js'
 import { overviewConnection, overviewDigest, overviewNextAction } from './overview.js'
 // #1997 (W1): the 5 human onboarding steps — pure structure + copy + fork
 // options + org-name validation, node --test unit-tested (wizardFlow.test.js).
-import { WIZARD_STEPS, WIZARD_FORK_OPTIONS, resolveBuildCatalog, orgNameError } from './wizardFlow.js'
+import { WIZARD_STEPS, WIZARD_FORK_OPTIONS, resolveBuildCatalog, orgNameError, durableKeyName } from './wizardFlow.js'
 // #1894: indexed-state + job-progress derivations — pure, node --test
 // unit-tested (memorySourcesStatus.test.js).
 import { docsIndexedLabel, formatRelativeTime, jobStatusLine } from './memorySourcesStatus.js'
@@ -300,7 +300,7 @@ function SettingsTab(props) {
           the fork-aware step-mapped resume. ── */}
       <section className="settings-home" aria-labelledby="settings-setup-guide-heading">
         <h3 id="settings-setup-guide-heading">Setup guide</h3>
-        <p className="dim small">Where your Organization is in setup — resumes exactly where it left off.</p>
+        <p className="dim small">Where your Organization is in setup — pick up from the step you're on.</p>
         <SetupGuideCard state={state} loading={loading} onResume={onResumeSetup} />
       </section>
 
@@ -764,7 +764,9 @@ function claimIntentInFlight() {
   // #1566: in-app provisioning (first-timers) — the reveal is atomic (A13),
   // so the key is displayed here and never elsewhere.
   const [welcomeProvisioning, setWelcomeProvisioning] = React.useState(false)
+  const pendingInvitesLoadedRef = React.useRef(false)  // #2361 review-r1 (Bug-1)
   const [welcomeKey, setWelcomeKey] = React.useState('')
+
   // #1591: the first-data snippet (graph-missing card) — full command with
   // the user's own key (their dashboard, their key; copy-able).
   // #2246 (ADR-010): session mode holds no apiKey — the snippet's key source
@@ -778,6 +780,12 @@ function claimIntentInFlight() {
   const [welcomeTeamName, setWelcomeTeamName] = React.useState('')
   const [welcomeGraphName, setWelcomeGraphName] = React.useState('')
   const [welcomeProvisionError, setWelcomeProvisionError] = React.useState('')
+  // #2323 (Option B): name-first first-run — the org is provisioned on the
+  // org-create step submit (never at mount). welcomeTeamReady marks the
+  // just-created org on the first-run path; sessionRef keeps the mount
+  // session so the step-1 submit can provision.
+  const [welcomeTeamReady, setWelcomeTeamReady] = React.useState(false)
+  const sessionRef = React.useRef(null)
   // #1643/#1692: the getting-started wizard (post-key steps: harness →
   // integrations → skills → seed → done). For first-timers it follows the
   // key reveal; for returning empty-graph users it re-opens at step 0
@@ -786,6 +794,10 @@ function claimIntentInFlight() {
   const setWizardStep = React.useCallback((n) => { setWizardStepRaw(n); setWizardCopied((c) => (c === 'harness' ? '' : c)) }, [])
   const [wizardHarness, setWizardHarness] = React.useState('claude')
   const [wizardCopied, setWizardCopied] = React.useState('')
+  // #2328: Codex has two surfaces — CLI (shell) and Desktop (GUI app, NO
+  // terminal, does not inherit shell exports). The connect step toggles so a
+  // Desktop user never faces an export-command they cannot run.
+  const [wizardCodexDesktop, setWizardCodexDesktop] = React.useState(false)
   const [wizardGithub, setWizardGithub] = React.useState({ connected: false, repos: null, busy: false, org: null })
   const wizardGithubPollRef = React.useRef(null)  // #1643 review P1: the status poll handle (hoisted so Cancel/unmount can stop it)
   // #1728 Slice 3: the Memory-sources surface (wizard step-1 + Overview
@@ -912,6 +924,17 @@ function claimIntentInFlight() {
   }
   const [wizardSeedDone, setWizardSeedDone] = React.useState(false)
   const [wizardSeeding, setWizardSeeding] = React.useState(false)
+  // #2361 review-r1 (Bug-1): pending invites were only fetched when the
+  // account menu opened — a resumer in welcome mode never saw an invitation
+  // on the org-create step. Fetch on welcome entry (once per session).
+  React.useEffect(() => {
+    if (welcomeMode && authed && sessionRef.current && !pendingInvitesLoadedRef.current) {
+      pendingInvitesLoadedRef.current = true
+      loadPendingInvites().catch(() => {})
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [welcomeMode, authed])
+
   // #1907: seed-step failure must surface INLINE (the global error banner
   // only renders post-welcome) — the message lives here and the retry is the
   // re-enabled 'Seed my graph' button. Cleared on every attempt.
@@ -1659,23 +1682,25 @@ function claimIntentInFlight() {
       }
       setOnboardingLoading(false)
     } catch (e) {
-      // #1847: first-timer mount race — this mount effect fires BEFORE the
-      // mount gate runs provisionInApp (which creates the team), so the GET
-      // 403s 'No team membership' and the MemorySources panel would render
-      // its error card until reload. Swallow ONLY that exact no-team 403,
-      // discriminated by ref (Round-11: status-based checks read e.status /
-      // refs, not message content): teamIdRef is provably null at swallow
-      // time for the first-timer pre-provision case (provisionInApp never
-      // sets it; the currentTeamId effect only fires post-provision), and
-      // being a ref it has no stale-closure trap (the mount effect closes
-      // over the first-render [], so teamsList.length would wrongly swallow
-      // cross-team 403s for returning users). Suspended teams return a dict
-      // detail → e.suspended is set, and a successful /v1/teams with a
-      // still-403 onboarding leaves teamIdRef set — both fall through to the
-      // normal error state (honest, retryable card) below: keeping the
-      // loading state leaves the panel in its initial state;
-      // finishWelcomeLoads() re-fires this after provisioning and is the
-      // authoritative load.
+      // #1847/#2323 (Option B): first-timer org-create race — the mount-time
+      // refreshOnboarding() fires BEFORE the org exists (a teamless first-
+      // timer is no longer provisioned at mount; the org-create step submit
+      // provisions via tenant-provision), so the GET 403s 'No team
+      // membership' and the MemorySources panel would render its error card
+      // until reload. Swallow ONLY that exact no-team 403, discriminated by
+      // ref (Round-11: status-based checks read e.status / refs, not message
+      // content): teamIdRef is provably null at swallow time for the
+      // first-timer pre-org-create case (provisionInApp never sets it; the
+      // currentTeamId effect only fires post-provision), and being a ref it
+      // has no stale-closure trap (the mount effect closes over the
+      // first-render [], so teamsList.length would wrongly swallow cross-team
+      // 403s for returning users). Suspended teams return a dict detail →
+      // e.suspended is set, and a successful /v1/teams with a still-403
+      // onboarding leaves teamIdRef set — both fall through to the normal
+      // error state (honest, retryable card) below: keeping the loading
+      // state leaves the panel in its initial state;
+      // finishWelcomeLoads() re-fires this after org-create + provisioning
+      // and is the authoritative load.
       if (e && e.status === 403 && !e.suspended && !teamIdRef.current) return
       setOnboardingLoading(false)  // best-effort — the surface renders its error state
     }
@@ -1698,7 +1723,6 @@ function claimIntentInFlight() {
   const [wizardOrgName, setWizardOrgName] = React.useState('')
   const [wizardOrgError, setWizardOrgError] = React.useState('')
   const [wizardOrgBusy, setWizardOrgBusy] = React.useState(false)
-  const [wizardOrgUpgrade, setWizardOrgUpgrade] = React.useState(false)
   const [wizardForkBusy, setWizardForkBusy] = React.useState(false)
   const [wizardForkError, setWizardForkError] = React.useState('')
   const [wizardForkChosen, setWizardForkChosen] = React.useState('')  // 'self' | 'build' | '' (set once per org)
@@ -1714,12 +1738,28 @@ function claimIntentInFlight() {
   // /v1/team/keys) — held HERE in-memory, shown once in the command snippet;
   // cap error routes to the API Keys tab (regenerate).
   const [wizardDurableKey, setWizardDurableKey] = React.useState('')
+
+  // #2361 review-r1 (I6): the connect-step key is shown ONCE — an accidental
+  // close right after copy loses it. Warn while a fresh plaintext is live.
+  React.useEffect(() => {
+    if (!(welcomeMode && (welcomeKey || wizardDurableKey))) return undefined
+    const warn = (e) => { e.preventDefault(); e.returnValue = '' }
+    window.addEventListener('beforeunload', warn)
+    return () => window.removeEventListener('beforeunload', warn)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [welcomeMode, welcomeKey, wizardDurableKey])
+
   const [wizardDurableBusy, setWizardDurableBusy] = React.useState(false)
   const [wizardDurableError, setWizardDurableError] = React.useState('')
   // #1998 fold-in: optional paste-your-own-durable-key fallback (closes the
   // 402-cap loop — a user at max_api_keys regenerates in the API Keys tab and
   // pastes the shown-once replacement here instead of dead-ending).
   const [wizardDurablePaste, setWizardDurablePaste] = React.useState('')
+  // #2325: paste-your-own is an ESCAPE behind a disclosure for owner/admin
+  // (their primary is the mint CTA below) — never a parallel third
+  // affordance sitting next to the primary action. Members (no in-dashboard
+  // mint) always see the paste box: it is their only path.
+  const [wizardShowPaste, setWizardShowPaste] = React.useState(false)
   // #1997 (W1): catalog-presented is marked when the build catalog
   // RENDERS (not just on pick) — re-entry with fork=build already set must
   // still mark it (launch-slice build-fork gate evaluable). Ref-guarded:
@@ -2215,12 +2255,12 @@ function claimIntentInFlight() {
     // Pass the current refresh seq: if a seed refire bumps it mid-flight,
     // this pre-seed response is dropped (it must not clobber the count).
     refreshTeam('', undefined, teamRefreshSeqRef.current).catch(() => {})
-    // #1847: re-fire the onboarding-state load NOW that the team exists —
-    // the mount-time refreshOnboarding() fired BEFORE provisioning (mount
-    // gate → provisionInApp) and 403'd 'No team membership' for first-timers,
-    // leaving the Overview MemorySources panel on its error card until
-    // reload. The team now exists → this fetch succeeds → the toggles render
-    // on the first view.
+    // #1847/#2323 (Option B): re-fire the onboarding-state load NOW that the
+    // team exists — the mount-time refreshOnboarding() fired BEFORE the
+    // org-create submit provisioned the team (name-first, tenant-provision)
+    // and 403'd 'No team membership' for first-timers, leaving the Overview
+    // MemorySources panel on its error card until reload. The team now
+    // exists → this fetch succeeds → the toggles render on the first view.
     await refreshOnboarding().catch(() => {})
   }
 
@@ -2234,16 +2274,18 @@ function claimIntentInFlight() {
     setWizardDurableKey('')
     setWizardDurablePaste('')
     setWizardDurableError('')
+    setWizardShowPaste(false)
     // #1997 (W1): the legacy jsonb completion write is REMOVED — the done
     // step hands off to the graph (accept-and-drop makes a client PATCH
     // inert on node-present orgs; the node's fork-aware gate owns
     // onboarding_complete). The wire follows the node.
     window.history.replaceState({}, '', '/')
     setWelcomeMode(false)
-    // #1842 P1-1: the first-timer flow (provisionInApp → welcome wizard →
-    // wizardComplete) never ran loadTeams/loadBackups — those fired only in
-    // completeLogin/switchTeam (returning users). currentTeamId stayed null →
-    // the currentTeamId effect never fired loadMembers/loadGraphs → Graphs/
+    // #1842 P1-1: the first-timer flow (org-create provision → welcome
+    // wizard → wizardComplete) never ran loadTeams/loadBackups — those fired
+    // only in completeLogin/switchTeam (returning users). currentTeamId
+    // stayed null → the currentTeamId effect never fired loadMembers/
+    // loadGraphs → Graphs/
     // Users/Backups shimmered forever after "Open my dashboard →".
     await finishWelcomeLoads()
   }
@@ -2253,9 +2295,19 @@ function claimIntentInFlight() {
   // membership row + the key are created here. The raw tt_ key NEVER leaves
   // the app origin (#1082) — it is revealed here exactly once (atomic
   // reveal+null, A13) and shown in the welcome card.
-  async function provisionInApp(session) {
+  async function provisionInApp(session, teamName = '') {
     setWelcomeProvisioning(true)
     setWelcomeProvisionError('')
+    // #2323 (code-review P2): use the LIVE session — the org-create submit
+    // can happen long after mount (an onboarding tab left open past token
+    // expiry), so the mount-captured token may no longer authenticate.
+    // supabase-js getSession() returns a fresh token transparently.
+    try {
+      const { data: live } = await supabaseClient.auth.getSession()
+      if (live && live.session && live.session.access_token && live.session.user) {
+        session = live.session
+      }
+    } catch { /* keep the passed session when getSession fails */ }
     // #1082 double-provision guard (fail-closed, mirrors welcome.html's
       // claimStatusGuard): a tt_claim_pending marker means a claimable anon
       // team may exist — never mint a stray team over it.
@@ -2283,6 +2335,10 @@ function claimIntentInFlight() {
           user_id: userId,
           email: (session.user && session.user.email) || '',
           ...(meta.display_name ? { display_name: meta.display_name } : {}),
+          // #2323 (Option B): name-first — the wizard-typed org name. The
+          // edge fn validates it (same regex as the server) and falls back to
+          // display-name derivation when absent (older callers).
+          ...(teamName ? { team_name: teamName } : {}),
         }),
       })
       // Attempt 1 + exactly ONE retry (a second mint = a second team).
@@ -2630,59 +2686,27 @@ function claimIntentInFlight() {
           }
         }
 
-        // #1566: a first-timer (valid session, NO teams) is provisioned
-        // IN-APP — the team + membership + key are created here (the
-        // tenant-provision edge function authorizes the app origin now) and
-        // the key is revealed in the welcome card. Skip the bootstrap mint
-        // (it 403s 'No team membership' for teamless users).
+        // #2323 (Option B): a first-timer (valid session, NO teams) is NOT
+        // provisioned at mount — a display-name phantom org would exist
+        // before the user names anything (the two-org confusion this fix
+        // removes). The wizard's org-create step IS the provisioning door:
+        // its submit calls tenant-provision with the typed name (deterministic
+        // team_id), and the welcome key + demo seed land on that one org.
         if (!teamsList.length) {
           if (sessionTokenRef.current === session.access_token) {
             // The welcome card must render: leave the checking state + mark
             // authed (the normal completeLogin path never runs for first-timers).
+            sessionRef.current = session
             setChecking(false)
             setAuthed(true)
             setWelcomeMode(true)
-            const provisioned = await provisionInApp(session)
-            if (provisioned && provisioned.routedAway) {
-              // claim in flight / claimable anon team — the claim flow owns it
-              setWelcomeProvisioning(false)
-            } else if (provisioned) {
-              setWelcomeKey(provisioned.api_key)
-              setWelcomeTeamName(provisioned.team_name)
-              setWelcomeGraphName(provisioned.graph_name || '')
-              // #2246 (ADR-010): the shown-once key is NOT persisted to
-              // localStorage/apiKey/teamKeysRef — the browser never holds a
-              // key in session mode. welcomeKey stays in-memory for the
-              // welcome card + connect snippets this session; a reload
-              // mid-welcome loses the plaintext (ADR accepted shown-once
-              // fragility — server keeps the hash only), recoverable via the
-              // API Keys tab (+ New key, shown once).
-              // #1660: prefill the seed step — the Subject from the OAuth
-              // identity (name or email prefix), the Project from the team.
-              {
-                const m = (session.user && session.user.user_metadata) || {}
-                setWizardSubject(m.display_name || (session.user && session.user.email ? session.user.email.split('@')[0] : '') || 'me')
-                setWizardProject(provisioned.team_name || 'my-project')
-              }
-              setWelcomeProvisioning(false)
-              // #1623: the welcome plan step needs the team row
-              // (checkout_price_ids for per-tier Upgrade CTAs) — the welcome
-              // card never fetched /v1/team before. Best-effort: a failure
-              // falls back to the "See pricing" link on the plan cards.
-              // #1860 (P3-2): first-timers never called loadAlerts (only
-              // completeLogin did, and the provisioned branch returns before
-              // it) — the security-alerts section stayed empty until reload.
-              // The provisioned team_id comes from the refreshTeam response
-              // (the team row just created). No double-fire: completeLogin
-              // never runs on this path.
-              refreshTeam('', undefined, teamRefreshSeqRef.current)
-                .then((t) => {
-                  if (t && t.team_id) loadAlerts(t.team_id)
-                })
-                .catch(() => {})
-            } else {
-              setWelcomeProvisionError('Could not create your organization — try again.')
-              setWelcomeProvisioning(false)
+            setWelcomeProvisioning(false)
+            // #1660: prefill the archived seed step's Subject from the OAuth
+            // identity now (no team exists to read); the Project resolves
+            // once the org is created.
+            {
+              const m = (session.user && session.user.user_metadata) || {}
+              setWizardSubject(m.display_name || (session.user && session.user.email ? session.user.email.split('@')[0] : '') || 'me')
             }
           }
           return
@@ -3084,9 +3108,16 @@ function claimIntentInFlight() {
     setWizardDurableKey('')
     setWizardDurablePaste('')
     setWizardDurableError('')
+    setWizardShowPaste(false)
     // #2246 (review, P1): hygiene — the shown-once welcome plaintext is
     // session-scoped; drop it with the other key state on logout.
     setWelcomeKey('')
+    // #2323 (code-review): the first-run provisioning labels are session-
+    // scoped too — a logout must not leak the previous session's org name
+    // into the next login's welcome header/step-1 summary.
+    setWelcomeTeamName('')
+    setWelcomeGraphName('')
+    setWelcomeTeamReady(false)
     // C7 #2116 (R1): the one-time reveal is session-scoped — a logout must
     // never leave plaintext mounted for the next login.
     setRevealKey(null)
@@ -3283,38 +3314,62 @@ function claimIntentInFlight() {
     }
   }
 
-  // #1997 (W1): org-create step handler — POST /v1/onboarding/team (Q5
-  // wizard lane, one-shot team_created). Name REQUIRED with editable prefill
-  // (DE2E-3); 402 → inline upgrade surface (never silent; W9 owns
-  // enforcement); 409 (already created) → advance.
+  // #2323 (Option B): org-create step handler — the FIRST-org door. For a
+  // teamless first-timer the submit PROVISIONS the org name-first via
+  // tenant-provision (deterministic team_id, welcome key + demo seed land on
+  // that one org — POST /v1/onboarding/team is no longer called for first
+  // orgs; it stays as the entitlement-gated second-org lane). Accounts that
+  // already hold an org never mint here (the step renders read-only). Name
+  // REQUIRED (DE2E-3); claim-guard errors route to the claim card.
   async function handleWizardCreateOrg() {
+    if (wizardOrgBusy) return  // #2361 review-r1 (Bug-2): double-submit guard
     const name = wizardOrgName.trim()
     const nameErr = orgNameError(name)
     if (nameErr) { setWizardOrgError(nameErr); return }
+    // An account that already holds an org never mints via this step — a
+    // stray submit on the read-only path just advances.
+    if (Array.isArray(teams) && teams.length > 0) { setWizardStep(2); return }
     setWizardOrgBusy(true)
     setWizardOrgError('')
-    setWizardOrgUpgrade(false)
     try {
-      const res = await api('/v1/onboarding/team', {
-        method: 'POST', useSession: true,
-        body: JSON.stringify({ name }),
-      })
+      const session = sessionRef.current
+      if (!session || !session.access_token) {
+        setWizardOrgError('Your session ended — reload to sign in again.')
+        return
+      }
+      const provisioned = await provisionInApp(session, name)
+      if (!provisioned) {
+        setWizardOrgError('Could not create your organization — try again.')
+        return
+      }
+      if (provisioned && provisioned.routedAway) {
+        // claim in flight / claimable anon team — the claim card owns the flow
+        return
+      }
+      // Success: the ONE org exists, named by the user. welcomeKey is the
+      // provisioned durable plaintext — shown once at the connect step (#2325),
+      // never on this card. In-memory only (ADR-010); a mid-wizard reload
+      // loses it and the connect step re-gates via the rows.
       setWizardOrgName('')
-      await loadTeams()
-      if (res?.team_id) switchTeam(res.team_id)
+      setWelcomeKey(provisioned.api_key || '')
+      setWelcomeTeamName(provisioned.team_name || name)
+      setWelcomeGraphName(provisioned.graph_name || '')
+      setWelcomeTeamReady(true)
+      // Pin the new org so fork/connect checkpoints + key mint target it, and
+      // fetch alerts for the team row (parity with the pre-#2323 provisioned
+      // branch, #1860).
+      await loadTeams().catch(() => {})
+      refreshTeam('', undefined, teamRefreshSeqRef.current)
+        .then((t) => { if (t && t.team_id) loadAlerts(t.team_id) })
+        .catch(() => {})
       setWizardStep(2)
     } catch (e) {
-      if (e?.status === 402) {
-        setWizardOrgError(e.message || 'Upgrade to create another organization')
-        setWizardOrgUpgrade(true)
-      } else if (e?.status === 409) {
-        // already created — advance (one-shot team_created guard)
-        setWizardStep(2)
-      } else {
-        setWizardOrgError(e?.message || 'Could not create the organization')
-      }
+      // #2323 (code-review): never leave the provisioning overlay + busy
+      // button stuck on an unexpected rejection — surface + recover.
+      setWizardOrgError((e && e.message) || 'Could not create your organization — try again.')
     } finally {
       setWizardOrgBusy(false)
+      setWelcomeProvisioning(false)
     }
   }
 
@@ -3423,10 +3478,32 @@ function claimIntentInFlight() {
       // alone resolves the first membership, wrong team for multi-team users.
       // #2246: mintKey rides the session JWT (rule 4) — no held key involved.
       const _teamAtCall = currentTeamId
-      const keyVal = await mintKey('', 'Setup command')
-      // Identity guard BEFORE any UI write: a team switch during the POST must
-      // not render this team's plaintext key under the new team's header.
-      if (teamIdRef.current !== _teamAtCall) return
+      // #2325/#2333: name the mint org + date so every connect key is a
+      // DISTINGUISHABLE row (the old fixed 'Setup command' label made
+      // rotate/regenerate rows identical under the free cap of 2). The org
+      // resolves like the CTA label's shownOrgName (welcome name right after
+      // provision → pinned team → first membership) so the row name always
+      // agrees with the org the key actually lands on (code-review P3).
+      const orgForKey =
+        (welcomeTeamReady && welcomeTeamName) ||
+        (team && team.team_name) ||
+        (Array.isArray(teams) && teams.length
+          ? ((teams.find((t) => t.team_id === teamIdRef.current) || teams[0] || {}).team_name || '')
+          : '') || ''
+      const keyName = durableKeyName(orgForKey, new Date(), (Array.isArray(keys) ? keys : []).map((k) => k && k.name))
+      const keyVal = await mintKey('', keyName)
+      // #2326: a team switch during the POST must NOT silently swallow the
+      // mint — surface it so the user isn't left believing connect produced
+      // a usable key. The key was created on the PREVIOUS org (mintKey pinned
+      // ?team_id= at call time); refresh the list so it shows there when the
+      // user switches back, and re-gate this step.
+      if (teamIdRef.current !== _teamAtCall) {
+        // #2326 (code-review): a loadAll('') here would fetch the NEW team's
+        // keys — the mint landed on the PREVIOUS org, which reloads its own
+        // keys when the user switches back. Surface the error and re-gate.
+        setWizardDurableError('The organization changed while the key was being created — the key was created on the previous organization. Switch back to it in the account menu to use it, or create another key here.')
+        return
+      }
       setWizardDurableKey(keyVal)
       // #2246 (ADR-010): the durable key is NOT installed (no
       // localStorage/teamKeysRef/apiKey write — the browser never holds a
@@ -3441,9 +3518,12 @@ function claimIntentInFlight() {
     } catch (e) {
       // #1147: a tier-cap 402 is a LIMIT, not an error — surface the upgrade /
       // regenerate path (the API Keys tab's regenerateKey does not grow the
-      // key count). Free tier max_api_keys = 2.
+      // key count). Free tier max_api_keys = 2. The remedy ends at the paste
+      // box, which for owner/admin sits behind the disclosure (#2325 review
+      // P2) — open it so the error's "paste it below" lands on a visible field.
       if (e?.status === 402) {
-        setWizardDurableError('You\'ve reached your plan\'s limit of API keys — regenerate one in the API Keys tab (shown once there), then paste it below.')
+        setWizardShowPaste(true)
+        setWizardDurableError('You\'ve reached your plan\'s limit of API keys — revoke or regenerate one in the API Keys tab (shown once there), then paste a key below.')
       } else {
         // #2246 (review): reachable mint failures here are the 402 cap above,
         // a suspension 403, or transport — the server POST /v1/team/keys has
@@ -3453,7 +3533,7 @@ function claimIntentInFlight() {
         // connect-step member copy + API Keys tab notice) and this handler's
         // callers are owner/admin-gated renders. A suspension 403 falls
         // through to its own message.
-        setWizardDurableError(e?.message || 'Could not create a new setup key — try again.')
+        setWizardDurableError(e?.message || 'Could not create a new key — try again.')
       }
     } finally {
       setWizardDurableBusy(false)
@@ -3506,12 +3586,19 @@ function claimIntentInFlight() {
     setWizardDurableKey('')
     setWizardDurablePaste('')
     setWizardDurableError('')
+    setWizardShowPaste(false)
     // #2246 (review, P1): welcomeKey is TEAM-scoped shown-once plaintext — a
     // switch must not leak the previous team's plaintext into the new team's
     // snippet/connect surfaces (welcomeKey feeds snippetKey, the re-entry/
     // first-data cards, and the connect gate). Same convention as the
     // wizardDurableKey drop above.
     setWelcomeKey('')
+    // #2323 (code-review): drop the first-run labels with the team switch —
+    // welcomeTeamName must never label a DIFFERENT team's header/step-1
+    // summary after the user switches.
+    setWelcomeTeamName('')
+    setWelcomeGraphName('')
+    setWelcomeTeamReady(false)
     setError('')
     setCurrentTeamId(teamId)
     teamIdRef.current = teamId
@@ -4729,11 +4816,33 @@ function claimIntentInFlight() {
   // when not).
   const durableConnect = durableConnectKey(welcomeKey, '', keys)
   const harnessKey = wizardDurableKey || durableConnect.key || ''
+  // #2323 (Option B): name-first first-run — an org exists once the wizard
+  // provisioned it (welcomeTeamReady) or the account already held one
+  // (re-entry / invite-held paths). Drives the welcome exit gate + heading.
+  const welcomeHasOrg = welcomeTeamReady || (Array.isArray(teams) && teams.length > 0)
+  // The org name shown in the welcome header/step-1 summary is the CURRENT
+  // team's name — welcomeTeamName (the first-run provision) only wins right
+  // after creation, before loadTeams pins `team` (code-review P2: a stale
+  // welcomeTeamName across a team switch must never label the wrong org).
+  const shownOrgName =
+    (welcomeTeamReady && welcomeTeamName) ||
+    (team && team.team_name) ||
+    (Array.isArray(teams)
+      ? ((teams.find((t) => t.team_id === teamIdRef.current) || teams[0] || {}).team_name || '')
+      : '') || ''
+  // #2328: the Codex connect step renders one of two surfaces — 'codex'
+  // (CLI) or 'codexDesktop' (GUI). Other harnesses pass through unchanged.
+  const wizardConnectHarness = (wizardHarness === 'codex' && wizardCodexDesktop) ? 'codexDesktop' : wizardHarness
 
   if (welcomeMode && authed) {
-    // #1566: first-timers are provisioned IN-APP — show the provisioning
-    // spinner, then the revealed key (exactly once, A13), or an actionable
-    // error. Returning users (welcomeKey empty) get the ready card.
+    // #2323 (Option B): name-first first-run — the welcome card renders the
+    // W1 wizard, never the key. There is NO mount provisioning (#1566's
+    // mount-time provision + ready-card reveal are deleted): the provisioning
+    // spinner + inline error below wrap ONLY the org-create step submit, and
+    // the provisioned plaintext is held in-memory (welcomeKey) and shown
+    // exactly once at the CONNECT step. Teamless first-timers land here from
+    // the session gate; org-holding accounts only via re-entry/resume (the
+    // read-only steps below).
     return (
       <div className="app">
         <header>
@@ -4747,8 +4856,8 @@ function claimIntentInFlight() {
               claim my team) own the recovery. */}
           <button
             className="ghost small"
-            disabled={welcomeProvisioning || welcomeProvisionError}
-            onClick={() => { window.history.replaceState({}, '', '/'); setWelcomeMode(false); setWizardDurableKey(''); setWizardDurablePaste(''); setWizardDurableError(''); finishWelcomeLoads() }}
+            disabled={welcomeProvisioning || welcomeProvisionError || !welcomeHasOrg}
+            onClick={() => { window.history.replaceState({}, '', '/'); setWelcomeMode(false); setWizardDurableKey(''); setWizardDurablePaste(''); setWizardDurableError(''); setWizardShowPaste(false); finishWelcomeLoads() }}
           >
             Open my dashboard →
           </button>
@@ -4782,31 +4891,15 @@ function claimIntentInFlight() {
             ) : (
               <>
                 <h1 style={{ fontFamily: 'var(--serif, Georgia, serif)', fontWeight: 400, marginBottom: '0.5rem' }}>
-                  {welcomeKey ? 'Your Tortoise is ready!' : 'Welcome to Tortoise'}
+                  {welcomeHasOrg
+                    ? (shownOrgName ? `${shownOrgName} is set up` : 'Your organization is set up')
+                    : 'Welcome to Tortoise'}
                 </h1>
-                {welcomeKey ? (
-                  <>
-                    <p className="dim" style={{ marginBottom: '1rem' }}>
-                      This is the only time this API key is shown — copy it now. The raw key
-                      never leaves this page ({welcomeTeamName ? `organization: ${welcomeTeamName}` : ''}).
-                    </p>
-                    <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '1.25rem' }}>
-                      <code style={{ flex: 1, padding: '0.6rem 0.8rem', background: 'var(--surface,#0d1a2d)', border: '1px solid var(--border,#1e293b)', borderRadius: 8, overflowWrap: 'anywhere', fontSize: 13 }}>
-                        {welcomeKey}
-                      </code>
-                      <button
-                        className="btn-primary"
-                        onClick={() => { try { navigator.clipboard.writeText(welcomeKey) } catch { /* clipboard blocked */ } }}
-                      >
-                        Copy
-                      </button>
-                    </div>
-                  </>
-                ) : (
-                  <p className="dim" style={{ marginBottom: '1.25rem' }}>
-                    Your Organization is set up. You can create and manage your API keys in the dashboard anytime.
-                  </p>
-                )}
+                <p className="dim" style={{ marginBottom: '1.25rem' }}>
+                  {welcomeHasOrg
+                    ? 'Your Organization is set up. Choose how you\'ll use it and connect your agent — your API key is shown once at the connect step.'
+                    : 'Set up your Organization in the steps below — it\'s created when you name it, and your API key is shown once at the connect step.'}
+                </p>
                 {/* #1997 (W1): the 5 HUMAN steps (epic plan P1) — orientation
                     → org-create/join → fork card → connect-consent → done.
                     All other steps (install/seed/decide) are agent-side or
@@ -4820,7 +4913,12 @@ function claimIntentInFlight() {
                   </div>
                   <p className="wizard-title">{WIZARD_STEPS[wizardStep].label}</p>
                   <p className="wizard-sub" style={{ marginBottom: '1rem' }}>
-                    {WIZARD_STEPS[wizardStep].sub}
+                    {wizardStep === 1 && welcomeHasOrg
+                      // #2323 (review P2): the shared step-1 sub ('Name your
+                      // organization…') is a contradiction for an org-holding
+                      // account on the read-only step — branch the copy.
+                      ? "You're already in an organization — you won't create another here. Pick how you'll use it next."
+                      : WIZARD_STEPS[wizardStep].sub}
                   </p>
 
                   {wizardStep === 0 && (
@@ -4841,44 +4939,64 @@ function claimIntentInFlight() {
 
                   {wizardStep === 1 && (
                     <div className="org-create">
-                      <label className="small" style={{ display: 'flex', flexDirection: 'column', gap: '0.3rem', marginBottom: '0.9rem' }}>
-                        <span className="dim small">Organization name</span>
-                        <input
-                          value={wizardOrgName || (welcomeTeamName || (team && team.team_name) || '')}
-                          onChange={(e) => setWizardOrgName(e.target.value)}
-                          placeholder="e.g. acme"
-                          aria-label="Organization name"
-                          autoFocus
-                          style={{ padding: '0.5rem 0.7rem', background: 'var(--surface,#0d1a2d)', border: '1px solid var(--border,#1e293b)', borderRadius: 8, fontSize: 14 }}
-                        />
-                      </label>
-                      {wizardOrgError && (
-                        <p className="error" role="alert" style={{ marginBottom: '0.9rem' }}>{wizardOrgError}</p>
-                      )}
-                      {wizardOrgUpgrade && (
-                        <div className="upgrade-surface" style={{ marginBottom: '0.9rem', padding: '0.6rem 0.8rem', border: '1px solid var(--border,#1e293b)', borderRadius: 8 }}>
-                          <p className="dim small" style={{ margin: 0 }}>
-                            Free plan: one Organization per account. Upgrade to create another — or accept an invitation to join one.
+                      {welcomeHasOrg ? (
+                        // #2323 (Option B): the account already has an org —
+                        // this step is a READ-ONLY summary, never a second
+                        // mint (re-entry / invite-held paths). The wizard
+                        // advances to the fork card.
+                        <>
+                          <p className="dim" style={{ marginBottom: '0.9rem' }}>
+                            You're set up in <strong>{shownOrgName || 'your organization'}</strong>. Next, choose how you'll use Tortoise.
                           </p>
-                          <div style={{ display: 'flex', gap: '0.5rem', marginTop: '0.5rem' }}>
-                            <button type="button" className="ghost small" onClick={() => setTab('billing')}>View plans →</button>
+                          <div className="wizard-nav">
+                            <button type="button" className="ghost" onClick={() => setWizardStep(0)}>← Back</button>
+                            <div className="wizard-nav-actions">
+                              <button type="button" className="btn-primary" onClick={() => setWizardStep(2)}>Continue →</button>
+                            </div>
                           </div>
-                        </div>
+                        </>
+                      ) : (
+                        // #2323 (Option B): the first-run provisioning door —
+                        // the typed name creates the ONE org (tenant-provision,
+                        // deterministic team_id). #2324: value is state-only —
+                        // no prefill fallback chain that resurrects text on
+                        // delete, and no phantom org name to fight.
+                        <>
+                          <label className="small" style={{ display: 'flex', flexDirection: 'column', gap: '0.3rem', marginBottom: '0.6rem' }}>
+                            <span className="dim small">Organization name</span>
+                            <input
+                              value={wizardOrgName}
+                              onChange={(e) => setWizardOrgName(e.target.value)}
+                              placeholder="e.g. acme"
+                              aria-label="Organization name"
+                              autoFocus
+                              maxLength={64}
+                              style={{ padding: '0.5rem 0.7rem', background: 'var(--surface,#0d1a2d)', border: '1px solid var(--border,#1e293b)', borderRadius: 8, fontSize: 14 }}
+                            />
+                          </label>
+                          <p className="dim small" style={{ margin: '0 0 0.9rem', lineHeight: 1.5 }}>
+                            This creates your organization — one per account on the free plan. Your API key is created here and shown once at the connect step.
+                          </p>
+                          {wizardOrgError && (
+                            <p className="error" role="alert" style={{ marginBottom: '0.9rem' }}>{wizardOrgError}</p>
+                          )}
+                          <div className="wizard-nav">
+                            <button type="button" className="ghost" onClick={() => setWizardStep(0)}>← Back</button>
+                            <div className="wizard-nav-actions">
+                              <button type="button" className="btn-primary" onClick={handleWizardCreateOrg} disabled={wizardOrgBusy}>
+                                {wizardOrgBusy ? 'Creating…' : 'Create Organization'}
+                              </button>
+                            </div>
+                          </div>
+                        </>
                       )}
-                      <div className="wizard-nav">
-                        <button type="button" className="ghost" onClick={() => setWizardStep(0)}>← Back</button>
-                        <div className="wizard-nav-actions">
-                          <button type="button" className="btn-primary" onClick={handleWizardCreateOrg} disabled={wizardOrgBusy}>
-                            {wizardOrgBusy ? 'Creating…' : 'Create Organization'}
-                          </button>
-                        </div>
-                      </div>
                       {pendingInvites && pendingInvites.length > 0 && (
                         <div className="pending-invites" style={{ marginTop: '1.25rem', paddingTop: '1rem', borderTop: '1px solid var(--border,#1e293b)' }}>
                           <p className="dim small" style={{ margin: '0 0 0.5rem' }}>Or accept an invitation to join an existing organization:</p>
                           {pendingInvites.map((inv) => (
                             <div key={inv.invitation_id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.4rem' }}>
                               <span className="small">{inv.team_name || 'Invitation'}</span>
+                              {inv.error && <span className="account-invite-error small" role="alert">{inv.error}</span>}
                               <div style={{ display: 'flex', gap: '0.4rem' }}>
                                 <button type="button" className="ghost small" onClick={() => acceptPendingInvite(inv)} disabled={pendingInvitesBusy === inv.invitation_id}>
                                   {pendingInvitesBusy === inv.invitation_id ? 'Joining…' : 'Accept'}
@@ -4907,7 +5025,8 @@ function claimIntentInFlight() {
                           <button
                             key={opt.id}
                             type="button"
-                            className={onboarding && onboarding.fork === opt.id ? 'fork-option active' : 'fork-option'}
+                            className={(wizardForkChosen === opt.id || (onboarding && onboarding.fork === opt.id)) ? 'fork-option active' : 'fork-option'}
+                            aria-pressed={wizardForkChosen === opt.id || (onboarding && onboarding.fork === opt.id)}
                             disabled={wizardForkBusy || (onboarding && !!onboarding.fork)}
                             onClick={() => handleWizardFork(opt.id)}
                             style={{ display: 'flex', flexDirection: 'column', gap: '0.25rem', textAlign: 'left', padding: '0.7rem 0.9rem', border: '1px solid var(--border,#1e293b)', borderRadius: 8, background: 'var(--surface,#0d1a2d)', cursor: wizardForkBusy || (onboarding && !!onboarding.fork) ? 'default' : 'pointer' }}
@@ -4947,7 +5066,8 @@ function claimIntentInFlight() {
                         {HARNESS_ORDER.map((h) => (
                           <button key={h} type="button"
                             className={'harness-tab' + (wizardHarness === h ? ' active' : '')}
-                            onClick={() => { setWizardHarness(h); setWizardCopied('') }}>
+                            aria-pressed={wizardHarness === h}
+                            onClick={() => { setWizardHarness(h); setWizardCopied(''); if (h !== 'codex') setWizardCodexDesktop(false) }}>
                             {HARNESS_NAMES[h]}
                           </button>
                         ))}
@@ -4974,7 +5094,7 @@ function claimIntentInFlight() {
                             {!isOwnerAdmin
                               ? 'Only owners and admins can create or rotate keys in this dashboard. Paste an API key below (from your agents or an owner/admin), or ask an owner/admin to share the setup command.'
                               : (durableConnect.source === 'rows-durable'
-                                  ? 'This Organization already has API key(s) — each plaintext was shown once when created and the table can\'t reveal it again. Create a fresh key here (shown once), or rotate an existing key in the API Keys tab and use its replacement.'
+                                  ? 'This Organization already has API key(s) — each key\'s full text was shown once when created and the table can\'t reveal it again. Create a fresh key here (shown once), or rotate an existing key in the API Keys tab and use its replacement.'
                                   : 'The setup command embeds an API key for this Organization. Keys are shown once when created — create a new key now (shown once), or create/regenerate one in the API Keys tab.')}
                           </p>
                           {wizardDurableError && (
@@ -4985,23 +5105,68 @@ function claimIntentInFlight() {
                             <div className="wizard-nav-actions">
                               {isOwnerAdmin && (
                                 <button type="button" className="btn-primary" onClick={wizardMintDurableKey} disabled={wizardDurableBusy}>
-                                  {wizardDurableBusy ? 'Creating…' : 'Create a new setup key'}
+                                  {wizardDurableBusy ? 'Creating…' : `Create a key for ${shownOrgName || 'your organization'}`}
                                 </button>
                               )}
-                              <button type="button" className="ghost" onClick={() => { window.history.replaceState({}, '', '/'); setWelcomeMode(false); setTab('keys'); finishWelcomeLoads() }}>Go to API Keys →</button>
                             </div>
+                            {/* #2361 review-r1 (Bug-5): no-key users (member with
+                                no key yet) must never be trapped on the connect
+                                step — Skip defers; the done step's copy stays
+                                honest ('connect it later'). */}
+                            <button type="button" className="ghost" onClick={() => setWizardStep(4)}>Skip for now</button>
                           </div>
-                          {/* #1998 fold-in: paste-your-own escape — a user at
-                              the max_api_keys cap regenerates a durable key in
-                              the API Keys tab (shown once there) and pastes it
-                              here instead of dead-ending on 402. */}
-                          <div style={{ marginTop: '1rem', display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+                          {/* #2325: the affordances below are ESCAPES, not a
+                              second path — a muted contextual 'Manage keys'
+                              link (the API Keys tab keeps its role as the
+                              management surface, never a parallel exit) and
+                              the paste box collapsed behind a disclosure for
+                              owner/admin so the mint CTA above is the ONE
+                              obvious primary action. Members see paste
+                              directly: it is their only in-dashboard key path
+                              (the mint CTA is owner/admin-only by DASHBOARD
+                              render policy — the server POST /v1/team/keys
+                              has NO role gate, #2246 — see
+                              wizardMintDurableKey). */}
+                          <div style={{ marginTop: '0.85rem', display: 'flex', flexWrap: 'wrap', gap: '0.9rem', alignItems: 'center' }}>
+                            <button type="button" className="ghost small" onClick={() => { window.history.replaceState({}, '', '/'); setWelcomeMode(false); setTab('keys'); finishWelcomeLoads() }}>
+                              {isOwnerAdmin ? `Manage keys for ${shownOrgName || 'your organization'} →` : `View keys for ${shownOrgName || 'your organization'} →`}
+                            </button>
+                            {isOwnerAdmin && (
+                              <button type="button" aria-expanded={wizardShowPaste} aria-controls="wizard-paste-row"
+                                onClick={() => {
+                                  // #2325 (review P2): opening the disclosure must NOT
+                                  // clear the active error (the 402 copy explains the
+                                  // paste remedy the box is about to show) — only
+                                  // closing it (or typing) does.
+                                  if (wizardShowPaste) { setWizardShowPaste(false); setWizardDurableError('') }
+                                  else { setWizardShowPaste(true) }
+                                }}
+                                style={{ background: 'none', border: 'none', padding: 0, color: 'var(--dim,#7d8ea3)', fontSize: 13, textDecoration: 'underline', cursor: 'pointer' }}>
+                                {wizardShowPaste ? 'Hide paste field' : "I already have a key — paste it instead"}
+                              </button>
+                            )}
+                          </div>
+                          {(!isOwnerAdmin || wizardShowPaste) && (
+                          // #1998/#2325: the paste box is the member path AND
+                          // the owner/admin cap-escape. #1998 history: a user
+                          // at the max_api_keys cap (free = 2) regenerates a
+                          // durable key in the API Keys tab (shown once there)
+                          // and pastes it here instead of dead-ending on 402.
+                          // Members get NO mint CTA (owner/admin-only by
+                          // dashboard render policy) — for them this box
+                          // renders unconditionally as their only in-dashboard
+                          // key path; for owner/admin it sits behind the
+                          // disclosure above (mint CTA is primary) and the
+                          // 402 handler opens it (#2325).
+                          <div id="wizard-paste-row" style={{ marginTop: '0.75rem', display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
                             <input
                               type="password"
                               aria-label="Paste an API key"
                               placeholder="…or paste an API key (tt_…)"
                               value={wizardDurablePaste}
+                              autoFocus={!!(wizardShowPaste && isOwnerAdmin)}
                               onChange={(e) => { setWizardDurablePaste(e.target.value); setWizardDurableError('') }}
+                              onKeyDown={(e) => { if (e.key === 'Enter' && wizardDurablePaste.trim()) { e.preventDefault(); document.querySelector('[data-paste-use]')?.click() } }}
                               style={{ flex: 1, minWidth: 0, padding: '0.5rem 0.65rem', background: 'var(--surface,#0d1a2d)', border: '1px solid var(--border,#1e293b)', borderRadius: 8, fontSize: 13, color: 'inherit' }}
                             />
                             <button
@@ -5068,22 +5233,37 @@ function claimIntentInFlight() {
                                 // completion/logout/team switch.
                               }}>Use this key</button>
                           </div>
+                          )}
                         </>
                       ) : (
                         <>
-                          {HARNESS_INTRO[wizardHarness] && (
+                          {wizardHarness === 'codex' && (
+                            // #2328: CLI vs Desktop surface toggle — a Codex
+                            // Desktop user must never see an export command
+                            // they cannot run (no terminal in the GUI).
+                            <div role="group" aria-label="Codex setup surface"
+                              style={{ marginTop: '0.9rem', display: 'inline-flex', border: '1px solid var(--border,#1e293b)', borderRadius: 8, overflow: 'hidden' }}>
+                              <button type="button" className={wizardCodexDesktop ? 'ghost small' : 'ghost small codex-variant-on'}
+                                style={wizardCodexDesktop ? {} : { background: 'rgba(6,182,212,0.12)', color: 'var(--accent,#06b6d4)' }}
+                                onClick={() => { setWizardCodexDesktop(false); setWizardCopied('') }}>CLI (terminal)</button>
+                              <button type="button" className="ghost small"
+                                style={wizardCodexDesktop ? { background: 'rgba(6,182,212,0.12)', color: 'var(--accent,#06b6d4)' } : {}}
+                                onClick={() => { setWizardCodexDesktop(true); setWizardCopied('') }}>Desktop (no terminal)</button>
+                            </div>
+                          )}
+                          {HARNESS_INTRO[wizardConnectHarness] && (
                             <p className="dim small" style={{ margin: '0.9rem 0 0', lineHeight: 1.6 }}>
-                              {HARNESS_INTRO[wizardHarness]}
+                              {HARNESS_INTRO[wizardConnectHarness]}
                             </p>
                           )}
                           {/* #2246: shown-once reminder above the snippet —
                               the embedded key plaintext is not recoverable
                               from the keys table (server keeps hashes). */}
                           <p className="dim small" style={{ margin: '0.9rem 0 0', lineHeight: 1.6 }}>
-                            The key below is shown once — copy the command now. If you lose the key, rotate it in the API Keys tab (the replacement is shown once there too).
+                            The key below is shown once — copy the command now. Skipping means this key won't be shown again — you can reconnect later from the Setup guide (you may need to create a new key). If you lose it, rotate it in the API Keys tab.
                           </p>
                           <pre className="snippet" style={{ marginTop: '0.75rem' }}>
-                            {UNIVERSAL_COMMAND[wizardHarness](harnessKey)}
+                            {UNIVERSAL_COMMAND[wizardConnectHarness](harnessKey)}
                           </pre>
                           {/* #1998 (W2): the universal command covers all 6
                               harnesses — 4 self-install (Claude Code, Cursor,
@@ -5091,12 +5271,13 @@ function claimIntentInFlight() {
                               Web). The agent self-adjudicates its harness from
                               the tortoise-onboarding skill's table; the skill
                               install line above fetches it. */}
+                          {!['codexDesktop', 'claude-desktop', 'claude-web'].includes(wizardConnectHarness) && (
                           <p className="dim small" style={{ margin: '0.75rem 0 0', lineHeight: 1.6 }}>
-                            One universal command, all 6 harnesses — your agent
-                            self-adjudicates which it is and verifies the
-                            connection with <code>tortoise_health</code> before
-                            you continue.
+                            Run the command, then tell your agent “Set up Tortoise” —
+                            it confirms the connection with <code>tortoise_health</code>
+                            and reports back here when it's done.
                           </p>
+                          )}
                           <div className="wizard-nav">
                             <button type="button" className="ghost" onClick={() => setWizardStep(2)}>← Back</button>
                             <div className="wizard-nav-actions">
@@ -5104,12 +5285,12 @@ function claimIntentInFlight() {
                                 <p className="error" role="alert" style={{ margin: '0 0.5rem 0 0', fontSize: 13 }}>{wizardConnectError}</p>
                               )}
                               <button type="button" className={wizardCopied === 'harness' ? 'ghost' : 'btn-primary'}
-                                onClick={() => wizardCopy(UNIVERSAL_COMMAND[wizardHarness](harnessKey), 'harness')}>
-                                {wizardCopied === 'harness' ? 'Copied ✓' : (HARNESS_COPY_LABEL[wizardHarness] || 'Copy setup')}
+                                onClick={() => wizardCopy(UNIVERSAL_COMMAND[wizardConnectHarness](harnessKey), 'harness')}>
+                                {wizardCopied === 'harness' ? 'Copied ✓' : (HARNESS_COPY_LABEL[wizardConnectHarness] || 'Copy setup')}
                               </button>
                               {wizardCopied === 'harness' && (
                                 <button type="button" className="btn-primary" onClick={wizardHarnessContinue} disabled={wizardConnectBusy}>
-                                  {wizardConnectBusy ? 'Saving…' : (HARNESS_CONTINUE_LABEL[wizardHarness] || "I've set it up — Continue →")}
+                                  {wizardConnectBusy ? 'Saving…' : (HARNESS_CONTINUE_LABEL[wizardHarness] || (HARNESS_SELF_INSTALL.includes(wizardHarness) ? 'My agent confirmed it — Continue →' : "I've set it up — Continue →"))}
                                 </button>
                               )}
                               <button type="button" className="ghost" onClick={() => setWizardStep(4)}>Skip for now</button>
@@ -5458,7 +5639,7 @@ function claimIntentInFlight() {
           <button className="ghost small" onClick={() => { setClaimError(''); try { sessionStorage.removeItem(CLAIM_KEY_STORAGE) } catch { /* best-effort */ } window.history.replaceState({}, '', window.location.pathname) }} aria-label="Dismiss">✕</button>
         </div>
       )}
-      <header>
+      <header className="dash-header">
         <div className="logo">Tortoise</div>
         <nav>
           <button className={tab === 'overview' ? 'active' : ''} onClick={() => { setTab('overview'); setSelectedSessionId(null); setSessionDetail(null); }}>Overview</button>
@@ -5473,6 +5654,10 @@ function claimIntentInFlight() {
               homes (P3). W6/W9 consume (single-owner R2-10). */}
           <button className={tab === 'settings' ? 'active' : ''} data-tab="settings" onClick={() => setTab('settings')}>Settings</button>
         </nav>
+        {/* #2332: the right-side controls (Setup + account blob) are one
+            atomic cluster — the CSS keeps them grouped at every width and
+            never lets them scatter onto separate wrapped rows. */}
+        <div className="header-cluster">
         {/* #1689: always-visible — OUTSIDE the nav; reopens the wizard at
             step 0 (skills). (The nav wraps via flex-wrap on narrow windows
             since #1874, so Setup is no longer displaced by nav overflow.) */}
@@ -5620,6 +5805,7 @@ function claimIntentInFlight() {
               </button>
             </div>
           )}
+        </div>
         </div>
         {/* #1877: create-team dialog — gated-on-click upgrade UX. The 402
             state explains "upgrade a team, then create" (the new team
@@ -5774,7 +5960,7 @@ function claimIntentInFlight() {
           // the getting-started wizard (harness → integrations → skills →
           // seed), not a raw-curl dead end.
           <section className="overview empty-state graph-missing">
-            <h2>Your graph is ready for its first data point</h2>
+            <h2>Continue setting up {shownOrgName || 'your organization'}</h2>
             {/* #2167 (step 6, phase-7 reviewer 2 P1) / #2246: the re-entry
                 card's "and API key are live" claim needs a real key in
                 hand — (snippetKey || apiKey) truthiness: the first-timer
@@ -5784,8 +5970,8 @@ function claimIntentInFlight() {
                 the keyless prompt + in-app Go to API Keys action. */}
             <p className="dim">
               {snippetKey
-                ? 'Your Organization and API key are live. Finish the setup to connect your tool, learn the three skills, and seed your graph — it only takes a minute.'
-                : 'Your Organization is live — finish setup to connect your agent. Create a key on the API Keys tab, or continue setup below.'}
+                ? 'Your Organization and API key are live. Finish the setup to connect your tool — your agent installs its skills and files the first decision for you.'
+                : 'Your Organization is live — finish the setup below to connect your agent. No API key yet? Create one on the API Keys tab first.'}
             </p>
             <div className="empty-actions">
               <button className="btn-primary" onClick={() => { setWizardStep(0); setWelcomeMode(true) }}>
@@ -5803,7 +5989,7 @@ function claimIntentInFlight() {
           // #1591 (UX design): a clear first-data card — plain copy, a
           // styled copyable snippet, and a single primary action.
           <section className="overview empty-state graph-missing">
-            <h2>Your graph is ready for its first data point</h2>
+            <h2>Continue setting up {shownOrgName || 'your organization'}</h2>
             {snippetKey ? (
               // #1831 P2-1: only show the copyable snippet when a real key
               // exists — after a recoverable mint failure (#1830) the state
@@ -5960,21 +6146,6 @@ function claimIntentInFlight() {
         )}
         {tab === 'keys' && (
           <section>
-            {/* #1148-ux review: graph selector restyled — page-scoped context
-                control, dark theme. */}
-            <div className="page-graph-selector">
-              <label htmlFor="page-graph-select">Graph</label>
-              <select
-                id="page-graph-select"
-                value={currentGraphId || ''}
-                onChange={(e) => e.target.value && setCurrentGraphId(e.target.value)}
-              >
-                {graphs.length === 0 && <option value="">No graph</option>}
-                {graphs.map((g) => (
-                  <option key={g.graph_id} value={g.graph_id}>{g.name}</option>
-                ))}
-              </select>
-            </div>
             {/* #1148: dashboard API-login toggle — claimed teams only.
                 Anon teams get the prominent Protect banner instead (above
                 the tabs); this toggle lets a claimed owner stop using a raw

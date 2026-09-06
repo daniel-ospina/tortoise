@@ -2022,3 +2022,86 @@ def test_restore_supabase_stamp_blip_best_effort(monkeypatch):
         live = proj.db.select_graph("tortoise")
         assert live.query("MATCH (n) RETURN count(n)").result_set[0][0] == 6
         proj.close()
+
+
+# ── #2313 per-graph key layout (Option A) ────────────────────────────────────
+
+
+def _seed_manifest(store, team_id, graph_id, ts, *, age_days=None):
+    """Craft a manifest object (bypassing create_backup) at the given key
+    shape so prune tests can control created_at directly.
+
+    ``age_days=None`` → fresh (now); otherwise that many days old.
+    """
+    now = datetime.now(timezone.utc)  # noqa: UP017
+    created = now - timedelta(days=age_days) if age_days is not None else now
+    ts_part = f"{ts}_{'0' * 8}"
+    backup_id = f"{team_id}/{graph_id}/{ts_part}" if graph_id else f"{team_id}/{ts_part}"
+    key = f"backups/{backup_id}"
+    manifest = {
+        "backup_id": backup_id,
+        "team_id": team_id,
+        "graph_name": f"graph-{graph_id}" if graph_id else "default-graph",
+        "created_at": created.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z",
+        "node_count": 1, "edge_count": 0,
+        "sha256": "x", "format": "tortoise-dump-v1",
+    }
+    store.upload(f"{key}/dump.enc", b"blob")
+    store.upload(f"{key}/manifest.json", json.dumps(manifest).encode())
+    return backup_id
+
+
+def test_create_backup_graph_keyed_layout(monkeypatch):
+    _set_env_key(monkeypatch)
+    with tempfile.TemporaryDirectory() as tmp:
+        proj = _make_proj(tmp)
+        _seed(proj.g)
+        registry = proj.db.select_graph("registry_tortoise")
+        store = MemoryStorage()
+        manifest = create_backup(
+            proj, registry, store, team_id="team_x",
+            graph_name="team_x_g_x", graph_id="g_x",
+        )
+        assert manifest["graph_id"] == "g_x"
+        assert manifest["backup_id"].startswith("team_x/g_x/")
+        # object keys live under the graph segment
+        keys = store.list("backups/team_x/g_x/")
+        assert any(k.endswith("dump.enc") for k in keys)
+        assert any(k.endswith("manifest.json") for k in keys)
+        # team-prefix listing also finds it (team-wide consumers unchanged)
+        assert len(list_backups(store, "team_x")) == 1
+        proj.close()
+
+
+def test_list_backups_graph_scoped():
+    store = MemoryStorage()
+    _seed_manifest(store, "team_x", None, "20200101T000000Z")
+    _seed_manifest(store, "team_x", "g_a", "20200101T000000Z")
+    _seed_manifest(store, "team_x", "g_b", "20200101T000000Z")
+    assert len(list_backups(store, "team_x")) == 3
+    got = list_backups(store, "team_x", graph_id="g_a")
+    assert len(got) == 1 and got[0]["backup_id"].startswith("team_x/g_a/")
+    assert list_backups(store, "team_x", graph_id="default") == []
+
+
+def test_prune_per_graph_isolation_and_legacy_team_pool():
+    store = MemoryStorage()
+    # old (prunable) artifacts across legacy + two graphs, plus one fresh
+    _seed_manifest(store, "team_x", None, "20200101T000000Z", age_days=30)
+    _seed_manifest(store, "team_x", "g_a", "20200101T000000Z", age_days=30)
+    _seed_manifest(store, "team_x", "g_b", "20200101T000000Z", age_days=30)
+    fresh = _seed_manifest(store, "team_x", "g_a", "20990101T000000Z")
+
+    # per-graph prune only touches g_a's pool (old g_a deleted, fresh kept)
+    del_a = prune_backups(store, "team_x", keep_daily=7, keep_weekly=0, graph_id="g_a")
+    assert len(del_a) == 1 and del_a[0].startswith("team_x/g_a/")
+    assert fresh not in del_a
+    # g_b untouched by g_a's prune
+    assert len(list_backups(store, "team_x", graph_id="g_b")) == 1
+    # team-wide prune deletes the legacy pool but NEVER nested per-graph keys
+    del_team = prune_backups(store, "team_x", keep_daily=7, keep_weekly=0)
+    assert len(del_team) == 1 and "/g_" not in del_team[0]
+    # surviving: g_a fresh (g_a prune kept it), g_b old (never pruned) — the
+    # legacy flat artifact is gone; nested keys were not cross-deleted
+    assert sorted(list_backups(store, "team_x"), key=lambda m: m["backup_id"])[0]["backup_id"].startswith("team_x/g_a/")
+    assert len(list_backups(store, "team_x")) == 2

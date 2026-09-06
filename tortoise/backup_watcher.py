@@ -59,25 +59,95 @@ def _team_prefixes(storage) -> list[str]:
     return sorted(teams)
 
 
-def _newest_backup_ts(storage, team_id: str) -> datetime | None:
-    """Newest archive timestamp for a team from R2 manifest keys (key-derived,
-    restore-surviving)."""
-    newest: datetime | None = None
+def _parse_backup_ts(token: str) -> datetime | None:
+    """Parse a manifest-key timestamp token (``{ts}_{rnd}``) into UTC."""
+    ts = token.split("_", 1)[0]  # strip the {rnd} suffix (review P1-1)
+    for fmt in ("%Y%m%dT%H%M%S%fZ", "%Y%m%dT%H%M%SZ"):
+        try:
+            return datetime.strptime(ts, fmt).replace(tzinfo=timezone.utc)  # noqa: UP017
+        except ValueError:
+            continue
+    return None
+
+
+def _default_graph_name(storage, team_id: str) -> str | None:
+    """The DEFAULT graph's dump name, from its per-graph state if present.
+
+    Post-#2313 the per-graph sweep writes graph_name into each graph's state
+    (ops/teams/{t}/graphs/{gid}/state.json). Legacy flat manifests carry the
+    graph they dumped — pre-#2313 C5-era graph-bound ON-DEMAND dumps of
+    CUSTOM graphs also wrote flat keys with the custom namespace as
+    graph_name. Reading the default's expected name lets the flat-freshness
+    scan exclude those custom-era artifacts.
+    """
+    try:
+        state = json.loads(storage.download(
+            f"ops/teams/{team_id}/graphs/default/state.json"))
+    except Exception:
+        return None
+    name = state.get("graph_name") if isinstance(state, dict) else None
+    return str(name) if name else None
+
+
+def _default_graph_newest(storage, team_id: str, newest: datetime | None) -> datetime | None:
+    """Merge the DEFAULT graph's archive freshness into ``newest``.
+
+    Post-#2313 the default graph's dumps live under the literal ``default``
+    key segment (``backups/{team}/default/{ts}_{rnd}/…``); pre-#2313 sweep
+    dumps are flat (``backups/{team}/{ts}_{rnd}/…``). Both shapes are the
+    default graph — team-level freshness is the max over the two (#2313 Task
+    4). Custom nested keys (``backups/{team}/{g_..}/…``) are NOT team-level;
+    the per-graph surface handles them.
+
+    Legacy flat manifests are disambiguated by their manifest ``graph_name``
+    when the default's expected name is known (post-#2313 state): a flat
+    manifest naming a CUSTOM namespace is a pre-#2313 C5-era on-demand dump
+    — it is NOT the default graph and does not gate team freshness. Before
+    any per-graph state exists (first post-#2313 sweep not yet run) every
+    flat manifest is treated as the default (pre-#2313 parity, ≤1h window).
+    """
+    default_name = _default_graph_name(storage, team_id)
     for k in storage.list(f"backups/{team_id}/"):
         if not k.endswith("/manifest.json"):
             continue
         parts = k.split("/")
-        if len(parts) != 4:
+        if len(parts) == 4:
+            # legacy flat — default unless it names a custom graph
+            if default_name is not None:
+                try:
+                    m = json.loads(storage.download(k))
+                    if isinstance(m, dict) and m.get("graph_name") != default_name:
+                        continue  # C5-era custom on-demand artifact
+                except Exception:
+                    continue  # unreadable manifest — cannot confirm default
+            parsed = _parse_backup_ts(parts[2])
+        elif len(parts) == 5 and parts[2] == "default":
+            parsed = _parse_backup_ts(parts[3])  # default nested
+        else:
+            continue  # custom nested — per-graph surface
+        if parsed is not None and (newest is None or parsed > newest):
+            newest = parsed
+    return newest
+
+
+def _newest_backup_ts(storage, team_id: str) -> datetime | None:
+    """Newest archive timestamp for a team's DEFAULT graph from R2 manifest
+    keys (key-derived, restore-surviving) — legacy flat + ``default`` nested."""
+    return _default_graph_newest(storage, team_id, None)
+
+
+def _newest_graph_backup_ts(storage, team_id: str, graph_id: str) -> datetime | None:
+    """Newest archive timestamp for ONE graph (#2313 Task 4)."""
+    newest: datetime | None = None
+    for k in storage.list(f"backups/{team_id}/{graph_id}/"):
+        if not k.endswith("/manifest.json"):
             continue
-        ts = parts[2].split("_", 1)[0]  # strip the {rnd} suffix (review P1-1)
-        for fmt in ("%Y%m%dT%H%M%S%fZ", "%Y%m%dT%H%M%SZ"):
-            try:
-                parsed = datetime.strptime(ts, fmt).replace(tzinfo=timezone.utc)  # noqa: UP017
-                if newest is None or parsed > newest:
-                    newest = parsed
-                break
-            except ValueError:
-                continue
+        parts = k.split("/")
+        if len(parts) != 5:
+            continue
+        parsed = _parse_backup_ts(parts[3])
+        if parsed is not None and (newest is None or parsed > newest):
+            newest = parsed
     return newest
 
 
@@ -163,6 +233,7 @@ class BackupWatcher:
         team_provider: Callable[[], list[str]],
         state_reader: Callable[[str], dict[str, Any]],
         driver_heartbeat_reader: Callable[[], dict[str, Any]],
+        graph_provider: Callable[[str], list[str] | None] | None = None,
         stale_threshold_min: int = 90,
         driver_down_threshold_min: int = 240,
         grace_min: int = 120,
@@ -174,6 +245,12 @@ class BackupWatcher:
         self._alerts = alert_store
         self._teams = team_provider
         self._state_reader = state_reader
+        # #2313: per-team CUSTOM-graph seam (team_id -> active sweep-eligible
+        # custom graph ids, or None when the control plane could not be read —
+        # an UNCONFIRMED surface). The DEFAULT graph rides the team-level
+        # surface (legacy back-compat). None/empty -> no per-graph surface
+        # (the pre-#2313 watcher behavior, byte-for-byte).
+        self._graphs_for = graph_provider or (lambda team_id: [])
         self._heartbeat_reader = driver_heartbeat_reader
         self._stale_min = stale_threshold_min
         self._driver_down_min = driver_down_threshold_min
@@ -184,6 +261,9 @@ class BackupWatcher:
         self._known_good: bool = False
         self._known_newest: dict[str, datetime] = {}
         self._known_state_teams: list[str] = []
+        self._known_graph_newest: dict[str, datetime] = {}
+        self._known_graph_state: set[str] = set()
+        self._last_graph_keys: set[str] = set()
         self._last_status: dict[str, Any] = {}
         self._rss_baseline: int | None = None
         self._start_time: datetime = self._now()
@@ -254,6 +334,49 @@ class BackupWatcher:
             state_teams = list(getattr(self, "_known_state_teams", []) or [])
 
         teams = self._teams()
+
+        # ── #2313 per-graph surface (custom graphs; the default rides the
+        # team surface). Scans R2 per seam graph; on R2 failure falls back to
+        # the last-known-good cache (degraded polls keep the custom surface
+        # honest — same policy as the team surface). ──
+        graph_r2_ok = r2_ok
+        graph_surface_confirmed = graph_r2_ok
+        try:
+            graph_newest: dict[str, datetime] = {}
+            graph_state: set[str] = set()
+            if graph_r2_ok:
+                for t in sorted(set(r2_teams + teams)):
+                    gids = self._graphs_for(t)
+                    if gids is None:
+                        # Control-plane read failed — the custom surface is
+                        # UNCONFIRMED this poll. Never open or resolve custom
+                        # incidents off a fabricated-empty surface (mirror of
+                        # the never-requires-confirmed-listing invariant; a
+                        # CP blip at sweep time is exactly when customs age).
+                        graph_surface_confirmed = False
+                        continue
+                    for gid in gids:
+                        n = _newest_graph_backup_ts(self._storage, t, gid)
+                        if n is not None:
+                            graph_newest[f"{t}:{gid}"] = n
+                for k in self._storage.list("ops/teams/"):
+                    parts = k.split("/")
+                    # ops/teams/{team}/graphs/{gid}/state.json → "{team}:{gid}"
+                    if (k.endswith("/state.json") and len(parts) == 6
+                            and parts[3] == "graphs"):
+                        graph_state.add(f"{parts[2]}:{parts[4]}")
+                self._known_graph_newest = graph_newest
+                self._known_graph_state = graph_state
+            else:
+                graph_newest = dict(getattr(self, "_known_graph_newest", {}) or {})
+                graph_state = set(getattr(self, "_known_graph_state", set()) or set())
+        except Exception as e:
+            logger.warning("per-graph R2 read failed (using cache): %s", e)
+            graph_r2_ok = False  # scan failure = unconfirmed surface (F1)
+            graph_surface_confirmed = False
+            graph_newest = dict(getattr(self, "_known_graph_newest", {}) or {})
+            graph_state = set(getattr(self, "_known_graph_state", set()) or set())
+
         try:
             simulate_age = self._simulate_age(now)
         except Exception as e:  # R2 read — fail soft during degraded polls
@@ -276,6 +399,52 @@ class BackupWatcher:
             kill_switch_off=self._kill_switch_off(),
         )
         self._known_good = r2_ok or self._known_good
+
+        # ── #2313 per-graph status table (custom graphs; the default rides
+        # the team surface). Mirrors the per-team table's classes. ──
+        per_graph: dict[str, str] = {}
+        for t in sorted(set(teams + r2_teams)):
+            gids = self._graphs_for(t)
+            if gids is None:
+                # Control-plane read failed — the custom surface is
+                # UNCONFIRMED for this team: never open/resolve custom
+                # incidents off a fabricated-empty surface, and never crash
+                # the poll (the team-level default surface is the never-
+                # silent core and must keep evaluating).
+                continue
+            for gid in gids:
+                key = f"{t}:{gid}"
+                newest = graph_newest.get(key)
+                if newest is None:
+                    # "never" REQUIRES a confirmed listing (module docstring
+                    # invariant). On a HEALTHY scan, absence from R2 IS the
+                    # confirmed listing → never. On a DEGRADED surface (R2
+                    # down OR the graph scan failed), a cache-miss graph is
+                    # UNCONFIRMED — never fabricate NEVER_BACKED_UP; classify
+                    # stale (same as the team table's cache-miss handling) so
+                    # an unseen graph at worst reads as "can't confirm a
+                    # fresh archive".
+                    per_graph[key] = "never" if graph_r2_ok else "stale"
+                    continue
+                age_min = (now - newest).total_seconds() / 60.0
+                per_graph[key] = "stale" if age_min > self._stale_min else "ok"
+                if key not in graph_state and t in teams:
+                    per_graph[key] = "stamp_missing"
+        # Universe shrink: graphs no longer on the seam surface (deleted /
+        # ineligible) resolve their incidents — but ONLY on a CONFIRMED
+        # surface. A degraded R2 or a failed control-plane read must never
+        # resolve real incidents (a CP blip at sweep time is exactly when
+        # customs age into staleness; delete-to-resolve would close the issue
+        # and re-file a fresh one on recovery — fabricated false recovery).
+        if graph_surface_confirmed:
+            prev_graph_keys = set(getattr(self, "_last_graph_keys", set()))
+            cur_graph_keys = set(per_graph)
+            for key in prev_graph_keys - cur_graph_keys:
+                for kind in ("STALE", "NEVER_BACKED_UP", "METADATA_LOST"):
+                    self._alerts.resolve_incident(kind, key)
+            self._last_graph_keys = cur_graph_keys
+        status = dict(status)
+        status["per_graph"] = per_graph
         self._last_status = status
 
         # ── Drive the alert store (no graph writes anywhere here). ──
@@ -301,6 +470,17 @@ class BackupWatcher:
                 self._alerts.open_incident("DRIVER_DOWN")
             else:
                 self._alerts.resolve_incident("DRIVER_DOWN")
+            for key, state in status.get("per_graph", {}).items():
+                if state == "never":
+                    self._alerts.open_incident("NEVER_BACKED_UP", key)
+                elif state == "stale":
+                    self._alerts.open_incident("STALE", key)
+                elif state == "stamp_missing":
+                    self._alerts.open_incident("METADATA_LOST", key)
+                else:
+                    self._alerts.resolve_incident("STALE", key)
+                    self._alerts.resolve_incident("NEVER_BACKED_UP", key)
+                    self._alerts.resolve_incident("METADATA_LOST", key)
             for team in status.get("backup_set_missing", []):
                 self._alerts.open_incident("BACKUP_SET_MISSING", team)
             # BACKUP_SET_MISSING resolves when the team's archives reappear.

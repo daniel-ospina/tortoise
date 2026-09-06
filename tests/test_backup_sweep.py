@@ -5,6 +5,7 @@ from __future__ import annotations  # noqa: I001
 import json
 import os
 import tempfile
+from datetime import datetime, timedelta, UTC
 
 import pytest
 
@@ -12,14 +13,16 @@ from tortoise.backup_config import BackupConfig
 from tortoise.backup_sweep import (
     OPS_STATE_KEY,
     _check_per_label_drift,
+    resolve_active_graph,
     enumerate_eligible_teams,
     enumerate_teams,
+    read_graph_state,
     read_ops_state,
     read_team_state,
     run_backup_sweep,
     team_graph_name,
 )
-from tortoise.hosted_backup import MemoryStorage
+from tortoise.hosted_backup import MemoryStorage, list_backups
 from tests._embedded import _wipe_or as wipe  # noqa: E402, RUF100
 from tortoise.projection import FalkorProjection
 
@@ -1064,3 +1067,360 @@ def test_sweep_supabase_stamp_blip_is_best_effort(shared_proj):
                        filters=[("id", "eq", "team_x")])
         assert row[0]["backup_latest_at"] is None
         pass  # shared session projection — fixture owns close
+
+
+# ── #2313 per-graph sweep (Task 3) ──────────────────────────────────────────
+# Multi-graph E2E needs selectable custom namespaces + registry Graph nodes —
+# namespaces leak on the docker lane (non-test_ wipe exemption, the server
+# wipe is fail-closed on non-test graphs) and the docker journal cannot know
+# per-test random custom names at module import time. Docker-lane coverage of
+# the per-graph dump/restore paths lives in the T7 E2E (test_backup_e2e.py);
+# the dialect branches are pure-fake covered (test_backup_graph_enum.py).
+
+
+@pytest.mark.skipif(_DOCKER_LANE, reason="custom namespaces leak on docker lane (T7 E2E covers)")
+def test_sweep_backs_up_default_plus_custom_graphs(shared_proj):
+    with tempfile.TemporaryDirectory() as tmp:  # noqa: F841
+        if shared_proj is None:
+            return
+        wipe(shared_proj)
+        proj = shared_proj
+        reg = proj.db.select_graph(_REGISTRY_GRAPH)
+        reg.query("CREATE (t:Team {id:'team_mg', tier:'pro'})")
+        team_g = proj.db.select_graph(_team_graph("team_mg"))
+        team_g.query("CREATE (p:Point {id:'pt-d', content:'d', pointKind:'claim'})")
+        # Two custom graphs (registry lane mint shape: gid + namespace).
+        for i, gid in enumerate(("g_aaa", "g_bbb")):
+            ns = f"team_team_mg_{gid}"
+            g = proj.db.select_graph(ns)
+            for j in range(i + 1):
+                g.query("CREATE (p:Point {id:$id, content:'c', pointKind:'claim'})",
+                        params={"id": f"pt-{j}", "c": f"custom {j}"})
+            reg.query(
+                "CREATE (g:Graph {id:$gid, team_id:'team_mg', name:$gid, "
+                "kind:'custom', namespace:$ns, status:'active'})",
+                params={"gid": gid, "ns": ns},
+            )
+        store = MemoryStorage()
+        res = run_backup_sweep(db=proj.db, registry=reg, storage=store,
+                               config=_config())
+        assert res["status"] == "backed_up"
+        team_res = res["results"]["team_mg"]
+        assert team_res["status"] == "backed_up"
+        assert set(team_res["graphs"].keys()) == {"default", "g_aaa", "g_bbb"}
+        assert team_res["graphs"]["g_aaa"]["status"] == "backed_up"
+        assert team_res["graphs"]["g_aaa"]["node_count"] == 1
+        assert team_res["graphs"]["g_bbb"]["node_count"] == 2
+        # Per-graph artifacts are graph-keyed; the default is the literal
+        # segment "default" (Q4 owner decision).
+        for gid, n in (("default", 1), ("g_aaa", 1), ("g_bbb", 2)):
+            keys = [k for k in store.list(f"backups/team_mg/{gid}/")
+                    if k.endswith("manifest.json")]
+            assert len(keys) == 1, gid
+            manifest = json.loads(store.download(keys[0]))
+            assert manifest["graph_id"] == gid
+            assert manifest["node_count"] == n
+            # manifest graph_name == the SELECTED graph (team graph name for
+            # the default; the custom namespace) — P0 guard coherence
+            expected_name = _team_graph("team_mg") if gid == "default" \
+                else f"team_team_mg_{gid}"
+            assert manifest["graph_name"] == expected_name
+            state = read_graph_state(store, "team_mg", gid)
+            assert state["node_count"] == n
+        # default mirrors the legacy team-state file (bridge consumers)
+        assert read_team_state(store, "team_mg") == \
+            read_graph_state(store, "team_mg", "default")
+
+
+@pytest.mark.skipif(_DOCKER_LANE, reason="custom namespaces leak on docker lane (T7 E2E covers)")
+def test_sweep_skips_deleted_custom_tombstone(shared_proj):
+    """Deleted (tombstone) custom graphs are never swept — no objects, no
+    state, no per-graph result entry (#2304 quarantine semantics)."""
+    with tempfile.TemporaryDirectory() as tmp:  # noqa: F841
+        if shared_proj is None:
+            return
+        wipe(shared_proj)
+        proj = shared_proj
+        reg = proj.db.select_graph(_REGISTRY_GRAPH)
+        reg.query("CREATE (t:Team {id:'team_tomb', tier:'pro'})")
+        team_g = proj.db.select_graph(_team_graph("team_tomb"))
+        team_g.query("CREATE (p:Point {id:'pt-d', content:'d', pointKind:'claim'})")
+        ns = "team_team_tomb_g_dead"
+        g = proj.db.select_graph(ns)
+        g.query("CREATE (p:Point {id:'pt-x', content:'x', pointKind:'claim'})")
+        reg.query(
+            "CREATE (g:Graph {id:'g_dead', team_id:'team_tomb', name:'dead', "
+            "kind:'custom', namespace:$ns, status:'deleted'})",
+            params={"ns": ns},
+        )
+        store = MemoryStorage()
+        res = run_backup_sweep(db=proj.db, registry=reg, storage=store,
+                               config=_config())
+        team_res = res["results"]["team_tomb"]
+        assert team_res["status"] == "backed_up"
+        assert set(team_res["graphs"].keys()) == {"default"}
+        assert store.list("backups/team_tomb/g_dead/") == []
+        assert "default" not in team_res["graphs"].get("g_dead", {})
+
+
+@pytest.mark.skipif(_DOCKER_LANE, reason="custom namespaces leak on docker lane (T7 E2E covers)")
+def test_sweep_custom_size_guard_is_per_graph(shared_proj):
+    """A custom graph over the size guard aborts ONLY itself; the default
+    graph still backs up (per-graph isolation)."""
+    with tempfile.TemporaryDirectory() as tmp:  # noqa: F841
+        if shared_proj is None:
+            return
+        wipe(shared_proj)
+        proj = shared_proj
+        reg = proj.db.select_graph(_REGISTRY_GRAPH)
+        reg.query("CREATE (t:Team {id:'team_sz', tier:'pro'})")
+        team_g = proj.db.select_graph(_team_graph("team_sz"))
+        team_g.query("CREATE (p:Point {id:'pt-d', content:'d', pointKind:'claim'})")
+        ns = "team_team_sz_g_big"
+        g = proj.db.select_graph(ns)
+        for i in range(50):
+            g.query("CREATE (p:Point {id:$id, content:'c', pointKind:'claim'})",
+                    params={"id": f"pt-{i}", "c": "big"})
+        reg.query(
+            "CREATE (g:Graph {id:'g_big', team_id:'team_sz', name:'big', "
+            "kind:'custom', namespace:$ns, status:'active'})",
+            params={"ns": ns},
+        )
+        store = MemoryStorage()
+        res = run_backup_sweep(db=proj.db, registry=reg, storage=store,
+                               config=_config(size_guard_max_nodes=10))
+        team_res = res["results"]["team_sz"]
+        assert team_res["graphs"]["default"]["status"] == "backed_up"
+        assert team_res["graphs"]["g_big"]["status"] == "aborted_size_guard"
+        assert store.list("backups/team_sz/g_big/") == []
+        aborts = [i for i in res["incidents"]
+                  if i["kind"] == "SIZE_GUARD_ABORT"]
+        assert len(aborts) == 1 and aborts[0]["graph_id"] == "g_big"
+
+
+@pytest.mark.skipif(_DOCKER_LANE, reason="custom namespaces leak on docker lane (T7 E2E covers)")
+def test_sweep_drains_legacy_flat_pool_leaves_nested(shared_proj):
+    """Pre-#2313 flat team-level objects are pruned by the per-team legacy
+    drain; nested per-graph objects are untouched by it."""
+    with tempfile.TemporaryDirectory() as tmp:  # noqa: F841
+        if shared_proj is None:
+            return
+        wipe(shared_proj)
+        proj = shared_proj
+        reg = proj.db.select_graph(_REGISTRY_GRAPH)
+        reg.query("CREATE (t:Team {id:'team_drain', tier:'pro'})")
+        team_g = proj.db.select_graph(_team_graph("team_drain"))
+        team_g.query("CREATE (p:Point {id:'pt-d', content:'d', pointKind:'claim'})")
+        store = MemoryStorage()
+        # Seed an OLD legacy flat artifact (pre-#2313 shape) that must be
+        # drained by the team sweep, plus one fresh nested default artifact
+        # (created by the sweep itself this run — newest).
+        old_ts = (datetime.now(UTC) - timedelta(days=40)).strftime(
+            "%Y%m%dT%H%M%S") + "000Z_00000000"
+        legacy_id = f"team_drain/{old_ts}"
+        store.upload(f"backups/{legacy_id}/dump.enc", b"old")
+        store.upload(f"backups/{legacy_id}/manifest.json", json.dumps({
+            "backup_id": legacy_id, "team_id": "team_drain",
+            "graph_name": _team_graph("team_drain"),
+            "created_at": (datetime.now(UTC) - timedelta(days=40)).isoformat(),
+            "node_count": 1, "edge_count": 0, "sha256": "x",
+            "format": "tortoise-dump-v1",
+        }).encode())
+        res = run_backup_sweep(db=proj.db, registry=reg, storage=store,
+                               config=_config(retention_weekly=0))
+        team_res = res["results"]["team_drain"]
+        assert team_res["graphs"]["default"]["status"] == "backed_up"
+        # legacy flat object drained (its manifest is gone)
+        assert not [k for k in store.list("backups/team_drain/")
+                    if k.endswith("manifest.json") and
+                    "/default/" not in k]
+        # nested default artifact from THIS run survives
+        assert len([k for k in store.list("backups/team_drain/default/")
+                    if k.endswith("manifest.json")]) == 1
+
+
+# ── #2313 Task 5: restore-target resolution (tombstone guard) ──────────────
+# resolve_active_graph reads ONLY the control plane (registry Graph nodes or
+# the teams/graphs fakes) — never the data plane — so these run on BOTH lanes
+# without namespaces ever being selected or journaled.
+
+
+def test_resolve_active_graph_registry_lane(shared_proj):
+    with tempfile.TemporaryDirectory() as tmp:  # noqa: F841
+        if shared_proj is None:
+            return
+        wipe(shared_proj)
+        proj = shared_proj
+        reg = proj.db.select_graph(_REGISTRY_GRAPH)
+        reg.query("CREATE (t:Team {id:'team_rg', tier:'pro'})")
+        reg.query("CREATE (t:Team {id:'team_rg2', tier:'pro'})")
+        # active custom + tombstoned custom + another team's graph
+        reg.query(
+            "CREATE (g:Graph {id:'g_live', team_id:'team_rg', kind:'custom', "
+            "namespace:'ns_live', status:'active'})")
+        reg.query(
+            "CREATE (g:Graph {id:'g_dead', team_id:'team_rg', kind:'custom', "
+            "namespace:'ns_dead', status:'deleted'})")
+        reg.query(
+            "CREATE (g:Graph {id:'g_other', team_id:'team_rg2', kind:'custom', "
+            "namespace:'ns_other', status:'active'})")
+        # active custom resolves to its namespace (the dump/select name)
+        row = resolve_active_graph(reg, "team_rg", "g_live")
+        assert row["graph_id"] == "g_live" and row["graph_name"] == "ns_live"
+        assert row["kind"] == "custom"
+        # default is always present (synthesized from the seam)
+        row = resolve_active_graph(reg, "team_rg", "default")
+        assert row["graph_id"] == "default"
+        assert row["graph_name"] == _team_graph("team_rg")
+        # tombstoned → refused
+        with pytest.raises(ValueError):
+            resolve_active_graph(reg, "team_rg", "g_dead")
+        # another team's graph → refused (tenant isolation at resolution)
+        with pytest.raises(ValueError):
+            resolve_active_graph(reg, "team_rg", "g_other")
+        # unknown → refused
+        with pytest.raises(ValueError):
+            resolve_active_graph(reg, "team_rg", "g_never")
+
+
+def test_resolve_active_graph_supabase_fake():
+    from tests.test_backup_graph_enum import _FakeGraphsTable
+    from tortoise.hosted_backup import _is_supabase_source
+
+    cp = _FakeGraphsTable(
+        {"id": "team_s", "graph_name": "team_myapp"},
+        [
+            {"id": "g_a", "team_id": "team_s", "name": "a", "kind": "custom",
+             "namespace": "team_s_g_a", "status": "active", "created_at": "1"},
+            {"id": "g_del", "team_id": "team_s", "name": "del", "kind": "custom",
+             "namespace": "team_s_g_del", "status": "deleted", "created_at": "2"},
+            {"id": "g_def", "team_id": "team_s", "name": "default", "kind": "default",
+             "namespace": "team_myapp", "status": "active", "created_at": "0"},
+        ],
+    )
+    assert _is_supabase_source(cp)
+    row = resolve_active_graph(cp, "team_s", "default")
+    assert row["graph_name"] == "team_myapp"  # teams.graph_name, not team_{id}
+    row = resolve_active_graph(cp, "team_s", "g_a")
+    assert row["graph_name"] == "team_s_g_a"
+    with pytest.raises(ValueError):
+        resolve_active_graph(cp, "team_s", "g_del")  # tombstoned
+    with pytest.raises(ValueError):
+        resolve_active_graph(cp, "team_s", "g_missing")
+
+
+# ── FIX-D / gap tests: drain gating, read_graph_state fallback, custom drift ──
+
+
+def test_read_graph_state_default_falls_back_to_legacy_team_state(shared_proj):
+    """The per-graph read for the DEFAULT graph falls back to the legacy
+    team-level file when no per-graph file exists yet (migration bridge for
+    the transition-guard baseline); custom graphs have no fallback."""
+    from tortoise.backup_sweep import _write_json, read_graph_state
+    with tempfile.TemporaryDirectory() as tmp:  # noqa: F841
+        if shared_proj is None:
+            return
+        wipe(shared_proj)
+        store = MemoryStorage()
+        _write_json(store, "ops/teams/team_x/state.json",
+                    {"node_count": 7, "label_counts": {"Point": 7}})
+        assert read_graph_state(store, "team_x", "default")["node_count"] == 7
+        # a per-graph file, once present, wins over the legacy file
+        _write_json(store, "ops/teams/team_x/graphs/default/state.json",
+                    {"node_count": 9})
+        assert read_graph_state(store, "team_x", "default")["node_count"] == 9
+        # custom graphs never read the legacy team file
+        assert read_graph_state(store, "team_x", "g_c1") == {}
+
+
+@pytest.mark.skipif(_DOCKER_LANE, reason="custom namespaces leak on docker lane (T7 E2E covers)")
+def test_sweep_custom_graph_data_loss_transition_fires_per_graph(shared_proj):
+    """A custom graph's >50% drop across runs fires DATA_LOSS_CANDIDATE with
+    the graph_id and does NOT update its per-graph state (guard baseline)."""
+    with tempfile.TemporaryDirectory() as tmp:  # noqa: F841
+        if shared_proj is None:
+            return
+        wipe(shared_proj)
+        proj = shared_proj
+        reg = proj.db.select_graph(_REGISTRY_GRAPH)
+        reg.query("CREATE (t:Team {id:'team_dl', tier:'pro'})")
+        team_g = proj.db.select_graph(_team_graph("team_dl"))
+        team_g.query("CREATE (p:Point {id:'pt-d', content:'d', pointKind:'claim'})")
+        ns = "team_team_dl_g_c1"
+        g = proj.db.select_graph(ns)
+        for i in range(5):
+            g.query("CREATE (p:Point {id:$id, content:'c', pointKind:'claim'})",
+                    params={"id": f"pt-{i}", "c": "c"})
+        reg.query(
+            "CREATE (g:Graph {id:'g_c1', team_id:'team_dl', kind:'custom', "
+            "namespace:$ns, status:'active'})",
+            params={"ns": ns},
+        )
+        store = MemoryStorage()
+        r1 = run_backup_sweep(db=proj.db, registry=reg, storage=store,
+                              config=_config())
+        assert r1["results"]["team_dl"]["graphs"]["g_c1"]["status"] == "backed_up"
+        st1 = read_graph_state(store, "team_dl", "g_c1")
+        assert st1["node_count"] == 5
+
+        # wipe >50% of the custom graph (5 → 2) — steady default unaffected
+        g.query("MATCH (p:Point) WHERE p.id IN ['pt-0','pt-1','pt-2'] DELETE p")
+        r2 = run_backup_sweep(db=proj.db, registry=reg, storage=store,
+                              config=_config())
+        res = r2["results"]["team_dl"]
+        assert res["graphs"]["default"]["status"] == "backed_up"
+        assert res["graphs"]["g_c1"]["status"] == "data_loss_candidate"
+        dl = [i for i in r2["incidents"]
+              if i["kind"] == "DATA_LOSS_CANDIDATE" and i.get("graph_id") == "g_c1"]
+        assert len(dl) == 1 and dl[0]["detail"]["previous"] == 5
+        # guard baseline preserved (state not advanced to 2)
+        assert read_graph_state(store, "team_dl", "g_c1")["node_count"] == 5
+        # no data-loss archive stands
+        assert len(list_backups(store, "team_dl", graph_id="g_c1")) == 1
+
+
+def test_sweep_legacy_drain_skipped_when_default_fails(shared_proj):
+    """FIX-D regression: the legacy flat-pool drain runs ONLY when the default
+    graph backed up — a default in data-loss keeps its last-good flat archives
+    (pre-#2313 the prune ran only on a successful default dump)."""
+    with tempfile.TemporaryDirectory() as tmp:  # noqa: F841
+        if shared_proj is None:
+            return
+        wipe(shared_proj)
+        proj = shared_proj
+        reg = proj.db.select_graph(_REGISTRY_GRAPH)
+        reg.query("CREATE (t:Team {id:'team_keep', tier:'pro'})")
+        team_g = proj.db.select_graph(_team_graph("team_keep"))
+        for i in range(2):
+            team_g.query(
+                "CREATE (p:Point {id:$id, content:'c', pointKind:'claim'})",
+                params={"id": f"pt-{i}"})
+        store = MemoryStorage()
+        # run 1: default backs up (baseline state written)
+        r1 = run_backup_sweep(db=proj.db, registry=reg, storage=store,
+                              config=_config(retention_weekly=0))
+        assert r1["results"]["team_keep"]["graphs"]["default"]["status"] == "backed_up"
+        # seed an OLD legacy flat artifact AFTER run 1 (run 1's successful
+        # drain would otherwise legitimately prune it): only run 2's drain —
+        # which must NOT run on a failing default — would erode it
+        from datetime import timedelta
+        old_ts = (datetime.now(UTC) - timedelta(days=30)).strftime(
+            "%Y%m%dT%H%M%S") + "000Z_00000000"
+        legacy_id = f"team_keep/{old_ts}"
+        store.upload(f"backups/{legacy_id}/dump.enc", b"old")
+        store.upload(f"backups/{legacy_id}/manifest.json", json.dumps({
+            "backup_id": legacy_id, "team_id": "team_keep",
+            "graph_name": _team_graph("team_keep"),
+            "created_at": (datetime.now(UTC) - timedelta(days=30)).isoformat(),
+            "node_count": 2, "edge_count": 0, "sha256": "x",
+            "format": "tortoise-dump-v1",
+        }).encode())
+        # run 2: default is EMPTIED → data_loss_candidate → drain must NOT run
+        team_g.query("MATCH (p:Point) DELETE p")
+        r2 = run_backup_sweep(db=proj.db, registry=reg, storage=store,
+                              config=_config(retention_weekly=0))
+        assert r2["results"]["team_keep"]["graphs"]["default"]["status"] == "data_loss_candidate"
+        # the legacy flat artifact SURVIVES run 2 (no drain on failure)
+        flat = [k for k in store.list("backups/team_keep/")
+                if k.endswith("manifest.json") and len(k.split("/")) == 4]
+        assert len(flat) == 1, "drain must not erode last-good archives on failure"

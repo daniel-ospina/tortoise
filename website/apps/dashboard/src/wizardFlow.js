@@ -24,12 +24,17 @@ export const WIZARD_STEPS = Object.freeze([
   {
     id: 'orientation',
     label: 'Orientation',
-    sub: "Here's what's about to happen: install → connect → add your organization and you → make your first decision.",
+    // #2361 review-r1: this sub used to promise 'install → connect → add
+    // your organization and you → make your first decision' — the live 5-step
+    // wizard creates the org first, connects second, and never adds the user
+    // or makes a decision (both are agent-side after connect). State the real
+    // order; the numbered bullets below carry the detail.
+    sub: "Here's what happens next: name your organization, choose how you'll use Tortoise, then connect your agent — your agent takes it from there.",
   },
   {
     id: 'org-create',
     label: 'Create your Organization',
-    sub: 'Name your organization — it becomes the first Subject on your graph. Or accept an invitation to join one.',
+    sub: "Name your organization — it's the memory space your agent files decisions and findings into. Or accept an invitation to join one.",
   },
   {
     id: 'fork',
@@ -96,6 +101,37 @@ export function resolveBuildCatalog(modules, fallback = BUILD_CATALOG_PLACEHOLDE
     && typeof row.kind === 'string'
     && typeof row.description === 'string' && row.description.length > 0)
   return wellFormed ? modules : fallback
+}
+
+// #2325/#2333: connect-step mint names must be DISTINGUISHABLE — the old
+// fixed 'Setup command' label made rotate/regenerate rows identical under
+// the free cap of 2. Every connect mint is named org + date (+ a same-minute
+// collision guard), so repeated connects never produce two identically-
+// named rows. Pure helper (node --test unit-tested). UTC stamp → sortable
+// and unambiguous across timezones.
+export function durableKeyName(orgName, date = new Date(), existingNames = []) {
+  const orgRaw = (orgName && String(orgName).trim()) || 'your organization'
+  const pad = (n) => String(n).padStart(2, '0')
+  const stamp = `${date.getUTCFullYear()}-${pad(date.getUTCMonth() + 1)}-${pad(date.getUTCDate())} ${pad(date.getUTCHours())}:${pad(date.getUTCMinutes())} UTC`
+  // #2325 (code-review P2): the server clamps key labels to 64 chars
+  // (hosted_api KEY_NAME_MAX, _clean_key_label s[:64] — silent), so the
+  // stamp + (n) suffix must never sit in the truncated tail. Bound the org
+  // segment first, keep the label ≤ 64, and run the collision guard against
+  // the clamped names the table actually stores.
+  const MAX = 64
+  const head = 'key for '
+  const tail = ` ${stamp}` // ~21 chars
+  const orgMax = MAX - head.length - tail.length - 5 // reserve room for " (nn)"
+  const org = orgRaw.length > orgMax ? orgRaw.slice(0, orgMax).replace(/[_-]+$/, '') : orgRaw
+  const base = `${head}${org}${tail}`
+  const seen = new Set(Array.isArray(existingNames) ? existingNames.filter(Boolean) : [])
+  let name = base
+  let n = 2
+  while (seen.has(name)) {
+    const suffix = ` (${n++})`
+    name = `${base.slice(0, MAX - suffix.length)}${suffix}`
+  }
+  return name
 }
 
 // Org-create name validation — mirrors the server (POST /v1/onboarding/team:

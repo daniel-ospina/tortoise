@@ -57,13 +57,26 @@ def _run(tmp_path, **kw) -> tuple[ExitCode, Path, dict]:
     return code, attempt_dir, summary
 
 
+def _episode_artifacts(attempt: Path) -> list:
+    """Per-episode run artifacts only — the run-end LIVE writers (recall.json
+    + family_*.json, Task 5 #2284) land in the attempt dir too, so count-
+    based artifact asserts filter them (writer files are not episode
+    artifacts)."""
+    return [p for p in attempt.glob("*.json")
+            if p.name not in ("summary.json", "recall.json")
+            and not p.name.startswith("family_")]
+
+
 class TestRunArtifacts:
     def test_per_scenario_artifacts_and_run_id(self, tmp_path):
         code, attempt, summary = _run(tmp_path, mock=True, seed=7)  # noqa: RUF059
         assert code is ExitCode.OK
-        names = [a.name for a in attempt.glob("*.json")
-                 if a.name != "summary.json"]
+        names = [a.name for a in _episode_artifacts(attempt)]
         assert len(names) == 2  # 2 scenarios × 1 mock arm
+        # writer files (Task 5) present alongside: recall.json always;
+        # family_*.json only when a family probe scorer ran
+        assert (attempt / "recall.json").is_file()
+        assert not list(attempt.glob("family_*.json"))  # harness scorer: no families
         # run_id = {episode_seed}-{arm}-{scenario}; episode seed = base+index
         assert sorted(names) == ["7-mock-s0.json", "8-mock-s1.json"]
         for n in names:
@@ -75,14 +88,14 @@ class TestRunArtifacts:
     def test_artifact_schema_keys(self, tmp_path):
         _, attempt, _ = _run(tmp_path, mock=True)
         art = json.loads((attempt / next(
-            n for n in attempt.iterdir() if n.name != "summary.json")).read_text())
+            a.name for a in _episode_artifacts(attempt))).read_text())
         for key in ("schema_version", "run_id", "seed", "arm", "scenario_id",
                     "tier", "model", "determinism", "episode_trace",
                     "metric_values", "model_call_outcomes", "ep_outcome",
                     "isolation_breach", "excluded", "setup", "timestamps",
                     "provenance"):
             assert key in art, key
-        assert art["schema_version"] == "1.0"
+        assert art["schema_version"] == "1.1"
         assert art["model"]["temperature"] == 0.0
         assert art["ep_outcome"] == "converged"
         assert art["isolation_breach"] is False
@@ -90,7 +103,7 @@ class TestRunArtifacts:
 
     def test_summary_schema(self, tmp_path):
         _, _, summary = _run(tmp_path, mock=True)
-        assert summary["schema_version"] == "1.0"
+        assert summary["schema_version"] == "1.1"
         assert summary["run"]["exit_code"] == 0
         assert summary["arms"][0]["arm_present"] is True
         assert summary["arms"][0]["valid_episodes"] == 2
@@ -177,10 +190,11 @@ class TestExit4Boundaries:
         code, attempt, summary = _run(tmp_path, mock=True)
         assert code is ExitCode.ARM_FAILED
         assert summary["arms"][0]["arm_present"] is False
-        # summary-only: no episode artifacts
+        # summary-only: no episode artifacts (the run-end writer emits the
+        # empty recall record — not an episode artifact)
         names = [n.name for n in attempt.iterdir()]
         assert "summary.json" in names
-        assert len(names) == 1
+        assert len(_episode_artifacts(attempt)) == 0
 
     def test_all_episodes_failed_exit4_after_artifacts(self, tmp_path, monkeypatch):
         """(b1) all-failed → per-scenario artifacts + summary written, THEN
@@ -195,7 +209,8 @@ class TestExit4Boundaries:
         assert code is ExitCode.ARM_FAILED
         # artifacts exist (counted in artifact) before the exit-4 computation
         names = [n.name for n in attempt.iterdir()]
-        assert len(names) == 3  # 2 episode artifacts + summary
+        assert len(names) == 4  # 2 episode artifacts + recall.json + summary
+        assert len(_episode_artifacts(attempt)) == 2
         assert summary["arms"][0]["valid_episodes"] == 0
         assert summary["arms"][0]["excluded"]["count"] == 2
 
@@ -223,14 +238,72 @@ class TestExit4Boundaries:
         by_id = {a["arm_id"]: a for a in summary["arms"]}
         assert by_id["mock"]["arm_present"] is False
         assert by_id["mock2"]["arm_present"] is True
-        names = [n.name for n in attempt.iterdir()]
-        assert len([n for n in names if n != "summary.json"]) == 2  # arm B artifacts
+        assert len([n for n in _episode_artifacts(attempt)]) == 2  # arm B artifacts
 
 
 class TestMockArmContract:
     def test_metric_values_nonempty(self, tmp_path):
         _, attempt, _ = _run(tmp_path, mock=True)
         art = json.loads((attempt / next(
-            n for n in attempt.iterdir() if n.name != "summary.json")).read_text())
+            a.name for a in _episode_artifacts(attempt))).read_text())
         assert art["metric_values"]["n_turns"] >= 1
         assert art["metric_values"]["total_tokens"] > 0
+
+
+class TestRealRequestFailClosed:
+    """PR #2341 review round 3, P2 (both reviewers): the real-executor
+    fail-closed gate keys on the REQUEST, not the requested arm ids. A real
+    request whose arms cannot resolve to a real-mode slot (default arms =
+    ["mock"], explicit all-mock arms) or that carries --mock raises
+    ConfigError BEFORE the attempt dir — never a silent mock-lane run rc=0
+    under a real label. (Round 2's gate required ``not mock AND any(a !=
+    "mock")``, so a real request with default arms or mock=True skipped the
+    refusal and ran the mock lane.)"""
+
+    def test_real_executor_default_arms_refused(self, tmp_path):
+        """RunConfig(executor="real") with DEFAULT arms (["mock"]) — no
+        requested arm can resolve to a real-mode slot → ConfigError before
+        the attempt dir (zero artifacts)."""
+        cfg = _config_dir(tmp_path)
+        out = tmp_path / "out"
+        with pytest.raises(ConfigError,
+                           match="no requested arm can resolve"):
+            run_battery(RunConfig(config_dir=cfg, out_dir=out,
+                                  executor="real"),
+                        stdout=lambda _: None)
+        assert not out.exists() or not [p for p in out.iterdir()]
+
+    def test_real_executor_explicit_all_mock_arms_refused(self, tmp_path):
+        """executor="real" with an EXPLICIT all-mock arm set is the mock
+        lane by construction → ConfigError (round 2 silently ran it rc=0)."""
+        cfg = _config_dir(tmp_path)
+        out = tmp_path / "out"
+        with pytest.raises(ConfigError,
+                           match="no requested arm can resolve"):
+            run_battery(RunConfig(config_dir=cfg, out_dir=out,
+                                  arms=["mock"], executor="real"),
+                        stdout=lambda _: None)
+        assert not out.exists() or not [p for p in out.iterdir()]
+
+    def test_real_executor_with_mock_flag_refused(self, tmp_path):
+        """executor="real" + mock=True → ConfigError: --mock forces every
+        arm onto the MockArm (the mock lane) — never a real-labeled run
+        over the mock executor (round 2 skipped this via ``not config.mock``
+        in the gate)."""
+        cfg = _config_dir(tmp_path)
+        out = tmp_path / "out"
+        with pytest.raises(ConfigError, match="--mock"):
+            run_battery(RunConfig(config_dir=cfg, out_dir=out,
+                                  executor="real", mock=True),
+                        stdout=lambda _: None)
+        assert not out.exists() or not [p for p in out.iterdir()]
+
+    def test_mock_executor_all_mock_arms_runs(self, tmp_path):
+        """Default lane unchanged: executor="mock" with all-mock arms runs
+        (exit OK, artifacts written, run_mode mock) — the real-request gate
+        never touches the mock lane."""
+        code, attempt, summary = _run(tmp_path, executor="mock",
+                                      arms=["mock"], mock=False)
+        assert code is ExitCode.OK
+        assert summary["run"]["run_mode"] == "mock"
+        assert len(_episode_artifacts(attempt)) == 2

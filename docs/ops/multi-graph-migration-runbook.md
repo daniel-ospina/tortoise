@@ -1,3 +1,16 @@
+---
+title: "Multi-Graph Migration Runbook"
+type: operations
+domain: platform
+doc_status: live
+created: 2026-09-01
+ownedBy: epistemic-team
+subjects:
+  team: epistemic-team
+aboutObjects:
+- tortoise-hosted-platform
+---
+
 # Multi-graph migration runbook — no-forced-migration path + rollback (epic #2083)
 
 C8 #2117 (docs + drill). Applies to the epic #2083 changes shipped in
@@ -97,8 +110,13 @@ Local: `npm --prefix supabase/tests/pglite run validate`.
 - **Deletes cascade keys:** `DELETE /v1/graphs/{id}` tombstones the graph
   and revokes its keys (idempotent; a client retry converges). The default
   graph 403s.
-- **Sweeps (C5 residual, tracked):** backup/event-retention sweeps still
-  enumerate the DEFAULT graph only — per-graph sweep enumeration + state
-  keying is a follow-up (R13 audit owns retention amplification).
+- **Sweeps (#2313 landed):** the hosted backup sweep now enumerates EVERY
+  active graph (default + custom) — graph-keyed archives
+  (`backups/{team}/{graph}/{ts}_{rnd}/...`), per-graph state/retention, and
+  per-graph watcher staleness (see `docs/ops/registry-backup-dr.md`).
+  Residual: a graph-bound SELF-SERVICE restore surface for custom graphs is
+  a follow-up (#2339); the internal DR operators (drill/re-baseline/ACL
+  reconcile) run against the FalkorDB registry control plane — supabase-lane
+  operation is a follow-up (#2340).
 - **docs:** schema details in `docs/registry-graph-schema.md`; the key
   permission model in `docs/auth-architecture.md` §6.

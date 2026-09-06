@@ -148,7 +148,7 @@ STATE_VALUE_CARVE_OUT = (
 )
 
 CORE_OBJECT_KEYS = (
-    "core:Project", "core:WorkItem", "core:document", "core:tag",
+    "core:Project", "core:WorkItem", "core:Problem", "core:document", "core:tag",
     "core:user", "core:skill", "core:tool", "core:agent",
     "core:workflow", "core:agreement", "core:standard", "core:other",
     "core:strategy", "core:plan", "core:goal", "core:target",
@@ -4673,6 +4673,20 @@ def _call_once(model, system: str, user: str, *, deadline_s: int,
         if stats is not None:
             with _DEADLINE_ABORTS_LOCK:
                 stats["deadline_aborts"] = stats.get("deadline_aborts", 0) + 1
+        # #2339: a deadline abort fires OUTSIDE the wrapper's complete()
+        # (this thread kills the worker, so RoutingModel/RotatingModel never
+        # see an exception and never fail over) — every retry would re-hit
+        # the SAME stalled provider. Signal the stall (cooldown + interrupt
+        # only the stalled adapter) so the NEXT attempt routes to the
+        # healthy fallback and the session survives. Best-effort: a model
+        # without note_stall keeps the pre-#2339 behavior (bare close +
+        # raise).
+        note_stall = getattr(model, "note_stall", None)
+        if note_stall is not None:
+            try:  # noqa: SIM105
+                note_stall()
+            except Exception:
+                pass
         raise TimeoutError(f"model call exceeded {deadline_s}s")
     if "exc" in box:
         raise box["exc"]

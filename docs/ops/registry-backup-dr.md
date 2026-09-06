@@ -1,8 +1,24 @@
+---
+title: "Registry/Knowledge-Graph Backup DR — Runbook (#596)"
+type: operations
+domain: platform
+doc_status: live
+created: 2026-08-08
+issue: 596
+ownedBy: epistemic-team
+subjects:
+  team: epistemic-team
+aboutObjects:
+- tortoise-hosted-platform
+---
+
 # Registry/Knowledge-Graph Backup DR — Runbook (#596)
 
 > "registry" naming is retained from the registry-era design — the content is
 > **per-team knowledge graphs** (control-plane metadata migrates to Supabase
-> under #669).
+> under #669). Since #2313 the sweep covers EVERY active graph of a team
+> (the default + custom graphs), each with its own archives, state, retention
+> and staleness incidents.
 
 ## Architecture
 - **Driver:** `.github/workflows/registry-backup-cron.yml` (hourly, GH Actions) → internal-key endpoints. Independent failure domain — an OOM crash-loop (#545) must not blind the pipeline.
@@ -11,18 +27,20 @@
 - **Alert sink (dual-channel):** GitHub issue (agent) + Telegram push (human), R2 create-once per-incident dedup (`ops/alerts/{KIND}/{team}.json`, delete-to-resolve), GH-search fallback, pending-push retries.
 
 ## R2 layout
-- `backups/{team}/{ts}_{rnd}/dump.enc` + `manifest.json` — per-team archives (retention: 24 hourly + 7 daily + 4 weekly, `keep_hourly`).
-- `ops/teams/{team}/state.json` — transition-guard counts.
+- `backups/{team}/{graph}/{ts}_{rnd}/dump.enc` + `manifest.json` — per-GRAPH archives (#2313; the default graph uses the literal `default` segment; custom graphs their control-plane id). Retention per graph: 24 hourly + 7 daily + 4 weekly (`keep_hourly`). Pre-#2313 team-level flat objects (`backups/{team}/{ts}_{rnd}/…`) are the DEFAULT graph's legacy archives — read-bucketed as default, drained by the sweep's per-team legacy prune.
+- `ops/teams/{team}/state.json` — legacy transition-guard counts (mirror of the default graph's per-graph state; pre-#2313 consumers).
+- `ops/teams/{team}/graphs/{graph_id}/state.json` — per-graph transition-guard counts (#2313).
 - `ops/state.json` — team count (enumeration-delta guard) + sweep timestamps.
+- Alerts are keyed per (kind, subject): team incidents use the team id; CUSTOM-graph incidents use `"{team}:{graph}"` (#2313) — the same subject re-baseline resolves and the watcher opens.
 - `ops/watcher-heartbeat.json`, `ops/driver-heartbeat.json` — mutual supervision.
 - `ops/alerts/`, `ops/pending-push/`, `ops/simulate/`, `ops/suppression.json`.
 
 ## Alert taxonomy + triage
 | Kind | Meaning | Triage |
 |---|---|---|
-| STALE | a team's newest archive is older than `BACKUP_STALE_THRESHOLD_MIN` (90) | Check sweep logs; run the sweep; R2 connectivity |
-| NEVER_BACKED_UP | a team exists with no archive yet | Confirm team is new; if old, investigate |
-| METADATA_LOST | archives exist but team state object missing | Re-run sweep (state re-created) |
+| STALE | a graph's newest archive is older than `BACKUP_STALE_THRESHOLD_MIN` (90) — subject `team` (default) or `team:graph` (custom) | Check sweep logs; run the sweep; R2 connectivity |
+| NEVER_BACKED_UP | an active graph exists with no archive yet (custom-graph incidents carry `team:graph`) | Confirm graph is new/empty; if old, investigate |
+| METADATA_LOST | archives exist but the graph's per-graph state object missing | Re-run sweep (state re-created) |
 | BACKUP_SET_MISSING | state exists but no archives (bulk delete/erroneous prune) | Investigate R2; restore from a retained archive if possible |
 | DRIVER_DOWN | driver heartbeat stale (> 4h) — workflow disabled/dead | Re-enable the workflow; GH 60-day auto-disable |
 | R2_DOWN | R2 unreachable (driver-side signal) | Check R2 creds/billing/bucket policy |
@@ -35,14 +53,15 @@
 | P0_GUARD_FAIL | a dump named the wrong graph or was empty — objects deleted | Investigate the sweep; alert auto-consolidates |
 
 ## Restore / drill
-- **Drill endpoint:** `POST /v1/internal/backups/drill` `{team_id, backup_key}` — internal-key only; restores into `_drill_*` scratch (live-phase binds scratch; registry end-stamp skipped; ≥1h cooldown). Zero production writes — asserted server-side.
+- **Drill endpoint:** `POST /v1/internal/backups/drill` `{team_id, backup_key}` — internal-key only; restores into `_drill_*` scratch (live-phase binds scratch; registry end-stamp skipped; ≥1h cooldown). Zero production writes — asserted server-side. The archive's key shape names its graph; the target resolves through the ACTIVE-graph seam — **drilling a deleted/quarantined graph's archive is refused (409)** (#2313 tombstone guard, #2304).
+- **ACL rebuild after full-platform restore:** a DR into a fresh FalkorDB server restores graph DATA from R2 — per-graph ACL server users do NOT live in the graph namespace. Run `POST /v1/internal/backups/acl-reconcile` (internal key) to replay the idempotent `create_acl_user` upsert for every active custom graph of every eligible team (default graphs ride the team-scoped ACL; tombstoned graphs never touched).
 - **Production restore (`drill:false`) is NOT in scope (501)** — restore-and-rotate machinery retired with the registry (#669).
 - **Rollout drill:** operator-invoked (documented commands in the drill workflow). Requires ≥1 team archive; in the chronic 0-teams state run against a seeded scratch graph or defer with a recorded reason. **Re-drill after any restore-path code change, R2 layout change, or key rotation.**
 - **Mid-drill crash:** boot GC sweeps `_drill_*`/`registry_drill_*`/`*_restore_*`/`*_pre_restore_*` older than 6h.
 
 ## Operator actions
 - **Suppression:** write `ops/suppression.json` `{"KIND": {"until": "ISO"}}` to pause a kind.
-- **Re-baseline:** `POST /v1/internal/backups/re-baseline` `{team_id}` after verifying a DATA_LOSS_CANDIDATE is a false positive.
+- **Re-baseline:** `POST /v1/internal/backups/re-baseline` `{team_id}` (+ optional `graph_id`, default `"default"`) after verifying a DATA_LOSS_CANDIDATE is a false positive. Custom-graph incidents resolve under `"{team}:{graph}"`; the default under the bare team.
 - **Simulate (staging):** `POST /v1/internal/backups/simulate-stale|recover` (gated on `BACKUP_SIMULATE_ENABLED`) — proves detection→filing→dedup ≤ 2× poll cadence.
 - **Secrets:** `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID`/`DR_ISSUES_PAT`/`BACKUP_ALERT_ASSIGNEE` are Fly + GH secrets; the Telegram pair exists in both (daemon-side and driver-side legs). `BACKUP_SWEEP_ENABLED=true` is set by deploy-hosted.yml only when all required secrets are present (fail-closed).
 

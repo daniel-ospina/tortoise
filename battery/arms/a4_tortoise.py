@@ -42,6 +42,12 @@ class A4TortoiseArm:
         Uses the embedded FalkorDBLite (hermetic; no Docker). The batcher's
         namespace routing (battery.runner.setup.batch_setup) materializes
         per-scenario graphs when given the projection.
+
+        seed_mode (#2284 I-1): contradiction scenarios seed claim_a +
+        evidence ONLY (¬A never pre-seeded — it arrives in-context at k at
+        run time); the hermetic warm guard refuses a stale PRE-FIX graph in
+        the same namespace. The sdk.ingest verb-channel swap is sibling A's
+        (#2291) — applied over the SAME seed_mode contract.
         """
         from tortoise.projection import FalkorProjection
         if not self._db_path:
@@ -51,7 +57,9 @@ class A4TortoiseArm:
         from battery.runner.setup import batch_setup
         # namespaced=True: per-scenario graphs (battery_<id>) — retrieve reads
         # the same namespaced graph (no cross-scenario MERGE collapse).
-        batch_setup(self._proj, scenarios, namespaced=True)
+        # seed_mode=True is the batch default for contradiction scenarios
+        # (¬A absent pre-k) + the hermetic warm-store guard.
+        batch_setup(self._proj, scenarios, namespaced=True, seed_mode=True)
         self.decide_cycles = 0
 
     def _scenario_graph(self, scenario: Scenario):
@@ -69,6 +77,7 @@ class A4TortoiseArm:
             rows = g.query(
                 "MATCH (p:Point) WHERE p.is_operator <> true "
                 "AND p.content IS NOT NULL "
+                "AND (p.pointKind IS NULL OR p.pointKind <> 'seed_manifest') "
                 "RETURN p.id AS id, p.content AS content, "
                 "p.status AS status LIMIT 20").result_set
             # Filter to live claims the episode can cite.
@@ -112,7 +121,9 @@ class A4TortoiseArm:
                 "updatedAt: $now}",
                 params={"id": point_id, "content": item.content, "now": now})
             claims = g.query(
-                "MATCH (p:Point {is_operator: false}) RETURN p.id AS id "
+                "MATCH (p:Point {is_operator: false}) "
+                "WHERE p.pointKind IS NULL OR p.pointKind <> 'seed_manifest' "
+                "RETURN p.id AS id "
                 "LIMIT 5").result_set
             target = str(claims[0][0]) if claims else None
             if target and item.kind == "nand":

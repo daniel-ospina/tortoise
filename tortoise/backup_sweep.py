@@ -1,4 +1,5 @@
-"""Backup sweep — enumerate teams and back up each team's knowledge graph.
+"""Backup sweep — enumerate teams and back up each team's knowledge GRAPHS
+(default + custom, #2313).
 
 The sweep is the driver's core action. It is decoupled from the alert store:
 conditions that need an operator's attention (size-guard abort, data-loss
@@ -13,7 +14,8 @@ handle (``registry_control_plane``, pre-#669) or the Supabase control plane
 interface so the #596 suite runs with zero network. Fail-closed: an
 enumeration failure is NEVER classified as the chronic NO_TEAMS state.
 
-Per-team protection (all guards from the reviewed plan):
+Per-graph protection (all guards from the reviewed plan; each guard is
+per-GRAPH — state, dumps, and retention are graph-scoped, #2313):
 - Size guard: abort before dump if the graph exceeds the configured max nodes.
 - P0 guard: ``manifest.graph_name`` must equal the seam-derived graph name
   (``team_{id}`` from the registry, ``teams.graph_name`` post-#669 —
@@ -222,6 +224,67 @@ def team_graph_name(source, team_id: str) -> str:
     return f"team_{team_id}"
 
 
+def enumerate_team_graphs(source, team_id: str) -> list[dict[str, Any]]:
+    """Per-team ACTIVE graph list — the per-graph sweep seam (#2313).
+
+    Returns registry-shaped rows ``[{graph_id, kind, namespace}]``
+    default-first (the DEFAULT graph always first, then customs by id) so
+    the per-graph sweep loop can dump each active graph. Supabase mode
+    delegates to the shared ``graph_metadata`` seam (derives the default
+    from ``teams.graph_name`` + reads active kind='custom' rows) — one
+    definition, no drift. Registry mode reads the Graph nodes in the
+    registry graph and filters ``status == 'deleted'`` in-process (the
+    registry lane returns tombstones; callers filter — same contract as
+    GET /v1/graphs, hosted_api.py). The registry default node (random gid,
+    kind='default') is normalized to the literal ``"default"`` so object
+    keys are stable across lanes (Q4 owner decision).
+
+    Fail-closed: a query failure raises RuntimeError — the sweep never
+    guesses a graph list (same contract as ``enumerate_teams``).
+    """
+    if _is_supabase_source(source):
+        try:
+            from .supabase_control import graph_metadata
+
+            rows = graph_metadata(source, team_id)
+        except Exception as e:
+            raise RuntimeError(
+                f"team-graph enumeration failed for {team_id}: {e}") from e
+        out = [
+            {"graph_id": r["graph_id"], "kind": r["kind"],
+             "namespace": r["namespace"]}
+            for r in rows
+        ]
+        # graph_metadata is default-first + active-only already; keep a
+        # deterministic order regardless of seam version.
+        out.sort(key=lambda g: (0 if g["kind"] == "default" else 1,
+                                g["graph_id"]))
+        return out
+    try:
+        rows = source.query(
+            "MATCH (g:Graph {team_id:$tid}) RETURN properties(g)",
+            params={"tid": team_id},
+        ).result_set
+    except Exception as e:
+        raise RuntimeError(
+            f"team-graph enumeration failed for {team_id}: {e}") from e
+    out = []
+    for (props,) in rows:
+        if (props.get("status") or "active") == "deleted":
+            continue  # tombstones are never swept (#2304 quarantine)
+        kind = props.get("kind") or "custom"
+        out.append({
+            # default-first key normalization (Q4): the registry default
+            # node's random gid maps to the stable literal "default".
+            "graph_id": "default" if kind == "default" else props.get("id"),
+            "kind": kind,
+            "namespace": props.get("namespace"),
+        })
+    out.sort(key=lambda g: (0 if g["kind"] == "default" else 1,
+                            str(g["graph_id"] or "")))
+    return out
+
+
 def _read_json(storage, key: str) -> dict[str, Any]:
     try:
         parsed = json.loads(storage.download(key))
@@ -242,6 +305,24 @@ def read_team_state(storage, team_id: str) -> dict[str, Any]:
     return _read_json(storage, f"{_TEAM_STATE_PREFIX}{team_id}/state.json")
 
 
+def _graph_state_key(team_id: str, graph_id: str) -> str:
+    return f"{_TEAM_STATE_PREFIX}{team_id}/graphs/{graph_id}/state.json"
+
+
+def read_graph_state(storage, team_id: str, graph_id: str) -> dict[str, Any]:
+    """Per-graph sweep state (#2313). For the DEFAULT graph, an absent
+    per-graph file falls back to the legacy team-level state file (the
+    pre-#2313 bridge — first per-graph run inherits the transition-guard
+    baseline; the sweep mirrors team-state for the default graph every run,
+    so the fallback only ever fires for teams whose sweep never wrote a
+    graph file before). Custom graphs have no legacy file — empty dict.
+    """
+    state = _read_json(storage, _graph_state_key(team_id, graph_id))
+    if state or graph_id != "default":
+        return state
+    return _read_json(storage, f"{_TEAM_STATE_PREFIX}{team_id}/state.json")
+
+
 def _delete_uploaded(storage, team_id: str, backup_id: str) -> None:
     """Best-effort removal of a just-uploaded (guard-rejected) backup."""
     for suffix in ("dump.enc", "manifest.json"):
@@ -251,34 +332,105 @@ def _delete_uploaded(storage, team_id: str, backup_id: str) -> None:
             logger.warning("cleanup of %s/%s failed: %s", backup_id, suffix, e)
 
 
-def _backup_team(
+def _sweep_graph_list(source, team_id: str) -> list[dict[str, Any]]:
+    """Per-team ACTIVE sweep target list — default graph always first (#2313).
+
+    The default graph is synthesized from the authoritative graph-name seam
+    (``team_graph_name`` — registry ``team_{id}`` / Supabase
+    ``teams.graph_name``), NOT from a kind='default' Graph row: pre-#2083
+    teams have no Graph nodes at all, and for registry-lane SDK teams the
+    seam is the name the sweep has always dumped (behavior-preserving; see
+    #770/#2023). Custom graphs come from ``enumerate_team_graphs``; the row
+    ``namespace`` is the FalkorDB graph to select/dump (customs are
+    ``team_{tid}_{gid}``). kind='default' rows from the seam are skipped
+    (the default is synthesized — never doubled).
+
+    Rows: ``[{graph_id, kind, namespace, graph_name}]`` where
+    ``graph_name`` is the dump/select name (namespace for customs; the
+    seam-resolved default name). Fail-closed: any seam failure raises
+    RuntimeError (the caller's resolution-failure isolation).
+    """
+    default_name = team_graph_name(source, team_id)  # raises → per-team resolution failure
+    rows = enumerate_team_graphs(source, team_id)  # raises RuntimeError fail-closed
+    graphs: list[dict[str, Any]] = [{
+        "graph_id": "default", "kind": "default",
+        "namespace": default_name, "graph_name": default_name,
+    }]
+    for r in rows:
+        if r.get("kind") == "default":
+            continue  # synthesized above — never doubled
+        gid = r.get("graph_id")
+        ns = r.get("namespace")
+        if not gid or not ns:
+            # A custom Graph row missing id/namespace cannot be dumped or
+            # keyed — fail that graph closed (visible per-graph error), the
+            # sweep never guesses a namespace.
+            graphs.append({
+                "graph_id": gid or f"custom_{len(graphs)}",
+                "kind": r.get("kind", "custom"),
+                "namespace": "", "graph_name": "", "_invalid": True,
+            })
+            continue
+        graphs.append({
+            "graph_id": gid, "kind": r.get("kind", "custom"),
+            "namespace": ns, "graph_name": ns,
+        })
+    return graphs
+
+
+def _backup_graph(
     *,
     db,
     registry,
     storage,
     config: BackupConfig,
     team_id: str,
-    graph_name: str,
+    graph: dict[str, Any],
     now: datetime,
     incidents: list[dict[str, Any]],
 ) -> dict[str, Any]:
+    """Back up ONE graph (default or custom) of a team (#2313).
+
+    ``graph``: a ``_sweep_graph_list`` row — graph_id (object-key segment;
+    ``"default"`` literal for the default graph, Q4 owner decision),
+    graph_name (FalkorDB graph to select/dump). Every existing guard (size,
+    P0, empty-transition, per-label drift) is per-graph: state, dumps, and
+    retention are graph-scoped (Option A). For the default graph the
+    artifacts/state are the graph-keyed equivalents of the pre-#2313
+    team-level layout (the legacy team file is mirrored each run for the
+    pre-#2313 consumers; legacy flat R2 objects drain via the team-level
+    legacy prune in ``_sweep_team``).
+    """
+    graph_id = graph["graph_id"]
+    graph_name = graph.get("graph_name") or ""
+    if graph.get("_invalid"):
+        return {"status": "error", "team_id": team_id, "graph_id": graph_id,
+                "error": "custom Graph row missing id/namespace — cannot dump"}
+    if not graph_name:
+        return {"status": "error", "team_id": team_id, "graph_id": graph_id,
+                "error": "no graph name resolved for graph"}
+
     # ── Size guard: cheap COUNT before any dump (the #545 OOM blast radius). ──
     try:
         g = db.select_graph(graph_name)
         count = int(g.query("MATCH (n) RETURN count(n)").result_set[0][0])
     except Exception as e:
-        return {"status": "error", "team_id": team_id, "error": str(e)}
+        return {"status": "error", "team_id": team_id, "graph_id": graph_id,
+                "error": str(e)}
     if count > config.size_guard_max_nodes:
         incidents.append(
             {
                 "kind": "SIZE_GUARD_ABORT",
                 "team_id": team_id,
-                "detail": {"count": count, "max": config.size_guard_max_nodes},
+                "graph_id": graph_id,
+                "detail": {"count": count, "max": config.size_guard_max_nodes,
+                           "graph_name": graph_name},
             }
         )
-        return {"status": "aborted_size_guard", "team_id": team_id, "count": count}
+        return {"status": "aborted_size_guard", "team_id": team_id,
+                "graph_id": graph_id, "count": count}
 
-    prior = read_team_state(storage, team_id)
+    prior = read_graph_state(storage, team_id, graph_id)
     prev_node_count = int(prior.get("node_count") or 0)
     prev_label_counts: dict[str, int] = prior.get("label_counts") or {}
 
@@ -290,23 +442,25 @@ def _backup_team(
         ).result_set
         label_counts = {str(r[0]): int(r[1]) for r in rows if r and r[0]}
     except Exception:
-        logger.warning("per-label count query failed for %s — continuing", team_id)
+        logger.warning("per-label count query failed for %s — continuing", graph_name)
 
     # ── Dump via the shipped pipeline (registry-stream-key, not GH-key, #661). ──
     proj = SimpleNamespace(g=g)
     if not config.registry_stream_key or len(config.registry_stream_key) != 32:
-        return {"status": "error", "team_id": team_id,
+        return {"status": "error", "team_id": team_id, "graph_id": graph_id,
                 "error": "REGISTRY_STREAM_KEY missing or invalid — fail-closed (#661)"}
     try:
         manifest = create_backup(
             proj, registry, storage,
-            team_id=team_id, graph_name=graph_name, key=config.registry_stream_key,
+            team_id=team_id, graph_name=graph_name, graph_id=graph_id,
+            key=config.registry_stream_key,
         )
     except Exception as e:
-        return {"status": "error", "team_id": team_id, "error": str(e)}
+        return {"status": "error", "team_id": team_id, "graph_id": graph_id,
+                "error": str(e)}
 
     # ── P0 guard: the manifest must name the seam-derived graph and carry data.
-    # The graph name comes from the enumeration seam (registry: team_{id};
+    # The graph name comes from the sweep list seam (registry: team_{id};
     # Supabase: teams.graph_name — #669), so this is a broken-pipeline tripwire
     # rather than an independent wrong-graph detector — the independent teeth
     # are the non-empty requirement plus the restore-time isolation checks
@@ -319,13 +473,14 @@ def _backup_team(
             {
                 "kind": "P0_GUARD_FAIL",
                 "team_id": team_id,
+                "graph_id": graph_id,
                 "detail": {
                     "manifest_graph_name": manifest.get("graph_name"),
                     "node_count": manifest.get("node_count"),
                 },
             }
         )
-        return {"status": "p0_guard_failed", "team_id": team_id}
+        return {"status": "p0_guard_failed", "team_id": team_id, "graph_id": graph_id}
 
     node_count = int(manifest["node_count"])
 
@@ -339,18 +494,22 @@ def _backup_team(
                 {
                     "kind": "DATA_LOSS_CANDIDATE",
                     "team_id": team_id,
+                    "graph_id": graph_id,
                     "detail": {"previous": prev_node_count, "now": 0, "drop_pct": 100},
                 }
             )
-            return {"status": "data_loss_candidate", "team_id": team_id, "node_count": 0}
+            return {"status": "data_loss_candidate", "team_id": team_id,
+                    "graph_id": graph_id, "node_count": 0}
         # Steady-0 (chronic empty team) is a signal, never an incident.
-        return {"status": "empty_skipped", "team_id": team_id, "node_count": 0}
+        return {"status": "empty_skipped", "team_id": team_id,
+                "graph_id": graph_id, "node_count": 0}
     if prev_node_count > 0 and node_count < prev_node_count * 0.5:
         _delete_uploaded(storage, team_id, manifest.get("backup_id", ""))
         incidents.append(
             {
                 "kind": "DATA_LOSS_CANDIDATE",
                 "team_id": team_id,
+                "graph_id": graph_id,
                 "detail": {
                     "previous": prev_node_count,
                     "now": node_count,
@@ -358,7 +517,8 @@ def _backup_team(
                 },
             }
         )
-        return {"status": "data_loss_candidate", "team_id": team_id, "node_count": node_count}
+        return {"status": "data_loss_candidate", "team_id": team_id,
+                "graph_id": graph_id, "node_count": node_count}
 
     # ── Per-label drift guard (#661): fires when the overall >50% ratio is
     # quiet but a low-count label took a hit (e.g. invitations). ──
@@ -372,6 +532,7 @@ def _backup_team(
                 {
                     "kind": "DATA_LOSS_CANDIDATE",
                     "team_id": team_id,
+                    "graph_id": graph_id,
                     "detail": {
                         "previous": prev_node_count,
                         "now": node_count,
@@ -383,41 +544,151 @@ def _backup_team(
                 }
             )
             return {"status": "data_loss_candidate", "team_id": team_id,
-                    "node_count": node_count}
+                    "graph_id": graph_id, "node_count": node_count}
 
-    # ── Persist team state (counts feed the transition guard next run). ──
-    _write_json(
-        storage,
-        f"{_TEAM_STATE_PREFIX}{team_id}/state.json",
-        {
-            "source": "backup",
-            "latest_backup_at": manifest.get("created_at"),
-            "latest_object_key": f"backups/{manifest.get('backup_id')}/dump.enc",
-            "node_count": node_count,
-            "counts": {"nodes": node_count, "edges": manifest.get("edge_count")},
-            "label_counts": label_counts,
-            "updated_at": now.isoformat(),
-        },
-    )
+    state = {
+        "source": "backup",
+        "latest_backup_at": manifest.get("created_at"),
+        "latest_object_key": f"backups/{manifest.get('backup_id')}/dump.enc",
+        "node_count": node_count,
+        "counts": {"nodes": node_count, "edges": manifest.get("edge_count")},
+        "label_counts": label_counts,
+        # graph_name names the dumped FalkorDB graph — the watcher uses the
+        # DEFAULT graph's state graph_name to disambiguate legacy flat
+        # manifests (custom-era on-demand dumps must not gate team freshness).
+        "graph_name": graph_name,
+        "graph_id": graph_id,
+        "updated_at": now.isoformat(),
+    }
+    # ── Persist per-graph state (counts feed the transition guard next run).
+    # The default graph ALSO mirrors the legacy team-level file (the pre-#2313
+    # consumers — watcher staleness, GET /backups summary, re-baseline —
+    # read it until Tasks 4/5 move them per-graph; the mirror keeps them
+    # truthful about the default graph in the same PR). ──
+    _write_json(storage, _graph_state_key(team_id, graph_id), state)
+    if graph_id == "default":
+        _write_json(storage, f"{_TEAM_STATE_PREFIX}{team_id}/state.json", state)
 
-    # ── Retention. ──
+    # ── Retention (per-graph pool; the default graph's nested pool plus the
+    # team-wide legacy flat drain in _sweep_team). ──
     try:
         deleted = prune_backups(
             storage, team_id,
             keep_daily=config.retention_daily,
             keep_weekly=config.retention_weekly,
             keep_hourly=config.retention_hourly,
+            graph_id=graph_id,
         )
     except Exception as e:
-        logger.warning("prune failed for %s: %s", team_id, e)
+        logger.warning("prune failed for %s: %s", graph_name, e)
         deleted = []
 
     return {
         "status": "backed_up",
         "team_id": team_id,
+        "graph_id": graph_id,
         "node_count": node_count,
         "pruned": len(deleted),
     }
+
+
+def _sweep_team(
+    *,
+    db,
+    registry,
+    storage,
+    config: BackupConfig,
+    team_id: str,
+    now: datetime,
+    incidents: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Sweep ONE team's active graphs (default + customs) (#2313).
+
+    Returns the team summary — the DEFAULT graph's result (back-compat: the
+    team-level result was the default graph pre-#2313) with a ``graphs``
+    sub-map of per-graph results, plus a per-team legacy-flat-pool drain
+    (pre-#2313 team-level R2 objects are only pruned team-wide — nested
+    per-graph keys are never touched by a team-wide prune).
+    """
+    try:
+        graphs = _sweep_graph_list(registry, team_id)
+    except Exception as e:
+        return {"status": "error", "team_id": team_id, "error": str(e),
+                "resolution": True}
+
+    graph_results: dict[str, Any] = {}
+    any_backed_up = False
+    for graph in graphs:
+        try:
+            gr = _backup_graph(
+                db=db, registry=registry, storage=storage, config=config,
+                team_id=team_id, graph=graph, now=now, incidents=incidents,
+            )
+        except Exception as e:  # per-graph isolation: one bad graph never
+            # aborts the team's other graphs (review P3-2)
+            logger.exception("sweep of %s/%s failed: %s", team_id,
+                             graph.get("graph_id"), e)
+            gr = {"status": "error", "team_id": team_id,
+                  "graph_id": graph.get("graph_id"), "error": str(e)}
+        graph_results[graph["graph_id"]] = gr
+        if gr.get("status") == "backed_up":
+            any_backed_up = True
+
+    # Legacy flat-pool drain: pre-#2313 team-level artifacts (and any
+    # straggler from pre-T5 on-demand endpoints) are pruned team-wide under
+    # the same retention policy. Nested per-graph keys are never touched
+    # here. The drain runs ONLY when the DEFAULT graph backed up this pass —
+    # the pre-#2313 prune that managed the flat pool ran exactly on a
+    # successful default dump. A default stuck in data-loss/error keeps its
+    # last-known-good flat archives for restore/forensics instead of the
+    # drain time-eroding the recovery source.
+    if graph_results.get("default", {}).get("status") == "backed_up":
+        try:
+            prune_backups(
+                storage, team_id,
+                keep_daily=config.retention_daily,
+                keep_weekly=config.retention_weekly,
+                keep_hourly=config.retention_hourly,
+            )
+        except Exception as e:
+            logger.warning("legacy team-level prune failed for %s: %s",
+                           team_id, e)
+
+    default = graph_results.get("default", {})
+    team_res = dict(default)
+    team_res["team_id"] = team_id
+    team_res["graphs"] = graph_results
+    # Back-compat status: a team is backed_up iff its default graph was
+    # (the pre-#2313 semantics); ``graphs`` carries per-graph detail.
+    team_res["status"] = (
+        default.get("status") if default else ("backed_up" if any_backed_up else "error")
+    )
+    return team_res
+
+
+def resolve_active_graph(source, team_id: str, graph_id: str) -> dict[str, Any]:
+    """Resolve a restore/re-baseline target graph to its ACTIVE sweep row.
+
+    #2313 Task 5 tombstone guard: a restore target must be an ACTIVE graph
+    of the team. The sweep list (``_sweep_graph_list``) contains ONLY active
+    graphs — deleted (tombstoned/quarantined, #2304) and unknown graphs are
+    absent, so resolution failure refuses the op with a clear error instead of
+    swapping an archive into a quarantined or unregistered namespace. The
+    default graph is always present (synthesized; never deletable).
+
+    Returns the row (graph_id/kind/namespace/graph_name). Raises ValueError
+    for deleted/unknown graphs (never RuntimeError — a MISSING graph is a
+    client error, not a control-plane failure).
+    """
+    for row in _sweep_graph_list(source, team_id):
+        if row.get("_invalid"):
+            continue
+        if row["graph_id"] == graph_id:
+            return row
+    raise ValueError(
+        f"graph {graph_id!r} is not an active graph of team {team_id} "
+        "-- restore/re-baseline refused (deleted or unknown)"
+    )
 
 
 def run_backup_sweep(
@@ -430,7 +701,8 @@ def run_backup_sweep(
     lock_for: Callable[[str], Any] | None = None,
     now: datetime | None = None,
 ) -> dict[str, Any]:
-    """Back up every team's knowledge graph. Returns the run result.
+    """Back up every team's knowledge graphs (default + custom, #2313).
+    Returns the run result.
 
     ``lock_for`` is an optional per-team lock factory (the endpoint supplies
     the asyncio-lock seam); the sweep serializes each team's dump under it.
@@ -508,29 +780,20 @@ def run_backup_sweep(
     for team_id in sorted(team_ids):
         ctx = lock_for(team_id) if lock_for else nullcontext()
         with ctx:
-            # Seam per-team resolution (#669): read graph_name from the
-            # control plane BEFORE the dump (Supabase mode reads
-            # teams.graph_name; registry mode is the deterministic team_{id}
-            # and never raises). Resolution failures are per-team isolated
-            # like every other error.
             try:
-                graph_name = team_graph_name(registry, team_id)
-            except Exception as e:
-                resolution_failures += 1
-                results[team_id] = {
-                    "status": "error", "team_id": team_id, "error": str(e),
-                }
-                continue
-            try:
-                results[team_id] = _backup_team(
+                res = _sweep_team(
                     db=db, registry=registry, storage=storage, config=config,
-                    team_id=team_id, graph_name=graph_name, now=now,
-                    incidents=incidents,
+                    team_id=team_id, now=now, incidents=incidents,
                 )
             except Exception as e:  # per-team isolation: one bad team never
                 # aborts the sweep for the others (review P3-2)
                 logger.exception("sweep of %s failed: %s", team_id, e)
-                results[team_id] = {"status": "error", "team_id": team_id, "error": str(e)}
+                res = {"status": "error", "team_id": team_id, "error": str(e)}
+            results[team_id] = res
+            if res.get("resolution"):
+                # Graph-list resolution failure (vanished team, missing
+                # graph_name, seam query error) — the flap guard counts it.
+                resolution_failures += 1
 
     # ── Control-plane flapping alarm (#669): every enumerated team failing
     # graph-name resolution means the control plane died between enumeration
@@ -563,7 +826,9 @@ def run_backup_sweep(
         },
     )
 
-    backed_up = sum(1 for r in results.values() if r.get("status") == "backed_up")
+    backed_up = sum(
+        1 for r in results.values() if r.get("status") == "backed_up"
+    )
     return {
         "status": "backed_up" if backed_up else "no_work",
         "teams_backed_up": backed_up,
