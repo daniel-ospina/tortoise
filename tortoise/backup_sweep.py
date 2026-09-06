@@ -341,7 +341,10 @@ def _classify_flat_pool(storage, team_id: str,
     Only flat keys (backups/{team}/{key}/manifest.json — 4 segments) are
     indexed; nested (default + custom) manifests never appear here. Keys whose
     manifest read fails are skipped (retried next run; a classification is
-    never guessed). Returns {backup_id: {graph_name, graph_id}}."""
+    never guessed). Returns {listing-derived backup_id: {graph_name,
+    graph_id}} — the index key and any later delete derive from the R2
+    LISTING key (prune_backups' untrusted-manifest parity, #2414), never a
+    manifest's self-declared backup_id."""
     ns_to_gid = {
         str(r.get("namespace") or ""): r.get("graph_id")
         for r in rows if not r.get("_invalid")
@@ -358,10 +361,12 @@ def _classify_flat_pool(storage, team_id: str,
                 continue  # transient — retried next run
             if not isinstance(m, dict):
                 continue
-            bid = str(m.get("backup_id") or "")
             name = str(m.get("graph_name") or "")
-            if not bid:
-                continue
+            # #2414: key from the LISTING (backups/{team}/{key}/…) — the
+            # manifest's backup_id is untrusted (a forged/stale manifest must
+            # never redirect the index or the drain's delete to another
+            # backup's objects).
+            bid = f"{parts[1]}/{parts[2]}"
             out[bid] = {"graph_name": name,
                         "graph_id": str(ns_to_gid.get(name) or "")}
             if len(out) >= _LEGACY_FLAT_INDEX_MAX:
