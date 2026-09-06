@@ -116,7 +116,7 @@ export function durableKeyName(orgName, date = new Date(), existingNames = []) {
   const MAX = 64
   const head = 'key for '
   const tail = ` ${stamp}` // ~21 chars
-  const orgMax = MAX - head.length - tail.length - 4 // reserve room for " (n)"
+  const orgMax = MAX - head.length - tail.length - 5 // reserve room for " (nn)"
   const org = orgRaw.length > orgMax ? orgRaw.slice(0, orgMax).replace(/[_-]+$/, '') : orgRaw
   const base = `${head}${org}${tail}`
   const seen = new Set(Array.isArray(existingNames) ? existingNames.filter(Boolean) : [])
