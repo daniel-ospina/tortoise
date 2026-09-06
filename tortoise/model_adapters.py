@@ -713,6 +713,17 @@ class RoutingModel:
         if self.fallback is not None and (
                 self._failed_over
                 or _primary_in_cooldown(self.primary.provider, self.cooldown_s)):
+            # R2 (#2384): a sticky _failed_over must not strand the session
+            # on a FALLBACK that note_stall itself cooled (its own deadline
+            # abort) — with the primary healthy again, unstick back to it.
+            # Both-cooled stays on the fallback (no healthy option exists).
+            if (self._failed_over
+                    and not _primary_in_cooldown(self.primary.provider,
+                                                 self.cooldown_s)
+                    and _primary_in_cooldown(self.fallback.provider,
+                                             self.cooldown_s)):
+                return self._call(self.primary, system, user, failover=False,
+                                  max_tokens=max_tokens)
             return self._call(self.fallback, system, user, failover=True,
                               max_tokens=max_tokens)
         try:
@@ -975,15 +986,23 @@ class RotatingModel:
                 except Exception:
                     pass
 
-    def note_stall(self) -> None:
+    def note_stall(self, provider: str | None = None) -> None:
         """Cooldown the WEDGED provider after an external deadline abort
         (mirrors RoutingModel.note_stall) + interrupt only its session.
-        Attribution uses the in-flight adapter (set when the worker was
-        killed) — never the stale ``route`` from the last success — so a
+        Attribution uses the caller's snapshot when given (the extractor
+        samples the in-flight adapter BEFORE close() unblocks the worker —
+        #2384), else the in-flight adapter, else the stale ``route`` — so a
         persistent wedge cools the right farm and the next ``complete()``
         rotates onto the healthy ones. A single stalled GPU farm no longer
         sinks a whole session."""
-        target = self._in_flight
+        target = None
+        if provider is not None:
+            for p in self.providers:
+                if p.provider == provider:
+                    target = p
+                    break
+        if target is None:
+            target = self._in_flight
         if target is None:
             for p in self.providers:
                 if p.provider == self.route:
