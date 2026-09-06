@@ -14465,8 +14465,8 @@ class TortoiseSDK:
         ``ObjectRegistered`` on first canonical registration (probe-gated,
         #2194 — a canonical re-mention never double-journals); SDK-created
         Subjects journal ``SubjectAdded`` the same way (probe-gated, #2295 —
-        the #2296 durability audit tracks the remaining Document/Source
-        surfaces).
+        the #2296 durability audit tracks the remaining Document surface;
+        Source already journals via create_source's own emit).
 
         ``_skip_sanitize=True`` (epic #900 T3, create_source's sanctioned
         source_path route): the caller has already extracted the server-
@@ -14572,7 +14572,13 @@ class TortoiseSDK:
         # Keep in sync with the Object block above (label constant, probe
         # node letter, event-type literal, flag name differ; everything else
         # is byte-identical). Subjects have no fold/sweep — the round-trip
-        # byte-identity tests are the only guard.
+        # byte-identity tests are the only guard. Accepted divergences mirror
+        # the Object block's: re-mention prop mutations + pre-#2295-history
+        # re-mentions are live-only; deletes are NOT journaled (_delete_entity
+        # is a bare graph delete) — a deleted Subject resurrects on the next
+        # rebuild, and delete→recreate mints a second "first registration"
+        # whose replay first-wins (pinned as accepted by tests 9a/9b; #2296
+        # scope hook).
         if (label == "Subject" and self._event_log_path
                 and event.get("name") and event.get("type") == "SubjectAdded"):
             try:
@@ -14589,16 +14595,21 @@ class TortoiseSDK:
                     event.get("name"), id_val)
                 _journal_subject_registration = True
         if ((_journal_object_registration or _journal_subject_registration)
-                and "createdAt" not in event):
+                and event.get("createdAt") is None):
             # (#2194/#2295) Synthesize createdAt BEFORE apply ONLY on the
             # journaling path (probe-no-row), so live + journal + replay
             # carry the identical value (replay would otherwise stamp rebuild
             # time — the #2164-P4 drift class; EventAPI add_subject precedent
-            # stamps createdAt=now_iso()). Re-mentions (skip path) and
-            # journal-less SDKs keep the projection's coalesce($now) behavior
-            # byte-identical to pre-fix. The OR-term is provably Object/Event-
-            # inert: each flag is only set under its own label gate, so on any
-            # Object/Event call (False or existing_flag) ≡ base behavior.
+            # stamps createdAt=now_iso()). Gate on is-None (not key-absence)
+            # so an explicit createdAt=None caller prop cannot slip a NULL
+            # onto the journal line (replay ON CREATE would then stamp
+            # rebuild time ≠ live create time — the #2164-P4 class; #2309
+            # review hardening, applied to both mirrors). Re-mentions (skip
+            # path) and journal-less SDKs keep the projection's coalesce($now)
+            # behavior byte-identical to pre-fix. The OR-term is provably
+            # Object/Event-inert: each flag is only set under its own label
+            # gate, so on any Object/Event call (False or existing_flag) ≡
+            # base behavior.
             from .ids import now_iso
             event["createdAt"] = now_iso()
         # Apply through projection (writes to FalkorDB)

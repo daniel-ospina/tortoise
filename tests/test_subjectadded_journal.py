@@ -608,3 +608,45 @@ class TestEventAPICoexistence:
                 "rebuilt createdAt must equal the SDK A-line value (== live)")
         finally:
             sdk.close()
+
+    def test_cross_file_reversed_sort_replay_is_accepted(self, tmp_path):
+        """Accepted-divergence contract pin (deep-review #3): when an EventAPI
+        random-ulid log and the SDK canonical log for the SAME name share ONE
+        rebuild dir, rebuild_all replays *.jsonl in sorted-filename order — a
+        sort order reversed vs the live interleave first-wins the OTHER line's
+        createdAt on rebuild ≠ live. Pinned so the accepted outcome is a
+        contract, not an incidental (a future coalesce-direction change would
+        silently break live/replay parity elsewhere).
+
+        Layout: api.jsonl sorts BEFORE sdk_events.jsonl, so B replays first →
+        rebuilt createdAt == B's (≠ live A's). Live keeps A's (createdAt
+        first-won live); the divergence is exactly the documented cross-file
+        class (#330; #2295 plan accepted divergences)."""
+        shared = tmp_path / "shared"
+        shared.mkdir()
+        sdk = TortoiseSDK(str(tmp_path / "t10b.db"),
+                          event_log_path=str(shared / "sdk_events.jsonl"))
+        try:
+            proj = sdk._get_proj()
+            # API log lives in the SAME rebuild dir, sorted BEFORE the SDK log
+            api = _api_log(proj, shared / "api.jsonl")
+            name = "crossfile-person"
+            sdk.create_entity("subject", name,
+                              subjectKind="core:org", is_episodic=False)
+            api.add_subject(name)  # random ulid, its own createdAt
+            live_rows = _subject_row(proj, name, "id", "createdAt")
+            assert live_rows, "live node must exist"
+            proj.rebuild_all(str(shared))
+            rows = _subject_row(proj, name, "id", "createdAt")
+            assert rows, "cross-file rebuild must converge on one node"
+            sdk_lines = _name_sas(
+                EventLog(str(shared / "sdk_events.jsonl")).read_all(), name)
+            api_lines = _name_sas(
+                EventLog(str(shared / "api.jsonl")).read_all(), name)
+            # B (api.jsonl) replays FIRST in sorted order → its createdAt wins
+            assert rows[0][1] == api_lines[0]["createdAt"], (
+                "sorted-first (api) line's createdAt must first-win on "
+                "rebuild — accepted cross-file divergence (#330 class)")
+            assert len(sdk_lines) == 1 and len(api_lines) == 1
+        finally:
+            sdk.close()
