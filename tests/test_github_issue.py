@@ -137,3 +137,40 @@ def test_search_open_incident_subject_scoped_query():
         assert 'in:title "[DR] DRIVER_DOWN"' in q
     finally:
         gi._request = orig
+
+
+def test_search_open_incident_filters_prefix_colliding_titles():
+    """#2413: GitHub phrase search does NOT guarantee punctuation-exact
+    matching — ':' is a token boundary, so a "[DR] KIND — team_a" phrase can
+    match a "[DR] KIND — team_a:g_x" title (the bare team subject is a
+    literal prefix of its per-graph subjects). The adoption path must verify
+    the EXACT title subject server-side (the query alone is not enough; the
+    driver's gh_find_open already endswith-matches, #2375)."""
+    import tortoise.github_issue as gi
+
+    def _colliding_request(method, url, token):
+        import urllib.parse as _up
+        q = _up.unquote(url)
+        # the real search query is kind-scoped — mirror that
+        if "METADATA_LOST" in q:
+            return {"items": [
+                {"number": 13, "title": "[DR] METADATA_LOST — team_a"},
+            ]}
+        return {"items": [
+            {"number": 10, "title": "[DR] STALE — team_a"},      # exact team
+            {"number": 11, "title": "[DR] STALE — team_a:g_x"},  # prefix collider
+            {"number": 12, "title": "[DR] STALE — team_b:g_y"},
+        ]}
+
+    orig = gi._request
+    gi._request = _colliding_request
+    try:
+        # bare team subject must adopt ONLY its own exact-subject issue —
+        # NOT the per-graph prefix collider (#2413)
+        assert gi.search_open_incident("r", "t", "STALE", "team_a") == [10]
+        # per-graph subject adopts only its exact per-graph issue
+        assert gi.search_open_incident("r", "t", "STALE", "team_a:g_x") == [11]
+        # global kinds keep the kind-wide match (prose titles)
+        assert gi.search_open_incident("r", "t", "STALE") == [10, 11, 12]
+    finally:
+        gi._request = orig

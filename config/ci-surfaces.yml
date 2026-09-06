@@ -77,6 +77,7 @@ surfaces:
   - test_import_endpoint.py
   - test_index_mcp.py
   - test_init_apikey_validation.py
+  - test_key_write_pins_tripwire.py  # #2299: server-side session key-write ?team_id= pin parity tripwire
   - test_mcp_client.py
   - test_mcp_http.py
   - test_mcp_server.py

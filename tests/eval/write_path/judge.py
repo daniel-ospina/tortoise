@@ -63,7 +63,13 @@ from tests.eval.write_path import grading, schema
 # fix-wave re-run that keeps the SAME pin is comparable and one that bumps
 # re-synthesizes probes + re-grades from scratch.
 
-JUDGE_PIN_MECHANICAL = "w2-write-path-mechanical-v1"
+# v1 -> v2 (#2405): the mechanical survival rule gained the paraphrase leg
+# (grading.survival_match — anchor-coverage band gated on
+# accepts_rephrase_linked + shared-token floor + polarity gate). Runs under
+# v2 are NOT comparable to v1 baselines (main.json 0.25 / m2.json 0.9722
+# were graded verbatim-only): both must protocol-re-bless under v2 before
+# any further compare/bless (runner judge-pin mismatch => inconclusive).
+JUDGE_PIN_MECHANICAL = "w2-write-path-mechanical-v2"
 PARAPHRASE_PROMPT_VERSION = "w2-salience-paraphrase-v1"
 SALIENCE_PROMPT_VERSION = "w2-salience-blind-v1"
 # Full-lane pin: both stage versions — judge_pin naming EVERY prompt that

@@ -261,7 +261,11 @@ curl -sS -m 20 -X POST -H "Authorization: Bearer $KEY" -H "Content-Type: applica
   "${API}/v1/internal/driver/heartbeat" >/dev/null 2>&1 || true
 
 # ── 6. self-heal: close open APP_DOWN / WATCHER_DOWN / R2_DOWN on health ─────
-if [ "$RUN_STATUS" = "backed_up" ] || [ "$RUN_STATUS" = "no_teams" ]; then
+# #2411: "degraded" (per-graph errors with ≥1 default backed up) still PROVES
+# the app/watcher/R2 are up — it must self-heal like backed_up. Pre-#2372 the
+# same condition returned backed_up and closed these; a persistent custom-graph
+# error must not leave stale app-down incidents open indefinitely.
+if [ "$RUN_STATUS" = "backed_up" ] || [ "$RUN_STATUS" = "no_teams" ] || [ "$RUN_STATUS" = "degraded" ]; then
   for kind in APP_DOWN WATCHER_DOWN R2_DOWN; do
     num="$(gh_find_open "$kind" "global")"
     [ -n "$num" ] && gh_close "$num" "Resolved — sweep succeeded ($RUN_STATUS)."
