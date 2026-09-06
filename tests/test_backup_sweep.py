@@ -1424,3 +1424,67 @@ def test_sweep_legacy_drain_skipped_when_default_fails(shared_proj):
         flat = [k for k in store.list("backups/team_keep/")
                 if k.endswith("manifest.json") and len(k.split("/")) == 4]
         assert len(flat) == 1, "drain must not erode last-good archives on failure"
+
+
+@pytest.mark.skipif(_DOCKER_LANE, reason="custom namespaces leak on docker lane (T7 E2E covers)")
+def test_sweep_degraded_headline_and_error_streaks(shared_proj, monkeypatch):
+    """#2372: a green headline must not mask custom-graph failures — a run
+    where the default backed up but a custom graph errored reports
+    ``degraded`` (never bare ``backed_up``) with a per-graph roll-up and a
+    consecutive-error streak that persists across runs and clears on
+    recovery."""
+    with tempfile.TemporaryDirectory() as tmp:  # noqa: F841
+        if shared_proj is None:
+            return
+        wipe(shared_proj)
+        proj = shared_proj
+        reg = proj.db.select_graph(_REGISTRY_GRAPH)
+        reg.query("CREATE (t:Team {id:'team_gr', tier:'pro'})")
+        team_g = proj.db.select_graph(_team_graph("team_gr"))
+        team_g.query("CREATE (p:Point {id:'pt-d', content:'d', pointKind:'claim'})")
+        ns = "team_team_gr_g_c1"
+        g = proj.db.select_graph(ns)
+        g.query("CREATE (p:Point {id:'pt-1', content:'c', pointKind:'claim'})")
+        reg.query(
+            "CREATE (g:Graph {id:'g_c1', team_id:'team_gr', kind:'custom', "
+            "namespace:$ns, status:'active'})",
+            params={"ns": ns},
+        )
+        store = MemoryStorage()
+        import tortoise.backup_sweep as bs_mod
+
+        real_backup_graph = bs_mod._backup_graph
+
+        def _flaky_backup_graph(*a, **kw):
+            if kw["graph"].get("graph_id") == "g_c1":
+                raise RuntimeError("injected custom failure")
+            return real_backup_graph(*a, **kw)
+
+        monkeypatch.setattr(bs_mod, "_backup_graph", _flaky_backup_graph)
+        r1 = run_backup_sweep(db=proj.db, registry=reg, storage=store,
+                              config=_config())
+        assert r1["status"] == "degraded", r1["status"]
+        assert r1["teams_backed_up"] == 1
+        assert r1["graph_totals"] == {"attempted": 2, "backed_up": 1,
+                                      "errors": 1}
+        fail = r1["graph_failures"][0]
+        assert fail["team_id"] == "team_gr" and fail["graph_id"] == "g_c1"
+        assert fail["streak"] == 1
+        assert r1["graph_error_streaks"] == {"team_gr:g_c1": 1}
+        # ops/state.json persists the roll-up (surfaced by /status)
+        ops = read_ops_state(store)
+        assert ops["graph_totals"]["errors"] == 1
+        assert ops["graph_error_streaks"] == {"team_gr:g_c1": 1}
+        # a second consecutive failing run → streak 2
+        r2 = run_backup_sweep(db=proj.db, registry=reg, storage=store,
+                              config=_config())
+        assert r2["status"] == "degraded"
+        assert r2["graph_error_streaks"] == {"team_gr:g_c1": 2}
+        # recovery → backed_up, streak cleared, graph re-counted
+        monkeypatch.setattr(bs_mod, "_backup_graph", real_backup_graph)
+        r3 = run_backup_sweep(db=proj.db, registry=reg, storage=store,
+                              config=_config())
+        assert r3["status"] == "backed_up"
+        assert r3["graph_error_streaks"] == {}
+        assert r3["graph_totals"]["errors"] == 0
+        assert r3["graph_totals"]["backed_up"] == 2
