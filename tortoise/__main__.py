@@ -2262,11 +2262,24 @@ def _cmd_volunteer(args) -> int:
         payload = None
     window = None
     session_id = args.session_id
+    # #2383: honor the advertised payload knobs when the window came in as a
+    # {window, session_id, min_confidence, max_pointers, why} contract dict
+    # (previously only window/session_id were read and the rest silently
+    # dropped to CLI defaults).
+    payload_min_c = None
+    payload_max_p = None
+    payload_why = None
     if (isinstance(payload, dict)
             and isinstance(payload.get("window"), list)
             and all(isinstance(t, dict) for t in payload["window"])):
         window = payload["window"]
         session_id = payload.get("session_id") or args.session_id
+        if isinstance(payload.get("min_confidence"), (int, float)):
+            payload_min_c = min(1.0, max(0.0, float(payload["min_confidence"])))
+        if isinstance(payload.get("max_pointers"), int):
+            payload_max_p = min(5, max(1, int(payload["max_pointers"])))
+        if isinstance(payload.get("why"), bool):
+            payload_why = bool(payload["why"])
     elif isinstance(payload, str):
         window = [{"role": "user", "content": payload}]
     elif (isinstance(payload, list) and payload
@@ -2297,9 +2310,15 @@ def _cmd_volunteer(args) -> int:
     body = {
         "window": window,
         "session_id": session_id,
-        "min_confidence": getattr(args, "min_confidence", 0.7),
-        "max_pointers": int(getattr(args, "max_pointers", 3)),
-        "why": not getattr(args, "no_why", False),
+        "min_confidence": (payload_min_c
+                           if payload_min_c is not None
+                           else getattr(args, "min_confidence", 0.7)),
+        "max_pointers": (payload_max_p
+                         if payload_max_p is not None
+                         else int(getattr(args, "max_pointers", 3))),
+        "why": (payload_why
+                if payload_why is not None
+                else not getattr(args, "no_why", False)),
     }
     if api_key:
         from urllib.request import Request, urlopen  # noqa: I001
@@ -2442,6 +2461,17 @@ def _cmd_install_hooks(args) -> int:
                       "explicitly).", file=_sys.stderr)
                 return 1
 
+    # #2383: uninstall with NO registration present must be a clean no-op —
+    # never fall through to the fresh-install write below (a double
+    # --uninstall previously INVERTED into a fresh install: exit 0 + a
+    # newly registered per-turn hook). Deliberately no is_symlink() carve-
+    # out: a DANGLING in-root symlink (exists() False) must also no-op —
+    # the R1 carve-out let it fall through and re-invert. Live symlinks
+    # (exists() True) take the normal branch below (read-through + write).
+    if uninstall and not target.exists():
+        print(f"No {harness} registration at {target} — nothing to remove.")
+        return 0
+
     if harness == "cline":
         # Cline hooks are files at .cline/hooks/<EventName> (project) or
         # ~/.cline/hooks (global); hooks must also be enabled in settings.
@@ -2491,7 +2521,8 @@ def _cmd_install_hooks(args) -> int:
                 hs = e.get("hooks")
                 if isinstance(hs, list) and hs and isinstance(hs[0], dict):
                     inner = hs[0].get("command")
-            return inner or ""
+            # Non-str commands (ints, dicts, ...) can never be ours.
+            return inner if isinstance(inner, str) else ""
         return ""
 
     existing = target.read_text(encoding="utf-8") if target.exists() else None
@@ -2522,6 +2553,12 @@ def _cmd_install_hooks(args) -> int:
         ups = ups or []
         ours = [e for e in ups if "volunteer-turn.sh" in _entry_command(e)]
         if uninstall:
+            if not ours:
+                # #2383: nothing of ours present — never rewrite the file
+                # and claim "Uninstalled".
+                print(f"No volunteer-turn.sh registration in {target} — "
+                      "nothing to remove.")
+                return 0
             remaining = [e for e in ups if e not in ours]
             if remaining:
                 hooks["UserPromptSubmit"] = remaining
@@ -2543,13 +2580,80 @@ def _cmd_install_hooks(args) -> int:
         if not ours:
             ups.append(registration[0])
             existing_json.setdefault("hooks", {})["UserPromptSubmit"] = ups
+        else:
+            # #2383/R2: an entry whose command points at a STALE script path
+            # (venv/python relocation, or a committed config cloned to
+            # another machine) is repaired in place — never left as a silent
+            # dead hook while install reports success. Repair is STRICT:
+            # only entries that are structurally ours (exactly two tokens:
+            # a volunteer-turn.sh path + this harness word) AND whose
+            # embedded path is verifiably dead are rewritten. Entries that
+            # merely CONTAIN the substring — user wrappers (firejail/
+            # venv-pinned), other products shipping their own
+            # volunteer-turn.sh, live-but-moved installs — are left
+            # untouched: rewriting them silently strips the security wrapper
+            # or hijacks a foreign hook (R2 finding).
+            desired = _entry_command(registration[0])
+            def _cmd_dict(e):
+                """The dict whose command carries the command, for either
+                the flat or the nested claude wrapper shape (or None)."""
+                if isinstance(e, dict) and isinstance(e.get("command"), str):
+                    return e
+                if isinstance(e, dict):
+                    hs = e.get("hooks")
+                    if (isinstance(hs, list) and hs
+                            and isinstance(hs[0], dict)
+                            and isinstance(hs[0].get("command"), str)):
+                        return hs[0]
+                return None
+
+            repaired = 0
+            live_ours = 0
+            foreign = []
+            for e in ours:
+                cmd_d = _cmd_dict(e)
+                if cmd_d is None:  # non-str command — never guess
+                    foreign.append(e)
+                    continue
+                cmd = cmd_d["command"]
+                try:
+                    toks = _shlex.split(cmd)
+                except ValueError:
+                    toks = []
+                structural_ours = (len(toks) == 2 and toks[1] == harness
+                                   and "volunteer-turn.sh" in toks[0])
+                if structural_ours and not Path(toks[0]).exists():
+                    # Verifiably dead path (venv/python relocation, cloned
+                    # config): repair in place.
+                    cmd_d["command"] = desired
+                    repaired += 1
+                elif structural_ours:
+                    # Live entry pointing at an existing script — our own
+                    # healthy registration (idempotent reinstall) OR a live
+                    # parallel-install path. Never hijack; count, don't warn.
+                    live_ours += 1
+                else:
+                    # Wrapper/customized/foreign: leave untouched.
+                    foreign.append(e)
+            if repaired and not dry:
+                print(f"Repaired {repaired} stale volunteer-turn.sh "
+                      f"registration(s) in {target}")
+            elif live_ours and not foreign and not dry:
+                print(f"volunteer-turn.sh already registered in {target} "
+                      "- up to date")
+            if foreign and not dry:
+                print(f"Left {len(foreign)} customized/foreign "
+                      "volunteer-turn.sh registration(s) untouched in "
+                      f"{target} (wrapped, not structurally ours, or a "
+                      "different product's hook)", file=_sys.stderr)
         out = _json.dumps(existing_json, indent=2) + "\n"
         if dry:
             print(f"[dry-run] would merge into {target}:")
             print(out)
         else:
             target.write_text(out)
-            print(f"Merged volunteer-turn.sh into {target}")
+            if not ours:
+                print(f"Merged volunteer-turn.sh into {target}")
         return 0
 
     if dry:
