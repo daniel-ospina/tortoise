@@ -160,13 +160,128 @@ class TestSessionContext:
                       "| Trigger | Must invoke |", "## Header", "> quote",
                       "```python\nx=1\n```", "model: gpt-5",
                       "TORTOISE_DB_URI: docker://:x@localhost:6379/t",
-                      "* HARD RULE: Skill Compliance", "1. **Model:** pick X"):
+                      "* HARD RULE: Skill Compliance", "1. **Model:** pick X",
+                      # #2434 P2-2: lowercase family labels are config/
+                      # transcript residue, NOT the SDK's authored shapes —
+                      # they stay noise even though the capitalized SDK
+                      # spellings below are exempt.
+                      "decision: pending", "reason: revert",
+                      "option: auto", "finding: x",
+                      "approved: scanner-release-2.4.1"):
             assert _is_digest_noise(noise) is True, noise
         for clean in ("Use FalkorDB as primary graph store",
                       "We decided to adopt BSL 1.1 for the engine",
                       "Alpha in production", "we decided X",
                       "claim A", "decision X",
                       "We chose BSL 1.1 because it converts to MPL-2.0 later.",
-                      "1. We decided to adopt BFS because it is simpler to operate."):
+                      "1. We decided to adopt BFS because it is simpler to operate.",
+                      # #2225: the SDK's own label-led decision-writer shapes
+                      # (authored spelling: Decision/Approved/Reason/Finding/
+                      # Option N — never lowercased by any capture path) are
+                      # genuine decisions, never digest noise.
+                      "Decision: adopt FalkorDB as the primary graph store",
+                      "Approved: scanner-release-2.4.1",
+                      "Finding: FalkorDB survives the 10k-node benchmark",
+                      "Reason: the migration cost is low",
+                      "Option 1: JSON",
+                      "2026-09-06: we decided to pin v2.5.1"):
             assert _is_digest_noise(clean) is False, clean
         print("PASS test_digest_filter_shared_pure_function")
+
+
+# ── #2225 (post-batch bug hunt): SDK decision-writer shapes survive ───
+# The digest noise filter (#2207/#2225) must NOT drop the SDK's own
+# label-led decision content — 'Decision: …' (file_decision), 'Approved: …'
+# (file_human_approval), 'Option N: …' rows and the decide flows'
+# 'Reason:'/'Finding:' leads are genuine decisions, not rule/config residue.
+# Pre-fix those shapes were filtered as noise, so a decisions-only graph read
+# as "no prior sessions" (#2434 review round: reproduced honestly below via
+# decide-flow label shapes — file_decision/file_human_approval also write
+# Option rows, evidence prose and an Event that masked the second-order bug).
+
+def _digest_contents(sdk) -> list[str]:
+    return [p.get("content", "") for p in sdk.session_context()["recent_points"]]
+
+
+class TestDigestKeepsSdkDecisionShapes:
+    def test_file_decision_surfaces_decision_and_options(self, sdk):
+        """A file_decision() call leaves its 'Decision: …' point AND its
+        'Option N: …' rows in session recent_points (pre-fix the decision
+        point was filtered as rule noise; only options/evidence survived)."""
+        res = sdk.file_decision(
+            ["adopt FalkorDB as the primary graph store",
+             "keep the current store"],
+            ["FalkorDB survives the 10k-node benchmark",
+             "the current store times out on write bursts"],
+            choice=0,
+        )
+        contents = _digest_contents(sdk)
+        assert any(c.startswith("Decision: adopt FalkorDB") for c in contents), (
+            f"decision point missing from digest: {contents}")
+        assert any("Option 1: adopt FalkorDB" in c for c in contents), contents
+        assert any("Option 2: keep the current store" in c for c in contents), \
+            contents
+        # The decision point itself is the point file_decision created.
+        assert any(
+            p.get("id") == res["decision_id"]
+            for p in sdk.session_context()["recent_points"]), contents
+
+    def test_human_approval_surfaces_approved_point(self, sdk):
+        """file_human_approval()'s default 'Approved: <artifact>' decision
+        point appears in recent_points (pre-fix: filtered as rule noise)."""
+        claim = sdk.create_point("decision", "ship the scanner build to internal testing")
+        subj = sdk.create_subject("daniel", "engineer")
+        doc = sdk.create_document("scanner-release-2.4.1", "artifact")
+        res = sdk.file_human_approval(
+            approver_id=subj["id"],
+            artifact_id=doc["id"],
+            point_ids=[claim["id"]],
+        )
+        contents = _digest_contents(sdk)
+        assert any(c.startswith("Approved: ") and doc["id"] in c
+                   for c in contents), (
+            f"approval point missing from digest: {contents}")
+        assert any(p.get("id") == res["decision_point_id"]
+                   for p in sdk.session_context()["recent_points"]), contents
+
+    def test_decisions_only_graph_is_not_no_prior_sessions(self, sdk):
+        """Second-order regression (#2225): a graph whose recent points are
+        ALL decide-flow label shapes must NOT report 'no prior sessions' —
+        no_prior_sessions is computed AFTER the digest filter, so dropping
+        every label-led shape made an all-decision graph read as empty.
+
+        Deliberately NOT via file_decision()/file_human_approval(): those
+        writers also leave Option rows, evidence prose and an Event behind,
+        which the pre-fix filter let through and masked the second-order bug
+        (review #2434 P2-1). The decide flow files its label-led content via
+        create_point exactly as below — 'Decision: …' (file_decision),
+        'Reason:'/'Finding:' leads (decide-flow research findings) — and with
+        no other point kind present every one of them must survive the digest.
+        """
+        sdk.create_point("decision", "Decision: adopt BSL 1.1 for the engine")
+        sdk.create_point("evidence", "Finding: FalkorDB survives the 10k-node benchmark")
+        sdk.create_point("evidence", "Reason: it converts to MPL-2.0 later")
+        ctx = sdk.session_context()
+        assert ctx["no_prior_sessions"] is False, (
+            "all-decision graph must not read as empty")
+        contents = [p.get("content", "") for p in ctx["recent_points"]]
+        assert len(contents) == 3, ctx["recent_points"]
+        for shape in ("Decision: adopt BSL 1.1", "Finding: FalkorDB",
+                      "Reason: it converts"):
+            assert any(shape in c for c in contents), (shape, contents)
+
+    def test_rule_noise_still_filtered_beside_decision_shapes(self, sdk):
+        """The #2207 filter keeps working: rule/config residue created in
+        the SAME graph as decision shapes never reaches the digest."""
+        sdk.file_decision(["adopt YAML"], ["schemas validate"], choice=0)
+        for content in ("---", "*Gate: filed as child issue via `issue-creation`.",
+                        "| Trigger | Must invoke |", "model: gpt-5",
+                        "TORTOISE_DB_URI: docker://:x@localhost:6379/t",
+                        "* HARD RULE: Skill Compliance"):
+            sdk.create_point("statement", content)
+        contents = _digest_contents(sdk)
+        assert any(c.startswith("Decision: adopt YAML") for c in contents), contents
+        for noise in ("Gate:", "| Trigger", "model: gpt-5", "TORTOISE_DB_URI",
+                      "HARD RULE"):
+            assert not any(noise in c for c in contents), (noise, contents)
+        assert not any(c.strip() == "---" for c in contents), contents
