@@ -80,9 +80,19 @@ def _patch_session_user(monkeypatch, user_id: str):
 
 def _seed_owner_membership(fake, team_id: str, user_id: str):
     """Give the session user an owner membership so _require_owner_admin passes."""
+    _seed_membership(fake, team_id, user_id, role="owner")
+
+
+def _seed_membership(fake, team_id: str, user_id: str, role: str = "owner"):
+    """Seed an active membership row with an explicit role (owner/admin/member).
+
+    #2297: the member-role row is what lets a session user RESOLVE the team
+    (get_current_team_session → _session_user_team) while _require_owner_admin
+    still 403s — same helper shape as test_onboarding_w6_member_authz.
+    """
     fake.tables.setdefault("team_memberships", []).append({
         "id": str(uuid.uuid4()), "team_id": team_id, "user_id": user_id,
-        "role": "owner", "status": "active", "created_at": "2026-01-01T00:00:00Z",
+        "role": role, "status": "active", "created_at": "2026-01-01T00:00:00Z",
         "identity": None, "lookup_hash": None,
     })
 
@@ -742,6 +752,189 @@ class TestKeyManagementTeamPins:
                          headers={"Authorization": "Bearer eyJ.sess"},
                          json={"name": "pinless"})
         assert r.status_code == 200, r.text
+
+
+class TestKeyManagementOwnerAdminGate:
+    """#2297 POLICY A (owner decision): owner/admin-gate MINT + REVOKE in the
+    SESSION lane; list stays member-open (#1828); PATCH toggle already gated
+    (#1148); KEY-auth class gates unchanged.
+
+    Pre-fix matrix (audit 2026-09-05, probe 4f2cc18e): a member session could
+    mint deleg-NULL owner-class keys (escalation root) AND revoke the owner's
+    keys (no role check, no per-key ownership check) — the most destructive
+    verb was the least gated. The dashboard render-gates all key management
+    to owner/admin; these tests pin the server-side enforcement contract.
+
+    Fixture: a claimed team whose session owner seeded an OWNER membership and
+    a separate MEMBER membership (the member resolves the team via
+    get_current_team_session — same shape as w6's _seed_membership).
+    """
+
+    def _owner_team_with_member(self, client, fake, monkeypatch):
+        """Provision a team, claim it for a session OWNER, add a session
+        MEMBER. Returns (key, owner_id, member_id, team_id)."""
+        key, team_id = _provision_anon(client, fake)
+        owner_id = str(uuid.uuid4())
+        member_id = str(uuid.uuid4())
+        _patch_session_user(monkeypatch, owner_id)
+        from tortoise.auth import lookup_hash
+        sc.claim_membership(fake, lookup_hash=lookup_hash(key),
+                            user_id=owner_id, email="owner@example.com")
+        _seed_membership(fake, team_id, member_id, role="member")
+        return key, owner_id, member_id, team_id
+
+    def _first_key_id(self, fake, team_id):
+        rows = fake.query("api_keys", select=["id"],
+                          filters=[("team_id", "eq", team_id)])
+        assert rows, f"no api_keys row for {team_id}"
+        return rows[0]["id"]
+
+    # ── member-role session: mint/revoke/toggle 403, list stays open ───────
+    def test_member_session_mint_403(self, client, fake, monkeypatch):
+        """#2297 root: a member session must NOT mint an owner-class key
+        (pre-fix 200 → deleg-NULL tt_/tk_ escalation credential)."""
+        _key, _owner_id, member_id, team_id = self._owner_team_with_member(
+            client, fake, monkeypatch)
+        _patch_session_user(monkeypatch, member_id)  # act as the member
+        r = client.post(f"/v1/team/keys?team_id={team_id}",
+                        headers={"Authorization": "Bearer eyJ.sess"}, json={})
+        assert r.status_code == 403, r.text
+        assert r.json()["detail"] == "Requires owner or admin role in team"
+        # no key was minted
+        assert len(fake.query("api_keys", select=["id"],
+                              filters=[("team_id", "eq", team_id)])) == 1
+
+    def test_member_session_revoke_403(self, client, fake, monkeypatch):
+        """The probe's exact hole: a member revoking the OWNER's key must now
+        403 (pre-fix 200 → revoked_at set on the owner's key)."""
+        _key, _owner_id, member_id, team_id = self._owner_team_with_member(
+            client, fake, monkeypatch)
+        kid = self._first_key_id(fake, team_id)  # the owner's signup key
+        _patch_session_user(monkeypatch, member_id)
+        r = client.delete(f"/v1/team/keys/{kid}?team_id={team_id}",
+                          headers={"Authorization": "Bearer eyJ.sess"})
+        assert r.status_code == 403, r.text
+        assert r.json()["detail"] == "Requires owner or admin role in team"
+        row = fake.query("api_keys", select=["revoked_at"],
+                         filters=[("id", "eq", kid)])[0]
+        assert row["revoked_at"] is None  # untouched
+
+    def test_member_session_list_200(self, client, fake, monkeypatch):
+        """List stays member-open (#1828) — read-only inventory, no gate."""
+        _key, _owner_id, member_id, team_id = self._owner_team_with_member(
+            client, fake, monkeypatch)
+        _patch_session_user(monkeypatch, member_id)
+        r = client.get(f"/v1/team/keys?team_id={team_id}",
+                       headers={"Authorization": "Bearer eyJ.sess"})
+        assert r.status_code == 200, r.text
+        assert len(r.json()["keys"]) == 1
+
+    def test_member_session_toggle_403(self, client, fake, monkeypatch):
+        """Toggle parity (#1148): the member role 403s PATCH exactly like mint/
+        revoke now do — all three key-WRITE verbs share the owner/admin gate."""
+        _key, _owner_id, member_id, team_id = self._owner_team_with_member(
+            client, fake, monkeypatch)
+        kid = self._first_key_id(fake, team_id)
+        _patch_session_user(monkeypatch, member_id)
+        r = client.patch(f"/v1/team/keys/{kid}?team_id={team_id}",
+                         headers={"Authorization": "Bearer eyJ.sess"},
+                         json={"enabled": False})
+        assert r.status_code == 403, r.text
+        assert r.json()["detail"] == "Requires owner or admin role in team"
+        # no partial write (the #2248 no-write-on-403-leg convention)
+        row = fake.query("api_keys", select=["enabled"],
+                         filters=[("id", "eq", kid)])[0]
+        assert row["enabled"] is not False
+
+    # ── owner-role session: all four verbs keep working ────────────────────
+    def test_owner_session_all_four_verbs_200(self, client, fake, monkeypatch):
+        """The dashboard's owner/admin contract: mint/list/toggle/revoke all
+        succeed for the claimed owner (the onboarding welcome wizard + durable
+        wizard mint run as this just-claimed owner)."""
+        key, owner_id, _member_id, team_id = self._owner_team_with_member(
+            client, fake, monkeypatch)
+        _patch_session_user(monkeypatch, owner_id)
+        h = {"Authorization": "Bearer eyJ.sess"}
+        # mint (2nd key — free cap 2, see test_api_key_cap_enforced_402)
+        m = client.post(f"/v1/team/keys?team_id={team_id}", headers=h, json={})
+        assert m.status_code == 200, m.text
+        minted_key = m.json()["key"]
+        kid = m.json()["id"]
+        # list (now 2 keys)
+        lst = client.get(f"/v1/team/keys?team_id={team_id}", headers=h)
+        assert lst.status_code == 200, lst.text
+        assert len(lst.json()["keys"]) == 2
+        # toggle
+        t = client.patch(f"/v1/team/keys/{kid}?team_id={team_id}",
+                         headers=h, json={"enabled": False})
+        assert t.status_code == 200, t.text
+        assert t.json()["enabled"] is False
+        # revoke the minted key (frees the slot)
+        d = client.delete(f"/v1/team/keys/{kid}?team_id={team_id}", headers=h)
+        assert d.status_code == 200, d.text
+        assert d.json()["revoked"] is True
+        # the REVOKED key no longer authenticates (401) — regression guard
+        # on the revoke write, mirroring the file's 401-after-revoke pattern
+        assert client.get("/v1/team",
+                          headers={"Authorization": f"Bearer {minted_key}"}
+                          ).status_code == 401
+        # the original provisioning key still authenticates — per-key
+        # revocation, not a blanket team revoke
+        assert client.get("/v1/team", headers={"Authorization": f"Bearer {key}"}
+                          ).status_code == 200
+
+    # ── admin-role session: same pass as owner (#1148 semantics) ───────────
+    def test_admin_session_mint_and_revoke_200(self, client, fake, monkeypatch):
+        """Admins ride the same gate (owner/admin) — the #1148 role tuple."""
+        key, team_id = _provision_anon(client, fake)
+        admin_id = str(uuid.uuid4())
+        _patch_session_user(monkeypatch, admin_id)
+        from tortoise.auth import lookup_hash
+        sc.claim_membership(fake, lookup_hash=lookup_hash(key),
+                            user_id=admin_id, email="owner@example.com")
+        # demote to admin and re-assert (claim mints owner; admin passes too)
+        rows = fake.tables["team_memberships"]
+        for row in rows:
+            if row.get("team_id") == team_id and row.get("user_id") == admin_id:
+                row["role"] = "admin"
+        m = client.post(f"/v1/team/keys?team_id={team_id}",
+                        headers={"Authorization": "Bearer eyJ.sess"}, json={})
+        assert m.status_code == 200, m.text
+        d = client.delete(f"/v1/team/keys/{m.json()['id']}?team_id={team_id}",
+                          headers={"Authorization": "Bearer eyJ.sess"})
+        assert d.status_code == 200, d.text
+
+    # ── key-auth (legacy tt_) lane: unchanged (#2297 does not touch it) ────
+    def test_key_auth_mint_and_revoke_unchanged(self, client, fake, monkeypatch):
+        """The KEY-auth lane keeps its class gates only — a legacy full-access
+        tt_ key (owner class, deleg NULL) mints + revokes exactly as before
+        (200). The role gate is SESSION-lane-only. (Claim first so the team
+        rides the free cap=2 — the anon tier caps at 1 key.)"""
+        key, team_id = _provision_anon(client, fake)
+        user_id = str(uuid.uuid4())
+        _patch_session_user(monkeypatch, user_id)
+        from tortoise.auth import lookup_hash
+        sc.claim_membership(fake, lookup_hash=lookup_hash(key),
+                            user_id=user_id, email="owner@example.com")
+        h = {"Authorization": f"Bearer {key}"}
+        m = client.post(f"/v1/team/keys?team_id={team_id}", headers=h, json={})
+        assert m.status_code == 200, m.text
+        kid = m.json()["id"]
+        assert client.delete(f"/v1/team/keys/{kid}?team_id={team_id}",
+                             headers=h).status_code == 200
+
+    def test_member_session_scoped_mint_403(self, client, fake, monkeypatch):
+        """#2297 escalation variant: a member requesting a SCOPED mint (the
+        C3 escalation shape — graphs:delete / keys:manage in the allowlist)
+        is 403'd by the role gate before any class logic runs."""
+        _key, _owner_id, member_id, team_id = self._owner_team_with_member(
+            client, fake, monkeypatch)
+        _patch_session_user(monkeypatch, member_id)
+        r = client.post(f"/v1/team/keys?team_id={team_id}",
+                        headers={"Authorization": "Bearer eyJ.sess"},
+                        json={"scopes": ["graphs:read", "graphs:delete"]})
+        assert r.status_code == 403, r.text
+        assert r.json()["detail"] == "Requires owner or admin role in team"
 
 
 class TestBackupsSessionAuth:

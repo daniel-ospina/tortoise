@@ -5322,6 +5322,14 @@ class TestC3KeyLifecycle:
             gid = g["graph_id"]
             app.dependency_overrides[get_current_team] = \
                 lambda: dict(TEST_TEAM, team_id=tid, session_user_id=_U1, key_id=None)
+            # #2297 POLICY A: the SESSION face is owner/admin-gated — seed the
+            # owner Membership (pre-#2297 the mint had no role check, so this
+            # override never needed it; same pattern as _session_mint).
+            sdk._get_registry().query(
+                "MERGE (m:Membership {user_id:$uid, team_id:$tid, "
+                "status:'active'}) SET m.role='owner'",
+                params={"uid": _U1, "tid": tid},
+            )
             r1 = tc.post("/v1/team/keys", json={"scopes": ["graphs:read"]})
             assert r1.status_code == 200, r1.text
             kid_teamwide = r1.json()["id"]
@@ -5427,6 +5435,14 @@ class TestC3KeyCapAndEscalationBackstop:
             team_dict = dict(TEST_TEAM, team_id=tid, session_user_id=_U1)
             team_dict.pop("key_id", None)
             app.dependency_overrides[get_current_team] = lambda: team_dict
+            # #2297 POLICY A: the SESSION face is owner/admin-gated — seed the
+            # owner Membership (pre-#2297 the mint had no role check, so this
+            # override never needed it; same pattern as _session_mint).
+            sdk._get_registry().query(
+                "MERGE (m:Membership {user_id:$uid, team_id:$tid, "
+                "status:'active'}) SET m.role='owner'",
+                params={"uid": _U1, "tid": tid},
+            )
             # Scoped mint → 409 (the _KeyCapExceeded semantic).
             r = tc.post("/v1/team/keys",
                         json={"scopes": ["graphs:read"]})
@@ -5589,6 +5605,14 @@ class TestC3KeyCapAndEscalationBackstop:
             team_dict = dict(TEST_TEAM, team_id=tid, session_user_id=_U1,
                              key_id=None)
             app.dependency_overrides[get_current_team] = lambda: team_dict
+            # #2297 POLICY A: the SESSION face is owner/admin-gated — seed the
+            # owner Membership (pre-#2297 the mint had no role check, so this
+            # override never needed it; same pattern as _session_mint).
+            sdk._get_registry().query(
+                "MERGE (m:Membership {user_id:$uid, team_id:$tid, "
+                "status:'active'}) SET m.role='owner'",
+                params={"uid": _U1, "tid": tid},
+            )
             r = tc.post("/v1/team/keys", json={})
             assert r.status_code == 402, r.text
         finally:

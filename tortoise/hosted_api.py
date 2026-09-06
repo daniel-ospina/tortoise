@@ -5145,6 +5145,10 @@ async def create_api_key(request: Request, response: Response, team: dict = Depe
     which stays for selfhost. The registry path is the #767 review note
     (PR #851 P1) surface this migration closes: no production window exists
     because #765 lands before the single-deploy flip (#771).
+
+    #2297 POLICY A: the SESSION lane is owner/admin-gated (a member session
+    must not mint deleg-NULL owner-class keys — the escalation root of
+    #2297's P1); the KEY-auth lane is unchanged (C2 deleg + D13 class gates).
     """
     from tortoise.supabase_control import (
         get_control_plane,
@@ -5159,6 +5163,25 @@ async def create_api_key(request: Request, response: Response, team: dict = Depe
     if team.get("key_id") is not None and team.get("delegation_depth") == 0:
         raise HTTPException(status_code=403,
                             detail="Minted keys cannot mint new keys")
+    # #2297 POLICY A (owner decision 2026-09-05): owner/admin-gate the
+    # SESSION lane of the mint. A member session previously minted deleg-NULL
+    # owner-class keys here (full-access tt_ or scoped tk_ carrying escalation
+    # scopes) — the escalation root of #2297's P1 (key-auth then reaches
+    # owner-session-gated surfaces with the member-minted owner-class key).
+    # Mirrors toggle_api_key_enabled's _require_owner_admin gate (#1148); the
+    # role is checked on the RESOLVED team (team["team_id"] — the ?team_id=
+    # pin's membership-checked team for multi-membership callers, #2230/#2248).
+    # The KEY-auth lane is deliberately untouched (the C2 deleg guard above +
+    # the D13 caller-class gates below govern minting WITH keys). The
+    # dependency-override lane (test seam) DOES carry session_user_id when a
+    # test supplies it — emulated session faces there are role-gated too and
+    # must seed owner/admin memberships; production key-auth never carries
+    # session_user_id (attached only on the JWT branch of
+    # get_current_team_session). #2299: this gate + the inline pin checks in
+    # the sibling handlers are consolidation candidates — keep this block
+    # liftable into a helper.
+    if team.get("session_user_id") is not None:
+        await _require_owner_admin(team["session_user_id"], team["team_id"])
     # Key label + C3 (#2112) scoped-mint body: {name?, graph_id?, scopes?}.
     # Read the body defensively — mint bodies are usually `{}` (dashboard/
     # CLI), so parse failures degrade to the legacy owner mint, never a
@@ -5201,9 +5224,11 @@ async def create_api_key(request: Request, response: Response, team: dict = Depe
     child_mint = is_key_caller and not caller_legacy_full
     try:
         if not scoped_request:
-            # Legacy {} mint — D13 caller-class gate: SESSION faces and
-            # legacy full-access (deleg-NULL, scopes=[]) OWNER-class keys
-            # mint the byte-identical pre-C3 tt_ key (402 key-cap, D3). A
+            # Legacy {} mint — D13 caller-class gate: SESSION faces
+            # (owner/admin-only since #2297 POLICY A — a member session 403s
+            # above) and legacy full-access (deleg-NULL, scopes=[]) OWNER-
+            # class keys mint the byte-identical pre-C3 tt_ key (402 key-cap,
+            # D3). A
             # scoped deleg-NULL key (even WITH keys:manage) may NOT mint a
             # full-access owner key — its {} mint routes the row-3/row-4
             # semantics: 403 without keys:manage (no mint capability); a
@@ -5251,8 +5276,9 @@ async def create_api_key(request: Request, response: Response, team: dict = Depe
                                     detail="Missing keys:manage scope to mint keys")
             # Key caller WITH mint capability → deleg=0 child (one-level-deep):
             # scopes ∩ child policy; an escalation-scope REQUEST from a key is a
-            # 403 (§6.3 — never silently stripped). SESSION faces and legacy
-            # full-access (owner-class) callers fail the `not caller_legacy_full`
+            # 403 (§6.3 — never silently stripped). SESSION faces (owner/admin-
+            # only since #2297 POLICY A) and legacy full-access (owner-class)
+            # callers fail the `not caller_legacy_full`
             # term and fall through to the else → owner-class deleg-NULL mint
             # with the full allowlist (D13 rows 1-2).
             if is_key_caller and not caller_legacy_full:
@@ -5521,7 +5547,9 @@ async def revoke_api_key(key_id: str, request: Request, team: dict = Depends(get
     get_current_team_session → _session_user_team resolves the pinned
     (membership-checked) team, so revoke targets the SELECTED team for
     multi-membership callers; the key-auth/registry lanes resolve the team
-    from the key itself and ignore the query (byte-compatible by design)."""
+    from the key itself and ignore the query (byte-compatible by design).
+    #2297 POLICY A: the SESSION lane is owner/admin-gated (a member must not
+    revoke keys it cannot toggle — #1148 parity); KEY-auth unchanged."""
     from tortoise.supabase_control import (
         api_key_by_id,
         get_control_plane,
@@ -5536,6 +5564,23 @@ async def revoke_api_key(key_id: str, request: Request, team: dict = Depends(get
     # 403 at the DI gate before this; legacy full-access keys and session
     # faces pass.
     _require_keys_manage(team, "revoke API keys")
+    # #2297 POLICY A (owner decision 2026-09-05): owner/admin-gate the
+    # SESSION lane of the revoke. A member previously revoked ANY team key
+    # (incl. the owner's) — the most destructive key verb carried the least
+    # gating (toggle/rename have 403'd members via _require_owner_admin since
+    # #1148). Same gate as toggle_api_key_enabled; the role is checked on the
+    # RESOLVED team (team["team_id"] — the ?team_id= pin's membership-checked
+    # team for multi-membership callers, #2230/#2248) BEFORE any key lookup,
+    # so a non-owner member sees the same 403 on every reachable key id (no
+    # existence/ownership differentiation, no partial revoke). KEY-auth
+    # callers keep the key-class gate above unchanged; production key-auth
+    # never carries session_user_id (attached only on the JWT branch of
+    # get_current_team_session) — the dependency-override lane (test seam)
+    # DOES when a test supplies it (emulated session faces there are
+    # role-gated too). #2299: this gate + the inline pin checks are
+    # consolidation candidates — keep this block liftable into a helper.
+    if team.get("session_user_id") is not None:
+        await _require_owner_admin(team["session_user_id"], team["team_id"])
     if is_supabase_enabled():
         try:
             row = api_key_by_id(get_control_plane(), key_id)
