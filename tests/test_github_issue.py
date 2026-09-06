@@ -106,3 +106,34 @@ def test_request_surfaces_http_error():
     with pytest.raises(gi.GithubApiError) as ei:
         raise gi.GithubApiError(401, "bad creds")
     assert ei.value.status == 401
+
+
+def test_search_open_incident_subject_scoped_query():
+    """#2313 Task 4: the search fallback query must scope to the incident's
+    OWN subject (kind + team/graph) — a kind-only query would let a
+    same-kind incident of a different subject adopt this issue number."""
+    seen: dict = {}
+
+    def _fake_request(method, url, token):
+        seen["url"] = url
+        return {"items": []}
+
+    import tortoise.github_issue as gi
+    orig = gi._request
+    gi._request = _fake_request
+    try:
+        import urllib.parse as _up
+        # per-graph subject → the title phrase carries "{team}:{graph}"
+        gi.search_open_incident("r", "t", "STALE", "team_a:g_x")
+        q = _up.unquote(seen["url"])
+        assert 'in:title "[DR] STALE — team_a:g_x"' in q
+        # bare team subject → bare phrase (never matches "team_a:g_x" titles)
+        gi.search_open_incident("r", "t", "STALE", "team_a")
+        q = _up.unquote(seen["url"])
+        assert 'in:title "[DR] STALE — team_a"' in q
+        # global kinds → bare kind phrase
+        gi.search_open_incident("r", "t", "DRIVER_DOWN")
+        q = _up.unquote(seen["url"])
+        assert 'in:title "[DR] DRIVER_DOWN"' in q
+    finally:
+        gi._request = orig

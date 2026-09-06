@@ -96,13 +96,23 @@ def close_issue(repo: str, token: str, number: int, comment: str | None = None) 
     _request("PATCH", f"{_API}/repos/{repo}/issues/{number}", token, {"state": "closed"})
 
 
-def search_open_incident(repo: str, token: str, kind: str) -> list[int]:
-    """GH-search fallback: open ``dr:backup`` issues whose title carries ``kind``.
+def search_open_incident(repo: str, token: str, kind: str,
+                          team_id: str = "") -> list[int]:
+    """GH-search fallback: open ``dr:backup`` issues whose title carries
+    ``kind`` AND the incident subject (``team_id`` — a team id or the
+    per-graph "{team}:{graph}" subject, #2313 Task 4).
+
+    Subject scoping matters: incidents are keyed per (kind, subject); an
+    adoption search that matches only ``kind`` would bind a same-kind issue
+    opened for a DIFFERENT subject — recovery of one would then close the
+    other's issue (silent-loss cross-talk). Empty ``team_id`` (global kinds
+    like DRIVER_DOWN) matches the bare ``[DR] {kind}`` title.
 
     Used when R2 is unreachable (no dedup object possible) or when a created
     dedup object is missing its issue_number (create-then-die window).
     """
-    query = f'repo:{repo} is:issue is:open label:"{_DR_LABEL}" in:title "[DR] {kind}"'
+    title = f"[DR] {kind}" + (f" — {team_id}" if team_id else "")
+    query = f'repo:{repo} is:issue is:open label:"{_DR_LABEL}" in:title "{title}"'
     url = f"{_API}/search/issues?q={urllib.parse.quote(query)}"
     data = _request("GET", url, token)
     return [int(i["number"]) for i in data.get("items", [])]

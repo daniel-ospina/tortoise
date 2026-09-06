@@ -484,9 +484,45 @@ async def _lifespan(app):
                         _logger.warning("watcher team enumeration failed: %s", exc)
                         return []
 
+                # #2313 Task 4: the per-graph watcher surface — ACTIVE custom
+                # graphs of a team, read from the SAME control-plane source as
+                # the sweep. The default graph rides the team surface; only
+                # customs are listed here (they are what the sweep now backs
+                # up per-graph). Best-effort: a control-plane blip degrades to
+                # an empty list (no custom-graph incidents that poll — the
+                # staleness guards keep the DEFAULT coverage intact, which is
+                # the never-silent core).
+                def _graph_provider(team_id: str) -> list[str] | None:
+                    try:
+                        if is_supabase_enabled():
+                            rows = team_source.query(
+                                "graphs", select=["id"],
+                                filters=[("team_id", "eq", team_id),
+                                         ("kind", "eq", "custom"),
+                                         ("status", "eq", "active")],
+                            )
+                            return [str(r["id"]) for r in rows if r.get("id")]
+                        rows = team_source.query(
+                            "MATCH (g:Graph {team_id:$tid}) "
+                            "WHERE g.kind = 'custom' AND "
+                            "coalesce(g.status, 'active') <> 'deleted' "
+                            "RETURN g.id",
+                            params={"tid": team_id},
+                        ).result_set
+                        return [str(r[0]) for r in rows if r and r[0]]
+                    except Exception as exc:
+                        # None = UNCONFIRMED surface (vs [] = genuine empty):
+                        # the watcher must never resolve custom-graph
+                        # incidents off a failed control-plane read.
+                        _logger.warning(
+                            "watcher custom-graph enumeration failed for %s: %s",
+                            team_id, exc)
+                        return None
+
                 watcher = BackupWatcher(
                     _backup_storage(), _alert_store_from(cfg),
                     team_provider=_sweep_teams,
+                    graph_provider=_graph_provider,
                     state_reader=read_team_state,
                     driver_heartbeat_reader=lambda: _read_driver_heartbeat(),
                     stale_threshold_min=cfg.stale_threshold_min,
@@ -16500,6 +16536,76 @@ def _require_backup_tier(team: dict) -> None:
         )
 
 
+def _manifest_graph(manifest: dict, override_gid: str | None = None) -> dict:
+    """#2313: derive the graph identity of a backup manifest for listing.
+
+    Per-graph manifests carry ``graph_id``; legacy flat manifests (pre-#2313
+    team-level artifacts) bucket to the DEFAULT graph by key shape (Q6 owner
+    decision) unless an override resolves them — see ``backups_list``'s
+    reverse lookup (a legacy flat manifest whose ``graph_name`` names a
+    custom namespace is a pre-#2313 C5-era on-demand custom dump and lists
+    under that custom graph). Additive enrichment only — consumers ignore
+    unknown fields.
+    """
+    graph = override_gid or manifest.get("graph_id")
+    if graph is None:
+        parts = str(manifest.get("backup_id", "")).split("/")
+        graph = parts[1] if len(parts) == 3 else "default"
+    out = dict(manifest)
+    out["graph_id"] = graph
+    out["kind"] = "default" if graph == "default" else "custom"
+    return out
+
+
+def _legacy_graph_overrides(cp_source, team_id: str,
+                            manifests: list[dict]) -> dict[str, str]:
+    """Q6 reverse lookup: legacy FLAT manifests (2-segment backup_id) carry
+    the graph they dumped in ``graph_name`` — resolve that to an ACTIVE graph
+    id via the graphs seam so pre-#2313 C5-era on-demand dumps of CUSTOM
+    graphs list under their graph instead of mislabeling as the default.
+    Returns {backup_id: graph_id}. Fail-soft: any seam error → empty map
+    (the default bucket in ``_manifest_graph`` is the fallback).
+    """
+    legacy = [m for m in manifests
+              if m.get("graph_id") is None
+              and len(str(m.get("backup_id", "")).split("/")) == 2]
+    if not legacy:
+        return {}
+    try:
+        from tortoise.backup_sweep import _sweep_graph_list
+        rows = _sweep_graph_list(cp_source, team_id)
+    except Exception as e:
+        _logger.warning("legacy graph reverse lookup failed for %s: %s",
+                        team_id, e)
+        return {}
+    return _legacy_bucket_map(rows, legacy)
+
+
+def _legacy_bucket_map(rows: list[dict], legacy: list[dict]) -> dict[str, str]:
+    """Pure Q6 mapping: active-graph rows (namespace → graph_id) → legacy flat
+    manifests whose ``graph_name`` names one of them. Pure for unit testing."""
+    ns_to_gid = {str(r.get("namespace") or ""): r["graph_id"]
+                 for r in rows if not r.get("_invalid")}
+    return {m["backup_id"]: ns_to_gid[str(m.get("graph_name") or "")]
+            for m in legacy
+            if str(m.get("graph_name") or "") in ns_to_gid}
+
+
+def _incident_subject(inc: dict) -> str:
+    """#2313: alert-store subject for a sweep incident.
+
+    Default-graph and team-level incidents keep the bare team subject (the
+    pre-#2313 alert surface). Custom-graph incidents use the per-graph
+    subject "{team}:{gid}" — the SAME key the watcher uses — so re-baseline
+    and the watcher can open/resolve coherently.
+    """
+    gid = inc.get("graph_id")
+    tid = inc.get("team_id", "")
+    if gid and gid != "default":
+        return f"{tid}:{gid}"
+    return tid
+
+
 @app.get("/backups")
 async def backups_list(team: dict = Depends(get_current_team_session_ungated)):  # noqa: B008
     """List this team's backups (newest first) with timestamps + node counts.
@@ -16515,7 +16621,33 @@ async def backups_list(team: dict = Depends(get_current_team_session_ungated)): 
     if not team_id:
         raise HTTPException(status_code=401, detail="Missing Authorization header")
     try:
-        return {"backups": await asyncio.to_thread(list_backups, _backup_storage(), team_id)}
+        listed = await asyncio.to_thread(
+            list_backups, _backup_storage(), team_id)
+        # #2313: additive per-graph identity on every entry. Legacy flat
+        # artifacts read-bucket to the default graph by key shape, with a
+        # Q6 reverse lookup first: a flat manifest whose graph_name names a
+        # custom namespace (pre-#2313 C5-era on-demand custom dumps) lists
+        # under that custom graph. Fail-soft — the default bucket stands on
+        # any control-plane error.
+        overrides: dict[str, str] = {}
+        if any(m.get("graph_id") is None for m in listed):
+            from tortoise.supabase_control import (
+                get_control_plane,
+                is_supabase_enabled,
+            )
+            try:
+                cp = (get_control_plane() if is_supabase_enabled()
+                      else _registry_sdk()._get_registry())
+            except Exception as e:
+                _logger.warning("backups list cp unavailable: %s", e)
+                cp = None
+            if cp is not None:
+                overrides = await asyncio.to_thread(
+                    _legacy_graph_overrides, cp, team_id, listed)
+        return {"backups": [
+            _manifest_graph(m, override_gid=overrides.get(m.get("backup_id")))
+            for m in listed
+        ]}
     except ValueError as e:
         raise HTTPException(status_code=400, detail=f"List rejected: {e}")  # noqa: B904
     except RuntimeError as e:
@@ -16609,6 +16741,7 @@ async def backups_create(team: dict = Depends(get_current_team_gated)):  # noqa:
         # resolves graph_namespace=None — the `or` fallback would widen a
         # ghost key onto the team DEFAULT graph (cross-graph read dump).
         # Mirror _data_sdk: vanish → 403, never a demotion.
+        default_name = team_graph_name(cp_source, team_id)
         if team.get("graph_id"):
             graph_name = team.get("graph_namespace")
             if not graph_name:
@@ -16616,13 +16749,20 @@ async def backups_create(team: dict = Depends(get_current_team_gated)):  # noqa:
                     status_code=403,
                     detail={"error_code": "GRAPH_NOT_FOUND",
                             "message": "graph not found for key"})
+            # #2313: canonical key segment — the DEFAULT graph (graph-bound
+            # default keys carry the default namespace) keys under the
+            # literal "default", never a lane-specific raw gid; custom graphs
+            # key under their control-plane id (the sweep's enum id).
+            graph_id = ("default" if graph_name == default_name
+                        else team.get("graph_id"))
         else:
-            graph_name = team_graph_name(cp_source, team_id)
+            graph_name = default_name
+            graph_id = "default"
         # #924 review P1: create_backup dumps proj.g — the SDK bound to
         # namespace=team_id resolves team_{team_id}, NOT the resolved graph.
         # For a team_{name} team the dump would be the EMPTY phantom graph
         # while the manifest claims team_{name}. Bind the dump projection to
-        # the RESOLVED graph (the sweep's _backup_team does db.select_graph
+        # the RESOLVED graph (the sweep's per-graph _backup_graph does db.select_graph
         # on the same name). from_uri reuses the configured connection with
         # graph_name override (#7886 multi-tenant isolation).
         import os as _os
@@ -16648,12 +16788,15 @@ async def backups_create(team: dict = Depends(get_current_team_gated)):  # noqa:
         storage = _backup_storage()
         manifest = await asyncio.to_thread(
             create_backup, dump_proj, cp_source, storage,
-            team_id=team_id, graph_name=graph_name,
+            team_id=team_id, graph_name=graph_name, graph_id=graph_id,
         )
-        # Retention: prune after a successful backup so storage stays bounded
-        # (best-effort — a prune failure must not fail the backup).
+        # Retention: prune the graph's pool after a successful backup so
+        # storage stays bounded (best-effort — a prune failure must not fail
+        # the backup). Per-graph prune never touches other graphs' nested
+        # keys; the legacy flat pool is drained by the sweep.
         try:
-            await asyncio.to_thread(prune_backups, storage, team_id)
+            await asyncio.to_thread(
+                prune_backups, storage, team_id, graph_id=graph_id)
         except Exception as e:
             _logger.warning("prune failed for team %s: %s", team_id, e)
     except HTTPException:
@@ -16715,11 +16858,30 @@ async def backups_restore(body: BackupRestoreRequest, request: Request, team: di
                 registry_sdk = _registry_sdk()
             cp_source = (get_control_plane() if is_supabase_enabled()
                          else registry_sdk._get_registry())
-            # #924: same seam as backups_create — teams.graph_name in Supabase
-            # mode (the old team_{id} hardcode would reject the restore as
+            # #924/#2313: resolve the restore target from the ACTIVE-graph
+            # seam. The artifact's key shape names its graph: legacy flat and
+            # the "default" segment are the team DEFAULT surface (the only
+            # surface this endpoint restores — custom-graph restore is a
+            # graph-bound-key operation, refused below); resolution via
+            # resolve_active_graph doubles as the tombstone guard (a
+            # deleted/quarantined graph is never a valid restore target,
+            # #2304). Default graph name: teams.graph_name in Supabase mode
+            # (the old team_{id} hardcode would reject the restore as
             # cross-graph for SDK-created teams), team_{id} in registry mode.
-            from tortoise.backup_sweep import team_graph_name
-            graph_name = team_graph_name(cp_source, team_id)
+            from tortoise.backup_sweep import resolve_active_graph
+            from tortoise.hosted_backup import _parse_backup_key
+            try:
+                _parsed_team, _parsed_graph, _ = _parse_backup_key(body.backup_key)
+            except ValueError as e:
+                raise ValueError(f"unrecognized backup key: {e}") from None
+            if _parsed_graph not in (None, "default"):
+                raise ValueError(
+                    "restoring a custom graph from this endpoint is not "
+                    "supported — graph-bound restore required"
+                )
+            _graph_id = _parsed_graph or "default"
+            _row = resolve_active_graph(cp_source, team_id, _graph_id)
+            graph_name = _row["graph_name"]
             result = await asyncio.to_thread(
                 restore_backup, sdk._get_proj().db, cp_source,
                 _backup_storage(),
@@ -16812,8 +16974,9 @@ def _alert_store_from(cfg) -> AlertStore:  # noqa: F821
     def close_issue(number: int, comment: str | None = None) -> None:
         gi.close_issue(cfg.gh_repo, cfg.github_issues_pat, number, comment)
 
-    def search_open(kind: str) -> list[int]:
-        return gi.search_open_incident(cfg.gh_repo, cfg.github_issues_pat, kind)
+    def search_open(kind: str, team_id: str = "") -> list[int]:
+        return gi.search_open_incident(
+            cfg.gh_repo, cfg.github_issues_pat, kind, team_id)
 
     def push_telegram(text: str) -> None:
         send_message(cfg.telegram_bot_token, cfg.telegram_chat_id, text)
@@ -16869,6 +17032,80 @@ def _boot_gc_drill_graphs(db, max_age_hours: float = 6.0) -> None:
             continue
 
 
+@app.post("/v1/internal/backups/acl-reconcile")
+async def backups_acl_reconcile(request: Request):
+    """Post-restore ACL rebuild/verification (#2313 folded delta): every
+    ACTIVE graph of every team must have its per-graph ACL user.
+
+    A full-platform restore (disaster recovery into a fresh FalkorDB server)
+    restores graph DATA from R2 — ACL server users do NOT live in the graph
+    namespace and are lost with the old server. ``create_acl_user`` is the
+    idempotent rebuild primitive (full-reset upsert; registry/selfhost mode
+    reuses the stored credential, hosted create-once verifies without
+    password churn). This reconcile replays it per ACTIVE graph — the DR
+    runbook's post-restore step. Idempotent + fail-soft: ACL-layer absence
+    (no server URI / bare redis) is reported, never a 500.
+    """
+    _check_internal(request)
+    cfg = _backup_config_safe()
+    if cfg is None:
+        raise HTTPException(status_code=503, detail="Backup sweep disabled")
+    from tortoise.backup_sweep import _sweep_graph_list, enumerate_eligible_teams
+
+    reg_sdk = _registry_sdk()
+    registry = reg_sdk._get_registry()
+    try:
+        team_ids = enumerate_eligible_teams(registry)
+    except RuntimeError as e:
+        raise HTTPException(status_code=503,
+                            detail=f"team enumeration failed: {e}") from e
+
+    import threading as _threading
+    from typing import Any as _Any
+
+    from tortoise.acl_graph_users import create_acl_user  # type: ignore[import-not-found]
+
+    results: dict[str, _Any] = {}
+    lock = _threading.Lock()
+    for team_id in sorted(team_ids):
+        try:
+            graphs = _sweep_graph_list(registry, team_id)
+        except Exception as e:
+            results[team_id] = {"status": "error", "error": str(e)}
+            continue
+        ok = skipped = defaults = 0
+        errors: list[str] = []
+        for row in graphs:
+            if row.get("_invalid"):
+                continue
+            if row["kind"] == "default":
+                # The default graph's ACL protection rides the TEAM-scoped
+                # tenant ACL (its namespace is the team namespace —
+                # team_{name}/{graph_name}); per-graph ACL users only exist
+                # for CUSTOM graphs (namespace team_{tid}_{gid}, the pattern
+                # acl_graph_users._graph_namespace derives).
+                defaults += 1
+                continue
+            try:
+                with lock:
+                    r = create_acl_user(row["graph_id"], team_id)
+                if r is None:
+                    skipped += 1  # ACL layer absent — fail-soft, reported
+                else:
+                    ok += 1
+            except Exception as e:
+                # A RAISED failure (server-reachable AclLayerError class) is
+                # surfaced in the summary — never silently swallowed.
+                _logger.warning("acl reconcile failed for %s/%s: %s",
+                                team_id, row.get("graph_id"), e)
+                errors.append(f"{row.get('graph_id')}: {e}")
+        results[team_id] = {"status": "reconciled", "custom_graphs_ok": ok,
+                            "acl_absent_skipped": skipped,
+                            "default_skipped": defaults,
+                            "errors": errors}
+    return {"status": "reconciled", "teams": len(results), "results": results}
+
+
 @app.post("/v1/internal/backups/sweep")
 async def backups_sweep(request: Request):
     """Run the per-team backup sweep (driver's core action). Internal-key only."""
@@ -16903,8 +17140,12 @@ async def backups_sweep(request: Request):
         alerts_failed = []
         for inc in result.get("incidents", []):
             try:
+                # #2313: graph-scoped incidents (custom graphs) route under
+                # the "{team}:{gid}" subject — coherent with the watcher and
+                # re-baseline. Default/team incidents keep the bare team.
                 await asyncio.to_thread(
-                    alerts.open_incident, inc["kind"], inc.get("team_id", ""), inc.get("detail")
+                    alerts.open_incident, inc["kind"],
+                    _incident_subject(inc), inc.get("detail")
                 )
             except Exception as e:  # incident-filing must never fail the run (review P3)
                 _logger.warning("incident routing failed for %s: %s", inc.get("kind"), e)
@@ -17027,32 +17268,58 @@ async def backups_simulate(request: Request):
 @app.post("/v1/internal/backups/re-baseline")
 async def backups_rebaseline(request: Request, body: dict):
     """Operator re-baseline: acknowledge a fired DATA_LOSS_CANDIDATE by
-    re-persisting the current graph counts (updates team state, closes the
-    incident) — distinct from suppression."""
+    re-persisting the current counts of the target graph (default unless
+    ``body.graph_id`` names a custom graph) — closes the incident.
+
+    #2313: per-graph re-baseline. The default graph updates the per-graph
+    state AND mirrors the legacy team file (the pre-#2313 surface); custom
+    graphs update only their per-graph state. Incident subjects follow the
+    graph: bare team for the default, "{team}:{gid}" for customs (the same
+    key the sweep routes and the watcher uses).
+    """
     _check_internal(request)
-    team_id = (body or {}).get("team_id", "")
+    body = body or {}
+    team_id = body.get("team_id", "")
+    graph_id = body.get("graph_id", "default")
     if not team_id:
         raise HTTPException(status_code=400, detail="team_id required")
-    from tortoise.backup_sweep import _write_json, read_team_state
+    from tortoise.backup_sweep import (
+        _graph_state_key,
+        _write_json,
+        read_team_state,
+        resolve_active_graph,
+    )
 
     reg_sdk = _registry_sdk()
-    registry = reg_sdk._get_registry()  # noqa: F841
+    registry = reg_sdk._get_registry()
     db = reg_sdk._get_proj().db
     storage = _backup_storage()
     try:
-        g = db.select_graph(f"team_{team_id}")
+        row = resolve_active_graph(registry, team_id, graph_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=f"Re-baseline rejected: {e}")  # noqa: B904
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=f"Re-baseline failed: {e}")  # noqa: B904
+    try:
+        g = db.select_graph(row["graph_name"])
         count = int(g.query("MATCH (n) RETURN count(n)").result_set[0][0])
     except Exception as e:
-        raise HTTPException(status_code=503, detail=f"team graph unavailable: {e}")  # noqa: B904
-    state = read_team_state(storage, team_id)
-    _write_json(
-        storage, f"ops/teams/{team_id}/state.json",
-        {**state, "node_count": count, "updated_at": datetime.now(UTC).isoformat()},
-    )
+        raise HTTPException(status_code=503, detail=f"graph unavailable: {e}")  # noqa: B904
+    state = {
+        **(read_team_state(storage, team_id)
+          if graph_id == "default" else {}),
+        "node_count": count,
+        "updated_at": datetime.now(UTC).isoformat(),
+    }
+    _write_json(storage, _graph_state_key(team_id, graph_id), state)
+    if graph_id == "default":
+        _write_json(storage, f"ops/teams/{team_id}/state.json", state)
+    subject = f"{team_id}:{graph_id}" if graph_id != "default" else team_id
     alerts = _alert_store_from(_backup_config_safe())
-    alerts.resolve_incident("DATA_LOSS_CANDIDATE", team_id)
-    alerts.resolve_incident("SIZE_GUARD_ABORT", team_id)
-    return {"status": "rebaselined", "team_id": team_id, "node_count": count}
+    alerts.resolve_incident("DATA_LOSS_CANDIDATE", subject)
+    alerts.resolve_incident("SIZE_GUARD_ABORT", subject)
+    return {"status": "rebaselined", "team_id": team_id,
+            "graph_id": graph_id, "node_count": count}
 
 
 @app.post("/v1/internal/backups/drill")
@@ -17076,7 +17343,8 @@ async def backups_drill(request: Request, body: dict):
         raise HTTPException(status_code=429, detail="drill cooldown — ≥1h between drills")
     _LAST_DRILL_AT = _time.time()
 
-    from tortoise.hosted_backup import restore_backup
+    from tortoise.backup_sweep import resolve_active_graph
+    from tortoise.hosted_backup import _parse_backup_key, restore_backup
 
     reg_sdk = _registry_sdk()
     registry = reg_sdk._get_registry()
@@ -17085,13 +17353,22 @@ async def backups_drill(request: Request, body: dict):
     ts = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
     target_graph = f"_drill_{ts}"
     try:
+        # #2313: the artifact's key shape names its graph; resolve the target
+        # through the ACTIVE-graph seam (tombstone guard — a drill of a
+        # deleted/quarantined graph is refused) so the drill exercises the
+        # REAL graph's name, not a hardcoded team_{id}.
+        _parsed_team, _parsed_graph, _ = _parse_backup_key(backup_key)
+        _graph_id = _parsed_graph or "default"
+        _row = resolve_active_graph(registry, team_id, _graph_id)
         result = await asyncio.to_thread(
             restore_backup, db, registry, storage, backup_key,
-            team_id=team_id, graph_name=f"team_{team_id}",
+            team_id=team_id, graph_name=_row["graph_name"],
             key=cfg.backup_key, target_graph=target_graph, drill=True,
         )
-    except (ValueError, RuntimeError) as e:
-        raise HTTPException(status_code=409, detail=f"Drill failed: {e}")  # noqa: B904
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=f"Drill rejected: {e}")  # noqa: B904
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=f"Drill failed: {e}")  # noqa: B904
     # Cleanup the scratch graph (best-effort; boot GC is the backstop).
     try:  # noqa: SIM105
         db.select_graph(target_graph).delete()
