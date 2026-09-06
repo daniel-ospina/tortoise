@@ -274,6 +274,7 @@ def test_welcome_mode_provisions_and_reveals_key_once(page: Page) -> None:
                                "value": _up.quote(json.dumps(sess)),
                                "domain": ".premiselabs.co", "path": "/"}])
     reveal_calls = {"n": 0}
+    fork_payloads: list = []
 
     def handle(route):
         url = route.request.url
@@ -282,9 +283,12 @@ def test_welcome_mode_provisions_and_reveals_key_once(page: Page) -> None:
                 # First-timer: no teams → the app provisions.
                 route.fulfill(status=200, content_type="application/json", body="[]")
                 return
-            if url.endswith("/v1/onboarding/state") and route.request.method == "GET":
+            if url.split("?", 1)[0].endswith("/v1/onboarding/state") and route.request.method == "GET":
                 # #1885: the shell calls this FIRST (re-fired per #1847) — a
                 # 401 catch-all shows the generic error card before the flow.
+                # #2356 (review): query-strip — the post-provision re-fire
+                # pins ?team_id= once a team exists (#1828), mirroring the
+                # returning-visit branch below.
                 route.fulfill(status=200, content_type="application/json",
                               body=json.dumps({"onboarding": {}}))
                 return
@@ -294,8 +298,11 @@ def test_welcome_mode_provisions_and_reveals_key_once(page: Page) -> None:
                 # — #1997 W1: self picks advance only after the 2xx; the api
                 # catch-all 401 below used to abort the advance and strand the
                 # page on the fork step). 200 no-op is the keyed-MERGE replay
-                # shape. Query-strip (the shell pins ?team_id= once a team
-                # exists — #1828) like the onboarding-state branch above.
+                # shape (handleWizardFork never reads the body); the payload
+                # is captured below so the set-once fork write is pinned.
+                # Query-strip (the shell pins ?team_id= once a team exists —
+                # #1828) like the onboarding-state branches.
+                fork_payloads.append(json.loads(route.request.post_data or "{}"))
                 route.fulfill(status=200, content_type="application/json",
                               body="{}")
                 return
@@ -355,13 +362,21 @@ def test_welcome_mode_provisions_and_reveals_key_once(page: Page) -> None:
     # displayed EXACTLY ONCE here. The reveal_api_key RPC fired exactly ONCE
     # at the org-create SUBMIT — provisionInApp's canonical post-write
     # membership poll → atomic reveal+null (A13, #1566); the 201-body
-    # plaintext is only the 3-poll fallback, so the connect step renders
-    # welcomeKey with no further reveal (ADR-010 single-consumption).
+    # plaintext is only the 3-poll fallback. The membership-poll mock below
+    # returns an active row on attempt 1, so the canonical channel is the one
+    # exercised: exactly one reveal, and the connect step renders welcomeKey
+    # with no further reveal (ADR-010 single-consumption). If a future
+    # delivery change makes the 201 body primary, this pin fails loudly.
     page.get_by_role("button", name="Use it for your own agents").click()
     expect(page.locator("body")).to_contain_text("Connect your agent", timeout=15_000)
     expect(page.locator("body")).to_contain_text("tt_welcome_key_1234567890abcdef", timeout=15_000)
     assert reveal_calls["n"] == 1, \
         f"first-run plaintext rides the canonical provision reveal (exactly once), got {reveal_calls['n']}"
+    # The fork advance rides the set-once checkpoint write — pin that the app
+    # actually sent fork=self before the connect step rendered (W1 contract;
+    # the #2323-era drift survived because nothing pinned the write).
+    assert fork_payloads == [{"fork": "self"}], \
+        f"the fork pick checkpoints fork=self exactly once (W1 set-once write), got {fork_payloads}"
     # Returning visit: the key is consumed (reveal returns 'pending') → the
     # ready card, no re-reveal.
     reveal_calls["n"] = 0
