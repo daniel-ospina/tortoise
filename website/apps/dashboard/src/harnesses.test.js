@@ -5,7 +5,7 @@ import assert from 'node:assert/strict'
 import {
   HARNESS_ORDER, HARNESS_NAMES, HARNESS_SELF_INSTALL, HARNESS_TEACH_HUMAN,
   UNIVERSAL_COMMAND, UNIVERSAL_COMMAND_HARNESSES,
-  HARNESS_INSTALL, HARNESS_STEPS, HARNESS_SKILLS, HARNESS_PERSIST,
+  HARNESS_INTRO, HARNESS_INSTALL, HARNESS_STEPS, HARNESS_SKILLS, HARNESS_PERSIST,
   HARNESS_SKILLLESS, HARNESS_SKILLS_IN_PROMPT, HARNESS_SKILLS_IN_STEPS,
   HARNESS_COPY_LABEL, HARNESS_CONTINUE_LABEL,
   HARNESS_CAPTURE_INSTALL, HARNESS_CAPTURE_REASON,
@@ -32,6 +32,34 @@ test('UNIVERSAL_COMMAND covers all 6 harnesses (one command per harness)', () =>
     const cmd = UNIVERSAL_COMMAND[h](KEY)
     assert.ok(cmd && cmd.length > 0, `${h} command non-empty`)
   }
+})
+
+test('#2328/#2329: Codex Desktop variant — terminal-less config path, .agents/skills, no .codex/skills', () => {
+  const cli = UNIVERSAL_COMMAND.codex(KEY)
+  assert.match(cli, /codex mcp add tortoise --url/, 'codex CLI: codex mcp add')
+  assert.match(cli, /--bearer-token-env-var TORTOISE_API_KEY/, 'codex CLI: env-var bearer')
+  // the CLI copy surfaces the approval reality (#2330) and points Desktop
+  // users at the no-terminal variant
+  assert.match(cli, /approval/, 'codex CLI states first-call approval reality')
+  assert.match(cli, /Codex Desktop/, 'codex CLI points Desktop users at the variant')
+  const desktop = UNIVERSAL_COMMAND.codexDesktop(KEY)
+  assert.ok(desktop && desktop.length > 0, 'codexDesktop command non-empty')
+  assert.match(desktop, /\[mcp_servers\.tortoise\]/, 'desktop: config.toml mcp_servers block')
+  assert.match(desktop, /bearer_token_env_var = "TORTOISE_API_KEY"/, 'desktop: env-var-name bearer')
+  assert.match(desktop, /launchctl setenv TORTOISE_API_KEY/, 'desktop: macOS env path')
+  assert.match(desktop, /setx TORTOISE_API_KEY/, 'desktop: Windows env path')
+  assert.match(desktop, /http_headers = \{ Authorization/, 'desktop: literal-header fallback')
+  assert.match(desktop, /\.agents\/skills/, 'desktop: skills in .agents/skills (#2329)')
+  assert.match(desktop, /--harness codex/, 'desktop: skill installer deferral command')
+  // .codex/skills may appear ONLY as the disambiguation "(not .codex/skills)"
+  // — never as a target path or install instruction.
+  for (const t of [desktop, cli]) {
+    if (t.includes('.codex/skills')) {
+      assert.ok(t.includes('not .codex/skills'), '.codex/skills only as negated disambiguation')
+    }
+  }
+  assert.equal(HARNESS_COPY_LABEL.codexDesktop, 'Copy instructions')
+  assert.ok(HARNESS_INTRO.codexDesktop && HARNESS_INTRO.codexDesktop.includes('~/.codex/config.toml'), 'desktop intro names the config file')
 })
 
 test('DE2E-5: 4 self-install harnesses carry a config-write command + skill install + tortoise_health verify', () => {
