@@ -364,3 +364,38 @@ def test_stale_first_claims_exclude_terminal(sdk, tmp_path):
     assert ids["b"] in stale, (
         "the retracted claim's LIVE neighbor stays in the stale window"
     )
+
+
+# ── assess_source outdated-flag ghost (second-model P2 coverage) ─────
+
+def test_assess_source_superseded_assessment_no_strand(sdk, tmp_path):
+    """Second-model P2: assess_source marks older assessments outdated=true
+    (the flag class). The superseded assessment must be dropped from the
+    dirty set (terminal can never be swept) and its neighborhood recomputed.
+    Mirrors test_retract_does_not_strand_terminal_dirty_root for the
+    assess_source write surface."""
+    url = "https://example.com/src-ghost"
+    first = sdk.assess_source(url, "agent-a", 0.9, "first assessment")
+    old_id = first["assessment_point_id"]
+    # Wire the assessment into an EP neighborhood (assessment → claim).
+    claim = sdk.create_point("statement", "assessed claim", status="live")["id"]
+    sdk.create_operator("IMPL", old_id, [claim])
+    sdk._dirty_roots.clear()
+
+    # Second assessment from the same assessor supersedes the first.
+    second = sdk.assess_source(url, "agent-a", 0.1, "revised assessment")
+    assert second["assessment_point_id"] != old_id
+    assert sdk.get_point(old_id)["outdated"] is True
+
+    # The superseded (outdated=true) assessment must not strand in the
+    # dirty set (terminal never swept); its neighborhood IS recomputed.
+    assert old_id not in sdk._dirty_roots, (
+        "superseded assessment must not strand in _dirty_roots (#2422)"
+    )
+    claim_dirty = sdk._get_proj().g.query(
+        "MATCH (n:Point) WHERE n.ep_dirty = true AND n.id = $id RETURN count(n)",
+        params={"id": claim},
+    ).result_set
+    assert int(claim_dirty[0][0]) == 1, (
+        "the superseded assessment's operator neighbor must be dirty for recompute"
+    )

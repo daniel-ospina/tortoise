@@ -5707,7 +5707,12 @@ class TortoiseSDK:
     # live — A9 #1059). The RETAINED piece: gated + explicit status:"live"
     # on a point item is a violation (no bypass of the gated contract).
 
-    _INGEST_TERMINAL_STATUSES = frozenset(("superseded", "retracted"))
+    # Ingest-terminal statuses — endpoints/refs resolving to these reject new
+    # direct connections. #2422 (second-model gate): derived from the shared
+    # EP/read-surface vocabulary (live.TERMINAL_EXCLUDED_STATUSES) so the
+    # write guard cannot drift from what EP treats as dead — a flag-outdated
+    # (outdated=true, status untouched) point must equally refuse new edges.
+    _INGEST_TERMINAL_STATUSES = TERMINAL_EXCLUDED_STATUSES
     _INGEST_DIRECTION_VALUES = frozenset(("bidirectional", "unidirectional"))
     _INGEST_LEGACY_WRITE_KINDS = frozenset((
         "decision", "vision", "strategy", "plan", "goal", "target",
@@ -6099,7 +6104,7 @@ class TortoiseSDK:
             "OR n.eventId IN $vals "
             "RETURN coalesce(n.id, n.url, n.eventId) AS key, "
             "head(labels(n)) AS label, n.is_operator, n.status, "
-            "n.id, n.eventId",
+            "coalesce(n.outdated, false) AS outdated, n.id, n.eventId",
             params={"vals": sorted(values)},
         ).result_set
         # Key the result so a lookup by the raw endpoint value finds the
@@ -6114,9 +6119,10 @@ class TortoiseSDK:
         # key resolve deterministically: an id-owner row (node_id == key)
         # wins over a row matched by another property.
         out: dict[str, dict] = {}
-        for key, label, is_op, status, node_id, event_id in rows:
+        for key, label, is_op, status, outdated, node_id, event_id in rows:
             entry = {"label": label, "is_operator": bool(is_op),
-                     "status": status, "id": node_id}
+                     "status": status, "outdated": bool(outdated),
+                     "id": node_id}
             if key not in out or node_id == key:
                 out[key] = entry
             if label == "Event" and event_id:
@@ -6221,12 +6227,16 @@ class TortoiseSDK:
                                        f"{v!r} must be a plain Point — got a "
                                        f"{got} endpoint",
                         })
-                    elif route == "direct" and info["status"] in self._INGEST_TERMINAL_STATUSES:
+                    elif route == "direct" and (
+                            info["status"] in self._INGEST_TERMINAL_STATUSES
+                            or info.get("outdated")):
                         violations.append({
                             "section": "connections", "index": i,
                             "message": f"ingest: connections[{i}] endpoint "
-                                       f"{v!r} is {info['status']} — new direct "
-                                       f"edges to terminal points are rejected",
+                                       f"{v!r} is {info['status']}"
+                                       f"{' (outdated)' if info.get('outdated') else ''}"
+                                       f" — new direct edges to terminal points "
+                                       f"are rejected (#2422)",
                         })
         # Bundle-local dedup-hit terminal guard (cycle-17/18) — Phase-1 ONLY.
         for i, conn, route, vals in conns:  # noqa: B007
@@ -6299,12 +6309,16 @@ class TortoiseSDK:
                                f"{v!r} must be a plain Point — got a {got} "
                                f"endpoint",
                 })
-            elif route == "direct" and info_i["status"] in self._INGEST_TERMINAL_STATUSES:
+            elif route == "direct" and (
+                    info_i["status"] in self._INGEST_TERMINAL_STATUSES
+                    or info_i.get("outdated")):
                 violations.append({
                     "section": "connections", "index": index,
                     "message": f"ingest: connections[{index}] endpoint "
-                               f"{v!r} is {info_i['status']} — new direct edges "
-                               f"to terminal points are rejected",
+                               f"{v!r} is {info_i['status']}"
+                               f"{' (outdated)' if info_i.get('outdated') else ''}"
+                               f" — new direct edges to terminal points are "
+                               f"rejected (#2422)",
                 })
 
     def _connections_conflict(self, ca: dict, cb: dict) -> bool:
@@ -7276,29 +7290,37 @@ class TortoiseSDK:
 
         proj = self._get_proj()
         # Endpoint validation: exist, plain Points, non-terminal.
+        # #2422 (second-model gate): the terminal set derives from the shared
+        # EP/read vocabulary AND the legacy outdated=true flag is rejected —
+        # a flag-outdated point (status untouched by invalidate_point) must
+        # equally refuse new direct edges.
         rows = proj.g.query(
             "MATCH (p:Point) WHERE p.id IN $ids "
-            "RETURN p.id, coalesce(p.is_operator, false), p.status",
+            "RETURN p.id, coalesce(p.is_operator, false), p.status, "
+            "coalesce(p.outdated, false)",
             params={"ids": [source_id, target_id]},
         ).result_set
-        found = {r[0]: (bool(r[1]), r[2]) for r in rows}
+        found = {r[0]: (bool(r[1]), r[2], bool(r[3])) for r in rows}
         for pid in (source_id, target_id):
             if pid not in found:
                 raise ValueError(
                     f"create_direct_edge: endpoint {pid!r} does not exist or "
                     f"is not a Point"
                 )
-            is_op, status = found[pid]
+            is_op, status, outdated = found[pid]
             if is_op:
                 raise ValueError(
                     f"create_direct_edge: endpoint {pid!r} is an operator — "
                     f"direct edges connect plain Points only"
                 )
-            if status in ("superseded", "retracted"):
+            if status in TERMINAL_EXCLUDED_STATUSES or outdated:
+                marker = "outdated" if outdated and (
+                    status not in TERMINAL_EXCLUDED_STATUSES) else (status or "live")
                 raise ValueError(
                     f"create_direct_edge: endpoint {pid!r} is terminal "
-                    f"({status!r}) — a direct edge incident to a terminal "
-                    f"point is rejected (terminal-point propagation hazard)"
+                    f"({marker}) — a direct edge incident to a terminal "
+                    f"point is rejected (terminal-point propagation hazard, "
+                    f"#2422)"
                 )
 
         # BARE-pattern MERGE + attribute SET (last-writer-wins; exactly one
