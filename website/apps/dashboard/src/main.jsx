@@ -764,7 +764,7 @@ function claimIntentInFlight() {
   // #1566: in-app provisioning (first-timers) — the reveal is atomic (A13),
   // so the key is displayed here and never elsewhere.
   const [welcomeProvisioning, setWelcomeProvisioning] = React.useState(false)
-  const pendingInvitesLoadedRef = React.useRef(false)  // #2361 review-r1 (Bug-1)
+
   const [welcomeKey, setWelcomeKey] = React.useState('')
 
   // #1591: the first-data snippet (graph-missing card) — full command with
@@ -924,9 +924,11 @@ function claimIntentInFlight() {
   }
   const [wizardSeedDone, setWizardSeedDone] = React.useState(false)
   const [wizardSeeding, setWizardSeeding] = React.useState(false)
-  // #2361 review-r1 (Bug-1): pending invites were only fetched when the
+  // #2361 review-r1/r3 (Bug-1): pending invites were only fetched when the
   // account menu opened — a resumer in welcome mode never saw an invitation
-  // on the org-create step. Fetch on welcome entry (once per session).
+  // on the org-create step. Fetch on welcome entry; no once-per-session latch
+  // (a failed fetch retries on the next welcome entry, and a mid-session
+  // invite appears without reopening the account menu).
   React.useEffect(() => {
     // #2361 review-r2 (P1): sessionRef is only set for teamless first-timers
     // — org-holders resuming welcome never fetched. sessionTokenRef holds the
@@ -950,6 +952,9 @@ function claimIntentInFlight() {
   const [wizardPaused, setWizardPaused] = React.useState(false)
   const wizardCardRef = React.useRef(null)
   const wizardFocusInit = React.useRef(false)
+  // #2361 review-r3 (P2-2): wizardPaused must not out-live a real connection —
+  // connect → Back → Skip must still show 'connected', not 'paused'.
+  const connectedOnceRef = React.useRef(false)
   const [wizardStepAnnounce, setWizardStepAnnounce] = React.useState('')
 
   // #2361 review-r2 (a11y P1): announce + move focus on wizard step change.
@@ -958,16 +963,21 @@ function claimIntentInFlight() {
   // steps only announce.
   React.useEffect(() => {
     if (!(welcomeMode && authed)) return
-    const label = wizardStep === 4 && wizardPaused
+    if (LEGACY_WIZARD_ARCHIVED) return  // A0 rollback owns its own steps (#2361 r3 P3-7)
+    const pausedDone = wizardStep === 4 && wizardPaused && !connectedOnceRef.current
+    const label = pausedDone
       ? 'Setup paused — your agent is not connected yet'
       : (wizardStep === 1 && welcomeHasOrg ? 'Your Organization' : WIZARD_STEPS[wizardStep].label)
     setWizardStepAnnounce(`Step ${wizardStep + 1} of 5: ${label}`)
     if (!wizardFocusInit.current) { wizardFocusInit.current = true; return }
+    // Skip container focus only when a child control autofocuses on mount:
+    // step 1 org input (no org yet) and step 3 owner paste disclosure open.
+    const step3PasteAutofocus = wizardStep === 3 && isOwnerAdmin && wizardShowPaste
     if (wizardStep === 1 && !welcomeHasOrg) return
-    if (wizardStep === 3) return
+    if (step3PasteAutofocus) return
     if (wizardCardRef.current) wizardCardRef.current.focus()
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [wizardStep, welcomeMode, authed, wizardPaused])
+  }, [wizardStep, welcomeMode, authed, wizardPaused, welcomeHasOrg, wizardShowPaste])
   const [onboardingComplete, setOnboardingComplete] = React.useState(false)
   const [welcomeOriented, setWelcomeOriented] = React.useState(false)
   const [wizardSubject, setWizardSubject] = React.useState('')
@@ -2294,6 +2304,8 @@ function claimIntentInFlight() {
 
   async function wizardComplete() {
     setWizardDone(true)
+    setWizardPaused(false)
+    connectedOnceRef.current = false
     // #2195/#2246 (durable connect key): the done step ends the connect flow —
     // the minted/pasted durable plaintext was shown once in the command; drop
     // it so a later re-entry re-gates (a revoked/regenerated key never
@@ -3476,6 +3488,7 @@ function claimIntentInFlight() {
         body: JSON.stringify({ step: 'harness-connected' }),
       })
       setWizardPaused(false)
+      connectedOnceRef.current = true
       setWizardStep(4)
     } catch (e) {
       if (e?.status === 503) {
@@ -4882,7 +4895,7 @@ function claimIntentInFlight() {
           <button
             className="ghost small"
             disabled={welcomeProvisioning || welcomeProvisionError || !welcomeHasOrg}
-            onClick={() => { window.history.replaceState({}, '', '/'); setWelcomeMode(false); setWizardDurableKey(''); setWizardDurablePaste(''); setWizardDurableError(''); setWizardShowPaste(false); finishWelcomeLoads() }}
+            onClick={() => { window.history.replaceState({}, '', '/'); setWelcomeMode(false); setWizardDurableKey(''); setWizardDurablePaste(''); setWizardDurableError(''); setWizardShowPaste(false); setWelcomeKey(''); setWizardPaused(false); connectedOnceRef.current = false; finishWelcomeLoads() }}
           >
             Open my dashboard →
           </button>
@@ -4947,7 +4960,12 @@ function claimIntentInFlight() {
                       // organization…') is a contradiction for an org-holding
                       // account on the read-only step — branch the copy.
                       ? "You're already in an organization — you won't create another here. Pick how you'll use it next."
-                      : WIZARD_STEPS[wizardStep].sub}
+                      : (wizardStep === 4 && wizardPaused && !connectedOnceRef.current)
+                        // #2361 review-r3 (P2-1): the done SUB claimed 'Your agent
+                        // takes over from here' above the paused body that says it
+                        // didn't connect — branch it.
+                        ? "You're set up, but your agent isn't connected yet. Reconnect any time from Settings → Setup guide."
+                        : WIZARD_STEPS[wizardStep].sub}
                   </p>
 
                   {wizardStep === 0 && (
@@ -5063,7 +5081,7 @@ function claimIntentInFlight() {
                             aria-pressed={wizardForkChosen === opt.id || (onboarding && onboarding.fork === opt.id)}
                             disabled={wizardForkBusy || !!wizardForkChosen || (onboarding && !!onboarding.fork)}
                             onClick={() => handleWizardFork(opt.id)}
-                            style={{ display: 'flex', flexDirection: 'column', gap: '0.25rem', textAlign: 'left', padding: '0.7rem 0.9rem', border: '1px solid var(--border,#1e293b)', borderRadius: 8, background: 'var(--surface,#0d1a2d)', cursor: wizardForkBusy || (onboarding && !!onboarding.fork) ? 'default' : 'pointer' }}
+                            style={{ display: 'flex', flexDirection: 'column', gap: '0.25rem', textAlign: 'left', padding: '0.7rem 0.9rem', border: '1px solid var(--border,#1e293b)', borderRadius: 8, background: 'var(--surface,#0d1a2d)', cursor: wizardForkBusy || !!wizardForkChosen || (onboarding && !!onboarding.fork) ? 'default' : 'pointer' }}
                           >
                             <strong>{opt.label}</strong>
                             <span className="dim small">{opt.description}</span>
@@ -5345,7 +5363,7 @@ function claimIntentInFlight() {
 
                   {wizardStep === 4 && (
                     <div className="done">
-                      {wizardPaused ? (
+                      {wizardPaused && !connectedOnceRef.current ? (
                         <p className="dim">You're set up, but your agent isn't connected yet — nothing was installed on the connect step. Open Settings → Setup guide to follow what happens next — the setup command there creates a fresh key when you do.</p>
                       ) : (
                         <p className="dim">Your agent is connected — it files your decisions and findings to this Organization's graph from here on. Open Settings → Setup guide to follow what happens next.</p>
@@ -6007,20 +6025,21 @@ function claimIntentInFlight() {
           // seed), not a raw-curl dead end.
           <section className="overview empty-state graph-missing">
             <h2>Continue setting up {shownOrgName || 'your organization'}</h2>
-            {/* #2167 (step 6, phase-7 reviewer 2 P1) / #2246: the re-entry
-                card's "and API key are live" claim needs a real key in
-                hand — (snippetKey || apiKey) truthiness: the first-timer
-                who exited the welcome flow still has welcomeKey in memory
-                (its plaintext was shown once THIS session), so the "live"
-                copy + setup path is honest; a zero-key returning user gets
-                the keyless prompt + in-app Go to API Keys action. */}
+            {/* #2361 review-r3: the card's key copy resolves from durable
+                ROWS + role (never the in-memory snippet, which is dropped at
+                wizard end): members can't create keys, and a fresh owner
+                create would 402 once the org's key allowance is used. */}
             <p className="dim">
-              {snippetKey
-                ? 'Your Organization and API key are live. Finish the setup to connect your tool — your agent installs its skills and files the first decision for you.'
-                : 'Your Organization is live — finish the setup below to connect your agent. No API key yet? Create one on the API Keys tab first.'}
+              {snippetKey || durableConnect.source === 'rows-durable'
+                ? (isOwnerAdmin
+                    ? "Your Organization's API key is live — finish the setup below to connect your agent (the setup step shows a fresh key, or you can use an existing one)."
+                    : "You're in — finish the setup below to connect your agent (paste the key an owner or admin shared with you).")
+                : (isOwnerAdmin
+                    ? "Your Organization is live — finish the setup below to connect your agent. No API key yet? One is created on the connect step when you get there."
+                    : "Your Organization is live — finish the setup below to connect your agent. You'll need an API key: ask an owner or admin to share one, then paste it on the connect step.")}
             </p>
             <div className="empty-actions">
-              <button className="btn-primary" onClick={() => { setWizardStep(0); setWelcomeMode(true) }}>
+              <button className="btn-primary" onClick={() => { connectedOnceRef.current = false; setWizardPaused(false); setWizardStep(0); setWelcomeMode(true) }}>
                 Continue setup →
               </button>
               {!snippetKey && (
@@ -6070,7 +6089,9 @@ function claimIntentInFlight() {
               // one click away for owners (their only first-party surface).
               <p className="dim">
                 {isOwnerAdmin
-                  ? 'Your Organization is live — connect your agent below (its key is created on the connect step, or in the API Keys tab).'
+                  ? (durableConnect.source === 'rows-durable'
+                      ? "Your Organization's API keys are live — connect your agent below (the setup step can mint up to your plan's key limit, or use an existing one)."
+                      : 'Your Organization is live — connect your agent below (its key is created on the connect step, or in the API Keys tab).')
                   : "Your Organization is live — connect your agent below. You'll need an API key to paste: ask an owner or admin to share one."}
               </p>
             )}
