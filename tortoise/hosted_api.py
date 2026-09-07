@@ -5145,6 +5145,120 @@ async def create_demo_graph(request: Request):
     return _seed_demo_graph(team_id)
 
 
+# ── #2406: one-time onboarding-call offer email ─────────────────────────────
+# Fired by the tenant-provision Edge Function right after first-org
+# provisioning (mirror of /internal/demo). Fail-soft at BOTH layers: this
+# endpoint resolves every failure to a structured {status} (never a surprise
+# 5xx to the edge fn) and the edge fn never lets the POST fail provisioning.
+#
+# Dedupe (exactly-once for every in-band path — scope doc §Dedupe design):
+#   1. marker read gate — teams.onboarding_email_sent_at set → already_sent;
+#   2. in-process in-flight gate (below) — a concurrent/second POST while the
+#      first send is in flight skips (closes the marker-read TOCTOU from the
+#      edge fn's +2s retry / a double wizard tab);
+#   3. the send is AWAITED and the marker stamped in the SAME request, only
+#      on provider accept (send-then-stamp); the provider Idempotency-Key
+#      onboarding:{team_id} collapses cross-process replays ≤24h;
+#   4. a skipped/failed send NEVER stamps the marker → retryable.
+_inflight_onboarding_emails: set[str] = set()
+
+
+@app.post("/internal/onboarding-email")
+async def send_onboarding_offer_email_endpoint(request: Request):
+    """Fire the one-time onboarding-call offer email for a NEW hosted signup.
+
+    Body: ``{"team_id": str, "display_name": str?}`` — display_name is the
+    PERSON's display name (edge-fn caller/body), never the org slug; the
+    greeting heuristic lives in email_notify (cosmetic-only copy).
+
+    Response statuses (HTTP 200 unless auth/body-contract failures):
+    ``sent`` (provider accepted + marker stamped), ``already_sent`` (marker
+    set), ``in_flight`` (another send for this team is in progress),
+    ``skipped`` (registry/selfhost mode, unknown team, no team email, or
+    sender-side skip) and ``failed`` (provider/control-plane failure, marker
+    UNSET — retryable).
+    """
+    _check_internal(request)
+
+    raw = await _read_capped_body(request, _BODY_MAX_BYTES, _BODY_413_DETAIL)
+    body = _json.loads(raw)
+    team_id = body.get("team_id")
+    if not team_id:
+        raise HTTPException(status_code=400, detail="Missing team_id")
+    display_name = body.get("display_name")
+    if not isinstance(display_name, str):
+        display_name = None
+
+    from tortoise.email_notify import send_onboarding_offer_email
+    from tortoise.supabase_control import (
+        get_control_plane,
+        is_supabase_enabled,
+        set_team_onboarding_email_sent,
+        team_by_id,
+    )
+
+    # Registry/selfhost mode: no hosted users, no emails — skip silently
+    # (selfhost signups carry no email by construction).
+    if not is_supabase_enabled():
+        _logger.info("onboarding email: skipped (registry mode) for team %s",
+                     team_id)
+        return {"status": "skipped", "reason": "registry-mode"}
+
+    try:
+        team = team_by_id(get_control_plane(), team_id)
+        if team is None:
+            _logger.warning("onboarding email: skipped (unknown team %s)",
+                            team_id)
+            return {"status": "skipped", "reason": "unknown-team"}
+        email = team.get("email")
+        if not email:
+            # Q5/agent/legacy lanes mint teams with email NULL — not hosted
+            # human first-org signups; unreachable by construction, guarded
+            # here anyway.
+            _logger.warning("onboarding email: skipped (no team email) %s",
+                            team_id)
+            return {"status": "skipped", "reason": "no-team-email"}
+        if team.get("onboarding_email_sent_at"):
+            return {"status": "already_sent"}
+        if team_id in _inflight_onboarding_emails:
+            _logger.warning(
+                "onboarding email: in-flight skip (team %s) — a concurrent "
+                "send is already running", team_id)
+            return {"status": "in_flight"}
+
+        _inflight_onboarding_emails.add(team_id)
+        try:
+            result = await send_onboarding_offer_email(
+                email, display_name, team.get("name"), team_id)
+        finally:
+            _inflight_onboarding_emails.discard(team_id)
+
+        if result.get("status") == "sent":
+            stamped = set_team_onboarding_email_sent(
+                get_control_plane(), team_id)
+            if not stamped:
+                # Another process stamped concurrently (cross-replica race) —
+                # the provider Idempotency-Key collapsed the duplicate send;
+                # outcome is still exactly-once.
+                _logger.warning(
+                    "onboarding email: sent for team %s but marker already "
+                    "set by a concurrent sender (provider deduped)", team_id)
+            return {"status": "sent",
+                    "message_id": result.get("message_id")}
+        # Sender-side skip/failure: marker UNSET — the edge-fn retry (or a
+        # later ops replay) retries. Logged for ops visibility.
+        _logger.warning(
+            "onboarding email: %s for team %s — marker unset, retryable",
+            result.get("status", "failed"), team_id)
+        return {"status": result.get("status", "failed"),
+                "reason": result.get("reason")}
+    except Exception as exc:
+        _logger.warning(
+            "onboarding email: request failed for team %s (%s) — signup is "
+            "never blocked", team_id, type(exc).__name__)
+        return {"status": "failed"}
+
+
 # ── C2 (#2111): the ONE shared per-graph key mint ────────────────────────────
 # C3 (#2112) standalone key-lifecycle endpoints CONSUME this helper (D0 —
 # one implementation, never re-implemented). It stamps delegation_depth=0,
