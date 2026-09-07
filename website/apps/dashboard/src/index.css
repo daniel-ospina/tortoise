@@ -750,6 +750,9 @@ input::placeholder, textarea::placeholder {
 .graph-del-confirm { color: var(--text-dim, #94a3b8); font-size: 12px; margin-left: 6px; }
 .graph-del-confirm .danger { color: var(--red, #f87171); border-color: var(--red, #f87171); }
 tr.graph-delete-arm td { background: rgba(248, 113, 113, 0.06); }
+.trash-section { margin-top: 18px; border-top: 1px solid var(--border, #1e293b); padding-top: 10px; }
+.trash-section summary { cursor: pointer; color: var(--text-dim, #94a3b8); font-size: 13px; margin-bottom: 8px; }
+.trash-section table { margin-top: 6px; }
 .row-dim td { opacity: 0.55; }
 .graph-key-panel {
   margin-top: 10px;

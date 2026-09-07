@@ -34,7 +34,9 @@ import {
   graphMintBody,
   graphsMeter,
   sortedGraphRows,
+  sortedTrashRows,
   tierCreateLocked,
+  trashEraseLabel,
 } from './graphs.js'
 // #1893: pure source-scope reconcile/serialize/job-body helpers (node --test
 // unit-tested — sourceScope.test.js).
@@ -1237,6 +1239,13 @@ function claimIntentInFlight() {
   const [graphBusy, setGraphBusy] = React.useState(false) // panel mint / graph delete in flight
   const [graphMsg, setGraphMsg] = React.useState('') // inline panel error (402/409/409 etc.)
   const [confirmDeleteId, setConfirmDeleteId] = React.useState(null) // custom row awaiting delete confirm
+  // #2304 trash (delete = 7-day recovery window): rows + restore/inspect.
+  const [trash, setTrash] = React.useState([])
+  const [trashStatus, setTrashStatus] = React.useState('closed') // closed|loading|ok|error
+  const [confirmRestoreId, setConfirmRestoreId] = React.useState(null) // trash row awaiting restore confirm
+  const [trashInspectId, setTrashInspectId] = React.useState(null) // rescue panel target (or null)
+  const [trashInspect, setTrashInspect] = React.useState(null) // GET /trash/{id}/points payload
+  const [trashMsg, setTrashMsg] = React.useState('') // trash-section error/notice
   // Panel-request sequence — a slow open must not clobber a NEWER open's
   // panel (panelGraphId in the handler closure is stale by design).
   const graphPanelReqRef = React.useRef(0)
@@ -3630,6 +3639,14 @@ function claimIntentInFlight() {
     setPanelKeysStatus('closed')
     setGraphMsg('')
     setConfirmDeleteId(null)
+    // #2304: trash state is team-scoped — never flash the previous team's
+    // trash rows / rescue panel / notices under a fresh team.
+    setTrash([])
+    setTrashStatus('closed')
+    setConfirmRestoreId(null)
+    setTrashInspectId(null)
+    setTrashInspect(null)
+    setTrashMsg('')
     setRevealKey(null)
     setTeam(null)          // Fix B: clear key-scoped overview state too
     setStaleFired(false)   // #1858: reset the per-load stale latch on EVERY switch — incl. null→null from the terminal '—' state, where the reset effect's team dep doesn't fire
@@ -3982,8 +3999,103 @@ function claimIntentInFlight() {
       setConfirmDeleteId(null)
       if (panelGraphId === graphId) closeGraphPanel()
       await Promise.all([loadGraphs(currentTeamId), loadTeams()]) // count meter refresh
+      if (isOwnerAdmin) await loadTrash(currentTeamId) // the row just entered the trash
     } catch (e) {
       if (teamIdRef.current === _teamAtCall) setGraphMsg(e.message || 'Could not delete graph — try again.')
+    } finally {
+      setGraphBusy(false)
+    }
+  }
+
+  // #2304: team trash (owner/admin). GET /v1/graphs/trash — the recovery
+  // window surface. Non-owner members never call it (server 403s); the
+  // section only renders for isOwnerAdmin.
+  async function loadTrash(teamId) {
+    const tok = sessionTokenRef.current
+    if (!tok || !teamId || !isOwnerAdmin) return
+    setTrashStatus('loading')
+    try {
+      const res = await fetch(`${API_BASE}/v1/graphs/trash?team_id=${teamId}`, {
+        headers: { Authorization: `Bearer ${tok}` },
+      })
+      if (!res.ok) {
+        if (teamIdRef.current === teamId) setTrashStatus('error')
+        return
+      }
+      const list = await res.json()
+      if (teamIdRef.current === teamId) {
+        setTrash(Array.isArray(list) ? list : [])
+        setTrashStatus('ok')
+      }
+    } catch {
+      if (teamIdRef.current === teamId) setTrashStatus('error')
+    }
+  }
+
+  // Full restore (owner/admin). 409 (live name conflict) and 410 (purged)
+  // ride the server detail straight to the inline notice.
+  async function restoreTrashRow(graphId) {
+    const _teamAtCall = currentTeamId
+    if (!graphId || !currentTeamId) return
+    setGraphBusy(true)
+    setTrashMsg('')
+    try {
+      const tok = sessionTokenRef.current
+      if (!tok) throw new Error('No session')
+      const q = `?team_id=${encodeURIComponent(currentTeamId)}`
+      const res = await fetch(`${API_BASE}/v1/graphs/trash/${encodeURIComponent(graphId)}/restore${q}`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${tok}` },
+      })
+      const body = await res.json().catch(() => ({}))
+      if (!res.ok) {
+        throw new Error(body.detail || `HTTP ${res.status}`)
+      }
+      if (teamIdRef.current !== _teamAtCall) return
+      const name = body.name || 'graph'
+      setConfirmRestoreId(null)
+      setTrashInspectId(null)
+      setTrashInspect(null)
+      setTrashMsg(`"${name}" restored. Mint fresh keys for it under Keys.`)
+      await Promise.all([loadGraphs(currentTeamId), loadTrash(currentTeamId)])
+    } catch (e) {
+      if (teamIdRef.current === _teamAtCall) setTrashMsg(e.message || 'Could not restore graph — try again.')
+    } finally {
+      setGraphBusy(false)
+    }
+  }
+
+  // Read-only rescue view (owner/admin): artifact-side metadata for one
+  // trash row — never touches the quarantined namespace.
+  async function inspectTrashRow(graphId) {
+    const _teamAtCall = currentTeamId
+    if (!graphId || !currentTeamId) return
+    setGraphBusy(true)
+    setTrashMsg('')
+    try {
+      const tok = sessionTokenRef.current
+      if (!tok) throw new Error('No session')
+      const q = `?team_id=${encodeURIComponent(currentTeamId)}`
+      const res = await fetch(`${API_BASE}/v1/graphs/trash/${encodeURIComponent(graphId)}/points${q}`, {
+        headers: { Authorization: `Bearer ${tok}` },
+      })
+      const body = await res.json().catch(() => ({}))
+      if (!res.ok) {
+        throw new Error(body.detail || `HTTP ${res.status}`)
+      }
+      if (teamIdRef.current !== _teamAtCall) return
+      setTrashInspectId(graphId)
+      setTrashInspect(body)
+    } catch (e) {
+      if (teamIdRef.current === _teamAtCall) {
+        // A failed re-inspect (e.g. the graph was purged → 410) must not
+        // leave a stale rescue panel open next to the error banner.
+        if (trashInspectId === graphId) {
+          setTrashInspectId(null)
+          setTrashInspect(null)
+        }
+        setTrashMsg(e.message || 'Could not inspect graph — try again.')
+      }
     } finally {
       setGraphBusy(false)
     }
@@ -4163,6 +4275,7 @@ function claimIntentInFlight() {
       refreshOnboarding().catch(() => {})
       loadMembers(currentTeamId)
       loadGraphs(currentTeamId)
+      loadTrash(currentTeamId) // #2304 owner/admin trash section (no-op for members)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentTeamId])
@@ -6498,7 +6611,7 @@ function claimIntentInFlight() {
                       )}
                       {isOwnerAdmin && graphCanDelete(g) && confirmDeleteId === g.graph_id ? (
                         <span className="graph-del-confirm">
-                          Delete {g.name}? Data and keys are removed permanently.{' '}
+                          Delete {g.name}? Keys are revoked now. The graph goes to Trash, where you can restore it for 7 days — then it and its backups are permanently erased.{' '}
                           <button className="ghost small danger" disabled={graphBusy} onClick={() => deleteGraphRow(g.graph_id)}>Delete</button>{' '}
                           <button className="ghost small" disabled={graphBusy} onClick={() => setConfirmDeleteId(null)}>Cancel</button>
                         </span>
@@ -6518,6 +6631,86 @@ function claimIntentInFlight() {
                 ))}
               </tbody>
             </table>
+            {/* #2304 trash (owner/admin): deleted custom graphs inside the
+                7-day recovery window. Purged rows never appear; legacy
+                tombstones (no deleted_at) show as past-window until the
+                purge cadence clears them. */}
+            {isOwnerAdmin && trash.length > 0 && (
+              <details className="trash-section" open={false}>
+                <summary aria-label={`Trash, ${trash.length} item${trash.length === 1 ? '' : 's'}`}>
+                  🗑 Trash ({trash.length}) — deleted graphs are kept 7 days, then permanently erased
+                </summary>
+                {trashMsg && <div className="error banner">{trashMsg}</div>}
+                {trashStatus === 'error' && <p className="dim small">Couldn't load trash — check your connection and try again.</p>}
+                <table>
+                  <thead><tr><th>Name</th><th>Deleted</th><th>Recovery</th><th><span className="sr-only">Actions</span></th></tr></thead>
+                  <tbody>
+                    {sortedTrashRows(trash).map((t) => (
+                      <tr key={t.graph_id} className={confirmRestoreId === t.graph_id ? 'graph-delete-arm' : undefined}>
+                        <td><code>{t.name}</code></td>
+                        <td>{t.deleted_at ? fmtTime(t.deleted_at) : '—'}</td>
+                        <td className="dim small">{trashEraseLabel(t.deleted_at)}</td>
+                        <td>
+                          {confirmRestoreId === t.graph_id ? (
+                            <span className="graph-del-confirm">
+                              Restore {t.name}? Its keys stay revoked — you'll mint fresh keys after.{' '}
+                              <button className="ghost small" disabled={graphBusy} onClick={() => restoreTrashRow(t.graph_id)}>Restore</button>{' '}
+                              <button className="ghost small" disabled={graphBusy} onClick={() => setConfirmRestoreId(null)}>Cancel</button>
+                            </span>
+                          ) : (
+                            <>
+                              <button
+                                className="ghost small"
+                                disabled={graphBusy}
+                                onClick={() => { setConfirmRestoreId(t.graph_id); setTrashMsg('') }}
+                                aria-label={`Restore graph ${t.name}`}
+                              >
+                                Restore
+                              </button>
+                              {' '}
+                              <button
+                                className="ghost small"
+                                disabled={graphBusy}
+                                onClick={() => inspectTrashRow(t.graph_id)}
+                                aria-expanded={trashInspectId === t.graph_id}
+                                aria-label={`Inspect graph ${t.name}`}
+                              >
+                                Inspect
+                              </button>
+                            </>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+                {trashInspectId && trashInspect && trashInspect.graph_id === trashInspectId && (
+                  <div className="graph-key-panel" aria-label={`Inspect ${trashInspect.name || trashInspectId}`}>
+                    <div className="graph-key-panel-head">
+                      <strong>Inspect {trashInspect.name || trashInspectId}</strong>
+                      <button className="ghost small" onClick={() => { setTrashInspectId(null); setTrashInspect(null) }}>Close</button>
+                    </div>
+                    <p className="dim small">Read-only rescue view — restore brings everything back as an active graph.</p>
+                    <ul className="dim small">
+                      <li>Deleted: {trashInspect.deleted_at ? fmtTime(trashInspect.deleted_at) : '—'}</li>
+                      <li>Backups kept: {trashInspect.archive_count != null ? trashInspect.archive_count : 0}</li>
+                      {trashInspect.latest_backup ? (
+                        <li>
+                          Latest backup:{' '}
+                          {trashInspect.latest_backup.created_at ? fmtTime(trashInspect.latest_backup.created_at) : 'recently'}
+                          {trashInspect.latest_backup.node_count != null
+                            ? ` · ${trashInspect.latest_backup.node_count.toLocaleString()} nodes / ${trashInspect.latest_backup.edge_count != null ? trashInspect.latest_backup.edge_count.toLocaleString() : '?'} edges`
+                            : ''}
+                        </li>
+                      ) : (
+                        <li>No backups yet for this graph.</li>
+                      )}
+                    </ul>
+                    <p className="dim small">After 7 days, the graph and its backups are permanently erased.</p>
+                  </div>
+                )}
+              </details>
+            )}
             {panelGraphId && (
               <div className="graph-key-panel" aria-label={`Keys for ${graphNameFor(panelGraphId) || 'graph'}`}>
                 <div className="graph-key-panel-head">

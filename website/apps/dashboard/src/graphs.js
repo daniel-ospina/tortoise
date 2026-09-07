@@ -86,3 +86,52 @@ export function graphMintBody(graphId, name) {
   if (name && name.trim()) body.name = name.trim()
   return body
 }
+
+// ── #2304 trash derivations (pure) ─────────────────────────────────────────
+// Server contract (branch feat/2304-delete-trash, verified against hosted_api):
+// - GET /v1/graphs/trash?team_id= rows: {graph_id, name, kind: 'custom',
+//   deleted_at} — owner/admin session only; purged rows never appear; the
+//   default graph can never be here.
+// - POST /v1/graphs/trash/{id}/restore?team_id= → {graph_id, status,
+//   name, note} or 404/403/409 (live name conflict)/410 (purged).
+// - GET /v1/graphs/trash/{id}/points?team_id= → {archive_count,
+//   latest_backup: {backup_id, created_at, node_count, edge_count}|null}.
+
+// The server-side recovery window (#2304 default). Client displays it only;
+// the purge enforces it.
+export const TRASH_GRACE_DAYS = 7
+
+// Whole days left of the recovery window for a trash row (0 = erasing
+// imminently / past window — the row may still be listed until the purge
+// runs). deleted_at is an ISO-8601 UTC string from the server.
+export function trashDaysLeft(deletedAt, nowIso) {
+  if (!deletedAt) return null // legacy tombstone — window already passed
+  const del = Date.parse(deletedAt)
+  const now = nowIso ? Date.parse(nowIso) : Date.now()
+  if (Number.isNaN(del) || Number.isNaN(now)) return null
+  const days = Math.ceil((del + TRASH_GRACE_DAYS * 86400000 - now) / 86400000)
+  return Math.max(0, days)
+}
+
+// Erases-in label for a trash row: "erases in 3 days" / "erases today" /
+// "past window — pending erase" (the purge clears it on its cadence).
+export function trashEraseLabel(deletedAt, nowIso) {
+  if (!deletedAt) return 'past window — pending erase'
+  const d = trashDaysLeft(deletedAt, nowIso)
+  if (d == null) return deletedAt
+  if (d === 0) return 'past window — pending erase'
+  return d === 1 ? 'erases in 1 day' : `erases in ${d} days`
+}
+
+// Oldest-first (soonest erasure on top — the urgent rows surface first).
+// Legacy tombstones (no deleted_at) sort first: their window is long gone.
+export function sortedTrashRows(rows) {
+  const rs = rows || []
+  return [...rs].sort((a, b) => {
+    const da = a.deleted_at ? Date.parse(a.deleted_at) : 0
+    const db = b.deleted_at ? Date.parse(b.deleted_at) : 0
+    if (Number.isNaN(da)) return -1
+    if (Number.isNaN(db)) return 1
+    return da - db
+  })
+}

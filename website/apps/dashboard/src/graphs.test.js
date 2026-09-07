@@ -9,7 +9,10 @@ import {
   graphsMeter,
   isDefaultGraph,
   sortedGraphRows,
+  sortedTrashRows,
   tierCreateLocked,
+  trashDaysLeft,
+  trashEraseLabel,
 } from './graphs.js'
 
 const DEFAULT = { graph_id: 'default', name: 'default', kind: 'default', status: 'active', key_count: 0 }
@@ -97,4 +100,52 @@ test('graphMintBody: no graph_id (team-wide legacy shape impossible from the pan
   const b = graphMintBody('g_prod', '')
   assert.equal(b.graph_id, 'g_prod')
   assert.ok(b.scopes.length === 2)
+})
+
+// ── #2304 trash derivations ─────────────────────────────────────────────────
+const T0 = Date.parse('2026-09-06T00:00:00Z') // fixed "now"
+const TOMB = (id, deletedAt) => ({ graph_id: id, name: id, kind: 'custom', deleted_at: deletedAt })
+
+test('trashDaysLeft: counts whole days from deleted_at to now', () => {
+  const now = new Date(T0).toISOString()
+  // Deleted exactly 4 days ago → 3 days left of the 7-day window.
+  const old = new Date(T0 - 4 * 86400000).toISOString()
+  assert.equal(trashDaysLeft(old, now), 3)
+  // Deleted just now → 7 days left.
+  assert.equal(trashDaysLeft(now, now), 7)
+  // Deleted 7+ days ago → 0 (past window; purge clears on cadence).
+  const aged = new Date(T0 - 8 * 86400000).toISOString()
+  assert.equal(trashDaysLeft(aged, now), 0)
+})
+
+test('trashDaysLeft: legacy (no deleted_at) and garbage are null-safe', () => {
+  assert.equal(trashDaysLeft(null, new Date().toISOString()), null)
+  assert.equal(trashDaysLeft('not-a-date', 'also-not'), null)
+  assert.equal(trashDaysLeft(undefined, undefined), null)
+})
+
+test('trashEraseLabel: human labels for the countdown column', () => {
+  const now = new Date(T0).toISOString()
+  assert.equal(trashEraseLabel(new Date(T0 - 6 * 86400000).toISOString(), now), 'erases in 1 day')
+  assert.equal(trashEraseLabel(new Date(T0 - 3 * 86400000).toISOString(), now), 'erases in 4 days')
+  assert.equal(trashEraseLabel(new Date(T0 - 9 * 86400000).toISOString(), now), 'past window — pending erase')
+  assert.equal(trashEraseLabel(null, now), 'past window — pending erase')
+})
+
+test('sortedTrashRows: oldest first (soonest erasure on top)', () => {
+  const rows = [
+    TOMB('new', new Date(T0 - 1 * 86400000).toISOString()),
+    TOMB('old', new Date(T0 - 5 * 86400000).toISOString()),
+    TOMB('legacy', null),
+    TOMB('mid', new Date(T0 - 3 * 86400000).toISOString()),
+  ]
+  const out = sortedTrashRows(rows).map((r) => r.graph_id)
+  // Legacy (no deleted_at) first, then ascending deleted_at.
+  assert.deepEqual(out, ['legacy', 'old', 'mid', 'new'])
+})
+
+test('sortedTrashRows: empty + null-safe', () => {
+  assert.deepEqual(sortedTrashRows([]), [])
+  assert.deepEqual(sortedTrashRows(null), [])
+  assert.deepEqual(sortedTrashRows(undefined), [])
 })
