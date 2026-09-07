@@ -124,6 +124,36 @@ class TestDashboardKeyLoginFlag:
         r2 = client.get("/v1/team", headers={"Authorization": f"Bearer {key}"})
         assert r2.json()["dashboard_key_login"] is False
 
+    def test_session_team_read_persists_dashboard_login_flip(self, client, fake,
+                                                          monkeypatch):
+        """#2475 regression: the dashboard switch renders from the SESSION-lane
+        GET /v1/team (the signed-in browser session), and the session builder
+        used to hardcode dashboard_key_login=True — so after a toggle-off the
+        persisted False persisted + key-auth enforcement stayed closed, but a
+        page reload (session GET) snapped the switch back ON. Pin both flips
+        on the session lane: off → false, back on → true."""
+        key, team_id = _provision_anon(client, fake)  # noqa: RUF059
+        user_id = str(uuid.uuid4())
+        _patch_session_user(monkeypatch, user_id)
+        _seed_owner_membership(fake, team_id, user_id)
+        sess = {"Authorization": "Bearer eyJ.sess"}
+        # the user-reported repro: toggle OFF … then reload
+        r = client.patch("/v1/team/dashboard-login", headers=sess,
+                         json={"enabled": False})
+        assert r.status_code == 200, r.text
+        assert r.json()["dashboard_key_login"] is False
+        r2 = client.get("/v1/team", headers=sess)  # reload — session lane
+        assert r2.status_code == 200, r2.text
+        assert r2.json()["dashboard_key_login"] is False
+        # flip back ON — the session lane reflects it too
+        r3 = client.patch("/v1/team/dashboard-login", headers=sess,
+                          json={"enabled": True})
+        assert r3.status_code == 200, r3.text
+        assert r3.json()["dashboard_key_login"] is True
+        r4 = client.get("/v1/team", headers=sess)
+        assert r4.status_code == 200, r4.text
+        assert r4.json()["dashboard_key_login"] is True
+
     def test_toggle_dashboard_login_rejects_non_owner(self, client, fake, monkeypatch):
         key, team_id = _provision_anon(client, fake)  # noqa: RUF059
         user_id = str(uuid.uuid4())
