@@ -2768,6 +2768,10 @@ class TortoiseSDK:
                 "errors": [], "warnings": [
                     "session already captured (same session_id) — no new "
                     "extraction"], "mode": "replayed",
+                # #2335 WI-1a: replayed has no extractor_v2 telemetry —
+                # stats is ALWAYS present (additive meta contract), empty
+                # on the replay branch (empty-on-replay semantics).
+                "stats": {},
             }
         elif os.environ.get("TORTOISE_SESSION_EXTRACTOR") == "m2":
             extracted, meta = self._extract_session_llm(
@@ -2922,6 +2926,9 @@ class TortoiseSDK:
             "ok": ok,
             "errors": extraction_errors,
             "warnings": extraction_warnings,
+            # #2335 WI-1a: the receipt carries the extractor telemetry
+            # (meta stats — real on v2, {} on replayed/M2). Additive.
+            "stats": meta.get("stats") or {},
         }
         # #1530 D8: extraction_provider reports the configured provider when a
         # route was resolved (the v2 path); the M2 path has no route/provider.
@@ -3139,6 +3146,9 @@ class TortoiseSDK:
             "provider": None, "route": None, "failover_used": False,
             "errors": errors, "warnings": warnings,
             "mode": "error" if errors else "llm",
+            # #2335 WI-1a: the M2 pipeline has no extractor_v2 stats —
+            # stats is ALWAYS present, empty on the M2 branch.
+            "stats": {},
         }
         return extracted, meta
 
@@ -3493,6 +3503,12 @@ class TortoiseSDK:
             "errors": errors,
             "warnings": warnings,
             "mode": "error" if errors else "v2",
+            # #2335 WI-1a: surface the extractor_v2 telemetry (recovery
+            # per-seam tokens / llm / chunks) on the product-lane meta —
+            # eval lane already surfaces it via ingest_v2; the product
+            # lane dropped it here. error_census is a TOP-LEVEL out key
+            # (sibling of stats) — folded separately when needed.
+            "stats": out.get("stats") or {},
         }
         return extracted, meta
 

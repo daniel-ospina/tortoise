@@ -3708,3 +3708,105 @@ def test_phase_f_sweep_event_delete_session_guard(tmp_path):
         assert q() == 0, "an absent Session must let the orphaned Event through"
     finally:
         sdk.close()
+
+
+# ── #2335 WI-1a: stats passthrough into capture meta + resp ────────────────
+# The extract_session_v2 telemetry (recovery per-seam tokens, llm, chunks,
+# error_census) was eval-lane-only; the product lane dropped it at the meta
+# assembly. These tests pin the additive `stats` key on the meta (v2 real /
+# replayed+M2 empty) + the resp body, per the #2335 measurement program.
+
+class _TokenFakeLLMResp(_FakeLLMResp):
+    """_FakeLLMResp + completion_tokens so the #2408 accumulator records
+    per-seam out-tokens (guard: completion_tokens > 0)."""
+
+    def json(self):
+        base = super().json()
+        base["usage"] = {"completion_tokens": 1234,
+                         "prompt_tokens": 500}
+        return base
+
+
+def _install_token_fake_provider(monkeypatch, requests_log):
+    """_install_fake_provider + token-bearing usage (S1/S2/S4 all report
+    completion_tokens → recovery s2_out_tokens/s4_out_tokens recorded)."""
+    import requests as _requests
+
+    def _fake_post(self_or_url, url=None, **kwargs):
+        requests_log.append(url)
+        system = ((kwargs.get("json") or {}).get("messages") or [{}])[0].get("content", "")
+        if "STORY SUMMARIZER" in system:
+            content = "The session revealed a new strategy."
+        else:
+            content = _V2_EMBED_JSON
+        return _TokenFakeLLMResp(content)
+
+    monkeypatch.setattr(_requests.Session, "post", _fake_post)
+
+
+def test_extract_session_v2_meta_carries_stats(sdk, monkeypatch):
+    """#2335 WI-1a: the v2 (extracted, meta) contract surfaces the extractor
+    stats — meta['stats'] present with the recovery per-seam out-tokens on a
+    healthy capture (the #2408 accumulator keys ride through)."""
+    from tortoise.model_adapters import _reset_failover_cooldown
+    _reset_failover_cooldown()
+    requests_log = []
+    _install_token_fake_provider(monkeypatch, requests_log)
+    monkeypatch.delenv("TORTOISE_SESSION_LLM_MOCK", raising=False)
+    monkeypatch.delenv("TORTOISE_SESSION_EXTRACTOR", raising=False)
+    monkeypatch.delenv("TORTOISE_EXTRACT_MODEL", raising=False)
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "ds-key")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
+
+    extracted, meta = sdk._extract_session_v2(
+        [{"role": "user", "content": "x"},
+         {"role": "assistant", "content": "we decided"}],
+        session_id="s-stats", now="2026-08-20T00:00:00Z")
+    assert isinstance(meta.get("stats"), dict), "meta must carry the stats key"
+    rec = (meta.get("stats") or {}).get("recovery") or {}
+    # healthy v2 run → both seams record (the #2408 accumulator fired)
+    assert rec.get("s2_out_tokens", 0) > 0, rec
+    assert rec.get("s4_out_tokens", 0) > 0, rec
+    assert isinstance(meta.get("stats", {}).get("llm"), dict)
+
+
+def test_capture_replayed_and_m2_stats_empty(sdk, monkeypatch):
+    """#2335 WI-1a: replayed + M2 branches carry stats == {} (no extractor_v2
+    telemetry exists there — empty-on-replay/M2 semantics)."""
+    # First capture (mock seam → M2 llm path).
+    res1 = sdk.capture_session(
+        [{"role": "user", "content": "x"},
+         {"role": "assistant", "content": "we decided"}])
+    sid = res1["session_id"]
+    # Re-capture same id → replayed branch.
+    res2 = sdk.capture_session(
+        [{"role": "user", "content": "x"},
+         {"role": "assistant", "content": "we decided"}],
+        session_id=sid)
+    assert res2["extraction_mode"] == "replayed"
+    # resp body carries stats on both branches; replayed == {}
+    assert "stats" in res1, "resp must carry the stats key"
+    assert isinstance(res1["stats"], dict)
+    assert res2["stats"] == {}, "replayed has no extractor_v2 telemetry"
+
+
+def test_capture_resp_carries_stats_v2(sdk, monkeypatch):
+    """#2335 WI-1a: the capture receipt (resp) surfaces stats on the v2 path
+    (meta.get('stats') rides into the resp body)."""
+    from tortoise.model_adapters import _reset_failover_cooldown
+    _reset_failover_cooldown()
+    requests_log = []
+    _install_token_fake_provider(monkeypatch, requests_log)
+    monkeypatch.delenv("TORTOISE_SESSION_LLM_MOCK", raising=False)
+    monkeypatch.delenv("TORTOISE_SESSION_EXTRACTOR", raising=False)
+    monkeypatch.delenv("TORTOISE_EXTRACT_MODEL", raising=False)
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "ds-key")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
+
+    res = sdk.capture_session(
+        [{"role": "user", "content": "x"},
+         {"role": "assistant", "content": "we decided"}])
+    assert "stats" in res
+    assert isinstance(res["stats"], dict)
+    rec = (res.get("stats") or {}).get("recovery") or {}
+    assert rec.get("s2_out_tokens", 0) > 0, rec
