@@ -78,6 +78,7 @@ surfaces:
   - test_index_mcp.py
   - test_init_apikey_validation.py
   - test_key_write_pins_tripwire.py  # #2299: server-side session key-write ?team_id= pin parity tripwire
+  - test_session_key_recovery_gate.py  # #2380: recovery-mint owner/admin gate matrix (both lanes) + created_by/outage/lane-marker pins
   - test_mcp_client.py
   - test_mcp_http.py
   - test_mcp_server.py
@@ -419,6 +420,7 @@ surfaces:
   - test_ep_projections.py
   - test_ep_quadrature.py
   - test_ep_selector.py
+  - test_pointsuperseded_rebuild.py
   - test_ep_sources.py
   - test_2199_decide_calibration.py
   - test_file_human_approval.py

@@ -1507,6 +1507,133 @@ def build_report(
         "escalated_abort_qids": escalated_qids["abort"],
         "escalated_partial_qids": escalated_qids["partial"],
     }
+
+    # ── #2408 (Task 2): the S4 re-emit-tax census readout ────────────────
+    # DIAGNOSTIC-ONLY — never a gate limb; integrity.valid / _outcome_grade
+    # / census logic are untouched. Computed over EXTRACTION-CLEAN outcomes
+    # only (grade == "clean": runner valid flag AND no error_classes — a
+    # partial-accept session grades recoverable (valid=false) and is
+    # excluded, so a truncated list's verbatim counts can never pollute the
+    # unchanged-share) AND whose S4 merge actually RAN (a non-empty
+    # s4_merge dict — the 7-key shape is produced ONLY by the merge path;
+    # an S4-empty graceful-degradation session leaves s4_merge={} with a
+    # warning (never an error string, so it would otherwise grade clean and
+    # dilute r_b with a near-empty S4 emission — excluded here, per the
+    # #2408 plan-review D3 fix). Legacy/pre-#2408 outcomes without the
+    # fields are likewise excluded (nothing measured). R_b is reported
+    # twice: over all census outcomes AND excluding escalation-recovered
+    # sessions (the recovered band carries the escalated 32K emission —
+    # the #1789 with/without fallback convention, I-2-14). Every
+    # div-by-zero → None.
+    _clean = [
+        o for o in outcomes
+        if (_outcome_grade(o) == "clean"
+            and isinstance(o.get("s4_merge"), dict) and o.get("s4_merge"))]
+    _clean_no_esc = [
+        o for o in _clean if not (o.get("llm_escalations") or 0)]
+    _s2_total = sum(o.get("s2_out_tokens") or 0 for o in _clean)
+    _s4_total = sum(o.get("s4_out_tokens") or 0 for o in _clean)
+    _r_b = (_s4_total / _s2_total if _s2_total else None)
+    _s2_total_ne = sum(o.get("s2_out_tokens") or 0 for o in _clean_no_esc)
+    _s4_total_ne = sum(o.get("s4_out_tokens") or 0 for o in _clean_no_esc)
+    _r_b_ne = (_s4_total_ne / _s2_total_ne if _s2_total_ne else None)
+    _verb = sum((o.get("s4_merge") or {}).get("verbatim_reemissions", 0)
+                for o in _clean)
+    _corr = sum((o.get("s4_merge") or {}).get("corrected_by_s4", 0)
+                for o in _clean)
+    _s2_items = sum((o.get("s4_merge") or {}).get("s2_items", 0)
+                    for o in _clean)
+    _s4_items = sum((o.get("s4_merge") or {}).get("s4_items", 0)
+                    for o in _clean)
+    _redun = [((o.get("s4_out_tokens") or 0)
+               * min(1.0, ((o.get("s4_merge") or {}).get("verbatim_reemissions", 0)
+                           / (o.get("s4_merge") or {}).get("s4_items", 0)
+                           if (o.get("s4_merge") or {}).get("s4_items", 0)
+                           else 0.0)))
+              for o in _clean]  # factor clamped to [0,1]: a dup-key S2 list
+    # can carry verbatim > s4_items (per-S2-item count vs an S4 key set) —
+    # the proxy must never exceed the question's whole S4 emission
+    s4_reemit: dict[str, Any] = {
+        "criterion": (
+            "#2408 S4 re-emit-tax census (DIAGNOSTIC — never a gate limb): "
+            "R_b = S4/S2 healthy-path output-token ratio; unchanged_share = "
+            "verbatim_reemissions/s2_items (the #1789-I-2-11 S2-centric "
+            "view); corrections_share = (corrected_by_s4 - verbatim_"
+            "reemissions)/s4_items and gaps_share = (s4_items - "
+            "corrected_by_s4)/s4_items (true-corrections + gaps decompose "
+            "over s4_items with verbatim NOT double-counted; exact shares "
+            "presuppose a dup-key-free S2 list — a dup S2 key inflates "
+            "corrected_by_s4/verbatim above s4_items and corrections_share "
+            "is floor-clamped only); redundant_s4_tokens_total = the "
+            "token-weighted PROXY sum (verbatim-fraction x call total, "
+            "fraction clamped to [0,1] — a dup-key S2 list can carry "
+            "verbatim > s4_items; no tokenizer exists; item-count shares "
+            "are exact, token attribution is the labeled proxy). Computed "
+            "over "
+            "extraction-CLEAN outcomes only (grade clean + valid) whose S4 "
+            "merge RAN (non-empty s4_merge — S4-empty graceful-degradation "
+            "and legacy/no-field outcomes excluded; question-level "
+            "granularity: a multi-session haystack question enters as a "
+            "whole when any session merged); escalation-recovered sessions "
+            "reported separately via r_b_excl_escalated. Feed for the "
+            "#1789 delta-contract gate and the #2335 emission-contract "
+            "decision."),
+        "n_clean_questions": len(_clean),
+        "s2_out_tokens_total": _s2_total,
+        "s4_out_tokens_total": _s4_total,
+        "r_b": round(_r_b, 4) if _r_b is not None else None,
+        "r_b_excl_escalated": (
+            round(_r_b_ne, 4) if _r_b_ne is not None else None),
+        "verbatim_reemissions_total": _verb,
+        "corrected_by_s4_total": _corr,
+        "s2_items_total": _s2_items,
+        "s4_items_total": _s4_items,
+        "unchanged_share": (
+            round(_verb / _s2_items, 4) if _s2_items else None),
+        "corrections_share": (
+            # true corrections exclude verbatim re-emissions (corrected_by_s4
+            # counts ALL collisions incl. unchanged re-types) — otherwise
+            # verbatim would be double-counted and the composition shares
+            # would not decompose over s4_items
+            round(max(0, _corr - _verb) / _s4_items, 4)
+            if _s4_items else None),
+        "gaps_share": (
+            round(max(0, _s4_items - _corr) / _s4_items, 4)
+            if _s4_items else None),
+        "redundant_s4_tokens_total": round(sum(_redun), 2),
+        "redundant_s4_tokens_max": (
+            round(max(_redun), 2) if _redun else 0.0),
+        "per_question": [
+            {
+                "question_id": o.get("question_id"),
+                "s2_out_tokens": o.get("s2_out_tokens") or 0,
+                "s4_out_tokens": o.get("s4_out_tokens") or 0,
+                "r_b": (round((o.get("s4_out_tokens") or 0)
+                              / (o.get("s2_out_tokens") or 0), 4)
+                        if (o.get("s2_out_tokens") or 0) else None),
+                "verbatim_reemissions": (o.get("s4_merge") or {}).get(
+                    "verbatim_reemissions", 0),
+                "corrected_by_s4": (o.get("s4_merge") or {}).get(
+                    "corrected_by_s4", 0),
+                "s2_items": (o.get("s4_merge") or {}).get("s2_items", 0),
+                "s4_items": (o.get("s4_merge") or {}).get("s4_items", 0),
+                "unchanged_share": (
+                    round((o.get("s4_merge") or {}).get(
+                        "verbatim_reemissions", 0)
+                          / (o.get("s4_merge") or {}).get("s2_items", 0), 4)
+                    if (o.get("s4_merge") or {}).get("s2_items", 0) else None),
+                "redundant_s4_tokens": round(
+                    (o.get("s4_out_tokens") or 0)
+                    * min(1.0, ((o.get("s4_merge") or {}).get("verbatim_reemissions", 0)
+                                / (o.get("s4_merge") or {}).get("s4_items", 0)
+                                if (o.get("s4_merge") or {}).get("s4_items", 0)
+                                else 0.0)),
+                    2),
+                "llm_escalations": o.get("llm_escalations") or 0,
+            }
+            for o in _clean
+        ],
+    }
     checks = [
         "python >= 3.12 guard enforced at run entry",
         "dataset loaded and recall-semantics audited",
@@ -1569,6 +1696,9 @@ def build_report(
         # the report's Task-6 criterion (ZERO truncation-attributable
         # residual/partial + no empty_embed_list) reads from here.
         "escalation": escalation_summary,
+        # #2408 (Task 2): the S4 re-emit-tax census readout — DIAGNOSTIC
+        # only (never a gate limb; integrity.valid untouched).
+        "s4_reemit": s4_reemit,
         # #1900/#1937: whole-run gated-outcome count (gate-red union per
         # outcome — the watchdog's ``_n_gated_total`` at report time, from
         # the outcomes list so resumed runs count prior-session outcomes

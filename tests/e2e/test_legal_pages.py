@@ -887,6 +887,7 @@ def test_mock_email_signup_created_signs_in_and_redirects(page: Page) -> None:
     page.route("**/v1/signup/email*", handle)
     page.route("**/auth/v1/signup*", handle)
     page.route("**/auth/v1/token*", handle)
+    page.add_init_script("localStorage.setItem('tortoise_beta_access','1');")  # TEMP beta-gate unlock (#beta-gate)
     _goto(page, BASE_URL + "/signup")
     expect(page.locator(".legal-accept")).to_be_visible()
 
@@ -946,6 +947,7 @@ def test_mock_github_oauth_fires(page: Page) -> None:
         route.continue_()
 
     page.route("**/auth/v1/authorize*", handle)
+    page.add_init_script("localStorage.setItem('tortoise_beta_access','1');")  # TEMP beta-gate unlock (#beta-gate)
     _goto(page, BASE_URL + "/signup")
     expect(page.locator(".legal-accept")).to_be_visible()
 

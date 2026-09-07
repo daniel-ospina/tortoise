@@ -954,6 +954,10 @@ def ingest_haystack_v2(sdk: TortoiseSDK, question: dict,  # noqa: F811
              # UNRECORDED truncation with valid=true).
              "llm": {"calls": 0, "retries": 0, "truncated": 0},
              "recovery": {},
+             # #2408 Task 2: the per-question S4 merge composition (summed
+             # from each session's s4_merge dict — unchanged/correction/
+             # gap split for the re-emit-tax census).
+             "s4_merge": {},
              # #1786 (R1, Task 1 Step 5): the per-question write-stage retry
              # count (distinct from the R2 whole-question counter — the E2E
              # asserts R2 via ``whole_question_retries``, never this).}
@@ -1085,6 +1089,20 @@ def ingest_haystack_v2(sdk: TortoiseSDK, question: dict,  # noqa: F811
                     stats["recovery"].get(_maxk, 0), _v)
             else:
                 stats["recovery"][_k] = stats["recovery"].get(_k, 0) + _v
+
+        # #2408 Task 2: surface the S4 merge composition dict (s4_merge —
+        # currently DROPPED at this boundary) as a scalar-sum copy. Each
+        # field is a count over DISTINCT per-session items, so `+=` is
+        # correct even on many-session haystack questions (divergence from
+        # #1789 Task-1 Step 3's last-session-wins recorded on #1789). The
+        # new s2_out_tokens/s4_out_tokens recovery keys hit the `else` SUM
+        # branch above (they don't prefix-match the max-preserve set).
+        _sm = (out.get("stats") or {}).get("s4_merge") or {}
+        if _sm:
+            _sm_acc = stats.setdefault("s4_merge", {})
+            for _smk, _smv in _sm.items():
+                if isinstance(_smv, int):
+                    _sm_acc[_smk] = _sm_acc.get(_smk, 0) + _smv
 
         # the ACTUAL writes (the _write_payload stats are authoritative —
         # they skip duplicates, so payload-len double-counts) + the E7

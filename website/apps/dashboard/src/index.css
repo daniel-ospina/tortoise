@@ -139,6 +139,11 @@ tbody tr:last-child td { border-bottom: none; }
 
 .live { color: var(--green); }
 .revoked { color: var(--red); }
+/* #2426: API-key expiry states — the keys-table Expires cell. .expiring =
+   amber ≤14d-to-go ('in N days'); .expired = terminal red (row stays listed
+   as a tombstone — rotate re-applies the lifetime span with a fresh clock). */
+.expiring { color: #fbbf24; }
+.expired { color: var(--red); }
 
 /* #300: tier badge + inline forms */
 .tier-badge {
@@ -156,6 +161,9 @@ tbody tr:last-child td { border-bottom: none; }
 button.tier-badge { background: transparent; font-family: inherit; cursor: pointer; }
 button.tier-badge:disabled { opacity: 0.6; cursor: wait; }
 .inline-form { display: flex; gap: 8px; align-items: center; }
+/* #2426: the API-Keys-tab create form grew an expiry <select> (+ Custom
+   date input) — wrap on narrow viewports instead of overflowing the row */
+.inline-form.key-create-form { flex-wrap: wrap; }
 .inline-form input, .inline-form select {
   background: var(--surface);
   border: 1px solid rgba(255,255,255,0.12);
