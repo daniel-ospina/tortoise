@@ -7055,7 +7055,7 @@ function claimIntentInFlight() {
                     <p className="dim small">Read-only rescue view — restore brings everything back as an active graph.</p>
                     <ul className="dim small">
                       <li>Deleted: {trashInspect.deleted_at ? fmtTime(trashInspect.deleted_at) : '—'}</li>
-                      <li>Backups kept: {trashInspect.archive_count != null ? trashInspect.archive_count : 0}</li>
+                      <li>Restorable archives: {trashInspect.archive_count != null ? trashInspect.archive_count : 0}</li>
                       {trashInspect.latest_backup ? (
                         <li>
                           Latest backup:{' '}
@@ -7064,6 +7064,10 @@ function claimIntentInFlight() {
                             ? ` · ${trashInspect.latest_backup.node_count.toLocaleString()} nodes / ${trashInspect.latest_backup.edge_count != null ? trashInspect.latest_backup.edge_count.toLocaleString() : '?'} edges`
                             : ''}
                         </li>
+                      ) : trashInspect.archive_count > 0 ? (
+                        // #2469: archives exist but no readable manifest
+                        // (dump-only runs / crash window) — say so honestly.
+                        <li>Backups exist — no readable manifest for details.</li>
                       ) : (
                         <li>No backups yet for this graph.</li>
                       )}
