@@ -182,16 +182,25 @@ def test_seed_mode_store_owns_seed_manifest_marker(tmp_path):
     """The seeder-owned seed-manifest marker is written into the seeded
     namespace (the warm guard's ownership record — Task 10's agent-filed
     content never false-refuses BECAUSE the marker is present) and is NOT
-    part of the retrievable memory surface."""
-    from battery.runner.setup import seed_manifest_point_id
+    part of the retrievable memory surface.
+
+    Relocked for the #2291 SDK-lane seed channel: the marker point is
+    keyed by CONTENT (ingest mints server ids — the derive id is a
+    raw-lane artifact), so presence is asserted by content, not by the
+    raw-lane id.
+    """
+    from battery.runner.setup import seed_manifest_content
     sc = _cts()[0]
     store = seeds.setup_seed_mode(tmp_path, sc.id)
     try:
-        g = store._arm._scenario_graph(sc)
-        rows = g.query(
-            "MATCH (n:Point {id: $mid}) RETURN n.content",
-            params={"mid": seed_manifest_point_id(sc.id)}).result_set
-        assert len(rows) == 1
+        want = seed_manifest_content(sc.id)
+        marker_ids = store.find_content("seed_mode:v1")
+        assert marker_ids, "seed-manifest marker missing from the seeded store"
+        found = store._arm._scenario_graph(sc).query(
+            "MATCH (n:Point) WHERE n.id IN $ids RETURN n.content",
+            params={"ids": marker_ids}).result_set
+        assert any(str(r[0]) == want for r in found), (
+            "marker content does not match the seeder-owned record")
         surface = store.surface_text()
         assert "seed_manifest" not in surface  # never a retrievable memory
     finally:

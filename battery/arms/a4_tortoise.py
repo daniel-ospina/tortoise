@@ -63,40 +63,36 @@ class A4TortoiseArm:
     def setup_scenarios(self, scenarios: list[Scenario]) -> None:
         """Build the per-scenario graphs + open one SDK handle per scenario.
 
-        Content is seeded through the reference lane (batch_setup over a
-        projection opened by ``open_reference_projection`` — construction
-        stays OUT of this module per the lane audit). seed_mode default:
-        contradiction scenarios seed claim_a + evidence ONLY (¬A never
-        pre-seeded — it arrives in-context at k at run time); the hermetic
-        warm guard refuses a stale PRE-FIX graph in the same namespace.
-        After seeding, one TortoiseSDK per scenario is opened on the SAME
-        store file with ``graph_name=scenario_namespace(id)`` bound at
-        construction — the runtime channel Tasks 3/4 refine.
+        Content is seeded through the PRODUCT bulk surface —
+        ``seed_scenario_via_ingest`` (sdk.ingest over each scenario's own
+        handle: derive_scenario_graph content contract + credibility
+        baselines + seed props; server batch_id; seed points promoted —
+        operators ride the source promotion). The warm guard refuses a stale
+        PRE-FIX graph in the same namespace BEFORE any batch_id is minted;
+        a clean seed_mode graph re-setup accumulates (idempotent ingest).
+        seed_mode default: contradiction scenarios seed claim_a + evidence
+        ONLY (¬A never pre-seeded — it arrives in-context at k at run time).
+        The reference-lane batch path stays for equivalence tests only
+        (battery.testing.seeds raw helper) — never the real A4 path.
         """
         if not self._db_path:
             tmp = tempfile.mkdtemp(prefix="battery_a4_")
             self._db_path = str(Path(tmp) / "a4.db")
         db_file = str(self._db_path)
-        from battery.runner.setup import batch_setup
-
-        # Reference-lane content seeding (projection opened here, closed
-        # before any SDK handle opens the same file).
-        proj = open_reference_projection(db_file)
-        try:
-            batch_setup(proj, scenarios, namespaced=True, seed_mode=True)
-        finally:
-            proj.close()
-
-        # Per-scenario product handles (one SDK per scenario graph).
         from tortoise.sdk import TortoiseSDK
+
+        from battery.runner.setup import seed_scenario_via_ingest
+
         ev_dir = Path(db_file).parent / "events"
         for sc in scenarios:
             ns = scenario_namespace(sc.id)
-            self._sdk_by_id[sc.id] = TortoiseSDK(
+            sdk = TortoiseSDK(
                 db_path=db_file,
                 graph_name=ns,
                 event_log_path=str(ev_dir / f"{ns}.jsonl"),
             )
+            self._sdk_by_id[sc.id] = sdk
+            seed_scenario_via_ingest(sdk, sc, seed_mode=True)
         self.decide_cycles = 0
 
     def _sdk(self, scenario: Scenario):
