@@ -160,6 +160,7 @@ Retention carve-outs, stated honestly:
 - **Billing and transactional records** are retained as required by applicable law, including tax and accounting obligations (GDPR Art. 17(3) carve-out for legal compliance).
 - **Analytics data** is handled in accordance with the analytics section (§3) and the retention terms of each analytics provider; analytics data is not silently claimed to be deleted.
 - **Backups** may retain data for a limited additional period after deletion to maintain integrity; data in backups is not used for any other purpose.
+- **Knowledge graphs.** Deleting a knowledge graph in the product starts a disclosed 7-day recovery window (the team's "Trash"): during that window the graph can be restored, and its API keys are revoked immediately. After the window ends, the graph is permanently erased — including any stored backup copies of it. Deleted graph data is not retained beyond that recovery window except where required by law or for fraud/security investigations. Backup copies of a deleted knowledge graph are erased with the graph after its recovery window, and are refused for restoration once the window has passed.
 
 ## 7. Security (outline ⑦)
 
@@ -261,7 +262,7 @@ This policy is versioned. When this policy changes, the version number and effec
 
 **What this channel covers.** The email channel covers: (a) account data, (b) non-account data, (c) users who cannot log in to their account, and (d) access, export, and objection requests. It is the general-purpose rights channel for this release.
 
-**Deletion scope.** When a deletion request is fulfilled, account and associated data is deleted or de-identified, subject to the retention carve-outs in §6 (billing/transactional records retained as required by law; analytics data handled per the analytics section). Deletion does not extend to content you have already shared publicly or to data that others have lawfully obtained.
+**Deletion scope.** When a deletion request is fulfilled, account and associated data is deleted or de-identified, subject to the retention carve-outs in §6 (billing/transactional records retained as required by law; analytics data handled per the analytics section). Deletion does not extend to content you have already shared publicly or to data that others have lawfully obtained. A knowledge graph deleted in the product follows its 7-day recovery window before permanent erasure, as described in §6.
 
 **Self-service deletion (future).** An in-product self-service account deletion feature does not exist at the time of this publication, so this policy does not promise one. If a self-service deletion feature is added to the product, this policy will be updated to describe it.
 
