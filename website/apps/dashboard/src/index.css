@@ -265,7 +265,7 @@ button.tier-badge:disabled { opacity: 0.6; cursor: wait; }
 }
 .account-menu-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; opacity: 0.6; padding: 4px 8px 6px; }
 /* #2494: two-section menu — section wrappers keep no extra padding. */
-.account-menu-section { padding: 2px 0; }
+.account-menu-section { padding: 2px 0; background: rgba(255,255,255,0.02); border-radius: 6px; margin: 0 2px; }
 /* #2494: org context row — mirrors identity-row layout with small avatar. */
 .account-menu-org { display: flex; align-items: center; gap: 8px; padding: 6px 12px 4px; }
 .account-menu-org .account-org-name { font-weight: 600; font-size: 13px; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

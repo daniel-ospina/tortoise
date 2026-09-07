@@ -2510,7 +2510,13 @@ def purge_graph_row(cp, team_id: str, graph_id: str, *, now: str,
     — the ownership guard tripped; the row keeps its namespace for operator
     review). Keeps the row (audit tombstone). Returns False when the row is
     not a tombstone (idempotent re-runs: a purged row returns False too —
-    the sweep treats that as done)."""
+    the sweep treats that as done).
+
+    The stamp PATCH is CONDITIONED on status=deleted and observes whether it
+    matched (#2464 P2): a restore flipping the row to ACTIVE between the
+    purge's pre-drop re-verify and the stamp must never get purged_at
+    stamped onto a live graph — the conditional PATCH matches 0 rows and
+    returns False (the registry-lane stamp conditions on status too)."""
     rows = cp.query(
         "graphs", select=["id"],
         filters=[("id", "eq", graph_id), ("team_id", "eq", team_id),
@@ -2518,12 +2524,13 @@ def purge_graph_row(cp, team_id: str, graph_id: str, *, now: str,
     )
     if not rows:
         return False
-    cp.query(
-        "graphs", method="PATCH",
-        filters=[("id", "eq", graph_id), ("team_id", "eq", team_id)],
+    updated = cp.query(
+        "graphs", select=["id"], method="PATCH",
+        filters=[("id", "eq", graph_id), ("team_id", "eq", team_id),
+                 ("status", "eq", "deleted")],
         json_body={"purged_at": now, "purged_residual": bool(residual)},
     )
-    return True
+    return bool(updated)
 
 
 def set_graph_recording(cp, team_id: str, graph_id: str,
