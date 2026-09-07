@@ -101,6 +101,8 @@ _TEAM_ADDITIVE_SELECT = [
     # #1623: Stripe billing state (0012 migration — the webhook's store) so
     # /v1/team can render plan state + the dashboard Billing page.
     "subscription_status", "customer_email",
+    # #2406: onboarding-call offer email marker (20260907000001).
+    "onboarding_email_sent_at",
 ]
 # Retry tiers for the fail-soft ladder (#1096): the NEWEST migration is
 # dropped FIRST, so a schema missing only the newest additive (e.g.
@@ -126,6 +128,13 @@ _TEAM_ADDITIVE_0015_TIER = ["suspended_at", "flagged_at"]  # 0015
 # still reads real billing state and a pre-0012 schema degrades to safe
 # defaults (None) rather than taking down auth. #1623.
 _TEAM_ADDITIVE_BILLING_TIER = ["subscription_status", "customer_email"]
+
+# #2406 signup-email marker (20260907000001 — the NEWEST additive migration):
+# its OWN tier, dropped FIRST by the #1096 ladder, so a schema missing ONLY
+# the marker column degrades just the marker (the onboarding endpoint reads
+# it as unset → one best-effort send attempt) while all older additive state
+# stays readable. Written by the service-role seam only — no RLS change.
+_TEAM_ADDITIVE_ONBOARDING_TIER = ["onboarding_email_sent_at"]
 
 # Combined quota read (primary query) — the healthy path stays ONE round-trip.
 _QUOTA_SELECT = _TEAM_BASE_SELECT + _TEAM_ADDITIVE_SELECT
@@ -864,7 +873,8 @@ def team_by_id(cp, team_id: str) -> dict | None:
                 "backup_enabled", "backup_latest_at", "backup_restored_at",
                 "created_at", "deleted_at", "grace_hours"]
             + _TEAM_ADDITIVE_SELECT,
-        additive_tiers=[_TEAM_ADDITIVE_2040_TIER,
+        additive_tiers=[_TEAM_ADDITIVE_ONBOARDING_TIER,  # newest migration first
+                         _TEAM_ADDITIVE_2040_TIER,
                          _TEAM_ADDITIVE_IMPORT_TIER,
                          _TEAM_ADDITIVE_DKL_TIER, _TEAM_ADDITIVE_0015_TIER,
                          _TEAM_ADDITIVE_BILLING_TIER])
@@ -1495,6 +1505,38 @@ def update_team_email(cp, team_id: str, email: str) -> None:
         filters=[("id", "eq", team_id)],
         json_body={"email": email},
     )
+
+
+def team_onboarding_email_sent(cp, team_id: str) -> bool | None:
+    """Marker read: True once the #2406 signup-email was accepted by the
+    provider (teams.onboarding_email_sent_at set); False when unset; None
+    when the team row does not exist."""
+    rows = cp.query(
+        "teams", select=["onboarding_email_sent_at"],
+        filters=[("id", "eq", team_id)],
+    )
+    if not rows:
+        return None
+    return rows[0].get("onboarding_email_sent_at") is not None
+
+
+def set_team_onboarding_email_sent(cp, team_id: str) -> bool:
+    """Rowcount-gated marker stamp (#2406): PATCH
+    ``onboarding_email_sent_at = now()`` WHERE id AND the marker is still
+    NULL (return=representation). True only when THIS call performed the
+    stamp (one row updated) — a marker already set (concurrent provision /
+    replay raced us) returns False and the provider Idempotency-Key
+    ``onboarding:{team_id}`` collapsed the duplicate send."""
+    rows = cp.query(
+        "teams",
+        select=["id"],
+        filters=[("id", "eq", team_id),
+                 ("onboarding_email_sent_at", "is", None)],
+        method="PATCH",
+        json_body={"onboarding_email_sent_at":
+                   datetime.now(timezone.utc).isoformat()},  # noqa: UP017
+    )
+    return bool(rows)
 
 
 # ── #1765 identity seam (migration 20260827000001) ──────────────────────────
@@ -2510,7 +2552,13 @@ def purge_graph_row(cp, team_id: str, graph_id: str, *, now: str,
     — the ownership guard tripped; the row keeps its namespace for operator
     review). Keeps the row (audit tombstone). Returns False when the row is
     not a tombstone (idempotent re-runs: a purged row returns False too —
-    the sweep treats that as done)."""
+    the sweep treats that as done).
+
+    The stamp PATCH is CONDITIONED on status=deleted and observes whether it
+    matched (#2464 P2): a restore flipping the row to ACTIVE between the
+    purge's pre-drop re-verify and the stamp must never get purged_at
+    stamped onto a live graph — the conditional PATCH matches 0 rows and
+    returns False (the registry-lane stamp conditions on status too)."""
     rows = cp.query(
         "graphs", select=["id"],
         filters=[("id", "eq", graph_id), ("team_id", "eq", team_id),
@@ -2518,12 +2566,13 @@ def purge_graph_row(cp, team_id: str, graph_id: str, *, now: str,
     )
     if not rows:
         return False
-    cp.query(
-        "graphs", method="PATCH",
-        filters=[("id", "eq", graph_id), ("team_id", "eq", team_id)],
+    updated = cp.query(
+        "graphs", select=["id"], method="PATCH",
+        filters=[("id", "eq", graph_id), ("team_id", "eq", team_id),
+                 ("status", "eq", "deleted")],
         json_body={"purged_at": now, "purged_residual": bool(residual)},
     )
-    return True
+    return bool(updated)
 
 
 def set_graph_recording(cp, team_id: str, graph_id: str,
