@@ -52,12 +52,15 @@ from tortoise.supabase_control import (
     provision_team,
     resolve_api_key,
     revoke_api_key,
+    restore_graph,
+    purge_graph_row,
     set_membership,
     soft_delete_graph,
     store_github_credentials,
     team_by_email,
     team_by_id,
     team_by_name,
+    trash_graphs,
     team_email,
     team_members,
     team_onboarding_state,
@@ -2408,6 +2411,86 @@ class TestGraphLifecycleSeam:
                                 "g_c2test00000004") == 1  # k1 only
         assert graph_key_ids(fake, "team-c2-001",
                              "g_c2test00000004") == ["k1", "k2"]  # cascade all
+
+    # ── #2304 trash seam (delete = quarantine → restore / purge) ──────────
+    def _seed_tombstone(self, fake, gid="g_c2test00000005", purged_at=None):
+        self._seed_team(fake)
+        insert_graph(fake, {
+            "id": gid, "team_id": "team-c2-001", "name": "old",
+            "kind": "custom",
+            "namespace": f"team_team-c2-001_{gid}",
+            "status": "deleted", "recording": None,
+            "deleted_at": "2026-09-01T00:00:00Z", "purged_at": purged_at,
+        })
+
+    def test_soft_delete_stamps_deleted_at(self, fake):
+        """#2304: soft_delete_graph records the deletion instant (the purge
+        grace window's start) alongside the tombstone flag."""
+        self._seed_team(fake)
+        insert_graph(fake, {
+            "id": "g_c2test00000009", "team_id": "team-c2-001",
+            "name": "prod", "kind": "custom",
+            "namespace": "team_team-c2-001_g_g_c2test00000009",
+            "status": "active", "recording": None,
+        })
+        assert soft_delete_graph(fake, "team-c2-001",
+                                 "g_c2test00000009") is True
+        rows = fake.query("graphs", select=["deleted_at"],
+                          filters=[("id", "eq", "g_c2test00000009")])
+        assert rows[0]["deleted_at"]  # deletion instant recorded
+
+    def test_trash_graphs_lists_unpurged_tombstones_only(self, fake):
+        self._seed_tombstone(fake, "g_c2test00000005")
+        self._seed_tombstone(fake, "g_c2test00000006", purged_at="2026-09-03T00:00:00Z")
+        rows = trash_graphs(fake, "team-c2-001")
+        ids = [r["graph_id"] for r in rows]
+        assert "g_c2test00000005" in ids
+        assert "g_c2test00000006" not in ids  # purged — nothing to restore
+
+    def test_restore_graph_flips_tombstone_only(self, fake):
+        """#2304: restore_graph flips an UNPURGED tombstone back to active
+        and clears the stamps; active/default/purged rows are refused."""
+        self._seed_tombstone(fake, "g_c2test00000005")
+        assert restore_graph(fake, "team-c2-001", "g_c2test00000005") is True
+        rows = fake.query("graphs", select=["status", "deleted_at"],
+                          filters=[("id", "eq", "g_c2test00000005")])
+        assert rows[0]["status"] == "active"
+        assert rows[0]["deleted_at"] is None
+        # Second flip: now active → refused.
+        assert restore_graph(fake, "team-c2-001", "g_c2test00000005") is False
+        # Purged tombstone → refused (410 territory; data physically erased).
+        self._seed_tombstone(fake, "g_c2test00000007",
+                             purged_at="2026-09-03T00:00:00Z")
+        assert restore_graph(fake, "team-c2-001", "g_c2test00000007") is False
+        # Default kind → refused.
+        insert_graph(fake, {
+            "id": "g_c2test00000008", "team_id": "team-c2-001",
+            "name": "default", "kind": "default",
+            "namespace": "team_team-c2-001", "status": "deleted",
+            "recording": None,
+        })
+        assert restore_graph(fake, "team-c2-001", "g_c2test00000008") is False
+
+    def test_purge_graph_row_stamps_only_tombstones(self, fake):
+        """#2304: purge_graph_row stamps purged_at (+residual) and keeps the
+        row (audit tombstone); non-deleted rows are refused (idempotent)."""
+        self._seed_tombstone(fake, "g_c2test00000005")
+        assert purge_graph_row(fake, "team-c2-001", "g_c2test00000005",
+                               now="2026-09-08T00:00:00Z") is True
+        rows = fake.query(
+            "graphs", select=["purged_at", "purged_residual"],
+            filters=[("id", "eq", "g_c2test00000005")])
+        assert rows[0]["purged_at"] == "2026-09-08T00:00:00Z"
+        assert rows[0]["purged_residual"] is False
+        # A restored (active) row is never purge-stamped.
+        insert_graph(fake, {
+            "id": "g_c2test0000000a", "team_id": "team-c2-001",
+            "name": "live", "kind": "custom",
+            "namespace": "team_team-c2-001_g_g_c2test0000000a",
+            "status": "active", "recording": None,
+        })
+        assert purge_graph_row(fake, "team-c2-001", "g_c2test0000000a",
+                               now="2026-09-08T00:00:00Z") is False
 
 
 # ── C3 (#2112): key lifecycle seams ─────────────────────────────────────────

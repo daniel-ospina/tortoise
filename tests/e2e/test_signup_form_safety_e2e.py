@@ -139,6 +139,7 @@ def test_429_signup_rate_limit_is_humanized(page: Page) -> None:
 
     page.route("**/v1/signup/email*", handle)
     page.route("**/auth/v1/signup*", handle)
+    page.add_init_script("localStorage.setItem('tortoise_beta_access','1');")  # TEMP beta-gate unlock (#beta-gate)
     page.goto(BASE_URL + "/signup", wait_until="domcontentloaded", timeout=30_000)
     page.locator("#btn-email").click()
     page.locator("#email").fill("rate-527@premise-labs.dev")
@@ -217,6 +218,7 @@ def test_429_short_tier_lockout_60s_then_expiry(page: Page) -> None:
 
     page.route("**/v1/signup/email*", handle)
     page.route("**/auth/v1/signup*", handle)
+    page.add_init_script("localStorage.setItem('tortoise_beta_access','1');")  # TEMP beta-gate unlock (#beta-gate)
     page.goto(BASE_URL + "/signup", wait_until="domcontentloaded", timeout=30_000)
     page.locator("#btn-email").click()
     page.locator("#email").fill("rate-short@premise-labs.dev")
@@ -292,6 +294,7 @@ def test_non_rate_limit_error_does_not_lock_out(page: Page) -> None:
     # mocked 422 exercises the server-error path.
     page.route("**/v1/signup/email*", handle)
     page.route("**/auth/v1/signup*", handle)
+    page.add_init_script("localStorage.setItem('tortoise_beta_access','1');")  # TEMP beta-gate unlock (#beta-gate)
     page.goto(BASE_URL + "/signup", wait_until="domcontentloaded", timeout=30_000)
     page.locator("#btn-email").click()
     page.locator("#email").fill("nolate@premise-labs.dev")
@@ -365,6 +368,7 @@ def test_resend_429_sets_lockout_and_disables_resend(page: Page) -> None:
 
     page.route("**/v1/signup/email*", handle_server)
     page.route("**/auth/v1/**", handle_legacy)
+    page.add_init_script("localStorage.setItem('tortoise_beta_access','1');")  # TEMP beta-gate unlock (#beta-gate)
     page.goto(BASE_URL + "/signup", wait_until="domcontentloaded", timeout=30_000)
     page.locator("#btn-email").click()
     page.locator("#email").fill("resend-429@premise-labs.dev")
@@ -402,6 +406,7 @@ def test_blocked_supabase_cdn_shows_clear_error(page: Page) -> None:
         route.continue_()
 
     page.route("**/*", handle)
+    page.add_init_script("localStorage.setItem('tortoise_beta_access','1');")  # TEMP beta-gate unlock (#beta-gate)
     page.goto(BASE_URL + "/signup", wait_until="domcontentloaded", timeout=30_000)
     expect(page.locator("#error")).to_contain_text(
         "temporarily unavailable", timeout=10_000)
@@ -413,6 +418,7 @@ def test_healthy_load_does_not_show_watchdog_error(page: Page) -> None:
     (a top-level `let` is NOT a window property), so on a HEALTHY load — CDN
     present — the 6s watchdog must not fire a false 'temporarily unavailable'
     error. Waits past the watchdog deadline to catch the false positive."""
+    page.add_init_script("localStorage.setItem('tortoise_beta_access','1');")  # TEMP beta-gate unlock (#beta-gate)
     page.goto(BASE_URL + "/signup", wait_until="domcontentloaded", timeout=30_000)
     # Give the client time to init, then wait past the 6s watchdog deadline.
     expect(page.locator("#btn-submit")).to_be_enabled(timeout=10_000)
@@ -496,6 +502,7 @@ def test_mock_email_signup_created_signs_in_and_redirects_url_clean(page: Page) 
     page.route("**/v1/signup/email*", handle)
     page.route("**/auth/v1/signup*", handle)
     page.route("**/auth/v1/token*", handle)
+    page.add_init_script("localStorage.setItem('tortoise_beta_access','1');")  # TEMP beta-gate unlock (#beta-gate)
     page.goto(BASE_URL + "/signup", wait_until="domcontentloaded", timeout=30_000)
     page.locator("#btn-email").click()
     page.locator("#email").fill(email)

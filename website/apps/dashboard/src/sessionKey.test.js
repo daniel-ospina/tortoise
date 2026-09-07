@@ -13,7 +13,13 @@ import {
   isManagedKey, durableConnectKey, usableDurableRows,
 } from './sessionKey.js'
 
-// #2166: isManagedKey — what the API Keys page actually shows (durable only).
+// #2166 + #2426: isManagedKey — what the API Keys page actually shows
+// (durable product keys only). Durable = user/agent-created keys
+// (provisioned/recovery/NULL created_via). Since #2426 a durable key may
+// carry a chosen expiry (30d/60d/… mint) — it stays a MANAGED product key:
+// the table must show its Expires state (soon/expired tombstones stay
+// listed and rotatable). The only non-managed rows are the dashboard's OWN
+// auto-minted session credentials (created_via 'bootstrap').
 test('managed: durable provisioned key', () => {
   assert.equal(isManagedKey({ created_via: 'provisioned', expires_at: null, revoked_at: null }), true)
 })
@@ -28,9 +34,18 @@ test('not managed: bootstrap session credential is never a table row', () => {
   assert.equal(isManagedKey({ created_via: 'bootstrap', expires_at: null, revoked_at: null }), false)
   // even after the reconcile sweep revokes an expired bootstrap — still not a product key
   assert.equal(isManagedKey({ created_via: 'bootstrap', revoked_at: '2026-08-03T00:00:00Z' }), false)
+  // an expiring bootstrap is a session credential too — never a table row
+  assert.equal(isManagedKey({ created_via: 'bootstrap', expires_at: '2026-08-02T00:00:00Z', revoked_at: null }), false)
 })
-test('not managed: any expiring row is an access credential, not a key', () => {
-  assert.equal(isManagedKey({ created_via: 'provisioned', expires_at: '2026-08-02T00:00:00Z', revoked_at: null }), false)
+test('#2426 managed: an expiring durable key IS a product key — table row', () => {
+  // The #2166 proxy ("any row with an expiry set is an access credential")
+  // was true only while bootstrap rows were the ONLY rows carrying expiry.
+  // A #2426 mint with a chosen lifetime (30d/60d/…) must stay listed so the
+  // table can show Expires: soon/expired — and an expired durable stays a
+  // rotatable tombstone, never a hidden row (cap accounting #2426).
+  assert.equal(isManagedKey({ created_via: 'provisioned', expires_at: '2026-08-02T00:00:00Z', revoked_at: null }), true)
+  assert.equal(isManagedKey({ created_via: 'recovery', expires_at: '2026-08-02T00:00:00Z' }), true)
+  assert.equal(isManagedKey({ created_via: null, expires_at: '2026-08-02T00:00:00Z' }), true)
 })
 test('managed: disabled durable key stays managed (toggle must stay reachable)', () => {
   assert.equal(isManagedKey({ created_via: 'provisioned', enabled: false, expires_at: null }), true)
@@ -42,8 +57,10 @@ test('managed: null row is never managed', () => {
 })
 
 // #2246: usableDurableRows — the rows-source connect resolution. A row is
-// "usable" when it is managed (durable — never bootstrap/expiring), not
-// revoked, and not disabled (enabled absent → enabled, registry parity).
+// "usable" when it is managed (never bootstrap) ∧ NEVER-EXPIRING (the embed
+// surface is Never-keys-only, #2426 decision 2 — an expiring durable is
+// in-table but must not route the connect gate to "reuse it") ∧ not revoked,
+// and not disabled (enabled absent → enabled, registry parity).
 // Rows are sorted most-recent-first by created_at; they carry hashes only, so
 // consumers must never derive an embeddable key from them.
 const row = (prefix, over) => ({
@@ -52,7 +69,7 @@ const row = (prefix, over) => ({
   ...(over || {}),
 })
 
-test('rows: usable durable rows only (provisioned/recovery/NULL, enabled, not revoked)', () => {
+test('rows: usable durable rows only (provisioned/recovery/NULL, never-expiring, enabled, not revoked)', () => {
   const rows = [
     row('tt_prov_ab', { created_via: 'provisioned' }),
     row('tt_rec_ab', { created_via: 'recovery' }),
@@ -65,6 +82,20 @@ test('rows: usable durable rows only (provisioned/recovery/NULL, enabled, not re
   const usable = usableDurableRows(rows)
   assert.deepEqual(usable.map((r) => r.key_prefix).sort(),
                    ['tt_null_ab', 'tt_prov_ab', 'tt_rec_ab'])
+})
+
+test('#2426 rows: expiring durable is NOT usable for the connect gate (Never-only embed)', () => {
+  // isManagedKey now admits expiring durables (they are table rows), so
+  // usableDurableRows must exclude them EXPLICITLY — a 30d key must not
+  // resolve the connect step to 'rows-durable' (the gate would offer to
+  // reuse a key that dies mid-embed).
+  const rows = [
+    row('tt_never_ab', { created_via: 'provisioned' }),
+    row('tt_30d_ab', { created_via: 'provisioned', expires_at: '2026-09-01T00:00:00Z' }),
+    row('tt_expired_ab', { created_via: 'provisioned', expires_at: '2026-07-01T00:00:00Z' }),
+  ]
+  const usable = usableDurableRows(rows)
+  assert.deepEqual(usable.map((r) => r.key_prefix), ['tt_never_ab'])
 })
 
 test('rows: most-recent-first ordering by created_at (ISO lexical)', () => {
@@ -141,8 +172,8 @@ test('connect: welcomeKey STALE when its row is disabled/absent (rows loaded) �
 })
 // #2246 review (P2): the stale-welcome predicate is symmetric with the paste
 // tail — a bootstrap/expiring row is dead for embedding too. Welcome keys are
-// provisioned (created_via 'provisioned'), so this only fires when the row a
-// welcome plaintext resolves to is a 24h/expiring access credential.
+// provisioned without expiry, so this only fires when the row a welcome
+// plaintext resolves to is a 24h/expiring access credential.
 test('connect: welcomeKey STALE when its row is bootstrap/expiring (rows loaded) → never embeds', () => {
   const boot = durableConnectKey('tt_welcome_abcdefgh', '', [
     { key_prefix: 'tt_welcome', created_via: 'bootstrap', expires_at: '2026-09-04T00:00:00Z', revoked_at: null, enabled: true },
@@ -182,13 +213,21 @@ test('connect: bootstrap apiKey → gate (never embed the 24h key)', () => {
   assert.equal(r.key, '')
   assert.equal(r.source, 'bootstrap')
 })
-test('connect: any expiring apiKey row → gate', () => {
+// #2426: an expiring DURABLE row (chosen lifetime at mint) is NOT a login
+// session credential — the classifier reports the distinct 'expiring' source
+// so the wizard paste error can say the key expires (never 'login session').
+test('connect: expiring durable apiKey row → gate with source expiring', () => {
   const live = 'tt_exp_abcdefgh'
   const r = durableConnectKey('', live, [
-    { key_prefix: live.slice(0, 10), created_via: 'recovery', expires_at: '2026-09-04T00:00:00Z' },
+    { key_prefix: live.slice(0, 10), created_via: 'provisioned', expires_at: '2026-09-04T00:00:00Z' },
   ])
   assert.equal(r.durable, false)
-  assert.equal(r.source, 'bootstrap') // classification is bootstrap OR expires_at
+  assert.equal(r.key, '')
+  assert.equal(r.source, 'expiring')
+  const rec = durableConnectKey('', 'tt_exp2_abcdefgh', [
+    { key_prefix: 'tt_exp2_ab', created_via: 'recovery', expires_at: '2026-09-04T00:00:00Z' },
+  ])
+  assert.equal(rec.source, 'expiring')
 })
 test('connect: NO matching row (keys not loaded / stale) → gate, never embed on unknown', () => {
   const r = durableConnectKey('', 'tt_something', [])

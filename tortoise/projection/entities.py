@@ -266,6 +266,59 @@ class _EntityHandlers:
             params={"id": pid, "now": _now_iso()},
         )
 
+    def _fold_point_superseded(self, ev: dict) -> int:
+        """#2423: fold a PointSuperseded event into Point.status/validity +
+        CORRECTS edge.
+
+        Projection-owned cache of the event stream (same §11 role as the
+        Object-side ``_fold_object_superseded``): a superseded Point is
+        re-stamped status='superseded' + outdated=true + validTo/expiredAt
+        (the E6 bi-temporal window END, replayed verbatim from the journaled
+        payload — a JSONL wipe+rebuild must reproduce the ORIGINAL stamps,
+        not rebuild time), and the CORRECTS edge (successor → superseded old)
+        is re-merged.
+
+        Idempotent (a replayed/duplicate event re-applies the same SET/MERGE);
+        a chain A→B→C leaves A superseded-by-B and B superseded-by-C (each
+        event folds its own target — live semantics, mirror Object).
+
+        Returns the MATCHED-ROW count (#2164 Task 2 additive fold-miss
+        signal): 1 = the target Point was found and folded, 0 = no Point
+        matched (missing Point / stale id) or the event lacks id+new_id. The
+        SET…RETURN form yields a row only when the MATCH bound a node, so a
+        fold-miss is distinguishable from a successful fold without a separate
+        existence pre-query. The CORRECTS MERGE is best-effort (a missing
+        successor no-ops the edge arm without failing the fold).
+        """
+        oid = ev.get("id")
+        new_id = ev.get("new_id")
+        if not oid or not new_id:
+            return 0
+        # The journaled payload carries the ORIGINAL supersede-time stamps
+        # (valid_to = the successor's validFrom — contiguous window END;
+        # expired_at = transaction-time expiry). Replay them verbatim — the
+        # #2164-P4 drift class (rebuild-time vs original-time) applies here
+        # too. updatedAt mirrors the live stamp block (supersede-time now,
+        # journaled on the line via the ts fallback).
+        valid_to = ev.get("valid_to")
+        expired_at = ev.get("expired_at") or _now_iso()
+        updated_at = ev.get("ts") or _now_iso()
+        result = self.g.query(
+            "MATCH (n:Point {id:$id}) "
+            "SET n.status='superseded', n.outdated=true, "
+            "    n.validTo=$vt, n.expiredAt=$ea, n.updatedAt=$ua "
+            "RETURN n.id LIMIT 1",
+            params={"id": oid, "vt": valid_to, "ea": expired_at,
+                    "ua": updated_at},
+        )
+        if result.result_set:
+            self.g.query(
+                "MATCH (a:Point {id:$new_id}), (b:Point {id:$old_id}) "
+                "MERGE (a)-[:CORRECTS]->(b)",
+                params={"new_id": new_id, "old_id": oid},
+            )
+        return len(result.result_set)
+
     # ── Entity nodes ───────────────────────────────────────────────
 
     def _upsert_subject(self, ev: dict) -> None:

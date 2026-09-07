@@ -39,7 +39,7 @@ import json
 import logging
 import os
 from contextlib import nullcontext
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any, Callable  # noqa: UP035
 
@@ -1009,3 +1009,319 @@ def run_backup_sweep(
         "results": results,
         "incidents": incidents,
     }
+
+
+# ── #2304 trash purge (delete = quarantine → 7-day grace → erasure) ──────────
+# Owner Option C: tombstoned custom graphs are recoverable (trash restore) for
+# a disclosed grace window, then PHYSICALLY erased: the data-plane namespace
+# (GRAPH.DELETE), every backup artifact (nested pool + per-graph ops state +
+# legacy flat archives via the #2370 classification index), and the tombstone
+# row stamped ``purged_at`` (the ROW is kept — audit tombstone; purge is a
+# data erasure, never a row deletion).
+#
+# Lane contract mirrors run_backup_sweep: ``registry`` is the control-plane
+# source (registry graph handle OR SupabaseControlPlane — dialect
+# auto-detected), ``db`` the data-plane FalkorDB handle (GRAPH.DELETE target),
+# ``storage`` the R2/artifact seam.
+
+_GRAPH_PURGE_GRACE_DAYS = 7  # the #2304 default recovery window
+
+logger = logging.getLogger(__name__)
+
+
+def enumerate_team_tombstones(source, team_id: str) -> list[dict[str, Any]]:
+    """Per-team trash (tombstone) list — the purge + trash-list seam (#2304).
+
+    Returns registry-shaped rows ``[{graph_id, name, namespace,
+    deleted_at, purged_at}]`` for kind='custom', status='deleted' graphs
+    that are NOT yet purged (purged rows are done — never re-purged; the
+    caller filters past-grace from ``deleted_at``). ``deleted_at`` absent =
+    legacy tombstone (predates the #2304 column; the caller treats it as
+    past-grace, ownership-guard-gated). Supabase mode queries the ``graphs``
+    table; registry mode reads the Graph nodes. The default graph can never
+    appear (delete refuses it). Fail-closed on query failure (RuntimeError
+    — the purge never guesses an empty trash list)."""
+    if _is_supabase_source(source):
+        try:
+            rows = source.query(
+                "graphs",
+                select=["id", "name", "namespace", "deleted_at", "purged_at"],
+                filters=[("team_id", "eq", team_id), ("status", "eq", "deleted"),
+                         ("kind", "eq", "custom"), ("purged_at", "is", None)],
+            )
+        except Exception as e:
+            raise RuntimeError(
+                f"tombstone enumeration failed for {team_id}: {e}") from e
+        return [
+            {"graph_id": r["id"], "name": r.get("name"),
+             "namespace": r.get("namespace"), "deleted_at": r.get("deleted_at"),
+             "purged_at": r.get("purged_at")}
+            for r in rows
+        ]
+    try:
+        rows = source.query(
+            "MATCH (g:Graph {team_id:$tid, status:'deleted'}) "
+            "WHERE coalesce(g.kind, 'custom') <> 'default' "
+            "AND g.purged_at IS NULL "
+            "RETURN g.id, g.name, g.namespace, g.deleted_at, g.purged_at",
+            params={"tid": team_id},
+        ).result_set
+    except Exception as e:
+        raise RuntimeError(
+            f"tombstone enumeration failed for {team_id}: {e}") from e
+    return [
+        {"graph_id": r[0], "name": r[1], "namespace": r[2],
+         "deleted_at": r[3], "purged_at": r[4]}
+        for r in rows
+    ]
+
+
+def _graph_purged_at_expired(deleted_at: Any, cutoff: str) -> bool:
+    """Grace check: deleted_at absent (legacy tombstone — past-grace by
+    definition) OR <= cutoff (ISO-8601 string compare; both lanes stamp
+    UTC +00:00 isoformat). A malformed stamp counts as expired — it can
+    never be younger than the grace window."""
+    if not deleted_at:
+        return True
+    try:
+        return str(deleted_at) <= cutoff
+    except Exception:
+        return True
+
+
+def _drop_graph_namespace(db, namespace: str) -> None:
+    """GRAPH.DELETE of a tombstoned custom data-plane namespace. Mirror of
+    hosted_api._drop_team_graph_impl (#2163): select_graph(ns).delete() on
+    every lane; an ABSENT graph (never minted / dropped earlier) raises the
+    FalkorDB "empty key" family — treat that as success so the purge
+    converges. Any other failure propagates: the tombstone row stays the
+    retry anchor (a purged stamp must never race a skipped drop)."""
+    try:
+        db.select_graph(namespace).delete()
+    except Exception as e:
+        msg = str(e).lower()
+        if "empty key" in msg or "invalid graph operation" in msg:
+            return  # absent graph = desired end state (idempotent re-run)
+        raise
+
+
+def _purge_graph_storage(storage, team_id: str, graph_id: str) -> dict[str, Any]:
+    """Delete every backup artifact of one purged graph, best-effort per
+    family (failures are logged + reported and never abort the purge of the
+    namespace — the row is stamped regardless, so residual artifacts are
+    logged loudly for operator follow-up; the artifact families are:
+      - nested per-graph pool   backups/{team}/{gid}/  (#2313)
+      - per-graph ops state     ops/teams/{team}/graphs/{gid}/ (#2313)
+      - legacy FLAT archives of this graph, resolved through the #2370
+        classification index (ops/legacy-flat-index/{team}.json) — only the
+        listing-derived backup_id objects are deleted (#2414 parity)."""
+    out: dict[str, Any] = {"pool_keys": 0, "state_keys": 0,
+                           "flat_keys": 0, "errors": []}
+    for prefix in (f"backups/{team_id}/{graph_id}/",
+                   f"ops/teams/{team_id}/graphs/{graph_id}/"):
+        try:
+            keys = list(storage.list(prefix))
+        except Exception as e:
+            out["errors"].append(f"list {prefix}: {e}")
+            continue
+        for k in keys:
+            try:
+                storage.delete(k)
+                out["pool_keys" if prefix.startswith("backups/")
+                    else "state_keys"] += 1
+            except Exception as e:
+                out["errors"].append(f"delete {k}: {e}")
+    # Legacy flat archives via the classification index.
+    index = {}
+    try:
+        index = read_legacy_flat_index(storage, team_id) or {}
+    except Exception as e:
+        logger.warning("purge %s %s: legacy index unreadable: %s",
+                       team_id, graph_id, e)
+    flat_bids = [
+        str(bid) for bid, ent in (index or {}).items()
+        if isinstance(ent, dict) and str(ent.get("graph_id") or "") == graph_id
+    ]
+    if flat_bids:
+        for bid in flat_bids:
+            try:
+                # Index bids are FULL keys ("{team}/{key}" — the #2370
+                # producer composes parts[1]/parts[2]) — the objects live at
+                # backups/{team}/{key}/..., so list/delete under the full bid.
+                for k in storage.list(f"backups/{bid}/"):
+                    try:
+                        storage.delete(k)
+                        out["flat_keys"] += 1
+                    except Exception as e:
+                        out["errors"].append(f"delete {k}: {e}")
+            except Exception as e:
+                out["errors"].append(f"list backups/{bid}/: {e}")
+        if not out["errors"]:
+            try:
+                _write_json(
+                    storage, _legacy_flat_index_key(team_id),
+                    {bid: ent for bid, ent in (index or {}).items()
+                     if bid not in flat_bids},
+                )
+            except Exception as e:
+                out["errors"].append(f"index rewrite: {e}")
+    return out
+
+
+def _purge_tombstone(source, db, storage, team_id: str, tomb: dict[str, Any],
+                     now_iso: str) -> dict[str, Any]:
+    """Physically erase ONE expired tombstone. Order:
+      1. Re-verify the row is STILL an unpurged tombstone (VGATE race fix:
+         the purge is per-team-locked, but a restore can flip the row
+         between enumeration and this call when the sweep runs without the
+         lock seam) — a restored graph is LIVE: never drop its namespace.
+      2. Ownership guard — only drop the namespace when it still maps to
+         THIS graph id (team_{tid}_{gid}); a mismatch means the namespace
+         was re-occupied by a live graph (name-based reuse / drift) — the
+         guard trips and the namespace is RETAINED (residual: operator
+         review — the live occupant owns it now).
+      3. GRAPH.DELETE the namespace (absent-tolerant; real failures raise
+         → the row stays the retry anchor).
+      4. Delete the backup artifacts (best-effort per family).
+      5. Stamp purged_at (+ purged_residual) — the row is KEPT.
+    Returns {status: purged|residual|skipped|error, ...}."""
+    gid = tomb.get("graph_id")
+    ns = str(tomb.get("namespace") or "")
+    if not _row_still_tombstoned(source, team_id, gid):
+        return {"status": "skipped", "graph_id": gid,
+                "reason": "row_restored_or_gone"}
+    expected = f"team_{team_id}_{gid}"
+    if not ns or ns != expected:
+        # Ownership guard tripped (verifier P1): never GRAPH.DELETE a
+        # namespace that does not derive from this graph id — it may host a
+        # live graph. Residual: stamp purged_at so the trash list stops
+        # offering a restore of data that is no longer addressable, and
+        # record the guard for operator review.
+        logger.warning(
+            "purge ownership guard: team=%s graph=%s namespace=%r "
+            "(expected %r) — namespace RETAINED",
+            team_id, gid, ns, expected)
+        _stamp_purged(source, team_id, gid, now_iso, residual=True)
+        return {"status": "residual", "graph_id": gid,
+                "namespace": ns, "reason": "namespace_ownership_guard"}
+    _drop_graph_namespace(db, ns)
+    artifacts = _purge_graph_storage(storage, team_id, gid)
+    _stamp_purged(source, team_id, gid, now_iso, residual=False)
+    return {"status": "purged", "graph_id": gid, "namespace": ns,
+            "artifacts": artifacts}
+
+
+def _row_still_tombstoned(source, team_id: str, graph_id: str) -> bool:
+    """Re-verify a graph row is STILL an unpurged tombstone (the purge's
+    pre-drop guard — a restore may have flipped it between enumeration and
+    the drop). Supabase lane: query the row. Registry lane: MATCH the node.
+    Fail-closed: a read failure returns False (the purge skips the drop —
+    never erase a namespace on an uncertain row state)."""
+    try:
+        if _is_supabase_source(source):
+            rows = source.query(
+                "graphs", select=["id"],
+                filters=[("id", "eq", graph_id),
+                         ("team_id", "eq", team_id),
+                         ("status", "eq", "deleted"),
+                         ("purged_at", "is", None)],
+            )
+            return bool(rows)
+        rows = source.query(
+            "MATCH (g:Graph {id:$gid, team_id:$tid}) "
+            "WHERE g.status = 'deleted' AND g.purged_at IS NULL RETURN g.id",
+            params={"gid": graph_id, "tid": team_id},
+        ).result_set
+        return bool(rows)
+    except Exception:  # never erase on an uncertain read — fail closed
+        return False
+
+
+def _stamp_purged(source, team_id: str, graph_id: str, now_iso: str,
+                  *, residual: bool) -> None:
+    """Stamp a tombstone row purged_at on the control-plane lane. A failure
+    RAISES (the retry anchor: the data is already dropped — never let a
+    stamp failure masquerade as done)."""
+    if _is_supabase_source(source):
+        from .supabase_control import purge_graph_row
+        purge_graph_row(source, team_id, graph_id, now=now_iso,
+                        residual=residual)
+        return
+    source.query(
+        "MATCH (g:Graph {id:$gid, team_id:$tid, status:'deleted'}) "
+        "SET g.purged_at = $ts, g.purged_residual = $r",
+        params={"gid": graph_id, "tid": team_id, "ts": now_iso,
+                "r": bool(residual)},
+    )
+
+
+def run_graph_purge(
+    *,
+    db,
+    registry,
+    storage,
+    team_ids: list[str] | None = None,
+    grace_days: int = _GRAPH_PURGE_GRACE_DAYS,
+    lock_for: Callable[[str], Any] | None = None,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """#2304: purge every team's expired trash (custom graphs tombstoned
+    longer than ``grace_days`` ago, plus legacy tombstones) — physical
+    erasure. Returns the run result.
+
+    Ownership-guarded namespace drops; idempotent (purged rows are never
+    re-enumerated; absent namespaces converge). Per-team isolation: one
+    bad team never aborts the purge of the others. Default graph can never
+    be purged (delete refuses it — tombstones are custom-only).
+    """
+    now = now or datetime.now(timezone.utc)  # noqa: UP017
+    now_iso = now.isoformat()
+    cutoff = (now - timedelta(days=max(1, grace_days))).isoformat()
+    if team_ids is None:
+        try:
+            team_ids = enumerate_teams(registry)
+        except RuntimeError as e:
+            return {"status": "enum_failed", "error": str(e),
+                    "teams_purged": 0}
+    purged: list[dict[str, Any]] = []
+    residuals: list[dict[str, Any]] = []
+    errors: list[dict[str, Any]] = []
+    teams_purged = 0
+    for team_id in sorted(team_ids or []):
+        ctx = lock_for(team_id) if lock_for else nullcontext()
+        with ctx:
+            try:
+                tombs = enumerate_team_tombstones(registry, team_id)
+            except Exception as e:  # per-team isolation
+                logger.exception("purge tombstone enumeration of %s failed",
+                                 team_id)
+                errors.append({"team_id": team_id, "error": str(e)})
+                continue
+            team_done = 0
+            for tomb in tombs:
+                if not _graph_purged_at_expired(
+                        tomb.get("deleted_at"), cutoff):
+                    continue  # inside the grace window — still recoverable
+                try:
+                    res = _purge_tombstone(
+                        registry, db, storage, team_id, tomb, now_iso)
+                except Exception as e:  # per-graph isolation: the row is
+                    # the retry anchor (unpurged) — never abort the pass
+                    logger.exception("purge of team=%s graph=%s failed",
+                                     team_id, tomb.get("graph_id"))
+                    errors.append({"team_id": team_id,
+                                   "graph_id": tomb.get("graph_id"),
+                                   "error": str(e)})
+                    continue
+                if res.get("status") == "purged":
+                    purged.append(res)
+                    team_done += 1
+                elif res.get("status") == "residual":
+                    residuals.append(res)
+                    team_done += 1
+            if team_done:
+                teams_purged += 1
+    return {"status": "ok" if not errors else "errors",
+            "purged_at": now_iso, "grace_days": grace_days,
+            "teams_purged": teams_purged,
+            "purged": purged, "residuals": residuals, "errors": errors}
