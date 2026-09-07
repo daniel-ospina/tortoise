@@ -63,6 +63,7 @@ from tortoise.supabase_control import (
     trash_graphs,
     team_email,
     team_members,
+    team_onboarding_email_sent,
     team_onboarding_state,
     team_api_keys,
     update_last_used,
@@ -71,6 +72,7 @@ from tortoise.supabase_control import (
     user_memberships,
     user_identity_inventory,
     reserve_unlink,
+    set_team_onboarding_email_sent,
     owner_user_id,
 )
 
@@ -3107,3 +3109,47 @@ class TestConcurrentAcceptSingleUseSupabase:
         row = fake.tables["invitations"][0]
         assert row.get("status") == "accepted"  # winner's commit stands
         assert row.get("accepted_at") is not None
+
+
+# ── #2406: onboarding-email marker (teams.onboarding_email_sent_at) ─────────
+
+class TestOnboardingEmailMarker:
+    def test_marker_unset_then_rowcount_gated_stamp(self, fake):
+        """Fresh team: marker unset → the stamp performs the write once; a
+        second stamp is a zero-row no-op (rowcount-gated — a concurrent
+        sender can never clobber the first provider-accept timestamp)."""
+        assert team_onboarding_email_sent(fake, "team-free-001") is False
+        assert set_team_onboarding_email_sent(fake, "team-free-001") is True
+        assert team_onboarding_email_sent(fake, "team-free-001") is True
+        first = fake.tables["teams"][0]["onboarding_email_sent_at"]
+        assert set_team_onboarding_email_sent(fake, "team-free-001") is False
+        assert fake.tables["teams"][0]["onboarding_email_sent_at"] == first
+
+    def test_marker_helpers_unknown_team(self, fake):
+        assert team_onboarding_email_sent(fake, "no-such-team") is None
+        assert set_team_onboarding_email_sent(fake, "no-such-team") is False
+
+    def test_team_by_id_reads_marker_column(self, fake):
+        fake.tables["teams"][0]["onboarding_email_sent_at"] = \
+            "2026-09-06T10:00:00+00:00"
+        team = team_by_id(fake, "team-free-001")
+        assert team is not None
+        assert team["onboarding_email_sent_at"] == "2026-09-06T10:00:00+00:00"
+
+    def test_marker_column_drift_degrades_marker_tier_only(self, fake,
+                                                           caplog):
+        """#2406: a schema missing ONLY onboarding_email_sent_at (deploy
+        ordering drift) fails soft — the marker's OWN tier is dropped first by
+        the #1096 ladder (marker reads unset → one best-effort send attempt,
+        logged) while real billing/import/suspension state stays readable."""
+        fake.tables["teams"][0]["subscription_status"] = "active"
+        fake.tables["teams"][0]["suspended_at"] = \
+            "2026-09-01T00:00:00+00:00"
+        fake.missing_columns = {"teams": {"onboarding_email_sent_at"}}
+        with caplog.at_level("WARNING", logger="tortoise.supabase_control"):
+            team = team_by_id(fake, "team-free-001")
+        assert team is not None
+        assert team.get("onboarding_email_sent_at") is None  # padded unset
+        assert team.get("subscription_status") == "active"   # billing tier intact
+        assert team.get("suspended_at") == "2026-09-01T00:00:00+00:00"
+        assert any("additive" in r.message for r in caplog.records)

@@ -1,0 +1,33 @@
+-- ============================================================================
+-- Migration 20260907000001: onboarding-call offer email sent-at marker (#2406)
+-- ----------------------------------------------------------------------------
+-- The tenant-provision edge function fires POST /internal/onboarding-email
+-- once per NEW hosted human signup (right after first-org provisioning, the
+-- only live door for hosted first-org signups under #2323 name-first
+-- provisioning). The FastAPI endpoint AWAITS the Resend send and stamps this
+-- column ONLY after the provider accepts — the durable exactly-once guard:
+-- a marker set means "signup email accepted by provider"; a replay /
+-- re-provision / re-signin sees it and skips (never double-email).
+--
+--   teams.onboarding_email_sent_at  (timestamptz, nullable) — provider-accept
+--     stamp for the #2406 signup email. The stamp PATCH is rowcount-gated
+--     (WHERE id AND marker IS NULL) so concurrent senders cannot both claim
+--     the send; a send that is skipped/failed leaves the marker UNSET and the
+--     edge-fn retry (or an ops replay) retries. Never written by
+--     provision_team's ON CONFLICT (id) refresh (only name/email are
+--     refreshed there), so a re-provision preserves the marker.
+--
+-- Additive + idempotent (IF NOT EXISTS), same pattern as 20260830000001.
+-- Nullable, no default, no NOT NULL — a schema missing it (drift, one
+-- migration behind) fails soft: the #1096 ladder drops the marker's OWN tier
+-- (_TEAM_ADDITIVE_ONBOARDING_TIER, newest dropped first) so only the marker
+-- degrades to unset. The control plane reads/writes via service_role, so no
+-- new grants are needed (precedent: 20260817000001 / 20260830000001).
+--
+-- ⚠️ Deploy ORDER: this migration must apply BEFORE the FastAPI + edge-fn
+-- code ships (a PGRST204 missing-column error degrades fail-soft to a
+-- logged miss, never a signup failure).
+-- ============================================================================
+
+ALTER TABLE public.teams
+    ADD COLUMN IF NOT EXISTS onboarding_email_sent_at timestamptz;
