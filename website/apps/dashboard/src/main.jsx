@@ -21,12 +21,15 @@ import { WIZARD_STEPS, WIZARD_FORK_OPTIONS, resolveBuildCatalog, orgNameError, d
 // unit-tested (memorySourcesStatus.test.js).
 import { docsIndexedLabel, formatRelativeTime, jobStatusLine } from './memorySourcesStatus.js'
 // #1708 D8: pure session-key predicates extracted to sessionKey.js (node --test
-// unit-tested). #2166: isManagedKey selects the durable product keys the API
-// Keys page shows. #2246 (ADR-010): the held-key machinery (isActiveKey,
-// isSessionKey, classifyHeldKey, heldKeyClearState, nextRegenInstallState,
+// unit-tested). #2166 + #2426: isManagedKey selects the durable product keys
+// the API Keys page shows — bootstrap session credentials excluded, expiring
+// durable keys (a #2426 mint with a chosen lifetime) INCLUDED. #2246
+// (ADR-010): the held-key machinery (isActiveKey, isSessionKey,
+// classifyHeldKey, heldKeyClearState, nextRegenInstallState,
 // probeClassifyStoredKey) was deleted — the browser never holds an API key in
 // session mode; durableConnectKey + usableDurableRows resolve the connect
-// step's gate from the keys-table rows.
+// step's gate from the keys-table rows (Never-keys-only embed policy, #2426
+// decision 2).
 import { isManagedKey, durableConnectKey } from './sessionKey.js'
 import {
   canManageGraphKeys,
@@ -67,6 +70,81 @@ const LAST_AUTH_METHOD = 'tortoise_last_auth_method'
 const CLAIM_KEY_STORAGE = 'tt_claim_key'
 const INVITE_TOKEN_STORAGE = 'tortoise.inviteToken'
 const CLAIM_PENDING_COOKIE = 'tt_claim_pending'
+
+// ── #2426: configurable API-key expiration (mint-time, market presets) ─────
+// Owner decision ("copy what's common"): 30d (default) / 60d / 90d / 1y /
+// Custom date / No expiration (Never). Presets travel as expires_in DAYS on
+// the mint body (1-366, GitHub's ceiling — the server computes the absolute
+// expires_at; the dual-param server path is avoided). Custom dates are
+// converted to whole days from today and clamped to the same 1-366 window.
+// Expiry is immutable after creation (Anthropic rule — no PATCH-expiry), so
+// the UI only ever sets it at create/rotate time.
+const KEY_EXPIRY_PRESETS = [
+  { id: '30', label: '30 days' },
+  { id: '60', label: '60 days' },
+  { id: '90', label: '90 days' },
+  { id: '365', label: '1 year' },
+  { id: 'custom', label: 'Custom date…' },
+  { id: 'never', label: 'No expiration' },
+]
+const KEY_MAX_EXPIRY_DAYS = 366
+const KEY_SOON_DAYS = 14
+const _MS_PER_DAY = 86400000
+
+// #2426: Custom date (YYYY-MM-DD) → whole days until that date, clamped to
+// 1..366. Null when missing/invalid/out-of-range — the + New key button stays
+// disabled until a valid Custom date is picked (never silently mint Never).
+function expiryDaysFromDate(dateStr) {
+  if (!dateStr) return null
+  const t = Date.parse(`${dateStr}T00:00:00Z`)
+  if (Number.isNaN(t)) return null
+  const days = Math.ceil((t - Date.now()) / _MS_PER_DAY)
+  return (days >= 1 && days <= KEY_MAX_EXPIRY_DAYS) ? days : null
+}
+
+// #2426: a key row's lifetime span in days (expires_at − created_at at
+// mint-time), clamped 1..366 — rotate carries the span over to the
+// replacement (Cloudflare 'resets relative to now' semantics; a key minted
+// 30d ago expiring in 5d → a fresh 30d replacement). Null when the row
+// never expires (Never stays Never) or the timestamps are unreadable.
+function lifetimeDaysFromRow(row) {
+  if (!row || !row.expires_at) return null
+  const start = Date.parse(row.created_at || row.createdAt || '')
+  const end = Date.parse(row.expires_at)
+  if (Number.isNaN(start) || Number.isNaN(end)) return null
+  const days = Math.round((end - start) / _MS_PER_DAY)
+  if (days < 1) return null
+  return Math.min(KEY_MAX_EXPIRY_DAYS, days)
+}
+
+// #2426: expiry display derivation for the keys-table Expires cell.
+// Returns { text, cls, title }: never → plain 'Never'; past → terminal
+// 'expired' (row stays listed — tombstone, DigitalOcean's delete-on-expire
+// is the anti-pattern); ≤14d → absolute date + amber 'in N days'; else the
+// absolute date. The server's expires_at is an exact mint-time timestamp,
+// so a 30d key reads 'in 30 days' the day it is made (ceil keeps a
+// partially-elapsed day from understating).
+function fmtExpiry(iso, now = Date.now()) {
+  if (!iso) return { text: 'Never', cls: '' }
+  const t = Date.parse(iso)
+  if (Number.isNaN(t)) return { text: String(iso), cls: '' }
+  const dateText = new Date(t).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })
+  const ms = t - now
+  if (ms <= 0) return { text: 'expired', cls: 'expired', title: `Expired ${dateText}` }
+  const days = Math.ceil(ms / _MS_PER_DAY)
+  if (days <= KEY_SOON_DAYS) {
+    return { text: `${dateText} · in ${days} day${days === 1 ? '' : 's'}`, cls: 'expiring', title: `Expires ${new Date(t).toLocaleString()}` }
+  }
+  return { text: dateText, cls: '', title: `Expires ${new Date(t).toLocaleString()}` }
+}
+
+// #2426: rotate confirm + show-once card share this human date string
+// (absolute, locale-formatted) for an expiry instant.
+function fmtExpiryDate(iso) {
+  const t = Date.parse(iso)
+  if (Number.isNaN(t)) return String(iso)
+  return new Date(t).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })
+}
 
 
 // #2002 (W6): pure captured-sessions view/delete derivations (node --test —
@@ -751,6 +829,14 @@ function claimIntentInFlight() {
   const [busy, setBusy] = React.useState(false)
   const [newKey, setNewKey] = React.useState(null)
   const [newKeyName, setNewKeyName] = React.useState('') // key-label: label for the next minted key
+  // #2426: expiry choice for the next minted key (presets 30d default /
+  // 60d / 90d / 1y / Custom date / Never). Sent as expires_in days; Never
+  // sends NO expiry param (absent = never, legacy mint shape preserved).
+  const [newKeyExpiryPreset, setNewKeyExpiryPreset] = React.useState('30')
+  const [newKeyExpiryDate, setNewKeyExpiryDate] = React.useState('')
+  // #2426: the show-once card's authoritative server echo of the minted
+  // key's expiry (ISO string, or null = Never). Cleared wherever newKey is.
+  const [newKeyExpiresAt, setNewKeyExpiresAt] = React.useState(null)
   // key-label: inline-rename state (which row is being edited + its draft text)
   const [editingKeyId, setEditingKeyId] = React.useState(null)
   const [editingKeyName, setEditingKeyName] = React.useState('')
@@ -1001,7 +1087,18 @@ function claimIntentInFlight() {
     if (step3PasteAutofocus) return
     if (wizardCardRef.current) wizardCardRef.current.focus()
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [wizardStep, welcomeMode, authed, wizardPaused, welcomeHasOrg, wizardShowPaste])
+  }, [wizardStep, welcomeMode, authed, wizardPaused])
+  // ⛔ #2426 e2e catch (P0): welcomeHasOrg (~line 4890) and wizardShowPaste
+  // (~1832) are declared LATER in this giant component — a hook dep array
+  // evaluates eagerly DURING render, so listing either here threw "Cannot
+  // access … before initialization" on every authenticated render and
+  // blanked the whole dashboard on main (introduced when 38498ab4 added
+  // both to this effect's deps). The effect BODY is a closure that runs
+  // post-render (safe to read them there — step3PasteAutofocus stays
+  // correct). Semantics of dropping them: toggling the paste disclosure on
+  // the SAME step now does not re-run the effect, which is exactly the
+  // "must not yank focus on disclosure toggle" intent — the stepChanged
+  // guard already no-ops it.
   const [onboardingComplete, setOnboardingComplete] = React.useState(false)
   const [welcomeOriented, setWelcomeOriented] = React.useState(false)
   const [wizardSubject, setWizardSubject] = React.useState('')
@@ -1037,7 +1134,14 @@ function claimIntentInFlight() {
 
   // #1147: shared mint — POST /v1/team/keys and return the plaintext key.
   // `name` (optional) is the key label — sent only when non-empty.
-  async function mintKey(activeKey, name) {
+  // #2426: optional `expiresInDays` (1-366) rides the body as expires_in
+  // (never the expires_at param — the dashboard path is days-only); null /
+  // undefined = No expiration (Never) → the body stays the legacy shape so
+  // the byte-identical pre-#2426 response (no expires_at key) is preserved.
+  // Returns the full response OBJECT {id, key, key_prefix, created_at, name,
+  // expires_at?} — callers read .key for the shown-once plaintext and
+  // .expires_at (when present) for the expiry echo.
+  async function mintKey(activeKey, name, expiresInDays) {
     // #2167 rule 4: session-mode durable-key CREATE (shared by createKey +
     // #2211's wizardMintDurableKey + regenerateKey's rotate mint) rides the
     // session JWT + pins ?team_id=<selected> (multi-membership correctness —
@@ -1048,13 +1152,16 @@ function claimIntentInFlight() {
     // calls api()); the activeKey param is vestigial (kept for signature
     // stability).
     const q = (sessionTokenRef.current && currentTeamId) ? `?team_id=${encodeURIComponent(currentTeamId)}` : ''
+    const payload = {}
+    if (name) payload.name = name
+    if (expiresInDays != null && !Number.isNaN(expiresInDays)) payload.expires_in = expiresInDays
     const k = await api(`/v1/team/keys${q}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...(sessionTokenRef.current ? {} : (activeKey ? { Authorization: `Bearer ${activeKey}` } : {})) },
       useSession: true,  // #1148: management → session JWT when signed in
-      body: name ? JSON.stringify({ name }) : '{}',
+      body: JSON.stringify(payload),
     })
-    return k.api_key || k.key || k
+    return k
   }
   // #1082 (PR1): claim-card state — paste tt_ key → OAuth → POST /v1/claim.
   const [claimKey, setClaimKey] = React.useState(() => {
@@ -3161,6 +3268,7 @@ function claimIntentInFlight() {
     setKeys([])
     setSessions([])
     setNewKey(null)
+    setNewKeyExpiresAt(null) // #2426: expiry echo rides the show-once card
     // #1082: clear the claim intent on logout (a stale pasted key must not
     // auto-claim the next user's session).
     setClaimKey('')
@@ -3560,7 +3668,10 @@ function claimIntentInFlight() {
           ? ((teams.find((t) => t.team_id === teamIdRef.current) || teams[0] || {}).team_name || '')
           : '') || ''
       const keyName = durableKeyName(orgForKey, new Date(), (Array.isArray(keys) ? keys : []).map((k) => k && k.name))
-      const keyVal = await mintKey('', keyName)
+      // #2426: the connect-step mint is the embed surface — the wizard stays
+      // Never-keys-only (decision 2), so wizardMintDurableKey sends NO expiry
+      // param (mk.expires_at absent → the card/table read Never).
+      const mk = await mintKey('', keyName)
       // #2326: a team switch during the POST must NOT silently swallow the
       // mint — surface it so the user isn't left believing connect produced
       // a usable key. The key was created on the PREVIOUS org (mintKey pinned
@@ -3573,7 +3684,7 @@ function claimIntentInFlight() {
         setWizardDurableError('The organization changed while the key was being created — the key was created on the previous organization. Switch back to it in the account menu to use it, or create another key here.')
         return
       }
-      setWizardDurableKey(keyVal)
+      setWizardDurableKey((mk && (mk.key || mk.api_key)) || '')
       // #2246 (ADR-010): the durable key is NOT installed (no
       // localStorage/teamKeysRef/apiKey write — the browser never holds a
       // key). wizardDurableKey keeps it in-memory so the connect snippet can
@@ -3641,7 +3752,9 @@ function claimIntentInFlight() {
     setBackupInfo(null)
     setBackupsStatus('loading') // #1923: mirror the backupInfo reset
     setNewKey(null)        // Round-16: the plaintext key card was shown once on the old team
+    setNewKeyExpiresAt(null) // #2426: expiry echo rides the show-once card
     setNewKeyName('')      // key-label: a typed label must not leak onto another team's mint
+    setNewKeyExpiryDate('') // #2426: a picked Custom date must not leak onto another team's mint
     setEditingKeyId(null)  // key-label: close any in-flight inline rename across teams
     renameCancelRef.current = true // key-label: the unmount-blur must not fire a rename for the old team
     // #2195 (durable connect key): the wizard's minted/pasted durable key is
@@ -4290,19 +4403,31 @@ function claimIntentInFlight() {
     // against the ref after the await (the round-16 mutation pattern).
     const _teamAtCall = currentTeamId
     if (busy) return // Round-27: in-function double-click guard (disabled attr is click-path only)
+    // #2426: a Custom-date preset with no valid in-range date must not mint
+    // — the button is also disabled, but Enter-to-create needs the same gate
+    // (never silently mint a Never key when the user picked Custom).
+    if (newKeyExpiryPreset === 'custom' && !expiryDaysFromDate(newKeyExpiryDate)) return
     setCapNotice('')
     setError('')
     setBusy(true)
     try {
       // #2246 (ADR-010): mintKey rides the session JWT (rule 4) + pins
       // ?team_id= — no held key is involved in session-mode create.
-      const newKeyVal = await mintKey('', newKeyName.trim() || undefined)
+      // #2426: preset → expires_in days (Never → null → no param).
+      const days = newKeyExpiryPreset === 'never' ? null
+        : (newKeyExpiryPreset === 'custom' ? expiryDaysFromDate(newKeyExpiryDate)
+          : Number(newKeyExpiryPreset))
+      const mk = await mintKey('', newKeyName.trim() || undefined, days)
       // Identity guard BEFORE any UI write: a team switch during the POST must
       // not render this team's plaintext key card or key table under the new
       // team's header (switchTeam's setNewKey(null) already ran for the new team).
       if (teamIdRef.current !== _teamAtCall) return
-      setNewKey(newKeyVal)
+      setNewKey((mk && (mk.key || mk.api_key)) || '')
+      // #2426: the show-once card states the key's expiry — the authoritative
+      // server echo (absent on a Never mint → null → 'never expires').
+      setNewKeyExpiresAt((mk && mk.expires_at) || null)
       setNewKeyName('')
+      setNewKeyExpiryDate('')
       await loadAll('')
     } catch (e) {
       // Round-18: a stale request's error must not land under the new team
@@ -4340,7 +4465,14 @@ function claimIntentInFlight() {
     // #2246 (PM-1): the confirm names the row (name · prefix · created) so a
     // one-click rotate never silently kills an agent key the user cannot
     // identify (rows are hash-only; names may be unset).
-    if (!confirm(`Rotate ${rowName}? A replacement key is created (shown once) and ${rowName} is revoked — applications using the old key will stop working.\n\n${rowDesc}`)) return
+    // #2426: the confirm ALSO states the replacement's expiry — the old
+    // key's lifetime span is re-applied from mint-time with a fresh clock
+    // (Cloudflare 'resets relative to now' semantics); Never stays Never.
+    const rowLifetime = lifetimeDaysFromRow(row0)
+    const replacementExpiry = rowLifetime
+      ? `The replacement expires ${fmtExpiryDate(new Date(Date.now() + rowLifetime * _MS_PER_DAY).toISOString())} (the same ${rowLifetime}-day lifetime as this key).`
+      : 'The replacement never expires (same as this key).'
+    if (!confirm(`Rotate ${rowName}? A replacement key is created (shown once) and ${rowName} is revoked — applications using the old key will stop working. ${replacementExpiry}\n\n${rowDesc}`)) return
     setCapNotice('')
     setError('')
     setBusy(true)
@@ -4349,7 +4481,10 @@ function claimIntentInFlight() {
       // #2229: label carry-over — the row may leave the closure list mid-
       // flight (switch/refresh) — degrade to an unlabeled mint.
       const oldRow = (keys || []).find((k) => (k.id || k.key_id) === keyId)
-      const newKeyVal = await mintKey('', (oldRow && oldRow.name) || undefined)
+      // #2426: rotate re-applies the old row's lifetime span (expires_in
+      // days from expires_at − created_at; Never → null → no param).
+      const mk = await mintKey('', (oldRow && oldRow.name) || undefined,
+                               lifetimeDaysFromRow(oldRow))
       // Round-29 (review P1): NEVER revoke without a confirmed target — if
       // the team moved during the mint RTT, bail BEFORE the destructive leg
       // (the old row may not belong to the now-selected team). The minted
@@ -4360,7 +4495,8 @@ function claimIntentInFlight() {
       if (teamIdRef.current !== _teamAtCall) return
       // #2246: no held install — the replacement is shown once and managed
       // from the table like any other durable.
-      setNewKey(newKeyVal)
+      setNewKey((mk && (mk.key || mk.api_key)) || '')
+      setNewKeyExpiresAt((mk && mk.expires_at) || null)
       await loadAll('')
     } catch (e) {
       if (teamIdRef.current === currentTeamId) {
@@ -4518,7 +4654,9 @@ function claimIntentInFlight() {
   // users create/rotate keys from the API Keys tab (each shown once).
   // keys[] stays unfiltered in state so managedKeys (the isManagedKey render
   // filter below) and durableConnectKey's rows-resolution keep working off
-  // the full payload (#2246).
+  // the full payload (#2246). #2426: managedKeys now INCLUDES expiring
+  // durable rows (bootstrap-exclusion only), so the table shows their
+  // Expires column state (soon/expired tombstones stay listed).
   const managedKeys = (keys || []).filter(isManagedKey)
 
   // #2246 (review, P1): row-truth invalidation of in-memory plaintext. Post-
@@ -5174,6 +5312,18 @@ function claimIntentInFlight() {
                                   ? 'This Organization already has API key(s) — each key\'s full text was shown once when created and the table can\'t reveal it again. Create a fresh key here (shown once), or rotate an existing key in the API Keys tab and use its replacement.'
                                   : 'The setup command embeds an API key for this Organization. Keys are shown once when created — create a new key now (shown once), or create/regenerate one in the API Keys tab.')}
                           </p>
+                          {/* #2426 decision 2: the embed/connect surface stays
+                              Never-keys-only — a key that expires would stop
+                              authenticating mid-agent-life. Keys minted HERE
+                              never expire; the hint tells owners/admins to
+                              pick No expiration for agent keys they create
+                              from the API Keys tab (which now defaults to a
+                              30-day lifetime). */}
+                          {isOwnerAdmin && (
+                            <p className="dim small" style={{ margin: '0.5rem 0 0', lineHeight: 1.5 }}>
+                              Keys embedded in agents should never expire — when you create or rotate one in the API Keys tab, choose <strong>No expiration</strong>.
+                            </p>
+                          )}
                           {wizardDurableError && (
                             <p className="error" role="alert" style={{ margin: '0.6rem 0 0', fontSize: 13 }}>{wizardDurableError}</p>
                           )}
@@ -5267,36 +5417,49 @@ function claimIntentInFlight() {
                                 // user pastes their own key). Never sent to
                                 // the server; shown once, cleared on use.
                                 const check = durableConnectKey('', pasted, keys)
-                                if (check.source === 'bootstrap' || check.source === 'revoked' || check.source === 'disabled') {
-                                  // #2246 (review, P2): paste-error — role- and
-                                  // state-branched. Rotate/trash/create are
-                                  // owner/admin-only as DASHBOARD policy
-                                  // (client isOwnerAdmin render gates) —
-                                  // server-side, the key-management WRITEs
-                                  // (POST mint, DELETE revoke, PATCH
-                                  // toggle/rename) are _require_owner_admin-
-                                  // gated on the session lane since #2297
-                                  // (#1148 for PATCH; list stays member-open
-                                  // #1828). Only owners/admins (isOwnerAdmin)
-                                  // get the create/rotate path. The
-                                  // REMEDY must also match the SOURCE:
-                                  // bootstrap/expiring rows are FILTERED from
-                                  // the API Keys table (managedKeys =
-                                  // isManagedKey), so a rotate is impossible
-                                  // for that branch — only a fresh create
-                                  // exists there. Revoked/disabled rows are
-                                  // durable and in-table, so that branch
-                                  // keeps the create-or-rotate path.
+                                if (check.source === 'bootstrap' || check.source === 'expiring' || check.source === 'revoked' || check.source === 'disabled') {
+                                  // #2246 (review, P2) + #2426: paste-error —
+                                  // role- and state-branched.
+                                  // Rotate/trash/create are owner/admin-only
+                                  // as DASHBOARD policy (client isOwnerAdmin
+                                  // render gates) — server-side, the
+                                  // key-management WRITEs (POST mint, DELETE
+                                  // revoke, PATCH toggle/rename) are
+                                  // _require_owner_admin-gated on the session
+                                  // lane since #2297 (#1148 for PATCH; list
+                                  // stays member-open #1828). Only
+                                  // owners/admins (isOwnerAdmin) get the
+                                  // create/rotate path. The REMEDY must also
+                                  // match the SOURCE: bootstrap rows are
+                                  // FILTERED from the API Keys table
+                                  // (managedKeys = isManagedKey), so a rotate
+                                  // is impossible for that branch — only a
+                                  // fresh create exists there. EXPIRING
+                                  // durable rows (a mint with a chosen
+                                  // lifetime — #2426) ARE in-table and
+                                  // rotatable: the expiring branch keeps the
+                                  // create-or-rotate path and the reason says
+                                  // the key would die mid-embed (Never-keys-
+                                  // only embed policy, decision 2).
+                                  // Revoked/disabled rows are durable and
+                                  // in-table, so that branch keeps the
+                                  // create-or-rotate path.
                                   const reason = check.source === 'bootstrap'
                                     ? 'It was created for a login session, so it stops working after 24 hours'
-                                    : 'Revoked and disabled keys never authenticate'
+                                    : (check.source === 'expiring'
+                                        ? 'It expires, and a key embedded in an agent must never expire'
+                                        : 'Revoked and disabled keys never authenticate')
                                   const remedy = check.source === 'bootstrap'
                                     ? (isOwnerAdmin
                                         ? 'Create a new key in the API Keys tab and paste it here.'
                                         : 'Ask an owner or admin to create a new key for you, then paste it here.')
-                                    : (isOwnerAdmin
-                                        ? 'Create or rotate a key in the API Keys tab and paste the new one.'
-                                        : 'Ask an owner or admin to create or rotate a key for you, then paste it here.')
+                                    : (check.source === 'expiring'
+                                        ? (isOwnerAdmin
+                                            ? 'Rotate it in the API Keys tab and paste the replacement — or create a new key with No expiration.'
+                                            : 'Ask an owner or admin to create or rotate a key for you, then paste it here.')
+                                        : (isOwnerAdmin
+                                            ? 'Create or rotate a key in the API Keys tab and paste the new one.'
+                                            : 'Ask an owner or admin to create or rotate a key for you, then paste it here.'))
                                   setWizardDurableError(`That key can't be used in the setup command. ${reason} — ${remedy}`)
                                   return
                                 }
@@ -6292,7 +6455,7 @@ function claimIntentInFlight() {
                   (Members-tab precedent) — as a span inside the flex .row it
                   wrapped badly beside the h2 on narrow viewports. */}
               {isOwnerAdmin && (
-                <div className="inline-form">
+                <div className="inline-form key-create-form">
                   <input
                     placeholder="Label (e.g. CI, staging)"
                     aria-label="New key label"
@@ -6301,7 +6464,37 @@ function claimIntentInFlight() {
                     onChange={(e) => setNewKeyName(e.target.value)}
                     onKeyDown={(e) => e.key === 'Enter' && createKey()}
                   />
-                  <button onClick={createKey} disabled={busy}>+ New key</button>
+                  {/* #2426: expiry preset dropdown (30d default / 60d /
+                      90d / 1y / Custom date… / No expiration). The preset
+                      rides the mint body as expires_in days; Never sends no
+                      expiry param. Custom reveals a date input (min/max
+                      bound to the 1-366-day window); + New key stays
+                      disabled until a valid Custom date is picked. */}
+                  <select
+                    aria-label="New key expiry"
+                    value={newKeyExpiryPreset}
+                    onChange={(e) => setNewKeyExpiryPreset(e.target.value)}
+                    title="When this key stops working — expiry is set at creation and cannot be changed later"
+                  >
+                    {KEY_EXPIRY_PRESETS.map((p) => (
+                      <option key={p.id} value={p.id}>{p.label}</option>
+                    ))}
+                  </select>
+                  {newKeyExpiryPreset === 'custom' && (
+                    <input
+                      type="date"
+                      aria-label="Custom expiry date"
+                      value={newKeyExpiryDate}
+                      min={new Date(Date.now() + _MS_PER_DAY).toISOString().slice(0, 10)}
+                      max={new Date(Date.now() + KEY_MAX_EXPIRY_DAYS * _MS_PER_DAY).toISOString().slice(0, 10)}
+                      onChange={(e) => setNewKeyExpiryDate(e.target.value)}
+                      onKeyDown={(e) => { if (e.key === 'Enter' && expiryDaysFromDate(newKeyExpiryDate)) { e.preventDefault(); createKey() } }}
+                    />
+                  )}
+                  <button
+                    onClick={createKey}
+                    disabled={busy || (newKeyExpiryPreset === 'custom' && !expiryDaysFromDate(newKeyExpiryDate))}
+                  >+ New key</button>
                 </div>
               )}
             </div>
@@ -6327,7 +6520,15 @@ function claimIntentInFlight() {
               <div className="new-key">
                 <strong>Your new key (shown once):</strong>
                 <code className="key-value">{newKey}</code>
-                <button className="ghost small" onClick={() => { navigator.clipboard.writeText(newKey); setNewKey(null) }}>Copy &amp; done</button>
+                {/* #2426: the show-once card states the key's expiry (the
+                    server echo; absent on a Never mint). Rotate/create set
+                    newKeyExpiresAt from the mint response. */}
+                {newKeyExpiresAt ? (
+                  <span className="dim">expires {fmtExpiryDate(newKeyExpiresAt)}</span>
+                ) : (
+                  <span className="dim">never expires</span>
+                )}
+                <button className="ghost small" onClick={() => { navigator.clipboard.writeText(newKey); setNewKey(null); setNewKeyExpiresAt(null) }}>Copy &amp; done</button>
               </div>
             )}
             {/* #2246 (ADR-010): the keys table is uniform — every durable row
@@ -6338,9 +6539,9 @@ function claimIntentInFlight() {
                 320-375px viewports. */}
             <div className="keys-table-wrap">
             <table>
-              <thead><tr><th scope="col">Name</th><th scope="col">Prefix</th><th scope="col">Created</th><th scope="col">Status</th><th scope="col"><span className="sr-only">Actions</span></th></tr></thead>
+              <thead><tr><th scope="col">Name</th><th scope="col">Prefix</th><th scope="col">Created</th><th scope="col">Expires</th><th scope="col">Status</th><th scope="col"><span className="sr-only">Actions</span></th></tr></thead>
               <tbody>
-                {managedKeys.length === 0 && <tr><td colSpan="5" className="dim">No keys yet.</td></tr>}
+                {managedKeys.length === 0 && <tr><td colSpan="6" className="dim">No keys yet.</td></tr>}
                 {managedKeys.map((k) => (
                   <tr key={k.id}>
                     <td>
@@ -6378,6 +6579,20 @@ function claimIntentInFlight() {
                     </td>
                     <td><code>{k.key_prefix || k.id?.slice(0, 12)}</code></td>
                     <td>{fmtTime(k.created_at || k.createdAt)}</td>
+                    {/* #2426: Expires cell — absolute date · 'Never' when
+                        null · amber 'in N days' at ≤14d · terminal 'expired'
+                        (row-dim styling family) when past. Expired rows stay
+                        listed (tombstone) and stay rotatable — rotate
+                        re-applies the lifetime span with a fresh clock. */}
+                    <td>{(() => {
+                      const ex = fmtExpiry(k.expires_at)
+                      // #2426: plain 'Never' / date text (no dim class — the
+                      // status cell's dim identifies 'disabled'; the research
+                      // pattern is an unadorned Never). Expiring/expired rows
+                      // carry their own classes + title tooltip.
+                      if (!ex.cls) return ex.text
+                      return <span className={ex.cls} title={ex.title || undefined}>{ex.text}</span>
+                    })()}</td>
                     <td>
                       {k.revoked_at ? <span className="revoked">revoked</span>
                         : k.enabled === false ? <span className="dim">disabled</span>
