@@ -324,14 +324,94 @@ def read_team_state(storage, team_id: str) -> dict[str, Any]:
 # bucket stands, fail-soft).
 _LEGACY_FLAT_INDEX_PREFIX = "ops/legacy-flat-index/"
 _LEGACY_FLAT_INDEX_MAX = 2000
+# #2466: purge-erased flat bids are recorded here so a concurrent sweep's
+# stale reclassification can never resurrect index entries for deleted
+# objects (the sweep and purge both rewrite the full index object — the R2
+# last-writer-wins race). Entries age out after this horizon (any real
+# concurrent window is minutes; 14 days is generous).
+_PURGE_FLAT_GHOSTS_PREFIX = "ops/purge-flat-ghosts/"
+_PURGE_FLAT_GHOSTS_MAX_AGE_DAYS = 14
 
 
 def _legacy_flat_index_key(team_id: str) -> str:
     return f"{_LEGACY_FLAT_INDEX_PREFIX}{team_id}.json"
 
 
+def _purge_flat_ghosts_key(team_id: str) -> str:
+    return f"{_PURGE_FLAT_GHOSTS_PREFIX}{team_id}.json"
+
+
+def read_purge_flat_ghosts(storage, team_id: str) -> dict[str, Any]:
+    """#2466: purge-erased flat bids of a team ({full_bid: {erased_at}})."""
+    return _read_json(storage, _purge_flat_ghosts_key(team_id))
+
+
+def _record_purged_flat_bids(storage, team_id: str, bids: list[str],
+                             erased_at: str) -> None:
+    """#2466: record purge-erased flat bids so the sweep's next index
+    rewrite drops any stale reclassification of them. Best-effort: a failure
+    to record is logged (the index-rewrite race window is small; the purge
+    row is stamped regardless)."""
+    if not bids:
+        return
+    ghosts = read_purge_flat_ghosts(storage, team_id)
+    ghosts.update({str(b): {"erased_at": erased_at} for b in bids})
+    try:
+        _write_json(storage, _purge_flat_ghosts_key(team_id), ghosts)
+    except Exception as e:
+        logger.warning("purge ghost record failed for %s: %s", team_id, e)
+
+
+def _filter_flat_index_ghosts(flats: dict[str, Any], ghosts: dict[str, Any],
+                              now: datetime) -> dict[str, Any]:
+    """#2466: drop purge-erased bids from a freshly-classified flats map and
+    age out stale ghost records (bids no longer present in the live R2
+    listing have finished racing — drop them once old)."""
+    out = {bid: ent for bid, ent in flats.items()
+           if str(bid) not in ghosts}
+    return out
+
+
 def read_legacy_flat_index(storage, team_id: str) -> dict[str, Any]:
     return _read_json(storage, _legacy_flat_index_key(team_id))
+
+
+def _write_flat_index_filtered(storage, team_id: str, flats: dict[str, Any],
+                               *, now: datetime | None = None) -> None:
+    """#2466: write the legacy flat index with purge-ghost reconciliation —
+    the sweep's write path. A purge that erased flat objects (possibly while
+    this sweep listed them) recorded the bids in the ghost list; a stale
+    reclassification must not resurrect index entries for deleted objects.
+    Ghosts older than the horizon are pruned on the same write."""
+    ghosts = read_purge_flat_ghosts(storage, team_id)
+    if not ghosts:
+        _write_json(storage, _legacy_flat_index_key(team_id), flats)
+        return
+    now = now or datetime.now(timezone.utc)  # noqa: UP017
+    cutoff = (now - timedelta(days=_PURGE_FLAT_GHOSTS_MAX_AGE_DAYS))
+    out = _filter_flat_index_ghosts(flats, ghosts, now)
+    remaining = {
+        bid: meta for bid, meta in ghosts.items()
+        if _within_ghost_horizon(meta, cutoff)
+    }
+    _write_json(storage, _legacy_flat_index_key(team_id), out)
+    if remaining != ghosts:
+        try:
+            _write_json(storage, _purge_flat_ghosts_key(team_id), remaining)
+        except Exception as e:
+            logger.warning("purge ghost prune failed for %s: %s", team_id, e)
+
+
+def _within_ghost_horizon(meta: Any, cutoff: datetime) -> bool:
+    """True when a ghost record is newer than the prune horizon (kept); a
+    malformed/absent erased_at is kept too (never drop a guard early)."""
+    try:
+        ts = datetime.fromisoformat(str(meta.get("erased_at") or ""))
+    except ValueError:
+        return True
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)  # noqa: UP017
+    return ts > cutoff
 
 
 def _classify_flat_pool(storage, team_id: str,
@@ -751,8 +831,11 @@ def _sweep_team(
                             "custom-era flat cleanup of %s/%s failed: %s",
                             team_id, bid, e)
                 flats.pop(bid, None)
+    # #2466: the sweep's index write reconciles purge-erased flat bids (a
+    # stale reclassification must never resurrect deleted objects) and prunes
+    # aged ghost records.
     try:
-        _write_json(storage, _legacy_flat_index_key(team_id), flats)
+        _write_flat_index_filtered(storage, team_id, flats)
     except Exception as e:
         logger.warning("legacy flat index write failed for %s: %s",
                        team_id, e)
@@ -1105,7 +1188,8 @@ def _drop_graph_namespace(db, namespace: str) -> None:
         raise
 
 
-def _purge_graph_storage(storage, team_id: str, graph_id: str) -> dict[str, Any]:
+def _purge_graph_storage(storage, team_id: str, graph_id: str,
+                         namespace: str | None = None) -> dict[str, Any]:
     """Delete every backup artifact of one purged graph, best-effort per
     family (failures are logged + reported and never abort the purge of the
     namespace — the row is stamped regardless, so residual artifacts are
@@ -1114,7 +1198,16 @@ def _purge_graph_storage(storage, team_id: str, graph_id: str) -> dict[str, Any]
       - per-graph ops state     ops/teams/{team}/graphs/{gid}/ (#2313)
       - legacy FLAT archives of this graph, resolved through the #2370
         classification index (ops/legacy-flat-index/{team}.json) — only the
-        listing-derived backup_id objects are deleted (#2414 parity)."""
+        listing-derived backup_id objects are deleted (#2414 parity).
+
+    ``namespace`` is the tombstone's data-plane namespace (team_{tid}_{gid},
+    gid-keyed and never reused): flat index entries keep the manifest's
+    graph_name (= the namespace) even after the sweep re-attributed the
+    entry to graph_id "" (the classify step maps ACTIVE rows only, so a
+    deleted graph's flats lose their gid on the first sweep after delete —
+    #2462 P1). Matching graph_name == namespace recovers those entries;
+    matching the bare NAME is deliberately NOT done (name reuse would
+    misattribute a new graph's flats)."""
     out: dict[str, Any] = {"pool_keys": 0, "state_keys": 0,
                            "flat_keys": 0, "errors": []}
     for prefix in (f"backups/{team_id}/{graph_id}/",
@@ -1140,7 +1233,13 @@ def _purge_graph_storage(storage, team_id: str, graph_id: str) -> dict[str, Any]
                        team_id, graph_id, e)
     flat_bids = [
         str(bid) for bid, ent in (index or {}).items()
-        if isinstance(ent, dict) and str(ent.get("graph_id") or "") == graph_id
+        if isinstance(ent, dict) and (
+            str(ent.get("graph_id") or "") == graph_id
+            # #2462: entries re-attributed to "" by the sweep (the classify
+            # step sees ACTIVE rows only) still carry the manifest's
+            # graph_name — the tombstone's gid-keyed namespace.
+            or (namespace
+                and str(ent.get("graph_name") or "") == namespace))
     ]
     if flat_bids:
         for bid in flat_bids:
@@ -1163,6 +1262,12 @@ def _purge_graph_storage(storage, team_id: str, graph_id: str) -> dict[str, Any]
                     {bid: ent for bid, ent in (index or {}).items()
                      if bid not in flat_bids},
                 )
+                # #2466: record the erased bids so a concurrent/stale sweep
+                # reclassification can never resurrect these index entries
+                # (R2 last-writer-wins — the sweep rewrites the whole index).
+                _record_purged_flat_bids(
+                    storage, team_id, flat_bids,
+                    datetime.now(timezone.utc).isoformat())  # noqa: UP017
             except Exception as e:
                 out["errors"].append(f"index rewrite: {e}")
     return out
@@ -1191,22 +1296,27 @@ def _purge_tombstone(source, db, storage, team_id: str, tomb: dict[str, Any],
         return {"status": "skipped", "graph_id": gid,
                 "reason": "row_restored_or_gone"}
     expected = f"team_{team_id}_{gid}"
-    if not ns or ns != expected:
+    residual = (not ns) or ns != expected
+    if residual:
         # Ownership guard tripped (verifier P1): never GRAPH.DELETE a
         # namespace that does not derive from this graph id — it may host a
-        # live graph. Residual: stamp purged_at so the trash list stops
-        # offering a restore of data that is no longer addressable, and
-        # record the guard for operator review.
+        # live graph. The tombstone's OWN artifacts (nested pool under the
+        # gid + flats whose graph_name is THIS namespace — gid-keyed, never
+        # reused) are still the deleted graph's and ARE purged; only the
+        # namespace drop is skipped. The row is stamped residual for
+        # operator review and the trash list stops offering a restore.
         logger.warning(
             "purge ownership guard: team=%s graph=%s namespace=%r "
-            "(expected %r) — namespace RETAINED",
+            "(expected %r) — namespace RETAINED, artifacts purged",
             team_id, gid, ns, expected)
-        _stamp_purged(source, team_id, gid, now_iso, residual=True)
+    else:
+        _drop_graph_namespace(db, ns)
+    artifacts = _purge_graph_storage(storage, team_id, gid, namespace=ns)
+    _stamp_purged(source, team_id, gid, now_iso, residual=residual)
+    if residual:
         return {"status": "residual", "graph_id": gid,
-                "namespace": ns, "reason": "namespace_ownership_guard"}
-    _drop_graph_namespace(db, ns)
-    artifacts = _purge_graph_storage(storage, team_id, gid)
-    _stamp_purged(source, team_id, gid, now_iso, residual=False)
+                "namespace": ns, "reason": "namespace_ownership_guard",
+                "artifacts": artifacts}
     return {"status": "purged", "graph_id": gid, "namespace": ns,
             "artifacts": artifacts}
 
