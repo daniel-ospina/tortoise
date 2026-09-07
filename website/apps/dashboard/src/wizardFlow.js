@@ -24,7 +24,7 @@ export const WIZARD_STEPS = Object.freeze([
   {
     id: 'org-create',
     label: 'Create your Organization',
-    sub: "Name your organization — it's the memory space your agent files decisions and findings into. Or accept an invitation to join one.",
+    sub: "Name your organization — it's the memory space your agent uses. Or accept an invitation to join one.",
   },
   {
     id: 'fork',
