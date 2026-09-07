@@ -2448,19 +2448,30 @@ def soft_delete_graph(cp, team_id: str, graph_id: str) -> bool:
 def restore_graph(cp, team_id: str, graph_id: str) -> bool:
     """#2304 trash restore: flip a tombstoned custom row back to active and
     clear the deletion stamp. Returns False when nothing matched (unknown /
-    active / default — callers 404/403). Keys stay dead (revoked at delete;
-    restore never resurrects them) — the owner mints fresh keys after."""
+    active / default / ALREADY PURGED — callers 404/403/410). Keys stay dead
+    (revoked at delete; restore never resurrects them) — the owner mints
+    fresh keys after. A purged row (purged_at set — data physically erased)
+    is never restorable: False so callers can 410.
+
+    The PATCH itself is CONDITIONED on the tombstone state (status eq
+    deleted + purged_at null) — a concurrent purge stamp between the pre-
+    read and the PATCH matches 0 rows, so a purge can never be clobbered
+    by a restore (VGATE race fix; callers additionally serialize on the
+    per-team sweep lock)."""
     rows = cp.query(
-        "graphs", select=["kind", "status"],
+        "graphs", select=["kind", "status", "purged_at"],
         filters=[("id", "eq", graph_id), ("team_id", "eq", team_id)],
     )
     if not rows or rows[0].get("kind") == "default" \
-            or rows[0].get("status") != "deleted":
+            or rows[0].get("status") != "deleted" \
+            or rows[0].get("purged_at"):
         return False
     cp.query(
         "graphs", method="PATCH",
-        filters=[("id", "eq", graph_id), ("team_id", "eq", team_id)],
-        json_body={"status": "active", "deleted_at": None},
+        filters=[("id", "eq", graph_id), ("team_id", "eq", team_id),
+                 ("status", "eq", "deleted"), ("purged_at", "is", None)],
+        json_body={"status": "active", "deleted_at": None,
+                   "purged_at": None, "purged_residual": False},
     )
     return True
 
@@ -2468,14 +2479,13 @@ def restore_graph(cp, team_id: str, graph_id: str) -> bool:
 def trash_graphs(cp, team_id: str) -> list[dict]:
     """#2304: tombstoned custom rows of a team (the trash list) — the owner
     restore surface. ``deleted_at`` NULL = legacy tombstone (predates the
-    column; purge treats it as past-grace). Never includes the default
-    (derived — no row, or a kind='default' override row which is excluded
-    by kind)."""
+    column; purge treats it as past-grace). Purged rows (purged_at set) are
+    excluded — data is physically gone; nothing to restore."""
     rows = cp.query(
         "graphs",
         select=["id", "name", "namespace", "deleted_at"],
         filters=[("team_id", "eq", team_id), ("status", "eq", "deleted"),
-                 ("kind", "eq", "custom")],
+                 ("kind", "eq", "custom"), ("purged_at", "is", None)],
         order="deleted_at",
     )
     return [
@@ -2484,6 +2494,29 @@ def trash_graphs(cp, team_id: str) -> list[dict]:
          "deleted_at": r.get("deleted_at")}
         for r in rows
     ]
+
+
+def purge_graph_row(cp, team_id: str, graph_id: str, *, now: str,
+                    residual: bool = False) -> bool:
+    """#2304: stamp a tombstoned row ``purged_at`` (data physically erased
+    by the purge sweep). ``residual`` True = namespace retained (re-occupied
+    — the ownership guard tripped; the row keeps its namespace for operator
+    review). Keeps the row (audit tombstone). Returns False when the row is
+    not a tombstone (idempotent re-runs: a purged row returns False too —
+    the sweep treats that as done)."""
+    rows = cp.query(
+        "graphs", select=["id"],
+        filters=[("id", "eq", graph_id), ("team_id", "eq", team_id),
+                 ("status", "eq", "deleted")],
+    )
+    if not rows:
+        return False
+    cp.query(
+        "graphs", method="PATCH",
+        filters=[("id", "eq", graph_id), ("team_id", "eq", team_id)],
+        json_body={"purged_at": now, "purged_residual": bool(residual)},
+    )
+    return True
 
 
 def set_graph_recording(cp, team_id: str, graph_id: str,

@@ -13436,31 +13436,35 @@ class TortoiseSDK:
     def graph_restore(self, team_id: str, graph_id: str) -> bool:
         """#2304 trash restore: flip a tombstoned custom node back to active
         and clear the deletion stamp. Returns False when nothing matched
-        (unknown / active / default). Keys stay dead (revoked at delete;
-        restore never resurrects them) — the owner mints fresh keys after."""
+        (unknown / active / default / ALREADY PURGED — callers 404/403/410).
+        Keys stay dead (revoked at delete; restore never resurrects them) —
+        the owner mints fresh keys after. A purged node (purged_at set —
+        data physically erased) is never restorable: False so callers 410."""
         reg = self._get_registry()
-        rows = reg.query(
+        # CONDITIONAL flip (VGATE race fix): the SET fires only when the
+        # node is still an UNPURGED tombstone — a concurrent purge stamp
+        # between any pre-read and this write matches 0 nodes, so a purge
+        # can never be clobbered by a restore. Returns whether it flipped.
+        res = reg.query(
             "MATCH (g:Graph {id:$gid, team_id:$tid}) "
-            "RETURN g.kind, coalesce(g.status, 'active')",
+            "WHERE g.status = 'deleted' AND g.purged_at IS NULL "
+            "AND coalesce(g.kind, 'custom') <> 'default' "
+            "SET g.status = 'active' REMOVE g.deleted_at, g.purged_at, "
+            "g.purged_residual RETURN count(g)",
             params={"gid": graph_id, "tid": team_id},
         ).result_set
-        if not rows or rows[0][0] == "default" or rows[0][1] != "deleted":
-            return False
-        reg.query(
-            "MATCH (g:Graph {id:$gid, team_id:$tid}) "
-            "SET g.status = 'active' REMOVE g.deleted_at",
-            params={"gid": graph_id, "tid": team_id},
-        )
-        return True
+        return bool(res and int(res[0][0]) > 0)
 
     def trash_graphs(self, team_id: str) -> list[dict]:
         """#2304: tombstoned custom nodes of a team (the trash list) — the
         owner restore surface. ``deleted_at`` absent = legacy tombstone
-        (predates the prop; purge treats it as past-grace)."""
+        (predates the prop; purge treats it as past-grace). Purged nodes
+        (purged_at set) are excluded — data is physically gone."""
         reg = self._get_registry()
         rows = reg.query(
             "MATCH (g:Graph {team_id:$tid, status:'deleted'}) "
             "WHERE coalesce(g.kind, 'custom') <> 'default' "
+            "AND g.purged_at IS NULL "
             "RETURN g.id, g.name, g.namespace, g.deleted_at",
             params={"tid": team_id},
         ).result_set
