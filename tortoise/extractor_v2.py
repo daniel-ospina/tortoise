@@ -139,13 +139,85 @@ USER_PERSONAL_STATE = {
 # ids, hashes, counts as process metrics) from STATE VALUES (keep verbatim:
 # personal bests, schedules, preferences — the value IS the fact). Shared by
 # S1 (_granularity_text), S2 and S4 (via _render_master).
+#
+# #2453 (compounds with #2424 — one PR): EXTENDED to OPERATIONAL/decision
+# values. The mechanics-token exclusion ("counts/logistics are ephemeral")
+# is correct for PROCESS artifacts but starves engineering-decision memory:
+# on the number-dense write-path session wp04 (aurora_perf) retention was
+# 0/13 — every gold unit a concrete measurement/date/TTL/count the mapper
+# was told to treat as disposable. A concrete value that is the SUBJECT of a
+# decision, observation, or plan is durable state, not process — carried
+# verbatim (paired with ANTI_ROUTINE_EXCLUSION so value retention never
+# becomes routine-metric hoarding). Renders wherever the state clause
+# renders: S1 (_granularity_text), S2 and S4 (via _render_master).
 STATE_VALUE_CARVE_OUT = (
     "STATE-VALUE CARVE-OUT (applies to every domain above): user-personal-state "
     "VALUES — personal bests, schedules, preferences — are DURABLE even where "
     "counts/logistics are ephemeral. Carry the VALUE verbatim ('my personal "
     "best 5K time is 27:12', not 'the user has a fast 5K'). The value is the "
-    "fact; it is NOT a mechanics token."
+    "fact; it is NOT a mechanics token.\n"
+    "OPERATIONAL-VALUE CARVE-OUT (decisions, observations, plans — the same "
+    "rule, a different domain): a concrete value that is the SUBJECT of a "
+    "decision, observation, or plan is DURABLE too. Measurements, "
+    "deadlines/freezes, thresholds/TTLs, versions, and counts are carried "
+    "VERBATIM when they are the thing being fixed, the chosen target, or the "
+    "recorded measurement ('the p95 hit 4.2 seconds', 'the October 5 "
+    "release', 'back under 800 milliseconds', 'a ten minute TTL', 'forty "
+    "thousand requests per day') — never round, paraphrase, or label them. "
+    "Only INCIDENTAL process logistics remain droppable: ids, hashes, and "
+    "ephemeral counters not central to a decision."
 )
+
+
+# #2424 (compounds with #2453 — one PR): the ANTI-ROUTINE exclusion gate —
+# the mapper-level NOOP (Mem0 semantics: a per-candidate relevance decision,
+# "new + durable + non-trivial, else skip"). A true-but-routine claim ("the
+# on-call room has been quiet lately" — the wp03 distractor class, planted
+# inside a content-dense turn) is TRUE, so the pre-#2424 mapper mapped it as
+# a point; distractor leakage ran 1-4/run against a design tolerance of 1.
+# The rule renders into BOTH mapping stages from this single source
+# (render_s2_prompt / render_s4_prompt replace the {anti_routine} slot in
+# S2_TMPL / S4_TMPL). S1 (the story summarizer) deliberately does NOT get it
+# — S1 keeps the narrative register and a routine aside simply does not
+# change the story.
+ANTI_ROUTINE_EXCLUSION = (
+    "ANTI-ROUTINE EXCLUSION (true-but-routine content is a NOOP): routine "
+    "operational asides, status-quo/banal remarks, filler, and small talk "
+    "must NOT be emitted as points, entities, or events. TRUE IS NOT ENOUGH: "
+    "a claim that is true but routine — no durable decision, state change, "
+    "or plan value ('the on-call room has been quiet lately') — is OMITTED. "
+    "Before emitting a candidate ask: does it change a future decision, "
+    "state, or belief? If only the moment is interesting it is a NOOP for "
+    "memory — emit nothing. Do NOT emit such content to hang an operator on "
+    "it (a routine aside gets no MITIGATES/NAND relevance attack — omit it "
+    "outright)."
+)
+
+# #2453 companion (renders with ANTI_ROUTINE_EXCLUSION at the SAME
+# high-weight slot): the master-list carve-out alone was too weak for the
+# value-dense write-path session wp04 (0-2/13 across four runs) — the
+# point-writing guidance sits far from the master block, so the exact-value
+# rule must ALSO ride where the mapper writes content. Rendered by
+# _s2s4_rules() into the {anti_routine} slot of S2_TMPL / S4_TMPL.
+VALUE_FIDELITY_RULE = (
+    "VALUE FIDELITY (decision-relevant values are written EXACTLY): when a "
+    "point, entity, or event references a concrete value — a measurement, "
+    "date/freeze, threshold/TTL, version, or count that is the SUBJECT of a "
+    "decision, observation, or plan — WRITE THE EXACT VALUE INTO THE "
+    "CONTENT. Never paraphrase, round, generalize, or drop it: 'the p95 hit "
+    "4.2 seconds' stays '4.2 seconds' (not 'slow'), 'back under 800 "
+    "milliseconds' stays '800 milliseconds', 'the October 5 release' stays "
+    "'October 5'. The number is the memory; a vague restatement is a lost "
+    "fact."
+)
+
+
+def _s2s4_rules() -> str:
+    """The shared rule block inserted at the {anti_routine} slot of the S2
+    and S4 mapping prompts: the anti-routine NOOP gate (#2424) paired with
+    the value-fidelity rule (#2453). One source, both stages."""
+    return ANTI_ROUTINE_EXCLUSION + "\n\n" + VALUE_FIDELITY_RULE
+
 
 CORE_OBJECT_KEYS = (
     "core:Project", "core:WorkItem", "core:Problem", "core:document", "core:tag",
@@ -1005,6 +1077,8 @@ But STRIP, DON'T DROP the durable claim they carry:
   "let me verify X").
 What survives is what changes the world model — including how we work.
 
+{anti_routine}
+
 CARVE-OUT — USER-PERSONAL-STATE VALUES ARE NOT MECHANICS TOKENS
 The exclusion list above targets PROCESS ARTIFACTS (issue ids, commit hashes,
 PR numbers, test counts as process metrics, file paths, commands, tool calls).
@@ -1119,6 +1193,7 @@ def render_s2_prompt(master: dict | None = None, *,
                 master, story, core_only=core_only))
             .replace("{pack_namespaces}", pack_ns)
             .replace("{chains_text}", chains)
+            .replace("{anti_routine}", _s2s4_rules())
             .replace("{date_anchor}", _date_anchor(
                 session_date, include_emission_rules=True))
             .replace("{output_contract}", contract)
@@ -1782,6 +1857,8 @@ durable claim — with the same CARVE-OUT: user-personal-state VALUES (personal
 bests, schedules, preferences) are facts, kept verbatim, never treated as
 mechanics tokens).
 
+{anti_routine}
+
 MASTER LIST (same closed vocabulary as S2 — no minted kinds)
 {master_list}
 
@@ -1917,6 +1994,7 @@ def render_s4_prompt(story: str, search: dict, embed_list: dict,
             .replace("{master_list}", _render_master(
                 master, story, core_only=core_only))
             .replace("{chains_text}", chains)
+            .replace("{anti_routine}", _s2s4_rules())
             .replace("{story}", story)
             .replace("{search_results}", _render_search_results(search))
             .replace("{embed_list_json}", json.dumps(embed_list, indent=1))
