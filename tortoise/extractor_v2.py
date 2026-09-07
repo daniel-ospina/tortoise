@@ -4293,6 +4293,12 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
     complete_list: dict = embed_list
     s4_warnings: list[str] = []
     s4_merge_stats: dict = {}
+    # #2335 WI-1b: S4-full-rescue episode counter — S2 produced NOTHING (any
+    # cause) yet S4 re-emitted a full non-empty list (~2× cost band; today
+    # only llm.calls doubles). Distinct key so the 2× band is measurable
+    # separately from size-driven escalations. Incremented ONLY under the
+    # S2-empty guard (see below) — the S4 merge runs on EVERY non-empty S4.
+    s4_full_rescues = 0
     if story:
         stage_stats: dict = {}
         try:
@@ -4304,6 +4310,12 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
                        s4.get("events") or s4.get("operators")):
                 complete_list = merge_embed_lists(embed_list, s4)
                 s4_merge_stats = _s4_merge_stats(embed_list, s4, complete_list)
+                # #2335 WI-1b: a full-rescue episode is S4 rebuilding the
+                # session from an EMPTY S2 base (the merge is otherwise the
+                # normal E4 merges-not-replaces on every healthy capture —
+                # counting those would corrupt the measurement).
+                if not any((embed_list or {}).values()):
+                    s4_full_rescues += 1
             else:
                 # graceful degradation — S2 output stands; not an error
                 s4_warnings.append("S4 returned an empty list — kept S2 output")
@@ -4511,7 +4523,12 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
     result["stats"]["elapsed_s"] = round(time.time() - t0, 1)
     result["stats"]["chunks"] = len(chunks)
     result["stats"]["failed_chunks"] = failed_chunks
+    result["stats"]["edus"] = len(edus)  # #2335 WI-1b: EDU(turn) count
     result["stats"]["s4_merge"] = s4_merge_stats  # E4 (#1536): no-silent-drop proof
+    if s4_full_rescues:
+        # #2335 WI-1b: absent-when-zero (a 0 write would fabricate a recovery
+        # shape on sessions that never hit the S2-empty/S4-full geometry).
+        result["stats"]["s4_full_rescues"] = s4_full_rescues
     # M3 (#1524, D3): additive integrity surface — the per-session census +
     # LLM roll-up feed the harness's per-question ``valid`` / ``error_classes``
     # (M4). The payload telemetry's hardcoded retry_count is wired to the
