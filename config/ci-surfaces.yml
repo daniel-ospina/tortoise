@@ -376,6 +376,7 @@ surfaces:
   - test_tool_registry.py
   - test_topic_summarization.py
   - test_tortoise_search.py
+  - test_trash_name_race.py       # #2468 restore-vs-create name race (fake CP)
   - test_tripwire.py
   - test_uri_env_mutations_declared.py
   - test_validity_windows.py
