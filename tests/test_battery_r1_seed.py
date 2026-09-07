@@ -201,14 +201,24 @@ def test_seed_mode_store_owns_seed_manifest_marker(tmp_path):
 def test_record_never_targets_seed_manifest_marker(tmp_path):
     """A4 record() claim-targets exclude the seeder-owned marker (the
     retrieve exclusion is mirrored on the write path) — an agent-filed
-    NAND/IMPL edge lands on a seeded statement, never on the marker."""
+    NAND/IMPL edge lands on a seeded statement, never on the marker.
+
+    Relocked for the #2291 closed-set write contract: targets come ONLY
+    from the retrieved closed set (context.prior_memories) — the test now
+    retrieves first (the agent's everyday read) and records against those
+    memories; an empty closed set is an honest zero-write (locked by the
+    Task-3 empty_set_never_writes regression).
+    """
     from battery.arms.base import AgentContext, Memory
     from battery.runner.setup import seed_manifest_point_id
     sc = _cts()[0]
     store = seeds.setup_seed_mode(tmp_path, sc.id)
     try:
+        prior = store.retrieve("")
+        assert prior, "seed_mode store must surface claim_a + evidence pre-k"
         store._arm.record(
-            AgentContext(scenario=sc, episode_seed=0, user_message="go"),
+            AgentContext(scenario=sc, episode_seed=0, user_message="go",
+                         prior_memories=tuple(prior)),
             Memory(id="e1", content="finding", kind="nand"))
         g = store._arm._scenario_graph(sc)
         rows = g.query(

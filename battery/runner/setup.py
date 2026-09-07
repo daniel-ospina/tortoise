@@ -550,6 +550,20 @@ def naive_setup(sdk, scenario: Scenario, *,
     return len(graph.points) + len(graph.operators)
 
 
+def open_reference_projection(db_path: str | Path, graph_name: str = "test"):
+    """Reference-lane projection opener (#2291 I-1).
+
+    The lane audit (tests/test_battery_lane_matrix.py) bans
+    ``FalkorProjection`` construction from the ARM module (a4_tortoise.py) so
+    the real runtime path can never drift back to raw Cypher. batch_setup
+    still needs a projection for hermetic content seeding until Task 2 swaps
+    the channel to sdk.ingest — this helper keeps the construction OUT of the
+    audited module (function-scoped allowlist = batch_setup + this opener).
+    """
+    from tortoise.projection import FalkorProjection
+    return FalkorProjection(str(db_path), graph_name=graph_name)
+
+
 def scenario_namespace(scenario_id: str) -> str:
     """Per-scenario namespace (materializes as team_<ns> graphs per the
     SDK's non-test namespace prefix — documented so scenario ids can never

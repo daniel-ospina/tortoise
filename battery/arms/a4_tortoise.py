@@ -1,15 +1,29 @@
-"""A4 — Tortoise epistemic-graph arm (the treatment).
+"""A4 — Tortoise epistemic-graph arm (the treatment), SDK-verb channel.
 
-The graph is the arm's memory: setup_scenarios builds the scenario graph
-(per-scenario namespace via the batcher — wiring the #1406 deferral),
-retrieve reads EP confidence + traverse (IMPL/NAND), record writes
-evidence points + operators with the decide-workflow semantics
-(truth-vs-relevance: NAND the claim vs mitigate the operator), and the arm
-exposes a decide_cycles counter — the R2 mechanism-gate trajectory field
-(Challenge/Deepen cycles per graph-scripts/decide.py patterns).
+The graph is the arm's memory: setup_scenarios builds the per-scenario
+graphs (reference-lane hermetic batch seeding — raw-MERGE allowlisted via
+``batch_setup`` UNTIL Task 2 swaps the channel to ``sdk.ingest``); the arm
+then holds ONE ``TortoiseSDK`` handle per scenario (``graph_name`` bound at
+construction, same store file, per-scenario event log) and every runtime
+read/write flows through PRODUCT verbs on that handle — never raw Cypher.
 
+Read surface (Task 1 minimal; Task 4 refines per-construct EP mapping):
+  retrieve → ``recall_state`` (UC1 state read: live claims ranked by
+  confidence, contested surfaced with counter-evidence, superseded
+  excluded, draft-exclusion belt-and-braces). Memory.confidence stays None
+  until Task 4 fills EP means from ``compute_confidence``.
+
+Write surface (Task 1 minimal; Task 3 refines #901 routing):
+  record → ``create_point`` (kind=evidence — decision-part semantics land
+  LIVE with a stamped starting belief) + ``create_operator`` (IMPL/NAND)
+  with targets from the retrieved closed set ONLY; an unresolved operator
+  target is an honest no-op, never a fresh store probe.
+
+The arm is hermetic: per-run embedded store (explicit db_path ignores
+TORTOISE_DB_URI), per-scenario graphs isolated (EP caches cannot bleed).
 Gold text NEVER enters the graph or the episode context (sealed-gold
-boundary). The arm is hermetic: embedded FalkorDBLite via TORTOISE_DB_PATH.
+boundary). Lane contract: docs/epics/1402-eval-battery/lane-matrix.md;
+enforced source-level by tests/test_battery_lane_matrix.py.
 """
 from __future__ import annotations
 
@@ -19,7 +33,18 @@ from pathlib import Path
 
 from battery.arms.base import AgentContext, ArmAdapter, ArmUnavailable, Memory  # noqa: F401
 from battery.config.corpus import Scenario
-from battery.runner.setup import scenario_namespace
+from battery.runner.setup import open_reference_projection, scenario_namespace
+
+#: Evidence-point kind used for agent writes (decision-part semantics: live
+#: with a stamped starting belief — the product's own write surface).
+_EVIDENCE_KIND = "evidence"
+_CLAIM_MEMORY_KIND = "claim"
+#: seed-manifest marker content prefix — never surfaced as a memory.
+_SEED_MANIFEST_PREFIX = "battery:seed_manifest:"
+
+
+def _is_seed_manifest(content: str) -> bool:
+    return (content or "").startswith(_SEED_MANIFEST_PREFIX)
 
 
 class A4TortoiseArm:
@@ -31,129 +56,143 @@ class A4TortoiseArm:
 
     def __init__(self, db_path: str | None = None, **config):
         self._db_path = db_path or os.environ.get("TORTOISE_DB_PATH") or ""
-        self._sdk = None
-        self._proj = None
+        self._sdk_by_id: dict[str, object] = {}
         self.decide_cycles = 0
 
     # ── setup ───────────────────────────────────────────────────────────
     def setup_scenarios(self, scenarios: list[Scenario]) -> None:
-        """Build the scenario graph (per-scenario namespace) + seed claims.
+        """Build the per-scenario graphs + open one SDK handle per scenario.
 
-        Uses the embedded FalkorDBLite (hermetic; no Docker). The batcher's
-        namespace routing (battery.runner.setup.batch_setup) materializes
-        per-scenario graphs when given the projection.
-
-        seed_mode (#2284 I-1): contradiction scenarios seed claim_a +
-        evidence ONLY (¬A never pre-seeded — it arrives in-context at k at
-        run time); the hermetic warm guard refuses a stale PRE-FIX graph in
-        the same namespace. The sdk.ingest verb-channel swap is sibling A's
-        (#2291) — applied over the SAME seed_mode contract.
+        Content is seeded through the reference lane (batch_setup over a
+        projection opened by ``open_reference_projection`` — construction
+        stays OUT of this module per the lane audit). seed_mode default:
+        contradiction scenarios seed claim_a + evidence ONLY (¬A never
+        pre-seeded — it arrives in-context at k at run time); the hermetic
+        warm guard refuses a stale PRE-FIX graph in the same namespace.
+        After seeding, one TortoiseSDK per scenario is opened on the SAME
+        store file with ``graph_name=scenario_namespace(id)`` bound at
+        construction — the runtime channel Tasks 3/4 refine.
         """
-        from tortoise.projection import FalkorProjection
         if not self._db_path:
             tmp = tempfile.mkdtemp(prefix="battery_a4_")
             self._db_path = str(Path(tmp) / "a4.db")
-        self._proj = FalkorProjection(self._db_path, graph_name="test")
+        db_file = str(self._db_path)
         from battery.runner.setup import batch_setup
-        # namespaced=True: per-scenario graphs (battery_<id>) — retrieve reads
-        # the same namespaced graph (no cross-scenario MERGE collapse).
-        # seed_mode=True is the batch default for contradiction scenarios
-        # (¬A absent pre-k) + the hermetic warm-store guard.
-        batch_setup(self._proj, scenarios, namespaced=True, seed_mode=True)
+
+        # Reference-lane content seeding (projection opened here, closed
+        # before any SDK handle opens the same file).
+        proj = open_reference_projection(db_file)
+        try:
+            batch_setup(proj, scenarios, namespaced=True, seed_mode=True)
+        finally:
+            proj.close()
+
+        # Per-scenario product handles (one SDK per scenario graph).
+        from tortoise.sdk import TortoiseSDK
+        ev_dir = Path(db_file).parent / "events"
+        for sc in scenarios:
+            ns = scenario_namespace(sc.id)
+            self._sdk_by_id[sc.id] = TortoiseSDK(
+                db_path=db_file,
+                graph_name=ns,
+                event_log_path=str(ev_dir / f"{ns}.jsonl"),
+            )
         self.decide_cycles = 0
 
+    def _sdk(self, scenario: Scenario):
+        sdk = self._sdk_by_id.get(scenario.id)
+        if sdk is None:
+            raise ArmUnavailable(
+                f"a4 arm not set up for scenario {scenario.id}")
+        return sdk
+
     def _scenario_graph(self, scenario: Scenario):
-        return self._proj.db.select_graph(scenario_namespace(scenario.id))
+        """READ-ONLY test-support handle over the scenario graph (used by
+        battery.testing.seeds.SeededStore.find_content). Never a runtime
+        write path."""
+        proj = self._sdk(scenario)._get_proj()  # noqa: SLF001  (test support)
+        return proj.db.select_graph(scenario_namespace(scenario.id))
 
     # ── retrieve ────────────────────────────────────────────────────────
     def retrieve(self, context: AgentContext) -> list[Memory]:
-        """Read the graph: EP confidence + IMPL/NAND context for the
-        scenario's claims. Raises ArmUnavailable on projection failure
-        (never partial memories)."""
-        if self._proj is None:
-            raise ArmUnavailable("a4 arm not set up")
+        """Read the graph through the product UC1 state surface.
+
+        recall_state over the scenario's SDK handle (same handle that
+        wrote): live claims ranked by the multiplicative confidence gate;
+        contested surfaced with counter_evidence; superseded excluded;
+        draft/terminal filtering per product semantics. The probe query is
+        the episode's own user message when present, else the scenario's
+        primary planted claim (the everyday "what do I know about X" read).
+        Memory.confidence stays None until Task 4 fills EP means. Raises
+        ArmUnavailable on failure (never partial memories).
+        """
+        sdk = self._sdk(context.scenario)
         try:
-            g = self._scenario_graph(context.scenario)
-            rows = g.query(
-                "MATCH (p:Point) WHERE p.is_operator <> true "
-                "AND p.content IS NOT NULL "
-                "AND (p.pointKind IS NULL OR p.pointKind <> 'seed_manifest') "
-                "RETURN p.id AS id, p.content AS content, "
-                "p.status AS status LIMIT 20").result_set
-            # Filter to live claims the episode can cite.
-            out = []
-            # result_set rows are positionals: (id, content, status).
-            for row in rows:
-                rid, rcontent, rstatus = (list(row) + [None] * 3)[:3]
-                if rstatus in (None, "live", "draft"):
-                    out.append(Memory(
-                        id=str(rid), content=str(rcontent or ""),
-                        kind="claim", confidence=None))
+            query = (context.user_message or "").strip()
+            if not query:
+                probe = _scenario_probe_query(context.scenario)
+                query = probe or ""
+            results = sdk.recall_state(
+                query=query or None, kind=None, limit=20)
+            out: list[Memory] = []
+            for row in results or []:
+                if not isinstance(row, dict):
+                    continue
+                if row.get("entity_type") != "point":
+                    continue
+                if row.get("is_operator"):
+                    continue
+                content = str(row.get("content") or "")
+                if not content or _is_seed_manifest(content):
+                    continue
+                if content.startswith("[MITIGATION]"):
+                    continue  # state-context attachment, not a standalone claim
+                rid = str(row.get("id") or "")
+                if not rid:
+                    continue
+                out.append(Memory(
+                    id=rid, content=content, confidence=None,
+                    kind=_CLAIM_MEMORY_KIND))
             return out
         except Exception as e:  # noqa: BLE001, RUF100
             raise ArmUnavailable(f"a4 graph read: {e}") from e
 
     # ── record ──────────────────────────────────────────────────────────
     def record(self, context: AgentContext, item: Memory) -> None:
-        """Write an evidence point + wire it to the scenario's claims.
+        """Write through the product verb surface.
 
-        Decide-workflow semantics: item.kind=="nand" → NAND the target claim
-        (truth edge); item.kind=="mitigate" → mitigate the operator
-        (relevance edge); otherwise create an evidence point with an IMPL to
-        the matched claim (support edge).
+        #901 semantics (Task 1 minimal; Task 3 refines): an evidence point
+        via create_point (kind=evidence → decision-part semantics: lands
+        live with a stamped starting belief), then a NAND (truth edge) or
+        IMPL (support edge) operator via create_operator with targets taken
+        ONLY from the retrieved closed set (context.prior_memories). An
+        unresolved target/operator is an honest no-op — never a fresh store
+        probe, never a content-derived guess.
         """
-        if self._proj is None:
+        if self._db_path is None:
             return
-        g = self._scenario_graph(context.scenario)
+        sdk = self._sdk(context.scenario)
         try:
-            import hashlib as _hashlib
-            import time as _time  # noqa: F401
-            from datetime import datetime, timezone
-            now = datetime.now(timezone.utc).isoformat()  # noqa: UP017
-            # Write directly through the projection graph (single-writer —
-            # never open a second SDK on the same store).
-            point_id = "ev-" + _hashlib.sha256(
-                f"{context.scenario.id}:{item.content}".encode()).hexdigest()[:16]
-            g.query(
-                "MERGE (p:Point {id: $id}) "
-                "ON CREATE SET p += {content: $content, pointKind: 'evidence', "
-                "is_operator: false, status: 'draft', createdAt: $now, "
-                "updatedAt: $now}",
-                params={"id": point_id, "content": item.content, "now": now})
-            claims = g.query(
-                "MATCH (p:Point {is_operator: false}) "
-                "WHERE p.pointKind IS NULL OR p.pointKind <> 'seed_manifest' "
-                "RETURN p.id AS id "
-                "LIMIT 5").result_set
-            target = str(claims[0][0]) if claims else None
-            if target and item.kind == "nand":
-                op_id = point_id + "-nand"
-                g.query(
-                    "MERGE (o:Point {id: $oid}) "
-                    "ON CREATE SET o += {is_operator: true, status: 'draft', "
-                    "createdAt: $now}", params={"oid": op_id, "now": now})
-                g.query(
-                    "MATCH (o:Point {id: $oid}), (t:Point {id: $tid}) "
-                    "MERGE (o)-[:NAND {direction: 'unidirectional'}]->(t)",
-                    params={"oid": op_id, "tid": target})
-            elif target and item.kind == "mitigate":
-                ops = g.query(
-                    "MATCH (o:Point {is_operator: true}) RETURN o.id AS id "
-                    "LIMIT 3").result_set
-                if ops:
-                    g.query(
-                        "MATCH (o:Point {id: $oid}) SET o.weight = $w",
-                        params={"oid": str(ops[0][0]), "w": 0.3})
-            elif target:
-                op_id = point_id + "-impl"
-                g.query(
-                    "MERGE (o:Point {id: $oid}) "
-                    "ON CREATE SET o += {is_operator: true, status: 'draft', "
-                    "createdAt: $now}", params={"oid": op_id, "now": now})
-                g.query(
-                    "MATCH (o:Point {id: $oid}), (t:Point {id: $tid}) "
-                    "MERGE (o)-[:IMPL]->(t)",
-                    params={"oid": op_id, "tid": target})
+            closed = [m for m in (context.prior_memories or ())
+                      if m.id and not _is_seed_manifest(m.content)]
+            if not closed:
+                return  # empty closed set ⇒ zero writes (honest no-op)
+            target = next((m.id for m in closed
+                           if m.kind == _CLAIM_MEMORY_KIND), closed[0].id)
+            created = sdk.create_point(kind=_EVIDENCE_KIND, content=item.content)
+            ev_id = created.get("id") if isinstance(created, dict) else None
+            if not ev_id:
+                raise ArmUnavailable("a4 create_point returned no id")
+            if item.kind == "nand":
+                sdk.create_operator(
+                    "NAND", ev_id, [target], direction="unidirectional")
+            elif item.kind == "mitigate":
+                # Operator targets require the closed set to carry the
+                # operator (Task 3 read-mapping refinement) — until then an
+                # unresolved operator target is an honest no-op.
+                return
+            else:
+                sdk.create_operator("IMPL", ev_id, [target])
             self.decide_cycles += 1  # one Challenge/Deepen cycle per record
         except Exception as e:  # noqa: BLE001, RUF100
             raise ArmUnavailable(f"a4 graph write: {e}") from e
@@ -162,11 +201,29 @@ class A4TortoiseArm:
         return "a4-tortoise"
 
     def close(self) -> None:
-        if self._proj is not None:
+        for sdk in self._sdk_by_id.values():
             try:  # noqa: SIM105
-                self._proj.close()
+                sdk.close()
             except Exception:  # noqa: BLE001, RUF100
                 pass
+        self._sdk_by_id = {}
+
+
+def _scenario_probe_query(scenario: Scenario) -> str:
+    """Deterministic probe text for the empty-context everyday read: the
+    primary planted claim when the scenario plants one, else the first
+    authored non-system turn."""
+    pairs = getattr(scenario, "contradiction_pairs", None) or []
+    if pairs:
+        ca = getattr(pairs[0], "claim_a", None)
+        if ca:
+            return ca[:200]
+    turns = [t for t in (scenario.prompt_pack or [])
+             if t.get("role") != "system"]
+    if turns:
+        return str(turns[0].get("content", ""))[:200]
+    return ""
+
 
 # Resolver-compatible alias (runner `arm_id_to_cls` convention).
 A4Arm = A4TortoiseArm
