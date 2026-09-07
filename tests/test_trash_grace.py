@@ -28,7 +28,12 @@ _OWNER = "9f2c1a40-0000-4a00-8000-000000000001"
 
 
 def _seed_graph(fake, *, deleted_at: str | None, purged_at: str | None = None):
-    fake.seed("teams", [dict(FREE_TEAM)])
+    # Solo-like team (max_graphs=2): the default counts as 1, so one custom
+    # restore fits under the cap — the #2467 quota gate (landing alongside)
+    # must not block the grace-path 200 case. Free (cap 1) is always at cap.
+    team = dict(FREE_TEAM)
+    team.update({"id": _TEAM, "tier": "solo", "max_graphs": 2})
+    fake.seed("teams", [team])
     fake.seed("team_memberships", [{
         "id": "m-1", "team_id": _TEAM, "user_id": _OWNER, "role": "owner",
         "status": "active",
