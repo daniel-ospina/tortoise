@@ -285,6 +285,42 @@
     } catch (e) { return false; }
   };
 
+  // #2529: supabase-js v2.112.2 may fail to process the implicit-flow
+  // #access_token fragment during async initialization (the URL hash
+  // is parsed correctly by xr() but _getUser() or _saveSession() can
+  // fail silently). Process the fragment synchronously HERE (before
+  // supabase-js loads) and store the session directly to the parent-
+  // domain cookie so the dashboard's createClient -> getSession() finds
+  // a session already stored. Only processes #access_token — never error
+  // fragments (#error=...) which must survive for the /auth banner.
+  (function () {
+    try {
+      var hash = window.location.hash;
+      if (!hash || !/^#access_token=/.test(hash)) return;
+      var p = new URLSearchParams(hash.replace(/^#/, ''));
+      var accessToken = p.get('access_token');
+      var refreshToken = p.get('refresh_token');
+      var expiresAt = parseInt(p.get('expires_at'), 10);
+      if (!accessToken || !refreshToken || !expiresAt) return;
+      var session = {
+        access_token: accessToken,
+        refresh_token: refreshToken,
+        expires_at: expiresAt,
+        expires_in: parseInt(p.get('expires_in'), 10) || 3600,
+        token_type: p.get('token_type') || 'bearer',
+      };
+      // Provider tokens — size guard in setItem strips them if oversized.
+      var pt = p.get('provider_token');
+      if (pt) session.provider_token = pt;
+      var prt = p.get('provider_refresh_token');
+      if (prt) session.provider_refresh_token = prt;
+      storeSession(session);
+      // Strip the fragment to prevent supabase-js from redundantly
+      // re-processing the same fragment (which may log console errors).
+      history.replaceState(null, '', window.location.pathname + window.location.search);
+    } catch (e) { /* best-effort */ }
+  })();
+
   window.__tortoiseSessionBridge.readValidSession = readValidSession;
   window.__tortoiseSessionBridge.clearStoredSession = clearStoredSession;
   window.__tortoiseSessionBridge.getLastAuthMethod = getLastAuthMethod;

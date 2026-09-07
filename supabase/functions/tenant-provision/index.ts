@@ -386,6 +386,65 @@ Deno.serve(async (req: Request) => {
     }
     const fastApiKey = Deno.env.get("FASTAPI_INTERNAL_KEY") || "";
 
+    // #2406: one-time onboarding-call offer email — fires AFTER the demo seed
+    // and INDEPENDENTLY of it (its own loop + error handling; a demo-seed
+    // failure never suppresses the email and vice versa). Two attempts (0s /
+    // +2s), bounded, logs every non-definitive outcome, and NEVER throws —
+    // provisioning has already committed; a failed offer email must never
+    // fail the signup. display_name is the PERSON display name (caller/body),
+    // never safeName (the org slug) — the greeting heuristic is server-side.
+    async function fireOnboardingEmail(
+      teamId: string,
+      personDisplayName: string | undefined,
+    ): Promise<void> {
+      const body = JSON.stringify({
+        team_id: teamId,
+        display_name: personDisplayName ?? undefined,
+      });
+      for (let attempt = 0; attempt < 2; attempt++) {
+        let res: Response | null = null;
+        try {
+          res = await fetch(`${fastApiUrl}/internal/onboarding-email`, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "Authorization": `Bearer ${fastApiKey}`,
+            },
+            body,
+            signal: AbortSignal.timeout(5_000),
+          });
+        } catch (e) {
+          console.error("Onboarding email failed:", e);
+        }
+        if (res && res.ok) {
+          let status = "";
+          try {
+            const parsed = await res.json();
+            status = typeof parsed?.status === "string" ? parsed.status : "";
+          } catch { /* response body drained below */ }
+          if (status === "sent" || status === "already_sent"
+              || status === "in_flight") {
+            // Definitive: provider accepted, previously sent, or a concurrent
+            // send is already in flight — never double-fire.
+            return;
+          }
+          if (status) {
+            console.error(
+              "Onboarding email not sent: /internal/onboarding-email " +
+                "status=" + status);
+          }
+        } else if (res) {
+          const errBody = await res.text().catch(() => "");
+          console.error(
+            "Onboarding email failed: /internal/onboarding-email returned " +
+              res.status + (errBody ? ": " + errBody : ""));
+        }
+        if (attempt === 0) {
+          await new Promise((r) => setTimeout(r, 2_000));
+        }
+      }
+    }
+
     // Fail CLOSED on a missing pepper at the lookupHash call site (not just
     // via hashApiKey's own guard): without the pepper, lookup_hash would be
     // SHA-256(key) — a digest that can never match tortoise/auth.py's
@@ -477,6 +536,14 @@ Deno.serve(async (req: Request) => {
           (demoErrBody ? ": " + demoErrBody : "")
       );
     }
+
+    // ── #2406: fire the one-time onboarding-call offer email ─────────────
+    // Independent of the demo seed (fires even when demo seeding threw) and
+    // fail-soft: fireOnboardingEmail never throws, so this can never turn a
+    // committed provisioning into a 500 for the user. Exactly-once is the
+    // server's job (marker + in-flight gate + provider Idempotency-Key); the
+    // +2s retry covers the lost-response / transient-provider window.
+    await fireOnboardingEmail(teamId, display_name);
 
     const response: ProvisionResponse = {
       team_id: teamId,
