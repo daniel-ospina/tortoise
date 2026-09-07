@@ -20,6 +20,9 @@ def _env(monkeypatch):
     # #1138: budget envs unset (free-tier defaults) + counters reset per test.
     monkeypatch.delenv("RESEND_SEND_BUDGET_DAILY", raising=False)
     monkeypatch.delenv("RESEND_SEND_BUDGET_MONTHLY", raising=False)
+    # #2406: onboarding sender env-tunable from — unset per test so the
+    # default daniel@premiselabs.co applies unless a test sets it.
+    monkeypatch.delenv("RESEND_ONBOARDING_FROM_EMAIL", raising=False)
     email_notify._send_counts_day = 0
     email_notify._send_counts_month = 0
     email_notify._send_counts_day_period = ""
@@ -330,3 +333,203 @@ def test_send_budget_month_rollover_resets_month_counter():
     assert email_notify._send_counts_month == 0
     assert email_notify._send_counts_day == 0
     assert not exceeded
+
+
+# ── #2406: onboarding-call offer email ───────────────────────────────────────
+
+def _invoke_onboarding(email, display_name=None, team_name=None,
+                       team_id="team-1"):
+    """Run the AWAITED onboarding send to completion (no background task)."""
+    return asyncio.run(email_notify.send_onboarding_offer_email(
+        email, display_name, team_name, team_id))
+
+
+def test_onboarding_payload_verbatim_copy_exact_url_and_from(monkeypatch):
+    """Copy is verbatim (issue #2406) incl. the EXACT booking URL (never the
+    ...onbaording-call typo); from daniel@premiselabs.co; personalized with
+    the greeting; provider Idempotency-Key onboarding:{team_id}."""
+    calls = []
+
+    async def fake_post(self, url, **kwargs):
+        calls.append((url, kwargs))
+        return _FakeResponse()
+
+    monkeypatch.setattr(email_notify.httpx.AsyncClient, "post", fake_post)
+    result = _invoke_onboarding(
+        "daniel@premiselabs.co", "Daniel Ospina", "acme", "team-abc")
+
+    assert result["status"] == "sent"
+    assert result["message_id"] == "msg_123"
+    assert calls, "resend should have been called"
+    url, kwargs = calls[0]
+    assert url == email_notify.RESEND_URL
+    headers = kwargs["headers"]
+    assert headers["Authorization"] == "Bearer re_test_secret_key_123"
+    assert headers["Idempotency-Key"] == "onboarding:team-abc"
+    body = kwargs["json"]
+    assert body["from"] == "daniel@premiselabs.co"
+    assert body["to"] == ["daniel@premiselabs.co"]
+    assert body["subject"] == email_notify.ONBOARDING_SUBJECT
+
+    # Verbatim copy — text body keeps every paragraph faithful.
+    text = body["text"]
+    assert text.startswith("Hey Daniel\n")
+    assert "We like to meet and help our users." in text
+    assert "strategising how to use Tortoise" in text
+    assert "a soundboard to discuss your usecase and how to make it better" in text
+    assert "Much love\nDaniel" in text
+    # EXACT URL — the ...onbaording-call typo is WRONG (#2406).
+    assert email_notify.ONBOARDING_BOOK_URL == \
+        "https://cal.com/danielospina/tortoise-onboarding-call"
+    assert "onbaording" not in email_notify.ONBOARDING_BOOK_URL
+    assert email_notify.ONBOARDING_BOOK_URL in text
+    # HTML body: greeting personalised + link present + escaping sane.
+    html_body = body["html"]
+    assert "Hey Daniel" in html_body
+    assert email_notify.ONBOARDING_BOOK_URL in html_body
+    assert "Daniel" in html_body
+    assert "onbaording" not in html_body
+
+
+def test_onboarding_greeting_name_real_funnel_vocabulary():
+    """Greeting heuristic pinned with REAL funnel vocabulary (scope doc):
+    OAuth display names, email local-parts, role mailboxes, org slugs,
+    numeric GitHub relays, hyphenated handles."""
+    g = email_notify._onboarding_greeting_name
+    # OAuth display name → first name token
+    assert g("Daniel Ospina", "daniel.ospina@gmail.com", "acme") == "Daniel"
+    # Email/password signup (no display_name) → email local-part
+    assert g(None, "daniel.ospina@gmail.com", "acme") == "Daniel"
+    assert g("", "alice.smith@example.com", "alice") == "Alice"
+    # Role mailbox → org token (title-cased)
+    assert g(None, "info@acme.com", "acme") == "Acme"
+    assert g(None, "support@acme.com", "acme") == "Acme"
+    # GitHub numeric-relay: the relay prefix fails the letters test → org token
+    assert g(None, "123456789+daniel-ospina@users.noreply.github.com",
+             "acme") == "Acme"
+    # Hyphenated slug handle falls through to the email/org fallbacks
+    assert g("daniel-ospina", "x@example.com", "acme") == "Acme"
+    # Inner case preserved; first char upper-cased
+    assert g("mcdonald", None, None) == "Mcdonald"
+    # Unicode letters count as letters
+    assert g("josé garcía", "j@example.com", "org") == "José"
+    # Nothing usable → 'there'
+    assert g(None, None, None) == "there"
+    assert g(None, "123456789@users.noreply.github.com", "u-9") == "there"
+    assert g(None, "a@b.co", "") == "there"
+
+
+def test_onboarding_from_is_env_tunable(monkeypatch):
+    monkeypatch.setenv("RESEND_ONBOARDING_FROM_EMAIL", "daniel@example.com")
+    calls = []
+
+    async def fake_post(self, url, **kwargs):
+        calls.append(kwargs["json"]["from"])
+        return _FakeResponse()
+
+    monkeypatch.setattr(email_notify.httpx.AsyncClient, "post", fake_post)
+    _invoke_onboarding("x@example.com", None, "org", "t1")
+    assert calls == ["daniel@example.com"]
+
+
+def test_onboarding_absent_key_returns_skipped(monkeypatch):
+    monkeypatch.delenv("RESEND_API_KEY")
+    called = []
+
+    async def fake_post(self, url, **kwargs):
+        called.append(url)
+        return _FakeResponse()
+
+    monkeypatch.setattr(email_notify.httpx.AsyncClient, "post", fake_post)
+    result = _invoke_onboarding("x@example.com", None, "org", "t1")
+    assert result == {"status": "skipped"}
+    assert not called
+
+
+def test_onboarding_transient_retry_then_sent(monkeypatch):
+    """One 0.5s transient retry: 503 → provider accept."""
+    class _StubResp:
+        def __init__(self, code):
+            self.status_code = code
+
+    attempts = {"n": 0}
+
+    async def fake_post(self, url, **kwargs):
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            raise email_notify.httpx.HTTPStatusError(
+                "503", request=None, response=_StubResp(503))
+        return _FakeResponse()
+
+    monkeypatch.setattr(email_notify.httpx.AsyncClient, "post", fake_post)
+    result = _invoke_onboarding("x@example.com", None, "org", "t1")
+    assert attempts["n"] == 2
+    assert result["status"] == "sent"
+
+
+def test_onboarding_provider_failure_failed_and_budget_refunded(monkeypatch):
+    """Provider failure → {status: failed}; the reserved budget slot is
+    refunded so a later send can still go out (caller never stamps)."""
+    class _StubResp:
+        def __init__(self, code):
+            self.status_code = code
+
+    attempts = {"n": 0}
+
+    async def failing_post(self, url, **kwargs):
+        attempts["n"] += 1
+        raise email_notify.httpx.HTTPStatusError(
+            "503", request=None, response=_StubResp(503))
+
+    async def ok_post(self, url, **kwargs):
+        return _FakeResponse()
+
+    monkeypatch.setattr(email_notify.httpx.AsyncClient, "post", failing_post)
+    result = _invoke_onboarding("x@example.com", None, "org", "t1")
+    assert attempts["n"] == 2  # first + one 0.5s transient retry
+    assert result == {"status": "failed"}
+    # Budget refunded: counters back to 0 and a later send proceeds.
+    assert email_notify._send_counts_day == 0
+    assert email_notify._send_counts_month == 0
+    monkeypatch.setattr(email_notify.httpx.AsyncClient, "post", ok_post)
+    result2 = _invoke_onboarding("y@example.com", None, "org", "t2")
+    assert result2["status"] == "sent"
+
+
+def test_onboarding_4xx_no_retry(monkeypatch):
+    """Permanent 4xx → single attempt, failed (never retried)."""
+    class _StubResp:
+        def __init__(self, code):
+            self.status_code = code
+
+    attempts = {"n": 0}
+
+    async def fake_post(self, url, **kwargs):
+        attempts["n"] += 1
+        raise email_notify.httpx.HTTPStatusError(
+            "422", request=None, response=_StubResp(422))
+
+    monkeypatch.setattr(email_notify.httpx.AsyncClient, "post", fake_post)
+    result = _invoke_onboarding("x@example.com", None, "org", "t1")
+    assert attempts["n"] == 1
+    assert result == {"status": "failed"}
+
+
+def test_onboarding_budget_exhausted_returns_skipped(monkeypatch, caplog):
+    """Shared #1138 budget guard: at the daily cap the onboarding send is
+    hard-stopped with a loud warning (never silently 429s past the tier)."""
+    monkeypatch.setenv("RESEND_SEND_BUDGET_DAILY", "1")
+    calls = []
+
+    async def fake_post(self, url, **kwargs):
+        calls.append(url)
+        return _FakeResponse()
+
+    monkeypatch.setattr(email_notify.httpx.AsyncClient, "post", fake_post)
+    assert _invoke_onboarding("a@example.com", None, "org", "t1")["status"] == "sent"
+    with caplog.at_level(logging.WARNING):
+        result = _invoke_onboarding("b@example.com", None, "org", "t2")
+    assert result == {"status": "skipped"}
+    assert len(calls) == 1  # second send skipped at the daily cap
+    assert any("SKIPPED" in r.message and "budget" in r.message
+               for r in caplog.records)

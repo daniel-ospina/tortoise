@@ -12,6 +12,7 @@ surfaces:
   - test_battery_report_writers.py
   - test_battery_schema_v11.py
   - test_delivery_tenancy.py  # C6 #2115: delivery-shape tenancy + session_recording per-graph override
+  - test_onboarding_email_http.py
   - test_sentry.py
   - test_tenancy_spine.py     # C5 #2114: data-plane tenancy spine (cross-graph suite)
   - test_agent_signup.py
@@ -376,7 +377,8 @@ surfaces:
   - test_tool_registry.py
   - test_topic_summarization.py
   - test_tortoise_search.py
-  - test_trash_name_race.py       # #2468 restore-vs-create name race (fake CP)
+  - test_trash_quota.py            # #2467 restore respects the max_graphs quota (fake CP)
+  - test_trash_name_race.py        # #2468 restore-vs-create name race (fake CP)
   - test_tripwire.py
   - test_uri_env_mutations_declared.py
   - test_validity_windows.py
