@@ -13,6 +13,8 @@ from tortoise.backup_config import BackupConfig
 from tortoise.backup_sweep import (
     OPS_STATE_KEY,
     _check_per_label_drift,
+    _write_flat_index_filtered,
+    read_purge_flat_ghosts,
     resolve_active_graph,
     enumerate_eligible_teams,
     enumerate_teams,
@@ -1778,6 +1780,58 @@ def test_purge_absent_namespace_converges(shared_proj):
                           team_ids=["team_x"])
     assert any(p["graph_id"] == gid for p in res["purged"])
     assert _tombstone_props(proj, gid).get("purged_at")
+
+
+# ── #2466 flat-index RMW reconciliation (sweep vs purge) ───────────────────
+
+def _flat_bids_in_index(store, team_id):
+    return set((json.loads(store.download(f"ops/legacy-flat-index/{team_id}.json")) or {}).keys())
+
+
+def test_purge_records_ghosts_and_sweep_write_drops_stale_bids():
+    """#2466: a purge-erased flat bid is recorded as a ghost; a later sweep
+    index write (even with a STALE reclassification that re-adds the bid) must
+    never resurrect it, while a genuinely fresh flat is kept."""
+    store = MemoryStorage()
+    erased = "team_x/flat_dead0001"
+    alive = "team_x/flat_alive01"
+    store.upload(f"backups/{erased}/dump.enc", b"x")
+    # Purge erases + records the ghost.
+    store.upload("ops/legacy-flat-index/team_x.json",
+                 json.dumps({erased: {"graph_name": "ns",
+                                      "graph_id": "g_dead0001"}}).encode())
+    from tortoise.backup_sweep import _purge_graph_storage
+    out = _purge_graph_storage(store, "team_x", "g_dead0001")
+    assert out["flat_keys"] == 1
+    ghosts = read_purge_flat_ghosts(store, "team_x")
+    assert erased in ghosts
+    # A STALE sweep reclassification re-adds the erased bid (concurrent run
+    # that listed the objects before the purge deleted them) plus a live one.
+    stale = {erased: {"graph_name": "ns", "graph_id": "g_dead0001"},
+             alive: {"graph_name": "team_team_x", "graph_id": "default"}}
+    _write_flat_index_filtered(store, "team_x", stale)
+    assert erased not in _flat_bids_in_index(store, "team_x")
+    assert alive in _flat_bids_in_index(store, "team_x")
+
+
+def test_flat_ghost_horizon_prunes_aged_records():
+    """#2466: ghost records older than the horizon are pruned on the sweep
+    write (they have finished racing); recent ones are kept."""
+    store = MemoryStorage()
+    old_bid = "team_x/flat_old000001"
+    fresh_bid = "team_x/flat_fresh001"
+    store.upload(
+        "ops/purge-flat-ghosts/team_x.json",
+        json.dumps({
+            old_bid: {"erased_at": (datetime.now(UTC)
+                                    - timedelta(days=40)).isoformat()},
+            fresh_bid: {"erased_at": (datetime.now(UTC)
+                                      - timedelta(days=1)).isoformat()},
+        }).encode())
+    _write_flat_index_filtered(store, "team_x", {})
+    ghosts = read_purge_flat_ghosts(store, "team_x")
+    assert fresh_bid in ghosts
+    assert old_bid not in ghosts
 
 
 @pytest.mark.skipif(_DOCKER_LANE, reason="purge erasure unit tests run embedded; docker lane covered by the hosted trash E2E (#2304)")
