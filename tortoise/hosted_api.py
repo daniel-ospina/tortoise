@@ -387,6 +387,17 @@ async def _lifespan(app):
     OPTIONAL — if the pre-warm misses its window, EmbeddingModel.get()
     retries on the next call and search falls back to FTS+structural RRF.
     """
+    # ── #2444: optional Sentry activation for the hosted API (no-op without
+    # SENTRY_DSN). Initialize before the app starts serving so captures are
+    # armed from the first request. Hosted-only concern: local SDK/self-host
+    # never sets the DSN, so this is inert there.
+    try:
+        from tortoise.sentry import init as _sentry_init
+
+        _sentry_init()
+    except Exception:  # noqa: BLE001, RUF100 — init is guarded internally; belt-and-suspenders
+        pass
+
     async with mcp_http_app.lifespan(mcp_http_app):
         try:
             import threading
@@ -630,6 +641,15 @@ async def _unhandled_exception_handler(request: Request, exc: Exception):
     _path = request.url.path.replace("\r", "\\r").replace("\n", "\\n")
     _logging.getLogger("tortoise.api").exception(
         "unhandled exception: %s %s", request.method, _path)
+    # #2444: surface unhandled hosted errors to Sentry when enabled (SENTRY_DSN).
+    # The error is also the live intake signal for the inbound channel — the
+    # forwarder dedupes by issue group, so repeated signatures collapse.
+    try:
+        from tortoise.sentry import capture_exception as _sentry_capture
+
+        _sentry_capture(exc, tags={"method": request.method, "path": _path})
+    except Exception:  # noqa: BLE001, RUF100 — capture never breaks the 500 response
+        pass
     origin = request.headers.get("origin")
     acao = origin if origin in _ALLOWED_ORIGINS else _ALLOWED_ORIGINS[0]
     return JSONResponse(
@@ -6728,6 +6748,24 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     if not session_existed:
         extraction_errors = list(meta.get("errors") or [])
         extraction_warnings = list(meta.get("warnings") or [])
+        # #2444: partial-extraction failures are the product's live error surface —
+        # surface them to Sentry (when enabled) with team/session context so an
+        # agent (or the inbound intake) can act on recurring signatures.
+        if extraction_errors:
+            try:
+                from tortoise.sentry import capture_message as _sentry_msg
+
+                _sentry_msg(
+                    f"capture extraction errors: {len(extraction_errors)} on session",
+                    level="warning",
+                    tags={
+                        "team_id": str(team.get("team_id", "")),
+                        "session_id": str(session_id or ""),
+                        "error_count": str(len(extraction_errors)),
+                    },
+                )
+            except Exception:  # noqa: BLE001, RUF100 — capture must never break the API
+                pass
         # #2031 review: surface the tenant-vocab degradation as an additive
         # capture warning (set by the v2 branch's fail-open path) — the
         # default vocabulary produces no minted kinds to flag, so a log line
