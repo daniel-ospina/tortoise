@@ -668,4 +668,4 @@ def _sha16(text: str) -> str:
 
 (plan-review cycles logged here as they run — see below)
 
-<!-- plan-review: cycles=0, status=running, version=2.3.0 -->
+<!-- plan-review: cycles=3, status=clean, version=2.3.0 -->
