@@ -4324,6 +4324,11 @@ def _cmd_index_github(args):
     point_model = MockModel("cheap")
     relation_model = MockModel("reason")
     indexed, skipped, unreadable, errors = 0, 0, 0, 0
+    # already_indexed counts ONLY the idempotent re-run class (content-hash
+    # skips) — those prove PRIOR success. No-claims skips (fresh-run files
+    # with nothing extractable) and unreadable skips prove nothing, and the
+    # summary line keeps `skipped` as their SUM (display unchanged).
+    already_indexed = 0
 
     for i, fp in enumerate(md_files, 1):
         rel = fp.relative_to(repo_path)
@@ -4347,6 +4352,7 @@ def _cmd_index_github(args):
         if content_hash in indexed_hashes:
             print(f"  [{i}/{total}] {rel}… ⊙ (already indexed)")
             skipped += 1
+            already_indexed += 1
             continue
         print(f"  [{i}/{total}] {rel}…", end=" ", flush=True)
         try:
@@ -4393,16 +4399,20 @@ def _cmd_index_github(args):
         __import__("shutil").rmtree(tmpdir, ignore_errors=True)
     # #32/#39 lineage: index failures must stay VISIBLE to callers/CI — the
     # onboard step-3 gates "Onboarding complete." on this rc (#39 killed the
-    # silent-failure false-green). An all-unreadable run (0 indexed but
-    # unreadable files skipped) is the same failure class #2201 fixes, so it
-    # must exit 1 too; a partial run (some indexed) keeps exit 0. `skipped >
-    # 0` keeps an idempotent RE-run green: on re-runs the already-indexed
-    # skips prove prior success (a repo with a permanent unreadable file
-    # indexes 0 on re-run — readable docs are hash-skipped — yet must return
-    # the same rc 0 its first run returned). An all-unreadable FRESH run has
-    # skipped == 0 and still exits 1. No-claims skips are the pre-existing
-    # "nothing to extract" success class, unchanged from before #2201.
-    return 0 if errors == 0 and (indexed > 0 or unreadable == 0 or skipped > 0) else 1
+    # silent-failure false-green). Failure arm: NOTHING was indexed while
+    # files were unreadable (the #2201 dangling-symlink/undecodable class).
+    # Rescues from that arm: (a) some files indexed → partial success, rc 0;
+    # (b) no unreadable files → a clean no-claims / pure re-run is the
+    # pre-existing "nothing to extract" success class, rc 0; (c) already-
+    # indexed re-run skips, which prove PRIOR success (a repo with a
+    # permanent unreadable file indexes 0 on re-run — readable docs are
+    # hash-skipped — and must return the same rc 0 its first run returned).
+    # No-claims skips prove nothing about the unreadable failures in the
+    # SAME run, so they never rescue the rc: a fresh run mixing an
+    # unreadable file with no-claim stubs (0 indexed) must exit 1 — the
+    # pre-fix rule read any `skipped > 0` as prior-success and masked it.
+    return 0 if errors == 0 and (
+        indexed > 0 or unreadable == 0 or already_indexed > 0) else 1
 
 
 def _cmd_doctor(args):

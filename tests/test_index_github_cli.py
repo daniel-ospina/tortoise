@@ -320,6 +320,65 @@ def test_index_github_all_unreadable_returns_failure(embedded_db_path, monkeypat
     assert "Traceback" not in captured.err, captured.err
 
 
+def test_index_github_mixed_unreadable_and_noclaims_returns_failure(
+        embedded_db_path, monkeypatch, capsys, tmp_path):
+    """Post-#2215 regression: a FRESH run that indexes 0 while mixing an
+    unreadable file with a no-claims file must exit 1 — the pre-fix rc rule
+    read any `skipped > 0` as idempotent prior-success, so a dangling
+    symlink (unreadable) + a frontmatter/no-claim stub (skipped) reported
+    rc 0 and `tortoise onboard` announced completion over an empty graph.
+    Only ALREADY-INDEXED (hash) skips prove prior success; no-claims skips
+    prove nothing about the same run's unreadable failures."""
+    _isolated_index_env(monkeypatch, tmp_path)
+
+    repo = _dangling_symlink_repo(tmp_path, leaf="dangling-repo-mixed")
+    # Replace the extractable doc with a NO-CLAIMS stub (no ## sections →
+    # "skipped — no claims found", never hash-marked) — the distinguishing
+    # case: unreadable > 0 AND skipped > 0 AND indexed == 0 on a fresh run.
+    (repo / "architecture.md").unlink()
+    (repo / "README.md").write_text(
+        "# Test Repo\n\nThis is a stub with no extractable sections.\n")
+
+    args = Args(url=str(repo), db=embedded_db_path)
+    exit_code = _cmd_index_github(args)
+
+    assert exit_code == 1, (
+        "mixed unreadable + no-claims fresh run (0 indexed) must exit 1, "
+        f"got {exit_code}")
+    out = capsys.readouterr().out
+    assert "Done: 0 indexed, 1 skipped, 1 unreadable, 0 errors" in out, out
+    assert "(skipped — no claims found)" in out, out
+    assert "unreadable" in out, out
+    assert "Traceback" not in out, out
+
+
+def test_index_github_mixed_fresh_then_idempotent_stays_failing(
+        embedded_db_path, monkeypatch, capsys, tmp_path):
+    """The mixed fresh failure stays rc 1 across runs when NOTHING was ever
+    indexed (no hash skips to prove prior success) — unlike the idempotent-
+    after-success case, which stays green (test_index_github_idempotent_with_
+    unreadable)."""
+    _isolated_index_env(monkeypatch, tmp_path)
+
+    repo = _dangling_symlink_repo(tmp_path, leaf="dangling-repo-mixed-rerun")
+    (repo / "architecture.md").unlink()
+    (repo / "README.md").write_text(
+        "# Test Repo\n\nThis is a stub with no extractable sections.\n")
+    args = Args(url=str(repo), db=embedded_db_path)
+
+    exit_code1 = _cmd_index_github(args)
+    assert exit_code1 == 1, f"fresh mixed run must exit 1, got {exit_code1}"
+    out1 = capsys.readouterr().out
+    assert "Done: 0 indexed, 1 skipped, 1 unreadable, 0 errors" in out1, out1
+
+    exit_code2 = _cmd_index_github(args)
+    assert exit_code2 == 1, (
+        "a re-run of a NEVER-successful mixed repo must still exit 1, "
+        f"got {exit_code2}")
+    out2 = capsys.readouterr().out
+    assert "Done: 0 indexed, 1 skipped, 1 unreadable, 0 errors" in out2, out2
+
+
 def test_index_github_idempotent_with_unreadable(embedded_db_path, monkeypatch,
                                                  capsys, tmp_path):
     """#2201/#32 re-review P1: a repo that has an unreadable file (the #2201

@@ -1211,6 +1211,41 @@ class TestOnboardCountExcludesNonContentDirs:
         assert "junk.md" not in out, "non-content files must not be announced"
         assert "Onboarding complete." in out, out
 
+    def test_onboard_mixed_unreadable_and_noclaims_never_completes(
+            self, tmp_path, monkeypatch, capsys):
+        """Post-#2215 regression at the onboard gate: a FRESH repo whose
+        index run indexes 0 while mixing an unreadable file (dangling
+        symlink) with a no-claims stub exits 1 from the indexer — the
+        pre-fix rc rule masked it as skipped>0 prior success, so onboard
+        printed "Onboarding complete." over an empty graph. Now it must
+        print "❌ Index failed" and never complete."""
+        from tortoise import __main__ as m
+        repo = tmp_path / "repo-mixed"
+        repo.mkdir()
+        # No-claims stub (no ## sections → skipped, never hash-marked).
+        (repo / "README.md").write_text(
+            "# Test Repo\n\nNo extractable sections here.\n")
+        # Dangling symlink — the #2201 unreadable class.
+        (repo / "data").mkdir()
+        missing = repo / "data" / "ONTOLOGY_v2.5.md"
+        (repo / "data" / "ONTOLOGY.md").symlink_to(missing)
+        self._embedded_env(monkeypatch, tmp_path)
+
+        with mock.patch.object(m, "_cmd_init", return_value=0), \
+             mock.patch.object(m, "_cmd_demo", return_value=0), \
+             mock.patch.object(m, "_cmd_doctor", return_value=0), \
+             mock.patch("subprocess.run") as fake_run:
+            fake_run.return_value.returncode = 0  # git repo detected
+            fake_run.return_value.stdout = str(repo)
+            rc = m.main(["onboard"])
+
+        out = capsys.readouterr().out
+        assert rc == 1, f"mixed-failure onboard must exit 1, got rc={rc}: {out}"
+        assert "Index failed" in out, out
+        assert "Onboarding complete." not in out, (
+            "onboard must never announce completion over an unindexed graph")
+        assert "Done: 0 indexed, 1 skipped, 1 unreadable, 0 errors" in out, out
+
     def test_init_autoindex_announce_count_excludes_venv(self, tmp_path,
                                                         monkeypatch, capsys):
         """`tortoise init --yes` auto-index announce counts the README only —
