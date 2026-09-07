@@ -4096,3 +4096,56 @@ def test_capture_succeeded_session_still_replays(sdk, monkeypatch):
     assert res2["extraction_mode"] == "replayed", res2
     assert res2["points"] == []
     assert calls["n"] == 1, "a succeeded session's re-capture must NOT re-extract"
+
+
+def test_capture_true_retry_v2_only_m2_failed_session_replays(
+        sdk, monkeypatch):
+    """#2335 WI-2b / review (PR #2473): TRUE retry is a v2-lane feature. A
+    FAILED M2 capture leaves LIVE partial claims (ULID ids, in-capture-only
+    dedup — the #1727 duplicate hazard); its same-session re-POST must NOT
+    re-run M2 (that would mint duplicates) — it replays (safe no-op)."""
+    monkeypatch.setenv("TORTOISE_SESSION_EXTRACTOR", "m2")
+    calls = {"n": 0}
+
+    class _PartialFailingSessionExtractor:
+        """Emits ONE live claim then raises — the partial-emission case that
+        makes an M2 re-run duplicate (live ULID claims + in-capture-only
+        dedup)."""
+        version = "partial-m2@0"
+
+        def run(self, transcript, source_id, api):
+            calls["n"] += 1
+            api.add_point("decision: ship serve first", {"source": source_id})
+            raise RuntimeError("provider rate limited mid-run")
+
+    monkeypatch.setattr(
+        "tortoise.sdk._build_session_llm_extractor",
+        lambda: _PartialFailingSessionExtractor())
+    monkeypatch.delenv("TORTOISE_SESSION_LLM_MOCK", raising=False)
+    conv = [{"role": "user", "content": "we decided X"}]
+    sid = "m2-failed-2335"
+    res1 = sdk.capture_session(conv, session_id=sid)
+    assert res1["ok"] is False, res1
+    assert res1["extracted"] >= 1, "m2 partial claim must land live"
+    proj = sdk._get_proj()
+    live1 = proj.g.query(
+        "MATCH (s:Session {id:$sid})-[:CONTAINS]->(p:Point) "
+        "WHERE coalesce(p.is_episodic,false) <> true RETURN count(p)",
+        params={"sid": sid}).result_set[0][0]
+    assert live1 == res1["extracted"], "live claims must be CONTAINS-wired"
+    # Same-session re-capture under m2: REPLAY (no re-extraction — no dup).
+    res2 = sdk.capture_session(conv, session_id=sid)
+    assert res2["extraction_mode"] == "replayed", res2
+    assert res2["points"] == []
+    assert calls["n"] == 1, "m2 failed session must NOT re-extract on re-POST"
+    live2 = proj.g.query(
+        "MATCH (s:Session {id:$sid})-[:CONTAINS]->(p:Point) "
+        "WHERE coalesce(p.is_episodic,false) <> true RETURN count(p)",
+        params={"sid": sid}).result_set[0][0]
+    assert live2 == live1, "no duplicate claims minted on m2 re-POST"
+    # capture_ok stays False (the failed attempt) + extractor recorded m2.
+    row = proj.g.query(
+        "MATCH (s:Session {id:$sid}) RETURN s.capture_ok, s.capture_extractor",
+        params={"sid": sid}).result_set
+    assert row[0][0] is False, row
+    assert row[0][1] == "m2", row

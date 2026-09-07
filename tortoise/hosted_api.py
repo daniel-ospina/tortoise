@@ -6552,7 +6552,8 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # ONE Event node instead of minting two.
     session_row = proj.g.query(
         "OPTIONAL MATCH (s:Session {id:$sid}) "
-        "RETURN count(s) AS n, s.capture_ok AS ok",
+        "RETURN count(s) AS n, s.capture_ok AS ok, "
+        "s.capture_extractor AS extractor",
         params={"sid": session_id},
     ).result_set[0]
     session_existed = bool(session_row[0])
@@ -6561,9 +6562,20 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # (capture_ok True). A prior FAILED capture (capture_ok False) is
     # RE-ATTEMPTED — extraction runs again. None (legacy, pre-#2335)
     # replays — backward compat with the #1727 invariant.
+    # Review (PR #2473): TRUE retry is gated to the v2 lane (the ONLY
+    # convergent lane — content-addressed pt_<sha> ids + graph content_hash
+    # resolution fold a re-attempt's partial claims onto the same nodes). The
+    # M2 lane mints non-deterministic time-ULID ids with in-capture-only dedup
+    # and folds partial emissions live on raise — re-running M2 over a failed
+    # attempt's LIVE ULID claims would mint DUPLICATES (the #1727 hole the
+    # replay skip closed). Retry fires only when the prior ran v2 AND this
+    # request runs v2 (env != m2) — otherwise replay (safe no-op).
     prior_capture_ok = session_row[1]
+    prior_capture_extractor = session_row[2]
     retry_failed_capture = (
-        session_existed and prior_capture_ok is False)
+        session_existed and prior_capture_ok is False
+        and prior_capture_extractor == "v2"
+        and os.environ.get("TORTOISE_SESSION_EXTRACTOR") != "m2")
 
     # Extraction-aware estimate (pre-write, fail-closed count) — review P2,
     # PR #976: the points quota counts NON-episodic Points only, and turn
@@ -6897,6 +6909,25 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
                             "eid": event_id, "sid": session_id,
                             "harness": source_harness, "ing": now},
                 )
+                if retry_failed_capture:
+                    # #2335 WI-2b / review (PR #2473): a RETRY heals the
+                    # failed first attempt's provenance gap (mirror of the
+                    # sdk heal). The retry's graph content_hash resolution
+                    # folded the first attempt's claims onto their existing
+                    # nodes (dedup=content_hash_hit — NOT in the minted set),
+                    # which would otherwise stay live WITHOUT an eventId
+                    # forever (the first mint never stamped them). Scoped to
+                    # THIS session's CONTAINS-wired points lacking eventId —
+                    # never clobber a fold that resolved to a different
+                    # session's canonical.
+                    proj.g.query(
+                        "MATCH (s:Session {id:$sid})-[c:CONTAINS]->"
+                        "(n:Point) WHERE n.eventId IS NULL AND coalesce(n.is_episodic,false) <> true "
+                        "SET n.eventId=$eid, n.source_session=$sid, "
+                        "    n.source_harness=$harness, n.ingested_at=$ing",
+                        params={"sid": session_id, "eid": event_id,
+                                "harness": source_harness, "ing": now},
+                    )
             else:
                 # P1 #1529 (D4): create_event returning no id/eventId silently
                 # skips stamping — surface as an additive warning.
@@ -7316,7 +7347,18 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # blank gate returns before the Session MERGE — nothing to record there.
     _capture_ok = (verb_status == STATUS_OK
                    and not extraction_errors and not skipped)
-    if session_existed or meta.get("mode") != "replayed":
+    if not session_existed or retry_failed_capture:
+        # #2335 WI-2b: record the outcome ONLY on a genuine attempt (fresh OR
+        # retry) — a replay performs NO Session write (zero-write no-op).
+        # Review (PR #2473): the SET records the extractor lane that RAN so
+        # the retry gate can require a v2 prior (M2 partials never retried).
+        # NOTE (documented lane divergence): hosted computes _capture_ok AFTER
+        # the post-write enrichment — an enrichment-read failure marks points
+        # skipped → verb partial → capture_ok False → retryable. The sdk
+        # computes ok BEFORE its surfaced-verification read and treats a
+        # verification failure as a benign warning (capture_ok True). Both
+        # are internally consistent; the divergence is documented, not
+        # forced-aligned (the sdk surface has no skipped/verb concept).
         # Non-fatal bookkeeping (mirror of the sdk guard): a graph hiccup
         # must NOT 500 a committed capture — and on a FAILED capture a raise
         # would leave capture_ok=None → the next same-session re-POST would
@@ -7324,8 +7366,13 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         # residue.
         try:
             proj.g.query(
-                "MATCH (s:Session {id:$sid}) SET s.capture_ok=$ok",
-                params={"sid": session_id, "ok": _capture_ok})
+                "MATCH (s:Session {id:$sid}) "
+                "SET s.capture_ok=$ok, "
+                "    s.capture_extractor=$extractor",
+                params={"sid": session_id, "ok": _capture_ok,
+                        "extractor": "m2" if os.environ.get(
+                            "TORTOISE_SESSION_EXTRACTOR") == "m2"
+                        else "v2"})
         except Exception as exc:  # pragma: no cover - graph hiccup
             extraction_warnings.append(
                 f"capture_ok state write failed: {type(exc).__name__}")

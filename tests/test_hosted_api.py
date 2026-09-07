@@ -2081,6 +2081,47 @@ class TestSessionCaptureWriteVerb:
             params={"sid": "h-retry-2335"}).result_set
         assert rows and rows[0][0] is True, rows
 
+    def test_capture_true_retry_m2_failed_session_replays(self, client,
+                                                           monkeypatch):
+        """#2335 WI-2b / review (PR #2473): TRUE retry is v2-lane (hosted
+        twin). A FAILED M2 capture leaves live partial claims; the same-
+        session re-POST replays (no re-run, no duplicates)."""
+        monkeypatch.setenv("TORTOISE_SESSION_EXTRACTOR", "m2")
+        calls = {"n": 0}
+
+        class _PartialFailingSessionExtractor:
+            version = "partial-m2@0"
+
+            def run(self, transcript, source_id, api):
+                calls["n"] += 1
+                api.add_point("decision: ship serve first",
+                              {"source": source_id})
+                raise RuntimeError("provider rate limited mid-run")
+
+        monkeypatch.setattr(
+            "tortoise.sdk._build_session_llm_extractor",
+            lambda: _PartialFailingSessionExtractor())
+        monkeypatch.delenv("TORTOISE_SESSION_LLM_MOCK", raising=False)
+        payload = {"conversation": [
+            {"role": "user", "content": "we decided X"}],
+            "session_id": "h-m2-failed-2335"}
+        r1 = client.post("/v1/sessions", json=payload)
+        assert r1.status_code == 200, r1.text
+        assert r1.json()["errors"], "first m2 attempt fails"
+        assert r1.json()["extracted"] >= 1
+        r2 = client.post("/v1/sessions", json=payload)
+        assert r2.status_code == 200, r2.text
+        assert r2.json()["extraction_mode"] == "replayed", r2.json()
+        assert calls["n"] == 1, "m2 failed session must not re-extract"
+        import tortoise.hosted_api as ha_mod
+        sdk = ha_mod._make_sdk(namespace=TEST_TEAM_ID)
+        proj = sdk._get_proj()
+        row = proj.g.query(
+            "MATCH (s:Session {id:$sid}) RETURN s.capture_ok, "
+            "s.capture_extractor", params={"sid": "h-m2-failed-2335"}
+        ).result_set
+        assert row[0][0] is False and row[0][1] == "m2", row
+
     def test_capture_replay_zero_new_nodes_verb_ok(self, client):
         """Idempotency: re-POST of the same session_id (recording on) writes
         0 new nodes — extraction is skipped, the verb still speaks ok."""

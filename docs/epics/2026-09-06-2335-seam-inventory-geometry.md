@@ -51,11 +51,17 @@ these (none of which a per-segment extractor call alone answers):
    it) or mint N events — the #1727 zero-new-node invariant pins the replay
    shape, and the mint-refresh-cost note (ON MATCH SET refreshes
    startedAt/endedAt) applies per re-run.
-3. **Ceilings do NOT lift.** `MAX_EXTRACTIONS_PER_TURN = 200` is M2-only;
-   `MAX_PAYLOAD_POINTS = 50` (soft 15 WARN / hard 25 hold / ceiling 50 → 402,
-   PL3) is the hosted ceiling and **segmentation does not raise it**. Each
-   segment's output still needs the escalation net (`escalated_*` counters,
-   #2408 Task-4 shape) or a 50-net-new session gets clipped mid-stream.
+3. **Ceilings do NOT lift.** Corrected anchors (review PR #2473 — the
+   soft-15/hard-25/ceiling-50→402 ladder is the COMMIT lane's
+   `MAX_VALUE_POINTS_PER_SESSION` (quota.py), while `MAX_PAYLOAD_POINTS = 50`
+   is the deliberately separate Layer-1 raw payload cap → 422 (commit_schema
+   — the two 50s must never be wired together), and the capture path's hard
+   bound is the team points-quota 402 gate, NOT either 50). Segmentation does
+   not raise ANY of these. `MAX_EXTRACTIONS_PER_TURN = 200` gates BOTH
+   estimate lanes (the shared v2 estimate is 3 × Σ min(sentences, cap) —
+   it is not M2-only). Each segment's output still needs the escalation net
+   (`escalated_*` counters, #2408 Task-4 shape) so no per-capture write gets
+   clipped mid-stream.
 4. **Escalation is the real cost surface.** #2408 measured **zero escalations
    across 155 sessions / 466 calls** — the escalation net never fired on
    real LongMemEval geometry. The cost-materiality readout is escalation

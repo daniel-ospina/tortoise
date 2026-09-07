@@ -912,26 +912,22 @@ REPORT_HOOK_URL = (
 # a list of strings (the pinned #1529 contract); the raw detail rides a NEW
 # sibling resp["diagnostics"] list. The eval lane and internal consumers
 # (out["errors"], meta["errors"], write-path receipts) are UNTOUCHED.
-_CAPTURE_ERROR_CONTRACT: dict[str, dict[str, str]] = {
-    "S2 output partial — truncated tail dropped (embed list incomplete)": {
-        "headline": ("The first pass of extraction produced an incomplete "
-                     "result. Retry the capture — the retry will re-attempt it."),
-        "diagnostics_suffix": "S2 output partial — truncated tail dropped "
-                              "(embed list incomplete)",
-    },
-    "S4 output partial — truncated tail dropped (embed list incomplete)": {
-        "headline": ("The final review pass produced an incomplete result. "
-                     "Retry the capture — the retry will re-attempt it."),
-        "diagnostics_suffix": "S4 output partial — truncated tail dropped "
-                              "(embed list incomplete)",
-    },
-    "no embed list produced (S2/S4 empty) — nothing to embed": {
-        "headline": ("Extraction could not find anything to store from this "
-                     "session. Retry the capture, or try again with more "
-                     "content."),
-        "diagnostics_suffix": ("no embed list produced (S2/S4 empty) — "
-                               "nothing to embed"),
-    },
+# key = raw error string (the exact-match contract); value = the human
+# headline. Review (PR #2473): dropped the dead ``diagnostics_suffix`` values
+# — diagnostics is the RAW string itself (returned verbatim by
+# _capture_resp_error_split), so suffix copies would be drift-hazard
+# duplicates of the keys.
+_CAPTURE_ERROR_CONTRACT: dict[str, str] = {
+    "S2 output partial — truncated tail dropped (embed list incomplete)": (
+        "The first pass of extraction produced an incomplete "
+        "result. Retry the capture — the retry will re-attempt it."),
+    "S4 output partial — truncated tail dropped (embed list incomplete)": (
+        "The final review pass produced an incomplete result. "
+        "Retry the capture — the retry will re-attempt it."),
+    "no embed list produced (S2/S4 empty) — nothing to embed": (
+        "Extraction could not find anything to store from this "
+        "session. Retry the capture, or try again with more "
+        "content."),
 }
 
 
@@ -960,9 +956,9 @@ def _capture_error_to_human(raw: str) -> str:
     """Map a raw capture error string to its human headline at the resp
     boundary. Unmapped errors pass through unchanged (fail-safe — a new
     extractor error must never be hidden)."""
-    for _raw, mapping in _CAPTURE_ERROR_CONTRACT.items():
+    for _raw, headline in _CAPTURE_ERROR_CONTRACT.items():
         if _raw in raw:
-            return mapping["headline"]
+            return headline
     for prefix, headline in _CAPTURE_ERROR_PREFIX_CONTRACT:
         if raw.startswith(prefix):
             return headline
@@ -2805,10 +2801,15 @@ class TortoiseSDK:
                 "extraction_mode": "empty",
                 "ok": False,
                 "errors": ["no extractable content — empty or blank conversation"],
-                # #2335 WI-2: diagnostics is always-present on the resp
-                # contract; the empty-gate error is already plain-language,
-                # so errors and diagnostics mirror here.
-                "diagnostics": [],
+                # #2335 WI-2: diagnostics mirrors the raw error (the WI-2
+                # fail-safe: an unmapped/plain error passes into BOTH errors
+                # and diagnostics at the main resp assembly — the empty-gate
+                # error is plain-language, so it mirrors identically).
+                "diagnostics": [
+                    "no extractable content — empty or blank conversation"],
+                # #2335 WI-1a: stats is ALWAYS present on the receipt
+                # (additive meta contract) — {} here (no extraction ran).
+                "stats": {},
                 "warnings": [],
             }
 
@@ -2854,7 +2855,8 @@ class TortoiseSDK:
         # only (test_capture_succeeded_session_still_replays).
         session_row = proj.g.query(
             "OPTIONAL MATCH (s:Session {id:$sid}) "
-            "RETURN count(s) AS n, s.capture_ok AS ok",
+            "RETURN count(s) AS n, s.capture_ok AS ok, "
+            "s.capture_extractor AS extractor",
             params={"sid": session_id},
         ).result_set[0]
         session_existed = bool(session_row[0])
@@ -2864,9 +2866,23 @@ class TortoiseSDK:
         # False) is RE-ATTEMPTED — extraction runs again (retry is TRUE).
         # None (legacy sessions, pre-#2335) replays — backward compat with
         # the #1727 invariant (a legacy session is presumed captured).
+        # Review (PR #2473): TRUE retry is gated to the v2 lane — the ONLY
+        # convergent lane. v2 point ids are content-addressed (pt_<sha>) and
+        # its dedup resolves against the GRAPH (content_hash MATCH), so a
+        # re-attempt folds the failed attempt's partial claims onto the same
+        # nodes (0 duplicates). The M2 lane mints non-deterministic time-ULID
+        # ids with IN-CAPTURE-ONLY dedup, and _extract_session_llm folds
+        # partial emissions live even on raise — a failed M2 attempt leaves
+        # LIVE ULID claims; re-running M2 would mint DUPLICATES (the exact
+        # #1727 hole the replay skip closed). Retry fires only when BOTH the
+        # prior attempt ran v2 (capture_extractor recorded) AND this request
+        # runs v2 (env != m2) — otherwise replay (safe no-op).
         prior_capture_ok = session_row[1]
+        prior_capture_extractor = session_row[2]
         retry_failed_capture = (
-            session_existed and prior_capture_ok is False)
+            session_existed and prior_capture_ok is False
+            and prior_capture_extractor == "v2"
+            and os.environ.get("TORTOISE_SESSION_EXTRACTOR") != "m2")
         proj.g.query(
             f"MERGE (s:Session {{id:$sid}}) SET {', '.join(_merge_sets)}",
             params=_merge_params,
@@ -3044,6 +3060,37 @@ class TortoiseSDK:
                                 "eid": event_id, "sid": session_id,
                                 "harness": source_harness, "ing": now},
                     )
+                    if retry_failed_capture:
+                        # #2335 WI-2b / review (PR #2473): a RETRY heals the
+                        # failed first attempt's provenance gap. The retry's
+                        # graph content_hash resolution FOLDED the first
+                        # attempt's claims onto their existing nodes
+                        # (dedup=content_hash_hit — NOT in the minted set),
+                        # so those nodes would otherwise stay live WITHOUT an
+                        # eventId forever (the first attempt's mint never
+                        # stamped them — it errored/returned no id, non-fatal,
+                        # and the session was left capture_ok=False).
+                        # Precision: scope to THIS session's CONTAINS-wired
+                        # points lacking eventId AND NOT episodic — turn
+                        # points (is_episodic=true, pointKind 'event') never
+                        # carry the sessionCaptured eventId in the normal
+                        # flow (stamps == extracted, pinned), so the heal
+                        # must not stamp them; only the folded CLAIM nodes
+                        # (non-episodic) get provenance. Never clobber a fold
+                        # that resolved to a DIFFERENT session's canonical
+                        # (that node already carries its original ingest's
+                        # provenance; re-stamping would violate the
+                        # single-eventId-per-session rule).
+                        proj.g.query(
+                            "MATCH (s:Session {id:$sid})-[c:CONTAINS]->"
+                            "(n:Point) WHERE n.eventId IS NULL "
+                            "AND coalesce(n.is_episodic, false) <> true "
+                            "SET n.eventId=$eid, n.source_session=$sid, "
+                            "    n.source_harness=$harness, "
+                            "    n.ingested_at=$ing",
+                            params={"sid": session_id, "eid": event_id,
+                                    "harness": source_harness, "ing": now},
+                        )
                 else:
                     # P1 #1529 (D4): create_event returning no id/eventId
                     # silently skips stamping — surface as an additive warning.
@@ -3103,10 +3150,24 @@ class TortoiseSDK:
         # #2335 WI-2b: record the attempt outcome on the Session node so a
         # SAME-session re-capture can distinguish a SUCCEEDED prior (replay
         # no-op) from a FAILED prior (TRUE retry). Set on every genuine
-        # attempt (fresh + retry); a replay leaves the stored True untouched
-        # (idempotent). The empty/blank gate returns before the Session
-        # MERGE, so nothing to record there.
-        if session_existed or meta.get("mode") != "replayed":
+        # attempt (fresh + retry); a replay performs NO write (zero-write
+        # no-op — the stored True/None stays untouched). The empty/blank
+        # gate returns before the Session MERGE, so nothing to record there.
+        # NOTE (documented lane divergence, mirror of hosted): sdk computes ok
+        # BEFORE the surfaced-verification read (~3170) — a post-write
+        # verification failure appends a warning only, capture_ok stays True.
+        # Hosted computes _capture_ok AFTER its enrichment and downgrades to
+        # partial (retryable) when points are skipped. Both internally
+        # consistent; not forced-aligned (no skipped/verb concept here).
+        if not session_existed or retry_failed_capture:
+            # #2335 WI-2b: the attempt outcome is recorded ONLY on a genuine
+            # attempt (fresh OR retry) — a replay performs NO Session write
+            # (zero-write no-op; the stored value — True or legacy None —
+            # stays untouched, matching the replay posture).
+            # Review (PR #2473): the SET also records the extractor lane that
+            # RAN (v2/m2) so the retry gate (above) can require a v2 prior —
+            # the M2 lane's partial emissions are non-convergent ULID claims,
+            # never retried.
             # Non-fatal bookkeeping (codebase posture: receipt/last-error/
             # Source/EP are all try/except + additive warning): a graph
             # hiccup here must NOT raise after the capture committed — and
@@ -3116,8 +3177,13 @@ class TortoiseSDK:
             # names the residue: capture_ok unset means an unknown prior.
             try:
                 proj.g.query(
-                    "MATCH (s:Session {id:$sid}) SET s.capture_ok=$ok",
-                    params={"sid": session_id, "ok": ok})
+                    "MATCH (s:Session {id:$sid}) "
+                    "SET s.capture_ok=$ok, "
+                    "    s.capture_extractor=$extractor",
+                    params={"sid": session_id, "ok": ok,
+                            "extractor": "m2" if os.environ.get(
+                                "TORTOISE_SESSION_EXTRACTOR") == "m2"
+                            else "v2"})
             except Exception as exc:  # pragma: no cover - graph hiccup
                 extraction_warnings.append(
                     f"capture_ok state write failed: {type(exc).__name__}")
