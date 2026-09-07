@@ -1245,10 +1245,13 @@ function claimIntentInFlight() {
   // #2509: sync tab state → URL hash (pushState for tab switches,
   // useRef guard skips initial mount to avoid strict-mode double effect).
   const tabSyncRef = React.useRef(false)
+  const programmaticTabChangeRef = React.useRef(false)
+  const popProcessingRef = React.useRef(false)
   React.useEffect(() => {
     if (!tabSyncRef.current) { tabSyncRef.current = true; return }
     const hash = '#/' + tab
     if (window.location.hash !== hash) {
+      programmaticTabChangeRef.current = true
       window.history.pushState({ tab }, '', hash)
     }
   }, [tab])
@@ -1257,6 +1260,17 @@ function claimIntentInFlight() {
   // with nav-button clicks.
   React.useEffect(() => {
     function onHashChange() {
+      // #2528: dedup guard — browsers that fire both popstate + hashchange
+      // for the same URL change must not run the handler twice.
+      if (popProcessingRef.current) return
+      popProcessingRef.current = true
+      setTimeout(() => { popProcessingRef.current = false }, 0)
+      // #2528: Safari fires popstate on pushState — skip when the change
+      // was self-triggered (tab sync effect sets this ref before pushState).
+      if (programmaticTabChangeRef.current) {
+        programmaticTabChangeRef.current = false
+        return
+      }
       const h = window.location.hash
       if (h.startsWith('#/')) {
         const candidate = h.slice(2)
@@ -2472,7 +2486,7 @@ function claimIntentInFlight() {
   // teamIdRef.current, so a call when currentTeamId is already set never
   // re-fires the currentTeamId effect (no duplicated members/graphs loads);
   // the setTeams refresh + loadBackups re-fetch are harmless.
-  async function finishWelcomeLoads() {
+  async function finishWelcomeLoads(tabOverride) {
     await loadTeams().catch(() => {})
     loadBackups('').catch(() => {})
     // #1906: the first-timer path never ran loadAll (keys+sessions) — the
@@ -2488,6 +2502,13 @@ function claimIntentInFlight() {
     // Pass the current refresh seq: if a seed refire bumps it mid-flight,
     // this pre-seed response is dropped (it must not clobber the count).
     refreshTeam('', undefined, teamRefreshSeqRef.current).catch(() => {})
+    // #2528: sync the URL hash to the target tab — exits from welcome that
+    // navigate to API Keys pass 'keys' through tabOverride so the replaceState
+    // uses the correct tab even though the closure holds 'overview'.
+    const tabToUse = tabOverride || tab
+    if (window.location.hash !== '#/' + tabToUse) {
+      window.history.replaceState({ tab: tabToUse }, '', '#/' + tabToUse)
+    }
     // #1847/#2323 (Option B): re-fire the onboarding-state load NOW that the
     // team exists — the mount-time refreshOnboarding() fired BEFORE the
     // org-create submit provisioned the team (name-first, tenant-provision)
@@ -5525,7 +5546,7 @@ function claimIntentInFlight() {
                               it was ungated predates that) — see
                               wizardMintDurableKey). */}
                           <div style={{ marginTop: '0.85rem', display: 'flex', flexWrap: 'wrap', gap: '0.9rem', alignItems: 'center' }}>
-                            <button type="button" className="ghost small" onClick={() => { window.history.replaceState({}, '', '#/keys'); setWelcomeMode(false); setTab('keys'); finishWelcomeLoads() }}>
+                            <button type="button" className="ghost small" onClick={() => { window.history.replaceState({}, '', '#/keys'); setWelcomeMode(false); setTab('keys'); finishWelcomeLoads('keys') }}>
                               {isOwnerAdmin ? `Manage keys for ${shownOrgName || 'your organization'} →` : `View keys for ${shownOrgName || 'your organization'} →`}
                             </button>
                             {isOwnerAdmin && (
@@ -5780,7 +5801,7 @@ function claimIntentInFlight() {
                           <div className="wizard-nav">
                             <button type="button" className="ghost" onClick={() => setWelcomeOriented(false)}>← Back</button>
                             <div className="wizard-nav-actions">
-                              <button type="button" className="ghost" onClick={() => { window.history.replaceState({}, '', '#/keys'); setWelcomeMode(false); setTab('keys'); finishWelcomeLoads() }}>Go to API Keys →</button>
+                              <button type="button" className="ghost" onClick={() => { window.history.replaceState({}, '', '#/keys'); setWelcomeMode(false); setTab('keys'); finishWelcomeLoads('keys') }}>Go to API Keys →</button>
                             </div>
                           </div>
                         </>
@@ -5995,7 +6016,7 @@ function claimIntentInFlight() {
                                     // key. Fire-and-forget: finishWelcomeLoads never rejects.
                                     <button
                                       className="btn-primary"
-                                      onClick={() => { window.clearTimeout(checkoutResetTimerRef.current); setCheckoutPending(false); window.history.replaceState({}, '', '#/keys'); setWelcomeMode(false); setTab('keys'); finishWelcomeLoads() }}
+                                      onClick={() => { window.clearTimeout(checkoutResetTimerRef.current); setCheckoutPending(false); window.history.replaceState({}, '', '#/keys'); setWelcomeMode(false); setTab('keys'); finishWelcomeLoads('keys') }}
                                     >
                                       Start free
                                     </button>
