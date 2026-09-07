@@ -1890,6 +1890,51 @@ def test_purge_skips_row_restored_between_enumeration_and_drop(shared_proj):
 
 
 @pytest.mark.skipif(_DOCKER_LANE, reason="purge erasure unit tests run embedded; docker lane covered by the hosted trash E2E (#2304)")
+def test_purge_race_restore_mid_drop_never_stamps(shared_proj, monkeypatch):
+    """#2464 P2 regression: if a cross-process restore flips the row to
+    ACTIVE between the purge's pre-drop verify and the post-artifact stamp,
+    the purge must NOT stamp purged_at onto the live row — it reports
+    race_restored loudly (data loss already happened; the row stays live and
+    re-deletable)."""
+    if shared_proj is None:
+        return
+    proj = _make_env(None, shared_proj)
+    store = MemoryStorage()
+    gid = f"g_midrace_{os.urandom(2).hex()}"
+    _seed_custom_tombstone(
+        proj, "team_x", gid, "midrace",
+        deleted_at=(datetime.now(UTC) - timedelta(days=30)).isoformat())
+    reg = proj.db.select_graph(_REGISTRY_GRAPH)
+    store.upload(f"backups/team_x/{gid}/runA/dump.enc", b"blob")
+    calls = {"n": 0}
+
+    def _race_row_still_tombstoned(source, team_id, gid_):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            # The cross-process restore flips the row between the pre-drop
+            # verify (call 1) and the post-artifact verify (call 2).
+            reg.query(
+                "MATCH (g:Graph {id:$gid, team_id:'team_x'}) "
+                "SET g.status = 'active' REMOVE g.deleted_at",
+                params={"gid": gid_})
+            return False
+        return True
+
+    monkeypatch.setattr(
+        "tortoise.backup_sweep._row_still_tombstoned",
+        _race_row_still_tombstoned)
+    res = run_graph_purge(db=proj.db, registry=reg, storage=store,
+                          team_ids=["team_x"])
+    # Not reported as purged; surfaced as an error entry (race surfaced
+    # loudly); row is LIVE and never stamped purged_at.
+    assert all(p["graph_id"] != gid for p in res["purged"])
+    assert any(e.get("graph_id") == gid and "race" in str(e.get("error"))
+               for e in res["errors"])
+    props = _tombstone_props(proj, gid)
+    assert props.get("status") == "active"  # row stayed live
+    assert not props.get("purged_at")  # never stamped onto a live row
+
+@pytest.mark.skipif(_DOCKER_LANE, reason="purge erasure unit tests run embedded; docker lane covered by the hosted trash E2E (#2304)")
 def test_purge_erases_reclassified_legacy_flats_by_namespace(shared_proj):
     """#2462 P1 regression: the hourly sweep re-attributes a DELETED graph's
     flat index entries to graph_id '' (the classify step maps ACTIVE rows

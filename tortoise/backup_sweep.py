@@ -1312,6 +1312,17 @@ def _purge_tombstone(source, db, storage, team_id: str, tomb: dict[str, Any],
     else:
         _drop_graph_namespace(db, ns)
     artifacts = _purge_graph_storage(storage, team_id, gid, namespace=ns)
+    # Post-artifact re-verify (#2464): a cross-process restore could have
+    # flipped the row to ACTIVE while the drop + artifact purge ran (the
+    # per-team lock is process-local). Never stamp a live row — report the
+    # race loudly instead of silently succeeding.
+    if not _row_still_tombstoned(source, team_id, gid):
+        logger.error(
+            "purge race: team=%s graph=%s restored while purge ran — "
+            "purged_at NOT stamped (row is live); namespace/artifacts were "
+            "already dropped", team_id, gid)
+        return {"status": "race_restored", "graph_id": gid,
+                "namespace": ns, "artifacts": artifacts}
     _stamp_purged(source, team_id, gid, now_iso, residual=residual)
     if residual:
         return {"status": "residual", "graph_id": gid,
@@ -1351,11 +1362,18 @@ def _stamp_purged(source, team_id: str, graph_id: str, now_iso: str,
                   *, residual: bool) -> None:
     """Stamp a tombstone row purged_at on the control-plane lane. A failure
     RAISES (the retry anchor: the data is already dropped — never let a
-    stamp failure masquerade as done)."""
+    stamp failure masquerade as done). The supabase seam's stamp is
+    CONDITIONED on status=deleted and returns False when a cross-process
+    restore flipped the row mid-purge (#2464) — that also RAISES here so
+    the caller records the race instead of silently succeeding."""
     if _is_supabase_source(source):
         from .supabase_control import purge_graph_row
-        purge_graph_row(source, team_id, graph_id, now=now_iso,
-                        residual=residual)
+        stamped = purge_graph_row(source, team_id, graph_id, now=now_iso,
+                                  residual=residual)
+        if not stamped:
+            raise RuntimeError(
+                f"purge stamp refused for {team_id}/{graph_id}: row is "
+                "no longer a deleted tombstone (restored concurrently?)")
         return
     source.query(
         "MATCH (g:Graph {id:$gid, team_id:$tid, status:'deleted'}) "
@@ -1429,6 +1447,14 @@ def run_graph_purge(
                 elif res.get("status") == "residual":
                     residuals.append(res)
                     team_done += 1
+                elif res.get("status") == "race_restored":
+                    # #2464: a cross-process restore won mid-purge — the
+                    # row is LIVE and unpurged; surface loudly (data loss
+                    # already occurred; the row is re-deletable).
+                    errors.append({"team_id": team_id,
+                                   "graph_id": tomb.get("graph_id"),
+                                   "error": "restore raced the purge "
+                                            "(row live; not stamped)"})
             if team_done:
                 teams_purged += 1
     return {"status": "ok" if not errors else "errors",
