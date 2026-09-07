@@ -206,7 +206,8 @@
       <ul>
         <li><strong>Billing and transactional records</strong> are retained as required by applicable law, including tax and accounting obligations (GDPR Art. 17(3) carve-out for legal compliance).</li>
         <li><strong>Analytics data</strong> is handled in accordance with the analytics section (§3) and the retention terms of each analytics provider; analytics data is not silently claimed to be deleted.</li>
-        <li><strong>Backups</strong> may retain data for a limited additional period after deletion to maintain integrity; data in backups is not used for any other purpose.</li>
+        <li><strong>Knowledge graphs.</strong> Deleting a knowledge graph in the product starts a disclosed 7-day recovery window (the team's "Trash"): during that window the graph can be restored, and its API keys are revoked immediately. After the window ends, the graph is permanently erased — including any stored backup copies of it. Deleted graph data is not retained beyond that recovery window except where required by law or for fraud/security investigations.</li>
+        <li><strong>Backups</strong> may retain data for a limited additional period after deletion to maintain integrity; data in backups is not used for any other purpose. Backup copies of a deleted knowledge graph are erased with the graph after its recovery window, and are refused for restoration once the window has passed.</li>
       </ul>
 
       <h2>7. Security</h2>
@@ -290,7 +291,7 @@
       <p><strong>Response commitment.</strong> Requests are answered within <strong>one month</strong> of receipt, as required by GDPR Art. 12(3). If a request is complex or numerous, the response period may be extended by up to two additional months; you will be informed of any extension within one month of receipt, together with the reasons for the delay.</p>
       <p><strong>Identity verification.</strong> we may request identity verification before acting on any request (GDPR Art. 12(6)). Where a request cannot be verified or is manifestly unfounded or excessive, the request may be refused or a reasonable fee may be charged, as permitted by law.</p>
       <p><strong>What this channel covers.</strong> The email channel covers: (a) account data, (b) non-account data, (c) users who cannot log in to their account, and (d) access, export, and objection requests. It is the general-purpose rights channel for this release.</p>
-      <p><strong>Deletion scope.</strong> When a deletion request is fulfilled, account and associated data is deleted or de-identified, subject to the retention carve-outs in §6 (billing/transactional records retained as required by law; analytics data handled per the analytics section). Deletion does not extend to content you have already shared publicly or to data that others have lawfully obtained.</p>
+      <p><strong>Deletion scope.</strong> When a deletion request is fulfilled, account and associated data is deleted or de-identified, subject to the retention carve-outs in §6 (billing/transactional records retained as required by law; analytics data handled per the analytics section; a knowledge graph deleted in the product follows its 7-day recovery window before permanent erasure). Deletion does not extend to content you have already shared publicly or to data that others have lawfully obtained.</p>
       <p><strong>Self-service deletion (future).</strong> An in-product self-service account deletion feature does not exist at the time of this publication, so this policy does not promise one. If a self-service deletion feature is added to the product, this policy will be updated to describe it.</p>
     </main>
 

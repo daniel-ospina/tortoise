@@ -20,6 +20,46 @@ aboutObjects:
 > (the default + custom graphs), each with its own archives, state, retention
 > and staleness incidents.
 
+## #2304 trash lifecycle & purge (delete = quarantine → grace → erasure)
+
+Since #2304, deleting a CUSTOM graph (DELETE /v1/graphs/{id}) is a QUARANTINE,
+not a removal: the row is tombstoned (status='deleted' + deleted_at stamped on
+BOTH lanes) and the graph enters the team's Trash for a **7-day recovery
+window** (owner-restorable via POST /v1/graphs/trash/{id}/restore — owner/admin
+session only; keys stay revoked). The default graph can never be deleted.
+
+**Purge** (physical erasure) runs on demand via the internal endpoint:
+
+    curl -X POST $API/v1/internal/backups/purge \
+      -H "Authorization: Bearer $INTERNAL_KEY"
+    # optional {"grace_days": N} (1..365) for drills; default 7
+
+Per expired tombstone (deleted_at <= now - 7d; legacy tombstones with no
+deleted_at count as past-grace) the purge: (1) re-verifies the row is STILL an
+unpurged tombstone (a restored graph is never erased — race guard); (2) drops
+the data-plane namespace (GRAPH.DELETE via select_graph(ns).delete(); an absent
+graph is success — idempotent); (3) deletes the graph's backup artifacts —
+nested pool `backups/{team}/{gid}/`, per-graph ops state
+`ops/teams/{team}/graphs/{gid}/`, and legacy FLAT archives resolved through the
+#2370 classification index; (4) stamps the row `purged_at` (row KEPT — audit
+tombstone; the trash list stops listing it; restore returns 410).
+
+The namespace ownership guard: only `team_{team_id}_{graph_id}` namespaces are
+dropped — a namespace that no longer maps to the tombstoned id (re-occupied by
+a live graph) is RETAINED and the row is stamped `purged_residual:true` for
+operator review. Artifact-deletion errors never fail the namespace drop; they
+are logged for operator follow-up (the row is stamped regardless).
+
+**Restore/purge serialization:** the restore endpoint takes the per-team sweep
+lock (`_sweep_team_lock`, timed 20s via to_thread — never blocks the event
+loop) around its probe+flip; the purge/sweep hold the same lock per team, so a
+restore racing a purge cannot interleave. A lock timeout returns 503.
+
+**Cadence:** operator-invoked today; wiring a fixed purge cadence into
+registry-cron.sh is deferred to #2317 (shared-file coordination). In practice,
+run the purge after the hourly sweep so past-window trash is erased within a
+day of expiry.
+
 ## Architecture
 - **Driver:** `.github/workflows/registry-backup-cron.yml` (hourly, GH Actions) → internal-key endpoints. Independent failure domain — an OOM crash-loop (#545) must not blind the pipeline.
 - **Watcher (driver-disabled leg):** in-process read-only staleness daemon (spawned in `_lifespan`) that files GitHub issues + pushes Telegram ITSELF — covered by construction when the workflow is disabled.

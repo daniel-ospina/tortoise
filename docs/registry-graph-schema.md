@@ -67,6 +67,13 @@ The registry graph is a dedicated FalkorDB namespace (`registry`) storing contro
 
 ### Graph (epic #2083, C1/C2 — multi-graph tenancy)
 
+#2304 lifecycle props (added 2026-09-06): `deleted_at` (ISO-8601 — delete
+stamp, grace-window start; absent = legacy tombstone), `purged_at` (physical
+erasure stamp — row kept as audit), `purged_residual` (bool — namespace
+retained by the ownership guard, operator review). Supabase lane mirrors these
+as `graphs.deleted_at / purged_at / purged_residual` (migration
+20260906000001).
+
 ```
 (:Graph {
   id: string,        // g_<16 hex> (random hex — NOT a ULID); the DEFAULT
