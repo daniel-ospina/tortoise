@@ -249,12 +249,12 @@ def test_account_menu_identity_block_single_team(page: Page):
     _open_account_menu(page)
     expect(page.locator(".account-identity-name")).to_have_text("danielospinabotero")
     expect(page.locator(".account-identity-email")).to_have_text("identity-e2e@premise-labs.dev")
-    # tier badge — scoped to the menu (the header's "free tier · Upgrade"
-    # anchor is outside .account-menu)
-    expect(page.locator(".account-menu .tier-badge")).to_have_text("free")
+    # #2494: tier badge is on the Organization block, NOT the identity block
+    expect(page.locator(".account-identity .tier-badge")).to_have_count(0)
+    expect(page.locator(".account-menu .tier-badge")).to_have_count(1)
     expect(page.locator(".account-menu").get_by_role("button", name="Profile")).to_be_visible()
     expect(page.locator(".account-menu").get_by_role("button", name="Log out")).to_be_visible()
-    expect(page.locator(".account-menu").get_by_text("Switch team")).to_have_count(0)
+    expect(page.locator(".account-menu").get_by_text("Switch organization")).to_have_count(0)
 
 
 def test_account_menu_email_prefix_fallback(page: Page):
@@ -283,7 +283,7 @@ def test_account_menu_multi_team_switch(page: Page):
     page.goto(DASHBOARD_URL)
     _open_account_menu(page)
     menu = page.locator(".account-menu")
-    expect(menu.get_by_text("Switch team")).to_be_visible()
+    expect(menu.get_by_text("Switch organization")).to_be_visible()
     expect(menu.get_by_text("Alpha")).to_be_visible()
     expect(menu.get_by_text("Bravo")).to_be_visible()
     # active team carries aria-current
@@ -519,13 +519,12 @@ def test_create_team_success(page: Page):
     page.goto(DASHBOARD_URL)
     _open_account_menu(page)
     menu = page.locator(".account-menu")
-    expect(menu.get_by_role("button", name="+ Create new team")).to_be_visible()
-    expect(menu.get_by_text("Switch team")).to_have_count(0)  # single-team: no switch label
-    menu.get_by_role("button", name="+ Create new team").click(force=True)  # menu closes + dialog opens → unmounts
-    # W1 (#1997 team→Organization rename): the create dialog renders as
-    # 'Create a new organization' with an 'Organization name' input
-    # (main.jsx #1877 modal — aria-label + input aria-label). The account-
-    # menu entry keeps the legacy '+ Create new team' label.
+    expect(menu.get_by_role("button", name="+ Create new organization")).to_be_visible()
+    expect(menu.get_by_text("Switch organization")).to_have_count(0)  # single-team: no switch label
+    menu.get_by_role("button", name="+ Create new organization").click(force=True)  # menu closes + dialog opens → unmounts
+    # W1 (#1997) + #2494: the create dialog renders as 'Create a new
+    # organization' with an 'Organization name' input (main.jsx #1877 modal
+    # — aria-label + input aria-label). The menu entry now matches.
     expect(page.get_by_role("dialog", name="Create a new organization")).to_be_visible()
     # validation mirrors the API (spaces rejected) — inline error, no POST
     page.get_by_label("Organization name").fill("bad name")
@@ -563,7 +562,7 @@ def test_create_team_free_capped_gate(page: Page):
 
     page.goto(DASHBOARD_URL)
     _open_account_menu(page)
-    page.locator(".account-menu").get_by_role("button", name="+ Create new team").click(force=True)  # menu closes → unmounts
+    page.locator(".account-menu").get_by_role("button", name="+ Create new organization").click(force=True)  # menu closes → unmounts
     page.get_by_label("Organization name").fill("blocked")
     page.locator(".modal .btn-primary").click(force=True)  # busy-state re-render
     dialog = page.get_by_role("dialog", name="Create a new organization")
@@ -574,6 +573,44 @@ def test_create_team_free_capped_gate(page: Page):
     expect(dialog.get_by_role("button", name="Upgrade")).to_be_visible()
     dialog.get_by_role("button", name="Upgrade").click()
     expect(page.get_by_role("heading", name="Billing")).to_be_visible()
+
+
+def test_account_menu_two_sections(page: Page):
+    """#2494: menu renders two labeled sections with correct item membership;
+    tier badge absent from identity block, present in org section."""
+    _seed(page)
+    teams = [
+        {"team_id": "team_a", "team_name": "Alpha", "tier": "free"},
+        {"team_id": "team_b", "team_name": "Bravo", "tier": "free"},
+    ]
+    _wire(page, inv=_inventory(login_methods=1), teams=teams)
+    page.goto(DASHBOARD_URL)
+    _open_account_menu(page)
+    menu = page.locator(".account-menu")
+    # section labels visible
+    expect(menu.get_by_text("Personal Account")).to_be_visible()
+    expect(menu.get_by_text("Organization")).to_be_visible()
+    # personal section: identity + Profile + Log out grouped
+    expect(menu.get_by_role("button", name="Profile")).to_be_visible()
+    expect(menu.get_by_role("button", name="Log out")).to_be_visible()
+    # tier badge NOT in identity block, IS in org section
+    expect(page.locator(".account-identity .tier-badge")).to_have_count(0)
+    expect(page.locator(".account-menu .tier-badge")).to_have_count(1)
+
+
+def test_account_menu_org_block_single_team(page: Page):
+    """#2494: single-team users see org name + tier badge in Organization
+    section; no switch list; Create new org is unconditional."""
+    _seed(page)
+    _wire(page, inv=_inventory(login_methods=1))
+    page.goto(DASHBOARD_URL)
+    _open_account_menu(page)
+    menu = page.locator(".account-menu")
+    # org section visible with team name + tier
+    expect(menu.get_by_text("Organization")).to_be_visible()
+    expect(menu.get_by_text("E2E")).to_be_visible()
+    expect(menu.get_by_text("Switch organization")).to_have_count(0)
+    expect(menu.get_by_role("button", name="+ Create new organization")).to_be_visible()
 
 
 def test_pending_invites_accept_lands_on_team(page: Page):
