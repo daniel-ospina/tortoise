@@ -3952,11 +3952,18 @@ class TortoiseSDK:
                 succ_vf = vf_rows[0][1]
             else:
                 succ_vf = now  # monotone fallback — never a gap
+        # #2423 (rebuild-parity fix): kwargs-style emission (id + extra keys)
+        # so the FULL payload rides the JSONL line — the previous dict-style
+        # emission only reached the :GraphEvent store (payload) while the
+        # JSONL line carried bare id=old_id, dropping new_id/valid_from/
+        # valid_to/expired_at. Rebuild's PointSuperseded fold (pass-1b)
+        # needs new_id + the bi-temporal stamps to re-stamp the superseded
+        # point verbatim (#2423 indicator 1) — a JSONL wipe+rebuild of a
+        # dict-style journal folds status-only (new_id missing) and warns.
         self._emit_event(
             "PointSuperseded",
-            {"id": old_id, "new_id": new_id,
-             "valid_from": succ_vf, "valid_to": succ_vf, "expired_at": now},
-            id=old_id,
+            id=old_id, new_id=new_id,
+            valid_from=succ_vf, valid_to=succ_vf, expired_at=now,
         )
 
         # CYCLE-26 REVIEW-FIX P1 (cycle-7 pin): the superseded-status write +

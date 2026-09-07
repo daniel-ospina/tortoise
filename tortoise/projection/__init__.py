@@ -1332,6 +1332,10 @@ class FalkorProjection(
                 self._upsert_point_props(p)
 
         supersede_folds: list = []  # ObjectSuperseded replays (pass-1b fold sweep)
+        point_supersede_folds: list = []  # #2423 PointSuperseded replays
+        # #2423: DirectEdgeRepoint descriptors (supersede's 2a-DIRECT transfer
+        # journal) — replayed in pass-2b AFTER operator edges exist.
+        direct_repoint_events: list = []
         # Pass 1b: apply revisions + other non-edge events AFTER all nodes exist
         for ev in events:
             ev = self._norm(ev)
@@ -1407,6 +1411,38 @@ class FalkorProjection(
                 # registration is irrelevant and later re-creations are
                 # re-folded correctly.
                 supersede_folds.append(ev)
+            elif t == "PointSuperseded":
+                # #2423 pass-1b rebuild parity: the POINT-side analog of
+                # #2164 (ObjectSuperseded above) — apply() has no supersede
+                # branch because live supersede_point mutates the graph
+                # directly (sdk.py status block + CORRECTS MERGE), but the
+                # REBUILD chain had NO branch either: a journaled
+                # PointSuperseded silently fell through and the superseded
+                # Point reverted to status='live' (its PointAdded snapshot
+                # predates the supersede), losing outdated/validTo/
+                # expiredAt + the CORRECTS edge (indicator 1) — a dead
+                # claim reappearing in default reads. Mirror the #2164
+                # pattern: defer the status/validity/CORRECTS fold to a
+                # trailing sweep (below, after this loop) so a later
+                # PointAdded/PointPromoted re-creation of the same id cannot
+                # resurrect it — the fold is an idempotent SET, so ordering
+                # vs its own creation event is irrelevant and later
+                # re-creations are re-folded correctly. (The operator-edge
+                # re-point + DirectEdgeRepoint replay half is pass-2b —
+                # after pass-2 rebuilds edges from operator snapshots that
+                # still name the OLD input.)
+                point_supersede_folds.append(ev)
+            elif t == "DirectEdgeRepoint":
+                # #2423: supersede's 2a-DIRECT transfer emits a flat
+                # DirectEdgeRepoint descriptor {src, tgt, edge_type, attrs}
+                # per repointed direct edge (sdk.py). No replay consumer
+                # exists anywhere — on rebuild the transferred direct edge is
+                # LOST (pass-2 only rebuilds operator-mediated edges from
+                # snapshots; operator-less direct edges have no PointAdded
+                # snapshot to carry them). Deferred to pass-2b (after all
+                # operator edges exist) — descriptor replay is a MERGE of the
+                # flat endpoints, order-independent by construction.
+                direct_repoint_events.append(ev)
             elif t == "DocumentCreated":
                 self._upsert_document(ev)
             elif t == "SourceCreated":
@@ -1438,6 +1474,36 @@ class FalkorProjection(
                     "delete race)",
                     ev.get("event_id"), ev.get("supersedes_by"))
 
+        # Pass 1b fold sweep (points): PointSuperseded replays (#2423) —
+        # status/validity/CORRECTS fold AFTER every point-creation event
+        # (PointAdded in pass 1a + PointPromoted/PointRevised above) so a
+        # journaled re-creation cannot resurrect the superseded point.
+        # Warn on 0-row folds (the journal claims a supersession whose old
+        # Point never re-existed — pre-#432 legacy journals, unjournaled
+        # producers, or delete races). The fold is idempotent; the sweep
+        # mirrors the ObjectSuperseded pattern above.
+        # Review P2-3 (id-reuse double-supersede): a raw producer that
+        # deletes + re-creates a point with the SAME id between two
+        # supersedes leaves TWO PointSuperseded events for one old_id. Only
+        # the LAST supersede is live-truth (each earlier supersede's
+        # CORRECTS + stamps died with the deleted node) — process the
+        # latest event per old id, or the earlier fold's CORRECTS (S1→A)
+        # would ghost beside the final S2→A. Chains A→B→C have distinct
+        # old ids, so each link still folds independently.
+        last_per_oid: dict[str, dict] = {}
+        for ev in point_supersede_folds:
+            if isinstance(ev.get("id"), str):
+                last_per_oid[ev["id"]] = ev
+        for ev in last_per_oid.values():
+            matched = self._fold_point_superseded(ev)
+            if matched == 0:
+                logger.warning(
+                    "rebuild: PointSuperseded fold matched no Point "
+                    "(event_id=%s old_id=%r new_id=%r) — superseded point "
+                    "not re-created by any journaled event (legacy "
+                    "journal, unjournaled producer, or delete race)",
+                    ev.get("event_id"), ev.get("id"), ev.get("new_id"))
+
         # Pass 1b tail: restore :Batch marker nodes AND the Point.batch_id
         # enforcement links from the pre-wipe snapshot (#990) — quarantine
         # locks survive rebuilds, and promote_point still sees them.
@@ -1458,7 +1524,19 @@ class FalkorProjection(
 
         # Pass 2: create edges for all operators + provenance/entity wiring
         # (shared _upsert_point_edges — single source of truth with apply, #330).
-        for ev in events:
+        # Journal-order maps for the pass-2b re-point (order-faithful
+        # trailing sweep): operator_created_seq[op_id] = index of the
+        # operator's OperatorAdded event in the journal; fold_seq[old_id] =
+        # index of the PointSuperseded event. An operator whose creation
+        # PREDATES the supersede is the live-transferred set; one created
+        # AFTER it legitimately keeps its terminal link (create_operator has
+        # no terminal guard) — the re-point must skip those. Live operators
+        # carry NO createdAt (probe: None), and rebuild stamps createdAt =
+        # rebuild-time via _upsert_point_props, so timestamp comparison is
+        # unreliable — the journal SEQUENCE is the faithful discriminator.
+        operator_created_seq: dict[str, int] = {}
+        fold_seq: dict[str, int] = {}
+        for seq, ev in enumerate(events):
             ev = self._norm(ev)
             if ev.get("type") in ("PointAdded", "OperatorAdded"):
                 # #331 (review r3): ev.get — missing 'point' key handled by
@@ -1478,7 +1556,171 @@ class FalkorProjection(
                     continue
                 if ev.get("projection_version", 0) >= 2:
                     p.pop("context", None)
+                if ((ev.get("type") == "OperatorAdded"
+                        or (ev.get("type") == "PointAdded"
+                            and isinstance(p.get("operator"), dict)))
+                        and isinstance(p.get("id"), str)):
+                    # Only the creation event is the creation-order signal;
+                    # a re-PointAdded of the same id (upsert) must not
+                    # overwrite the operator's ORIGINAL creation position.
+                    # PointAdded-carried operators (capture/raw producers
+                    # that journal the operator in a point snapshot, not an
+                    # OperatorAdded) must ALSO be recorded — otherwise the
+                    # pass-2b order-faithful discriminator treats them as
+                    # unsequenced (None → always re-point), silently
+                    # disabling the guard for that class (review P2-1).
+                    operator_created_seq.setdefault(p["id"], seq)
                 self._upsert_point_edges(p)
+            elif ev.get("type") == "PointSuperseded" and isinstance(ev.get("id"), str):
+                fold_seq.setdefault(ev["id"], seq)
+
+        # Pass 2b (#2423): PointSuperseded EDGE re-point replay +
+        # DirectEdgeRepoint descriptor replay — AFTER pass-2 rebuilt operator
+        # edges from operator PointAdded snapshots whose stored
+        # operator.inputs STILL NAME THE OLD point (live supersede's transfer
+        # is CREATE+DELETE graph mutation only — operator.inputs is never
+        # updated and no operator snapshot is re-emitted), so every
+        # transferred operator edge re-materialized at the OLD point (the
+        # edge-topology half of the #2423 resurrection).
+        #
+        # Operator edges: re-point old → final-live-successor mirroring the
+        # live 2a transfer semantics (sdk.supersede_point). Supersede chains
+        # A→B→C are resolved TRANSITIVELY (each superseded point's edges end
+        # on the final live point, not an intermediate terminal one) — the
+        # #2249 order-independence contract. alreadyDecided operators stay
+        # attached to the superseded prior (the #1080 dedup-context carve-out
+        # live supersede honors). An operator whose creation PREDATES the
+        # supersede is the live-transferred set — an operator created AFTER a
+        # supersede legitimately keeps its terminal link (create_operator has
+        # no terminal guard), so the re-point compares createdAt vs the
+        # supersede's ts (order-faithful trailing sweep).
+        #
+        # Direct edges: DirectEdgeRepoint descriptors (supersede's 2a-DIRECT
+        # journal, flat {src, tgt, edge_type, attrs}) get their replay
+        # consumer — the transferred direct edge is re-created at its FINAL
+        # (transitively-resolved) endpoints with its attrs. Direct-edge base
+        # creation (DirectEdgeCreated) replay stays deferred (A10 #1048 —
+        # plain direct edges remain lost on rebuild); the supersede-transfer
+        # descriptors ARE in scope here (E2E-11.6: the successor holds the
+        # transferred direct edge post-rebuild).
+        if point_supersede_folds or direct_repoint_events:
+            from tortoise.security import validate_rel_type
+            # Successor map old→new; resolve transitively to the final live
+            # point (chain-safe, cycle-guarded).
+            succ: dict[str, str] = {}
+            for ev in point_supersede_folds:
+                oid, nid = ev.get("id"), ev.get("new_id")
+                if isinstance(oid, str) and isinstance(nid, str):
+                    succ[oid] = nid
+
+            def _final(point_id: str) -> str:
+                seen: set[str] = set()
+                while point_id in succ and point_id not in seen:
+                    seen.add(point_id)
+                    point_id = succ[point_id]
+                return point_id
+
+            if point_supersede_folds:
+                # Collect per-fold operator-edge rows + validate rel types
+                # BEFORE any mutation (#329 collect-then-mutate pattern).
+                # Order-faithful discriminator: an operator whose
+                # OperatorAdded seq PREDATES the PointSuperseded seq is the
+                # live-transferred set (its edge existed at supersede time);
+                # an operator created AFTER the supersede (seq > fold_seq)
+                # legitimately keeps its terminal link (create_operator has
+                # no terminal guard) — skip. Re-point targets the FINAL
+                # live successor (transitive chain resolution), so folds
+                # stay order-independent (#2249).
+                repoints: list[tuple] = []  # (op_id, rel_type, idx, rid, old_id, new_id, op_label)
+                for ev in point_supersede_folds:
+                    oid = ev.get("id")
+                    if not isinstance(oid, str):
+                        continue
+                    final_id = _final(oid)
+                    if final_id == oid:
+                        continue
+                    fseq = fold_seq.get(oid)
+                    rows = self.g.query(
+                        "MATCH (op:Point {is_operator:true})-[r]->(old:Point {id:$id}) "
+                        "RETURN op.id, type(r), r.idx, ID(r), op.label",
+                        params={"id": oid},
+                    ).result_set
+                    for row in rows:
+                        # r.idx can be null (legacy edge) — Cypher handles a
+                        # null idx in the pattern; validate ONLY the rel type.
+                        validate_rel_type(row[1])
+                        op_seq = operator_created_seq.get(row[0])
+                        if op_seq is not None and fseq is not None \
+                                and op_seq > fseq:
+                            continue  # operator postdates the supersede
+                        repoints.append(
+                            (row[0], row[1], row[2], row[3], oid, final_id,
+                             row[4]))
+                repointed_seen: set[tuple] = set()
+                for (op_id, rtype, idx, rid, oid, nid, op_label) in repoints:
+                    # alreadyDecided ops keep their dedup-context edge on the
+                    # superseded prior (#1080) — mirror live's 2a skip.
+                    if op_label == "alreadyDecided":
+                        continue
+                    # #2423 review P2-3 (id-reuse double-supersede): the same
+                    # pass-2 (op)-[type{idx}]->(old) edge can be collected by
+                    # TWO folds when a raw producer deletes + re-creates a
+                    # point with the SAME id between supersedes (both folds
+                    # resolve old→the same final successor). CREATE would mint
+                    # a parallel duplicate edge (double EP weight) — dedupe on
+                    # the exact (op, type, idx, final) key.
+                    key = (op_id, rtype, idx, nid)
+                    if key in repointed_seen:
+                        continue
+                    repointed_seen.add(key)
+                    self.g.query(
+                        f"MATCH (op:Point {{id:$op_id}}), (new:Point {{id:$nid}}) "
+                        f"CREATE (op)-[:{rtype} {{idx:$idx}}]->(new)",
+                        params={"op_id": op_id, "nid": nid, "idx": idx},
+                    )
+                    self.g.query(
+                        f"MATCH (op:Point {{id:$op_id}})-[r:{rtype} {{idx:$idx}}]->"
+                        f"(old:Point {{id:$oid}}) WHERE ID(r)=$rid DELETE r",
+                        params={"op_id": op_id, "oid": oid, "idx": idx,
+                                "rid": rid},
+                    )
+
+            if direct_repoint_events:
+                for ev in direct_repoint_events:
+                    etype = ev.get("edge_type")
+                    src, tgt = ev.get("src"), ev.get("tgt")
+                    if (not isinstance(src, str) or not isinstance(tgt, str)
+                            or not isinstance(etype, str)):
+                        logger.warning(
+                            "rebuild: malformed DirectEdgeRepoint event skipped "
+                            "(event_id=%s)", ev.get("event_id"))
+                        continue
+                    validate_rel_type(etype)
+                    src_f, tgt_f = _final(src), _final(tgt)
+                    if src_f == tgt_f:
+                        # Phantom self-edge: live supersede's guard deletes an
+                        # edge whose other endpoint IS the successor (tid==new)
+                        # WITHOUT a descriptor; a chain A'→A'' can collapse an
+                        # earlier descriptor's endpoints onto each other. Never
+                        # recreate a self-edge (E2E-11.6 no-self contract).
+                        continue
+                    # Two-step MERGE (mirror create_direct_edge / supersede
+                    # 2a-DIRECT — never creates duplicate nodes; collapses to
+                    # one edge) then last-writer-wins attr SET.
+                    self.g.query(
+                        f"MATCH (a:Point {{id:$a}}), (b:Point {{id:$b}}) "
+                        f"MERGE (a)-[:{etype}]->(b)",
+                        params={"a": src_f, "b": tgt_f},
+                    )
+                    attrs = {k: ev[k] for k in
+                             ("direction", "confidence", "weight",
+                              "label", "batch_id") if k in ev}
+                    if attrs:
+                        self.g.query(
+                            f"MATCH (a:Point {{id:$a}})-[r:{etype}]->"
+                            f"(b:Point {{id:$b}}) SET r += $attrs",
+                            params={"a": src_f, "b": tgt_f, "attrs": attrs},
+                        )
 
         node_count = self.g.query(
             "MATCH (n:Point) RETURN count(n)"
