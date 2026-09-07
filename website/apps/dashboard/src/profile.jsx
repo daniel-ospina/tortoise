@@ -88,6 +88,8 @@ export function ReauthDialog({ open, busy, onClose, onPassword, onProvider, erro
   const [password, setPassword] = React.useState('')
   if (!open) return null
   const available = providers && providers.length ? providers : []
+  const hasPasswordMethod = providers.includes('email')
+  const showPasswordForm = hasPasswordMethod || passwordMode
   return (
     <div className="modal-backdrop" onClick={onClose}>
       <div className="modal" role="dialog" aria-modal="true" aria-label="Confirm it's you"
@@ -96,17 +98,19 @@ export function ReauthDialog({ open, busy, onClose, onPassword, onProvider, erro
         <p className="dim">{passwordMode
           ? 'You re-authenticated — now choose your new password.'
           : 'For security, sign in again before changing login methods.'}</p>
-        <form className="inline-form claim-email-form" onSubmit={(e) => { e.preventDefault(); onPassword(password) }}>
-          <input
-            type="password" placeholder={passwordMode ? 'New password' : 'Password'}
-            aria-label={passwordMode ? 'New password' : 'Password'}
-            value={password} onChange={(e) => setPassword(e.target.value)}
-            autoComplete={passwordMode ? 'new-password' : 'current-password'}
-          />
-          <button type="submit" disabled={busy || password.length < 6}>
-            {busy ? 'Saving…' : (passwordMode ? 'Set new password' : 'Confirm')}
-          </button>
-        </form>
+        {showPasswordForm && (
+          <form className="inline-form claim-email-form" onSubmit={(e) => { e.preventDefault(); onPassword(password) }}>
+            <input
+              type="password" placeholder={passwordMode ? 'New password' : 'Password'}
+              aria-label={passwordMode ? 'New password' : 'Password'}
+              value={password} onChange={(e) => setPassword(e.target.value)}
+              autoComplete={passwordMode ? 'new-password' : 'current-password'}
+            />
+            <button type="submit" disabled={busy || password.length < 6}>
+              {busy ? 'Saving…' : (passwordMode ? 'Set new password' : 'Confirm')}
+            </button>
+          </form>
+        )}
         <div className="claim-actions">
           {/* #1765 review P1: SAME-provider only — a different provider with a
               private email would auto-link a NEW user (account split). */}
@@ -133,7 +137,6 @@ export function ProfileTab({
   onUnlink, unlinkBusy,
   onAddOAuth, onAddEmail, addBusy, addError,
   onResend, resendBusy,
-  onOpenReauth,
 }) {
   if (loading) return <p className="dim">Loading login methods…</p>
   if (error) {
@@ -208,10 +211,6 @@ export function ProfileTab({
         </button>
       )}
 
-      <p className="dim small" style={{ marginTop: 16 }}>
-        <button className="ghost small" onClick={onOpenReauth}>Re-authenticate now</button>
-        {' '}— needed when your last sign-in is older than the security window.
-      </p>
     </section>
   )
 }

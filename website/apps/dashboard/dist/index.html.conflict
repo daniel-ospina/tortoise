@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Tortoise Dashboard</title>
+    <link rel="icon" href="data:," /> <!-- Round-7: kill the favicon.ico 404 console error -->
+    <meta name="theme-color" content="#060b14" />
+    <!-- #1225/#1511: shared session bridge + gate helpers — loaded FIRST so
+         the gate's readValidSession is synchronous at gate time. -->
+    <script src="/assets/supabase-session.js"></script>
+    <!-- #1498/#1511: INSTANT auth gate — the shared readValidSession enforces
+         STRICT session validity (missing/past expires_at = invalid) BEFORE
+         the app bundle renders. No VALID session + no claim in flight →
+         bounceToAuth (origin-aware location.replace; Back-proof, no
+         "checking session" flash). The storedKey exemption is GONE (#1511:
+         a stored key is a "Last used" hint on /auth, not a dashboard
+         credential); the claim flow (paste tt_ → OAuth → claim) survives via
+         the tt_claim_key + tt_claim_pending/?claim=1 exemptions. -->
+    <script>
+      (function () {
+        try {
+          var hasSession = (typeof window.readValidSession === "function") ? !!window.readValidSession() : false;
+          var claimKey = null;
+          try { claimKey = window.sessionStorage.getItem("tt_claim_key"); } catch (e) {}
+          var claimPending = /(?:^|; )tt_claim_pending=/.test(document.cookie);
+          var claimIntent = new URLSearchParams(window.location.search).get('claim') === '1' ||
+            // In-flight claim (OAuth return): the key AND the 1h pending marker.
+            // A BARE stale key or a bare stale marker is NOT claim intent —
+            // it must not pin a sessionless user on the claim screen (code-
+            // review P1) or misroute a signed-in user to the claim route.
+            (!!claimKey && claimPending);
+          // #1566 (code-review P0): an OAuth/email-confirmation return carries
+          // the session in the FRAGMENT (#access_token=… / #code=…) — the
+          // synchronous gate runs BEFORE supabase-js ingests it, so a bounce
+          // here would DROP the fragment and loop first-time signups back to
+          // /auth. Exempt callback fragments: the async mount check owns the
+          // outcome (ingest → session → dashboard; stale → /auth).
+          var hasCallbackFragment = /[?#&](access_token|code)=/.test(window.location.search + window.location.hash);
+          // #1909: a DENIED provider round-trip lands on this origin as
+          // #error=…&error_code=… (supabase-js implicit flow). Preserve ONLY
+          // error fragments on the /auth bounce — never a live token fragment
+          // (re-ingested by the destination, #1566) — so /auth's banner can
+          // render the reason instead of a bare login card.
+          var errFragment = /[?#&](?:error|error_code|error_description)=/.test(window.location.hash) &&
+            !/[?&#](?:access_token|refresh_token|code)=/.test(window.location.hash)
+            ? window.location.hash : '';
+          if (!hasSession && !claimIntent && !hasCallbackFragment) {
+            // #1224/#1566: preserve OAuth error params (they land on this
+            // origin now that signups redirect here) for /auth's banner —
+            // search AND any #1909 error fragment.
+            if (typeof window.bounceToAuth === "function") window.bounceToAuth(window.location.search, errFragment);
+            else window.location.replace("https://tortoise.premiselabs.co/auth" + window.location.search + errFragment);
+          }
+        } catch (e) { /* best-effort — the app's async check still applies */ }
+      })();
+    </script>
+<<<<<<< HEAD
+    <script type="module" crossorigin src="/assets/index-psxdiZXL.js"></script>
+=======
+    <script type="module" crossorigin src="/assets/index-Ch_xRgni.js"></script>
+>>>>>>> origin/main
+    <link rel="stylesheet" crossorigin href="/assets/index-CfymwI6n.css">
+  </head>
+  <body>
+    <div id="root"></div>
+    <!-- Supabase JS (UMD) — provides window.supabase for session auth (D5 #572).
+         P4 (code-review): pinned @supabase/supabase-js@2.112.2 and SELF-HOSTED — the
+         jsdelivr UMD path is a floating range and is served with a dynamically
+         generated banner ("Do NOT use SRI with dynamically generated files"), so an
+         SRI hash there could silently break. Self-hosting pins the exact bundle,
+         removes the CDN supply-chain surface (script runs with cookie + key access),
+         and needs no integrity hash (same-origin). -->
+    <script src="/vendor/supabase-2.112.2.min.js"></script>
+  </body>
+</html>

@@ -92,6 +92,9 @@ const KEY_EXPIRY_PRESETS = [
 const KEY_MAX_EXPIRY_DAYS = 366
 const KEY_SOON_DAYS = 14
 const _MS_PER_DAY = 86400000
+// #2479 code-review fix P2: named constant for max re-auth attempts (spec: 1)
+const MAX_REAUTH_ATTEMPTS = 1
+const REAUTH_EXCEEDED_MESSAGE = 'Re-authentication failed — try again later or contact support.'
 
 // #2426: Custom date (YYYY-MM-DD) → whole days until that date, clamped to
 // 1..366. Null when missing/invalid/out-of-range — the + New key button stays
@@ -774,6 +777,12 @@ function App() {
   })
   // pending action resumed after a re-auth round (change-email gate, #1765)
   const pendingReauthRef = React.useRef(null)
+  // #2479: re-auth attempt counter (max 1 per session for password re-auth;
+  // OAuth round-trips naturally reset via full page navigation)
+  const reauthAttemptRef = React.useRef(0)
+  // #2479 code-review fix P1: tracks that we're re-executing a pending action
+  // after successful re-auth (prevents infinite loop if the API returns 403 again)
+  const reauthRetriedRef = React.useRef(false)
   // #1765 review P1: the pre-reauth session user id (verify the provider
   // round-trip didn't switch accounts before resuming the pending action)
   const beforeUidRef = React.useRef(null)
@@ -1571,6 +1580,11 @@ function claimIntentInFlight() {
       // gated by the ReauthDialog (stolen-session ATO guardrail, plan-review
       // P1-1 — never bypass double_confirm_changes). The pending action is
       // DATA (not a closure) so it survives the provider OAuth round-trip.
+      // #2479: check retry limit before opening re-auth dialog
+      if (reauthAttemptRef.current >= MAX_REAUTH_ATTEMPTS) {
+        setProfileError(REAUTH_EXCEEDED_MESSAGE)
+        return
+      }
       pendingReauthRef.current = { email, password }
       setReauthOpen(true)
     }
@@ -1593,6 +1607,23 @@ function claimIntentInFlight() {
       })
       await fetchIdentity()
     } catch (e) {
+      // #2479: server returns 403 REAUTH_REQUIRED when session is stale
+      if (e.status === 403 && /REAUTH_REQUIRED/i.test(e.message)) {
+        if (reauthAttemptRef.current >= MAX_REAUTH_ATTEMPTS) {
+          setProfileError(REAUTH_EXCEEDED_MESSAGE)
+          return
+        }
+        // #2479 code-review fix P1: if we already re-executed this pending action
+        // after successful re-auth and it failed again, bail without re-opening dialog
+        if (reauthRetriedRef.current) {
+          setProfileError(REAUTH_EXCEEDED_MESSAGE)
+          return
+        }
+        reauthRetriedRef.current = false
+        pendingReauthRef.current = { unlinkIdentityId: identityId }
+        setReauthOpen(true)
+        return
+      }
       setProfileError(e.message || 'Could not remove login method')
     } finally {
       setProfileBusy('')
@@ -1619,11 +1650,19 @@ function claimIntentInFlight() {
         email: (identityInv && identityInv.email) || '', password,
       })
       if (error) throw new Error(error.message)
+      // #2479: success — reset attempt counter
+      reauthAttemptRef.current = 0
       setReauthOpen(false)
       await fetchIdentity()
       const pending = pendingReauthRef.current
       pendingReauthRef.current = null
       if (pending) {
+        if (pending.unlinkIdentityId) {
+          // #2479: re-auth was for unlink — re-execute with fresh session
+          reauthRetriedRef.current = true
+          handleUnlink(pending.unlinkIdentityId)
+          return
+        }
         if (pending.promptPassword) {
           // #1765 review P1-2: in promptPassword mode the typed password IS
           // the NEW password — apply it directly (never signInWithPassword,
@@ -1635,6 +1674,13 @@ function claimIntentInFlight() {
         await doChangeEmail(pending.email, pending.password)
       }
     } catch (e) {
+      reauthAttemptRef.current += 1
+      if (reauthAttemptRef.current >= MAX_REAUTH_ATTEMPTS) {
+        setReauthOpen(false)
+        pendingReauthRef.current = null
+        setProfileError(REAUTH_EXCEEDED_MESSAGE)
+        return
+      }
       setReauthError(e.message || 'Sign-in failed')
     } finally {
       setReauthBusy(false)
@@ -1661,7 +1707,8 @@ function claimIntentInFlight() {
         // return effect compares against it to detect an account switch).
         try {
           sessionStorage.setItem('tt_reauth_pending', JSON.stringify({
-            email: pending.email, uid: beforeUidRef.current }))
+            email: pending.email, uid: beforeUidRef.current,
+            unlinkIdentityId: pending.unlinkIdentityId }))
         } catch { /* best-effort */ }
       }
       const { error } = await supabaseClient.auth.signInWithOAuth({
@@ -1745,6 +1792,7 @@ function claimIntentInFlight() {
             } catch { /* best-effort */ }
           }
           await fetchIdentity()
+          setTab('profile')
           const { data: sess } = await supabaseClient.auth.getSession()
           const returnedUid = sess && sess.session && sess.session.user && sess.session.user.id
           if (pending && pending.uid && returnedUid && returnedUid !== pending.uid) {
@@ -1752,6 +1800,13 @@ function claimIntentInFlight() {
             return
           }
           if (pending) {
+            // #2479: check if re-auth was for unlink
+            if (pending.unlinkIdentityId) {
+              setReauthPasswordMode(false)
+              reauthRetriedRef.current = true
+              handleUnlink(pending.unlinkIdentityId)
+              return
+            }
             // re-prompt the NEW password (never persisted across the round-trip)
             pendingReauthRef.current = { email: pending.email, promptPassword: true }
             setReauthOpen(true)
@@ -6592,7 +6647,6 @@ function claimIntentInFlight() {
             addError={profileError}
             onResend={handleResend}
             resendBusy={profileBusy === 'resend'}
-            onOpenReauth={() => setReauthOpen(true)}
           />
         )}
         {tab === 'keys' && (
