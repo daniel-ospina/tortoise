@@ -3984,6 +3984,7 @@ def test_capture_error_contract_stage_failure_headlines(sdk, monkeypatch):
             "warnings": [], "minted_kinds": [],
             "errors": [
                 "S1 chunk failed: TimeoutError: read timed out",
+                "2/3 S1 chunks failed",
                 "S2 failed: ValueError: bad json",
                 "S4 failed: RuntimeError: boom — kept S2 output",
                 "S5 failed: ConnectionError: reset",
@@ -3998,12 +3999,13 @@ def test_capture_error_contract_stage_failure_headlines(sdk, monkeypatch):
     for headline in res["errors"]:
         for tok in ("S1", "S2", "S4", "S5", "ValueError", "RuntimeError",
                     "TimeoutError", "ConnectionError", "boom", "json",
-                    "read timed out", "reset"):
+                    "read timed out", "reset", "2/3"):
             assert tok.lower() not in headline.lower(), (headline, tok)
         assert "retry" in headline.lower(), headline
     # raw detail (TypeName prefix preserved) rides diagnostics
     assert res["diagnostics"] == [
         "S1 chunk failed: TimeoutError: read timed out",
+        "2/3 S1 chunks failed",
         "S2 failed: ValueError: bad json",
         "S4 failed: RuntimeError: boom — kept S2 output",
         "S5 failed: ConnectionError: reset"]

@@ -952,12 +952,27 @@ _CAPTURE_ERROR_PREFIX_CONTRACT: list[tuple[str, str]] = [
 ]
 
 
+# "{n}/{m} S1 chunks failed" — the S1 SUMMARY line (extractor_v2:4152) has a
+# variable count prefix, so it needs a suffix pattern, not a prefix. Its
+# per-chunk sibling ("S1 chunk failed: ...") is already prefix-mapped; the
+# summary would otherwise leak the "S1" stage name on the very provider-
+# outage path the contract targets (review second-model P2).
+_S1_CHUNK_SUMMARY_SUFFIX = " S1 chunks failed"
+
+
 def _capture_error_to_human(raw: str) -> str:
     """Map a raw capture error string to its human headline at the resp
     boundary. Unmapped errors pass through unchanged (fail-safe — a new
     extractor error must never be hidden)."""
+    if raw.endswith(_S1_CHUNK_SUMMARY_SUFFIX):
+        return ("Part of the extraction failed partway through. Retry the "
+                "capture — the retry will re-attempt it.")
     for _raw, headline in _CAPTURE_ERROR_CONTRACT.items():
-        if _raw in raw:
+        # Exact equality (review second-model P3): the contract keys are
+        # FULL error strings; substring `in` could misclassify a future
+        # compound error that embeds one of them. The raw strings arrive
+        # verbatim from the extractor, so equality is the correct test.
+        if raw == _raw:
             return headline
     for prefix, headline in _CAPTURE_ERROR_PREFIX_CONTRACT:
         if raw.startswith(prefix):
@@ -2772,7 +2787,7 @@ class TortoiseSDK:
             # record (the >max_turns demand is a leading indicator — both
             # lanes must surface it; hosted records in hosted_api).
             _logger.warning(
-                "turn_cap_exceeded turns=%d cap=%d session_id=%s",
+                "turn_cap_exceeded turns=%d cap=%d session_id=%r",
                 len(conversation), max_turns, session_id)
             raise ValueError(
                 f"Session turn cap exceeded: {len(conversation)} > {max_turns}")
@@ -2811,6 +2826,11 @@ class TortoiseSDK:
                 # (additive meta contract) — {} here (no extraction ran).
                 "stats": {},
                 "warnings": [],
+                # Deliberately NO report_url on this gate (review second-
+                # model P3): the empty/blank conversation is a CLIENT input
+                # error, not a provider/extraction bug — the bug-report hook
+                # (report_url) rides provider/extraction failures only. The
+                # hosted lane returns 422 here (no body) — consistent.
             }
 
         # #1727 Slice 2 (Task 11): harness is set set-only-when-present (None

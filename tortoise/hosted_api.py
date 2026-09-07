@@ -6497,7 +6497,7 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         # logging` blocks — module-level logging is function-local here.
         import logging
         logging.getLogger("tortoise.api").warning(
-            "turn_cap_exceeded turns=%d cap=%d harness=%s team=%s",
+            "turn_cap_exceeded turns=%d cap=%d harness=%r team=%r",
             len(body.conversation), MAX_SESSION_TURNS,
             body.harness, team.get("team_id"))
         raise HTTPException(
@@ -6618,8 +6618,8 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
             # not covered; zero-event windows there are quota-confounded).
             import logging
             logging.getLogger("tortoise.api").warning(
-                "quota_refusal capture est=%d count=%d max=%d tier=%s team=%s "
-                "harness=%s", est, count, max_points,
+                "quota_refusal capture est=%d count=%d max=%d tier=%r team=%r "
+                "harness=%r", est, count, max_points,
                 team.get("tier"), team.get("team_id"), body.harness)
             raise HTTPException(
                 status_code=402,
