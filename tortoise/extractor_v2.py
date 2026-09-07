@@ -208,7 +208,9 @@ VALUE_FIDELITY_RULE = (
     "4.2 seconds' stays '4.2 seconds' (not 'slow'), 'back under 800 "
     "milliseconds' stays '800 milliseconds', 'the October 5 release' stays "
     "'October 5'. The number is the memory; a vague restatement is a lost "
-    "fact."
+    "fact. BOUNDARY: a routine readout that is not a thing being fixed or a "
+    "chosen target is still a NOOP under the ANTI-ROUTINE EXCLUSION above "
+    "— the number alone does not make an aside durable."
 )
 
 

@@ -322,9 +322,18 @@ class TestS2:
         for prompt in (v2.render_s2_prompt(),
                        v2.render_s2_prompt(core_only=True)):
             assert "ANTI-ROUTINE EXCLUSION" in prompt
+            assert "VALUE FIDELITY" in prompt  # #2453 rides the same slot
             assert "NOOP" in prompt
             assert "the on-call room has been quiet lately" in prompt
             assert "{anti_routine}" not in prompt   # placeholder fully filled
+        # S1 (narrative story register) deliberately gets the value clause
+        # but NOT the anti-routine gate — lock the asymmetry.
+        s1 = (v2.S1_TMPL
+              .replace("{memory_granularity}", v2._granularity_text())
+              .replace("{date_anchor}", v2._date_anchor(None)))
+        assert "ANTI-ROUTINE EXCLUSION" not in s1
+        assert "NOOP" not in s1
+        assert "OPERATIONAL-VALUE" in s1
 
     def test_s4_prompt_anti_routine_exclusion(self):
         """#2424: S4 (the GAP REVIEWER) applies the SAME anti-routine gate
@@ -334,6 +343,7 @@ class TestS2:
                        v2.render_s4_prompt("STORY", {}, S2_FIXTURE,
                                            core_only=True)):
             assert "ANTI-ROUTINE EXCLUSION" in prompt
+            assert "VALUE FIDELITY" in prompt  # #2453 rides the same slot
             assert "TRUE IS NOT ENOUGH" in prompt
             assert "{anti_routine}" not in prompt
 
@@ -2506,7 +2516,7 @@ class TestClassifyStage:
         base = (v2.S2_TMPL
                 .replace("{master_list}", v2._render_master(v2.build_master_list()))
                 .replace("{chains_text}", v2._render_chains(v2.build_master_list()))
-                .replace("{anti_routine}", v2.ANTI_ROUTINE_EXCLUSION)
+                .replace("{anti_routine}", v2._s2s4_rules())
                 .replace("{date_anchor}", v2._date_anchor(None, include_emission_rules=True))
                 .replace("{output_contract}", v2.OUTPUT_CONTRACT))
         assert v2.render_s2_prompt() == base
