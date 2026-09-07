@@ -9868,6 +9868,15 @@ async def _restore_trash_graph_locked(request: Request, user: dict,
             status_code=409,
             detail=f"A live graph named {name!r} already exists — rename or "
                    "delete it first")
+    # #2467: restore ADDS an active graph — it must respect the team's
+    # max_graphs quota (delete freed the slot; restoring re-consumes it).
+    # A team at cap cannot restore until it deletes something (create_graph
+    # parity — a restore is a create-equivalent for the quota meter). The
+    # restored row is NOT yet counted (still deleted), so the gate measures
+    # the pre-restore active count + 1 the same way create does.
+    team_for_quota = await _team_node(team_id)
+    if team_for_quota is not None:
+        await _graph_quota_gate(team_for_quota)
     sdk = _make_sdk(namespace="registry")
     from tortoise.supabase_control import (
         get_control_plane,
