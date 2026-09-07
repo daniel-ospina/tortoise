@@ -3925,6 +3925,9 @@ def test_capture_error_contract_partial_headline(sdk, monkeypatch):
     # raw detail preserved in diagnostics
     assert res["diagnostics"] == [
         "S2 output partial — truncated tail dropped (embed list incomplete)"]
+    # the report hook (bug_report.yml placeholder) rides the errored resp
+    assert res["report_url"].endswith(
+        "issues/new?template=bug_report.yml"), res["report_url"]
 
 
 def test_capture_clean_has_empty_diagnostics(sdk):
@@ -3933,6 +3936,8 @@ def test_capture_clean_has_empty_diagnostics(sdk):
     res = sdk.capture_session(CONV)
     assert res["ok"] is True
     assert res["diagnostics"] == []
+    # no report hook on a clean capture
+    assert "report_url" not in res
 
 
 def test_capture_error_contract_unmapped_passthrough(sdk, monkeypatch):
@@ -3958,3 +3963,95 @@ def test_capture_error_contract_unmapped_passthrough(sdk, monkeypatch):
     assert res["ok"] is False
     assert res["errors"] == ["RuntimeError: provider returned 500"]
     assert res["diagnostics"] == ["RuntimeError: provider returned 500"]
+    # unmapped errors still carry the report hook (recovery is truthful)
+    assert "report_url" in res and res["report_url"].endswith(
+        "issues/new?template=bug_report.yml")
+
+
+# ── #2335 WI-2b: TRUE retry — a FAILED session's re-capture re-attempts ──
+
+def test_capture_true_retry_failed_session_reattempts(sdk, monkeypatch):
+    """#2335 WI-2b: a capture that FAILS (extraction errors) records
+    capture_ok=False; a SAME-session re-capture RE-ATTEMPTS extraction
+    (not a no-op replay) and, on success, records capture_ok=True."""
+    import tortoise.extractor_v2 as ev2
+    calls = {"n": 0}
+
+    def _v2_fail_then_succeed(*a, **kw):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return {
+                "session_id": kw.get("session_id", "s"),
+                "story_arc": "", "embed_list": {},
+                "search": {"mode": "embedded", "degraded": True},
+                "payload": None,
+                "chain_notes": [], "link_before_create": [], "supersessions": [],
+                "warnings": [], "minted_kinds": [],
+                "errors": ["RuntimeError: provider returned 500"],
+                "stats": {"llm": {"calls": 1}, "recovery": {}},
+                "error_census": {},
+            }
+        # second attempt succeeds with a real payload
+        return {
+            "session_id": kw.get("session_id", "s"),
+            "story_arc": "story", "embed_list": {},
+            "search": {"mode": "embedded", "degraded": True},
+            "payload": {"entities": [], "events": [], "points": [
+                {"content": "the retry worked", "pointKind": "statement",
+                 "about_entities": []}], "operators": []},
+            "chain_notes": [], "link_before_create": [], "supersessions": [],
+            "warnings": [], "minted_kinds": [],
+            "stats": {"llm": {"calls": 1}, "recovery": {}},
+            "error_census": {},
+        }
+    monkeypatch.setattr(ev2, "extract_session_v2", _v2_fail_then_succeed)
+    monkeypatch.delenv("TORTOISE_SESSION_LLM_MOCK", raising=False)
+
+    conv = [{"role": "user", "content": "we decided X"}]
+    sid = "retry-session-2335"
+    # First capture FAILS (extraction error; turn points + Session land).
+    res1 = sdk.capture_session(conv, session_id=sid)
+    assert res1["ok"] is False, res1
+    # Same-session re-capture RE-ATTEMPTS (not "replayed").
+    res2 = sdk.capture_session(conv, session_id=sid)
+    assert res2["extraction_mode"] != "replayed", res2
+    assert res2["ok"] is True, res2
+    assert calls["n"] == 2, "the retry must re-run extraction"
+    proj = sdk._get_proj()
+    ok_row = proj.g.query(
+        "MATCH (s:Session {id:$sid}) RETURN s.capture_ok",
+        params={"sid": sid}).result_set
+    assert ok_row and ok_row[0][0] is True, ok_row
+
+
+def test_capture_succeeded_session_still_replays(sdk, monkeypatch):
+    """#2335 WI-2b: a SUCCEEDED capture's same-session re-capture is STILL a
+    no-op replay (the #1727 invariant is preserved for successes)."""
+    import tortoise.extractor_v2 as ev2
+    calls = {"n": 0}
+
+    def _v2_ok(*a, **kw):
+        calls["n"] += 1
+        return {
+            "session_id": kw.get("session_id", "s"),
+            "story_arc": "story", "embed_list": {},
+            "search": {"mode": "embedded", "degraded": True},
+            "payload": {"entities": [], "events": [], "points": [
+                {"content": "worked", "pointKind": "statement",
+                 "about_entities": []}], "operators": []},
+            "chain_notes": [], "link_before_create": [], "supersessions": [],
+            "warnings": [], "minted_kinds": [],
+            "stats": {"llm": {"calls": 1}, "recovery": {}},
+            "error_census": {},
+        }
+    monkeypatch.setattr(ev2, "extract_session_v2", _v2_ok)
+    monkeypatch.delenv("TORTOISE_SESSION_LLM_MOCK", raising=False)
+
+    conv = [{"role": "user", "content": "we decided X"}]
+    sid = "success-session-2335"
+    res1 = sdk.capture_session(conv, session_id=sid)
+    assert res1["ok"] is True
+    res2 = sdk.capture_session(conv, session_id=sid)
+    assert res2["extraction_mode"] == "replayed", res2
+    assert res2["points"] == []
+    assert calls["n"] == 1, "a succeeded session's re-capture must NOT re-extract"

@@ -893,6 +893,16 @@ def _content_hash(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+# #2335 WI-2: the "file a report" hook target — the bug_report.yml template
+# new-issue URL (the #2409 inbound-channel default; the machine-addressable
+# hook target decision lives in #2409). Surfaced on the resp ONLY when a
+# capture errored, so a customer/agent can file a structured report. The
+# report body carries structured fields + the harness's own logs (never the
+# reporter's narrative as instructions — the #2409 killer-combo guard).
+REPORT_HOOK_URL = (
+    "https://github.com/daniel-ospina/tortoise/issues/new?template=bug_report.yml")
+
+
 # #2335 WI-2: the customer-facing error contract. The extractor's error
 # strings leak internal jargon (stage names, exception types) to the capture
 # resp. This mapper converts a RAW error string to a {headline, diagnostics}
@@ -2792,10 +2802,37 @@ class TortoiseSDK:
         # (idempotent no-ops for an identical-payload re-POST — 0 new nodes;
         # a LONGER replay payload extends the stored turn list, the hosted
         # #1727 scope).
-        session_existed = bool(proj.g.query(
-            "MATCH (s:Session {id:$sid}) RETURN count(s)",
+        # #2335 WI-2b (TRUE retry): the #1727 invariant is REFINED, not
+        # removed — the replay skip now fires ONLY when the prior capture
+        # SUCCEEDED (capture_ok True) OR the session predates capture_ok
+        # (legacy None — presumed captured, backward compat). A prior
+        # FAILED capture (capture_ok False) RE-ATTEMPTS extraction: the M2
+        # duplicate-claim risk does not apply (the failed attempt minted no
+        # live claims — extraction errors leave the turn Points + Session
+        # only) and the deterministic event id makes the retry's Event
+        # mint/provenance re-run CONVERGENT (no duplicate Event node; the
+        # mint's ON MATCH refreshes startedAt/endedAt on the retry, which is
+        # CORRECT — the successful retry is the real capture). Partial-write
+        # policy (documented on #2335): a failed capture's deterministic
+        # pt_<sha> turn ids converge on re-attempt (no new turn nodes); NEW
+        # extracted claims on the retry are REAL new memory (they were never
+        # live). #1727's zero-new-node invariant is pinned for SUCCESSES
+        # only (test_capture_succeeded_session_still_replays).
+        session_row = proj.g.query(
+            "OPTIONAL MATCH (s:Session {id:$sid}) "
+            "RETURN count(s) AS n, s.capture_ok AS ok",
             params={"sid": session_id},
-        ).result_set[0][0])
+        ).result_set[0]
+        session_existed = bool(session_row[0])
+        # #2335 WI-2b (TRUE retry): capture_ok records whether the LAST
+        # attempt SUCCEEDED. Replay (no-op) fires only when the prior capture
+        # SUCCEEDED (capture_ok True). A prior FAILED capture (capture_ok
+        # False) is RE-ATTEMPTED — extraction runs again (retry is TRUE).
+        # None (legacy sessions, pre-#2335) replays — backward compat with
+        # the #1727 invariant (a legacy session is presumed captured).
+        prior_capture_ok = session_row[1]
+        retry_failed_capture = (
+            session_existed and prior_capture_ok is False)
         proj.g.query(
             f"MERGE (s:Session {{id:$sid}}) SET {', '.join(_merge_sets)}",
             params=_merge_params,
@@ -2866,7 +2903,12 @@ class TortoiseSDK:
         # existing session_id is a NO-OP replay (extraction_mode "replayed",
         # 0 new non-episodic nodes), byte-parity with hosted_api's replay
         # branch (meta mode "replayed" + the additive warning).
-        if session_existed:
+        if session_existed and not retry_failed_capture:
+            # #2335 WI-2b: replay fires ONLY when the prior capture SUCCEEDED
+            # (capture_ok True) OR the session predates the capture_ok
+            # property (legacy None — presumed captured, backward compat).
+            # A prior FAILED capture (capture_ok False) falls through to the
+            # extraction branches below — retry is TRUE.
             extracted = []
             meta = {
                 "provider": None, "route": None, "failover_used": False,
@@ -2915,7 +2957,15 @@ class TortoiseSDK:
         # retry is a no-op "replayed" — recovery requires a fresh session_id).
         # Byte-parity with hosted; heal-on-replay would diverge the two
         # surfaces.
-        if not session_existed:
+        if not session_existed or retry_failed_capture:
+            # #2335 WI-2b: a RETRY re-runs the mint/provenance — the Event id
+            # is DETERMINISTIC (_server_id = _session_capture_event_id), so
+            # re-minting on a retry MERGEs onto the SAME Event node (no
+            # duplicate — the idempotent-convergence the concurrent-fresh
+            # race already relies on) and the retry-minted points get the
+            # provenance stamp + typed-Source upgrade they need. The prior
+            # failed attempt's Event node exists; the deterministic id makes
+            # this a convergent no-op-create + refresh.
             try:
                 # W5 Phase F (#2104): the mint uses the DETERMINISTIC id
                 # derived from session_id (_server_id channel — the
@@ -3009,6 +3059,16 @@ class TortoiseSDK:
         # response. "empty" always co-occurs with an error entry; belt-and-
         # braces: map mode=="empty" → ok=False regardless of the error list.
         ok = not extraction_errors and meta.get("mode") != "empty"
+        # #2335 WI-2b: record the attempt outcome on the Session node so a
+        # SAME-session re-capture can distinguish a SUCCEEDED prior (replay
+        # no-op) from a FAILED prior (TRUE retry). Set on every genuine
+        # attempt (fresh + retry); a replay leaves the stored True untouched
+        # (idempotent). The empty/blank gate returns before the Session
+        # MERGE, so nothing to record there.
+        if session_existed or meta.get("mode") != "replayed":
+            proj.g.query(
+                "MATCH (s:Session {id:$sid}) SET s.capture_ok=$ok",
+                params={"sid": session_id, "ok": ok})
         if not ok and meta.get("mode") == "empty":
             effective_mode = "empty"
         elif not ok:
@@ -3036,6 +3096,9 @@ class TortoiseSDK:
             "errors": _capture_resp_error_split(extraction_errors)[0],
             "warnings": extraction_warnings,
             "diagnostics": _capture_resp_error_split(extraction_errors)[1],
+            # #2335 WI-2: the report hook (bug_report.yml placeholder → #2409
+            # sink decision) — present ONLY when the capture errored.
+            **({"report_url": REPORT_HOOK_URL} if extraction_errors else {}),
             # #2335 WI-1a: the receipt carries the extractor telemetry
             # (meta stats — real on v2, {} on replayed/M2). Additive.
             "stats": meta.get("stats") or {},

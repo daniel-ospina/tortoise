@@ -1836,6 +1836,9 @@ class TestSessionCapture:
             assert tok.lower() not in headline.lower(), (headline, tok)
         assert b["diagnostics"] == [
             "no embed list produced (S2/S4 empty) — nothing to embed"]
+        # the report hook rides the errored hosted receipt
+        assert b["report_url"].endswith(
+            "issues/new?template=bug_report.yml"), b["report_url"]
 
 
 class TestSessionCaptureWriteVerb:
@@ -2024,6 +2027,59 @@ class TestSessionCaptureWriteVerb:
             params={"sid": "w5-recording-off-session"},
         ).result_set
         assert rows[0][0] == 0  # no Session write when recording off
+
+    def test_capture_true_retry_failed_session_reattempts(self, client, monkeypatch):
+        """#2335 WI-2b (hosted twin): a capture that FAILS records
+        capture_ok=False; a same-session re-POST RE-ATTEMPTS extraction and,
+        on success, the receipt reflects the retry (not a no-op replay)."""
+        import tortoise.extractor_v2 as ev2
+        calls = {"n": 0}
+
+        def _v2_fail_then_succeed(*a, **kw):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return {
+                    "session_id": kw.get("session_id", "s"),
+                    "story_arc": "", "embed_list": {},
+                    "search": {"mode": "embedded", "degraded": True},
+                    "payload": None,
+                    "chain_notes": [], "link_before_create": [],
+                    "supersessions": [], "warnings": [], "minted_kinds": [],
+                    "errors": ["RuntimeError: provider returned 500"],
+                    "stats": {"llm": {"calls": 1}, "recovery": {}},
+                    "error_census": {},
+                }
+            return {
+                "session_id": kw.get("session_id", "s"),
+                "story_arc": "story", "embed_list": {},
+                "search": {"mode": "embedded", "degraded": True},
+                "payload": {"entities": [], "events": [], "points": [
+                    {"content": "the retry worked", "pointKind": "statement",
+                     "about_entities": []}], "operators": []},
+                "chain_notes": [], "link_before_create": [],
+                "supersessions": [], "warnings": [], "minted_kinds": [],
+                "stats": {"llm": {"calls": 1}, "recovery": {}},
+                "error_census": {},
+            }
+        monkeypatch.setattr(ev2, "extract_session_v2", _v2_fail_then_succeed)
+        monkeypatch.delenv("TORTOISE_SESSION_LLM_MOCK", raising=False)
+        conv = [{"role": "user", "content": "we decided X"}]
+        payload = {"conversation": conv, "session_id": "h-retry-2335"}
+        r1 = client.post("/v1/sessions", json=payload)
+        assert r1.status_code == 200, r1.text
+        assert r1.json()["errors"], "first attempt fails"
+        r2 = client.post("/v1/sessions", json=payload)
+        assert r2.status_code == 200, r2.text
+        b2 = r2.json()
+        assert b2["extraction_mode"] != "replayed", b2
+        assert calls["n"] == 2, "the retry must re-run extraction"
+        # capture_ok now True on the Session node
+        import tortoise.hosted_api as ha_mod
+        rows = ha_mod.TortoiseSDK(
+            namespace=TEST_TEAM_ID)._get_proj().g.query(
+            "MATCH (s:Session {id:$sid}) RETURN s.capture_ok",
+            params={"sid": "h-retry-2335"}).result_set
+        assert rows and rows[0][0] is True, rows
 
     def test_capture_replay_zero_new_nodes_verb_ok(self, client):
         """Idempotency: re-POST of the same session_id (recording on) writes
