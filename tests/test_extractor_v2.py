@@ -325,10 +325,13 @@ class TestS2:
         assert "the on-call room has been quiet lately" \
             in v2.ANTI_ROUTINE_EXCLUSION
         assert "CLAUSE-LEVEL STRIP" in v2.ANTI_ROUTINE_EXCLUSION
-        assert "stripped, not carried" in v2.ANTI_ROUTINE_EXCLUSION
+        assert "NEVER a whole point" in v2.ANTI_ROUTINE_EXCLUSION
+        assert "When in doubt, EMIT" in v2.ANTI_ROUTINE_EXCLUSION
         # the durable-claim example keeps a routine clause separable: the
         # quiet-room aside must not ride the routing decision's prose
-        assert "emits the routing decision, not the quiet-room clause" \
+        assert "emits the routing decision" \
+            in v2.ANTI_ROUTINE_EXCLUSION
+        assert "double duty IS durable entity state" \
             in v2.ANTI_ROUTINE_EXCLUSION
         assert "{anti_routine}" in v2.S2_TMPL       # the single-source slot
         assert "{anti_routine}" in v2.S4_TMPL       # both mapping stages wire it
@@ -339,8 +342,8 @@ class TestS2:
             assert "NOOP" in prompt
             assert "the on-call room has been quiet lately" in prompt
             assert "CLAUSE-LEVEL STRIP" in prompt
-            assert "emits the routing decision, not the quiet-room clause" \
-                in prompt
+            assert "emits the routing decision" in prompt
+            assert "When in doubt, EMIT" in prompt
             assert "{anti_routine}" not in prompt   # placeholder fully filled
         # S1 (narrative story register) deliberately gets the value clause
         # but NOT the anti-routine gate — lock the asymmetry (the clause
@@ -367,8 +370,7 @@ class TestS2:
             assert "VALUE FIDELITY" in prompt  # #2453 rides the same slot
             assert "TRUE IS NOT ENOUGH" in prompt
             assert "CLAUSE-LEVEL STRIP" in prompt
-            assert "emits the routing decision, not the quiet-room clause" \
-                in prompt
+            assert "emits the routing decision" in prompt
             assert "{anti_routine}" not in prompt
 
     def test_prompt_supersession_rules(self):
