@@ -494,15 +494,16 @@ def test_revise_after_invalidate_skip_updated_at(sup):
     _, events, sdk = sup
     a = sdk.create_point("statement", "revise-me", status="live")["id"]
     b = sdk.create_point("statement", "corrector", status="live")["id"]
-    t0 = "2026-09-08T12:00:00+00:00"
     sdk.invalidate_point(a, corrected_by_id=b)
-    # Live revise AFTER the invalidate — a newer same-id writer.
+    # Live revise AFTER the invalidate — a newer same-id writer. (Plain-prop
+    # update_point does NOT re-stamp updatedAt live — the non-Object branch
+    # writes per-key n += $props — so the live updatedAt still reads the
+    # invalidate ts here; the revise's rebuild-now stamp is what pass-1b
+    # applies, and the seq-gate must let it survive the older fold ts.)
     sdk.update_point(a, props={"note": "revised after invalidate"})
-    live = sdk._get_proj().g.query(
-        "MATCH (n:Point {id:$id}) RETURN n.outdated, n.updatedAt",
-        params={"id": a}).result_set[0]
-    assert live[0] is True, "live flag set by invalidate"
-    live_revise_ua = live[1]
+    inv_ts = (sdk.get_point(a) or {}).get("updatedAt")
+    assert inv_ts, "invalidate stamps updatedAt"
+    assert (sdk.get_point(a) or {}).get("outdated") is True
 
     _rebuild(sdk, events)
     proj = sdk._get_proj()
@@ -512,12 +513,13 @@ def test_revise_after_invalidate_skip_updated_at(sup):
         params={"id": a}).result_set[0]
     assert post[0] is True, "outdated survived rebuild (always folds)"
     assert post[4] == "live", "no status change"
-    assert post[3] != t0, (
+    assert post[3] != inv_ts, (
         "updatedAt must NOT regress to the older invalidate ts "
         "(skip_updated_at fired — the revise is the newer writer)"
     )
-    assert post[3] == live_revise_ua or post[3] > t0, (
-        "rebuilt updatedAt is the revise's rebuild-now stamp or later"
+    assert post[3] > inv_ts, (
+        "rebuilt updatedAt sits in the rebuild epoch (post-invalidate): "
+        "the revise's rebuild-now stamp survived the fold"
     )
     assert _corr_total(proj, a) == 1, "CORRECTS still folded"
 
