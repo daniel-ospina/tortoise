@@ -24,11 +24,15 @@ TORTOISE_DB_PATH at a per-test temp db (runs under any lane).
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import subprocess
 import sys
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import ClassVar
 
 import pytest
 
@@ -562,3 +566,197 @@ def test_install_codex_leaves_foreign_volunteer_hook_untouched(tmp_path):
     cmd = cfg["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"]
     assert cmd == foreign  # live foreign hook untouched
     assert len(cfg["hooks"]["UserPromptSubmit"]) == 1
+
+
+# ── #2369 per-turn reflex trust boundary (co-sourced identity) ──────────
+# (trust-posture hardening: file-sourced keys never take their destination
+# from env; a repo .tortoise can never supply a transmitting identity; a
+# hosted-against-file run prints a stderr endpoint-mode note.)
+
+
+class _RecordingStub(BaseHTTPRequestHandler):
+    """Localhost HTTP stub that records (path, Authorization) per hit and
+    answers JSON. Subclass per test to set `body` + a fresh `hits` list.
+
+    Hosted reflex runs POST /v1/context and print the returned "block";
+    hosted team commands GET /v1/team. The child subprocess connects to
+    the loopback port the test serves on — hermetic, no real network.
+    """
+    body: ClassVar[dict] = {"block": "stub"}
+    hits: ClassVar[list] = []
+
+    def _answer(self):
+        self.hits.append({
+            "path": self.path,
+            "auth": self.headers.get("Authorization"),
+            "body_len": int(self.headers.get("Content-Length") or 0),
+        })
+        payload = json.dumps(self.body).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def do_POST(self):
+        self._answer()
+
+    def do_GET(self):
+        self._answer()
+
+    def log_message(self, *_args):
+        pass
+
+
+@contextlib.contextmanager
+def _stub_server(handler):
+    """Serve `handler` on an ephemeral loopback port until the context ends."""
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    thread = threading.Thread(target=srv.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{srv.server_address[1]}"
+    finally:
+        srv.shutdown()
+        srv.server_close()
+        thread.join(timeout=5)
+
+
+def _write_global_credentials(home: Path, api_key: str, api_url: str) -> Path:
+    """Write the user-global ~/.tortoise/credentials.json (signup shape)."""
+    d = home / ".tortoise"
+    d.mkdir(parents=True, exist_ok=True)
+    f = d / "credentials.json"
+    f.write_text(json.dumps({"api_key": api_key, "api_url": api_url}))
+    f.chmod(0o600)
+    return f
+
+
+def _trust_env(tmp_path: Path, home: Path | None = None) -> dict:
+    """Isolated-HOME child env for trust tests: no real identity leaks in,
+    no docker lane, empty api-key vars for the test to poison deliberately."""
+    env = {
+        **os.environ,
+        "TORTOISE_DB_URI": "",
+        "HOME": str(home or (tmp_path / "home")),
+        "TORTOISE_SECRET_PEPPER": "test-static-pepper",
+        "_SEAM_CWD": str(tmp_path),
+    }
+    env.pop("TORTOISE_API_KEY", None)
+    env.pop("TORTOISE_API_URL", None)
+    return env
+
+
+class TestVolunteerTrustBoundary:
+    """#2369 D1: the per-turn reflex identity is ONE source chain."""
+
+    def test_poisoned_env_url_cannot_redirect_file_sourced_key(self, tmp_path):
+        """(a) A poisoned TORTOISE_API_URL with a FILE-sourced key must NOT
+        redirect: the reflex POSTs to the file's own api_url (a live stub),
+        the live attacker recorder sees zero requests, and stdout carries
+        the legit stub's block — not the attacker's."""
+        legit = type("Legit", (_RecordingStub,), {
+            "body": {"block": "legit-stub-block"}, "hits": []})
+        attacker = type("Attacker", (_RecordingStub,), {
+            "body": {"block": "attacker-block"}, "hits": []})
+        with _stub_server(legit) as legit_url, _stub_server(attacker) as atk_url:
+            home = tmp_path / "home"
+            _write_global_credentials(home, "tt_file_key", legit_url)
+            env = _trust_env(tmp_path, home)
+            env["TORTOISE_API_URL"] = atk_url  # the poisoned override
+            r = _run(["volunteer"], env, stdin="How is CI deploy triggered?")
+        assert r.returncode == 0, r.stderr
+        assert "legit-stub-block" in r.stdout  # answered by the FILE's URL
+        assert "attacker-block" not in r.stdout  # never redirected
+        assert attacker.hits == [], "poisoned env URL must never be POSTed"
+        assert len(legit.hits) == 1
+        assert legit.hits[0]["auth"] == "Bearer tt_file_key"
+        assert legit.hits[0]["body_len"] > 0  # the prompt window went to the file URL
+
+    def test_env_key_env_url_pair_still_honored(self, tmp_path):
+        """(b) The allowed case: when the KEY also came from env, the env
+        TORTOISE_API_URL override is honored — an env identity is one chain.
+        A stored file identity (different host) must NOT win over the env
+        pair for env-identity surfaces (team info reads the shared resolver)."""
+        env_stub = type("EnvStub", (_RecordingStub,), {
+            "body": {"team_id": "team-e", "tier": "free", "point_count": 0},
+            "hits": []})
+        file_stub = type("FileStub", (_RecordingStub,), {
+            "body": {"team_id": "team-f", "tier": "free", "point_count": 0},
+            "hits": []})
+        with _stub_server(env_stub) as env_url, _stub_server(file_stub) as file_url:
+            home = tmp_path / "home"
+            _write_global_credentials(home, "tt_file_key", file_url)
+            env = _trust_env(tmp_path, home)
+            env["TORTOISE_API_KEY"] = "tt_env_key"
+            env["TORTOISE_API_URL"] = env_url
+            r = _run(["team", "info"], env)
+        assert r.returncode == 0, r.stderr
+        assert "Team:       team-e" in r.stdout  # answered by the ENV URL
+        assert len(env_stub.hits) == 1
+        assert env_stub.hits[0]["auth"] == "Bearer tt_env_key"
+        assert file_stub.hits == [], "file identity must not shadow the env pair"
+
+    def test_repo_tortoise_cannot_flip_reflex_hosted_without_global(self, tmp_path):
+        """(c) A repo-shipped .tortoise (attacker key+URL) with NO user-global
+        config must NOT flip the reflex to hosted: it degrades to local
+        (no-send, fail-open — clean silence, exit 0), even with a poisoned
+        env URL pointing at the attacker."""
+        attacker = type("Attacker", (_RecordingStub,), {
+            "body": {"block": "attacker-block"}, "hits": []})
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        with _stub_server(attacker) as atk_url:
+            (repo / ".tortoise").write_text(json.dumps({
+                "api_key": "tt_repo_key", "api_url": atk_url}))
+            env = _trust_env(tmp_path, tmp_path / "home-empty")
+            env["TORTOISE_API_URL"] = atk_url  # poison, must be irrelevant
+            env["TORTOISE_DB_PATH"] = str(tmp_path / "empty.db")
+            r = _run(["volunteer"], env, stdin="hello", cwd=str(repo))
+        assert r.returncode == 0, r.stderr
+        assert r.stdout.strip() == ""  # local clean silence — nothing injected
+        assert attacker.hits == [], "repo .tortoise must never authorize a POST"
+        assert "tortoise: hosted-mode note:" not in r.stderr
+
+    def test_repo_tortoise_cannot_override_user_global_identity(self, tmp_path):
+        """(c) Precedence: repo .tortoise (attacker) + user-global config
+        (legit) → the reflex transmits with the USER-GLOBAL identity only —
+        the legit stub is hit with the global key, the attacker sees zero."""
+        legit = type("Legit", (_RecordingStub,), {
+            "body": {"block": "legit-stub-block"}, "hits": []})
+        attacker = type("Attacker", (_RecordingStub,), {
+            "body": {"block": "attacker-block"}, "hits": []})
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        with _stub_server(legit) as legit_url, _stub_server(attacker) as atk_url:
+            (repo / ".tortoise").write_text(json.dumps({
+                "api_key": "tt_repo_key", "api_url": atk_url}))
+            home = tmp_path / "home"
+            _write_global_credentials(home, "tt_global_key", legit_url)
+            env = _trust_env(tmp_path, home)
+            r = _run(["volunteer"], env, stdin="hello", cwd=str(repo))
+        assert r.returncode == 0, r.stderr
+        assert "legit-stub-block" in r.stdout
+        assert attacker.hits == [], "repo .tortoise identity must never be used"
+        assert len(legit.hits) == 1
+        assert legit.hits[0]["auth"] == "Bearer tt_global_key"
+
+    def test_hosted_against_file_emits_stderr_endpoint_note(self, tmp_path):
+        """(d) A hosted-against-file run prints the run-time endpoint-mode
+        note on stderr (naming the endpoint + identity file), so a future
+        redirect is visible at run time. stdout stays the clean injection
+        channel — the note never pollutes the block."""
+        legit = type("Legit", (_RecordingStub,), {
+            "body": {"block": "legit-stub-block"}, "hits": []})
+        with _stub_server(legit) as legit_url:
+            home = tmp_path / "home"
+            cfg = _write_global_credentials(home, "tt_file_key", legit_url)
+            env = _trust_env(tmp_path, home)
+            r = _run(["volunteer"], env, stdin="hello")
+        assert r.returncode == 0, r.stderr
+        assert "legit-stub-block" in r.stdout
+        # The note names the endpoint mode (host label) and the identity file.
+        assert "tortoise: hosted-mode note: volunteer:" in r.stderr
+        assert "hosted (127.0.0.1:" in r.stderr
+        assert str(cfg) in r.stderr  # identity file named
+        assert "attacker" not in r.stderr
