@@ -60,7 +60,7 @@ class A4TortoiseArm:
         self.decide_cycles = 0
 
     # ── setup ───────────────────────────────────────────────────────────
-    def setup_scenarios(self, scenarios: list[Scenario]) -> None:
+    def setup_scenarios(self, scenarios: list[Scenario], *, seed_lane: bool = True) -> None:
         """Build the per-scenario graphs + open one SDK handle per scenario.
 
         Content is seeded through the PRODUCT bulk surface —
@@ -74,14 +74,16 @@ class A4TortoiseArm:
         ONLY (¬A never pre-seeded — it arrives in-context at k at run time).
         The reference-lane batch path stays for equivalence tests only
         (battery.testing.seeds raw helper) — never the real A4 path.
+
+        ``seed_lane=False``: open the per-scenario handles only (no seeding)
+        — used by the equivalence facade to READ a raw-lane-seeded store
+        through the arm's product read surface.
         """
         if not self._db_path:
             tmp = tempfile.mkdtemp(prefix="battery_a4_")
             self._db_path = str(Path(tmp) / "a4.db")
         db_file = str(self._db_path)
         from tortoise.sdk import TortoiseSDK
-
-        from battery.runner.setup import seed_scenario_via_ingest
 
         ev_dir = Path(db_file).parent / "events"
         for sc in scenarios:
@@ -92,7 +94,9 @@ class A4TortoiseArm:
                 event_log_path=str(ev_dir / f"{ns}.jsonl"),
             )
             self._sdk_by_id[sc.id] = sdk
-            seed_scenario_via_ingest(sdk, sc, seed_mode=True)
+            if seed_lane:
+                from battery.runner.setup import seed_scenario_via_ingest
+                seed_scenario_via_ingest(sdk, sc, seed_mode=True)
         self.decide_cycles = 0
 
     def _sdk(self, scenario: Scenario):
