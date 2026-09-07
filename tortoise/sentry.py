@@ -68,7 +68,7 @@ def capture_exception(exc: BaseException, tags: dict[str, Any] | None = None) ->
                 for k, v in tags.items():
                     scope.set_tag(str(k), str(v))
             sentry_sdk.capture_exception(exc)
-    except Exception as e:  # noqa: BLE001, RUF100
+    except Exception as e:  # noqa: BLE001, RUF100 — a capture failure must never reach the API
         _log.debug("sentry capture_exception failed: %s", e)
 
 
@@ -84,5 +84,5 @@ def capture_message(msg: str, level: str = "warning", tags: dict[str, Any] | Non
                 for k, v in tags.items():
                     scope.set_tag(str(k), str(v))
             sentry_sdk.capture_message(msg, level=level)
-    except Exception as e:  # noqa: BLE001, RUF100
+    except Exception as e:  # noqa: BLE001, RUF100 — a capture failure must never reach the API
         _log.debug("sentry capture_message failed: %s", e)
