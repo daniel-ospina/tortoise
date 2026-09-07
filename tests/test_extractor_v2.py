@@ -4529,7 +4529,6 @@ class TestEdusChunksRescue2335:
         """S2 empty (any cause) + S4 non-empty full re-emission → the rescue
         counter increments exactly once (the ~2× cost band)."""
         from tortoise import extractor_v2 as v2
-        monkeypatch = None
         conv = [{"role": "user", "content": "we decided X"}]
 
         calls = {"s2": 0, "s4": 0}

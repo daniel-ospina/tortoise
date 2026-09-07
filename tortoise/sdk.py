@@ -935,6 +935,27 @@ _CAPTURE_ERROR_CONTRACT: dict[str, dict[str, str]] = {
 }
 
 
+# Stage-failure families carry LIVE exception text ("S4 failed:
+# ValueError: ..."), so exact-match is impossible — match on the stable
+# prefix (the plan D7 Step-1 inventory). Headlines name what happened in
+# plain words + the TRUE recovery ("Retry" — WI-2b makes retry real for
+# failed sessions); raw detail (TypeName + message) stays in diagnostics.
+_CAPTURE_ERROR_PREFIX_CONTRACT: list[tuple[str, str]] = [
+    ("S1 chunk failed: ",
+     "Part of the extraction failed partway through. Retry the capture — "
+     "the retry will re-attempt it."),
+    ("S2 failed: ",
+     "The first pass of extraction failed partway through. Retry the "
+     "capture — the retry will re-attempt it."),
+    ("S4 failed: ",
+     "The final review pass failed and the earlier result was kept as-is. "
+     "Retry the capture — the retry will re-attempt it."),
+    ("S5 failed: ",
+     "A consolidation pass after extraction failed. Retry the capture — "
+     "the retry will re-attempt it."),
+]
+
+
 def _capture_error_to_human(raw: str) -> str:
     """Map a raw capture error string to its human headline at the resp
     boundary. Unmapped errors pass through unchanged (fail-safe — a new
@@ -942,6 +963,9 @@ def _capture_error_to_human(raw: str) -> str:
     for _raw, mapping in _CAPTURE_ERROR_CONTRACT.items():
         if _raw in raw:
             return mapping["headline"]
+    for prefix, headline in _CAPTURE_ERROR_PREFIX_CONTRACT:
+        if raw.startswith(prefix):
+            return headline
     return raw
 
 
@@ -960,7 +984,13 @@ def _emit_capture_observation(*, session_id: str, lane: str, mode: str,
     capture with the size/diagnostic fields, so a GO event (>=2-chunk +
     double-residual vs the effective escalation ceiling) is DIAGNOSABLE from
     the logs when the self-surfacing failure fires. Emitted at the shared
-    resp/effective-mode assembly (covers v2/m2/replayed/error/empty) on BOTH
+    resp/effective-mode assembly. NOTE the mode COVERAGE is v2/m2/replayed/
+    error — an "empty" line can never fire here: the empty/blank conversation
+    gate RETURNS before the Session MERGE + shared emit point on both lanes
+    (no Session is written, so there is no capture to observe; the empty
+    population is not a GO candidate). Same for the 402/turn-cap raise paths
+    (their records live in the raise-site log lines, Task 3 — never reach
+    this emit point). On BOTH
     lanes (sdk + hosted call this with their own ``lane`` tag).
 
     Fields: session_id / lane / mode / turns / chunks / edus / per-seam max
@@ -2950,13 +2980,20 @@ class TortoiseSDK:
         # Known limitation (review r3/r6, accepted — hosted #1727 mirrors it):
         # a GENUINE capture whose mint/stamp failed mid-write (non-fatal catch
         # below) leaves the Session with an un-stamped Event gap; a same-
-        # session retry observes session_existed=True and replays (never
-        # re-mints), so the gap does not self-heal. The replay skip also masks
-        # a retry after a FAILED EXTRACTION (a first capture that committed the
-        # Session + turn points but errored in the extractor: a same-session
-        # retry is a no-op "replayed" — recovery requires a fresh session_id).
-        # Byte-parity with hosted; heal-on-replay would diverge the two
-        # surfaces.
+        # session retry of a SUCCEEDED capture replays (never re-mints), so
+        # the gap does not self-heal. Byte-parity with hosted; heal-on-replay
+        # would diverge the two surfaces.
+        # #2335 WI-2b: the mint gate below is retry-aware — a TRUE retry (a
+        # prior FAILED capture, capture_ok False) DOES re-run the mint. The
+        # re-mint converges on the deterministic _session_capture_event_id
+        # (no duplicate Event node) but appends a second EventRecorded
+        # journal line for that eventId. Reconciles the replay-skip
+        # rationale: replay must not touch the first capture's Event (it
+        # represents a real, successful capture), while a retry's re-mint is
+        # the CORRECT refresh (the first mint recorded a FAILED attempt; the
+        # retry is the real capture). The duplicate journal line is benign —
+        # rebuild upserts by eventId (idempotent-convergent), the same
+        # property the concurrent-fresh race relies on.
         if not session_existed or retry_failed_capture:
             # #2335 WI-2b: a RETRY re-runs the mint/provenance — the Event id
             # is DETERMINISTIC (_server_id = _session_capture_event_id), so
@@ -3066,9 +3103,20 @@ class TortoiseSDK:
         # (idempotent). The empty/blank gate returns before the Session
         # MERGE, so nothing to record there.
         if session_existed or meta.get("mode") != "replayed":
-            proj.g.query(
-                "MATCH (s:Session {id:$sid}) SET s.capture_ok=$ok",
-                params={"sid": session_id, "ok": ok})
+            # Non-fatal bookkeeping (codebase posture: receipt/last-error/
+            # Source/EP are all try/except + additive warning): a graph
+            # hiccup here must NOT raise after the capture committed — and
+            # on a FAILED capture a raise would leave capture_ok=None →
+            # the next same-session re-POST would legacy-replay instead of
+            # re-attempting (the TRUE retry silently no-ops). The warning
+            # names the residue: capture_ok unset means an unknown prior.
+            try:
+                proj.g.query(
+                    "MATCH (s:Session {id:$sid}) SET s.capture_ok=$ok",
+                    params={"sid": session_id, "ok": ok})
+            except Exception as exc:  # pragma: no cover - graph hiccup
+                extraction_warnings.append(
+                    f"capture_ok state write failed: {type(exc).__name__}")
         if not ok and meta.get("mode") == "empty":
             effective_mode = "empty"
         elif not ok:

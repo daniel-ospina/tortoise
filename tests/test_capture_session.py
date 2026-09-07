@@ -3968,6 +3968,47 @@ def test_capture_error_contract_unmapped_passthrough(sdk, monkeypatch):
         "issues/new?template=bug_report.yml")
 
 
+def test_capture_error_contract_stage_failure_headlines(sdk, monkeypatch):
+    """#2335 WI-2 (D7 Step-1): the STAGE-FAILURE families (S1/S2/S4/S5 —
+    live exception text, prefix-matched) reach the resp as human headlines
+    with NO stage names / exception types; raw detail stays in diagnostics."""
+    import tortoise.extractor_v2 as ev2
+
+    def _v2_out(*a, **kw):
+        return {
+            "session_id": kw.get("session_id", "s"),
+            "story_arc": "", "embed_list": {},
+            "search": {"mode": "embedded", "degraded": True},
+            "payload": None,
+            "chain_notes": [], "link_before_create": [], "supersessions": [],
+            "warnings": [], "minted_kinds": [],
+            "errors": [
+                "S1 chunk failed: TimeoutError: read timed out",
+                "S2 failed: ValueError: bad json",
+                "S4 failed: RuntimeError: boom — kept S2 output",
+                "S5 failed: ConnectionError: reset",
+            ],
+            "stats": {"llm": {"calls": 1}, "recovery": {}},
+            "error_census": {},
+        }
+    monkeypatch.setattr(ev2, "extract_session_v2", _v2_out)
+    monkeypatch.delenv("TORTOISE_SESSION_LLM_MOCK", raising=False)
+    res = sdk.capture_session(CONV)
+    assert res["ok"] is False
+    for headline in res["errors"]:
+        for tok in ("S1", "S2", "S4", "S5", "ValueError", "RuntimeError",
+                    "TimeoutError", "ConnectionError", "boom", "json",
+                    "read timed out", "reset"):
+            assert tok.lower() not in headline.lower(), (headline, tok)
+        assert "retry" in headline.lower(), headline
+    # raw detail (TypeName prefix preserved) rides diagnostics
+    assert res["diagnostics"] == [
+        "S1 chunk failed: TimeoutError: read timed out",
+        "S2 failed: ValueError: bad json",
+        "S4 failed: RuntimeError: boom — kept S2 output",
+        "S5 failed: ConnectionError: reset"]
+
+
 # ── #2335 WI-2b: TRUE retry — a FAILED session's re-capture re-attempts ──
 
 def test_capture_true_retry_failed_session_reattempts(sdk, monkeypatch):

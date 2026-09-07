@@ -6580,7 +6580,10 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # #1727 (review PR #1827): the points-estimate 402 gate is SKIPPED on a
     # replay — session_existed writes no non-episodic points, so an
     # as-if-fresh estimate must not 402-block a zero-node re-POST.
-    if not session_existed:
+    # #2335 WI-2b: a TRUE-retry re-POST (capture_ok False) re-runs
+    # extraction and mints NEW non-episodic points — it is NOT a zero-node
+    # replay, so the estimate gate must fire for it too (a retry can 402).
+    if not session_existed or retry_failed_capture:
         est = _session_extraction_estimate(windowed)
         from tortoise.quota import count_team_usage
         sdk_team = _data_sdk(team)
@@ -7314,9 +7317,18 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     _capture_ok = (verb_status == STATUS_OK
                    and not extraction_errors and not skipped)
     if session_existed or meta.get("mode") != "replayed":
-        proj.g.query(
-            "MATCH (s:Session {id:$sid}) SET s.capture_ok=$ok",
-            params={"sid": session_id, "ok": _capture_ok})
+        # Non-fatal bookkeeping (mirror of the sdk guard): a graph hiccup
+        # must NOT 500 a committed capture — and on a FAILED capture a raise
+        # would leave capture_ok=None → the next same-session re-POST would
+        # legacy-replay instead of re-attempting. Additive warning names the
+        # residue.
+        try:
+            proj.g.query(
+                "MATCH (s:Session {id:$sid}) SET s.capture_ok=$ok",
+                params={"sid": session_id, "ok": _capture_ok})
+        except Exception as exc:  # pragma: no cover - graph hiccup
+            extraction_warnings.append(
+                f"capture_ok state write failed: {type(exc).__name__}")
     # W5 Phase E (#2104, S11): disclosure marker DATA on the capture
     # receipt — ``surfaced`` uses the §3.2.2 marker vocabulary (one entry
     # per memory item THIS capture added; N = len = the disclosure count,
