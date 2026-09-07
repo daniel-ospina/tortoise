@@ -3154,7 +3154,7 @@ class TortoiseSDK:
         # no-op — the stored True/None stays untouched). The empty/blank
         # gate returns before the Session MERGE, so nothing to record there.
         # NOTE (documented lane divergence, mirror of hosted): sdk computes ok
-        # BEFORE the surfaced-verification read (~3170) — a post-write
+        # BEFORE the surfaced-verification read (~3260) — a post-write
         # verification failure appends a warning only, capture_ok stays True.
         # Hosted computes _capture_ok AFTER its enrichment and downgrades to
         # partial (retryable) when points are skipped. Both internally

@@ -6919,7 +6919,10 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
                     # forever (the first mint never stamped them). Scoped to
                     # THIS session's CONTAINS-wired points lacking eventId —
                     # never clobber a fold that resolved to a different
-                    # session's canonical.
+                    # session's canonical. Turn points (is_episodic=true,
+                    # pointKind 'event') never carry the sessionCaptured
+                    # eventId in the normal flow — excluded via the
+                    # non-episodic clause (mirror of the sdk heal).
                     proj.g.query(
                         "MATCH (s:Session {id:$sid})-[c:CONTAINS]->"
                         "(n:Point) WHERE n.eventId IS NULL AND coalesce(n.is_episodic,false) <> true "
@@ -7343,8 +7346,9 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # #2335 WI-2b: record the attempt outcome on the Session node (TRUE
     # retry state). A SUCCEEDED prior → same-session re-capture replays
     # (no-op); a FAILED prior → re-attempts. Set on every genuine attempt
-    # (fresh + retry); a replay leaves the stored True untouched. The empty/
-    # blank gate returns before the Session MERGE — nothing to record there.
+    # (fresh + retry); a replay performs NO Session write (zero-write no-op
+    # — the stored True/None stays untouched). The empty/blank gate returns
+    # before the Session MERGE — nothing to record there.
     _capture_ok = (verb_status == STATUS_OK
                    and not extraction_errors and not skipped)
     if not session_existed or retry_failed_capture:
