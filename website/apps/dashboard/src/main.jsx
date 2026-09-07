@@ -2539,7 +2539,7 @@ function claimIntentInFlight() {
     // step hands off to the graph (accept-and-drop makes a client PATCH
     // inert on node-present orgs; the node's fork-aware gate owns
     // onboarding_complete). The wire follows the node.
-    window.history.replaceState({}, '', '#/' + tab)
+    window.history.replaceState({}, '', '#/' + tabToUse)
     setWelcomeMode(false)
     // #1842 P1-1: the first-timer flow (org-create provision → welcome
     // wizard → wizardComplete) never ran loadTeams/loadBackups — those fired
