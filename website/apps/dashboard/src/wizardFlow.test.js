@@ -8,10 +8,10 @@ import {
   durableKeyName,
 } from './wizardFlow.js'
 
-test('EXACTLY 5 human steps in the plan order (orientation → org-create → fork → connect → done)', () => {
-  assert.equal(WIZARD_STEPS.length, 5)
+test('EXACTLY 4 human steps in the plan order (org-create → fork → connect → done)', () => {
+  assert.equal(WIZARD_STEPS.length, 4)
   assert.deepEqual(WIZARD_STEPS.map((s) => s.id), [
-    'orientation', 'org-create', 'fork', 'connect', 'done',
+    'org-create', 'fork', 'connect', 'done',
   ])
 })
 
