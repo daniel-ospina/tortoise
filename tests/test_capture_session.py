@@ -2122,6 +2122,155 @@ def test_apply_supersessions_cycle_predecessor_hoisted(sdk):
     assert b is not None and (b[0] or "live") == "live", b
 
 
+def test_apply_supersessions_chain_idless_target_converges(sdk):
+    """#2249 (code-review P2-2, second-model): an id-less Object can never be
+    a VISIBLE successor (the fold-time gate requires an id) — chains through
+    one as a middle/tail link are order-insensitive. But an id-less TARGET
+    (chain HEAD, folds by name via the loop's fallback) still participates
+    as a NEEDER of its own successor — [C→D, mid→C] where mid is id-less:
+    mid→C needs C visible; C→D terminalizes C → the pre-pass sorts mid→C
+    first and BOTH folds land (applied=2, mid.sb=C via the name fallback,
+    C.sb=D). Pre-fix payload order [C→D, mid→C] folds C first → mid→C's
+    successor is terminal → gate-skip → mid STAYS LIVE (applied=1)."""
+    from tortoise.commit_ops import apply_supersessions
+
+    proj = sdk._get_proj()
+    sdk.create_entity("object", "it-C", objectKind="core:strategy")
+    sdk.create_entity("object", "it-D", objectKind="core:strategy")
+    # raw legacy id-less mid node (NO id property at all)
+    proj.g.query("CREATE (o:Object {name:'it-mid', status:'live'})")
+    warns: list[str] = []
+    applied = apply_supersessions(
+        proj, sdk,
+        [{"superseded": "it-C", "supersedes_by": "it-D",
+          "evidence": "d replaces c"},
+         {"superseded": "it-mid", "supersedes_by": "it-C",
+          "evidence": "c replaces mid (id-less head)"}],
+        session_id="sess_it", warn=warns.append)
+    assert applied == 2, \
+        f"id-less-target chain must converge (both folds land): {warns}"
+    assert warns == [], warns
+    mid = _entity_fold_state(proj, "it-mid")
+    assert mid == ("superseded", "it-C"), mid
+    assert _entity_fold_state(proj, "it-C") == ("superseded", "it-D")
+
+
+def test_apply_supersessions_selfref_dupname_keep_first_stable(sdk):
+    """#2249 regression pin (code-review P2-1, second-model): when a
+    record's successor name resolves back onto its OWN target via a
+    duplicate-name carrier (self-referential mixed id/name claim against a
+    dup-named distinct carrier), the pre-pass must NOT create an edge from
+    it — the fold-time gate excludes the target itself by construction, so
+    such an edge is spurious and would hoist the self-referential claim
+    ahead of a divergent first-emitted sibling, FLIPPING the keep-first
+    winner. Payload [B→C, Y] where B (id-B) shares name 'plan-X' with a
+    duplicate B' (id-B-dup): B→C (first-emitted) must win — B.sb='plan-C',
+    Y keep-first-warns, applied=1. (Green pre-fix: no sort. Green with the
+    guard. RED on an unguarded pre-pass: Y would fold B.sb='plan-X' first.)
+    See test_apply_supersessions_same_ref_stability for the plain same-ref
+    stability contract this extends."""
+    from tortoise.commit_ops import apply_supersessions
+
+    proj = sdk._get_proj()
+    sdk.create_entity("object", "plan-C", objectKind="core:strategy")
+    # duplicate-named carriers of 'plan-X' with explicit ids (legacy/raw)
+    proj.g.query(
+        "CREATE (o:Object {id:'sf-id-B', name:'plan-X', status:'live'})")
+    proj.g.query(
+        "CREATE (o:Object {id:'sf-id-B-dup', name:'plan-X', status:'live'})")
+    warns: list[str] = []
+    applied = apply_supersessions(
+        proj, sdk,
+        [{"superseded": "sf-id-B", "supersedes_by": "plan-C",
+          "evidence": "b replaced by c (first-emitted)"},
+         {"superseded": "sf-id-B", "supersedes_by": "plan-X",
+          "evidence": "self-referential claim onto own name"}],
+        session_id="sess_sf", warn=warns.append)
+    assert applied == 1, f"first-emitted claim wins: {warns}"
+    b = _entity_fold_state(proj, "plan-X")
+    assert b is not None, b
+    # B and B' share the name — the fold landed on ONE carrier by id (sf-id-B);
+    # assert via the id-carrying probe that the FIRST-EMITTED successor won.
+    rows = proj.g.query(
+        "MATCH (o:Object {id:'sf-id-B'}) RETURN o.status, o.supersededBy",
+    ).result_set
+    assert rows and rows[0][0] == "superseded" and rows[0][1] == "plan-C", rows
+    assert any("keep-first" in w for w in warns), \
+        f"divergent second claim must keep-first warn: {warns}"
+
+
+def test_apply_supersessions_cycle_and_entangled_reverse_emission_literal(sdk):
+    """#2249 determinism pins (code-review P2): cycle/entangled payloads in
+    REVERSE emissions stay emission-LITERAL and deterministic (payload-order
+    fallback — no exception, applied counts pinned). Arms:
+    (a) 3-cycle [C→A, B→C, A→B] reverse (payload-order fallback): C→A folds
+    C; B→C gate-skips (successor C already terminal); A→B folds A (B still
+    live) → applied=2, C.sb=A, A.sb=B, B LIVE (B→C is the skipped link —
+    emission-literal, not the "chain" a human might expect).
+    (b) entangled [B→C, B→A, A→B]: B→C folds B (applied), B→A keep-first-
+    warns, A→B gate-skips → applied=1, B.sb=C, A live.
+    (c) entangled [B→A, B→C, A→B]: B→A folds B (applied), B→C keep-first-
+    warns, A→B gate-skips → applied=1, B.sb=A, A live.
+    Each asserts the exact pre-fix-parity outcome so a future Kahn/leftover
+    change cannot silently shift an unpinned arm."""
+    from tortoise.commit_ops import apply_supersessions
+
+    proj = sdk._get_proj()
+
+    def _seed(prefix: str) -> None:
+        for n in ("-A", "-B", "-C"):
+            sdk.create_entity("object", prefix + n,
+                              objectKind="core:strategy")
+
+    # (a) pure 3-cycle, reverse emission
+    _seed("cy3")
+    warns_a: list[str] = []
+    applied_a = apply_supersessions(
+        proj, sdk,
+        [{"superseded": "cy3-C", "supersedes_by": "cy3-A", "evidence": ""},
+         {"superseded": "cy3-B", "supersedes_by": "cy3-C", "evidence": ""},
+         {"superseded": "cy3-A", "supersedes_by": "cy3-B", "evidence": ""}],
+        session_id="sess_cy3", warn=warns_a.append)
+    assert applied_a == 2, f"3-cycle folds first two emitted: {warns_a}"
+    assert any("keep-first" in w or "no visible successor" in w
+               for w in warns_a), warns_a
+    c = _entity_fold_state(proj, "cy3-C")
+    assert c == ("superseded", "cy3-A"), c
+    assert _entity_fold_state(proj, "cy3-A") == ("superseded", "cy3-B")
+    b_live = _entity_fold_state(proj, "cy3-B")
+    assert b_live is not None and (b_live[0] or "live") == "live", b_live
+
+    # (b) entangled reverse [B→C, B→A, A→B] — A stays live (emission-literal)
+    _seed("re1")
+    warns_b: list[str] = []
+    applied_b = apply_supersessions(
+        proj, sdk,
+        [{"superseded": "re1-B", "supersedes_by": "re1-C", "evidence": ""},
+         {"superseded": "re1-B", "supersedes_by": "re1-A", "evidence": ""},
+         {"superseded": "re1-A", "supersedes_by": "re1-B", "evidence": ""}],
+        session_id="sess_re1", warn=warns_b.append)
+    assert applied_b == 1, f"payload-order fallback: {warns_b}"
+    b = _entity_fold_state(proj, "re1-B")
+    assert b == ("superseded", "re1-C"), b
+    a_b = _entity_fold_state(proj, "re1-A")
+    assert a_b is not None and (a_b[0] or "live") == "live", a_b
+
+    # (c) entangled [B→A, B→C, A→B] — garbage claim wins the middle (literal)
+    _seed("re2")
+    warns_c: list[str] = []
+    applied_c = apply_supersessions(
+        proj, sdk,
+        [{"superseded": "re2-B", "supersedes_by": "re2-A", "evidence": ""},
+         {"superseded": "re2-B", "supersedes_by": "re2-C", "evidence": ""},
+         {"superseded": "re2-A", "supersedes_by": "re2-B", "evidence": ""}],
+        session_id="sess_re2", warn=warns_c.append)
+    assert applied_c == 1, f"payload-order fallback: {warns_c}"
+    b2 = _entity_fold_state(proj, "re2-B")
+    assert b2 == ("superseded", "re2-A"), b2
+    a_c = _entity_fold_state(proj, "re2-A")
+    assert a_c is not None and (a_c[0] or "live") == "live", a_c
+
+
 def test_apply_supersessions_self_supersession_skipped(sdk):
     """#2164 review (P1 — ISSUE A): a SELF-supersession record —
     superseded == supersedes_by (the same ref string) — must be SKIPPED

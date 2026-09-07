@@ -172,11 +172,22 @@ def _supersession_fold_order(proj, records):
     outcomes). Records that FEED a cycle (a cycle member is their
     successor) sort AHEAD of it — deterministic + monotonic (hoisting can
     only add folds; pinned by test_apply_supersessions_cycle_predecessor_hoisted).
-    Never raises — any doubt
-    fails soft to payload order. The main loop re-probes per record at
-    fold time (its gates are STATUS-dependent — the pre-pass resolves
-    structure only, so no TOCTOU: the Object graph is write-static inside
-    apply_supersessions, entities precede every call).
+    Self-referential successor names (a record's successor resolving back
+    onto its OWN target via duplicate-name carriers) contribute no edges —
+    the fold-time gate excludes the target itself (code-review P2-1). Edge
+    creation excludes R's own target so a divergent same-target claim never
+    hoists past its first-emitted sibling. Never raises on payload-content
+    doubt — payloads with <2 entity records, unresolved/ambiguous refs, and
+    cycles all fail soft to payload order; graph-QUERY failures propagate to
+    the caller's try/except fallback (apply_supersessions), which preserves
+    pre-fix per-record semantics. Id-less nodes can never be a VISIBLE
+    successor (the fold-time gate requires an id), so chains through them as
+    a middle/tail link are order-insensitive — but an id-less TARGET still
+    participates as a needer of its own successor and sorts normally (pinned
+    by test_apply_supersessions_chain_idless_target_converges). The main
+    loop re-probes per record at fold time (its gates are STATUS-dependent —
+    the pre-pass resolves structure only, so no TOCTOU: the Object graph is
+    write-static inside apply_supersessions, entities precede every call).
     """
     records = list(records or [])
     n = len(records)
@@ -246,12 +257,17 @@ def _supersession_fold_order(proj, records):
     # edges but occupy positions) wires constraints onto the RIGHT records.
     succ: dict[int, list[int]] = {}
     indeg = [0] * n
-    for ridx, _ref, sb in entity:                     # R — supersedes_by sb
+    for ridx, r_ref, sb in entity:                    # R — supersedes_by sb
         for sidx, s_ref, _s_sb in entity:             # S — terminalizes target_id[s_ref]
             if sidx == ridx:
                 continue
             t = target_id.get(s_ref)
-            if t and t in cand_ids.get(sb, set()):
+            # Exclude R's OWN target (code-review P2-1): the fold-time gate
+            # has_visible_distinct excludes the target itself by construction,
+            # so an edge keyed on it is spurious — it could hoist a divergent
+            # same-target claim ahead of its first-emitted sibling and flip the
+            # keep-first winner under duplicate-name carriers.
+            if t and t in cand_ids.get(sb, set()) and t != target_id.get(r_ref):
                 succ.setdefault(ridx, []).append(sidx)
                 indeg[sidx] += 1
     # Stable Kahn over ALL n positions (entity members carry the edges;
