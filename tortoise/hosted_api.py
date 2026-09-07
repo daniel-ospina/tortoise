@@ -9167,13 +9167,13 @@ async def create_team(body: dict, user: dict = Depends(get_current_user)):  # no
     + membership_create) stays for selfhost."""
     name = (body.get("name") or "").strip()
     if not name:
-        raise HTTPException(status_code=422, detail="Team name required")
+        raise HTTPException(status_code=422, detail="Organization name required")
     if len(name) > 64:
-        raise HTTPException(status_code=422, detail="Team name must be ≤ 64 characters")
+        raise HTTPException(status_code=422, detail="Organization name must be ≤ 64 characters")
     import re as _re
     # spaces are now allowed in team names (onboarding wizard needs them)
     if not _re.match(r"^[a-zA-Z0-9][a-zA-Z0-9_ -]{0,63}$", name):
-        raise HTTPException(status_code=422, detail="Invalid team name")
+        raise HTTPException(status_code=422, detail="Invalid organization name")
 
     # #1954: the 429/409/402 gates + provision are read-then-write — the
     # whole check+provision runs under the per-user lock so a concurrent
@@ -9262,12 +9262,12 @@ async def _create_team_supabase_lane(cp, name: str, user: dict) -> dict:
         cp, cutoff=since, user_id=user["user_id"], role="owner")
     if recent >= 3:
         raise HTTPException(status_code=429,
-                            detail="Too many teams created — try again later")
+                            detail="Too many organizations created — try again later")
     # Duplicate-name 409 (registry team_create raises ControlPlaneError
     # 'already exists'; the 0011 unique index is the atomic guard — the
     # pre-check is the friendly fast-path, the RPC 409 is authoritative).
     if team_by_name(cp, name):
-        raise HTTPException(status_code=409, detail="Team name already exists")
+        raise HTTPException(status_code=409, detail="Organization name already exists")
     # #1877/#2789: per-person entitlement — one FREE ORGANIZATION, counted by
     # OWNERSHIP (role='owner'), not membership. Any active owned org without an
     # active paid subscription blocks creating another (the new team would
@@ -9314,7 +9314,7 @@ async def _create_team_supabase_lane(cp, name: str, user: dict) -> dict:
         # the registry path).
         if "HTTP 409" in str(e):
             raise HTTPException(status_code=409,  # noqa: B904
-                                detail="Team name already exists")
+                                detail="Organization name already exists")
         raise HTTPException(status_code=500, detail="Team creation failed")  # noqa: B904
     return {"team_id": team_id, "graph_name": graph_name,
             "tier": "free", "name": name}
@@ -9343,7 +9343,7 @@ async def _create_team_registry_lane(sdk, name: str, user: dict) -> dict:
     ).result_set[0][0]
     if recent >= 3:
         raise HTTPException(status_code=429,
-                            detail="Too many teams created — try again later")
+                            detail="Too many organizations created — try again later")
 
     # #1877 ordering parity: the registry 409 currently surfaces only from
     # team_create's exception handler — add a dup-name pre-check BEFORE the
@@ -9354,7 +9354,7 @@ async def _create_team_registry_lane(sdk, name: str, user: dict) -> dict:
         params={"name": name},
     ).result_set[0][0]
     if dup:
-        raise HTTPException(status_code=409, detail="Team name already exists")
+        raise HTTPException(status_code=409, detail="Organization name already exists")
     # #1877/#2789: per-person entitlement — one FREE ORGANIZATION, counted by
     # OWNERSHIP (registry tier='free' proxy; selfhost has no subscription
     # model). STRUCTURED detail (#2789) — parity with the supabase lane.
@@ -9373,7 +9373,7 @@ async def _create_team_registry_lane(sdk, name: str, user: dict) -> dict:
                                  owner_user_id=user["user_id"])
     except Exception as e:
         if isinstance(e, ControlPlaneError) and "already exists" in str(e):
-            raise HTTPException(status_code=409, detail="Team name already exists")  # noqa: B904
+            raise HTTPException(status_code=409, detail="Organization name already exists")  # noqa: B904
         raise HTTPException(status_code=500, detail="Team creation failed")  # noqa: B904
 
     # #1877 second-model P1: the owner Membership is created INSIDE
@@ -11034,7 +11034,7 @@ async def invite_to_team(body: dict, user: dict = Depends(get_current_user)):  #
             tier = team.get("tier") or "free"
             if tier in ("free", "solo"):
                 raise HTTPException(status_code=402,
-                                    detail="Invites require the Pro or Team tier — upgrade to invite teammates")
+                                    detail="Invites require the Pro or Team tier — upgrade to invite members")
             # #1965: per-team lock around the capacity check + mint — two
             # concurrent invites must not both read active+pending < 2 and
             # both mint past max_users. Serialized per team_id; the count
@@ -11050,7 +11050,7 @@ async def invite_to_team(body: dict, user: dict = Depends(get_current_user)):  #
                                if not i.get("expires_at") or i["expires_at"] > now]
                     if len(active) + len(pending) >= 2:  # Pro max_users=2
                         raise HTTPException(status_code=402,
-                                            detail="Team member limit reached — upgrade to invite more")
+                                            detail="Member limit reached — upgrade to invite more")
                 inv = invitation_mint(get_control_plane(), team_id, email, role,
                                       invited_by=user["user_id"],
                                       inviter_email=(user.get("email") or None))
@@ -11106,7 +11106,7 @@ async def invite_to_team(body: dict, user: dict = Depends(get_current_user)):  #
         # active-only under-counted pending seats).
         if tier in ("free", "solo"):
             raise HTTPException(status_code=402,
-                                detail="Invites require the Pro or Team tier — upgrade to invite teammates")
+                                detail="Invites require the Pro or Team tier — upgrade to invite members")
         if tier == "pro":
             from datetime import datetime as _pdt
             active = reg.query(
@@ -11122,7 +11122,7 @@ async def invite_to_team(body: dict, user: dict = Depends(get_current_user)):  #
             ).result_set[0][0]
             if active + pending >= 2:  # Pro max_users=2
                 raise HTTPException(status_code=402,
-                                    detail="Team member limit reached — upgrade to invite more")
+                                    detail="Member limit reached — upgrade to invite more")
 
         # Invitation node via SDK (token returned once); roles admin/member allowed here
         import uuid as _uuid
@@ -11420,7 +11420,7 @@ async def accept_invite(body: dict, request: Request,
             if _cap_active >= int(_cap_max):
                 raise HTTPException(
                     status_code=402,
-                    detail="Team member limit reached — upgrade to invite more")
+                    detail="Member limit reached — upgrade to invite more")
 
         # Token single-use: CONDITIONAL claim — the SET's own matched-row
         # count is authoritative (P2-1 concurrency review, cross-lane half):
@@ -11824,7 +11824,7 @@ async def _registry_mismatch_accept_v2(sdk, invite: dict, user: dict,
             if _cap_active >= int(_cap_max):
                 raise HTTPException(
                     status_code=402,
-                    detail="Team member limit reached — upgrade to invite more")
+                    detail="Member limit reached — upgrade to invite more")
         # Token single-use + OTP single-use: CONDITIONAL write (still-pending
         # guard) + the write's OWN matched-row count IS the authoritative
         # single-use claim — a concurrent accept (email-match invitee racing
@@ -12342,7 +12342,7 @@ async def _registry_accept_by_id(sdk, invitation_id: str, user: dict) -> dict:
             if _cap_active >= int(_cap_max):
                 raise HTTPException(
                     status_code=402,
-                    detail="Team member limit reached — upgrade to invite more")
+                    detail="Member limit reached — upgrade to invite more")
         # Single-use: CONDITIONAL claim — the SET's own matched-row count is
         # authoritative (P2-1 cross-lane half, by-id twin): a concurrent v2
         # OTP-mismatch winner on the SAME invitation row (or a same-user
@@ -14841,7 +14841,7 @@ async def claim_team(request: Request):
         raise HTTPException(
             status_code=403,
             detail=("Your email is not confirmed — cannot claim an "
-                    "anonymous team. Confirm your email and try again."),
+                    "anonymous organization. Confirm your email and try again."),
         )
 
     # 3. pasted key — the key-possession anchor.
@@ -17436,7 +17436,7 @@ async def create_onboarding_team(body: dict,
         raise HTTPException(status_code=400, detail="name is required (max 64 chars)")
     import re
     if not re.match(r"^[a-zA-Z0-9][a-zA-Z0-9_ -]{0,63}$", name):
-        raise HTTPException(status_code=400, detail="Invalid team name")
+        raise HTTPException(status_code=400, detail="Invalid organization name")
     # #1748: the session user owns the sub-team. Session JWT →
     # session_user_id (get_current_team_session); key-auth → created_by
     # (the key creator's user UUID — session-minted bootstrap/recovery
@@ -17541,7 +17541,7 @@ def _create_onboarding_team_lane(team: dict, name: str,
             # P1, PR #874).
             if "HTTP 409" in str(e):
                 raise HTTPException(status_code=409,  # noqa: B904
-                                    detail="Team name already exists")
+                                    detail="Organization name already exists")
             raise HTTPException(status_code=400, detail=f"Team create failed: {e}")  # noqa: B904
         _update_onboarding_state(team["team_id"], team_created=True)
         _track_onboarding_event(team, "question_answered",
@@ -20787,13 +20787,13 @@ def _billing_checkout_new_org_sync(user: dict, name: str, price_id: str) -> dict
             detail="A paid plan is required to purchase a new organization")
     if is_supabase_enabled():
         if team_by_name(get_control_plane(), name):
-            raise HTTPException(status_code=409, detail="Team name already exists")
+            raise HTTPException(status_code=409, detail="Organization name already exists")
     else:
         _dup = _make_sdk(namespace="registry")._get_registry().query(
             "MATCH (t:Team {name:$name}) RETURN count(t)", params={"name": name},
         ).result_set[0][0]
         if _dup:
-            raise HTTPException(status_code=409, detail="Team name already exists")
+            raise HTTPException(status_code=409, detail="Organization name already exists")
 
     new_org_id = _new_org_team_id()
     try:
