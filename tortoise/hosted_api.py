@@ -72,6 +72,7 @@ from tortoise.sdk import (
     _capture_minted_ids,  # W5 Phase D (#2104): provenance-stamp gate (minted only)
     _capture_turn_window,  # #1532 D1: shared stored-window truncation
     _content_hash,
+    _emit_capture_observation,  # #2335 WI-1d: observation leg (hosted lane tag)
     _normalize_turn_role,  # #1532 D2: shared role normalization (None->unknown)
     _session_capture_event_id,  # W5 Phase F (#2104): deterministic sessionCaptured Event id
     _session_extraction_estimate,  # #1532 D4: v2-aware pre-write quota estimate
@@ -7303,6 +7304,16 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # response — protocol_version, status, provenance, error; the verb's
     # per-point entries ride the enriched ``resp["points"]`` list (extra
     # wins on merge, D8).
+    # #2335 WI-1d: the observation leg (hosted lane tag) — one structured
+    # line per capture; mode covers v2/m2/replayed/error/empty.
+    try:
+        _emit_capture_observation(
+            session_id=session_id, lane="hosted",
+            mode=effective_mode, turns=len(body.conversation), meta=meta)
+    except Exception:  # pragma: no cover — never block capture
+        import logging  # function-local convention (see the turn-cap site)
+        logging.getLogger("tortoise.api").exception(
+            "capture_observation emit failed (non-fatal)")
     return build_write_verb(
         source_session=session_id,
         source_harness=body.harness or "unknown",

@@ -3824,3 +3824,65 @@ def test_capture_resp_carries_stats_v2(sdk, monkeypatch):
     assert isinstance(res["stats"], dict)
     rec = (res.get("stats") or {}).get("recovery") or {}
     assert rec.get("s2_out_tokens", 0) > 0, rec
+
+
+# ── #2335 WI-1d: the observation leg (structured per-capture log line) ────
+
+def test_capture_observation_line_v2(sdk, monkeypatch, caplog):
+    """#2335 WI-1d: a healthy v2 capture emits ONE structured observation
+    line carrying the size/diagnostic fields (mode/chunks/edus/per-seam max
+    out-token) — the diagnosis source when a GO event fires."""
+    import logging as _log
+
+    from tortoise.model_adapters import _reset_failover_cooldown
+    _reset_failover_cooldown()
+    requests_log = []
+    _install_token_fake_provider(monkeypatch, requests_log)
+    monkeypatch.delenv("TORTOISE_SESSION_LLM_MOCK", raising=False)
+    monkeypatch.delenv("TORTOISE_SESSION_EXTRACTOR", raising=False)
+    monkeypatch.delenv("TORTOISE_EXTRACT_MODEL", raising=False)
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "ds-key")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
+
+    with caplog.at_level(_log.INFO, logger="tortoise.sdk"):
+        sdk.capture_session(
+            [{"role": "user", "content": "x"},
+             {"role": "assistant", "content": "we decided"}],
+            session_id="obs-v2")
+    lines = [r.getMessage() for r in caplog.records
+             if "capture_observation" in r.getMessage()]
+    assert lines, "a v2 capture must emit the observation line"
+    import json as _json
+    obs = _json.loads(lines[0].split("capture_observation ", 1)[1])
+    assert obs["lane"] == "sdk"
+    assert obs["mode"].startswith("llm:")
+    assert obs["turns"] == 2
+    assert obs["chunks"] == 1
+    assert obs["edus"] == 2
+    # per-seam max out-token present (token-bearing fake → s2_out_tokens)
+    assert obs["s2_max_out_tokens"] == 1234, obs
+    assert obs["s4_max_out_tokens"] == 1234, obs
+
+
+def test_capture_observation_line_replayed(sdk, caplog):
+    """#2335 WI-1d: a replay emits the observation line with mode=replayed
+    and NO fabricated size fields (stats {} on replay — absent-when-no-data)."""
+    import logging as _log
+    sdk.capture_session(
+        [{"role": "user", "content": "x"},
+         {"role": "assistant", "content": "we decided"}],
+        session_id="obs-replay")
+    with caplog.at_level(_log.INFO, logger="tortoise.sdk"):
+        sdk.capture_session(
+            [{"role": "user", "content": "x"},
+             {"role": "assistant", "content": "we decided"}],
+            session_id="obs-replay")
+    lines = [r.getMessage() for r in caplog.records
+             if "capture_observation" in r.getMessage()]
+    assert lines
+    import json as _json
+    obs = _json.loads(lines[0].split("capture_observation ", 1)[1])
+    assert obs["mode"] == "replayed"
+    assert obs["lane"] == "sdk"
+    assert "chunks" not in obs, "a replay has no extractor telemetry"
+    assert "edus" not in obs

@@ -2998,6 +2998,29 @@ class TestSessionFloodGate:
         assert str(MAX_SESSION_TURNS + 1) in hits[0], hits[0]
         assert str(MAX_SESSION_TURNS) in hits[0], hits[0]
 
+    def test_capture_observation_line_hosted(self, client, caplog):
+        """#2335 WI-1d: the hosted capture emits the observation line with
+        lane=hosted + the size fields (the hosted llm:mock lane runs the
+        real v2 extractor, so chunks/edus/max-tokens are present)."""
+        import json as _json
+        import logging
+        conv = [{"role": "user", "content": "Let's use PostgreSQL."},
+                {"role": "assistant", "content": "Agreed."}]
+        # the observation line is emitted by the SHARED sdk helper (_logger
+        # = "tortoise.sdk") — capture at the propagation root
+        with caplog.at_level(logging.INFO, logger="tortoise"):
+            r = client.post("/v1/sessions", json={
+                "session_id": "obs-hosted", "conversation": conv})
+        assert r.status_code == 200, r.text
+        lines = [rec.getMessage() for rec in caplog.records
+                 if "capture_observation" in rec.getMessage()]
+        assert lines, "a hosted capture must emit the observation line"
+        obs = _json.loads(lines[0].split("capture_observation ", 1)[1])
+        assert obs["lane"] == "hosted"
+        assert obs["mode"].startswith("llm:")
+        assert obs["chunks"] == 1, obs
+        assert obs["edus"] == 2, obs
+
     def test_quota_refusal_record(self, client, caplog):
         """#2335 WI-1c: the 402 points-gate raise emits a structured record
         with est-at-refusal / count / max / tier — the hosted-low proxy for

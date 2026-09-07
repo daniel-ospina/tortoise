@@ -893,6 +893,54 @@ def _content_hash(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+def _emit_capture_observation(*, session_id: str, lane: str, mode: str,
+                              turns: int, meta: dict) -> None:
+    """#2335 WI-1d: the structured observation leg — ONE JSON line per
+    capture with the size/diagnostic fields, so a GO event (>=2-chunk +
+    double-residual vs the effective escalation ceiling) is DIAGNOSABLE from
+    the logs when the self-surfacing failure fires. Emitted at the shared
+    resp/effective-mode assembly (covers v2/m2/replayed/error/empty) on BOTH
+    lanes (sdk + hosted call this with their own ``lane`` tag).
+
+    Fields: session_id / lane / mode / turns / chunks / edus / per-seam max
+    out-token (recovered-case max semantics per the #2408 Task-4 handoff:
+    max(sX_out_tokens, truncation_completion_tokens_sX) — base in the
+    truncation key, escalated final list in the out-token key) / error_census.
+    ``meta["stats"]`` is {} on replayed/M2 (no extractor_v2 telemetry) — the
+    line still fires with the mode + turns (a replay/no-op is observable).
+    """
+    st = meta.get("stats") or {}
+    rec = st.get("recovery") or {}
+    out: dict = {
+        "capture_observation": True,
+        "session_id": session_id,
+        "lane": lane,
+        "mode": mode,
+        "turns": turns,
+    }
+    # absent-when-no-data: only present fields are reported (a tokenless
+    # mock / replay must not fabricate a measured 0).
+    if st:
+        chunks = st.get("chunks")
+        if chunks is not None:
+            out["chunks"] = chunks
+        edus = st.get("edus")
+        if edus is not None:
+            out["edus"] = edus
+        for seam in ("s2", "s4"):
+            tok = rec.get(f"{seam}_out_tokens")
+            trunc = rec.get(f"truncation_completion_tokens_{seam}")
+            vals = [v for v in (tok, trunc) if v]
+            if vals:
+                out[f"{seam}_max_out_tokens"] = max(vals)
+        if st.get("s4_full_rescues"):
+            out["s4_full_rescues"] = st["s4_full_rescues"]
+        ec = meta.get("error_census")
+        if ec:
+            out["error_census"] = ec
+    _logger.info("capture_observation %s", _json.dumps(out, sort_keys=True))
+
+
 def _session_capture_event_id(session_id: str) -> str:
     """Deterministic sessionCaptured Event id (W5 Phase F #2104).
 
@@ -2992,6 +3040,14 @@ class TortoiseSDK:
         from tortoise.write_verb import surfaced_marker
         resp["surfaced"] = surfaced_marker(
             extracted, verified_ids=verified_ids)
+        # #2335 WI-1d: the observation leg — one structured line per capture
+        # at the shared assembly (mode covers v2/m2/replayed/error/empty).
+        try:
+            _emit_capture_observation(
+                session_id=session_id, lane="sdk",
+                mode=effective_mode, turns=len(conversation), meta=meta)
+        except Exception as e:  # pragma: no cover — never block capture
+            _logger.warning("capture_observation emit failed: %s", e)
         return resp
 
     def _extract_session_llm(
@@ -3515,6 +3571,10 @@ class TortoiseSDK:
             # lane dropped it here. error_census is a TOP-LEVEL out key
             # (sibling of stats) — folded separately when needed.
             "stats": out.get("stats") or {},
+            # #2335 WI-1a: error_census is a TOP-LEVEL extractor key
+            # (sibling of stats) — folded alongside so the observation leg
+            # and diagnostics can read it from the meta contract.
+            "error_census": out.get("error_census") or {},
         }
         return extracted, meta
 
