@@ -6586,7 +6586,11 @@ function claimIntentInFlight() {
                         re-applies the lifetime span with a fresh clock. */}
                     <td>{(() => {
                       const ex = fmtExpiry(k.expires_at)
-                      if (!ex.cls) return ex.text === 'Never' ? <span className="dim">{ex.text}</span> : ex.text
+                      // #2426: plain 'Never' / date text (no dim class — the
+                      // status cell's dim identifies 'disabled'; the research
+                      // pattern is an unadorned Never). Expiring/expired rows
+                      // carry their own classes + title tooltip.
+                      if (!ex.cls) return ex.text
                       return <span className={ex.cls} title={ex.title || undefined}>{ex.text}</span>
                     })()}</td>
                     <td>
