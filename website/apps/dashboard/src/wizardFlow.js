@@ -1,14 +1,14 @@
-// #1997 (W1): the 5 human steps of the onboarding wizard — single source of
+// #1997 (W1): the 4 human steps of the onboarding wizard — single source of
 // truth for step structure + copy. Pure (no React), node --test unit-tested
 // (setupGuide.js pattern).
 //
-// Epic #1976 plan P1 (wizard): orientation → org-create/join → fork card →
+// Epic #1976 plan P1 (wizard): org-create/join → fork card →
 // connect-consent → done. ALL other steps (install/seed/decide) are
 // agent-side or archived (the legacy #1643 wizard render lives in the
 // ARCHIVED section of main.jsx — never deleted, A0 rollback path).
 //
 // Contract (issue #1997 O/I/T + DE2E-1/2/3):
-// - EXACTLY 5 human steps, in this order.
+// - EXACTLY 4 human steps, in this order.
 // - user-facing copy says "Organization" — never "team"/"workspace"
 //   (DE2E-2 copy sweep; the wizardArchived.test.js source-scan asserts the
 //   live render uses WIZARD_STEPS and the org-create dialog says
@@ -21,16 +21,6 @@
 //   catalog-presented step edge (surface 4).
 
 export const WIZARD_STEPS = Object.freeze([
-  {
-    id: 'orientation',
-    label: 'Orientation',
-    // #2361 review-r1: this sub used to promise 'install → connect → add
-    // your organization and you → make your first decision' — the live 5-step
-    // wizard creates the org first, connects second, and never adds the user
-    // or makes a decision (both are agent-side after connect). State the real
-    // order; the numbered bullets below carry the detail.
-    sub: "Here's what happens next: name your organization, choose how you'll use Tortoise, then connect your agent — your agent takes it from there.",
-  },
   {
     id: 'org-create',
     label: 'Create your Organization',
