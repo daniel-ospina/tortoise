@@ -28,6 +28,7 @@ import asyncio
 import html
 import logging
 import os
+import re
 from datetime import datetime, timezone
 
 import httpx
@@ -206,8 +207,14 @@ def _is_transient(err: Exception) -> bool:
 
 
 async def _send_resend(to: str, subject: str, html_body: str, text_body: str,
-                       idempotency_key: str | None = None) -> dict:
-    """POST to Resend /emails. Raises on failure (caller decides retry)."""
+                       idempotency_key: str | None = None,
+                       from_addr: str | None = None,
+                       timeout: float = 15.0) -> dict:
+    """POST to Resend /emails. Raises on failure (caller decides retry).
+
+    ``from_addr`` defaults to the shared RESEND_FROM_EMAIL sender — the
+    onboarding profile (#2406) passes daniel@premiselabs.co explicitly.
+    """
     api_key = _env("RESEND_API_KEY")
     if api_key is None:
         raise RuntimeError("RESEND_API_KEY not set")
@@ -221,7 +228,7 @@ async def _send_resend(to: str, subject: str, html_body: str, text_body: str,
         headers["Idempotency-Key"] = idempotency_key
 
     payload = {
-        "from": _from_address(),
+        "from": from_addr or _from_address(),
         "to": [to],
         "subject": subject,
         "html": html_body,
@@ -229,7 +236,7 @@ async def _send_resend(to: str, subject: str, html_body: str, text_body: str,
     }
 
     async with _send_semaphore:  # noqa: SIM117
-        async with httpx.AsyncClient(timeout=15.0) as client:
+        async with httpx.AsyncClient(timeout=timeout) as client:
             resp = await client.post(RESEND_URL, headers=headers, json=payload)
             resp.raise_for_status()
             # #1138: budget slot was already RESERVED at schedule time in
@@ -390,6 +397,172 @@ def send_otp_email(team_name: str, invitee_email: str, code: str,
     )
     _pending_email_tasks.add(task)
     task.add_done_callback(_pending_email_tasks.discard)
+
+
+# ── Onboarding-call offer email (#2406) ────────────────────────────────────
+# Sent ONCE per NEW hosted human signup: the tenant-provision edge function
+# fires POST /internal/onboarding-email right after first-org provisioning
+# (see docs/scoping/2026-09-06-2406-onboarding-call-email.md), and the caller
+# AWAITS this send, stamping teams.onboarding_email_sent_at only on provider
+# accept — so delivery is exactly-once for every in-band path (marker read
+# gate + in-process in-flight gate in the endpoint + provider Idempotency-Key).
+# Unlike the invite/OTP emails this profile is never backgrounded: the stamp
+# happens in the SAME request as the awaited send (no crash window that could
+# double-fire from the edge function's +2s retry). NEVER raises.
+
+# Issue copy is verbatim; the subject line is not pinned by the issue —
+# ops-tweakable constant, flagged in the PR (#2406 open question 1).
+ONBOARDING_SUBJECT = "Let's get you set up with Tortoise"
+# EXACT booking URL — the earlier `...onbaording-call` typo is WRONG (#2406).
+ONBOARDING_BOOK_URL = "https://cal.com/danielospina/tortoise-onboarding-call"
+ONBOARDING_FROM_DEFAULT = "daniel@premiselabs.co"
+
+
+# Best-effort greeting vocabulary. display_name is USER-ASSERTED OAuth
+# metadata (any JWT holder can set it via supabase.auth.updateUser; providers
+# do not populate it uniformly), so the greeting is COSMETIC-ONLY copy — never
+# load-bearing (#2406 §Personalization). Algorithm (see the scope doc):
+#   1. display_name first whitespace token passing the name-shape predicate;
+#   2. else the email local-part's first [-_.+ ]-segment passing the name-shape
+#      predicate AND not a role-mailbox word (info@acme.com + org 'acme' →
+#      'Acme'); GitHub numeric-relay segments ("123456789+…") fail the letters
+#      test → org fallback;
+#   3. else the org token's first letter-run (title-cased-ish);
+#   4. else 'there'.
+_ROLE_MAILBOX_RE = re.compile(
+    r"^(?:info|hello|admin|support|contact|sales|billing|office|noreply|"
+    r"no[-_]?reply|no|mailbox|postmaster|team)$",
+    re.IGNORECASE,
+)
+_LETTER_RUN_RE = re.compile(r"[^\W\d_]+")  # first unicode letter-run
+
+
+def _name_shape_ok(token: str) -> bool:
+    """A plausible first-name token: 2–24 letters (slug handles / numeric
+    relay prefixes fall through)."""
+    return 2 <= len(token) <= 24 and token.isalpha()
+
+
+def _capitalize_first(token: str) -> str:
+    """First character upper-cased, inner case preserved."""
+    return token[0].upper() + token[1:] if token else token
+
+
+def _onboarding_greeting_name(display_name: str | None,
+                              email: str | None,
+                              team_name: str | None) -> str:
+    """Best-effort 'Hey [name]' personalization. Never raises."""
+    if isinstance(display_name, str) and display_name.strip():
+        for token in display_name.split():
+            if _name_shape_ok(token):
+                return _capitalize_first(token)
+    if isinstance(email, str) and email.strip():
+        local = email.split("@", 1)[0] if "@" in email else email
+        first = re.split(r"[-_.+ ]+", local, maxsplit=1)[0] if local else ""
+        if (_name_shape_ok(first)
+                and not _ROLE_MAILBOX_RE.fullmatch(first)):
+            return _capitalize_first(first)
+    if isinstance(team_name, str) and team_name.strip():
+        m = _LETTER_RUN_RE.search(team_name)
+        if m and _name_shape_ok(m.group(0)):
+            return _capitalize_first(m.group(0))
+    return "there"
+
+
+# Verbatim copy from issue #2406 — paragraphs kept faithful in both bodies.
+def _onboarding_html(greeting: str, link: str) -> str:
+    name = html.escape(greeting)
+    lk = html.escape(link, quote=True)
+    return f"""\
+<div style="background:#060b14;padding:32px 16px;font-family:Helvetica,Arial,sans-serif;">
+  <div style="max-width:480px;margin:0 auto;background:#0d1a2d;border:1px solid #1e293b;border-radius:12px;padding:28px;">
+    <p style="color:#e2e8f0;font-size:16px;margin:0 0 16px;">Hey {name}</p>
+    <p style="color:#94a3b8;font-size:14px;margin:0 0 16px;">We like to meet and help our users. If you'd like help strategising how to use Tortoise, onboarding, or otherwise a soundboard to discuss your usecase and how to make it better, just book a call <a href="{lk}" style="color:#06b6d4;">{lk}</a></p>
+    <p style="color:#e2e8f0;font-size:14px;margin:0 0 4px;">Much love</p>
+    <p style="color:#e2e8f0;font-size:14px;margin:0;">Daniel</p>
+  </div>
+</div>"""
+
+
+def _onboarding_text(greeting: str, link: str) -> str:
+    return (
+        f"Hey {greeting}\n\n"
+        "We like to meet and help our users. If you'd like help strategising "
+        "how to use Tortoise, onboarding, or otherwise a soundboard to discuss "
+        f"your usecase and how to make it better, just book a call {link}\n\n"
+        "Much love\n"
+        "Daniel"
+    )
+
+
+def _onboarding_from() -> str:
+    return _env("RESEND_ONBOARDING_FROM_EMAIL") or ONBOARDING_FROM_DEFAULT
+
+
+async def _send_onboarding_attempt(email: str, greeting: str,
+                                   team_id: str) -> dict:
+    """One attempt + one 0.5s retry on transient-only. Raises only into the
+    caller's retry loop via the returned status — never leaks exceptions."""
+    html_body = _onboarding_html(greeting, ONBOARDING_BOOK_URL)
+    text_body = _onboarding_text(greeting, ONBOARDING_BOOK_URL)
+    last_err: Exception | None = None
+    for attempt in (0, 1):
+        try:
+            result = await _send_resend(
+                email, ONBOARDING_SUBJECT, html_body, text_body,
+                idempotency_key=f"onboarding:{team_id}",
+                from_addr=_onboarding_from(),
+                # Awaited inside the provisioning request — bounded so a slow
+                # provider can never stretch the edge fn's retry deadline.
+                timeout=3.0,
+            )
+            message_id = (result or {}).get("id")
+            logger.info(
+                "email notify: onboarding offer accepted by provider "
+                "(team %s, msg %s)", team_id, message_id)
+            return {"status": "sent", "message_id": message_id}
+        except Exception as e:  # noqa: BLE001, RUF100
+            last_err = e
+            if attempt == 0 and _is_transient(e):
+                await asyncio.sleep(0.5)
+                continue
+            break
+    logger.warning(
+        "email notify: onboarding offer email failed for team %s (%s)",
+        team_id, redact_safe(last_err))
+    _refund_send()  # #1138: provider rejected/failed the POST — free the slot
+    return {"status": "failed"}
+
+
+async def send_onboarding_offer_email(email: str,
+                                      display_name: str | None,
+                                      team_name: str | None,
+                                      team_id: str) -> dict:
+    """Send (AWAITED) the one-time onboarding-call offer email (#2406).
+
+    Returns ``{"status": "sent", "message_id"}`` on provider accept,
+    ``{"status": "skipped"}`` (channel unconfigured / budget exhausted) or
+    ``{"status": "failed"}`` (provider rejected after one 0.5s transient
+    retry). NEVER raises — the caller (POST /internal/onboarding-email)
+    stamps ``teams.onboarding_email_sent_at`` ONLY on ``sent``, so a skipped/
+    failed send leaves the marker unset and stays retryable.
+    """
+    api_key = _env("RESEND_API_KEY")
+    if _skip_channel("resend-onboarding", api_key):
+        return {"status": "skipped"}
+
+    # #1138: hard-stop before sending when the shared send budget is
+    # exhausted (same reserve/refund posture as the invite/OTP paths).
+    exceeded, reason = _budget_exceeded()
+    if exceeded:
+        logger.warning(
+            "email notify: onboarding offer for team %s SKIPPED — send budget "
+            "exhausted (%s)", team_id, reason)
+        return {"status": "skipped"}
+    _reserve_send()
+
+    greeting = _onboarding_greeting_name(display_name, email, team_name)
+    return await _send_onboarding_attempt(email, greeting, team_id)
 
 
 async def drain_pending_sends(timeout: float = 2.0) -> None:
