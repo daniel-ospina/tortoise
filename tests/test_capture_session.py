@@ -4149,3 +4149,75 @@ def test_capture_true_retry_v2_only_m2_failed_session_replays(
         params={"sid": sid}).result_set
     assert row[0][0] is False, row
     assert row[0][1] == "m2", row
+
+
+def test_capture_true_retry_heals_unstamped_first_attempt(
+        sdk, monkeypatch):
+    """#2335 WI-2b / review (PR #2473): a retry heals the failed first
+    attempt's provenance gap. Attempt 1: v2 extraction writes a CLAIM + an
+    error, AND the Event mint FAILS (monkeypatched raise) — the claim lands
+    live, CONTAINS-wired, UNSTAMPED (no eventId), capture_ok False.
+    Attempt 2 (retry): re-extraction graph-content-hash-FOLDS the claim onto
+    its existing node (dedup=content_hash_hit — NOT in the minted set) + the
+    mint now succeeds — the retry's heal stamps this session's CONTAINS-wired
+    non-episodic claim nodes lacking eventId."""
+    import tortoise.extractor_v2 as ev2
+    import tortoise.sdk as sdk_mod
+    calls = {"n": 0}
+    real_create_event = sdk.create_event
+    _CLAIM = {"id": "pt_" + sdk_mod._content_hash("the suburbs are home now"),
+              "content": "the suburbs are home now", "pointKind": "statement",
+              "about_entities": []}
+    _ERR = ["S4 failed: ValueError: bad json — kept S2 output"]
+
+    def _v2_out(*a, **kw):
+        calls["n"] += 1
+        return {
+            "session_id": kw.get("session_id", "s"),
+            "story_arc": "", "embed_list": {},
+            "search": {"mode": "embedded", "degraded": True},
+            "payload": {"entities": [], "events": [],
+                        "points": [dict(_CLAIM)], "operators": []},
+            "chain_notes": [], "link_before_create": [], "supersessions": [],
+            "warnings": [], "minted_kinds": [],
+            "errors": _ERR if calls["n"] == 1 else [],
+            "stats": {"llm": {"calls": 1}, "recovery": {}},
+            "error_census": {},
+        }
+    monkeypatch.setattr(ev2, "extract_session_v2", _v2_out)
+    monkeypatch.delenv("TORTOISE_SESSION_LLM_MOCK", raising=False)
+    conv = [{"role": "user", "content": "we decided X"}]
+    sid = "heal-2335"
+
+    # Attempt 1: extraction writes the claim + errors; the Event mint FAILS
+    # (simulated) — the claim stays live but UNSTAMPED.
+    def _fail_mint(*a, **kw):
+        raise RuntimeError("simulated mint failure")
+    monkeypatch.setattr(sdk, "create_event", _fail_mint)
+    res1 = sdk.capture_session(conv, session_id=sid)
+    assert res1["ok"] is False, res1
+    assert res1["extracted"] >= 1, "attempt-1 claim must land"
+    proj = sdk._get_proj()
+    unstamped1 = proj.g.query(
+        "MATCH (s:Session {id:$sid})-[:CONTAINS]->(n:Point) "
+        "WHERE n.eventId IS NULL AND "
+        "coalesce(n.is_episodic, false) <> true RETURN n.id",
+        params={"sid": sid}).result_set
+    assert len(unstamped1) == res1["extracted"], (
+        f"attempt-1 claim must be CONTAINS-wired + un-stamped: "
+        f"{len(unstamped1)} vs {res1['extracted']}")
+
+    # Attempt 2 (TRUE retry): claim folds onto the existing node
+    # (content_hash_hit) + mint succeeds + the heal stamps it.
+    monkeypatch.setattr(sdk, "create_event", real_create_event)
+    res2 = sdk.capture_session(conv, session_id=sid)
+    assert res2["ok"] is True, res2
+    assert res2["extraction_mode"] != "replayed", res2
+    unstamped2 = proj.g.query(
+        "MATCH (s:Session {id:$sid})-[:CONTAINS]->(n:Point) "
+        "WHERE n.eventId IS NULL AND "
+        "coalesce(n.is_episodic, false) <> true RETURN count(n)",
+        params={"sid": sid}).result_set[0][0]
+    assert unstamped2 == 0, (
+        f"retry must heal the un-stamped claim ({len(unstamped1)} -> "
+        f"{unstamped2})")
