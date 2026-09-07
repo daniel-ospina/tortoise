@@ -19,7 +19,9 @@ Runnable with:
 """
 from __future__ import annotations
 
+import json
 import os
+from datetime import UTC, datetime
 
 import pytest
 
@@ -875,3 +877,49 @@ def test_pre_fix_journal_boundary_resurrection_persists(sup):
     assert _struct_edges(proj, x) == {("aboutSubject", "BoundarySubj")}, (
         "pre-fix journal: old's resurrection must persist (no descriptor)")
     assert not _struct_edges(proj, succ)
+
+
+def test_delete_leg_skips_live_recreated_src(sup):
+    """code-review P1: the structural delete-leg must ONLY clean the pass-2
+    resurrection at a TERMINAL (dead) old point. A LIVE re-created src
+    (id-reuse: supersede fold dropped by #2488's survivor filter) owns its
+    edges legitimately — the delete-leg would clobber a live point.
+
+    Lane: live X with a legit extractedFrom edge; a stale structural
+    descriptor whose src is X is replayed (the id-reuse fold-drop lane —
+    #2488's survivor filter would drop the pre-recreation supersede fold, so
+    X stays LIVE at replay). The delete-leg must NOT fire (X is not
+    terminal — its edge is legit).
+    """
+    _, events, sdk = sup
+    s = "https://parity.example/doc"
+    x = sdk.create_point("statement", "X", status="live",
+                         extractedFrom=s)["id"]
+    # Simplest id-reuse stand-in: X is LIVE at replay (no supersede fold ran).
+    # Emit a structural descriptor whose src is the LIVE X (stale descriptor
+    # from a dropped fold) + a fresh PointAdded snapshot so pass-2 rebuilds X.
+    # Fresh PointAdded for X (rebuild materializes X live from this snapshot).
+    with open(events / "events.jsonl", "a") as fh:
+        fh.write(json.dumps({
+            "event_id": sdk.ulid(), "ts": datetime.now(UTC).isoformat(),
+            "type": "PointAdded", "initiated_by": "raw-producer",
+            "projection_version": 2,
+            "point": {"id": x, "kind": "statement", "content": "X",
+                      "status": "live", "extractedFrom": s}})+"\n")
+        fh.write(json.dumps({
+            "event_id": sdk.ulid(), "ts": datetime.now(UTC).isoformat(),
+            "type": "DirectEdgeRepoint", "initiated_by": "raw-producer",
+            "projection_version": 2,
+            "src": x, "tgt": s, "target_label": "Source",
+            "edge_type": "extractedFrom"})+"\n")
+    # Live X has the edge pre-rebuild.
+    assert _struct_edges(sdk._get_proj(), x) == {("extractedFrom", s)}
+    _rebuild(sdk, events)
+    proj = sdk._get_proj()
+    post = proj.g.query(
+        "MATCH (n:Point {id:$id}) RETURN n.status, coalesce(n.outdated,false)",
+        params={"id": x}).result_set[0]
+    assert post[0] == "live", "X must be LIVE at replay (no fold ran)"
+    assert _struct_edges(proj, x) == {("extractedFrom", s)}, (
+        "delete-leg must NOT fire against a live src — the edge is legit"
+    )

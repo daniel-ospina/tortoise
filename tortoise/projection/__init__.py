@@ -1858,6 +1858,23 @@ class FalkorProjection(
                 # — must not collapse). Objects/Events/Documents are id-keyed
                 # entities: two distinct same-name targets must not collapse.
                 structural_seen: set[tuple] = set()
+
+                def _src_is_terminal(sid: str) -> bool:
+                    """#2489 (code-review P1): the delete-leg must ONLY clean
+                    the pass-2 resurrection at a DEAD (terminal) old point.
+                    Under id-reuse (#2488 survivor filter drops a pre-recreation
+                    supersede fold), src is a re-created LIVE incarnation whose
+                    edges are legitimately its own — deleting them clobbers a
+                    live point. Terminal src = the superseded/retracted/outdated
+                    incarnation whose transferred edges pass-2 resurrected."""
+                    rows = self.g.query(
+                        f"MATCH (x:Point {{id:$sid}}) "
+                        f"WHERE {_terminal_excluded('x.status')} RETURN 1 LIMIT 1",
+                        params={"sid": sid}).result_set
+                    # _terminal_excluded is the NOT-terminal predicate: empty
+                    # rows → the node is terminal (or absent). Absent src =
+                    # nothing to clean — treat as terminal (delete is a no-op).
+                    return not rows
                 for ev in direct_repoint_events:
                     etype = ev.get("edge_type")
                     src, tgt = ev.get("src"), ev.get("tgt")
@@ -1888,6 +1905,13 @@ class FalkorProjection(
                                 "rebuild: malformed delete_only "
                                 "DirectEdgeRepoint event skipped "
                                 "(event_id=%s)", ev.get("event_id"))
+                            continue
+                        if not _src_is_terminal(src):
+                            # code-review P1: src is a LIVE re-created
+                            # incarnation (id-reuse) — its edges are legit;
+                            # the delete-leg must not clobber. Skip the whole
+                            # descriptor (create-skip is implied: a live src
+                            # has no surviving supersede fold).
                             continue
                         for tgt_logical in {tgt, _final(tgt) if tgt in succ else None}:
                             if not tgt_logical:
@@ -1937,7 +1961,11 @@ class FalkorProjection(
                         # Delete-leg (old-side resurrection cleanup) runs BEFORE
                         # the dedupe skip — a dropped duplicate still cleans its
                         # old-side resurrection. Constrained re-query on the
-                        # resolved node identity; fresh internal ids only.
+                        # resolved node identity; fresh internal ids only. P1:
+                        # only when src is TERMINAL at replay — a live re-created
+                        # src (id-reuse) owns its edges legitimately.
+                        if not _src_is_terminal(src):
+                            continue
                         self.g.query(
                             f"MATCH (old:Point {{id:$old}})-[r:{etype}]->(t) "
                             f"WHERE ID(t) = $tid DELETE r",
