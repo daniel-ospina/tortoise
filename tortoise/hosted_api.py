@@ -1317,6 +1317,112 @@ def _clean_key_label(value: object) -> str | None:
     return s[:KEY_NAME_MAX] if s else None
 
 
+# #2426: configurable API-key expiration. Market-standard (GitHub/Azure/
+# Anthropic/Vercel/DigitalOcean/Cloudflare) mint-time expiry: the key's
+# lifetime is fixed AT CREATION and immutable afterwards (no PATCH-expiry —
+# Anthropic rule). Body may carry EITHER ``expires_in`` (integer days,
+# 1-366 — GitHub's ceiling; a 366-day span = the 1y preset) OR
+# ``expires_at`` (ISO-8601 date or datetime). Absent = Never (existing
+# behavior, now an explicit choice). Validation is 422 — never a silent
+# degradation (unlike a label, expiry is a security property).
+_KEY_MAX_EXPIRY_DAYS = 366
+
+
+def _validate_mint_expiry(body: dict) -> str | None:
+    """Resolve a mint body's optional expiry to a normalized ``expires_at``
+    ISO timestamp (None = Never). Raises HTTPException(422) on:
+    - both ``expires_in`` and ``expires_at`` present (mutually exclusive),
+    - ``expires_in`` not an int in 1..366 (bool/float/str/non-int reject),
+    - ``expires_at`` not ISO-8601 parseable, not a future date, or more than
+      ``_KEY_MAX_EXPIRY_DAYS`` out (Never is the escape hatch for longer).
+
+    ``expires_in`` is the dashboard path (presets + Custom date → days):
+    the timestamp is mint-time + N days, so a 1-day key lives ~24h and a
+    date-only ``expires_at`` is normalized to END of that UTC day (the key
+    stays valid through the chosen date — auth refuses at expires_at <= now).
+    Naive datetimes are interpreted as UTC (the auth layer compares against
+    aware ``datetime.now(UTC)``; every store timestamp is UTC).
+    """
+    has_in = body.get("expires_in") is not None
+    has_at = body.get("expires_at") is not None
+    if has_in and has_at:
+        raise HTTPException(
+            status_code=422,
+            detail="expires_in and expires_at are mutually exclusive — send one",
+        )
+    now = datetime.now(UTC)
+    if has_in:
+        raw = body.get("expires_in")
+        # bool is an int subclass — a JSON true would pass isinstance; reject.
+        if isinstance(raw, bool) or not isinstance(raw, int):
+            raise HTTPException(
+                status_code=422,
+                detail="expires_in must be an integer number of days (1-366)",
+            )
+        if not 1 <= raw <= _KEY_MAX_EXPIRY_DAYS:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "expires_in must be between 1 and 366 days"
+                    f" ({_KEY_MAX_EXPIRY_DAYS})"
+                ),
+            )
+        return (now + timedelta(days=raw)).isoformat()
+    if has_at:
+        raw = body.get("expires_at")
+        if not isinstance(raw, str):
+            raise HTTPException(
+                status_code=422,
+                detail="expires_at must be an ISO-8601 date or datetime",
+            )
+        text = raw.strip()
+        is_date_only = len(text) == 10 and text.count("-") == 2
+        try:
+            if is_date_only:
+                # Date-only → end of that UTC day (valid through the date).
+                parsed = datetime.fromisoformat(text + "T23:59:59+00:00")
+            else:
+                parsed = datetime.fromisoformat(
+                    text[:-1] + "+00:00" if text.endswith("Z") else text)
+                if parsed.tzinfo is None:
+                    parsed = parsed.replace(tzinfo=UTC)
+        except ValueError:
+            raise HTTPException(
+                status_code=422,
+                detail="expires_at must be an ISO-8601 date or datetime",
+            ) from None
+        if parsed <= now:
+            raise HTTPException(
+                status_code=422,
+                detail="expires_at must be in the future",
+            )
+        # #2426 code-review P2: an explicit non-UTC offset (e.g. +05:00) must
+        # not survive into the stored expires_at — every registry-lane expiry
+        # predicate compares LEXICOGRAPHIC ISO strings against a +00:00 now
+        # (auth, MCP apikey_verify, session-key caps, quota), so an offset
+        # expiry would authenticate ~offset-hours late/early and diverge from
+        # the supabase lane's instant compare. Normalize to UTC here.
+        parsed = parsed.astimezone(UTC)
+        # Ceiling: date-only inputs compare on the DATE — end-of-UTC-day can
+        # cross the 366-day instant for part of the day, and the date-only
+        # contract is "valid through the chosen date", so comparing the date
+        # keeps it symmetric with `expires_in: 366` always passing.
+        if is_date_only:
+            within = parsed.date() <= (now + timedelta(days=_KEY_MAX_EXPIRY_DAYS)).date()
+        else:
+            within = parsed <= now + timedelta(days=_KEY_MAX_EXPIRY_DAYS)
+        if not within:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "expires_at must be within 366 days"
+                    " — choose No expiration for longer-lived keys"
+                ),
+            )
+        return parsed.isoformat()
+    return None
+
+
 def _probe_db() -> dict:
     """Deep-check the graph DB through the shared/default connection (#1384).
 
@@ -1592,11 +1698,18 @@ async def get_current_team(request: Request) -> dict:
                 break
         # Fallback: legacy provision_tenant keys (key_prefix=team_id[:8])
         # won't match the token[:10] prefix. In that case scan all keys.
+        # #2426: the scan carries the SAME expires_at filter as the two
+        # lookups above — an expired key whose prefix scan came back empty
+        # must not be rescued here (an expired #2426 durable or bootstrap
+        # stops authenticating in BOTH lanes; #742 intent). Legacy nodes
+        # lack the prop → expires_at NULL → pass the filter unchanged.
         if team_id is None:
             key_result = sdk._get_registry().query(
                 "MATCH (k:APIKey) WHERE k.revoked_at IS NULL "
+                "AND (k.expires_at IS NULL OR k.expires_at > $now) "
                 "RETURN k.team_id, k.id, k.key_hash, k.created_by, "
-                "k.graph_id, k.scopes, k.delegation_depth, k.created_by_key_id"
+                "k.graph_id, k.scopes, k.delegation_depth, k.created_by_key_id",
+                params={"now": now_iso},
             ).result_set
             for k_team_id, k_id, stored_hash, k_created_by, k_gid, k_sc, k_dd, k_cbk in key_result:
                 if verify_api_key(token, stored_hash):
@@ -1811,6 +1924,10 @@ async def _get_current_team_supabase(request: Request, token: str) -> dict:
 #       POST   /v1/session/key          session_key (E1 mint) carries the
 #     team selector in the BODY (required when multi-membership) and
 #     membership-checks it inline; the client tripwire never pins it.
+#     #2380: the recovery purpose additionally carries an owner/admin ROLE
+#     gate (the #2297 POLICY A seam) on the RESOLVED tid — body team_id
+#     when multi-membership, else memberships[0]; bootstrap is member-open.
+#     Not a pin seam — a role gate layered on the body's resolved team.
 #   * internal cascades (team-delete revoke_team_api_keys, graph-delete key
 #     cascade) derive the team from the deleted entity — no caller pin.
 #   * token-driven agent routes (signup/recover/token-revoke) resolve the
@@ -2218,6 +2335,17 @@ async def get_current_team_gated(request: Request) -> dict:
     return await get_current_team(request)
 
 
+# #2297/#2380: the session_user_id dict key is the auth-lane discriminator
+# the role gates predicate on — attached ONLY on the JWT branch of
+# get_current_team_session (see below). Key-auth team dicts carry none;
+# dependency-override dicts are returned UNCHANGED (the test seam carries
+# session_user_id only when the override supplies it — ~8 files inject
+# dict(TEST_TEAM, session_user_id=...) to emulate a session face). Named
+# constant = single source of the literal (the
+# _require_owner_admin_if_session helper reads it once).
+_SESSION_USER_ID_KEY = "session_user_id"
+
+
 async def get_current_team_session(request: Request, gate_key_login: bool = True) -> dict:
     """Management-endpoint dependency: accept a session JWT (verified
     identity) OR an API key. Key-auth goes through get_current_team + the
@@ -2278,7 +2406,15 @@ async def get_current_team_session(request: Request, gate_key_login: bool = True
     # exchange); the key-auth/override branches return before this, so
     # their team dicts carry no session_user_id (create_api_key falls back
     # to "api").
-    team["session_user_id"] = user["user_id"]
+    team[_SESSION_USER_ID_KEY] = user["user_id"]
+    # #2380 (Task 4): explicit auth_lane marker — documentation-in-code for
+    # the session-vs-key distinction the #2297/#2380 role gates predicate
+    # on. THE GATE PREDICATE STAYS ON session_user_id PRESENCE, NOT this
+    # marker: the dependency-override seam returns override dicts unchanged
+    # (~15+ suites inject dict(TEST_TEAM, session_user_id=...)), so a
+    # marker-required predicate would silently stop gating the override
+    # seam. auth_lane absent = key-auth / override lane.
+    team["auth_lane"] = "session"
     return team
 
 
@@ -5038,6 +5174,7 @@ def _mint_key(team_id: str, *, graph_id: str | None = None,
               prefix: str | None = None,
               created_via: str = "provisioned",
               name: str | None = None,
+              expires_at: str | None = None,
               acl_strict: bool = False) -> dict:
     """C3 (#2112) — the ONE low-level key write (registry + Supabase).
     Generalized from C2's _mint_graph_key (D14 — never re-implemented):
@@ -5046,10 +5183,15 @@ def _mint_key(team_id: str, *, graph_id: str | None = None,
     carry escalation; key mint ∩ child policy), delegation_depth is 0 for
     key-minted children or None for owner-minted keys.
 
+    #2426: optional ``expires_at`` (normalized ISO timestamp or None = Never,
+    resolved by _validate_mint_expiry at the endpoint) rides BOTH lanes —
+    the supabase api_keys row and the registry APIKey node prop. The mint
+    caller echoes it in the response envelope.
+
     Returns {id, key_plaintext, key_prefix, scopes, delegation_depth,
-    graph_id, created_by_key_id, created_at}. key_plaintext appears ONLY
-    in this return (reveal-once: the caller puts it in the 201 envelope /
-    mint response and nowhere else; hash-only stored). Raises
+    graph_id, created_by_key_id, created_at, expires_at}. key_plaintext
+    appears ONLY in this return (reveal-once: the caller puts it in the 201
+    envelope / mint response and nowhere else; hash-only stored). Raises
     _KeyCapExceeded when the team is at max_api_keys (caller maps 409).
     C4 (#2113) ACL seam fires for graph-bound mints (fail-soft no-op).
     """
@@ -5110,7 +5252,7 @@ def _mint_key(team_id: str, *, graph_id: str | None = None,
             "created_by": created_by,
             "created_at": now,
             "revoked_at": None,
-            "expires_at": None,
+            "expires_at": expires_at,
             "name": name,
             # C1 columns: graph scope + allowlist + mint lineage
             "graph_id": graph_id,
@@ -5129,6 +5271,7 @@ def _mint_key(team_id: str, *, graph_id: str | None = None,
             graph_id=graph_id, scopes=final_scopes or None,
             created_by_key_id=caller_key_id, delegation_depth=delegation_depth,
             prefix=prefix, name=name, created_via=created_via,
+            expires_at=expires_at,
         )
         kid = created["id"]
         api_key = created["api_key"]
@@ -5143,6 +5286,7 @@ def _mint_key(team_id: str, *, graph_id: str | None = None,
         "graph_id": graph_id,
         "created_by_key_id": caller_key_id,
         "created_at": now,
+        "expires_at": expires_at,
     }
 
 
@@ -5260,6 +5404,12 @@ async def create_api_key(request: Request, response: Response, team: dict = Depe
     deleg=0 child ∩ child policy, escalation request 403; deleg=0 caller
     → 403). Bodies default to {} (legacy clients) → the byte-identical
     pre-C3 owner mint (tt_, deleg NULL, no scopes).
+    #2426: the body may additionally carry {expires_in? (days 1-366) XOR
+    expires_at? (ISO date/datetime)} on ANY mint class — the stored
+    expires_at is written in both auth lanes and echoed in the response
+    when set (absent = Never, response shape byte-identical). Expiry is
+    immutable after creation (no PATCH-expiry); enforcement already lives
+    in the auth layer (~1558-1570, both lanes).
 
     #765 (plan Task 8 writer inventory): Supabase mode inserts the api_keys
     row via the seam (lookup_hash + key_prefix + created_via='provisioned'),
@@ -5302,17 +5452,21 @@ async def create_api_key(request: Request, response: Response, team: dict = Depe
     # session_user_id (attached only on the JWT branch of
     # get_current_team_session). #2299 (landed): the sibling inline ?team_id=
     # pin checks consolidated into _session_pinned_team /
-    # _ensure_key_in_pinned_team; this #2297 owner/admin gate stays here (a
-    # role-gate helper would be a separate consolidation).
-    if team.get("session_user_id") is not None:
-        await _require_owner_admin(team["session_user_id"], team["team_id"])
-    # Key label + C3 (#2112) scoped-mint body: {name?, graph_id?, scopes?}.
+    # _ensure_key_in_pinned_team; this #2297 owner/admin gate stays here —
+    # #2380 (Task 4): consolidated into the shared
+    # _require_owner_admin_if_session helper (fires only when the team dict
+    # carries session_user_id).
+    await _require_owner_admin_if_session(team)
+    # Key label + C3 (#2112) scoped-mint body: {name?, graph_id?, scopes?}
+    # + #2426 expiry: {expires_in? (days 1-366) XOR expires_at? (ISO)}.
     # Read the body defensively — mint bodies are usually `{}` (dashboard/
     # CLI), so parse failures degrade to the legacy owner mint, never a
-    # failure mode.
+    # failure mode. Expiry validation is 422 (a security property, never a
+    # silent degradation); the HTTPException propagates via the except below.
     name = None
     graph_id = None
     requested_scopes = None
+    expires_at = None
     try:
         raw = await _read_capped_body(request, _BODY_MAX_BYTES, _BODY_413_DETAIL)
         payload = _json.loads(raw)
@@ -5320,9 +5474,26 @@ async def create_api_key(request: Request, response: Response, team: dict = Depe
             name = _clean_key_label(payload.get("name"))
             graph_id = payload.get("graph_id")
             requested_scopes = payload.get("scopes")
+            expires_at = _validate_mint_expiry(payload)
     except HTTPException:
         raise
     except Exception:
+        # Legacy-tolerant default: mint bodies are usually `{}` (dashboard/
+        # CLI), so a parse failure of the EMPTY path degrades to the legacy
+        # owner mint, never a failure mode. #2426 code-review P2: a body that
+        # REQUESTED expiry must never silently degrade to a Never key
+        # (fail-open on a security property) — if the raw body hints at the
+        # expiry keys and parsing/validation failed (e.g. a >4300-digit
+        # expires_in trips the json int guard, or malformed JSON), raise 422
+        # instead of minting unbounded.
+        if raw and (b"expires_in" in raw or b"expires_at" in raw):
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "expires_in/expires_at could not be read — send expires_in "
+                    "(1-366 days) or an ISO-8601 expires_at"
+                ),
+            ) from None
         name = None
 
     is_key_caller = team.get("key_id") is not None
@@ -5371,13 +5542,14 @@ async def create_api_key(request: Request, response: Response, team: dict = Depe
                     team["team_id"], scopes=["graphs:read"],
                     delegation_depth=0, caller_key_id=team["key_id"],
                     session_user_id=team.get("session_user_id"),
-                    prefix="tk_", name=name,
+                    prefix="tk_", name=name, expires_at=expires_at,
                 )
             else:
                 _check_team_limit(team, "api_keys")
                 minted = _mint_key(
                     team["team_id"], name=name,
                     session_user_id=team.get("session_user_id"),
+                    expires_at=expires_at,
                 )
         else:
             if not isinstance(requested_scopes, list):
@@ -5446,7 +5618,7 @@ async def create_api_key(request: Request, response: Response, team: dict = Depe
                 team["team_id"], graph_id=graph_id, scopes=final_scopes,
                 delegation_depth=delegation_depth, caller_key_id=caller_key_id,
                 session_user_id=team.get("session_user_id"),
-                prefix=prefix, name=name,
+                prefix=prefix, name=name, expires_at=expires_at,
             )
     except _KeyCapExceeded:
         # D3 asymmetry (pinned): the LEGACY owner mint keeps the historical
@@ -5525,6 +5697,14 @@ async def create_api_key(request: Request, response: Response, team: dict = Depe
         "created_at": now,
         "name": name,
     }
+    if expires_at is not None:
+        # #2426: expiry echo. Deliberately ABSENT on the Never (no expiry
+        # param) mint so the byte-identical legacy shape ({id,key,
+        # key_prefix,created_at,name} — exact-equality pin in
+        # test_writer_inventory) survives for pre-#2426 clients; a mint that
+        # requested expiry always echoes the authoritative stored timestamp
+        # (the dashboard's show-once card + table read it back).
+        resp["expires_at"] = expires_at
     if scoped_request or child_mint:
         # C3 (#2112) scoped/delegated-mint fields — ABSENT on the legacy {}
         # owner-class path so pre-C3 clients see the byte-identical shape
@@ -5561,7 +5741,10 @@ async def list_api_keys(graph_id: str | None = None,
     selfhost. #1708 D7: additive created_via/expires_at in BOTH lanes
     (agent_signup #1709, create_api_key #1753 and session_key mints all
     write them at mint time; the registry list stays None-tolerant for
-    LEGACY nodes minted before those fixes). C3 (#2112): optional
+    LEGACY nodes minted before those fixes). #2380 (P2): the minting USER
+    (created_by, additive) rides both lanes' rows so owners can identify +
+    revoke legacy member-minted owner-class keys — created_by_key_id
+    (delegation) is distinct; legacy NULL rows → None. C3 (#2112): optional
     ?graph_id= filter (per-graph key panel — surface 12) + the C1 tenancy
     columns ride the rows (scopes/delegation_depth/graph_id/created_by_key_id).
     """
@@ -5600,6 +5783,13 @@ async def list_api_keys(graph_id: str | None = None,
                     "scopes": row.get("scopes") or [],
                     "delegation_depth": row.get("delegation_depth"),
                     "created_by_key_id": row.get("created_by_key_id"),
+                    # #2380 (P2): the minting USER (created_by, additive)
+                    # rides the rows so owners can identify + revoke legacy
+                    # member-minted owner-class keys. created_by_key_id
+                    # (delegation attribution) is distinct — this is the
+                    # user_id that minted. Legacy rows (created_by NULL →
+                    # absent key on the row) degrade to None, no error.
+                    "created_by": row.get("created_by"),
                 }
                 for row in keys
             ]
@@ -5611,7 +5801,8 @@ async def list_api_keys(graph_id: str | None = None,
                 "MATCH (k:APIKey {team_id: $tid, graph_id: $gid}) "
                 "RETURN k.id, k.key_prefix, k.created_at, k.last_used_at, "
                 "k.revoked_at, k.name, k.created_via, k.expires_at, "
-                "k.graph_id, k.scopes, k.delegation_depth, k.created_by_key_id "
+                "k.graph_id, k.scopes, k.delegation_depth, k.created_by_key_id, "
+                "k.created_by "
                 "ORDER BY k.created_at DESC",
                 params={"tid": team["team_id"], "gid": graph_id},
             )
@@ -5620,7 +5811,8 @@ async def list_api_keys(graph_id: str | None = None,
                 "MATCH (k:APIKey {team_id: $tid}) "
                 "RETURN k.id, k.key_prefix, k.created_at, k.last_used_at, k.revoked_at, "
                 "k.name, k.created_via, k.expires_at, "
-                "k.graph_id, k.scopes, k.delegation_depth, k.created_by_key_id "
+                "k.graph_id, k.scopes, k.delegation_depth, k.created_by_key_id, "
+                "k.created_by "
                 "ORDER BY k.created_at DESC",
                 params={"tid": team["team_id"]},
             )
@@ -5650,6 +5842,12 @@ async def list_api_keys(graph_id: str | None = None,
                 "scopes": row[9] or [],
                 "delegation_depth": row[10],
                 "created_by_key_id": row[11],
+                # #2380 (P2): minting USER (additive; row[12] appended to
+                # BOTH SELECT variants — graph-filtered AND unfiltered — so
+                # a parity test pins both). None-tolerant: LEGACY nodes
+                # minted before created_by existed lack the prop → JSON
+                # null, no error.
+                "created_by": row[12],
             }
             for row in keys.result_set
         ]
@@ -5703,11 +5901,12 @@ async def revoke_api_key(key_id: str, request: Request, team: dict = Depends(get
     # never carries session_user_id (attached only on the JWT branch of
     # get_current_team_session) — the dependency-override lane (test seam)
     # DOES when a test supplies it (emulated session faces there are
-    # role-gated too). #2299 (landed): the sibling inline pin checks
-    # consolidated into the shared helpers; this #2297 owner/admin gate stays
-    # here (role-gate helper = separate consolidation).
-    if team.get("session_user_id") is not None:
-        await _require_owner_admin(team["session_user_id"], team["team_id"])
+    # role-gated too). #2380 (Task 4): consolidated into the shared
+    # _require_owner_admin_if_session helper (fires only when the team dict
+    # carries session_user_id; predicate unchanged — override seam keeps
+    # gating). #2299 (landed): the sibling inline pin checks consolidated
+    # into the shared helpers; this #2297 owner/admin gate stays here.
+    await _require_owner_admin_if_session(team)
     if is_supabase_enabled():
         try:
             row = api_key_by_id(get_control_plane(), key_id)
@@ -9261,25 +9460,111 @@ async def _require_owner_admin(user_id: str, team_id: str) -> dict:
         membership_for_user_team as _sb_membership,
     )
     if is_supabase_enabled():
-        membership = _sb_membership(get_control_plane(), user_id, team_id)
+        try:
+            # #2380 (P2, #1719 class): this seam's OWN membership read is a
+            # control-plane call — an outage/schema-cache failure degrades to
+            # the repo-standard 503 control_plane_unavailable (mirrors the
+            # lazy _session_pinned_team read wrapped by #2401 and the
+            # mint-path map), never a raw 500 from the global handler. The
+            # seam is shared by invites / members / key-toggle /
+            # dashboard-login / create / revoke — all inherit 503 parity.
+            # Non-outage exceptions propagate untouched (a schema/dialect
+            # bug must stay loud, not masquerade as an outage).
+            membership = _sb_membership(get_control_plane(), user_id, team_id)
+        except Exception as _exc:
+            _raise_503_if_cp_outage(_exc)
+            raise
         if not membership or membership["role"] not in ("owner", "admin"):
             raise HTTPException(status_code=403, detail="Requires owner or admin role in team")
-        _ensure_not_suspended(await _team_node(team_id))
+        try:
+            # The suspension-stamp read (teams row, _team_node) is a SECOND
+            # control-plane call AFTER the role check (#1853 ordering — role
+            # 403 precedes SUSPENDED) — same outage class, same 503.
+            _ensure_not_suspended(await _team_node(team_id))
+        except Exception as _exc:
+            _raise_503_if_cp_outage(_exc)
+            raise
         return {"team_id": team_id, "role": membership["role"]}
     # #1853: registry reads use the KEEPALIVE anchor (#1607 pattern — a
     # fresh _make_sdk is GC'd with close-on-GC + SHUTDOWN NOSAVE, killing
     # the shared embedded server and losing un-saved cascade writes; the
     # anchor is process-lifetime and sees them).
     sdk = _registry_anchor()
-    rows = sdk._get_registry().query(
-        "MATCH (m:Membership {user_id:$uid, team_id:$tid, status:'active'}) "
-        "RETURN m.role",
-        params={"uid": user_id, "tid": team_id},
-    ).result_set
+    try:
+        rows = sdk._get_registry().query(
+            "MATCH (m:Membership {user_id:$uid, team_id:$tid, status:'active'}) "
+            "RETURN m.role",
+            params={"uid": user_id, "tid": team_id},
+        ).result_set
+    except Exception as _exc:
+        _raise_503_if_cp_outage(_exc)
+        raise
     if not rows or rows[0][0] not in ("owner", "admin"):
         raise HTTPException(status_code=403, detail="Requires owner or admin role in team")
-    _ensure_not_suspended(await _team_node(team_id))
+    try:
+        # #1853 ordering preserved: role 403 precedes the SUSPENDED check;
+        # the teams-node read is a second store call — same outage class.
+        _ensure_not_suspended(await _team_node(team_id))
+    except Exception as _exc:
+        _raise_503_if_cp_outage(_exc)
+        raise
     return {"team_id": team_id, "role": rows[0][0]}
+
+
+def _raise_503_if_cp_outage(exc: BaseException) -> None:
+    """#2380 (#1719 class): raise 503 control_plane_unavailable when exc is a
+    control-plane transport outage; otherwise return and let the caller
+    re-raise untouched.
+
+    Supabase mode raises RuntimeError on transport (the supabase_control
+    contract). Registry mode raises the redis exception family the falkordb
+    client surfaces (ConnectionError / TimeoutError / BusyLoadingError /
+    ResponseError / InvalidResponse — the classes sdk._classify_db_failure
+    buckets, sdk.py ~1368); RuntimeError is kept for the outage-simulating
+    test seams. A non-outage exception (schema/dialect bug, authz 403 from a
+    caller's own read) stays loud — it must never masquerade as an outage.
+    """
+    if isinstance(exc, RuntimeError):
+        raise _control_plane_unavailable() from None
+    try:
+        from redis.exceptions import (  # lazy — redis is not an import-time dep
+            BusyLoadingError,
+            ConnectionError,
+            InvalidResponse,
+            ResponseError,
+            TimeoutError,
+        )
+    except ImportError:  # redis absent (hosted-only install) — no registry
+        return
+    if isinstance(exc, (BusyLoadingError, ConnectionError, InvalidResponse,
+                        ResponseError, TimeoutError)):
+        raise _control_plane_unavailable() from None
+
+
+async def _require_owner_admin_if_session(team: dict) -> None:
+    """#2297/#2380 POLICY A gate helper: owner/admin role gate that fires
+    ONLY when the team dict was resolved from a SESSION JWT (it carries
+    session_user_id — attached solely on the JWT branch of
+    get_current_team_session). Key-auth team dicts (and dependency-override
+    dicts that emulate key-auth) carry no session_user_id → pass-through
+    UNCHANGED (their class gates govern: C2 deleg + D13 caller-class for
+    mint, keys:manage for revoke). An override dict that DOES carry
+    session_user_id (the test seam's emulated session — ~15+ suites inject
+    dict(TEST_TEAM, session_user_id=...)) is role-gated exactly like a real
+    session face.
+
+    Predicate is the EXISTING invariant (session_user_id presence — read
+    through the named _SESSION_USER_ID_KEY constant), deliberately NOT a new
+    marker: the override seam returns override dicts unchanged, so a marker-
+    required predicate would silently stop gating the seam and the whole
+    member matrix would go ungated while tests stayed green.
+
+    Role checked on the RESOLVED team (team["team_id"] — the ?team_id= pin's
+    membership-checked team for multi-membership callers, #2230/#2248).
+    """
+    session_user_id = team.get(_SESSION_USER_ID_KEY)
+    if session_user_id is not None:
+        await _require_owner_admin(session_user_id, team["team_id"])
 
 
 async def _require_owner(user_id: str, team_id: str, *,
@@ -14028,6 +14313,13 @@ async def session_key(body: dict, request: Request, user: dict = Depends(get_cur
       included) — with a RE-CHECK so a rotation that doesn't free a
       persistent slot fails CLOSED (402, never cap+1); 402 when nothing at
       all is rotatable.
+
+    #2380 (P1, Option A): purpose semantics are role-gated — RECOVERY is
+    owner/admin-only (the #2297 POLICY A seam: a member session must not
+    mint a persistent deleg-NULL owner-class key; role checked on the
+    RESOLVED team — body team_id when multi-membership, else
+    memberships[0] — in BOTH auth lanes, see the gates below); BOOTSTRAP
+    (24h ephemeral) stays member-open per product posture.
     """
     import uuid as _uuid
     from datetime import datetime, timedelta
@@ -14079,6 +14371,19 @@ async def session_key(body: dict, request: Request, user: dict = Depends(get_cur
     # #308 (R5): a suspended team cannot re-mint keys (scoping delta 12).
     if team_row and team_row[0][1] is not None:
         raise HTTPException(status_code=403, detail=_suspended_detail())
+    # #2380 (P1, Option A): owner/admin-gate the RECOVERY purpose — a
+    # member-role session must not mint a persistent deleg-NULL owner-class
+    # key here (the #2297 POLICY A escalation root, recovery flavor — the
+    # member-at-cap auto-revoke side-effect is killed with it). bootstrap
+    # (24h ephemeral, cap-exempt) stays member-open per product posture.
+    # Ordering pinned by design review: AFTER this lane's OWN suspension
+    # check (a member on a SUSPENDED team gets this lane's existing
+    # SUSPENDED detail first — cross-lane byte parity) and BEFORE the mint
+    # lock below (the gate awaits _team_node; the lock section forbids
+    # awaits). Role is checked on the RESOLVED tid (body team_id when
+    # multi-membership, else memberships[0]) — never memberships[0] blindly.
+    if purpose == "recovery":
+        await _require_owner_admin(user_id, tid)
 
     api_key = f"tt_{_uuid.uuid4().hex}"
     key_hash = _hash(api_key)
@@ -14109,21 +14414,35 @@ async def session_key(body: dict, request: Request, user: dict = Depends(get_cur
             # #750.8: .get() so a pricing.json key drift never 500s the mint
             # (pricing.py validates required keys at load; belt-and-braces).
             max_keys = lim.get("max_api_keys")
+            # #2426: the durable-count predicate excludes EXPIRED keys
+            # (expires_at past) as well as bootstrap rows — an expired key
+            # never authenticates (#742), so counting it against
+            # max_api_keys would wedge the team at its cap with no recourse.
+            # Mirrors the bootstrap cap query's expiry filter (bootstrap
+            # precedent) and the supabase lane's active_api_keys helper
+            # (which has always excluded expired rows).
             active_keys = reg.query(
                 "MATCH (k:APIKey {team_id:$tid}) WHERE k.revoked_at IS NULL "
-                "AND (k.created_via IS NULL OR k.created_via <> 'bootstrap') RETURN count(k)",
-                params={"tid": tid},
+                "AND (k.created_via IS NULL OR k.created_via <> 'bootstrap') "
+                "AND (k.expires_at IS NULL OR k.expires_at > $now) RETURN count(k)",
+                params={"tid": tid, "now": now},
             ).result_set[0][0]
             if max_keys is not None and active_keys >= max_keys:
                 # #750.10: never auto-revoke a key the current user created
                 # (created_by = their user_id) — recovery must not dead-end by
                 # killing the user's own session key. Oldest OTHER key wins.
+                # #2426: the candidate scan carries the same expiry filter as
+                # the count — only LIVE (non-expired) others are revocable
+                # rotation targets, because revoking an expired key (which no
+                # longer counts) would free no slot and the others branch does
+                # not re-check (cap+1 hazard).
                 oldest = reg.query(
                     "MATCH (k:APIKey {team_id:$tid}) WHERE k.revoked_at IS NULL "
                     "AND (k.created_via IS NULL OR k.created_via <> 'bootstrap') "
                     "AND k.created_by <> $uid "
+                    "AND (k.expires_at IS NULL OR k.expires_at > $now) "
                     "RETURN k.id ORDER BY k.created_at ASC LIMIT 1",
-                    params={"tid": tid, "uid": user_id},
+                    params={"tid": tid, "uid": user_id, "now": now},
                 ).result_set
                 if oldest:
                     reg.query(
@@ -14205,11 +14524,14 @@ async def session_key(body: dict, request: Request, user: dict = Depends(get_cur
                         )
                         # P2-1: only mint when a persistent slot actually opened
                         # (legacy rotation frees one; a modern bootstrap never
-                        # counted against max_api_keys).
+                        # counted against max_api_keys). #2426: the recheck
+                        # mirrors the cap count exactly (expiry filter included)
+                        # so an expired-key rotation cannot 402 or overshoot.
                         recheck = reg.query(
                             "MATCH (k:APIKey {team_id:$tid}) WHERE k.revoked_at IS NULL "
-                            "AND (k.created_via IS NULL OR k.created_via <> 'bootstrap') RETURN count(k)",
-                            params={"tid": tid},
+                            "AND (k.created_via IS NULL OR k.created_via <> 'bootstrap') "
+                            "AND (k.expires_at IS NULL OR k.expires_at > $now) RETURN count(k)",
+                            params={"tid": tid, "now": now},
                         ).result_set[0][0]
                         if max_keys is not None and recheck >= max_keys:
                             raise HTTPException(status_code=402, detail="Key limit reached — revoke an existing key")
@@ -14248,7 +14570,10 @@ async def _session_key_supabase(body: dict, request: Request, user: dict) -> dic
     get_current_team / MCP resolve it via the unique lookup_hash index, and
     api_keys.revoked_at is the authoritative revoke. #1855: the whole
     cap/revoke/recheck/insert section runs under the per-team in-process lock
-    (see _team_mint_lock above — same lock as the registry lane).
+    (see _team_mint_lock above — same lock as the registry lane). #2380 (P1):
+    the registry-lane recovery role gate has its byte-parity twin here
+    (owner/admin on the RESOLVED tid, after THIS lane's own suspension check
+    — see the gate below); bootstrap stays member-open.
     """
     import uuid as _uuid
     from datetime import datetime, timedelta
@@ -14287,6 +14612,16 @@ async def _session_key_supabase(body: dict, request: Request, user: dict) -> dic
     # #308 (R5): a suspended team cannot re-mint keys (scoping delta 12).
     if (team_row or {}).get("suspended_at") is not None:
         raise HTTPException(status_code=403, detail=_suspended_detail())
+    # #2380 (P1, Option A): owner/admin-gate the RECOVERY purpose — the
+    # registry-lane gate's byte-parity twin (same ordering: AFTER this
+    # lane's OWN suspension check above, so a member on a SUSPENDED team
+    # gets THIS lane's existing SUSPENDED detail — never the role detail —
+    # identical to the registry lane; BEFORE the mint lock below — the gate
+    # awaits _team_node and the lock section forbids awaits). bootstrap stays
+    # member-open. Role checked on the RESOLVED tid (body team_id when
+    # multi-membership, else memberships[0]).
+    if purpose == "recovery":
+        await _require_owner_admin(user_id, tid)
 
     api_key = f"tt_{_uuid.uuid4().hex}"
     kid = _short_id()
