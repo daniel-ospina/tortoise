@@ -1879,3 +1879,78 @@ def test_purge_race_restore_mid_drop_never_stamps(shared_proj, monkeypatch):
     props = _tombstone_props(proj, gid)
     assert props.get("status") == "active"  # row stayed live
     assert not props.get("purged_at")  # never stamped onto a live row
+
+@pytest.mark.skipif(_DOCKER_LANE, reason="purge erasure unit tests run embedded; docker lane covered by the hosted trash E2E (#2304)")
+def test_purge_erases_reclassified_legacy_flats_by_namespace(shared_proj):
+    """#2462 P1 regression: the hourly sweep re-attributes a DELETED graph's
+    flat index entries to graph_id '' (the classify step maps ACTIVE rows
+    only). The purge must still find them — the entries keep the manifest's
+    graph_name (the tombstone's gid-keyed namespace) — and erase the dumps.
+    """
+    if shared_proj is None:
+        return
+    proj = _make_env(None, shared_proj)
+    store = MemoryStorage()
+    gid = f"g_recls_{os.urandom(2).hex()}"
+    ns = _seed_custom_tombstone(
+        proj, "team_x", gid, "reclassified",
+        deleted_at=(datetime.now(UTC) - timedelta(days=30)).isoformat())
+    # Post-sweep index state: graph_id re-attributed to "" (no ACTIVE row
+    # carries the namespace anymore), graph_name kept from the manifest.
+    bid = f"team_x/flat_{os.urandom(2).hex()}"
+    store.upload(f"backups/{bid}/dump.enc", b"flat")
+    store.upload(f"backups/{bid}/manifest.json", b"{}")
+    store.upload(
+        "ops/legacy-flat-index/team_x.json",
+        json.dumps({bid: {"graph_name": ns, "graph_id": ""}}).encode())
+    res = run_graph_purge(db=proj.db, registry=proj.db.select_graph(
+        _REGISTRY_GRAPH), storage=store, team_ids=["team_x"])
+    purged = [p for p in res["purged"] if p["graph_id"] == gid]
+    assert len(purged) == 1
+    assert purged[0]["artifacts"]["flat_keys"] == 2
+    assert purged[0]["artifacts"]["errors"] == []
+    assert store.list(f"backups/{bid}/") == []
+    idx = json.loads(store.download("ops/legacy-flat-index/team_x.json"))
+    assert bid not in idx
+    # A live graph's flats (different namespace) are never touched.
+    live_ns = _team_graph("team_x")
+    live_bid = f"team_x/flat_{os.urandom(2).hex()}"
+    store.upload(f"backups/{live_bid}/dump.enc", b"keep")
+    store.upload(
+        "ops/legacy-flat-index/team_x.json",
+        json.dumps({live_bid: {"graph_name": live_ns, "graph_id": "default"}})
+        .encode())
+    run_graph_purge(db=proj.db, registry=proj.db.select_graph(
+        _REGISTRY_GRAPH), storage=store, team_ids=["team_x"])
+    assert store.list(f"backups/{live_bid}/") != []  # untouched
+
+
+@pytest.mark.skipif(_DOCKER_LANE, reason="purge erasure unit tests run embedded; docker lane covered by the hosted trash E2E (#2304)")
+def test_purge_residual_still_erases_artifacts(shared_proj):
+    """#2462: when the ownership guard trips (namespace retained), the
+    tombstone's OWN artifacts (nested pool + its flats) are still erased —
+    only the namespace drop is skipped."""
+    if shared_proj is None:
+        return
+    proj = _make_env(None, shared_proj)
+    store = MemoryStorage()
+    gid = f"g_resart_{os.urandom(2).hex()}"
+    other_ns = f"team_team_x_g_live_{os.urandom(2).hex()}"
+    _seed_custom_tombstone(proj, "team_x", gid, "stale", ns=other_ns,
+                           deleted_at=(datetime.now(UTC)
+                                       - timedelta(days=30)).isoformat())
+    store.upload(f"backups/team_x/{gid}/runA/dump.enc", b"blob")
+    bid = f"team_x/flat_{os.urandom(2).hex()}"
+    store.upload(f"backups/{bid}/dump.enc", b"flat")
+    store.upload(
+        "ops/legacy-flat-index/team_x.json",
+        json.dumps({bid: {"graph_name": other_ns, "graph_id": ""}}).encode())
+    res = run_graph_purge(db=proj.db, registry=proj.db.select_graph(
+        _REGISTRY_GRAPH), storage=store, team_ids=["team_x"])
+    residual = [p for p in res["residuals"] if p["graph_id"] == gid]
+    assert len(residual) == 1
+    # Namespace retained but the tombstone's artifacts are gone.
+    assert other_ns in proj.db.list_graphs()
+    assert store.list(f"backups/team_x/{gid}/") == []
+    assert store.list(f"backups/{bid}/") == []
+    assert _tombstone_props(proj, gid).get("purged_residual") is True
