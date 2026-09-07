@@ -92,6 +92,9 @@ const KEY_EXPIRY_PRESETS = [
 const KEY_MAX_EXPIRY_DAYS = 366
 const KEY_SOON_DAYS = 14
 const _MS_PER_DAY = 86400000
+// #2479 code-review fix P2: named constant for max re-auth attempts (spec: 1)
+const MAX_REAUTH_ATTEMPTS = 1
+const REAUTH_EXCEEDED_MESSAGE = 'Re-authentication failed — try again later or contact support.'
 
 // #2426: Custom date (YYYY-MM-DD) → whole days until that date, clamped to
 // 1..366. Null when missing/invalid/out-of-range — the + New key button stays
@@ -775,6 +778,9 @@ function App() {
   // #2479: re-auth attempt counter (max 3 per session for password re-auth;
   // OAuth round-trips naturally reset via full page navigation)
   const reauthAttemptRef = React.useRef(0)
+  // #2479 code-review fix P1: tracks that we're re-executing a pending action
+  // after successful re-auth (prevents infinite loop if the API returns 403 again)
+  const reauthRetriedRef = React.useRef(false)
   // #1765 review P1: the pre-reauth session user id (verify the provider
   // round-trip didn't switch accounts before resuming the pending action)
   const beforeUidRef = React.useRef(null)
@@ -1506,8 +1512,8 @@ function claimIntentInFlight() {
       // P1-1 — never bypass double_confirm_changes). The pending action is
       // DATA (not a closure) so it survives the provider OAuth round-trip.
       // #2479: check retry limit before opening re-auth dialog
-      if (reauthAttemptRef.current >= 3) {
-        setProfileError('Re-authentication unavailable — try again later or contact support.')
+      if (reauthAttemptRef.current >= MAX_REAUTH_ATTEMPTS) {
+        setProfileError(REAUTH_EXCEEDED_MESSAGE)
         return
       }
       pendingReauthRef.current = { email, password }
@@ -1534,8 +1540,14 @@ function claimIntentInFlight() {
     } catch (e) {
       // #2479: server returns 403 REAUTH_REQUIRED when session is stale
       if (e.status === 403 && /REAUTH_REQUIRED/i.test(e.message)) {
-        if (reauthAttemptRef.current >= 3) {
-          setProfileError('Re-authentication unavailable — try again later or contact support.')
+        if (reauthAttemptRef.current >= MAX_REAUTH_ATTEMPTS) {
+          setProfileError(REAUTH_EXCEEDED_MESSAGE)
+          return
+        }
+        // #2479 code-review fix P1: if we already re-executed this pending action
+        // after successful re-auth and it failed again, bail without re-opening dialog
+        if (reauthRetriedRef.current) {
+          setProfileError(REAUTH_EXCEEDED_MESSAGE)
           return
         }
         pendingReauthRef.current = { unlinkIdentityId: identityId }
@@ -1577,6 +1589,7 @@ function claimIntentInFlight() {
       if (pending) {
         if (pending.unlinkIdentityId) {
           // #2479: re-auth was for unlink — re-execute with fresh session
+          reauthRetriedRef.current = true
           handleUnlink(pending.unlinkIdentityId)
           return
         }
@@ -1592,10 +1605,10 @@ function claimIntentInFlight() {
       }
     } catch (e) {
       reauthAttemptRef.current += 1
-      if (reauthAttemptRef.current >= 3) {
+      if (reauthAttemptRef.current >= MAX_REAUTH_ATTEMPTS) {
         setReauthOpen(false)
         pendingReauthRef.current = null
-        setProfileError('Re-authentication failed — try again later or contact support.')
+        setProfileError(REAUTH_EXCEEDED_MESSAGE)
         return
       }
       setReauthError(e.message || 'Sign-in failed')
@@ -1624,7 +1637,8 @@ function claimIntentInFlight() {
         // return effect compares against it to detect an account switch).
         try {
           sessionStorage.setItem('tt_reauth_pending', JSON.stringify({
-            email: pending.email, uid: beforeUidRef.current }))
+            email: pending.email, uid: beforeUidRef.current,
+            unlinkIdentityId: pending.unlinkIdentityId }))
         } catch { /* best-effort */ }
       }
       const { error } = await supabaseClient.auth.signInWithOAuth({
@@ -1719,6 +1733,7 @@ function claimIntentInFlight() {
             // #2479: check if re-auth was for unlink
             if (pending.unlinkIdentityId) {
               setReauthPasswordMode(false)
+              reauthRetriedRef.current = true
               handleUnlink(pending.unlinkIdentityId)
               return
             }
