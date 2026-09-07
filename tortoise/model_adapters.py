@@ -671,11 +671,17 @@ class RoutingModel:
     ``complete()`` tries the primary; the exception class decides (D4):
     FATAL (401/402/403) and FATAL_CONFIG (400/404/unknown 4xx) re-raise
     immediately — no retry, NO failover; TRANSIENT/UNKNOWN fails over to the
-    fallback when configured. Stickiness (D5): once a call fails over,
-    ``last_route``/``route`` flip to the fallback and STAY there for the rest
-    of this extraction (forward-only, never back mid-extraction). A primary
-    in the process-local cooldown window is skipped outright (fallback used
-    directly) — the #1350 flap protection.
+    fallback when configured. Stickiness (D5): once an in-complete call
+    fails over, ``last_route``/``route`` flip to the fallback and STAY there
+    for the rest of this extraction (forward-only, never back
+    mid-extraction). The DEADLINE-abort path (``note_stall``) is separate:
+    circuit-breaker semantics (#2384 option A) — a first deadline abort only
+    cools the provider, a SECOND consecutive stall trips the sticky
+    ``_failed_over``, and a half-open probe (fallback itself cooled + the
+    primary's cooldown lapsed) may return the session to the primary
+    (clearing the sticky on success). A primary in the process-local
+    cooldown window is skipped outright (fallback used directly) — the
+    #1350 flap protection.
 
     Exposes the capture meta contract (D8): ``provider`` (the configured
     primary), ``route``/``last_route`` (the active / most-recent route),
@@ -690,6 +696,13 @@ class RoutingModel:
         self.failover_used = False
         self.errors: list[str] = []
         self._failed_over = False
+        # #2384 option A: per-provider CONSECUTIVE deadline-abort strikes.
+        # Only the PRIMARY's count is consumed (the trip below) — a
+        # fallback-served stall must never flip (that would lock the session
+        # onto the wedged fallback forward-only). A primary success between
+        # stalls resets its count in ``_call``, so two stalls only trip when
+        # no primary success intervened (circuit breaker: never trip on one).
+        self._stall_strikes: dict[str, int] = {}
         # M3 (#1524, GATE-2): surfaced from the inner adapter after each call.
         self.last_finish_reason: str | None = None
         # #1987 Task 3: the RESOLVED SPEC (the wire id the serving adapter
@@ -713,10 +726,12 @@ class RoutingModel:
         if self.fallback is not None and (
                 self._failed_over
                 or _primary_in_cooldown(self.primary.provider, self.cooldown_s)):
-            # R2 (#2384): a sticky _failed_over must not strand the session
-            # on a FALLBACK that note_stall itself cooled (its own deadline
-            # abort) — with the primary healthy again, unstick back to it.
-            # Both-cooled stays on the fallback (no healthy option exists).
+            # R2 + half-open (#2384): a sticky _failed_over must not strand
+            # the session on a FALLBACK that note_stall itself cooled (its
+            # own deadline abort) — with the primary healthy again, a single
+            # probe may return the session to it (option A: ``_call`` clears
+            # the sticky on a probe success). Both-cooled stays on the
+            # fallback (no healthy option exists).
             if (self._failed_over
                     and not _primary_in_cooldown(self.primary.provider,
                                                  self.cooldown_s)
@@ -746,6 +761,14 @@ class RoutingModel:
                                    max_tokens=max_tokens)
         finally:
             self._in_flight = None
+        if adapter is self.primary:
+            # #2384 option A: a successful primary call proves the lane
+            # healthy — reset its consecutive-stall count (a success between
+            # stalls is never a trip) and, on a half-open probe success,
+            # clear the sticky _failed_over so the session returns to the
+            # primary.
+            self._stall_strikes[self.primary.provider] = 0
+            self._failed_over = False
         self.last_route = adapter.provider
         self.last_finish_reason = getattr(adapter, "last_finish_reason", None)
         # #1987 Task 3: per-call usage + resolved-spec forwards.
@@ -778,8 +801,13 @@ class RoutingModel:
         records the failure for the WEDGED adapter (the one ``_in_flight``
         when the worker was killed — never the stale ``route`` from the
         last success) and interrupts only that adapter's session. The next
-        ``complete()`` then routes to the healthy alternative. Best-effort:
-        never raises (the deadline path calls it fire-and-forget).
+        ``complete()`` then routes to the healthy alternative. Two-strike
+        trip (#2384 option A): the FIRST stall only cools the provider (a
+        scaled-deadline straggler is NOT evidence of provider distress) —
+        only a SECOND consecutive stall of the primary flips the sticky
+        ``_failed_over``; a primary success in between resets the count.
+        Best-effort: never raises (the deadline path calls it
+        fire-and-forget).
         """
         target = None
         if provider is not None:
@@ -793,11 +821,14 @@ class RoutingModel:
             return
         _note_failure(target.provider, self.cooldown_s)
         self.errors.append(f"{target.provider}: stalled (deadline abort)")
-        # Sticky failover only when the PRIMARY wedged — a fallback-served
-        # stall must NOT lock the session onto the wedged fallback
-        # forward-only (that would strand it for the whole extraction).
-        if (self.fallback is not None
-                and target is not None and target is self.primary):
+        # Two-strike trip (#2384 option A): count the stall per provider; the
+        # SECOND consecutive stall of the PRIMARY trips the sticky
+        # _failed_over. A fallback-served stall still must NOT flip (that
+        # would lock the session onto the wedged fallback forward-only).
+        self._stall_strikes[target.provider] = (
+            self._stall_strikes.get(target.provider, 0) + 1)
+        if (self.fallback is not None and target is self.primary
+                and self._stall_strikes[target.provider] >= 2):
             self._failed_over = True
         close = getattr(target, "close", None)
         if close is not None:
@@ -892,7 +923,17 @@ class RotatingModel:
     the capture-meta contract:
     ``provider``/``route`` (active provider), ``errors``, ``last_finish_reason``
     (the truncation signal — read from the serving adapter), ``close()``
-    (interrupt a hung read — the #1655 fix, applied to the active adapter)."""
+    (interrupt a hung read — the #1655 fix, applied to the active adapter).
+
+    Deadline-abort stalls (#2384 option A): ``note_stall`` cools the wedged
+    lane on the FIRST abort (a straggler is not distress evidence); a SECOND
+    CONSECUTIVE stall of the SAME lane (per-provider count, reset by a
+    success on that lane) takes the lane out of rotation for the session
+    (``_downed``) — the pool stops burning deadline probes against a
+    twice-stalled lane. A downed lane returns only via the half-open probe
+    in ``complete`` (when no healthy lane remains and its cooldown lapsed)
+    — a probe success restores it. Different lanes never compound: each
+    lane's count is its own."""
     def __init__(self, providers: list, *, cooldown_s: float = 300.0,
                  weights: list[float] | None = None, model: str | None = None):
         self.providers = providers
@@ -921,6 +962,15 @@ class RotatingModel:
         # worker mid-call with this set — note_stall() cools THIS adapter,
         # never the stale ``route`` (last success).
         self._in_flight = None
+        # #2384 option A: per-provider CONSECUTIVE deadline-abort strikes +
+        # the session-downed set they trip (the rotation analog of
+        # RoutingModel's two-strike _failed_over). One stall only cools;
+        # strikes[provider] >= 2 downs the lane for the session; a success on
+        # the lane (in complete) resets its count and restores it. _cooldowns
+        # stays per-wrapper (pre-existing); _downed lanes are excluded even
+        # after their cooldown lapses unless the half-open probe fires.
+        self._stall_strikes: dict[str, int] = {}
+        self._downed: set[str] = set()
 
     @property
     def provider(self) -> str:
@@ -939,11 +989,27 @@ class RotatingModel:
             p = self.providers[idx]
             if self._cooldowns.get(p.provider, 0.0) > now:
                 continue
+            if p.provider in self._downed:
+                # #2384 option A half-open probe: a twice-stalled lane is out
+                # of rotation for the session UNLESS no healthy lane remains
+                # (its own cooldown lapsed) — then a single probe re-admits it
+                # and a probe success (below) restores it. Never burn probes
+                # against a downed lane while a healthy one is usable.
+                if any(q.provider not in self._downed
+                       and self._cooldowns.get(q.provider, 0.0) <= now
+                       for q in self.providers):
+                    continue
+                self._downed.discard(p.provider)
             try:
                 self._in_flight = p
                 out = p.complete(system=system, user=user, max_tokens=max_tokens)
                 self._in_flight = None
                 self.route = p.provider
+                # #2384 option A: a success on the lane resets its
+                # consecutive-stall count and (if it was a half-open probe)
+                # restores it to the pool.
+                self._stall_strikes[p.provider] = 0
+                self._downed.discard(p.provider)
                 self.last_finish_reason = getattr(p, "last_finish_reason", None)
                 # #1987 Task 3: per-call usage + resolved-spec forwards.
                 self.last_prompt_tokens = getattr(p, "last_prompt_tokens", 0)
@@ -994,7 +1060,12 @@ class RotatingModel:
         #2384), else the in-flight adapter, else the stale ``route`` — so a
         persistent wedge cools the right farm and the next ``complete()``
         rotates onto the healthy ones. A single stalled GPU farm no longer
-        sinks a whole session."""
+        sinks a whole session. Two-strike trip (#2384 option A): a SECOND
+        CONSECUTIVE stall of the SAME lane (counted per provider; a success
+        on that lane in between resets its count in ``complete``) takes the
+        lane out of rotation for the session (``_downed``) — one stall only
+        cools. A downed lane is re-admitted only by the half-open probe
+        (``complete`` when no healthy lane remains)."""
         target = None
         if provider is not None:
             for p in self.providers:
@@ -1011,6 +1082,17 @@ class RotatingModel:
         if target is None:
             return
         self._cooldowns[target.provider] = time.time() + self.cooldown_s
+        # #2384 option A: count the stall per provider; the SECOND consecutive
+        # stall of the SAME lane downs it for the session (excluded from
+        # rotation until the half-open probe re-admits it). One stall only
+        # cools — a scaled-deadline straggler is not distress evidence. A
+        # success on the lane (in complete) resets its count.
+        self._stall_strikes[target.provider] = (
+            self._stall_strikes.get(target.provider, 0) + 1)
+        if self._stall_strikes[target.provider] >= 2:
+            self._downed.add(target.provider)
+            self.errors.append(
+                f"{target.provider}: downed (2 consecutive deadline aborts)")
         self.errors.append(f"{target.provider}: stalled (deadline abort)")
         close = getattr(target, "close", None)
         if close is not None:
