@@ -1421,6 +1421,16 @@ class TestSessionCapture:
         # crashes the response) — assert list-ness, not emptiness.
         assert body["errors"] == []
         assert isinstance(body["warnings"], list)
+        # #2335 WI-1a: the receipt carries the stats key (always-present
+        # additive contract) — the hosted llm:mock lane runs the REAL v2
+        # extractor, so the full extractor_v2 telemetry is present
+        # (entities/chunks/s4_merge/recovery/llm), NOT the empty M2 shape.
+        assert "stats" in body, "hosted receipt must carry the stats key"
+        st = body["stats"]
+        assert isinstance(st, dict) and st, "hosted v2 capture carries real stats"
+        assert st.get("chunks", 0) >= 1, st
+        assert isinstance(st.get("llm"), dict)
+        assert isinstance(st.get("recovery"), dict)
 
     def test_capture_session_with_explicit_id(self, client):
         r = client.post(
@@ -1485,6 +1495,8 @@ class TestSessionCapture:
         assert r2.status_code == 200, r2.text
         assert r2.json()["extraction_mode"] == "replayed", r2.json()
         assert r2.json()["extracted"] == 0, r2.json()
+        # #2335 WI-1a: replayed receipt carries stats == {} (empty-on-replay)
+        assert r2.json()["stats"] == {}, r2.json()["stats"]
 
         # Turn Point MERGEs across captures (idempotent): 1 turn point
         # containing PostgreSQL + 1 LLM point (extraction ran once — the

@@ -6684,7 +6684,10 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     tenant_vocab_warning: str | None = None
     if session_existed:
         meta = {"errors": [], "warnings": [], "mode": "replayed",
-                "route": None, "provider": None}
+                "route": None, "provider": None,
+                # #2335 WI-1a: hosted replayed carries no extractor_v2
+                # telemetry — stats always-present, empty on replay.
+                "stats": {}}
         extraction_errors: list = []
         extraction_warnings = [
             "session already captured (same session_id) — no new extraction"]
@@ -7269,6 +7272,9 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
             "surfaced": surfaced,
             "extraction_mode": effective_mode,
             "errors": extraction_errors, "warnings": extraction_warnings,
+            # #2335 WI-1a: the hosted receipt carries the extractor
+            # telemetry (sdk meta stats — real on v2, {} on replayed/M2).
+            "stats": meta.get("stats") or {},
             # #2002 (W6): first_capture=true exactly once per org — the
             # trigger for the in-conversation announcement (SKILL.md §6 copy).
             "first_capture": bool(first_capture)}
