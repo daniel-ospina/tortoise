@@ -775,7 +775,7 @@ function App() {
   })
   // pending action resumed after a re-auth round (change-email gate, #1765)
   const pendingReauthRef = React.useRef(null)
-  // #2479: re-auth attempt counter (max 3 per session for password re-auth;
+  // #2479: re-auth attempt counter (max 1 per session for password re-auth;
   // OAuth round-trips naturally reset via full page navigation)
   const reauthAttemptRef = React.useRef(0)
   // #2479 code-review fix P1: tracks that we're re-executing a pending action
@@ -1550,6 +1550,7 @@ function claimIntentInFlight() {
           setProfileError(REAUTH_EXCEEDED_MESSAGE)
           return
         }
+        reauthRetriedRef.current = false
         pendingReauthRef.current = { unlinkIdentityId: identityId }
         setReauthOpen(true)
         return
