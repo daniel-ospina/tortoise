@@ -21,8 +21,10 @@ dashboard fixture (scope doc §S5, AC5 follow-up #2178):
     - provisioned revoked -> truthful inline "revoked" (never hidden, never
       "active", terminal — no actions)
     - absent created_via (stale-cache shape) -> active + actionable
-  BOOTSTRAP / EXPIRING rows NEVER render (isManagedKey excludes
-  created_via==='bootstrap' OR any expires_at row — the shipped predicate).
+  BOOTSTRAP rows NEVER render (isManagedKey excludes created_via===
+  'bootstrap' — #2426: an EXPIRING DURABLE (created_via provisioned/recovery/
+  NULL with expires_at set) IS a product key and renders with its Expires
+  state (mint-time lifetime, market presets).
 
 #2246 session-only additions:
   - The mount stored-key probe is DELETED: a localStorage-seeded residue
@@ -112,7 +114,7 @@ PREFIXES = {
     "boot_active": "tt_0b1c2d3e",     # row 6: bootstrap, active (never renders)
     "boot_swept": "tt_0f0e0d0c",      # row 7: bootstrap, revoked (never renders)
     "revoked": "tt_0d0c0b0a",         # row 8: provisioned revoked (renders inline)
-    "expiring": "tt_0e0d0c0b",        # row 9: provisioned + expires_at (never renders)
+    "expiring": "tt_0e0d0c0b",        # row 9: provisioned + future expires_at — renders (#2426)
     "boot_expired": "tt_03040506",    # row 10: bootstrap, expired (never renders)
     "absent_via": "tt_04050607",      # row 11: created_via absent (stale-cache shape)
 }
@@ -173,9 +175,13 @@ def _mixed_keys_fixture() -> list[dict]:
         _key_row("key_mixed_08", p["revoked"], "old ci",
                  created_via="provisioned",
                  revoked_at="2026-08-03T00:00:00.000Z"),
-        # 9. provisioned + expires_at -> EXCLUDED by isManagedKey.
+        # 9. provisioned + expires_at (future mint-time lifetime) -> a #2426
+        #    expiring DURABLE — renders with an Expires state + full actions
+        #    (a 30d key IS a product key; bootstrap-exclusion is the ONLY
+        #    hidden class post-#2426).
         _key_row("key_mixed_09", p["expiring"], "expiring",
-                 created_via="provisioned", expires_at=_EXPIRY_24H),
+                 created_via="provisioned",
+                 expires_at=_future_expiry_30d()),
         # 10. bootstrap, expired, !revoked -> NEVER a managed row.
         _key_row("key_mixed_10", p["boot_expired"], None,
                  created_via="bootstrap", expires_at=_EXPIRY_24H),
@@ -183,6 +189,13 @@ def _mixed_keys_fixture() -> list[dict]:
         #     (accepted limitation pinned in the DOM).
         _absent_via_legacy(),
     ]
+
+
+def _future_expiry_30d() -> str:
+    """#2426: a stable FUTURE expires_at for the expiring-durable fixture row
+    (fixed dates would decay — the Expires cell is wall-clock-relative)."""
+    from datetime import UTC, datetime, timedelta
+    return (datetime.now(UTC) + timedelta(days=30)).isoformat()
 
 
 def _absent_via_legacy() -> dict:
@@ -282,7 +295,7 @@ def _open_keys_tab(page: Page, mint_calls: list | None = None,
     page.locator('[data-tab="keys"]').click()
     # The keys table is the only <table> in the active tab's DOM (BackupsCard
     # is a div card; other tab sections don't render when inactive).
-    expect(page.locator("tbody tr")).to_have_count(7, timeout=15_000)
+    expect(page.locator("tbody tr")).to_have_count(8, timeout=15_000)
 
 
 def test_zero_session_key_posts_and_zero_key_authed_requests(page: Page) -> None:
@@ -307,9 +320,10 @@ def test_zero_session_key_posts_and_zero_key_authed_requests(page: Page) -> None
 
 def test_mixed_table_shows_only_durable_rows_with_truthful_statuses(page: Page) -> None:
     """Durable rows render with truthful statuses + the SAME uniform action
-    set (rotate + toggle + trash + rename); bootstrap/expiring rows NEVER
-    render; NO "in use by this dashboard" note anywhere; no banned
-    vocabulary."""
+    set (rotate + toggle + trash + rename); bootstrap rows NEVER
+    render (created_via==='bootstrap'); the #2426 expiring durable row
+    RENDERS with its Expires state; NO "in use by this dashboard" note
+    anywhere; no banned vocabulary."""
     _open_keys_tab(page)
 
     # — Positive control (row 1): provisioned active -> full actions —
@@ -373,17 +387,19 @@ def test_mixed_table_shows_only_durable_rows_with_truthful_statuses(page: Page) 
     expect(stale.locator("span.live")).to_contain_text("active")
     expect(stale.locator(".key-trash")).to_be_visible()
 
-    # — Uniformity invariant: EXACTLY 6 Rotate affordances — one per
-    #   non-revoked durable row (rows 1,2,3,4,5,11; revoked row 8 terminal;
-    #   bootstrap/expiring rows never render) —
-    expect(page.locator(".key-rotate")).to_have_count(6)
+    # — Uniformity invariant: EXACTLY 7 Rotate affordances — one per
+    #   non-revoked durable row (rows 1,2,3,4,5,9,11; revoked row 8
+    #   terminal; bootstrap rows never render) —
+    expect(page.locator(".key-rotate")).to_have_count(7)
 
-    # — Bootstrap / expiring rows NEVER render (prefix-scoped) —
+    # — #2426: the expiring durable renders (prefix visible) with an
+    #   Expires cell; bootstrap rows NEVER render (prefix-scoped) —
+    expect(page.locator("code", has_text=PREFIXES["expiring"])).to_have_count(1)
     for never in (PREFIXES["boot_active"], PREFIXES["boot_swept"],
-                  PREFIXES["expiring"], PREFIXES["boot_expired"]):
+                  PREFIXES["boot_expired"]):
         expect(page.locator("code", has_text=never)).to_have_count(0)
 
-    # No empty-state row (the fixture has 7 durable rows).
+    # No empty-state row (the fixture has 8 durable rows).
     expect(page.locator("tbody", has_text="No keys yet.")).to_have_count(0)
 
     # — Banned user-facing vocabulary + the gone held-row note —
@@ -493,7 +509,7 @@ def test_rotate_durable_key_replaces_in_place_without_holding(page: Page) -> Non
     page.goto(APP_HOST + "/", wait_until="domcontentloaded", timeout=30_000)
     expect(page.locator("body")).to_contain_text("Graphs", timeout=25_000)
     page.locator('[data-tab="keys"]').click()
-    expect(page.locator("tbody tr")).to_have_count(7, timeout=15_000)
+    expect(page.locator("tbody tr")).to_have_count(8, timeout=15_000)
 
     # Rotate row 3 (the durable formerly known as "held") — a uniform action.
     row3 = page.locator("tbody tr", has_text=RESIDUE_PREFIX)

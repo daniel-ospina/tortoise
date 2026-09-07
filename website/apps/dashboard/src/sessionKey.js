@@ -11,28 +11,36 @@
 // — welcome plaintext, paste validation, rows-routed gate), and the rows
 // resolution helper (usableDurableRows) the session connect gate sources from.
 
-// #2166: durable product keys are the ONLY rows the API Keys page shows.
-// Auto-minted session credentials (created_via 'bootstrap', or any row with an
-// expiry set) are the dashboard's own access keys — never presented as API
-// keys for using the product. Durable = user/agent-created keys the user can
-// name, toggle, revoke, and (later) scope or give a validity window. Disabled
-// (enabled:false) durable rows stay managed — the toggle needs them visible.
+// #2166 + #2426: durable product keys are the ONLY rows the API Keys page
+// shows. The dashboard's OWN access credentials — auto-minted session keys
+// (created_via 'bootstrap') — are never presented as product API keys.
+// Durable = user/agent-created keys the user can name, toggle, revoke, and
+// (since #2426) give a validity window at creation: created_via is the ONLY
+// session-credential signal. An EXPIRING durable row (created_via
+// 'provisioned'/'recovery'/NULL with expires_at set, e.g. a 30d mint) IS a
+// product key — it must stay listed so the table can show its Expires state,
+// and #2426's cap-accounting means an expired one is a rotatable tombstone,
+// never a hidden row. Disabled (enabled:false) durable rows stay managed —
+// the toggle needs them visible.
 export function isManagedKey(k) {
   if (!k) return false
-  return !(k.created_via === 'bootstrap' || !!k.expires_at)
+  return !(k.created_via === 'bootstrap')
 }
 
 // #2246 (ADR-010): rows-source connect resolution. The API Keys table shows
 // rows the browser can MANAGE but never HOLD — GET /v1/team/keys returns
 // hashes only, so a "usable" durable row can never supply a plaintext key.
-// This predicate picks the durable rows that could be re-used IF the user had
-// their plaintext (durable ∧ ¬revoked ∧ ¬disabled; enabled absent → enabled,
+// This predicate picks the rows the connect gate may route to as a REUSABLE
+// durable — managed (bootstrap-excluded, #2426) ∧ never-expiring (an
+// expiring key is not embed-safe: the setup command embeds a key an agent
+// authenticates with indefinitely, so the embed policy stays Never-only,
+// #2426 decision 2) ∧ ¬revoked ∧ ¬disabled (enabled absent → enabled,
 // registry parity), most-recent first by created_at (ISO strings sort
 // lexically). Consumers use it for gate copy / routing ONLY — never to derive
 // an embeddable key.
 export function usableDurableRows(keyRows) {
   return (keyRows || [])
-    .filter((k) => k && isManagedKey(k) && !k.revoked_at && k.enabled !== false)
+    .filter((k) => k && isManagedKey(k) && !k.expires_at && !k.revoked_at && k.enabled !== false)
     .sort((a, b) =>
       String(b.created_at || b.createdAt || '').localeCompare(String(a.created_at || a.createdAt || '')))
 }
@@ -41,10 +49,15 @@ export function usableDurableRows(keyRows) {
 // command embeds an API key the user's agent will authenticate with. It must
 // be a DURABLE key — a 24h bootstrap session credential (created_via
 // 'bootstrap', expires_at = now+24h) stops authenticating within a day,
-// killing any agent configured with it. This classifies the key the connect
-// step should embed from server key rows (GET /v1/team/keys — which lists
-// ALL rows incl. bootstrap, kept unfiltered in state so prefix matching
-// works, #2166). Returns { key, durable, source }:
+// killing any agent configured with it. #2426: expiring DURABLE keys are also
+// not embed-safe (they stop authenticating at their chosen expiry — the
+// connect step is the Never-keys-only embed surface, decision 2), so the
+// classifier refuses them exactly like bootstrap rows but reports the
+// DISTINCT source 'expiring' so the wizard's paste error can say why (an
+// expiring 30d durable is NOT a "login session" key). This classifies the
+// key the connect step should embed from server key rows (GET /v1/team/keys
+// — which lists ALL rows incl. bootstrap, kept unfiltered in state so prefix
+// matching works, #2166). Returns { key, durable, source }:
 //   - welcomeKey present → durable (first-time A13 provisioned key) — UNLESS
 //     keyRows is a loaded non-empty array and the welcome plaintext's prefix
 //     row is absent/revoked/disabled/bootstrap/expiring: the shown-once
@@ -64,22 +77,23 @@ export function usableDurableRows(keyRows) {
 // durable exists → source 'rows-durable' (gate copy routes to create/rotate;
 // the plaintext was shown once at mint and is unrecoverable from rows);
 // none → source 'none' (create-one). Paste validation keeps using the
-// apiKey param with the pasted plaintext — revoked/disabled/bootstrap rows
-// must still reject (the escape hatch's whole point).
+// apiKey param with the pasted plaintext — revoked/disabled/bootstrap/
+// expiring rows must still reject (the escape hatch's whole point).
 export function durableConnectKey(welcomeKey, apiKey, keyRows) {
   // #2246 (review, P1/P2): row-truth stale check on the in-memory welcome
   // plaintext — post-#2246 the table actions are uniform one-click (rotate /
   // revoke / disable), so a welcomeKey whose prefix row is gone/revoked/
   // disabled must NOT win. P2: a bootstrap/expiring row is dead for embedding
-  // too (symmetric with the paste tail below — a 24h session credential must
-  // never back an embed); welcome keys are provisioned (created_via
-  // 'provisioned'), so this arm is a harmless belt that keeps the predicate
-  // identical to main.jsx's row-truth effect. Check only when keyRows is a LOADED non-empty
+  // too (symmetric with the paste tail below — a 24h session credential, or
+  // any key with an expiry, must never back an embed); welcome keys are
+  // provisioned without expiry (created_via 'provisioned', expires_at null),
+  // so this arm is a harmless belt that keeps the predicate identical to
+  // main.jsx's row-truth effect. Check only when keyRows is a LOADED non-empty
   // array (null/[] = not loaded yet — the pre-load welcome reveal must keep
   // working; the provisioned row lands in the same loadAll response). When
   // stale, set the welcome plaintext aside and proceed as if it were absent
   // so the normal rows/paste resolution (rows-durable / none / durable /
-  // bootstrap / revoked / disabled / unknown) runs.
+  // bootstrap / expiring / revoked / disabled / unknown) runs.
   let welcome = welcomeKey
   if (welcome && Array.isArray(keyRows) && keyRows.length > 0) {
     const row = keyRows.find((k) => k && k.key_prefix && welcome.startsWith(k.key_prefix))
@@ -94,8 +108,7 @@ export function durableConnectKey(welcomeKey, apiKey, keyRows) {
   if (!row) return { key: '', durable: false, source: 'unknown' }
   if (row.revoked_at) return { key: '', durable: false, source: 'revoked' }
   if (row.enabled === false) return { key: '', durable: false, source: 'disabled' }
-  if (row.created_via === 'bootstrap' || !!row.expires_at) {
-    return { key: '', durable: false, source: 'bootstrap' }
-  }
+  if (row.created_via === 'bootstrap') return { key: '', durable: false, source: 'bootstrap' }
+  if (row.expires_at) return { key: '', durable: false, source: 'expiring' }
   return { key: apiKey, durable: true, source: 'durable' }
 }

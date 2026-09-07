@@ -13824,7 +13824,8 @@ class TortoiseSDK:
                       delegation_depth: int | None = None,
                       prefix: str = "tt_",
                       name: str | None = None,
-                      created_via: str | None = None) -> dict:
+                      created_via: str | None = None,
+                      expires_at: str | None = None) -> dict:
         """Generate an API key for a team.
 
         Stores SHA-256 hash (never plaintext). Plaintext returned once.
@@ -13839,7 +13840,12 @@ class TortoiseSDK:
         20260825000001 parity — the hosted create_api_key lane passes it)
         and ``created_via`` (mint-source classification — "provisioned" /
         "agent_signup" etc.) ride the node as optional props; absent =
-        legacy nodes without them.
+        legacy nodes without them. #2426: optional ``expires_at`` (ISO
+        timestamp, None = never) rides the same optional-props pattern — the
+        registry node is graph-property-additive, and the auth/expiry filter
+        (hosted_api ~1558-1570) and cap predicates already read the prop on
+        LEGACY nodes (expires_at absent = NULL = never), so an expiring mint
+        is a pure CREATE-side addition.
 
         Registry-side invariant (code-review #2b, mirrors the Supabase DB
         CHECK chk_minted_key_no_escalation): a MINTED key (delegation_depth
@@ -13895,6 +13901,8 @@ class TortoiseSDK:
             extra += ", name:$nm"; params["nm"] = name  # noqa: E702 (baseline #1503)
         if created_via is not None:
             extra += ", created_via:$cv"; params["cv"] = created_via  # noqa: E702 (baseline #1503)
+        if expires_at is not None:
+            extra += ", expires_at:$ea"; params["ea"] = expires_at  # noqa: E702 (baseline #1503)
         reg.query(
             "CREATE (k:APIKey {id:$id, team_id:$tid, key_hash:$kh, "
             "key_prefix:$kp, created_by:$cb, created_at:$now"
@@ -14093,12 +14101,17 @@ class TortoiseSDK:
                         "now": now_iso},
             )
             # re-count AFTER the insert; only revoke when over cap (and a row
-            # genuinely existed to revoke)
+            # genuinely existed to revoke). #2426 code-review P2: expired-but-
+            # unrevoked durables are excluded from the count AND the revoke-
+            # target scan (expired keys don't count — never wedge, and never
+            # let the oldest-LIVE key be the revoke collateral for expired
+            # rows above the cap; matches the session-key recovery lanes).
             rows = reg.query(
                 "MATCH (k:APIKey {team_id:$tid}) WHERE k.revoked_at IS NULL "
+                "AND (k.expires_at IS NULL OR k.expires_at > $now) "
                 "AND (k.created_via IS NULL OR k.created_via <> 'bootstrap') "
                 "RETURN k.id, k.created_at ORDER BY k.created_at ASC",
-                params={"tid": team_id},
+                params={"tid": team_id, "now": now_iso},
             ).result_set
             if len(rows) > max_keys and rows:
                 reg.query(
