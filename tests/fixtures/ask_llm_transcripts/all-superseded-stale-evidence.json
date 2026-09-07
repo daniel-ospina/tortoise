@@ -20,6 +20,6 @@
       "session_date": "2026-08-20"
     }
   ],
-  "user_message": "Memory context:\nCurrent Date: 2026-08-29\n\n[session ?] (session date 2026-08-01) [SUPERSEDED BY: The gym schedule is now Tuesday and Thursday.] The gym schedule is Monday, Wednesday, Friday.\n\n[session ?] (session date 2026-08-20) [SUPERSEDES: The gym schedule is Monday, Wednesday, Friday.] The gym schedule is now Tuesday and Thursday.\n\nQuestion: what is the current gym schedule?\n\nAnswer:",
-  "user_message_hash": "c9a977793239e68e5b36dc344906ce61e658058342833f6ac19a89547a056de3"
+  "user_message": "Memory context:\nCurrent Date: 2026-08-29\n\n[session ?] (session date 2026-08-20) [SUPERSEDES: The gym schedule is Monday, Wednesday, Friday.] The gym schedule is now Tuesday and Thursday.\n\n[session ?] (session date 2026-08-01) [SUPERSEDED BY: The gym schedule is now Tuesday and Thursday.] The gym schedule is Monday, Wednesday, Friday.\n\nQuestion: what is the current gym schedule?\n\nAnswer:",
+  "user_message_hash": "95a3269a9d3bdbf2484968cc9bef39edac61e07cb88cb6d9d473cd37f59895d6"
 }
