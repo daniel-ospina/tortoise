@@ -6,8 +6,9 @@ after signup) runs in the pre-deploy gate (plan Task 10). This test guards
 the same contract at the source level so a regression can never ship: the
 Edge Function must call provision_team (the atomic Supabase RPC), must NOT
 call /internal/provision (the old registry writer) or update_user_team (the
-old membership writer), must keep the data-plane demo seed, and must compute
-lookup_hash via the shared TS mirror (parity with tortoise/auth.py).
+old membership writer), must keep the data-plane REAL starter seed
+(#2360: /internal/starter-seed — never the demo sample auto-seed), and must
+compute lookup_hash via the shared TS mirror (parity with tortoise/auth.py).
 """
 from __future__ import annotations
 
@@ -58,35 +59,57 @@ def test_edge_function_writes_supabase_only():
     assert 'rpc("update_user_team"' not in src, (
         "Edge Function must not call the removed update_user_team RPC"
     )
-    # Data plane stays: the demo seed creates the team's knowledge-graph
+    # Data plane stays: the real starter seed creates the team's knowledge-graph
     # namespace (FalkorDB) — that is NOT a registry write.
-    assert "/internal/demo" in src, "Edge Function must keep the demo seed"
+    assert "/internal/starter-seed" in src, "Edge Function must keep the starter seed"
+    # #2360 re-spec: the fake demo auto-seed is GONE — a fresh org must never
+    # receive sample Points counted as its own data. The fetch URL is the
+    # contract (a stray call must never regress).
+    assert "`${fastApiUrl}/internal/demo`" not in src, (
+        "Edge Function must not call the demo sample auto-seed (#2360)"
+    )
     # lookup_hash must be computed via the shared TS mirror (P1-1 parity).
     assert "lookupHash" in src, "Edge Function must compute lookup_hash"
 
 
-def test_demo_seed_logs_non_ok_responses():
-    """#1860 (P3-1): a non-2xx /internal/demo response must be LOGGED, not
-    silently swallowed. The old fire-and-forget `.catch()` covered only
-    transport/abort errors — an HTTP 500 body resolved 'successfully', so a
-    failed seed left the first-timer's graph silently missing demo data.
-    The response must be bound and checked with !ok (source contract)."""
+def test_starter_seed_logs_non_ok_responses():
+    """#1860 (P3-1) carried to the #2360 starter seed: a non-2xx
+    /internal/starter-seed response must be LOGGED, not silently swallowed.
+    The old fire-and-forget `.catch()` covered only transport/abort errors —
+    an HTTP 500 body resolved 'successfully', so a failed seed left the
+    first-timer's graph silently missing starter data. The response must be
+    bound and checked with !ok (source contract)."""
     src = EDGE_FN.read_text()
-    # the demo-seed fetch binds its response (not fire-and-forget)
-    assert "const demoRes = await fetch(`${fastApiUrl}/internal/demo`" in src, (
-        "demo-seed fetch must bind its response (demoRes) so !ok is checkable"
+    # the starter-seed fetch binds its response (not fire-and-forget)
+    assert "const starterRes = await fetch(`${fastApiUrl}/internal/starter-seed`" in src, (
+        "starter-seed fetch must bind its response (starterRes) so !ok is checkable"
     )
     # transport/abort failures still log
-    assert 'console.error("Demo seed failed:", e)' in src
+    assert 'console.error("Starter seed failed:", e)' in src
     # HTTP errors (4xx/5xx) log the status — never silently pass
-    assert "!demoRes.ok" in src, (
-        "demo-seed must check !demoRes.ok — a 500 body resolving 'successfully' "
+    assert "!starterRes.ok" in src, (
+        "starter-seed must check !starterRes.ok — a 500 body resolving 'successfully' "
         "is the #1860 P3-1 bug"
     )
-    assert "demoRes.status" in src, "non-ok demo-seed log must include the status"
+    assert "starterRes.status" in src, "non-ok starter-seed log must include the status"
     # the provision RPC has already committed — the failure must NOT fail the
     # whole provisioning (the user can still be onboarded)
     assert "return json(response, 201" in src
+
+
+def test_starter_seed_carries_real_identity_data():
+    """#2360: the starter seed is REAL data — the edge fn must pass the
+    org name (user-confirmed), the person's own auth identity (user_id /
+    email), and the user's display name when present (never a silently
+    email-derived name, never a placeholder)."""
+    src = EDGE_FN.read_text()
+    # org_name = the wizard-typed org name (safeName) — real, confirmed
+    assert "org_name: safeName" in src, "starter seed must pass the org name"
+    # the person identity refs ride the VERIFIED caller (never client JSON)
+    assert "person_user_id: user_id" in src
+    assert "person_email: email" in src
+    # display name is passed only when the user actually has one
+    assert 'starterBody.person_name = display_name.trim()' in src
 
 
 def test_edge_function_uses_shared_lookup_mirror():
