@@ -685,6 +685,8 @@ const supabaseStorage = {
 // client consumes the fragment during init, so snapshot it FIRST (mirrors
 // welcome.html's landingHash) and read error params from BOTH surfaces.
 const landingHash = window.location.hash
+// #2509: known dashboard tab names for URL↔hash sync (deep-linkability).
+const KNOWN_TABS = ['overview', 'keys', 'graphs', 'members', 'billing', 'settings', 'profile']
 function oauthErrorParams() {
   const p = new URLSearchParams(window.location.search)
   const h = new URLSearchParams(landingHash.replace(/^#/, ''))
@@ -1229,7 +1231,74 @@ function claimIntentInFlight() {
     }
   }
 
-  const [tab, setTab] = React.useState('overview')
+  const initialTab = (() => {
+    // #2509: read tab from landingHash (captured at module scope before
+    // supabase.js init, so OAuth fragment stripping doesn't interfere).
+    const h = landingHash
+    if (h.startsWith('#/')) {
+      const candidate = h.slice(2)
+      if (KNOWN_TABS.includes(candidate)) return candidate
+    }
+    return 'overview'
+  })()
+  const [tab, setTab] = React.useState(initialTab)
+  // #2509: sync tab state → URL hash (pushState for tab switches,
+  // useRef guard skips initial mount to avoid strict-mode double effect).
+  const tabSyncRef = React.useRef(false)
+  const programmaticTabChangeRef = React.useRef(false)
+  const popProcessingRef = React.useRef(false)
+  React.useEffect(() => {
+    if (!tabSyncRef.current) { tabSyncRef.current = true; return }
+    const hash = '#/' + tab
+    if (window.location.hash !== hash) {
+      programmaticTabChangeRef.current = true
+      window.history.pushState({ tab }, '', hash)
+    }
+  }, [tab])
+  // #2509: sync URL hash → tab on browser back/forward (popstate) or
+  // address-bar edits (hashchange). Clears intra-tab sub-state for parity
+  // with nav-button clicks.
+  React.useEffect(() => {
+    function onHashChange() {
+      // #2528: dedup guard — browsers that fire both popstate + hashchange
+      // for the same URL change must not run the handler twice.
+      if (popProcessingRef.current) return
+      popProcessingRef.current = true
+      setTimeout(() => { popProcessingRef.current = false }, 0)
+      // #2528: Safari fires popstate on pushState — skip when the change
+      // was self-triggered (tab sync effect sets this ref before pushState).
+      if (programmaticTabChangeRef.current) {
+        programmaticTabChangeRef.current = false
+        return
+      }
+      const h = window.location.hash
+      if (h.startsWith('#/')) {
+        const candidate = h.slice(2)
+        if (KNOWN_TABS.includes(candidate)) {
+          setTab(candidate)
+          setSelectedSessionId(null)
+          setSessionDetail(null)
+          return
+        }
+      }
+      if (!h.startsWith('#/') && h.length > 0) {
+        // OAuth fragment or unknown hash — don't override tab.
+        return
+      }
+      // Unknown/malformed hash — fallback with replaceState (avoids
+      // phantom history entry that pushState would create).
+      setTab('overview')
+      if (window.location.hash !== '#/overview') {
+        window.history.replaceState({ tab: 'overview' }, '', '#/overview')
+      }
+    }
+    window.addEventListener('popstate', onHashChange)
+    window.addEventListener('hashchange', onHashChange)
+    return () => {
+      window.removeEventListener('popstate', onHashChange)
+      window.removeEventListener('hashchange', onHashChange)
+    }
+  }, [])
   const [authMode, setAuthMode] = React.useState('session') // 'session' | 'apikey'
   const [checking, setChecking] = React.useState(true)
   const sessionTokenRef = React.useRef(null)
@@ -1787,7 +1856,7 @@ function claimIntentInFlight() {
           clearInterval(poll)
           setCheckoutPending(false) // Round-15: popup flow never returns the param to this tab — don't stay stuck
           params.delete('session_id')
-          window.history.replaceState({}, '', `${window.location.pathname}${params.toString() ? `?${params}` : ''}`)
+          window.history.replaceState({}, '', `${window.location.pathname}${params.toString() ? `?${params}` : ''}${window.location.hash}`)
         }
       }, 2000)
       return () => clearInterval(poll)
@@ -1796,7 +1865,7 @@ function claimIntentInFlight() {
       window.clearTimeout(checkoutResetTimerRef.current)
       setCheckoutPending(false)
       params.delete('checkout')
-      window.history.replaceState({}, '', `${window.location.pathname}${params.toString() ? `?${params}` : ''}`)
+      window.history.replaceState({}, '', `${window.location.pathname}${params.toString() ? `?${params}` : ''}${window.location.hash}`)
     }
   }, [team?.subscription_status])
 
@@ -2417,7 +2486,7 @@ function claimIntentInFlight() {
   // teamIdRef.current, so a call when currentTeamId is already set never
   // re-fires the currentTeamId effect (no duplicated members/graphs loads);
   // the setTeams refresh + loadBackups re-fetch are harmless.
-  async function finishWelcomeLoads() {
+  async function finishWelcomeLoads(tabOverride) {
     await loadTeams().catch(() => {})
     loadBackups('').catch(() => {})
     // #1906: the first-timer path never ran loadAll (keys+sessions) — the
@@ -2433,6 +2502,13 @@ function claimIntentInFlight() {
     // Pass the current refresh seq: if a seed refire bumps it mid-flight,
     // this pre-seed response is dropped (it must not clobber the count).
     refreshTeam('', undefined, teamRefreshSeqRef.current).catch(() => {})
+    // #2528: sync the URL hash to the target tab — exits from welcome that
+    // navigate to API Keys pass 'keys' through tabOverride so the replaceState
+    // uses the correct tab even though the closure holds 'overview'.
+    const tabToUse = tabOverride || tab
+    if (window.location.hash !== '#/' + tabToUse) {
+      window.history.replaceState({ tab: tabToUse }, '', '#/' + tabToUse)
+    }
     // #1847/#2323 (Option B): re-fire the onboarding-state load NOW that the
     // team exists — the mount-time refreshOnboarding() fired BEFORE the
     // org-create submit provisioned the team (name-first, tenant-provision)
@@ -2463,7 +2539,7 @@ function claimIntentInFlight() {
     // step hands off to the graph (accept-and-drop makes a client PATCH
     // inert on node-present orgs; the node's fork-aware gate owns
     // onboarding_complete). The wire follows the node.
-    window.history.replaceState({}, '', '/')
+    window.history.replaceState({}, '', '#/' + tab)
     setWelcomeMode(false)
     // #1842 P1-1: the first-timer flow (org-create provision → welcome
     // wizard → wizardComplete) never ran loadTeams/loadBackups — those fired
@@ -2615,7 +2691,7 @@ function claimIntentInFlight() {
         const inviteTokenParam = new URLSearchParams(window.location.search).get('invite_token')
         if (inviteTokenParam) {
           try { sessionStorage.setItem(INVITE_TOKEN_STORAGE, inviteTokenParam) } catch { /* best-effort */ }
-          window.history.replaceState({}, '', window.location.pathname)
+          window.history.replaceState({}, '', window.location.pathname + window.location.hash)
         }
         const stashedInvite = (() => {
           try { return sessionStorage.getItem(INVITE_TOKEN_STORAGE) || '' } catch { return '' }
@@ -5170,7 +5246,7 @@ function claimIntentInFlight() {
           <button
             className="ghost small"
             disabled={welcomeProvisioning || welcomeProvisionError || !welcomeHasOrg}
-            onClick={() => { window.history.replaceState({}, '', '/'); setWelcomeMode(false); setWizardDurableKey(''); setWizardDurablePaste(''); setWizardDurableError(''); setWizardShowPaste(false); setWizardPaused(false); connectedOnceRef.current = false; if (wizardStep >= 3) setWelcomeKey(''); finishWelcomeLoads() }}
+            onClick={() => { window.history.replaceState({}, '', '#/' + tab); setWelcomeMode(false); setWizardDurableKey(''); setWizardDurablePaste(''); setWizardDurableError(''); setWizardShowPaste(false); setWizardPaused(false); connectedOnceRef.current = false; if (wizardStep >= 3) setWelcomeKey(''); finishWelcomeLoads() }}
           >
             Open my dashboard →
           </button>
@@ -5470,7 +5546,7 @@ function claimIntentInFlight() {
                               it was ungated predates that) — see
                               wizardMintDurableKey). */}
                           <div style={{ marginTop: '0.85rem', display: 'flex', flexWrap: 'wrap', gap: '0.9rem', alignItems: 'center' }}>
-                            <button type="button" className="ghost small" onClick={() => { window.history.replaceState({}, '', '/'); setWelcomeMode(false); setTab('keys'); finishWelcomeLoads() }}>
+                            <button type="button" className="ghost small" onClick={() => { window.history.replaceState({}, '', '#/keys'); setWelcomeMode(false); setTab('keys'); finishWelcomeLoads('keys') }}>
                               {isOwnerAdmin ? `Manage keys for ${shownOrgName || 'your organization'} →` : `View keys for ${shownOrgName || 'your organization'} →`}
                             </button>
                             {isOwnerAdmin && (
@@ -5725,7 +5801,7 @@ function claimIntentInFlight() {
                           <div className="wizard-nav">
                             <button type="button" className="ghost" onClick={() => setWelcomeOriented(false)}>← Back</button>
                             <div className="wizard-nav-actions">
-                              <button type="button" className="ghost" onClick={() => { window.history.replaceState({}, '', '/'); setWelcomeMode(false); setTab('keys'); finishWelcomeLoads() }}>Go to API Keys →</button>
+                              <button type="button" className="ghost" onClick={() => { window.history.replaceState({}, '', '#/keys'); setWelcomeMode(false); setTab('keys'); finishWelcomeLoads('keys') }}>Go to API Keys →</button>
                             </div>
                           </div>
                         </>
@@ -5940,7 +6016,7 @@ function claimIntentInFlight() {
                                     // key. Fire-and-forget: finishWelcomeLoads never rejects.
                                     <button
                                       className="btn-primary"
-                                      onClick={() => { window.clearTimeout(checkoutResetTimerRef.current); setCheckoutPending(false); window.history.replaceState({}, '', '/'); setWelcomeMode(false); setTab('keys'); finishWelcomeLoads() }}
+                                      onClick={() => { window.clearTimeout(checkoutResetTimerRef.current); setCheckoutPending(false); window.history.replaceState({}, '', '#/keys'); setWelcomeMode(false); setTab('keys'); finishWelcomeLoads('keys') }}
                                     >
                                       Start free
                                     </button>
