@@ -53,6 +53,7 @@ import logging
 import os
 import re
 
+from .live import is_terminal_status  # #2490: terminal rows override has_ep
 from .search_engine import (  # type: ignore[import-not-found]
     CONTESTED_VARIANCE_THRESHOLD,
     _exclude_status_clause,
@@ -301,13 +302,25 @@ def _assemble_ep_rows(rows: list, by_id: dict[str, dict]) -> None:
     EXISTING :Point node (the query is the existence anchor). Unmeasured
     points coalesce to the Beta(1,1) uniform prior: mean 0.5, variance
     1/12, has_ep False — absence of measurement is NOT low support (repo
-    neutral-0.5 convention)."""
+    neutral-0.5 convention).
+
+    #2490: the gate is a PROJECTION-side has_ep OVERRIDE, NOT a WHERE
+    insertion — why() explicitly serves terminal ids in the supersession
+    block, so filtering them out of _EP_CYPHER's WHERE would drop the very
+    rows why must present. Terminal rows (status in the terminal vocab OR
+    the legacy outdated flag) read has_ep=False + contested=False even when
+    EP measured them pre-terminalization (their posterior decayed to vacuity
+    at the write)."""
     for row in rows:
         if not row or not row[0]:
             continue
         pid = row[0]
         a, b = float(row[1]), float(row[2])
         has_ep = bool(row[3])
+        # #2490: terminal rows never surface a decayed posterior as measured
+        # EP — has_ep=False + contested=False (projection-side override).
+        if len(row) > 5 and is_terminal_status(row[4], bool(row[5])):
+            has_ep = False
         variance = _beta_variance(a, b)
         by_id[pid]["ep"] = {
             "confidence_mean": round(_mean(a, b), 4),
@@ -427,7 +440,12 @@ _EP_CYPHER = (
     "RETURN n.id, "
     "  coalesce(n.posterior_alpha, n.ep_alpha, 1.0), "
     "  coalesce(n.posterior_beta, n.ep_beta, 1.0), "
-    "  (n.posterior_alpha IS NOT NULL OR n.ep_alpha IS NOT NULL)"
+    "  (n.posterior_alpha IS NOT NULL OR n.ep_alpha IS NOT NULL), "
+    # #2490: status/outdated ride the RETURN so _assemble_ep_rows can apply
+    # the projection-side has_ep override for terminal rows (why must serve
+    # terminal ids in the supersession block — the exclusion is NOT a WHERE
+    # insertion here).
+    "  n.status, coalesce(n.outdated, false)"
 )
 # Tradeoffs (decision points): the point is the operator SOURCE (INPUT idx 0)
 # and the alternatives are the operator's IMPL TARGETS at idx > 0 (the

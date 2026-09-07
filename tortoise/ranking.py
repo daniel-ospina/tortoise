@@ -35,6 +35,7 @@ from .search_engine import (  # noqa: E402, RUF100
     _exclude_status_clause,
     CONTESTED_VARIANCE_THRESHOLD,
 )
+from .live import is_terminal_status  # #2490: terminal rows are never contested
 
 logger = logging.getLogger(__name__)
 
@@ -409,7 +410,11 @@ class GraphRanker:
             "  / (coalesce(n.posterior_alpha, n.ep_alpha, 1.0) + coalesce(n.posterior_beta, n.ep_beta, 1.0)), "
             "  0.5) AS conf, degree, n.createdAt AS created, "
             "  coalesce(n.posterior_alpha, n.ep_alpha, 1.0) AS alpha, coalesce(n.posterior_beta, n.ep_beta, 1.0) AS beta, "
-            "  n.ep_alpha IS NOT NULL AS has_ep"
+            # #2490: aligned with StateRanker/GapsRanker — has_ep is the
+            # posterior-OR-prior expression (was ep_alpha-only here), plus
+            # the status/outdated columns for the Python-side terminal gate.
+            "  (n.posterior_alpha IS NOT NULL OR n.ep_alpha IS NOT NULL) AS has_ep, "
+            "  n.status, coalesce(n.outdated, false)"
         )
         rows = self.projection.g.query(cypher, params={"ids": ids}).result_set
         out = {}
@@ -417,6 +422,12 @@ class GraphRanker:
             pid = row[0]
             variance = _beta_variance(float(row[4]), float(row[5]))
             has_ep = bool(row[6])
+            # #2490: terminal rows (status in the terminal vocab OR the legacy
+            # outdated flag) never surface as measured/contested EP. The len
+            # guard tolerates test doubles mirroring the pre-#2490 row shape
+            # (the live query always returns the status/outdated columns).
+            if len(row) > 8 and is_terminal_status(row[7], bool(row[8])):
+                has_ep = False
             out[pid] = {
                 "confidence": float(row[1]),
                 "degree": int(row[2]),
@@ -691,13 +702,18 @@ class StateRanker:
             "  coalesce(n.posterior_alpha, n.ep_alpha, 1.0) AS alpha, "
             "  coalesce(n.posterior_beta, n.ep_beta, 1.0) AS beta, "
             "  (n.posterior_alpha IS NOT NULL OR n.ep_alpha IS NOT NULL) AS has_ep, "
-            "  ep_degree + about_degree AS degree"
+            "  ep_degree + about_degree AS degree, "
+            "  n.status, coalesce(n.outdated, false)"
         )
         rows = self.projection.g.query(cypher, params={"ids": ids}).result_set
         out = {}
         for row in rows:
             pid, alpha, beta, has_ep, degree = (
                 row[0], float(row[1]), float(row[2]), bool(row[3]), int(row[4]))
+            # #2490: terminal rows never surface as measured/contested EP (len
+            # guard — see GraphRanker).
+            if len(row) > 6 and is_terminal_status(row[5], bool(row[6])):
+                has_ep = False
             variance = _beta_variance(alpha, beta)
             out[pid] = {
                 "confidence": round(alpha / (alpha + beta), 6) if (alpha + beta) > 0 else NEUTRAL_CONFIDENCE,
@@ -988,12 +1004,17 @@ class GapsRanker:
             "RETURN n.id, "
             "  coalesce(n.posterior_alpha, n.ep_alpha, 1.0) AS alpha, "
             "  coalesce(n.posterior_beta, n.ep_beta, 1.0) AS beta, "
-            "  (n.posterior_alpha IS NOT NULL OR n.ep_alpha IS NOT NULL) AS has_ep",
+            "  (n.posterior_alpha IS NOT NULL OR n.ep_alpha IS NOT NULL) AS has_ep, "
+            "  n.status, coalesce(n.outdated, false)",
             params={"ids": ids},
         ).result_set
         out = {}
         for row in rows:
             pid, alpha, beta, has_ep = row[0], float(row[1]), float(row[2]), bool(row[3])
+            # #2490: terminal rows never surface as measured/contested EP (len
+            # guard — see GraphRanker).
+            if len(row) > 5 and is_terminal_status(row[4], bool(row[5])):
+                has_ep = False
             variance = _beta_variance(alpha, beta)
             out[pid] = {
                 "confidence": round(alpha / (alpha + beta), 6) if (alpha + beta) > 0 else NEUTRAL_CONFIDENCE,

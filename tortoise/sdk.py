@@ -26,6 +26,7 @@ from .assembly import AssemblyAnswer
 from .cross_lens import DEFAULT_THRESHOLD
 from .ids import ulid
 from .live import TERMINAL_EXCLUDED_STATUSES  # EP terminal vocabulary (shared)
+from .live import decay_clause, _terminal_excluded  # #2490 vacuity decay + terminal predicate
 from .embedded_lifecycle import atexit_fast_close  # #1371: registers the batch flush
 from .retrieval import DEFAULT_POOL_SIZE, resolve_pool_size
 from . import monitoring
@@ -4343,7 +4344,8 @@ class TortoiseSDK:
 
         proj.g.query(
             "MATCH (n:Point {id:$id}) SET n.outdated = true, "
-            "n.updatedAt = $now, n.validTo = $now, n.expiredAt = $now",
+            "n.updatedAt = $now, n.validTo = $now, n.expiredAt = $now, "
+            f"{decay_clause('n')}",
             params={"id": id, "now": now},
         )
         proj.g.query(
@@ -4780,7 +4782,8 @@ class TortoiseSDK:
         proj.g.query(
             "MATCH (n:Point {id:$id}) SET n.status = 'superseded', "
             "n.outdated = true, n.updatedAt = $now, "
-            "n.validTo = $valid_to, n.expiredAt = $expired_at",
+            "n.validTo = $valid_to, n.expiredAt = $expired_at, "
+            f"{decay_clause('n')}",
             params={"id": old_id, "now": now,
                     "valid_to": succ_vf, "expired_at": now},
         )
@@ -4857,7 +4860,8 @@ class TortoiseSDK:
         r = proj.g.query(
             "MATCH (n:Point {id:$id}) "
             "WHERE (n.status IS NULL OR NOT (n.status IN $terminal)) "
-            "SET n.status = 'retracted', n.updatedAt = $now RETURN properties(n)",
+            "SET n.status = 'retracted', n.updatedAt = $now, "
+            f"{decay_clause('n')} RETURN properties(n)",
             params={"id": id, "now": datetime.now(timezone.utc).isoformat(),  # noqa: UP017
                     "terminal": ["retracted", "superseded", "archived"]})
         if not r.result_set:
@@ -9092,10 +9096,18 @@ class TortoiseSDK:
         # an unmeasured uniform prior is NOT contested) OR an incoming NAND
         # operator edge on a LIVE point (the derived `challenged` condition,
         # ontology §5).
+        # #2490: terminal claims are EXCLUDED from the variance scan — they
+        # decay to vacuity (v=1/12 > threshold) at the terminalizing write and
+        # must surface as "stale" (above), never "contested". Deliberate
+        # asymmetry vs get_contested_claims: THIS scan also requires stored EP
+        # params (unmeasured == not contested) while get_contested_claims
+        # coalesces to Beta(1,1) and lists an unmeasured LIVE claim as
+        # contested (its :169-pin). Do not "harmonize" the two.
         contested: dict[str, dict] = {}
         rows = proj.g.query(
             "MATCH (n:Point) "
             "WHERE n.is_operator = false "
+            f"  AND {_terminal_excluded('n.status')} "
             "  AND (n.posterior_alpha IS NOT NULL OR n.ep_alpha IS NOT NULL) "
             "  AND (n.posterior_beta IS NOT NULL OR n.ep_beta IS NOT NULL) "
             "WITH n, coalesce(n.posterior_alpha, n.ep_alpha, 1.0) AS a, "
@@ -9110,10 +9122,17 @@ class TortoiseSDK:
         # #913 round-1: the derived `challenged` condition (ontology §5) is
         # a NAND edge on a LIVE point — draft/terminal endpoints are already
         # handled by stale/draft semantics and must not double-flag.
+        # #2490 gate-consistency (2nd-model): "live" must ALSO mean
+        # flag-live — the legacy invalidate class keeps status='live' while
+        # setting outdated=true, so a status-only gate would surface that
+        # terminal claim as contested AND stale (the variance scan above
+        # already excludes it via _terminal_excluded — the flag class must
+        # not slip through this leg).
         rows = proj.g.query(
             "MATCH (op:Point {is_operator:true})-[r:NAND]->(n:Point) "
             "WHERE n.is_operator = false "
             "  AND (n.status IS NULL OR n.status = 'live') "
+            "  AND coalesce(n.outdated, false) = false "
             "RETURN DISTINCT n.id",
         ).result_set
         for (pid,) in rows:
@@ -18857,7 +18876,8 @@ class TortoiseSDK:
             "WHERE p.targetSource = $url AND p.assessor = $assessor "
             "  AND p.id <> $new_id "
             "  AND (p.outdated IS NULL OR p.outdated = false) "
-            "SET p.outdated = true "
+            "SET p.outdated = true, "
+            f"{decay_clause('p')} "
             "RETURN p.id",
             params={"url": url, "assessor": str(assessor), "new_id": p["id"]},
         ).result_set

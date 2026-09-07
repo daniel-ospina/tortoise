@@ -1,7 +1,17 @@
-"""Entity CRUD handlers for FalkorProjection — Point, Subject, Object, Document, Event, Source."""
+"""Entity CRUD handlers for FalkorProjection — Point, Subject, Object, Document, Event, Source.
+
+#2490 rebuild-decay note (rides #2488, APPLIED): #2488's
+``_fold_point_invalidated`` landed in this module and now appends
+``decay_clause('n')`` to ITS terminalizing SET (both the unconditional and
+``skip_updated_at`` branches) — otherwise INVALIDATED claims resurrect their
+frozen posterior post-rebuild while superseded/retracted decay (the exact
+ghost class #2490 eliminates).
+"""
 from __future__ import annotations
 
 from datetime import datetime, timezone
+
+from tortoise.live import decay_clause  # #2490: rebuild folds decay terminal posteriors
 
 
 def _now_iso() -> str:
@@ -267,7 +277,8 @@ class _EntityHandlers:
         deleted it). Future retractions leave this tombstone.
         """
         self.g.query(
-            "MATCH (n:Point {id:$id}) SET n.status = 'retracted', n.updatedAt = $now",
+            "MATCH (n:Point {id:$id}) SET n.status = 'retracted', n.updatedAt = $now, "
+            f"{decay_clause('n')}",
             params={"id": pid, "now": _now_iso()},
         )
 
@@ -311,7 +322,8 @@ class _EntityHandlers:
         result = self.g.query(
             "MATCH (n:Point {id:$id}) "
             "SET n.status='superseded', n.outdated=true, "
-            "    n.validTo=$vt, n.expiredAt=$ea, n.updatedAt=$ua "
+            "    n.validTo=$vt, n.expiredAt=$ea, n.updatedAt=$ua, "
+            f"    {decay_clause('n')} "
             "RETURN n.id LIMIT 1",
             params={"id": oid, "vt": valid_to, "ea": expired_at,
                     "ua": updated_at},
@@ -379,13 +391,15 @@ class _EntityHandlers:
             # A later same-id PointRevised/PointPromoted already stamped
             # updatedAt (inline, pass-1b) — omit the column so this fold
             # cannot clobber the newer stamp with the older invalidate ts.
-            set_clause = "SET n.outdated=true, n.validTo=$vt, n.expiredAt=$ea "
+            set_clause = ("SET n.outdated=true, n.validTo=$vt, n.expiredAt=$ea, "
+                          f"{decay_clause('n')} ")
             params = {"id": oid, "vt": valid_to, "ea": expired_at}
         else:
             # Unconditional updatedAt write: this sweep fold is the id's last
             # journal writer → exact live parity (supersede's precedent).
             set_clause = ("SET n.outdated=true, n.validTo=$vt, "
-                          "n.expiredAt=$ea, n.updatedAt=$ua ")
+                          "n.expiredAt=$ea, n.updatedAt=$ua, "
+                          f"{decay_clause('n')} ")
             params = {"id": oid, "vt": valid_to, "ea": expired_at,
                       "ua": updated_at}
         result = self.g.query(

@@ -1,5 +1,6 @@
-JUDGE: judge_why_suite_v1
+JUDGE: judge_why_suite_v2
 SCOPE: W3 why-layer suite (epic #2080, issue #2100) — E2E-1/E2E-7 shared grading
+#2490: v2 — the superseded family is RESOLVED: never graded as a live dispute.
 ROLE: You are the pinned why-layer judge for Tortoise, an epistemic memory
       graph engine. You grade how well the SURFACED CONTEXT answers the four
       why-questions for one recalled point. You see ONLY the surfaced context
@@ -60,6 +61,6 @@ OUTPUT (closed vocabulary — return ONLY JSON):
   No markdown fences. No extra keys. No commentary.
 
 PINNING: this prompt text is hashed (sha256) into the baseline judge_pin
-("judge_why_suite_v1:<hex>"). Changing ANY character is a protocol change:
+("judge_why_suite_v2:<hex>"). Changing ANY character is a protocol change:
 a new judge protocol, re-graded from scratch — never a silent compare
 against a prior pin.
