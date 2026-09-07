@@ -407,7 +407,10 @@ class TestDeleteDuringCapture:
             merged = dict(params or {})
             merged.update(kw)  # state helpers pass params as **kwargs
             if "RETURN count(s)" in query and "{id:$sid}" in query:
-                return type("Rows", (), {"result_set": [[0]]})()
+                # #2335 WI-2b: the session probe now also reads
+                # capture_ok/capture_extractor (3 columns) — a Session that
+                # is "gone" returns 0 rows with null state columns.
+                return type("Rows", (), {"result_set": [[0, None, None]]})()
             # the dead-session SWEEP (exact-ids point/Event/Source removal)
             # must fire in this branch — intercept it so the test fixture
             # graph stays intact, and record that it ran

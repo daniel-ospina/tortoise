@@ -3911,7 +3911,6 @@ def test_capture_error_contract_partial_headline(sdk, monkeypatch):
             "error_census": {"partial_parse": 1},
         }
     monkeypatch.setattr(ev2, "extract_session_v2", _v2_out)
-    monkeypatch.delenv("TORTOISE_SESSION_LLM_MOCK", raising=False)
     res = sdk.capture_session(CONV)
     assert res["ok"] is False
     # headline: human, no STAGE NAMES / internal jargon tokens
@@ -3958,7 +3957,6 @@ def test_capture_error_contract_unmapped_passthrough(sdk, monkeypatch):
             "error_census": {},
         }
     monkeypatch.setattr(ev2, "extract_session_v2", _v2_out)
-    monkeypatch.delenv("TORTOISE_SESSION_LLM_MOCK", raising=False)
     res = sdk.capture_session(CONV)
     assert res["ok"] is False
     assert res["errors"] == ["RuntimeError: provider returned 500"]
@@ -3993,7 +3991,6 @@ def test_capture_error_contract_stage_failure_headlines(sdk, monkeypatch):
             "error_census": {},
         }
     monkeypatch.setattr(ev2, "extract_session_v2", _v2_out)
-    monkeypatch.delenv("TORTOISE_SESSION_LLM_MOCK", raising=False)
     res = sdk.capture_session(CONV)
     assert res["ok"] is False
     for headline in res["errors"]:
@@ -4048,7 +4045,6 @@ def test_capture_true_retry_failed_session_reattempts(sdk, monkeypatch):
             "error_census": {},
         }
     monkeypatch.setattr(ev2, "extract_session_v2", _v2_fail_then_succeed)
-    monkeypatch.delenv("TORTOISE_SESSION_LLM_MOCK", raising=False)
 
     conv = [{"role": "user", "content": "we decided X"}]
     sid = "retry-session-2335"
@@ -4088,7 +4084,6 @@ def test_capture_succeeded_session_still_replays(sdk, monkeypatch):
             "error_census": {},
         }
     monkeypatch.setattr(ev2, "extract_session_v2", _v2_ok)
-    monkeypatch.delenv("TORTOISE_SESSION_LLM_MOCK", raising=False)
 
     conv = [{"role": "user", "content": "we decided X"}]
     sid = "success-session-2335"
@@ -4123,7 +4118,6 @@ def test_capture_true_retry_v2_only_m2_failed_session_replays(
     monkeypatch.setattr(
         "tortoise.sdk._build_session_llm_extractor",
         lambda: _PartialFailingSessionExtractor())
-    monkeypatch.delenv("TORTOISE_SESSION_LLM_MOCK", raising=False)
     conv = [{"role": "user", "content": "we decided X"}]
     sid = "m2-failed-2335"
     res1 = sdk.capture_session(conv, session_id=sid)
@@ -4187,7 +4181,6 @@ def test_capture_true_retry_heals_unstamped_first_attempt(
             "error_census": {},
         }
     monkeypatch.setattr(ev2, "extract_session_v2", _v2_out)
-    monkeypatch.delenv("TORTOISE_SESSION_LLM_MOCK", raising=False)
     conv = [{"role": "user", "content": "we decided X"}]
     sid = "heal-2335"
 

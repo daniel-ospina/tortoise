@@ -1825,7 +1825,6 @@ class TestSessionCapture:
                 "error_census": {"empty_embed_list": 1},
             }
         monkeypatch.setattr(ev2, "extract_session_v2", _v2_out)
-        monkeypatch.delenv("TORTOISE_SESSION_LLM_MOCK", raising=False)
         conv = [{"role": "user", "content": "Let's use PostgreSQL."}]
         r = client.post("/v1/sessions", json={
             "session_id": "err-contract-hosted", "conversation": conv})
@@ -2062,7 +2061,6 @@ class TestSessionCaptureWriteVerb:
                 "error_census": {},
             }
         monkeypatch.setattr(ev2, "extract_session_v2", _v2_fail_then_succeed)
-        monkeypatch.delenv("TORTOISE_SESSION_LLM_MOCK", raising=False)
         conv = [{"role": "user", "content": "we decided X"}]
         payload = {"conversation": conv, "session_id": "h-retry-2335"}
         r1 = client.post("/v1/sessions", json=payload)
@@ -2101,7 +2099,6 @@ class TestSessionCaptureWriteVerb:
         monkeypatch.setattr(
             "tortoise.sdk._build_session_llm_extractor",
             lambda: _PartialFailingSessionExtractor())
-        monkeypatch.delenv("TORTOISE_SESSION_LLM_MOCK", raising=False)
         payload = {"conversation": [
             {"role": "user", "content": "we decided X"}],
             "session_id": "h-m2-failed-2335"}
