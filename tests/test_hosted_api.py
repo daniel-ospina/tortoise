@@ -1421,6 +1421,16 @@ class TestSessionCapture:
         # crashes the response) — assert list-ness, not emptiness.
         assert body["errors"] == []
         assert isinstance(body["warnings"], list)
+        # #2335 WI-1a: the receipt carries the stats key (always-present
+        # additive contract) — the hosted llm:mock lane runs the REAL v2
+        # extractor, so the full extractor_v2 telemetry is present
+        # (entities/chunks/s4_merge/recovery/llm), NOT the empty M2 shape.
+        assert "stats" in body, "hosted receipt must carry the stats key"
+        st = body["stats"]
+        assert isinstance(st, dict) and st, "hosted v2 capture carries real stats"
+        assert st.get("chunks", 0) >= 1, st
+        assert isinstance(st.get("llm"), dict)
+        assert isinstance(st.get("recovery"), dict)
 
     def test_capture_session_with_explicit_id(self, client):
         r = client.post(
@@ -1485,6 +1495,8 @@ class TestSessionCapture:
         assert r2.status_code == 200, r2.text
         assert r2.json()["extraction_mode"] == "replayed", r2.json()
         assert r2.json()["extracted"] == 0, r2.json()
+        # #2335 WI-1a: replayed receipt carries stats == {} (empty-on-replay)
+        assert r2.json()["stats"] == {}, r2.json()["stats"]
 
         # Turn Point MERGEs across captures (idempotent): 1 turn point
         # containing PostgreSQL + 1 LLM point (extraction ran once — the
@@ -1794,6 +1806,40 @@ class TestSessionCapture:
         assert r2.status_code == 402, r.text  # non-blank over quota: 402 still fires
 
 
+    def test_capture_error_contract_hosted_diagnostics(self, client, monkeypatch):
+        """#2335 WI-2: hosted capture resp carries headline errors + raw
+        diagnostics (byte-parity with the sdk receipt)."""
+        import tortoise.extractor_v2 as ev2
+
+        def _v2_out(*a, **kw):
+            return {
+                "session_id": kw.get("session_id", "s"),
+                "story_arc": "", "embed_list": {},
+                "search": {"mode": "embedded", "degraded": True},
+                "payload": None,
+                "chain_notes": [], "link_before_create": [], "supersessions": [],
+                "warnings": [], "minted_kinds": [],
+                "errors": [
+                    "no embed list produced (S2/S4 empty) — nothing to embed"],
+                "stats": {"llm": {"calls": 1}, "recovery": {}},
+                "error_census": {"empty_embed_list": 1},
+            }
+        monkeypatch.setattr(ev2, "extract_session_v2", _v2_out)
+        conv = [{"role": "user", "content": "Let's use PostgreSQL."}]
+        r = client.post("/v1/sessions", json={
+            "session_id": "err-contract-hosted", "conversation": conv})
+        assert r.status_code == 200, r.text
+        b = r.json()
+        headline = b["errors"][0]
+        for tok in ("S2", "S4", "embed list"):
+            assert tok.lower() not in headline.lower(), (headline, tok)
+        assert b["diagnostics"] == [
+            "no embed list produced (S2/S4 empty) — nothing to embed"]
+        # the report hook rides the errored hosted receipt
+        assert b["report_url"].endswith(
+            "issues/new?template=bug_report.yml"), b["report_url"]
+
+
 class TestSessionCaptureWriteVerb:
     """W5 (#2104): POST /v1/sessions speaks the frozen memory_write_v1 write
     verb (S12/DM-2) — protocol_version REQUIRED, provenance REQUIRED,
@@ -1980,6 +2026,98 @@ class TestSessionCaptureWriteVerb:
             params={"sid": "w5-recording-off-session"},
         ).result_set
         assert rows[0][0] == 0  # no Session write when recording off
+
+    def test_capture_true_retry_failed_session_reattempts(self, client, monkeypatch):
+        """#2335 WI-2b (hosted twin): a capture that FAILS records
+        capture_ok=False; a same-session re-POST RE-ATTEMPTS extraction and,
+        on success, the receipt reflects the retry (not a no-op replay)."""
+        import tortoise.extractor_v2 as ev2
+        calls = {"n": 0}
+
+        def _v2_fail_then_succeed(*a, **kw):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return {
+                    "session_id": kw.get("session_id", "s"),
+                    "story_arc": "", "embed_list": {},
+                    "search": {"mode": "embedded", "degraded": True},
+                    "payload": None,
+                    "chain_notes": [], "link_before_create": [],
+                    "supersessions": [], "warnings": [], "minted_kinds": [],
+                    "errors": ["RuntimeError: provider returned 500"],
+                    "stats": {"llm": {"calls": 1}, "recovery": {}},
+                    "error_census": {},
+                }
+            return {
+                "session_id": kw.get("session_id", "s"),
+                "story_arc": "story", "embed_list": {},
+                "search": {"mode": "embedded", "degraded": True},
+                "payload": {"entities": [], "events": [], "points": [
+                    {"content": "the retry worked", "pointKind": "statement",
+                     "about_entities": []}], "operators": []},
+                "chain_notes": [], "link_before_create": [],
+                "supersessions": [], "warnings": [], "minted_kinds": [],
+                "stats": {"llm": {"calls": 1}, "recovery": {}},
+                "error_census": {},
+            }
+        monkeypatch.setattr(ev2, "extract_session_v2", _v2_fail_then_succeed)
+        conv = [{"role": "user", "content": "we decided X"}]
+        payload = {"conversation": conv, "session_id": "h-retry-2335"}
+        r1 = client.post("/v1/sessions", json=payload)
+        assert r1.status_code == 200, r1.text
+        assert r1.json()["errors"], "first attempt fails"
+        r2 = client.post("/v1/sessions", json=payload)
+        assert r2.status_code == 200, r2.text
+        b2 = r2.json()
+        assert b2["extraction_mode"] != "replayed", b2
+        assert calls["n"] == 2, "the retry must re-run extraction"
+        # capture_ok now True on the Session node
+        import tortoise.hosted_api as ha_mod
+        rows = ha_mod.TortoiseSDK(
+            namespace=TEST_TEAM_ID)._get_proj().g.query(
+            "MATCH (s:Session {id:$sid}) RETURN s.capture_ok",
+            params={"sid": "h-retry-2335"}).result_set
+        assert rows and rows[0][0] is True, rows
+
+    def test_capture_true_retry_m2_failed_session_replays(self, client,
+                                                           monkeypatch):
+        """#2335 WI-2b / review (PR #2473): TRUE retry is v2-lane (hosted
+        twin). A FAILED M2 capture leaves live partial claims; the same-
+        session re-POST replays (no re-run, no duplicates)."""
+        monkeypatch.setenv("TORTOISE_SESSION_EXTRACTOR", "m2")
+        calls = {"n": 0}
+
+        class _PartialFailingSessionExtractor:
+            version = "partial-m2@0"
+
+            def run(self, transcript, source_id, api):
+                calls["n"] += 1
+                api.add_point("decision: ship serve first",
+                              {"source": source_id})
+                raise RuntimeError("provider rate limited mid-run")
+
+        monkeypatch.setattr(
+            "tortoise.sdk._build_session_llm_extractor",
+            lambda: _PartialFailingSessionExtractor())
+        payload = {"conversation": [
+            {"role": "user", "content": "we decided X"}],
+            "session_id": "h-m2-failed-2335"}
+        r1 = client.post("/v1/sessions", json=payload)
+        assert r1.status_code == 200, r1.text
+        assert r1.json()["errors"], "first m2 attempt fails"
+        assert r1.json()["extracted"] >= 1
+        r2 = client.post("/v1/sessions", json=payload)
+        assert r2.status_code == 200, r2.text
+        assert r2.json()["extraction_mode"] == "replayed", r2.json()
+        assert calls["n"] == 1, "m2 failed session must not re-extract"
+        import tortoise.hosted_api as ha_mod
+        sdk = ha_mod._make_sdk(namespace=TEST_TEAM_ID)
+        proj = sdk._get_proj()
+        row = proj.g.query(
+            "MATCH (s:Session {id:$sid}) RETURN s.capture_ok, "
+            "s.capture_extractor", params={"sid": "h-m2-failed-2335"}
+        ).result_set
+        assert row[0][0] is False and row[0][1] == "m2", row
 
     def test_capture_replay_zero_new_nodes_verb_ok(self, client):
         """Idempotency: re-POST of the same session_id (recording on) writes
@@ -2965,6 +3103,69 @@ class TestSessionFloodGate:
         })
         assert r.status_code == 400, r.text
         assert "cap" in r.text.lower()
+
+    def test_turn_cap_exceeded_record(self, client, caplog):
+        """#2335 WI-1c: the turn-cap refusal emits a structured record naming
+        the cap + the demand (the >500-turn population is a leading indicator
+        — currently invisible on the product lane)."""
+        import logging
+
+        from tortoise.quota import MAX_SESSION_TURNS
+
+        conversation = [{"role": "user", "content": "hi"}] * (MAX_SESSION_TURNS + 1)
+        with caplog.at_level(logging.WARNING, logger="tortoise.api"):
+            r = client.post("/v1/sessions", json={
+                "session_id": "cap-record-session", "conversation": conversation,
+            })
+        assert r.status_code == 400, r.text
+        hits = [rec.getMessage() for rec in caplog.records
+                if "turn_cap_exceeded" in rec.getMessage()]
+        assert hits, "the turn-cap refusal must emit a structured record"
+        assert str(MAX_SESSION_TURNS + 1) in hits[0], hits[0]
+        assert str(MAX_SESSION_TURNS) in hits[0], hits[0]
+
+    def test_capture_observation_line_hosted(self, client, caplog):
+        """#2335 WI-1d: the hosted capture emits the observation line with
+        lane=hosted + the size fields (the hosted llm:mock lane runs the
+        real v2 extractor, so chunks/edus/max-tokens are present)."""
+        import json as _json
+        import logging
+        conv = [{"role": "user", "content": "Let's use PostgreSQL."},
+                {"role": "assistant", "content": "Agreed."}]
+        # the observation line is emitted by the SHARED sdk helper (_logger
+        # = "tortoise.sdk") — capture at the propagation root
+        with caplog.at_level(logging.INFO, logger="tortoise"):
+            r = client.post("/v1/sessions", json={
+                "session_id": "obs-hosted", "conversation": conv})
+        assert r.status_code == 200, r.text
+        lines = [rec.getMessage() for rec in caplog.records
+                 if "capture_observation" in rec.getMessage()]
+        assert lines, "a hosted capture must emit the observation line"
+        obs = _json.loads(lines[0].split("capture_observation ", 1)[1])
+        assert obs["lane"] == "hosted"
+        assert obs["mode"].startswith("llm:")
+        assert obs["chunks"] == 1, obs
+        assert obs["edus"] == 2, obs
+
+    def test_quota_refusal_record(self, client, caplog):
+        """#2335 WI-1c: the 402 points-gate raise emits a structured record
+        with est-at-refusal / count / max / tier — the hosted-low proxy for
+        the 402-filtered population (refusal-heavy = UNKNOWN, not covered)."""
+        import logging
+        dense = ("we should go. " * 300)  # 4500 chars < 5000 turn limit
+        conversation = [{"role": "user", "content": dense}] * 51
+        with caplog.at_level(logging.WARNING, logger="tortoise.api"):
+            r = client.post("/v1/sessions", json={
+                "session_id": "quota-record-session", "conversation": conversation,
+            })
+        assert r.status_code == 402, r.text[:200]
+        hits = [rec.getMessage() for rec in caplog.records
+                if "quota_refusal" in rec.getMessage()]
+        assert hits, "the 402 raise must emit a structured refusal record"
+        msg = hits[0]
+        # est-at-refusal, count, max, tier all present
+        assert "est=" in msg and "max=" in msg, msg
+        assert "tier=" in msg, msg
 
     def test_extraction_amplifier_402_zero_growth(self, client):
         """Dense sentence content → extraction-aware estimate exceeds the
