@@ -145,6 +145,136 @@ def apply_payload_operators(proj, sdk, operators: list, *,
 # and the hosted commit endpoint (_execute_commit_writes §6b, migrated in
 # #2193) share ONE consumer-side discipline.
 
+def _supersession_fold_order(proj, records):
+    """#2249: stable fold order for same-payload supersession chains.
+
+    A same-payload chain (A→B and B→C in ONE payload) folds correctly only
+    when A→B runs BEFORE B→C: B→C terminalizes B, and the fold-time
+    visible-successor gate then skips A→B (its successor B is
+    recall-excluded) leaving A live with its fold unjournaled. Payload
+    emission order is NOT controllable (extractor embeds preserve LLM order;
+    hosted §6b processes external client payloads verbatim) — reverse
+    emission [B→C, A→B] is a natural outcome. This pre-pass returns an
+    order in which every chain record folds while its successor is still
+    live, making the end state order-INDEPENDENT.
+
+    Mechanics: resolve, via TWO batched graph probes (never canonical-id
+    math — legacy non-canonical-id carriers make obj-<sha26(name)> unsound;
+    see test_apply_supersessions_chain_legacy_noncanonical_mid_node), the
+    object each entity record's fold would terminalize (ref side, mirroring
+    the loop's id-match-wins / single-name / never-guess discipline) and
+    the id-carrying carriers under each successor name. Edge R→S when S's
+    fold terminalizes an object in R's successor-candidate set. Stable Kahn
+    (min-heap by original index) → fold order. Records that never fold
+    (missing/self/pt_ lane), unresolved/ambiguous refs, and cycles + their
+    transitive DEPENDENTS (records a cycle member points to) contribute no
+    edges and keep PAYLOAD order (deterministic, reproduces pre-fix
+    outcomes). Records that FEED a cycle (a cycle member is their
+    successor) sort AHEAD of it — deterministic + monotonic (hoisting can
+    only add folds; pinned by test_apply_supersessions_cycle_predecessor_hoisted).
+    Never raises — any doubt
+    fails soft to payload order. The main loop re-probes per record at
+    fold time (its gates are STATUS-dependent — the pre-pass resolves
+    structure only, so no TOCTOU: the Object graph is write-static inside
+    apply_supersessions, entities precede every call).
+    """
+    records = list(records or [])
+    n = len(records)
+    if n < 2:
+        return list(range(n))
+    entity = []  # (original_index, ref, supersedes_by) — entity lane only
+    for idx, record in enumerate(records):
+        ref = str(_sr_attr(record, "superseded") or "").strip()
+        supersedes_by = str(_sr_attr(record, "supersedes_by") or "").strip()
+        if not ref or not supersedes_by or ref == supersedes_by \
+                or ref.startswith("pt_"):
+            # missing/self are warned + skipped by the loop; pt_ records
+            # ride supersede() (separate lane) — none participate in edges
+            continue
+        entity.append((idx, ref, supersedes_by))
+    if len(entity) < 2:
+        return list(range(n))
+    # Batch probe 1 — successor-name candidates (id-carrying rows only: an
+    # id-less carrier can never be a VISIBLE successor — the loop's
+    # has_visible_distinct requires an id).
+    sb_names = sorted({sb for _, _, sb in entity})
+    cand_rows = proj.g.query(
+        "MATCH (o:Object) WHERE o.name IN $names RETURN o.name, o.id",
+        params={"names": sb_names}).result_set
+    cand_ids: dict[str, set] = {}
+    for name, oid in cand_rows:
+        if oid:
+            cand_ids.setdefault(name, set()).add(oid)
+    # Batch probe 2 — ref-side resolution, mirroring the loop's discipline
+    # (apply_supersessions): an id-form ref wins (rows whose id == ref);
+    # two ids claiming one ref = corruption never-guess; a name-form ref
+    # resolves only via a SINGLE carrier (>1 = never-guess). Distilled to
+    # the single object each fold would terminalize (its real id — None for
+    # legacy id-less targets, which can never be an edge endpoint: the loop
+    # folds them by name but they are id-less, and only id-carrying nodes
+    # can be visible successors).
+    refs_sorted = sorted({ref for _, ref, _ in entity})
+    tgt_rows = proj.g.query(
+        "MATCH (o:Object) WHERE o.id IN $ids OR o.name IN $names "
+        "RETURN o.id, o.name",
+        params={"ids": refs_sorted, "names": refs_sorted}).result_set
+    by_id: dict[str, list] = {}
+    by_name: dict[str, list] = {}
+    for oid, name in tgt_rows:
+        if oid and oid in refs_sorted:
+            by_id.setdefault(oid, []).append((oid, name))
+        if name in refs_sorted:
+            by_name.setdefault(name, []).append((oid, name))
+    target_id: dict[str, str] = {}  # ref -> real id its fold terminalizes
+    for ref in refs_sorted:
+        if by_id.get(ref):
+            if len(by_id[ref]) > 1:  # duplicate id claim — loop never-guesses
+                continue
+            target_id[ref] = by_id[ref][0][0]
+        elif len(by_name.get(ref, [])) == 1:
+            target_id[ref] = by_name[ref][0][0] or None  # legacy id-less → None
+        # else ambiguous (>1 name) or dangling → the loop skips → no edges
+    # Edges over ORIGINAL record indices: R must fold before S when S's
+    # fold terminalizes an object R's fold needs visible (S.target ∈ R's
+    # successor-name candidates). Plan-review P0: the edge runs NEEDER→
+    # TERMINALIZER — the producer record (whose visible-successor gate needs
+    # its successor live) sorts BEFORE the record that would terminalize it.
+    # Over-edging is harmless (fold-order cosmetics only); under-edging
+    # fails soft to payload order. Index-space: entity carries ORIGINAL
+    # record indices and edges/indeg are keyed by them, so a payload mixing
+    # entity records with pt_/self/missing records (which contribute no
+    # edges but occupy positions) wires constraints onto the RIGHT records.
+    succ: dict[int, list[int]] = {}
+    indeg = [0] * n
+    for ridx, _ref, sb in entity:                     # R — supersedes_by sb
+        for sidx, s_ref, _s_sb in entity:             # S — terminalizes target_id[s_ref]
+            if sidx == ridx:
+                continue
+            t = target_id.get(s_ref)
+            if t and t in cand_ids.get(sb, set()):
+                succ.setdefault(ridx, []).append(sidx)
+                indeg[sidx] += 1
+    # Stable Kahn over ALL n positions (entity members carry the edges;
+    # non-entity records have indeg 0 and keep payload positions): pop the
+    # lowest original index among ready nodes; leftover (cycles + their
+    # transitive dependents) appends in original-index order == payload
+    # order for that block (deterministic, pre-fix outcome).
+    import heapq
+    ready = [i for i in range(n) if indeg[i] == 0]
+    heapq.heapify(ready)
+    order: list[int] = []
+    while ready:
+        i = heapq.heappop(ready)
+        order.append(i)
+        for j in succ.get(i, []):
+            indeg[j] -= 1
+            if indeg[j] == 0:
+                heapq.heappush(ready, j)
+    if len(order) < n:  # cycle block — append leftovers in payload order
+        remaining = sorted(set(range(n)) - set(order))
+        order.extend(remaining)
+    return order
+
 
 def apply_supersessions(proj, sdk, records, *, session_id, warn=None):
     """Apply canonical supersession records — the ONE consumer-side
@@ -173,18 +303,36 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None):
     divergence). pt_ terminal olds remain unreachable via capture
     (S3 point exclusion + supersede_point's own guard); their silent
     idempotent skip guards out-of-band delivery. Same-commit supersession
-    CHAINS (A→B and B→C in one payload) must be emitted in fold order
-    ([A→B, B→C]): the visible-successor gate warns and skips a fold whose
-    successor this same payload has already terminalized — reverse order
-    leaves A live with its A→B fold unjournaled (order-sensitivity tracked
-    in #2249; extractor-side emission currently preserves embed/LLM order
-    with no sort). Returns the number of
+    CHAINS (A→B and B→C in one payload) fold in DEPENDENCY order regardless
+    of emission order (#2249): the pre-pass orders records so each fold
+    runs while its successor is still live, and the visible-successor gate
+    (which warns + skips a fold whose successor is recall-excluded) stays
+    the same-payload-vs-cross-commit discriminator at fold time — a
+    successor terminalized EARLIER IN THIS PAYLOAD folds after its
+    producer; one terminal BEFORE the payload still skips (guard-(h)
+    semantics). Returns the number of
     records applied.
     """
     if warn is None:
         warn = _logger.warning
     applied = 0
-    for record in records or []:
+    # #2249: same-payload chains fold in DEPENDENCY order (a silent stable
+    # pre-pass — payloads with <2 entity records or any resolution doubt
+    # fall through to payload order). The per-record gates below re-run
+    # unchanged at fold time on LIVE status — they remain the
+    # same-payload/cross-commit discriminator (guard (h)). A pre-pass
+    # failure (transient graph error) fails SOFT to payload order with one
+    # warn — pre-fix partial-progress semantics are preserved exactly (the
+    # hosted §6b caller runs this bare; capture wraps the whole call).
+    records = list(records or [])
+    try:
+        fold_order = _supersession_fold_order(proj, records)
+    except Exception as exc:  # pragma: no cover - transient graph failure
+        warn(f"supersession fold-order pre-pass failed ({exc}) — "
+             f"falling back to payload order")
+        fold_order = list(range(len(records)))
+    for i in fold_order:
+        record = records[i]
         ref = str(_sr_attr(record, "superseded") or "").strip()
         supersedes_by = str(_sr_attr(record, "supersedes_by") or "").strip()
         evidence = str(_sr_attr(record, "evidence") or "")
