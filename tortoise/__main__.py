@@ -2116,6 +2116,29 @@ def _cmd_create_point(args) -> int:
     return 0
 
 
+def _context_source_label(api_url: str | None) -> str:
+    """Hosted-mode source label for the session-start digest header (#2209).
+
+    Names which memory is answering so a stored hosted key can never
+    silently flip the hook's digest local to hosted without a visible
+    switch. Returns 'hosted (<host>)' with scheme/path stripped (e.g.
+    'hosted (api.premiselabs.co)'); falls back to the raw URL when it has
+    no parseable host. Userinfo (basic-auth credentials) is stripped so a
+    credentialed api_url never leaks into the injected digest (review P2,
+    #2209). Local mode uses the plain 'local' label at the call site.
+    """
+    from urllib.parse import urlsplit
+    url = (api_url or "").strip()
+    if not url:
+        return "hosted"
+    try:
+        netloc = urlsplit(url if "://" in url else f"//{url}").netloc
+    except ValueError:
+        return f"hosted ({url.rsplit('@', 1)[-1]})"
+    netloc = netloc.rsplit("@", 1)[-1]  # never echo userinfo (user:pass@)
+    return f"hosted ({netloc or url})"
+
+
 def _cmd_context(args) -> int:
     """Print a compact memory digest for agent session-start injection.
 
@@ -2125,6 +2148,10 @@ def _cmd_context(args) -> int:
 
     Hosted mode (\".tortoise\" config): calls the hosted API.
     Local mode (embedded/Docker): uses TortoiseSDK.session_context().
+
+    #2209: the digest header always names which memory is answering
+    ("hosted (api.premiselabs.co)" vs "local") — a stored hosted key must
+    never swap the source silently.
     """
     import json as _json, os as _os, sys as _sys  # noqa: E401, I001
 
@@ -2140,6 +2167,10 @@ def _cmd_context(args) -> int:
         print(f"Warning: config at {e} is corrupt or unreadable — falling back "
               "to local memory mode.", file=_sys.stderr)
         api_key = None
+
+    # #2209: which memory is answering — computed once the resolver has
+    # picked a mode, stamped on the digest header / empty notice below.
+    source_label = _context_source_label(api_url) if api_key else "local"
 
     if api_key:
         # ── Hosted: query the API ──
@@ -2173,10 +2204,10 @@ def _cmd_context(args) -> int:
             return 1
 
     if data.get("no_prior_sessions") or not (data.get("diary_entries") or data.get("recent_points") or data.get("recent_events")):
-        print("<Tortoise memory is empty — no prior sessions yet.>")
+        print(f"<Tortoise memory is empty — no prior sessions yet. Source: {source_label}>")
         return 0
 
-    print("# Tortoise memory (from previous sessions)")
+    print(f"# Tortoise memory (from previous sessions) — {source_label}")
 
     diary = data.get("diary_entries") or []
     if diary:
@@ -4293,6 +4324,11 @@ def _cmd_index_github(args):
     point_model = MockModel("cheap")
     relation_model = MockModel("reason")
     indexed, skipped, unreadable, errors = 0, 0, 0, 0
+    # already_indexed counts ONLY the idempotent re-run class (content-hash
+    # skips) — those prove PRIOR success. No-claims skips (fresh-run files
+    # with nothing extractable) and unreadable skips prove nothing, and the
+    # summary line keeps `skipped` as their SUM (display unchanged).
+    already_indexed = 0
 
     for i, fp in enumerate(md_files, 1):
         rel = fp.relative_to(repo_path)
@@ -4316,6 +4352,7 @@ def _cmd_index_github(args):
         if content_hash in indexed_hashes:
             print(f"  [{i}/{total}] {rel}… ⊙ (already indexed)")
             skipped += 1
+            already_indexed += 1
             continue
         print(f"  [{i}/{total}] {rel}…", end=" ", flush=True)
         try:
@@ -4362,16 +4399,20 @@ def _cmd_index_github(args):
         __import__("shutil").rmtree(tmpdir, ignore_errors=True)
     # #32/#39 lineage: index failures must stay VISIBLE to callers/CI — the
     # onboard step-3 gates "Onboarding complete." on this rc (#39 killed the
-    # silent-failure false-green). An all-unreadable run (0 indexed but
-    # unreadable files skipped) is the same failure class #2201 fixes, so it
-    # must exit 1 too; a partial run (some indexed) keeps exit 0. `skipped >
-    # 0` keeps an idempotent RE-run green: on re-runs the already-indexed
-    # skips prove prior success (a repo with a permanent unreadable file
-    # indexes 0 on re-run — readable docs are hash-skipped — yet must return
-    # the same rc 0 its first run returned). An all-unreadable FRESH run has
-    # skipped == 0 and still exits 1. No-claims skips are the pre-existing
-    # "nothing to extract" success class, unchanged from before #2201.
-    return 0 if errors == 0 and (indexed > 0 or unreadable == 0 or skipped > 0) else 1
+    # silent-failure false-green). Failure arm: NOTHING was indexed while
+    # files were unreadable (the #2201 dangling-symlink/undecodable class).
+    # Rescues from that arm: (a) some files indexed → partial success, rc 0;
+    # (b) no unreadable files → a clean no-claims / pure re-run is the
+    # pre-existing "nothing to extract" success class, rc 0; (c) already-
+    # indexed re-run skips, which prove PRIOR success (a repo with a
+    # permanent unreadable file indexes 0 on re-run — readable docs are
+    # hash-skipped — and must return the same rc 0 its first run returned).
+    # No-claims skips prove nothing about the unreadable failures in the
+    # SAME run, so they never rescue the rc: a fresh run mixing an
+    # unreadable file with no-claim stubs (0 indexed) must exit 1 — the
+    # pre-fix rule read any `skipped > 0` as prior-success and masked it.
+    return 0 if errors == 0 and (
+        indexed > 0 or unreadable == 0 or already_indexed > 0) else 1
 
 
 def _cmd_doctor(args):

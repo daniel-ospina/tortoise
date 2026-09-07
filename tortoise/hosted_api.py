@@ -1317,6 +1317,112 @@ def _clean_key_label(value: object) -> str | None:
     return s[:KEY_NAME_MAX] if s else None
 
 
+# #2426: configurable API-key expiration. Market-standard (GitHub/Azure/
+# Anthropic/Vercel/DigitalOcean/Cloudflare) mint-time expiry: the key's
+# lifetime is fixed AT CREATION and immutable afterwards (no PATCH-expiry —
+# Anthropic rule). Body may carry EITHER ``expires_in`` (integer days,
+# 1-366 — GitHub's ceiling; a 366-day span = the 1y preset) OR
+# ``expires_at`` (ISO-8601 date or datetime). Absent = Never (existing
+# behavior, now an explicit choice). Validation is 422 — never a silent
+# degradation (unlike a label, expiry is a security property).
+_KEY_MAX_EXPIRY_DAYS = 366
+
+
+def _validate_mint_expiry(body: dict) -> str | None:
+    """Resolve a mint body's optional expiry to a normalized ``expires_at``
+    ISO timestamp (None = Never). Raises HTTPException(422) on:
+    - both ``expires_in`` and ``expires_at`` present (mutually exclusive),
+    - ``expires_in`` not an int in 1..366 (bool/float/str/non-int reject),
+    - ``expires_at`` not ISO-8601 parseable, not a future date, or more than
+      ``_KEY_MAX_EXPIRY_DAYS`` out (Never is the escape hatch for longer).
+
+    ``expires_in`` is the dashboard path (presets + Custom date → days):
+    the timestamp is mint-time + N days, so a 1-day key lives ~24h and a
+    date-only ``expires_at`` is normalized to END of that UTC day (the key
+    stays valid through the chosen date — auth refuses at expires_at <= now).
+    Naive datetimes are interpreted as UTC (the auth layer compares against
+    aware ``datetime.now(UTC)``; every store timestamp is UTC).
+    """
+    has_in = body.get("expires_in") is not None
+    has_at = body.get("expires_at") is not None
+    if has_in and has_at:
+        raise HTTPException(
+            status_code=422,
+            detail="expires_in and expires_at are mutually exclusive — send one",
+        )
+    now = datetime.now(UTC)
+    if has_in:
+        raw = body.get("expires_in")
+        # bool is an int subclass — a JSON true would pass isinstance; reject.
+        if isinstance(raw, bool) or not isinstance(raw, int):
+            raise HTTPException(
+                status_code=422,
+                detail="expires_in must be an integer number of days (1-366)",
+            )
+        if not 1 <= raw <= _KEY_MAX_EXPIRY_DAYS:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "expires_in must be between 1 and 366 days"
+                    f" ({_KEY_MAX_EXPIRY_DAYS})"
+                ),
+            )
+        return (now + timedelta(days=raw)).isoformat()
+    if has_at:
+        raw = body.get("expires_at")
+        if not isinstance(raw, str):
+            raise HTTPException(
+                status_code=422,
+                detail="expires_at must be an ISO-8601 date or datetime",
+            )
+        text = raw.strip()
+        is_date_only = len(text) == 10 and text.count("-") == 2
+        try:
+            if is_date_only:
+                # Date-only → end of that UTC day (valid through the date).
+                parsed = datetime.fromisoformat(text + "T23:59:59+00:00")
+            else:
+                parsed = datetime.fromisoformat(
+                    text[:-1] + "+00:00" if text.endswith("Z") else text)
+                if parsed.tzinfo is None:
+                    parsed = parsed.replace(tzinfo=UTC)
+        except ValueError:
+            raise HTTPException(
+                status_code=422,
+                detail="expires_at must be an ISO-8601 date or datetime",
+            ) from None
+        if parsed <= now:
+            raise HTTPException(
+                status_code=422,
+                detail="expires_at must be in the future",
+            )
+        # #2426 code-review P2: an explicit non-UTC offset (e.g. +05:00) must
+        # not survive into the stored expires_at — every registry-lane expiry
+        # predicate compares LEXICOGRAPHIC ISO strings against a +00:00 now
+        # (auth, MCP apikey_verify, session-key caps, quota), so an offset
+        # expiry would authenticate ~offset-hours late/early and diverge from
+        # the supabase lane's instant compare. Normalize to UTC here.
+        parsed = parsed.astimezone(UTC)
+        # Ceiling: date-only inputs compare on the DATE — end-of-UTC-day can
+        # cross the 366-day instant for part of the day, and the date-only
+        # contract is "valid through the chosen date", so comparing the date
+        # keeps it symmetric with `expires_in: 366` always passing.
+        if is_date_only:
+            within = parsed.date() <= (now + timedelta(days=_KEY_MAX_EXPIRY_DAYS)).date()
+        else:
+            within = parsed <= now + timedelta(days=_KEY_MAX_EXPIRY_DAYS)
+        if not within:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "expires_at must be within 366 days"
+                    " — choose No expiration for longer-lived keys"
+                ),
+            )
+        return parsed.isoformat()
+    return None
+
+
 def _probe_db() -> dict:
     """Deep-check the graph DB through the shared/default connection (#1384).
 
@@ -1592,11 +1698,18 @@ async def get_current_team(request: Request) -> dict:
                 break
         # Fallback: legacy provision_tenant keys (key_prefix=team_id[:8])
         # won't match the token[:10] prefix. In that case scan all keys.
+        # #2426: the scan carries the SAME expires_at filter as the two
+        # lookups above — an expired key whose prefix scan came back empty
+        # must not be rescued here (an expired #2426 durable or bootstrap
+        # stops authenticating in BOTH lanes; #742 intent). Legacy nodes
+        # lack the prop → expires_at NULL → pass the filter unchanged.
         if team_id is None:
             key_result = sdk._get_registry().query(
                 "MATCH (k:APIKey) WHERE k.revoked_at IS NULL "
+                "AND (k.expires_at IS NULL OR k.expires_at > $now) "
                 "RETURN k.team_id, k.id, k.key_hash, k.created_by, "
-                "k.graph_id, k.scopes, k.delegation_depth, k.created_by_key_id"
+                "k.graph_id, k.scopes, k.delegation_depth, k.created_by_key_id",
+                params={"now": now_iso},
             ).result_set
             for k_team_id, k_id, stored_hash, k_created_by, k_gid, k_sc, k_dd, k_cbk in key_result:
                 if verify_api_key(token, stored_hash):
@@ -1781,6 +1894,129 @@ async def _get_current_team_supabase(request: Request, token: str) -> dict:
         raise HTTPException(status_code=500, detail="Auth error")  # noqa: B904
 
 
+# ── #2230/#2299: session-lane ?team_id= pin enforcement (shared helpers) ──
+# Route-coverage matrix (audited for #2299): every session-capable key-WRITE
+# route honors a truthy ?team_id= in session mode through exactly ONE seam —
+#   * DI seam (get_current_team_session → _session_user_team): the dependency
+#     membership-checks the pin and resolves the team FROM it —
+#       POST   /v1/team/keys            create_api_key (mint)
+#       DELETE /v1/team/keys/{key_id}   revoke_api_key
+#     A key outside the DI-resolved team then fails closed 403 "Not your API
+#     key" at the lookup. No route in this set CANNOT honor a pin: the pin
+#     selects WHICH team's inventory is authoritative, never a bypass.
+#   * inline seam (_session_pinned_team membership gate + the key lookup +
+#     _ensure_key_in_pinned_team fail-closed) — handlers resolved via
+#     get_current_user (no team dependency):
+#       PATCH  /v1/team/keys/{key_id}   toggle_api_key_enabled
+#       PATCH  /v1/team/dashboard-login toggle_dashboard_login (no key_id —
+#       the pin IS the write target; the membership gate here + the
+#       _require_owner_admin role gate on the pinned team enforce it).
+#     Server gate on the dashboard-login route = enforcement-WHEN-PINNED +
+#     fail-closed non-member 403 (defense-in-depth and the contract for
+#     PINNED clients). The first-party client caller TODAY
+#     (website/apps/dashboard/src/main.jsx toggleDashboardKeyLogin) sends NO
+#     ?team_id= on this route and the client tripwire (WRITE_FNS) boundary
+#     excludes it — unpinned toggles resolve memberships[0] (the
+#     long-standing default), so the wrong-team-write class is NOT closed
+#     end-to-end for this route YET; closing that client gap is a separate
+#     client-side change (this server contract is ready for it).
+#   * body-pin seam (documented — NOT query-pinned, different contract):
+#       POST   /v1/session/key          session_key (E1 mint) carries the
+#     team selector in the BODY (required when multi-membership) and
+#     membership-checks it inline; the client tripwire never pins it.
+#     #2380: the recovery purpose additionally carries an owner/admin ROLE
+#     gate (the #2297 POLICY A seam) on the RESOLVED tid — body team_id
+#     when multi-membership, else memberships[0]; bootstrap is member-open.
+#     Not a pin seam — a role gate layered on the body's resolved team.
+#   * internal cascades (team-delete revoke_team_api_keys, graph-delete key
+#     cascade) derive the team from the deleted entity — no caller pin.
+#   * token-driven agent routes (signup/recover/token-revoke) resolve the
+#     team from the signup TOKEN, never a session ?team_id= — the token IS
+#     the pin (no query seam exists).
+# A FUTURE session-lane key-write endpoint MUST resolve its ?team_id= through
+# the DI seam or these helpers; the parity tripwire test
+# (tests/test_key_write_pins_tripwire.py — the server counterpart of the
+# client keyTeamPinsTripwire.test.js) guards regressions on the four
+# enumerated /v1/team/keys + /v1/team/dashboard-login routes. The body-pin /
+# cascade / token rows above are documented, NOT scanned; a FUTURE endpoint
+# on a NEW prefix must deliberately extend KEY_WRITE_HANDLERS + this matrix +
+# the client tripwire (review-guarded, not test-provable by this file).
+
+
+def _session_pinned_team(cp: object, user_id: str, pinned: str | None, *,
+                         memberships: list[dict] | None = None) -> str | None:
+    """#2230/#2299: membership-gate a truthy ?team_id= pin (session lane).
+
+    A truthy pin must be one of the session user's ACTIVE memberships, else
+    the call fails closed with 403 "No membership in team" — the SAME detail
+    _session_user_team raises at DI time (POST /v1/team/keys mint, DELETE
+    revoke) and the mint/list pins raise. This is the SINGLE membership
+    predicate the DI seam and the inline lanes share, so a future key-write
+    endpoint cannot silently ignore the pin again (the pre-#2230 PATCH
+    failure mode).
+
+    The gate MUST run before any key lookup: a non-member pin 403s whether
+    or not the key_id exists — no cross-team key-existence oracle, mirroring
+    _session_user_team's DI-time gate.
+
+    Returns the validated pinned team id, or None when unpinned (the
+    caller's intrinsic-team default governs — see the #2230 divergence note
+    in toggle_api_key_enabled's docstring).
+
+    memberships: optional precomputed user_memberships rows. The DI seam
+    (_session_user_team) and the dashboard-login lane pass their list (they
+    queried it anyway for the empty-check + memberships[0] default — avoids
+    a second control-plane query); the toggle-PATCH lane omits it and the
+    helper queries lazily (only paid when a pin is actually present).
+    """
+    if not pinned:
+        return None
+    if memberships is None:
+        from tortoise.supabase_control import user_memberships
+
+        try:
+            memberships = user_memberships(cp, user_id)
+        except RuntimeError:
+            # #1719/#2299: the lazy membership read is a control-plane call —
+            # an outage/schema-cache failure degrades to the repo-standard
+            # 503 control_plane_unavailable (the mint-path map), never a raw
+            # 500 from the global handler. Only this lazy read is wrapped;
+            # the precomputed-membership callers (DI seam) run their own
+            # earlier read — pre-existing, left as-is.
+            raise _control_plane_unavailable() from None
+    if pinned not in {m["team_id"] for m in memberships}:
+        raise HTTPException(status_code=403, detail="No membership in team")
+    return pinned
+
+
+def _ensure_key_in_pinned_team(pinned_team_id: str | None,
+                               key_team_id: str | None, *,
+                               required: bool = False) -> None:
+    """#2230/#2299: fail-closed half of the ?team_id= pin — a TRUTHY pinned
+    team must own the target key or the call 403s "Not your API key" (the
+    same detail revoke_api_key's team-mismatch raises; the DI seam compares
+    against the DI-resolved team — pinned ?team_id= or the memberships[0]
+    default — and revoke passes that resolved team here).
+
+    required=False (default — the optional-pin PATCH contract): a None
+    pinned_team_id means "no pin" and no-ops — the key's intrinsic team
+    governs. A truthy pinned team must equal the key's team or the call 403s.
+
+    required=True (the DI/authority lanes — revoke): pinned_team_id is the
+    RESOLVED team and must own the key UNCONDITIONALLY — a None resolved
+    team still fails closed against any non-None key team (the old strict
+    `!=` compare at the None edge), so an authority that fails to resolve a
+    team can never silently widen the revoke. Both None is the sole no-raise
+    edge (None != None → False, matching the old compare).
+
+    Callers run this AFTER the key lookup; the membership gate
+    (_session_pinned_team) always precedes the lookup."""
+    if pinned_team_id is None and not required:
+        return
+    if pinned_team_id != key_team_id:
+        raise HTTPException(status_code=403, detail="Not your API key")
+
+
 async def _session_user_team(request: Request, user: dict) -> dict:
     """Resolve a team dict for a SESSION-authenticated user (JWT).
 
@@ -1802,15 +2038,19 @@ async def _session_user_team(request: Request, user: dict) -> dict:
     memberships = user_memberships(cp, user["user_id"])
     if not memberships:
         raise HTTPException(status_code=403, detail="No team membership")
-    team_id = request.query_params.get("team_id") or memberships[0]["team_id"]
-    # #1148 review P1 (gate-closing): the session user must actually be a
-    # member of the requested team — otherwise ?team_id= lets any session
-    # user mint keys for / restore backups into / open billing for ANY team
-    # id they can guess (cross-team key minting, bypassing the
-    # dashboard_key_login flag by design). Same invariant as list_graphs/
-    # create_graph (_membership_team).
-    if team_id not in {m["team_id"] for m in memberships}:
-        raise HTTPException(status_code=403, detail="No membership in team")
+    # #1148 review P1 (gate-closing) + #2299 (consolidation): the session
+    # user must actually be a member of the requested team — otherwise
+    # ?team_id= lets any session user mint keys for / restore backups into /
+    # open billing for ANY team id they can guess (cross-team key minting,
+    # bypassing the dashboard_key_login flag by design). Same invariant as
+    # list_graphs/create_graph (_membership_team). #2299: the check routes
+    # through the shared _session_pinned_team predicate — the SAME membership
+    # gate the inline key-write lanes use — so every session-lane ?team_id=
+    # pin resolves through one implementation. The default (memberships[0])
+    # is always a membership, so only a bad PIN can raise here.
+    team_id = _session_pinned_team(
+        cp, user["user_id"], request.query_params.get("team_id"),
+        memberships=memberships) or memberships[0]["team_id"]
     from tortoise.supabase_control import (
         _QUOTA_SELECT,
         _TEAM_ADDITIVE_0015_TIER,
@@ -2095,6 +2335,17 @@ async def get_current_team_gated(request: Request) -> dict:
     return await get_current_team(request)
 
 
+# #2297/#2380: the session_user_id dict key is the auth-lane discriminator
+# the role gates predicate on — attached ONLY on the JWT branch of
+# get_current_team_session (see below). Key-auth team dicts carry none;
+# dependency-override dicts are returned UNCHANGED (the test seam carries
+# session_user_id only when the override supplies it — ~8 files inject
+# dict(TEST_TEAM, session_user_id=...) to emulate a session face). Named
+# constant = single source of the literal (the
+# _require_owner_admin_if_session helper reads it once).
+_SESSION_USER_ID_KEY = "session_user_id"
+
+
 async def get_current_team_session(request: Request, gate_key_login: bool = True) -> dict:
     """Management-endpoint dependency: accept a session JWT (verified
     identity) OR an API key. Key-auth goes through get_current_team + the
@@ -2155,7 +2406,15 @@ async def get_current_team_session(request: Request, gate_key_login: bool = True
     # exchange); the key-auth/override branches return before this, so
     # their team dicts carry no session_user_id (create_api_key falls back
     # to "api").
-    team["session_user_id"] = user["user_id"]
+    team[_SESSION_USER_ID_KEY] = user["user_id"]
+    # #2380 (Task 4): explicit auth_lane marker — documentation-in-code for
+    # the session-vs-key distinction the #2297/#2380 role gates predicate
+    # on. THE GATE PREDICATE STAYS ON session_user_id PRESENCE, NOT this
+    # marker: the dependency-override seam returns override dicts unchanged
+    # (~15+ suites inject dict(TEST_TEAM, session_user_id=...)), so a
+    # marker-required predicate would silently stop gating the override
+    # seam. auth_lane absent = key-auth / override lane.
+    team["auth_lane"] = "session"
     return team
 
 
@@ -4915,6 +5174,7 @@ def _mint_key(team_id: str, *, graph_id: str | None = None,
               prefix: str | None = None,
               created_via: str = "provisioned",
               name: str | None = None,
+              expires_at: str | None = None,
               acl_strict: bool = False) -> dict:
     """C3 (#2112) — the ONE low-level key write (registry + Supabase).
     Generalized from C2's _mint_graph_key (D14 — never re-implemented):
@@ -4923,10 +5183,15 @@ def _mint_key(team_id: str, *, graph_id: str | None = None,
     carry escalation; key mint ∩ child policy), delegation_depth is 0 for
     key-minted children or None for owner-minted keys.
 
+    #2426: optional ``expires_at`` (normalized ISO timestamp or None = Never,
+    resolved by _validate_mint_expiry at the endpoint) rides BOTH lanes —
+    the supabase api_keys row and the registry APIKey node prop. The mint
+    caller echoes it in the response envelope.
+
     Returns {id, key_plaintext, key_prefix, scopes, delegation_depth,
-    graph_id, created_by_key_id, created_at}. key_plaintext appears ONLY
-    in this return (reveal-once: the caller puts it in the 201 envelope /
-    mint response and nowhere else; hash-only stored). Raises
+    graph_id, created_by_key_id, created_at, expires_at}. key_plaintext
+    appears ONLY in this return (reveal-once: the caller puts it in the 201
+    envelope / mint response and nowhere else; hash-only stored). Raises
     _KeyCapExceeded when the team is at max_api_keys (caller maps 409).
     C4 (#2113) ACL seam fires for graph-bound mints (fail-soft no-op).
     """
@@ -4987,7 +5252,7 @@ def _mint_key(team_id: str, *, graph_id: str | None = None,
             "created_by": created_by,
             "created_at": now,
             "revoked_at": None,
-            "expires_at": None,
+            "expires_at": expires_at,
             "name": name,
             # C1 columns: graph scope + allowlist + mint lineage
             "graph_id": graph_id,
@@ -5006,6 +5271,7 @@ def _mint_key(team_id: str, *, graph_id: str | None = None,
             graph_id=graph_id, scopes=final_scopes or None,
             created_by_key_id=caller_key_id, delegation_depth=delegation_depth,
             prefix=prefix, name=name, created_via=created_via,
+            expires_at=expires_at,
         )
         kid = created["id"]
         api_key = created["api_key"]
@@ -5020,6 +5286,7 @@ def _mint_key(team_id: str, *, graph_id: str | None = None,
         "graph_id": graph_id,
         "created_by_key_id": caller_key_id,
         "created_at": now,
+        "expires_at": expires_at,
     }
 
 
@@ -5137,6 +5404,12 @@ async def create_api_key(request: Request, response: Response, team: dict = Depe
     deleg=0 child ∩ child policy, escalation request 403; deleg=0 caller
     → 403). Bodies default to {} (legacy clients) → the byte-identical
     pre-C3 owner mint (tt_, deleg NULL, no scopes).
+    #2426: the body may additionally carry {expires_in? (days 1-366) XOR
+    expires_at? (ISO date/datetime)} on ANY mint class — the stored
+    expires_at is written in both auth lanes and echoed in the response
+    when set (absent = Never, response shape byte-identical). Expiry is
+    immutable after creation (no PATCH-expiry); enforcement already lives
+    in the auth layer (~1558-1570, both lanes).
 
     #765 (plan Task 8 writer inventory): Supabase mode inserts the api_keys
     row via the seam (lookup_hash + key_prefix + created_via='provisioned'),
@@ -5177,18 +5450,23 @@ async def create_api_key(request: Request, response: Response, team: dict = Depe
     # test supplies it — emulated session faces there are role-gated too and
     # must seed owner/admin memberships; production key-auth never carries
     # session_user_id (attached only on the JWT branch of
-    # get_current_team_session). #2299: this gate + the inline pin checks in
-    # the sibling handlers are consolidation candidates — keep this block
-    # liftable into a helper.
-    if team.get("session_user_id") is not None:
-        await _require_owner_admin(team["session_user_id"], team["team_id"])
-    # Key label + C3 (#2112) scoped-mint body: {name?, graph_id?, scopes?}.
+    # get_current_team_session). #2299 (landed): the sibling inline ?team_id=
+    # pin checks consolidated into _session_pinned_team /
+    # _ensure_key_in_pinned_team; this #2297 owner/admin gate stays here —
+    # #2380 (Task 4): consolidated into the shared
+    # _require_owner_admin_if_session helper (fires only when the team dict
+    # carries session_user_id).
+    await _require_owner_admin_if_session(team)
+    # Key label + C3 (#2112) scoped-mint body: {name?, graph_id?, scopes?}
+    # + #2426 expiry: {expires_in? (days 1-366) XOR expires_at? (ISO)}.
     # Read the body defensively — mint bodies are usually `{}` (dashboard/
     # CLI), so parse failures degrade to the legacy owner mint, never a
-    # failure mode.
+    # failure mode. Expiry validation is 422 (a security property, never a
+    # silent degradation); the HTTPException propagates via the except below.
     name = None
     graph_id = None
     requested_scopes = None
+    expires_at = None
     try:
         raw = await _read_capped_body(request, _BODY_MAX_BYTES, _BODY_413_DETAIL)
         payload = _json.loads(raw)
@@ -5196,9 +5474,26 @@ async def create_api_key(request: Request, response: Response, team: dict = Depe
             name = _clean_key_label(payload.get("name"))
             graph_id = payload.get("graph_id")
             requested_scopes = payload.get("scopes")
+            expires_at = _validate_mint_expiry(payload)
     except HTTPException:
         raise
     except Exception:
+        # Legacy-tolerant default: mint bodies are usually `{}` (dashboard/
+        # CLI), so a parse failure of the EMPTY path degrades to the legacy
+        # owner mint, never a failure mode. #2426 code-review P2: a body that
+        # REQUESTED expiry must never silently degrade to a Never key
+        # (fail-open on a security property) — if the raw body hints at the
+        # expiry keys and parsing/validation failed (e.g. a >4300-digit
+        # expires_in trips the json int guard, or malformed JSON), raise 422
+        # instead of minting unbounded.
+        if raw and (b"expires_in" in raw or b"expires_at" in raw):
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "expires_in/expires_at could not be read — send expires_in "
+                    "(1-366 days) or an ISO-8601 expires_at"
+                ),
+            ) from None
         name = None
 
     is_key_caller = team.get("key_id") is not None
@@ -5247,13 +5542,14 @@ async def create_api_key(request: Request, response: Response, team: dict = Depe
                     team["team_id"], scopes=["graphs:read"],
                     delegation_depth=0, caller_key_id=team["key_id"],
                     session_user_id=team.get("session_user_id"),
-                    prefix="tk_", name=name,
+                    prefix="tk_", name=name, expires_at=expires_at,
                 )
             else:
                 _check_team_limit(team, "api_keys")
                 minted = _mint_key(
                     team["team_id"], name=name,
                     session_user_id=team.get("session_user_id"),
+                    expires_at=expires_at,
                 )
         else:
             if not isinstance(requested_scopes, list):
@@ -5322,7 +5618,7 @@ async def create_api_key(request: Request, response: Response, team: dict = Depe
                 team["team_id"], graph_id=graph_id, scopes=final_scopes,
                 delegation_depth=delegation_depth, caller_key_id=caller_key_id,
                 session_user_id=team.get("session_user_id"),
-                prefix=prefix, name=name,
+                prefix=prefix, name=name, expires_at=expires_at,
             )
     except _KeyCapExceeded:
         # D3 asymmetry (pinned): the LEGACY owner mint keeps the historical
@@ -5401,6 +5697,14 @@ async def create_api_key(request: Request, response: Response, team: dict = Depe
         "created_at": now,
         "name": name,
     }
+    if expires_at is not None:
+        # #2426: expiry echo. Deliberately ABSENT on the Never (no expiry
+        # param) mint so the byte-identical legacy shape ({id,key,
+        # key_prefix,created_at,name} — exact-equality pin in
+        # test_writer_inventory) survives for pre-#2426 clients; a mint that
+        # requested expiry always echoes the authoritative stored timestamp
+        # (the dashboard's show-once card + table read it back).
+        resp["expires_at"] = expires_at
     if scoped_request or child_mint:
         # C3 (#2112) scoped/delegated-mint fields — ABSENT on the legacy {}
         # owner-class path so pre-C3 clients see the byte-identical shape
@@ -5437,7 +5741,10 @@ async def list_api_keys(graph_id: str | None = None,
     selfhost. #1708 D7: additive created_via/expires_at in BOTH lanes
     (agent_signup #1709, create_api_key #1753 and session_key mints all
     write them at mint time; the registry list stays None-tolerant for
-    LEGACY nodes minted before those fixes). C3 (#2112): optional
+    LEGACY nodes minted before those fixes). #2380 (P2): the minting USER
+    (created_by, additive) rides both lanes' rows so owners can identify +
+    revoke legacy member-minted owner-class keys — created_by_key_id
+    (delegation) is distinct; legacy NULL rows → None. C3 (#2112): optional
     ?graph_id= filter (per-graph key panel — surface 12) + the C1 tenancy
     columns ride the rows (scopes/delegation_depth/graph_id/created_by_key_id).
     """
@@ -5476,6 +5783,13 @@ async def list_api_keys(graph_id: str | None = None,
                     "scopes": row.get("scopes") or [],
                     "delegation_depth": row.get("delegation_depth"),
                     "created_by_key_id": row.get("created_by_key_id"),
+                    # #2380 (P2): the minting USER (created_by, additive)
+                    # rides the rows so owners can identify + revoke legacy
+                    # member-minted owner-class keys. created_by_key_id
+                    # (delegation attribution) is distinct — this is the
+                    # user_id that minted. Legacy rows (created_by NULL →
+                    # absent key on the row) degrade to None, no error.
+                    "created_by": row.get("created_by"),
                 }
                 for row in keys
             ]
@@ -5487,7 +5801,8 @@ async def list_api_keys(graph_id: str | None = None,
                 "MATCH (k:APIKey {team_id: $tid, graph_id: $gid}) "
                 "RETURN k.id, k.key_prefix, k.created_at, k.last_used_at, "
                 "k.revoked_at, k.name, k.created_via, k.expires_at, "
-                "k.graph_id, k.scopes, k.delegation_depth, k.created_by_key_id "
+                "k.graph_id, k.scopes, k.delegation_depth, k.created_by_key_id, "
+                "k.created_by "
                 "ORDER BY k.created_at DESC",
                 params={"tid": team["team_id"], "gid": graph_id},
             )
@@ -5496,7 +5811,8 @@ async def list_api_keys(graph_id: str | None = None,
                 "MATCH (k:APIKey {team_id: $tid}) "
                 "RETURN k.id, k.key_prefix, k.created_at, k.last_used_at, k.revoked_at, "
                 "k.name, k.created_via, k.expires_at, "
-                "k.graph_id, k.scopes, k.delegation_depth, k.created_by_key_id "
+                "k.graph_id, k.scopes, k.delegation_depth, k.created_by_key_id, "
+                "k.created_by "
                 "ORDER BY k.created_at DESC",
                 params={"tid": team["team_id"]},
             )
@@ -5526,6 +5842,12 @@ async def list_api_keys(graph_id: str | None = None,
                 "scopes": row[9] or [],
                 "delegation_depth": row[10],
                 "created_by_key_id": row[11],
+                # #2380 (P2): minting USER (additive; row[12] appended to
+                # BOTH SELECT variants — graph-filtered AND unfiltered — so
+                # a parity test pins both). None-tolerant: LEGACY nodes
+                # minted before created_by existed lack the prop → JSON
+                # null, no error.
+                "created_by": row[12],
             }
             for row in keys.result_set
         ]
@@ -5545,9 +5867,11 @@ async def revoke_api_key(key_id: str, request: Request, team: dict = Depends(get
     for selfhost.
     #2230: a ?team_id= pin is honored by the SESSION lane automatically —
     get_current_team_session → _session_user_team resolves the pinned
-    (membership-checked) team, so revoke targets the SELECTED team for
-    multi-membership callers; the key-auth/registry lanes resolve the team
-    from the key itself and ignore the query (byte-compatible by design).
+    (membership-checked) team via the shared _session_pinned_team
+    predicate (#2299), so revoke targets the SELECTED team for
+    multi-membership callers; the key-auth/registry lanes resolve the
+    team from the key itself and ignore the query (byte-compatible by
+    design).
     #2297 POLICY A: the SESSION lane is owner/admin-gated (a member must not
     revoke keys it cannot toggle — #1148 parity); KEY-auth unchanged."""
     from tortoise.supabase_control import (
@@ -5577,17 +5901,24 @@ async def revoke_api_key(key_id: str, request: Request, team: dict = Depends(get
     # never carries session_user_id (attached only on the JWT branch of
     # get_current_team_session) — the dependency-override lane (test seam)
     # DOES when a test supplies it (emulated session faces there are
-    # role-gated too). #2299: this gate + the inline pin checks are
-    # consolidation candidates — keep this block liftable into a helper.
-    if team.get("session_user_id") is not None:
-        await _require_owner_admin(team["session_user_id"], team["team_id"])
+    # role-gated too). #2380 (Task 4): consolidated into the shared
+    # _require_owner_admin_if_session helper (fires only when the team dict
+    # carries session_user_id; predicate unchanged — override seam keeps
+    # gating). #2299 (landed): the sibling inline pin checks consolidated
+    # into the shared helpers; this #2297 owner/admin gate stays here.
+    await _require_owner_admin_if_session(team)
     if is_supabase_enabled():
         try:
             row = api_key_by_id(get_control_plane(), key_id)
             if row is None:
                 raise HTTPException(status_code=404, detail="API key not found")
-            if row.get("team_id") != team["team_id"]:
-                raise HTTPException(status_code=403, detail="Not your API key")
+            # #2299: consolidated fail-closed — the DI-resolved team (pinned
+            # ?team_id= or memberships[0] default) must own the key, via the
+            # shared helper (byte-identical detail to the PATCH lane's pin
+            # mismatch). required=True: the resolved team is the AUTHORITY and
+            # must own the key unconditionally — a None team fails closed
+            # (the old strict `!=` behavior), never a silent revoke widen.
+            _ensure_key_in_pinned_team(team["team_id"], row.get("team_id"), required=True)
             if row.get("revoked_at") is not None:
                 return {"revoked": True, "already": True, "key_id": key_id}
             from datetime import datetime
@@ -5608,8 +5939,12 @@ async def revoke_api_key(key_id: str, request: Request, team: dict = Depends(get
         ).result_set
         if not rows:
             raise HTTPException(status_code=404, detail="API key not found")
-        if rows[0][0] != team["team_id"]:
-            raise HTTPException(status_code=403, detail="Not your API key")
+        # #2299: same consolidated fail-closed (registry lane — the resolved
+        # team is the authority; keys are team-scoped by the key there).
+        # required=True, same as the supabase lane: the resolved team must
+        # own the key unconditionally (a None team fails closed, matching
+        # the old strict `!=`).
+        _ensure_key_in_pinned_team(team["team_id"], rows[0][0], required=True)
         if rows[0][1] is not None:
             return {"revoked": True, "already": True, "key_id": key_id}
         from datetime import datetime
@@ -5647,7 +5982,10 @@ async def toggle_dashboard_login(
     management calls (keys mint/revoke, backups restore, billing) return
     403 dashboard_login_disabled; graph endpoints keep accepting the key.
     Anon teams always keep it true (the Protect screen IS the bootstrap).
-    Returns the updated team row."""
+    Returns the updated team row.
+    #2299: the ?team_id= pin routes through the shared membership gate
+    (_session_pinned_team) before the role gate — a non-member pin fails
+    closed 403 "No membership in team" exactly like the key-write pins."""
     # Resolve the team from the session's membership (single-team: the user's
     # team; multi-team: the id in the query).
     from tortoise.session_auth import verify_session_jwt as _verify
@@ -5659,15 +5997,24 @@ async def toggle_dashboard_login(
         user_memberships,
     )
     if is_supabase_enabled():
-        memberships = user_memberships(get_control_plane(), user["user_id"])
+        cp = get_control_plane()
+        memberships = user_memberships(cp, user["user_id"])
         if not memberships:
             raise HTTPException(status_code=403, detail="No team membership")
         if team_id is None:
             team_id = memberships[0]["team_id"]
+        # #2299: the shared session-pin gate (same predicate as the key-write
+        # lanes + the DELETE/mint DI): a truthy ?team_id= must be an ACTIVE
+        # membership or the call fails closed 403 "No membership in team"
+        # BEFORE the role gate — no team-state/key existence oracle. A
+        # member-but-not-owner/admin pin still 403s at _require_owner_admin
+        # below (the role gate is the pin's second enforcement layer).
+        _session_pinned_team(cp, user["user_id"], team_id,
+                             memberships=memberships)
         # verify this user is owner/admin of that team
         await _require_owner_admin(user["user_id"], team_id)
         from tortoise.supabase_control import set_dashboard_key_login as _set_flag
-        _set_flag(get_control_plane(), team_id, body.enabled)
+        _set_flag(cp, team_id, body.enabled)
         return {"team_id": team_id, "dashboard_key_login": body.enabled}
     # Registry mode: operators control access directly; flag is a no-op
     # (always true). Return success so the UI doesn't error.
@@ -5713,7 +6060,19 @@ async def toggle_api_key_enabled(
     fails closed with 403 "Not your API key", exactly like DELETE's team
     mismatch. No pin → the key's intrinsic team governs (backwards
     compatible). The registry/selfhost lane below is deliberately
-    unchanged (keys are team-scoped by the key there)."""
+    unchanged (keys are team-scoped by the key there).
+
+    #2230 divergence note (pinless PATCH vs pinless DELETE): session-lane
+    DELETE without a pin resolves memberships[0] (the DI default) and fails
+    closed 403 "Not your API key" when the key lives in ANOTHER team; this
+    PATCH without a pin acts on the key's INTRINSIC team (200) instead —
+    each lane keeps its pre-#2230 legacy default. The dashboard always pins
+    (the client keyTeamPinsTripwire), so the divergence is unreachable from
+    the dashboard — it only surfaces to direct-API callers sending no pin.
+    #2299: the pin enforcement now routes through the SHARED helpers
+    (_session_pinned_team membership gate + _ensure_key_in_pinned_team
+    fail-closed) — the same predicate the DI seam runs for DELETE/create —
+    so a future key-write endpoint cannot silently ignore the pin again."""
     from tortoise.supabase_control import (
         api_key_by_id,
         get_control_plane,
@@ -5728,50 +6087,30 @@ async def toggle_api_key_enabled(
     from tortoise.supabase_control import (
         set_api_key_scopes as _sb_set_scopes,
     )
-    from tortoise.supabase_control import user_memberships as _sb_user_memberships
     if is_supabase_enabled():
         cp = get_control_plane()
-        # #2230: honor the ?team_id= pin (session mode) exactly like the
-        # DELETE handler's session lane (get_current_team_session →
-        # _session_user_team) — the dashboard's key table is scoped to the
-        # SELECTED team, so a multi-membership caller acting in team B's
-        # context must never mutate team A's key (pre-#2230 the pin was
-        # silently ignored: a wrong-team key_id succeeded whenever the user
-        # owned both teams). Membership-check the pinned team FIRST, before
-        # any key lookup (mirrors _session_user_team — the same 403 "No
-        # membership in team" the mint/list pins raise, and no cross-team
-        # key-existence oracle: a non-member pin 403s whether or not the
-        # key_id exists, same fail-closed shape as DELETE's session
-        # dependency). One ordering note vs DELETE: this handler resolves
-        # the USER via get_current_user and checks membership inline HERE,
-        # while DELETE's get_current_team_session dependency runs its
+        # #2230/#2299: the ?team_id= pin (session mode) is enforced through
+        # the SHARED helpers — _session_pinned_team membership-gates a
+        # truthy pin FIRST (the same 403 "No membership in team" + no
+        # key-existence oracle as the DELETE/mint DI seam,
+        # _session_user_team), then _ensure_key_in_pinned_team fails CLOSED
+        # on a key outside the pinned team (DELETE's exact 403 "Not your
+        # API key"). Ordering vs DELETE is unchanged: this handler resolves
+        # the USER via get_current_user and gates the pin inline HERE, while
+        # DELETE's get_current_team_session dependency runs its
         # suspended/disabled checks first — the pin 403s match; the
-        # suspended-team 403 may precede them on DELETE only. A truthy pin
-        # then fails closed on a key that is not in the pinned team with
-        # the SAME 403 DELETE raises on team mismatch. No pin (or blank
-        # ?team_id= — the dashboard never sends one, and pre-#2230 the
-        # endpoint ignored the query entirely) → the key's intrinsic team
-        # governs, fully backwards compatible. Deliberate divergence from
-        # DELETE's pinless default: session-lane DELETE without a pin
-        # resolves memberships[0] and 403s when the key lives in another
-        # team; this PATCH without a pin acts on the key's intrinsic team
-        # (200). Each keeps its pre-#2230 legacy default — the browser
-        # always pins, so the divergence is unreachable from the dashboard.
-        # Registry lane below is untouched (selfhost keys are team-scoped
-        # by the key itself).
-        pinned = request.query_params.get("team_id")
-        if pinned and pinned not in {m["team_id"]
-                                     for m in _sb_user_memberships(
-                                         cp, user["user_id"])}:
-            raise HTTPException(status_code=403,
-                                detail="No membership in team")
+        # suspended-team 403 may precede them on DELETE only. Pinless
+        # behavior is unchanged: no pin → the key's intrinsic team governs
+        # (the deliberate #2230 divergence from DELETE's memberships[0]
+        # default — see the function docstring). Registry lane below is
+        # untouched (selfhost keys are team-scoped by the key itself).
+        pinned = _session_pinned_team(
+            cp, user["user_id"], request.query_params.get("team_id"))
         row = api_key_by_id(cp, key_id)
         if row is None:
             raise HTTPException(status_code=404, detail="API key not found")
         team_id = row.get("team_id")
-        if pinned and pinned != team_id:
-            raise HTTPException(status_code=403,
-                                detail="Not your API key")
+        _ensure_key_in_pinned_team(pinned, team_id)
         await _require_owner_admin(user["user_id"], team_id)
         if row.get("revoked_at") is not None:
             raise HTTPException(status_code=409, detail="Cannot modify a revoked key")
@@ -9060,6 +9399,272 @@ async def delete_graph(graph_id: str, team_id: str,
     return Response(status_code=204)
 
 
+# ── #2304 trash surface (delete = quarantine → restore within grace) ───────
+# Owner Option C: a deleted custom graph sits in the team's TRASH for a
+# disclosed recovery window (default 7 days — the purge grace), then is
+# physically erased. These endpoints are the owner/admin RESTORE surfaces:
+# they are SESSION-ONLY (a revoked graph key can never reach a tombstone)
+# and role-gated owner/admin (mirrors delete_graph's session branch). Keys
+# stay dead across the whole lifecycle — restore never resurrects them; the
+# owner mints fresh keys after restore.
+
+async def _require_owner_admin_session(user: dict, team_id: str) -> None:
+    """#2304: owner/admin membership gate for the trash surfaces (403
+    otherwise). Session-only by construction — trash endpoints never accept
+    a key context."""
+    membership = await _membership_team(user.get("user_id") or "", team_id)
+    if membership is None or membership.get("role") not in ("owner", "admin"):
+        raise HTTPException(
+            status_code=403, detail="Requires owner or admin role in team")
+
+
+async def _graph_row_probe(team_id: str, graph_id: str) -> dict | None:
+    """Fetch ONE graph row (any status) across the mode branch — the
+    trash-restore decision probe. Returns {kind, status, name, purged_at} or
+    None (unknown graph)."""
+    sdk = _make_sdk(namespace="registry")
+    from tortoise.supabase_control import (
+        get_control_plane,
+        is_supabase_enabled,
+    )
+    if is_supabase_enabled():
+        rows = get_control_plane().query(
+            "graphs", select=["kind", "status", "name", "purged_at"],
+            filters=[("id", "eq", graph_id), ("team_id", "eq", team_id)],
+        )
+        if not rows:
+            return None
+        r = rows[0]
+        return {"kind": r.get("kind"), "status": r.get("status"),
+                "name": r.get("name"), "purged_at": r.get("purged_at")}
+    rows = sdk._get_registry().query(
+        "MATCH (g:Graph {id:$gid, team_id:$tid}) "
+        "RETURN g.kind, coalesce(g.status, 'active'), g.name, g.purged_at",
+        params={"gid": graph_id, "tid": team_id},
+    ).result_set
+    if not rows:
+        return None
+    return {"kind": rows[0][0], "status": rows[0][1],
+            "name": rows[0][2], "purged_at": rows[0][3]}
+
+
+async def _trash_name_conflict(team_id: str, name: str,
+                               self_gid: str) -> bool:
+    """True when a LIVE (non-deleted) graph already holds ``name`` — a
+    restored graph must never duplicate an active display name (create-
+    graph uniqueness among actives, #2304). The tombstone itself is
+    excluded by the self_gid comparison (it is deleted — never listed)."""
+    sdk = _make_sdk(namespace="registry")
+    from tortoise.supabase_control import (
+        get_control_plane,
+        is_supabase_enabled,
+    )
+    if is_supabase_enabled():
+        rows = get_control_plane().query(
+            "graphs", select=["id"],
+            filters=[("team_id", "eq", team_id), ("name", "eq", name),
+                     ("status", "eq", "active")],
+        )
+        return any(r.get("id") != self_gid for r in rows)
+    rows = sdk._get_registry().query(
+        "MATCH (g:Graph {team_id:$tid, name:$name}) "
+        "RETURN g.id, coalesce(g.status, 'active')",
+        params={"tid": team_id, "name": name},
+    ).result_set
+    return any(r[0] != self_gid and r[1] != "deleted" for r in rows)
+
+
+@app.get("/v1/graphs/trash")
+async def list_trash(team_id: str,
+                     user: dict = Depends(get_current_user)):  # noqa: B008
+    """#2304 — team trash (tombstoned custom graphs not yet purged).
+    Owner/admin session only. Rows: [{graph_id, name, kind, deleted_at}]
+    — purged rows (data physically erased) are never listed; the default
+    graph can never be here. ``deleted_at`` absent = legacy tombstone
+    (predates #2304 — treated as past-grace by the purge). The purge sweep
+    erases past-grace rows on its cadence; until then they remain listed
+    and restorable (the recovery window is enforced by the purge)."""
+    await _require_owner_admin_session(user, team_id)
+    team = await _team_node(team_id)
+    if team is None:
+        raise HTTPException(status_code=404, detail="Unknown team")
+    _ensure_not_suspended(team)
+    sdk = _make_sdk(namespace="registry")
+    from tortoise.supabase_control import (
+        get_control_plane,
+        is_supabase_enabled,
+    )
+    if is_supabase_enabled():
+        cp = get_control_plane()
+        from tortoise.supabase_control import trash_graphs as sb_trash
+        trash = await asyncio.to_thread(sb_trash, cp, team_id)
+    else:
+        trash = await asyncio.to_thread(sdk.trash_graphs, team_id)
+    return [{"graph_id": t["graph_id"], "name": t["name"],
+             "kind": "custom", "deleted_at": t.get("deleted_at")}
+            for t in trash]
+
+
+@app.post("/v1/graphs/trash/{graph_id}/restore")
+async def restore_trash_graph(request: Request, graph_id: str, team_id: str,
+                              user: dict = Depends(get_current_user)):  # noqa: B008
+    """#2304 — full restore of a tombstoned custom graph inside the grace
+    window. Owner/admin session only. Un-tombstones the row (status active)
+    and re-creates the per-graph ACL user; keys stay dead (revoked at
+    delete) — the owner mints fresh keys after restore. The graph's data
+    namespace was never touched by quarantine (gid-keyed
+    ``team_{tid}_{gid}``, exclusive to this graph) so the data is intact;
+    if it is absent (a partial-delete state) the restore does NOT fabricate
+    it — the owner restores from backups (POST /v1/backups) after the
+    restore. Refusals: 404 unknown, 403 non-owner/admin, 410 purged (data
+    physically erased — nothing to restore), 409 the name is held by a live
+    graph (rename or delete it first — no silent duplicates)."""
+    await _require_owner_admin_session(user, team_id)
+    team = await _team_node(team_id)
+    if team is None:
+        raise HTTPException(status_code=404, detail="Unknown team")
+    _ensure_not_suspended(team)
+    # The probe+flip run under the per-team sweep lock: the purge sweep
+    # holds the SAME lock while it erases a team's tombstones, so a restore
+    # and a purge of the same graph can never interleave (VGATE race fix —
+    # the lane seams are ALSO conditioned on unpurged-tombstone state, but
+    # the lock closes the window entirely).
+    lock = _sweep_team_lock(team_id)
+    # Timed acquire in a worker thread — never block the event loop, and a
+    # TIMED acquire can time out WITHOUT holding the lock (an orphaned
+    # untimed acquire would wedge the team lock forever once it eventually
+    # succeeded — VGATE round-3 fix).
+    acquired = await asyncio.to_thread(lock.acquire, True, 20)
+    if not acquired:
+        raise HTTPException(
+            status_code=503,
+            detail="Restore busy (team sweep in flight)") from None
+    try:
+        return await _restore_trash_graph_locked(request, user, team_id,
+                                                 graph_id)
+    finally:
+        lock.release()
+
+
+async def _restore_trash_graph_locked(request: Request, user: dict,
+                                      team_id: str,
+                                      graph_id: str):
+    row = await _graph_row_probe(team_id, graph_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Unknown graph")
+    if row.get("kind") == "default":
+        raise HTTPException(status_code=403,
+                            detail="Cannot restore the default graph")
+    if row.get("status") != "deleted":
+        raise HTTPException(status_code=409,
+                            detail="Graph is not deleted (nothing to restore)")
+    if row.get("purged_at"):
+        raise HTTPException(
+            status_code=410,
+            detail="Graph was purged (data physically erased) — not "
+                   "restorable; re-create it from scratch")
+    name = (row.get("name") or "").strip()
+    if name and await _trash_name_conflict(team_id, name, graph_id):
+        raise HTTPException(
+            status_code=409,
+            detail=f"A live graph named {name!r} already exists — rename or "
+                   "delete it first")
+    sdk = _make_sdk(namespace="registry")
+    from tortoise.supabase_control import (
+        get_control_plane,
+        is_supabase_enabled,
+    )
+    if is_supabase_enabled():
+        from tortoise.supabase_control import restore_graph as sb_restore
+        restored = await asyncio.to_thread(
+            sb_restore, get_control_plane(), team_id, graph_id)
+    else:
+        restored = await asyncio.to_thread(sdk.graph_restore, team_id,
+                                           graph_id)
+    if not restored:
+        # Still reachable only if the row flipped between the probe and the
+        # flip despite the lock (lane-level anomaly) — refuse loudly.
+        raise HTTPException(
+            status_code=410,
+            detail="Graph was purged before the restore completed — not "
+                   "restorable")
+    _acl_user_create_hook(graph_id, team_id)
+    await _async_audit_trash_restore(request, user, team_id, graph_id)
+    return {"graph_id": graph_id, "status": "restored",
+            "name": name, "note": "Keys stay dead — mint fresh keys for "
+                                    "this graph (POST /v1/team/keys)"}
+
+
+async def _async_audit_trash_restore(request: Request, user: dict,
+                                     team_id: str,
+                                     graph_id: str) -> None:
+    """Audit-log a trash restore (best-effort — never fails the restore)."""
+    try:
+        await _async_audit(
+            request, team_id, "graph_restored", resource_type="graph",
+            resource_id=graph_id, actor_user_id=user.get("user_id"),
+        )
+    except Exception:
+        _logger.debug("trash-restore audit failed (non-blocking)",
+                      exc_info=True)
+
+
+@app.get("/v1/graphs/trash/{graph_id}/points")
+async def trash_graph_points(graph_id: str, team_id: str,
+                             user: dict = Depends(get_current_user)):  # noqa: B008
+    """#2304 — READ-ONLY rescue surface for a tombstoned graph (owner/admin
+    session only): what data does the trash hold, and when was it last
+    backed up? Serves the per-graph pool manifests from the artifact store
+    — the live namespace is NEVER touched (quarantine preserves it
+    untouched; reads here are artifact-side). Full content access happens
+    via restore. 410 when purged (artifacts erased)."""
+    await _require_owner_admin_session(user, team_id)
+    team = await _team_node(team_id)
+    if team is None:
+        raise HTTPException(status_code=404, detail="Unknown team")
+    _ensure_not_suspended(team)
+    row = await _graph_row_probe(team_id, graph_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Unknown graph")
+    if row.get("status") != "deleted":
+        raise HTTPException(status_code=409,
+                            detail="Graph is not in the trash")
+    if row.get("purged_at"):
+        raise HTTPException(status_code=410, detail="Graph was purged")
+    import json as _json
+
+    storage = _backup_storage()
+    prefix = f"backups/{team_id}/{graph_id}/"
+    manifests = []
+    try:
+        keys = await asyncio.to_thread(storage.list, prefix)
+    except Exception:
+        keys = []
+    for k in keys:
+        if k.endswith("/manifest.json"):
+            manifests.append(k)
+    latest: dict | None = None
+    for mk in sorted(manifests, reverse=True):
+        try:
+            blob = await asyncio.to_thread(storage.download, mk)
+            m = _json.loads(blob.decode("utf-8"))
+            latest = {"backup_id": m.get("backup_id"),
+                      "created_at": m.get("created_at"),
+                      "node_count": m.get("node_count"),
+                      "edge_count": m.get("edge_count")}
+            break
+        except Exception:
+            continue  # unreadable manifest — try the next newest
+    return {
+        "graph_id": graph_id, "name": row.get("name"),
+        "deleted_at": row.get("deleted_at"),
+        "archive_count": len(manifests),
+        "latest_backup": latest,
+        "note": "Read-only rescue view (artifact side). Restore the graph "
+                "to access its content (POST /v1/graphs/trash/{id}/restore)",
+    }
+
+
 @app.get("/v1/graphs")
 async def list_graphs(team_id: str, user: dict = Depends(get_current_user)):  # noqa: B008
     """E7 — list graphs in a team (graph switcher). C2 (#2111): rows gain
@@ -9123,25 +9728,111 @@ async def _require_owner_admin(user_id: str, team_id: str) -> dict:
         membership_for_user_team as _sb_membership,
     )
     if is_supabase_enabled():
-        membership = _sb_membership(get_control_plane(), user_id, team_id)
+        try:
+            # #2380 (P2, #1719 class): this seam's OWN membership read is a
+            # control-plane call — an outage/schema-cache failure degrades to
+            # the repo-standard 503 control_plane_unavailable (mirrors the
+            # lazy _session_pinned_team read wrapped by #2401 and the
+            # mint-path map), never a raw 500 from the global handler. The
+            # seam is shared by invites / members / key-toggle /
+            # dashboard-login / create / revoke — all inherit 503 parity.
+            # Non-outage exceptions propagate untouched (a schema/dialect
+            # bug must stay loud, not masquerade as an outage).
+            membership = _sb_membership(get_control_plane(), user_id, team_id)
+        except Exception as _exc:
+            _raise_503_if_cp_outage(_exc)
+            raise
         if not membership or membership["role"] not in ("owner", "admin"):
             raise HTTPException(status_code=403, detail="Requires owner or admin role in team")
-        _ensure_not_suspended(await _team_node(team_id))
+        try:
+            # The suspension-stamp read (teams row, _team_node) is a SECOND
+            # control-plane call AFTER the role check (#1853 ordering — role
+            # 403 precedes SUSPENDED) — same outage class, same 503.
+            _ensure_not_suspended(await _team_node(team_id))
+        except Exception as _exc:
+            _raise_503_if_cp_outage(_exc)
+            raise
         return {"team_id": team_id, "role": membership["role"]}
     # #1853: registry reads use the KEEPALIVE anchor (#1607 pattern — a
     # fresh _make_sdk is GC'd with close-on-GC + SHUTDOWN NOSAVE, killing
     # the shared embedded server and losing un-saved cascade writes; the
     # anchor is process-lifetime and sees them).
     sdk = _registry_anchor()
-    rows = sdk._get_registry().query(
-        "MATCH (m:Membership {user_id:$uid, team_id:$tid, status:'active'}) "
-        "RETURN m.role",
-        params={"uid": user_id, "tid": team_id},
-    ).result_set
+    try:
+        rows = sdk._get_registry().query(
+            "MATCH (m:Membership {user_id:$uid, team_id:$tid, status:'active'}) "
+            "RETURN m.role",
+            params={"uid": user_id, "tid": team_id},
+        ).result_set
+    except Exception as _exc:
+        _raise_503_if_cp_outage(_exc)
+        raise
     if not rows or rows[0][0] not in ("owner", "admin"):
         raise HTTPException(status_code=403, detail="Requires owner or admin role in team")
-    _ensure_not_suspended(await _team_node(team_id))
+    try:
+        # #1853 ordering preserved: role 403 precedes the SUSPENDED check;
+        # the teams-node read is a second store call — same outage class.
+        _ensure_not_suspended(await _team_node(team_id))
+    except Exception as _exc:
+        _raise_503_if_cp_outage(_exc)
+        raise
     return {"team_id": team_id, "role": rows[0][0]}
+
+
+def _raise_503_if_cp_outage(exc: BaseException) -> None:
+    """#2380 (#1719 class): raise 503 control_plane_unavailable when exc is a
+    control-plane transport outage; otherwise return and let the caller
+    re-raise untouched.
+
+    Supabase mode raises RuntimeError on transport (the supabase_control
+    contract). Registry mode raises the redis exception family the falkordb
+    client surfaces (ConnectionError / TimeoutError / BusyLoadingError /
+    ResponseError / InvalidResponse — the classes sdk._classify_db_failure
+    buckets, sdk.py ~1368); RuntimeError is kept for the outage-simulating
+    test seams. A non-outage exception (schema/dialect bug, authz 403 from a
+    caller's own read) stays loud — it must never masquerade as an outage.
+    """
+    if isinstance(exc, RuntimeError):
+        raise _control_plane_unavailable() from None
+    try:
+        from redis.exceptions import (  # lazy — redis is not an import-time dep
+            BusyLoadingError,
+            ConnectionError,
+            InvalidResponse,
+            ResponseError,
+            TimeoutError,
+        )
+    except ImportError:  # redis absent (hosted-only install) — no registry
+        return
+    if isinstance(exc, (BusyLoadingError, ConnectionError, InvalidResponse,
+                        ResponseError, TimeoutError)):
+        raise _control_plane_unavailable() from None
+
+
+async def _require_owner_admin_if_session(team: dict) -> None:
+    """#2297/#2380 POLICY A gate helper: owner/admin role gate that fires
+    ONLY when the team dict was resolved from a SESSION JWT (it carries
+    session_user_id — attached solely on the JWT branch of
+    get_current_team_session). Key-auth team dicts (and dependency-override
+    dicts that emulate key-auth) carry no session_user_id → pass-through
+    UNCHANGED (their class gates govern: C2 deleg + D13 caller-class for
+    mint, keys:manage for revoke). An override dict that DOES carry
+    session_user_id (the test seam's emulated session — ~15+ suites inject
+    dict(TEST_TEAM, session_user_id=...)) is role-gated exactly like a real
+    session face.
+
+    Predicate is the EXISTING invariant (session_user_id presence — read
+    through the named _SESSION_USER_ID_KEY constant), deliberately NOT a new
+    marker: the override seam returns override dicts unchanged, so a marker-
+    required predicate would silently stop gating the seam and the whole
+    member matrix would go ungated while tests stayed green.
+
+    Role checked on the RESOLVED team (team["team_id"] — the ?team_id= pin's
+    membership-checked team for multi-membership callers, #2230/#2248).
+    """
+    session_user_id = team.get(_SESSION_USER_ID_KEY)
+    if session_user_id is not None:
+        await _require_owner_admin(session_user_id, team["team_id"])
 
 
 async def _require_owner(user_id: str, team_id: str, *,
@@ -13890,6 +14581,13 @@ async def session_key(body: dict, request: Request, user: dict = Depends(get_cur
       included) — with a RE-CHECK so a rotation that doesn't free a
       persistent slot fails CLOSED (402, never cap+1); 402 when nothing at
       all is rotatable.
+
+    #2380 (P1, Option A): purpose semantics are role-gated — RECOVERY is
+    owner/admin-only (the #2297 POLICY A seam: a member session must not
+    mint a persistent deleg-NULL owner-class key; role checked on the
+    RESOLVED team — body team_id when multi-membership, else
+    memberships[0] — in BOTH auth lanes, see the gates below); BOOTSTRAP
+    (24h ephemeral) stays member-open per product posture.
     """
     import uuid as _uuid
     from datetime import datetime, timedelta
@@ -13941,6 +14639,19 @@ async def session_key(body: dict, request: Request, user: dict = Depends(get_cur
     # #308 (R5): a suspended team cannot re-mint keys (scoping delta 12).
     if team_row and team_row[0][1] is not None:
         raise HTTPException(status_code=403, detail=_suspended_detail())
+    # #2380 (P1, Option A): owner/admin-gate the RECOVERY purpose — a
+    # member-role session must not mint a persistent deleg-NULL owner-class
+    # key here (the #2297 POLICY A escalation root, recovery flavor — the
+    # member-at-cap auto-revoke side-effect is killed with it). bootstrap
+    # (24h ephemeral, cap-exempt) stays member-open per product posture.
+    # Ordering pinned by design review: AFTER this lane's OWN suspension
+    # check (a member on a SUSPENDED team gets this lane's existing
+    # SUSPENDED detail first — cross-lane byte parity) and BEFORE the mint
+    # lock below (the gate awaits _team_node; the lock section forbids
+    # awaits). Role is checked on the RESOLVED tid (body team_id when
+    # multi-membership, else memberships[0]) — never memberships[0] blindly.
+    if purpose == "recovery":
+        await _require_owner_admin(user_id, tid)
 
     api_key = f"tt_{_uuid.uuid4().hex}"
     key_hash = _hash(api_key)
@@ -13971,21 +14682,35 @@ async def session_key(body: dict, request: Request, user: dict = Depends(get_cur
             # #750.8: .get() so a pricing.json key drift never 500s the mint
             # (pricing.py validates required keys at load; belt-and-braces).
             max_keys = lim.get("max_api_keys")
+            # #2426: the durable-count predicate excludes EXPIRED keys
+            # (expires_at past) as well as bootstrap rows — an expired key
+            # never authenticates (#742), so counting it against
+            # max_api_keys would wedge the team at its cap with no recourse.
+            # Mirrors the bootstrap cap query's expiry filter (bootstrap
+            # precedent) and the supabase lane's active_api_keys helper
+            # (which has always excluded expired rows).
             active_keys = reg.query(
                 "MATCH (k:APIKey {team_id:$tid}) WHERE k.revoked_at IS NULL "
-                "AND (k.created_via IS NULL OR k.created_via <> 'bootstrap') RETURN count(k)",
-                params={"tid": tid},
+                "AND (k.created_via IS NULL OR k.created_via <> 'bootstrap') "
+                "AND (k.expires_at IS NULL OR k.expires_at > $now) RETURN count(k)",
+                params={"tid": tid, "now": now},
             ).result_set[0][0]
             if max_keys is not None and active_keys >= max_keys:
                 # #750.10: never auto-revoke a key the current user created
                 # (created_by = their user_id) — recovery must not dead-end by
                 # killing the user's own session key. Oldest OTHER key wins.
+                # #2426: the candidate scan carries the same expiry filter as
+                # the count — only LIVE (non-expired) others are revocable
+                # rotation targets, because revoking an expired key (which no
+                # longer counts) would free no slot and the others branch does
+                # not re-check (cap+1 hazard).
                 oldest = reg.query(
                     "MATCH (k:APIKey {team_id:$tid}) WHERE k.revoked_at IS NULL "
                     "AND (k.created_via IS NULL OR k.created_via <> 'bootstrap') "
                     "AND k.created_by <> $uid "
+                    "AND (k.expires_at IS NULL OR k.expires_at > $now) "
                     "RETURN k.id ORDER BY k.created_at ASC LIMIT 1",
-                    params={"tid": tid, "uid": user_id},
+                    params={"tid": tid, "uid": user_id, "now": now},
                 ).result_set
                 if oldest:
                     reg.query(
@@ -14067,11 +14792,14 @@ async def session_key(body: dict, request: Request, user: dict = Depends(get_cur
                         )
                         # P2-1: only mint when a persistent slot actually opened
                         # (legacy rotation frees one; a modern bootstrap never
-                        # counted against max_api_keys).
+                        # counted against max_api_keys). #2426: the recheck
+                        # mirrors the cap count exactly (expiry filter included)
+                        # so an expired-key rotation cannot 402 or overshoot.
                         recheck = reg.query(
                             "MATCH (k:APIKey {team_id:$tid}) WHERE k.revoked_at IS NULL "
-                            "AND (k.created_via IS NULL OR k.created_via <> 'bootstrap') RETURN count(k)",
-                            params={"tid": tid},
+                            "AND (k.created_via IS NULL OR k.created_via <> 'bootstrap') "
+                            "AND (k.expires_at IS NULL OR k.expires_at > $now) RETURN count(k)",
+                            params={"tid": tid, "now": now},
                         ).result_set[0][0]
                         if max_keys is not None and recheck >= max_keys:
                             raise HTTPException(status_code=402, detail="Key limit reached — revoke an existing key")
@@ -14110,7 +14838,10 @@ async def _session_key_supabase(body: dict, request: Request, user: dict) -> dic
     get_current_team / MCP resolve it via the unique lookup_hash index, and
     api_keys.revoked_at is the authoritative revoke. #1855: the whole
     cap/revoke/recheck/insert section runs under the per-team in-process lock
-    (see _team_mint_lock above — same lock as the registry lane).
+    (see _team_mint_lock above — same lock as the registry lane). #2380 (P1):
+    the registry-lane recovery role gate has its byte-parity twin here
+    (owner/admin on the RESOLVED tid, after THIS lane's own suspension check
+    — see the gate below); bootstrap stays member-open.
     """
     import uuid as _uuid
     from datetime import datetime, timedelta
@@ -14149,6 +14880,16 @@ async def _session_key_supabase(body: dict, request: Request, user: dict) -> dic
     # #308 (R5): a suspended team cannot re-mint keys (scoping delta 12).
     if (team_row or {}).get("suspended_at") is not None:
         raise HTTPException(status_code=403, detail=_suspended_detail())
+    # #2380 (P1, Option A): owner/admin-gate the RECOVERY purpose — the
+    # registry-lane gate's byte-parity twin (same ordering: AFTER this
+    # lane's OWN suspension check above, so a member on a SUSPENDED team
+    # gets THIS lane's existing SUSPENDED detail — never the role detail —
+    # identical to the registry lane; BEFORE the mint lock below — the gate
+    # awaits _team_node and the lock section forbids awaits). bootstrap stays
+    # member-open. Role checked on the RESOLVED tid (body team_id when
+    # multi-membership, else memberships[0]).
+    if purpose == "recovery":
+        await _require_owner_admin(user_id, tid)
 
     api_key = f"tt_{_uuid.uuid4().hex}"
     kid = _short_id()
@@ -17807,6 +18548,7 @@ _DRILL_COOLDOWN_S = 3600
 _SWEEP_TEAM_LOCKS: dict[str, threading.Lock] = {}
 _SWEEP_LOCKS_GUARD = threading.Lock()
 _SWEEP_INFLIGHT = asyncio.Lock()
+_PURGE_INFLIGHT = asyncio.Lock()  # #2304 trash-purge in-flight guard
 
 
 def _backup_config_safe() -> BackupConfig | None:  # noqa: F821
@@ -18026,6 +18768,44 @@ async def backups_sweep(request: Request):
         if alerts_failed:
             result["alerts_failed"] = alerts_failed
         return result
+
+
+@app.post("/v1/internal/backups/purge")
+async def backups_purge(request: Request, body: dict | None = None):
+    """#2304 — trash purge: physically erase every expired tombstone
+    (custom graphs deleted > grace_days ago, plus legacy tombstones).
+    Internal-key only. Optional ``{"grace_days": N}`` overrides the 7-day
+    default (operator drills). Ownership-guarded namespace drops, idempotent,
+    per-team/`-graph isolation; purged rows are stamped (kept — audit).
+    In-flight guard: a concurrent purge returns 202.
+
+    Cadence: operator-invoked today (runbook); the driver cron wiring lands
+    with #2317's registry-cron.sh changes (coordination — same file)."""
+    _check_internal(request)
+    from tortoise.backup_sweep import run_graph_purge
+
+    reg_sdk = _registry_sdk()
+    registry = reg_sdk._get_registry()
+    db = reg_sdk._get_proj().db
+    storage = _backup_storage()
+    grace_days = int((body or {}).get("grace_days") or 7)
+    if not 1 <= grace_days <= 365:
+        raise HTTPException(status_code=422,
+                            detail="grace_days must be 1..365")
+    if _PURGE_INFLIGHT.locked():
+        return {"status": "already_running", "purged": []}
+    async with _PURGE_INFLIGHT:
+        def lock_for(team_id: str):
+            return _sweep_team_lock(team_id)
+
+        try:
+            return await asyncio.to_thread(
+                run_graph_purge, db=db, registry=registry, storage=storage,
+                grace_days=grace_days, lock_for=lock_for,
+            )
+        except RuntimeError as e:
+            raise HTTPException(status_code=503,
+                                detail=f"Purge failed: {e}") from e
 
 
 @app.get("/v1/internal/backups/status")

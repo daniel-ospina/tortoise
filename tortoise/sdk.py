@@ -1435,14 +1435,39 @@ def _decorate_fallback_hits(results: list[dict], graph) -> list[dict]:
 # bullets ('*Gate: filed as child issue…'), heading/table/quote/fence lines,
 # bare 'Label: value' config residue — are filtered out at digest time
 # (display-layer defense only; the extractor itself is unchanged).
+#
+# #2225 (post-batch bug hunt): the filter must NOT drop the SDK's OWN
+# decision-writer shapes, which are label-led by construction but are
+# genuine decisions — 'Decision: …' (file_decision), 'Approved: …' (human
+# approval), 'Option N: …' (file_decision rows), the decide flows'
+# 'Reason:'/'Finding:' leads, and date-led '2026-09-06: …' diary lines. They
+# are exempted from the label-noise arm before it runs (see
+# _DIGEST_GENUINE_LABEL_RE); a decisions-only graph must not read as
+# "no prior sessions".
 _DIGEST_STRUCTURE_RE = re.compile(r"^(?:[-*=~_`|#>]{2,}|\.{2,}|[-*+]\s*)$")
 _DIGEST_MD_LEAD_RE = re.compile(r"^(?:#{1,6}\s|>{1,}|`{3,}|~{3,}|\|)")
+# Genuine decision content that LOOKS label-led but must survive the digest:
+# date-led lines and the SDK/decide-flow label families in their authored
+# spelling — 'Decision: …'/'Option N: …' (file_decision), 'Approved: …'
+# (file_human_approval), 'Reason:'/'Finding:' leads (decide flows). Every SDK
+# writer capitalizes the label and no capture/extraction path lowercases point
+# content before persisting (all .lower() uses are tokenization/dedup/classi-
+# fication keys), so the match is EXACT-case: a generic lowercase
+# 'decision: pending'-style line is config/transcript residue — NOT a decision
+# — and still hits _DIGEST_LABEL_RE below (review #2434 P2-2).
+_DIGEST_GENUINE_LABEL_RE = re.compile(
+    r"^(?:\d{4}-\d{2}-\d{2}\s*:"            # '2026-09-06: we decided…'
+    r"|(?:[-*+]\s+|\d+[.)]\s+)?"             # optional list/number marker
+    r"(?:Decision|Approved|Reason|Finding|Option)\s*\d*\s*:"
+    r")",
+)
 # Label-led rule/config lines: an optional list/number marker and optional
 # emphasis, then a label ending in ':' before the value — '*Gate: filed as
 # child issue…', '- model: gpt-5', '* HARD RULE: Skill Compliance',
 # 'TORTOISE_DB_URI: docker://…'. All-caps continuations keep multi-word rule
 # labels ('HARD RULE', 'DO NOT EDIT') together; prose claims starting
-# mid-sentence are never label-led.
+# mid-sentence are never label-led. Genuine decision shapes above never
+# reach this arm (_DIGEST_GENUINE_LABEL_RE short-circuits first).
 _DIGEST_LABEL_RE = re.compile(
     r"^(?:[-*+]\s+|\d+[.)]\s+)?(?:[*_]{1,2})?"
     r"[A-Za-z0-9][A-Za-z0-9_.-]*(?:\s+[A-Z][A-Z0-9_.-]*)*"
@@ -1463,6 +1488,11 @@ def _is_digest_noise(content) -> bool:
         return True
     if _DIGEST_MD_LEAD_RE.match(t):
         return True
+    # #2225: the SDK's own label-led decision shapes are genuine content —
+    # exempt them BEFORE the rule/config label arm so 'Decision: …' /
+    # 'Approved: …' points never vanish from the digest.
+    if _DIGEST_GENUINE_LABEL_RE.match(t):
+        return False
     return bool(_DIGEST_LABEL_RE.match(t))
 
 
@@ -3922,11 +3952,18 @@ class TortoiseSDK:
                 succ_vf = vf_rows[0][1]
             else:
                 succ_vf = now  # monotone fallback — never a gap
+        # #2423 (rebuild-parity fix): kwargs-style emission (id + extra keys)
+        # so the FULL payload rides the JSONL line — the previous dict-style
+        # emission only reached the :GraphEvent store (payload) while the
+        # JSONL line carried bare id=old_id, dropping new_id/valid_from/
+        # valid_to/expired_at. Rebuild's PointSuperseded fold (pass-1b)
+        # needs new_id + the bi-temporal stamps to re-stamp the superseded
+        # point verbatim (#2423 indicator 1) — a JSONL wipe+rebuild of a
+        # dict-style journal folds status-only (new_id missing) and warns.
         self._emit_event(
             "PointSuperseded",
-            {"id": old_id, "new_id": new_id,
-             "valid_from": succ_vf, "valid_to": succ_vf, "expired_at": now},
-            id=old_id,
+            id=old_id, new_id=new_id,
+            valid_from=succ_vf, valid_to=succ_vf, expired_at=now,
         )
 
         # CYCLE-26 REVIEW-FIX P1 (cycle-7 pin): the superseded-status write +
@@ -11643,12 +11680,14 @@ class TortoiseSDK:
                 ranked = w4_enrich_items(proj, ranked)
             return ranked
         if order_by == "confidence":
-            # #25/#2206: sort by the PERSISTED EP confidence (n.confidence,
-            # written by compute_confidence). Post-#2206 this is the SAME
-            # belief mean α/(α+β) that ep.confidence_mean carries
-            # (annotate_ep_batch reads the same coalesce of
-            # posterior_alpha/ep_alpha); n.confidence is read directly here so
-            # the sort never depends on the result-window annotation pass.
+            # #25/#2206/#2286: sort by the PERSISTED EP belief mean α/(α+β)
+            # that ep.confidence_mean carries. GraphRanker reads the
+            # n.confidence flush-mirror when present and falls back to the
+            # SAME coalesce of posterior_alpha/ep_alpha that annotate_ep_batch
+            # reads — so the sort key and the result-window annotation can
+            # never disagree (notably for prior-only claims: an auto-baselined
+            # decide part with no EP flush has no n.confidence but a persisted
+            # 0.75 prior — the pre-fix read ranked it as unmeasured 0.5).
             from .ranking import GraphRanker
             ranker = graph_ranker or GraphRanker(proj)
             signals = ranker._fetch_signals([r.id for r in results], entity_type)
@@ -13409,7 +13448,12 @@ class TortoiseSDK:
         """Soft-delete a Graph node (status='deleted' tombstone — the v1
         lifecycle, C2 #2111). Returns True when a non-default node was
         tombstoned; False when unknown OR the default (callers map to
-        404/403). Pre-C1 nodes without status gain it on delete."""
+        404/403). Pre-C1 nodes without status gain it on delete.
+
+        #2304: stamps ``deleted_at`` (the trash grace window's start — the
+        purge enforces the 7-day recovery period off it; legacy tombstones
+        (deleted_at absent) predate the prop and are treated as past-grace).
+        """
         reg = self._get_registry()
         rows = reg.query(
             "MATCH (g:Graph {id:$gid, team_id:$tid}) RETURN g.kind",
@@ -13419,12 +13463,55 @@ class TortoiseSDK:
             return False
         if rows[0][0] == "default":
             return False
+        from datetime import datetime
         reg.query(
             "MATCH (g:Graph {id:$gid, team_id:$tid}) "
-            "SET g.status = 'deleted'",
-            params={"gid": graph_id, "tid": team_id},
+            "SET g.status = 'deleted', g.deleted_at = $ts",
+            params={"gid": graph_id, "tid": team_id,
+                    "ts": datetime.now(UTC).isoformat()},
         )
         return True
+
+    def graph_restore(self, team_id: str, graph_id: str) -> bool:
+        """#2304 trash restore: flip a tombstoned custom node back to active
+        and clear the deletion stamp. Returns False when nothing matched
+        (unknown / active / default / ALREADY PURGED — callers 404/403/410).
+        Keys stay dead (revoked at delete; restore never resurrects them) —
+        the owner mints fresh keys after. A purged node (purged_at set —
+        data physically erased) is never restorable: False so callers 410."""
+        reg = self._get_registry()
+        # CONDITIONAL flip (VGATE race fix): the SET fires only when the
+        # node is still an UNPURGED tombstone — a concurrent purge stamp
+        # between any pre-read and this write matches 0 nodes, so a purge
+        # can never be clobbered by a restore. Returns whether it flipped.
+        res = reg.query(
+            "MATCH (g:Graph {id:$gid, team_id:$tid}) "
+            "WHERE g.status = 'deleted' AND g.purged_at IS NULL "
+            "AND coalesce(g.kind, 'custom') <> 'default' "
+            "SET g.status = 'active' REMOVE g.deleted_at, g.purged_at, "
+            "g.purged_residual RETURN count(g)",
+            params={"gid": graph_id, "tid": team_id},
+        ).result_set
+        return bool(res and int(res[0][0]) > 0)
+
+    def trash_graphs(self, team_id: str) -> list[dict]:
+        """#2304: tombstoned custom nodes of a team (the trash list) — the
+        owner restore surface. ``deleted_at`` absent = legacy tombstone
+        (predates the prop; purge treats it as past-grace). Purged nodes
+        (purged_at set) are excluded — data is physically gone."""
+        reg = self._get_registry()
+        rows = reg.query(
+            "MATCH (g:Graph {team_id:$tid, status:'deleted'}) "
+            "WHERE coalesce(g.kind, 'custom') <> 'default' "
+            "AND g.purged_at IS NULL "
+            "RETURN g.id, g.name, g.namespace, g.deleted_at",
+            params={"tid": team_id},
+        ).result_set
+        return [
+            {"graph_id": r[0], "name": r[1], "namespace": r[2],
+             "deleted_at": r[3]}
+            for r in rows
+        ]
 
     def graph_set_recording(self, team_id: str, graph_id: str,
                             value: bool | None) -> bool:
@@ -13785,7 +13872,8 @@ class TortoiseSDK:
                       delegation_depth: int | None = None,
                       prefix: str = "tt_",
                       name: str | None = None,
-                      created_via: str | None = None) -> dict:
+                      created_via: str | None = None,
+                      expires_at: str | None = None) -> dict:
         """Generate an API key for a team.
 
         Stores SHA-256 hash (never plaintext). Plaintext returned once.
@@ -13800,7 +13888,12 @@ class TortoiseSDK:
         20260825000001 parity — the hosted create_api_key lane passes it)
         and ``created_via`` (mint-source classification — "provisioned" /
         "agent_signup" etc.) ride the node as optional props; absent =
-        legacy nodes without them.
+        legacy nodes without them. #2426: optional ``expires_at`` (ISO
+        timestamp, None = never) rides the same optional-props pattern — the
+        registry node is graph-property-additive, and the auth/expiry filter
+        (hosted_api ~1558-1570) and cap predicates already read the prop on
+        LEGACY nodes (expires_at absent = NULL = never), so an expiring mint
+        is a pure CREATE-side addition.
 
         Registry-side invariant (code-review #2b, mirrors the Supabase DB
         CHECK chk_minted_key_no_escalation): a MINTED key (delegation_depth
@@ -13856,6 +13949,8 @@ class TortoiseSDK:
             extra += ", name:$nm"; params["nm"] = name  # noqa: E702 (baseline #1503)
         if created_via is not None:
             extra += ", created_via:$cv"; params["cv"] = created_via  # noqa: E702 (baseline #1503)
+        if expires_at is not None:
+            extra += ", expires_at:$ea"; params["ea"] = expires_at  # noqa: E702 (baseline #1503)
         reg.query(
             "CREATE (k:APIKey {id:$id, team_id:$tid, key_hash:$kh, "
             "key_prefix:$kp, created_by:$cb, created_at:$now"
@@ -14054,12 +14149,17 @@ class TortoiseSDK:
                         "now": now_iso},
             )
             # re-count AFTER the insert; only revoke when over cap (and a row
-            # genuinely existed to revoke)
+            # genuinely existed to revoke). #2426 code-review P2: expired-but-
+            # unrevoked durables are excluded from the count AND the revoke-
+            # target scan (expired keys don't count — never wedge, and never
+            # let the oldest-LIVE key be the revoke collateral for expired
+            # rows above the cap; matches the session-key recovery lanes).
             rows = reg.query(
                 "MATCH (k:APIKey {team_id:$tid}) WHERE k.revoked_at IS NULL "
+                "AND (k.expires_at IS NULL OR k.expires_at > $now) "
                 "AND (k.created_via IS NULL OR k.created_via <> 'bootstrap') "
                 "RETURN k.id, k.created_at ORDER BY k.created_at ASC",
-                params={"tid": team_id},
+                params={"tid": team_id, "now": now_iso},
             ).result_set
             if len(rows) > max_keys and rows:
                 reg.query(
@@ -16273,14 +16373,14 @@ class TortoiseSDK:
         """Targeted marker SET (pin (a) cycle-7): e.embeddingRepairFailedAt =
         $ts touching NO other Event key (NOT a partial-prop re-write — the
         E2E-11(d) prop-snapshot guard asserts preservation)."""
-        from datetime import datetime, timezone
+        from datetime import datetime
         try:
             proj = self._get_proj()
             proj.g.query(
                 "MATCH (e:Event {eventId:$eid}) "
                 "SET e.embeddingRepairFailedAt = $ts",
                 params={"eid": event_id,
-                        "ts": datetime.now(timezone.utc).isoformat()},  # noqa: UP017
+                        "ts": datetime.now(UTC).isoformat()},
             )
         except Exception:  # noqa: BLE001, RUF100
             pass

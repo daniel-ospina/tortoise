@@ -16,10 +16,12 @@ from tortoise.backup_sweep import (
     resolve_active_graph,
     enumerate_eligible_teams,
     enumerate_teams,
+    enumerate_team_tombstones,
     read_graph_state,
     read_ops_state,
     read_team_state,
     run_backup_sweep,
+    run_graph_purge,
     team_graph_name,
 )
 from tortoise.hosted_backup import MemoryStorage, list_backups
@@ -228,6 +230,44 @@ def test_sweep_no_teams_is_signal_not_incident(shared_proj):
         assert res["status"] == "no_teams"
         assert res["incidents"] == []
         assert read_ops_state(store).get("last_team_count") == 0
+
+
+def test_sweep_noop_run_preserves_previous_rollup(shared_proj):
+    """#2412: a no-op run (0 eligible teams) must NOT erase the previous
+    real run's per-graph roll-up from ops/state.json — /status last_sweep
+    must keep showing the last REAL sweep and the error-streak bookkeeping
+    survives no-op runs (pre-#2412 the early-return wrote a bare 2-key
+    object, rendering last_sweep: None right after a healthy run)."""
+    with tempfile.TemporaryDirectory() as tmp:  # noqa: F841
+        proj = shared_proj
+        if proj is None:
+            return
+        wipe(proj)
+        reg = proj.db.select_graph(_REGISTRY_GRAPH)
+        store = MemoryStorage()
+        prior = {
+            "last_team_count": 2,
+            "last_sweep_at": "2026-09-06T10:00:00+00:00",
+            "graph_totals": {"attempted": 3, "backed_up": 2, "errors": 1},
+            "graph_failures": [{"team_id": "team_x", "graph_id": "g_a",
+                                "error": "boom", "streak": 2}],
+            "graph_error_streaks": {"team_x:g_a": 2},
+            "updated_at": "2026-09-06T10:00:00+00:00",
+        }
+        store.upload(OPS_STATE_KEY, json.dumps(prior).encode())
+        # no eligible Pro teams -> no-op run (no_teams branch)
+        res = run_backup_sweep(
+            db=proj.db, registry=reg, storage=store, config=_config(
+                team_sweep_enabled=False),
+        )
+        assert res["status"] == "no_teams"
+        state = read_ops_state(store)
+        # the previous real sweep's roll-up SURVIVES the no-op run
+        assert state["last_sweep_at"] == prior["last_sweep_at"]
+        assert state["graph_totals"] == prior["graph_totals"]
+        assert state["graph_failures"] == prior["graph_failures"]
+        assert state["graph_error_streaks"] == prior["graph_error_streaks"]
+        assert state["last_team_count"] == 0
 
 
 def test_sweep_enum_delta_fires_incident(shared_proj):
@@ -1566,3 +1606,230 @@ def test_sweep_degraded_headline_and_error_streaks(shared_proj, monkeypatch):
         assert r3["graph_error_streaks"] == {}
         assert r3["graph_totals"]["errors"] == 0
         assert r3["graph_totals"]["backed_up"] == 2
+
+
+def test_classify_flat_pool_keys_by_listing_not_manifest_bid():
+    """#2414: the flat classification index keys by the R2 LISTING key — a
+    manifest whose self-declared backup_id names a DIFFERENT team/key must
+    not redirect the index (or the failing-default drain's delete, which
+    deletes backups/{index-key}/…) to another backup's objects (prune_backups'
+    untrusted-manifest parity)."""
+    store = MemoryStorage()
+    real = _seed_flat_for_sweep(store, "team_a", "team_team_a_g_custom", 0.1)
+    # forge the manifest's backup_id to point elsewhere
+    forged_key = f"backups/{real}/manifest.json"
+    m = json.loads(store.download(forged_key))
+    m["backup_id"] = "team_other/20200101T000000Z_forged"
+    store.upload(forged_key, json.dumps(m).encode())
+    rows = [{"graph_id": "g_custom", "kind": "custom",
+             "namespace": "team_team_a_g_custom"}]
+    from tortoise.backup_sweep import _classify_flat_pool
+    idx = _classify_flat_pool(store, "team_a", rows)
+    # keyed under the LISTING backup_id (team_a/<real-key>), not the forged id
+    assert set(idx) == {real}, idx
+    assert idx[real]["graph_id"] == "g_custom"
+    assert not any("team_other" in k for k in idx)
+
+
+# ── #2304 trash purge tests (delete = quarantine → grace → erasure) ─────────
+
+def _seed_custom_tombstone(proj, team_id, gid, name, *,
+                           ns=None, deleted_at=None, kind="custom"):
+    """Seed a tombstoned custom Graph node in the registry + (optionally)
+    its data-plane namespace graph with a Point. Returns the namespace."""
+    reg = proj.db.select_graph(_REGISTRY_GRAPH)
+    namespace = ns or f"team_{team_id}_{gid}"
+    reg.query(
+        "CREATE (g:Graph {id:$gid, team_id:$tid, name:$name, kind:$kind, "
+        "namespace:$ns, status:'deleted', deleted_at:$ts})",
+        params={"gid": gid, "tid": team_id, "name": name, "kind": kind,
+                "ns": namespace, "ts": deleted_at},
+    )
+    g = proj.db.select_graph(namespace)
+    g.query("CREATE (p:Point {id:'pt-x', content:'c', pointKind:'claim'})")
+    return namespace
+
+
+def _tombstone_props(proj, gid, team_id="team_x"):
+    rows = proj.db.select_graph(_REGISTRY_GRAPH).query(
+        "MATCH (g:Graph {id:$gid, team_id:$tid}) RETURN properties(g)",
+        params={"gid": gid, "tid": team_id}).result_set
+    return dict(rows[0][0]) if rows else {}
+
+
+@pytest.mark.skipif(_DOCKER_LANE, reason="purge erasure unit tests run embedded; docker lane covered by the hosted trash E2E (#2304)")
+def test_purge_erases_namespace_artifacts_and_stamps_row(shared_proj):
+    if shared_proj is None:
+        return
+    proj = _make_env(None, shared_proj)
+    store = MemoryStorage()
+    gid = f"g_purge_{os.urandom(2).hex()}"
+    ns = _seed_custom_tombstone(
+        proj, "team_x", gid, "old-graph",
+        deleted_at=(datetime.now(UTC) - timedelta(days=14)).isoformat())
+    # Artifacts: nested pool + per-graph ops state + legacy flat archive.
+    store.upload(f"backups/team_x/{gid}/runA/dump.enc", b"blob")
+    store.upload(f"backups/team_x/{gid}/runA/manifest.json", b"{}")
+    store.upload(f"ops/teams/team_x/graphs/{gid}/state.json", b"{}")
+    bid = f"flat_{os.urandom(2).hex()}"
+    # Canonical #2370 index shape: full bids "{team}/{key}" with objects at
+    # backups/{team}/{key}/...
+    full_bid = f"team_x/{bid}"
+    store.upload(f"backups/{full_bid}/dump.enc", b"flat")
+    store.upload(f"backups/{full_bid}/manifest.json", b"{}")
+    store.upload(
+        "ops/legacy-flat-index/team_x.json",
+        json.dumps({full_bid: {"graph_name": ns, "graph_id": gid}}).encode())
+    # A SECOND custom tombstone inside the grace window must survive.
+    fresh_gid = f"g_fresh_{os.urandom(2).hex()}"
+    _seed_custom_tombstone(
+        proj, "team_x", fresh_gid, "fresh",
+        deleted_at=(datetime.now(UTC) - timedelta(days=1)).isoformat())
+    store.upload(f"backups/team_x/{fresh_gid}/runA/dump.enc", b"keep")
+
+    res = run_graph_purge(db=proj.db, registry=proj.db.select_graph(
+        _REGISTRY_GRAPH), storage=store, team_ids=["team_x"])
+
+    assert res["status"] == "ok"
+    purged = [p for p in res["purged"] if p["graph_id"] == gid]
+    assert len(purged) == 1
+    # Namespace graph erased (data-plane GRAPH.DELETE).
+    assert ns not in proj.db.list_graphs()
+    # Artifacts erased: nested pool + per-graph state + legacy flat pool.
+    assert store.list(f"backups/team_x/{gid}/") == []
+    assert store.list(f"ops/teams/team_x/graphs/{gid}/") == []
+    assert store.list(f"backups/{full_bid}/") == []
+    idx = json.loads(store.download("ops/legacy-flat-index/team_x.json"))
+    assert gid not in [e.get("graph_id") for e in idx.values()]
+    # Row KEPT + stamped (audit tombstone, still deleted).
+    props = _tombstone_props(proj, gid)
+    assert props["status"] == "deleted"
+    assert props.get("purged_at")
+    # Fresh tombstone untouched (inside grace) — its pool survives.
+    assert store.list(f"backups/team_x/{fresh_gid}/") != []
+    fresh = _tombstone_props(proj, fresh_gid)
+    assert not fresh.get("purged_at")
+    # Idempotent: a second run purges nothing (row excluded by purged_at).
+    res2 = run_graph_purge(db=proj.db, registry=proj.db.select_graph(
+        _REGISTRY_GRAPH), storage=store, team_ids=["team_x"])
+    assert all(p["graph_id"] != gid for p in res2["purged"])
+
+
+@pytest.mark.skipif(_DOCKER_LANE, reason="purge erasure unit tests run embedded; docker lane covered by the hosted trash E2E (#2304)")
+def test_purge_legacy_tombstone_missing_deleted_at_is_past_grace(shared_proj):
+    if shared_proj is None:
+        return
+    proj = _make_env(None, shared_proj)
+    store = MemoryStorage()
+    gid = f"g_legacy_{os.urandom(2).hex()}"
+    ns = _seed_custom_tombstone(proj, "team_x", gid, "ancient",
+                                deleted_at=None)  # pre-#2304 tombstone
+    store.upload(f"backups/team_x/{gid}/runA/dump.enc", b"blob")
+    res = run_graph_purge(db=proj.db, registry=proj.db.select_graph(
+        _REGISTRY_GRAPH), storage=store, team_ids=["team_x"])
+    assert any(p["graph_id"] == gid for p in res["purged"])
+    assert ns not in proj.db.list_graphs()
+    props = _tombstone_props(proj, gid)
+    assert props.get("purged_at")
+
+
+@pytest.mark.skipif(_DOCKER_LANE, reason="purge erasure unit tests run embedded; docker lane covered by the hosted trash E2E (#2304)")
+def test_purge_ownership_guard_retains_reoccupied_namespace(shared_proj):
+    if shared_proj is None:
+        return
+    proj = _make_env(None, shared_proj)
+    store = MemoryStorage()
+    gid = f"g_guard_{os.urandom(2).hex()}"
+    # Tombstone whose namespace does NOT derive from its id — the guard must
+    # refuse the drop (the namespace may host a LIVE graph).
+    other_ns = f"team_team_x_g_live_{os.urandom(2).hex()}"
+    _seed_custom_tombstone(proj, "team_x", gid, "stale", ns=other_ns,
+                           deleted_at=(datetime.now(UTC)
+                                       - timedelta(days=30)).isoformat())
+    res = run_graph_purge(db=proj.db, registry=proj.db.select_graph(
+        _REGISTRY_GRAPH), storage=store, team_ids=["team_x"])
+    resids = [p for p in res["residuals"] if p["graph_id"] == gid]
+    assert len(resids) == 1
+    assert "ownership_guard" in resids[0]["reason"]
+    # Namespace NOT dropped; row stamped purged_residual (no restore of
+    # unaddressable data).
+    assert other_ns in proj.db.list_graphs()
+    props = _tombstone_props(proj, gid)
+    assert props.get("purged_at")
+    assert props.get("purged_residual") is True
+
+
+@pytest.mark.skipif(_DOCKER_LANE, reason="purge erasure unit tests run embedded; docker lane covered by the hosted trash E2E (#2304)")
+def test_purge_absent_namespace_converges(shared_proj):
+    if shared_proj is None:
+        return
+    proj = _make_env(None, shared_proj)
+    store = MemoryStorage()
+    gid = f"g_absent_{os.urandom(2).hex()}"
+    reg = proj.db.select_graph(_REGISTRY_GRAPH)
+    namespace = f"team_team_x_{gid}"
+    reg.query(
+        "CREATE (g:Graph {id:$gid, team_id:'team_x', name:'ghost', "
+        "kind:'custom', namespace:$ns, status:'deleted', deleted_at:$ts})",
+        params={"gid": gid, "ns": namespace,
+                "ts": (datetime.now(UTC) - timedelta(days=10)).isoformat()})
+    # No data-plane namespace was ever minted — drop must be a no-op success.
+    res = run_graph_purge(db=proj.db, registry=reg, storage=store,
+                          team_ids=["team_x"])
+    assert any(p["graph_id"] == gid for p in res["purged"])
+    assert _tombstone_props(proj, gid).get("purged_at")
+
+
+@pytest.mark.skipif(_DOCKER_LANE, reason="purge erasure unit tests run embedded; docker lane covered by the hosted trash E2E (#2304)")
+def test_enumerate_team_tombstones_excludes_active_and_purged(shared_proj):
+    if shared_proj is None:
+        return
+    proj = _make_env(None, shared_proj)
+    reg = proj.db.select_graph(_REGISTRY_GRAPH)
+    old = f"g_t_{os.urandom(2).hex()}"
+    fresh = f"g_f_{os.urandom(2).hex()}"
+    purged = f"g_p_{os.urandom(2).hex()}"
+    for gid, status, purged_at in ((old, "deleted", None),
+                                   (fresh, "deleted", None),
+                                   (purged, "deleted",
+                                    datetime.now(UTC).isoformat())):
+        reg.query(
+            "CREATE (g:Graph {id:$gid, team_id:'team_x', name:$gid, "
+            "kind:'custom', namespace:$ns, status:$st, purged_at:$pa})",
+            params={"gid": gid, "ns": f"team_team_x_{gid}",
+                    "st": status, "pa": purged_at})
+    tombs = enumerate_team_tombstones(reg, "team_x")
+    ids = {t["graph_id"] for t in tombs}
+    assert old in ids and fresh in ids
+    assert purged not in ids  # purged rows are never re-purged
+
+
+@pytest.mark.skipif(_DOCKER_LANE, reason="purge erasure unit tests run embedded; docker lane covered by the hosted trash E2E (#2304)")
+def test_purge_skips_row_restored_between_enumeration_and_drop(shared_proj):
+    """VGATE race regression: if a restore flips the row to active between
+    purge enumeration and the drop, the purge must NOT erase the (now live)
+    namespace and must not stamp purged_at."""
+    if shared_proj is None:
+        return
+    proj = _make_env(None, shared_proj)
+    store = MemoryStorage()
+    gid = f"g_race_{os.urandom(2).hex()}"
+    ns = _seed_custom_tombstone(
+        proj, "team_x", gid, "raced",
+        deleted_at=(datetime.now(UTC) - timedelta(days=30)).isoformat())
+    # The restore flips it active between enumeration and the drop.
+    reg = proj.db.select_graph(_REGISTRY_GRAPH)
+    reg.query(
+        "MATCH (g:Graph {id:$gid, team_id:'team_x'}) "
+        "SET g.status = 'active' REMOVE g.deleted_at",
+        params={"gid": gid})
+    store.upload(f"backups/team_x/{gid}/runA/dump.enc", b"blob")
+    res = run_graph_purge(db=proj.db, registry=reg, storage=store,
+                          team_ids=["team_x"])
+    skipped = [p for p in res["purged"] if p["graph_id"] == gid]
+    assert not skipped
+    # Namespace survives (live data), no purged stamp, artifacts untouched.
+    assert ns in proj.db.list_graphs()
+    props = _tombstone_props(proj, gid)
+    assert not props.get("purged_at")
+    assert store.list(f"backups/team_x/{gid}/") != []

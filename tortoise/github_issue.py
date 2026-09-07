@@ -115,4 +115,18 @@ def search_open_incident(repo: str, token: str, kind: str,
     query = f'repo:{repo} is:issue is:open label:"{_DR_LABEL}" in:title "{title}"'
     url = f"{_API}/search/issues?q={urllib.parse.quote(query)}"
     data = _request("GET", url, token)
-    return [int(i["number"]) for i in data.get("items", [])]
+    items = data.get("items", [])
+    if team_id:
+        # #2413 exact-subject verification: GitHub issue search does NOT
+        # guarantee punctuation-exact phrase matching — ':' is a token
+        # boundary, so the phrase "[DR] KIND — team_a" can match a title
+        # "[DR] KIND — team_a:g_x" (the bare team subject is a literal
+        # prefix of its per-graph subjects). A prefix-colliding adoption
+        # would bind a DIFFERENT subject's issue into this incident's dedup
+        # object — one subject's recovery then closes the other's live issue
+        # (silent-loss cross-talk; the driver's gh_find_open already verifies
+        # the exact title suffix, #2375). Verify server-side before adopting.
+        suffix = f" — {team_id}"
+        items = [i for i in items
+                 if str(i.get("title", "")).endswith(suffix)]
+    return [int(i["number"]) for i in items]

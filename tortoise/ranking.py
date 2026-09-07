@@ -386,11 +386,28 @@ class GraphRanker:
             return {}
 
     def _fetch_point_signals(self, ids: list[str]) -> dict[str, dict]:
+        # Post-#2206/#2286 parity: a point's confidence is the belief MEAN
+        # α/(α+β) of the coalesced posterior→prior columns
+        # (coalesce(n.posterior_alpha, n.ep_alpha, 1.0) / ... — the same
+        # canonical read annotate_ep_batch / get_confidence / why /
+        # StateRanker use). n.confidence (the EP-flush mirror of that mean)
+        # is preferred when present — it is byte-identical for flushed
+        # claims and preserves pre-#852 legacy graphs that carry only the
+        # mirror — but when it is ABSENT the read must fall through to the
+        # canonical coalesce mean, NOT to the neutral 0.5. #2262
+        # mass-produced the exposing class: every decide part is born with a
+        # persisted ep_alpha/ep_beta prior (system default → 0.75) and NO
+        # n.confidence until the first EP flush — the pre-fix coalesce fell
+        # to 0.5 and ranked a 0.75-prior claim as unmeasured while every
+        # other surface read 0.75.
         cypher = (
             "MATCH (n:Point) WHERE n.id IN $ids "
             "OPTIONAL MATCH (n)-[r:IMPL|NAND]-(:Point {is_operator: true}) "
             "WITH n, count(r) AS degree "
-            "RETURN n.id, coalesce(n.confidence, 0.5) AS conf, degree, n.createdAt AS created, "
+            "RETURN n.id, coalesce(n.confidence, "
+            "  coalesce(n.posterior_alpha, n.ep_alpha, 1.0) "
+            "  / (coalesce(n.posterior_alpha, n.ep_alpha, 1.0) + coalesce(n.posterior_beta, n.ep_beta, 1.0)), "
+            "  0.5) AS conf, degree, n.createdAt AS created, "
             "  coalesce(n.posterior_alpha, n.ep_alpha, 1.0) AS alpha, coalesce(n.posterior_beta, n.ep_beta, 1.0) AS beta, "
             "  n.ep_alpha IS NOT NULL AS has_ep"
         )
@@ -446,14 +463,19 @@ class GraphRanker:
 #   set) — the fusion already happened upstream (search_engine.rrf_fusion).
 # * confidence = the EP posterior MEAN α/(α+β) from the persisted
 #   posterior_alpha/beta (falling back to ep_alpha/beta) — the same belief
-#   signal the existing order_by="confidence" path reads (n.confidence).
+#   signal the order_by="confidence" path reads (GraphRanker prefers the
+#   n.confidence flush-mirror when present and falls back to the identical
+#   coalesce-column mean otherwise, so StateRanker and GraphRanker can never
+#   disagree on a point's belief).
 #   Uncalibrated points (no persisted α/β → Beta(1,1)) fall back to a
 #   documented neutral 0.5: absence of measurement is NOT evidence against.
 #   NOTE: EpBreakdown.confidence_mean is deliberately NOT used — post-#2206
-#   it carries the SAME belief mean (α/(α+β) over the coalesce read, rounded
-#   4dp), so this is a single-source-read optimization (n.confidence is the
-#   raw persisted property), not a semantics split. contention/evidence on
-#   the breakdown remain the structural edge-ratio family — never beliefs.
+#   it carries the SAME belief mean (α/(α+β) over the same coalesce read,
+#   rounded 4dp), so reading the coalesced columns directly is a
+#   single-source-read optimization (n.confidence is only the EP-flush
+#   mirror of that mean — absent until a flush — not an independent
+#   source), not a semantics split. contention/evidence on the breakdown
+#   remain the structural edge-ratio family — never beliefs.
 # * centrality_norm = min-max normalized degree centrality (incident
 #   IMPL/NAND + about* edge count, within the result set). w_c ≈ 0.10 is
 #   deliberately WEAK and subordinate to confidence: with w_c=0.10 the whole

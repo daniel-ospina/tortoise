@@ -139,6 +139,11 @@ tbody tr:last-child td { border-bottom: none; }
 
 .live { color: var(--green); }
 .revoked { color: var(--red); }
+/* #2426: API-key expiry states — the keys-table Expires cell. .expiring =
+   amber ≤14d-to-go ('in N days'); .expired = terminal red (row stays listed
+   as a tombstone — rotate re-applies the lifetime span with a fresh clock). */
+.expiring { color: #fbbf24; }
+.expired { color: var(--red); }
 
 /* #300: tier badge + inline forms */
 .tier-badge {
@@ -156,6 +161,9 @@ tbody tr:last-child td { border-bottom: none; }
 button.tier-badge { background: transparent; font-family: inherit; cursor: pointer; }
 button.tier-badge:disabled { opacity: 0.6; cursor: wait; }
 .inline-form { display: flex; gap: 8px; align-items: center; }
+/* #2426: the API-Keys-tab create form grew an expiry <select> (+ Custom
+   date input) — wrap on narrow viewports instead of overflowing the row */
+.inline-form.key-create-form { flex-wrap: wrap; }
 .inline-form input, .inline-form select {
   background: var(--surface);
   border: 1px solid rgba(255,255,255,0.12);
@@ -750,6 +758,9 @@ input::placeholder, textarea::placeholder {
 .graph-del-confirm { color: var(--text-dim, #94a3b8); font-size: 12px; margin-left: 6px; }
 .graph-del-confirm .danger { color: var(--red, #f87171); border-color: var(--red, #f87171); }
 tr.graph-delete-arm td { background: rgba(248, 113, 113, 0.06); }
+.trash-section { margin-top: 18px; border-top: 1px solid var(--border, #1e293b); padding-top: 10px; }
+.trash-section summary { cursor: pointer; color: var(--text-dim, #94a3b8); font-size: 13px; margin-bottom: 8px; }
+.trash-section table { margin-top: 6px; }
 .row-dim td { opacity: 0.55; }
 .graph-key-panel {
   margin-top: 10px;

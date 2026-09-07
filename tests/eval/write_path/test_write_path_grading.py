@@ -125,6 +125,139 @@ def test_rephrase_ignored_for_non_accepting_unit():
     assert counts["hit_point_ids"] == ["p1"]
 
 
+# ── #2405 paraphrase-survival leg (measurement consistency) ───────────────
+
+
+def test_paraphrase_survivor_flagged_counts():
+    """A FLAGGED unit whose anchor is NOT verbatim in any point but whose
+    content token-covers the anchor at the product dedup band (>= 0.45)
+    survives — the extractor distills; paraphrase is not content_missing."""
+    gold = gold_with([_unit("u1", "search shard saturated")])
+    # Verbatim absent; content tokens {lone, search, shard, flooded} cover
+    # 2/3 of the anchor's content tokens {search, shard, saturated}.
+    points = [_point("p1", "the lone search shard flooded over")]
+    assert not schema.anchor_present("search shard saturated", "the lone search "
+                                     "shard flooded over")
+    counts = grading.macro_survival_counts(gold, points)
+    assert counts["survived"] == 1
+    assert counts["hit_point_ids"] == ["p1"]
+
+
+def test_paraphrase_below_band_does_not_survive():
+    """Below the 0.45 band = no claim retention — precision guard."""
+    gold = gold_with([_unit("u1", "search shard saturated")])
+    points = [_point("p1", "we discussed scaling the cluster instead")]
+    counts = grading.macro_survival_counts(gold, points)
+    assert counts["survived"] == 0
+
+
+def test_paraphrase_ignored_for_non_flagged_unit():
+    """Units the corpus marks verbatim-only (dates/numbers/names/mechanics)
+    do NOT get the paraphrase leg — a paraphrase stays content_missing even
+    at high overlap (the extractor paraphrasing 'October 15 freeze' must
+    still be a miss: fidelity-critical units need near-verbatim retention)."""
+    gold = gold_with([_unit("u1", "search shard saturated", rephrase=False)])
+    points = [_point("p1", "the lone search shard flooded over")]
+    counts = grading.macro_survival_counts(gold, points)
+    assert counts["survived"] == 0
+
+
+def test_paraphrase_leg_excludes_turn_echo():
+    """The echo is never graded as memory — even when it paraphrase-covers
+    the anchor at the band."""
+    gold = gold_with([_unit("u1", "search shard saturated")])
+    echo = [_point("t0", "[user] the lone search shard flooded over")]
+    counts = grading.macro_survival_counts(gold, echo)
+    assert counts["survived"] == 0
+
+
+def test_verbatim_leg_still_fires_for_flagged_units():
+    """Verbatim remains the first (high-precision) leg — unchanged for all
+    units, flagged or not."""
+    gold = gold_with([_unit("u1", "one shard saturated", rephrase=True)])
+    points = [_point("p1", "The deploy split traffic and one shard saturated.")]
+    counts = grading.macro_survival_counts(gold, points)
+    assert counts["survived"] == 1 and counts["hit_point_ids"] == ["p1"]
+
+
+
+
+def test_paraphrase_near_band_negative_from_below():
+    """A 2/5 = 0.40 coverage (below the 0.45 band) must NOT survive — pins
+    the constant from below (a silent drop to <= 0.40 would otherwise pass
+    the whole suite)."""
+    gold = gold_with([_unit("u1", "single owner lease lock batch")])
+    # Point covers exactly {owner, lease} = 2/5 anchor content tokens.
+    points = [_point("p1", "the owner holds one active lease today")]
+    assert not schema.anchor_present("single owner lease lock batch",
+                                     "the owner holds one active lease today")
+    counts = grading.macro_survival_counts(gold, points)
+    assert counts["survived"] == 0
+
+
+def test_paraphrase_negation_contradiction_never_survives():
+    """Polarity gate (R1 P1-2): a point asserting the OPPOSITE of a flagged
+    anchor must NOT count as retention — 'no lease rows' is not retained by
+    'we found lease rows'."""
+    gold = gold_with([_unit("u1", "no lease rows at all")])
+    points = [_point("p1", "we found lease rows in the table")]
+    counts = grading.macro_survival_counts(gold, points)
+    assert counts["survived"] == 0
+
+
+def test_paraphrase_negation_preserving_paraphrase_survives():
+    gold = gold_with([_unit("u1", "no lease rows at all")])
+    points = [_point("p1", "found no lease rows anywhere in the registry")]
+    counts = grading.macro_survival_counts(gold, points)
+    assert counts["survived"] == 1
+
+
+def test_survival_stopword_set_pinned():
+    """The local stopword snapshot must stay == the M6 set MINUS the
+    negators {no, not} (R1 P2-3: the survival band must not silently ride
+    M6's calibration knob). Catches drift on either side."""
+    from tools.longmem_eval import evidence
+    m6 = {t for t in evidence.tokens("a b c")}  # import sanity only
+    assert isinstance(m6, set)
+    m6_stopwords = set(evidence._STOPWORDS)
+    expected = m6_stopwords - {"no", "not"}
+    assert frozenset(expected) == grading._SURVIVAL_STOPWORDS
+    assert "no" not in grading._SURVIVAL_STOPWORDS
+    assert "lease" not in grading._SURVIVAL_STOPWORDS
+
+
+
+def test_paraphrase_negation_zero_synonym_recall():
+    """R2 P3-1: extended negators keep the same-polarity paraphrase alive
+    ('no lease rows' -> 'zero lease rows anywhere')."""
+    gold = gold_with([_unit("u1", "no lease rows at all")])
+    points = [_point("p1", "found zero lease rows anywhere in the registry")]
+    counts = grading.macro_survival_counts(gold, points)
+    assert counts["survived"] == 1
+
+
+def test_paraphrase_incidental_negator_limit_documented():
+    """R2 P2-3 (accepted limit): the membership-anywhere gate cannot catch an
+    INCIDENTAL negator elsewhere in the point. Documented precision trade-off
+    of the lexical band — pinned here so the limit is explicit, not silent."""
+    gold = gold_with([_unit("u1", "no lease rows at all")])
+    # 'no' is incidental (modifies 'errors', not the lease-row claim).
+    points = [_point("p1", "we found lease rows with no errors at all")]
+    counts = grading.macro_survival_counts(gold, points)
+    assert counts["survived"] == 1  # the documented limit, not a regression
+
+
+def test_paraphrase_mirror_direction_not_gated():
+    """R2 P2-3 (accepted limit): a POINT-side negation of a POSITIVE anchor is
+    not gated — lexical bands cannot scope negations without false-rejecting
+    'we shipped the fix, no rollback needed'."""
+    gold = gold_with([_unit("u1", "we found lease rows in the table")])
+    points = [_point("p1", "found no lease rows anywhere in the registry")]
+    counts = grading.macro_survival_counts(gold, points)
+    assert counts["survived"] == 1  # anchor positive -> gate off by design
+
+
+
 # ── Strict survival (provenance + EP flags) ────────────────────────────────
 
 
