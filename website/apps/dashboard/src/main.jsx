@@ -1001,7 +1001,18 @@ function claimIntentInFlight() {
     if (step3PasteAutofocus) return
     if (wizardCardRef.current) wizardCardRef.current.focus()
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [wizardStep, welcomeMode, authed, wizardPaused, welcomeHasOrg, wizardShowPaste])
+  }, [wizardStep, welcomeMode, authed, wizardPaused])
+  // ⛔ #2426 e2e catch (P0): welcomeHasOrg (~line 4890) and wizardShowPaste
+  // (~1832) are declared LATER in this giant component — a hook dep array
+  // evaluates eagerly DURING render, so listing either here threw "Cannot
+  // access … before initialization" on every authenticated render and
+  // blanked the whole dashboard on main (introduced when 38498ab4 added
+  // both to this effect's deps). The effect BODY is a closure that runs
+  // post-render (safe to read them there — step3PasteAutofocus stays
+  // correct). Semantics of dropping them: toggling the paste disclosure on
+  // the SAME step now does not re-run the effect, which is exactly the
+  // "must not yank focus on disclosure toggle" intent — the stepChanged
+  // guard already no-ops it.
   const [onboardingComplete, setOnboardingComplete] = React.useState(false)
   const [welcomeOriented, setWelcomeOriented] = React.useState(false)
   const [wizardSubject, setWizardSubject] = React.useState('')
