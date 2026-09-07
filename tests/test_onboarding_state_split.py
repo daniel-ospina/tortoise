@@ -611,6 +611,238 @@ class TestCheckpoint:
             tc.__exit__(None, None, None)
 
 
+class TestForkUnsureAt:
+    """#2407 "not sure yet — decide later" (Data Model 1) endpoint contract.
+
+    Pins: the unsure record persists a server-stamped fork_unsure_at WITHOUT
+    consuming the set-once fork (fork stays None → the fork card keeps asking);
+    a later explicit self/build pick is a fresh fork write (200, never a 409);
+    completion NEVER auto-closes an unsure org as 'self' (the full self
+    checklist leaves it active until the fork is answered); repeat unsure
+    picks re-stamp (200); an unsure record after a fork is a 409 (never
+    asked / already answered).
+    """
+
+    def test_unsure_records_signal_fork_stays_unset(self):
+        tc, team_id = _registered_client()
+        try:
+            r = tc.post("/v1/onboarding/state/checkpoint",
+                        json={"fork_unsure_at": True})
+            assert r.status_code == 200, r.text
+            body = r.json()["onboarding"]
+            assert body["fork"] is None  # set-once fork NOT consumed
+            at = body["fork_unsure_at"]
+            assert isinstance(at, str) and "T" in at  # server-stamped ISO
+            node = _read_node(team_id)
+            assert node["fork_unsure_at"] == at
+            assert "fork" not in node or node["fork"] is None
+        finally:
+            tc.__exit__(None, None, None)
+
+    def test_unsure_repeat_re_stamps_never_409(self):
+        tc, _team_id = _registered_client()
+        try:
+            r1 = tc.post("/v1/onboarding/state/checkpoint",
+                         json={"fork_unsure_at": True})
+            assert r1.status_code == 200, r1.text
+            r2 = tc.post("/v1/onboarding/state/checkpoint",
+                         json={"fork_unsure_at": True})
+            assert r2.status_code == 200, r2.text
+            body = r2.json()["onboarding"]
+            assert body["fork"] is None
+            assert isinstance(body["fork_unsure_at"], str)
+        finally:
+            tc.__exit__(None, None, None)
+
+    def test_later_explicit_fork_no_409_and_clears_marker(self):
+        """Indicator-4 pin: an unsure org answers the fork LATER — the pick is
+        a fresh set-once write (200, never a 409) and clears the marker."""
+        tc, _team_id = _registered_client()
+        try:
+            r0 = tc.post("/v1/onboarding/state/checkpoint",
+                         json={"fork_unsure_at": True})
+            assert r0.status_code == 200, r0.text
+            for fork in ("self", "build"):
+                tc2, team_id2 = _registered_client()
+                try:
+                    tc2.post("/v1/onboarding/state/checkpoint",
+                             json={"fork_unsure_at": True})
+                    r = tc2.post("/v1/onboarding/state/checkpoint",
+                                 json={"fork": fork})
+                    assert r.status_code == 200, r.text
+                    body = r.json()["onboarding"]
+                    assert body["fork"] == fork
+                    assert body["fork_unsure_at"] is None  # cleared on fork-set
+                    node = _read_node(team_id2)
+                    assert "fork_unsure_at" not in node or \
+                        node["fork_unsure_at"] is None
+                finally:
+                    tc2.__exit__(None, None, None)
+        finally:
+            tc.__exit__(None, None, None)
+
+    def test_fork_unsure_is_never_a_fork_value(self):
+        """Model-1 pin: the fork write path rejects 'unsure' (422) — the
+        deferral lives in fork_unsure_at, never in the fork value."""
+        tc, _team_id = _registered_client()
+        try:
+            r = tc.post("/v1/onboarding/state/checkpoint",
+                        json={"fork": "unsure"})
+            assert r.status_code == 422
+        finally:
+            tc.__exit__(None, None, None)
+
+    def test_unsure_false_422(self):
+        """fork_unsure_at is a MARKER op — only true is meaningful; a false
+        body is a client error (422), never a silent no-op."""
+        tc, _team_id = _registered_client()
+        try:
+            r = tc.post("/v1/onboarding/state/checkpoint",
+                        json={"fork_unsure_at": False})
+            assert r.status_code == 422
+        finally:
+            tc.__exit__(None, None, None)
+
+    def test_unsure_with_fork_is_two_ops_400(self):
+        tc, _team_id = _registered_client()
+        try:
+            r = tc.post("/v1/onboarding/state/checkpoint",
+                        json={"fork_unsure_at": True, "fork": "self"})
+            assert r.status_code == 400
+        finally:
+            tc.__exit__(None, None, None)
+
+    def test_unsure_after_fork_set_is_conflict_409(self):
+        """An unsure record after the org already answered is contradictory
+        (the fork card no longer renders) → 409 fork_already_set."""
+        tc, _team_id = _registered_client()
+        try:
+            tc.post("/v1/onboarding/state/checkpoint", json={"fork": "build"})
+            r = tc.post("/v1/onboarding/state/checkpoint",
+                        json={"fork_unsure_at": True})
+            assert r.status_code == 409
+        finally:
+            tc.__exit__(None, None, None)
+
+    def test_fork_set_once_still_applies_after_unsure(self):
+        """Set-once semantics resume once a fork lands: a changed fork after
+        an unsure-then-self sequence is still a 409."""
+        tc, _team_id = _registered_client()
+        try:
+            tc.post("/v1/onboarding/state/checkpoint",
+                    json={"fork_unsure_at": True})
+            tc.post("/v1/onboarding/state/checkpoint", json={"fork": "self"})
+            r = tc.post("/v1/onboarding/state/checkpoint",
+                        json={"fork": "build"})
+            assert r.status_code == 409
+        finally:
+            tc.__exit__(None, None, None)
+
+    def test_unsure_full_self_checklist_never_auto_closes(self):
+        """Indicator-3 pin: an unsure org completing the ENTIRE self
+        checklist stays active — onboarding must NOT auto-close it as 'self'
+        while the fork question is open (the Setup-guide fork row stays)."""
+        tc, _team_id = _registered_client()
+        try:
+            tc.post("/v1/onboarding/state/checkpoint",
+                    json={"fork_unsure_at": True})
+            for step in ("harness-connected", "first-points-filed",
+                         "decide-completed"):
+                tc.post("/v1/onboarding/state/checkpoint", json={"step": step})
+            st = tc.get("/v1/onboarding/state").json()["onboarding"]
+            assert st["fork"] is None
+            assert st["status"] == "active"  # never auto-closed as self
+            assert st["onboarding_complete"] is False
+        finally:
+            tc.__exit__(None, None, None)
+
+    def test_unsure_then_self_answering_later_completes(self):
+        """Answering the fork LATER (after the self steps already landed)
+        unlocks completion — the explicit pick is a fork write (200) that
+        clears the marker and evals the (now evaluable) self gate."""
+        tc, _team_id = _registered_client()
+        try:
+            tc.post("/v1/onboarding/state/checkpoint",
+                    json={"fork_unsure_at": True})
+            for step in ("harness-connected", "first-points-filed",
+                         "decide-completed"):
+                tc.post("/v1/onboarding/state/checkpoint", json={"step": step})
+            r = tc.post("/v1/onboarding/state/checkpoint",
+                        json={"fork": "self"})
+            assert r.status_code == 200, r.text
+            body = r.json()["onboarding"]
+            assert body["fork"] == "self"
+            assert body["fork_unsure_at"] is None
+            assert body["status"] == "complete"
+            assert body["onboarding_complete"] is True
+        finally:
+            tc.__exit__(None, None, None)
+
+    def test_patch_fork_unsure_at_is_server_owned_403(self):
+        """fork_unsure_at is a checkpoint-only (server-stamped) FLOW key — a
+        stray PATCH is rejected loudly, never silently dropped."""
+        tc, _team_id = _registered_client()
+        try:
+            r = tc.patch("/v1/onboarding/state",
+                         json={"fork_unsure_at": "2026-01-01T00:00:00+00:00"})
+            assert r.status_code == 403
+        finally:
+            tc.__exit__(None, None, None)
+
+    def test_writer_conflict_on_compact_and_fork_set(self):
+        """Graph-level writer contract: 'conflict' when the org is compact
+        (never asked the fork card) or already forked; 'recorded' otherwise;
+        the marker never lands on a forked/compact node."""
+        import uuid
+
+        from tortoise.hosted_api import _make_sdk as _ms
+        # compact org → conflict (compact orgs never see the fork card)
+        tc = f"fu-compact-{uuid.uuid4().hex[:8]}"
+        gc = _ms(namespace=tc)._get_proj()
+        onboarding_state.ensure_onboarding_state_node(gc, tc, compact=True)
+        assert onboarding_state.write_fork_unsure_at(
+            gc, tc, "2026-01-01T00:00:00+00:00") == "conflict"
+        assert onboarding_state.read_onboarding_node(gc, tc).get(
+            "fork_unsure_at") is None
+        # forked org → conflict
+        tf = f"fu-forked-{uuid.uuid4().hex[:8]}"
+        gf = _ms(namespace=tf)._get_proj()
+        onboarding_state.write_fork(gf, tf, "self")
+        assert onboarding_state.write_fork_unsure_at(
+            gf, tf, "2026-01-01T00:00:00+00:00") == "conflict"
+        # fresh org → recorded
+        tr = f"fu-fresh-{uuid.uuid4().hex[:8]}"
+        gr = _ms(namespace=tr)._get_proj()
+        assert onboarding_state.write_fork_unsure_at(
+            gr, tr, "2026-01-01T00:00:00+00:00") == "recorded"
+        assert onboarding_state.read_onboarding_node(gr, tr).get(
+            "fork_unsure_at") == "2026-01-01T00:00:00+00:00"
+        # invalid timestamp rejected (never written)
+        try:
+            onboarding_state.write_fork_unsure_at(gr, tr, "")
+            raise AssertionError("empty timestamp must be rejected")
+        except ValueError:
+            pass
+
+    def test_recompute_unsure_org_stays_active(self):
+        """T7 recompute sweep: an unsure org with the full self checklist is
+        NOT gate-promoted (complete must not regress, but the gate must also
+        refuse to promote on the self default while the fork is open)."""
+        import uuid
+
+        from tortoise.hosted_api import _make_sdk as _ms
+        tid = f"fu-rc-{uuid.uuid4().hex[:8]}"
+        g = _ms(namespace=tid)._get_proj()
+        onboarding_state.ensure_onboarding_state_node(g, tid)
+        onboarding_state.write_fork_unsure_at(g, tid, "2026-01-01T00:00:00+00:00")
+        for step in ("harness-connected", "first-points-filed",
+                     "decide-completed"):
+            onboarding_state.write_completed_step(g, tid, step)
+        assert onboarding_state.recompute_completion(
+            g, tid, False) == "unchanged"
+        assert onboarding_state.read_onboarding_node(g, tid)["status"] == "active"
+
+
 class TestPatchRouting:
     def test_server_owned_keys_403(self):
         tc, _team_id = _registered_client()
@@ -619,7 +851,8 @@ class TestPatchRouting:
                             {"version": 2}, {"completed_steps": []},
                             {"compact": True},
                             {"last_decide_attempt": "failed"},
-                            {"member_progress": {}}):
+                            {"member_progress": {}},
+                            {"fork_unsure_at": "2026-01-01T00:00:00+00:00"}):
                 r = tc.patch("/v1/onboarding/state", json=payload)
                 assert r.status_code == 403, payload
         finally:

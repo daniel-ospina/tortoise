@@ -16519,7 +16519,8 @@ def _maybe_apply_completion(team_id: str) -> bool:
             return False
         steps = _os.completed_steps(proj, team_id)
         if _os.completion_gate_satisfied(
-                steps, node.get("fork"), bool(node.get("compact"))):
+                steps, node.get("fork"), bool(node.get("compact")),
+                fork_unsure_at=bool(node.get("fork_unsure_at"))):
             _os.write_status(proj, team_id, _os.STATUS_COMPLETE)
             try:  # created-signal invalidates the 60s MCP TTL cache (pin 18)
                 from tortoise import mcp_server as _mcp
@@ -16714,6 +16715,7 @@ def _get_onboarding_projection(team_id: str) -> dict:
             node.get("member_progress")),
         "last_decide_attempt": node.get("last_decide_attempt"),
         "compact": node.get("compact", False),
+        "fork_unsure_at": node.get("fork_unsure_at"),
     })
     state["onboarding_complete"] = _os.resolve_wire_completion(
         node.get("status"), bool(raw.get("onboarding_complete")), steps)
@@ -16806,6 +16808,9 @@ class OnboardingStatePatchRequest(BaseModel):
     completed_steps: list[str] | None = None
     member_progress: dict | None = None
     last_decide_attempt: str | None = None
+    # #2407: fork_unsure_at is a server-stamped FLOW key — declared here so
+    # a stray PATCH is REJECTED loudly (403 server-owned) like the siblings.
+    fork_unsure_at: str | None = None
 
 
 # #2001 (W5): PATCH-surface ownership table — which FLOW keys are rejected
@@ -16813,6 +16818,7 @@ class OnboardingStatePatchRequest(BaseModel):
 _PATCH_SERVER_OWNED_KEYS = {
     "fork", "compact", "status", "version",
     "completed_steps", "member_progress", "last_decide_attempt",
+    "fork_unsure_at",
 }
 _PATCH_REJECTED_STEP_FIELDS = {
     "harness_connected", "first_points_filed", "decide_completed",
@@ -17000,6 +17006,10 @@ class OnboardingCheckpointRequest(BaseModel):
     last_decide_attempt: str | None = None
     member_progress: dict | None = None
     status: str | None = None
+    # #2407: "not sure yet — decide later" fork-card answer — a MARKER
+    # (true) that records fork_unsure_at server-side WITHOUT consuming the
+    # set-once fork value. Never a timestamp from the client (server-stamped).
+    fork_unsure_at: bool | None = None
     model_config = {"extra": "forbid"}
 
 
@@ -17018,6 +17028,11 @@ async def onboarding_checkpoint(body: OnboardingCheckpointRequest,
       (replay → noop), unknown step → 422.
     - fork/compact → set-once (first write wins; same-value replay 200;
       changed → 409).
+    - fork_unsure_at (true) → #2407 "not sure yet — decide later": records
+      the fork-card deferral (server-stamped ISO timestamp) WITHOUT
+      consuming the set-once fork — fork stays NULL so the card stays
+      answerable; repeat → 200 (re-stamp); fork already set or compact org
+      → 409 (never asked / already answered).
     - last_decide_attempt → LWW; 'failed' is SKIPPED once decide-completed
       exists (dismissal alone never completes).
     - member_progress → {user_id: [steps]} user-scoped map-merge;
@@ -17041,6 +17056,7 @@ async def onboarding_checkpoint(body: OnboardingCheckpointRequest,
             ("compact", body.compact),
             ("last_decide_attempt", body.last_decide_attempt),
             ("member_progress", body.member_progress),
+            ("fork_unsure_at", body.fork_unsure_at),
         ) if val is not None
     ]
     if len(present) > 1:
@@ -17077,6 +17093,22 @@ async def onboarding_checkpoint(body: OnboardingCheckpointRequest,
                                     detail="fork must be 'self' or 'build'")
             outcome = _os.write_fork(proj, team_id, body.fork,
                                      status_from_mirror=legacy_mirror)
+            if outcome == "conflict":
+                raise HTTPException(
+                    status_code=409,
+                    detail={"message": "fork_already_set"})
+            # #2407 invariant: the unsure marker is meaningful only while
+            # fork IS NULL — a consumed fork clears it (the org answered).
+            _os.clear_fork_unsure_at(proj, team_id)
+        elif body.fork_unsure_at is not None:
+            if body.fork_unsure_at is not True:
+                raise HTTPException(
+                    status_code=422,
+                    detail={"message": "invalid_fork_unsure_at",
+                            "expects": True})
+            at = datetime.now(UTC).isoformat()
+            outcome = _os.write_fork_unsure_at(
+                proj, team_id, at, status_from_mirror=legacy_mirror)
             if outcome == "conflict":
                 raise HTTPException(
                     status_code=409,
@@ -17127,7 +17159,8 @@ async def onboarding_checkpoint(body: OnboardingCheckpointRequest,
                     proj, team_id, uid, steps,
                     status_from_mirror=legacy_mirror))
         # post-write fork-aware gate eval (monotonic) — step/fork/compact
-        # writes only (never member_progress)
+        # writes only (never member_progress; fork_unsure_at records no
+        # progress and its gate is unsatisfiable-by-design until answered)
         if body.step is not None or body.fork is not None or body.compact is not None:
             _maybe_apply_completion(team_id)
     except HTTPException:
