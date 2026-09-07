@@ -6041,12 +6041,12 @@ function claimIntentInFlight() {
             }}
             onKeyDown={(e) => { if (e.key === 'Escape') setAccountMenuOpen(false) }}
             aria-expanded={accountMenuOpen}
-            aria-label={`Account menu — ${currentTeamName || 'No team'}`}
+            aria-label={`Account menu — ${currentTeamName || 'No organization'}`}
           >
             <span className="account-avatar" aria-hidden="true">
-              {(currentTeamName || 'T').charAt(0).toUpperCase()}
+              {(currentTeamName || 'O').charAt(0).toUpperCase()}
             </span>
-            <span className="account-name">{currentTeamName || 'No team'}</span>
+            <span className="account-name">{currentTeamName || 'No organization'}</span>
             <span className="account-chevron" aria-hidden="true">▾</span>
           </button>
           <ReauthDialog
@@ -6066,6 +6066,8 @@ function claimIntentInFlight() {
                Disclosure pattern: labeled group + plain buttons (needs no
                arrow-key handling; Tab + Enter work natively). */
             <div className="account-menu" role="group" aria-label="Account actions">
+              <div className="account-menu-section">
+                <div className="account-menu-label">Personal Account</div>
               {/* #1874: identity block — the PERSON. Session: display_name →
                   email-prefix fallback (pattern main.jsx:1227). Team-name
                   fallback is DEFENSIVE — the menu never renders without a
@@ -6075,98 +6077,103 @@ function claimIntentInFlight() {
                 <span className="account-avatar" aria-hidden="true">
                   {(sessionMetaRef.current?.display_name ||
                     (sessionMetaRef.current?.email ? sessionMetaRef.current.email.split('@')[0] : '') ||
-                    currentTeamName || 'T').charAt(0).toUpperCase()}
+                    currentTeamName || 'O').charAt(0).toUpperCase()}
                 </span>
                 <div className="account-identity-text">
                   <span className="account-identity-name">
                     {sessionMetaRef.current?.display_name ||
                       (sessionMetaRef.current?.email ? sessionMetaRef.current.email.split('@')[0] : '') ||
-                      currentTeamName || 'No team'}
+                      currentTeamName || 'No organization'}
                   </span>
                   {sessionMetaRef.current?.email && (
                     <span className="account-identity-email">{sessionMetaRef.current.email}</span>
                   )}
                 </div>
-                {team?.tier && <span className="tier-badge">{team.tier}</span>}
               </div>
-              <div className="account-menu-divider" />
               <button className="account-menu-profile" onClick={() => { setTab('profile'); setAccountMenuOpen(false) }}>
                 Profile
               </button>
-              <div className="account-menu-divider" />
-              {/* P3-4 (review): hide the switch section for single-team users
-                  (anon key-login has no session → teams is empty; showing
-                  "Switch team → No team" reads broken). */}
-              {teams.length > 1 && (
-                <>
-                  <div className="account-menu-label">Switch team</div>
-                  {teams.map((t) => (
-                    <button
-                      key={t.team_id}
-                      className={t.team_id === currentTeamId ? 'active' : ''}
-                      aria-current={t.team_id === currentTeamId ? 'true' : undefined}
-                      onClick={() => {
-                        if (t.team_id !== currentTeamId) switchTeam(t.team_id)
-                        setAccountMenuOpen(false)
-                      }}
-                    >
-                      <span className="account-avatar small" aria-hidden="true">
-                        {(t.team_name || 'T').charAt(0).toUpperCase()}
-                      </span>
-                      <span>{t.team_name}</span>
-                      {t.team_id === currentTeamId && <span className="account-check" aria-hidden="true">✓</span>}
-                    </button>
-                  ))}
-                </>
-              )}
-              {/* #1877: create-team entry — UNCONDITIONAL (it's the sole
-                  entry for single-team users; the switch label above stays
-                  hidden for teams.length ≤ 1). */}
-              <button className="account-menu-create" onClick={() => { setCreateTeamOpen(true); setCreateTeamName(''); setCreateTeamError(''); setCreateTeamUpgrade(false); setAccountMenuOpen(false) }}>
-                + Create new team
-              </button>
-              {/* #1875: invitee-side pending invites (Slack/GitHub/Notion
-                  workspace-switcher precedent). Renders only when there are
-                  pending invites; Accept lands on the team, Decline removes. */}
-              {pendingInvites && pendingInvites.length > 0 && (
-                pendingInvites[0] && pendingInvites[0]._loadError ? (
-                  <div className="account-invite" role="alert">
-                    <span className="dim small">{pendingInvites[0]._loadError}</span>
-                  </div>
-                ) : (
-                <>
-                  <div className="account-menu-label">Invites</div>
-                  {pendingInvites.map((inv) => (
-                    <div key={inv.invitation_id} className="account-invite">
-                      <div className="account-invite-text">
-                        <span className="account-invite-team">{inv.team_name}</span>
-                        <span className="dim small">{inv.inviter_email ? `by ${inv.inviter_email}` : ''}</span>
-                        {inv.error && <span className="account-invite-error" role="alert">{inv.error}</span>}
-                      </div>
-                      <div className="account-invite-actions">
-                        <button
-                          className="ghost small"
-                          disabled={pendingInvitesBusy !== ''}
-                          onClick={() => acceptPendingInvite(inv)}
-                        >
-                          {pendingInvitesBusy === inv.invitation_id ? 'Joining…' : 'Accept'}
-                        </button>
-                        <button
-                          className="ghost small"
-                          disabled={pendingInvitesBusy !== ''}
-                          onClick={() => declinePendingInvite(inv)}
-                        >
-                          Decline
-                        </button>
-                      </div>
-                    </div>
-                  ))}
-                  </>
-              ))}
-              <div className="account-menu-divider" />
+              <div className="account-menu-micro-divider" />
               <button className="account-menu-logout" onClick={logout}>
                 Log out
               </button>
+              </div>
+
+              <div className="account-menu-divider" />
+
+              <div className="account-menu-section">
+                <div className="account-menu-label">Organization</div>
+                {/* #2494: org context row — static; tier badge lives here. */}
+                <div className="account-menu-org">
+                  <span className="account-avatar small" aria-hidden="true">
+                    {(currentTeamName || 'O').charAt(0).toUpperCase()}
+                  </span>
+                  <span className="account-org-name">{currentTeamName || 'No organization'}</span>
+                  {team?.tier && <span className="tier-badge">{team.tier}</span>}
+                </div>
+                {teams.length > 1 && (
+                  <>
+                    <div className="account-menu-label">Switch organization</div>
+                    {teams.map((t) => (
+                      <button
+                        key={t.team_id}
+                        className={t.team_id === currentTeamId ? 'active' : ''}
+                        aria-current={t.team_id === currentTeamId ? 'true' : undefined}
+                        onClick={() => {
+                          if (t.team_id !== currentTeamId) switchTeam(t.team_id)
+                          setAccountMenuOpen(false)
+                        }}
+                      >
+                        <span className="account-avatar small" aria-hidden="true">
+                          {(t.team_name || 'T').charAt(0).toUpperCase()}
+                        </span>
+                        <span>{t.team_name}</span>
+                        {t.team_id === currentTeamId && <span className="account-check" aria-hidden="true">✓</span>}
+                      </button>
+                    ))}
+                  </>
+                )}
+                {/* #1875: invitee-side pending invites — OUTSIDE the
+                    multi-team gate so single-team users also see invites. */}
+                {pendingInvites && pendingInvites.length > 0 && (
+                  pendingInvites[0] && pendingInvites[0]._loadError ? (
+                    <div className="account-invite" role="alert">
+                      <span className="dim small">{pendingInvites[0]._loadError}</span>
+                    </div>
+                  ) : (
+                  <>
+                    <div className="account-menu-label">Invites</div>
+                    {pendingInvites.map((inv) => (
+                      <div key={inv.invitation_id} className="account-invite">
+                        <div className="account-invite-text">
+                          <span className="account-invite-team">{inv.team_name}</span>
+                          <span className="dim small">{inv.inviter_email ? `by ${inv.inviter_email}` : ''}</span>
+                          {inv.error && <span className="account-invite-error" role="alert">{inv.error}</span>}
+                        </div>
+                        <div className="account-invite-actions">
+                          <button
+                            className="ghost small"
+                            disabled={pendingInvitesBusy !== ''}
+                            onClick={() => acceptPendingInvite(inv)}
+                          >
+                            {pendingInvitesBusy === inv.invitation_id ? 'Joining…' : 'Accept'}
+                          </button>
+                          <button
+                            className="ghost small"
+                            disabled={pendingInvitesBusy !== ''}
+                            onClick={() => declinePendingInvite(inv)}
+                          >
+                            Decline
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                    </>
+                ))}
+                <button className="account-menu-create" onClick={() => { setCreateTeamOpen(true); setCreateTeamName(''); setCreateTeamError(''); setCreateTeamUpgrade(false); setAccountMenuOpen(false) }}>
+                  + Create new organization
+                </button>
+              </div>
             </div>
           )}
         </div>
