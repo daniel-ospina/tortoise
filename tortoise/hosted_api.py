@@ -9603,8 +9603,8 @@ async def _require_owner_admin_session(user: dict, team_id: str) -> None:
 
 async def _graph_row_probe(team_id: str, graph_id: str) -> dict | None:
     """Fetch ONE graph row (any status) across the mode branch — the
-    trash-restore decision probe. Returns {kind, status, name, purged_at} or
-    None (unknown graph)."""
+    trash-restore decision probe. Returns {kind, status, name, namespace,
+    purged_at} or None (unknown graph)."""
     sdk = _make_sdk(namespace="registry")
     from tortoise.supabase_control import (
         get_control_plane,
@@ -9612,23 +9612,27 @@ async def _graph_row_probe(team_id: str, graph_id: str) -> dict | None:
     )
     if is_supabase_enabled():
         rows = get_control_plane().query(
-            "graphs", select=["kind", "status", "name", "purged_at"],
+            "graphs",
+            select=["kind", "status", "name", "namespace", "purged_at"],
             filters=[("id", "eq", graph_id), ("team_id", "eq", team_id)],
         )
         if not rows:
             return None
         r = rows[0]
         return {"kind": r.get("kind"), "status": r.get("status"),
-                "name": r.get("name"), "purged_at": r.get("purged_at")}
+                "name": r.get("name"), "namespace": r.get("namespace"),
+                "purged_at": r.get("purged_at")}
     rows = sdk._get_registry().query(
         "MATCH (g:Graph {id:$gid, team_id:$tid}) "
-        "RETURN g.kind, coalesce(g.status, 'active'), g.name, g.purged_at",
+        "RETURN g.kind, coalesce(g.status, 'active'), g.name, g.namespace, "
+        "g.purged_at",
         params={"gid": graph_id, "tid": team_id},
     ).result_set
     if not rows:
         return None
     return {"kind": rows[0][0], "status": rows[0][1],
-            "name": rows[0][2], "purged_at": rows[0][3]}
+            "name": rows[0][2], "namespace": rows[0][3],
+            "purged_at": rows[0][4]}
 
 
 async def _trash_name_conflict(team_id: str, name: str,
@@ -9817,15 +9821,41 @@ async def trash_graph_points(graph_id: str, team_id: str,
     import json as _json
 
     storage = _backup_storage()
+    # #2469: count ARCHIVE RUNS, not manifests — create_backup uploads
+    # dump.enc before manifest.json, so a crash leaves a dump-only run that
+    # the old manifest-count treated as "nothing to rescue". Each run dir
+    # under the nested pool (backups/{team}/{gid}/{run}/…) counts once;
+    # dump-only runs count too. Legacy FLAT archives of this graph (index
+    # entries whose graph_id is this gid, or whose graph_name is this
+    # graph's gid-keyed namespace — the #2462 purge-match semantics) are
+    # folded in so Inspect never understates what can be restored.
     prefix = f"backups/{team_id}/{graph_id}/"
-    manifests = []
+    nested_runs: set[str] = set()
+    manifests: list[str] = []
     try:
         keys = await asyncio.to_thread(storage.list, prefix)
     except Exception:
         keys = []
     for k in keys:
+        parts = k.split("/")
+        # backups/{team}/{gid}/{run}/… → run = parts[3] (5+ segments).
+        if len(parts) >= 5 and parts[3]:
+            nested_runs.add(parts[3])
         if k.endswith("/manifest.json"):
             manifests.append(k)
+    flat_bids: set[str] = set()
+    try:
+        from tortoise.backup_sweep import read_legacy_flat_index
+        index = await asyncio.to_thread(read_legacy_flat_index, storage,
+                                        team_id)
+        ns = str(row.get("namespace") or "")
+        for bid, ent in (index or {}).items():
+            if isinstance(ent, dict) and (
+                    str(ent.get("graph_id") or "") == graph_id
+                    or (ns and str(ent.get("graph_name") or "") == ns)):
+                flat_bids.add(str(bid))
+    except Exception:
+        flat_bids = set()  # unreadable index → nested pool only
     latest: dict | None = None
     for mk in sorted(manifests, reverse=True):
         try:
@@ -9841,7 +9871,7 @@ async def trash_graph_points(graph_id: str, team_id: str,
     return {
         "graph_id": graph_id, "name": row.get("name"),
         "deleted_at": row.get("deleted_at"),
-        "archive_count": len(manifests),
+        "archive_count": len(nested_runs) + len(flat_bids),
         "latest_backup": latest,
         "note": "Read-only rescue view (artifact side). Restore the graph "
                 "to access its content (POST /v1/graphs/trash/{id}/restore)",
