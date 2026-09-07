@@ -37,6 +37,7 @@ from tortoise.hosted_api import app, get_current_team, get_current_user
 from tests._http_fixtures import patched_tortoise_sdk
 from tests.fake_control_plane import ErrorControlPlane, FakeControlPlane
 from tests.test_supabase_control import FREE_TEAM, TOKEN, _key_row, _membership_row  # noqa: F401
+from datetime import UTC
 
 _INTERNAL_HEADERS = {"Authorization": "Bearer test-internal-shared-secret-xyz"}
 
@@ -228,6 +229,103 @@ class TestCreateApiKey:
         assert tc.post("/v1/team/keys").status_code == 200
         r = tc.post("/v1/team/keys")
         assert r.status_code == 402, r.text
+
+
+class TestCreateApiKeyExpiry2426:
+    """#2426: configurable API-key expiration on mint — SUPABASE lane.
+
+    The mint body accepts {expires_in (days 1-366) XOR expires_at (ISO)};
+    api_keys.expires_at is written on the row (both lanes), the response
+    echoes it, and expired-but-unrevoked durables stop counting against
+    max_api_keys (cap-accounting — otherwise expired keys wedge a team at
+    its cap). Auth refusal of expired keys is pinned too (resolve_api_key
+    #742). Never = absent param → legacy byte-identical shape (the exact
+    response-shape pin in TestCreateApiKey above).
+    """
+
+    def test_expires_in_mint_writes_row_echoes_and_lists(self, team_client):
+        from datetime import datetime
+        tc, fake, _ = team_client
+        r = tc.post("/v1/team/keys", json={"name": "ci-30d", "expires_in": 30})
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert {"id", "key", "key_prefix", "created_at", "name",
+                "expires_at"} <= set(body)
+        rows = fake.tables["api_keys"]
+        assert len(rows) == 1
+        assert rows[0]["expires_at"] == body["expires_at"]
+        # ~now + 30 days (±2 min)
+        skew = (datetime.fromisoformat(rows[0]["expires_at"].replace("Z", "+00:00"))
+                - datetime.now(UTC)).total_seconds() / 86400.0
+        assert 29.9 <= skew <= 30.1, rows[0]["expires_at"]
+        # GET /v1/team/keys round-trips expires_at (dashboard Expires column)
+        listed = tc.get("/v1/team/keys").json()["keys"]
+        assert any(k["id"] == body["id"]
+                   and k.get("expires_at") == body["expires_at"] for k in listed)
+
+    def test_never_mint_writes_null_and_keeps_legacy_shape(self, team_client):
+        tc, fake, _ = team_client
+        r = tc.post("/v1/team/keys", json={"name": "forever"})
+        assert r.status_code == 200, r.text
+        assert "expires_at" not in r.json(), "Never mint must not echo expires_at"
+        assert fake.tables["api_keys"][0]["expires_at"] is None
+
+    def test_expires_at_iso_date_mint(self, team_client):
+        from datetime import datetime, timedelta
+        tc, fake, _ = team_client
+        target = (datetime.now(UTC) + timedelta(days=9)).date().isoformat()
+        r = tc.post("/v1/team/keys", json={"expires_at": target})
+        assert r.status_code == 200, r.text
+        # date-only → end of that UTC day (valid through the date)
+        assert r.json()["expires_at"].startswith(target + "T23:59:59"), r.json()
+        assert fake.tables["api_keys"][0]["expires_at"] == r.json()["expires_at"]
+
+    def test_validation_422_supabase_lane(self, team_client):
+        tc, fake, _ = team_client
+        for body in ({"expires_in": 0}, {"expires_in": 367},
+                     {"expires_in": "30"}, {"expires_at": "garbage"},
+                     {"expires_at": "2020-01-01"},
+                     {"expires_in": 30, "expires_at": "2030-01-01"}):
+            r = tc.post("/v1/team/keys", json=body)
+            assert r.status_code == 422, f"body={body} → {r.status_code}: {r.text}"
+        assert fake.tables["api_keys"] == []  # no partial writes on 422
+
+    def test_expired_key_does_not_authenticate(self, team_client):
+        tc, fake, _ = team_client
+        r = tc.post("/v1/team/keys", json={"expires_in": 30})
+        assert r.status_code == 200, r.text
+        key = r.json()["key"]
+        app.dependency_overrides.clear()  # real auth → resolve_api_key (fake cp)
+        try:
+            live = tc.get("/v1/team", headers={"Authorization": f"Bearer {key}"})
+            assert live.status_code == 200, live.text
+            # backdate the row — an expired durable stops authenticating
+            # (#742 semantics; mint-time validation forbids past expiries)
+            fake.tables["api_keys"][0]["expires_at"] = "2020-01-01T00:00:00+00:00"
+            dead = tc.get("/v1/team", headers={"Authorization": f"Bearer {key}"})
+            assert dead.status_code == 401, dead.text
+        finally:
+            app.dependency_overrides.clear()
+
+    def test_expired_durable_frees_a_cap_slot(self, team_client):
+        """#2426 cap accounting (supabase lane): the api_keys count excludes
+        expired-but-unrevoked rows — a team at max_api_keys with an expired
+        key can mint again."""
+        from datetime import datetime, timedelta
+        tc, fake, _ = team_client
+        a = tc.post("/v1/team/keys", json={"name": "expiring", "expires_in": 30})
+        b = tc.post("/v1/team/keys", json={"name": "keeper"})
+        assert a.status_code == 200 and b.status_code == 200
+        # at cap (free max_api_keys=2) → 402 control
+        assert tc.post("/v1/team/keys").status_code == 402
+        # expire the first row directly (fake cp row mutation)
+        past = (datetime.now(UTC) - timedelta(days=1)).isoformat()
+        for row in fake.tables["api_keys"]:
+            if row["id"] == a.json()["id"]:
+                row["expires_at"] = past
+        # expired durable no longer counts → cap slot free
+        r = tc.post("/v1/team/keys", json={"name": "replacement"})
+        assert r.status_code == 200, r.text
 
 
 # ── GET /v1/team/keys (list_api_keys) ───────────────────────────────────────
