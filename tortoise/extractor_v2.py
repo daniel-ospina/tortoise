@@ -180,6 +180,14 @@ STATE_VALUE_CARVE_OUT = (
 # S2_TMPL / S4_TMPL). S1 (the story summarizer) deliberately does NOT get it
 # — S1 keeps the narrative register and a routine aside simply does not
 # change the story.
+#
+# #2424 RESIDUAL (clause-level): a sealed write-path run still leaked BOTH
+# wp03 distractors (d_01 + d_02) — the emission-level NOOP gates whole
+# candidates, so a routine aside that rides INSIDE the prose of an
+# otherwise-durable point slips through (a real point whose content also
+# carries "the on-call room has been quiet lately" as decoration). The
+# second paragraph below closes that hole at the same granularity the leak
+# takes: the CLAUSE, not the candidate.
 ANTI_ROUTINE_EXCLUSION = (
     "ANTI-ROUTINE EXCLUSION (true-but-routine content is a NOOP): routine "
     "operational asides, status-quo/banal remarks, filler, and small talk "
@@ -190,7 +198,21 @@ ANTI_ROUTINE_EXCLUSION = (
     "state, or belief? If only the moment is interesting it is a NOOP for "
     "memory — emit nothing. Do NOT emit such content to hang an operator on "
     "it (a routine aside gets no MITIGATES/NAND relevance attack — omit it "
-    "outright)."
+    "outright).\n"
+    "CLAUSE-LEVEL STRIP (an aside embedded in an otherwise-durable point is "
+    "stripped, not carried): the emission NOOP above gates WHOLE candidates "
+    "— a routine clause that rides inside a real point's prose still leaks. "
+    "When a point/entity/event's CORE is durable, write the durable claim "
+    "ONLY: strip routine-aside clauses out of its content before emitting — "
+    "a real decision does not carry status-quo/banal decoration, and an "
+    "aside gains no durability from sharing a sentence with a real claim "
+    "('we route alerts by service ownership; the on-call room has been "
+    "quiet lately' emits the routing decision, not the quiet-room clause; "
+    "the team demo date appended to the severity-preflight decision is "
+    "stripped too). BOUNDARY: strip ROUTINE content only — never a clause "
+    "that carries the durable value, the negation/polarity of the claim, or "
+    "the decision/state itself (VALUE FIDELITY below and the TRUTH-vs-WEIGHT "
+    "rules still govern those)."
 )
 
 # #2453 companion (renders with ANTI_ROUTINE_EXCLUSION at the SAME
@@ -217,7 +239,9 @@ VALUE_FIDELITY_RULE = (
 def _s2s4_rules() -> str:
     """The shared rule block inserted at the {anti_routine} slot of the S2
     and S4 mapping prompts: the anti-routine NOOP gate (#2424) paired with
-    the value-fidelity rule (#2453). One source, both stages."""
+    the value-fidelity rule (#2453). One source, both stages. The #2424
+    residual clause-level strip (routine asides embedded in durable prose)
+    lives inside ANTI_ROUTINE_EXCLUSION, so it reaches both stages too."""
     return ANTI_ROUTINE_EXCLUSION + "\n\n" + VALUE_FIDELITY_RULE
 
 
