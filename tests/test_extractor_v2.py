@@ -4493,6 +4493,90 @@ class TestS1Escalation2134:
         assert llm_stats["truncated"] == 3  # every escalation is recorded
 
 
+class TestEdusChunksRescue2335:
+    """#2335 WI-1b — the product-lane size/density fields: EDU(turn) count,
+    S1-chunk count (already in stats, pinned here), and the S4-full-rescue
+    episode counter (S2 produced nothing → S4 non-empty full re-emission
+    ~2×; today only llm.calls doubles). The rescue counter is a NEW guarded
+    increment — the S4 merge runs on EVERY non-empty S4, so counting every
+    merge would corrupt the measurement (the S2-empty guard is added)."""
+
+    def _conv(self, turns=3):
+        out = []
+        for i in range(turns):
+            out.append({"role": "user", "content": f"turn {i} content"})
+            out.append({"role": "assistant", "content": f"reply {i}"})
+        return out
+
+    def test_stats_carries_edu_count(self):
+        """EDU count (len(_edus_from_conversation) — content-bearing turns
+        only, 1:1 with the product EDU == turn) is surfaced in stats."""
+        from tortoise import extractor_v2 as v2
+        conv = self._conv(turns=3)
+
+        def resp(system, user):
+            if "STORY SUMMARIZER" in system:
+                return "The session covered the plan."
+            return json.dumps(S2_FIXTURE)
+
+        out = v2.extract_session_v2(MockModel(resp), conv)
+        st = out["stats"]
+        assert "edus" in st, "stats must carry the EDU(turn) count"
+        assert st["edus"] == 6, st  # 3 user + 3 assistant content turns
+        assert st["chunks"] == 1, st  # pinned: S1-chunk count already present
+
+    def test_s4_full_rescue_counts_when_s2_empty(self):
+        """S2 empty (any cause) + S4 non-empty full re-emission → the rescue
+        counter increments exactly once (the ~2× cost band)."""
+        from tortoise import extractor_v2 as v2
+        conv = [{"role": "user", "content": "we decided X"}]
+
+        calls = {"s2": 0, "s4": 0}
+        def resp(system, user):
+            if "STORY SUMMARIZER" in system:
+                return "We believed X."
+            if "MAPPER" in system:  # S2
+                calls["s2"] += 1
+                return json.dumps({"entities": [], "events": [], "points": [],
+                                   "operators": []})  # S2 EMPTY
+            if "GAP REVIEWER" in system:  # S4
+                calls["s4"] += 1
+                return json.dumps(S2_FIXTURE)  # S4 full re-emission
+            return json.dumps(S2_FIXTURE)
+
+        out = v2.extract_session_v2(MockModel(resp), conv)
+        st = out["stats"]
+        assert out["payload"] is not None, "S4 rescued the session"
+        assert calls["s4"] >= 1
+        assert st.get("s4_full_rescues", 0) == 1, (
+            "S2-empty → S4-full must count exactly one rescue episode")
+        assert st["s4_merge"]["added_by_s4"] > 0  # S4 rebuilt from empty
+
+    def test_no_rescue_when_s2_produced(self):
+        """Normal path (S2 produced content, S4 merges) → NO rescue count —
+        the merge runs on every non-empty S4, so without the S2-empty guard
+        this would over-count (the measurement-corruption hazard)."""
+        from tortoise import extractor_v2 as v2
+        conv = [{"role": "user", "content": "we decided X"}]
+
+        def resp(system, user):
+            if "STORY SUMMARIZER" in system:
+                return "We believed X."
+            if "MAPPER" in system:
+                return json.dumps(S2_FIXTURE)  # S2 produced content
+            if "GAP REVIEWER" in system:
+                return json.dumps(S2_FIXTURE)  # S4 merge (normal E4)
+            return json.dumps(S2_FIXTURE)
+
+        out = v2.extract_session_v2(MockModel(resp), conv)
+        st = out["stats"]
+        assert st.get("s4_full_rescues", 0) == 0, (
+            "a normal S4 merge over a non-empty S2 base is NOT a rescue")
+        # the S4 merge RAN over a non-empty S2 base (s4_merge present with
+        # the S2 items counted — rescued-or-not is about the S2-empty state)
+        assert st["s4_merge"]["s2_items"] > 0  # S2 base entered the merge
+
+
 class TestKindClassifierAdjudication2134:
     def test_kind_classifier_adjudication_length_no_escalation(self):
         """#2134 P1-30: the kind_classifier adjudication seam passes

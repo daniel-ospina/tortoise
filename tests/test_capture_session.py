@@ -336,6 +336,20 @@ def test_capture_session_turn_cap(sdk):
         sdk.capture_session([{"role": "user", "content": "x"}] * 201, max_turns=200)
 
 
+def test_capture_session_turn_cap_record(sdk, caplog):
+    """#2335 WI-1c: the self-host turn-cap refusal emits a structured record
+    (turns/cap) — the sdk-lane twin of the hosted record."""
+    import logging
+    with caplog.at_level(logging.WARNING, logger="tortoise.sdk"), \
+            pytest.raises(ValueError, match="turn cap"):
+        sdk.capture_session(
+            [{"role": "user", "content": "x"}] * 201, max_turns=200)
+    hits = [r.getMessage() for r in caplog.records
+            if "turn_cap_exceeded" in r.getMessage()]
+    assert hits, "the sdk turn-cap refusal must emit a structured record"
+    assert "turns=201" in hits[0] and "cap=200" in hits[0], hits[0]
+
+
 def test_capture_session_creates_event(sdk):
     res = sdk.capture_session(CONV)
     proj = sdk._get_proj()
@@ -4210,3 +4224,497 @@ def test_phase_f_sweep_event_delete_session_guard(tmp_path):
         assert q() == 0, "an absent Session must let the orphaned Event through"
     finally:
         sdk.close()
+
+
+# ── #2335 WI-1a: stats passthrough into capture meta + resp ────────────────
+# The extract_session_v2 telemetry (recovery per-seam tokens, llm, chunks,
+# error_census) was eval-lane-only; the product lane dropped it at the meta
+# assembly. These tests pin the additive `stats` key on the meta (v2 real /
+# replayed+M2 empty) + the resp body, per the #2335 measurement program.
+
+class _TokenFakeLLMResp(_FakeLLMResp):
+    """_FakeLLMResp + completion_tokens so the #2408 accumulator records
+    per-seam out-tokens (guard: completion_tokens > 0)."""
+
+    def json(self):
+        base = super().json()
+        base["usage"] = {"completion_tokens": 1234,
+                         "prompt_tokens": 500}
+        return base
+
+
+def _install_token_fake_provider(monkeypatch, requests_log):
+    """_install_fake_provider + token-bearing usage (S1/S2/S4 all report
+    completion_tokens → recovery s2_out_tokens/s4_out_tokens recorded)."""
+    import requests as _requests
+
+    def _fake_post(self_or_url, url=None, **kwargs):
+        requests_log.append(url)
+        system = ((kwargs.get("json") or {}).get("messages") or [{}])[0].get("content", "")
+        if "STORY SUMMARIZER" in system:
+            content = "The session revealed a new strategy."
+        else:
+            content = _V2_EMBED_JSON
+        return _TokenFakeLLMResp(content)
+
+    monkeypatch.setattr(_requests.Session, "post", _fake_post)
+
+
+def test_extract_session_v2_meta_carries_stats(sdk, monkeypatch):
+    """#2335 WI-1a: the v2 (extracted, meta) contract surfaces the extractor
+    stats — meta['stats'] present with the recovery per-seam out-tokens on a
+    healthy capture (the #2408 accumulator keys ride through)."""
+    from tortoise.model_adapters import _reset_failover_cooldown
+    _reset_failover_cooldown()
+    requests_log = []
+    _install_token_fake_provider(monkeypatch, requests_log)
+    monkeypatch.delenv("TORTOISE_SESSION_LLM_MOCK", raising=False)
+    monkeypatch.delenv("TORTOISE_SESSION_EXTRACTOR", raising=False)
+    monkeypatch.delenv("TORTOISE_EXTRACT_MODEL", raising=False)
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "ds-key")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
+
+    _extracted, meta = sdk._extract_session_v2(
+        [{"role": "user", "content": "x"},
+         {"role": "assistant", "content": "we decided"}],
+        session_id="s-stats", now="2026-08-20T00:00:00Z")
+    assert isinstance(meta.get("stats"), dict), "meta must carry the stats key"
+    rec = (meta.get("stats") or {}).get("recovery") or {}
+    # healthy v2 run → both seams record (the #2408 accumulator fired)
+    assert rec.get("s2_out_tokens", 0) > 0, rec
+    assert rec.get("s4_out_tokens", 0) > 0, rec
+    assert isinstance(meta.get("stats", {}).get("llm"), dict)
+
+
+def test_capture_replayed_and_m2_stats_empty(sdk, monkeypatch):
+    """#2335 WI-1a: replayed + M2 branches carry stats == {} (no extractor_v2
+    telemetry exists there — empty-on-replay/M2 semantics)."""
+    # First capture (mock seam → M2 llm path).
+    res1 = sdk.capture_session(
+        [{"role": "user", "content": "x"},
+         {"role": "assistant", "content": "we decided"}])
+    sid = res1["session_id"]
+    # Re-capture same id → replayed branch.
+    res2 = sdk.capture_session(
+        [{"role": "user", "content": "x"},
+         {"role": "assistant", "content": "we decided"}],
+        session_id=sid)
+    assert res2["extraction_mode"] == "replayed"
+    # resp body carries stats on both branches; replayed == {}
+    assert "stats" in res1, "resp must carry the stats key"
+    assert isinstance(res1["stats"], dict)
+    assert res2["stats"] == {}, "replayed has no extractor_v2 telemetry"
+
+
+def test_capture_resp_carries_stats_v2(sdk, monkeypatch):
+    """#2335 WI-1a: the capture receipt (resp) surfaces stats on the v2 path
+    (meta.get('stats') rides into the resp body)."""
+    from tortoise.model_adapters import _reset_failover_cooldown
+    _reset_failover_cooldown()
+    requests_log = []
+    _install_token_fake_provider(monkeypatch, requests_log)
+    monkeypatch.delenv("TORTOISE_SESSION_LLM_MOCK", raising=False)
+    monkeypatch.delenv("TORTOISE_SESSION_EXTRACTOR", raising=False)
+    monkeypatch.delenv("TORTOISE_EXTRACT_MODEL", raising=False)
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "ds-key")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
+
+    res = sdk.capture_session(
+        [{"role": "user", "content": "x"},
+         {"role": "assistant", "content": "we decided"}])
+    assert "stats" in res
+    assert isinstance(res["stats"], dict)
+    rec = (res.get("stats") or {}).get("recovery") or {}
+    assert rec.get("s2_out_tokens", 0) > 0, rec
+
+
+# ── #2335 WI-1d: the observation leg (structured per-capture log line) ────
+
+def test_capture_observation_line_v2(sdk, monkeypatch, caplog):
+    """#2335 WI-1d: a healthy v2 capture emits ONE structured observation
+    line carrying the size/diagnostic fields (mode/chunks/edus/per-seam max
+    out-token) — the diagnosis source when a GO event fires."""
+    import logging as _log
+
+    from tortoise.model_adapters import _reset_failover_cooldown
+    _reset_failover_cooldown()
+    requests_log = []
+    _install_token_fake_provider(monkeypatch, requests_log)
+    monkeypatch.delenv("TORTOISE_SESSION_LLM_MOCK", raising=False)
+    monkeypatch.delenv("TORTOISE_SESSION_EXTRACTOR", raising=False)
+    monkeypatch.delenv("TORTOISE_EXTRACT_MODEL", raising=False)
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "ds-key")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
+
+    with caplog.at_level(_log.INFO, logger="tortoise.sdk"):
+        sdk.capture_session(
+            [{"role": "user", "content": "x"},
+             {"role": "assistant", "content": "we decided"}],
+            session_id="obs-v2")
+    lines = [r.getMessage() for r in caplog.records
+             if "capture_observation" in r.getMessage()]
+    assert lines, "a v2 capture must emit the observation line"
+    import json as _json
+    obs = _json.loads(lines[0].split("capture_observation ", 1)[1])
+    assert obs["lane"] == "sdk"
+    assert obs["mode"].startswith("llm:")
+    assert obs["turns"] == 2
+    assert obs["chunks"] == 1
+    assert obs["edus"] == 2
+    # per-seam max out-token present (token-bearing fake → s2_out_tokens)
+    assert obs["s2_max_out_tokens"] == 1234, obs
+    assert obs["s4_max_out_tokens"] == 1234, obs
+
+
+def test_capture_observation_line_replayed(sdk, caplog):
+    """#2335 WI-1d: a replay emits the observation line with mode=replayed
+    and NO fabricated size fields (stats {} on replay — absent-when-no-data)."""
+    import logging as _log
+    sdk.capture_session(
+        [{"role": "user", "content": "x"},
+         {"role": "assistant", "content": "we decided"}],
+        session_id="obs-replay")
+    with caplog.at_level(_log.INFO, logger="tortoise.sdk"):
+        sdk.capture_session(
+            [{"role": "user", "content": "x"},
+             {"role": "assistant", "content": "we decided"}],
+            session_id="obs-replay")
+    lines = [r.getMessage() for r in caplog.records
+             if "capture_observation" in r.getMessage()]
+    assert lines
+    import json as _json
+    obs = _json.loads(lines[0].split("capture_observation ", 1)[1])
+    assert obs["mode"] == "replayed"
+    assert obs["lane"] == "sdk"
+    assert "chunks" not in obs, "a replay has no extractor telemetry"
+    assert "edus" not in obs
+
+
+# ── #2335 WI-2: the customer-facing error contract (headline + diagnostics) ─
+
+def test_capture_error_contract_partial_headline(sdk, monkeypatch):
+    """#2335 WI-2: a partial-S2 error reaches the resp as a HUMAN headline
+    (no stage names / jargon) with the raw detail in diagnostics."""
+    import tortoise.extractor_v2 as ev2
+
+    def _v2_out(*a, **kw):
+        return {
+            "session_id": kw.get("session_id", "s"),
+            "story_arc": "", "embed_list": {},
+            "search": {"mode": "embedded", "degraded": True},
+            "payload": None,
+            "chain_notes": [], "link_before_create": [], "supersessions": [],
+            "warnings": [],
+            "minted_kinds": [],
+            "errors": [
+                "S2 output partial — truncated tail dropped "
+                "(embed list incomplete)"],
+            "stats": {"llm": {"calls": 1}, "recovery": {}},
+            "error_census": {"partial_parse": 1},
+        }
+    monkeypatch.setattr(ev2, "extract_session_v2", _v2_out)
+    res = sdk.capture_session(CONV)
+    assert res["ok"] is False
+    # headline: human, no STAGE NAMES / internal jargon tokens
+    headline = res["errors"][0]
+    for tok in ("S2", "S4", "truncated", "embed list", "tail dropped",
+                "stage", "partial"):
+        assert tok.lower() not in headline.lower(), (headline, tok)
+    # the headline names the failing pass in plain words + TRUE recovery
+    assert "first pass" in headline.lower(), headline
+    assert "retry" in headline.lower(), headline
+    # raw detail preserved in diagnostics
+    assert res["diagnostics"] == [
+        "S2 output partial — truncated tail dropped (embed list incomplete)"]
+    # the report hook (bug_report.yml placeholder) rides the errored resp
+    assert res["report_url"].endswith(
+        "issues/new?template=bug_report.yml"), res["report_url"]
+
+
+def test_capture_clean_has_empty_diagnostics(sdk):
+    """#2335 WI-2: a clean capture carries diagnostics == [] (always-present
+    additive field, empty on success)."""
+    res = sdk.capture_session(CONV)
+    assert res["ok"] is True
+    assert res["diagnostics"] == []
+    # no report hook on a clean capture
+    assert "report_url" not in res
+
+
+def test_capture_error_contract_unmapped_passthrough(sdk, monkeypatch):
+    """#2335 WI-2: an UNMAPPED error passes through unchanged in BOTH errors
+    and diagnostics (fail-safe — a new extractor error is never hidden)."""
+    import tortoise.extractor_v2 as ev2
+
+    def _v2_out(*a, **kw):
+        return {
+            "session_id": kw.get("session_id", "s"),
+            "story_arc": "", "embed_list": {},
+            "search": {"mode": "embedded", "degraded": True},
+            "payload": None,
+            "chain_notes": [], "link_before_create": [], "supersessions": [],
+            "warnings": [], "minted_kinds": [],
+            "errors": ["RuntimeError: provider returned 500"],
+            "stats": {"llm": {"calls": 1}, "recovery": {}},
+            "error_census": {},
+        }
+    monkeypatch.setattr(ev2, "extract_session_v2", _v2_out)
+    res = sdk.capture_session(CONV)
+    assert res["ok"] is False
+    assert res["errors"] == ["RuntimeError: provider returned 500"]
+    assert res["diagnostics"] == ["RuntimeError: provider returned 500"]
+    # unmapped errors still carry the report hook (recovery is truthful)
+    assert "report_url" in res and res["report_url"].endswith(
+        "issues/new?template=bug_report.yml")
+
+
+def test_capture_error_contract_stage_failure_headlines(sdk, monkeypatch):
+    """#2335 WI-2 (D7 Step-1): the STAGE-FAILURE families (S1/S2/S4/S5 —
+    live exception text, prefix-matched) reach the resp as human headlines
+    with NO stage names / exception types; raw detail stays in diagnostics."""
+    import tortoise.extractor_v2 as ev2
+
+    def _v2_out(*a, **kw):
+        return {
+            "session_id": kw.get("session_id", "s"),
+            "story_arc": "", "embed_list": {},
+            "search": {"mode": "embedded", "degraded": True},
+            "payload": None,
+            "chain_notes": [], "link_before_create": [], "supersessions": [],
+            "warnings": [], "minted_kinds": [],
+            "errors": [
+                "S1 chunk failed: TimeoutError: read timed out",
+                "2/3 S1 chunks failed",
+                "S2 failed: ValueError: bad json",
+                "S4 failed: RuntimeError: boom — kept S2 output",
+                "S5 failed: ConnectionError: reset",
+            ],
+            "stats": {"llm": {"calls": 1}, "recovery": {}},
+            "error_census": {},
+        }
+    monkeypatch.setattr(ev2, "extract_session_v2", _v2_out)
+    res = sdk.capture_session(CONV)
+    assert res["ok"] is False
+    for headline in res["errors"]:
+        for tok in ("S1", "S2", "S4", "S5", "ValueError", "RuntimeError",
+                    "TimeoutError", "ConnectionError", "boom", "json",
+                    "read timed out", "reset", "2/3"):
+            assert tok.lower() not in headline.lower(), (headline, tok)
+        assert "retry" in headline.lower(), headline
+    # raw detail (TypeName prefix preserved) rides diagnostics
+    assert res["diagnostics"] == [
+        "S1 chunk failed: TimeoutError: read timed out",
+        "2/3 S1 chunks failed",
+        "S2 failed: ValueError: bad json",
+        "S4 failed: RuntimeError: boom — kept S2 output",
+        "S5 failed: ConnectionError: reset"]
+
+
+# ── #2335 WI-2b: TRUE retry — a FAILED session's re-capture re-attempts ──
+
+def test_capture_true_retry_failed_session_reattempts(sdk, monkeypatch):
+    """#2335 WI-2b: a capture that FAILS (extraction errors) records
+    capture_ok=False; a SAME-session re-capture RE-ATTEMPTS extraction
+    (not a no-op replay) and, on success, records capture_ok=True."""
+    import tortoise.extractor_v2 as ev2
+    calls = {"n": 0}
+
+    def _v2_fail_then_succeed(*a, **kw):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return {
+                "session_id": kw.get("session_id", "s"),
+                "story_arc": "", "embed_list": {},
+                "search": {"mode": "embedded", "degraded": True},
+                "payload": None,
+                "chain_notes": [], "link_before_create": [], "supersessions": [],
+                "warnings": [], "minted_kinds": [],
+                "errors": ["RuntimeError: provider returned 500"],
+                "stats": {"llm": {"calls": 1}, "recovery": {}},
+                "error_census": {},
+            }
+        # second attempt succeeds with a real payload
+        return {
+            "session_id": kw.get("session_id", "s"),
+            "story_arc": "story", "embed_list": {},
+            "search": {"mode": "embedded", "degraded": True},
+            "payload": {"entities": [], "events": [], "points": [
+                {"content": "the retry worked", "pointKind": "statement",
+                 "about_entities": []}], "operators": []},
+            "chain_notes": [], "link_before_create": [], "supersessions": [],
+            "warnings": [], "minted_kinds": [],
+            "stats": {"llm": {"calls": 1}, "recovery": {}},
+            "error_census": {},
+        }
+    monkeypatch.setattr(ev2, "extract_session_v2", _v2_fail_then_succeed)
+
+    conv = [{"role": "user", "content": "we decided X"}]
+    sid = "retry-session-2335"
+    # First capture FAILS (extraction error; turn points + Session land).
+    res1 = sdk.capture_session(conv, session_id=sid)
+    assert res1["ok"] is False, res1
+    # Same-session re-capture RE-ATTEMPTS (not "replayed").
+    res2 = sdk.capture_session(conv, session_id=sid)
+    assert res2["extraction_mode"] != "replayed", res2
+    assert res2["ok"] is True, res2
+    assert calls["n"] == 2, "the retry must re-run extraction"
+    proj = sdk._get_proj()
+    ok_row = proj.g.query(
+        "MATCH (s:Session {id:$sid}) RETURN s.capture_ok",
+        params={"sid": sid}).result_set
+    assert ok_row and ok_row[0][0] is True, ok_row
+
+
+def test_capture_succeeded_session_still_replays(sdk, monkeypatch):
+    """#2335 WI-2b: a SUCCEEDED capture's same-session re-capture is STILL a
+    no-op replay (the #1727 invariant is preserved for successes)."""
+    import tortoise.extractor_v2 as ev2
+    calls = {"n": 0}
+
+    def _v2_ok(*a, **kw):
+        calls["n"] += 1
+        return {
+            "session_id": kw.get("session_id", "s"),
+            "story_arc": "story", "embed_list": {},
+            "search": {"mode": "embedded", "degraded": True},
+            "payload": {"entities": [], "events": [], "points": [
+                {"content": "worked", "pointKind": "statement",
+                 "about_entities": []}], "operators": []},
+            "chain_notes": [], "link_before_create": [], "supersessions": [],
+            "warnings": [], "minted_kinds": [],
+            "stats": {"llm": {"calls": 1}, "recovery": {}},
+            "error_census": {},
+        }
+    monkeypatch.setattr(ev2, "extract_session_v2", _v2_ok)
+
+    conv = [{"role": "user", "content": "we decided X"}]
+    sid = "success-session-2335"
+    res1 = sdk.capture_session(conv, session_id=sid)
+    assert res1["ok"] is True
+    res2 = sdk.capture_session(conv, session_id=sid)
+    assert res2["extraction_mode"] == "replayed", res2
+    assert res2["points"] == []
+    assert calls["n"] == 1, "a succeeded session's re-capture must NOT re-extract"
+
+
+def test_capture_true_retry_v2_only_m2_failed_session_replays(
+        sdk, monkeypatch):
+    """#2335 WI-2b / review (PR #2473): TRUE retry is a v2-lane feature. A
+    FAILED M2 capture leaves LIVE partial claims (ULID ids, in-capture-only
+    dedup — the #1727 duplicate hazard); its same-session re-POST must NOT
+    re-run M2 (that would mint duplicates) — it replays (safe no-op)."""
+    monkeypatch.setenv("TORTOISE_SESSION_EXTRACTOR", "m2")
+    calls = {"n": 0}
+
+    class _PartialFailingSessionExtractor:
+        """Emits ONE live claim then raises — the partial-emission case that
+        makes an M2 re-run duplicate (live ULID claims + in-capture-only
+        dedup)."""
+        version = "partial-m2@0"
+
+        def run(self, transcript, source_id, api):
+            calls["n"] += 1
+            api.add_point("decision: ship serve first", {"source": source_id})
+            raise RuntimeError("provider rate limited mid-run")
+
+    monkeypatch.setattr(
+        "tortoise.sdk._build_session_llm_extractor",
+        lambda: _PartialFailingSessionExtractor())
+    conv = [{"role": "user", "content": "we decided X"}]
+    sid = "m2-failed-2335"
+    res1 = sdk.capture_session(conv, session_id=sid)
+    assert res1["ok"] is False, res1
+    assert res1["extracted"] >= 1, "m2 partial claim must land live"
+    proj = sdk._get_proj()
+    live1 = proj.g.query(
+        "MATCH (s:Session {id:$sid})-[:CONTAINS]->(p:Point) "
+        "WHERE coalesce(p.is_episodic,false) <> true RETURN count(p)",
+        params={"sid": sid}).result_set[0][0]
+    assert live1 == res1["extracted"], "live claims must be CONTAINS-wired"
+    # Same-session re-capture under m2: REPLAY (no re-extraction — no dup).
+    res2 = sdk.capture_session(conv, session_id=sid)
+    assert res2["extraction_mode"] == "replayed", res2
+    assert res2["points"] == []
+    assert calls["n"] == 1, "m2 failed session must NOT re-extract on re-POST"
+    live2 = proj.g.query(
+        "MATCH (s:Session {id:$sid})-[:CONTAINS]->(p:Point) "
+        "WHERE coalesce(p.is_episodic,false) <> true RETURN count(p)",
+        params={"sid": sid}).result_set[0][0]
+    assert live2 == live1, "no duplicate claims minted on m2 re-POST"
+    # capture_ok stays False (the failed attempt) + extractor recorded m2.
+    row = proj.g.query(
+        "MATCH (s:Session {id:$sid}) RETURN s.capture_ok, s.capture_extractor",
+        params={"sid": sid}).result_set
+    assert row[0][0] is False, row
+    assert row[0][1] == "m2", row
+
+
+def test_capture_true_retry_heals_unstamped_first_attempt(
+        sdk, monkeypatch):
+    """#2335 WI-2b / review (PR #2473): a retry heals the failed first
+    attempt's provenance gap. Attempt 1: v2 extraction writes a CLAIM + an
+    error, AND the Event mint FAILS (monkeypatched raise) — the claim lands
+    live, CONTAINS-wired, UNSTAMPED (no eventId), capture_ok False.
+    Attempt 2 (retry): re-extraction graph-content-hash-FOLDS the claim onto
+    its existing node (dedup=content_hash_hit — NOT in the minted set) + the
+    mint now succeeds — the retry's heal stamps this session's CONTAINS-wired
+    non-episodic claim nodes lacking eventId."""
+    import tortoise.extractor_v2 as ev2
+    import tortoise.sdk as sdk_mod
+    calls = {"n": 0}
+    real_create_event = sdk.create_event
+    _CLAIM = {"id": "pt_" + sdk_mod._content_hash("the suburbs are home now"),
+              "content": "the suburbs are home now", "pointKind": "statement",
+              "about_entities": []}
+    _ERR = ["S4 failed: ValueError: bad json — kept S2 output"]
+
+    def _v2_out(*a, **kw):
+        calls["n"] += 1
+        return {
+            "session_id": kw.get("session_id", "s"),
+            "story_arc": "", "embed_list": {},
+            "search": {"mode": "embedded", "degraded": True},
+            "payload": {"entities": [], "events": [],
+                        "points": [dict(_CLAIM)], "operators": []},
+            "chain_notes": [], "link_before_create": [], "supersessions": [],
+            "warnings": [], "minted_kinds": [],
+            "errors": _ERR if calls["n"] == 1 else [],
+            "stats": {"llm": {"calls": 1}, "recovery": {}},
+            "error_census": {},
+        }
+    monkeypatch.setattr(ev2, "extract_session_v2", _v2_out)
+    conv = [{"role": "user", "content": "we decided X"}]
+    sid = "heal-2335"
+
+    # Attempt 1: extraction writes the claim + errors; the Event mint FAILS
+    # (simulated) — the claim stays live but UNSTAMPED.
+    def _fail_mint(*a, **kw):
+        raise RuntimeError("simulated mint failure")
+    monkeypatch.setattr(sdk, "create_event", _fail_mint)
+    res1 = sdk.capture_session(conv, session_id=sid)
+    assert res1["ok"] is False, res1
+    assert res1["extracted"] >= 1, "attempt-1 claim must land"
+    proj = sdk._get_proj()
+    unstamped1 = proj.g.query(
+        "MATCH (s:Session {id:$sid})-[:CONTAINS]->(n:Point) "
+        "WHERE n.eventId IS NULL AND "
+        "coalesce(n.is_episodic, false) <> true RETURN n.id",
+        params={"sid": sid}).result_set
+    assert len(unstamped1) == res1["extracted"], (
+        f"attempt-1 claim must be CONTAINS-wired + un-stamped: "
+        f"{len(unstamped1)} vs {res1['extracted']}")
+
+    # Attempt 2 (TRUE retry): claim folds onto the existing node
+    # (content_hash_hit) + mint succeeds + the heal stamps it.
+    monkeypatch.setattr(sdk, "create_event", real_create_event)
+    res2 = sdk.capture_session(conv, session_id=sid)
+    assert res2["ok"] is True, res2
+    assert res2["extraction_mode"] != "replayed", res2
+    unstamped2 = proj.g.query(
+        "MATCH (s:Session {id:$sid})-[:CONTAINS]->(n:Point) "
+        "WHERE n.eventId IS NULL AND "
+        "coalesce(n.is_episodic, false) <> true RETURN count(n)",
+        params={"sid": sid}).result_set[0][0]
+    assert unstamped2 == 0, (
+        f"retry must heal the un-stamped claim ({len(unstamped1)} -> "
+        f"{unstamped2})")
