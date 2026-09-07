@@ -387,6 +387,17 @@ async def _lifespan(app):
     OPTIONAL — if the pre-warm misses its window, EmbeddingModel.get()
     retries on the next call and search falls back to FTS+structural RRF.
     """
+    # ── #2444: optional Sentry activation for the hosted API (no-op without
+    # SENTRY_DSN). Initialize before the app starts serving so captures are
+    # armed from the first request. Hosted-only concern: local SDK/self-host
+    # never sets the DSN, so this is inert there.
+    try:
+        from tortoise.sentry import init as _sentry_init
+
+        _sentry_init()
+    except Exception:  # noqa: BLE001, RUF100 — init is guarded internally; belt-and-suspenders
+        pass
+
     async with mcp_http_app.lifespan(mcp_http_app):
         try:
             import threading
@@ -630,6 +641,15 @@ async def _unhandled_exception_handler(request: Request, exc: Exception):
     _path = request.url.path.replace("\r", "\\r").replace("\n", "\\n")
     _logging.getLogger("tortoise.api").exception(
         "unhandled exception: %s %s", request.method, _path)
+    # #2444: surface unhandled hosted errors to Sentry when enabled (SENTRY_DSN).
+    # The error is also the live intake signal for the inbound channel — the
+    # forwarder dedupes by issue group, so repeated signatures collapse.
+    try:
+        from tortoise.sentry import capture_exception as _sentry_capture
+
+        _sentry_capture(exc, tags={"method": request.method, "path": _path})
+    except Exception:  # noqa: BLE001, RUF100 — capture never breaks the 500 response
+        pass
     origin = request.headers.get("origin")
     acao = origin if origin in _ALLOWED_ORIGINS else _ALLOWED_ORIGINS[0]
     return JSONResponse(
@@ -6728,6 +6748,24 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     if not session_existed:
         extraction_errors = list(meta.get("errors") or [])
         extraction_warnings = list(meta.get("warnings") or [])
+        # #2444: partial-extraction failures are the product's live error surface —
+        # surface them to Sentry (when enabled) with team/session context so an
+        # agent (or the inbound intake) can act on recurring signatures.
+        if extraction_errors:
+            try:
+                from tortoise.sentry import capture_message as _sentry_msg
+
+                _sentry_msg(
+                    f"capture extraction errors: {len(extraction_errors)} on session",
+                    level="warning",
+                    tags={
+                        "team_id": str(team.get("team_id", "")),
+                        "session_id": str(session_id or ""),
+                        "error_count": str(len(extraction_errors)),
+                    },
+                )
+            except Exception:  # noqa: BLE001, RUF100 — capture must never break the API
+                pass
         # #2031 review: surface the tenant-vocab degradation as an additive
         # capture warning (set by the v2 branch's fail-open path) — the
         # default vocabulary produces no minted kinds to flag, so a log line
@@ -9395,6 +9433,272 @@ async def delete_graph(graph_id: str, team_id: str,
             )
     _acl_user_drop_hook(graph_id)
     return Response(status_code=204)
+
+
+# ── #2304 trash surface (delete = quarantine → restore within grace) ───────
+# Owner Option C: a deleted custom graph sits in the team's TRASH for a
+# disclosed recovery window (default 7 days — the purge grace), then is
+# physically erased. These endpoints are the owner/admin RESTORE surfaces:
+# they are SESSION-ONLY (a revoked graph key can never reach a tombstone)
+# and role-gated owner/admin (mirrors delete_graph's session branch). Keys
+# stay dead across the whole lifecycle — restore never resurrects them; the
+# owner mints fresh keys after restore.
+
+async def _require_owner_admin_session(user: dict, team_id: str) -> None:
+    """#2304: owner/admin membership gate for the trash surfaces (403
+    otherwise). Session-only by construction — trash endpoints never accept
+    a key context."""
+    membership = await _membership_team(user.get("user_id") or "", team_id)
+    if membership is None or membership.get("role") not in ("owner", "admin"):
+        raise HTTPException(
+            status_code=403, detail="Requires owner or admin role in team")
+
+
+async def _graph_row_probe(team_id: str, graph_id: str) -> dict | None:
+    """Fetch ONE graph row (any status) across the mode branch — the
+    trash-restore decision probe. Returns {kind, status, name, purged_at} or
+    None (unknown graph)."""
+    sdk = _make_sdk(namespace="registry")
+    from tortoise.supabase_control import (
+        get_control_plane,
+        is_supabase_enabled,
+    )
+    if is_supabase_enabled():
+        rows = get_control_plane().query(
+            "graphs", select=["kind", "status", "name", "purged_at"],
+            filters=[("id", "eq", graph_id), ("team_id", "eq", team_id)],
+        )
+        if not rows:
+            return None
+        r = rows[0]
+        return {"kind": r.get("kind"), "status": r.get("status"),
+                "name": r.get("name"), "purged_at": r.get("purged_at")}
+    rows = sdk._get_registry().query(
+        "MATCH (g:Graph {id:$gid, team_id:$tid}) "
+        "RETURN g.kind, coalesce(g.status, 'active'), g.name, g.purged_at",
+        params={"gid": graph_id, "tid": team_id},
+    ).result_set
+    if not rows:
+        return None
+    return {"kind": rows[0][0], "status": rows[0][1],
+            "name": rows[0][2], "purged_at": rows[0][3]}
+
+
+async def _trash_name_conflict(team_id: str, name: str,
+                               self_gid: str) -> bool:
+    """True when a LIVE (non-deleted) graph already holds ``name`` — a
+    restored graph must never duplicate an active display name (create-
+    graph uniqueness among actives, #2304). The tombstone itself is
+    excluded by the self_gid comparison (it is deleted — never listed)."""
+    sdk = _make_sdk(namespace="registry")
+    from tortoise.supabase_control import (
+        get_control_plane,
+        is_supabase_enabled,
+    )
+    if is_supabase_enabled():
+        rows = get_control_plane().query(
+            "graphs", select=["id"],
+            filters=[("team_id", "eq", team_id), ("name", "eq", name),
+                     ("status", "eq", "active")],
+        )
+        return any(r.get("id") != self_gid for r in rows)
+    rows = sdk._get_registry().query(
+        "MATCH (g:Graph {team_id:$tid, name:$name}) "
+        "RETURN g.id, coalesce(g.status, 'active')",
+        params={"tid": team_id, "name": name},
+    ).result_set
+    return any(r[0] != self_gid and r[1] != "deleted" for r in rows)
+
+
+@app.get("/v1/graphs/trash")
+async def list_trash(team_id: str,
+                     user: dict = Depends(get_current_user)):  # noqa: B008
+    """#2304 — team trash (tombstoned custom graphs not yet purged).
+    Owner/admin session only. Rows: [{graph_id, name, kind, deleted_at}]
+    — purged rows (data physically erased) are never listed; the default
+    graph can never be here. ``deleted_at`` absent = legacy tombstone
+    (predates #2304 — treated as past-grace by the purge). The purge sweep
+    erases past-grace rows on its cadence; until then they remain listed
+    and restorable (the recovery window is enforced by the purge)."""
+    await _require_owner_admin_session(user, team_id)
+    team = await _team_node(team_id)
+    if team is None:
+        raise HTTPException(status_code=404, detail="Unknown team")
+    _ensure_not_suspended(team)
+    sdk = _make_sdk(namespace="registry")
+    from tortoise.supabase_control import (
+        get_control_plane,
+        is_supabase_enabled,
+    )
+    if is_supabase_enabled():
+        cp = get_control_plane()
+        from tortoise.supabase_control import trash_graphs as sb_trash
+        trash = await asyncio.to_thread(sb_trash, cp, team_id)
+    else:
+        trash = await asyncio.to_thread(sdk.trash_graphs, team_id)
+    return [{"graph_id": t["graph_id"], "name": t["name"],
+             "kind": "custom", "deleted_at": t.get("deleted_at")}
+            for t in trash]
+
+
+@app.post("/v1/graphs/trash/{graph_id}/restore")
+async def restore_trash_graph(request: Request, graph_id: str, team_id: str,
+                              user: dict = Depends(get_current_user)):  # noqa: B008
+    """#2304 — full restore of a tombstoned custom graph inside the grace
+    window. Owner/admin session only. Un-tombstones the row (status active)
+    and re-creates the per-graph ACL user; keys stay dead (revoked at
+    delete) — the owner mints fresh keys after restore. The graph's data
+    namespace was never touched by quarantine (gid-keyed
+    ``team_{tid}_{gid}``, exclusive to this graph) so the data is intact;
+    if it is absent (a partial-delete state) the restore does NOT fabricate
+    it — the owner restores from backups (POST /v1/backups) after the
+    restore. Refusals: 404 unknown, 403 non-owner/admin, 410 purged (data
+    physically erased — nothing to restore), 409 the name is held by a live
+    graph (rename or delete it first — no silent duplicates)."""
+    await _require_owner_admin_session(user, team_id)
+    team = await _team_node(team_id)
+    if team is None:
+        raise HTTPException(status_code=404, detail="Unknown team")
+    _ensure_not_suspended(team)
+    # The probe+flip run under the per-team sweep lock: the purge sweep
+    # holds the SAME lock while it erases a team's tombstones, so a restore
+    # and a purge of the same graph can never interleave (VGATE race fix —
+    # the lane seams are ALSO conditioned on unpurged-tombstone state, but
+    # the lock closes the window entirely).
+    lock = _sweep_team_lock(team_id)
+    # Timed acquire in a worker thread — never block the event loop, and a
+    # TIMED acquire can time out WITHOUT holding the lock (an orphaned
+    # untimed acquire would wedge the team lock forever once it eventually
+    # succeeded — VGATE round-3 fix).
+    acquired = await asyncio.to_thread(lock.acquire, True, 20)
+    if not acquired:
+        raise HTTPException(
+            status_code=503,
+            detail="Restore busy (team sweep in flight)") from None
+    try:
+        return await _restore_trash_graph_locked(request, user, team_id,
+                                                 graph_id)
+    finally:
+        lock.release()
+
+
+async def _restore_trash_graph_locked(request: Request, user: dict,
+                                      team_id: str,
+                                      graph_id: str):
+    row = await _graph_row_probe(team_id, graph_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Unknown graph")
+    if row.get("kind") == "default":
+        raise HTTPException(status_code=403,
+                            detail="Cannot restore the default graph")
+    if row.get("status") != "deleted":
+        raise HTTPException(status_code=409,
+                            detail="Graph is not deleted (nothing to restore)")
+    if row.get("purged_at"):
+        raise HTTPException(
+            status_code=410,
+            detail="Graph was purged (data physically erased) — not "
+                   "restorable; re-create it from scratch")
+    name = (row.get("name") or "").strip()
+    if name and await _trash_name_conflict(team_id, name, graph_id):
+        raise HTTPException(
+            status_code=409,
+            detail=f"A live graph named {name!r} already exists — rename or "
+                   "delete it first")
+    sdk = _make_sdk(namespace="registry")
+    from tortoise.supabase_control import (
+        get_control_plane,
+        is_supabase_enabled,
+    )
+    if is_supabase_enabled():
+        from tortoise.supabase_control import restore_graph as sb_restore
+        restored = await asyncio.to_thread(
+            sb_restore, get_control_plane(), team_id, graph_id)
+    else:
+        restored = await asyncio.to_thread(sdk.graph_restore, team_id,
+                                           graph_id)
+    if not restored:
+        # Still reachable only if the row flipped between the probe and the
+        # flip despite the lock (lane-level anomaly) — refuse loudly.
+        raise HTTPException(
+            status_code=410,
+            detail="Graph was purged before the restore completed — not "
+                   "restorable")
+    _acl_user_create_hook(graph_id, team_id)
+    await _async_audit_trash_restore(request, user, team_id, graph_id)
+    return {"graph_id": graph_id, "status": "restored",
+            "name": name, "note": "Keys stay dead — mint fresh keys for "
+                                    "this graph (POST /v1/team/keys)"}
+
+
+async def _async_audit_trash_restore(request: Request, user: dict,
+                                     team_id: str,
+                                     graph_id: str) -> None:
+    """Audit-log a trash restore (best-effort — never fails the restore)."""
+    try:
+        await _async_audit(
+            request, team_id, "graph_restored", resource_type="graph",
+            resource_id=graph_id, actor_user_id=user.get("user_id"),
+        )
+    except Exception:
+        _logger.debug("trash-restore audit failed (non-blocking)",
+                      exc_info=True)
+
+
+@app.get("/v1/graphs/trash/{graph_id}/points")
+async def trash_graph_points(graph_id: str, team_id: str,
+                             user: dict = Depends(get_current_user)):  # noqa: B008
+    """#2304 — READ-ONLY rescue surface for a tombstoned graph (owner/admin
+    session only): what data does the trash hold, and when was it last
+    backed up? Serves the per-graph pool manifests from the artifact store
+    — the live namespace is NEVER touched (quarantine preserves it
+    untouched; reads here are artifact-side). Full content access happens
+    via restore. 410 when purged (artifacts erased)."""
+    await _require_owner_admin_session(user, team_id)
+    team = await _team_node(team_id)
+    if team is None:
+        raise HTTPException(status_code=404, detail="Unknown team")
+    _ensure_not_suspended(team)
+    row = await _graph_row_probe(team_id, graph_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Unknown graph")
+    if row.get("status") != "deleted":
+        raise HTTPException(status_code=409,
+                            detail="Graph is not in the trash")
+    if row.get("purged_at"):
+        raise HTTPException(status_code=410, detail="Graph was purged")
+    import json as _json
+
+    storage = _backup_storage()
+    prefix = f"backups/{team_id}/{graph_id}/"
+    manifests = []
+    try:
+        keys = await asyncio.to_thread(storage.list, prefix)
+    except Exception:
+        keys = []
+    for k in keys:
+        if k.endswith("/manifest.json"):
+            manifests.append(k)
+    latest: dict | None = None
+    for mk in sorted(manifests, reverse=True):
+        try:
+            blob = await asyncio.to_thread(storage.download, mk)
+            m = _json.loads(blob.decode("utf-8"))
+            latest = {"backup_id": m.get("backup_id"),
+                      "created_at": m.get("created_at"),
+                      "node_count": m.get("node_count"),
+                      "edge_count": m.get("edge_count")}
+            break
+        except Exception:
+            continue  # unreadable manifest — try the next newest
+    return {
+        "graph_id": graph_id, "name": row.get("name"),
+        "deleted_at": row.get("deleted_at"),
+        "archive_count": len(manifests),
+        "latest_backup": latest,
+        "note": "Read-only rescue view (artifact side). Restore the graph "
+                "to access its content (POST /v1/graphs/trash/{id}/restore)",
+    }
 
 
 @app.get("/v1/graphs")
@@ -18280,6 +18584,7 @@ _DRILL_COOLDOWN_S = 3600
 _SWEEP_TEAM_LOCKS: dict[str, threading.Lock] = {}
 _SWEEP_LOCKS_GUARD = threading.Lock()
 _SWEEP_INFLIGHT = asyncio.Lock()
+_PURGE_INFLIGHT = asyncio.Lock()  # #2304 trash-purge in-flight guard
 
 
 def _backup_config_safe() -> BackupConfig | None:  # noqa: F821
@@ -18499,6 +18804,44 @@ async def backups_sweep(request: Request):
         if alerts_failed:
             result["alerts_failed"] = alerts_failed
         return result
+
+
+@app.post("/v1/internal/backups/purge")
+async def backups_purge(request: Request, body: dict | None = None):
+    """#2304 — trash purge: physically erase every expired tombstone
+    (custom graphs deleted > grace_days ago, plus legacy tombstones).
+    Internal-key only. Optional ``{"grace_days": N}`` overrides the 7-day
+    default (operator drills). Ownership-guarded namespace drops, idempotent,
+    per-team/`-graph isolation; purged rows are stamped (kept — audit).
+    In-flight guard: a concurrent purge returns 202.
+
+    Cadence: operator-invoked today (runbook); the driver cron wiring lands
+    with #2317's registry-cron.sh changes (coordination — same file)."""
+    _check_internal(request)
+    from tortoise.backup_sweep import run_graph_purge
+
+    reg_sdk = _registry_sdk()
+    registry = reg_sdk._get_registry()
+    db = reg_sdk._get_proj().db
+    storage = _backup_storage()
+    grace_days = int((body or {}).get("grace_days") or 7)
+    if not 1 <= grace_days <= 365:
+        raise HTTPException(status_code=422,
+                            detail="grace_days must be 1..365")
+    if _PURGE_INFLIGHT.locked():
+        return {"status": "already_running", "purged": []}
+    async with _PURGE_INFLIGHT:
+        def lock_for(team_id: str):
+            return _sweep_team_lock(team_id)
+
+        try:
+            return await asyncio.to_thread(
+                run_graph_purge, db=db, registry=registry, storage=storage,
+                grace_days=grace_days, lock_for=lock_for,
+            )
+        except RuntimeError as e:
+            raise HTTPException(status_code=503,
+                                detail=f"Purge failed: {e}") from e
 
 
 @app.get("/v1/internal/backups/status")
