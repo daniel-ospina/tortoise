@@ -811,6 +811,41 @@ def _noop_ops_state(ops_state: Any, now: datetime) -> dict[str, Any]:
     return out
 
 
+def _drop_purged_graphs_from_ops_state(storage, team_id: str,
+                                       graph_ids: set[str],
+                                       *, now: datetime | None = None) -> None:
+    """#2471: remove erased graphs from the ops-state roll-up
+    (graph_failures entries + graph_error_streaks keys keyed
+    "{team}:{gid}") so /status never references graphs the purge erased.
+    Merge-preserving for every other field (mirror of _noop_ops_state).
+    Best-effort under the purge's per-team lock; a racing real-run sweep
+    converges on its own next pass (it only carries keys for graphs it
+    attempted)."""
+    if not graph_ids:
+        return
+    try:
+        prev = read_ops_state(storage)
+    except Exception as e:
+        logger.warning("purge ops-state read failed for %s: %s", team_id, e)
+        return
+    if not isinstance(prev, dict):
+        return
+    keys = {f"{team_id}:{gid}" for gid in graph_ids}
+    failures = [f for f in (prev.get("graph_failures") or [])
+                if not (isinstance(f, dict)
+                        and f.get("team_id") == team_id
+                        and str(f.get("graph_id") or "") in graph_ids)]
+    streaks = {k: v for k, v in (prev.get("graph_error_streaks") or {}).items()
+               if k not in keys}
+    try:
+        prev["graph_failures"] = failures
+        prev["graph_error_streaks"] = streaks
+        prev["updated_at"] = (now or datetime.now(timezone.utc)).isoformat()  # noqa: UP017
+        _write_json(storage, OPS_STATE_KEY, prev)
+    except Exception as e:
+        logger.warning("purge ops-state write failed for %s: %s", team_id, e)
+
+
 def run_backup_sweep(
     *,
     db,
@@ -1298,6 +1333,7 @@ def run_graph_purge(
                 errors.append({"team_id": team_id, "error": str(e)})
                 continue
             team_done = 0
+            erased_gids: set[str] = set()
             for tomb in tombs:
                 if not _graph_purged_at_expired(
                         tomb.get("deleted_at"), cutoff):
@@ -1315,12 +1351,23 @@ def run_graph_purge(
                     continue
                 if res.get("status") == "purged":
                     purged.append(res)
+                    erased_gids.add(str(tomb.get("graph_id") or ""))
                     team_done += 1
                 elif res.get("status") == "residual":
                     residuals.append(res)
+                    erased_gids.add(str(tomb.get("graph_id") or ""))
                     team_done += 1
             if team_done:
                 teams_purged += 1
+                # #2471: erased graphs must stop ghosting in the ops-state
+                # roll-up (/status graph_failures + graph_error_streaks
+                # reference {team}:{gid} — a real sweep drops them on its
+                # next pass, but NO-OP runs (#2412) merge-preserve them, so
+                # a purged graph could linger indefinitely). Runs under the
+                # same per-team lock as the sweep's writes; a racing real-
+                # run sweep converges on its own next pass.
+                _drop_purged_graphs_from_ops_state(
+                    storage, team_id, erased_gids, now=now)
     return {"status": "ok" if not errors else "errors",
             "purged_at": now_iso, "grace_days": grace_days,
             "teams_purged": teams_purged,

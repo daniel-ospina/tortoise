@@ -1804,6 +1804,51 @@ def test_enumerate_team_tombstones_excludes_active_and_purged(shared_proj):
     assert purged not in ids  # purged rows are never re-purged
 
 
+def test_purge_drops_erased_graphs_from_ops_state_rollup(shared_proj):
+    """#2471: after a purge, /status bookkeeping (graph_failures +
+    graph_error_streaks) must stop referencing the erased graph — no-op
+    sweeps (#2412) merge-preserve those keys, so they would otherwise ghost
+    forever. Other fields + live-graph bookkeeping are preserved."""
+    if shared_proj is None:
+        return
+    proj = _make_env(None, shared_proj)
+    store = MemoryStorage()
+    reg = proj.db.select_graph(_REGISTRY_GRAPH)
+    ghost = f"g_gh_{os.urandom(2).hex()}"
+    reg.query(
+        "CREATE (g:Graph {id:$gid, team_id:'team_x', name:$gid, "
+        "kind:'custom', namespace:$ns, status:'deleted', "
+        "deleted_at:$da, purged_at:null})",
+        params={"gid": ghost, "ns": f"team_team_x_{ghost}",
+                "da": (datetime.now(UTC) - timedelta(days=30)).isoformat()})
+    store.upload(
+        OPS_STATE_KEY,
+        json.dumps({
+            "last_team_count": 1, "last_sweep_at": "2026-09-01T00:00:00Z",
+            "updated_at": "2026-09-01T00:00:00Z",
+            "graph_totals": {"attempted": 2, "backed_up": 1,
+                              "errors": 1},
+            "graph_failures": [
+                {"team_id": "team_x", "graph_id": ghost,
+                 "error": "boom", "streak": 3},
+                {"team_id": "team_x", "graph_id": "g_live0001",
+                 "error": "x", "streak": 1},
+            ],
+            "graph_error_streaks": {f"team_x:{ghost}": 3,
+                                     "team_x:g_live0001": 1},
+        }).encode())
+    res = run_graph_purge(db=proj.db, registry=reg, storage=store,
+                          team_ids=["team_x"])
+    assert any(p["graph_id"] == ghost for p in res["purged"])
+    state = json.loads(store.download(OPS_STATE_KEY))
+    assert f"team_x:{ghost}" not in (state.get("graph_error_streaks") or {})
+    assert all(f.get("graph_id") != ghost
+               for f in (state.get("graph_failures") or []))
+    assert "team_x:g_live0001" in (state.get("graph_error_streaks") or {})
+    assert state["last_sweep_at"] == "2026-09-01T00:00:00Z"
+    assert (state.get("graph_totals") or {}).get("attempted") == 2
+
+
 @pytest.mark.skipif(_DOCKER_LANE, reason="purge erasure unit tests run embedded; docker lane covered by the hosted trash E2E (#2304)")
 def test_purge_skips_row_restored_between_enumeration_and_drop(shared_proj):
     """VGATE race regression: if a restore flips the row to active between
