@@ -12,6 +12,7 @@ surfaces:
   - test_battery_report_writers.py
   - test_battery_schema_v11.py
   - test_delivery_tenancy.py  # C6 #2115: delivery-shape tenancy + session_recording per-graph override
+  - test_sentry.py
   - test_tenancy_spine.py     # C5 #2114: data-plane tenancy spine (cross-graph suite)
   - test_agent_signup.py
   - test_agent_signup_idempotency.py
