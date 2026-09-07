@@ -39,6 +39,7 @@ import {
   sortedGraphRows,
   sortedTrashRows,
   tierCreateLocked,
+  trashDaysLeft,
   trashEraseLabel,
 } from './graphs.js'
 // #1893: pure source-scope reconcile/serialize/job-body helpers (node --test
@@ -6860,7 +6861,13 @@ function claimIntentInFlight() {
                 <table>
                   <thead><tr><th>Name</th><th>Deleted</th><th>Recovery</th><th><span className="sr-only">Actions</span></th></tr></thead>
                   <tbody>
-                    {sortedTrashRows(trash).map((t) => (
+                    {sortedTrashRows(trash).map((t) => {
+                      // #2465: past-window + legacy rows are NOT restorable
+                      // (server 410s them — pending permanent erasure). Show
+                      // Inspect only, so the UI never offers a restore that
+                      // the server refuses.
+                      const restorable = !!(t.deleted_at && trashDaysLeft(t.deleted_at) > 0)
+                      return (
                       <tr key={t.graph_id} className={confirmRestoreId === t.graph_id ? 'graph-delete-arm' : undefined}>
                         <td><code>{t.name}</code></td>
                         <td>{t.deleted_at ? fmtTime(t.deleted_at) : '—'}</td>
@@ -6874,15 +6881,17 @@ function claimIntentInFlight() {
                             </span>
                           ) : (
                             <>
-                              <button
-                                className="ghost small"
-                                disabled={graphBusy}
-                                onClick={() => { setConfirmRestoreId(t.graph_id); setTrashMsg('') }}
-                                aria-label={`Restore graph ${t.name}`}
-                              >
-                                Restore
-                              </button>
-                              {' '}
+                              {restorable && (
+                                <button
+                                  className="ghost small"
+                                  disabled={graphBusy}
+                                  onClick={() => { setConfirmRestoreId(t.graph_id); setTrashMsg('') }}
+                                  aria-label={`Restore graph ${t.name}`}
+                                >
+                                  Restore
+                                </button>
+                              )}
+                              {restorable && ' '}
                               <button
                                 className="ghost small"
                                 disabled={graphBusy}
@@ -6896,7 +6905,8 @@ function claimIntentInFlight() {
                           )}
                         </td>
                       </tr>
-                    ))}
+                      )
+                    })}
                   </tbody>
                 </table>
                 {trashInspectId && trashInspect && trashInspect.graph_id === trashInspectId && (
