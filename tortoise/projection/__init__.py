@@ -1303,7 +1303,12 @@ class FalkorProjection(
         # Pass 1: create all Point/Operator nodes (skip edges) + non-edge events
         # Pass 1a: create all Point/Operator nodes first
         # (skip edges), so cross-file PointRevised always has a node to revise (#21).
-        for ev in events:
+        # #2488: last_recreate_seq[id] = journal seq of the id's LAST
+        # PointAdded — the pass-1b trailing-sweep survivor anchor (recorded
+        # here because pass-1a sees PointAdded in journal order over the
+        # SAME events list the pass-1b sweep's enumerate indexes).
+        last_recreate_seq: dict[str, int] = {}
+        for seq, ev in enumerate(events):
             ev = self._norm(ev)
             t = ev.get("type")
             if t in ("PointAdded", "OperatorAdded"):
@@ -1322,6 +1327,16 @@ class FalkorProjection(
                         "rebuild: skipping %s with missing point id "
                         "(event_id=%s)", t, ev.get("event_id"))
                     continue
+                # #2488: record the id's LAST PointAdded journal seq — the
+                # sweep's cross-family survivor anchor (a re-created id's
+                # pre-recreation terminalizing folds died with the deleted
+                # node). PointAdded ONLY — PointPromoted is NOT a drop
+                # boundary (promote is same-node draft→live; it never clears
+                # outdated/CORRECTS, so seeding from it would silently drop a
+                # pre-promote invalidate fold). OperatorAdded rows are not
+                # recorded (operators are not invalidatable/supersedable).
+                if t == "PointAdded":
+                    last_recreate_seq[p["id"]] = seq
                 # Phase 1 stop-writes: strip context from v2+ events (#49)
                 # (identical to apply() — parity between rebuild and apply)
                 if ev.get("projection_version", 0) >= 2:
@@ -1332,12 +1347,24 @@ class FalkorProjection(
                 self._upsert_point_props(p)
 
         supersede_folds: list = []  # ObjectSuperseded replays (pass-1b fold sweep)
-        point_supersede_folds: list = []  # #2423 PointSuperseded replays
+        # #2488: ONE cross-family deferred list for point re-stamp folds —
+        # PointSuperseded (#2423) + PointInvalidated (#2488) — carrying the
+        # journal (enumerate) seq: the trailing sweep's survivor rule and
+        # updatedAt seq-gate need the faithful order (ts collides within a
+        # ms; JSONL carries no seq). Same events list pass-1a enumerates ⇒
+        # identical seq space as last_recreate_seq.
+        point_re_stamp_folds: list[tuple[int, dict]] = []
+        # #2488: per-id highest journal seq of a same-id INLINE updatedAt
+        # writer (PointRevised / PointPromoted — pass-1b applies both
+        # inline; they never enter the deferred list); a PointInvalidated
+        # fold whose seq is EARLIER than this must not clobber the newer
+        # inline stamp with the older journaled invalidate ts.
+        max_inline_seq: dict[str, int] = {}
         # #2423: DirectEdgeRepoint descriptors (supersede's 2a-DIRECT transfer
         # journal) — replayed in pass-2b AFTER operator edges exist.
         direct_repoint_events: list = []
         # Pass 1b: apply revisions + other non-edge events AFTER all nodes exist
-        for ev in events:
+        for seq, ev in enumerate(events):
             ev = self._norm(ev)
             t = ev.get("type")
             if t in ("PointAdded", "OperatorAdded"):
@@ -1349,11 +1376,23 @@ class FalkorProjection(
                 # #331 (review r4): str-only ids.
                 rid = ev.get("id")
                 if isinstance(rid, str):
+                    # #2488 (code-review P2-3): a retract after an invalidate
+                    # is the newer writer — record it so the sweep fold's
+                    # skip_updated_at gate omits updatedAt (otherwise the fold
+                    # regresses the tombstone's stamp below the retract's own
+                    # rebuild stamp).
+                    max_inline_seq[rid] = seq
                     self._retract(rid)
             elif t == "PointPromoted":
                 # #785: rebuild parity — re-apply the promoted snapshot.
                 p = ev.get("point")
                 if isinstance(p, dict) and p.get("id"):
+                    if isinstance(p["id"], str):
+                        # #2488: promote stamps updatedAt inline (the CAS
+                        # below re-applies the snapshot) — a same-id promote
+                        # is a newer writer than an earlier invalidate (the
+                        # sweep skip_updated_at gate source).
+                        max_inline_seq[p["id"]] = seq
                     if ev.get("projection_version", 0) >= 2:
                         p.pop("context", None)
                     self._upsert_point_props(p)
@@ -1384,6 +1423,11 @@ class FalkorProjection(
                 # Phase 1: discard new_context for v2+ events (#49)
                 if ev.get("projection_version", 0) >= 2:
                     ev.pop("new_context", None)
+                # #2488: revise stamps updatedAt inline (the fold below) — a
+                # same-id revise later than an invalidate is the newer writer
+                # (the sweep skip_updated_at gate source).
+                if isinstance(ev.get("id"), str):
+                    max_inline_seq[ev["id"]] = seq
                 # set_updated_at parity with apply() (#330)
                 self._revise_point(ev, set_updated_at=True)
             elif t == "EventRecorded":
@@ -1431,7 +1475,25 @@ class FalkorProjection(
                 # re-point + DirectEdgeRepoint replay half is pass-2b —
                 # after pass-2 rebuilds edges from operator snapshots that
                 # still name the OLD input.)
-                point_supersede_folds.append(ev)
+                if isinstance(ev.get("id"), str):
+                    point_re_stamp_folds.append((seq, ev))
+            elif t == "PointInvalidated":
+                # #2488 pass-1b rebuild parity: the POINT-side invalidate
+                # analog of the PointSuperseded branch above — live
+                # invalidate_point mutates the graph directly (outdated flag
+                # SET + CORRECTS MERGE, no status write) and the REBUILD
+                # chain had NO branch either: a journaled PointInvalidated
+                # silently fell through, so a JSONL wipe+rebuild replayed
+                # the pre-invalidate PointAdded and RESURRECTED the claim to
+                # EP voting/reads (the #2488 ghost). Defer to the SAME
+                # trailing sweep as PointSuperseded (one cross-family list)
+                # with the enumerate seq — the survivor rule drops
+                # pre-re-creation folds and the sweep folds survivors in
+                # journal-append order. The fold applies outdated=true +
+                # validTo/expiredAt/updatedAt + CORRECTS only — it never
+                # writes status (an invalidated point stays status='live').
+                if isinstance(ev.get("id"), str):
+                    point_re_stamp_folds.append((seq, ev))
             elif t == "DirectEdgeRepoint":
                 # #2423: supersede's 2a-DIRECT transfer emits a flat
                 # DirectEdgeRepoint descriptor {src, tgt, edge_type, attrs}
@@ -1480,35 +1542,99 @@ class FalkorProjection(
                     "delete race)",
                     ev.get("event_id"), ev.get("supersedes_by"))
 
-        # Pass 1b fold sweep (points): PointSuperseded replays (#2423) —
-        # status/validity/CORRECTS fold AFTER every point-creation event
-        # (PointAdded in pass 1a + PointPromoted/PointRevised above) so a
-        # journaled re-creation cannot resurrect the superseded point.
-        # Warn on 0-row folds (the journal claims a supersession whose old
-        # Point never re-existed — pre-#432 legacy journals, unjournaled
-        # producers, or delete races). The fold is idempotent; the sweep
-        # mirrors the ObjectSuperseded pattern above.
-        # Review P2-3 (id-reuse double-supersede): a raw producer that
-        # deletes + re-creates a point with the SAME id between two
-        # supersedes leaves TWO PointSuperseded events for one old_id. Only
-        # the LAST supersede is live-truth (each earlier supersede's
-        # CORRECTS + stamps died with the deleted node) — process the
-        # latest event per old id, or the earlier fold's CORRECTS (S1→A)
-        # would ghost beside the final S2→A. Chains A→B→C have distinct
-        # old ids, so each link still folds independently.
-        last_per_oid: dict[str, dict] = {}
-        for ev in point_supersede_folds:
-            if isinstance(ev.get("id"), str):
-                last_per_oid[ev["id"]] = ev
-        for ev in last_per_oid.values():
-            matched = self._fold_point_superseded(ev)
-            if matched == 0:
-                logger.warning(
-                    "rebuild: PointSuperseded fold matched no Point "
-                    "(event_id=%s old_id=%r new_id=%r) — superseded point "
-                    "not re-created by any journaled event (legacy "
-                    "journal, unjournaled producer, or delete race)",
-                    ev.get("event_id"), ev.get("id"), ev.get("new_id"))
+        # ── Pass 1b fold sweep (points): cross-family re-stamp survivors ──
+        # PointSuperseded replays (#2423 — status/validity/CORRECTS) +
+        # PointInvalidated replays (#2488 — outdated/validity/CORRECTS, no
+        # status) fold AFTER every point-creation event (PointAdded in pass
+        # 1a + PointPromoted/PointRevised above) so a journaled re-creation
+        # cannot resurrect the superseded/invalidated point. Warn on 0-row
+        # folds (the journal claims a fold whose old Point never re-existed
+        # — pre-#432 legacy journals, unjournaled producers, or delete
+        # races). Folds are idempotent; the sweep mirrors the ObjectSuperseded
+        # pattern above.
+        #
+        # Cross-family survivor rule (#2488, replaces the #2423 last_per_oid
+        # dedup): per old_id, keep ONLY re-stamping folds whose journal seq
+        # is AFTER the id's last PointAdded re-creation (last_recreate_seq,
+        # pass-1a). A delete+recreate id-reuse wipes every pre-recreation
+        # fold's stamps/CORRECTS live (they died with the deleted node) — a
+        # raw producer reusing an id between two supersedes leaves TWO
+        # PointSuperseded events for one old_id, and only the post-recreate
+        # one is live-truth (acceptance c). A None anchor = "no re-creation
+        # seen → keep all folds" (legacy journals, single-incarnation ids).
+        #
+        # Supersede-kind canonicalization (retained from #2423 last_per_oid):
+        # a superseded point is status-TERMINAL and live supersede of a
+        # terminal point raises — a second same-id PointSuperseded in one
+        # journal (raw producer that did not journal its delete+recreate)
+        # is never live-truth, so keep the LAST supersede survivor per old
+        # id (the earlier fold's CORRECTS S1→A would ghost beside the final
+        # S2→A). PointInvalidated folds ALL survive the id filter and are
+        # NOT canonicalized — double-invalidate is live-legal (no terminal
+        # guard; outdated is a flag), so every survivor is live-truth and
+        # must fold (distinct corrected_by → 2 CORRECTS, acceptance b).
+        # Chains A→B→C have distinct old ids — each link folds independently.
+        supersede_last: dict[str, tuple[int, dict]] = {}
+        invalidate_survivors: list[tuple[int, dict]] = []
+        for fsq, ev in point_re_stamp_folds:
+            anchor = last_recreate_seq.get(ev["id"])
+            if anchor is not None and fsq <= anchor:
+                # Pre-re-creation fold — dropped (id-reuse survivor rule).
+                continue
+            if ev["type"] == "PointSuperseded":
+                supersede_last[ev["id"]] = (fsq, ev)
+            else:
+                invalidate_survivors.append((fsq, ev))
+        # Journal-append order (ascending event index). Do NOT sort by ts —
+        # ts collides within the same ms and the JSONL carries no seq.
+        point_sweep = sorted(
+            [*supersede_last.values(), *invalidate_survivors],
+            key=lambda pair: pair[0])
+        for fsq, ev in point_sweep:
+            if ev["type"] == "PointInvalidated":
+                # #2488 updatedAt seq-gate (NOT clock comparison): pass-1a's
+                # _upsert_point_props already stamped every replayed node
+                # updatedAt=rebuild-now, and rebuild-now always postdates the
+                # journaled invalidate ts — a `$ts >= n.updatedAt` CASE could
+                # never fire. Unlike a superseded old (status terminal,
+                # frozen), an invalidated point stays status='live' — a LATER
+                # same-id PointRevised/PointPromoted (inline, stamped
+                # rebuild-now in pass-1b) is a legitimate newer writer.
+                # skip_updated_at fires when max_inline_seq[id] > this
+                # invalidate's seq: the gate suppresses ONLY the updatedAt
+                # column — outdated/validTo/expiredAt/CORRECTS fold always
+                # (or a live-legal invalidate→PointRevised loses its outdated
+                # flag and the ghost silently returns). Otherwise the fold is
+                # the id's last journal writer and writes the journaled ts
+                # UNCONDITIONALLY (exact live parity, supersede's precedent).
+                later_inline = max_inline_seq.get(ev["id"])
+                skip_ua = later_inline is not None and later_inline > fsq
+                matched = self._fold_point_invalidated(
+                    ev, skip_updated_at=skip_ua)
+                if matched == 0:
+                    logger.warning(
+                        "rebuild: PointInvalidated fold matched no Point "
+                        "(event_id=%s id=%r corrected_by=%r) — invalidated "
+                        "point not re-created by any journaled event "
+                        "(legacy journal, unjournaled producer, or delete "
+                        "race)",
+                        ev.get("event_id"), ev.get("id"),
+                        ev.get("corrected_by"))
+            else:
+                matched = self._fold_point_superseded(ev)
+                if matched == 0:
+                    logger.warning(
+                        "rebuild: PointSuperseded fold matched no Point "
+                        "(event_id=%s old_id=%r new_id=%r) — superseded point "
+                        "not re-created by any journaled event (legacy "
+                        "journal, unjournaled producer, or delete race)",
+                        ev.get("event_id"), ev.get("id"), ev.get("new_id"))
+        # fold_seq[old_id] = journal seq of the id's surviving supersede fold
+        # (pass-2b re-point discriminator; bound to the supersede-kind
+        # survivor so a mixed invalidate→supersede never binds the invalidate
+        # seq — invalidate transfers no edges).
+        fold_seq: dict[str, int] = {
+            ev["id"]: s for s, ev in supersede_last.values()}
 
         # Pass 1b tail: restore :Batch marker nodes AND the Point.batch_id
         # enforcement links from the pre-wipe snapshot (#990) — quarantine
@@ -1533,15 +1659,20 @@ class FalkorProjection(
         # Journal-order maps for the pass-2b re-point (order-faithful
         # trailing sweep): operator_created_seq[op_id] = index of the
         # operator's OperatorAdded event in the journal; fold_seq[old_id] =
-        # index of the PointSuperseded event. An operator whose creation
-        # PREDATES the supersede is the live-transferred set; one created
-        # AFTER it legitimately keeps its terminal link (create_operator has
-        # no terminal guard) — the re-point must skip those. Live operators
-        # carry NO createdAt (probe: None), and rebuild stamps createdAt =
-        # rebuild-time via _upsert_point_props, so timestamp comparison is
-        # unreliable — the journal SEQUENCE is the faithful discriminator.
+        # index of the surviving PointSuperseded event (built by the pass-1b
+        # sweep above — the raw enumerate-time fold_seq was deleted in #2488:
+        # pass-2b must bind to the pre-filtered supersede-kind SURVIVOR, or a
+        # pre-recreate supersede dropped by the survivor filter leaves a raw
+        # entry whose .get(oid) fold_seq=None — the `op_seq > fseq` guard
+        # would silently disable → ghost re-point of the fresh incarnation).
+        # An operator whose creation PREDATES the supersede is the
+        # live-transferred set; one created AFTER it legitimately keeps its
+        # terminal link (create_operator has no terminal guard) — the
+        # re-point must skip those. Live operators carry NO createdAt
+        # (probe: None), and rebuild stamps createdAt = rebuild-time via
+        # _upsert_point_props, so timestamp comparison is unreliable — the
+        # journal SEQUENCE is the faithful discriminator.
         operator_created_seq: dict[str, int] = {}
-        fold_seq: dict[str, int] = {}
         for seq, ev in enumerate(events):
             ev = self._norm(ev)
             if ev.get("type") in ("PointAdded", "OperatorAdded"):
@@ -1577,8 +1708,6 @@ class FalkorProjection(
                     # disabling the guard for that class (review P2-1).
                     operator_created_seq.setdefault(p["id"], seq)
                 self._upsert_point_edges(p)
-            elif ev.get("type") == "PointSuperseded" and isinstance(ev.get("id"), str):
-                fold_seq.setdefault(ev["id"], seq)
 
         # Pass 2b (#2423): PointSuperseded EDGE re-point replay +
         # DirectEdgeRepoint descriptor replay — AFTER pass-2 rebuilt operator
@@ -1609,12 +1738,17 @@ class FalkorProjection(
         # plain direct edges remain lost on rebuild); the supersede-transfer
         # descriptors ARE in scope here (E2E-11.6: the successor holds the
         # transferred direct edge post-rebuild).
-        if point_supersede_folds or direct_repoint_events:
+        # #2488: succ/repoint/fold_seq bind to the supersede-kind SURVIVOR
+        # subset (supersede_last — post-recreate, last-per-id) of the one
+        # pre-filtered deferred list. A PointInvalidated survivor is NOT a
+        # re-point source (invalidate transfers no edges); binding a mixed
+        # invalidate→supersede to the invalidate seq would skip legit re-points.
+        if supersede_last or direct_repoint_events:
             from tortoise.security import validate_rel_type
             # Successor map old→new; resolve transitively to the final live
             # point (chain-safe, cycle-guarded).
             succ: dict[str, str] = {}
-            for ev in point_supersede_folds:
+            for _, ev in supersede_last.values():
                 oid, nid = ev.get("id"), ev.get("new_id")
                 if isinstance(oid, str) and isinstance(nid, str):
                     succ[oid] = nid
@@ -1626,7 +1760,7 @@ class FalkorProjection(
                     point_id = succ[point_id]
                 return point_id
 
-            if point_supersede_folds:
+            if supersede_last:
                 # Collect per-fold operator-edge rows + validate rel types
                 # BEFORE any mutation (#329 collect-then-mutate pattern).
                 # Order-faithful discriminator: an operator whose
@@ -1638,7 +1772,7 @@ class FalkorProjection(
                 # live successor (transitive chain resolution), so folds
                 # stay order-independent (#2249).
                 repoints: list[tuple] = []  # (op_id, rel_type, idx, rid, old_id, new_id, op_label)
-                for ev in point_supersede_folds:
+                for _, ev in supersede_last.values():
                     oid = ev.get("id")
                     if not isinstance(oid, str):
                         continue

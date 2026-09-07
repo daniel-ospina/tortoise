@@ -82,11 +82,15 @@ def test_all_mutations_emit(sdk_factory, tmp_path):
     old = sdk.create_point("statement", "old")
     new = sdk.create_point("statement", "new")
     sdk.supersede_point(old["id"], new["id"])
+    # #2488: invalidate on the superseded old is live-legal (invalidate has
+    # no terminal guard) — a second re-stamp emitter on the same pair.
+    sdk.invalidate_point(old["id"], new["id"])
     sdk.annotate_operator(op["id"], 0.5, 0.5, 0.5, 0.5)
     types = [e["type"] for e in _events(sdk._get_proj())]
     assert types.count("PointAdded") == 4  # src, tgt, old, new
     assert "OperatorAdded" in types and "PointRetracted" in types
     assert "PointSuperseded" in types and "OperatorAnnotated" in types
+    assert "PointInvalidated" in types  # #2488: invalidate_point emits
 
 
 def test_content_edit_emits_nothing(sdk_factory, tmp_path):

@@ -730,6 +730,7 @@ _GRAPH_EVENT_TYPES = frozenset({
     "DedupeRecorded",  # #784: content-dedup candidate recorded/merged
     "DedupeRejected",  # #784: content-dedup candidate rejected
     "ObjectSuperseded",  # #1350: Object status fold source (supersession)
+    "PointInvalidated",  # #2488: invalidate_point — outdated flag + CORRECTS (no status)
 })
 
 # Epic #902 A4 (§4.2): JSONL-ONLY batch_id record type — deliberately NOT in
@@ -2239,10 +2240,11 @@ class TortoiseSDK:
            — #548: id + extra fields for JSONL.
 
         **Graph event store (#432):** written when *type_* is in
-        ``_GRAPH_EVENT_TYPES`` (PointAdded, OperatorAdded, PointRetracted,
-        PointSuperseded, OperatorAnnotated). The payload is taken from
-        *payload* if given, otherwise synthesized from ``point["id"]`` or
-        *id* + *extra*.
+        ``_GRAPH_EVENT_TYPES`` (11 registered types — PointAdded,
+        OperatorAdded, PointRetracted, PointSuperseded, OperatorAnnotated,
+        PointInvalidated, plus the promote/dedupe/object-supersede types).
+        The payload is taken from *payload* if given, otherwise synthesized
+        from ``point["id"]`` or *id* + *extra*.
 
         **JSONL event log (#548):** written when *point* is provided (cleaned
         and appended as the ``"point"`` key) or *id* is provided. Events with
@@ -4325,6 +4327,19 @@ class TortoiseSDK:
                 f"exist — refusing to orphan outdated point {id!r}"
             )
         now = datetime.now(timezone.utc).isoformat()  # noqa: UP017
+
+        # #2488 (rebuild-parity fix): kwargs-style PointInvalidated emission —
+        # validated-emit-then-mutate (mirrors supersede_point's #432 anti-
+        # phantom pattern). ts=now MUST be passed: the fold's updatedAt reads
+        # ev.get("ts") (fallback clock), and a drift from the live SET clock
+        # breaks exact-stamp rebuild parity. Crash after emit/before write is
+        # convergent: re-run revalidates + re-emits; duplicate events fold
+        # idempotently; double-invalidate is already legal.
+        self._emit_event(
+            "PointInvalidated",
+            id=id, corrected_by=corrected_by_id,
+            ts=now, valid_to=now, expired_at=now,
+        )
 
         proj.g.query(
             "MATCH (n:Point {id:$id}) SET n.outdated = true, "
