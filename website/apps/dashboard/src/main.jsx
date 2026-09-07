@@ -2762,6 +2762,10 @@ function claimIntentInFlight() {
             if (inviteRes.ok) {
               try { sessionStorage.removeItem(INVITE_TOKEN_STORAGE) } catch { /* best-effort */ }
               setBanner('Welcome to the team! Your membership is active.')
+              // #2538: propagate the accepted invite to wizard state so
+              // loadTeams fires and the welcomeHasOrg chain triggers the
+              // dashboard route guard (invited users skip onboarding).
+              await loadTeams().catch(() => {})
             } else {
               let inviteMsg = `Could not accept invite (HTTP ${inviteRes.status}).`
               try {
@@ -5415,6 +5419,11 @@ function claimIntentInFlight() {
                           </p>
                           {wizardOrgError && (
                             <p className="error" role="alert" style={{ marginBottom: '0.9rem' }}>{wizardOrgError}</p>
+                          )}
+                          {(!pendingInvites || pendingInvites.length === 0) && (
+                            <p className="dim small" style={{ margin: '0 0 0.9rem', lineHeight: 1.5, fontStyle: 'italic' }}>
+                              Want to join an existing organization? Ask your admin to invite you to your email, then reload this page.
+                            </p>
                           )}
                           <div className="wizard-nav-actions">
                               <button type="button" className="btn-primary" onClick={handleWizardCreateOrg} disabled={wizardOrgBusy}>
