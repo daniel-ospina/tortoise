@@ -2459,10 +2459,12 @@ def restore_graph(cp, team_id: str, graph_id: str) -> bool:
     is never restorable: False so callers can 410.
 
     The PATCH itself is CONDITIONED on the tombstone state (status eq
-    deleted + purged_at null) — a concurrent purge stamp between the pre-
-    read and the PATCH matches 0 rows, so a purge can never be clobbered
-    by a restore (VGATE race fix; callers additionally serialize on the
-    per-team sweep lock)."""
+    deleted + purged_at null) and observes whether it matched: PATCH with a
+    select returns the UPDATED rows ([] when the WHERE matched nothing — a
+    concurrent purge stamp between the pre-read and the PATCH makes the
+    flip a no-op and returns False, so a purge can never be clobbered and
+    the caller is never told a phantom restore happened (#2463 P2).
+    Callers additionally serialize on the per-team sweep lock."""
     rows = cp.query(
         "graphs", select=["kind", "status", "purged_at"],
         filters=[("id", "eq", graph_id), ("team_id", "eq", team_id)],
@@ -2471,14 +2473,14 @@ def restore_graph(cp, team_id: str, graph_id: str) -> bool:
             or rows[0].get("status") != "deleted" \
             or rows[0].get("purged_at"):
         return False
-    cp.query(
-        "graphs", method="PATCH",
+    updated = cp.query(
+        "graphs", select=["id"], method="PATCH",
         filters=[("id", "eq", graph_id), ("team_id", "eq", team_id),
                  ("status", "eq", "deleted"), ("purged_at", "is", None)],
         json_body={"status": "active", "deleted_at": None,
                    "purged_at": None, "purged_residual": False},
     )
-    return True
+    return bool(updated)
 
 
 def trash_graphs(cp, team_id: str) -> list[dict]:

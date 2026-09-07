@@ -186,14 +186,26 @@ class TestWritePathsMarkDirty:
         new = _make_claim(sdk, "new")
         sdk._dirty_roots.clear()
         sdk.invalidate_point(old["id"], new["id"])
-        assert old["id"] in sdk._dirty_roots and new["id"] in sdk._dirty_roots
+        # #2422: the invalidated (outdated=true) point is terminal for EP —
+        # it can never enter an affected set so a dirty flag would strand
+        # forever (pins auto-dream to local). Only the LIVE successor stays
+        # in the dirty set.
+        assert old["id"] not in sdk._dirty_roots, (
+            "terminal (invalidated) point must not strand in _dirty_roots (#2422)"
+        )
+        assert new["id"] in sdk._dirty_roots
 
     def test_supersede_marks_dirty(self, sdk):
         old = _make_claim(sdk, "superseded")
         new = _make_claim(sdk, "successor")
         sdk._dirty_roots.clear()
         sdk.supersede_point(old["id"], new["id"])
-        assert old["id"] in sdk._dirty_roots and new["id"] in sdk._dirty_roots
+        # #2422: the superseded old point is terminal for EP — a dirty flag
+        # would strand forever (never swept). Only the LIVE successor stays.
+        assert old["id"] not in sdk._dirty_roots, (
+            "terminal (superseded) point must not strand in _dirty_roots (#2422)"
+        )
+        assert new["id"] in sdk._dirty_roots
 
     def test_mitigate_marks_dirty(self, sdk):
         a = _make_claim(sdk, "a")

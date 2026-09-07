@@ -1146,11 +1146,64 @@ def test_call_once_deadline_cools_wedged_primary_end_to_end():
     with pytest.raises(TimeoutError):
         v2._call_once(model, "s", "u", deadline_s=0.05, max_tokens=None,
                       stats=None)
+    # #2384 option A (two-strike): the FIRST deadline abort cools the primary
+    # but must NOT flip the sticky _failed_over — a scaled-deadline straggler
+    # is not evidence of provider distress. complete() still goes to the
+    # fallback here only because the primary is in cooldown.
     assert _primary_in_cooldown("deepseek-direct", 300) is True
-    assert model._failed_over is True
+    assert model._failed_over is False
     out = model.complete(system="s", user="u")
     assert out.startswith("fallback:"), out
     assert fallback.calls == 1
+
+
+# ── #2384 option A: two-strike trip + half-open recovery ───────────────────
+
+
+class _TwoStrikePair:
+    """Recording primary/fallback pair for two-strike policy tests."""
+
+    def __init__(self):
+        self.primary_calls = 0
+        self.fallback_calls = 0
+
+    def _mk(self, name):
+        calls = self
+
+        class _P:
+            provider = name
+
+            def complete(self, *, system, user, max_tokens=None):
+                if name == "deepseek-direct":
+                    calls.primary_calls += 1
+                    return f"primary:{system}"
+                calls.fallback_calls += 1
+                return f"fallback:{system}"
+
+        return _P()
+
+
+def test_two_strikes_trip_sticky_third_stall_uses_fallback():
+    """The SECOND consecutive primary deadline abort flips the sticky; the
+    session then sticks to the fallback forward-only (complete() bypasses
+    the primary entirely even after its cooldown lapses)."""
+    from tortoise.model_adapters import RoutingModel, _reset_failover_cooldown
+    _reset_failover_cooldown()
+    pair = _TwoStrikePair()
+    model = RoutingModel(pair._mk("deepseek-direct"), pair._mk("openrouter"),
+                         cooldown_s=300)
+    # Strike 1: primary cools, NO trip.
+    model._in_flight = model.primary
+    model.note_stall(provider="deepseek-direct")
+    assert model._failed_over is False
+    # Strike 2 (no primary success between): trips the sticky.
+    model.note_stall(provider="deepseek-direct")
+    assert model._failed_over is True
+    # Sticky: complete() routes to the fallback WITHOUT touching the primary
+    # (no primary call), regardless of cooldown state.
+    out = model.complete(system="s", user="u")
+    assert out == "fallback:s"
+    assert pair.fallback_calls == 1 and pair.primary_calls == 0
 
 
 def test_routingmodel_unsicks_from_cooled_fallback_to_healthy_primary():
@@ -1191,3 +1244,67 @@ def test_routingmodel_unsicks_from_cooled_fallback_to_healthy_primary():
     model2._failed_over = True
     out = model2.complete(system="s", user="u")
     assert out == "fallback-ok", out
+
+
+def test_half_open_probe_returns_session_to_primary_on_success():
+    """#2384 option A half-open: with the sticky tripped and the FALLBACK
+    cooled (its own abort), complete() probes the primary; a probe success
+    clears the sticky so the session returns to the primary."""
+    from tortoise.model_adapters import RoutingModel, _note_failure, _reset_failover_cooldown
+    _reset_failover_cooldown()
+    pair = _TwoStrikePair()
+    model = RoutingModel(pair._mk("deepseek-direct"), pair._mk("openrouter"),
+                         cooldown_s=300)
+    # Two strikes on the primary → sticky tripped.
+    model.note_stall(provider="deepseek-direct")
+    model.note_stall(provider="deepseek-direct")
+    assert model._failed_over is True
+    # Fallback gets its own stall (cooldown) → no healthy lane except the
+    # primary → the half-open probe serves it. Reset FIRST (clears the
+    # primary's cooldown from the two strikes), THEN cool the fallback.
+    _reset_failover_cooldown()
+    _note_failure("openrouter", 300)
+    out = model.complete(system="s", user="u")
+    assert out == "primary:s"
+    # The probe success cleared the sticky and reset the strikes.
+    assert model._failed_over is False
+    assert model._stall_strikes["deepseek-direct"] == 0
+
+
+def test_rotating_two_strikes_down_lane_half_open_probe_restores():
+    """RotatingModel (#2384 option A): two consecutive stalls of the SAME
+    lane down it for the session; complete() excludes it while a healthy
+    lane exists, half-open-probes it when none remains, and a probe success
+    restores it (strikes reset)."""
+    from tortoise.model_adapters import RotatingModel
+
+    class _P:
+        def __init__(self, name):
+            self.provider = name
+            self.calls = 0
+
+        def complete(self, *, system, user, max_tokens=None):
+            self.calls += 1
+            return f"{self.provider}:{system}"
+
+    a, b = _P("farm-a"), _P("farm-b")
+    model = RotatingModel([a, b], cooldown_s=300)
+    # Strike 1 on farm-a: cools only.
+    model._in_flight = a
+    model.note_stall(provider="farm-a")
+    assert "farm-a" not in model._downed
+    # Strike 2 on farm-a (no success between): downed.
+    model.note_stall(provider="farm-a")
+    assert "farm-a" in model._downed
+    # A healthy lane exists → farm-b serves; farm-a excluded even uncooled.
+    model._cooldowns["farm-a"] = 0.0
+    out = model.complete(system="s", user="u")
+    assert out.startswith("farm-b:")
+    # Down both lanes → half-open probe re-admits the downed (uncooled) lane.
+    model._cooldowns["farm-b"] = 10.0 ** 10
+    model._cooldowns["farm-a"] = 0.0
+    out = model.complete(system="s", user="u")
+    assert out.startswith("farm-a:") or out.startswith("farm-b:")
+    if out.startswith("farm-a:"):
+        assert "farm-a" not in model._downed  # probe success restored it
+        assert model._stall_strikes["farm-a"] == 0

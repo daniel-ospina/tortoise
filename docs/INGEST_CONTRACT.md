@@ -321,7 +321,7 @@ Three recovery tools, in order of preference:
 
 | Situation | Tool | Semantics |
 |---|---|---|
-| A point's **content is wrong** and a corrected version exists | `supersede_point(old_id, new_id)` (SDK) / `tortoise_supersede` | Atomically replaces the old point: `CORRECTS` edge, `outdated:true`, **all edges transferred** to the new point (operator edges both directions, structural edges), preserving type/direction/confidence/weight/label/`batch_id`. The old point keeps only the CORRECTS edge as provenance. |
+| A point's **content is wrong** and a corrected version exists | `supersede_point(old_id, new_id)` (SDK) / `tortoise_supersede` | Atomically replaces the old point: `CORRECTS` edge, `outdated:true`, **all edges transferred** to the new point (operator edges both directions, structural edges), preserving type/direction/confidence/weight/label/`batch_id`. The old point keeps only the CORRECTS edge as provenance. *(Current v1 behavior — the #2421 restatement-vs-correction policy will replace the universal transfer with a per-edge carry/drop/pend triage for semantic edges; see ONTOLOGY §3.1.)* |
 | A point should **not exist** | `retract_point(id)` (SDK) / `tortoise_retract_point` | Terminal `status="retracted"` tombstone; default query surfaces exclude it (`include_retracted=True` to see it). |
 | An **operator / mitigation** was wrongly ingested | see operator disposition below | `supersede_point` rejects operators (supersession is for statement points) — disposition is explicit, never silent. |
 
