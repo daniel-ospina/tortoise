@@ -8059,10 +8059,12 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
     # priors, #1391). The summary log therefore INFOs zero-warn applies even
     # when applied<total — a WARNING means a record actually warned. Per-
     # record fail-open (warn-only — never fails the commit). Same-commit
-    # supersession chains must be emitted in fold order ([A→B, B→C]) — the
-    # visible-successor gate skips a fold whose successor this payload has
-    # already terminalized (order-sensitivity pinned in #2249). The step-6
-    # entity writes above have landed the payload's net-new successors.
+    # supersession chains fold in dependency order inside apply_supersessions
+    # (#2249) — emission order is irrelevant; the helper's pre-pass sorts so
+    # each fold runs while its successor is still live. Cross-commit
+    # reverse-arriving chains still skip (guard (h) — the fold-time gate
+    # discriminates pre-payload terminality). The step-6 entity writes above
+    # have landed the payload's net-new successors.
     # ──
     from tortoise.commit_ops import apply_supersessions
 
