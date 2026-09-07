@@ -2978,6 +2978,46 @@ class TestSessionFloodGate:
         assert r.status_code == 400, r.text
         assert "cap" in r.text.lower()
 
+    def test_turn_cap_exceeded_record(self, client, caplog):
+        """#2335 WI-1c: the turn-cap refusal emits a structured record naming
+        the cap + the demand (the >500-turn population is a leading indicator
+        — currently invisible on the product lane)."""
+        import logging
+
+        from tortoise.quota import MAX_SESSION_TURNS
+
+        conversation = [{"role": "user", "content": "hi"}] * (MAX_SESSION_TURNS + 1)
+        with caplog.at_level(logging.WARNING, logger="tortoise.api"):
+            r = client.post("/v1/sessions", json={
+                "session_id": "cap-record-session", "conversation": conversation,
+            })
+        assert r.status_code == 400, r.text
+        hits = [rec.getMessage() for rec in caplog.records
+                if "turn_cap_exceeded" in rec.getMessage()]
+        assert hits, "the turn-cap refusal must emit a structured record"
+        assert str(MAX_SESSION_TURNS + 1) in hits[0], hits[0]
+        assert str(MAX_SESSION_TURNS) in hits[0], hits[0]
+
+    def test_quota_refusal_record(self, client, caplog):
+        """#2335 WI-1c: the 402 points-gate raise emits a structured record
+        with est-at-refusal / count / max / tier — the hosted-low proxy for
+        the 402-filtered population (refusal-heavy = UNKNOWN, not covered)."""
+        import logging
+        dense = ("we should go. " * 300)  # 4500 chars < 5000 turn limit
+        conversation = [{"role": "user", "content": dense}] * 51
+        with caplog.at_level(logging.WARNING, logger="tortoise.api"):
+            r = client.post("/v1/sessions", json={
+                "session_id": "quota-record-session", "conversation": conversation,
+            })
+        assert r.status_code == 402, r.text[:200]
+        hits = [rec.getMessage() for rec in caplog.records
+                if "quota_refusal" in rec.getMessage()]
+        assert hits, "the 402 raise must emit a structured refusal record"
+        msg = hits[0]
+        # est-at-refusal, count, max, tier all present
+        assert "est=" in msg and "max=" in msg, msg
+        assert "tier=" in msg, msg
+
     def test_extraction_amplifier_402_zero_growth(self, client):
         """Dense sentence content → extraction-aware estimate exceeds the
         points quota → 402 BEFORE any write (zero node growth)."""

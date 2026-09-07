@@ -336,6 +336,20 @@ def test_capture_session_turn_cap(sdk):
         sdk.capture_session([{"role": "user", "content": "x"}] * 201, max_turns=200)
 
 
+def test_capture_session_turn_cap_record(sdk, caplog):
+    """#2335 WI-1c: the self-host turn-cap refusal emits a structured record
+    (turns/cap) — the sdk-lane twin of the hosted record."""
+    import logging
+    with caplog.at_level(logging.WARNING, logger="tortoise.sdk"), \
+            pytest.raises(ValueError, match="turn cap"):
+        sdk.capture_session(
+            [{"role": "user", "content": "x"}] * 201, max_turns=200)
+    hits = [r.getMessage() for r in caplog.records
+            if "turn_cap_exceeded" in r.getMessage()]
+    assert hits, "the sdk turn-cap refusal must emit a structured record"
+    assert "turns=201" in hits[0] and "cap=200" in hits[0], hits[0]
+
+
 def test_capture_session_creates_event(sdk):
     res = sdk.capture_session(CONV)
     proj = sdk._get_proj()
@@ -3758,7 +3772,7 @@ def test_extract_session_v2_meta_carries_stats(sdk, monkeypatch):
     monkeypatch.setenv("DEEPSEEK_API_KEY", "ds-key")
     monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
 
-    extracted, meta = sdk._extract_session_v2(
+    _extracted, meta = sdk._extract_session_v2(
         [{"role": "user", "content": "x"},
          {"role": "assistant", "content": "we decided"}],
         session_id="s-stats", now="2026-08-20T00:00:00Z")

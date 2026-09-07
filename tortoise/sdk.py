@@ -2633,6 +2633,12 @@ class TortoiseSDK:
         session_id = session_id or f"session_{uuid.uuid4().hex[:12]}"
 
         if len(conversation) > max_turns:
+            # #2335 WI-1c: the self-host turn-cap refusal is a structured
+            # record (the >max_turns demand is a leading indicator — both
+            # lanes must surface it; hosted records in hosted_api).
+            _logger.warning(
+                "turn_cap_exceeded turns=%d cap=%d session_id=%s",
+                len(conversation), max_turns, session_id)
             raise ValueError(
                 f"Session turn cap exceeded: {len(conversation)} > {max_turns}")
 

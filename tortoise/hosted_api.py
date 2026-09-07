@@ -6487,6 +6487,16 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         )
 
     if len(body.conversation) > MAX_SESSION_TURNS:
+        # #2335 WI-1c: the turn-cap refusal is a structured record (the
+        # >MAX_SESSION_TURNS demand is a leading indicator — the most-mega
+        # population is otherwise invisible to every instrument leg).
+        # local import: _capture_session_impl carries many local `import
+        # logging` blocks — module-level logging is function-local here.
+        import logging
+        logging.getLogger("tortoise.api").warning(
+            "turn_cap_exceeded turns=%d cap=%d harness=%s team=%s",
+            len(body.conversation), MAX_SESSION_TURNS,
+            body.harness, team.get("team_id"))
         raise HTTPException(
             status_code=400,
             detail=f"Session turn cap exceeded: {len(body.conversation)} > {MAX_SESSION_TURNS}.",
@@ -6568,6 +6578,15 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
             from tortoise.pricing import tier_limits as _tl
             max_points = _tl(team.get("tier") or "free").get("max_graph_nodes")
         if count + est > max_points:
+            # #2335 WI-1c: the quota-refusal is a structured record — est-at-
+            # refusal / count / max / tier — the hosted-low proxy for the
+            # 402-filtered population (refusal-heavy hosted-low = UNKNOWN,
+            # not covered; zero-event windows there are quota-confounded).
+            import logging
+            logging.getLogger("tortoise.api").warning(
+                "quota_refusal capture est=%d count=%d max=%d tier=%s team=%s "
+                "harness=%s", est, count, max_points,
+                team.get("tier"), team.get("team_id"), body.harness)
             raise HTTPException(
                 status_code=402,
                 detail=f"Team points limit reached: {count} in use + {est} estimated "
