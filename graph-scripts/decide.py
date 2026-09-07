@@ -8,7 +8,10 @@ Two modes:
 MITIGATION SEMANTICS (TRUTH vs RELEVANCE):
   - truth_edges: NAND directly on the target finding point (it's FALSE)
   - relevance_edges: mitigate the OPERATOR (it's TRUE but matters LESS)
-    Uses mitigate_operator with strength in [0.10, 0.50] range.
+    Uses mitigate_operator with strength in [0.10, 0.50] range (clamped
+    below). Single source of the strength semantics + dampening formula
+    (w_eff = w * (1 - strength)): tortoise/weights.py module docstring
+    (#2315) — 0.50 = strongest sanctioned mitigation.
   - Never NAND an option/criterion point for bad fit — express fit on the operator.
 
 Input format (JSON):
@@ -216,7 +219,8 @@ def main():
             tgt = re["target"]
             reason = re.get("reason", "Overstated relevance")
             strength = re.get("strength", 0.30)
-            # Clamp to valid mitigation range [0.10, 0.50]
+            # Clamp to the sanctioned [0.10, 0.50] band (single source:
+            # tortoise/weights.py module docstring, #2315).
             strength = max(0.10, min(0.50, strength))
             try:
                 # Reuse the operator if this edge was already created in `edges`

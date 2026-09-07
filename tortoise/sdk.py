@@ -5531,21 +5531,35 @@ class TortoiseSDK:
                           credibility: str | int | float | None = None) -> dict:
         """Create a mitigation Point that modulates an operator's edge strength.
 
-        MITIGATION STRENGTH SEMANTICS (single-sourced — issue #2199 knock-on
-        decision 3): ``strength`` means how much this reason reduces the
-        edge — 0 = fully neutralized, 1 = fully intact (default 0.5). It is
-        NOT a statement of how true the reason is, and it is NOT fused into
-        the mitigation point's Beta prior (that would invert the meaning).
-        Strength is currently ADVISORY metadata: EP does not read
-        ``mitigation_strength`` / ``mitigated_by`` yet (nothing in ep.py
-        references either) — a future issue may wire it as edge modulation;
-        until then the decide tooling clamps to [0.10, 0.50] and the number
-        is auditable metadata on the mitigation point.
+        MITIGATION STRENGTH SEMANTICS — single source of truth is the
+        tortoise/weights.py module docstring (#2315; product decision
+        2026-09-07: mitigation is a GRADED DAMPENER, not a refutation).
+        Sanctioned band: **[0.10, 0.50]** — 0.10 minor caveat (weakest),
+        0.30 significant limitation, 0.50 major counter-evidence
+        (STRONGEST; never >0.50 — that would invert the claim, use NAND).
+        Formula: ``w_eff = w * (1 - strength)`` — EP reads
+        ``mitigation_strength`` via ``compute_operator_weight`` and reduces
+        the operator's effective weight (weights.py applies the multiply;
+        a 0.50 mitigation keeps 50% of the weight, so the operator is
+        dampened, never refuted). Strength is NOT how true the reason is
+        and is NOT fused into the mitigation point's Beta prior (#2199
+        knock-on decision 3 — the number modulates the OPERATOR's weight;
+        the mitigation point's own prior stays a calibrated live evidence
+        point). This SDK range-checks strength to 0-1 for legacy
+        writers; the decide layer clamps to the band and weights.py clamps
+        defensively on read.
+
+        SCHEMA RULE (ontology §3.9): the ``mitigated_by`` edge can ONLY
+        originate from an ``is_operator:true`` Point — this method is the
+        single writer gate and enforces it below (raises for non-operators);
+        generic create_edge cannot write the predicate (allowlist).
 
         Args:
             id: Operator Point ID to mitigate.
             reason: Why the edge is weaker than it appears.
-            strength: 0-1 edge-modulation hint (advisory — see above).
+            strength: dampening strength in [0.10, 0.50] (0.50 = strong;
+                see weights.py module docstring) — clamped to the band by
+                the decide layer and by EP's read path.
             credibility: optional plain-language starting belief for the
                 mitigation reason itself (gold/high/medium/low/unverified,
                 T0-T4 form, or numeric 0-4) — stamped 'set-by-author'.
