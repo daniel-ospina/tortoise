@@ -6066,6 +6066,8 @@ function claimIntentInFlight() {
                Disclosure pattern: labeled group + plain buttons (needs no
                arrow-key handling; Tab + Enter work natively). */
             <div className="account-menu" role="group" aria-label="Account actions">
+              <div className="account-menu-section">
+                <div className="account-menu-label">Personal Account</div>
               {/* #1874: identity block — the PERSON. Session: display_name →
                   email-prefix fallback (pattern main.jsx:1227). Team-name
                   fallback is DEFENSIVE — the menu never renders without a
@@ -6088,8 +6090,6 @@ function claimIntentInFlight() {
                   )}
                 </div>
               </div>
-              <div className="account-menu-section">
-                <div className="account-menu-label">Personal Account</div>
               <button className="account-menu-profile" onClick={() => { setTab('profile'); setAccountMenuOpen(false) }}>
                 Profile
               </button>
