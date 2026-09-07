@@ -664,6 +664,19 @@ def _sha16(text: str) -> str:
 
 ---
 
+## Research grounding (per task)
+Every task carries best-practice + competitor grounding —
+docs/research/2026-09-07-battery-grounding.md (§#2292; file lands with the
+#2291 branch first). Decision-relevant cites already folded inline:
+anchored yes/no binary criteria reliability (Autorubric 2603.00077);
+evidence-scrubbed, grounding-tied checklist items (2601.08654);
+chance-corrected validation spanning contrasting label structures where
+test-retest can mask position invariance (2606.19544); rubric validity does
+not transfer across models — validate on the ACTUAL pinned model's real
+deliberation text (2026.findings-eacl.335); κ + calibration sets + drift
+monitoring (futureagi 2026). No competitor publishes a validated
+deliberation rubric — this is the buyer-visible first.
+
 ## Review Changelog
 
 (plan-review cycles logged here as they run — see below)
