@@ -2805,6 +2805,10 @@ class TortoiseSDK:
                 "extraction_mode": "empty",
                 "ok": False,
                 "errors": ["no extractable content — empty or blank conversation"],
+                # #2335 WI-2: diagnostics is always-present on the resp
+                # contract; the empty-gate error is already plain-language,
+                # so errors and diagnostics mirror here.
+                "diagnostics": [],
                 "warnings": [],
             }
 
@@ -3208,7 +3212,7 @@ class TortoiseSDK:
         resp["surfaced"] = surfaced_marker(
             extracted, verified_ids=verified_ids)
         # #2335 WI-1d: the observation leg — one structured line per capture
-        # at the shared assembly (mode covers v2/m2/replayed/error/empty).
+        # at the shared assembly (mode covers v2/m2/replayed/error — empty returns pre-emit).
         try:
             _emit_capture_observation(
                 session_id=session_id, lane="sdk",
