@@ -1,0 +1,94 @@
+{
+  "conversation": [
+    {
+      "content": "The all-at-once rollout shipped clean on Friday, but there was an anomaly overnight in the Bluepeak region: duplicate claims for about six minutes on the hydrate queue. We need a cause before the next rollout. The on-call handoff was smooth at least, no pages overnight.",
+      "role": "user"
+    },
+    {
+      "content": "Duplicates on the hydrate queue post-fix is the exact class the lease was supposed to kill. Six minutes is short, a window rather than a drain. Let us timeline it against the flag state.",
+      "role": "assistant"
+    },
+    {
+      "content": "We toggled the global flag once at cutover and never touched it after. I pulled the toggle log to be sure.",
+      "role": "user"
+    },
+    {
+      "content": "One toggle at cutover. Then the anomaly is not a mid-flight flip, unless the flag state itself was the trigger.",
+      "role": "assistant"
+    },
+    {
+      "content": "My first hypothesis is the global flag: the flip must have raced the lease renewal when the region cut over, leaving a renewal window where two workers could claim one batch. Honestly I have been second-guessing the all-at-once call since we made it.",
+      "role": "user"
+    },
+    {
+      "content": "Flag-raced-renewal is testable: compare the toggle timestamp against the lease renewal stamps in the region around the anomaly.",
+      "role": "assistant"
+    },
+    {
+      "content": "I pulled both. The toggle is two hours before the first duplicate, and the renewal stamps are all clean, no overlap, no double renewal.",
+      "role": "user"
+    },
+    {
+      "content": "Two hours of stable flag state before the duplicates already weakens the flag hypothesis. What does differ in that region?",
+      "role": "assistant"
+    },
+    {
+      "content": "Whatever the cause, here is the risk that matters for the next rollout: clock skew between regions can make lease expiry unsafe, a lagging region renews after the owner's lease truly expired, and its renewal can clobber a live lease in another region.",
+      "role": "user"
+    },
+    {
+      "content": "Skew is a real expiry hazard: the CAS compares against wall-clock expiry, so a drifted clock changes who wins. Is that what the timestamps show?",
+      "role": "assistant"
+    },
+    {
+      "content": "The flag did not cause the duplicates, it had been stable for two hours before the anomaly, and the renewal stamps show the region clock drifted eleven seconds, which is exactly the six-minute duplicate window on the hydrate queue.",
+      "role": "user"
+    },
+    {
+      "content": "So the flag hypothesis is out, the clock drift explains the window, and the lease behaved as designed under a drifted clock: it expired early, the second worker claimed the batch, and the hydrate side saw the duplicate.",
+      "role": "assistant"
+    },
+    {
+      "content": "Then the fix is not about the flag at all. A skew-tolerant lease: the expiry check needs a grace period so a lagging region cannot clobber a live lease.",
+      "role": "user"
+    },
+    {
+      "content": "Grace period on the lease expiry, sized to the worst observed drift. What is the biggest skew we have seen between regions?",
+      "role": "assistant"
+    },
+    {
+      "content": "Eleven seconds is the worst we have logged, but the SLO review assumed sub-second. I would size the grace to thirty seconds and log any expiry that lands inside it.",
+      "role": "user"
+    },
+    {
+      "content": "Thirty-second grace with an internal log on grace expiries. That bounds the skew hazard without making the lease lax.",
+      "role": "assistant"
+    },
+    {
+      "content": "We shipped the skew-tolerant lease grace period to every region last night, with the grace window a lagging region's renewal cannot clobber a live lease, so the clock-skew risk is covered.",
+      "role": "user"
+    },
+    {
+      "content": "Risk closed by the grace period: expiry is now skew-tolerant, and the duplicates are attributed to the drift, not to the fix.",
+      "role": "assistant"
+    },
+    {
+      "content": "And one more decision while we are here: for the next rollout, reverse the all-at-once call, per-service flags instead of one global flag, so a single bad region cannot take the whole fleet down with it. Honestly the global flag has been the single point of failure all along.",
+      "role": "user"
+    },
+    {
+      "content": "Per-service flags changes the reversibility model: each service's flag is pulled independently instead of one fleet-wide switch.",
+      "role": "assistant"
+    },
+    {
+      "content": "Right. The global flag made one bad region a fleet-wide event; per-service flags keep a bad region from taking the whole fleet down.",
+      "role": "user"
+    },
+    {
+      "content": "Good, and the skew fix ships with the hydrate queue re-run before the next rollout. Priya will track the grace-expiry log for a week. Also the demo room is booked Thursday if you want to show the dashboards.",
+      "role": "user"
+    }
+  ],
+  "harness": "codex",
+  "session_id": "wp07_bluepeak_followup"
+}

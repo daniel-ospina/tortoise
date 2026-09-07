@@ -1,0 +1,236 @@
+{
+  "attribution_hazards": [
+    {
+      "id": "wp07_bluepeak_followup_h_01",
+      "planted_turn": 11,
+      "quote": "the region clock drifted eleven seconds, which is exactly the six-minute duplicate window",
+      "source": "diego"
+    },
+    {
+      "id": "wp07_bluepeak_followup_h_02",
+      "planted_turn": 7,
+      "quote": "the renewal stamps are all clean, no overlap, no double renewal",
+      "source": "maya"
+    }
+  ],
+  "distractor_leakage_tolerance": 1,
+  "distractors": [
+    {
+      "anchor": "the demo room is booked Thursday",
+      "id": "wp07_bluepeak_followup_d_01",
+      "planted_turn": 22,
+      "statement": "Routine aside that the demo room is booked Thursday."
+    },
+    {
+      "anchor": "no pages overnight",
+      "id": "wp07_bluepeak_followup_d_02",
+      "planted_turn": 1,
+      "statement": "Routine on-call note from the handoff."
+    }
+  ],
+  "planted_operators": [
+    {
+      "expected_kind": "NEGATE",
+      "from": {
+        "planted_turn": 11,
+        "verbatim_anchor": "The flag did not cause the duplicates, it had been stable for two hours before the anomaly"
+      },
+      "id": "wp07_bluepeak_followup_op_02",
+      "reason": "counter-claim with an explicit negation marker (t11 'did not cause') attacks the flag hypothesis (t5) \u2014 ONTOLOGY \u00a73.1 NAND 'A contradicts B'; extraction-emitted NANDs default unidirectional (#909: new-claim-attacks-existing). from = counter-claim/attacker, to = the attacked hypothesis; asst t12 states the contradiction ('the flag hypothesis is out').",
+      "relation_turn": 12,
+      "to": {
+        "planted_turn": 5,
+        "verbatim_anchor": "the flip must have raced the lease renewal when the region cut over"
+      }
+    },
+    {
+      "expected_kind": "MITIGATES",
+      "from": {
+        "planted_turn": 17,
+        "verbatim_anchor": "a lagging region's renewal cannot clobber a live lease"
+      },
+      "id": "wp07_bluepeak_followup_op_03",
+      "reason": "the shipped grace period (t17) reduces the clock-skew risk claim (t9) \u2014 ONTOLOGY \u00a73.1/\u00a73.9 mitigate_operator / mitigated_by; FLAGGED (scoping finding F1): core \u00a73.1 vocabulary (IMPL/NAND/CORRECTS) has no point-to-point 'action reduces risk' operator and registered MITIGATES is relevance-on-an-operator-edge (extractor S2: claim true but matters less than it seems). Gold asserts the write path's MITIGATES form; NAND/supersede of the risk is the ontology-owner question.",
+      "relation_turn": 18,
+      "to": {
+        "planted_turn": 9,
+        "verbatim_anchor": "clock skew between regions can make lease expiry unsafe"
+      }
+    },
+    {
+      "expected_kind": "SUPERSEDE",
+      "from": {
+        "planted_turn": 19,
+        "verbatim_anchor": "per-service flags instead of one global flag"
+      },
+      "id": "wp07_bluepeak_followup_op_04",
+      "reason": "decision D2 (t19 'reverse the all-at-once call') overturns decision D1 made in the prior session (wp06 t17) \u2014 ONTOLOGY \u00a73.1 CORRECTS (new point corrects/replaces an outdated point; supersede_point marks old outdated). FLAGGED (scoping finding F2): \u00a72 state-centric + extractor S2 supersede ENTITY/state-level (one 'B supersedes A' statement point + ObjectSuperseded); point-level CORRECTS forms when S3 resolves the superseded claim already in-graph. Planted CROSS-SESSION (wp07 -> wp06) because that is the only mechanism by which today's v2 extractor can emit point-level CORRECTS in one sequential corpus capture. from = the new decision (own session), to = the superseded decision (wp06).",
+      "relation_turn": 19,
+      "to": {
+        "planted_turn": 17,
+        "session_id": "wp06_quarry_rollout",
+        "verbatim_anchor": "ship the lease fix all-at-once behind a single global kill flag"
+      }
+    }
+  ],
+  "planted_units": [
+    {
+      "depth_bucket": "early",
+      "id": "wp07_bluepeak_followup_u_01",
+      "kind": "fact",
+      "notability": "high",
+      "planted_turn": 1,
+      "verbatim_anchor": "duplicate claims for about six minutes on the hydrate queue"
+    },
+    {
+      "depth_bucket": "early",
+      "id": "wp07_bluepeak_followup_u_02",
+      "kind": "fact",
+      "notability": "low",
+      "planted_turn": 1,
+      "verbatim_anchor": "The on-call handoff was smooth"
+    },
+    {
+      "depth_bucket": "early",
+      "id": "wp07_bluepeak_followup_u_03",
+      "kind": "fact",
+      "notability": "high",
+      "planted_turn": 3,
+      "verbatim_anchor": "toggled the global flag once at cutover"
+    },
+    {
+      "depth_bucket": "early",
+      "id": "wp07_bluepeak_followup_u_04",
+      "kind": "vibe",
+      "notability": "high",
+      "planted_turn": 5,
+      "verbatim_anchor": "second-guessing the all-at-once call since we made it"
+    },
+    {
+      "depth_bucket": "early",
+      "id": "wp07_bluepeak_followup_u_05",
+      "kind": "fact",
+      "notability": "high",
+      "planted_turn": 7,
+      "verbatim_anchor": "the toggle is two hours before the first duplicate"
+    },
+    {
+      "depth_bucket": "late",
+      "id": "wp07_bluepeak_followup_u_06",
+      "kind": "fact",
+      "notability": "high",
+      "planted_turn": 15,
+      "verbatim_anchor": "Eleven seconds is the worst we have logged"
+    },
+    {
+      "depth_bucket": "late",
+      "id": "wp07_bluepeak_followup_u_07",
+      "kind": "decision",
+      "notability": "high",
+      "planted_turn": 15,
+      "verbatim_anchor": "size the grace to thirty seconds"
+    },
+    {
+      "depth_bucket": "late",
+      "id": "wp07_bluepeak_followup_u_09",
+      "kind": "vibe",
+      "notability": "high",
+      "planted_turn": 19,
+      "verbatim_anchor": "the global flag has been the single point of failure all along"
+    },
+    {
+      "depth_bucket": "late",
+      "id": "wp07_bluepeak_followup_u_08",
+      "kind": "entity",
+      "notability": "high",
+      "planted_turn": 22,
+      "verbatim_anchor": "Priya will track the grace-expiry log for a week"
+    }
+  ],
+  "salient_units": [
+    {
+      "id": "wp07_bluepeak_followup_u_01",
+      "survival": {
+        "accepts_rephrase_linked": false,
+        "ep_update_required": true,
+        "provenance_required": true,
+        "via_anchor": "duplicate claims for about six minutes on the hydrate queue"
+      }
+    },
+    {
+      "id": "wp07_bluepeak_followup_u_02",
+      "survival": {
+        "accepts_rephrase_linked": true,
+        "ep_update_required": true,
+        "provenance_required": true,
+        "via_anchor": "The on-call handoff was smooth"
+      }
+    },
+    {
+      "id": "wp07_bluepeak_followup_u_03",
+      "survival": {
+        "accepts_rephrase_linked": false,
+        "ep_update_required": true,
+        "provenance_required": true,
+        "via_anchor": "toggled the global flag once at cutover"
+      }
+    },
+    {
+      "id": "wp07_bluepeak_followup_u_04",
+      "survival": {
+        "accepts_rephrase_linked": true,
+        "ep_update_required": true,
+        "provenance_required": true,
+        "via_anchor": "second-guessing the all-at-once call since we made it"
+      }
+    },
+    {
+      "id": "wp07_bluepeak_followup_u_05",
+      "survival": {
+        "accepts_rephrase_linked": false,
+        "ep_update_required": true,
+        "provenance_required": true,
+        "via_anchor": "the toggle is two hours before the first duplicate"
+      }
+    },
+    {
+      "id": "wp07_bluepeak_followup_u_06",
+      "survival": {
+        "accepts_rephrase_linked": false,
+        "ep_update_required": true,
+        "provenance_required": true,
+        "via_anchor": "Eleven seconds is the worst we have logged"
+      }
+    },
+    {
+      "id": "wp07_bluepeak_followup_u_07",
+      "survival": {
+        "accepts_rephrase_linked": false,
+        "ep_update_required": true,
+        "provenance_required": true,
+        "via_anchor": "size the grace to thirty seconds"
+      }
+    },
+    {
+      "id": "wp07_bluepeak_followup_u_09",
+      "survival": {
+        "accepts_rephrase_linked": true,
+        "ep_update_required": true,
+        "provenance_required": true,
+        "via_anchor": "the global flag has been the single point of failure all along"
+      }
+    },
+    {
+      "id": "wp07_bluepeak_followup_u_08",
+      "survival": {
+        "accepts_rephrase_linked": false,
+        "ep_update_required": true,
+        "provenance_required": true,
+        "via_anchor": "Priya will track the grace-expiry log for a week"
+      }
+    }
+  ],
+  "scenario": "Maya and Diego investigate a six-minute duplicate anomaly after the all-at-once rollout: the flag hypothesis is counter-claimed by clock-skew evidence (NEGATE), a grace period closes the skew risk (MITIGATES), and the all-at-once global-flag decision from the prior session is overturned for per-service flags (SUPERSEDE, cross-session).",
+  "schema_version": 1,
+  "session_id": "wp07_bluepeak_followup"
+}

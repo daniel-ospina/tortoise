@@ -566,3 +566,39 @@ def test_run_origin_judge_pin_mismatch(tmp_path, monkeypatch):
     assert report["run_status"] == "completed"
     assert report["verdict"] == schema.VERDICT_INCONCLUSIVE
     assert report["failure_origin"] == "judge_pin_mismatch"
+
+
+def test_run_carries_operator_edge_audit_dimension(tmp_path, monkeypatch):
+    """#2514: every completed run carries the planted-operator (layer-2)
+    audit — the corpus-wide mechanical grade of whether the extractor wired
+    the RIGHT operator edge between the anchored claims. On the deterministic
+    m2 echo lane the numbers are structural (no relation extraction ⇒ 0/4
+    edges, 3/4 endpoint-anchor pairs content-present), recorded as an
+    additive audit dimension + note + receipt field — never a gated metric."""
+    root = _tmp_corpus(tmp_path)
+    monkeypatch.setenv("TORTOISE_SESSION_EXTRACTOR", "m2")
+    monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
+    report = runner.run_benchmark(root=root)
+    assert report["run_status"] == "completed", report.get("log")
+    audit = report["operator_audit"]
+    assert audit is not None
+    assert audit["planted"] == 4  # wp06 (1) + wp07 (3) seeded operator edges
+    assert audit["edge_correct"] == 0  # structural: the echo lane writes no operators
+    assert 1 <= audit["content_ok"] <= audit["planted"]
+    notes = "\n".join(report.get("notes", []))
+    assert "operator-edge audit (#2514)" in notes
+    # Per-session detail rides the owning session's result (the cross-session
+    # SUPERSEDE is owned by wp07; its to-anchor lives in wp06's memory layer).
+    owned_by = {
+        r["session_id"]: r.get("planted_operators", []) for r in report["session_results"]
+    }
+    assert len(owned_by["wp06_quarry_rollout"]) == 1
+    assert len(owned_by["wp07_bluepeak_followup"]) == 3
+    supersede = owned_by["wp07_bluepeak_followup"][2]
+    assert supersede["expected_kind"] == "SUPERSEDE"
+    assert supersede["to_session"] == "wp06_quarry_rollout"
+    # The receipt carries the audit (audit trail for the sealed run).
+    receipt = runner.build_receipt(report)
+    assert runner.validate_receipt(receipt) == []
+    assert receipt["operator_audit"]["planted"] == 4
+    assert receipt["operator_audit"]["edge_correct"] == 0

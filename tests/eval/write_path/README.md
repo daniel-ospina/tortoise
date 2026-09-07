@@ -57,6 +57,16 @@ the session-capture boundary set (`claude`, `claude-desktop`, `claude-web`,
   operator who spoke it).  Emitted gold ids (`wp01_quarry_debug_u_01`,
   `..._h_01`) are **globally unique** — session-stem prefixed — so the W2-b
   runner can aggregate across sessions without bare-id collisions.
+* `planted_operators` — **(issue #2514, layer-2 gold)** optional sealed
+  section naming the operator EDGES the extractor must wire between planted
+  claims: `{id, expected_kind (SUPERSEDE|NEGATE|MITIGATES|SUPPORTS),
+  from: {verbatim_anchor, planted_turn, session_id?}, to: {verbatim_anchor,
+  planted_turn, session_id?}, relation_turn, reason}`.  `session_id` defaults
+  to the gold's own session; the SUPERSEDE is planted CROSS-SESSION
+  (wp07 → wp06) because a point-level supersession (CORRECTS) only forms when
+  the superseded claim already exists in-graph.  Ontology ambiguity for
+  SUPERSEDE + MITIGATES is flagged, not resolved (scoping note
+  `docs/scoping/2026-09-07-2514-operator-corpus.md`, findings F1/F2).
 * `salient_units` — 1:1 with `planted_units`, carrying **point-level**
   `survival` semantics (the unit of analysis is the POINT — the
   research-brief/plan write-path unit assumption; NOT eval-spec §5's
@@ -138,10 +148,15 @@ its planted turn at render time, so fixture/gold drift cannot ship silently.
 | `wp04_aurora_perf` | pi | aurora dashboard latency investigation | 13 | 13 | 2 | 2 |
 | `wp05_retro_writeup` | claude-desktop | Bluepeak incident retro + follow-ups | 15 | 15 | 2 | 2 |
 
+| `wp06_quarry_rollout` | codex | quarry lease-fix rollout decision; chaos run supports scope-independence (SUPPORTS planted) | 9 | 9 | 2 | 2 |
+| `wp07_bluepeak_followup` | codex | duplicate anomaly after the rollout; flag hypothesis counter-claimed (NEGATE), skew risk closed (MITIGATES), rollout decision overturned (SUPERSEDE, cross-session) | 9 | 9 | 2 | 2 |
+
 Floors (issue targets): ≥ 4 fictional sessions, ≥ 60 planted salient units
 with verbatim anchors — chosen so E2E-2's percentage-based assertions
 (macro ≥ target / strict ≥ target) have stable denominators. Current corpus:
-5 sessions / 72 units.
+7 sessions / 90 units.  Issue-#2514 operator floor: all four planted-operator
+kinds (SUPERSEDE/NEGATE/MITIGATES/SUPPORTS) are planted ≥ 1× (4 edges total;
+the corpus-level grades live on every run's `operator_audit` — see below).
 
 All people, companies, and systems are fictional (Peregrine Systems, quarry /
 lumen / ember / aurora, Halcyon Retail, Bluepeak Logistics, and the named
@@ -151,3 +166,24 @@ re-embodies the write-path failure archetype of gbrain's Cat-35 real-gold
 example (a duplicate-ingest batch race — the raw-notes 10:10Z gold item) in
 a freshly re-authored fictional session; ideas reimplemented carry no license
 obligation, and no corpus file or verbatim gold text is copied.
+
+## Layer-2 operator-edge audit (issue #2514)
+
+Every completed run carries an additive `operator_audit` on the report +
+receipt: `{planted, edge_correct, content_ok}` graded mechanically over the
+session snapshot's operator surface (`operator_edges` — reified
+IMPL/NAND/MITIGATES nodes touching the session's memory points;
+`direct_edges` — the Point→Point CORRECTS supersession edge; `mitigations` —
+mitigation Points on operators).  Kind → graph-form mapping + the ontology
+findings live in the scoping note.  The audit is NOT a `METRIC_VALUES` member
+(no baseline re-bless of the metric vocabulary): the m2 echo lane has no
+relation extraction, so its 0/4 is structural, and the operator bar is a
+product-lane (llm) bar — same posture split as the standing leakage bar.  On
+this branch the corpus-blessed baselines re-pin the extended corpus:
+`baselines/m2.json` was re-measured by a real deterministic replay (leakage
+11 → 15 structural; receipt `w2b-m2-lane-2514-corpus-2026-09-07.json`);
+`baselines/main.json` carries its published llm numbers forward with an
+explicit not-re-measured justification.  A sealed llm run (corpus-bless +
+protocol-bless v1→v2, with the first real operator-edge numbers) is REQUIRED
+before the llm lane is comparable again — see the scoping note's "Sealed run
+required to activate".

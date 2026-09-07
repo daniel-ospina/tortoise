@@ -1181,3 +1181,112 @@ def test_compare_run_judge_pin_mismatch_is_inconclusive() -> None:
         run_judge_pin=baseline["judge_pin"],
     )
     assert verdict == schema.VERDICT_PASS
+
+
+# ── #2514 planted-operator (layer-2) gold contract ─────────────────────────
+# Sealed gold section ``planted_operators``: expected operator kind +
+# anchored from/to endpoints the extractor must wire as the RIGHT edge.
+# Anchors ground in their named session's transcript (own session at
+# validate_gold time; cross-session endpoints — the SUPERSEDE planted
+# wp07 → wp06 — ground corpus-wide).
+
+OPERATOR_SESSIONS = [
+    s for s in COMMITTED_SESSIONS if corpus.load_gold(s).get("planted_operators")
+]
+
+
+def test_committed_operator_gold_kind_coverage_and_id_hygiene() -> None:
+    """Corpus plants every issue-#2514 operator kind ≥1 (SUPERSEDE/NEGATE/
+    MITIGATES/SUPPORTS) and every planted-operator id is globally unique."""
+    kinds: set[str] = set()
+    op_ids: list[str] = []
+    cross_session = 0
+    for s in COMMITTED_SESSIONS:
+        gold = corpus.load_gold(s)
+        for op in gold.get("planted_operators", []):
+            kinds.add(op["expected_kind"])
+            op_ids.append(op["id"])
+            if (op.get("from") or {}).get("session_id") or (op.get("to") or {}).get("session_id"):
+                cross_session += 1
+    assert kinds == set(schema.PLANTED_OPERATOR_KIND_VALUES), kinds
+    assert len(op_ids) == len(set(op_ids)), "duplicate planted-operator ids"
+    assert len(op_ids) >= 4
+    # The #2514 cross-session SUPERSEDE is planted (a point-level CORRECTS
+    # only forms when the superseded claim already exists in-graph).
+    assert cross_session >= 1
+    # Operator gold ids never collide with planted-unit ids (aggregation).
+    unit_ids = {
+        u["id"]
+        for s in COMMITTED_SESSIONS
+        for u in corpus.load_gold(s).get("planted_units", [])
+    }
+    assert not (set(op_ids) & unit_ids)
+
+
+@pytest.mark.parametrize("session_id", OPERATOR_SESSIONS)
+def test_committed_operator_gold_validates_and_grounds(session_id: str) -> None:
+    fixture = corpus.load_fixture(session_id)
+    gold = corpus.load_gold(session_id)
+    issues = schema.validate_gold(gold, fixture=fixture)
+    assert issues == [], f"gold {session_id} failed validation: {issues}"
+    fixtures = {s: corpus.load_fixture(s) for s in COMMITTED_SESSIONS}
+    x_issues = schema.validate_planted_operators_cross_session(gold, fixtures)
+    assert x_issues == [], f"gold {session_id} cross-session grounding: {x_issues}"
+    for op in gold["planted_operators"]:
+        assert op["from"]["verbatim_anchor"] != op["to"]["verbatim_anchor"]
+        assert op["reason"]
+        for side in ("from", "to"):
+            ep = op[side]
+            sid = ep.get("session_id", session_id)
+            turn = fixtures[sid]["conversation"][ep["planted_turn"] - 1]["content"]
+            assert schema.anchor_present(ep["verbatim_anchor"], turn), (
+                f"{op['id']} {side} anchor not grounded in {sid}"
+            )
+        own_turn = fixture["conversation"][op["relation_turn"] - 1]["content"]
+        assert own_turn  # relation_turn in range of the own session
+
+
+def test_operator_gold_schema_rejects_bad_kind_and_self_loop() -> None:
+    gold = corpus.load_gold(OPERATOR_SESSIONS[0])
+    base = dict(gold)
+    op = dict(gold["planted_operators"][0])
+    bad = dict(op)
+    bad["expected_kind"] = "BOGUS"
+    issues = schema.validate_gold({**base, "planted_operators": [bad]})
+    assert any("expected_kind" in i for i in issues), issues
+    # A self-loop (identical from/to endpoints) is a degenerate edge.
+    loop = dict(op)
+    loop["to"] = dict(loop["from"])
+    issues = schema.validate_gold({**base, "planted_operators": [loop]})
+    assert any("identical" in i for i in issues), issues
+
+
+def test_operator_gold_anchor_drift_is_rejected(tmp_path) -> None:
+    """An operator endpoint anchor that is NOT in its planted turn is a
+    fixture/gold drift error (same discipline as planted_units)."""
+    generate_corpus.write_corpus(root=tmp_path)
+    gold_path = tmp_path / "gold" / f"{OPERATOR_SESSIONS[0]}.gold.json"
+    gold = json.loads(gold_path.read_text())
+    op = dict(gold["planted_operators"][0])
+    op["from"] = {**op["from"], "verbatim_anchor": "silent operator-key edit"}
+    gold["planted_operators"] = [op]
+    gold_path.write_text(json.dumps(gold, indent=2, sort_keys=True) + "\n")
+    fixture = corpus.load_fixture(OPERATOR_SESSIONS[0], root=tmp_path)
+    issues = schema.validate_gold(gold, fixture=fixture)
+    assert any("verbatim_anchor" in i and "not a normalized substring" in i
+               for i in issues), issues
+
+
+def test_cross_session_operator_endpoint_must_resolve(tmp_path) -> None:
+    """An endpoint naming a session that is not in the corpus is reported by
+    the corpus-level cross-session validator (never a silent skip)."""
+    generate_corpus.write_corpus(root=tmp_path)
+    gold_path = tmp_path / "gold" / f"{OPERATOR_SESSIONS[0]}.gold.json"
+    gold = json.loads(gold_path.read_text())
+    op = dict(gold["planted_operators"][0])
+    op["to"] = {**op["to"], "session_id": "wp99_does_not_exist"}
+    gold["planted_operators"] = [op]
+    issues = schema.validate_planted_operators_cross_session(
+        gold, {s: corpus.load_fixture(s, root=tmp_path) for s in corpus.session_ids(tmp_path)}
+    )
+    assert any("unknown session" in i for i in issues), issues
