@@ -289,6 +289,18 @@ def _supersede_commit(client, session_id: str, ref: str, sby: str, *,
     return _commit(client, raw)
 
 
+def _supersede_chain_commit(client, session_id: str, chain: list[tuple[str, str]],
+                            *, evidence: str):
+    """#2249: a commit whose ONLY supersession work is a same-payload CHAIN
+    (reverse-emission shape — the payload asserts B→C before A→B). Rides a
+    two-record supersessions list; the test seeds successors first via
+    _seed_objects (mirroring the guard (a)–(h) style)."""
+    raw = _raw_payload(1, session_id=session_id, supersessions=[
+        {"superseded": ref, "supersedes_by": sby, "evidence": evidence}
+        for ref, sby in chain
+    ])
+    return _commit(client, raw)
+
 def _object_row(name: str):
     """Graph read of every Object carrier named *name* — (status,
     supersededBy, id) per row. Returns ALL carriers (the duplicate-name
@@ -1131,6 +1143,28 @@ class Test6bEntitySupersessionGuards:
         assert b and b[0][0] == "superseded" and b[0][1] == "h-c", b
         c = _object_row("h-c")
         assert c and c[0][0] == "live", c
+
+
+
+class Test6bSameCommitChain:
+    """(i) #2249 hosted e2e — same-commit CHAINS driven through POST
+    /v1/sessions/commit (reverse-emission payloads)."""
+    def test_reverse_chain_folds_to_literal_end_state(self, client):
+        """(i) #2249 hosted e2e — a same-commit chain emitted REVERSE
+        ([B→C, A→B]) must converge to the payload-literal end state: A
+        supersededBy h-b, B supersededBy h-c, C live. Pre-fix A stayed live
+        (its fold gate-skipped a successor the same payload terminalized)."""
+        _seed_objects(client, "g6i-seed", ["h-a", "h-b", "h-c"])
+        r = _supersede_chain_commit(
+            client, "g6i-c1", [("h-b", "h-c"), ("h-a", "h-b")],
+            evidence="reverse chain")
+        assert r.status_code == 200, r.text
+        a = _object_row("h-a")
+        assert a and a[0][0] == "superseded" and a[0][1] == "h-b", a
+        b = _object_row("h-b")
+        assert b and b[0][0] == "superseded" and b[0][1] == "h-c", b
+        c = _object_row("h-c")
+        assert c and (c[0][0] or "live") == "live" and c[0][1] is None, c
 
 
 class TestBudgetDE2E7:
