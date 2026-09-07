@@ -228,8 +228,13 @@ def _normalize_answer_text(text: str) -> str:
     #1949): lowercase, strip leading/trailing punctuation and whitespace,
     collapse internal whitespace. Internal punctuation is preserved (e.g.
     "St. Louis", "co-op") so normalization cannot merge distinct answers.
+
+    Coerces non-string inputs (int, float, None) to str so that integer
+    gold answers (e.g. temporal-reasoning Q71017276, gold=4) don't crash
+    with AttributeError("'int' object has no attribute 'strip'") (#2450).
     """
-    text = (text or "").strip().lower()
+    text = str(text) if text is not None else ""
+    text = text.strip().lower()
     return " ".join(text.strip(_TRAILING_PUNCTUATION).split())
 
 
