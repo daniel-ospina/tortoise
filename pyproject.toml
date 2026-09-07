@@ -26,6 +26,10 @@ dependencies = [
     "fastmcp==3.4.6",
     "prometheus-client>=0.16",
     "posthog>=3.0",
+    # Optional-but-declared Sentry integration for the hosted API (#2444): the
+    # dependency is hard (declared) but activation is gated on SENTRY_DSN being
+    # set — local SDK / self-host / tests never initialize it (tortoise/sentry.py).
+    "sentry-sdk>=2.0",
     # Session-JWT verification (session_auth.py, #1460). Was transitive via
     # `mcp` — promoted to a direct dep so a future mcp bump can't drop it
     # silently. The [crypto] extra is required for ES256/RS256 JWKS verify
