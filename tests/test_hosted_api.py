@@ -1806,6 +1806,38 @@ class TestSessionCapture:
         assert r2.status_code == 402, r.text  # non-blank over quota: 402 still fires
 
 
+    def test_capture_error_contract_hosted_diagnostics(self, client, monkeypatch):
+        """#2335 WI-2: hosted capture resp carries headline errors + raw
+        diagnostics (byte-parity with the sdk receipt)."""
+        import tortoise.extractor_v2 as ev2
+
+        def _v2_out(*a, **kw):
+            return {
+                "session_id": kw.get("session_id", "s"),
+                "story_arc": "", "embed_list": {},
+                "search": {"mode": "embedded", "degraded": True},
+                "payload": None,
+                "chain_notes": [], "link_before_create": [], "supersessions": [],
+                "warnings": [], "minted_kinds": [],
+                "errors": [
+                    "no embed list produced (S2/S4 empty) — nothing to embed"],
+                "stats": {"llm": {"calls": 1}, "recovery": {}},
+                "error_census": {"empty_embed_list": 1},
+            }
+        monkeypatch.setattr(ev2, "extract_session_v2", _v2_out)
+        monkeypatch.delenv("TORTOISE_SESSION_LLM_MOCK", raising=False)
+        conv = [{"role": "user", "content": "Let's use PostgreSQL."}]
+        r = client.post("/v1/sessions", json={
+            "session_id": "err-contract-hosted", "conversation": conv})
+        assert r.status_code == 200, r.text
+        b = r.json()
+        headline = b["errors"][0]
+        for tok in ("S2", "S4", "embed list"):
+            assert tok.lower() not in headline.lower(), (headline, tok)
+        assert b["diagnostics"] == [
+            "no embed list produced (S2/S4 empty) — nothing to embed"]
+
+
 class TestSessionCaptureWriteVerb:
     """W5 (#2104): POST /v1/sessions speaks the frozen memory_write_v1 write
     verb (S12/DM-2) — protocol_version REQUIRED, provenance REQUIRED,

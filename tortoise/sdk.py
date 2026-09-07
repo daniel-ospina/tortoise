@@ -893,6 +893,57 @@ def _content_hash(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+# #2335 WI-2: the customer-facing error contract. The extractor's error
+# strings leak internal jargon (stage names, exception types) to the capture
+# resp. This mapper converts a RAW error string to a {headline, diagnostics}
+# pair AT THE RESP BOUNDARY ONLY — headline = plain-language reason (no stage
+# names / exception types), diagnostics = the raw string (TypeName prefix
+# preserved for P2's fatal-4xx classification). Additive: resp["errors"] stays
+# a list of strings (the pinned #1529 contract); the raw detail rides a NEW
+# sibling resp["diagnostics"] list. The eval lane and internal consumers
+# (out["errors"], meta["errors"], write-path receipts) are UNTOUCHED.
+_CAPTURE_ERROR_CONTRACT: dict[str, dict[str, str]] = {
+    "S2 output partial — truncated tail dropped (embed list incomplete)": {
+        "headline": ("The first pass of extraction produced an incomplete "
+                     "result. Retry the capture — the retry will re-attempt it."),
+        "diagnostics_suffix": "S2 output partial — truncated tail dropped "
+                              "(embed list incomplete)",
+    },
+    "S4 output partial — truncated tail dropped (embed list incomplete)": {
+        "headline": ("The final review pass produced an incomplete result. "
+                     "Retry the capture — the retry will re-attempt it."),
+        "diagnostics_suffix": "S4 output partial — truncated tail dropped "
+                              "(embed list incomplete)",
+    },
+    "no embed list produced (S2/S4 empty) — nothing to embed": {
+        "headline": ("Extraction could not find anything to store from this "
+                     "session. Retry the capture, or try again with more "
+                     "content."),
+        "diagnostics_suffix": ("no embed list produced (S2/S4 empty) — "
+                               "nothing to embed"),
+    },
+}
+
+
+def _capture_error_to_human(raw: str) -> str:
+    """Map a raw capture error string to its human headline at the resp
+    boundary. Unmapped errors pass through unchanged (fail-safe — a new
+    extractor error must never be hidden)."""
+    for _raw, mapping in _CAPTURE_ERROR_CONTRACT.items():
+        if _raw in raw:
+            return mapping["headline"]
+    return raw
+
+
+def _capture_resp_error_split(errors: list[str]) -> tuple[list[str], list[str]]:
+    """Split capture errors for the resp: headlines for resp["errors"]
+    (strings, per #1529 — the customer-facing message) + the RAW strings
+    (TypeName preserved) for resp["diagnostics"]. An unmapped error is its
+    own headline AND its own diagnostic (fail-safe — never hidden)."""
+    return ([_capture_error_to_human(e) for e in errors],
+            list(errors))
+
+
 def _emit_capture_observation(*, session_id: str, lane: str, mode: str,
                               turns: int, meta: dict) -> None:
     """#2335 WI-1d: the structured observation leg — ONE JSON line per
@@ -2978,8 +3029,13 @@ class TortoiseSDK:
             "points": extracted,
             "extraction_mode": effective_mode,
             "ok": ok,
-            "errors": extraction_errors,
+            # #2335 WI-2: the customer-facing error contract — resp errors
+            # carry HUMAN headlines; the raw strings (TypeName preserved)
+            # ride the additive diagnostics list (always-present; [] when
+            # clean). Unmapped errors pass through unchanged (fail-safe).
+            "errors": _capture_resp_error_split(extraction_errors)[0],
             "warnings": extraction_warnings,
+            "diagnostics": _capture_resp_error_split(extraction_errors)[1],
             # #2335 WI-1a: the receipt carries the extractor telemetry
             # (meta stats — real on v2, {} on replayed/M2). Additive.
             "stats": meta.get("stats") or {},

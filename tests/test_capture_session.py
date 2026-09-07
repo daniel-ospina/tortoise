@@ -3886,3 +3886,75 @@ def test_capture_observation_line_replayed(sdk, caplog):
     assert obs["lane"] == "sdk"
     assert "chunks" not in obs, "a replay has no extractor telemetry"
     assert "edus" not in obs
+
+
+# ── #2335 WI-2: the customer-facing error contract (headline + diagnostics) ─
+
+def test_capture_error_contract_partial_headline(sdk, monkeypatch):
+    """#2335 WI-2: a partial-S2 error reaches the resp as a HUMAN headline
+    (no stage names / jargon) with the raw detail in diagnostics."""
+    import tortoise.extractor_v2 as ev2
+
+    def _v2_out(*a, **kw):
+        return {
+            "session_id": kw.get("session_id", "s"),
+            "story_arc": "", "embed_list": {},
+            "search": {"mode": "embedded", "degraded": True},
+            "payload": None,
+            "chain_notes": [], "link_before_create": [], "supersessions": [],
+            "warnings": [],
+            "minted_kinds": [],
+            "errors": [
+                "S2 output partial — truncated tail dropped "
+                "(embed list incomplete)"],
+            "stats": {"llm": {"calls": 1}, "recovery": {}},
+            "error_census": {"partial_parse": 1},
+        }
+    monkeypatch.setattr(ev2, "extract_session_v2", _v2_out)
+    monkeypatch.delenv("TORTOISE_SESSION_LLM_MOCK", raising=False)
+    res = sdk.capture_session(CONV)
+    assert res["ok"] is False
+    # headline: human, no STAGE NAMES / internal jargon tokens
+    headline = res["errors"][0]
+    for tok in ("S2", "S4", "truncated", "embed list", "tail dropped",
+                "stage", "partial"):
+        assert tok.lower() not in headline.lower(), (headline, tok)
+    # the headline names the failing pass in plain words + TRUE recovery
+    assert "first pass" in headline.lower(), headline
+    assert "retry" in headline.lower(), headline
+    # raw detail preserved in diagnostics
+    assert res["diagnostics"] == [
+        "S2 output partial — truncated tail dropped (embed list incomplete)"]
+
+
+def test_capture_clean_has_empty_diagnostics(sdk):
+    """#2335 WI-2: a clean capture carries diagnostics == [] (always-present
+    additive field, empty on success)."""
+    res = sdk.capture_session(CONV)
+    assert res["ok"] is True
+    assert res["diagnostics"] == []
+
+
+def test_capture_error_contract_unmapped_passthrough(sdk, monkeypatch):
+    """#2335 WI-2: an UNMAPPED error passes through unchanged in BOTH errors
+    and diagnostics (fail-safe — a new extractor error is never hidden)."""
+    import tortoise.extractor_v2 as ev2
+
+    def _v2_out(*a, **kw):
+        return {
+            "session_id": kw.get("session_id", "s"),
+            "story_arc": "", "embed_list": {},
+            "search": {"mode": "embedded", "degraded": True},
+            "payload": None,
+            "chain_notes": [], "link_before_create": [], "supersessions": [],
+            "warnings": [], "minted_kinds": [],
+            "errors": ["RuntimeError: provider returned 500"],
+            "stats": {"llm": {"calls": 1}, "recovery": {}},
+            "error_census": {},
+        }
+    monkeypatch.setattr(ev2, "extract_session_v2", _v2_out)
+    monkeypatch.delenv("TORTOISE_SESSION_LLM_MOCK", raising=False)
+    res = sdk.capture_session(CONV)
+    assert res["ok"] is False
+    assert res["errors"] == ["RuntimeError: provider returned 500"]
+    assert res["diagnostics"] == ["RuntimeError: provider returned 500"]

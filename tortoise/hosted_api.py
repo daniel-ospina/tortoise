@@ -70,6 +70,7 @@ from tortoise.sdk import (
     _apply_capture_ingest_ep,  # W5 Phase C (#2104): live-at-capture + ingest EP pass
     _capture_ep_target_ids,  # W5 Phase D (#2104): EP pass targets (minted + first-time folds)
     _capture_minted_ids,  # W5 Phase D (#2104): provenance-stamp gate (minted only)
+    _capture_resp_error_split,  # #2335 WI-2: customer error contract (headline/diagnostics)
     _capture_turn_window,  # #1532 D1: shared stored-window truncation
     _content_hash,
     _emit_capture_observation,  # #2335 WI-1d: observation leg (hosted lane tag)
@@ -7291,7 +7292,11 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
             "extracted": len(extracted), "points": extracted,
             "surfaced": surfaced,
             "extraction_mode": effective_mode,
-            "errors": extraction_errors, "warnings": extraction_warnings,
+            # #2335 WI-2: customer error contract — headline errors + raw
+            # diagnostics (byte-parity with the sdk receipt).
+            "errors": _capture_resp_error_split(extraction_errors)[0],
+            "warnings": extraction_warnings,
+            "diagnostics": _capture_resp_error_split(extraction_errors)[1],
             # #2335 WI-1a: the hosted receipt carries the extractor
             # telemetry (sdk meta stats — real on v2, {} on replayed/M2).
             "stats": meta.get("stats") or {},
