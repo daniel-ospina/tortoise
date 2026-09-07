@@ -542,6 +542,29 @@ class TestRecoveryMint:
         assert by_id["own-rec-1"] is None      # own persistent untouched
         assert _count_persistent_keys(reg, "team-a") <= 2  # revoke+mint = cap
 
+    def test_revoked_tombstones_do_not_block_recovery_mint(self, client, reg):
+        """#2481 (session-key recovery lane, REGISTRY): revoked keys are
+        audit tombstones — they never count toward max_api_keys. A team
+        whose every prior durable key was revoked (active = 0) mints a
+        recovery key immediately (no rotation, no 402) even with a tall
+        tombstone stack; only a true ACTIVE overage can 402 (covered by the
+        own-provisioned-key test above)."""
+        _seed_team(reg, "team-a")
+        _seed_membership(reg, "team-a", _U1, "owner")
+        # a pile of revoked durables (recovery + provisioned tombstones) —
+        # none may consume the cap slot
+        for i in range(5):
+            _seed_api_key(reg, "team-a", f"tomb-{i}", created_by=_U1,
+                          created_via=("recovery" if i % 2 else "provisioned"),
+                          created_at=_hours_ago(20 + i),
+                          revoked_at=_hours_ago(2))
+        assert _count_persistent_keys(reg, "team-a") == 0
+        r = client.post("/v1/session/key", json={"purpose": "recovery"})
+        assert r.status_code == 200, r.text
+        assert r.json()["expires_at"] is None  # recovery mint, not bootstrap
+        assert r.json()["rotated"] is False    # slot was free — no rotation
+        assert _count_persistent_keys(reg, "team-a") == 1
+
 
 class TestMintGuards:
     """Membership / team_id / purpose validation."""

@@ -5365,6 +5365,19 @@ def _mint_key(team_id: str, *, graph_id: str | None = None,
 
     # Key-cap gate (pre-check; the caller rolls back on _KeyCapExceeded —
     # the provisioning caller rolls back the graph, no graph-without-key).
+    # #2481 (audit pin): this is the PRIMARY mint gate for every standalone
+    # mint surface (POST /v1/team/keys legacy/scoped/child mints and the
+    # per-graph create_team_graph mint). It counts via quota._count_resource
+    # — the ONE predicate that already excludes revoked rows
+    # (revoked_at IS NULL) and expired rows (#2426), so revoked tombstones
+    # never consume the max_api_keys budget. The session-key mint/rotate
+    # lanes (session_key / _session_key_supabase) and the signup-token
+    # recovery lanes carry their own predicates with the SAME
+    # revoked_at IS NULL + non-bootstrap exclusions. #2426 note: the
+    # recovery lanes' EXPIRY exclusion diverges (the Supabase
+    # recover_team_key RPC still counts expired-but-unrevoked rows while
+    # its registry twin excludes them) — recorded as out of scope for
+    # #2481 (revoked-only); recovery never 402s, so no user wedge.
     from tortoise.quota import _count_resource
     from tortoise.supabase_control import (
         get_control_plane,

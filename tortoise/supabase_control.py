@@ -884,7 +884,8 @@ def team_by_id(cp, team_id: str) -> dict | None:
 
 def active_api_keys(cp, team_id: str, *, created_via: str | None = None,
                     created_by: str | None = None) -> list[dict]:
-    """Non-revoked, non-expired api_keys rows for a team (#742 expiry).
+    """Non-revoked, non-expired api_keys rows for a team (#742 expiry;
+    #2481 — a REVOKED row is an audit tombstone, never a budget consumer).
 
     Optional created_via/created_by filters (bootstrap cap / recovery cap
     queries). Expiry is filtered here (PostgREST dialect stays minimal).
@@ -2755,7 +2756,8 @@ def count_graph_keys(cp, team_id: str, graph_id: str) -> int:
     and the list short-circuits kind='default' rows to 0 before reaching it.
     Team-wide rows (graph_id NULL) are the keys that RESOLVE to the default
     graph; they are counted nowhere on a graph row (managed on the API-Keys
-    tab) — do NOT special-case 'default' here to count them."""
+    tab) — do NOT special-case 'default' here to count them. #2481: revoked tombstones are
+    excluded — they never consume the team's max_api_keys budget."""
     rows = cp.query(
         "api_keys", select=["id"],
         filters=[("graph_id", "eq", graph_id), ("team_id", "eq", team_id),
