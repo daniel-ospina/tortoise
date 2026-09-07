@@ -148,6 +148,36 @@ class TestMasterList:
         # and S2/S4's rendered master list carries it too
         assert "STATE-VALUE CARVE-OUT" in v2._render_master(v2.build_master_list())
 
+    def test_operational_value_carve_out_surfaces(self):
+        """#2453: the value carve-out EXTENDS to operational/decision values
+        — a concrete value (measurement, deadline/freeze, threshold/TTL,
+        version, count) that is the SUBJECT of a decision/observation/plan
+        is durable and carried VERBATIM (wp04 aurora_perf 0/13 root cause:
+        every gold unit was a value the mapper treated as disposable). The
+        clause rides the SAME shared block as the state clause, so it
+        surfaces wherever the state carve-out does — S1's granularity slot
+        AND the S2/S4 rendered master list (both verbose and core-only)."""
+        # S1's memory_granularity slot carries the operational clause too
+        gt = v2._granularity_text()
+        assert "OPERATIONAL-VALUE CARVE-OUT" in gt
+        assert "4.2 seconds" in gt
+        # S2/S4's rendered master list carries it (verbose + core-only)
+        for rendered in (v2._render_master(v2.build_master_list()),
+                         v2._render_master(v2.build_master_list(),
+                                           core_only=True)):
+            assert "OPERATIONAL-VALUE CARVE-OUT" in rendered
+            assert "VERBATIM" in rendered
+            assert "800 milliseconds" in rendered
+        # end-to-end: the rendered S2/S4 prompts carry it through the
+        # master-list slot
+        assert "OPERATIONAL-VALUE CARVE-OUT" in v2.render_s2_prompt()
+        assert "OPERATIONAL-VALUE CARVE-OUT" in v2.render_s4_prompt(
+            "STORY", {}, S2_FIXTURE)
+        # incidental logistics stay droppable — the carve-out must not
+        # become a hoarding licence (#2453 pairs with #2424)
+        assert "INCIDENTAL process logistics" in v2.STATE_VALUE_CARVE_OUT
+        assert "ids, hashes" in v2.STATE_VALUE_CARVE_OUT
+
 
 # ── Chunker + compiler ─────────────────────────────────────────────────────
 
@@ -273,6 +303,49 @@ class TestS2:
         assert "CARVE-OUT" in v2.S4_TMPL
         assert "NEVER dropped" in v2.S4_TMPL or "never dropped" in v2.S4_TMPL
         assert "Tier-A" in v2.S4_TMPL
+
+    def test_s2_prompt_anti_routine_exclusion(self):
+        """#2424: S2 (the GRAPH MAPPER) carries the anti-routine exclusion
+        gate — true-but-routine content (routine operational asides,
+        status-quo/banal remarks, filler, small talk) is a NOOP for memory
+        (Mem0 semantics), NEVER emitted as a point/entity/event. The rule
+        lives in ONE shared constant and renders into BOTH mapping stages
+        (S2 and S4) from the {anti_routine} template slot; a future edit
+        cannot silently drop it from one prompt."""
+        assert "ANTI-ROUTINE EXCLUSION" in v2.ANTI_ROUTINE_EXCLUSION
+        assert "NOOP" in v2.ANTI_ROUTINE_EXCLUSION
+        assert "points, entities, or events" in v2.ANTI_ROUTINE_EXCLUSION
+        assert "the on-call room has been quiet lately" \
+            in v2.ANTI_ROUTINE_EXCLUSION
+        assert "{anti_routine}" in v2.S2_TMPL       # the single-source slot
+        assert "{anti_routine}" in v2.S4_TMPL       # both mapping stages wire it
+        for prompt in (v2.render_s2_prompt(),
+                       v2.render_s2_prompt(core_only=True)):
+            assert "ANTI-ROUTINE EXCLUSION" in prompt
+            assert "VALUE FIDELITY" in prompt  # #2453 rides the same slot
+            assert "NOOP" in prompt
+            assert "the on-call room has been quiet lately" in prompt
+            assert "{anti_routine}" not in prompt   # placeholder fully filled
+        # S1 (narrative story register) deliberately gets the value clause
+        # but NOT the anti-routine gate — lock the asymmetry.
+        s1 = (v2.S1_TMPL
+              .replace("{memory_granularity}", v2._granularity_text())
+              .replace("{date_anchor}", v2._date_anchor(None)))
+        assert "ANTI-ROUTINE EXCLUSION" not in s1
+        assert "NOOP" not in s1
+        assert "OPERATIONAL-VALUE" in s1
+
+    def test_s4_prompt_anti_routine_exclusion(self):
+        """#2424: S4 (the GAP REVIEWER) applies the SAME anti-routine gate
+        — it must not ADD true-but-routine content as gaps (its TASK's
+        process-chatter exclusion extends to routine asides)."""
+        for prompt in (v2.render_s4_prompt("STORY", {}, S2_FIXTURE),
+                       v2.render_s4_prompt("STORY", {}, S2_FIXTURE,
+                                           core_only=True)):
+            assert "ANTI-ROUTINE EXCLUSION" in prompt
+            assert "VALUE FIDELITY" in prompt  # #2453 rides the same slot
+            assert "TRUE IS NOT ENOUGH" in prompt
+            assert "{anti_routine}" not in prompt
 
     def test_prompt_supersession_rules(self):
         """#1386: S2/S4 carry the supersession mapping rule + decision-event
@@ -2443,6 +2516,7 @@ class TestClassifyStage:
         base = (v2.S2_TMPL
                 .replace("{master_list}", v2._render_master(v2.build_master_list()))
                 .replace("{chains_text}", v2._render_chains(v2.build_master_list()))
+                .replace("{anti_routine}", v2._s2s4_rules())
                 .replace("{date_anchor}", v2._date_anchor(None, include_emission_rules=True))
                 .replace("{output_contract}", v2.OUTPUT_CONTRACT))
         assert v2.render_s2_prompt() == base
@@ -4417,6 +4491,90 @@ class TestS1Escalation2134:
             + recovery_stats.get("escalated_abort", 0))
         assert llm_stats["calls"] == 6  # 2 per escalated chunk
         assert llm_stats["truncated"] == 3  # every escalation is recorded
+
+
+class TestEdusChunksRescue2335:
+    """#2335 WI-1b — the product-lane size/density fields: EDU(turn) count,
+    S1-chunk count (already in stats, pinned here), and the S4-full-rescue
+    episode counter (S2 produced nothing → S4 non-empty full re-emission
+    ~2×; today only llm.calls doubles). The rescue counter is a NEW guarded
+    increment — the S4 merge runs on EVERY non-empty S4, so counting every
+    merge would corrupt the measurement (the S2-empty guard is added)."""
+
+    def _conv(self, turns=3):
+        out = []
+        for i in range(turns):
+            out.append({"role": "user", "content": f"turn {i} content"})
+            out.append({"role": "assistant", "content": f"reply {i}"})
+        return out
+
+    def test_stats_carries_edu_count(self):
+        """EDU count (len(_edus_from_conversation) — content-bearing turns
+        only, 1:1 with the product EDU == turn) is surfaced in stats."""
+        from tortoise import extractor_v2 as v2
+        conv = self._conv(turns=3)
+
+        def resp(system, user):
+            if "STORY SUMMARIZER" in system:
+                return "The session covered the plan."
+            return json.dumps(S2_FIXTURE)
+
+        out = v2.extract_session_v2(MockModel(resp), conv)
+        st = out["stats"]
+        assert "edus" in st, "stats must carry the EDU(turn) count"
+        assert st["edus"] == 6, st  # 3 user + 3 assistant content turns
+        assert st["chunks"] == 1, st  # pinned: S1-chunk count already present
+
+    def test_s4_full_rescue_counts_when_s2_empty(self):
+        """S2 empty (any cause) + S4 non-empty full re-emission → the rescue
+        counter increments exactly once (the ~2× cost band)."""
+        from tortoise import extractor_v2 as v2
+        conv = [{"role": "user", "content": "we decided X"}]
+
+        calls = {"s2": 0, "s4": 0}
+        def resp(system, user):
+            if "STORY SUMMARIZER" in system:
+                return "We believed X."
+            if "MAPPER" in system:  # S2
+                calls["s2"] += 1
+                return json.dumps({"entities": [], "events": [], "points": [],
+                                   "operators": []})  # S2 EMPTY
+            if "GAP REVIEWER" in system:  # S4
+                calls["s4"] += 1
+                return json.dumps(S2_FIXTURE)  # S4 full re-emission
+            return json.dumps(S2_FIXTURE)
+
+        out = v2.extract_session_v2(MockModel(resp), conv)
+        st = out["stats"]
+        assert out["payload"] is not None, "S4 rescued the session"
+        assert calls["s4"] >= 1
+        assert st.get("s4_full_rescues", 0) == 1, (
+            "S2-empty → S4-full must count exactly one rescue episode")
+        assert st["s4_merge"]["added_by_s4"] > 0  # S4 rebuilt from empty
+
+    def test_no_rescue_when_s2_produced(self):
+        """Normal path (S2 produced content, S4 merges) → NO rescue count —
+        the merge runs on every non-empty S4, so without the S2-empty guard
+        this would over-count (the measurement-corruption hazard)."""
+        from tortoise import extractor_v2 as v2
+        conv = [{"role": "user", "content": "we decided X"}]
+
+        def resp(system, user):
+            if "STORY SUMMARIZER" in system:
+                return "We believed X."
+            if "MAPPER" in system:
+                return json.dumps(S2_FIXTURE)  # S2 produced content
+            if "GAP REVIEWER" in system:
+                return json.dumps(S2_FIXTURE)  # S4 merge (normal E4)
+            return json.dumps(S2_FIXTURE)
+
+        out = v2.extract_session_v2(MockModel(resp), conv)
+        st = out["stats"]
+        assert st.get("s4_full_rescues", 0) == 0, (
+            "a normal S4 merge over a non-empty S2 base is NOT a rescue")
+        # the S4 merge RAN over a non-empty S2 base (s4_merge present with
+        # the S2 items counted — rescued-or-not is about the S2-empty state)
+        assert st["s4_merge"]["s2_items"] > 0  # S2 base entered the merge
 
 
 class TestKindClassifierAdjudication2134:

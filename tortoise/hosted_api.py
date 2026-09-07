@@ -66,12 +66,15 @@ from tortoise.quota import (
 )
 from tortoise.schemas import AskRequest
 from tortoise.sdk import (
+    REPORT_HOOK_URL,  # #2335 WI-2: the bug_report.yml report-hook target
     TortoiseSDK,
     _apply_capture_ingest_ep,  # W5 Phase C (#2104): live-at-capture + ingest EP pass
     _capture_ep_target_ids,  # W5 Phase D (#2104): EP pass targets (minted + first-time folds)
     _capture_minted_ids,  # W5 Phase D (#2104): provenance-stamp gate (minted only)
+    _capture_resp_error_split,  # #2335 WI-2: customer error contract (headline/diagnostics)
     _capture_turn_window,  # #1532 D1: shared stored-window truncation
     _content_hash,
+    _emit_capture_observation,  # #2335 WI-1d: observation leg (hosted lane tag)
     _normalize_turn_role,  # #1532 D2: shared role normalization (None->unknown)
     _session_capture_event_id,  # W5 Phase F (#2104): deterministic sessionCaptured Event id
     _session_extraction_estimate,  # #1532 D4: v2-aware pre-write quota estimate
@@ -6487,6 +6490,16 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         )
 
     if len(body.conversation) > MAX_SESSION_TURNS:
+        # #2335 WI-1c: the turn-cap refusal is a structured record (the
+        # >MAX_SESSION_TURNS demand is a leading indicator — the most-mega
+        # population is otherwise invisible to every instrument leg).
+        # local import: _capture_session_impl carries many local `import
+        # logging` blocks — module-level logging is function-local here.
+        import logging
+        logging.getLogger("tortoise.api").warning(
+            "turn_cap_exceeded turns=%d cap=%d harness=%r team=%r",
+            len(body.conversation), MAX_SESSION_TURNS,
+            body.harness, team.get("team_id"))
         raise HTTPException(
             status_code=400,
             detail=f"Session turn cap exceeded: {len(body.conversation)} > {MAX_SESSION_TURNS}.",
@@ -6527,14 +6540,42 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # FRESH session_id can both observe session_existed=False and mint a
     # sessionCaptured Event (narrow race) — sequential retries converge
     # correctly (the second POST sees the Session and replays, 0 new nodes).
+    # #2335 WI-2b refines that: the replay fires ONLY for SUCCEEDED priors
+    # (capture_ok True) or legacy (None); a FAILED prior (capture_ok False)
+    # RE-ATTEMPTS extraction (TRUE retry) — the retry's Event mint re-runs
+    # but converges on the deterministic _session_capture_event_id (the
+    # TOCTOU idempotence below); retry-minted points get provenance. The
+    # zero-new-node replay invariant is pinned for SUCCESSES only.
     # W5 Phase F (#2104): the concurrent race is now idempotent too — the
     # sessionCaptured Event mint below uses a DETERMINISTIC id derived from
     # session_id (_session_capture_event_id), so both writers MERGE onto
     # ONE Event node instead of minting two.
-    session_existed = bool(proj.g.query(
-        "MATCH (s:Session {id:$sid}) RETURN count(s)",
+    session_row = proj.g.query(
+        "OPTIONAL MATCH (s:Session {id:$sid}) "
+        "RETURN count(s) AS n, s.capture_ok AS ok, "
+        "s.capture_extractor AS extractor",
         params={"sid": session_id},
-    ).result_set[0][0])
+    ).result_set[0]
+    session_existed = bool(session_row[0])
+    # #2335 WI-2b (TRUE retry): capture_ok records whether the LAST attempt
+    # SUCCEEDED. Replay (no-op) fires only when the prior capture SUCCEEDED
+    # (capture_ok True). A prior FAILED capture (capture_ok False) is
+    # RE-ATTEMPTED — extraction runs again. None (legacy, pre-#2335)
+    # replays — backward compat with the #1727 invariant.
+    # Review (PR #2473): TRUE retry is gated to the v2 lane (the ONLY
+    # convergent lane — content-addressed pt_<sha> ids + graph content_hash
+    # resolution fold a re-attempt's partial claims onto the same nodes). The
+    # M2 lane mints non-deterministic time-ULID ids with in-capture-only dedup
+    # and folds partial emissions live on raise — re-running M2 over a failed
+    # attempt's LIVE ULID claims would mint DUPLICATES (the #1727 hole the
+    # replay skip closed). Retry fires only when the prior ran v2 AND this
+    # request runs v2 (env != m2) — otherwise replay (safe no-op).
+    prior_capture_ok = session_row[1]
+    prior_capture_extractor = session_row[2]
+    retry_failed_capture = (
+        session_existed and prior_capture_ok is False
+        and prior_capture_extractor == "v2"
+        and os.environ.get("TORTOISE_SESSION_EXTRACTOR") != "m2")
 
     # Extraction-aware estimate (pre-write, fail-closed count) — review P2,
     # PR #976: the points quota counts NON-episodic Points only, and turn
@@ -6551,7 +6592,10 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # #1727 (review PR #1827): the points-estimate 402 gate is SKIPPED on a
     # replay — session_existed writes no non-episodic points, so an
     # as-if-fresh estimate must not 402-block a zero-node re-POST.
-    if not session_existed:
+    # #2335 WI-2b: a TRUE-retry re-POST (capture_ok False) re-runs
+    # extraction and mints NEW non-episodic points — it is NOT a zero-node
+    # replay, so the estimate gate must fire for it too (a retry can 402).
+    if not session_existed or retry_failed_capture:
         est = _session_extraction_estimate(windowed)
         from tortoise.quota import count_team_usage
         sdk_team = _data_sdk(team)
@@ -6568,6 +6612,15 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
             from tortoise.pricing import tier_limits as _tl
             max_points = _tl(team.get("tier") or "free").get("max_graph_nodes")
         if count + est > max_points:
+            # #2335 WI-1c: the quota-refusal is a structured record — est-at-
+            # refusal / count / max / tier — the hosted-low proxy for the
+            # 402-filtered population (refusal-heavy hosted-low = UNKNOWN,
+            # not covered; zero-event windows there are quota-confounded).
+            import logging
+            logging.getLogger("tortoise.api").warning(
+                "quota_refusal capture est=%d count=%d max=%d tier=%r team=%r "
+                "harness=%r", est, count, max_points,
+                team.get("tier"), team.get("team_id"), body.harness)
             raise HTTPException(
                 status_code=402,
                 detail=f"Team points limit reached: {count} in use + {est} estimated "
@@ -6682,9 +6735,16 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # warning below — the default vocabulary produces no minted kinds to
     # flag, so a log line alone would leave the degradation invisible).
     tenant_vocab_warning: str | None = None
-    if session_existed:
+    if session_existed and not retry_failed_capture:
+        # #2335 WI-2b: replay fires ONLY when the prior capture SUCCEEDED
+        # (capture_ok True) or the session predates capture_ok (legacy None —
+        # presumed captured). A prior FAILED capture falls through to
+        # extraction — retry is TRUE.
         meta = {"errors": [], "warnings": [], "mode": "replayed",
-                "route": None, "provider": None}
+                "route": None, "provider": None,
+                # #2335 WI-1a: hosted replayed carries no extractor_v2
+                # telemetry — stats always-present, empty on replay.
+                "stats": {}}
         extraction_errors: list = []
         extraction_warnings = [
             "session already captured (same session_id) — no new extraction"]
@@ -6745,7 +6805,9 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # extraction failure keeps 200 + additive errors (the mutation already
     # happened — turn points landed — and E2E-8 permits "non-200 OR additive
     # warnings"; a non-200 would hide the partial write).
-    if not session_existed:
+    if not session_existed or retry_failed_capture:
+        # #2335 WI-2b: a retry's meta errors/warnings must surface (the
+        # re-attempted extraction's outcome, not the failed first attempt's).
         extraction_errors = list(meta.get("errors") or [])
         extraction_warnings = list(meta.get("warnings") or [])
         # #2444: partial-extraction failures are the product's live error surface —
@@ -6797,7 +6859,12 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # TOCTOU: both observe session_existed=False — MERGE onto ONE Event
     # node (the Event projection MERGEs on eventId; the second concurrent
     # writer's create is an idempotent no-op).
-    if not session_existed:
+    if not session_existed or retry_failed_capture:
+        # #2335 WI-2b: a retry re-runs the mint — the deterministic Event id
+        # (_session_capture_event_id) converges on the SAME node (MERGE), and
+        # the retry-minted points get the provenance stamp + typed-Source
+        # upgrade they need. (Refresh of startedAt/endedAt on the retry is
+        # CORRECT — the successful retry is the real capture.)
         try:
             event = sdk.create_event(
                 f"session_{session_id}",
@@ -6842,6 +6909,28 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
                             "eid": event_id, "sid": session_id,
                             "harness": source_harness, "ing": now},
                 )
+                if retry_failed_capture:
+                    # #2335 WI-2b / review (PR #2473): a RETRY heals the
+                    # failed first attempt's provenance gap (mirror of the
+                    # sdk heal). The retry's graph content_hash resolution
+                    # folded the first attempt's claims onto their existing
+                    # nodes (dedup=content_hash_hit — NOT in the minted set),
+                    # which would otherwise stay live WITHOUT an eventId
+                    # forever (the first mint never stamped them). Scoped to
+                    # THIS session's CONTAINS-wired points lacking eventId —
+                    # never clobber a fold that resolved to a different
+                    # session's canonical. Turn points (is_episodic=true,
+                    # pointKind 'event') never carry the sessionCaptured
+                    # eventId in the normal flow — excluded via the
+                    # non-episodic clause (mirror of the sdk heal).
+                    proj.g.query(
+                        "MATCH (s:Session {id:$sid})-[c:CONTAINS]->"
+                        "(n:Point) WHERE n.eventId IS NULL AND coalesce(n.is_episodic,false) <> true "
+                        "SET n.eventId=$eid, n.source_session=$sid, "
+                        "    n.source_harness=$harness, n.ingested_at=$ing",
+                        params={"sid": session_id, "eid": event_id,
+                                "harness": source_harness, "ing": now},
+                    )
             else:
                 # P1 #1529 (D4): create_event returning no id/eventId silently
                 # skips stamping — surface as an additive warning.
@@ -6894,7 +6983,9 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # Metering (#681): best-effort write-op count for overage billing. A
     # replay (session_existed) writes ZERO nodes — an idempotent re-POST must
     # not inflate metering/abuse with phantom writes (review PR #1827).
-    if not session_existed:
+    if not session_existed or retry_failed_capture:
+        # #2335 WI-2b: a retry writes new extracted points (not a zero-node
+        # replay) — metering + abuse records fire for the re-attempt.
         _record_write_op(team)
         # #308 (R1, delta 8): capture_session creates one Point per turn plus
         # the extracted decision/statement Points — weight by the actual
@@ -7252,6 +7343,43 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         # skipped: at least one extracted point could not be verified
         # post-write — the verb is partial, never an unqualified ok.
         verb_status = STATUS_PARTIAL
+    # #2335 WI-2b: record the attempt outcome on the Session node (TRUE
+    # retry state). A SUCCEEDED prior → same-session re-capture replays
+    # (no-op); a FAILED prior → re-attempts. Set on every genuine attempt
+    # (fresh + retry); a replay performs NO Session write (zero-write no-op
+    # — the stored True/None stays untouched). The empty/blank gate returns
+    # before the Session MERGE — nothing to record there.
+    _capture_ok = (verb_status == STATUS_OK
+                   and not extraction_errors and not skipped)
+    if not session_existed or retry_failed_capture:
+        # #2335 WI-2b: record the outcome ONLY on a genuine attempt (fresh OR
+        # retry) — a replay performs NO Session write (zero-write no-op).
+        # Review (PR #2473): the SET records the extractor lane that RAN so
+        # the retry gate can require a v2 prior (M2 partials never retried).
+        # NOTE (documented lane divergence): hosted computes _capture_ok AFTER
+        # the post-write enrichment — an enrichment-read failure marks points
+        # skipped → verb partial → capture_ok False → retryable. The sdk
+        # computes ok BEFORE its surfaced-verification read and treats a
+        # verification failure as a benign warning (capture_ok True). Both
+        # are internally consistent; the divergence is documented, not
+        # forced-aligned (the sdk surface has no skipped/verb concept).
+        # Non-fatal bookkeeping (mirror of the sdk guard): a graph hiccup
+        # must NOT 500 a committed capture — and on a FAILED capture a raise
+        # would leave capture_ok=None → the next same-session re-POST would
+        # legacy-replay instead of re-attempting. Additive warning names the
+        # residue.
+        try:
+            proj.g.query(
+                "MATCH (s:Session {id:$sid}) "
+                "SET s.capture_ok=$ok, "
+                "    s.capture_extractor=$extractor",
+                params={"sid": session_id, "ok": _capture_ok,
+                        "extractor": "m2" if os.environ.get(
+                            "TORTOISE_SESSION_EXTRACTOR") == "m2"
+                        else "v2"})
+        except Exception as exc:  # pragma: no cover - graph hiccup
+            extraction_warnings.append(
+                f"capture_ok state write failed: {type(exc).__name__}")
     # W5 Phase E (#2104, S11): disclosure marker DATA on the capture
     # receipt — ``surfaced`` uses the §3.2.2 marker vocabulary (one entry
     # per memory item THIS capture added; N = len = the disclosure count,
@@ -7268,7 +7396,16 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
             "extracted": len(extracted), "points": extracted,
             "surfaced": surfaced,
             "extraction_mode": effective_mode,
-            "errors": extraction_errors, "warnings": extraction_warnings,
+            # #2335 WI-2: customer error contract — headline errors + raw
+            # diagnostics (byte-parity with the sdk receipt).
+            "errors": _capture_resp_error_split(extraction_errors)[0],
+            "warnings": extraction_warnings,
+            "diagnostics": _capture_resp_error_split(extraction_errors)[1],
+            # #2335 WI-2: the report hook (bug_report.yml placeholder -> 2409).
+            **({"report_url": REPORT_HOOK_URL} if extraction_errors else {}),
+            # #2335 WI-1a: the hosted receipt carries the extractor
+            # telemetry (sdk meta stats - real on v2, {} on replayed/M2).
+            "stats": meta.get("stats") or {},
             # #2002 (W6): first_capture=true exactly once per org — the
             # trigger for the in-conversation announcement (SKILL.md §6 copy).
             "first_capture": bool(first_capture)}
@@ -7278,6 +7415,16 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # response — protocol_version, status, provenance, error; the verb's
     # per-point entries ride the enriched ``resp["points"]`` list (extra
     # wins on merge, D8).
+    # #2335 WI-1d: the observation leg (hosted lane tag) — one structured
+    # line per capture; mode covers v2/m2/replayed/error — empty returns pre-emit.
+    try:
+        _emit_capture_observation(
+            session_id=session_id, lane="hosted",
+            mode=effective_mode, turns=len(body.conversation), meta=meta)
+    except Exception:  # pragma: no cover — never block capture
+        import logging  # function-local convention (see the turn-cap site)
+        logging.getLogger("tortoise.api").exception(
+            "capture_observation emit failed (non-fatal)")
     return build_write_verb(
         source_session=session_id,
         source_harness=body.harness or "unknown",

@@ -1594,7 +1594,8 @@ class _ConfigError(Exception):
     """Candidate config file exists but is corrupt or unreadable."""
 
 
-def _resolve_config_path(include_env: bool = True) -> tuple[Path | None, dict | None, str | None, str | None]:
+def _resolve_config_path(include_env: bool = True, *,
+                         global_only: bool = False) -> tuple[Path | None, dict | None, str | None, str | None]:
     """Shared config resolver — env → cwd/.tortoise → ~/.tortoise/credentials.json (#1708 D1/D5/D6).
 
     Returns (config_path, config, api_key, api_url) or (None, None, None, None).
@@ -1609,8 +1610,19 @@ def _resolve_config_path(include_env: bool = True) -> tuple[Path | None, dict | 
       the next candidate wins.
     - A directory at a candidate path (cwd/.tortoise in some repos; the global
       path's directory is by design) is skipped as "no config here" (D5).
-    - include_env=False: file candidates only (used by _cmd_context, D1b — env
-      alone must never flip the local-memory SessionStart hook to hosted mode).
+    - CO-SOURCE (#2369 D1.1): a FILE-sourced key resolves its URL from the SAME
+      file or the built-in default ONLY — the env TORTOISE_API_URL override
+      applies ONLY when the key ALSO came from env. One identity = one source
+      chain (no split-brain): a poisoned env must never redirect a stored key
+      to an attacker host.
+    - include_env=False: file candidates only (used by the transmitting
+      surfaces, D1b — env alone must never flip the local-memory SessionStart
+      hook / per-turn reflex to hosted mode).
+    - global_only=True (#2369 D1.2): the cwd/.tortoise candidate is SKIPPED —
+      surfaces that transmit prompts (the per-turn volunteer reflex + the
+      session-start hosted digest) resolve their identity from the user-global
+      config only; a repo-supplied .tortoise must never authorize transmission
+      to a host the repo (attacker-controllable) chose.
     """
     import json as _json
     import os as _os
@@ -1622,7 +1634,11 @@ def _resolve_config_path(include_env: bool = True) -> tuple[Path | None, dict | 
             env_url = _os.environ.get("TORTOISE_API_URL", "https://api.premiselabs.co")
             return None, {"api_key": env_key, "api_url": env_url}, env_key, env_url
 
-    candidates = (Path.cwd() / ".tortoise", Path.home() / ".tortoise" / "credentials.json")
+    if global_only:
+        candidates = (Path.home() / ".tortoise" / "credentials.json",)
+    else:
+        candidates = (Path.cwd() / ".tortoise",
+                      Path.home() / ".tortoise" / "credentials.json")
     for path in candidates:
         if not path.is_file():
             continue
@@ -1642,7 +1658,10 @@ def _resolve_config_path(include_env: bool = True) -> tuple[Path | None, dict | 
             raise _ConfigError(path)
         if not api_key.strip():
             continue
-        api_url = config.get("api_url") or _os.environ.get("TORTOISE_API_URL", "https://api.premiselabs.co")
+        # #2369 D1.1 co-source: the key is FILE-sourced, so the URL resolves
+        # from the SAME file or the built-in default only — never from env
+        # (a poisoned TORTOISE_API_URL must not redirect the stored key).
+        api_url = config.get("api_url") or "https://api.premiselabs.co"
         return path, config, api_key, api_url
     return None, None, None, None
 
@@ -2139,6 +2158,27 @@ def _context_source_label(api_url: str | None) -> str:
     return f"hosted ({netloc or url})"
 
 
+def _emit_hosted_mode_note(verb: str, cfg_path: Path | None,
+                           api_url: str | None) -> None:
+    """#2369 D1.3: run-time stderr note when a transmitting surface runs
+    hosted against a FILE config — names the endpoint mode so a future
+    redirect (env regression, tampered file) is visible at run time.
+
+    stderr ONLY: the reflex stdout is injected into the agent turn and must
+    stay clean. The note opens with a stable marker ("tortoise: hosted-mode
+    note:") that the SHIPPED per-turn hook (claude-hooks/volunteer-turn.sh)
+    relays from the reflex's captured stderr into the harness log — the
+    endpoint is visible per hosted run without leaking reflex error noise
+    into the agent context.
+    """
+    import sys as _sys
+    if cfg_path is None:
+        return  # env-sourced identity — nothing to name
+    label = _context_source_label(api_url)
+    print(f"tortoise: hosted-mode note: {verb}: transmitting to {label} "
+          f"— identity file {cfg_path}", file=_sys.stderr)
+
+
 def _cmd_context(args) -> int:
     """Print a compact memory digest for agent session-start injection.
 
@@ -2146,8 +2186,9 @@ def _cmd_context(args) -> int:
     injected into the session context automatically, so the agent starts
     each session knowing what Tortoise already remembers.
 
-    Hosted mode (\".tortoise\" config): calls the hosted API.
-    Local mode (embedded/Docker): uses TortoiseSDK.session_context().
+    Hosted mode (user-global ~/.tortoise/credentials.json only): calls the
+    hosted API. Local mode (embedded/Docker): uses
+    TortoiseSDK.session_context().
 
     #2209: the digest header always names which memory is answering
     ("hosted (api.premiselabs.co)" vs "local") — a stored hosted key must
@@ -2155,14 +2196,18 @@ def _cmd_context(args) -> int:
     """
     import json as _json, os as _os, sys as _sys  # noqa: E401, I001
 
-    # Shared resolver (#1708 D1b): file candidates only (cwd → global) — a
-    # TORTOISE_API_KEY in dev shells must never silently flip this documented
-    # local-memory SessionStart hook to hosted mode. Global-config presence
-    # still flips it (a machine that ran `signup` has a hosted identity).
+    # Transmitting-identity resolver (#2369 D1, supersedes #1708 D1b): the
+    # session-start hosted digest transmits the stored Bearer key, so its
+    # identity is co-sourced — file keys resolve their URL from the SAME
+    # file or the built-in default only (never env), and only the
+    # user-global ~/.tortoise/credentials.json counts (a repo/cwd .tortoise
+    # must never flip this documented hook to an attacker-chosen host). Env
+    # alone (a bare TORTOISE_API_KEY in dev shells) still never flips it to
+    # hosted mode.
     api_key = None
-    api_url = _os.environ.get("TORTOISE_API_URL", "https://api.premiselabs.co")
+    api_url = None
     try:
-        _cfg_path, _cfg, api_key, api_url = _resolve_config_path(include_env=False)
+        _cfg_path, _cfg, api_key, api_url = _resolve_config_path(include_env=False, global_only=True)
     except _ConfigError as e:
         print(f"Warning: config at {e} is corrupt or unreadable — falling back "
               "to local memory mode.", file=_sys.stderr)
@@ -2173,6 +2218,7 @@ def _cmd_context(args) -> int:
     source_label = _context_source_label(api_url) if api_key else "local"
 
     if api_key:
+        _emit_hosted_mode_note("context", _cfg_path, api_url)
         # ── Hosted: query the API ──
         from urllib.request import Request, urlopen  # noqa: I001
         from urllib.error import URLError, HTTPError
@@ -2326,17 +2372,29 @@ def _cmd_volunteer(args) -> int:
                                "block": "", "degraded_reason": None}))
         return 0
 
-    # Shared resolver (#1708 D1b): a file/global hosted config flips the
-    # hook to hosted mode; a bare TORTOISE_API_KEY never silently does (the
-    # documented local-memory hook posture — mirrors _cmd_context).
+    # Transmitting-identity resolver (#2369 D1, supersedes #1708 D1b): the
+    # per-turn reflex POSTs the full prompt window + Bearer key, so its
+    # identity is co-sourced — file keys resolve their URL from the SAME
+    # file or the built-in default only (never env), and only the
+    # user-global ~/.tortoise/credentials.json counts (a repo/cwd .tortoise
+    # — attacker-controllable — must never redirect the reflex to a host it
+    # chose). Env alone (a bare TORTOISE_API_KEY) still never flips it to
+    # hosted mode (the documented local-memory hook posture — mirrors
+    # _cmd_context).
     api_key = None
-    api_url = _os.environ.get("TORTOISE_API_URL", "https://api.premiselabs.co")
+    api_url = None
     try:
-        _cfg_path, _cfg, api_key, api_url = _resolve_config_path(include_env=False)
+        _cfg_path, _cfg, api_key, api_url = _resolve_config_path(include_env=False, global_only=True)
     except _ConfigError as e:
         print(f"Warning: config at {e} is corrupt or unreadable — falling back "
               "to local memory mode.", file=_sys.stderr)
         api_key = None
+
+    if api_key:
+        # #2369 D1.3: name the endpoint mode on stderr (the shipped hook
+        # relays this marker to the harness log; stdout stays the injection
+        # channel).
+        _emit_hosted_mode_note("volunteer", _cfg_path, api_url)
 
     body = {
         "window": window,
