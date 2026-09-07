@@ -148,6 +148,36 @@ class TestMasterList:
         # and S2/S4's rendered master list carries it too
         assert "STATE-VALUE CARVE-OUT" in v2._render_master(v2.build_master_list())
 
+    def test_operational_value_carve_out_surfaces(self):
+        """#2453: the value carve-out EXTENDS to operational/decision values
+        — a concrete value (measurement, deadline/freeze, threshold/TTL,
+        version, count) that is the SUBJECT of a decision/observation/plan
+        is durable and carried VERBATIM (wp04 aurora_perf 0/13 root cause:
+        every gold unit was a value the mapper treated as disposable). The
+        clause rides the SAME shared block as the state clause, so it
+        surfaces wherever the state carve-out does — S1's granularity slot
+        AND the S2/S4 rendered master list (both verbose and core-only)."""
+        # S1's memory_granularity slot carries the operational clause too
+        gt = v2._granularity_text()
+        assert "OPERATIONAL-VALUE CARVE-OUT" in gt
+        assert "4.2 seconds" in gt
+        # S2/S4's rendered master list carries it (verbose + core-only)
+        for rendered in (v2._render_master(v2.build_master_list()),
+                         v2._render_master(v2.build_master_list(),
+                                           core_only=True)):
+            assert "OPERATIONAL-VALUE CARVE-OUT" in rendered
+            assert "VERBATIM" in rendered
+            assert "800 milliseconds" in rendered
+        # end-to-end: the rendered S2/S4 prompts carry it through the
+        # master-list slot
+        assert "OPERATIONAL-VALUE CARVE-OUT" in v2.render_s2_prompt()
+        assert "OPERATIONAL-VALUE CARVE-OUT" in v2.render_s4_prompt(
+            "STORY", {}, S2_FIXTURE)
+        # incidental logistics stay droppable — the carve-out must not
+        # become a hoarding licence (#2453 pairs with #2424)
+        assert "INCIDENTAL process logistics" in v2.STATE_VALUE_CARVE_OUT
+        assert "ids, hashes" in v2.STATE_VALUE_CARVE_OUT
+
 
 # ── Chunker + compiler ─────────────────────────────────────────────────────
 
@@ -273,6 +303,49 @@ class TestS2:
         assert "CARVE-OUT" in v2.S4_TMPL
         assert "NEVER dropped" in v2.S4_TMPL or "never dropped" in v2.S4_TMPL
         assert "Tier-A" in v2.S4_TMPL
+
+    def test_s2_prompt_anti_routine_exclusion(self):
+        """#2424: S2 (the GRAPH MAPPER) carries the anti-routine exclusion
+        gate — true-but-routine content (routine operational asides,
+        status-quo/banal remarks, filler, small talk) is a NOOP for memory
+        (Mem0 semantics), NEVER emitted as a point/entity/event. The rule
+        lives in ONE shared constant and renders into BOTH mapping stages
+        (S2 and S4) from the {anti_routine} template slot; a future edit
+        cannot silently drop it from one prompt."""
+        assert "ANTI-ROUTINE EXCLUSION" in v2.ANTI_ROUTINE_EXCLUSION
+        assert "NOOP" in v2.ANTI_ROUTINE_EXCLUSION
+        assert "points, entities, or events" in v2.ANTI_ROUTINE_EXCLUSION
+        assert "the on-call room has been quiet lately" \
+            in v2.ANTI_ROUTINE_EXCLUSION
+        assert "{anti_routine}" in v2.S2_TMPL       # the single-source slot
+        assert "{anti_routine}" in v2.S4_TMPL       # both mapping stages wire it
+        for prompt in (v2.render_s2_prompt(),
+                       v2.render_s2_prompt(core_only=True)):
+            assert "ANTI-ROUTINE EXCLUSION" in prompt
+            assert "VALUE FIDELITY" in prompt  # #2453 rides the same slot
+            assert "NOOP" in prompt
+            assert "the on-call room has been quiet lately" in prompt
+            assert "{anti_routine}" not in prompt   # placeholder fully filled
+        # S1 (narrative story register) deliberately gets the value clause
+        # but NOT the anti-routine gate — lock the asymmetry.
+        s1 = (v2.S1_TMPL
+              .replace("{memory_granularity}", v2._granularity_text())
+              .replace("{date_anchor}", v2._date_anchor(None)))
+        assert "ANTI-ROUTINE EXCLUSION" not in s1
+        assert "NOOP" not in s1
+        assert "OPERATIONAL-VALUE" in s1
+
+    def test_s4_prompt_anti_routine_exclusion(self):
+        """#2424: S4 (the GAP REVIEWER) applies the SAME anti-routine gate
+        — it must not ADD true-but-routine content as gaps (its TASK's
+        process-chatter exclusion extends to routine asides)."""
+        for prompt in (v2.render_s4_prompt("STORY", {}, S2_FIXTURE),
+                       v2.render_s4_prompt("STORY", {}, S2_FIXTURE,
+                                           core_only=True)):
+            assert "ANTI-ROUTINE EXCLUSION" in prompt
+            assert "VALUE FIDELITY" in prompt  # #2453 rides the same slot
+            assert "TRUE IS NOT ENOUGH" in prompt
+            assert "{anti_routine}" not in prompt
 
     def test_prompt_supersession_rules(self):
         """#1386: S2/S4 carry the supersession mapping rule + decision-event
@@ -2443,6 +2516,7 @@ class TestClassifyStage:
         base = (v2.S2_TMPL
                 .replace("{master_list}", v2._render_master(v2.build_master_list()))
                 .replace("{chains_text}", v2._render_chains(v2.build_master_list()))
+                .replace("{anti_routine}", v2._s2s4_rules())
                 .replace("{date_anchor}", v2._date_anchor(None, include_emission_rules=True))
                 .replace("{output_contract}", v2.OUTPUT_CONTRACT))
         assert v2.render_s2_prompt() == base

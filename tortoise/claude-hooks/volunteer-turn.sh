@@ -89,9 +89,22 @@ PY3="$(command -v python3 || true)"
 [ -z "$PY3" ] && exit 0
 
 # ── Run the reflex (fail-open: any failure → empty injection) ────────────
+# The reflex prints a run-time endpoint-mode note on stderr when it runs
+# hosted against a file config (#2369 D1.3). Capture that stderr and relay
+# ONLY the note marker to OUR stderr (the harness log surfaces it), so the
+# endpoint of a hosted run is visible at run time — while genuine reflex
+# error noise stays out of the hook (stdout remains the only injection
+# channel).
+REFLEX_ERR="$(mktemp "${TMPDIR:-/tmp}/tortoise-reflex.XXXXXX" 2>/dev/null)" \
+  || REFLEX_ERR=""
+if [ -z "$REFLEX_ERR" ]; then
+  REFLEX_ERR="$(mktemp 2>/dev/null)" || REFLEX_ERR="/tmp/tortoise-reflex.$$"
+fi
+trap 'rm -f "$REFLEX_ERR"' EXIT
+
 BLOCK=""
 if [ -n "$TORTOISE_BIN" ]; then
-  BLOCK="$(printf '%s' "$PROMPT" | "$TORTOISE_BIN" volunteer 2>/dev/null || true)"
+  BLOCK="$(printf '%s' "$PROMPT" | "$TORTOISE_BIN" volunteer 2>"$REFLEX_ERR" || true)"
 else
   # Module fallback: the checkout path travels via ENV (never string-
   # interpolated into python -c source — a quote in the path must not inject
@@ -101,7 +114,12 @@ import os, sys
 sys.path.insert(0, os.environ['TORTOISE_VOLUNTEER_MODULE'])
 from tortoise.__main__ import main
 raise SystemExit(main(['volunteer']))
-" 2>/dev/null || true)"
+" 2>"$REFLEX_ERR" || true)"
+fi
+# Relay the #2369 endpoint-mode note (marker-filtered; only emitted on
+# hosted-against-file runs) to the hook's stderr for the harness log.
+if [ -s "$REFLEX_ERR" ]; then
+  grep -F "tortoise: hosted-mode note:" "$REFLEX_ERR" >&2 || true
 fi
 if [ -z "$(printf '%s' "$BLOCK" | tr -d '[:space:]')" ]; then
   exit 0

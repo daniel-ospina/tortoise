@@ -38,12 +38,18 @@ coverage lands first; per-harness registration files follow demand.
   graph, nothing above the confidence gate) → the hook emits NOTHING and
   exits 0. The agent turn proceeds untouched.
 - **Auth fail-closed**: hosted capture/auth channels keep their own deny
-  rules. The hook process carries no credentials of its own, BUT the reflex
-  it invokes transmits a file-sourced Bearer key to the endpoint resolved
-  from the config file or env `TORTOISE_API_URL` — the trust boundary of
-  that destination (env override + repo-shipped `.tortoise`) is tracked in
-  #2369 and is NOT yet hardened. Do not rely on this posture until #2369
-  lands.
+  rules. The hook process carries no credentials of its own, but the reflex
+  it invokes transmits the Bearer identity resolved from ONE source chain
+  (#2369 D1, hardened): a file-sourced key transmits only to the SAME
+  file's `api_url` or the built-in default — the env `TORTOISE_API_URL`
+  override applies only to env-sourced keys; the transmitting identity
+  resolves from the user-global `~/.tortoise/credentials.json` only (a
+  repo/cwd `.tortoise` can never supply it — repo config feeds only local,
+  non-sending mode); and a hosted-against-file run prints a stderr
+  endpoint-mode note (`tortoise: hosted-mode note:`) that the shipped hook
+  relays to the harness log, so a future redirect is loud at run time.
+  Env alone (a bare `TORTOISE_API_KEY`) still never flips the hook to
+  hosted mode (#1708 D1b).
 - W4 user-exposure opt-in: per-turn injection ships behind the `install`
   command — nothing auto-registers.
 
