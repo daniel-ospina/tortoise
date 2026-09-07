@@ -4662,18 +4662,101 @@ class TortoiseSDK:
 
         # 2b. Transfer plain structural edges (#122) — about*, extractedFrom, wasDerivedFrom, etc.
         # These edges connect the Point to entities (Subject, Object, Source, etc.)
+        #
+        # #2489 (structural-edge transfer parity): the transfer is now JOURNALED
+        # for the snapshot-derivable rel set (extractedFrom +
+        # aboutSubject/Object/Event/Document/Point) as flat DirectEdgeRepoint
+        # descriptors {src=old_id, tgt=<replay key>, target_label=<label>,
+        # edge_type=<rel>} emitted BEFORE the transfer (EMIT-BEFORE-TRANSFER,
+        # §4.4 — same crash discipline as 2a-DIRECT). Rebuild pass-2 resurrects
+        # these edges at OLD from the point's immutable snapshot (extractedFrom
+        # prop / aboutEntities list), so the pass-2b replay must move them to the
+        # final successor AND delete the resurrection at old. Non-derivable rels
+        # (aboutAction — Action dissolved in Ontology v3.0; wasDerivedFrom — A10
+        # raw family) are NEVER snapshot-recreated: no descriptor (do NOT half-
+        # own the A10 raw-edge family). The journal carries the target's LOGICAL
+        # identity only (tgt=<key> or, for the delete-only guard, tgt=new_id) —
+        # never the FalkorDB internal ID (internal ids die at rebuild).
+        from .projection.edges import DERIVABLE_STRUCTURAL_RELS, STRUCTURAL_REL_LABELS, stub_key
         structural_rels = [
             'aboutSubject', 'aboutObject', 'aboutAction', 'aboutEvent',
             'aboutPoint', 'aboutDocument', 'extractedFrom', 'wasDerivedFrom'
         ]
+        # Successor internal node id — runtime-only (never journaled). The 2b
+        # no-self-edge guard compares the structural target's NODE IDENTITY to
+        # the successor (mirror 2a-DIRECT's tid==new_id guard at ~4407): without
+        # it the MERGE below mints a phantom (new)-[:rel]->(new) self-edge when
+        # old's edge terminates at the successor (cycle-26 class — e.g. old
+        # X-[:aboutPoint]->Y live, supersede(X->Y)).
+        succ_rows = proj.g.query(
+            "MATCH (n:Point {id:$id}) RETURN ID(n)",
+            params={"id": new_id},
+        ).result_set
+        succ_internal = succ_rows[0][0] if succ_rows else None
         for rel in structural_rels:
+            derivable = rel in DERIVABLE_STRUCTURAL_RELS
             struct_rows = proj.g.query(
                 f"MATCH (old:Point {{id:$old_id}})-[r:{rel}]->(target) "
-                f"RETURN id(target), target.id, labels(target)",
+                f"RETURN id(target), target.id, labels(target), properties(target)",
                 params={"old_id": old_id},
             ).result_set
             for row in struct_rows:
+                # Row shape: [internal id, logical id, labels, properties] —
+                # #2489 extends the SELECT with properties(target) so the shared
+                # stub_key resolver (projection/edges.py) extracts the per-rel
+                # replay key (name / coalesce(title,name) / url) at emission.
                 target_graph_id = row[0]  # FalkorDB internal node id — exact match
+                target_props = row[3] or {}
+                if (succ_internal is not None
+                        and target_graph_id == succ_internal):
+                    # #2489 no-self-edge guard: the structural target IS the
+                    # successor node. Delete the old edge ONLY — no transfer (a
+                    # transfer would MERGE the phantom (new)-[:rel]->(new)). For
+                    # DERIVABLE rels emit a DELETE-ONLY descriptor so the pass-2b
+                    # replay deletes the pass-2-resurrected edge at old on the
+                    # NEXT rebuild — old's immutable snapshot re-mints the
+                    # phantom on every rebuild, so without the descriptor
+                    # old-side zero-incident is violated in exactly this lane.
+                    # Non-derivable rels emit NOTHING (never snapshot-recreated;
+                    # a delete_only descriptor would journal a permanent no-op
+                    # delete-leg for a family this fix does not own).
+                    if derivable:
+                        self._emit_event(
+                            "DirectEdgeRepoint",
+                            id=f"{old_id}->{new_id}:{rel}:self",
+                            src=old_id, tgt=new_id,
+                            target_label=STRUCTURAL_REL_LABELS.get(rel),
+                            edge_type=rel, delete_only=True,
+                        )
+                    proj.g.query(
+                        f"MATCH (old:Point {{id:$old_id}})-[r:{rel}]->(t) "
+                        f"WHERE id(t) = $tid DELETE r",
+                        params={"old_id": old_id, "tid": target_graph_id},
+                    )
+                    transferred += 1
+                    continue
+                # #2489: per-rel key extraction via the SHARED resolver — never
+                # target.id (Subjects MERGE by name, Sources by url, Documents by
+                # name-or-title). SKIP unresolvable keys (name-less Point from an
+                # id-targeted create_about_edge; url-less extractedFrom target): a
+                # null-key descriptor is un-replayable — those edges die at
+                # rebuild today anyway (zero regression).
+                if derivable:
+                    keyed = stub_key(rel, target_props)
+                    if keyed is not None:
+                        target_label, target_key = keyed
+                        # EMIT-BEFORE-TRANSFER: the structural REPOINT descriptor
+                        # (A10/pass-2b replay consumes it post-rebuild). Event id
+                        # gets a target-key suffix — multi-target same-rel id
+                        # hygiene (2a-DIRECT's id base is
+                        # f"{old_id}->{new_id}:{rtype}").
+                        self._emit_event(
+                            "DirectEdgeRepoint",
+                            id=f"{old_id}->{new_id}:{rel}:{target_key}",
+                            src=old_id, tgt=target_key,
+                            target_label=target_label,
+                            edge_type=rel,
+                        )
                 # Create new edge: new point → same target (MERGE = idempotent, no dupes)
                 proj.g.query(
                     f"MATCH (new:Point {{id:$new_id}}), (t) WHERE id(t) = $tid "
