@@ -421,6 +421,12 @@ def _cmd_calibrate(args: argparse.Namespace) -> ExitCode:
     print("cal table hash: "
           + cal_table_hash(thresholds.cal_rows,
                            thresholds.determinism_tolerances))
+    # #2292 Task 6: the measured-token reviewable-change hash rides the
+    # same print surface as the [cal] hash (print-only, never auto).
+    from battery.config.arms import load_arms, token_table_hash
+    arms = load_arms(_Path(args.config or args.config_dir
+                           or _DEFAULT_CONFIG) / "arms.yaml")
+    print("token table hash: " + token_table_hash(arms))
     for line in print_deltas(thresholds.cal_rows, _load_cal_measured(args)):
         print(line)
     print("PRINT ONLY — re-lock is a reviewable table change (never auto).")
