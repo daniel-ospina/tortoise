@@ -470,8 +470,8 @@ def consent_preview(cp, user_id: str, base: str, resource: str | None) -> dict:
             ],
         }
     raise OAuthError(403, "invalid_grant",
-                     "This account has no team. Create a team before "
-                     "connecting an MCP client.")
+                     "This account has no active team. Create a team "
+                     "before connecting an MCP client.")
 
 
 def issue_auth_code(cp, *, client_id: str, user_id: str, base: str,
@@ -1048,7 +1048,15 @@ _CONSENT_HTML = """<!DOCTYPE html>
       headers: { "Authorization": "Bearer " + accessToken },
     });
     if (res.status === 401) return null;   // stale/rejected session
-    if (!res.ok) throw new Error("Could not resolve team: " + res.status);
+    if (!res.ok) {
+      // Terminal 4xx (suspended team, no usable team) carries an actionable
+      // error_description — surface it verbatim; only 5xx is retryable.
+      const payload = await res.json().catch(() => null);
+      const err = new Error((payload && (payload.error_description || payload.error)) ||
+          ("Could not resolve team: " + res.status));
+      if (res.status >= 500) err.transient = true;
+      throw err;
+    }
     return res.json();
   }
 
@@ -1088,8 +1096,6 @@ _CONSENT_HTML = """<!DOCTYPE html>
       const preview = await fetchPreview(data.session.access_token);
       if (!preview) return "stale";   // session rejected/expired
       const memberships = preview.memberships;
-      document.getElementById("resource-line").textContent =
-          preview.resource || PARAMS.resource || "default (sole team)";
       if (memberships && memberships.length > 1) {
         // Account chooser — options are REBUILT from scratch every run so a
         // sequential re-run can never duplicate rows. Authorize stays disabled
@@ -1113,7 +1119,12 @@ _CONSENT_HTML = """<!DOCTYPE html>
             "Tortoise MCP — choose the team this connection will use";
         disableAuthorize();
       } else if (preview.team_id) {
-        // single / sole-active-team auto-bind — exactly as before R1
+        // single / sole-active-team auto-bind — the page renders EXACTLY as
+        // before R1 (byte-identical single-team contract): the resource line
+        // shows the client-declared value (or the pre-R1 default), never the
+        // resolved team URL
+        document.getElementById("resource-line").textContent =
+            PARAMS.resource || "default (sole team)";
         document.getElementById("team-line").textContent =
             (preview.team_name || preview.team_id) + " (" + preview.team_id + ")";
         enableAuthorize();
@@ -1125,32 +1136,33 @@ _CONSENT_HTML = """<!DOCTYPE html>
     } catch (e) {
       disableAuthorize();
       showError(e.message);
-      showRetry();
+      if (e.transient) showRetry();   // terminal 4xx/network-side copy needs no retry affordance
       return "error";
     }
   }
 
   async function runConsentFlow() {
-    if (previewInFlight) return;   // concurrent guard
+    if (previewInFlight) return;   // concurrent guard (spans the refresh too)
     previewInFlight = true;
     teamResource = null;           // never carry a stale selection between runs
+    staleRefreshes = 0;            // one-shot cap per cycle — never sticky across runs
     disableAuthorize();
     let result;
     try {
       result = await showConsentOnce();
+      if (result === "stale" && staleRefreshes < 1) {
+        // refresh-first recovery (NEVER sign-out): at most ONE refresh per
+        // stale cycle, and the in-flight guard stays held across it so an
+        // onAuthStateChange (INITIAL_SESSION/SIGNED_IN) racing the refresh
+        // cannot double-run and reuse the rotating refresh token.
+        staleRefreshes += 1;
+        const { error } = await supabaseClient.auth.refreshSession();
+        if (!error) result = await showConsentOnce();
+      }
     } finally {
       previewInFlight = false;
     }
-    if (result === "stale") {
-      if (staleRefreshes < 1) {
-        staleRefreshes += 1;
-        const { error } = await supabaseClient.auth.refreshSession();
-        if (!error) { await runConsentFlow(); return; }   // guard already cleared
-      }
-      showExpiredSignin();
-      return;
-    }
-    if (result === "ok") staleRefreshes = 0;
+    if (result === "stale") showExpiredSignin();
   }
 
   function showSignin() {

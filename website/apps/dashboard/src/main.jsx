@@ -923,9 +923,13 @@ function claimIntentInFlight() {
   // key reveal; for returning empty-graph users it re-opens at step 0
   // (harness); step-0 Back returns to the orientation card.
   const [wizardStep, setWizardStepRaw] = React.useState(0)
-  const setWizardStep = React.useCallback((n) => { setWizardStepRaw(n); setWizardCopied((c) => (c === 'harness' ? '' : c)) }, [])
+  const setWizardStep = React.useCallback((n) => { setWizardStepRaw(n); setWizardCopied((c) => (c === 'harness' ? '' : c)); setWizardCopyFailed(false) }, [])
   const [wizardHarness, setWizardHarness] = React.useState('claude')
   const [wizardCopied, setWizardCopied] = React.useState('')
+  // #1701 R2: a failed clipboard write must not strand the ChatGPT flow — the
+  // error prescribes a manual ⌘/Ctrl-C copy, so the manual-Continue affordance
+  // appears ONLY after a failure (the user explicitly asserts the copy).
+  const [wizardCopyFailed, setWizardCopyFailed] = React.useState(false)
   // #2328: Codex has two surfaces — CLI (shell) and Desktop (GUI app, NO
   // terminal, does not inherit shell exports). The connect step toggles so a
   // Desktop user never faces an export-command they cannot run.
@@ -2225,9 +2229,11 @@ function claimIntentInFlight() {
     try {
       await navigator.clipboard.writeText(text)
     } catch {
-      setWizardConnectError('Copy failed — select the prompt below and press ⌘/Ctrl-C')
+      setWizardCopyFailed(true)
+      setWizardConnectError('Copy failed — select the prompt below and press ⌘/Ctrl-C, then Continue below')
       return
     }
+    setWizardCopyFailed(false)
     setWizardCopied('harness')
     api(`/v1/onboarding/state${onboardingTeamQ()}`, { method: 'PATCH', useSession: true,
       body: JSON.stringify({ harness: 'chatgpt', section: 'config' }) }).catch(() => {})
@@ -5689,7 +5695,7 @@ sdk.create_point(text="My first point")
                           <button key={h} type="button"
                             className={'harness-tab' + (wizardHarness === h ? ' active' : '')}
                             aria-pressed={wizardHarness === h}
-                            onClick={() => { setWizardHarness(h); setWizardCopied(''); if (h !== 'codex') setWizardCodexDesktop(false) }}>
+                            onClick={() => { setWizardHarness(h); setWizardCopied(''); setWizardCopyFailed(false); setWizardConnectError(''); if (h !== 'codex') setWizardCodexDesktop(false) }}>
                             {HARNESS_NAMES[h]}
                           </button>
                         ))}
@@ -5751,9 +5757,9 @@ sdk.create_point(text="My first point")
                                 onClick={wizardCopyChatgpt}>
                                 {wizardCopied === 'harness' ? 'Copied ✓' : (HARNESS_COPY_LABEL.chatgpt || 'Copy prompt')}
                               </button>
-                              {wizardCopied === 'harness' && (
+                              {(wizardCopied === 'harness' || wizardCopyFailed) && (
                                 <button type="button" className="btn-primary" onClick={wizardHarnessContinue} disabled={wizardConnectBusy}>
-                                  {wizardConnectBusy ? 'Saving…' : (HARNESS_CONTINUE_LABEL.chatgpt || "I've connected it — Continue →")}
+                                  {wizardConnectBusy ? 'Saving…' : (wizardCopyFailed ? "I've pasted it manually — Continue →" : (HARNESS_CONTINUE_LABEL.chatgpt || "I've connected it — Continue →"))}
                                 </button>
                               )}
                               <button type="button" className="ghost" onClick={() => { setWizardPaused(true); setWizardStep(3) }}>Skip for now</button>
