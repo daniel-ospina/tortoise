@@ -9998,8 +9998,19 @@ async def _restore_trash_graph_locked(request: Request, user: dict,
                 from None
         raise
     if not restored:
-        # Still reachable only if the row flipped between the probe and the
-        # flip despite the lock (lane-level anomaly) — refuse loudly.
+        # #2563 (re-audit P3): False from the conditional flip ALSO means the
+        # row was ALREADY restored (double-click / retry in another tab — the
+        # lane flip matches 0 rows because the row is active, not deleted).
+        # Re-probe and distinguish that from a genuine purge instead of
+        # answering a misleading 410 "was purged".
+        again = await _graph_row_probe(team_id, graph_id)
+        if again and again.get("status") == "active" \
+                and not again.get("purged_at"):
+            raise HTTPException(
+                status_code=409,
+                detail="Graph was already restored (it is active) — "
+                       "nothing to restore")
+        # Purged (or vanished) — refuse loudly.
         raise HTTPException(
             status_code=410,
             detail="Graph was purged before the restore completed — not "

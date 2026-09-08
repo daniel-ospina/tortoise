@@ -104,6 +104,38 @@ def test_supabase_duplicate_key_maps_to_409(sb_client, as_owner, monkeypatch):
     assert "concurrent create" in r.json()["detail"]
 
 
+def test_restore_false_flip_already_active_returns_409_not_410(
+        sb_client, as_owner, monkeypatch):
+    """#2563 (re-audit P3): a False lane-flip result ALSO means the row was
+    already restored (double-click / retry in another tab) — the endpoint
+    must re-probe and answer 409 "already restored", never the misleading
+    410 "was purged"."""
+    tc, fake, _ = sb_client
+    _seed(fake)
+    as_owner()
+
+    class _StubSdk:
+        def graph_count(self, team_id):
+            return 1
+
+    monkeypatch.setattr("tortoise.hosted_api._make_sdk",
+                        lambda *a, **k: _StubSdk())
+    import tortoise.supabase_control as sc
+
+    def _already_restored(*_a, **_k):
+        # The first (concurrent) restore already flipped the row active.
+        for g in fake.tables["graphs"]:
+            if g["id"] == _GID:
+                g["status"] = "active"
+                g.pop("deleted_at", None)
+        return False
+
+    monkeypatch.setattr(sc, "restore_graph", _already_restored)
+    r = tc.post(f"/v1/graphs/trash/{_GID}/restore?team_id={_TEAM}")
+    assert r.status_code == 409, r.text
+    assert "already restored" in r.json()["detail"]
+
+
 def test_registry_rollback_on_post_flip_name_conflict(sb_client, as_owner,
                                                       monkeypatch):
     """Registry-lane semantics exercised via the shared endpoint: when a
