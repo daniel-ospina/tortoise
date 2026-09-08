@@ -816,6 +816,7 @@ function App() {
   // be disabled mid-flight by the time the dialog actually opens.
   function closeReauth() {
     setReauthOpen(false)
+    setProfileBusy('')
     restoreFocus(reauthRestoreRef)
   }
   // #1765 review P1: the pre-reauth session user id (verify the provider
@@ -1676,6 +1677,7 @@ function claimIntentInFlight() {
       // #2392 (a11y): capture the opening trigger (the add-email submit
       // control) while it still owns focus — synchronous here, no await in
       // this branch.
+      setProfileBusy('reauth')
       rememberFocusedTrigger(reauthRestoreRef)
       pendingReauthRef.current = { email, password }
       setReauthOpen(true)
@@ -6818,7 +6820,7 @@ sdk.create_point(text="My first point")
             unlinkBusy={profileBusy === 'unlink'}
             onAddOAuth={handleAddOAuth}
             onAddEmail={handleAddEmail}
-            addBusy={profileBusy === 'oauth' || profileBusy === 'email'}
+            addBusy={profileBusy === 'oauth' || profileBusy === 'email' || profileBusy === 'reauth'}
             addError={profileError}
             onResend={handleResend}
             resendBusy={profileBusy === 'resend'}

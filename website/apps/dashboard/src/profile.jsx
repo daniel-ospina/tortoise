@@ -52,13 +52,13 @@ export function AddLoginMethodButtons({ busy, onOAuth, onEmail, error }) {
       <button onClick={() => onOAuth('google')} disabled={busy}>
         Connect Google login
       </button>
-      <button className="ghost" onClick={() => setShowEmail(!showEmail)} disabled={busy}>
+      <button onClick={() => setShowEmail(!showEmail)} disabled={busy}>
         Connect email and password
       </button>
       {showEmail && (
         <form
           className="inline-form claim-email-form"
-          onSubmit={(e) => { e.preventDefault(); onEmail(email, password) }}
+          onSubmit={(e) => { e.preventDefault(); onEmail(email, password); setShowEmail(false); setEmail(''); setPassword('') }}
         >
           <input
             type="email" placeholder="you@example.com" aria-label="Email"
