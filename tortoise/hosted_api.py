@@ -6587,6 +6587,7 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     import uuid
     from datetime import datetime
 
+    from tortoise.sdk import _current_actor_user_id  # #2600 actor stamp
     from tortoise.quota import (
         MAX_SESSION_TURNS,
         QuotaCheckError,
@@ -6792,6 +6793,20 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     if body.harness:
         _merge_sets.append("s.harness=$harness")
         _merge_params["harness"] = body.harness
+    # #2600: actor stamp — set only when a server-resolved human is present
+    # (team dict carries it on REST; the MCP capture tool threads the
+    # middleware ContextVar into its hand-built dict at mcp_server.py).
+    # coalesce = FIRST-writer-wins on idempotent re-POST (a re-POST with a
+    # DIFFERENT actor never overwrites) AND backfills legacy-None on a true
+    # retry (a legacy null-actor session re-POSTed by a member gets the
+    # member — first-writer-wins thereafter). Conditional clause preserves
+    # the embedded/Docker no-unused-param contract (mirrors the harness
+    # clause above).
+    _actor_uid = team.get("actor_user_id") or _current_actor_user_id.get()
+    if _actor_uid:
+        _merge_sets.append(
+            "s.actor_user_id=coalesce(s.actor_user_id, $uid)")
+        _merge_params["uid"] = _actor_uid
 
     # #1727 Slice 2 (Task 11, T2-P2c): idempotency scope = Session + turn
     # Points. A re-POST of the same session_id (Claude Code's real session id

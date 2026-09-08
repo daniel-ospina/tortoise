@@ -4549,6 +4549,344 @@ class TestV2SessionFloodGate:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# #2600 (Phase 1, Task 2) — Session.actor_user_id stamp via the REAL registry
+# auth face. POST /v1/sessions is key-only (get_current_team_gated) — on the
+# docker lane (registry CP) the two "members" are registry-seeded keys with
+# distinct UUID creators (sdk.apikey_create(created_by=<uuid>)), authenticated
+# with the real tt_ keys (NO DI override — an override dict bypasses the
+# registry branch's created_by → actor_user_id alias + _data_sdk ContextVar
+# set, so a DI-seam capture would be actor-less for the wrong reason).
+
+_2600_UUID_A = "11111111-1111-4111-8111-111111111111"
+_2600_UUID_B = "22222222-2222-4222-8222-222222222222"
+
+
+class TestSessionActorStamp2600:
+    """Session MERGE actor clause — first-writer-wins coalesce + legacy
+    backfill, asserted via DIRECT graph read (list_sessions does not expose
+    actor_user_id until Task 5)."""
+
+    def _data_sdk(self, team_id: str):
+        """Open the TEAM data graph directly (Session nodes live in the
+        namespace team_{tid} — NOT the registry projection the mint SDK
+        returns)."""
+        import tortoise.hosted_api as ha_mod
+        return ha_mod._make_sdk(namespace=team_id)
+
+    def _session_actor(self, team_id: str, session_id: str):
+        rows = self._data_sdk(team_id)._get_proj().g.query(
+            "MATCH (s:Session {id:$sid}) RETURN s.actor_user_id",
+            params={"sid": session_id}).result_set
+        return rows[0][0] if rows else None
+
+    def _setup(self, tmp_path):
+        """Temp registry + seeded pro team + real-auth TestClient (no DI
+        override). Returns (sdk, team_id, client)."""
+        import tortoise.hosted_api as ha_mod
+        db_path = os.path.join(tmp_path, "stamp.db")
+        _orig = _patch_tortoise_sdk_init(db_path)
+        os.environ["TORTOISE_DB_PATH"] = db_path
+        sdk = ha_mod._make_sdk(namespace="registry")
+        tid = "team-2600-stamp"
+        _seed_team_graphs(sdk, tid, "pro", None)
+        try:
+            with TestClient(ha_mod.app,
+                            raise_server_exceptions=False) as tc:
+                yield sdk, tid, tc
+        finally:
+            os.environ.pop("TORTOISE_DB_PATH", None)
+            _restore_tortoise_sdk_init(_orig)
+
+    def test_registry_member_capture_stamps_actor(self, tmp_path):
+        """key minted with created_by=<uuidA> → capture (fresh session_id)
+        → Session.actor_user_id == uuidA (direct graph read) + harness
+        present + Session count 1."""
+        gen = self._setup(tmp_path)
+        sdk, tid, tc = next(gen)
+        try:
+            keyA = sdk.apikey_create(tid, _2600_UUID_A)
+            hA = {"Authorization": f"Bearer {keyA['api_key']}"}
+            r = tc.post("/v1/sessions", headers=hA, json={
+                "conversation": [{"role": "user", "content": "we should ship actor attribution first."},
+                                  {"role": "assistant", "content": "agree — stamp it at capture."}],
+                "session_id": "s-stamp-2600-a", "harness": "claude"})
+            assert r.status_code == 200, r.text[:300]
+            rows = self._data_sdk(tid)._get_proj().g.query(
+                "MATCH (s:Session {id:$sid}) RETURN s.actor_user_id, s.harness",
+                params={"sid": "s-stamp-2600-a"}).result_set
+            assert rows and rows[0][0] == _2600_UUID_A, rows
+            assert rows[0][1] == "claude", rows
+        finally:
+            gen.close()
+
+    def test_two_members_stamp_their_own_sessions(self, tmp_path):
+        """uuidA and uuidB each capture their OWN session → each Session
+        carries its actor; never cross-contaminated (deterministic,
+        unconditional per-session actor)."""
+        gen = self._setup(tmp_path)
+        sdk, tid, tc = next(gen)
+        try:
+            keyA = sdk.apikey_create(tid, _2600_UUID_A)
+            keyB = sdk.apikey_create(tid, _2600_UUID_B)
+            hA = {"Authorization": f"Bearer {keyA['api_key']}"}
+            hB = {"Authorization": f"Bearer {keyB['api_key']}"}
+            for h, sid, expect in ((hA, "s-stamp-2600-ba", _2600_UUID_A),
+                                   (hB, "s-stamp-2600-bb", _2600_UUID_B)):
+                r = tc.post("/v1/sessions", headers=h, json={
+                    "conversation": [{"role": "user", "content": "member capture."},
+                                      {"role": "assistant", "content": "stamped."}],
+                    "session_id": sid})
+                assert r.status_code == 200, r.text[:300]
+            rows = self._data_sdk(tid)._get_proj().g.query(
+                "MATCH (s:Session) WHERE s.id IN $sids RETURN s.id, s.actor_user_id "
+                "ORDER BY s.id",
+                params={"sids": ["s-stamp-2600-ba", "s-stamp-2600-bb"]}).result_set
+            by_sid = {row[0]: row[1] for row in rows}
+            assert by_sid == {"s-stamp-2600-ba": _2600_UUID_A,
+                              "s-stamp-2600-bb": _2600_UUID_B}, by_sid
+        finally:
+            gen.close()
+
+    def test_cross_actor_repost_keeps_first_writer(self, tmp_path):
+        """P1-1 coalesce discriminator: A captures S; B re-POSTs the SAME
+        session_id → Session.actor_user_id stays A (first-writer-wins — a
+        plain SET would show B). Node count unchanged (#1727)."""
+        gen = self._setup(tmp_path)
+        sdk, tid, tc = next(gen)
+        try:
+            keyA = sdk.apikey_create(tid, _2600_UUID_A)
+            keyB = sdk.apikey_create(tid, _2600_UUID_B)
+            hA = {"Authorization": f"Bearer {keyA['api_key']}"}
+            hB = {"Authorization": f"Bearer {keyB['api_key']}"}
+            conv = [{"role": "user", "content": "we should open the beta."},
+                    {"role": "assistant", "content": "agreed."}]
+            r1 = tc.post("/v1/sessions", headers=hA, json={
+                "conversation": conv, "session_id": "s-stamp-2600-fww"})
+            assert r1.status_code == 200, r1.text[:300]
+            r2 = tc.post("/v1/sessions", headers=hB, json={
+                "conversation": conv, "session_id": "s-stamp-2600-fww"})
+            assert r2.status_code == 200, r2.text[:300]
+            rows = self._data_sdk(tid)._get_proj().g.query(
+                "MATCH (s:Session {id:$sid}) RETURN s.actor_user_id",
+                params={"sid": "s-stamp-2600-fww"}).result_set
+            assert rows[0][0] == _2600_UUID_A, \
+                f"cross-actor re-POST overwrote the first writer: {rows}"
+        finally:
+            gen.close()
+
+    def test_legacy_null_actor_session_backfilled_on_repost(self, tmp_path):
+        """Legacy backfill pin: seed a Session node WITHOUT actor_user_id
+        (pre-#2600 shape) → member B re-POSTs it → coalesce backfills B onto
+        the Session (true-retry merge); the session's legacy turn Points
+        carry no actor at the EVENT level (they were written pre-stamp)."""
+        gen = self._setup(tmp_path)
+        sdk, tid, tc = next(gen)
+        try:
+            # seed the legacy Session + its turn Point (the pre-#2600 shape:
+            # no actor_user_id anywhere) in the TEAM data graph
+            proj = self._data_sdk(tid)._get_proj()
+            proj.g.query(
+                "CREATE (s:Session {id:$sid, created_at:$now, turn_count:1, "
+                "is_episodic:true})-[:CONTAINS]->"
+                "(t:Point {id:$tid, content:'[user] legacy', pointKind:'event', "
+                "is_operator:false, is_episodic:true})",
+                params={"sid": "s-stamp-2600-legacy",
+                        "now": datetime.now(UTC).isoformat(),
+                        "tid": "s-stamp-2600-legacy_t0"})
+            keyB = sdk.apikey_create(tid, _2600_UUID_B)
+            hB = {"Authorization": f"Bearer {keyB['api_key']}"}
+            r = tc.post("/v1/sessions", headers=hB, json={
+                "conversation": [{"role": "user", "content": "true-retry legacy backfill."},
+                                  {"role": "assistant", "content": "ok."}],
+                "session_id": "s-stamp-2600-legacy"})
+            assert r.status_code == 200, r.text[:300]
+            rows = proj.g.query(
+                "MATCH (s:Session {id:$sid}) RETURN s.actor_user_id",
+                params={"sid": "s-stamp-2600-legacy"}).result_set
+            assert rows[0][0] == _2600_UUID_B, \
+                f"legacy null-actor session not backfilled on re-POST: {rows}"
+        finally:
+            gen.close()
+
+    def test_actorless_key_repost_keeps_first_writer(self, tmp_path):
+        """P1-1 variant: the pre-#2600 'api' class (non-UUID created_by) is
+        NOT an actor — its re-POST must not erase A's stamp (missing clause
+        ≠ wipe)."""
+        gen = self._setup(tmp_path)
+        sdk, tid, tc = next(gen)
+        try:
+            keyA = sdk.apikey_create(tid, _2600_UUID_A)
+            legacy = sdk.apikey_create(tid, "api")
+            hA = {"Authorization": f"Bearer {keyA['api_key']}"}
+            hL = {"Authorization": f"Bearer {legacy['api_key']}"}
+            conv = [{"role": "user", "content": "attribution contract."},
+                    {"role": "assistant", "content": "locked."}]
+            r1 = tc.post("/v1/sessions", headers=hA, json={
+                "conversation": conv, "session_id": "s-stamp-2600-api"})
+            assert r1.status_code == 200, r1.text[:300]
+            r2 = tc.post("/v1/sessions", headers=hL, json={
+                "conversation": conv, "session_id": "s-stamp-2600-api"})
+            assert r2.status_code == 200, r2.text[:300]
+            rows = self._data_sdk(tid)._get_proj().g.query(
+                "MATCH (s:Session {id:$sid}) RETURN s.actor_user_id",
+                params={"sid": "s-stamp-2600-api"}).result_set
+            assert rows[0][0] == _2600_UUID_A, rows
+        finally:
+            gen.close()
+
+    def _v2_fail_once_extractor(self, calls, *, fail_count=1):
+        """A v2 extractor stub that returns errors for the first N calls
+        (capture_ok=False shape) then succeeds (mirrors the #2335 hosted
+        twin's _v2_fail_then_succeed)."""
+        def _fake(*a, **kw):
+            calls["n"] += 1
+            if calls["n"] <= fail_count:
+                return {
+                    "session_id": kw.get("session_id", "s"),
+                    "story_arc": "", "embed_list": {},
+                    "search": {"mode": "embedded", "degraded": True},
+                    "payload": None,
+                    "chain_notes": [], "link_before_create": [],
+                    "supersessions": [], "warnings": [], "minted_kinds": [],
+                    "errors": ["RuntimeError: provider returned 500"],
+                    "stats": {"llm": {"calls": 1}, "recovery": {}},
+                    "error_census": {},
+                }
+            return {
+                "session_id": kw.get("session_id", "s"),
+                "story_arc": "story", "embed_list": {},
+                "search": {"mode": "embedded", "degraded": True},
+                "payload": {"entities": [], "events": [], "points": [
+                    {"content": "the retry worked", "pointKind": "statement",
+                     "about_entities": []}], "operators": []},
+                "chain_notes": [], "link_before_create": [],
+                "supersessions": [], "warnings": [], "minted_kinds": [],
+                "stats": {"llm": {"calls": 1}, "recovery": {}},
+                "error_census": {},
+            }
+        return _fake
+
+    def test_failed_prior_true_retry_keeps_first_writer_actor(self,
+                                                              tmp_path,
+                                                              monkeypatch):
+        """P2 shape (i): A's capture FAILS (extractor returns errors →
+        capture_ok=False); B true-retries the same session → the retry
+        re-runs extraction (mode != replayed) AND Session.actor_user_id
+        STILL == A (coalesce first-writer — the failed attempt's stamp is
+        A's, never overwritten by the successful retry)."""
+        import tortoise.extractor_v2 as ev2
+        gen = self._setup(tmp_path)
+        sdk, tid, tc = next(gen)
+        try:
+            calls = {"n": 0}
+            monkeypatch.setattr(ev2, "extract_session_v2",
+                                self._v2_fail_once_extractor(calls))
+            keyA = sdk.apikey_create(tid, _2600_UUID_A)
+            keyB = sdk.apikey_create(tid, _2600_UUID_B)
+            hA = {"Authorization": f"Bearer {keyA['api_key']}"}
+            hB = {"Authorization": f"Bearer {keyB['api_key']}"}
+            conv = [{"role": "user", "content": "we decided to ship the retry contract."}]
+            r1 = tc.post("/v1/sessions", headers=hA, json={
+                "conversation": conv, "session_id": "s-stamp-2600-retry"})
+            assert r1.status_code == 200, r1.text[:300]
+            assert r1.json()["errors"], "first attempt must fail"
+            # A's failed attempt DID stamp the Session (the MERGE runs
+            # before extraction; capture_ok=False is recorded after).
+            rows = self._data_sdk(tid)._get_proj().g.query(
+                "MATCH (s:Session {id:$sid}) RETURN s.actor_user_id, s.capture_ok",
+                params={"sid": "s-stamp-2600-retry"}).result_set
+            assert rows and rows[0][0] == _2600_UUID_A, rows
+            assert rows[0][1] is False, rows
+            # B true-retries → extraction re-runs (mode != replayed) and
+            # the Session actor STAYS A.
+            r2 = tc.post("/v1/sessions", headers=hB, json={
+                "conversation": conv, "session_id": "s-stamp-2600-retry"})
+            assert r2.status_code == 200, r2.text[:300]
+            assert r2.json()["extraction_mode"] != "replayed", r2.json()
+            assert calls["n"] == 2, "the true retry must re-run extraction"
+            rows = self._data_sdk(tid)._get_proj().g.query(
+                "MATCH (s:Session {id:$sid}) RETURN s.actor_user_id, s.capture_ok",
+                params={"sid": "s-stamp-2600-retry"}).result_set
+            assert rows[0][0] == _2600_UUID_A, \
+                f"true retry must keep A as first writer: {rows}"
+            assert rows[0][1] is True, rows
+        finally:
+            gen.close()
+
+    def test_raise_shape_repost_replays_keeps_actor(self, tmp_path,
+                                                     monkeypatch):
+        """P2 shape (ii): the extractor RAISES on A's capture (pre-MERGE or
+        mid-run → 503 path, capture_ok=None → legacy replay) → B's re-POST
+        REPLAYS (extraction skipped) and the Session keeps A (if stamped)
+        or stays null-actor — never B (zero B events)."""
+        import tortoise.extractor_v2 as ev2
+        gen = self._setup(tmp_path)
+        sdk, tid, tc = next(gen)
+        try:
+            calls = {"n": 0}
+
+            def _raising(*a, **kw):
+                calls["n"] += 1
+                raise RuntimeError("provider exploded mid-run")
+
+            monkeypatch.setattr(ev2, "extract_session_v2", _raising)
+            keyA = sdk.apikey_create(tid, _2600_UUID_A)
+            keyB = sdk.apikey_create(tid, _2600_UUID_B)
+            hA = {"Authorization": f"Bearer {keyA['api_key']}"}
+            hB = {"Authorization": f"Bearer {keyB['api_key']}"}
+            conv = [{"role": "user", "content": "raise shape capture."}]
+            r1 = tc.post("/v1/sessions", headers=hA, json={
+                "conversation": conv, "session_id": "s-stamp-2600-raise"})
+            # A 503 OR a 500 — both leave capture_ok=None (the capture_ok
+            # SET never runs on a raised extraction); accept either and
+            # assert the no-re-extract + first-writer contract below.
+            assert r1.status_code in (500, 503), r1.text[:300]
+            # A's Session IS stamped before the extractor raise (the Session
+            # MERGE runs before extraction); capture_ok stays None (legacy
+            # replay shape).
+            rows = self._data_sdk(tid)._get_proj().g.query(
+                "MATCH (s:Session {id:$sid}) RETURN s.actor_user_id, s.capture_ok",
+                params={"sid": "s-stamp-2600-raise"}).result_set
+            assert rows and rows[0][0] == _2600_UUID_A, rows
+            assert rows[0][1] is None, rows
+            r2 = tc.post("/v1/sessions", headers=hB, json={
+                "conversation": conv, "session_id": "s-stamp-2600-raise"})
+            # capture_ok=None → legacy REPLAY (extraction skipped): 200
+            # replayed, the Session keeps A, extractor never re-runs.
+            assert r2.status_code == 200, r2.text[:300]
+            assert r2.json()["extraction_mode"] == "replayed", r2.json()
+            rows = self._data_sdk(tid)._get_proj().g.query(
+                "MATCH (s:Session {id:$sid}) RETURN s.actor_user_id",
+                params={"sid": "s-stamp-2600-raise"}).result_set
+            assert rows[0][0] == _2600_UUID_A, rows
+            assert calls["n"] == 1, \
+                "a raise-shaped failed capture must NOT re-extract on re-POST"
+        finally:
+            gen.close()
+
+    def test_actorless_legacy_key_capture_is_unattributed(self, tmp_path):
+        """A key whose created_by is NOT a UUID (legacy 'api' class) is
+        unattributed — its capture writes a Session with NO actor_user_id
+        (strip-and-ignore documented residual: never a fabricated actor)."""
+        gen = self._setup(tmp_path)
+        sdk, tid, tc = next(gen)
+        try:
+            legacy = sdk.apikey_create(tid, "api")
+            hL = {"Authorization": f"Bearer {legacy['api_key']}"}
+            r = tc.post("/v1/sessions", headers=hL, json={
+                "conversation": [{"role": "user", "content": "legacy key capture."},
+                                  {"role": "assistant", "content": "ok."}],
+                "session_id": "s-stamp-2600-legacy-key"})
+            assert r.status_code == 200, r.text[:300]
+            rows = self._data_sdk(tid)._get_proj().g.query(
+                "MATCH (s:Session {id:$sid}) RETURN s.actor_user_id",
+                params={"sid": "s-stamp-2600-legacy-key"}).result_set
+            assert rows and rows[0][0] is None, rows
+        finally:
+            gen.close()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # ── #1676: search/topic_summary offload — event-loop concurrency + thread safety
 
 class TestSearchOffloadConcurrency:

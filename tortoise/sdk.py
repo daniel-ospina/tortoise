@@ -2913,6 +2913,17 @@ class TortoiseSDK:
         if harness:
             _merge_sets.append("s.harness=$harness")
             _merge_params["harness"] = harness
+        # #2600 (SDK-mirror parity): actor stamp — same conditional coalesce
+        # clause as the hosted MERGE, reading the ContextVar (set by the
+        # mcp_auth middleware / hosted _data_sdk). Embedded/local captures
+        # have no auth → var unset → sets unchanged → byte-identical legacy
+        # shape. First-writer-wins on idempotent re-POST; backfills legacy-
+        # None on true retry. Keep the two MERGE clauses in sync.
+        _mirror_actor = _current_actor_user_id.get()
+        if _mirror_actor:
+            _merge_sets.append(
+                "s.actor_user_id=coalesce(s.actor_user_id, $uid)")
+            _merge_params["uid"] = _mirror_actor
         # W5 Phase F (#2104, indicator 8 — SDK mirror replay parity): probe
         # session_existed BEFORE the Session MERGE, mirroring the hosted
         # #1727 replay skip — a re-capture of an EXISTING session_id skips

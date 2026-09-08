@@ -30,6 +30,10 @@ EXPECTED_RANGE_EMBEDDED = {
     "Object": ["id", "name"],
     "Event": ["eventId"],
     "Source": ["id", "url"],
+    # #2600: actor-filtered session reads (list_sessions?actor_user_id) must
+    # be an index seek on both lanes — plain string single-prop RANGE index
+    # (embedded-safe, mirrors the entity string indexes above).
+    "Session": ["actor_user_id"],
 }
 
 # ── Epic #1647 T8 (D5/D6): docker sibling expectations ────────────────────
