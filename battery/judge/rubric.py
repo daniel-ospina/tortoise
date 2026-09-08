@@ -109,18 +109,27 @@ def _load_json_spec(rubrics_dir: Path, rubric_id: str) -> RubricSpec | None:
     lint_rubric_items(items)
     for g in gold:
         lint_evidence_neutral(str(g.get("render", "")))
-    # loader-level gold-block guard (review #2575 A-P2): a gold block with
-    # NO expected-no at >20% share makes the gold leg vacuous (an all-yes
-    # degenerate judge passes 100% on all-yes anchors). Refuse at load — a
-    # rubric whose anchors cannot catch degeneracy never loads.
-    if gold:
-        no_renders = [g for g in gold if (g.get("expected") or "").lower()
-                      in ("no", "expected-no", "expected_no")]
-        if not no_renders or len(no_renders) / len(gold) <= 0.20:
-            raise ConfigError(
-                f"rubric {rubric_id!r} gold block needs >=1 expected-no anchor "
-                f"at >20% share (found {len(no_renders)}/{len(gold)}) — an "
-                f"all-yes gold block cannot catch a degenerate judge")
+    # loader-level gold-block guard (review #2575 A-P2 + pro-gate P1-2): a
+    # gold block with NO expected-no at >20% share makes the gold leg
+    # vacuous (an all-yes degenerate judge passes 100% on all-yes anchors)
+    # — and a rubric with NO gold block at all leaves the declarative gold
+    # leg default-passing on the real path (gold_n=0 -> gold_ok=True) while
+    # two identical all-yes judges clear AC1. Both refuse at load: an
+    # itemized JSON rubric used for declarative validation MUST carry a
+    # gold block with >=1 expected-no at >20% share.
+    if not gold:
+        raise ConfigError(
+            f"rubric {rubric_id!r} is itemized JSON but has NO gold_anchors "
+            f"block — declarative validation's gold leg would be vacuous "
+            f"(gold_n=0 => gold_ok=True); add a gold block with >=1 "
+            f"expected-no anchor at >20% share")
+    no_renders = [g for g in gold if (g.get("expected") or "").lower()
+                  in ("no", "expected-no", "expected_no")]
+    if not no_renders or len(no_renders) / len(gold) <= 0.20:
+        raise ConfigError(
+            f"rubric {rubric_id!r} gold block needs >=1 expected-no anchor "
+            f"at >20% share (found {len(no_renders)}/{len(gold)}) — an "
+            f"all-yes gold block cannot catch a degenerate judge")
     extra = {k: v for k, v in data.items()
              if k not in ("rubric_id", "items", "gold_anchors")}
     return RubricSpec(rubric_id=rubric_id, items=items, gold_anchors=gold,

@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from typing import Callable  # noqa: UP035
 
 from battery.arms.base import ArmUnavailable
+from battery.exceptions import ConfigError
 from battery.enums import ModelCallOutcome
 
 
@@ -111,6 +112,15 @@ class JudgeClient:
         usage = data.get("usage") or {}
         # Metered judge spend (decision (c)): parse the OpenRouter usage
         # block so the --evidence path can HARD-STOP against the reserve.
+        # Fail-closed on an ABSENT usage block (review #2575 pro-gate
+        # P2-1): usage-missing responses are unmetered — pt=ct=0 would
+        # cost $0.00 and sail past the reserve. A real judge call always
+        # bills tokens; usage absence means the meter cannot see spend.
+        if not usage:
+            raise ConfigError(
+                "judge response carries NO usage block — spend unmetered; "
+                "fail-closed (reserve HARD STOP cannot meter an absent "
+                "usage)")
         pt = int(usage.get("prompt_tokens", 0) or 0)
         ct = int(usage.get("completion_tokens", 0) or 0)
         cost = float(usage.get("cost", 0.0)

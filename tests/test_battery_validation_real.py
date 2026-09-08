@@ -182,3 +182,45 @@ def test_ac1_bar_passes_kappa_paradox_pool():
     assert ac1 >= 0.70    # AC1 bar clears (decision A)
     assert ac1 > k        # kappa < AC1 on the skewed pool (the paradox)
 
+
+def test_decision_a_bars_frozen_and_wired(tmp_path):
+    """Decision-A freeze (pro-gate #2575 P1-1): a regression lowering the
+    constants or flipping the real-path bar sails every content test green
+    while silently weakening the gate — freeze all three:
+    (1) AC1_RELIABILITY_MIN == KAPPA_MIN == 0.70;
+    (2) on the paradox pool the kappa bar BLOCKS where the AC1 bar PASSES
+        (compositionally: default gate stays kappa — a flipped real-path
+        bar would fail the next real validation AND the frozen comparator
+        below proves the real regime sits below the kappa bar);
+    (3) the run-level wiring: run_evidence_validation records ac1 + percent
+        agreement on the validated pair and clears the gate.
+    """
+    from battery.judge.gate import AC1_RELIABILITY_MIN, KAPPA_MIN, _gwet_ac1
+    from battery.judge.gate import _cohens_kappa as _ck
+    assert AC1_RELIABILITY_MIN == 0.70
+    assert KAPPA_MIN == 0.70
+    # measured real-run regime (po 0.886 / kappa 0.54 / AC1 0.849): kappa
+    # caps BELOW the 0.70 bar on the yes-heavy real pool, AC1 clears — the
+    # exact boundary the bar switch exists for. 44 pairs, 5 disagreements
+    # on an all-yes-skewed pool: po 0.886, kappa collapses (skewed-
+    # marginal paradox), AC1 stays ~0.87.
+    a = ["yes"] * 44
+    b = ["yes"] * 39 + ["no"] * 5
+    po = sum(1 for x, y in zip(a, b, strict=True) if x == y) / len(a)
+    k = _ck(a, b)
+    ac1 = _gwet_ac1(a, b)
+    assert po >= 0.85
+    assert k < KAPPA_MIN        # kappa bar blocks this real-text pool
+    assert ac1 >= AC1_RELIABILITY_MIN  # AC1 bar passes it (decision A)
+    # run-level wiring: the real path (evidence.py) honors the ac1 bar and
+    # the record carries ac1 + percent_agreement fields.
+    rec = run_evidence_validation(
+        config_dir=CONFIG, rubric_id="r2-coverage",
+        evidence=_fixture_bundle(), judge_a=_GoodJudge(),
+        judge_b=_GoodJudge(), records_path=_record_path(tmp_path),
+        reserve_usd=10.0)
+    assert rec.passed, rec.blocked_reason
+    assert rec.ac1 is not None and rec.ac1 >= AC1_RELIABILITY_MIN
+    assert rec.percent_agreement >= 0.85
+    assert rec.kappa is not None  # kappa always recorded (never deleted)
+
