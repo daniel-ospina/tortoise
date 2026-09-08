@@ -21,7 +21,6 @@ that no raw-query construct is reachable from the runtime surface.
 from __future__ import annotations
 
 import ast
-import os
 from pathlib import Path
 
 import pytest
@@ -119,27 +118,23 @@ def test_arm_module_has_no_import_of_raw_projection(arm_ast: ast.Module) -> None
     assert "FalkorProjection" not in imports, imports
 
 
-def test_hermetic_env_stripped_and_per_scenario_handle(tmp_path) -> None:
+def test_hermetic_env_stripped_and_per_scenario_handle(tmp_path,
+                                               monkeypatch) -> None:
     """Hermetic fixture: env stripped; the seeded store is a per-run tmp
     dir; retrieve returns pre-k memories through the real arm surface."""
     # Env-strip: an ambient URI must not redirect the hermetic store.
-    saved = os.environ.pop("TORTOISE_DB_URI", None)
-    saved_path = os.environ.pop("TORTOISE_DB_PATH", None)
+    # (monkeypatch fixture-param auto-undo — pytest restores at teardown)
+    monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+    monkeypatch.delenv("TORTOISE_DB_PATH", raising=False)
+    ns = tmp_path / "run1"
+    store = setup_seed_mode(ns, "ct-001")
     try:
-        ns = tmp_path / "run1"
-        store = setup_seed_mode(ns, "ct-001")
-        try:
-            memories = store.retrieve("")
-            assert isinstance(memories, list)
-            # seed_mode: claim_a + evidence pre-k are present in the arm's
-            # retrieved surface; ¬A content absence is covered by
-            # test_battery_r1_seed (no-leak) — this test only locks the
-            # hermetic fixture shape + that the store lives under tmp_path.
-            assert any(m for m in memories), "retrieve returned no memories"
-        finally:
-            store.close()
+        memories = store.retrieve("")
+        assert isinstance(memories, list)
+        # seed_mode: claim_a + evidence pre-k are present in the arm's
+        # retrieved surface; ¬A content absence is covered by
+        # test_battery_r1_seed (no-leak) — this test only locks the
+        # hermetic fixture shape + that the store lives under tmp_path.
+        assert any(m for m in memories), "retrieve returned no memories"
     finally:
-        if saved is not None:
-            os.environ["TORTOISE_DB_URI"] = saved
-        if saved_path is not None:
-            os.environ["TORTOISE_DB_PATH"] = saved_path
+        store.close()
