@@ -34,9 +34,12 @@ import pytest
 from tortoise.sdk import TortoiseSDK
 
 # ── Live-FalkorDB availability (the FTS backend the anchor spine needs) ───
-_URI = os.environ.get(
-    "TORTOISE_DB_URI",
-    "docker://:falkordb@localhost:6379/tortoise_test_matrix").rstrip("/")
+# NB: tier-2 CI sets TORTOISE_DB_URI="" (present-but-empty) — the plain
+# .get(var, default) probe would return "" and die on the "_probe" suffix.
+# The `or` fallback treats "" as unset so the probe reaches the provisioned
+# falkordb service on BOTH lanes (matches test_search_engine_gaps/indexes).
+_URI = (os.environ.get("TORTOISE_DB_URI")
+        or "docker://:falkordb@localhost:6379/tortoise_test_matrix").rstrip("/")
 FALKORDB_AVAILABLE = False
 _OLD_URI = os.environ.get("TORTOISE_DB_URI")
 try:
