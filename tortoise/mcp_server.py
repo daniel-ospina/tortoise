@@ -2929,6 +2929,7 @@ def tortoise_session_capture(conversation: list[dict],
         _current_scopes,
         _current_legacy_full_access,
     )
+    from tortoise.sdk import _current_actor_user_id  # noqa: I001  # #2600
     team_id = _current_team_id.get()
     if not team_id or team_id == SELFHOST_TEAM_ID:
         # stdio / self-host HTTP: no hosted state plane, no receipts — the
@@ -2946,6 +2947,10 @@ def tortoise_session_capture(conversation: list[dict],
     limits = _current_team_limits.get() or {}
     team = {"team_id": team_id, "tier": limits.get("tier", "free"),
             "key_id": None}
+    # #2600: carry the resolved human actor (set by TeamResolutionMiddleware)
+    # into the impl's team dict so the Session MERGE + _data_sdk ContextVar
+    # set see it — never depend on the asyncio.run context bridge.
+    team["actor_user_id"] = _current_actor_user_id.get()
     # C6 #2115 (D-C6-4): a graph-bound key's capture must land in ITS graph
     # — carry the resolution ContextVars into the impl's team dict so
     # _data_sdk routes there (and the per-graph recording gate reads the

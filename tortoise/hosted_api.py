@@ -1852,7 +1852,11 @@ async def get_current_team(request: Request) -> dict:
                 "delegation_depth": delegation_depth,
                 "created_by_key_id": created_by_key_id}
         await _abuse_post_auth(request, team_dict)
-        return team_dict
+        # #2600: canonical actor_user_id alias (UUID-gated, reads the raw
+        # created_by already on the dict at ~1830). Additive; ContextVar set
+        # lives in _data_sdk, not here.
+        from tortoise.sdk import _alias_actor_user_id
+        return _alias_actor_user_id(team_dict)
     except HTTPException:
         raise
     except Exception:
@@ -1910,7 +1914,11 @@ async def _get_current_team_supabase(request: Request, token: str) -> dict:
         # #308: R3 read velocity + R4 geo (best-effort, off the critical
         # path via to_thread).
         await _abuse_post_auth(request, team)
-        return team
+        # #2600: canonical actor_user_id alias (UUID-gated, reads created_by
+        # already on the resolve_api_key dict). Additive; ContextVar set lives
+        # in _data_sdk, not here.
+        from tortoise.sdk import _alias_actor_user_id
+        return _alias_actor_user_id(team)
     except HTTPException:
         raise
     except Exception:
@@ -2255,6 +2263,10 @@ def _data_sdk(team: dict) -> TortoiseSDK:
     """C5 #2114 (D-C5-2): the data-plane tenancy resolver — the ONE entry
     every team-data surface uses to open its SDK.
 
+    #2600: the server-resolved human actor ContextVar is set HERE (the single
+    REST set-site) — CONDITIONALLY, only when the dict carries a gated
+    actor_user_id, so a hand-built actor-less dict (the MCP capture tool's
+    team dict) never ERASES a value the auth seams set (cycle-2 P0).
     - graph-bound key (graph_id set): ownership pre-check THEN open the
       resolved FULL graph name (custom team_{tid}_{gid} or a bound default)
       via the explicit graph-name seam — cross-graph denied at the app
@@ -2267,6 +2279,12 @@ def _data_sdk(team: dict) -> TortoiseSDK:
       (sdk.team_create team_{name}, #2023) diverges and flipping would
       silently move those teams' data access.
     """
+    # #2600: single REST ContextVar set-site — CONDITIONAL (only when the
+    # dict carries a gated actor; never erase a value the auth seams set).
+    from tortoise.sdk import _current_actor_user_id
+    _actor = team.get("actor_user_id")
+    if _actor is not None:
+        _current_actor_user_id.set(_actor)
     team_id = team["team_id"]
     gid = team.get("graph_id")
     if gid:
@@ -2438,7 +2456,12 @@ async def get_current_team_session(request: Request, gate_key_login: bool = True
     # marker-required predicate would silently stop gating the override
     # seam. auth_lane absent = key-auth / override lane.
     team["auth_lane"] = "session"
-    return team
+    # #2600: canonical actor_user_id alias — this is the session-lane
+    # dict-BUILD site (session_user_id was just attached above; the helper's
+    # session_user_id read picks it up, UUID-gated). Additive; ContextVar set
+    # lives in _data_sdk, not here.
+    from tortoise.sdk import _alias_actor_user_id
+    return _alias_actor_user_id(team)
 
 
 async def get_current_team_session_ungated(request: Request) -> dict:

@@ -17,6 +17,7 @@ import logging
 import os
 import re
 import stat
+from contextvars import ContextVar
 from time import monotonic as _monotonic
 from typing import Any
 
@@ -757,6 +758,55 @@ def _raise_update_point_status_error(proj, id: str) -> None:
     )
 
 _logger = logging.getLogger(__name__)
+
+# ── #2600 server-resolved human actor ───────────────────────────────────────
+# `_current_actor_user_id` carries the server-resolved human actor for
+# session + write-event stamps. SET ONLY at auth seams (mcp_auth
+# TeamResolutionMiddleware dispatch + hosted_api._data_sdk) — NEVER from
+# client input. sdk.py is the neutral home: both mcp_auth and hosted_api
+# already import sdk, and sdk must not import either (no import cycle).
+_current_actor_user_id: ContextVar[str | None] = ContextVar(
+    "_current_actor_user_id", default=None)
+
+
+def _is_uuid_shape(value: object) -> bool:
+    """UUID-shaped string gate for actor aliasing (#2600). ``created_by`` is
+    NOT always a human id: production mints store literal ``"api"``,
+    ``'st_'||hash`` recovery ids, and registry EMAIL self-signup creators.
+    Alias to ``actor_user_id`` ONLY for UUID shapes. Byte-copies
+    supabase_control._is_uuid semantics (the #1738 class) so the gate matches
+    PostgreSQL uuid acceptance on BOTH planes: brace-strip, reject
+    urn:/uuid:-prefixed forms, accept hyphenated / 32-hex-no-hyphen / braced.
+    (sdk cannot import supabase_control — this is the neutral copy; keep the
+    two in sync.)"""
+    import uuid as _uuid  # noqa: PLC0415 — function-local (lazy import parity)
+    if not isinstance(value, str) or not value:
+        return False
+    probe = value.strip()
+    if probe.startswith("{") and probe.endswith("}"):
+        probe = probe[1:-1].strip()
+    if probe.startswith(("urn:", "uuid:")):
+        return False
+    try:
+        _uuid.UUID(probe)
+        return True
+    except (ValueError, TypeError, AttributeError):
+        return False
+
+
+def _alias_actor_user_id(team: dict) -> dict:
+    """#2600: canonical ``actor_user_id`` key on a resolved team dict —
+    UUID-gated, never fabricated. Reads the RAW resolver fields (``user_id``
+    / ``created_by`` / ``session_user_id`` — each auth lane carries whichever
+    applies) and aliases to ``actor_user_id`` ONLY when UUID-shaped. Additive:
+    never removes an existing key. Shared by mcp_auth.TeamResolutionMiddleware
+    and the hosted_api REST DI terminals (single implementation, both planes).
+    """
+    raw = team.get("user_id") or team.get("created_by") or team.get(
+        "session_user_id")
+    if _is_uuid_shape(raw):
+        team["actor_user_id"] = raw
+    return team
 
 #: C2 (#2518, #2513): max Object-spine anchors resolved from the query text
 #: (the entity/fact-augmented key expansion pass's additive term source).
@@ -14797,7 +14847,13 @@ class TortoiseSDK:
                     "delegation_depth": delegation_depth,
                     "scopes": scopes,
                     "legacy_full_access": (delegation_depth is None)
-                    and (scopes == [])}
+                    and (scopes == []),
+                    # #2600: RAW key creator rides the resolved dict (the MCP
+                    # middleware's UUID-gated `actor_user_id` alias reads it —
+                    # sdk cannot import supabase_control, so the gate lives in
+                    # the consuming seam). Additive; None for legacy keys that
+                    # predate created_by.
+                    "created_by": m.get("created_by")}
         return None
 
     # ── Control Plane: Agent signup tokens (#1709, approach C) ────────

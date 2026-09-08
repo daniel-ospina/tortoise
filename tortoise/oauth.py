@@ -746,7 +746,14 @@ def resolve_oauth_access_token(cp, token: str) -> dict | None:
     team = _team_row(cp, row["team_id"])
     if team is None:
         return None
-    return _quota_fields(cp, team)
+    team = _quota_fields(cp, team)
+    # #2600: the resolved dict carries the RAW actor fields (the token row's
+    # user_id/client_id) so consuming seams (mcp_auth middleware / REST DI)
+    # can alias the canonical `actor_user_id` — additive, transport-agnostic
+    # (the resolver never aliases; the seam gates UUID shape).
+    team["user_id"] = row.get("user_id")
+    team["client_id"] = row.get("client_id")
+    return team
 
 
 # ── Metadata (P1 — RFC 9728 PRM + RFC 8414 AS metadata) ────────────────────
