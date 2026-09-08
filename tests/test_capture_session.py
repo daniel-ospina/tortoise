@@ -4763,6 +4763,27 @@ def test_apply_supersessions_concurrent_divergent_fold_one_wins(
         sdk1.create_entity("object", "race-O", objectKind="core:strategy")
         sdk1.create_entity("object", "race-B", objectKind="core:strategy")
         sdk1.create_entity("object", "race-C", objectKind="core:strategy")
+        # REVIEW (round 1, P1): assert the PREMISE before racing — BOTH projs
+        # must resolve the SAME shared server graph with exactly ONE live
+        # race-O. A double-fold could otherwise be SDK aliasing (each thread
+        # folded its OWN race-O) rather than a server-atomicity gap; the
+        # premise assert turns any aliasing into a deterministic pre-race
+        # failure instead of a ~4% post-race flake. If the redirect ever
+        # splits, every run fails HERE loudly.
+        for label, proj in (("proj1", proj1), ("proj2", proj2)):
+            n = proj.g.query(
+                "MATCH (o:Object {name:'race-O'}) RETURN count(o)",
+            ).result_set[0][0]
+            assert n == 1, f"{label} must see exactly ONE race-O: {n}"
+        n1 = proj1.g.query(
+            "MATCH (o:Object {name:'race-O', status:'live'}) RETURN count(o)",
+        ).result_set[0][0]
+        n2 = proj2.g.query(
+            "MATCH (o:Object {name:'race-O', status:'live'}) RETURN count(o)",
+        ).result_set[0][0]
+        assert n1 == 1 and n2 == 1, (
+            f"both projs must see the SAME live race-O: proj1={n1} "
+            f"proj2={n2}")
         barrier = threading.Barrier(2)
         orig = proj1.__class__._fold_object_superseded
 
@@ -4791,6 +4812,14 @@ def test_apply_supersessions_concurrent_divergent_fold_one_wins(
         t2.join(30)
         assert not t1.is_alive() and not t2.is_alive(), "threads deadlocked"
         applied_total = sum(r[0] for r in results)
+        # one node-count backstop: even if aliasing slipped past the premise
+        # race (both threads folded DIFFERENT race-O nodes), the double-fold
+        # signature would show 2 nodes here — a test-infra failure, not a
+        # product bug.
+        total_race_o = proj1.g.query(
+            "MATCH (o:Object {name:'race-O'}) RETURN count(o)",
+        ).result_set[0][0]
+        assert total_race_o == 1, f"aliasing: {total_race_o} race-O nodes"
         assert applied_total == 1, f"exactly ONE fold must land: {results}"
         warn_joined = " | ".join(w for r in results for w in r[1])
         assert "lost a concurrent race" in warn_joined, \

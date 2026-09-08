@@ -433,13 +433,19 @@ class TestProjectionFold:
             sdk.close()
 
     def test_fold_returns_match_count(self):
-        """#2164 Task 2: _fold_object_superseded returns the MATCHED-ROW count
-        (additive fold-miss signal).
+        """#2164 Task 2 + #2242: _fold_object_superseded returns the
+        CLASSIFIED tuple (folded, matched) — 0/1 folded replaced the bare
+        matched-row count.
 
-        Pre-change the fold returned None and its Cypher was a bare MATCH…SET
-        with no RETURN — a fold that matched 0 rows (missing Object, stale id)
-        was indistinguishable from a successful fold. Now: 0 = no Object
-        matched (the fold missed), 1 = the Object was folded.
+        Pre-#2164 the fold returned None and its Cypher was a bare MATCH…SET
+        with no RETURN — a fold that matched 0 rows (missing Object, stale
+        id) was indistinguishable from a successful fold. #2164 added the
+        matched-row signal; #2242 split it into (folded, matched): folded =
+        rows actually flipped by THIS fold (the CAS keep-first loser flips
+        0), matched = rows bound (a terminal re-fold still binds the node —
+        (0, 1) — which is how a present-but-terminal target is distinguished
+        from genuine absence (0, 0)). The CAS-contract asserts pass cas=True
+        EXPLICITLY (the default is False/blind — replay parity).
         """
         sdk = _fresh_sdk()
         try:
@@ -513,6 +519,44 @@ class TestProjectionFold:
                 params={"n": "cas-A"}).result_set
             assert rows and rows[0] == ["superseded", "cas-B", ts1], \
                 "CAS must keep the FIRST fold's stamps on a terminal re-fold"
+        finally:
+            sdk.close()
+
+    def test_fold_cas_terminal_id_no_name_fallback_to_other_live_node(self):
+        """#2242 review round-1 P2 pin: the id->name fallback (#2164 ISSUE B)
+        fires ONLY on genuine absence ((0,0)) — a present-but-TERMINAL id
+        node ((0,1)) must never fall back, even when the event name resolves
+        to a DIFFERENT live node (a dup-name carrier). A buggy
+        folded==0-only guard would fold the wrong live node under a name
+        mismatch yet pass every terminal-refold test (which name the SAME
+        terminal node)."""
+        sdk = _fresh_sdk()
+        try:
+            proj = sdk._get_proj()
+            # terminal node T — superseded via a first fold
+            sdk.create_entity("object", "carrier", objectKind="core:strategy")
+            sdk.create_entity("object", "succ", objectKind="core:strategy")
+            oid = proj.g.query(
+                "MATCH (o:Object {name:'carrier'}) RETURN o.id",
+            ).result_set[0][0]
+            fold = proj._fold_object_superseded
+            assert fold({"id": oid, "name": "carrier",
+                          "supersedes_by": "succ"}, cas=True) == (1, 1)
+            # a SECOND live node with the SAME name (raw CREATE — dup-name
+            # carrier; create_entity dedupes by name, only raw writes reach
+            # this shape)
+            proj.g.query(
+                "CREATE (o:Object {name:'carrier', status:'live', id:$id})",
+                params={"id": "carrier-live-raw"})
+            # id branch: oid node present but terminal -> (0,1); if the guard
+            # were folded==0-only the fallback would fold the live carrier
+            assert fold({"id": oid, "name": "carrier",
+                          "supersedes_by": "succ"}, cas=True) == (0, 1)
+            rows = proj.g.query(
+                "MATCH (o:Object {id:'carrier-live-raw'}) "
+                "RETURN o.status, o.supersededBy",
+            ).result_set
+            assert rows and rows[0] == ["live", None],                 f"fallback must NOT fold the dup-name LIVE carrier: {rows}"
         finally:
             sdk.close()
 

@@ -456,23 +456,30 @@ class _EntityHandlers:
         #2242 (CAS): the fold is CONDITIONAL when ``cas=True`` — the LIVE
         path (apply_supersessions, which passes cas=True explicitly) — via a
         single atomic statement computing ``live = (o.status IS NULL OR NOT
-        (o.status IN $excluded))`` before a ``CASE WHEN live`` SET (server-
-        mode single-statement atomicity; metering.py doctrine). Returns
-        (folded, matched): folded = rows actually flipped (were live),
-        matched = rows bound — (0, 0) = no node (fold-miss), (0, N) = node
-        exists but ALREADY terminal (a concurrent commit folded it between
-        this record's gate probe and the fold — the keep-first loser), or an
-        idempotent re-fold; folded > 0 = claimed. First-fold stamps are kept
-        on a terminal re-fold (never re-SET). The id→name fallback (#2164
-        ISSUE B legacy) fires ONLY on matched == 0 (genuine absence) — never
-        when the id node exists but is terminal (a fallback could fold a
-        dup-name carrier or re-claim a terminal target).
+        (o.status IN $excluded))`` before a ``CASE WHEN live`` SET. The
+        atomicity guarantee is SERVER-mode (single-statement serialization
+        on FalkorDB server — metering.py doctrine); embedded self-host
+        threads share one process and can still race the read-modify-write
+        (documented out-of-scope in the plan). Returns (folded, matched):
+        folded = rows actually flipped (were live), matched = rows bound —
+        (0, 0) = no node (fold-miss), (0, N) = node exists but ALREADY
+        terminal: under the live path that is the keep-first loser (a
+        concurrent commit folded it between this record's gate probe and the
+        fold); direct fold callers can also produce it as an idempotent
+        re-fold. folded > 0 = claimed. First-fold stamps are kept on a
+        terminal re-fold (never re-SET). The id→name fallback (#2164 ISSUE B
+        legacy) fires ONLY on matched == 0 (genuine absence) — never when
+        the id node exists but is terminal (a fallback could fold a dup-name
+        carrier or re-claim a terminal target).
 
         ``cas=False`` (the DEFAULT — replay/rebuild surfaces: the pass-1b
         sweep, the apply dispatch, backup restore, consistency, migrate,
         CLI) is the legacy UNCONDITIONAL SET, byte-identical to pre-CAS —
         returning (matched, matched) so the sweep's folded == 0 warn
-        condition ≡ today's matched == 0. Replay MUST stay blind last-wins:
+        condition ≡ today's matched == 0 (the legacy query keeps its
+        ``RETURN o.id LIMIT 1`` — matched ≤ 1 per fold, exactly the pre-CAS
+        count; a multi-node dup-name match folds every bound node but the
+        LIMIT caps the reported row). Replay MUST stay blind last-wins:
         incarnation-reuse shapes (delete→recreate→re-supersede — two fold
         lines for one name belonging to DIFFERENT incarnations) resolve
         LAST-wins (the #2423 point-sweep precedent); a first-wins replay

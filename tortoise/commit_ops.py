@@ -636,7 +636,10 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None):
                 # and NOT counted. Sequential paths can never reach here
                 # (the terminal/visible gates precede the fold in the same
                 # sync block) — this warn is exactly the cross-commit
-                # concurrency signal (#2242 indicator 1).
+                # concurrency signal (#2242 indicator 1). The CAS relies on
+                # server-mode single-statement serialization (metering.py
+                # doctrine); embedded self-host threads within one process
+                # can still race — out of scope, see the plan.
                 if fold_matched == 0:
                     warn(f"ObjectSuperseded emitted for {obj_name!r} but the "
                          f"fold matched no Object — event stays journaled "
