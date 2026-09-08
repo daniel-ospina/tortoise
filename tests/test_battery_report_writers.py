@@ -78,7 +78,10 @@ def _config_dir(tmp_path) -> Path:
         {"arm_id": "mock", "adapter": "battery.arms.mock",
          "price_per_1k_usd": 0.0, "expected_tokens_per_episode": 64},
         {"arm_id": "a0", "adapter": "battery.arms.a0_plain",
-         "price_per_1k_usd": 0.5, "expected_tokens_per_episode": 500}]}),
+         "price_per_1k_usd": 0.5, "expected_tokens_per_episode": 500,
+         # #2292 Task 5: real-mode hermetic runs need the concrete pin +
+         # temp (the pin pre-flight refuses the placeholder sentinel).
+         "model_pin": "deepseek/deepseek-v4-flash", "temperature": 0.0}]}),
         encoding="utf-8")
     (d / "budget.yaml").write_text(yaml.safe_dump(
         {"max_episodes": 1000, "max_estimated_cost_usd": 50.0}),
@@ -371,6 +374,14 @@ class TestEmitterGapHonesty:
         fixture corpus is controls-only — no planted pairs — so the R1
         sentinel lands on the FP-control cell.)"""
         cfg = _config_dir(tmp_path)
+        # Task-9-emulation: the hermetic real-run uses the CURRENT armed
+        # a0 class whose model_id='fixed' sentinel the #2292 pin
+        # pre-flight refuses — clear it (the armed classes are
+        # parameterized off the sentinel at Task 9; the pin gate
+        # guards the real classes until then).
+        import battery.arms.a0_plain as _a0m
+        monkeypatch.setattr(_a0m.A0PlainArm, "model_id",
+                            "deepseek/deepseek-v4-flash")
         out = tmp_path / "out"
         attempt = _run(out, cfg, families={"R1"}, mock=False, arms=["a0"],
                        emit_only={"stated_confidence"}, executor="real",
@@ -424,7 +435,7 @@ class TestEmitterGapHonesty:
 
         class _UnavailableRealArm:
             arm_id = "a0"
-            model_id = "fixed"
+            model_id = "deepseek/deepseek-v4-flash"  # Task-9-emulation arm (pin gate clears)
             temperature = 0.0
 
             def setup_scenarios(self, scenarios):
@@ -467,7 +478,7 @@ class TestEmitterGapHonesty:
 
         class _UnavailableRealArm:
             arm_id = "a0"
-            model_id = "fixed"
+            model_id = "deepseek/deepseek-v4-flash"  # Task-9-emulation arm (pin gate clears)
             temperature = 0.0
 
             def setup_scenarios(self, scenarios):
@@ -928,7 +939,7 @@ class TestRunModeHonesty:
 
         class _InitFailingRealArm:
             arm_id = "a0"
-            model_id = "fixed"
+            model_id = "deepseek/deepseek-v4-flash"  # Task-9-emulation arm (pin gate clears)
             temperature = 0.0
 
             def setup_scenarios(self, scenarios):
@@ -998,6 +1009,14 @@ class TestRunModeHonesty:
         report flips to incomplete_emitter_gap — a real artifact with an
         empty event log is never clean coverage, regardless of scorer."""
         cfg = _config_dir(tmp_path)
+        # Task-9-emulation: the hermetic real-run uses the CURRENT armed
+        # a0 class whose model_id='fixed' sentinel the #2292 pin
+        # pre-flight refuses — clear it (the armed classes are
+        # parameterized off the sentinel at Task 9; the pin gate
+        # guards the real classes until then).
+        import battery.arms.a0_plain as _a0m
+        monkeypatch.setattr(_a0m.A0PlainArm, "model_id",
+                            "deepseek/deepseek-v4-flash")
         out = tmp_path / "out"
         attempt = _run(out, cfg, families=set(), mock=False, arms=["a0"],
                        executor="real", emit_only=set(),

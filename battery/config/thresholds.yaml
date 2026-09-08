@@ -25,6 +25,13 @@ determinism:
     outcome_timeout: 1e-6         # derived/objective — measured |Δ|=0.0
     re_derivations: 1e-6          # derived/objective — measured |Δ|=0.0
     total_tokens: 1e-6            # derived/objective — measured |Δ|=0.0
+    # PROVISIONAL real-path row (#2292 Task 7): probe-emittable usage/
+    # token rows are NOT transcript-locked — the mock-lane 1e-6 seed never
+    # applies to real usage. Value 1000 = measured two-run probe |Δ|
+    # per-episode deliberation tokens (2026-09-08 runs: mean 3405 vs 4399
+    # tok/ep, same seed 7, 8 episodes; scaffold scope). Real-path
+    # confirmation + finalization at #2284 Task 8 exposure.
+    probe_usage_tokens_episode: 1000.0
 
 cal:
   # metric -> {arm -> value}. Values are [cal]-locked; re-locking is a
@@ -36,8 +43,22 @@ cal:
   # gate path consumes profile.json control_records once Task 9 emits bct
   # control verdicts.
   classification-delta: 0.10
-  surfaced-rate: {a4: 0.90, a0: 0.00}
-  coverage-subscore: {a4: 0.50, a0: 0.35}
+  # Post-I-1 seed-mode semantics (#2292 Task 7): the a4 expectation is the
+  # MOCK-LANE MEASURED planted-population surfaced rate under the seed-mode
+  # split (04-plan fixture matrix A4 0.92) — strictly above the no-store
+  # comparator AND strictly above the verbatim E2E-1.1 90% AC nominal
+  # (a row copied verbatim from the AC number is an undecidable boundary
+  # lock). Consistent with the E2E-1.1 >= 90% gate target.
+  surfaced-rate: {a4: 0.92, a0: 0.00}
+  # R2 judged-subscore gate (decision (e), #2292 Task 7): ONE canonical
+  # form — a4-expectation >= 1.5x a0-expectation WITH the a0=0 floor
+  # (control == 0 => gate passes iff treatment > 0; the config
+  # expectation assert and the runtime gate agree at the boundary).
+  # a0 (no-store control) = 0.0 judged-subscore floor; a4 = 0.50
+  # (judged subscore over validated-rubric deliberation renders;
+  # the mock-era A4 0.51 | A0 0.50 PARITY row is STALE — superseded
+  # 2026-09-08).
+  coverage-subscore: {a4: 0.50, a0: 0.00}
   brier: {a4: 0.25, a0: 0.30}
   defeat-precision: {a4: 0.70, a0: 0.00}
   correct-direction-rate: {a4: 0.90, a0: 0.50}
@@ -50,4 +71,15 @@ cal:
   # credibility NAND write pushes the claim to ~0.05-0.06 (probe 2026-09-07).
   # Passed EXPLICITLY as variance_threshold by the arm (never a tortoise/
   # default edit, never an inline constant). READ-ONLY to #2284 Tasks 7/8.
+  # placeholder-locked provisional rows (#2292 Task 7): measurement path is
+  # #2284 Task 9 EXECUTOR-owned (bct control-verdict emission + the
+  # flip/fp rate pools — fp denominator = bct benign twins pooled across
+  # arms x runs, #2284 Task 3 corpus). Values trace to the AC nominal
+  # UPPER-BOUND caps as placeholders (flip-flop <= 10%, fp <= 5%, E2E-1.1)
+  # — placeholder-locked: NEVER presented as measured or stale-guess-as-locked.
+  #   Extends the
+  # PR #2341 round-4 deferral note (FP gate path consumes
+  # profile.json control_records once Task 9 emits bct control verdicts).
+  flip-flop-rate: {a4: 0.10}
+  false-positive-rate: {a4: 0.05}
   ep-variance: {a4: 0.04}
