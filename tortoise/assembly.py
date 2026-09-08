@@ -47,6 +47,9 @@ Subjects are returned as RAW text spans (quotes/possessives intact —
 """
 from __future__ import annotations
 
+# ruff: noqa: I001  — the module is deliberately section-appended (each
+# #2165 task adds its own imports mid-file); global import-sorting would
+# restructure the append boundary on every task.
 import re
 from enum import StrEnum
 
@@ -278,7 +281,8 @@ def extract_subject_terms(question: str,
 # both-halves gate keeps the fired decision false, R1).
 # ══════════════════════════════════════════════════════════════════════════
 
-from dataclasses import dataclass  # noqa: E402
+from dataclasses import dataclass, field  # noqa: E402
+from datetime import UTC as _UTC, date as _date, datetime as _datetime  # noqa: E402
 from typing import Protocol  # noqa: E402
 
 
@@ -501,3 +505,209 @@ def docker_resolver_port(sdk) -> ResolverPort:
     return types.SimpleNamespace(exact_objects=exact_objects,
                                  fts_objects=fts_objects,
                                  alias_objects=alias_objects)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# #2165 Task 4 — typed walker + slice builder (R2/R3-8/R12, R17 P3-1/
+# P3-6; P3-3 DEFERRED: the _RECALL_OBJECT_EXCLUDED_STATUS Object-status
+# exclusion tuple binds at RESOLVE/RENDER time (Task 5) — it is NEVER
+# applied to a resolved subject's own state row (the superseded couch's
+# state IS the answer) nor to Points). One batched typed walk (never
+# row-level N+1, never blind BFS): state slice
+# (Object status/supersededBy/supersededAt in ONE statement), dated spine
+# (aboutObject Points ∪ Event-aboutObject edges ∪ product-lane eventId
+# join), evidence view (points with validity + EP). Per-lane date ladder
+# when → createdAt (sentinel-stripped) → eventId-joined startedAt (R2);
+# parse-fail FALLS THROUGH the ladder (never undated while a usable date
+# exists); undated is reserved for rows with NO usable date. As-of windows
+# exclude rows dated after question_date (equality-day inclusive, UTC date
+# truncation via the shared _norm_date helper).
+# ══════════════════════════════════════════════════════════════════════════
+
+# the v2-lane undated sentinel (tools/longmem_eval/ingest.UNDATED_SENTINEL —
+# stable value, mirrored here so the pure module never imports tools)
+_UNDATED_SENTINEL = "1970-01-01T00:00:00Z"
+_TIER_ORDER = {"when": 0, "created": 1, "started": 2, "undated": 3}
+
+
+@dataclass(frozen=True)
+class AssemblySlices:
+    """The walker's typed output — consumed by the Task-5 renderer."""
+
+    state_rows: tuple = ()
+    timeline_rows: tuple = ()
+    evidence_rows: tuple = ()
+    admission: dict = field(default_factory=dict)
+
+
+class WalkerPort(Protocol):
+    """Graph seam for the walker (dict-stubbed in unit tests; the docker
+    adapter wraps a live projection)."""
+
+    def state_rows(self, object_ids: list[str]) -> list[dict]: ...
+
+    def spine_rows(self, object_ids: list[str],
+                   per_subject_cap: int) -> list[dict]: ...
+
+
+def _norm_date(value) -> _date | None:
+    """Shared date normalization — the SINGLE source for the as-of equality
+    boundary AND the Task-5 ordering/diff arithmetic: parse (ISO datetime
+    with Z, or YYYY-MM-DD) → sentinel-strip → UTC DATE truncation
+    (date-only semantics: 2026-06-10T23:30:00Z → 2026-06-10). Returns None
+    for absent/garbage/sentinel values — never raises."""
+    if not value:
+        return None
+    s = str(value).strip()
+    if not s:
+        return None
+    try:
+        if "T" in s or " " in s:
+            dt = s.replace("Z", "+00:00").replace(" ", "T")
+            dt = _datetime.fromisoformat(dt)
+            if dt.tzinfo is not None:
+                # aware instants truncate in UTC — NEVER the machine-local
+                # zone (a host-dependent day-boundary would scramble the
+                # as-of equality boundary and Task-5 byte-goldens)
+                dt = dt.astimezone(_UTC)
+            d = dt.date()
+        else:
+            d = _date.fromisoformat(s[:10])
+    except (ValueError, TypeError):
+        return None
+    # sentinel-strip: the v2-lane undated marker (and any pre-1970 epoch
+    # artifact) is NOT a usable date
+    if d <= _date(1970, 1, 1):
+        return None
+    return d
+
+
+def _tier_and_date(row: dict) -> tuple[str, _date | None]:
+    """R2 ladder for ONE spine row: when → createdAt → startedAt, each
+    parse-gated; a malformed value FALLS THROUGH to the next tier (never
+    undated while a usable date exists). Returns (tier, normalized date)."""
+    for key, tier in (("when", "when"), ("created_at", "created"),
+                      ("started_at", "started")):
+        d = _norm_date(row.get(key))
+        if d is not None:
+            return tier, d
+    return "undated", None
+
+
+def collect_slices(port: WalkerPort, candidates: list[SubjectCandidate], *,
+                   shape: AssemblyShape | None,
+                   question_date=None,
+                   per_subject_cap: int = 200) -> AssemblySlices:
+    """One batched typed walk over the resolved subjects → typed slices.
+
+    State rows come back in a SINGLE port.state_rows call (one statement —
+    no torn supersession header under a concurrent #2242 fold); spine rows
+    in one port.spine_rows call. Each spine row is date-tiered by the R2
+    ladder and ordered: dated ascending (deterministic tiebreak: subject
+    object_id, then row id), undated LAST. ``question_date`` (optional) is
+    the as-of window: rows dated AFTER it are excluded (equality-day
+    inclusive after UTC truncation); undated rows are always retained
+    undated-last. Never raises on malformed stored dates (they fall through
+    the ladder).
+    """
+    if not candidates:
+        return AssemblySlices()
+    object_ids = [c.object_id for c in candidates]
+    state_rows = list(port.state_rows(object_ids) or [])
+    spine_raw = list(port.spine_rows(object_ids, per_subject_cap) or [])
+
+    timeline: list[dict] = []
+    per_subject_counts: dict[str, int] = {}
+    for row in spine_raw:
+        oid = str(row.get("object_id") or "")
+        # per-subject cap enforced post-fetch (single batched query)
+        per_subject_counts[oid] = per_subject_counts.get(oid, 0) + 1
+        if per_subject_counts[oid] > per_subject_cap:
+            continue
+        row = dict(row)
+        tier, d = _tier_and_date(row)
+        row["tier"] = tier
+        row["date"] = d
+        timeline.append(row)
+
+    # as-of window: exclude rows dated AFTER question_date (undated kept)
+    if question_date is not None:
+        dq = _norm_date(question_date)
+        if dq is not None:
+            timeline = [r for r in timeline
+                        if r["date"] is None or r["date"] <= dq]
+
+    # CHRONOLOGICAL spine: date primary (undated -> _date.max -> naturally
+    # LAST), deterministic tiebreak object_id then id (R17 P3-6)
+    timeline.sort(key=lambda r: (r["date"] or _date.max,
+                                 r.get("object_id", ""), r.get("id", "")))
+    # evidence view = the point rows (validity + EP carried on the row)
+    evidence_rows = [r for r in timeline if r.get("kind") == "point"]
+    rows_requested = per_subject_cap * len(object_ids)
+    truncated = any(per_subject_counts.get(oid, 0) >= per_subject_cap
+                    for oid in object_ids)
+    return AssemblySlices(
+        state_rows=tuple(state_rows),
+        timeline_rows=tuple(timeline),
+        evidence_rows=tuple(evidence_rows),
+        admission={"rows_requested": rows_requested,
+                   "rows_admitted": len(timeline),
+                   "truncated": truncated})
+
+
+def docker_walker_port(sdk) -> WalkerPort:
+    """Adapter over a live TortoiseSDK: the state read is ONE batched
+    Cypher statement (status/supersededBy/supersededAt together — no torn
+    header under a concurrent fold); the spine is ONE batched points+events
+    walk per subject set (never N+1)."""
+    proj = sdk._get_proj()
+
+    def state_rows(object_ids: list[str]) -> list[dict]:
+        rows = proj.g.query(
+            "MATCH (o:Object) WHERE o.id IN $ids "
+            "RETURN o.id, o.name, o.status, o.supersededBy, o.supersededAt",
+            params={"ids": object_ids}).result_set
+        return [{"object_id": r[0], "name": r[1], "status": r[2],
+                 "superseded_by": r[3], "superseded_at": r[4]} for r in rows]
+
+    def spine_rows(object_ids: list[str],
+                   per_subject_cap: int = 200) -> list[dict]:
+        # Deterministic + PER-SUBJECT-FAIR: one ORDER BY id LIMIT query per
+        # subject per kind (bounded: 2 kinds x len(subjects) — never per-row
+        # N+1). A shared LIMIT over the subject set would let a hub starve a
+        # co-subject and make the surviving rows engine-order-dependent.
+        if not object_ids:
+            return []
+        out: list[dict] = []
+        for oid in object_ids:
+            prow = proj.g.query(
+                "MATCH (o:Object {id:$oid})<-[:aboutObject]-(p:Point) "
+                "RETURN 'point' AS kind, p.id, p.content, p.when, "
+                "p.createdAt, p.status, p.validFrom, p.ep_alpha, p.ep_beta, "
+                "p.quote, p.search_keys, p.eventId, p.lme_session_index "
+                "ORDER BY p.id LIMIT $cap",
+                params={"oid": oid, "cap": per_subject_cap}).result_set
+            for r in prow:
+                out.append({"object_id": oid, "kind": r[0], "id": r[1],
+                            "content": r[2], "when": r[3],
+                            "created_at": r[4], "status": r[5],
+                            "valid_from": r[6], "ep_alpha": r[7],
+                            "ep_beta": r[8], "quote": r[9],
+                            "search_keys": r[10], "event_id": r[11],
+                            "lme_session_index": r[12]})
+            erow = proj.g.query(
+                "MATCH (o:Object {id:$oid})<-[:aboutObject]-(e:Event) "
+                "RETURN 'event' AS kind, e.eventId, e.content, e.startedAt, "
+                "e.status, e.lme_event_id, e.lme_session_index "
+                "ORDER BY e.eventId LIMIT $cap",
+                params={"oid": oid, "cap": per_subject_cap}).result_set
+            for r in erow:
+                out.append({"object_id": oid, "kind": r[0], "id": r[1],
+                            "content": r[2], "started_at": r[3],
+                            "status": r[4], "lme_event_id": r[5],
+                            "lme_session_index": r[6]})
+        return out
+
+    import types
+    return types.SimpleNamespace(state_rows=state_rows,
+                                 spine_rows=spine_rows)

@@ -641,3 +641,424 @@ def test_resolver_docker_alias_leg(_docker_sdk):
     assert c.name == "couch"
     assert c.source == "alias"
     assert c.confidence == "low"
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# #2165 Task 4 — typed walker + slice builder (R2/R3-8/R12, R17 P3-1/P3-3/
+# P3-6). RED→GREEN: collect_slices / AssemblySlices / WalkerPort /
+# docker_walker_port are new symbols in tortoise/assembly.py.
+# ══════════════════════════════════════════════════════════════════════════
+
+from tortoise.assembly import (  # noqa: E402
+    collect_slices,
+    docker_walker_port,
+)
+
+
+class _DictWalkerPort:
+    """In-memory WalkerPort over {object_id: {state, points, events}}."""
+
+    def __init__(self, graph):
+        self._g = graph
+        self.state_calls = 0
+
+    def state_rows(self, object_ids):
+        self.state_calls += 1
+        out = []
+        for oid in object_ids:
+            o = self._g.get(oid)
+            if o:
+                out.append(dict(o["state"]))
+        return out
+
+    def spine_rows(self, object_ids, per_subject_cap=200):
+        out = []
+        for oid in object_ids:
+            o = self._g.get(oid) or {}
+            rows = list(o.get("points", [])) + list(o.get("events", []))
+            out.extend(rows[:per_subject_cap])
+        return out
+
+
+def _fixture_walker_port():
+    return _DictWalkerPort({
+        "obj-couch": {
+            "state": {"object_id": "obj-couch", "name": "couch",
+                      "status": "superseded", "superseded_by": "sofa",
+                      "superseded_at": "2026-09-01T00:00:00Z"},
+            "points": [
+                {"object_id": "obj-couch", "kind": "point",
+                 "id": "pA-couch-bought", "content": "bought the grey couch",
+                 "when": "2026-08-10", "created_at": "2026-08-10",
+                 "status": "live", "ep_alpha": 8.0, "ep_beta": 1.5},
+                {"object_id": "obj-couch", "kind": "point",
+                 "id": "pX-undated", "content": "undated couch note",
+                 "when": None, "created_at": "1970-01-01T00:00:00Z",
+                 "status": "live", "ep_alpha": None, "ep_beta": None},
+            ],
+            "events": [],
+        },
+        "obj-dogbed": {
+            "state": {"object_id": "obj-dogbed", "name": "dog bed",
+                      "status": "live", "superseded_by": None,
+                      "superseded_at": None},
+            "points": [
+                {"object_id": "obj-dogbed", "kind": "point",
+                 "id": "pA-dogbed-chewed", "content": "dog chewed the bed",
+                 "when": None, "created_at": "2026-08-10",
+                 "status": "live", "ep_alpha": 6.0, "ep_beta": 2.0},
+            ],
+            "events": [],
+        },
+    })
+
+
+def _cand(oid, name, idx):
+    from tortoise.assembly import SubjectCandidate
+    return SubjectCandidate(subject_index=idx, object_id=oid, name=name,
+                            confidence="high", source="exact")
+
+
+def test_walker_state_slice_single_statement_and_statuses():
+    """State slice: status/supersededBy/supersededAt read in ONE statement
+    (mock-port pins the single-statement read — never N reads); the
+    superseded couch carries its full fold state + pinned supersededAt."""
+    port = _fixture_walker_port()
+    res = collect_slices(port,
+                         [_cand("obj-couch", "couch", 0),
+                          _cand("obj-dogbed", "dog bed", 1)],
+                         shape=AssemblyShape.ORDERING)
+    assert port.state_calls == 1, "state slice must be a SINGLE statement"
+    by_id = {r["object_id"]: r for r in res.state_rows}
+    assert by_id["obj-couch"]["status"] == "superseded"
+    assert by_id["obj-couch"]["superseded_by"] == "sofa"
+    assert by_id["obj-couch"]["superseded_at"] == "2026-09-01T00:00:00Z"
+    assert by_id["obj-dogbed"]["status"] == "live"
+
+
+def test_walker_date_ladder_tiers_and_undated_last():
+    """R2 ladder: when (parseable) → tier when; createdAt (sentinel-stripped)
+    → tier created; NO usable date → tier undated. Spine rows carry tier +
+    a normalized date; dated rows sort before undated rows."""
+    port = _fixture_walker_port()
+    res = collect_slices(port,
+                         [_cand("obj-couch", "couch", 0),
+                          _cand("obj-dogbed", "dog bed", 1)],
+                         shape=AssemblyShape.ORDERING)
+    by_id = {r["id"]: r for r in res.timeline_rows}
+    assert by_id["pA-couch-bought"]["tier"] == "when"
+    assert by_id["pA-dogbed-chewed"]["tier"] == "created"
+    assert by_id["pX-undated"]["tier"] == "undated"
+    assert by_id["pX-undated"]["date"] is None
+    # CHRONOLOGICAL order: dated rows nondecreasing by date, undated LAST
+    # (date-major, NOT tier-major — sparse-when graphs mix tiers routinely)
+    dated = [r for r in res.timeline_rows if r["date"] is not None]
+    dates = [r["date"] for r in dated]
+    assert dates == sorted(dates), dates
+    assert res.timeline_rows[-1]["id"] == "pX-undated"
+    # admission metadata
+    assert res.admission["rows_requested"] >= len(res.timeline_rows)
+    assert res.admission["truncated"] is False
+
+
+def test_walker_malformed_when_falls_through_ladder():
+    """Malformed `when` + a REAL (non-sentinel) createdAt → tier created —
+    NEVER undated while a usable date exists; malformed when + sentinel
+    createdAt → undated. Never a raise."""
+    port = _fixture_walker_port()
+    port._g["obj-garbage"] = {
+        "state": {"object_id": "obj-garbage", "name": "garbage",
+                  "status": "live"},
+        "points": [
+            {"object_id": "obj-garbage", "kind": "point",
+             "id": "pG1", "content": "garbage when + valid created",
+             "when": "not-a-real-date-2026", "created_at": "2026-08-01",
+             "status": "live", "ep_alpha": None, "ep_beta": None},
+            {"object_id": "obj-garbage", "kind": "point",
+             "id": "pG2", "content": "garbage when + sentinel created",
+             "when": "not-a-real-date-2026",
+             "created_at": "1970-01-01T00:00:00Z",
+             "status": "live", "ep_alpha": None, "ep_beta": None},
+        ],
+        "events": [],
+    }
+    res = collect_slices(port, [_cand("obj-garbage", "garbage", 0)],
+                         shape=AssemblyShape.CURRENT_STATE)
+    by_id = {r["id"]: r for r in res.timeline_rows}
+    assert by_id["pG1"]["tier"] == "created", "usable createdAt must date it"
+    assert by_id["pG2"]["tier"] == "undated"
+    assert by_id["pG1"]["date"] is not None
+
+
+@_docker_only
+def test_walker_events_hosted_variant_started_tier(_docker_sdk):
+    """Hosted-variant Event-aboutObject edges → Event spine rows dated by
+    startedAt (tier started). Base graph (zero Event edges) → no event rows."""
+    _ag.build_base_graph(_docker_sdk)
+    _ag.build_hosted_variant(_docker_sdk)
+    # resolve couch + dog bed through the real lane
+    from tortoise.assembly import docker_resolver_port, resolve_subjects
+    rport = docker_resolver_port(_docker_sdk)
+    res = resolve_subjects(rport, ["the couch", "the dog bed"],
+                           shape=AssemblyShape.ORDERING)
+    slices = collect_slices(docker_walker_port(_docker_sdk),
+                            list(res.candidates),
+                            shape=AssemblyShape.ORDERING)
+    kinds = {r["kind"] for r in slices.timeline_rows}
+    assert "event" in kinds
+    ev_rows = [r for r in slices.timeline_rows if r["kind"] == "event"]
+    assert ev_rows and all(r["tier"] == "started" for r in ev_rows)
+    assert all(r["date"] is not None for r in ev_rows)
+
+
+@_docker_only
+def test_walker_base_graph_zero_event_rows(_docker_sdk):
+    """Base v2-lane graph: Points only (zero Event-aboutObject edges) — the
+    spine assembles from point rows alone (tier when/created), no event rows,
+    no eventId join (R2 vacuous on the eval lane)."""
+    _ag.build_base_graph(_docker_sdk)
+    from tortoise.assembly import docker_resolver_port, resolve_subjects
+    rport = docker_resolver_port(_docker_sdk)
+    res = resolve_subjects(rport, ["the couch"], shape=AssemblyShape.CURRENT_STATE)
+    slices = collect_slices(docker_walker_port(_docker_sdk),
+                            list(res.candidates),
+                            shape=AssemblyShape.CURRENT_STATE)
+    assert all(r["kind"] == "point" for r in slices.timeline_rows)
+    assert all(not r.get("event_id") for r in slices.timeline_rows)
+    assert slices.state_rows and slices.state_rows[0]["name"] == "couch"
+
+
+def test_walker_hub_cap_binds_at_query():
+    """R12/C8: a hub subject with rows > the per-slice pre-fetch cap →
+    rows_requested == cap, truncated True, rows_admitted < total. The cap
+    binds AT THE QUERY (the port never receives rows beyond cap)."""
+    port = _fixture_walker_port()
+    port._g["obj-hub"] = {
+        "state": {"object_id": "obj-hub", "name": "hub", "status": "live"},
+        "points": [
+            {"object_id": "obj-hub", "kind": "point", "id": f"pH{i}",
+             "content": f"hub note {i}", "when": None,
+             "created_at": f"2026-0{(i % 9) + 1}-05", "status": "live",
+             "ep_alpha": None, "ep_beta": None}
+            for i in range(10)],
+        "events": [],
+    }
+    res = collect_slices(port, [_cand("obj-hub", "hub", 0)],
+                         shape=AssemblyShape.CURRENT_STATE,
+                         per_subject_cap=4)
+    assert res.admission["rows_requested"] == 4
+    assert res.admission["truncated"] is True
+    assert len(res.timeline_rows) == 4
+    assert res.admission["rows_admitted"] <= 4
+
+
+# ── Task-4 acceptance pins: as-of, terminal-points, tiebreak, interleave ──
+
+def test_norm_date_utc_truncation_host_independent():
+    """Shared helper contract (second-model P2-3): aware instants truncate
+    in UTC regardless of the machine zone — near-day-boundary full-ISO
+    values map identically on every host (2026-06-10T23:30:00Z → 2026-06-10;
+    rollover 2026-06-11T00:30:00Z → 2026-06-11). Sentinel/garbage → None."""
+    from tortoise.assembly import _norm_date
+    assert _norm_date("2026-06-10T23:30:00Z").isoformat() == "2026-06-10"
+    assert _norm_date("2026-06-11T00:30:00Z").isoformat() == "2026-06-11"
+    assert _norm_date("2026-09-01T00:00:00Z").isoformat() == "2026-09-01"
+    assert _norm_date("2026-09-01T02:00:00+02:00").isoformat() == "2026-09-01"
+    assert _norm_date("2026-06-10").isoformat() == "2026-06-10"
+    assert _norm_date("1970-01-01T00:00:00Z") is None
+    assert _norm_date("not-a-date") is None
+    assert _norm_date(None) is None and _norm_date("") is None
+
+
+def test_walker_as_of_window_excludes_post_d_keeps_boundary():
+    """As-of window: rows dated AFTER question_date excluded; the
+    EQUALITY-DAY boundary (date-only row == question_date) is RETAINED
+    (UTC-truncated comparison); undated rows admitted undated-last."""
+    port = _fixture_walker_port()
+    port._g["obj-couch"]["points"].extend([
+        {"object_id": "obj-couch", "kind": "point", "id": "pB-sold",
+         "content": "sold couch on the boundary day", "when": "2026-09-01",
+         "created_at": "2026-09-01", "status": "live",
+         "ep_alpha": None, "ep_beta": None},
+        {"object_id": "obj-couch", "kind": "point", "id": "pB-later",
+         "content": "post-D couch event", "when": "2026-09-05",
+         "created_at": "2026-09-05", "status": "live",
+         "ep_alpha": None, "ep_beta": None},
+    ])
+    res = collect_slices(port, [_cand("obj-couch", "couch", 0)],
+                         shape=AssemblyShape.CURRENT_STATE,
+                         question_date="2026-09-01T00:00:00Z")
+    ids = [r["id"] for r in res.timeline_rows]
+    assert "pB-sold" in ids, "equality-day row MUST be retained (UTC date)"
+    assert "pB-later" not in ids, "post-D row must be excluded"
+    assert ids[-1] == "pX-undated", "undated retained undated-LAST"
+    # state slice is as-of-agnostic here (supersession header math is Task 5)
+    assert res.state_rows[0]["superseded_at"] == "2026-09-01T00:00:00Z"
+
+
+def test_walker_terminal_points_retained_distinct_from_object_tuple():
+    """TERMINAL-POINT semantics pinned SEPARATELY from the Object-status
+    tuple: a retracted POINT stays in the spine (tier + status intact) and
+    in evidence_rows — the Object exclusion ({superseded,...}) is NEVER
+    applied to Points (Task 5 renders the D8 marker)."""
+    port = _fixture_walker_port()
+    port._g["obj-dogbed"]["points"].append(
+        {"object_id": "obj-dogbed", "kind": "point", "id": "pRetracted",
+         "content": "dog bed note later retracted", "when": None,
+         "created_at": "2026-08-11", "status": "retracted",
+         "ep_alpha": None, "ep_beta": None})
+    res = collect_slices(port, [_cand("obj-dogbed", "dog bed", 0)],
+                         shape=AssemblyShape.CURRENT_STATE)
+    by_id = {r["id"]: r for r in res.timeline_rows}
+    assert "pRetracted" in by_id
+    assert by_id["pRetracted"]["status"] == "retracted"
+    assert by_id["pRetracted"]["tier"] == "created"
+    assert any(r["id"] == "pRetracted" for r in res.evidence_rows)
+    # the superseded OBJECT (couch) is a DIFFERENT slice (state_rows)
+    res2 = collect_slices(port, [_cand("obj-couch", "couch", 0)],
+                          shape=AssemblyShape.CURRENT_STATE)
+    assert res2.state_rows[0]["status"] == "superseded"
+
+
+def test_walker_same_date_tiebreak_deterministic():
+    """R17 P3-6: two same-date rows (cross-subject) order by object_id then
+    id; two collect_slices calls on the same port yield byte-identical
+    timeline id order."""
+    port = _fixture_walker_port()
+    # same when-date on both subjects; also same-date same-subject
+    port._g["obj-couch"]["points"].append(
+        {"object_id": "obj-couch", "kind": "point", "id": "pB1",
+         "content": "b1", "when": "2026-09-01", "created_at": "2026-09-01",
+         "status": "live", "ep_alpha": None, "ep_beta": None})
+    port._g["obj-dogbed"]["points"].append(
+        {"object_id": "obj-dogbed", "kind": "point", "id": "pB2",
+         "content": "b2", "when": "2026-09-01", "created_at": "2026-09-01",
+         "status": "live", "ep_alpha": None, "ep_beta": None})
+    res1 = collect_slices(port,
+                          [_cand("obj-couch", "couch", 0),
+                           _cand("obj-dogbed", "dog bed", 1)],
+                          shape=AssemblyShape.ORDERING)
+    res2 = collect_slices(port,
+                          [_cand("obj-couch", "couch", 0),
+                           _cand("obj-dogbed", "dog bed", 1)],
+                          shape=AssemblyShape.ORDERING)
+    ids1 = [r["id"] for r in res1.timeline_rows]
+    ids2 = [r["id"] for r in res2.timeline_rows]
+    assert ids1 == ids2, "two calls must be byte-identical"
+    # cross-subject same-date: obj-couch ('obj-couch') < obj-dogbed, so
+    # the couch's pB1 comes before dogbed's pB2
+    assert ids1.index("pB1") < ids1.index("pB2")
+
+
+def test_walker_torn_read_interleave_no_crash():
+    """cycle-2 P2: a #2242 fold injected BETWEEN the state read and the
+    spine read renders deterministically (whichever window won) — no crash,
+    each slice reflects its own read window."""
+    port = _fixture_walker_port()
+    orig_spine = port.spine_rows
+
+    def _interleaved_spine(object_ids, per_subject_cap=200):
+        # the fold lands mid-walk: couch flips to live + a new point appears
+        port._g["obj-couch"]["state"]["status"] = "live"
+        port._g["obj-couch"]["state"]["superseded_by"] = None
+        port._g["obj-couch"]["points"].append(
+            {"object_id": "obj-couch", "kind": "point", "id": "pMid",
+             "content": "written after the fold", "when": None,
+             "created_at": "2026-09-02", "status": "live",
+             "ep_alpha": None, "ep_beta": None})
+        return orig_spine(object_ids, per_subject_cap)
+
+    port.spine_rows = _interleaved_spine
+    res = collect_slices(port, [_cand("obj-couch", "couch", 0)],
+                         shape=AssemblyShape.CURRENT_STATE)
+    # state read happened BEFORE the fold → superseded; spine read AFTER →
+    # includes pMid. Deterministic per-window render, no crash.
+    assert res.state_rows[0]["status"] == "superseded"
+    assert any(r["id"] == "pMid" for r in res.timeline_rows)
+
+
+def test_walker_cap_backstop_on_faithful_port():
+    """The python-side per-subject cap is a real backstop for ports that
+    return more than cap rows (the docker lane caps AT THE QUERY; the stub
+    here returns ALL rows so the drop branch actually executes)."""
+    port = _fixture_walker_port()
+    port._g["obj-hub"] = {
+        "state": {"object_id": "obj-hub", "name": "hub", "status": "live"},
+        "points": [
+            {"object_id": "obj-hub", "kind": "point", "id": f"pH{i}",
+             "content": f"hub note {i}", "when": None,
+             "created_at": f"2026-0{(i % 9) + 1}-05", "status": "live",
+             "ep_alpha": None, "ep_beta": None}
+            for i in range(10)],
+        "events": [],
+    }
+    # faithful port: NO pre-slicing (returns all 10)
+    class _Faithful(_DictWalkerPort):
+        def spine_rows(self, object_ids, per_subject_cap=200):
+            out = []
+            for oid in object_ids:
+                o = self._g.get(oid) or {}
+                out.extend(o.get("points", []))
+                out.extend(o.get("events", []))
+            return out
+
+    res = collect_slices(_Faithful(port._g), [_cand("obj-hub", "hub", 0)],
+                         shape=AssemblyShape.CURRENT_STATE,
+                         per_subject_cap=4)
+    assert len(res.timeline_rows) == 4
+    assert res.admission["rows_requested"] == 4
+    assert res.admission["truncated"] is True
+    assert res.admission["rows_admitted"] == 4
+
+
+@_docker_only
+def test_walker_docker_state_round_trip_superseded_at(_docker_sdk):
+    """The docker state Cypher's positional mapping is pinned: couch state
+    row round-trips status/supersededBy/supersededAt through the real lane
+    (supersededAt == the fixture's pinned 2026-09-01T00:00:00Z)."""
+    _ag.build_base_graph(_docker_sdk)
+    from tortoise.assembly import docker_resolver_port, docker_walker_port, resolve_subjects
+    rport = docker_resolver_port(_docker_sdk)
+    res = resolve_subjects(rport, ["the couch"], shape=AssemblyShape.CURRENT_STATE)
+    slices = collect_slices(docker_walker_port(_docker_sdk),
+                            list(res.candidates),
+                            shape=AssemblyShape.CURRENT_STATE)
+    row = slices.state_rows[0]
+    assert row["name"] == "couch"
+    assert row["status"] == "superseded"
+    assert row["superseded_by"] == "sofa"
+    assert row["superseded_at"] == "2026-09-01T00:00:00Z"
+
+
+@_docker_only
+def test_walker_docker_hub_cap_binds_per_subject(_docker_sdk):
+    """R12/C8 live: build_hub_graph (60 points) walked at per_subject_cap 20
+    → truncated True, rows_admitted == 20 < 60; and a two-subject walk keeps
+    each subject's rows independent (hub capped at 20 does NOT starve the
+    quiet dog-bed subject)."""
+    _ag.build_hub_graph(_docker_sdk, n_points=60)
+    _ag.build_base_graph(_docker_sdk)
+    from tortoise.assembly import docker_resolver_port, docker_walker_port, resolve_subjects
+    rport = docker_resolver_port(_docker_sdk)
+    res = resolve_subjects(rport, ["the hub-subject", "the dog bed"],
+                           shape=AssemblyShape.ORDERING)
+    assert res.both_halves_ok(AssemblyShape.ORDERING) is True, \
+        "both halves must resolve"
+    by_idx = {c.subject_index: c for c in res.candidates}
+    hub_oid = by_idx[0].object_id
+    dogbed_oid = by_idx[1].object_id
+    slices = collect_slices(docker_walker_port(_docker_sdk),
+                            list(res.candidates),
+                            shape=AssemblyShape.ORDERING,
+                            per_subject_cap=20)
+    assert slices.admission["truncated"] is True
+    hub_rows = [r for r in slices.timeline_rows
+                if r["object_id"] == hub_oid]
+    dogbed_rows = [r for r in slices.timeline_rows
+                   if r["object_id"] == dogbed_oid]
+    # hub kept EXACTLY its cap (ORDER BY id deterministic per subject);
+    # the quiet co-subject still received ALL its rows — never starved
+    assert len(hub_rows) == 20
+    assert slices.admission["rows_admitted"] == 20 + len(dogbed_rows)
+    assert len(dogbed_rows) == 2, \
+        "base graph dog bed: pA-dogbed-chewed + pA-vet (2 anchored points)"
