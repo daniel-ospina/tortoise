@@ -58,9 +58,13 @@ CLASSIFICATION_TABLE = [
     ("what did i eat for dinner on tuesday", False, None, None),
     ("did i go running yesterday morning", False, None, None),
     # how-long / elapsed-time are TEMPORAL-REASONING classes (R5 #1544),
-    # not counting aggregation
+    # not counting aggregation — same-semantic "since/back/has passed"
+    # pairs included (P1 #2607 review pin)
     ("how long was the flight to costa rica", False, None, None),
     ("how many days ago did i go running", False, None, None),
+    ("how many days since the api migration", False, None, None),
+    ("how many weeks back did we discuss the migration", False, None, None),
+    ("how much time has passed since the migration", False, None, None),
     ("what is my current api key status", False, None, None),
     ("", False, None, None),
     (None, False, None, None),
@@ -139,6 +143,9 @@ def test_detector_elapsed_time_and_how_long_never_aggregative():
     "how many/much" surface words."""
     for q in ("how many days ago did i last see my dentist",
               "how many weeks ago did we discuss the migration",
+              "how many days since the api migration",
+              "how many weeks back did we discuss the migration",
+              "how much time has passed since the migration",
               "how long did the bike ride take",
               "3 days ago how much did i weigh"):
         assert agg.detect_aggregative_intent(q).is_aggregative is False, q

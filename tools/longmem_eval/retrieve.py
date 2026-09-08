@@ -1379,7 +1379,12 @@ def retrieve_for_question(
             from tortoise.aggregate import aggregative_verdict
             aggregative_verdict_out = aggregative_verdict(
                 query=question["question"], proj=sdk._get_proj(),
-                retrieved_points=pool[:top_k])
+                # P2 (#2607 review): sample the window the READER actually
+                # receives — TR questions keep the pinned ``tr_top_k`` cap
+                # (the pool may retain more under the pool-only arm), so a
+                # wider sample would over-approximate k and flip a real
+                # partial into a false complete on the R5 slice.
+                retrieved_points=pool[:effective_top_k])
         except Exception:
             # fail-open (never break a working retrieval lane): log and
             # record no verdict — the arm marker stays for reconstruction

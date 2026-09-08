@@ -135,6 +135,16 @@ _QUANTIFIER_RES: tuple[tuple[str, re.Pattern[str]], ...] = tuple(
 _ELAPSED_TIME_RE = re.compile(
     r"\bhow\s+many\s+(?:days?|weeks?|months?|years?)\s+ago\b"
     r"|\b\d+\s+(?:days?|weeks?|months?|years?)\s+ago\b"
+    # P1 (#2607 review): "since"/"back"/"has passed since" elapsed shapes
+    # ask the SAME single-date question as the "ago" forms ("how many days
+    # since the api migration") and are R5 temporal — they must never
+    # classify as entity-scoped aggregative, or the census would fire a
+    # false partial/complete signal on the exact R5 class the design
+    # excludes.
+    r"|\bhow\s+many\s+(?:days?|weeks?|months?|years?|time)\s+since\b"
+    r"|\bhow\s+many\s+(?:days?|weeks?|months?|years?)\s+back\b"
+    r"|\bhow\s+much\s+time\s+has\s+passed\s+since\b"
+    r"|\bhow\s+much\s+time\s+(?:since|has\s+passed)\b"
 )
 #: "how long" is excluded outright: it asks a duration/span (single fact,
 #: or R5/C6's temporal-ordering class), never a sum/count across facets.
@@ -227,6 +237,19 @@ class AggregativeIntent:
     facet_dimension: str | None = None
 
 
+#: Corpus-scope adverb phrases — "how much money have we spent SO FAR" is
+#: a corpus-wide sweep (never flagged), not an entity-scoped count (P2
+#: #2607 review: a stray scope adverb must not flip open→entity-scoped and
+#: co-match an activity-named Object through the anchor FTS). Stripped at
+#: the same seam as the other scope phrases (detect step 4) so the token
+#: gate never sees them.
+_CORPUS_SCOPE_PHRASES: tuple[str, ...] = (
+    "so far", "to date", "in the past", "up to now", "lately",
+    "recently", "ever", "overall", "cumulatively", "in total",
+    "in all", "altogether", "combined", "total", "sum",
+)
+
+
 def _open_ended_scope(remaining: str) -> bool:
     """True when the post-quantifier remainder carries NO enumerable
     subject — every content token is corpus self-reference, a bare
@@ -279,10 +302,10 @@ def detect_aggregative_intent(query: str | None) -> AggregativeIntent:
     if matched is None:
         return AggregativeIntent(False)
     qid, m = matched
-    # 4. scope over the remainder (quantifier + amount markers removed)
+    # 4. scope over the remainder (quantifier + amount markers + the
+    #    corpus-scope sweep adverbs removed)
     remaining = q
-    for phrase in (m.group(0), "in total", "in all", "altogether",
-                   "combined", "total", "sum"):
+    for phrase in (m.group(0), *_CORPUS_SCOPE_PHRASES):
         remaining = _strip_phrase(remaining, phrase)
     scope = "open-ended" if _open_ended_scope(remaining) else "entity-scoped"
     # 5. facet-dimension hint (date/kind cues; default session). The
