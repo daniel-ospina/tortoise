@@ -1,0 +1,94 @@
+{
+  "conversation": [
+    {
+      "content": "Let us decide the rollout for the quarry lease fix. The lease-before-claim change is merged and the staging matrix is green. We have until the October freeze to ship it to the Halcyon queue, so this is a today decision, not a next-week one.",
+      "role": "user"
+    },
+    {
+      "content": "Two levers shape the rollout: scope, all shards at once versus one shard at a time, and reversibility, a kill flag we can pull versus a canary we watch. Which do you want to decide on data?",
+      "role": "assistant"
+    },
+    {
+      "content": "Data first. I want to run the chaos harness against both rollout shapes before we pick. Same fault set, four shards, killed workers mid-claim.",
+      "role": "user"
+    },
+    {
+      "content": "The all-at-once shape is the lease fix enabled fleet-wide behind one global kill flag. The per-shard shape enables it shard by shard over a week, each shard watched before the next one flips.",
+      "role": "assistant"
+    },
+    {
+      "content": "My worry with any shape is the stall coming back. If we flip mid-rollout and the flip glitches, we could re-enter the duplicate-processing race while the queue drains.",
+      "role": "user"
+    },
+    {
+      "content": "The original stall was a no-lease bug, not a flip bug, but the glitch scenario is fair to test. The chaos harness covers it: it kills workers, it does not toggle flags.",
+      "role": "assistant"
+    },
+    {
+      "content": "Right, and I want the harness to prove the boundary case: two workers claiming one batch at the exact moment a region toggles.",
+      "role": "user"
+    },
+    {
+      "content": "That boundary is the lease CAS: only the owner can complete, so a second claim attempt fails at compare-and-swap regardless of what toggles around it.",
+      "role": "assistant"
+    },
+    {
+      "content": "That is my read too: the race only re-enters when two workers can claim one batch, and the lease makes that impossible no matter how we roll out.",
+      "role": "user"
+    },
+    {
+      "content": "Hypothesis recorded. The chaos run either confirms it at the shard boundary or it does not, scope independence is the claim under test.",
+      "role": "assistant"
+    },
+    {
+      "content": "If the run confirms it, all-at-once is tempting: one day of rollout instead of a week of canary watching.",
+      "role": "user"
+    },
+    {
+      "content": "All-at-once buys the shortest exposure window and the flag is the reversibility backstop. Per-shard buys a smaller blast radius per flip. The chaos numbers should decide.",
+      "role": "assistant"
+    },
+    {
+      "content": "The chaos run just finished. We killed a lease-holding worker mid-batch on four shards and every batch was claimed exactly once after the expiry, no duplicates anywhere. It took longer than expected because I queued it behind the nightly embedding job.",
+      "role": "user"
+    },
+    {
+      "content": "So the chaos run supports the claim that the race cannot re-enter once the lease is held, rollout scope does not change the guarantee.",
+      "role": "assistant"
+    },
+    {
+      "content": "Then I am not going to argue for a week of canary watching. Scope is settled by the data. My shift ends at six, so if the flip lands today I want the runbook link in the channel.",
+      "role": "user"
+    },
+    {
+      "content": "Scope settled: the lease guarantee is scope-independent. That leaves reversibility: one global flag versus per-service flags.",
+      "role": "assistant"
+    },
+    {
+      "content": "We ship the lease fix all-at-once behind a single global kill flag. One flag is one switch to pull, and the chaos run says the fix itself cannot re-race.",
+      "role": "user"
+    },
+    {
+      "content": "Decision recorded: all-at-once rollout behind the global kill flag, watch the queue drain after the flip, pull the flag on any regression.",
+      "role": "assistant"
+    },
+    {
+      "content": "And who drives the flip? I would rather it be one person with the runbook open, not a group chat decision at 2am.",
+      "role": "user"
+    },
+    {
+      "content": "One driver with the runbook. Maya is the natural driver for the flip, she owns the ingest queue service and ran the staging matrix.",
+      "role": "assistant"
+    },
+    {
+      "content": "Cutoff stays September 30 as agreed, and the lease migration already landed ahead of Friday's maintenance window.",
+      "role": "user"
+    },
+    {
+      "content": "Rollout plan: all-at-once behind the global kill flag, driver Maya, cutoff unchanged, migration landed before Friday. Shall I open the rollout PR?",
+      "role": "assistant"
+    }
+  ],
+  "harness": "codex",
+  "session_id": "wp06_quarry_rollout"
+}

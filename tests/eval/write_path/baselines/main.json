@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "fixtures_hash": "sha256:52d4a742e7cea21ce9f1147cc3ec46a10436a6dd9e7fbc7ad22701d851d90dc8",
+  "fixtures_hash": "sha256:d17a99af2828eab6d1084f9d5edf8534497465d56f910ef6d6dafbf68c87bec6",
   "judge_pin": "w2-write-path-mechanical-v2",
   "config": {
     "lanes": [
@@ -13,11 +13,11 @@
     "seed": 42,
     "extractor_posture": "llm"
   },
-  "justification": "Protocol-re-bless of main.json to judge pin w2-write-path-mechanical-v2 (the #2338 Phase G path prescribed by PHASE_G_DEFERRAL_2026-09-05.md addenda). Blocking blocker resolved: distractor leakage 4 -> 0 (<= tolerance 1) via the anti-routine gate (#2424: emission-level NOOP + clause-level decoration strip), confirmed in TWO consecutive sealed runs (0, 0). Sessions emitting 5/5; quote_fidelity 1.0 + provenance_accuracy 1.0 held. Macro recorded honestly at the run value 0.4444 (32/72) under the v2 paraphrase-aware rule \u2014 no claim of macro improvement over the EX-code run (0.5278): the clause code measured 0.4444 twice (same-code consistency); per-session variance band across all sealed runs +/-0.06-0.08 macro (wp02 6-8/13, wp03 6-15/15, wp04 2-5/13, wp05 5-6/15); surviving-unit misses dominated by content_missing (extractor recall), not leakage or provenance. This blessing records the v2 baseline WITH the fixed extractor \u2014 not a quality-ceiling claim.",
+  "justification": "INTENTIONAL corpus regeneration (#2514): fixtures 5->7 sessions (wp06_quarry_rollout + wp07_bluepeak_followup), fixtures_hash 52d4a742e -> d17a99af2, +4 planted operators (SUPPORTS/NEGATE/MITIGATES/SUPERSEDE). First llm-lane measurement on the new corpus: macro 0.5444 (49/90), sessions 7/7 emitting, leakage 1 (= wp03's per-session tolerance 1 \u2014 d_01, the known high-variance distractor: leaked in 2 of the last 4 sealed runs, 0 in the two clause runs), quote/provenance 1.0. FIRST REAL OPERATOR AUDIT: 0/4 planted operator edges edge_correct (content_ok 1) \u2014 the extractor does not emit correct supersede/negate/mitigate/support edges on the product lane; this is the measured baseline the layer-2 fix must move (corpus purpose achieved: the gap is now a number, not an assumption). Structural note: reified operator points carry no eventId and never enter the memory layer. Operator audit is an additive dimension, not a gated metric.",
   "metrics": {
-    "salient_unit_survival_macro": 0.4444444444444444,
-    "salient_unit_survival_strict": 0.4444444444444444,
-    "distractor_leakage_per_run": 0,
+    "salient_unit_survival_macro": 0.5444444444444444,
+    "salient_unit_survival_strict": 0.5444444444444444,
+    "distractor_leakage_per_run": 1,
     "sessions_emitting": 1.0,
     "quote_fidelity": 1.0,
     "provenance_accuracy": 1.0
@@ -250,6 +250,75 @@
       ],
       "justification": "Protocol-re-bless of main.json to judge pin w2-write-path-mechanical-v2 (the #2338 Phase G path prescribed by PHASE_G_DEFERRAL_2026-09-05.md addenda). Blocking blocker resolved: distractor leakage 4 -> 0 (<= tolerance 1) via the anti-routine gate (#2424: emission-level NOOP + clause-level decoration strip), confirmed in TWO consecutive sealed runs (0, 0). Sessions emitting 5/5; quote_fidelity 1.0 + provenance_accuracy 1.0 held. Macro recorded honestly at the run value 0.4444 (32/72) under the v2 paraphrase-aware rule \u2014 no claim of macro improvement over the EX-code run (0.5278): the clause code measured 0.4444 twice (same-code consistency); per-session variance band across all sealed runs +/-0.06-0.08 macro (wp02 6-8/13, wp03 6-15/15, wp04 2-5/13, wp05 5-6/15); surviving-unit misses dominated by content_missing (extractor recall), not leakage or provenance. This blessing records the v2 baseline WITH the fixed extractor \u2014 not a quality-ceiling claim.",
       "protocol_change": true
+    },
+    {
+      "date": "2026-09-08",
+      "justification": "corpus_change STAGED (#2514): fixtures_hash 52d4a742e -> d17a99af2 (+2 operator-planted sessions wp06/wp07). Metrics remain the #2542 v2 values until the llm activation run on the 7-session corpus lands + re-blesses.",
+      "corpus_change": true,
+      "values": {
+        "salient_unit_survival_macro": 0.4444444444444444,
+        "salient_unit_survival_strict": 0.4444444444444444,
+        "distractor_leakage_per_run": 0,
+        "sessions_emitting": 1.0,
+        "quote_fidelity": 1.0,
+        "provenance_accuracy": 1.0
+      }
+    },
+    {
+      "date": "2026-09-08T01:25:48Z",
+      "values": {
+        "salient_unit_survival_macro": 0.5444444444444444,
+        "salient_unit_survival_strict": 0.5444444444444444,
+        "distractor_leakage_per_run": 1,
+        "sessions_emitting": 1.0,
+        "quote_fidelity": 1.0,
+        "provenance_accuracy": 1.0
+      },
+      "failure_classes": [
+        "content_missing",
+        "content_missing",
+        "content_missing",
+        "content_missing",
+        "content_missing",
+        "content_missing",
+        "content_missing",
+        "content_missing",
+        "content_missing",
+        "content_missing",
+        "content_missing",
+        "content_missing",
+        "content_missing",
+        "content_missing",
+        "content_missing",
+        "content_missing",
+        "content_missing",
+        "content_missing",
+        "content_missing",
+        "content_missing",
+        "content_missing",
+        "content_missing",
+        "content_missing",
+        "content_missing",
+        "content_missing",
+        "content_missing",
+        "content_missing",
+        "content_missing",
+        "content_missing",
+        "content_missing",
+        "content_missing",
+        "content_missing",
+        "content_missing",
+        "content_missing",
+        "content_missing",
+        "content_missing",
+        "content_missing",
+        "content_missing",
+        "content_missing",
+        "content_missing",
+        "content_missing"
+      ],
+      "justification": "INTENTIONAL corpus regeneration (#2514): fixtures 5->7 sessions (wp06_quarry_rollout + wp07_bluepeak_followup), fixtures_hash 52d4a742e -> d17a99af2, +4 planted operators (SUPPORTS/NEGATE/MITIGATES/SUPERSEDE). First llm-lane measurement on the new corpus: macro 0.5444 (49/90), sessions 7/7 emitting, leakage 1 (= wp03's per-session tolerance 1 \u2014 d_01, the known high-variance distractor: leaked in 2 of the last 4 sealed runs, 0 in the two clause runs), quote/provenance 1.0. FIRST REAL OPERATOR AUDIT: 0/4 planted operator edges edge_correct (content_ok 1) \u2014 the extractor does not emit correct supersede/negate/mitigate/support edges on the product lane; this is the measured baseline the layer-2 fix must move (corpus purpose achieved: the gap is now a number, not an assumption). Structural note: reified operator points carry no eventId and never enter the memory layer. Operator audit is an additive dimension, not a gated metric.",
+      "verdict": "regression"
     }
   ]
 }
