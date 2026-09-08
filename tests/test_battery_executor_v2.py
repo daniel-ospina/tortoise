@@ -418,7 +418,7 @@ def test_cross_run_event_log_session_relative_equality(tmp_path) -> None:
     run1 = _run("r1")
     run2 = _run("r2")
     assert len(run1) == len(run2) == 4  # 2 scenarios x 2 sessions
-    for u1, u2 in zip(run1, run2):
+    for u1, u2 in zip(run1, run2, strict=True):
         assert u1 == u2, "session-relative event order must match across runs"
     # sanity: the logs are real (non-empty, cover MANDATORY per unit)
     for unit in run1:
