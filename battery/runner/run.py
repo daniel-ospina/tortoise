@@ -224,6 +224,21 @@ def _execute_real_episode(*, config: RunConfig, arm, scenario: Scenario,
     caller = (config.caller_factory() if config.caller_factory
               else UsageRecordingCaller(RealModelCaller()))
     render = render_reader_prompt(scenario.to_render_dict())
+    # memory-context injection (Task 9 v1): the arm's retrieved memories are
+    # the ONLY arm-to-arm difference in what the model sees — a0 retrieves
+    # nothing (empty memory section), a4 retrieves the seeded graph state. A
+    # flat list of claim contents + EP confidence — the reader-facing render
+    # stays the single sanctioned surface (never a raw graph dump).
+    mem_lines = []
+    for m in prior:
+        if getattr(m, "kind", "") == "claim" and (m.content or "").strip():
+            conf = f" (my confidence {m.confidence:.2f})" \
+                if isinstance(m.confidence, (int, float)) else ""
+            mem_lines.append(f"- {m.content.strip()}{conf}")
+    if mem_lines:
+        render = (render
+                  + "\n\n[memory — what I know so far]\n"
+                  + "\n".join(mem_lines))
     try:
         ep = execute_tvde_episode(caller=caller, scenario_render=render,
                                   scenario_id=scenario.id)
