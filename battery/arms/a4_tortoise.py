@@ -40,6 +40,14 @@ from battery.runner.setup import scenario_namespace
 #: with a stamped starting belief — the product's own write surface).
 _EVIDENCE_KIND = "evidence"
 _CLAIM_MEMORY_KIND = "claim"
+#: Author-stated credibility fallback for filed evidence (#2284 exposure
+#: finding): the SDK applies the documented decide default (medium,
+#: Beta(3,1)) ONLY when status is NOT explicitly passed — the arm stages
+#: evidence as draft (draft-first, #2291), so it must state the default
+#: ITSELF or every agent-filed contradiction silently behaves as
+#: unverified (~3x weaker: measured -0.07 vs -0.21 on the target). Single
+#: source: tortoise.sdk.DECIDE_DEFAULT_CREDIBILITY.
+_DEFAULT_EVIDENCE_CREDIBILITY = "medium"
 #: Per-episode Challenge/Deepen cycle cap (#2291 I-3 / Task 4 ep_outcome):
 #: cap-hit ⇒ non_converged/undec, never forced CONVERGED.
 DECIDE_CYCLES_CAP = 8
@@ -375,6 +383,8 @@ class A4TortoiseArm:
                 return  # identical re-file this setup: TRUE no-op
             created = sdk.create_point(kind=_EVIDENCE_KIND, content=item.content,
                                        dedup=True, status="draft",
+                                       credibility=item.credibility
+                                       or _DEFAULT_EVIDENCE_CREDIBILITY,
                                        source_harness="battery",
                                        source_session=sid)
             ev_id = created.get("id") if isinstance(created, dict) else None

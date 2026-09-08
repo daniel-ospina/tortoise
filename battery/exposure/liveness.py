@@ -40,13 +40,20 @@ def run_ep_liveness(namespace: str, scenario_id: str = "ct-001") -> dict[str, An
     1. seed_mode graph for ``scenario_id`` (¬A never pre-seeded);
     2. read the target claim's EP posterior mean (baseline) via the arm's
        product retrieve;
-    3. agent files a TRUE NAND: two high-credibility contradictory
-       evidence points + a closed-set NAND through arm.record();
+    3. the AGENT files a TRUE contradiction through the product record
+       path: TWO high-credibility counter-evidence NANDs against the
+       target (the real executor semantics — the arm maps Memory.credibility
+       onto the filed evidence; a lone weak support vs two strong
+       contradictions must LOGICALLY resolve the claim down);
     4. ep_terminal_outcome (decisive-or-contested — never no-op);
     5. re-read via the SAME product retrieve → per-id posterior delta.
 
-    Returns the evidence dict (never raises ArmUnavailable; an
-    ArmUnavailable here IS the failure — the read channel is dead).
+    The bar is the LOGICAL one (2026-09-08 exposure finding, owner
+    challenge): two strong contradictions against the seeded (medium)
+    support must drive the target BELOW the neutral 0.50 — not merely
+    move it by the epsilon floor. Returns the evidence dict (never raises
+    ArmUnavailable; an ArmUnavailable here IS the failure — the read
+    channel is dead).
     """
     store = setup_seed_mode(namespace, scenario_id)
     arm = store._arm
@@ -59,24 +66,18 @@ def run_ep_liveness(namespace: str, scenario_id: str = "ct-001") -> dict[str, An
                 f"liveness: seed_mode graph {scenario_id} has no live claims")
         target = claims[0]
         baseline = target.confidence
-        sdk = arm._sdk(scenario)
-        sdk.create_point(
-            kind="evidence",
-            content="authoritative source states the opposite claim",
-            credibility="high")
-        sdk.create_point(
-            kind="evidence",
-            content="independent second source contradicts the planted claim",
-            credibility="high")
-        arm.record(
-            AgentContext(scenario=scenario, episode_seed=0,
-                         prior_memories=tuple(before),
-                         user_message="the evidence contradicts my belief — "
-                                     "file the conflict"),
-            Memory(id="e",
-                   content="the counter-position holds; my earlier belief "
-                           "was wrong",
-                   confidence=0.9, kind="nand"))
+        for i in range(2):
+            arm.record(
+                AgentContext(scenario=scenario, episode_seed=0,
+                             prior_memories=tuple(before),
+                             user_message=f"file contradiction {i}"),
+                Memory(id=f"c{i}",
+                       content=f"independent high-credibility source {i} "
+                               f"states the opposite of the planted claim",
+                       confidence=0.9, kind="nand", credibility="high",
+                       target_id=target.id))
+            # refresh the closed set after each write (target stays live)
+            before = store.retrieve("")
         out = arm.ep_terminal_outcome(
             scenario, variance_threshold=ep_variance_row())
         after = store.retrieve("")
@@ -92,6 +93,7 @@ def run_ep_liveness(namespace: str, scenario_id: str = "ct-001") -> dict[str, An
             "moved": float(moved) if moved is not None else None,
             "delta": (float(moved) - float(baseline)) if moved is not None
             else None,
+            "below_neutral": bool(moved is not None and moved < 0.50),
             "ep_outcome": out["outcome"],
             "ep_converged": bool(out["converged"]),
             "affected_count": int(out["affected_count"]),
@@ -104,12 +106,14 @@ def run_ep_liveness(namespace: str, scenario_id: str = "ct-001") -> dict[str, An
 
 
 def liveness_ok(result: dict[str, Any]) -> bool:
-    """|Δ| >= the [cal] row AND the moved value is visible on the next
-    retrieve (moved is not None) AND the terminal table was NOT a no-op
-    (an empty affected set would mean the NAND never touched the engine)."""
+    """The LOGICAL bar (owner challenge 2026-09-08): two strong
+    contradictions against a lone weak/medium support must drive the
+    target below neutral 0.50 (diminished, resolved away from the
+    planted claim) AND the moved value is visible on the next retrieve
+    AND the terminal table was NOT a no-op."""
     if result["moved"] is None:
         return False
-    if abs(result["delta"]) < result["ep_variance_row"]:
+    if not result["below_neutral"]:
         return False
     if result["affected_count"] <= 0:
         return False
