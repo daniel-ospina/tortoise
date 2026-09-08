@@ -38,8 +38,9 @@ from __future__ import annotations
 import json
 import logging
 import os
+import threading
 from contextlib import nullcontext
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any, Callable  # noqa: UP035
 
@@ -877,6 +878,24 @@ def resolve_active_graph(source, team_id: str, graph_id: str) -> dict[str, Any]:
     )
 
 
+# #2560 (re-audit P3): ALL read-modify-write cycles on the global
+# ops/state.json go through ONE lock — the purge's ghost-drop (#2471), the
+# no-op merge-preserves, and the real-run roll-up otherwise interleave
+# freely (a no-op that read state BEFORE a purge drop writes its stale
+# merge back and resurrects the purged graph's streak keys forever).
+_OPS_STATE_LOCK = threading.Lock()
+
+
+def _noop_ops_state_write(storage, now: datetime) -> None:
+    """#2560: write the merge-preserving no-op roll-up AFTER re-reading the
+    state under _OPS_STATE_LOCK — a no-op run whose start-of-run read
+    predates a concurrent purge's ghost-drop would otherwise resurrect the
+    dropped keys. Serialized against the purge drop + real-run write."""
+    with _OPS_STATE_LOCK:
+        ops_state = read_ops_state(storage)
+        _write_json(storage, OPS_STATE_KEY, _noop_ops_state(ops_state, now))
+
+
 def _noop_ops_state(ops_state: Any, now: datetime) -> dict[str, Any]:
     """#2412: a no-op run (0 eligible / 0 teams) must NOT erase the last real
     run's roll-up — merge-preserve the #2372 sweep fields (last_sweep_at,
@@ -906,27 +925,39 @@ def _drop_purged_graphs_from_ops_state(storage, team_id: str,
     attempted)."""
     if not graph_ids:
         return
-    try:
-        prev = read_ops_state(storage)
-    except Exception as e:
-        logger.warning("purge ops-state read failed for %s: %s", team_id, e)
-        return
-    if not isinstance(prev, dict):
-        return
-    keys = {f"{team_id}:{gid}" for gid in graph_ids}
-    failures = [f for f in (prev.get("graph_failures") or [])
-                if not (isinstance(f, dict)
-                        and f.get("team_id") == team_id
-                        and str(f.get("graph_id") or "") in graph_ids)]
-    streaks = {k: v for k, v in (prev.get("graph_error_streaks") or {}).items()
-               if k not in keys}
-    try:
-        prev["graph_failures"] = failures
-        prev["graph_error_streaks"] = streaks
-        prev["updated_at"] = (now or datetime.now(timezone.utc)).isoformat()  # noqa: UP017
-        _write_json(storage, OPS_STATE_KEY, prev)
-    except Exception as e:
-        logger.warning("purge ops-state write failed for %s: %s", team_id, e)
+    # #2560: the read→mutate→write runs under _OPS_STATE_LOCK so a no-op
+    # sweep cannot interleave a stale merge-preserve write between the read
+    # and the write (resurrecting the just-dropped keys).
+    with _OPS_STATE_LOCK:
+        try:
+            prev = read_ops_state(storage)
+        except Exception as e:
+            logger.warning("purge ops-state read failed for %s: %s",
+                           team_id, e)
+            return
+        if not isinstance(prev, dict):
+            return
+        keys = {f"{team_id}:{gid}" for gid in graph_ids}
+        failures = [
+            f for f in (prev.get("graph_failures") or [])
+            if not (isinstance(f, dict)
+                    and f.get("team_id") == team_id
+                    and str(f.get("graph_id") or "") in graph_ids)
+        ]
+        streaks = {
+            k: v
+            for k, v in (prev.get("graph_error_streaks") or {}).items()
+            if k not in keys
+        }
+        try:
+            prev["graph_failures"] = failures
+            prev["graph_error_streaks"] = streaks
+            prev["updated_at"] = (
+                now or datetime.now(UTC)).isoformat()
+            _write_json(storage, OPS_STATE_KEY, prev)
+        except Exception as e:
+            logger.warning("purge ops-state write failed for %s: %s",
+                           team_id, e)
 
 
 def run_backup_sweep(
@@ -977,9 +1008,7 @@ def run_backup_sweep(
                     "detail": {"message": "team sweep enabled but 0 eligible (Pro) teams found"},
                 }
             )
-            _write_json(
-                storage, OPS_STATE_KEY, _noop_ops_state(ops_state, now),
-            )
+            _noop_ops_state_write(storage, now)
             return {
                 "status": "no_eligible_teams",
                 "teams_backed_up": 0,
@@ -1001,9 +1030,7 @@ def run_backup_sweep(
                     "detail": {"previous": prev_team_count, "now": 0},
                 }
             )
-        _write_json(
-            storage, OPS_STATE_KEY, _noop_ops_state(ops_state, now),
-        )
+        _noop_ops_state_write(storage, now)
         return {
             "status": "no_teams",
             "teams_backed_up": 0,
@@ -1096,17 +1123,18 @@ def run_backup_sweep(
     graph_totals = {"attempted": graphs_attempted,
                     "backed_up": graphs_backed_up,
                     "errors": graph_errors}
-    _write_json(
-        storage, OPS_STATE_KEY,
-        {
-            "last_team_count": len(team_ids),
-            "last_sweep_at": now.isoformat(),
-            "updated_at": now.isoformat(),
-            "graph_totals": graph_totals,
-            "graph_failures": graph_failures[:20],
-            "graph_error_streaks": streaks,
-        },
-    )
+    with _OPS_STATE_LOCK:  # #2560: serialize the real-run roll-up write
+        _write_json(
+            storage, OPS_STATE_KEY,
+            {
+                "last_team_count": len(team_ids),
+                "last_sweep_at": now.isoformat(),
+                "updated_at": now.isoformat(),
+                "graph_totals": graph_totals,
+                "graph_failures": graph_failures[:20],
+                "graph_error_streaks": streaks,
+            },
+        )
 
     backed_up = sum(
         1 for r in results.values() if r.get("status") == "backed_up"
