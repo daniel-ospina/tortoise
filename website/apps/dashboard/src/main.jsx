@@ -39,6 +39,7 @@ import {
   sortedGraphRows,
   sortedTrashRows,
   tierCreateLocked,
+  trashDaysLeft,
   trashEraseLabel,
 } from './graphs.js'
 // #1893: pure source-scope reconcile/serialize/job-body helpers (node --test
@@ -52,6 +53,10 @@ import {
 // #1765: identity surface — pure predicates + presentational components
 import { bannerShow, shouldRefetchOnFocus } from './identity.js'
 import { RecoveryBanner, ProfileTab, ReauthDialog } from './profile.jsx' 
+// #2392: minimal a11y focus management for the dialog family — capture the
+// opening trigger, restore focus to it on close (pure, node --test
+// unit-tested — dialogFocus.test.js).
+import { rememberFocusedTrigger, rememberRestoreTarget, restoreFocus } from './dialogFocus.js'
 
 const API_BASE = 'https://api.premiselabs.co'
 // #2246 (ADR-010): KEY_STORAGE ('tortoise_api_key') is the legacy held-key
@@ -797,6 +802,19 @@ function App() {
   // #2479 code-review fix P1: tracks that we're re-executing a pending action
   // after successful re-auth (prevents infinite loop if the API returns 403 again)
   const reauthRetriedRef = React.useRef(false)
+  // #2392 (a11y): focus-restore holder for ReauthDialog — the trigger
+  // (add-email submit / unlink button) is captured at the gesture start;
+  // on close the dialog hands focus back instead of dropping it on <body>.
+  const reauthRestoreRef = React.useRef(null)
+  // #2392 (a11y): every reauth close path (Escape/backdrop/✕ from the
+  // dialog, password success, MAX-attempts bail, provider round-trip with no
+  // pending action) restores focus to the trigger. Opens capture separately
+  // at each site (see handleAddEmail / handleUnlink) because the trigger may
+  // be disabled mid-flight by the time the dialog actually opens.
+  function closeReauth() {
+    setReauthOpen(false)
+    restoreFocus(reauthRestoreRef)
+  }
   // #1765 review P1: the pre-reauth session user id (verify the provider
   // round-trip didn't switch accounts before resuming the pending action)
   const beforeUidRef = React.useRef(null)
@@ -1388,19 +1406,43 @@ function claimIntentInFlight() {
   const [createTeamBusy, setCreateTeamBusy] = React.useState(false)
   const [createTeamError, setCreateTeamError] = React.useState('')
   const [createTeamUpgrade, setCreateTeamUpgrade] = React.useState(false)
+  // #2392 (a11y): focus-restore holder for the create-team dialog — the
+  // blob trigger button is captured when '+ Create new organization' is
+  // clicked (the menu item itself unmounts when the account menu closes
+  // under the dialog) and refocused on every close path.
+  const createTeamRestoreRef = React.useRef(null)
   // #1875: invitee-side pending invites (account-menu surface)
   const [pendingInvites, setPendingInvites] = React.useState(null)  // null = not loaded
   const [pendingInvitesBusy, setPendingInvitesBusy] = React.useState('')  // '' | invitation_id
   const accountBlobRef = React.useRef(null) // #1148-ux review P2-4/P3-1: outside-click + Escape close
+  // #2392 (a11y): the blob BUTTON (not the container) — the always-mounted
+  // account-menu trigger. The menu itself unmounts on close and drops focus
+  // to <body>; this button is where keyboard/SR focus must return.
+  const accountBlobBtnRef = React.useRef(null)
   React.useEffect(() => {
     if (!accountMenuOpen) return
     function onPointerDown(e) {
       if (accountBlobRef.current && !accountBlobRef.current.contains(e.target)) {
         setAccountMenuOpen(false)
+        // #2392 (a11y): an outside click that lands on nothing focusable
+        // leaves focus on <body>. Reclaim it for the blob trigger — deferred
+        // past the browser's default mousedown focus so a click that DID
+        // focus a background control (tab, button…) keeps that focus instead
+        // of fighting the user's intent.
+        setTimeout(() => {
+          if (typeof document !== 'undefined' && document.activeElement === document.body) {
+            const btn = accountBlobBtnRef.current
+            if (btn) btn.focus()
+          }
+        }, 0)
       }
     }
     function onKeyDown(e) {
-      if (e.key === 'Escape') setAccountMenuOpen(false)
+      if (e.key === 'Escape') {
+        setAccountMenuOpen(false)
+        const btn = accountBlobBtnRef.current
+        if (btn) btn.focus()
+      }
     }
     document.addEventListener('pointerdown', onPointerDown)
     document.addEventListener('keydown', onKeyDown)
@@ -1453,6 +1495,35 @@ function claimIntentInFlight() {
   // or per-graph mint response; cleared on dismiss / team switch; no route
   // ever re-shows it (the API never re-serves plaintext).
   const [revealKey, setRevealKey] = React.useState(null)
+  // #2392 (a11y): focus-restore holder for the reveal-key modal. The mint is
+  // ASYNC (the modal mounts only when the POST resolves), so the trigger is
+  // captured at the mint gesture start in createGraph/mintGraphKey — by the
+  // time the response lands, busy has disabled the trigger and focus has
+  // already dropped to <body>.
+  const revealRestoreRef = React.useRef(null)
+  // #2392 (review P1): backdrop-click dismissal must never fire on a drag
+  // that STARTED inside the card. The reveal modal shows a long wrapped
+  // plaintext the user may select by hand (clipboard-failure fallback); a
+  // selection drag that overshoots the card boundary completes on the
+  // backdrop, and a plain onClick there would destroy the one-time secret
+  // mid-copy. Track the pointerdown origin — only a press that began on the
+  // backdrop itself may dismiss.
+  const revealBackdropPressRef = React.useRef(false)
+  // #2392 (a11y): the single create-team/reveal-key close path — every close
+  // (backdrop, Escape, Cancel/Upgrade, success, Copy & done, I saved it)
+  // restores focus to the opening trigger instead of dropping it on <body>.
+  function closeCreateTeam() {
+    setCreateTeamOpen(false)
+    setCreateTeamUpgrade(false)
+    restoreFocus(createTeamRestoreRef)
+  }
+  // NOTE: the logout/team-switch revealKey clears (below) deliberately do NOT
+  // route through closeRevealKey — they are context changes, not user
+  // dismissals, so no focus restore is wanted there.
+  function closeRevealKey() {
+    setRevealKey(null)
+    restoreFocus(revealRestoreRef)
+  }
   const teamIdRef = React.useRef(null)
   const teamRefreshSeqRef = React.useRef(0) // #1906 (code-review P2): monotonic seq for the welcome-path team refreshes — a post-seed refire must win over a concurrent exit refresh (a pre-seed point_count must never clobber the post-seed count)
   const authSubRef = React.useRef(null) // Round-6: supabase onAuthStateChange subscription
@@ -1599,6 +1670,10 @@ function claimIntentInFlight() {
         setProfileError(REAUTH_EXCEEDED_MESSAGE)
         return
       }
+      // #2392 (a11y): capture the opening trigger (the add-email submit
+      // control) while it still owns focus — synchronous here, no await in
+      // this branch.
+      rememberFocusedTrigger(reauthRestoreRef)
       pendingReauthRef.current = { email, password }
       setReauthOpen(true)
     }
@@ -1612,6 +1687,10 @@ function claimIntentInFlight() {
   }
 
   async function handleUnlink(identityId) {
+    // #2392 (a11y): capture the opening trigger (the unlink/Remove button)
+    // at gesture start — by the time a 403 REAUTH_REQUIRED lands below,
+    // profileBusy has disabled the button and focus has dropped to <body>.
+    rememberFocusedTrigger(reauthRestoreRef)
     setProfileBusy('unlink'); setProfileError('')
     try {
       await api('/v1/user/identity/unlink', {
@@ -1666,7 +1745,7 @@ function claimIntentInFlight() {
       if (error) throw new Error(error.message)
       // #2479: success — reset attempt counter
       reauthAttemptRef.current = 0
-      setReauthOpen(false)
+      closeReauth()
       await fetchIdentity()
       const pending = pendingReauthRef.current
       pendingReauthRef.current = null
@@ -1690,7 +1769,7 @@ function claimIntentInFlight() {
     } catch (e) {
       reauthAttemptRef.current += 1
       if (reauthAttemptRef.current >= MAX_REAUTH_ATTEMPTS) {
-        setReauthOpen(false)
+        closeReauth()
         pendingReauthRef.current = null
         setProfileError(REAUTH_EXCEEDED_MESSAGE)
         return
@@ -1730,7 +1809,7 @@ function claimIntentInFlight() {
         options: { redirectTo: `${window.location.origin}${window.location.pathname}?reauth=1` },
       })
       if (error) throw new Error(error.message)
-      if (!pending) setReauthOpen(false)
+      if (!pending) closeReauth()
     } catch (e) {
       setReauthError(e.message || 'Sign-in failed')
       setReauthBusy(false)
@@ -3631,7 +3710,7 @@ function claimIntentInFlight() {
         method: 'POST', useSession: true,
         body: JSON.stringify({ name }),
       })
-      setCreateTeamOpen(false)
+      closeCreateTeam() // #2392 (a11y): also hands focus back to the blob trigger
       setCreateTeamName('')
       await loadTeams()
       if (res?.team_id) switchTeam(res.team_id)
@@ -4063,6 +4142,11 @@ function claimIntentInFlight() {
   async function createGraph() {
     const _teamAtCall = currentTeamId // Round-16: mutation identity guard — a switch mid-flight must not act on the previous team
     if (busy || !newGraphName.trim()) return
+    // #2392 (a11y): capture the mint trigger (+ Create button, or the name
+    // input when Enter submits) while it still owns focus — setBusy below
+    // disables it and the browser drops focus to <body> before the reveal
+    // modal mounts from the async response.
+    rememberFocusedTrigger(revealRestoreRef)
     setBusy(true)
     setError('')
     try {
@@ -4158,6 +4242,11 @@ function claimIntentInFlight() {
   async function mintGraphKey() {
     const gid = panelGraphId
     if (!gid || graphBusy) return
+    // #2392 (a11y): capture the panel-mint trigger (+ Mint key button, or
+    // the key-name input on Enter) while it still owns focus — graphBusy
+    // disables it mid-flight and focus drops to <body> before the reveal
+    // modal mounts.
+    rememberFocusedTrigger(revealRestoreRef)
     // P2-1 (review): capture the open-sequence at OPERATION START — a panel
     // open landing during the mint POST (before the refresh) must also
     // invalidate the refresh's write.
@@ -6153,6 +6242,7 @@ function claimIntentInFlight() {
         <div className="account-blob" ref={accountBlobRef}>
           <button
             className="account-blob-btn"
+            ref={accountBlobBtnRef}
             onClick={() => {
               const opening = !accountMenuOpen
               setAccountMenuOpen(opening)
@@ -6174,7 +6264,7 @@ function claimIntentInFlight() {
         error={reauthError}
         providers={(identityInv && identityInv.methods || []).map((x) => x.provider)}
         passwordMode={reauthPasswordMode}
-        onClose={() => { setReauthOpen(false); pendingReauthRef.current = null; setReauthPasswordMode(false) }}
+        onClose={() => { closeReauth(); pendingReauthRef.current = null; setReauthPasswordMode(false) }}
         onPassword={handleReauthPassword}
         onProvider={handleReauthProvider}
       />
@@ -6289,7 +6379,14 @@ function claimIntentInFlight() {
                     ))}
                     </>
                 ))}
-                <button className="account-menu-create" onClick={() => { setCreateTeamOpen(true); setCreateTeamName(''); setCreateTeamError(''); setCreateTeamUpgrade(false); setAccountMenuOpen(false) }}>
+                <button className="account-menu-create" onClick={() => {
+                  // #2392 (a11y): capture the focus-restore anchor BEFORE the
+                  // menu closes — this item unmounts with the account menu
+                  // under the dialog, so close hands focus to the always-
+                  // mounted blob trigger button instead.
+                  rememberRestoreTarget(createTeamRestoreRef, accountBlobBtnRef.current)
+                  setCreateTeamOpen(true); setCreateTeamName(''); setCreateTeamError(''); setCreateTeamUpgrade(false); setAccountMenuOpen(false)
+                }}>
                   + Create new organization
                 </button>
               </div>
@@ -6302,20 +6399,23 @@ function claimIntentInFlight() {
             doesn't exist until the gate passes); the CTA lands on Billing
             (#1876's team selector). */}
         {createTeamOpen && (
-          <div className="modal-backdrop" onClick={() => { if (!createTeamBusy) setCreateTeamOpen(false) }}>
+          <div className="modal-backdrop" onClick={() => { if (!createTeamBusy) closeCreateTeam() }}>
             <div className="modal" role="dialog" aria-modal="true" aria-label="Create a new organization"
                  onClick={(e) => e.stopPropagation()}
-                 onKeyDown={(e) => { if (e.key === 'Escape' && !createTeamBusy) setCreateTeamOpen(false) }}>
+                 onKeyDown={(e) => { if (e.key === 'Escape' && !createTeamBusy) closeCreateTeam() }}>
               {createTeamUpgrade ? (
                 <>
                   <h3>Create a new organization</h3>
                   <p className="error" role="alert">{createTeamError}</p>
                   <p className="dim">The free plan includes one organization. Upgrade an existing organization to create more.</p>
                   <div className="row" style={{ marginTop: 12 }}>
-                    <button className="btn-primary" onClick={() => { setCreateTeamOpen(false); setCreateTeamUpgrade(false); setTab('billing') }}>
+                    {/* #2392 (a11y): autoFocus moves focus INTO the dialog in
+                        the upgrade branch too (the non-upgrade branch's name
+                        input already autofocuses). */}
+                    <button className="btn-primary" autoFocus onClick={() => { closeCreateTeam(); setTab('billing') }}>
                       Upgrade
                     </button>
-                    <button className="ghost" onClick={() => { setCreateTeamOpen(false); setCreateTeamUpgrade(false) }}>Cancel</button>
+                    <button className="ghost" onClick={closeCreateTeam}>Cancel</button>
                   </div>
                 </>
               ) : (
@@ -6334,7 +6434,7 @@ function claimIntentInFlight() {
                     <button className="btn-primary" onClick={handleCreateTeam} disabled={createTeamBusy}>
                       {createTeamBusy ? 'Creating…' : 'Create organization'}
                     </button>
-                    <button className="ghost" onClick={() => setCreateTeamOpen(false)} disabled={createTeamBusy}>Cancel</button>
+                    <button className="ghost" onClick={closeCreateTeam} disabled={createTeamBusy}>Cancel</button>
                   </div>
                 </>
               )}
@@ -6985,7 +7085,13 @@ function claimIntentInFlight() {
                 <table>
                   <thead><tr><th>Name</th><th>Deleted</th><th>Recovery</th><th><span className="sr-only">Actions</span></th></tr></thead>
                   <tbody>
-                    {sortedTrashRows(trash).map((t) => (
+                    {sortedTrashRows(trash).map((t) => {
+                      // #2465: past-window + legacy rows are NOT restorable
+                      // (server 410s them — pending permanent erasure). Show
+                      // Inspect only, so the UI never offers a restore that
+                      // the server refuses.
+                      const restorable = !!(t.deleted_at && trashDaysLeft(t.deleted_at) > 0)
+                      return (
                       <tr key={t.graph_id} className={confirmRestoreId === t.graph_id ? 'graph-delete-arm' : undefined}>
                         <td><code>{t.name}</code></td>
                         <td>{t.deleted_at ? fmtTime(t.deleted_at) : '—'}</td>
@@ -6999,15 +7105,17 @@ function claimIntentInFlight() {
                             </span>
                           ) : (
                             <>
-                              <button
-                                className="ghost small"
-                                disabled={graphBusy}
-                                onClick={() => { setConfirmRestoreId(t.graph_id); setTrashMsg('') }}
-                                aria-label={`Restore graph ${t.name}`}
-                              >
-                                Restore
-                              </button>
-                              {' '}
+                              {restorable && (
+                                <button
+                                  className="ghost small"
+                                  disabled={graphBusy}
+                                  onClick={() => { setConfirmRestoreId(t.graph_id); setTrashMsg('') }}
+                                  aria-label={`Restore graph ${t.name}`}
+                                >
+                                  Restore
+                                </button>
+                              )}
+                              {restorable && ' '}
                               <button
                                 className="ghost small"
                                 disabled={graphBusy}
@@ -7021,7 +7129,8 @@ function claimIntentInFlight() {
                           )}
                         </td>
                       </tr>
-                    ))}
+                      )
+                    })}
                   </tbody>
                 </table>
                 {trashInspectId && trashInspect && trashInspect.graph_id === trashInspectId && (
@@ -7113,16 +7222,38 @@ function claimIntentInFlight() {
                  the plaintext exists nowhere else (hash-only storage) — no
                  show-key route ever re-renders it. Clipboard failure keeps
                  the key visible in the modal text; dismissing clears state. */
-              <div className="modal-backdrop">
-                <div className="modal" role="dialog" aria-modal="true" aria-label="New key — shown once">
+              <div className="modal-backdrop"
+                   onPointerDown={(e) => {
+                     // Track where the press began: only a pointerdown on the
+                     // backdrop itself may later dismiss via click. A press that
+                     // started inside the card (text-selection drag, coarse
+                     // pointer) must never destroy the one-time secret (#2392
+                     // review P1) — even if the drag releases over the backdrop,
+                     // the click's common-ancestor target is the backdrop and a
+                     // plain onClick there would fire mid-copy.
+                     revealBackdropPressRef.current = !(e.target && e.target.closest && e.target.closest('.modal'))
+                   }}
+                   onClick={() => {
+                     if (revealBackdropPressRef.current) {
+                       revealBackdropPressRef.current = false
+                       closeRevealKey()
+                     }
+                   }}>
+                <div className="modal" role="dialog" aria-modal="true" aria-label="New key — shown once"
+                     onClick={(e) => e.stopPropagation()}
+                     onKeyDown={(e) => { if (e.key === 'Escape') closeRevealKey() }}>
                   <h2>{revealKey.title}</h2>
                   <p className="dim small">Your new key — <strong>shown once</strong>. Copy it now; you won't see it again.</p>
                   <code className="key-value">{revealKey.plaintext}</code>
                   <div className="claim-actions">
-                    <button className="ghost" onClick={async () => {
+                    {/* #2392 (a11y): autoFocus the primary control on open —
+                        before this the trigger behind the backdrop kept focus.
+                        closeRevealKey (backdrop/Escape/Copy & done/I saved it)
+                        restores focus to that trigger. */}
+                    <button className="ghost" autoFocus onClick={async () => {
                       try {
                         await navigator.clipboard.writeText(revealKey.plaintext)
-                        setRevealKey(null)
+                        closeRevealKey()
                       } catch {
                         // Clipboard unavailable (e.g. non-secure context): the
                         // key stays visible so the user can copy by hand — it is
@@ -7138,7 +7269,7 @@ function claimIntentInFlight() {
                         }
                       }
                     }}>Copy &amp; done</button>
-                    <button className="ghost" onClick={() => setRevealKey(null)}>I saved it</button>
+                    <button className="ghost" onClick={closeRevealKey}>I saved it</button>
                   </div>
                 </div>
               </div>
