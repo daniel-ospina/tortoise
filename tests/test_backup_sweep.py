@@ -15,6 +15,8 @@ from tortoise.backup_config import BackupConfig
 from tortoise.backup_sweep import (
     OPS_STATE_KEY,
     _check_per_label_drift,
+    _drop_purged_graphs_from_ops_state,
+    _noop_ops_state_write,
     _stamp_purged,
     _write_flat_index_filtered,
     read_purge_flat_ghosts,
@@ -1946,6 +1948,46 @@ def test_purge_drops_erased_graphs_from_ops_state_rollup(shared_proj):
     assert "team_x:g_live0001" in (state.get("graph_error_streaks") or {})
     assert state["last_sweep_at"] == "2026-09-01T00:00:00Z"
     assert (state.get("graph_totals") or {}).get("attempted") == 2
+
+
+def test_noop_write_cannot_resurrect_a_purge_dropped_streak(shared_proj):
+    """#2560 (re-audit P3): a no-op run that read ops/state.json BEFORE a
+    concurrent purge dropped an erased graph's streak must NOT write its
+    stale merge back (resurrecting the ghost forever). The no-op write
+    re-reads under _OPS_STATE_LOCK."""
+    if shared_proj is None:
+        return
+    store = MemoryStorage()
+    gid = f"g_nr_{os.urandom(2).hex()}"
+    store.upload(
+        OPS_STATE_KEY,
+        json.dumps({
+            "last_team_count": 1, "last_sweep_at": "2026-09-01T00:00:00Z",
+            "updated_at": "2026-09-01T00:00:00Z",
+            "graph_totals": {"attempted": 2, "backed_up": 1, "errors": 1},
+            "graph_failures": [
+                {"team_id": "team_x", "graph_id": gid,
+                 "error": "boom", "streak": 3},
+                {"team_id": "team_x", "graph_id": "g_live0001",
+                 "error": "x", "streak": 1},
+            ],
+            "graph_error_streaks": {f"team_x:{gid}": 3,
+                                     "team_x:g_live0001": 1},
+        }).encode())
+    # A no-op sweep reads state at RUN START…
+    stale = read_ops_state(store)
+    assert f"team_x:{gid}" in (stale.get("graph_error_streaks") or {})
+    # …then the purge drops the erased graph's keys (#2471)…
+    _drop_purged_graphs_from_ops_state(store, "team_x", {gid})
+    # …then the no-op WRITES. The helper must re-read under the lock so the
+    # drop is not clobbered.
+    _noop_ops_state_write(store, datetime.now(UTC))
+    state = json.loads(store.download(OPS_STATE_KEY))
+    assert f"team_x:{gid}" not in (state.get("graph_error_streaks") or {})
+    assert all(f.get("graph_id") != gid
+               for f in (state.get("graph_failures") or []))
+    assert "team_x:g_live0001" in (state.get("graph_error_streaks") or {})
+    assert state["last_sweep_at"] == "2026-09-01T00:00:00Z"
 
 
 @pytest.mark.skipif(_DOCKER_LANE, reason="purge erasure unit tests run embedded; docker lane covered by the hosted trash E2E (#2304)")
