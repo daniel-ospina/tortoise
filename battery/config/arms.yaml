@@ -33,7 +33,7 @@ arms:
     adapter: battery.arms.a0_plain
     config: {}
     price_per_1k_usd: 0.5
-    expected_tokens_per_episode: 26409  # measured (2026-09-08 #2292 probe: per-episode deliberation 95th-pct 8803 x 3x headroom; scaffold probe = reader+deliberation only — arm retrieval context NOT included; #2284 Task 8 exposure finalizes over the SAME token_table_hash machinery)
+    expected_tokens_per_episode: 26409  # MEASURED + EXPOSURE-FINALIZED (2026-09-08: #2292 probe p95 8803 x 3x headroom AND #2284 Task-8 exposure part-1 smoke n=8 (d-001/ct-001/cal-001/ret-001 x a0/a4) deliberation p95 7518 / mean 3821 — 26409 = 3x headroom over the LARGER measured p95 (7518 x 3 = 22554 <= 26409); deliberation-content only, arm retrieval context NOT included (Task-9 executor measures the full episode); SAME token_table_hash machinery)
     model_pin: deepseek/deepseek-v4-flash  # measured pin (decision a: UNCAPPED, temp 0)
     temperature: 0.0
   - arm_id: a1
@@ -68,6 +68,6 @@ arms:
     adapter: battery.arms.a4_tortoise
     config: {}
     price_per_1k_usd: 0.5
-    expected_tokens_per_episode: 26409  # measured (2026-09-08 #2292 probe: per-episode deliberation 95th-pct 8803 x 3x headroom; scaffold probe = reader+deliberation only — arm retrieval context NOT included; #2284 Task 8 exposure finalizes over the SAME token_table_hash machinery)
+    expected_tokens_per_episode: 26409  # MEASURED + EXPOSURE-FINALIZED (2026-09-08: #2292 probe p95 8803 x 3x headroom AND #2284 Task-8 exposure part-1 smoke n=8 (d-001/ct-001/cal-001/ret-001 x a0/a4) deliberation p95 7518 / mean 3821 — 26409 = 3x headroom over the LARGER measured p95 (7518 x 3 = 22554 <= 26409); deliberation-content only, arm retrieval context NOT included (Task-9 executor measures the full episode); SAME token_table_hash machinery)
     model_pin: deepseek/deepseek-v4-flash  # measured pin (decision a: UNCAPPED, temp 0)
     temperature: 0.0
