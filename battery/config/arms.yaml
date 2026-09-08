@@ -4,9 +4,12 @@
 #
 # model_pin / temperature (#2284 Task 6): protocol-hash inputs for the
 # parity unchanged-check (seed/model_pin/temperature/event-schema/
-# tool-surface). Values below are checked-in FLASH-CLASS PLACEHOLDERS —
-# sibling #2292 re-locks each arm's measured pin before any real-run parity;
-# until then the parity protocol leg stays placeholder + #1144-gated.
+# tool-surface). #2292 re-locked the real-capable arms to the measured pin
+# (decision (a): deepseek/deepseek-v4-flash UNCAPPED, temp 0, same model
+# across arms — resolved via model_adapters.MODELS['deepseek-flash']); the
+# mock row is exempt (lane cap, never real-scored). A real run refuses an
+# unpinned/unresolvable pin or a class-level model_id='fixed' sentinel
+# (run.py pin pre-flight).
 #
 # expected_tokens_per_episode (#2284 Task 7): per-arm token-budget
 # numbers, each annotated measured_after_exposure on its row (provisional —
@@ -24,47 +27,47 @@ arms:
     config: {}
     price_per_1k_usd: 0.0
     expected_tokens_per_episode: 64
-    model_pin: flash-class-placeholder
+    model_pin: mock-agent  # lane cap — mock is never real-scored (pin-exempt; decision a)
     temperature: 0.0
   - arm_id: a0
     adapter: battery.arms.a0_plain
     config: {}
     price_per_1k_usd: 0.5
     expected_tokens_per_episode: 500  # measured_after_exposure
-    model_pin: flash-class-placeholder
+    model_pin: deepseek/deepseek-v4-flash  # measured pin (decision a: UNCAPPED, temp 0)
     temperature: 0.0
   - arm_id: a1
     adapter: battery.arms.a1_longctx
     config: {}
     price_per_1k_usd: 0.5
     expected_tokens_per_episode: 600  # measured_after_exposure
-    model_pin: flash-class-placeholder
+    model_pin: deepseek/deepseek-v4-flash  # measured pin (decision a: UNCAPPED, temp 0)
     temperature: 0.0
   - arm_id: a2
     adapter: battery.arms.a2_mem0
     config: {}
     price_per_1k_usd: 1.0
     expected_tokens_per_episode: 700  # measured_after_exposure
-    model_pin: flash-class-placeholder
+    model_pin: deepseek/deepseek-v4-flash  # measured pin (decision a: UNCAPPED, temp 0)
     temperature: 0.0
   - arm_id: a2b
     adapter: battery.arms.a2b_zep
     config: {}
     price_per_1k_usd: 1.0
     expected_tokens_per_episode: 700  # measured_after_exposure
-    model_pin: flash-class-placeholder
+    model_pin: deepseek/deepseek-v4-flash  # measured pin (decision a: UNCAPPED, temp 0)
     temperature: 0.0
   - arm_id: a3
     adapter: battery.arms.a3_rag
     config: {}
     price_per_1k_usd: 0.5
     expected_tokens_per_episode: 400  # measured_after_exposure
-    model_pin: flash-class-placeholder
+    model_pin: deepseek/deepseek-v4-flash  # measured pin (decision a: UNCAPPED, temp 0)
     temperature: 0.0
   - arm_id: a4
     adapter: battery.arms.a4_tortoise
     config: {}
     price_per_1k_usd: 0.5
     expected_tokens_per_episode: 800  # measured_after_exposure (800 tok/ep guess)
-    model_pin: flash-class-placeholder
+    model_pin: deepseek/deepseek-v4-flash  # measured pin (decision a: UNCAPPED, temp 0)
     temperature: 0.0

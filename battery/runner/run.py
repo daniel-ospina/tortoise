@@ -275,6 +275,47 @@ def run_battery(config: RunConfig, *, stdout: Callable[[str], None] = print,
                 "emitting executor is Task-9 owned). Real mode without an "
                 "active real executor fails closed — run the mock lane "
                 "(default) or wire the executor seam.")
+        # ── model-pin pre-flight (#2292 Task 5; coordination n10) ──────
+        #    A real request must resolve a CONCRETE pinned model for every
+        #    requested real arm: the flash-class placeholder sentinel, an
+        #    unresolvable pin, a class-level model_id='fixed' sentinel
+        #    (battery/arms/*.py — the Task-9 parameterization seam), or a
+        #    temperature mismatch across requested real arms each refuse
+        #    BEFORE the attempt dir (zero orphaned artifacts). Additive
+        #    INSIDE the real-executor gate block — #2284 Task 9 merges
+        #    later over the same block and consumes the pinned values
+        #    ("sibling B pin").
+        from battery.config.arms import resolve_pinned_model
+        real_arm_ids = [a for a in config.arms if a != "mock"]
+        _pinned_temps: dict[str, float] = {}
+        for arm_id in real_arm_ids:
+            ac = arm_map.get(arm_id)
+            if ac is None:
+                raise ConfigError(f"unknown arm {arm_id!r} (not in arms.yaml)")
+            if ac.model_pin in ("", "flash-class-placeholder"):
+                raise ConfigError(
+                    f"arm {arm_id!r} carries the placeholder model pin — "
+                    f"arms.yaml must carry a measured concrete pin before "
+                    f"any real run (decision a: "
+                    f"deepseek/deepseek-v4-flash, temp 0)")
+            try:
+                resolve_pinned_model(ac.model_pin)
+            except ConfigError as e:
+                raise ConfigError(
+                    f"arm {arm_id!r}: {e} — real run refuses (unpinned or "
+                    f"unresolvable model)") from e
+            cls = _resolve_arm(arm_id, ac, mock=False)
+            if getattr(cls, "model_id", "") == "fixed":
+                raise ConfigError(
+                    f"arm {arm_id!r} still hardcodes the class-level "
+                    f"model_id='fixed' sentinel (Task 9 parameterizes arms "
+                    f"off it) — real run refuses")
+            _pinned_temps[arm_id] = ac.temperature
+        if real_arm_ids and len({_pinned_temps[a] for a in real_arm_ids}) > 1:
+            raise ConfigError(
+                "temperature differs across requested real arms "
+                f"({_pinned_temps}) — real run refuses (protocol-hash "
+                "input must be identical across arms)")
     provenance = {
         "git_sha": _git_sha(),
         "config_files": [p.name for p in (config.config_dir).glob("*.yaml")],
@@ -307,9 +348,17 @@ def run_battery(config: RunConfig, *, stdout: Callable[[str], None] = print,
         # config.executor explicitly requested real mode (the pre-flight
         # gate refused that request without an active seam).
         run_mode = arm_run_mode(config, arm)
-        model = {"provider": "mock-agent" if run_mode == "mock" else "real",
-                 "model_id": arm.model_id,
-                 "temperature": float(getattr(arm, "temperature", 0.0))}
+        if run_mode == "real":
+            # #2292 Task 5: the artifact model block records the PINNED
+            # arm config (never the class 'fixed' sentinel) — model_id +
+            # provider + temperature are the parity protocol-hash inputs.
+            model = {"provider": "openrouter",
+                     "model_id": arm_config.model_pin,
+                     "temperature": arm_config.temperature}
+        else:
+            model = {"provider": "mock-agent",
+                     "model_id": arm.model_id,
+                     "temperature": float(getattr(arm, "temperature", 0.0))}
         # ── arm-init (setup_scenarios) — failure → skip arm, summary-only ──
         try:
             arm.setup_scenarios(scenarios)
