@@ -440,16 +440,33 @@ def session_emitted(points: list[SessionPoint]) -> bool:
 #               the to-anchor claim (or an op_type MITIGATES operator)
 # Direction: graded as a non-blocking flag (direction_correct) — the primary
 # assertion is that the RIGHT KIND of edge connects the two anchored claims.
+# #2552 (the grader leg): endpoint anchoring grades VERBATIM-FIRST with the
+# #2405-style paraphrase band (the SAME token-coverage recall band + polarity
+# gate the unit metrics use — ``survival_match``) — a memory Point that
+# distills the planted anchor still anchors. The layer-2 audit measures
+# WIRING, not surface text: an S2 distillation that paraphrases an endpoint
+# claim previously graded ``*_content_missing`` even when the edge itself
+# was correct (measured on the #2556 run: op_01 SUPPORTS was wired and
+# graded 0 because verbatim-only anchoring never found its endpoint). The
+# band is recall-side on purpose; precision is guarded by the shared-token
+# floor + the negation-polarity gate, exactly as the unit band is.
 
 
 def _anchor_points(points: list[SessionPoint], anchor: str) -> list[SessionPoint]:
-    """Memory Points of a session carrying the planted anchor text."""
+    """Memory Points of a session carrying the planted anchor text.
+
+    Verbatim containment (``schema.anchor_present``) is the high-precision
+    leg and runs first; when a point does not contain the anchor verbatim,
+    the #2405-style paraphrase band (``survival_match`` — token-coverage of
+    the anchor at >= SURVIVAL_PARAPHRASE_OVERLAP with the shared-token
+    floor + negation-polarity gate) rescues a distillation that retained
+    the claim's meaning. An empty/unmatchable anchor anchors nothing."""
     out: list[SessionPoint] = []
     for point in points:
         content = point.get("content") or ""
         if is_turn_echo(content):
             continue
-        if schema.anchor_present(anchor, content):
+        if schema.anchor_present(anchor, content) or survival_match(content, anchor):
             out.append(point)
     return out
 
@@ -529,6 +546,14 @@ def operator_edge_detail(
                 # compare directly when from_points is empty of content matches
                 from_carries = schema.anchor_present(
                     planted.get("from", {}).get("verbatim_anchor") or "", content)
+            if not from_carries:
+                # #2552 paraphrase leg: the mitigation reason (commit_ops
+                # passes the src point content verbatim) may itself distill
+                # the planted from-anchor — the audit grades the WIRING, not
+                # the surface text (same band + polarity gate as endpoints).
+                from_carries = survival_match(
+                    content,
+                    planted.get("from", {}).get("verbatim_anchor") or "")
             if from_carries and (tset & set(endpoints)):
                 forms.append(f"mitigated_by({mit.get('point_id')})")
                 direction_correct = True

@@ -81,6 +81,7 @@ that report.py aggregates alongside the legacy evidence_recall@k.
 # ═════════════════════════════════════════════════════════════════════════
 from __future__ import annotations
 
+import logging
 import math
 import os
 import re
@@ -92,6 +93,9 @@ from datetime import datetime
 from typing import Any
 
 from tortoise import search_engine
+from tortoise.coverage_loop import (  # C3-1 (#2519, #2567): product loop rules
+    DEFAULT_LOOP_GUARD_WINDOW as _LOOP_WINDOW,
+)
 from tortoise.embeddings import EmbeddingModel
 from tortoise.retrieval import (
     DEFAULT_CONTEXT_ITEM_CAP,
@@ -887,6 +891,33 @@ def retrieve_for_question(
     # evidence lever: identical questions, expansion ON vs OFF, deltas on
     # evidence_recall@k / recall_all@5 (C1 metrics).
     entity_key_expansion: bool | None = None,
+    # C3-1 (#2519, #2567): the evidence-completeness loop — tri-state
+    # (True/False explicit, None = env ``TORTOISE_LME_COVERAGE_LOOP``; only
+    # 1/true/yes/on enables — fail-safe OFF, the #1745 default decision).
+    # Arms the retrieve → check → expand → merge completeness stage over the
+    # deduped pool (product rules in tortoise/coverage_loop.py): the rule-
+    # based facet census fires ONLY on entity-scoped facet-incompleteness
+    # (open-ended never fires), ONE targeted second sparse pass recovers the
+    # missing facet (hard ≤1-extra-pass bound), and the additive merge's
+    # session-diverse rank discipline keeps a same-session flood from
+    # crowding the guard window. The A/B switch for #2519's all-or-nothing
+    # lever (2×2 covariate with the #2518 entity-key expansion arm):
+    # identical questions, loop ON vs OFF, deltas on recall_all@5.
+    coverage_loop: bool | None = None,
+    # C5 (#2521, #2513): aggregative-intent detection + per-facet coverage
+    # check — tri-state (True/False explicit, None = env
+    # ``TORTOISE_LME_AGGREGATIVE_FLAG``; only 1/true/yes/on enables —
+    # fail-safe OFF, the #1745 default decision). When ON, each question's
+    # retrieval outcome records the hermetic detector verdict
+    # (``detect_aggregative_intent``) and — for entity-scoped aggregation
+    # only — the per-facet coverage verdict over the anchor spine vs the
+    # deduped pool (``tortoise/aggregate.py``: ``aggregative_verdict``),
+    # emitted as ``aggregative_verdict``. The A/B switch that MEASURES the
+    # #2521 detector for the C3-3 coverage-signal routing (#2519): it does
+    # NOT change retrieval behavior yet (the completeness loop is C3-1/
+    # C3-3) — it records {detected_intent, facet_coverage, missing_facets}
+    # per outcome so the routing's signal-to-flag mapping is decidable.
+    aggregative_flag: bool | None = None,
     # #1786 (R5): the hybrid-arm collective retrieval deadline (ms) — the
     # eval passes EVAL_RETRIEVAL_BUDGET_MS (1500); None = SDK default
     # 500 ms. Threads ONLY the hybrid arm (``hybrid_search`` →
@@ -1024,6 +1055,18 @@ def retrieve_for_question(
         _eek_env = (os.environ.get("TORTOISE_LME_ENTITY_KEY_EXPANSION")
                     or "")
         entity_key_expansion_on = _eek_env.strip().lower() in _TRUTHY
+    # C5 (#2521, #2513): resolve the aggregative-intent coverage-check arm
+    # tri-state the same way (explicit flag > env > OFF — fail-safe: only
+    # 1/true/yes/on enables). The resolved bool rides the outcome as the
+    # arm marker; the verdict itself is recorded ONLY under the arm (the
+    # off-path dict keeps today's exact shape, D2).
+    if aggregative_flag is not None:
+        aggregative_flag_on = aggregative_flag
+    else:
+        from .rerank import _TRUTHY as _AGG_TRUTHY
+        _agg_env = (os.environ.get("TORTOISE_LME_AGGREGATIVE_FLAG")
+                    or "")
+        aggregative_flag_on = _agg_env.strip().lower() in _AGG_TRUTHY
     # R1: pool-depth headroom — a monopolizing session's points must not
     # crowd other sessions out BEFORE dedup runs (E2E-1).
     # R5 (D4): TR questions fetch the point+event union (E2E-4's "no
@@ -1119,6 +1162,127 @@ def retrieve_for_question(
         if h["has_answer"] and not _is_raw_chunk(h)]
     depth_marked_chunk_ranks = [
         i for i, h in enumerate(pool) if h["has_answer"] and _is_raw_chunk(h)]
+
+    # ── C3-1 (#2519, #2567): the coverage-completeness loop — retrieve →
+    # check → expand → merge over the DEDUPED pool (product rules live in
+    # tortoise/coverage_loop.py; this stage composes them on the annotated
+    # pool where session linkage lives). CENSUS: the rule-based facet census
+    # resolves the query's own entity anchors through the Object-name spine
+    # (the #2518 seam) — countable entity-scoped facets only. CHECK
+    # (coverage_gap): the pool is facet-incomplete when a census facet is
+    # seeded in the guard window yet its session span is not fully covered
+    # (partial evidence — the §7 facet-based rule: never re-rank the pool
+    # that missed). Open-ended queries (no countable facet) never fire.
+    # EXPAND: ONE targeted second sparse pass for the missing facet (hard
+    # ≤1-extra-pass bound — the A4/C2 reserved-slot OR contract). MERGE:
+    # additive union (base slots reserved) + the session-diverse rank
+    # discipline — a same-session flood must never crowd the guard window.
+    # Default OFF + env gate (TORTOISE_LME_COVERAGE_LOOP); TR questions keep
+    # the R5 date machinery and skip the loop; any failure keeps the
+    # ORIGINAL pool (fail-open, byte-identical). ──
+    if coverage_loop is not None:
+        coverage_loop_on = coverage_loop
+    else:
+        from .rerank import _TRUTHY
+        _cl_env = (os.environ.get("TORTOISE_LME_COVERAGE_LOOP") or "")
+        coverage_loop_on = _cl_env.strip().lower() in _TRUTHY
+    # per-outcome loop markers (§8 census — the off-arm records zeros so the
+    # 2×2 with the #2518 arm stays reconstructable per question).
+    loop_fired_facet: str | None = None
+    loop_iterations = 0
+    loop_merged_added = 0
+    loop_latency_ms = 0.0
+    if coverage_loop_on and not is_tr and pool:
+        from tortoise import coverage_loop as _cl
+        _t_loop = time.monotonic()
+        try:
+            # session dates for the date-range facet qualification (the R5
+            # interval/recency bounds) — {dataset session id: ISO date}.
+            _q_sids = question.get("haystack_session_ids") or []
+            _q_dates = question.get("haystack_dates") or []
+            _session_dates = {
+                sid: _q_dates[i] for i, sid in enumerate(_q_sids)
+                if i < len(_q_dates) and sid} or None
+            _facets = _cl.facet_census(
+                sdk._get_proj(), question["question"],
+                session_dates=_session_dates)
+            _missing_facets = _cl.coverage_gap(
+                _facets, pool, window=_LOOP_WINDOW)
+            if _missing_facets:
+                loop_fired_facet = _missing_facets[0].key
+                _exp = _cl.loop_expansion_pass(
+                    sdk._get_proj(), question["question"],
+                    _missing_facets,
+                    limit=pool_limit, excluded_statuses=(),
+                    leg_trace=legs)
+                loop_iterations = int(_exp.get("iterations") or 0)
+                _expanded = _exp.get("expanded_ids") or []
+                _pool_ids = {h["id"] for h in pool}
+                _new_ids = [pid for pid in _expanded
+                            if pid not in _pool_ids]
+                if _new_ids:
+                    # annotate the recovery hits on the SAME surface as the
+                    # base pool (props → speaker derivation → annotation).
+                    _add_props = point_props_for_hits(
+                        sdk._get_proj(), _new_ids)
+                    _turn_ids = [
+                        p.get("source_turn_id")
+                        for p in _add_props.values()
+                        if p.get("source_turn_id")]
+                    _spk = _speaker_for_turns(sdk._get_proj(), _turn_ids)
+                    for p in _add_props.values():
+                        if (not p.get("speaker")
+                                and p.get("source_turn_id")):
+                            p["speaker"] = _spk.get(
+                                p["source_turn_id"], "")
+                    _raw_new = [
+                        {"id": pid,
+                         "content": (_add_props.get(pid) or {}).get(
+                             "content", ""),
+                         "match_source": "fts"}
+                        for pid in _new_ids]
+                    _added_hits = _annotate_hits(_raw_new, _add_props, dates)
+                    # additive union in SECOND-PASS relevance order (the A4
+                    # leg-merge contract at pool level): the re-query's
+                    # ranked members lead — base hits it re-found keep their
+                    # pass rank, newly surfaced recovery hits join at their
+                    # pass rank; base hits the sparse re-query cannot see
+                    # keep their base ranks appended after. Then the
+                    # session-diverse window discipline (§3(d)): a same-
+                    # session flood must never crowd the guard window.
+                    _merged = _cl.merge_expansion_order(
+                        pool, _added_hits, _expanded)
+                    _merged = _cl.session_diverse_order(
+                        _merged, window=_LOOP_WINDOW)
+                    # re-apply the per-session raw-chunk cap (C5) to the
+                    # merged pool — the recovery pass can surface chunks.
+                    _merged = _dedup_pool(
+                        _merged,
+                        max_chunks_per_session=max_chunks_per_session)
+                    _merged_ids = {h["id"] for h in _merged}
+                    loop_merged_added = len(
+                        set(_new_ids) & _merged_ids)
+                    pool = _merged
+        except Exception:  # noqa: BLE001, RUF100
+            # fail-open: any loop failure keeps the ORIGINAL pool —
+            # byte-identical to the one-shot result (the A4/C2 posture).
+            import logging as _logging
+            _logging.getLogger(__name__).warning(
+                "C3-1 coverage loop failed for %s — keeping the original "
+                "pool (fail-open)", qid, exc_info=True)
+            loop_fired_facet = None
+            loop_iterations = 0
+            loop_merged_added = 0
+        loop_latency_ms = (time.monotonic() - _t_loop) * 1000.0
+    coverage_loop_stats = {
+        "on": coverage_loop_on,
+        "loop_iterations": loop_iterations,
+        "loop_fired_facet": loop_fired_facet,
+        "loop_merged_added": loop_merged_added,
+        "loop_window": _LOOP_WINDOW,
+        "loop_latency_ms": round(loop_latency_ms, 2),
+        "tr_excluded": bool(is_tr),
+    }
 
     # ── C2 (#1745): evidence-mark boost — applied to the DEDUPED pool
     # BEFORE ``_recall_metrics`` (the only pool-metric mover: C1 cannot
@@ -1329,6 +1493,43 @@ def retrieve_for_question(
             len(ctx_evidence_ids) / reader_surface_denom
             if reader_surface_denom else None)
 
+    # ── C5 (#2521, #2513): aggregative-intent + per-facet coverage verdict
+    # (MEASUREMENT seam — retrieval behavior is untouched; the completeness
+    # loop is C3-1/C3-3 #2519). Under the arm ONLY: run the hermetic
+    # detector over the question (zero cost, no IO) and, when it is an
+    # entity-scoped aggregation, resolve the query's entity anchors through
+    # the Object-name spine (the #2518 surface) and check the per-facet
+    # coverage of the retrieval's TOP-K window (``pool[:top_k]`` — the
+    # ranked window that can reach the reader; a known facet present only
+    # at a deeper pool rank is EXACTLY the measured starved-facet shape
+    # #2513 targets, because the eval's structural leg admits every
+    # statement point into the pool while the rank cut decides what the
+    # reader sees). Emits the structured verdict {detected_intent,
+    # facet_coverage, missing_facets} riding the outcome. Fail-open
+    # contract (the #1745 default + the never-flag rule): the product
+    # library never raises; a defensive guard here records ``None`` on any
+    # unexpected failure (the arm marker still rides, so a failed check is
+    # never mistaken for a clean no-signal).
+    aggregative_verdict_out: dict | None = None
+    if aggregative_flag_on:
+        try:
+            from tortoise.aggregate import aggregative_verdict
+            aggregative_verdict_out = aggregative_verdict(
+                query=question["question"], proj=sdk._get_proj(),
+                # P2 (#2607 review): sample the window the READER actually
+                # receives — TR questions keep the pinned ``tr_top_k`` cap
+                # (the pool may retain more under the pool-only arm), so a
+                # wider sample would over-approximate k and flip a real
+                # partial into a false complete on the R5 slice.
+                retrieved_points=pool[:effective_top_k])
+        except Exception:
+            # fail-open (never break a working retrieval lane): log and
+            # record no verdict — the arm marker stays for reconstruction
+            logging.getLogger(__name__).warning(
+                "aggregative coverage verdict failed open for %s",
+                question.get("question_id", "?"), exc_info=True)
+            aggregative_verdict_out = None
+
     out = {
         "question_id": qid,
         "hits": pool,  # pinned contract: the deduped pool (R1 #1540)
@@ -1405,6 +1606,18 @@ def retrieve_for_question(
         # Reconstructs which arm a question ran on for the shared-question
         # A/B deltas (identical questions, expansion ON vs OFF).
         "entity_key_expansion": entity_key_expansion_on,
+        # C3-1 (#2519, #2567): the coverage-completeness loop arm — the
+        # resolved tri-state bool + the §8 per-outcome markers
+        # (loop_iterations / loop_fired_facet / loop_merged_added — the
+        # off-arm records zeros so the 2×2 with #2518 stays
+        # reconstructable per question). Always present on the hybrid path.
+        "coverage_loop": coverage_loop_on,
+        "coverage_loop_stats": coverage_loop_stats,
+        # C5 (#2521, #2513): the aggregative-intent coverage-check arm —
+        # the resolved tri-state bool (explicit flag / env; fail-safe OFF),
+        # always present so the A/B arms are reconstructable even when the
+        # verdict below is absent (off-path, D2).
+        "aggregative_flag": aggregative_flag_on,
         # R5 (#1544): TR-constraint surface — the detected kind (TR only)
         # and whether the window filter fell back to the unfiltered pool
         # (never starve the reader into abstention).
@@ -1438,7 +1651,8 @@ def retrieve_for_question(
             "marked_points_bands": _mark_bands(depth_marked_ranks),
             "marked_chunks_in_pool": len(depth_marked_chunk_ranks),
         },
-        "retrieval_latency_ms": round(latency_ms + rerank_ms, 2),
+        "retrieval_latency_ms": round(
+            latency_ms + rerank_ms + loop_latency_ms, 2),
     }
     # R6 (#1545) D6: the rerank pass is recorded ADDITIVELY — the leg-mix
     # ``rerank`` bucket counts selection-loss only (the ``mmr_dropped`` hits),
@@ -1450,6 +1664,12 @@ def retrieve_for_question(
     if rerank_on and rerank_pass.get("applied"):
         match_source_counts["rerank"] = rerank_pass.get("dropped", 0)
     out["match_source_counts"] = match_source_counts
+    # C5 (#2521, #2513): the aggregative verdict rides the outcome ONLY
+    # under the arm (D2 — the off-path dict keeps today's exact shape; the
+    # report projection reads it via o.get so pre-feature checkpoints and
+    # the OFF arm render identically).
+    if aggregative_flag_on:
+        out["aggregative_verdict"] = aggregative_verdict_out
     # Conditional keys (D2): the off-path dict keeps today's exact shape.
     if rerank_on:
         out["rerank_pass"] = rerank_pass
