@@ -2223,14 +2223,24 @@ class TortoiseSDK:
         """
         # ── Graph event store (#432) ──────────────────────────────
         if type_ in _GRAPH_EVENT_TYPES:
+            # #2600: copy FIRST — a caller-reused payload dict must never
+            # gain an unexpected key from the actor merge below; then merge
+            # the ContextVar actor (set by mcp_auth middleware / hosted
+            # _data_sdk) when present (additive — legacy/embedded lanes with
+            # no server-resolved human stay byte-identical).
+            actor = _current_actor_user_id.get()
             graph_payload = payload
-            if graph_payload is None:
+            if graph_payload is not None:
+                graph_payload = dict(graph_payload)  # copy FIRST (#2600)
+            else:
                 if point is not None:
                     graph_payload = {"id": point.get("id")}
                 elif id is not None:
                     graph_payload = {"id": id, **extra}
                 else:
                     graph_payload = {}
+            if actor is not None:
+                graph_payload["actor_user_id"] = actor
             try:
                 from .event_store import append_event, ensure_event_schema, next_seq
                 proj = self._get_proj()
@@ -2254,6 +2264,14 @@ class TortoiseSDK:
             "initiated_by": "sdk",
             "projection_version": 2,
         }
+        # #2600: the JSONL envelope carries the actor too (additive — only
+        # when a server-resolved human is present; a rebuild replay restores
+        # the ORIGINAL payload dict, whose own actor_user_id — if any — was
+        # caller-authored, never forged here). The actor is NOT added to any
+        # replay skip-set.
+        _jsonl_actor = _current_actor_user_id.get()
+        if _jsonl_actor is not None:
+            event["actor_user_id"] = _jsonl_actor
         if point is not None:
             # Strip embedding — it is recomputed on replay by
             # _upsert_point_props (vecf32 serialization is fragile).

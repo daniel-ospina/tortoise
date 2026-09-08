@@ -39,7 +39,8 @@ class EventAPI:
         self._svbp = None
 
     # -- internals -----------------------------------------------------------
-    def _emit(self, type_: str, *, corrects=None, **payload) -> dict:
+    def _emit(self, type_: str, *, corrects=None, actor: str | None = None,
+              **payload) -> dict:
         event = {
             "event_id": ulid(),
             "ts": now_iso(),
@@ -49,6 +50,11 @@ class EventAPI:
             "corrects": corrects,
             **payload,
         }
+        # #2600: optional human actor (default None = extraction lanes
+        # byte-identical). Only the EventAPI constructor can name it — no
+        # caller change required for existing lanes.
+        if actor is not None:
+            event["actor_user_id"] = actor
         self.log.append(event)
         if self.projection is not None:
             self.projection.apply(event)

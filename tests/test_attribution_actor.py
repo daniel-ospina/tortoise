@@ -196,3 +196,140 @@ class TestRegistryApikeyVerifyRawCreatedBy:
         resolved = sdk.apikey_verify(key)
         assert resolved is not None
         assert resolved.get("created_by") in (None, "api")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# #2600 Phase 1 Task 3 — _emit_event journaled-event actor backstop + the
+# EventAPI._emit optional actor. The :GraphEvent store node payload (JSON
+# string on e.payload) is the backstop record for who did a write; this
+# merges the ContextVar actor at EMISSION (copy-first — a caller-reused
+# payload dict never gains the key).
+UUID_B = "660e8400-e29b-41d4-a716-446655440001"
+
+
+class TestEmitEventActorBackstop:
+    """_emit_event graph-event payload actor merge (ContextVar) + copy-first
+    no-mutation pin + JSONL envelope parity."""
+
+    def _graph_payloads(self, sdk, type_: str):
+        rows = sdk._get_proj().g.query(
+            "MATCH (e:GraphEvent {type:$t}) RETURN e.payload ORDER BY e.seq",
+            params={"t": type_}).result_set
+        import json
+        return [json.loads(r[0]) for r in rows]
+
+    def test_graph_event_payload_carries_actor_when_set(self, tmp_path):
+        """ContextVar set → the :GraphEvent node payload gains actor_user_id
+        (additive merge at emission)."""
+        from tortoise.sdk import TortoiseSDK, _current_actor_user_id
+        sdk = TortoiseSDK(db_path=str(tmp_path / "emit.db"))
+        try:
+            tok = _current_actor_user_id.set(UUID_B)
+            try:
+                sdk._emit_event("PointAdded", {"id": "pt-1", "content": "x"})
+            finally:
+                _current_actor_user_id.reset(tok)
+            payloads = self._graph_payloads(sdk, "PointAdded")
+            assert payloads and payloads[0]["actor_user_id"] == UUID_B, payloads
+            assert payloads[0]["id"] == "pt-1", payloads
+        finally:
+            sdk.close()
+
+    def test_graph_event_no_actor_when_var_unset(self, tmp_path):
+        """ContextVar unset (embedded/self-host lane) → payload has NO
+        actor_user_id key (byte-identical legacy shape — assert key
+        absence, not None-value)."""
+        from tortoise.sdk import TortoiseSDK, _current_actor_user_id
+        sdk = TortoiseSDK(db_path=str(tmp_path / "emit-none.db"))
+        try:
+            _current_actor_user_id.set(None)  # noqa: F841 — explicit reset below
+            sdk._emit_event("OperatorAdded", {"id": "op-1"})
+            payloads = self._graph_payloads(sdk, "OperatorAdded")
+            assert payloads and "actor_user_id" not in payloads[0], payloads
+        finally:
+            sdk.close()
+
+    def test_caller_reused_payload_never_mutated(self, tmp_path):
+        """Copy-first pin: the same payload dict passed to two emissions
+        NEVER gains actor_user_id on the caller's object (the merge writes
+        the COPY)."""
+        from tortoise.sdk import TortoiseSDK, _current_actor_user_id
+        sdk = TortoiseSDK(db_path=str(tmp_path / "emit-copy.db"))
+        try:
+            shared = {"id": "pt-shared"}
+            tok = _current_actor_user_id.set(UUID_B)
+            try:
+                sdk._emit_event("PointAdded", shared)
+                sdk._emit_event("PointAdded", shared)
+            finally:
+                _current_actor_user_id.reset(tok)
+            assert "actor_user_id" not in shared, \
+                "caller payload dict must never gain the actor key"
+            payloads = self._graph_payloads(sdk, "PointAdded")
+            assert len(payloads) == 2
+            assert all(p.get("actor_user_id") == UUID_B for p in payloads)
+        finally:
+            sdk.close()
+
+    def test_jsonl_envelope_carries_actor(self, tmp_path):
+        """SDK with event_log_path + ContextVar set → the JSONL event line
+        carries actor_user_id (additive); the underlying point snapshot is
+        untouched."""
+        import json
+        from tortoise.log import EventLog
+        from tortoise.sdk import TortoiseSDK, _current_actor_user_id
+        events = tmp_path / "ev"
+        events.mkdir()
+        log_path = events / "emit.jsonl"
+        sdk = TortoiseSDK(db_path=str(tmp_path / "emit-log.db"),
+                          event_log_path=str(log_path))
+        try:
+            tok = _current_actor_user_id.set(UUID_B)
+            try:
+                pt = sdk.create_point("statement", "emit actor journal line",
+                                      id="pt-emit-log", is_episodic=False)
+            finally:
+                _current_actor_user_id.reset(tok)
+            assert pt.get("id") == "pt-emit-log"
+            lines = EventLog(log_path).read_all()
+            # the create_point journals a PointAdded snapshot event
+            adds = [e for e in lines if e.get("type") == "PointAdded"]
+            assert adds, "PointAdded must journal to the JSONL log"
+            env = adds[0]
+            assert env.get("actor_user_id") == UUID_B, env
+            # the point snapshot itself keeps only point fields (actor rides
+            # the envelope, never the stored point)
+            assert "actor_user_id" not in env["point"], env
+        finally:
+            sdk.close()
+
+
+class TestEventApiEmitOptionalActor:
+    """EventAPI._emit actor keyword — default None byte-identical; explicit
+    actor present on the emitted event dict."""
+
+    def test_default_none_no_actor_key(self):
+        from tortoise.api import EventAPI
+        from tortoise.log import EventLog
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as d:
+            log = EventLog(Path(d) / "api.jsonl")
+            api = EventAPI(log, initiated_by="extractor")
+            ev = api._emit("PointAdded", id="p1")
+            assert ev.get("actor_user_id") is None
+            assert "actor_user_id" not in ev, ev
+
+    def test_explicit_actor_present(self):
+        from tortoise.api import EventAPI
+        from tortoise.log import EventLog
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as d:
+            log = EventLog(Path(d) / "api.jsonl")
+            api = EventAPI(log, initiated_by="extractor")
+            ev = api._emit("PointAdded", id="p2", actor=UUID_B)
+            assert ev["actor_user_id"] == UUID_B, ev
+            # journaled copy carries it too
+            readback = log.read_all()
+            assert readback and readback[-1].get("actor_user_id") == UUID_B
