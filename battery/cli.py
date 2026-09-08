@@ -93,6 +93,12 @@ def _parser() -> argparse.ArgumentParser:
     vj.add_argument("--out", default=_DEFAULT_OUT, help="records output dir")
     vj.add_argument("--mock", action="store_true",
                     help="hermetic mock-judge run (no model API)")
+    vj.add_argument(
+        "--evidence", default=None,
+        help="probe evidence bundle JSON (#2292 Task 4): run the "
+             "declarative validation battery over REAL deliberation "
+             "renders (retest/IRT/gold legs) with TWO judge configs "
+             "(BATTERY_JUDGE_MODEL + BATTERY_JUDGE_MODEL_2)")
 
     probe = sub.add_parser(
         "probe", help="#2292 real-model probe (measured tokens + evidence)")
@@ -125,13 +131,56 @@ def _stub(name: str, owner: str) -> Callable[[argparse.Namespace], ExitCode]:
 
 def _cmd_validate_judge(args: argparse.Namespace) -> ExitCode:
     """battery validate-judge --rubric <id> — run the validation battery for
-    one rubric (issue #1410; E2E-5.1). Exit 2 when the gate blocks."""
+    one rubric (issue #1410; E2E-5.1). Exit 2 when the gate blocks.
+
+    ``--evidence <bundle.json>`` (#2292 Task 4): the PRE-EXPOSURE
+    validation run over real probe deliberation text — declarative
+    anchored-yes/no protocol over the itemized rubric, TWO judge configs
+    (inter-judge kappa, fail-closed when BATTERY_JUDGE_MODEL_2 is
+    absent on the real path), judge spend metered against the
+    judge_leg_reserve_usd reserve (HARD STOP)."""
     from battery.judge.client import JudgeClient
     from battery.judge.gate import RubricRegistry, validate_rubric
+    from battery.judge.rubric import load_rubric_spec
     rubric_id = args.rubric
+
+    if getattr(args, "evidence", None):
+        # Pre-exposure validation over the REAL probe evidence bundle.
+        from pathlib import Path as _P2
+
+        from battery.config.budget import load_budget
+        from battery.judge.evidence import run_evidence_validation
+        budget = load_budget(_P2(args.config_dir) / "budget.yaml")
+        reserve = budget.judge_leg_reserve_usd if not args.mock else None
+        record = run_evidence_validation(
+            config_dir=args.config_dir, rubric_id=rubric_id,
+            evidence=args.evidence, force_mock=bool(args.mock),
+            records_path=_P2(args.out or _DEFAULT_OUT)
+            / "judge" / "records.json",
+            reserve_usd=reserve)
+        print(f"rubric {rubric_id}: {'VALIDATED' if record.passed else 'BLOCKED'} "
+              f"(retest={record.abba_agreement:.2f} kappa={record.kappa} "
+              f"reason={record.blocked_reason or 'ok'})")
+        return ExitCode.OK if record.passed else ExitCode.GATE_BLOCKED
+
     rubric_text = _load_rubric_text(args, rubric_id)
     pairs = _default_probe_pairs(rubric_id)
     client = JudgeClient(force_mock=args.mock)
+    # Itemized rubric => the declarative anchored-yes/no protocol (Task 2):
+    # item count + vocabulary; the gold-anchor leg auto-resolves from the
+    # rubric store. Legacy .md rubrics keep the pairwise #1410 battery.
+    n_items = 4
+    vocabulary = None
+    spec = None
+    try:
+        spec = load_rubric_spec(args.config_dir or args.config_dir
+                                or _DEFAULT_CONFIG, rubric_id)
+    except Exception:  # noqa: BLE001, RUF100 — no rubric file: pairwise fallback
+        spec = None
+    if spec is not None and spec.is_itemized:
+        n_items = max(len(spec.items), 1)
+        from battery.judge.gate import DECLARATIVE_VOCAB
+        vocabulary = DECLARATIVE_VOCAB
     # Kappa leg: two judge passes over the SAME probe items (E2E-5.1
     # chance-corrected reliability is actually measured, not hardcoded).
     labels_a = [client.judge(rubric_id, f"kappa-a{i}", p[0]).verdict
@@ -139,7 +188,8 @@ def _cmd_validate_judge(args: argparse.Namespace) -> ExitCode:
     labels_b = [client.judge(rubric_id, f"kappa-b{i}", p[1]).verdict
                 for i, p in enumerate(pairs)]
     record = validate_rubric(rubric_id, rubric_text, client, pairs,
-                             labels_a, labels_b, n_items=4)
+                             labels_a, labels_b, n_items=n_items,
+                             vocabulary=vocabulary)
     from pathlib import Path as _Path
     records_path = _Path(args.out or _DEFAULT_OUT) / "judge" / "records.json"
     registry = RubricRegistry(records_path)

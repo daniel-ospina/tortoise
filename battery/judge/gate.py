@@ -241,14 +241,30 @@ def validate_rubric(rubric_id: str, rubric_text: str,
     kappa_ok = kappa is not None and kappa >= KAPPA_MIN
 
     # 3) IRT item-infit — declarative judges the caller-supplied anchored
-    #    item renders (irt_renders[i] for i in range(n_items * 3), the
-    #    LIVE loop bound); pairwise keeps the legacy contentless probes.
+    #    item renders: prompt i judges item (i % n_items) on render
+    #    (i // n_items), so the rasch slices (verdicts[i::n_items]) are the
+    #    SAME item across distinct renders and the live loop bound
+    #    (n_items x 3) is fed without repeating a prompt until the
+    #    render x item product is exhausted. Pairwise keeps the legacy
+    #    contentless probes.
     irt_prompts = []
     for i in range(n_items * 3):
         if declarative:
-            render = (irt_renders[i] if irt_renders
-                      and i < len(irt_renders) else f"probe {i}")
-            irt_prompts.append(_declarative_render_prompt(render, rubric_text))
+            if irt_renders:
+                render = irt_renders[(i // n_items) % len(irt_renders)]
+                item_text = _item_text(
+                    rubric_id, f"item-{i % n_items}", rubric_text)
+                irt_prompts.append(
+                    _declarative_render_prompt(render, rubric_text,
+                                               item_text=item_text))
+            else:
+                # No anchored renders supplied — legacy contentless probe
+                # fallback with the FULL rubric prompt (a deterministic
+                # judge stays consistent -> degenerate fit, exactly the
+                # legacy behavior). Never cycle per-item here: there is no
+                # anchored render to judge.
+                irt_prompts.append(
+                    _declarative_render_prompt(f"probe {i}", rubric_text))
         else:
             irt_prompts.append(f"probe {i}")
     verdicts = [client.judge(rubric_id, f"irt-{i}", p).verdict
@@ -339,9 +355,15 @@ _RENDER_ITEM_PROMPT = (
 )
 
 
-def _declarative_render_prompt(render: str, rubric_text: str) -> str:
+def _declarative_render_prompt(render: str, rubric_text: str,
+                               item_text: str | None = None) -> str:
     """Declarative evidence-render judge prompt (retest/IRT): the anchored
-    evidence is judged against the full rubric; answer YES/NO."""
+    evidence is judged against the FULL rubric (retest) or a single item
+    (IRT — item_text given); answer YES/NO."""
+    if item_text and item_text != rubric_text:
+        return (f"Rubric item: {item_text}\n\n"
+                f"Evidence: {render}\n"
+                f"Answer YES or NO.")
     return (
         f"Rubric: {rubric_text}\n\n"
         f"Judge this evidence against the anchored items.\n"
@@ -350,18 +372,30 @@ def _declarative_render_prompt(render: str, rubric_text: str) -> str:
     )
 
 
-def _item_text(rubric_id: str, item_id: str, rubric_text: str) -> str:
-    """Item text for a gold anchor: resolved from the rubric store when
-    possible (itemized rubric), else falls back to the rubric text."""
-    if not item_id:
-        return rubric_text
+def _items_for(rubric_id: str) -> list[dict]:
+    """Itemized rubric items from the repo rubric store (best-effort)."""
     from pathlib import Path as _P
     default_cfg = _P(__file__).resolve().parents[1] / "config"
     try:
-        spec = load_rubric_spec(default_cfg, rubric_id)
+        return load_rubric_spec(default_cfg, rubric_id).items
     except Exception:  # noqa: BLE001, RUF100
+        return []
+
+
+def _item_text(rubric_id: str, item_id: str, rubric_text: str) -> str:
+    """Item text for a gold/IRT anchor: resolved from the rubric store when
+    possible (itemized rubric; ``item-<i>`` selects by index), else falls
+    back to the rubric text."""
+    if not item_id:
         return rubric_text
-    for it in spec.items:
+    items = _items_for(rubric_id)
+    if items and item_id.startswith("item-"):
+        try:
+            return str(items[int(item_id[len("item-"):])].get(
+                "text", rubric_text))
+        except (ValueError, IndexError):
+            return rubric_text
+    for it in items:
         if it.get("id") == item_id:
             return str(it.get("text", rubric_text))
     return rubric_text
