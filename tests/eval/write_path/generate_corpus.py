@@ -115,6 +115,42 @@ def _hazard(hazard_id: str, quote: str, source: str, *, turn: int) -> dict:
     return {"id": hazard_id, "quote": quote, "source": source, "planted_turn": turn}
 
 
+def _operator(op_id: str, kind: str, from_anchor: str, from_turn: int,
+              to_anchor: str, to_turn: int, *, relation_turn: int,
+              reason: str, from_session: str | None = None,
+              to_session: str | None = None) -> dict:
+    """One planted-OPERATOR authoring spec (issue #2514, layer-2 gold).
+
+    ``kind`` is the task-language operator name (schema.PLANTED_OPERATOR_KIND
+    vocabulary: SUPERSEDE/NEGATE/MITIGATES/SUPPORTS); the mechanical grader
+    maps it to the graph surface it asserts (grading.operator_edge_detail).
+    ``from`` is the epistemically ACTIVE endpoint (newer decision / attacker /
+    evidence / mitigation action), ``to`` the object it acts on.  ``reason``
+    cites the ontology semantics (scoping note 2026-09-07-2514-operator-
+    corpus.md table).  Anchors MUST be verbatim fragments of the named
+    sessions' turns; ``relation_turn`` is the OWN-session turn that STATES the
+    relation.  Cross-session endpoints (the SUPERSEDE planted wp07 -> wp06)
+    carry an explicit ``*_session``; they are grounded at corpus level.
+    """
+    return {
+        "id": op_id,
+        "expected_kind": kind,
+        "from": {"verbatim_anchor": from_anchor, "planted_turn": from_turn,
+                 **({"session_id": from_session} if from_session else {})},
+        "to": {"verbatim_anchor": to_anchor, "planted_turn": to_turn,
+               **({"session_id": to_session} if to_session else {})},
+        "relation_turn": relation_turn,
+        "reason": reason,
+    }
+
+
+# Corpus floor for the planted-operator (layer-2) gold (issue #2514): every
+# operator kind the issue names must be planted at least once across the
+# corpus, and each planted edge must be unambiguous in its transcript.
+MIN_PLANTED_OPERATOR_EDGES = 4
+REQUIRED_OPERATOR_KINDS = {"SUPERSEDE", "NEGATE", "MITIGATES", "SUPPORTS"}
+
+
 # ── Session authoring ───────────────────────────────────────────────────────
 # Each spec: {session_id, harness, scenario, turns, units, distractors,
 # hazards}.  planted_turn is 1-based over ``turns``; anchors are verified.
@@ -400,7 +436,131 @@ WP05 = {
     ],
 }
 
-AUTHORED_SESSIONS = [WP01, WP02, WP03, WP04, WP05]
+
+WP06 = {
+    "session_id": "wp06_quarry_rollout",
+    "harness": "codex",
+    "scenario": "Diego and Maya decide the rollout shape for the quarry lease fix: the chaos harness supports the scope-independence claim (SUPPORTS) and they commit to all-at-once behind a single global kill flag (the decision the follow-up session overturns).",
+    "turns": [
+        _t("user", "Let us decide the rollout for the quarry lease fix. The lease-before-claim change is merged and the staging matrix is green. We have until the October freeze to ship it to the Halcyon queue, so this is a today decision, not a next-week one."),
+        _t("assistant", "Two levers shape the rollout: scope, all shards at once versus one shard at a time, and reversibility, a kill flag we can pull versus a canary we watch. Which do you want to decide on data?"),
+        _t("user", "Data first. I want to run the chaos harness against both rollout shapes before we pick. Same fault set, four shards, killed workers mid-claim."),
+        _t("assistant", "The all-at-once shape is the lease fix enabled fleet-wide behind one global kill flag. The per-shard shape enables it shard by shard over a week, each shard watched before the next one flips."),
+        _t("user", "My worry with any shape is the stall coming back. If we flip mid-rollout and the flip glitches, we could re-enter the duplicate-processing race while the queue drains."),
+        _t("assistant", "The original stall was a no-lease bug, not a flip bug, but the glitch scenario is fair to test. The chaos harness covers it: it kills workers, it does not toggle flags."),
+        _t("user", "Right, and I want the harness to prove the boundary case: two workers claiming one batch at the exact moment a region toggles."),
+        _t("assistant", "That boundary is the lease CAS: only the owner can complete, so a second claim attempt fails at compare-and-swap regardless of what toggles around it."),
+        _t("user", "That is my read too: the race only re-enters when two workers can claim one batch, and the lease makes that impossible no matter how we roll out."),
+        _t("assistant", "Hypothesis recorded. The chaos run either confirms it at the shard boundary or it does not, scope independence is the claim under test."),
+        _t("user", "If the run confirms it, all-at-once is tempting: one day of rollout instead of a week of canary watching."),
+        _t("assistant", "All-at-once buys the shortest exposure window and the flag is the reversibility backstop. Per-shard buys a smaller blast radius per flip. The chaos numbers should decide."),
+        _t("user", "The chaos run just finished. We killed a lease-holding worker mid-batch on four shards and every batch was claimed exactly once after the expiry, no duplicates anywhere. It took longer than expected because I queued it behind the nightly embedding job."),
+        _t("assistant", "So the chaos run supports the claim that the race cannot re-enter once the lease is held, rollout scope does not change the guarantee."),
+        _t("user", "Then I am not going to argue for a week of canary watching. Scope is settled by the data. My shift ends at six, so if the flip lands today I want the runbook link in the channel."),
+        _t("assistant", "Scope settled: the lease guarantee is scope-independent. That leaves reversibility: one global flag versus per-service flags."),
+        _t("user", "We ship the lease fix all-at-once behind a single global kill flag. One flag is one switch to pull, and the chaos run says the fix itself cannot re-race."),
+        _t("assistant", "Decision recorded: all-at-once rollout behind the global kill flag, watch the queue drain after the flip, pull the flag on any regression."),
+        _t("user", "And who drives the flip? I would rather it be one person with the runbook open, not a group chat decision at 2am."),
+        _t("assistant", "One driver with the runbook. Maya is the natural driver for the flip, she owns the ingest queue service and ran the staging matrix."),
+        _t("user", "Cutoff stays September 30 as agreed, and the lease migration already landed ahead of Friday's maintenance window."),
+        _t("assistant", "Rollout plan: all-at-once behind the global kill flag, driver Maya, cutoff unchanged, migration landed before Friday. Shall I open the rollout PR?"),
+    ],
+    "units": [
+        _unit("u_01", "fact", "the staging matrix is green", turn=1, notability="medium"),
+        _unit("u_02", "fact", "until the October freeze", turn=1, notability="medium"),
+        _unit("u_03", "decision", "run the chaos harness against both rollout shapes", turn=3, accepts_rephrase_linked=False),
+        _unit("u_04", "idea", "we could re-enter the duplicate-processing race while the queue drains", turn=5),
+        _unit("u_05", "fact", "two workers claiming one batch at the exact moment a region toggles", turn=7),
+        _unit("u_06", "idea", "one day of rollout instead of a week of canary watching", turn=11),
+        _unit("u_07", "decision", "one person with the runbook open", turn=19, accepts_rephrase_linked=False),
+        _unit("u_08", "entity", "Maya is the natural driver for the flip", turn=20, accepts_rephrase_linked=False),
+        _unit("u_09", "fact", "lease migration already landed ahead of Friday's maintenance window", turn=21, accepts_rephrase_linked=False),
+    ],
+    "distractors": [
+        _distractor("d_01", "The chaos run waited for the nightly embedding job.", "queued it behind the nightly embedding job", turn=13),
+        _distractor("d_02", "Routine note that the shift ends at six.", "my shift ends at six", turn=15),
+    ],
+    "hazards": [
+        _hazard("h_01", "we killed a lease-holding worker mid-batch on four shards", "maya", turn=13),
+        _hazard("h_02", "I would rather it be one person with the runbook open", "diego", turn=19),
+    ],
+    "planted_operators": [
+        _operator("op_01", "SUPPORTS",
+                  "every batch was claimed exactly once after the expiry", 13,
+                  "the lease makes that impossible no matter how we roll out", 9,
+                  relation_turn=14,
+                  reason="chaos-run observation (t13) supports the scope-independence hypothesis (t9) — ONTOLOGY §3.1 IMPL 'A supports/implies B' + §8 semantic type supports|IMPL (Evidence supports Claim); asst t14 states the relation explicitly ('the chaos run supports the claim that...'). from = observation/evidence, to = hypothesis."),
+    ],
+}
+
+WP07 = {
+    "session_id": "wp07_bluepeak_followup",
+    "harness": "codex",
+    "scenario": "Maya and Diego investigate a six-minute duplicate anomaly after the all-at-once rollout: the flag hypothesis is counter-claimed by clock-skew evidence (NEGATE), a grace period closes the skew risk (MITIGATES), and the all-at-once global-flag decision from the prior session is overturned for per-service flags (SUPERSEDE, cross-session).",
+    "turns": [
+        _t("user", "The all-at-once rollout shipped clean on Friday, but there was an anomaly overnight in the Bluepeak region: duplicate claims for about six minutes on the hydrate queue. We need a cause before the next rollout. The on-call handoff was smooth at least, no pages overnight."),
+        _t("assistant", "Duplicates on the hydrate queue post-fix is the exact class the lease was supposed to kill. Six minutes is short, a window rather than a drain. Let us timeline it against the flag state."),
+        _t("user", "We toggled the global flag once at cutover and never touched it after. I pulled the toggle log to be sure."),
+        _t("assistant", "One toggle at cutover. Then the anomaly is not a mid-flight flip, unless the flag state itself was the trigger."),
+        _t("user", "My first hypothesis is the global flag: the flip must have raced the lease renewal when the region cut over, leaving a renewal window where two workers could claim one batch. Honestly I have been second-guessing the all-at-once call since we made it."),
+        _t("assistant", "Flag-raced-renewal is testable: compare the toggle timestamp against the lease renewal stamps in the region around the anomaly."),
+        _t("user", "I pulled both. The toggle is two hours before the first duplicate, and the renewal stamps are all clean, no overlap, no double renewal."),
+        _t("assistant", "Two hours of stable flag state before the duplicates already weakens the flag hypothesis. What does differ in that region?"),
+        _t("user", "Whatever the cause, here is the risk that matters for the next rollout: clock skew between regions can make lease expiry unsafe, a lagging region renews after the owner's lease truly expired, and its renewal can clobber a live lease in another region."),
+        _t("assistant", "Skew is a real expiry hazard: the CAS compares against wall-clock expiry, so a drifted clock changes who wins. Is that what the timestamps show?"),
+        _t("user", "The flag did not cause the duplicates, it had been stable for two hours before the anomaly, and the renewal stamps show the region clock drifted eleven seconds, which is exactly the six-minute duplicate window on the hydrate queue."),
+        _t("assistant", "So the flag hypothesis is out, the clock drift explains the window, and the lease behaved as designed under a drifted clock: it expired early, the second worker claimed the batch, and the hydrate side saw the duplicate."),
+        _t("user", "Then the fix is not about the flag at all. A skew-tolerant lease: the expiry check needs a grace period so a lagging region cannot clobber a live lease."),
+        _t("assistant", "Grace period on the lease expiry, sized to the worst observed drift. What is the biggest skew we have seen between regions?"),
+        _t("user", "Eleven seconds is the worst we have logged, but the SLO review assumed sub-second. I would size the grace to thirty seconds and log any expiry that lands inside it."),
+        _t("assistant", "Thirty-second grace with an internal log on grace expiries. That bounds the skew hazard without making the lease lax."),
+        _t("user", "We shipped the skew-tolerant lease grace period to every region last night, with the grace window a lagging region's renewal cannot clobber a live lease, so the clock-skew risk is covered."),
+        _t("assistant", "Risk closed by the grace period: expiry is now skew-tolerant, and the duplicates are attributed to the drift, not to the fix."),
+        _t("user", "And one more decision while we are here: for the next rollout, reverse the all-at-once call, per-service flags instead of one global flag, so a single bad region cannot take the whole fleet down with it. Honestly the global flag has been the single point of failure all along."),
+        _t("assistant", "Per-service flags changes the reversibility model: each service's flag is pulled independently instead of one fleet-wide switch."),
+        _t("user", "Right. The global flag made one bad region a fleet-wide event; per-service flags keep a bad region from taking the whole fleet down."),
+        _t("user", "Good, and the skew fix ships with the hydrate queue re-run before the next rollout. Priya will track the grace-expiry log for a week. Also the demo room is booked Thursday if you want to show the dashboards."),
+    ],
+    "units": [
+        _unit("u_01", "fact", "duplicate claims for about six minutes on the hydrate queue", turn=1, accepts_rephrase_linked=False),
+        _unit("u_02", "fact", "The on-call handoff was smooth", turn=1, notability="low"),
+        _unit("u_03", "fact", "toggled the global flag once at cutover", turn=3, accepts_rephrase_linked=False),
+        _unit("u_04", "vibe", "second-guessing the all-at-once call since we made it", turn=5),
+        _unit("u_05", "fact", "the toggle is two hours before the first duplicate", turn=7, accepts_rephrase_linked=False),
+        _unit("u_06", "fact", "Eleven seconds is the worst we have logged", turn=15, accepts_rephrase_linked=False),
+        _unit("u_07", "decision", "size the grace to thirty seconds", turn=15, accepts_rephrase_linked=False),
+        _unit("u_08", "entity", "Priya will track the grace-expiry log for a week", turn=22, accepts_rephrase_linked=False),
+        _unit("u_09", "vibe", "the global flag has been the single point of failure all along", turn=19),
+    ],
+    "distractors": [
+        _distractor("d_01", "Routine aside that the demo room is booked Thursday.", "the demo room is booked Thursday", turn=22),
+        _distractor("d_02", "Routine on-call note from the handoff.", "no pages overnight", turn=1),
+    ],
+    "hazards": [
+        _hazard("h_01", "the region clock drifted eleven seconds, which is exactly the six-minute duplicate window", "diego", turn=11),
+        _hazard("h_02", "the renewal stamps are all clean, no overlap, no double renewal", "maya", turn=7),
+    ],
+    "planted_operators": [
+        _operator("op_02", "NEGATE",
+                  "The flag did not cause the duplicates, it had been stable for two hours before the anomaly", 11,
+                  "the flip must have raced the lease renewal when the region cut over", 5,
+                  relation_turn=12,
+                  reason="counter-claim with an explicit negation marker (t11 'did not cause') attacks the flag hypothesis (t5) — ONTOLOGY §3.1 NAND 'A contradicts B'; extraction-emitted NANDs default unidirectional (#909: new-claim-attacks-existing). from = counter-claim/attacker, to = the attacked hypothesis; asst t12 states the contradiction ('the flag hypothesis is out')."),
+        _operator("op_03", "MITIGATES",
+                  "a lagging region's renewal cannot clobber a live lease", 17,
+                  "clock skew between regions can make lease expiry unsafe", 9,
+                  relation_turn=18,
+                  reason="the shipped grace period (t17) reduces the clock-skew risk claim (t9) — ONTOLOGY §3.1/§3.9 mitigate_operator / mitigated_by; FLAGGED (scoping finding F1): core §3.1 vocabulary (IMPL/NAND/CORRECTS) has no point-to-point 'action reduces risk' operator and registered MITIGATES is relevance-on-an-operator-edge (extractor S2: claim true but matters less than it seems). Gold asserts the write path's MITIGATES form; NAND/supersede of the risk is the ontology-owner question."),
+        _operator("op_04", "SUPERSEDE",
+                  "per-service flags instead of one global flag", 19,
+                  "ship the lease fix all-at-once behind a single global kill flag", 17,
+                  relation_turn=19, to_session="wp06_quarry_rollout",
+                  reason="decision D2 (t19 'reverse the all-at-once call') overturns decision D1 made in the prior session (wp06 t17) — ONTOLOGY §3.1 CORRECTS (new point corrects/replaces an outdated point; supersede_point marks old outdated). FLAGGED (scoping finding F2): §2 state-centric + extractor S2 supersede ENTITY/state-level (one 'B supersedes A' statement point + ObjectSuperseded); point-level CORRECTS forms when S3 resolves the superseded claim already in-graph. Planted CROSS-SESSION (wp07 -> wp06) because that is the only mechanism by which today's v2 extractor can emit point-level CORRECTS in one sequential corpus capture. from = the new decision (own session), to = the superseded decision (wp06)."),
+    ],
+}
+
+
+AUTHORED_SESSIONS = [WP01, WP02, WP03, WP04, WP05, WP06, WP07]
 
 
 # ── Rendering ───────────────────────────────────────────────────────────────
@@ -515,7 +675,76 @@ def _build_session_docs(spec: dict) -> tuple[dict, dict]:
         "salient_units": salient_units,
         "distractor_leakage_tolerance": 1,  # research-recommended ≤1/run (gbrain 1/86)
     }
+    planted_operators = _build_planted_operators(spec, turns, n_turns, prefix)
+    if planted_operators:
+        gold["planted_operators"] = planted_operators
     return fixture, gold
+
+
+def _build_planted_operators(spec: dict, turns: list[dict], n_turns: int,
+                             prefix: str) -> list[dict]:
+    """Derive the sealed ``planted_operators`` gold section for one session.
+
+    Issue #2514 layer-2 gold.  Each spec entry names the expected operator
+    kind + two anchored endpoints + the OWN-session ``relation_turn`` where
+    the relation is stated.  Anchors grounded in the own session are verified
+    here (normalized-substring); anchors that point at ANOTHER session
+    (``session_id`` set — the cross-session SUPERSEDE) are verified by
+    ``validate_committed`` corpus-wide.  Emitted ids are globally unique via
+    the session-stem prefix (``wp07_x_op_02``) like every other gold id.
+    """
+    ops = spec.get("planted_operators") or []
+    if not isinstance(ops, list):
+        raise ValueError(f"{prefix}: planted_operators must be a list")
+    own = spec["session_id"]
+    rendered: list[dict] = []
+    seen: set[str] = set()
+    for op in sorted(ops, key=lambda o: (o.get("relation_turn", 0), o.get("id", ""))):
+        kind = op["expected_kind"]
+        if kind not in schema.PLANTED_OPERATOR_KIND_VALUES:
+            raise ValueError(f"{prefix}: unknown planted-operator kind {kind!r}")
+        relation_turn = op["relation_turn"]
+        if not (1 <= relation_turn <= n_turns):
+            raise ValueError(
+                f"{prefix}: op {op.get('id')} relation_turn {relation_turn} "
+                f"out of range for {n_turns} turns"
+            )
+        endpoints: list[tuple[str, dict]] = []
+        for side in ("from", "to"):
+            endpoint = op[side]
+            endpoint_session = endpoint.get("session_id") or own
+            anchor = endpoint["verbatim_anchor"]
+            planted_turn = endpoint["planted_turn"]
+            if endpoint_session == own:
+                if not (1 <= planted_turn <= n_turns):
+                    raise ValueError(
+                        f"{prefix}: op {op.get('id')} {side} planted_turn "
+                        f"{planted_turn} out of range for {n_turns} turns"
+                    )
+                content = turns[planted_turn - 1]["content"]
+                if not schema.anchor_present(anchor, content):
+                    raise ValueError(
+                        f"{prefix}: op {op.get('id')} {side} verbatim_anchor "
+                        f"{anchor!r} is NOT a normalized substring of turn "
+                        f"{planted_turn} content:\n    {content[:200]}"
+                    )
+            rendered_endpoint = {"verbatim_anchor": anchor, "planted_turn": planted_turn}
+            if endpoint_session != own:
+                rendered_endpoint["session_id"] = endpoint_session
+            endpoints.append((side, rendered_endpoint))
+        op_id = f"{prefix}_{op['id']}"
+        if op_id in seen:
+            raise ValueError(f"{prefix}: duplicate planted-operator id {op_id!r}")
+        seen.add(op_id)
+        rendered.append({
+            "id": op_id,
+            "expected_kind": kind,
+            "from": endpoints[0][1],
+            "to": endpoints[1][1],
+            "relation_turn": relation_turn,
+            "reason": op["reason"],
+        })
+    return rendered
 
 
 def _dump_json_bytes(doc: dict) -> bytes:
@@ -552,6 +781,7 @@ def render_corpus() -> dict[str, bytes]:
         raise AssertionError(
             f"corpus has {unit_count} planted salient units < {MIN_PLANTED_SALIENT_UNITS} floor"
         )
+    _assert_operator_floors(outputs)
 
     # fixtures_hash covers fixture AND gold files (a gold-only edit changes it
     # ⇒ invalidates committed baselines — E2E-2 negative gate).
@@ -580,6 +810,32 @@ def render_corpus() -> dict[str, bytes]:
         rel = "baselines/main.json" if posture == "llm" else "baselines/m2.json"
         outputs[rel] = _dump_json_bytes(baseline)
     return outputs
+
+
+def _assert_operator_floors(outputs: dict[str, bytes]) -> None:
+    """Issue #2514 floor: the corpus plants every operator kind at least once
+    (SUPERSEDE/NEGATE/MITIGATES/SUPPORTS) across the seeded golds.
+    """
+    kinds: set[str] = set()
+    total = 0
+    for rel, data in outputs.items():
+        if not rel.startswith("gold/") or not rel.endswith(".gold.json"):
+            continue
+        gold = json.loads(data)
+        ops = gold.get("planted_operators") or []
+        total += len(ops)
+        kinds.update(op.get("expected_kind") for op in ops)
+    if total < MIN_PLANTED_OPERATOR_EDGES:
+        raise AssertionError(
+            f"corpus has {total} planted operator edges < "
+            f"{MIN_PLANTED_OPERATOR_EDGES} floor (issue #2514)"
+        )
+    missing = sorted(REQUIRED_OPERATOR_KINDS - kinds)
+    if missing:
+        raise AssertionError(
+            f"corpus planted operators missing kinds {missing} — every issue-#2514 "
+            "operator kind must be planted at least once"
+        )
 
 
 # ── Disk write + CLI ────────────────────────────────────────────────────────
@@ -682,6 +938,9 @@ def validate_committed(root: Path | None = None) -> list[str]:
         issues += [
             f"{gold_path.name}: {issue}" for issue in schema.validate_gold(gold, fixture=fixture)
         ]
+        # #2514 cross-session operator anchors (an endpoint naming another
+        # session) ground corpus-wide — the one-gold validator cannot see the
+        # other fixture.  Run after all fixtures are loaded (below).
         # Corpus paths are keyed by file stem (corpus.session_ids, fixture_path,
         # gold_path) — the embedded session_id must match so content and paths
         # can never disagree.
@@ -696,6 +955,19 @@ def validate_committed(root: Path | None = None) -> list[str]:
                 f"{gold_path.name}: embedded session_id {gold.get('session_id')!r} "
                 f"!= filename stem {gold_stem!r}"
             )
+    # #2514 cross-session operator-anchor grounding (endpoints naming a
+    # session other than the gold's own — the SUPERSEDE planted wp07 → wp06).
+    fixtures_by_session = {
+        sid: schema.read_json(path) for sid, path in fixtures.items()
+    }
+    for session_id in sorted(golds):
+        gold = schema.read_json(golds[session_id])
+        issues += [
+            f"{golds[session_id].name}: {issue}"
+            for issue in schema.validate_planted_operators_cross_session(
+                gold, fixtures_by_session
+            )
+        ]
     # Both posture baselines validate + their fixtures_hash must match the
     # committed fixture + gold files (REVIEW-FIX: a gold-only edit
     # invalidates BOTH lanes' baselines; the m2 CI lane is not exempt).
@@ -723,6 +995,29 @@ def validate_committed(root: Path | None = None) -> list[str]:
             f"_manifest.json verification failed (missing={verification['missing']}, "
             f"extra={verification['extra']}, mismatched={verification['mismatched']}, "
             f"malformed={verification['malformed']})"
+        )
+    # Issue #2514 floors hold on the COMMITTED files (kind coverage + edge
+    # count).  The render-time assertion guards fresh renders; this re-checks
+    # the on-disk corpus so a hand-edit cannot silently drop the coverage.
+    kinds: set[str] = set()
+    total = 0
+    for session_id in sorted(golds):
+        gold = schema.read_json(golds[session_id])
+        ops = gold.get("planted_operators") or []
+        if not isinstance(ops, list):
+            continue
+        total += len(ops)
+        kinds.update(op.get("expected_kind") for op in ops if isinstance(op, dict))
+    if total < MIN_PLANTED_OPERATOR_EDGES:
+        issues.append(
+            f"committed corpus has {total} planted operator edges < "
+            f"{MIN_PLANTED_OPERATOR_EDGES} floor (issue #2514)"
+        )
+    missing_kinds = sorted(REQUIRED_OPERATOR_KINDS - kinds)
+    if missing_kinds:
+        issues.append(
+            f"committed corpus planted operators missing kinds {missing_kinds} "
+            "— every issue-#2514 operator kind must be planted at least once"
         )
     return issues
 

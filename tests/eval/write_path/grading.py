@@ -406,6 +406,215 @@ def session_emitted(points: list[SessionPoint]) -> bool:
     return any(not is_turn_echo(p.get("content") or "") for p in points)
 
 
+# ── Planted-operator (layer-2) edge grading (#2514) ───────────────────────
+# The write-path bench grades CONTENT survival + leakage only; issue #2514
+# adds the layer-2 question: did the extractor wire the RIGHT operator EDGE
+# between the right points (instead of a bare new point)?  The planted
+# operator gold (gold.<session>.planted_operators) names, per planted edge:
+#   expected_kind ∈ SUPERSEDE | NEGATE | MITIGATES | SUPPORTS
+#   from = the epistemically ACTIVE endpoint (newer decision / attacker /
+#          evidence / mitigation action), to = the object it acts on.
+#
+# The graded surface extends the session snapshot (see
+# runner.snapshot_session) with three additive keys:
+#   operator_edges — reified operator-mediated edges: [{"op_id", "op_type"
+#     (IMPL|NAND|...), "direction", "label", "endpoints": {pid: idx},
+#     "source_id": the idx-0 endpoint or None}].  Reified operator nodes are
+#     :Point {is_operator:true} WITHOUT eventId, so they never enter the
+#     eventId-keyed memory layer — this surface is what makes them gradeable.
+#   direct_edges — direct Point→Point relationships among the session's
+#     memory points: [{"rel_type", "from_id", "to_id"}] (the supersession
+#     CORRECTS edge lands here — supersede_point writes a direct edge).
+#   mitigations — mitigation Points on operators that touch the session:
+#     [{"op_id", "point_id", "content"}] ((op)-[:mitigated_by]->(m)).
+#
+# Kind → graph-form map (the ONTOLOGY reading; ambiguity findings F1/F2 in
+# the scoping note docs/scoping/2026-09-07-2514-operator-corpus.md):
+#   SUPERSEDE → a CORRECTS direct edge from-point → to-point (new corrects
+#               superseded old; §3.1 supersession semantics)
+#   NEGATE    → a NAND operator edge touching both endpoints (extraction
+#               NANDs default unidirectional — the counter-claim attacks)
+#   SUPPORTS  → an IMPL operator edge touching both endpoints
+#   MITIGATES → the write path's MITIGATES form: a mitigation Point whose
+#               content carries the from-anchor on an operator that touches
+#               the to-anchor claim (or an op_type MITIGATES operator)
+# Direction: graded as a non-blocking flag (direction_correct) — the primary
+# assertion is that the RIGHT KIND of edge connects the two anchored claims.
+
+
+def _anchor_points(points: list[SessionPoint], anchor: str) -> list[SessionPoint]:
+    """Memory Points of a session carrying the planted anchor text."""
+    out: list[SessionPoint] = []
+    for point in points:
+        content = point.get("content") or ""
+        if is_turn_echo(content):
+            continue
+        if schema.anchor_present(anchor, content):
+            out.append(point)
+    return out
+
+
+def operator_edge_detail(
+    planted: dict,
+    from_points: list[SessionPoint],
+    to_points: list[SessionPoint],
+    snapshot: dict,
+) -> dict:
+    """One planted-operator edge verdict against a session's operator surface.
+
+    ``planted`` is a gold planted_operators entry; ``from_points``/``to_points``
+    are the memory Points carrying the endpoint anchors (already resolved
+    across sessions by the corpus-level grader); ``snapshot`` carries the
+    session's operator_edges/direct_edges/mitigations.  Returns a detail dict
+    with the verdict + named failure class:
+    ``from_content_missing`` / ``to_content_missing`` (a bare-point emission
+    fails HERE — no Point carries the claim), ``edge_missing`` (both points
+    present but no qualifying edge), ``edge_correct`` (+ optional
+    ``direction_off`` flag when the edge kind is right but the active
+    endpoint is not the idx-0 source / CORRECTS direction is inverted).
+    """
+    kind = planted.get("expected_kind")
+    from_ids = [p.get("point_id") for p in from_points]
+    to_ids = [p.get("point_id") for p in to_points]
+    if not from_ids:
+        return {"id": planted.get("id"), "expected_kind": kind,
+                "verdict": "from_content_missing", "edge_correct": False}
+    if not to_ids:
+        return {"id": planted.get("id"), "expected_kind": kind,
+                "verdict": "to_content_missing", "edge_correct": False}
+    fset, tset = set(from_ids), set(to_ids)
+    forms: list[str] = []
+    direction_correct = False
+    if kind == "SUPERSEDE":
+        for edge in snapshot.get("direct_edges", []):
+            if edge.get("rel_type") != "CORRECTS":
+                continue
+            if edge.get("from_id") in fset and edge.get("to_id") in tset:
+                forms.append("CORRECTS")
+                direction_correct = True  # CORRECTS is new→old by construction
+    elif kind in ("NEGATE", "SUPPORTS"):
+        want = "NAND" if kind == "NEGATE" else "IMPL"
+        for edge in snapshot.get("operator_edges", []):
+            if edge.get("op_type") != want:
+                continue
+            endpoints = edge.get("endpoints") or {}
+            if not (fset & set(endpoints) and tset & set(endpoints)):
+                continue
+            forms.append(want)
+            if edge.get("source_id") in fset:
+                direction_correct = True
+    elif kind == "MITIGATES":
+        # Accepted forms (scoping finding F1 — the write path's MITIGATES is
+        # a mitigation Point on an operator, or a reified op_type MITIGATES).
+        for edge in snapshot.get("operator_edges", []):
+            if edge.get("op_type") != "MITIGATES":
+                continue
+            endpoints = edge.get("endpoints") or {}
+            if fset & set(endpoints) and tset & set(endpoints):
+                forms.append("MITIGATES")
+                direction_correct = True
+        ops_by_id = {e.get("op_id"): e for e in snapshot.get("operator_edges", [])}
+        for mit in snapshot.get("mitigations", []):
+            content = mit.get("content") or ""
+            op = ops_by_id.get(mit.get("op_id")) or {}
+            endpoints = op.get("endpoints") or {}
+            if not content:
+                continue
+            # mitigation Point content == the planted from-anchor (commit_ops
+            # passes the src point content as mitigate_operator's reason) and
+            # the mitigated operator touches the to-anchor claim.
+            from_carries = any(schema.anchor_present(p.get("content") or "", content)
+                               for p in from_points)
+            if not from_carries:
+                # compare directly when from_points is empty of content matches
+                from_carries = schema.anchor_present(
+                    planted.get("from", {}).get("verbatim_anchor") or "", content)
+            if from_carries and (tset & set(endpoints)):
+                forms.append(f"mitigated_by({mit.get('point_id')})")
+                direction_correct = True
+    if forms:
+        detail = {"id": planted.get("id"), "expected_kind": kind,
+                  "verdict": "edge_correct", "edge_correct": True,
+                  "forms_found": forms}
+        if not direction_correct:
+            detail["direction_off"] = True
+        return detail
+    return {"id": planted.get("id"), "expected_kind": kind,
+            "verdict": "edge_missing", "edge_correct": False}
+
+
+def grade_planted_operators(
+    golds: dict[str, dict],
+    points_by_session: dict[str, list[SessionPoint]],
+    snapshots_by_session: dict[str, dict],
+) -> dict:
+    """Corpus-level planted-operator grading over the graded snapshot surface.
+
+    ``golds`` maps session_id -> gold (only sessions carrying
+    ``planted_operators`` contribute), ``points_by_session`` the memory layer
+    per session, ``snapshots_by_session`` the operator surface per session.
+    Endpoint anchors resolve against the memory layer of the session they
+    name (a planted edge's own session by default — the cross-session
+    SUPERSEDE resolves its ``to`` anchor in the OTHER session's points).
+    Returns::
+
+        {"planted": int, "edge_correct": int, "content_ok": int,
+         "results": {edge_id: detail}, "by_session": {sid: {...}}}
+
+    Pooled fractions are honest denominators (planted == 0 ⇒ empty audit).
+    """
+    results: dict[str, dict] = {}
+    by_session: dict[str, dict] = {}
+    for sid, gold in sorted(golds.items()):
+        ops = gold.get("planted_operators") or []
+        if not ops:
+            continue
+        bucket: list[dict] = []
+        for planted in ops:
+            if not isinstance(planted, dict):
+                continue
+            from_sid = (planted.get("from") or {}).get("session_id") or sid
+            to_sid = (planted.get("to") or {}).get("session_id") or sid
+            from_points = _anchor_points(
+                points_by_session.get(from_sid, []),
+                (planted.get("from") or {}).get("verbatim_anchor") or "",
+            )
+            to_points = _anchor_points(
+                points_by_session.get(to_sid, []),
+                (planted.get("to") or {}).get("verbatim_anchor") or "",
+            )
+            # Operator surface of the FROM-anchor's session (the session whose
+            # capture must have emitted the edge — for the cross-session
+            # SUPERSEDE that is the owning/from session).
+            surface = snapshots_by_session.get(from_sid, {})
+            detail = operator_edge_detail(planted, from_points, to_points, surface)
+            detail["from_session"] = from_sid
+            detail["to_session"] = to_sid
+            detail["owner_session"] = sid
+            results[planted.get("id", "?")] = detail
+            bucket.append(detail)
+        by_session[sid] = {
+            "planted": len(bucket),
+            "edge_correct": sum(1 for d in bucket if d.get("edge_correct")),
+            "content_ok": sum(
+                1 for d in bucket
+                if d.get("verdict") not in ("from_content_missing", "to_content_missing")
+            ),
+            "failures": [d for d in bucket if not d.get("edge_correct")],
+        }
+    all_results = list(results.values())
+    return {
+        "planted": len(all_results),
+        "edge_correct": sum(1 for d in all_results if d.get("edge_correct")),
+        "content_ok": sum(
+            1 for d in all_results
+            if d.get("verdict") not in ("from_content_missing", "to_content_missing")
+        ),
+        "results": results,
+        "by_session": by_session,
+    }
+
+
 # ── Run aggregation ─────────────────────────────────────────────────────────
 
 

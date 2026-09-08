@@ -48,7 +48,13 @@ REPO_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 from tests.eval.write_path import corpus, runner, schema  # noqa: E402
 from tests.eval.write_path.judge import JUDGE_PIN_MECHANICAL  # noqa: E402
 
-pytestmark = pytest.mark.timeout(900)
+# Module wall-clock cap.  #2514 extended the corpus from 5 to 7 sessions
+# (wp06/wp07), so the deterministic replay tests below each re-run the FULL
+# corpus several times; 900s was calibrated for the 5-session corpus.  Raised
+# to 1800s so the extended corpus keeps headroom on loaded CI runners (the
+# per-test assertions — determinism, provenance-shaped regression — are
+# unchanged; verified under load at 755s for the 4-replay determinism test).
+pytestmark = pytest.mark.timeout(1800)
 
 # The deterministic BPRE replay posture (hermetic harness §6.5).
 EXTRACTOR_MOCK = {"TORTOISE_SESSION_LLM_MOCK": "1", "TORTOISE_SESSION_EXTRACTOR": "m2"}
@@ -136,6 +142,12 @@ def test_bpre_lane_full_corpus_replay_emits_and_grades(sdk_factory):
     assert report["metrics"]["salient_unit_survival_macro"] > 0.0
     assert report["metrics"]["salient_unit_survival_macro"] <= 1.0
     assert report["metrics"]["provenance_accuracy"] == 1.0
+    # #2514 operator-edge audit: the echo lane structurally writes no operator
+    # edges — the planted 4 are graded 0 edge_correct (audit dimension on the
+    # completed run; the operator bar is a product-lane bar, see scoping note).
+    assert report["operator_audit"]["planted"] == 4
+    assert report["operator_audit"]["edge_correct"] == 0
+    assert 1 <= report["operator_audit"]["content_ok"] <= 4
     # Every session contributed a graded gold + memory points + control 1.0.
     seen_sessions = {r["session_id"] for r in report["session_results"]}
     assert seen_sessions == set(corpus.session_ids())
@@ -149,6 +161,7 @@ def test_bpre_lane_full_corpus_replay_emits_and_grades(sdk_factory):
     assert runner.validate_receipt(receipt) == []
     assert receipt["judge_pin"] == JUDGE_PIN_MECHANICAL
     assert receipt["corpus_hash"] == corpus.compute_fixtures_hash()
+    assert receipt["operator_audit"]["planted"] == 4
 
 
 def test_bpre_lane_determinism_and_provenance_regression_fails(sdk_factory, tmp_path):

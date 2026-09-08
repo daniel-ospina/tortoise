@@ -90,19 +90,27 @@ export function ReauthDialog({ open, busy, onClose, onPassword, onProvider, erro
   const available = providers && providers.length ? providers : []
   const hasPasswordMethod = providers.includes('email')
   const showPasswordForm = hasPasswordMethod || passwordMode
+  // #2392 (a11y): no password form → the first provider button is the
+  // primary control; give it (and only it) initial focus.
+  const focusProvider = !showPasswordForm
   return (
-    <div className="modal-backdrop" onClick={onClose}>
+    <div className="modal-backdrop" onClick={() => { if (!busy) onClose() }}>
       <div className="modal" role="dialog" aria-modal="true" aria-label="Confirm it's you"
-           onClick={(e) => e.stopPropagation()}>
+           onClick={(e) => e.stopPropagation()}
+           onKeyDown={(e) => { if (e.key === 'Escape' && !busy) onClose() }}>
         <h2>Confirm it's you</h2>
         <p className="dim">{passwordMode
           ? 'You re-authenticated — now choose your new password.'
           : 'For security, sign in again before changing login methods.'}</p>
         {showPasswordForm && (
           <form className="inline-form claim-email-form" onSubmit={(e) => { e.preventDefault(); onPassword(password) }}>
+            {/* #2392 (a11y): autoFocus the primary control on open — focus
+                previously never moved into this dialog. Focus restore on
+                close happens in main.jsx (closeReauth). */}
             <input
               type="password" placeholder={passwordMode ? 'New password' : 'Password'}
               aria-label={passwordMode ? 'New password' : 'Password'}
+              autoFocus
               value={password} onChange={(e) => setPassword(e.target.value)}
               autoComplete={passwordMode ? 'new-password' : 'current-password'}
             />
@@ -115,15 +123,15 @@ export function ReauthDialog({ open, busy, onClose, onPassword, onProvider, erro
           {/* #1765 review P1: SAME-provider only — a different provider with a
               private email would auto-link a NEW user (account split). */}
           {available.includes('github') && (
-            <button onClick={() => onProvider('github')} disabled={busy}>Sign in with GitHub</button>
+            <button onClick={() => onProvider('github')} disabled={busy} autoFocus={focusProvider}>Sign in with GitHub</button>
           )}
           {available.includes('google') && (
-            <button onClick={() => onProvider('google')} disabled={busy}>Sign in with Google</button>
+            <button onClick={() => onProvider('google')} disabled={busy} autoFocus={focusProvider && !available.includes('github')}>Sign in with Google</button>
           )}
           {available.length === 0 && <p className="dim">Sign in again with your password above.</p>}
         </div>
         {error && <p className="error" role="alert">{error}</p>}
-        <button className="ghost small" onClick={onClose} aria-label="Close">✕</button>
+        <button className="ghost small" onClick={() => { if (!busy) onClose() }} aria-label="Close" disabled={busy}>✕</button>
       </div>
     </div>
   )
