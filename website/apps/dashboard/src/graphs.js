@@ -144,6 +144,20 @@ export function trashEraseLabel(deletedAt, nowIso) {
   return d === 1 ? 'erases in 1 day' : `erases in ${d} days`
 }
 
+// ── #2307 (post-#2083 C7 review): role-aware [Keys] panel empty copy ──────
+// The per-graph mint form is owner/admin-rendered only; a member's panel
+// shows "Only owners and admins can manage graph keys." instead (no mint
+// control exists for them). The never-minted empty state must therefore NOT
+// tell a member to "mint one above" — that control doesn't exist on their
+// panel. Owners/admins keep the actionable line; members get the factual
+// state plus who can create (app-wide member copy precedent: "ask an owner
+// or admin" / "Only owners and admins can create…"), no mint instruction.
+export function graphKeyPanelEmptyLine(isOwnerAdmin) {
+  return isOwnerAdmin
+    ? 'No keys for this graph yet — mint one above (shown once).'
+    : 'No keys for this graph yet — only owners and admins can create keys.'
+}
+
 // Oldest-first (soonest erasure on top — the urgent rows surface first).
 // Legacy tombstones (no deleted_at) sort first: their window is long gone.
 export function sortedTrashRows(rows) {

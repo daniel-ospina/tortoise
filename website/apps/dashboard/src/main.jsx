@@ -34,6 +34,7 @@ import { isManagedKey, durableConnectKey } from './sessionKey.js'
 import {
   canManageGraphKeys,
   graphCanDelete,
+  graphKeyPanelEmptyLine,
   graphKeysSuppressed,
   graphMintBody,
   graphsMeter,
@@ -7318,7 +7319,12 @@ sdk.create_point(text="My first point")
                 {graphMsg && <div className="error banner">{graphMsg}</div>}
                 {panelKeysStatus === 'loading' && <p className="dim small">Loading keys…</p>}
                 {panelKeysStatus === 'error' && <p className="dim small">Couldn't load keys — try again.</p>}
-                {panelKeysStatus === 'ok' && panelKeys.length === 0 && <p className="dim small">No keys for this graph yet — mint one above (shown once).</p>}
+                {panelKeysStatus === 'ok' && panelKeys.length === 0 && (
+                  // #2307: role-aware empty copy — the "mint one above" line
+                  // is only truthful next to the owner/admin mint form; members
+                  // (no mint control) get who-can-create instead.
+                  <p className="dim small">{graphKeyPanelEmptyLine(isOwnerAdmin)}</p>
+                )}
                 {panelKeysStatus === 'ok' && panelKeys.length > 0 && (
                   <table>
                     <thead><tr><th scope="col">Name</th><th scope="col">Prefix</th><th scope="col">Created</th><th scope="col">Status</th><th scope="col"><span className="sr-only">Actions</span></th></tr></thead>
