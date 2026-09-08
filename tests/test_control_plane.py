@@ -91,9 +91,11 @@ class TestTeamCRUD:
         with pytest.raises(ControlPlaneError, match="must not be empty"):
             sdk.team_create("")
 
-    def test_team_create_rejects_invalid_name(self, sdk):
-        with pytest.raises(ControlPlaneError, match="Invalid team name"):
-            sdk.team_create("name with spaces")
+    def test_team_create_accepts_spaces(self, sdk):
+        """Spaces in team names are now accepted."""
+        result = sdk.team_create("name with spaces")
+        assert result["name"] == "name with spaces"
+        assert result["api_key"].startswith("tt_")
 
     def test_team_get_returns_none_for_missing(self, sdk):
         assert sdk.team_get("nonexistent-id") is None

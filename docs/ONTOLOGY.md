@@ -313,7 +313,29 @@ wasDerivedFrom
 
 Epistemic edges (operators): `IMPL`, `NAND` (+ semantic label).
 
-Mitigation edge: `mitigated_by` — Point → Point (operator → mitigation Point), written by `mitigate_operator` (sdk.py:1613): `(op:Point {is_operator:true})-[:mitigated_by]->(m:Point)`, with the mitigation Point back-linking `-[:IMPL]->` the operator (#909 §4.3 #7 — registered; previously unregistered).
+Mitigation edge: `mitigated_by` — Point → Point (operator → mitigation Point), written by `mitigate_operator` (`TortoiseSDK.mitigate_operator`): `(op:Point {is_operator:true})-[:mitigated_by]->(m:Point)`, with the mitigation Point back-linking `-[:IMPL]->` the operator (#909 §4.3 #7 — registered; previously unregistered).
+
+> **Hard rule (#2315, pinned 2026-09-07):** a `mitigated_by` edge can ONLY
+> originate from an `is_operator:true` Point. `mitigate_operator` is the
+> SINGLE writer gate and enforces it (raises on non-operators); generic
+> `create_edge` cannot write the predicate (its allowlist is the §3.9 set
+> above, which excludes `mitigated_by`); rebuild/commit paths route through
+> `mitigate_operator`. A raw graph write that attaches `mitigated_by` to a
+> non-operator violates the ontology — no EP factor ever reads it (factor
+> extraction addresses operators only), so such an edge would be dead
+> structure.
+>
+> **Strength semantics (#2315, product decision 2026-09-07 — mitigation is a
+> GRADED DAMPENER, not a refutation):** the mitigation Point's
+> `mitigation_strength` property is the dampening strength in [0.10, 0.50]
+> (0.10 minor caveat … 0.50 major counter-evidence = strongest; >0.50 would
+> invert the claim — use NAND). EP reduces the operator's effective weight
+> by `w_eff = w × (1 − strength)` in `compute_operator_weight`
+> (tortoise/weights.py — single source of the convention; §8 has the
+> operator-mediated (op-123) mitigation-anchor diagram showing where the
+> operator mediates the IMPL/NAND edge between two claims).
+> The strength is NOT fused into the mitigation point's own Beta prior
+> (#2199 decision 3).
 
 About edges: `aboutSubject`, `aboutObject`, `aboutEvent`, `aboutPoint`, `aboutDocument`, `aboutSource` (Point/Document/Event → Source), `aboutAction` (legacy).
 

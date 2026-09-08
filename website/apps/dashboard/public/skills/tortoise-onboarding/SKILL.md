@@ -319,13 +319,17 @@ cannot reach the graph (never decide against a dead connection):
    (strength 0.10–0.50), never NAND the option for a bad fit. Annotate bias /
    precision with `tortoise_annotate_operator` when useful.
 
-   **Mitigation semantics (single-sourced, #2199):** `strength` means how
-   much the reason reduces the edge — 0 = fully neutralized, 1 = fully
-   intact. It is NOT how true the reason is and is NOT fused into the
-   mitigation's belief: the mitigation POINT itself is calibrated like any
-   other decision part (omit `credibility` → system starting belief medium;
-   pass it → set-by-author). `strength` is currently ADVISORY metadata — EP
-   does not read it yet — so it is auditable, not a weight.
+   **Mitigation semantics (single source: tortoise/weights.py module
+   docstring, #2315):** `strength` is the graded DAMPENER of the
+   operator's effective EP weight — sanctioned band 0.10–0.50, 0.50 =
+   major counter-evidence (strongest); never >0.50 (would invert the
+   claim — use NAND). Formula `w_eff = w * (1 - strength)`: a 0.30
+   mitigation keeps 70% of the operator's weight; 0.50 keeps 50% —
+   dampened, never refuted. It is NOT how true the reason is and is NOT
+   fused into the mitigation's belief: the mitigation POINT itself is
+   calibrated like any other decision part (omit `credibility` → system
+   starting belief medium; pass it → set-by-author). EP reads
+   `mitigation_strength` via `compute_operator_weight`.
 6. **Options can IMPL/NAND each other** — two go well together (IMPL), three
    are mutually exclusive (NAND).
 7. **Rank + sanity-check.** Run `tortoise_compute_confidence` (anchors = the

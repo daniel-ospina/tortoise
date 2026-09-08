@@ -14,7 +14,7 @@ import { setupGuide } from './setupGuide.js'
 // memory digest, next action), zero toggles. Pure derivations, node --test
 // unit-tested (overview.test.js).
 import { overviewConnection, overviewDigest, overviewNextAction } from './overview.js'
-// #1997 (W1): the 5 human onboarding steps — pure structure + copy + fork
+// #1997 (W1): the 4 human onboarding steps — pure structure + copy + fork
 // options + org-name validation, node --test unit-tested (wizardFlow.test.js).
 import { WIZARD_STEPS, WIZARD_FORK_OPTIONS, resolveBuildCatalog, orgNameError, durableKeyName } from './wizardFlow.js'
 // #1894: indexed-state + job-progress derivations — pure, node --test
@@ -92,6 +92,9 @@ const KEY_EXPIRY_PRESETS = [
 const KEY_MAX_EXPIRY_DAYS = 366
 const KEY_SOON_DAYS = 14
 const _MS_PER_DAY = 86400000
+// #2479 code-review fix P2: named constant for max re-auth attempts (spec: 1)
+const MAX_REAUTH_ATTEMPTS = 1
+const REAUTH_EXCEEDED_MESSAGE = 'Re-authentication failed — try again later or contact support.'
 
 // #2426: Custom date (YYYY-MM-DD) → whole days until that date, clamped to
 // 1..366. Null when missing/invalid/out-of-range — the + New key button stays
@@ -685,6 +688,8 @@ const supabaseStorage = {
 // client consumes the fragment during init, so snapshot it FIRST (mirrors
 // welcome.html's landingHash) and read error params from BOTH surfaces.
 const landingHash = window.location.hash
+// #2509: known dashboard tab names for URL↔hash sync (deep-linkability).
+const KNOWN_TABS = ['overview', 'keys', 'graphs', 'members', 'billing', 'settings', 'profile']
 function oauthErrorParams() {
   const p = new URLSearchParams(window.location.search)
   const h = new URLSearchParams(landingHash.replace(/^#/, ''))
@@ -772,6 +777,12 @@ function App() {
   })
   // pending action resumed after a re-auth round (change-email gate, #1765)
   const pendingReauthRef = React.useRef(null)
+  // #2479: re-auth attempt counter (max 1 per session for password re-auth;
+  // OAuth round-trips naturally reset via full page navigation)
+  const reauthAttemptRef = React.useRef(0)
+  // #2479 code-review fix P1: tracks that we're re-executing a pending action
+  // after successful re-auth (prevents infinite loop if the API returns 403 again)
+  const reauthRetriedRef = React.useRef(false)
   // #1765 review P1: the pre-reauth session user id (verify the provider
   // round-trip didn't switch accounts before resuming the pending action)
   const beforeUidRef = React.useRef(null)
@@ -1053,7 +1064,7 @@ function claimIntentInFlight() {
   // step (a re-opener may have connected in a prior session) so the paused
   // gate reads fresh server truth.
   React.useEffect(() => {
-    if (welcomeMode && authed && wizardStep === 4 && !onboardingRefreshedAtDoneRef.current) {
+    if (welcomeMode && authed && wizardStep === 3 && !onboardingRefreshedAtDoneRef.current) {
       onboardingRefreshedAtDoneRef.current = true
       refreshOnboarding().catch(() => {})
     }
@@ -1071,10 +1082,10 @@ function claimIntentInFlight() {
   React.useEffect(() => {
     if (!(welcomeMode && authed)) return
     if (LEGACY_WIZARD_ARCHIVED) return  // A0 rollback owns its own steps (#2361 r3 P3-7)
-    const label = (wizardStep === 4 && effectivelyPaused)
+    const label = (wizardStep === 3 && effectivelyPaused)
       ? 'Setup paused — your agent is not connected yet'
-      : (wizardStep === 1 && welcomeHasOrg ? 'Your Organization' : WIZARD_STEPS[wizardStep].label)
-    setWizardStepAnnounce(`Step ${wizardStep + 1} of 5: ${label}`)
+      : (wizardStep === 0 && welcomeHasOrg ? 'Your Organization' : WIZARD_STEPS[wizardStep].label)
+    setWizardStepAnnounce(`Step ${wizardStep + 1} of 4: ${label}`)
     if (!wizardFocusInit.current) { wizardFocusInit.current = true; return }
     // #2361 review-r4 (P3): focus ONLY on step changes — toggling the paste
     // disclosure (wizardShowPaste) or an invite accept (welcomeHasOrg) must
@@ -1084,8 +1095,8 @@ function claimIntentInFlight() {
     if (!stepChanged) return
     // Skip container focus only when a child control autofocuses on mount:
     // step 1 org input (no org yet) and step 3 owner paste disclosure open.
-    const step3PasteAutofocus = wizardStep === 3 && isOwnerAdmin && wizardShowPaste
-    if (wizardStep === 1 && !welcomeHasOrg) return
+    const step3PasteAutofocus = wizardStep === 2 && isOwnerAdmin && wizardShowPaste
+    if (wizardStep === 0 && !welcomeHasOrg) return
     if (step3PasteAutofocus) return
     if (wizardCardRef.current) wizardCardRef.current.focus()
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1229,7 +1240,74 @@ function claimIntentInFlight() {
     }
   }
 
-  const [tab, setTab] = React.useState('overview')
+  const initialTab = (() => {
+    // #2509: read tab from landingHash (captured at module scope before
+    // supabase.js init, so OAuth fragment stripping doesn't interfere).
+    const h = landingHash
+    if (h.startsWith('#/')) {
+      const candidate = h.slice(2)
+      if (KNOWN_TABS.includes(candidate)) return candidate
+    }
+    return 'overview'
+  })()
+  const [tab, setTab] = React.useState(initialTab)
+  // #2509: sync tab state → URL hash (pushState for tab switches,
+  // useRef guard skips initial mount to avoid strict-mode double effect).
+  const tabSyncRef = React.useRef(false)
+  const programmaticTabChangeRef = React.useRef(false)
+  const popProcessingRef = React.useRef(false)
+  React.useEffect(() => {
+    if (!tabSyncRef.current) { tabSyncRef.current = true; return }
+    const hash = '#/' + tab
+    if (window.location.hash !== hash) {
+      programmaticTabChangeRef.current = true
+      window.history.pushState({ tab }, '', hash)
+    }
+  }, [tab])
+  // #2509: sync URL hash → tab on browser back/forward (popstate) or
+  // address-bar edits (hashchange). Clears intra-tab sub-state for parity
+  // with nav-button clicks.
+  React.useEffect(() => {
+    function onHashChange() {
+      // #2528: dedup guard — browsers that fire both popstate + hashchange
+      // for the same URL change must not run the handler twice.
+      if (popProcessingRef.current) return
+      popProcessingRef.current = true
+      setTimeout(() => { popProcessingRef.current = false }, 0)
+      // #2528: Safari fires popstate on pushState — skip when the change
+      // was self-triggered (tab sync effect sets this ref before pushState).
+      if (programmaticTabChangeRef.current) {
+        programmaticTabChangeRef.current = false
+        return
+      }
+      const h = window.location.hash
+      if (h.startsWith('#/')) {
+        const candidate = h.slice(2)
+        if (KNOWN_TABS.includes(candidate)) {
+          setTab(candidate)
+          setSelectedSessionId(null)
+          setSessionDetail(null)
+          return
+        }
+      }
+      if (!h.startsWith('#/') && h.length > 0) {
+        // OAuth fragment or unknown hash — don't override tab.
+        return
+      }
+      // Unknown/malformed hash — fallback with replaceState (avoids
+      // phantom history entry that pushState would create).
+      setTab('overview')
+      if (window.location.hash !== '#/overview') {
+        window.history.replaceState({ tab: 'overview' }, '', '#/overview')
+      }
+    }
+    window.addEventListener('popstate', onHashChange)
+    window.addEventListener('hashchange', onHashChange)
+    return () => {
+      window.removeEventListener('popstate', onHashChange)
+      window.removeEventListener('hashchange', onHashChange)
+    }
+  }, [])
   const [authMode, setAuthMode] = React.useState('session') // 'session' | 'apikey'
   const [checking, setChecking] = React.useState(true)
   const sessionTokenRef = React.useRef(null)
@@ -1502,6 +1580,11 @@ function claimIntentInFlight() {
       // gated by the ReauthDialog (stolen-session ATO guardrail, plan-review
       // P1-1 — never bypass double_confirm_changes). The pending action is
       // DATA (not a closure) so it survives the provider OAuth round-trip.
+      // #2479: check retry limit before opening re-auth dialog
+      if (reauthAttemptRef.current >= MAX_REAUTH_ATTEMPTS) {
+        setProfileError(REAUTH_EXCEEDED_MESSAGE)
+        return
+      }
       pendingReauthRef.current = { email, password }
       setReauthOpen(true)
     }
@@ -1524,6 +1607,23 @@ function claimIntentInFlight() {
       })
       await fetchIdentity()
     } catch (e) {
+      // #2479: server returns 403 REAUTH_REQUIRED when session is stale
+      if (e.status === 403 && /REAUTH_REQUIRED/i.test(e.message)) {
+        if (reauthAttemptRef.current >= MAX_REAUTH_ATTEMPTS) {
+          setProfileError(REAUTH_EXCEEDED_MESSAGE)
+          return
+        }
+        // #2479 code-review fix P1: if we already re-executed this pending action
+        // after successful re-auth and it failed again, bail without re-opening dialog
+        if (reauthRetriedRef.current) {
+          setProfileError(REAUTH_EXCEEDED_MESSAGE)
+          return
+        }
+        reauthRetriedRef.current = false
+        pendingReauthRef.current = { unlinkIdentityId: identityId }
+        setReauthOpen(true)
+        return
+      }
       setProfileError(e.message || 'Could not remove login method')
     } finally {
       setProfileBusy('')
@@ -1550,11 +1650,19 @@ function claimIntentInFlight() {
         email: (identityInv && identityInv.email) || '', password,
       })
       if (error) throw new Error(error.message)
+      // #2479: success — reset attempt counter
+      reauthAttemptRef.current = 0
       setReauthOpen(false)
       await fetchIdentity()
       const pending = pendingReauthRef.current
       pendingReauthRef.current = null
       if (pending) {
+        if (pending.unlinkIdentityId) {
+          // #2479: re-auth was for unlink — re-execute with fresh session
+          reauthRetriedRef.current = true
+          handleUnlink(pending.unlinkIdentityId)
+          return
+        }
         if (pending.promptPassword) {
           // #1765 review P1-2: in promptPassword mode the typed password IS
           // the NEW password — apply it directly (never signInWithPassword,
@@ -1566,6 +1674,13 @@ function claimIntentInFlight() {
         await doChangeEmail(pending.email, pending.password)
       }
     } catch (e) {
+      reauthAttemptRef.current += 1
+      if (reauthAttemptRef.current >= MAX_REAUTH_ATTEMPTS) {
+        setReauthOpen(false)
+        pendingReauthRef.current = null
+        setProfileError(REAUTH_EXCEEDED_MESSAGE)
+        return
+      }
       setReauthError(e.message || 'Sign-in failed')
     } finally {
       setReauthBusy(false)
@@ -1592,7 +1707,8 @@ function claimIntentInFlight() {
         // return effect compares against it to detect an account switch).
         try {
           sessionStorage.setItem('tt_reauth_pending', JSON.stringify({
-            email: pending.email, uid: beforeUidRef.current }))
+            email: pending.email, uid: beforeUidRef.current,
+            unlinkIdentityId: pending.unlinkIdentityId }))
         } catch { /* best-effort */ }
       }
       const { error } = await supabaseClient.auth.signInWithOAuth({
@@ -1676,6 +1792,7 @@ function claimIntentInFlight() {
             } catch { /* best-effort */ }
           }
           await fetchIdentity()
+          setTab('profile')
           const { data: sess } = await supabaseClient.auth.getSession()
           const returnedUid = sess && sess.session && sess.session.user && sess.session.user.id
           if (pending && pending.uid && returnedUid && returnedUid !== pending.uid) {
@@ -1683,6 +1800,13 @@ function claimIntentInFlight() {
             return
           }
           if (pending) {
+            // #2479: check if re-auth was for unlink
+            if (pending.unlinkIdentityId) {
+              setReauthPasswordMode(false)
+              reauthRetriedRef.current = true
+              handleUnlink(pending.unlinkIdentityId)
+              return
+            }
             // re-prompt the NEW password (never persisted across the round-trip)
             pendingReauthRef.current = { email: pending.email, promptPassword: true }
             setReauthOpen(true)
@@ -1787,7 +1911,7 @@ function claimIntentInFlight() {
           clearInterval(poll)
           setCheckoutPending(false) // Round-15: popup flow never returns the param to this tab — don't stay stuck
           params.delete('session_id')
-          window.history.replaceState({}, '', `${window.location.pathname}${params.toString() ? `?${params}` : ''}`)
+          window.history.replaceState({}, '', `${window.location.pathname}${params.toString() ? `?${params}` : ''}${window.location.hash}`)
         }
       }, 2000)
       return () => clearInterval(poll)
@@ -1796,7 +1920,7 @@ function claimIntentInFlight() {
       window.clearTimeout(checkoutResetTimerRef.current)
       setCheckoutPending(false)
       params.delete('checkout')
-      window.history.replaceState({}, '', `${window.location.pathname}${params.toString() ? `?${params}` : ''}`)
+      window.history.replaceState({}, '', `${window.location.pathname}${params.toString() ? `?${params}` : ''}${window.location.hash}`)
     }
   }, [team?.subscription_status])
 
@@ -1889,7 +2013,7 @@ function claimIntentInFlight() {
   // #1997 (W1): LEGACY #1643 step labels — ARCHIVED-not-deleted (A0 rollback
   // path, epic §8; the DE2E-1 archived-not-deleted assertion greps this +
   // the LEGACY_WIZARD_ARCHIVED marker below). The LIVE wizard renders
-  // WIZARD_STEPS (wizardFlow.js) — 5 human steps.
+  // WIZARD_STEPS (wizardFlow.js) — 4 human steps.
   const wizardSteps = ['Connect your tool', 'Memory sources', 'Your agent\'s toolkit', 'Seed your graph', 'You\'re set']
   // #1997 (W1): ARCHIVED flag — the legacy #1643 wizard render JSX below
   // stays byte-identical for the A0 gate's rollback path (partial revert
@@ -2417,7 +2541,7 @@ function claimIntentInFlight() {
   // teamIdRef.current, so a call when currentTeamId is already set never
   // re-fires the currentTeamId effect (no duplicated members/graphs loads);
   // the setTeams refresh + loadBackups re-fetch are harmless.
-  async function finishWelcomeLoads() {
+  async function finishWelcomeLoads(tabOverride) {
     await loadTeams().catch(() => {})
     loadBackups('').catch(() => {})
     // #1906: the first-timer path never ran loadAll (keys+sessions) — the
@@ -2433,6 +2557,13 @@ function claimIntentInFlight() {
     // Pass the current refresh seq: if a seed refire bumps it mid-flight,
     // this pre-seed response is dropped (it must not clobber the count).
     refreshTeam('', undefined, teamRefreshSeqRef.current).catch(() => {})
+    // #2528: sync the URL hash to the target tab — exits from welcome that
+    // navigate to API Keys pass 'keys' through tabOverride so the replaceState
+    // uses the correct tab even though the closure holds 'overview'.
+    const tabToUse = tabOverride || tab
+    if (window.location.hash !== '#/' + tabToUse) {
+      window.history.replaceState({ tab: tabToUse }, '', '#/' + tabToUse)
+    }
     // #1847/#2323 (Option B): re-fire the onboarding-state load NOW that the
     // team exists — the mount-time refreshOnboarding() fired BEFORE the
     // org-create submit provisioned the team (name-first, tenant-provision)
@@ -2463,7 +2594,7 @@ function claimIntentInFlight() {
     // step hands off to the graph (accept-and-drop makes a client PATCH
     // inert on node-present orgs; the node's fork-aware gate owns
     // onboarding_complete). The wire follows the node.
-    window.history.replaceState({}, '', '/')
+    window.history.replaceState({}, '', '#/' + tab)
     setWelcomeMode(false)
     // #1842 P1-1: the first-timer flow (org-create provision → welcome
     // wizard → wizardComplete) never ran loadTeams/loadBackups — those fired
@@ -2615,7 +2746,7 @@ function claimIntentInFlight() {
         const inviteTokenParam = new URLSearchParams(window.location.search).get('invite_token')
         if (inviteTokenParam) {
           try { sessionStorage.setItem(INVITE_TOKEN_STORAGE, inviteTokenParam) } catch { /* best-effort */ }
-          window.history.replaceState({}, '', window.location.pathname)
+          window.history.replaceState({}, '', window.location.pathname + window.location.hash)
         }
         const stashedInvite = (() => {
           try { return sessionStorage.getItem(INVITE_TOKEN_STORAGE) || '' } catch { return '' }
@@ -2631,6 +2762,10 @@ function claimIntentInFlight() {
             if (inviteRes.ok) {
               try { sessionStorage.removeItem(INVITE_TOKEN_STORAGE) } catch { /* best-effort */ }
               setBanner('Welcome to the team! Your membership is active.')
+              // #2538: propagate the accepted invite to wizard state so
+              // loadTeams fires and the welcomeHasOrg chain triggers the
+              // dashboard route guard (invited users skip onboarding).
+              await loadTeams().catch(() => {})
             } else {
               let inviteMsg = `Could not accept invite (HTTP ${inviteRes.status}).`
               try {
@@ -3512,7 +3647,7 @@ function claimIntentInFlight() {
     if (nameErr) { setWizardOrgError(nameErr); return }
     // An account that already holds an org never mints via this step — a
     // stray submit on the read-only path just advances.
-    if (Array.isArray(teams) && teams.length > 0) { setWizardStep(2); return }
+    if (Array.isArray(teams) && teams.length > 0) { setWizardStep(1); return }
     setWizardOrgBusy(true)
     setWizardOrgError('')
     try {
@@ -3546,7 +3681,7 @@ function claimIntentInFlight() {
       refreshTeam('', undefined, teamRefreshSeqRef.current)
         .then((t) => { if (t && t.team_id) loadAlerts(t.team_id) })
         .catch(() => {})
-      setWizardStep(2)
+      setWizardStep(1)
     } catch (e) {
       // #2323 (code-review): never leave the provisioning overlay + busy
       // button stuck on an unexpected rejection — surface + recover.
@@ -3591,7 +3726,7 @@ function claimIntentInFlight() {
           }).catch(() => {})
         }
       } else {
-        setWizardStep(3)
+        setWizardStep(2)
       }
     } catch (e) {
       if (e?.status === 409) {
@@ -3599,7 +3734,7 @@ function claimIntentInFlight() {
         // so the actual fork renders (the Continue button needs it)
         setWizardForkError('This organization already chose how it uses Tortoise.')
         refreshOnboarding().catch(() => {})
-        setWizardStep(3)
+        setWizardStep(2)
       } else if (e?.status === 503) {
         setWizardForkError('The graph is temporarily unavailable — try again in a moment.')
       } else {
@@ -3630,7 +3765,7 @@ function claimIntentInFlight() {
       })
       setWizardPaused(false)
       connectedOnceRef.current = true
-      setWizardStep(4)
+      setWizardStep(3)
     } catch (e) {
       if (e?.status === 503) {
         setWizardConnectError('The graph is temporarily unavailable — try again in a moment.')
@@ -5170,7 +5305,7 @@ function claimIntentInFlight() {
           <button
             className="ghost small"
             disabled={welcomeProvisioning || welcomeProvisionError || !welcomeHasOrg}
-            onClick={() => { window.history.replaceState({}, '', '/'); setWelcomeMode(false); setWizardDurableKey(''); setWizardDurablePaste(''); setWizardDurableError(''); setWizardShowPaste(false); setWizardPaused(false); connectedOnceRef.current = false; if (wizardStep >= 3) setWelcomeKey(''); finishWelcomeLoads() }}
+            onClick={() => { window.history.replaceState({}, '', '#/' + tab); setWelcomeMode(false); setWizardDurableKey(''); setWizardDurablePaste(''); setWizardDurableError(''); setWizardShowPaste(false); setWizardPaused(false); connectedOnceRef.current = false; if (wizardStep >= 2) setWelcomeKey(''); finishWelcomeLoads() }}
           >
             Open my dashboard →
           </button>
@@ -5211,13 +5346,9 @@ function claimIntentInFlight() {
                 <span className="sr-only" role="status" aria-live="polite">
                   {welcomeProvisioning ? 'Creating your organization' : (welcomeHasOrg && shownOrgName ? `${shownOrgName} is set up` : '')}
                 </span>
-                <p className="dim" style={{ marginBottom: '1.25rem' }}>
-                  {welcomeHasOrg
-                    ? 'Your Organization is set up. Choose how you\'ll use it and connect your agent — your API key is shown once at the connect step.'
-                    : 'Set up your Organization in the steps below — it\'s created when you name it, and your API key is shown once at the connect step.'}
-                </p>
-                {/* #1997 (W1): the 5 HUMAN steps (epic plan P1) — orientation
-                    → org-create/join → fork card → connect-consent → done.
+                {/* #1997 (W1): the 4 HUMAN steps (epic plan P1) — org-create/join
+                    → fork card → connect-consent → done (orientation removed per
+                    epic #2534).
                     All other steps (install/seed/decide) are agent-side or
                     archived. Copy from wizardFlow.js (DE2E-2: 'Organization',
                     never 'team'/'workspace' in user-facing labels). */}
@@ -5229,37 +5360,15 @@ function claimIntentInFlight() {
                     ))}
                   </div>
                   <p className="wizard-title">{WIZARD_STEPS[wizardStep].label}</p>
-                  <p className="wizard-sub" style={{ marginBottom: '1rem' }}>
-                    {wizardStep === 1 && welcomeHasOrg
-                      // #2323 (review P2): the shared step-1 sub ('Name your
-                      // organization…') is a contradiction for an org-holding
-                      // account on the read-only step — branch the copy.
-                      ? "You're already in an organization — you won't create another here. Pick how you'll use it next."
-                      : (wizardStep === 4 && effectivelyPaused)
-                        // #2361 review-r3/r4: the done SUB claimed 'Your agent takes
-                        // over from here' above a paused body — branch it, and only
-                        // when the org truly never connected (server checkpoint).
+                  {wizardStep !== 0 && (
+                    <p className="wizard-sub" style={{ marginBottom: '1rem' }}>
+                      {(wizardStep === 3 && effectivelyPaused)
                         ? "You're set up, but your agent isn't connected yet. Reconnect any time from Settings → Setup guide."
                         : WIZARD_STEPS[wizardStep].sub}
-                  </p>
-
-                  {wizardStep === 0 && (
-                    <div className="wizard-orient">
-                      <ol className="wizard-intro" style={{ margin: '0 0 1rem 1.1rem', padding: 0, lineHeight: 1.7 }}>
-                        <li><strong>Create your Organization</strong> — the shared memory space your agent writes to. Name it, and it's created.</li>
-                        <li><strong>Choose how you'll use it</strong> — for your own agents, or to build an application on top.</li>
-                        <li><strong>Connect your agent</strong> — one command installs the connector and skills your agent needs; your API key is shown once here.</li>
-                        <li><strong>Your agent takes it from there</strong> — it files your decisions and findings to this Organization as you make them.</li>
-                      </ol>
-                      <div className="wizard-nav">
-                        <div className="wizard-nav-actions">
-                          <button type="button" className="btn-primary" onClick={() => setWizardStep(1)}>Continue →</button>
-                        </div>
-                      </div>
-                    </div>
+                    </p>
                   )}
 
-                  {wizardStep === 1 && (
+                  {wizardStep === 0 && (
                     <div className="org-create">
                       {welcomeHasOrg ? (
                         // #2323 (Option B): the account already has an org —
@@ -5270,12 +5379,9 @@ function claimIntentInFlight() {
                           <p className="dim" style={{ marginBottom: '0.9rem' }}>
                             You're set up in <strong>{shownOrgName || 'your organization'}</strong>. Next, choose how you'll use Tortoise.
                           </p>
-                          <div className="wizard-nav">
-                            <button type="button" className="ghost" onClick={() => setWizardStep(0)}>← Back</button>
-                            <div className="wizard-nav-actions">
-                              <button type="button" className="btn-primary" onClick={() => setWizardStep(2)}>Continue →</button>
+                          <div className="wizard-nav-actions">
+                              <button type="button" className="btn-primary" onClick={() => setWizardStep(1)}>Continue →</button>
                             </div>
-                          </div>
                         </>
                       ) : (
                         // #2323 (Option B): the first-run provisioning door —
@@ -5296,20 +5402,19 @@ function claimIntentInFlight() {
                               style={{ padding: '0.5rem 0.7rem', background: 'var(--surface,#0d1a2d)', border: '1px solid var(--border,#1e293b)', borderRadius: 8, fontSize: 14 }}
                             />
                           </label>
-                          <p className="dim small" style={{ margin: '0 0 0.9rem', lineHeight: 1.5 }}>
-                            This creates your organization — one per account on the free plan. Your API key is created here and shown once at the connect step.
-                          </p>
                           {wizardOrgError && (
                             <p className="error" role="alert" style={{ marginBottom: '0.9rem' }}>{wizardOrgError}</p>
                           )}
-                          <div className="wizard-nav">
-                            <button type="button" className="ghost" onClick={() => setWizardStep(0)}>← Back</button>
-                            <div className="wizard-nav-actions">
+                          {(!pendingInvites || pendingInvites.length === 0) && (
+                            <p className="dim small" style={{ margin: '0 0 0.9rem', lineHeight: 1.5, fontStyle: 'italic' }}>
+                              Looking to join an existing organization? Ask your admin to invite you to your email, then reload this page.
+                            </p>
+                          )}
+                          <div className="wizard-nav-actions">
                               <button type="button" className="btn-primary" onClick={handleWizardCreateOrg} disabled={wizardOrgBusy}>
                                 {wizardOrgBusy ? 'Creating…' : 'Create Organization'}
                               </button>
                             </div>
-                          </div>
                         </>
                       )}
                       {pendingInvites && pendingInvites.length > 0 && (
@@ -5378,7 +5483,7 @@ function claimIntentInFlight() {
                         <button type="button" className="ghost" onClick={() => setWizardStep(1)}>← Back</button>
                         <div className="wizard-nav-actions">
                           {wizardForkChosen || (onboarding && onboarding.fork) ? (
-                            <button type="button" className="btn-primary" onClick={() => setWizardStep(3)}>Continue →</button>
+                            <button type="button" className="btn-primary" onClick={() => setWizardStep(2)}>Continue →</button>
                           ) : (
                             <p className="dim small" style={{ margin: 0 }}>Pick how you'll use Tortoise — you choose once per Organization.</p>
                           )}
@@ -5441,7 +5546,7 @@ function claimIntentInFlight() {
                             <p className="error" role="alert" style={{ margin: '0.6rem 0 0', fontSize: 13 }}>{wizardDurableError}</p>
                           )}
                           <div className="wizard-nav" style={{ marginTop: '1rem' }}>
-                            <button type="button" className="ghost" onClick={() => setWizardStep(2)}>← Back</button>
+                            <button type="button" className="ghost" onClick={() => setWizardStep(1)}>← Back</button>
                             <div className="wizard-nav-actions">
                               {isOwnerAdmin && (
                                 <button type="button" className="btn-primary" onClick={wizardMintDurableKey} disabled={wizardDurableBusy}>
@@ -5453,7 +5558,7 @@ function claimIntentInFlight() {
                                 no key yet) must never be trapped on the connect
                                 step — Skip defers; the done step's copy stays
                                 honest ('connect it later'). */}
-                            <button type="button" className="ghost" onClick={() => { setWizardPaused(true); setWizardStep(4) }}>Skip for now</button>
+                            <button type="button" className="ghost" onClick={() => { setWizardPaused(true); setWizardStep(3) }}>Skip for now</button>
                           </div>
                           {/* #2325: the affordances below are ESCAPES, not a
                               second path — a muted contextual 'Manage keys'
@@ -5470,7 +5575,7 @@ function claimIntentInFlight() {
                               it was ungated predates that) — see
                               wizardMintDurableKey). */}
                           <div style={{ marginTop: '0.85rem', display: 'flex', flexWrap: 'wrap', gap: '0.9rem', alignItems: 'center' }}>
-                            <button type="button" className="ghost small" onClick={() => { window.history.replaceState({}, '', '/'); setWelcomeMode(false); setTab('keys'); finishWelcomeLoads() }}>
+                            <button type="button" className="ghost small" onClick={() => { window.history.replaceState({}, '', '#/keys'); setWelcomeMode(false); setTab('keys'); finishWelcomeLoads('keys') }}>
                               {isOwnerAdmin ? `Manage keys for ${shownOrgName || 'your organization'} →` : `View keys for ${shownOrgName || 'your organization'} →`}
                             </button>
                             {isOwnerAdmin && (
@@ -5639,7 +5744,7 @@ function claimIntentInFlight() {
                           </p>
                           )}
                           <div className="wizard-nav">
-                            <button type="button" className="ghost" onClick={() => setWizardStep(2)}>← Back</button>
+                            <button type="button" className="ghost" onClick={() => setWizardStep(1)}>← Back</button>
                             <div className="wizard-nav-actions">
                               {wizardConnectError && (
                                 <p className="error" role="alert" style={{ margin: '0 0.5rem 0 0', fontSize: 13 }}>{wizardConnectError}</p>
@@ -5653,7 +5758,7 @@ function claimIntentInFlight() {
                                   {wizardConnectBusy ? 'Saving…' : (HARNESS_CONTINUE_LABEL[wizardHarness] || (HARNESS_SELF_INSTALL.includes(wizardHarness) ? 'My agent confirmed it — Continue →' : "I've set it up — Continue →"))}
                                 </button>
                               )}
-                              <button type="button" className="ghost" onClick={() => { setWizardPaused(true); setWizardStep(4) }}>Skip for now</button>
+                              <button type="button" className="ghost" onClick={() => { setWizardPaused(true); setWizardStep(3) }}>Skip for now</button>
                             </div>
                           </div>
                         </>
@@ -5661,7 +5766,7 @@ function claimIntentInFlight() {
                     </div>
                   )}
 
-                  {wizardStep === 4 && (
+                  {wizardStep === 3 && (
                     <div className="done">
                       {effectivelyPaused ? (
                         <p className="dim">You're set up, but your agent isn't connected yet — nothing was installed on the connect step. Open Settings → Setup guide to follow what happens next — the setup command there creates a fresh key when you do.</p>
@@ -5669,7 +5774,7 @@ function claimIntentInFlight() {
                         <p className="dim">Your agent is connected — it files your decisions and findings to this Organization's graph from here on. Open Settings → Setup guide to follow what happens next.</p>
                       )}
                       <div className="wizard-nav">
-                        <button type="button" className="ghost" onClick={() => setWizardStep(3)}>← Back</button>
+                        <button type="button" className="ghost" onClick={() => setWizardStep(2)}>← Back</button>
                       </div>
                       <div className="wizard-actions">
                         <button type="button" className="btn-primary" onClick={wizardComplete}>Open my dashboard →</button>
@@ -5725,7 +5830,7 @@ function claimIntentInFlight() {
                           <div className="wizard-nav">
                             <button type="button" className="ghost" onClick={() => setWelcomeOriented(false)}>← Back</button>
                             <div className="wizard-nav-actions">
-                              <button type="button" className="ghost" onClick={() => { window.history.replaceState({}, '', '/'); setWelcomeMode(false); setTab('keys'); finishWelcomeLoads() }}>Go to API Keys →</button>
+                              <button type="button" className="ghost" onClick={() => { window.history.replaceState({}, '', '#/keys'); setWelcomeMode(false); setTab('keys'); finishWelcomeLoads('keys') }}>Go to API Keys →</button>
                             </div>
                           </div>
                         </>
@@ -5940,7 +6045,7 @@ function claimIntentInFlight() {
                                     // key. Fire-and-forget: finishWelcomeLoads never rejects.
                                     <button
                                       className="btn-primary"
-                                      onClick={() => { window.clearTimeout(checkoutResetTimerRef.current); setCheckoutPending(false); window.history.replaceState({}, '', '/'); setWelcomeMode(false); setTab('keys'); finishWelcomeLoads() }}
+                                      onClick={() => { window.clearTimeout(checkoutResetTimerRef.current); setCheckoutPending(false); window.history.replaceState({}, '', '#/keys'); setWelcomeMode(false); setTab('keys'); finishWelcomeLoads('keys') }}
                                     >
                                       Start free
                                     </button>
@@ -6516,7 +6621,6 @@ function claimIntentInFlight() {
             addError={profileError}
             onResend={handleResend}
             resendBusy={profileBusy === 'resend'}
-            onOpenReauth={() => setReauthOpen(true)}
           />
         )}
         {tab === 'keys' && (
@@ -6915,7 +7019,7 @@ function claimIntentInFlight() {
                     <p className="dim small">Read-only rescue view — restore brings everything back as an active graph.</p>
                     <ul className="dim small">
                       <li>Deleted: {trashInspect.deleted_at ? fmtTime(trashInspect.deleted_at) : '—'}</li>
-                      <li>Backups kept: {trashInspect.archive_count != null ? trashInspect.archive_count : 0}</li>
+                      <li>Restorable archives: {trashInspect.archive_count != null ? trashInspect.archive_count : 0}</li>
                       {trashInspect.latest_backup ? (
                         <li>
                           Latest backup:{' '}
@@ -6924,6 +7028,10 @@ function claimIntentInFlight() {
                             ? ` · ${trashInspect.latest_backup.node_count.toLocaleString()} nodes / ${trashInspect.latest_backup.edge_count != null ? trashInspect.latest_backup.edge_count.toLocaleString() : '?'} edges`
                             : ''}
                         </li>
+                      ) : trashInspect.archive_count > 0 ? (
+                        // #2469: archives exist but no readable manifest
+                        // (dump-only runs / crash window) — say so honestly.
+                        <li>Backups exist — no readable manifest for details.</li>
                       ) : (
                         <li>No backups yet for this graph.</li>
                       )}

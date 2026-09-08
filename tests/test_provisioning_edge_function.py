@@ -121,6 +121,74 @@ def test_shared_lookup_implements_plan_construction():
 # origin allowlist covering the welcome page's hosts (mirrors
 # waitlist-subscribe's proven pattern).
 
+# ── #2406: onboarding-call offer email (post-provision trigger) ────────────
+
+def test_edge_function_fires_onboarding_email_after_provision():
+    """The provisioning door must fire POST /internal/onboarding-email (the
+    #2406 one-time onboarding-call offer) for every NEW hosted signup."""
+    src = EDGE_FN.read_text()
+    assert "/internal/onboarding-email" in src, (
+        "Edge Function must fire the onboarding-email internal endpoint"
+    )
+    # Fires after the demo seed block, still inside the handler (provision
+    # RPC already committed).
+    assert "await fireOnboardingEmail(teamId, display_name);" in src, (
+        "onboarding email must be fired after provisioning, passing the "
+        "PERSON display_name"
+    )
+    assert src.index("fireOnboardingEmail(teamId, display_name)") > src.index(
+        "Demo seed failed"), (
+        "onboarding email must fire after the demo seed (independent of it)"
+    )
+
+
+def test_edge_function_onboarding_email_passes_person_name_not_safe_name():
+    """The greeting must derive from the PERSON display name (caller/body) —
+    NEVER the org slug (safeName): the org name is wizard-typed and
+    whitespace-free; it is not a person's name (scope-doc §Personalization)."""
+    src = EDGE_FN.read_text()
+    # Scope the check to the onboarding POST body itself (safeName legitimately
+    # appears elsewhere — e.g. the provision_team RPC body p_team_name).
+    body_start = src.index("const body = JSON.stringify(")
+    body_chunk = src[body_start:body_start + 400]
+    assert "display_name: personDisplayName ?? undefined" in body_chunk, (
+        "onboarding body must carry the person display_name key"
+    )
+    assert "safeName" not in body_chunk, (
+        "the org slug must never be passed as the email greeting source"
+    )
+    assert "team_name" not in body_chunk, (
+        "the onboarding body must carry team_id + display_name only"
+    )
+    # The call site passes the PERSON display_name — not safeName.
+    assert "await fireOnboardingEmail(teamId, display_name);" in src
+    assert "fireOnboardingEmail(teamId, safeName)" not in src
+
+
+def test_edge_function_onboarding_email_retries_and_never_fails_provisioning():
+    """The #2406 email POST is 2 attempts (0s/+2s), bounded, logs every
+    non-definitive outcome, and NEVER throws — provisioning has already
+    committed, so a failed offer email must never fail the signup."""
+    src = EDGE_FN.read_text()
+    # two attempts with a +2s retry between them
+    assert "attempt < 2; attempt++" in src, (
+        "onboarding email must be attempted twice (0s/+2s)"
+    )
+    assert "setTimeout(r, 2_000)" in src, (
+        "the retry must wait +2s before the second attempt"
+    )
+    # bounded (never blow the hook deadline)
+    assert "AbortSignal.timeout(5_000)" in src, (
+        "onboarding email fetch must be time-bounded"
+    )
+    # independent error handling inside the helper — a failure never throws
+    # into the handler's outer catch (which would 500 a committed provision)
+    assert 'console.error("Onboarding email failed:", e)' in src
+    assert '"Onboarding email not sent: /internal/onboarding-email "' in src, (
+        "non-definitive statuses must be logged"
+    )
+
+
 def test_edge_function_answers_cors_preflight():
     """OPTIONS (preflight) must be answered 204 BEFORE the method gate, with
     methods/headers the welcome page actually sends."""

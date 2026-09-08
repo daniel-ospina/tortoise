@@ -5145,6 +5145,120 @@ async def create_demo_graph(request: Request):
     return _seed_demo_graph(team_id)
 
 
+# ── #2406: one-time onboarding-call offer email ─────────────────────────────
+# Fired by the tenant-provision Edge Function right after first-org
+# provisioning (mirror of /internal/demo). Fail-soft at BOTH layers: this
+# endpoint resolves every failure to a structured {status} (never a surprise
+# 5xx to the edge fn) and the edge fn never lets the POST fail provisioning.
+#
+# Dedupe (exactly-once for every in-band path — scope doc §Dedupe design):
+#   1. marker read gate — teams.onboarding_email_sent_at set → already_sent;
+#   2. in-process in-flight gate (below) — a concurrent/second POST while the
+#      first send is in flight skips (closes the marker-read TOCTOU from the
+#      edge fn's +2s retry / a double wizard tab);
+#   3. the send is AWAITED and the marker stamped in the SAME request, only
+#      on provider accept (send-then-stamp); the provider Idempotency-Key
+#      onboarding:{team_id} collapses cross-process replays ≤24h;
+#   4. a skipped/failed send NEVER stamps the marker → retryable.
+_inflight_onboarding_emails: set[str] = set()
+
+
+@app.post("/internal/onboarding-email")
+async def send_onboarding_offer_email_endpoint(request: Request):
+    """Fire the one-time onboarding-call offer email for a NEW hosted signup.
+
+    Body: ``{"team_id": str, "display_name": str?}`` — display_name is the
+    PERSON's display name (edge-fn caller/body), never the org slug; the
+    greeting heuristic lives in email_notify (cosmetic-only copy).
+
+    Response statuses (HTTP 200 unless auth/body-contract failures):
+    ``sent`` (provider accepted + marker stamped), ``already_sent`` (marker
+    set), ``in_flight`` (another send for this team is in progress),
+    ``skipped`` (registry/selfhost mode, unknown team, no team email, or
+    sender-side skip) and ``failed`` (provider/control-plane failure, marker
+    UNSET — retryable).
+    """
+    _check_internal(request)
+
+    raw = await _read_capped_body(request, _BODY_MAX_BYTES, _BODY_413_DETAIL)
+    body = _json.loads(raw)
+    team_id = body.get("team_id")
+    if not team_id:
+        raise HTTPException(status_code=400, detail="Missing team_id")
+    display_name = body.get("display_name")
+    if not isinstance(display_name, str):
+        display_name = None
+
+    from tortoise.email_notify import send_onboarding_offer_email
+    from tortoise.supabase_control import (
+        get_control_plane,
+        is_supabase_enabled,
+        set_team_onboarding_email_sent,
+        team_by_id,
+    )
+
+    # Registry/selfhost mode: no hosted users, no emails — skip silently
+    # (selfhost signups carry no email by construction).
+    if not is_supabase_enabled():
+        _logger.info("onboarding email: skipped (registry mode) for team %s",
+                     team_id)
+        return {"status": "skipped", "reason": "registry-mode"}
+
+    try:
+        team = team_by_id(get_control_plane(), team_id)
+        if team is None:
+            _logger.warning("onboarding email: skipped (unknown team %s)",
+                            team_id)
+            return {"status": "skipped", "reason": "unknown-team"}
+        email = team.get("email")
+        if not email:
+            # Q5/agent/legacy lanes mint teams with email NULL — not hosted
+            # human first-org signups; unreachable by construction, guarded
+            # here anyway.
+            _logger.warning("onboarding email: skipped (no team email) %s",
+                            team_id)
+            return {"status": "skipped", "reason": "no-team-email"}
+        if team.get("onboarding_email_sent_at"):
+            return {"status": "already_sent"}
+        if team_id in _inflight_onboarding_emails:
+            _logger.warning(
+                "onboarding email: in-flight skip (team %s) — a concurrent "
+                "send is already running", team_id)
+            return {"status": "in_flight"}
+
+        _inflight_onboarding_emails.add(team_id)
+        try:
+            result = await send_onboarding_offer_email(
+                email, display_name, team.get("name"), team_id)
+        finally:
+            _inflight_onboarding_emails.discard(team_id)
+
+        if result.get("status") == "sent":
+            stamped = set_team_onboarding_email_sent(
+                get_control_plane(), team_id)
+            if not stamped:
+                # Another process stamped concurrently (cross-replica race) —
+                # the provider Idempotency-Key collapsed the duplicate send;
+                # outcome is still exactly-once.
+                _logger.warning(
+                    "onboarding email: sent for team %s but marker already "
+                    "set by a concurrent sender (provider deduped)", team_id)
+            return {"status": "sent",
+                    "message_id": result.get("message_id")}
+        # Sender-side skip/failure: marker UNSET — the edge-fn retry (or a
+        # later ops replay) retries. Logged for ops visibility.
+        _logger.warning(
+            "onboarding email: %s for team %s — marker unset, retryable",
+            result.get("status", "failed"), team_id)
+        return {"status": result.get("status", "failed"),
+                "reason": result.get("reason")}
+    except Exception as exc:
+        _logger.warning(
+            "onboarding email: request failed for team %s (%s) — signup is "
+            "never blocked", team_id, type(exc).__name__)
+        return {"status": "failed"}
+
+
 # ── C2 (#2111): the ONE shared per-graph key mint ────────────────────────────
 # C3 (#2112) standalone key-lifecycle endpoints CONSUME this helper (D0 —
 # one implementation, never re-implemented). It stamps delegation_depth=0,
@@ -7945,10 +8059,12 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
     # priors, #1391). The summary log therefore INFOs zero-warn applies even
     # when applied<total — a WARNING means a record actually warned. Per-
     # record fail-open (warn-only — never fails the commit). Same-commit
-    # supersession chains must be emitted in fold order ([A→B, B→C]) — the
-    # visible-successor gate skips a fold whose successor this payload has
-    # already terminalized (order-sensitivity pinned in #2249). The step-6
-    # entity writes above have landed the payload's net-new successors.
+    # supersession chains fold in dependency order inside apply_supersessions
+    # (#2249) — emission order is irrelevant; the helper's pre-pass sorts so
+    # each fold runs while its successor is still live. Cross-commit
+    # reverse-arriving chains still skip (guard (h) — the fold-time gate
+    # discriminates pre-payload terminality). The step-6 entity writes above
+    # have landed the payload's net-new successors.
     # ──
     from tortoise.commit_ops import apply_supersessions
 
@@ -8743,9 +8859,8 @@ async def create_team(body: dict, user: dict = Depends(get_current_user)):  # no
     if len(name) > 64:
         raise HTTPException(status_code=422, detail="Team name must be ≤ 64 characters")
     import re as _re
-    # #750.6: align with sdk.team_create — spaces are rejected there, so accept
-    # them here too (stricter wins; surface as 422 not a 500 ControlPlaneError).
-    if not _re.match(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$", name):
+    # spaces are now allowed in team names (onboarding wizard needs them)
+    if not _re.match(r"^[a-zA-Z0-9][a-zA-Z0-9_ -]{0,63}$", name):
         raise HTTPException(status_code=422, detail="Invalid team name")
 
     # #1954: the 429/409/402 gates + provision are read-then-write — the
@@ -9603,8 +9718,8 @@ async def _require_owner_admin_session(user: dict, team_id: str) -> None:
 
 async def _graph_row_probe(team_id: str, graph_id: str) -> dict | None:
     """Fetch ONE graph row (any status) across the mode branch — the
-    trash-restore decision probe. Returns {kind, status, name, purged_at} or
-    None (unknown graph)."""
+    trash-restore decision probe. Returns {kind, status, name, namespace,
+    purged_at} or None (unknown graph)."""
     sdk = _make_sdk(namespace="registry")
     from tortoise.supabase_control import (
         get_control_plane,
@@ -9612,23 +9727,27 @@ async def _graph_row_probe(team_id: str, graph_id: str) -> dict | None:
     )
     if is_supabase_enabled():
         rows = get_control_plane().query(
-            "graphs", select=["kind", "status", "name", "purged_at"],
+            "graphs",
+            select=["kind", "status", "name", "namespace", "purged_at"],
             filters=[("id", "eq", graph_id), ("team_id", "eq", team_id)],
         )
         if not rows:
             return None
         r = rows[0]
         return {"kind": r.get("kind"), "status": r.get("status"),
-                "name": r.get("name"), "purged_at": r.get("purged_at")}
+                "name": r.get("name"), "namespace": r.get("namespace"),
+                "purged_at": r.get("purged_at")}
     rows = sdk._get_registry().query(
         "MATCH (g:Graph {id:$gid, team_id:$tid}) "
-        "RETURN g.kind, coalesce(g.status, 'active'), g.name, g.purged_at",
+        "RETURN g.kind, coalesce(g.status, 'active'), g.name, g.namespace, "
+        "g.purged_at",
         params={"gid": graph_id, "tid": team_id},
     ).result_set
     if not rows:
         return None
     return {"kind": rows[0][0], "status": rows[0][1],
-            "name": rows[0][2], "purged_at": rows[0][3]}
+            "name": rows[0][2], "namespace": rows[0][3],
+            "purged_at": rows[0][4]}
 
 
 async def _trash_name_conflict(team_id: str, name: str,
@@ -9716,17 +9835,29 @@ async def restore_trash_graph(request: Request, graph_id: str, team_id: str,
     # Timed acquire in a worker thread — never block the event loop, and a
     # TIMED acquire can time out WITHOUT holding the lock (an orphaned
     # untimed acquire would wedge the team lock forever once it eventually
-    # succeeded — VGATE round-3 fix).
-    acquired = await asyncio.to_thread(lock.acquire, True, 20)
+    # succeeded — VGATE round-3 fix). #2470: the hourly sweep holds the lock
+    # across the ENTIRE team pass (default + every custom graph, R2 uploads
+    # of large dumps routinely exceed the old 20s) — the timeout is now
+    # sweep-scale and the message is neutral (a PURGE also holds it).
+    acquired = await asyncio.to_thread(lock.acquire, True,
+                                       _TRASH_RESTORE_LOCK_TIMEOUT_S)
     if not acquired:
         raise HTTPException(
             status_code=503,
-            detail="Restore busy (team sweep in flight)") from None
+            headers={"Retry-After": "300"},
+            detail="Another backup operation is in flight for this team — "
+                   "try again in a few minutes") from None
     try:
         return await _restore_trash_graph_locked(request, user, team_id,
                                                  graph_id)
     finally:
         lock.release()
+
+
+# #2470: the per-team lock is held for the whole sweep/purge team pass (which
+# can run minutes on a large team), so a restore waits sweep-scale before
+# 503ing with a Retry-After.
+_TRASH_RESTORE_LOCK_TIMEOUT_S = 300
 
 
 async def _restore_trash_graph_locked(request: Request, user: dict,
@@ -9752,6 +9883,15 @@ async def _restore_trash_graph_locked(request: Request, user: dict,
             status_code=409,
             detail=f"A live graph named {name!r} already exists — rename or "
                    "delete it first")
+    # #2467: restore ADDS an active graph — it must respect the team's
+    # max_graphs quota (delete freed the slot; restoring re-consumes it).
+    # A team at cap cannot restore until it deletes something (create_graph
+    # parity — a restore is a create-equivalent for the quota meter). The
+    # restored row is NOT yet counted (still deleted), so the gate measures
+    # the pre-restore active count + 1 the same way create does.
+    team_for_quota = await _team_node(team_id)
+    if team_for_quota is not None:
+        await _graph_quota_gate(team_for_quota)
     sdk = _make_sdk(namespace="registry")
     from tortoise.supabase_control import (
         get_control_plane,
@@ -9817,15 +9957,41 @@ async def trash_graph_points(graph_id: str, team_id: str,
     import json as _json
 
     storage = _backup_storage()
+    # #2469: count ARCHIVE RUNS, not manifests — create_backup uploads
+    # dump.enc before manifest.json, so a crash leaves a dump-only run that
+    # the old manifest-count treated as "nothing to rescue". Each run dir
+    # under the nested pool (backups/{team}/{gid}/{run}/…) counts once;
+    # dump-only runs count too. Legacy FLAT archives of this graph (index
+    # entries whose graph_id is this gid, or whose graph_name is this
+    # graph's gid-keyed namespace — the #2462 purge-match semantics) are
+    # folded in so Inspect never understates what can be restored.
     prefix = f"backups/{team_id}/{graph_id}/"
-    manifests = []
+    nested_runs: set[str] = set()
+    manifests: list[str] = []
     try:
         keys = await asyncio.to_thread(storage.list, prefix)
     except Exception:
         keys = []
     for k in keys:
+        parts = k.split("/")
+        # backups/{team}/{gid}/{run}/… → run = parts[3] (5+ segments).
+        if len(parts) >= 5 and parts[3]:
+            nested_runs.add(parts[3])
         if k.endswith("/manifest.json"):
             manifests.append(k)
+    flat_bids: set[str] = set()
+    try:
+        from tortoise.backup_sweep import read_legacy_flat_index
+        index = await asyncio.to_thread(read_legacy_flat_index, storage,
+                                        team_id)
+        ns = str(row.get("namespace") or "")
+        for bid, ent in (index or {}).items():
+            if isinstance(ent, dict) and (
+                    str(ent.get("graph_id") or "") == graph_id
+                    or (ns and str(ent.get("graph_name") or "") == ns)):
+                flat_bids.add(str(bid))
+    except Exception:
+        flat_bids = set()  # unreadable index → nested pool only
     latest: dict | None = None
     for mk in sorted(manifests, reverse=True):
         try:
@@ -9841,7 +10007,7 @@ async def trash_graph_points(graph_id: str, team_id: str,
     return {
         "graph_id": graph_id, "name": row.get("name"),
         "deleted_at": row.get("deleted_at"),
-        "archive_count": len(manifests),
+        "archive_count": len(nested_runs) + len(flat_bids),
         "latest_backup": latest,
         "note": "Read-only rescue view (artifact side). Restore the graph "
                 "to access its content (POST /v1/graphs/trash/{id}/restore)",
@@ -16567,7 +16733,7 @@ async def create_onboarding_team(body: dict,
     if not name or len(name) > 64:
         raise HTTPException(status_code=400, detail="name is required (max 64 chars)")
     import re
-    if not re.match(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$", name):
+    if not re.match(r"^[a-zA-Z0-9][a-zA-Z0-9_ -]{0,63}$", name):
         raise HTTPException(status_code=400, detail="Invalid team name")
     # #1748: the session user owns the sub-team. Session JWT →
     # session_user_id (get_current_team_session); key-auth → created_by
