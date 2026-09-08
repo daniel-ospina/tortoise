@@ -288,8 +288,17 @@ class A4TortoiseArm:
         }
 
     # ── record ──────────────────────────────────────────────────────────
-    def record(self, context: AgentContext, item: Memory) -> None:
+    def record(self, context: AgentContext, item: Memory) -> str | None:
         """Write through the product verb surface (#901 routing).
+
+        Returns the PRODUCT write reference when a write succeeded (the
+        operator edge id for nand/imply writes — the Amend-1 event_ref a
+        tool_event emission carries); None on any honest no-op (cap-hit,
+        empty/claim-less closed set, unknown verb, identical re-file,
+        unresolved target). The executor emits a ``contradiction_surfaced``
+        tool_event ONLY when a real ref came back — emission-loss-proof:
+        absence of the tool_event provably means the conflict was not
+        filed, never a lost emission (#2284 Task 9).
 
         #2291 Task 3 semantics:
         - Targets come ONLY from the retrieved closed set
@@ -322,28 +331,28 @@ class A4TortoiseArm:
           (never swallow + fabricate from an uncalibrated store).
         """
         if self._db_path is None:
-            return
+            return None
         sdk = self._sdk(context.scenario)
         sid = context.scenario.id
         filed = self._filed_content.setdefault(sid, set())
         try:
             if self.decide_cycles >= DECIDE_CYCLES_CAP:
-                return  # cap-hit: honest no-op (never forced CONVERGED)
+                return None  # cap-hit: honest no-op (never forced CONVERGED)
             closed = [m for m in (context.prior_memories or ())
                       if m.id and not _is_seed_manifest(m.content)]
             if item.kind == "mitigate":
                 ops = [m for m in closed if m.kind == "operator"]
                 if not ops:
-                    return  # unresolved operator target ⇒ honest no-op
+                    return None  # unresolved operator target ⇒ honest no-op
                 if item.target_id is not None:
                     op_ids = {o.id for o in ops}
                     if item.target_id not in op_ids:
-                        return  # target not a closed-set operator ⇒ refuse
+                        return None  # target not a closed-set operator ⇒ refuse
                     mit_key = f"mitigate::{item.target_id}::{item.content}"
                 else:
                     mit_key = f"mitigate::{item.content}"
                 if mit_key in filed:
-                    return  # identical re-mitigation: TRUE no-op
+                    return None  # identical re-mitigation: TRUE no-op
                 c = item.confidence
                 if isinstance(c, float) and math.isfinite(c):
                     # clamp raw numeric confidence into [0.10, 0.50]
@@ -357,20 +366,20 @@ class A4TortoiseArm:
                     op_target, reason=item.content or "", strength=strength)
                 filed.add(mit_key)
                 self.decide_cycles += 1
-                return
+                return None
             claims = [m for m in closed if m.kind == _CLAIM_MEMORY_KIND]
             if not claims:
-                return  # empty/claim-less closed set ⇒ zero writes (no-op)
+                return None  # empty/claim-less closed set ⇒ zero writes (no-op)
             if item.kind not in _WRITE_KINDS:
                 # Unknown/not-yet-routed verb (supersede, …): HONEST NO-OP.
                 # Never a silent IMPL misroute that flips a replacement into
                 # agreement with the superseded claim. Task-9's executor
                 # routes supersede at its own layer via the product verb.
-                return
+                return None
             if item.target_id is not None:
                 claim_ids = {c.id for c in claims}
                 if item.target_id not in claim_ids:
-                    return  # target not a closed-set claim ⇒ refuse
+                    return None  # target not a closed-set claim ⇒ refuse
                 target = item.target_id
             else:
                 target = claims[0].id
@@ -380,7 +389,7 @@ class A4TortoiseArm:
             op_kind = "nand" if item.kind == "nand" else "imply"
             dedup_key = f"{op_kind}::{target}::{item.content}"
             if dedup_key in filed:
-                return  # identical re-file this setup: TRUE no-op
+                return None  # identical re-file this setup: TRUE no-op
             created = sdk.create_point(kind=_EVIDENCE_KIND, content=item.content,
                                        dedup=True, status="draft",
                                        credibility=item.credibility
@@ -392,16 +401,21 @@ class A4TortoiseArm:
                 raise ArmUnavailable("a4 create_point returned no id")
             try:
                 if item.kind == "nand":
-                    sdk.create_operator(
+                    op = sdk.create_operator(
                         "NAND", ev_id, [target], direction="unidirectional")
                 else:
-                    sdk.create_operator("IMPL", ev_id, [target])
+                    op = sdk.create_operator("IMPL", ev_id, [target])
             except Exception as e:  # noqa: BLE001, RUF100
                 # Evidence stays DRAFT (promote_source fires only on operator
                 # success) ⇒ inert residue, never a live orphan.
                 raise ArmUnavailable(f"a4 operator write failed: {e}") from e
             filed.add(dedup_key)
             self.decide_cycles += 1  # one cycle per NEW record
+            if isinstance(op, dict):
+                op_id = op.get("id")
+                if isinstance(op_id, str) and op_id:
+                    return op_id
+            return str(ev_id)  # fallback ref: the evidence point the edge promoted
         except ArmUnavailable:
             raise
         except Exception as e:  # noqa: BLE001, RUF100

@@ -57,6 +57,13 @@ from battery.runner.artifacts import (
 )
 from battery.runner.emit import MANDATORY
 from battery.runner.episode import EpisodeResult, EpisodeTracker, TurnRecord  # noqa: F401
+from battery.runner.executor import (
+    envelope_events,
+    execute_tvde_episode,
+    state_events,
+    surfacing_event,
+)
+from battery.runner.model_calls import RealModelCaller, UsageRecordingCaller
 from battery.runner.scorers import (
     HARNESS_METRIC_IDS,
     HarnessScorer,
@@ -83,7 +90,8 @@ class RunConfig:
                  seed: int = 0, tier: Tier | None = None, arms: list[str] | None = None,
                  mock: bool = False, batch_setup: bool = False,  # noqa: F811
                  scorer_specs: list[str] | None = None, max_episodes: int | None = None,
-                 db_path: str | None = None, executor: str = "mock"):
+                 db_path: str | None = None, executor: str = "mock",
+                 caller_factory: Callable | None = None):
         self.config_dir = Path(config_dir) if config_dir else DEFAULT_CONFIG_DIR
         self.out_dir = Path(out_dir) if out_dir else DEFAULT_OUT_DIR
         self.seed = seed
@@ -101,6 +109,10 @@ class RunConfig:
         # --mock sets arms=[mock]; --arms takes precedence when both given.
         self.arms = list(arms) if arms else (["mock"] if mock else ["mock"])  # noqa: RUF034
         self.scorer_specs = scorer_specs or ["harness"]
+        #: Task-9 real-executor caller seam: injectable for hermetic tests;
+        #: None => the pinned real caller (RealModelCaller) is built (real
+        #: mode is spend-gated + fail-closed without OPENROUTER_API_KEY).
+        self.caller_factory = caller_factory
 
 
 def arm_run_mode(config: RunConfig, arm) -> str:
@@ -131,10 +143,19 @@ def _resolve_arm(arm_id: str, arm_config: ArmConfig, *, mock: bool) -> ArmAdapte
     try:
         mod = importlib.import_module(module_name)
         cls = getattr(mod, arm_id_to_cls(arm_id))
-        return cls(**arm_config.config)
+        resolved = cls(**arm_config.config)
     except Exception as e:  # noqa: BLE001, RUF100
         raise ConfigError(f"cannot resolve arm {arm_id!r} "
                           f"({arm_config.adapter}): {e}") from e
+    # Task-9 parameterization seam (the 'fixed' sentinel retires HERE): a
+    # real-mode arm instance carries the arms.yaml pin + temperature as
+    # INSTANCE attributes (class attrs stay 'fixed' for the mock/hermetic
+    # lanes). arms.yaml is the single pin source; the class sentinel never
+    # blocks a real run whose config resolved a concrete pin.
+    if not mock and arm_id != "mock" and arm_config.model_pin:
+        resolved.model_id = arm_config.model_pin
+        resolved.temperature = arm_config.temperature
+    return resolved
 
 
 def arm_id_to_cls(arm_id: str) -> str:
@@ -172,6 +193,111 @@ def execute_mock_episode(arm, scenario: Scenario, episode_seed: int,
 
 _DEFAULT_PLAN = ({"turn": 1, "tokens": 50, "tool_calls": 0,
                   "re_derivations": 0},)
+
+
+def _execute_real_episode(*, config: RunConfig, arm, scenario: Scenario,
+                          episode_seed: int, tracker: EpisodeTracker,
+                          ) -> tuple[list[ModelCallOutcome], int, list[dict],
+                                     dict]:
+    """Task-9 real emitting executor: retrieve -> reader render -> TVDE
+    scaffold on the pinned caller -> envelope/state emissions -> decide
+    writes (register_conflict/file_nand intents) -> surfacing tool_event
+    emissions (ONLY on a real product ref — emission-loss-proof) -> EP
+    terminal read-out where the arm exposes it.
+
+    Returns (outcomes, re_derivations, event_log, ep_surface). The caller
+    (run_battery) records turns via ``tracker``. Zero fabricated turns:
+    every turn content is the model's own response or the episode is
+    excluded (realism gate)."""
+    from battery.arms.base import AgentContext, Memory
+    from battery.config.corpus_loader import render_reader_prompt
+
+    ctx = AgentContext(scenario=scenario, episode_seed=episode_seed,
+                       prior_memories=tuple(), user_message="")
+    try:
+        prior = arm.retrieve(ctx)
+    except ArmUnavailable:
+        tracker.add_turn(role="agent", content="(arm unavailable)",
+                         tokens=0, outcome=ModelCallOutcome.FAILED)
+        return ([ModelCallOutcome.FAILED], 0, [], {"error": "read-failed"})
+
+    caller = (config.caller_factory() if config.caller_factory
+              else UsageRecordingCaller(RealModelCaller()))
+    render = render_reader_prompt(scenario.to_render_dict())
+    try:
+        ep = execute_tvde_episode(caller=caller, scenario_render=render,
+                                  scenario_id=scenario.id)
+    except (ValueError, ConfigError) as e:
+        tracker.add_turn(role="agent",
+                         content=f"(realism gate: {e})", tokens=0,
+                         outcome=ModelCallOutcome.FAILED)
+        return ([ModelCallOutcome.FAILED], 0, [],
+                {"error": f"realism-gate: {e}"})
+
+    events: list[dict] = []
+    for env in ep.envelopes:
+        events += envelope_events(env)
+    rows = getattr(caller, "rows", [])
+    for i, turn in enumerate(ep.turns):
+        tokens = int(rows[i].completion_tokens) if i < len(rows) else 0
+        tracker.add_turn(role="agent", content=turn["content"],
+                         tokens=tokens, outcome=ModelCallOutcome.OK)
+
+    # decide writes: surfacing intents against a closed-set claim; a
+    # tool_event is emitted ONLY when the product returned a real ref
+    # (Amend-1) — absence of the emission provably means not filed.
+    claims = [m for m in prior if getattr(m, "kind", "") == "claim"]
+    write_ctx = AgentContext(scenario=scenario, episode_seed=episode_seed,
+                             prior_memories=tuple(prior),
+                             user_message="file the surfaced conflict")
+    for idx, env in enumerate(ep.envelopes):
+        for intent in env.intents:
+            if intent not in ("register_conflict", "file_nand"):
+                continue
+            if not claims:
+                break
+            ref = None
+            try:
+                ref = arm.record(
+                    write_ctx,
+                    Memory(id=f"s{idx}", content=env.position,
+                           confidence=None, kind="nand",
+                           target_id=claims[0].id, credibility="high"))
+            except ArmUnavailable:
+                ref = None
+            if ref:
+                events.append(surfacing_event(
+                    within_turn=idx + 1, event_ref=ref,
+                    explicit=True))
+
+    # state-terminal: decide_cycles harness-side; ep_outcome + contested
+    # from the product terminal table where the arm exposes it (a4), else
+    # the scaffold's honest report (a0/no-store arms converge or stay
+    # undecided from the final envelope).
+    ep_outcome = "undec" if (ep.envelopes
+                             and ep.envelopes[-1].undecided) else "converged"
+    ep_contested: bool | None = None
+    term = None
+    if hasattr(arm, "ep_terminal_outcome"):
+        try:
+            term = arm.ep_terminal_outcome(scenario)
+        except ArmUnavailable:
+            term = None
+    if term:
+        ep_outcome = str(term.get("outcome", ep_outcome))
+        ep_contested = ep_outcome == "contested"
+    events += state_events(ep_outcome=ep_outcome,
+                           decide_cycles=ep.decide_cycles,
+                           ep_contested=ep_contested)
+    ep_surface = {
+        "outcome": ep_outcome,
+        "contested": bool(ep_contested),
+        "decide_cycles": ep.decide_cycles,
+        "converged_early": ep.converged_early,
+        "scenario_render_len": len(render),
+    }
+    outcomes = [ModelCallOutcome.OK] * len(ep.turns)
+    return (outcomes, 0, events, ep_surface)
 
 
 def _agent_context(arm: MockArm, scenario: Scenario, episode_seed: int):
@@ -268,13 +394,11 @@ def run_battery(config: RunConfig, *, stdout: Callable[[str], None] = print,
                 "mock) — a real request over the mock lane fails closed; "
                 "request a non-mock arm (e.g. --arms a0) or run the mock "
                 "lane (default).")
-        if _episode_log is _DEFAULT_EPISODE_LOG:
+        if not _REAL_EXECUTOR_WIRED:
             raise ConfigError(
-                "real executor requested but no real emitting executor seam "
-                "is active: the stock episode-log seam is a no-op (the real "
-                "emitting executor is Task-9 owned). Real mode without an "
-                "active real executor fails closed — run the mock lane "
-                "(default) or wire the executor seam.")
+                "real executor requested but the real emitting executor is "
+                "not wired (Task 9). Real mode without an active real "
+                "executor fails closed — run the mock lane (default).")
         # ── model-pin pre-flight (#2292 Task 5; coordination n10) ──────
         #    A real request must resolve a CONCRETE pinned model for every
         #    requested real arm: the flash-class placeholder sentinel, an
@@ -402,18 +526,32 @@ def run_battery(config: RunConfig, *, stdout: Callable[[str], None] = print,
         for idx, scenario in enumerate(sorted(scenarios, key=lambda s: s.id)):
             episode_seed = config.seed + idx  # per-episode seed = base + index
             tracker = EpisodeTracker()
-            outcomes, re_deriv = execute_mock_episode(
-                arm, scenario, episode_seed, tracker)
+            if run_mode == "real":
+                # Task-9 real emitting executor: retrieve -> TVDE scaffold on
+                # the pinned caller -> envelope/state/tool emissions -> decide
+                # writes. Zero fabricated turns (realism gate inside).
+                outcomes, re_deriv, ep_events, ep_surface = \
+                    _execute_real_episode(
+                        config=config, arm=arm, scenario=scenario,
+                        episode_seed=episode_seed, tracker=tracker)
+                evlog = ep_events
+            else:
+                outcomes, re_deriv = execute_mock_episode(
+                    arm, scenario, episode_seed, tracker)
+                ep_surface = {}
+                evlog = _episode_log(
+                    scenario, episode_seed=episode_seed, arm_id=arm_id,
+                    run_mode=run_mode)
             episode = EpisodeResult(
                 scenario_id=scenario.id, seed=episode_seed, arm=arm_id,
                 turns=tracker.turns, re_derivations=re_deriv,
                 ep_outcome=EpOutcome.CONVERGED,
+                ep_surface=ep_surface,
                 model_call_outcomes=outcome_counts_dict(outcomes),
                 excluded_reason=(_exclude_reason(outcomes)
                                  if not _all_ok(outcomes) else None),
                 run_mode=run_mode,
-                event_log=_episode_log(scenario, episode_seed=episode_seed,
-                                       arm_id=arm_id, run_mode=run_mode),
+                event_log=evlog,
             )
             # Expected set computed on the episode BEFORE scoring via the
             # scorer seam (default HarnessScorer -> empty expected => gap
@@ -592,6 +730,12 @@ def _episode_log(scenario, *, episode_seed: int, arm_id: str,
 #: compare — hermetic tests stub run._episode_log to activate the seam and
 #: drive the two-phase emitter gate).
 _DEFAULT_EPISODE_LOG = _episode_log
+
+#: Task-9 real emitting executor — wired (run.py + executor.py). The gate
+#: refuses real mode while unwired (fail-closed); hermetic stubs may flip
+#: it to exercise refusal paths.
+_REAL_EXECUTOR_WIRED = True
+
 
 
 def _verify_corpus_freshness(config_dir: Path) -> None:
