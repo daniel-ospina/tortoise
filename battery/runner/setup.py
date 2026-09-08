@@ -47,7 +47,7 @@ from __future__ import annotations
 import hashlib
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from pathlib import Path  # noqa: F401
+from pathlib import Path
 from typing import Any, Callable, Iterable, Sequence  # noqa: F401, UP035
 
 from battery.config.corpus import Scenario
@@ -548,6 +548,138 @@ def naive_setup(sdk, scenario: Scenario, *,
             [i["id"] for i in op["inputs"][1:]],
             label=op.get("label"), direction=None)
     return len(graph.points) + len(graph.operators)
+
+
+def open_reference_projection(db_path: str | Path, graph_name: str = "test"):
+    """Reference-lane projection opener (#2291 I-1).
+
+    The lane audit (tests/test_battery_lane_matrix.py) bans
+    ``FalkorProjection`` construction from the ARM module (a4_tortoise.py) so
+    the real runtime path can never drift back to raw Cypher. batch_setup
+    still needs a projection for hermetic content seeding until Task 2 swaps
+    the channel to sdk.ingest — this helper keeps the construction OUT of the
+    audited module (function-scoped allowlist = batch_setup + this opener).
+    """
+    from tortoise.projection import FalkorProjection
+    return FalkorProjection(str(db_path), graph_name=graph_name)
+
+
+def _sdk_get_point(sdk, point_id: str) -> dict | None:
+    """Best-effort point fetch over the SDK (the ingest-lane warm guard's
+    read surface). Missing/raises ⇒ None (absent)."""
+    try:
+        pt = sdk.get_point(point_id)
+    except Exception:  # noqa: BLE001, RUF100
+        return None
+    if not isinstance(pt, dict) or not pt.get("id"):
+        return None
+    return pt
+
+
+def _sdk_marker_present(sdk, scenario: Scenario) -> bool:
+    """Seed-manifest marker presence over the SDK lane, keyed by CONTENT
+    (ingest mints server ids — the derive id is a raw-lane artifact). Read
+    via the product fts surface, never raw queries."""
+    want = seed_manifest_content(scenario.id)
+    rows = sdk.tortoise_fts_query("battery:seed_manifest", limit=20) or []
+    return any(str(r.get("content") or "") == want for r in rows)
+
+
+def _refuse_stale_pre_fix_sdk(sdk, scenario: Scenario) -> None:
+    """seed_mode warm-store guard over the SDK (ingest) lane: mirror of
+    ``_refuse_stale_pre_fix`` read via PRODUCT reads (fts/get_point), never
+    raw queries. Marker present ⇒ accumulate; marker absent + legacy
+    claim_b/NAND present ⇒ refuse with ConfigError BEFORE any batch_id is
+    minted. Legacy ids are content-derived (raw lane wrote derive ids), so
+    the stale check is by id — no content probing."""
+    if not (carries_planted_pairs(scenario) and scenario.contradiction_pairs):
+        return
+    if _sdk_marker_present(sdk, scenario):
+        return  # marker present → accumulate (agent content follows)
+    pair = scenario.contradiction_pairs[0]
+    legacy_b_id = scenario_entity_id("statement", pair.claim_b)
+    if _sdk_get_point(sdk, legacy_b_id) is not None:
+        raise ConfigError(
+            f"seed_mode warm guard (ingest lane): scenario {scenario.id} "
+            "namespace holds a stale PRE-FIX contradiction graph (claim_b "
+            "pre-seeded, no seed-manifest marker) — refusing to seed over "
+            "it (never silently retain ¬A); use a fresh namespace or purge "
+            "the stale store")
+
+def seed_scenario_via_ingest(sdk, scenario: Scenario, *,
+                             seed_mode: bool = True,
+                             credibility: str = "medium") -> dict:
+    """SDK-lane seed channel (#2291 I-2): derive_scenario_graph (the SAME
+    content contract as the reference lane) → ``sdk.ingest`` bundle with
+    refs + credibility baselines + seed props → promote the seed POINTS
+    (operators ride the source promotion; direct operator promotion is
+    blocked by the product). Captures the server-minted batch_id.
+
+    Product behavior (pinned by probe, plan Task 2 Step 1): credibility is
+    author-set on ANY kind/status ⇒ ``baseline_set: true`` even on drafts;
+    kind=evidence lands live, kind=statement lands draft; ingest is
+    content-hash idempotent (re-run ⇒ deduped, same batch_id); connections
+    reify to operator points only with the reification anchor; labels on
+    connections must be declared relations (omit them — decorative).
+
+    Returns ``{batch_id, promoted: [ids], created_points: [ids]}``.
+    """
+    _refuse_stale_pre_fix_sdk(sdk, scenario)
+    graph = derive_scenario_graph(scenario, seed_mode=seed_mode)
+    points: list[dict] = []
+    ref_by_id: dict[str, str] = {}
+    for n, pt in enumerate(graph.points):
+        ref = f"p{n}"
+        item: dict = {"ref": ref, "kind": pt["kind"], "content": pt["content"]}
+        if pt["kind"] in ("statement", "evidence"):
+            item["credibility"] = credibility
+        item["seed"] = True
+        item["source_harness"] = "battery"
+        item["source_session"] = scenario.id
+        props = {k: v for k, v in pt.items()
+                 if k not in ("id", "kind", "content")}
+        if props:
+            item["props"] = props
+        points.append(item)
+        ref_by_id[pt["id"]] = ref
+    connections: list[dict] = []
+    for op in graph.operators:
+        inputs = op.get("inputs") or []
+        if len(inputs) < 2:
+            continue
+        src_id = inputs[0]["id"]
+        for inp in inputs[1:]:
+            tgt_id = inp["id"]
+            if src_id not in ref_by_id or tgt_id not in ref_by_id:
+                continue
+            connections.append({
+                "from": ref_by_id[src_id], "to": ref_by_id[tgt_id],
+                "operator": op["op_type"],
+                "direction": op.get("direction", "unidirectional"),
+                "reify": True,
+            })
+    bundle = {"points": points}
+    if connections:
+        bundle["connections"] = connections
+    resp = sdk.ingest(bundle, granularity="bulk",
+                      promotion_policy="gated")
+    batch_id = resp.get("batch_id")
+    ids = resp.get("ids", {}) or {}
+    created_points: list[str] = list(ids.get("points") or [])
+    marker_content = seed_manifest_content(scenario.id)
+    promoted: list[str] = []
+    for pid in created_points:
+        pt = _sdk_get_point(sdk, pid)
+        if pt is not None and str(pt.get("content") or "") == marker_content:
+            continue  # the seeder-owned marker stays as written (never promoted)
+        try:
+            pr = sdk.promote_point(pid)
+        except Exception:  # noqa: BLE001, RUF100
+            continue  # operator/terminal rows are blocked — ride the source
+        if isinstance(pr, dict) and pr.get("promoted"):
+            promoted.append(pid)
+    return {"batch_id": batch_id, "promoted": promoted,
+            "created_points": created_points}
 
 
 def scenario_namespace(scenario_id: str) -> str:

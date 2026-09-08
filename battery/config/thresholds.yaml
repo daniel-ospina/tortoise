@@ -41,3 +41,13 @@ cal:
   brier: {a4: 0.25, a0: 0.30}
   defeat-precision: {a4: 0.70, a0: 0.00}
   correct-direction-rate: {a4: 0.90, a0: 0.50}
+  # [cal] ep-variance row (#2291 I-4): posterior-variance threshold above
+  # which a claim reads CONTESTED (non-decisive BY CONSTRUCTION even when the
+  # engine converged — mechanism convergence != decisiveness). Value 0.04 =
+  # the product's own per-call default (ep.py get_contested_claims); VERIFIED
+  # discriminating on the embedded lane: uncontested seed baselines
+  # (medium Beta(3,1) variance 0.0375) stay below; a conflicting low-
+  # credibility NAND write pushes the claim to ~0.05-0.06 (probe 2026-09-07).
+  # Passed EXPLICITLY as variance_threshold by the arm (never a tortoise/
+  # default edit, never an inline constant). READ-ONLY to #2284 Tasks 7/8.
+  ep-variance: {a4: 0.04}
