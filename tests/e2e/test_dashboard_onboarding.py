@@ -168,9 +168,10 @@ def test_first_timer_wizard_human_steps(page: Page) -> None:
     assert any(c.get("fork") == "self" for c in cap["checkpoint"]), f"fork not checkpointed: {cap['checkpoint']}"
     # STEP 2: connect-consent — the durable-key gate (#1998/#2195/#2246): a
     # returning user without a mounted key sees the mint/paste surface first
-    # (HARNESS_ORDER is 6 self-install/teach harnesses). Paste the durable
-    # key → the universal command + copy render.
-    expect(page.locator(".harness-tab")).to_have_count(6)
+    # (HARNESS_ORDER is 7 — 4 self-install + 2 teach-human + the key-less
+    # OAuth chatgpt tab from #1701, which renders its own branch above the
+    # gate). Paste the durable key → the universal command + copy render.
+    expect(page.locator(".harness-tab")).to_have_count(7)
     page.locator(".harness-tab", has_text="Claude Code").click()
     page.get_by_label("Paste an API key").fill("tt_connect_abcdef0123456789")
     page.get_by_role("button", name="Use this key").click()

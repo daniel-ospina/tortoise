@@ -1,3 +1,13 @@
+---
+title: "OAuth 2.1 for Remote MCP Auth (hosted)"
+type: engineering
+subjects.team: epistemic-team
+domain: platform
+doc_status: live
+created: 2026-08-15
+updated: 2026-09-10
+---
+
 # OAuth 2.1 for Remote MCP Auth (hosted)
 
 > **Issue:** #524 · **Status:** implemented · **Scoping decisions (locked 2026-08-15):**
@@ -44,17 +54,27 @@ needs no client_id paste.
 
 ## Token → team mapping (P4, D4)
 
-The team is selected by the **client-declared RFC 8707 resource indicator**
-(no picker UI):
+The team is selected by the **client-declared RFC 8707 resource indicator**, or
+by an explicit user choice on the consent page for resource-less clients
+(#1701 R1):
 
 | Resource | Team |
 |---|---|
-| `https://api.premiselabs.co/mcp` (or omitted) | the user's **sole** active team; error if 0 or >1 (client must declare) |
-| `https://api.premiselabs.co/mcp/teams/{team_id}` | that team (must be an active membership) |
+| `https://api.premiselabs.co/mcp` (or omitted, or the AS origin root `https://api.premiselabs.co`) | the user's **sole** active team; several active teams → the consent page shows a **team chooser** (ChatGPT etc. cannot declare an RFC 8707 resource); 0 active teams → error |
+| `https://api.premiselabs.co/mcp/teams/{team_id}` | that team (must be an active membership, not suspended) |
 
 The token row stores the bound `team_id`; the MCP boundary introspects it
 directly (D6 — OAuth tokens are self-sufficient, no `tt_` key minting; the
 session→key bridge stays for dashboard flows).
+
+**Resource-less clients (#1701 R1):** the consent preview
+(`/oauth/consent/preview`) returns the account's selectable (non-suspended)
+teams when several active teams exist, and the page's picker binds only the
+user's explicit selection (no silent default). Suspended teams are excluded
+from the chooser and can never mint a code — preview, consent POST, and the
+exchange-time backstop all reject them. The origin-root resource echo is
+accepted by **exact equality** only; any other undeclared resource value is
+still rejected (RFC 8707 §2).
 
 ## Refresh + revocation (D5)
 

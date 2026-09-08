@@ -3,6 +3,18 @@
 // env-indirection configs keep the raw key out of config files (#529 J5/T7b).
 const MCP_URL = 'https://api.premiselabs.co/mcp/'
 
+// #1701: ChatGPT's custom-connector URL — NO trailing slash. OpenAI's
+// connector validates an '/mcp' suffix, and bare POST /mcp dispatches
+// directly into the mounted MCP app (no 307). MCP_URL above keeps its
+// slash for the 6 keyed harnesses (byte-identical copy).
+const CHATGPT_MCP_URL = 'https://api.premiselabs.co/mcp'
+
+// #1701: the skills-as-prompt body shared by Claude Web and ChatGPT (both
+// have no local skills). ONE constant so the two user-facing prompts can
+// never drift.
+const WORKFLOWS_PROMPT =
+  `You have Tortoise connected (the 'tortoise' MCP tools). Follow these workflows:\n\n1) Writing to the graph — Tortoise stores knowledge as points with edges: IMPL means 'supports', NAND means 'contradicts'. Mitigations reduce confidence (range 0.10–0.50). To change a point, supersede it and clean up its active edges rather than editing in place. Prefer structural claims over labels and always cite provenance.\n\n2) Decisions — to make a decision, first refine it, then research the options, the criteria that matter, and the findings/evidence, then wire IMPL/NAND edges from findings and criteria to options (mitigate an edge, range 0.10–0.50, when it's true but matters less), and rank the options by EP confidence.\n\n3) Research findings — when I share a research finding, ingest it as a point, check for existing related claims first, and surface connections to what we already know.`
+
 // #1727 (Task 13): per-harness session-capture support gate — the single
 // source of truth consumed by BOTH the dashboard's per-harness sessions
 // toggle AND the conditional claude-web prompt paragraph below (flipped in
@@ -25,6 +37,7 @@ export const HARNESS_CAPTURE_SUPPORT = {
   codex: false,             // backfill import only (Task 15) — no live install path
   cursor: false,            // cursor spike verdict: unsupported for capture
   pi: true,
+  chatgpt: false,        // #1701: cloud-hosted — no server-visible filing signal
 }
 
 const CURSOR_MCP_CONFIG_ENV = {
@@ -67,6 +80,15 @@ export const HARNESS_STEPS = (harness, key) => ({
     'Create .cursor/mcp.json in this project with the JSON below — the config references the env var, not the key:',
     { label: 'Install the Tortoise skills (how-to-use-tortoise, tortoise-decide, tortoise-file-finding):', code: `curl -fsSL ${SKILLS_INSTALL_URL} | bash -s -- --harness cursor`, copy: `curl -fsSL ${SKILLS_INSTALL_URL} | bash -s -- --harness cursor` },
   ],
+  chatgpt: [
+    'Enable Developer mode: chatgpt.com → Settings → Security and login → Developer mode (Plus/Pro/Business/Enterprise/Education).',
+    'Open chatgpt.com/plugins → the + button → create a Developer-mode app.',
+    { label: 'MCP server URL', code: CHATGPT_MCP_URL, copy: CHATGPT_MCP_URL },
+    "Choose OAuth — ChatGPT discovers Tortoise's authorization server (no API key needed).",
+    'Scan Tools — sign in to Tortoise when prompted and click Authorize.',
+    'The tortoise_* tools appear (Developer mode); write actions ask for confirmation in chat.',
+    'Paste the prompt below into a ChatGPT chat — it gives ChatGPT the Tortoise workflows.',
+  ],
 })[harness]
 
 // #1710: per-harness short instruction shown ABOVE the snippet — what to
@@ -82,6 +104,7 @@ export const HARNESS_INTRO = {
   // #2328: Desktop variant intro (no terminal).
   codexDesktop: 'Edit ~/.codex/config.toml (create it if missing) — Codex Desktop and the CLI share this file. Copy the block, paste it in, then fully quit and reopen Codex Desktop:',
   pi: 'Paste this into your Pi agent:',
+  chatgpt: 'Start a new chat at chatgpt.com and paste the prompt below — that conversation becomes your connected agent. ChatGPT has no local skills — the prompt gives it the Tortoise workflows.',
 }
 
 export const HARNESS_NAMES = {
@@ -91,11 +114,12 @@ export const HARNESS_NAMES = {
   codex: 'Codex',
   cursor: 'Cursor',
   pi: 'Pi',
+  chatgpt: 'ChatGPT',
 }
 
 // Harnesses with no local file system for the file-based skills or shell
 // profile (Claude Desktop/Web connect from the app/cloud — MCP only).
-export const HARNESS_SKILLLESS = ['claude-desktop', 'claude-web']
+export const HARNESS_SKILLLESS = ['claude-desktop', 'claude-web', 'chatgpt']
 
 // Harnesses whose install copy embeds the skill-install step in a self-
 // contained prompt (Pi) — nothing extra is appended after the copy.
@@ -123,7 +147,7 @@ chmod +x .claude/hooks/session-start.sh .claude/hooks/session-end.sh
   'claude-desktop': (key) =>
     `${JSON.stringify({ mcpServers: { tortoise: { url: MCP_URL, headers: { Authorization: `Bearer ${key}` } } } }, null, 2)}`,
   'claude-web': () => {
-    const base = `You have Tortoise connected (the 'tortoise' MCP tools). Follow these workflows:\n\n1) Writing to the graph — Tortoise stores knowledge as points with edges: IMPL means 'supports', NAND means 'contradicts'. Mitigations reduce confidence (range 0.10–0.50). To change a point, supersede it and clean up its active edges rather than editing in place. Prefer structural claims over labels and always cite provenance.\n\n2) Decisions — to make a decision, first refine it, then research the options, the criteria that matter, and the findings/evidence, then wire IMPL/NAND edges from findings and criteria to options (mitigate an edge, range 0.10–0.50, when it's true but matters less), and rank the options by EP confidence.\n\n3) Research findings — when I share a research finding, ingest it as a point, check for existing related claims first, and surface connections to what we already know.`
+    const base = WORKFLOWS_PROMPT
     // The session-filing paragraph is gated on HARNESS_CAPTURE_SUPPORT — the
     // single source of truth (web is currently false: disabled-with-reason).
     const filing = HARNESS_CAPTURE_SUPPORT['claude-web']
@@ -137,6 +161,10 @@ chmod +x .claude/hooks/session-start.sh .claude/hooks/session-end.sh
     `${JSON.stringify(CURSOR_MCP_CONFIG_ENV, null, 2)}`,
   pi: (key) =>
     `Set up Tortoise for this project:\n1. Add TORTOISE_API_KEY=${key} to my shell profile (~/.zshrc or ~/.bashrc).\n2. Create or merge .mcp.json in this project with:\n${JSON.stringify(PI_MCP_CONFIG_ENV, null, 2)}\n3. Run: curl -fsSL ${SKILLS_INSTALL_URL} | bash -s -- --harness pi\n4. Verify the Tortoise MCP server is configured and the three skills (how-to-use-tortoise, tortoise-decide, tortoise-file-finding) are installed, then tell me what you did.\n5. Session capture (#1727 T1): recording is on by default (ToS-covered) — switch it off anytime from the dashboard (Memory sources > Agent sessions; the server returns a 409 while disabled). The extension fires an install-probe on load (harness + timestamp only, no content) and files sessions to Tortoise Cloud when capture is enabled. Backfill past sessions with: tortoise sessions import --harness pi --file <session.jsonl> (local receipt written only on a 2xx).`,
+  // #1701: ChatGPT — key-less OAuth harness. Copy = WORKFLOWS_PROMPT only;
+  // the connector steps live in HARNESS_STEPS / HARNESS_INTRO above the
+  // snippet (never in the copied text).
+  chatgpt: () => WORKFLOWS_PROMPT,
 }
 
 // #1643: the official skill installer — served from the product site (the
@@ -166,6 +194,7 @@ export const HARNESS_COPY_LABEL = {
   'claude-web': 'Copy prompt',
   pi: 'Copy prompt',
   codexDesktop: 'Copy instructions',
+  chatgpt: 'Copy prompt',
 }
 
 // #1694: per-harness label for the post-copy Continue affordance — for
@@ -173,6 +202,7 @@ export const HARNESS_COPY_LABEL = {
 // the button says what copying actually achieved.
 export const HARNESS_CONTINUE_LABEL = {
   'claude-web': "I've pasted it — Continue →",
+  chatgpt: "I've connected it — Continue →",
 }
 
 // #1728 Slice 3 (Task 16): the session-CAPTURE install steps shown INLINE in
@@ -209,6 +239,7 @@ export const HARNESS_CAPTURE_REASON = {
   'claude-web': 'session capture for web is in progress — not available yet',
   codex: 'backfill import only — no live install path yet',
   cursor: 'unsupported for session capture',
+  chatgpt: "ChatGPT connects from its own cloud — session capture isn't available for it",
 }
 
 // #1728 (Task 17): receipt/probe labels for the 4-state capture status
@@ -224,13 +255,17 @@ export const HARNESS_CAPTURE_STATUS_LABEL = {
 export const HARNESS_PERSIST = (key) =>
   `# Persist the key for future sessions — add this line to your shell profile (~/.zshrc, ~/.bashrc, or equivalent):\nexport TORTOISE_API_KEY=${key}`
 
-export const HARNESS_ORDER = ['claude', 'claude-desktop', 'claude-web', 'codex', 'cursor', 'pi']
+export const HARNESS_ORDER = ['claude', 'claude-desktop', 'claude-web', 'codex', 'cursor', 'pi', 'chatgpt']
 
 // ── #1998 (W2): universal setup command (epic #1976 I-3, surface 5) ────────
-// The connect step's ONE command per harness — all 6 covered, 4 self-install
-// (config-write) + 2 teach-human. HARNESS_NAMES/HARNESS_ORDER stay the single
-// 6-harness vocabulary; the harness table in the tortoise-onboarding SKILL.md
-// is the agent-side self-adjudication source (the chooser's successor).
+// The connect step's ONE command per harness — all 7 covered, 4 self-install
+// (config-write) + 3 teach-human (desktop/web/chatgpt — web/chatgpt have no
+// local shell, so the human completes the steps). HARNESS_NAMES/HARNESS_ORDER
+// stay the single 7-harness vocabulary; the harness table in the
+// tortoise-onboarding SKILL.md is the agent-side self-adjudication source
+// (the chooser's successor). chatgpt is key-less/OAuth (HARNESS_OAUTH) and
+// renders through a dedicated wizard branch, not this universal command —
+// UNIVERSAL_COMMAND.chatgpt exists for total-loop/roundtrip consumers only.
 //
 // Contract (DE2E-5): every harness reaches a connected state verifiable via
 // tortoise_health; the tortoise-onboarding skill takes over from the command
@@ -241,7 +276,12 @@ export const HARNESS_ORDER = ['claude', 'claude-desktop', 'claude-web', 'codex',
 // render + Memory-sources capture rows depend on them; A0 rollback path).
 export const HARNESS_SELF_INSTALL = ['claude', 'codex', 'cursor', 'pi']
 
-export const HARNESS_TEACH_HUMAN = ['claude-desktop', 'claude-web']
+export const HARNESS_TEACH_HUMAN = ['claude-desktop', 'claude-web', 'chatgpt']
+
+// #1701: OAuth-only harnesses (ChatGPT) — no API key, no tt_ token. The
+// wizard connect step renders these key-less (no key-mint, no universal
+// command).
+export const HARNESS_OAUTH = ['chatgpt']
 
 // The skill installer line every config-writing harness command appends
 // (v2 SKILLS includes tortoise-onboarding + the 3 core skills).
@@ -316,6 +356,9 @@ bearer_token_env_var = "TORTOISE_API_KEY"
     `# Tortoise — universal setup command (Claude Desktop — manual setup)\n# Claude Desktop has no local shell, so YOU complete the steps below, then the\n# agent verifies after:\n# 1. Open ~/Library/Application Support/Claude/claude_desktop_config.json\n#    (macOS) — or Claude > Settings > Developer in the app.\n# 2. MERGE the mcpServers block below into the existing config (never replace\n#    the whole file; the key stays literal here — keep the file private):\n${JSON.stringify({ mcpServers: { tortoise: { url: MCP_URL, headers: { Authorization: `Bearer ${key}` } } } }, null, 2)}\n# 3. Restart Claude Desktop, then say "Set up Tortoise" in a chat — the agent\n#    verifies with tortoise_health. Click "I've set it up — Continue" in the\n#    dashboard connect step when it passes (that writes the checkpoint).`,
   'claude-web': (key) =>
     `Tortoise — universal setup command (Claude Web — manual setup)\nClaude Web runs in Anthropic's cloud — no local files. Complete the connector\nsteps below, then the agent (with the connector's tortoise_* tools) verifies:\n1. Go to claude.ai > Settings > Connectors > Add custom connector, name it "Tortoise".\n2. Server URL: ${MCP_URL}\n3. Request headers (advanced): Authorization: Bearer ${key}  (stored by Anthropic)\n4. In a Claude Web chat, say "Set up Tortoise" — the agent calls tortoise_health\n   to verify, then click "I've pasted it — Continue" in the dashboard connect\n   step (that writes the harness-connected checkpoint).`,
+  chatgpt: () =>
+    `Tortoise — ChatGPT (Developer mode, OAuth)\n1. Enable Developer mode: chatgpt.com → Settings → Security and login →\n   Developer mode (Plus/Pro/Business/Enterprise/Education).\n2. Open chatgpt.com/plugins → the + button → create a Developer-mode app.\n3. MCP server URL: ${CHATGPT_MCP_URL}  (no API key — choose OAuth; ChatGPT\n   discovers Tortoise's authorization server automatically).\n4. Click Scan Tools — sign in to Tortoise when prompted and click Authorize.\n   When Tortoise prompts you to choose an organization, pick the one you're
+   onboarding for.\n5. The tortoise_* tools appear (Developer mode). In the SAME ChatGPT chat,\n   paste the prompt below — it gives ChatGPT the Tortoise workflows:\n\n${WORKFLOWS_PROMPT}\n\nAfter you paste it, ask ChatGPT a Tortoise question (e.g. "are we connected?")\nand confirm it answers from the connected MCP tools, then click "I've\nconnected it — Continue →" in the dashboard connect step (that writes the\nharness-connected checkpoint).`,
 }
 
 export const UNIVERSAL_COMMAND_HARNESSES = HARNESS_ORDER

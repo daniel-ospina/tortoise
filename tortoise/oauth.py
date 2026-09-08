@@ -16,10 +16,14 @@ Flow (locked scoping decisions 2026-08-15, docs/scoping/2026-08-15-524-oauth-mcp
     JWKS verify"). Branded consent = ONE custom HTML page (D2).
   * P3 — Dynamic Client Registration (RFC 7591) at ``POST /register`` (D1).
   * P4 — token→team mapping via RFC 8707 resource indicator, client-declared
-    (D4, no picker UI): the resource is ``{origin}/mcp`` (single-membership
-    users resolve to their sole active team) or ``{origin}/mcp/teams/{team_id}``
-    (explicit team). Rotating refresh tokens per (user, team), revoked on team
-    suspension (D5).
+    (D4): the resource is ``{origin}/mcp`` (single-membership users resolve
+    to their sole active team) or ``{origin}/mcp/teams/{team_id}`` (explicit
+    team). Rotating refresh tokens per (user, team), revoked on team
+    suspension (D5). #1701 R1 — resource-less OAuth clients (ChatGPT cannot
+    declare RFC 8707 resources): ``consent_preview`` returns the account's
+    selectable (non-suspended) teams and the consent page offers a team
+    chooser; suspended teams never bind (preview, mint AND exchange); the AS
+    origin root is accepted as the bare MCP resource echo.
   * D6 — OAuth tokens are self-sufficient at the MCP boundary: the middleware
     introspects the access token row (no tt_ key minting); the session→key
     bridge (POST /v1/session/key) stays for dashboard flows.
@@ -185,12 +189,20 @@ def parse_resource(base: str, resource: str | None) -> tuple[str | None, str | N
     resource, or raises OAuthError for anything outside the MCP resource
     tree (RFC 8707 §2 — the AS must reject unknown resource values so a
     token can never be minted for a resource the client does not declare).
+
+    #1701 R1: the AS's own origin root (``{base}`` / ``{base}/``) is accepted
+    as the bare MCP resource — some OAuth clients (OpenAI/ChatGPT's runtime)
+    echo ``resource={origin}`` instead of the PRM value. Exact equality only
+    (never a prefix rule); tokens stay (user, team)-bound and MCP-only.
     """
     base_mcp = mcp_resource_url(base)
     if not resource:
         return base_mcp, None
     resource = resource.strip().rstrip("/")
     if resource == base_mcp:
+        return base_mcp, None
+    base_root = base.rstrip("/")
+    if resource == base_root:
         return base_mcp, None
     team_prefix = base_mcp + "/teams/"
     if resource.startswith(team_prefix) and "/" not in resource[len(team_prefix):]:
@@ -202,17 +214,37 @@ def parse_resource(base: str, resource: str | None) -> tuple[str | None, str | N
                      f"({base_mcp}) or a team-scoped resource under it.")
 
 
-def _default_team(cp, user_id: str) -> str:
-    """The user's sole active team (D4: no picker UI). 0 teams → error;
-    >1 teams → error telling the client to declare a team-scoped resource."""
+def _selectable_teams(cp, user_id: str) -> list[dict]:
+    """The user's ACTIVE memberships whose teams are not durably suspended —
+    the single source for default-team resolution AND the consent chooser
+    (#1701 R1). Sorted deterministically by team_id (user_memberships has no
+    ORDER BY; the chooser needs a stable order)."""
     from tortoise.supabase_control import user_memberships
-    memberships = user_memberships(cp, user_id)
-    if len(memberships) == 1:
-        return memberships[0]["team_id"]
-    if not memberships:
+    out = []
+    for m in user_memberships(cp, user_id):
+        rows = cp.query("teams", select=["name", "suspended_at"],
+                        filters=[("id", "eq", m["team_id"])])
+        if not rows or rows[0].get("suspended_at") is not None:
+            continue
+        out.append({"team_id": m["team_id"],
+                    "team_name": rows[0].get("name") or m["team_id"]})
+    return sorted(out, key=lambda t: t["team_id"])
+
+
+def _default_team(cp, user_id: str) -> str:
+    """The user's sole ACTIVE (non-suspended) team (D4 + #1701 R1).
+
+    0 usable teams → error; >1 usable teams → error telling the client to
+    declare a team-scoped resource. Suspended memberships never count toward
+    the default, so a 1-active + 1-suspended account binds the active team
+    and never dead-ends on the multi-team 400."""
+    active = _selectable_teams(cp, user_id)
+    if len(active) == 1:
+        return active[0]["team_id"]
+    if not active:
         raise OAuthError(403, "invalid_grant",
-                         "This account has no team. Create a team before "
-                         "connecting an MCP client.")
+                         "This account has no active team. Create a team "
+                         "before connecting an MCP client.")
     raise OAuthError(400, "invalid_resource",
                      "This account belongs to multiple teams — the MCP client "
                      "must declare a team-scoped resource indicator "
@@ -395,13 +427,51 @@ def validate_authorize_params(cp, *, client_id: str, redirect_uri: str | None,
 
 
 def consent_preview(cp, user_id: str, base: str, resource: str | None) -> dict:
-    """Consent-page team preview (D4): resolve the team the grant would bind."""
-    team_id = _resolve_team(cp, user_id, base, resource)
-    return {
-        "team_id": team_id,
-        "team_name": _team_name(cp, team_id),
-        "resource": team_resource_url(base, team_id) if resource else mcp_resource_url(base),
-    }
+    """Consent-page team preview (D4 + #1701 R1 account-chooser).
+
+    A client-declared team-scoped resource resolves to that team (membership
+    AND suspension checked — a suspended team 403s here, never at exchange).
+    A bare/omitted/origin-root-echoed resource resolves to the sole ACTIVE
+    team or, for several, returns the selectable list for the page's chooser.
+    Zero active teams keeps the 403 so an account with no usable team cannot
+    mint a code.
+    """
+    _, team_id = parse_resource(base, resource)
+    if team_id is not None:
+        from tortoise.supabase_control import membership_for_user_team
+        if membership_for_user_team(cp, user_id, team_id) is None:
+            raise OAuthError(403, "invalid_resource",
+                             "Not a member of the requested team.")
+        _assert_team_usable(cp, team_id)  # suspended → 403 invalid_grant
+        return {
+            "team_id": team_id,
+            "team_name": _team_name(cp, team_id),
+            "resource": (team_resource_url(base, team_id) if resource
+                         else mcp_resource_url(base)),
+        }
+    teams = _selectable_teams(cp, user_id)
+    if len(teams) == 1:
+        return {
+            "team_id": teams[0]["team_id"],
+            "team_name": teams[0]["team_name"],
+            # byte-identical with today: a truthy declared resource (bare MCP
+            # or origin echo) keeps the team-scoped resource field.
+            "resource": (team_resource_url(base, teams[0]["team_id"])
+                         if resource else mcp_resource_url(base)),
+        }
+    if len(teams) > 1:
+        return {
+            "team_id": None,
+            "team_name": None,
+            "resource": mcp_resource_url(base),
+            "memberships": [
+                {**t, "resource": team_resource_url(base, t["team_id"])}
+                for t in teams
+            ],
+        }
+    raise OAuthError(403, "invalid_grant",
+                     "This account has no team. Create a team before "
+                     "connecting an MCP client.")
 
 
 def issue_auth_code(cp, *, client_id: str, user_id: str, base: str,
@@ -411,9 +481,12 @@ def issue_auth_code(cp, *, client_id: str, user_id: str, base: str,
 
     Resolves the team from the client-declared resource indicator (RFC 8707)
     at consent time so the code carries the exact team the token will bind.
-    Returns (code, team_id).
+    #1701 R1: the team must be USABLE (not suspended) — a suspended team can
+    never mint a code (suspension surfaces at consent, not at a later
+    exchange). Returns (code, team_id).
     """
     team_id = _resolve_team(cp, user_id, base, resource)
+    _assert_team_usable(cp, team_id)
     code = secrets.token_urlsafe(32)
     cp.query("oauth_codes", method="POST", json_body={
         "code_hash": _sha256(code),
@@ -838,10 +911,14 @@ _CONSENT_HTML = """<!DOCTYPE html>
     <p class="muted" id="client-line"></p>
     <div class="row"><span class="k">Requested scopes</span><span class="v" id="scope-line"></span></div>
     <div class="row"><span class="k">Resource</span><span class="v" id="resource-line"></span></div>
-    <div class="row"><span class="k">Team</span><span class="v" id="team-line">resolving…</span></div>
+    <div class="row"><span class="k">Team</span>
+      <span class="v" id="team-line">resolving…</span>
+      <select id="team-select" style="display:none;background:var(--bg,#0d1a2d);color:var(--text,#e2e8f0);border:1px solid var(--border,#1e293b);border-radius:6px;font-family:var(--mono);font-size:13px;padding:4px 6px;max-width:60%;text-align:left;" aria-label="Team for this connection"></select>
+    </div>
     <div class="actions">
       <button class="btn-deny" id="btn-deny">Deny</button>
-      <button class="btn-auth" id="btn-auth">Authorize</button>
+      <button class="btn-deny" id="btn-retry-preview" style="display:none">Retry</button>
+      <button class="btn-auth" id="btn-auth" disabled>Authorize</button>
     </div>
   </div>
   <div id="view-signin" style="display:none">
@@ -970,27 +1047,110 @@ _CONSENT_HTML = """<!DOCTYPE html>
         encodeURIComponent(PARAMS.resource || ""), {
       headers: { "Authorization": "Bearer " + accessToken },
     });
-    if (res.status === 401) return null;
+    if (res.status === 401) return null;   // stale/rejected session
     if (!res.ok) throw new Error("Could not resolve team: " + res.status);
     return res.json();
   }
 
-  async function showConsent() {
+  // #1701 R1: account-chooser state. teamResource is set ONLY by the picker's
+  // change handler — an untouched picker can never authorize (no silent
+  // wrong-org bind). previewInFlight guards concurrent showConsent runs.
+  let previewInFlight = false;
+  let teamResource = null;
+  let staleRefreshes = 0;   // at most ONE refresh per stale cycle
+  const authBtn = () => document.getElementById("btn-auth");
+  function disableAuthorize() { authBtn().disabled = true; }
+  function enableAuthorize() { authBtn().disabled = false; }
+  function showRetry() { document.getElementById("btn-retry-preview").style.display = "inline-block"; }
+  function hideRetry() { document.getElementById("btn-retry-preview").style.display = "none"; }
+  function showExpiredSignin() {
+    // NEVER call the auth logout API here — the session cookie is shared
+    // with the dashboard (parent domain) and a global logout would revoke
+    // it server-side on every device. A fresh sign-in replaces the cookie.
+    showSignin();
+    showError("Your session expired — sign in again.");
+  }
+
+  async function showConsentOnce() {
     const { data } = await supabaseClient.auth.getSession();
-    if (!data.session) { showSignin(); return; }
+    if (!data.session) { showSignin(); return "nosession"; }
     document.getElementById("view-consent").style.display = "block";
     document.getElementById("view-signin").style.display = "none";
+    hideError();
     document.getElementById("client-line").textContent =
         PARAMS.client_name + " wants to access your Tortoise MCP surface.";
     document.getElementById("scope-line").textContent = PARAMS.scope || "mcp";
-    document.getElementById("resource-line").textContent =
-        PARAMS.resource || "default (sole team)";
+    document.getElementById("team-line").style.display = "";
+    const teamSelect = document.getElementById("team-select");
+    teamSelect.style.display = "none";
+    hideRetry();
     try {
       const preview = await fetchPreview(data.session.access_token);
-      if (!preview) { showSignin(); return; }
-      document.getElementById("team-line").textContent =
-          (preview.team_name || preview.team_id) + " (" + preview.team_id + ")";
-    } catch (e) { showError(e.message); }
+      if (!preview) return "stale";   // session rejected/expired
+      const memberships = preview.memberships;
+      document.getElementById("resource-line").textContent =
+          preview.resource || PARAMS.resource || "default (sole team)";
+      if (memberships && memberships.length > 1) {
+        // Account chooser — options are REBUILT from scratch every run so a
+        // sequential re-run can never duplicate rows. Authorize stays disabled
+        // until the user explicitly picks a team (change event below).
+        document.getElementById("team-line").style.display = "none";
+        while (teamSelect.firstChild) teamSelect.removeChild(teamSelect.firstChild);
+        const placeholder = document.createElement("option");
+        placeholder.value = "";
+        placeholder.disabled = true;
+        placeholder.selected = true;
+        placeholder.textContent = "Choose a team…";
+        teamSelect.appendChild(placeholder);
+        memberships.forEach((m) => {
+          const opt = document.createElement("option");
+          opt.value = m.resource;
+          opt.textContent = (m.team_name || m.team_id) + " (" + m.team_id + ")";
+          teamSelect.appendChild(opt);
+        });
+        teamSelect.style.display = "block";
+        document.getElementById("resource-line").textContent =
+            "Tortoise MCP — choose the team this connection will use";
+        disableAuthorize();
+      } else if (preview.team_id) {
+        // single / sole-active-team auto-bind — exactly as before R1
+        document.getElementById("team-line").textContent =
+            (preview.team_name || preview.team_id) + " (" + preview.team_id + ")";
+        enableAuthorize();
+      } else {
+        disableAuthorize();
+        showError("No usable team for this account.");
+      }
+      return "ok";
+    } catch (e) {
+      disableAuthorize();
+      showError(e.message);
+      showRetry();
+      return "error";
+    }
+  }
+
+  async function runConsentFlow() {
+    if (previewInFlight) return;   // concurrent guard
+    previewInFlight = true;
+    teamResource = null;           // never carry a stale selection between runs
+    disableAuthorize();
+    let result;
+    try {
+      result = await showConsentOnce();
+    } finally {
+      previewInFlight = false;
+    }
+    if (result === "stale") {
+      if (staleRefreshes < 1) {
+        staleRefreshes += 1;
+        const { error } = await supabaseClient.auth.refreshSession();
+        if (!error) { await runConsentFlow(); return; }   // guard already cleared
+      }
+      showExpiredSignin();
+      return;
+    }
+    if (result === "ok") staleRefreshes = 0;
   }
 
   function showSignin() {
@@ -1015,43 +1175,75 @@ _CONSENT_HTML = """<!DOCTYPE html>
     if (!email || !password) { showError("Enter email and password."); return; }
     const { error } = await supabaseClient.auth.signInWithPassword({ email, password });
     if (error) { showError(error.message); return; }
-    showConsent();
+    runConsentFlow();
+  };
+
+  const teamSelectEl = document.getElementById("team-select");
+  teamSelectEl.onchange = function () {
+    teamResource = teamSelectEl.value;
+    if (teamResource) enableAuthorize(); else disableAuthorize();
   };
 
   document.getElementById("btn-auth").onclick = async () => {
     hideError(); spinner(true);
+    if (authBtn().disabled) { spinner(false); showError("Resolving your team… retry in a moment."); return; }
     const { data } = await supabaseClient.auth.getSession();
     if (!data.session) { spinner(false); showSignin(); return; }
+    const doPost = async (accessToken) => fetch("/oauth/consent", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": "Bearer " + accessToken,
+      },
+      body: JSON.stringify({
+        client_id: PARAMS.client_id,
+        redirect_uri: PARAMS.redirect_uri,
+        response_type: PARAMS.response_type,
+        code_challenge: PARAMS.code_challenge,
+        code_challenge_method: PARAMS.code_challenge_method,
+        state: PARAMS.state,
+        scope: PARAMS.scope,
+        resource: teamResource || PARAMS.resource || null,
+      }),
+    });
     try {
-      const res = await fetch("/oauth/consent", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": "Bearer " + data.session.access_token,
-        },
-        body: JSON.stringify({
-          client_id: PARAMS.client_id,
-          redirect_uri: PARAMS.redirect_uri,
-          response_type: PARAMS.response_type,
-          code_challenge: PARAMS.code_challenge,
-          code_challenge_method: PARAMS.code_challenge_method,
-          state: PARAMS.state,
-          scope: PARAMS.scope,
-          resource: PARAMS.resource || null,
-        }),
-      });
+      let res = await doPost(data.session.access_token);
+      if (res.status === 401) {
+        // one refresh, one re-POST with the FRESH token (never logout)
+        const { error } = await supabaseClient.auth.refreshSession();
+        if (!error) {
+          const { data: d2 } = await supabaseClient.auth.getSession();
+          if (d2 && d2.session) res = await doPost(d2.session.access_token);
+        }
+      }
       const payload = await res.json();
-      if (!res.ok) throw new Error(payload.error_description || payload.error || "Consent failed");
+      if (!res.ok) {
+        if (res.status === 401) { spinner(false); showExpiredSignin(); return; }
+        throw new Error(payload.error_description || payload.error || "Consent failed");
+      }
       const q = { code: payload.code };
       if (payload.state) q.state = payload.state;
       redirectBack(q);
     } catch (e) { spinner(false); showError(e.message); }
   };
 
+  document.getElementById("btn-retry-preview").onclick = () => {
+    hideError(); hideRetry();
+    runConsentFlow();
+  };
+
   document.getElementById("btn-deny").onclick = () =>
       redirectBack({ error: "access_denied", state: PARAMS.state });
 
-  if (supabaseClient) showConsent(); else spinner(false);
+  // #1701 R1: auto-advance when a session lands after an initial null
+  // (provider redirect hash ingestion / cookie session). runConsentFlow is
+  // in-flight guarded, so a double fire never runs two overlapping previews.
+  if (supabaseClient) {
+    supabaseClient.auth.onAuthStateChange((event) => {
+      if (event === "INITIAL_SESSION" || event === "SIGNED_IN") runConsentFlow();
+    });
+    runConsentFlow();
+  } else spinner(false);
 </script>
 </body>
 </html>
