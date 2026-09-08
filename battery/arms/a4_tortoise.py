@@ -27,6 +27,7 @@ enforced source-level by tests/test_battery_lane_matrix.py.
 """
 from __future__ import annotations
 
+import math
 import os
 import tempfile
 from pathlib import Path
@@ -61,6 +62,11 @@ class A4TortoiseArm:
         self._db_path = db_path or os.environ.get("TORTOISE_DB_PATH") or ""
         self._sdk_by_id: dict[str, object] = {}
         self.decide_cycles = 0
+        self._active_scenario: str | None = None
+        #: per-scenario memo of evidence content already filed this setup
+        #: (idempotency: an identical re-file is a true no-op — no duplicate
+        #: operator, no double cycle; product content-hash keeps one point).
+        self._filed_content: dict[str, set[str]] = {}
 
     # ── setup ───────────────────────────────────────────────────────────
     def setup_scenarios(self, scenarios: list[Scenario], *, seed_lane: bool = True) -> None:
@@ -88,7 +94,12 @@ class A4TortoiseArm:
         db_file = str(self._db_path)
         from tortoise.sdk import TortoiseSDK
 
+        # Close any prior handles (accumulate re-setup lifecycle — never
+        # leak opened projections/atexit registrations across sessions).
+        self.close()
+
         ev_dir = Path(db_file).parent / "events"
+        self._filed_content = {}
         for sc in scenarios:
             ns = scenario_namespace(sc.id)
             sdk = TortoiseSDK(
@@ -133,8 +144,16 @@ class A4TortoiseArm:
         emitted as operator-kind Memories (content = the attached edge
         label when given, else "") so the WRITE closed set can carry
         operators for #901 mitigate routing. Raises ArmUnavailable on
-        failure (never partial memories).
+        failure (never partial memories). The per-episode decide counter
+        resets when the episode MOVES to a different scenario (episodes are
+        per-scenario sequential — a late scenario must not inherit an early
+        one's cycle count toward the cap).
         """
+        # Episode boundary: reset decide_cycles when the scenario changes.
+        sid = context.scenario.id
+        if self._active_scenario is not None and self._active_scenario != sid:
+            self.decide_cycles = 0
+        self._active_scenario = sid
         sdk = self._sdk(context.scenario)
         try:
             query = (context.user_message or "").strip()
@@ -208,17 +227,23 @@ class A4TortoiseArm:
           is reached honestly via the decide-cap path. Never forced.
 
         Returns {outcome, converged, iterations, max_variance,
-        affected_count, decide_cycles, capped}. Consumers (Task-8 liveness,
-        verify-at-scope, R3 scorer) read DECISIVE within-row outcomes only.
+        affected_count, decide_cycles, capped, anchors,
+        anchor_shortfall}. Consumers (Task-8 liveness, verify-at-scope, R3
+        scorer) read DECISIVE within-row outcomes only. anchor_shortfall is
+        set when decide cycles happened but the probe returned no live
+        anchors (vacuous-EP diagnostic — never a silent non_converged).
         """
         sdk = self._sdk(scenario)
+        anchors = _live_claim_ids(sdk, scenario)
         cc = sdk.compute_confidence(
-            factors=None, anchors=_live_claim_ids(sdk, scenario))
+            factors=None, anchors=anchors)
         conf = cc.get("confidences") or {}
         diagnostic = cc.get("diagnostic")
         converged = bool(cc.get("converged"))
         iterations = int(cc.get("iterations") or 0)
         vacuous = (not conf) or bool(diagnostic)
+        decide = self.decide_cycles
+        anchor_shortfall = decide > 0 and not anchors
         variances = {}
         for cid, entry in conf.items():
             if isinstance(entry, dict) and entry.get("variance") is not None:
@@ -228,13 +253,12 @@ class A4TortoiseArm:
                     continue
         max_var = max(variances.values(), default=0.0)
         affected = len(conf)
-        decide = self.decide_cycles
         capped = decide >= DECIDE_CYCLES_CAP and decide > 0
         if decide == 0 and affected == 0:
             outcome = "no-op"
         elif max_var > float(variance_threshold):
             outcome = "contested"  # non-decisive BY CONSTRUCTION
-        elif capped or not converged:
+        elif capped or not converged or anchor_shortfall:
             outcome = "undec" if _is_loopy(scenario) else "non_converged"
         elif vacuous:
             # converged but no decisive affected set — mechanism convergence
@@ -246,7 +270,8 @@ class A4TortoiseArm:
             "outcome": outcome, "converged": converged,
             "iterations": iterations, "max_variance": max_var,
             "affected_count": affected, "decide_cycles": decide,
-            "capped": capped,
+            "capped": capped, "anchors": len(anchors),
+            "anchor_shortfall": anchor_shortfall,
         }
 
     # ── record ──────────────────────────────────────────────────────────
@@ -257,8 +282,10 @@ class A4TortoiseArm:
         - Targets come ONLY from the retrieved closed set
           (context.prior_memories); an EMPTY closed set (or no claim member)
           ⇒ zero writes + honest no-op (locked: ``empty_set_never_writes``).
-        - kind=evidence content is created idempotently (dedup by content
-          hash — a re-filed finding never duplicates the point/operator).
+        - kind=evidence content is filed once per scenario per setup: a
+          re-file of IDENTICAL content is a TRUE no-op (no duplicate
+          evidence point, no duplicate operator, no double cycle — the
+          product content-hash keeps the point singular either way).
         - kind="nand" (truth edge): create_operator NAND, unidirectional,
           promote_source=True, targeting a closed-set CLAIM.
         - kind="mitigate" (relevance edge): mitigate_operator on a
@@ -270,10 +297,14 @@ class A4TortoiseArm:
           engine-honored surfaces (call/idempotency/observability), NEVER on
           claim-EP deltas.
         - kind default (support edge): create_operator IMPL.
-        - decide_cycles increments per successful record; the per-episode
-          cap (DECIDE_CYCLES_CAP, default 8) makes further records honest
-          no-ops (cap-hit semantics surface in Task 4's ep_outcome table —
-          never forced CONVERGED).
+        - Evidence is created STATUS DRAFT; it goes LIVE only when the
+          operator edge succeeds (create_operator promote_source) — an
+          operator write failure leaves an INERT draft orphan (never a live
+          orphan in state reads/EP on accumulating graphs).
+        - decide_cycles increments per successful NEW record; the
+          per-episode cap (DECIDE_CYCLES_CAP, default 8) makes further
+          records honest no-ops (cap-hit semantics surface in Task 4's
+          ep_outcome table — never forced CONVERGED).
         - Mid-run failure (CalibrationError/product error) ⇒ ArmUnavailable
           (never swallow + fabricate from an uncalibrated store).
         """
@@ -281,17 +312,21 @@ class A4TortoiseArm:
             return
         sdk = self._sdk(context.scenario)
         try:
-            closed = [m for m in (context.prior_memories or ())
-                      if m.id and not _is_seed_manifest(m.content)]
             if self.decide_cycles >= DECIDE_CYCLES_CAP:
                 return  # cap-hit: honest no-op (never forced CONVERGED)
+            closed = [m for m in (context.prior_memories or ())
+                      if m.id and not _is_seed_manifest(m.content)]
             if item.kind == "mitigate":
                 ops = [m for m in closed if m.kind == "operator"]
                 if not ops:
                     return  # unresolved operator target ⇒ honest no-op
-                strength = item.confidence if isinstance(item.confidence, float) \
-                    and 0.0 < item.confidence < 1.0 else 0.3
-                strength = max(0.10, min(0.50, strength))
+                c = item.confidence
+                if isinstance(c, float) and math.isfinite(c):
+                    # clamp raw numeric confidence into [0.10, 0.50]
+                    # (out-of-range high ⇒ capped at the 0.50 convention).
+                    strength = max(0.10, min(0.50, c))
+                else:
+                    strength = 0.3  # decide-tooling default, in-range
                 sdk.mitigate_operator(
                     ops[0].id, reason=item.content or "", strength=strength)
                 self.decide_cycles += 1
@@ -299,20 +334,30 @@ class A4TortoiseArm:
             claims = [m for m in closed if m.kind == _CLAIM_MEMORY_KIND]
             if not claims:
                 return  # empty/claim-less closed set ⇒ zero writes (no-op)
+            sid = context.scenario.id
+            filed = self._filed_content.setdefault(sid, set())
+            if item.content in filed:
+                return  # identical re-file this setup: TRUE no-op
             target = claims[0].id
             created = sdk.create_point(kind=_EVIDENCE_KIND, content=item.content,
-                                       dedup=True,
+                                       dedup=True, status="draft",
                                        source_harness="battery",
-                                       source_session=context.scenario.id)
+                                       source_session=sid)
             ev_id = created.get("id") if isinstance(created, dict) else None
             if not ev_id:
                 raise ArmUnavailable("a4 create_point returned no id")
-            if item.kind == "nand":
-                sdk.create_operator(
-                    "NAND", ev_id, [target], direction="unidirectional")
-            else:
-                sdk.create_operator("IMPL", ev_id, [target])
-            self.decide_cycles += 1  # one Challenge/Deepen cycle per record
+            try:
+                if item.kind == "nand":
+                    sdk.create_operator(
+                        "NAND", ev_id, [target], direction="unidirectional")
+                else:
+                    sdk.create_operator("IMPL", ev_id, [target])
+            except Exception as e:  # noqa: BLE001, RUF100
+                # Evidence stays DRAFT (promote_source fires only on operator
+                # success) ⇒ inert residue, never a live orphan.
+                raise ArmUnavailable(f"a4 operator write failed: {e}") from e
+            filed.add(item.content)
+            self.decide_cycles += 1  # one cycle per NEW record
         except ArmUnavailable:
             raise
         except Exception as e:  # noqa: BLE001, RUF100
@@ -349,8 +394,11 @@ def _live_claim_ids(sdk, scenario: Scenario) -> list[str]:
             if rid:
                 out.append(rid)
         return out
-    except Exception:  # noqa: BLE001, RUF100
-        return []
+    except Exception as e:  # noqa: BLE001, RUF100
+        # Never swallow: a failed state read must surface as ArmUnavailable,
+        # not as an empty anchor set that silently relabels a converged
+        # store non_converged/undec with no diagnostic.
+        raise ArmUnavailable(f"a4 live-claim state read failed: {e}") from e
 
 
 def _is_loopy(scenario: Scenario) -> bool:

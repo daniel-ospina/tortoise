@@ -9,12 +9,31 @@ lane equivalence (same content contract, no ¬A pre-k on either lane).
 """
 from __future__ import annotations
 
+import os
+
 import pytest
 
 from battery.testing import seeds
 from battery.testing.seeds import setup_seed_mode, setup_seed_mode_raw
 
 _CT = "ct-001"
+
+
+@pytest.fixture(autouse=True, scope="module")
+def _force_embedded_lane() -> None:
+    """Hermetic per-run store tests materialize scenario graphs as named
+    (battery_ct-001 …) — a TORTOISE_DB_URI redirect folds graphs per test
+    and voids the assertions. Force the embedded lane for this module
+    (embedded-file-contract; precedent: test_embedded_lifecycle)."""
+    saved = os.environ.pop("TORTOISE_DB_URI", None)
+    saved_path = os.environ.pop("TORTOISE_DB_PATH", None)
+    try:
+        yield
+    finally:
+        if saved is not None:
+            os.environ["TORTOISE_DB_URI"] = saved
+        if saved_path is not None:
+            os.environ["TORTOISE_DB_PATH"] = saved_path
 
 
 def _scenario(store) -> object:
@@ -29,7 +48,8 @@ def test_no_require_calibration_false_anywhere() -> None:
     offenders: list[str] = []
     for py in sorted(root.rglob("*.py")):
         src = py.read_text()
-        if "require_calibration=False" in src:
+        # whitespace-agnostic: catches `= False`, ` =False`, split lines
+        if __import__("re").search(r"require_calibration\s*=\s*False", src):
             offenders.append(str(py))
     assert not offenders, offenders
 
@@ -98,13 +118,15 @@ def test_promote_semantics_seed_points_and_operators(tmp_path) -> None:
         for m in mems:
             pt = sdk.get_point(m.id)
             assert pt.get("status") == "live", pt.get("status")
-        # Build one real operator and assert direct promotion is blocked.
-        if len(mems) >= 2:
-            op = sdk.create_operator("IMPL", mems[0].id, [mems[1].id])
-            oid = op.get("id")
-            pr = sdk.promote_point(oid)
-            assert pr.get("blocked") is True
-            assert pr.get("reason") == "is_operator"
+        # Build one real operator and assert direct promotion is blocked
+        # (operator promotion is a product-level refusal, not a silent skip).
+        if len(mems) < 2:
+            pytest.skip("ct-001 seed must surface ≥2 memories for an operator")
+        op = sdk.create_operator("IMPL", mems[0].id, [mems[1].id])
+        oid = op.get("id")
+        pr = sdk.promote_point(oid)
+        assert pr.get("blocked") is True
+        assert pr.get("reason") == "is_operator"
     finally:
         store.close()
 

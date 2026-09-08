@@ -7,6 +7,7 @@ clean seed_mode graph (re-setup accumulates; stale pre-fix refuses).
 """
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -18,6 +19,25 @@ from battery.testing.seeds import seed_full_legacy, setup_seed_mode
 
 def _store(tmp_path, sid: str = "ct-001"):
     return setup_seed_mode(tmp_path, sid)
+
+
+@pytest.fixture(autouse=True, scope="module")
+def _force_embedded_lane() -> None:
+    """Hermetic per-run store tests materialize scenario graphs as named
+    (battery_ct-001 …) — a TORTOISE_DB_URI redirect folds graphs per test
+    and voids the assertions. Force the embedded lane for this module
+    (embedded-file-contract; precedent: test_embedded_lifecycle)."""
+    saved = os.environ.pop("TORTOISE_DB_URI", None)
+    saved_path = os.environ.pop("TORTOISE_DB_PATH", None)
+    try:
+        yield
+    finally:
+        if saved is not None:
+            os.environ["TORTOISE_DB_URI"] = saved
+        if saved_path is not None:
+            os.environ["TORTOISE_DB_PATH"] = saved_path
+
+
 
 
 def test_seeded_vs_agent_provenance_distinct(tmp_path) -> None:
@@ -74,7 +94,7 @@ def test_event_log_correlation_per_scenario(tmp_path) -> None:
                          prior_memories=tuple(mems), user_message="go"),
             Memory(id="e1", content="event log finding", kind="nand"))
         after = log.read_text(errors="replace")
-        assert "event log finding" in after or len(after) > len(before)
+        assert "event log finding" in after
     finally:
         store.close()
 

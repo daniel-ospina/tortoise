@@ -142,12 +142,16 @@ def test_bct_twin_surface_equality(n):
 
 
 # ── warm-store fail-closed on stale PRE-FIX graphs ────────────────────────
-def test_seed_mode_warm_store_fails_closed_on_stale(tmp_path):
+def test_seed_mode_warm_store_fails_closed_on_stale(tmp_path, monkeypatch):
     """seed_mode over a stale PRE-FIX full graph refuses (seeder-owned
     marker distinguishes stale-seeder content from agent-filed content: the
     guard tests a seed-manifest marker written by the seeder, never raw
     content presence). Agent-filed claim_b content (Task 9/10) must NOT
     false-refuse — locked in Task 10."""
+    # Cross-lane test: SDK-lane/guard tests must observe graphs as named —
+    # force embedded semantics (a URI redirect folds graphs per test).
+    monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+    monkeypatch.delenv("TORTOISE_DB_PATH", raising=False)
     seeds.seed_full_legacy(tmp_path, "ct-001")  # pre-fix seeding (fresh store)
     # purge=False: observe the existing legacy namespace — the warm guard
     # must refuse (marker absent + planted content present).
@@ -178,7 +182,7 @@ def test_seed_mode_warm_store_accumulates_over_clean(tmp_path):
         store2.close()
 
 
-def test_seed_mode_store_owns_seed_manifest_marker(tmp_path):
+def test_seed_mode_store_owns_seed_manifest_marker(tmp_path, monkeypatch):
     """The seeder-owned seed-manifest marker is written into the seeded
     namespace (the warm guard's ownership record — Task 10's agent-filed
     content never false-refuses BECAUSE the marker is present) and is NOT
@@ -189,6 +193,10 @@ def test_seed_mode_store_owns_seed_manifest_marker(tmp_path):
     raw-lane artifact), so presence is asserted by content, not by the
     raw-lane id.
     """
+    # Cross-lane test: SDK-lane/guard tests must observe graphs as named —
+    # force embedded semantics (a URI redirect folds graphs per test).
+    monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+    monkeypatch.delenv("TORTOISE_DB_PATH", raising=False)
     from battery.runner.setup import seed_manifest_content
     sc = _cts()[0]
     store = seeds.setup_seed_mode(tmp_path, sc.id)
@@ -207,8 +215,13 @@ def test_seed_mode_store_owns_seed_manifest_marker(tmp_path):
         store.close()
 
 
-def test_record_never_targets_seed_manifest_marker(tmp_path):
+def test_record_never_targets_seed_manifest_marker(tmp_path, monkeypatch):
     """A4 record() claim-targets exclude the seeder-owned marker (the
+    # Cross-lane test: SDK-lane/guard tests must observe graphs as named —
+    # force embedded semantics (a URI redirect folds graphs per test).
+    monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+    monkeypatch.delenv("TORTOISE_DB_PATH", raising=False)
+
     retrieve exclusion is mirrored on the write path) — an agent-filed
     NAND/IMPL edge lands on a seeded statement, never on the marker.
 
@@ -218,6 +231,10 @@ def test_record_never_targets_seed_manifest_marker(tmp_path):
     memories; an empty closed set is an honest zero-write (locked by the
     Task-3 empty_set_never_writes regression).
     """
+    # Cross-lane test: SDK-lane/guard tests must observe graphs as named —
+    # force embedded semantics (a URI redirect folds graphs per test).
+    monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+    monkeypatch.delenv("TORTOISE_DB_PATH", raising=False)
     from battery.arms.base import AgentContext, Memory
     from battery.runner.setup import seed_manifest_point_id
     sc = _cts()[0]

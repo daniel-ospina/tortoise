@@ -9,6 +9,8 @@ no-ops; targets never touch the seed-manifest marker.
 """
 from __future__ import annotations
 
+import os
+
 import pytest
 
 from battery.arms.a4_tortoise import DECIDE_CYCLES_CAP
@@ -19,6 +21,25 @@ from battery.testing.seeds import setup_seed_mode
 def _store(tmp_path, scenario_id: str = "ct-001"):
     store = setup_seed_mode(tmp_path, scenario_id)
     return store
+
+
+@pytest.fixture(autouse=True, scope="module")
+def _force_embedded_lane() -> None:
+    """Hermetic per-run store tests materialize scenario graphs as named
+    (battery_ct-001 …) — a TORTOISE_DB_URI redirect folds graphs per test
+    and voids the assertions. Force the embedded lane for this module
+    (embedded-file-contract; precedent: test_embedded_lifecycle)."""
+    saved = os.environ.pop("TORTOISE_DB_URI", None)
+    saved_path = os.environ.pop("TORTOISE_DB_PATH", None)
+    try:
+        yield
+    finally:
+        if saved is not None:
+            os.environ["TORTOISE_DB_URI"] = saved
+        if saved_path is not None:
+            os.environ["TORTOISE_DB_PATH"] = saved_path
+
+
 
 
 def test_empty_set_never_writes(tmp_path) -> None:
@@ -47,8 +68,9 @@ def test_empty_set_never_writes(tmp_path) -> None:
 
 
 def test_refiling_same_content_is_idempotent(tmp_path) -> None:
-    """Re-filing the same finding content never duplicates the evidence
-    point or its operator edge (content-hash dedup on the product write)."""
+    """Re-filing the same finding content is a TRUE no-op: no duplicate
+    evidence point, no duplicate operator edge, no double decide cycle
+    (arm-side memo over the product content-hash dedup)."""
     store = _store(tmp_path)
     try:
         mems = store.retrieve("")
@@ -56,13 +78,21 @@ def test_refiling_same_content_is_idempotent(tmp_path) -> None:
                            prior_memories=tuple(mems), user_message="go")
         store._arm.record(ctx, Memory(id="e1", content="finding X", kind="nand"))
         first_cycles = store._arm.decide_cycles
+        assert first_cycles == 1
         store._arm.record(ctx, Memory(id="e2", content="finding X", kind="nand"))
-        assert store._arm.decide_cycles == first_cycles + 1  # cycle counted
+        assert store._arm.decide_cycles == first_cycles  # re-file adds NO cycle
         g = store._arm._scenario_graph(store._scenario)
         rows = g.query(
             "MATCH (n:Point) WHERE n.content = 'finding X' "
             "RETURN count(n)").result_set
         assert int(rows[0][0] or 0) == 1  # ONE evidence point, no duplicate
+        # One NAND operator node expected (its product form emits two
+        # edges — o→source evidence AND o→target claim — so count
+        # OPERATOR NODES, not edges).
+        nand_ops = g.query(
+            "MATCH (o:Point {is_operator: true}) "
+            "WHERE (o)-[:NAND]->() RETURN count(o)").result_set
+        assert int(nand_ops[0][0] or 0) == 1  # ONE NAND operator, no dup
     finally:
         store.close()
 
@@ -122,12 +152,31 @@ def test_mitigate_resolves_operator_memory_and_clamps(tmp_path) -> None:
             Memory(id="m1", content="weaker than it appears",
                    confidence=2.0, kind="mitigate"))
         assert store._arm.decide_cycles >= 1
-        # Idempotent second mitigation (no crash on the same operator).
+        g = store._arm._scenario_graph(store._scenario)
+        rows = g.query(
+            "MATCH (m:Point) WHERE m.content = $c "
+            "RETURN m.mitigation_strength",
+            params={"c": "[MITIGATION] weaker than it appears"}).result_set
+        assert rows, "no mitigation node written"
+        first_strength = float(rows[0][0])
+        assert first_strength == 0.5  # confidence 2.0 ⇒ clamped to the 0.50 cap
+        # Idempotent second mitigation: same operator ⇒ same node updates
+        # (default strength 0.3, still inside [0.10, 0.50]) — never a dup.
         store._arm.record(
             AgentContext(scenario=store._scenario, episode_seed=0,
                          prior_memories=prior, user_message="go"),
             Memory(id="m2", content="weaker still", kind="mitigate"))
         assert store._arm.decide_cycles >= 2
+        rows2 = g.query(
+            "MATCH (m:Point) WHERE m.content = $c "
+            "RETURN count(m)",
+            params={"c": "[MITIGATION] weaker still"}).result_set
+        assert int(rows2[0][0] or 0) == 1  # single mitigation node, updated
+        rows3 = g.query(
+            "MATCH (m:Point) WHERE m.content = $c "
+            "RETURN m.mitigation_strength",
+            params={"c": "[MITIGATION] weaker still"}).result_set
+        assert 0.10 <= float(rows3[0][0]) <= 0.50
     finally:
         store.close()
 
