@@ -4567,6 +4567,7 @@ class TestSessionActorStamp2600:
     actor_user_id until Task 5)."""
 
     def _data_sdk(self, team_id: str):
+
         """Open the TEAM data graph directly (Session nodes live in the
         namespace team_{tid} — NOT the registry projection the mint SDK
         returns)."""
@@ -7019,3 +7020,49 @@ class TestSupabaseLaneV2AcceptErrorShape:
             asyncio.run(_run())
         assert ei.value.status_code == 403
         assert ei.value.detail["error_code"] == "invite_otp_invalid"
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# #2600 Phase 1 Task 4 — REST boundary pin: forged actor claims in a raw JSON
+# body are SILENTLY DROPPED (Pydantic extra="ignore" on CreatePointRequest —
+# verified the model has NO model_config → v2 default extra="ignore"). The
+# store never gains the forged key and the response is 2xx, never 422.
+
+class TestCreatePointForgedActorSilentlyDropped:
+    """E2E-3 negative (REST leg, no model_config change)."""
+
+    def test_forged_actor_field_dropped_not_rejected(self, client):
+        """A raw JSON body carrying top-level actor keys → 2xx (never a 422);
+        the forged keys never reach the store; the point is created normally."""
+        import tortoise.hosted_api as ha_mod
+        r = client.post("/v1/points", json={
+            "content": "forged actor boundary pin",
+            "kind": "statement",
+            # forged top-level claims — Pydantic extra="ignore" drops them
+            "actor_user_id": "forged-actor-0000",
+            "owner": "forged-owner",
+        })
+        assert r.status_code == 200, r.text
+        pid = r.json()["id"]
+        sdk = ha_mod._make_sdk(namespace=TEST_TEAM_ID)
+        rows = sdk._get_proj().g.query(
+            "MATCH (p:Point {id:$id}) RETURN p.actor_user_id, p.owner",
+            params={"id": pid}).result_set
+        assert rows and list(rows[0]) == [None, None], \
+            f"forged fields must never reach the store: {rows}"
+
+    def test_forged_actor_field_absent_still_creates(self, client):
+        """Control: without the forged fields the request shape is unchanged
+        (2xx + point present) — the drop is additive."""
+        import tortoise.hosted_api as ha_mod
+        r = client.post("/v1/points", json={
+            "content": "clean boundary control",
+            "kind": "statement",
+        })
+        assert r.status_code == 200, r.text
+        pid = r.json()["id"]
+        sdk = ha_mod._make_sdk(namespace=TEST_TEAM_ID)
+        rows = sdk._get_proj().g.query(
+            "MATCH (p:Point {id:$id}) RETURN count(p)",
+            params={"id": pid}).result_set
+        assert rows and rows[0][0] == 1, rows

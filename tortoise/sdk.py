@@ -832,6 +832,17 @@ _ENTITY_ALIAS_PER_ANCHOR = 64
 _SIGNUP_TOKEN_RECOVER_LOCK = threading.Lock()
 
 
+#: #2600: client-supplied actor claims are STRIP-AND-IGNORE (never a 4xx
+#: — the server owns attribution). Shared by _sanitize_props (SDK backstop)
+#: and the MCP boundary (_reject_server_managed_props in mcp_server.py —
+#: same frozenset literal kept in sync; agent_id closes the reserved-key
+#: contract for any future props surface, verified no tenant tool declares
+#: it today). authoredBy is deliberately NOT here (pre-existing client
+#: author-label residual — documented).
+_RESERVED_ACTOR_PROPS = frozenset(
+    {"actor_user_id", "owner", "initiated_by", "agent_id"})
+
+
 def _sanitize_props(props: dict, *, reject_id: bool = False) -> dict:
     """#329: reject server-managed fields on tenant write surfaces.
 
@@ -844,6 +855,17 @@ def _sanitize_props(props: dict, *, reject_id: bool = False) -> dict:
     ``source_path`` parameter is UNTOUCHED — this only guards props passthrough.
     """
     props = dict(props)
+    # #2600: reserved actor keys are STRIP-AND-IGNORE (never a 4xx — the
+    # server owns the actor). Pop BEFORE the reject checks below — the
+    # dict(props) copy above makes the pop safe (the caller's dict never
+    # loses a key). ``agent_id`` closes the reserved-key contract for any
+    # future props surface (verified: no tenant tool declares it today —
+    # it only appears as the server-side EventAPI construction arg).
+    for _reserved in _RESERVED_ACTOR_PROPS:
+        if _reserved in props:
+            logging.getLogger("tortoise.api").warning(
+                "ignoring client-supplied %r on tenant props", _reserved)
+            props.pop(_reserved)
     for key in ("sourcePath", "source_path"):
         if key in props:
             raise ValueError(

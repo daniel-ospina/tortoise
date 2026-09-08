@@ -333,3 +333,223 @@ class TestEventApiEmitOptionalActor:
             # journaled copy carries it too
             readback = log.read_all()
             assert readback and readback[-1].get("actor_user_id") == UUID_B
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# #2600 Phase 1 Task 4 — forged-claim STRIP-AND-IGNORE (never reject). The
+# server owns the actor: a client-supplied actor claim is popped with a
+# warning (SDK _sanitize_props backstop) and popped at the MCP boundary
+# (_reject_server_managed_props choke point) — never stored, never a 4xx.
+# authoredBy is NOT stripped (pre-existing client author-label residual).
+
+class TestStripAndIgnoreActorClaims:
+    """_sanitize_props reserved-actor-key strip (E2E-3 negative, SDK leg)."""
+
+    def test_sanitize_pops_forged_actor_keys(self, caplog):
+        from tortoise.sdk import _sanitize_props
+        for reserved in ("actor_user_id", "owner", "initiated_by", "agent_id"):
+            props = {"content": "x", reserved: "attacker-claim",
+                     "search_keys": "k"}
+            out = _sanitize_props(props)
+            assert reserved not in out, \
+                f"{reserved} must be stripped from tenant props"
+            assert out["content"] == "x", out
+            # caller's dict is untouched (dict(props) copy-first)
+            assert reserved in props, "caller dict must never be mutated"
+        assert props["content"] == "x"
+
+    def test_sanitize_other_rejects_still_raise(self):
+        """The strip is additive — the existing server-managed rejects still
+        raise (never masked by the pop)."""
+        from tortoise.sdk import _sanitize_props
+        try:
+            _sanitize_props({"actor_user_id": "x", "is_episodic": True})
+            raise AssertionError("is_episodic reject must still fire")
+        except ValueError as ex:
+            assert "is_episodic" in str(ex), ex
+        try:
+            _sanitize_props({"actor_user_id": "x", "sourcePath": "/etc/passwd"})
+            raise AssertionError("sourcePath reject must still fire")
+        except ValueError as ex:
+            assert "sourcePath" in str(ex), ex
+
+    def test_sanitize_authoredBy_not_stripped(self):
+        """authoredBy is the pre-existing client author-label — deliberately
+        NOT in the reserved set (documented residual)."""
+        from tortoise.sdk import _sanitize_props
+        out = _sanitize_props({"authoredBy": "agent-claude", "content": "y"})
+        assert out["authoredBy"] == "agent-claude", out
+
+    def test_sanitize_strip_emits_warning(self, caplog):
+        import logging
+        from tortoise.sdk import _sanitize_props
+        with caplog.at_level(logging.WARNING, logger="tortoise.api"):
+            _sanitize_props({"actor_user_id": "forged", "content": "z"})
+        hits = [r.getMessage() for r in caplog.records
+                if "ignoring client-supplied" in r.getMessage()]
+        assert hits, "the strip must emit an ignoring warning"
+        assert "actor_user_id" in hits[0], hits
+
+    def test_create_point_strip_backstop_node_clean(self, tmp_path):
+        """End-to-end SDK backstop: a forged actor claim via props on
+        create_point is stripped — the node never carries it and no error
+        is raised (strip-and-ignore, never 4xx)."""
+        from tortoise.sdk import TortoiseSDK
+        sdk = TortoiseSDK(db_path=str(tmp_path / "strip.db"))
+        try:
+            pt = sdk.create_point("statement", "strip forged claim",
+                                  actor_user_id="attacker-1",
+                                  is_episodic=False)
+            # props bypass: create_point binds unknown kwargs into props —
+            # the forged key is stripped before the node write.
+            rows = sdk._get_proj().g.query(
+                "MATCH (p:Point {id:$id}) RETURN p.actor_user_id",
+                params={"id": pt["id"]}).result_set
+            assert rows and rows[0][0] is None, \
+                "forged actor_user_id must never reach the node"
+        finally:
+            sdk.close()
+
+
+class TestMcpBoundaryStripAndIgnore:
+    """E2E-3 negative (MCP boundary leg): _reject_server_managed_props pops
+    the reserved actor keys BEFORE the server-managed reject — a tool call
+    succeeds, and the forged claim never lands on the node."""
+
+    def test_reject_helper_strips_reserved(self):
+        from tortoise.mcp_server import _reject_server_managed_props
+        for reserved in ("actor_user_id", "owner", "initiated_by", "agent_id"):
+            props = {reserved: "forged", "content": "x"}
+            # None → no server-managed violation remains after the pop
+            assert _reject_server_managed_props(props) is None, props
+            assert reserved not in props, props
+            assert props["content"] == "x", props
+
+    def test_reject_helper_still_rejects_server_managed(self):
+        from tortoise.mcp_server import _reject_server_managed_props
+        err = _reject_server_managed_props(
+            {"actor_user_id": "forged", "is_episodic": True})
+        assert err and "is_episodic" in err, err
+        # actor key gone even when a real violation follows
+        err = _reject_server_managed_props(
+            {"actor_user_id": "forged", "sourcePath": "/x"})
+        assert err and "sourcePath" in err, err
+
+    def test_tool_create_point_forged_actor_ignored(self, tmp_path):
+        """tortoise_create_point (direct call — MCP tenant-mode team context
+        required for the SDK open) with a forged actor claim in props →
+        success (no 4xx) and the node carries no forged key. Run with a
+        minimal hosted team context."""
+        from tortoise.mcp_auth import (  # noqa: I001
+            _current_team_id, _current_team_limits, _transport_mode)
+        from tortoise.mcp_server import tortoise_create_point
+        import os
+        os.environ.setdefault("TORTOISE_SESSION_LLM_MOCK", "1")
+        from tests._http_fixtures import patched_tortoise_sdk
+        with patched_tortoise_sdk(str(tmp_path / "mcp-strip.db")):
+            import tortoise.hosted_api as _ha
+            _ha._make_sdk(namespace="registry")._get_registry().query(
+                "CREATE (t:Team {id:$id})",
+                params={"id": "team-strip-2600"})
+            tok_t = _current_team_id.set("team-strip-2600")
+            tok_l = _current_team_limits.set(
+                {"team_id": "team-strip-2600", "tier": "free",
+                 "max_points": 100000})
+            tok_m = _transport_mode.set("http")
+            try:
+                res = tortoise_create_point(
+                    kind="statement", content="strip forged mcp claim",
+                    props={"actor_user_id": "forged", "owner": "evil",
+                           "agent_id": "spoof"})
+                assert "error" not in res, res
+                rows = _ha._make_sdk(namespace="team-strip-2600")._get_proj(
+                ).g.query(
+                    "MATCH (p:Point) WHERE p.content CONTAINS 'strip forged mcp' "
+                    "RETURN p.actor_user_id, p.owner, p.agent_id").result_set
+                assert rows, "the forged-claim point must be created"
+                assert list(rows[0]) == [None, None, None], \
+                    f"forged claims must never reach the node: {rows}"
+            finally:
+                _current_team_id.reset(tok_t)
+                _current_team_limits.reset(tok_l)
+                _transport_mode.reset(tok_m)
+
+
+class TestMcpToolSweepStripActor:
+    """Plan Step 3 (P2-5): parametrized sweep across representative
+    props-accepting MCP tools — each succeeds with a forged actor key in
+    props, and the stored node carries no forged value (the shared
+    _reject_server_managed_props choke point covers ALL 11 call sites; the
+    sweep pins the end-to-end behavior on a per-surface sample)."""
+
+    def _ctx(self, tmp_path):
+        import contextlib
+        from tortoise.mcp_auth import (_current_team_id, _current_team_limits,
+                                       _transport_mode)
+        from tests._http_fixtures import patched_tortoise_sdk
+        import os
+        os.environ.setdefault("TORTOISE_SESSION_LLM_MOCK", "1")
+
+        @contextlib.contextmanager
+        def _mgr():
+            with patched_tortoise_sdk(str(tmp_path / "sweep.db")):
+                import tortoise.hosted_api as _ha
+                _ha._make_sdk(namespace="registry")._get_registry().query(
+                    "CREATE (t:Team {id:$id})",
+                    params={"id": "team-sweep-2600"})
+                tok_t = _current_team_id.set("team-sweep-2600")
+                tok_l = _current_team_limits.set(
+                    {"team_id": "team-sweep-2600", "tier": "free",
+                     "max_points": 100000})
+                tok_m = _transport_mode.set("http")
+                try:
+                    yield
+                finally:
+                    _current_team_id.reset(tok_t)
+                    _current_team_limits.reset(tok_l)
+                    _transport_mode.reset(tok_m)
+        return _mgr()
+
+    def test_update_point_forged_actor_stripped(self, tmp_path):
+        """update_point with forged actor props → success; the node keeps
+        its real props and never gains the forged key."""
+        from tortoise.mcp_server import (tortoise_create_point,
+                                         tortoise_update_point)
+        with self._ctx(tmp_path):
+            created = tortoise_create_point(kind="statement",
+                                            content="sweep update target")
+            assert "error" not in created, created
+            pid = created["id"]
+            res = tortoise_update_point(pid, {"actor_user_id": "evil",
+                                              "owner": "evil2",
+                                              "note": "kept"})
+            assert "error" not in res, res
+            import tortoise.hosted_api as _ha
+            rows = _ha._make_sdk(namespace="team-sweep-2600")._get_proj(
+            ).g.query(
+                "MATCH (p:Point {id:$id}) RETURN p.actor_user_id, p.owner, "
+                "p.note", params={"id": pid}).result_set
+            assert rows and list(rows[0]) == [None, None, "kept"], rows
+
+    def test_create_subject_object_forged_actor_stripped(self, tmp_path):
+        """create_subject / create_object with forged actor props → created
+        nodes carry no forged value (entity surfaces)."""
+        from tortoise.mcp_server import (tortoise_create_object,
+                                         tortoise_create_subject)
+        with self._ctx(tmp_path):
+            s = tortoise_create_subject("sweep-subj", "core:strategy",
+                                        props={"actor_user_id": "evil",
+                                               "initiated_by": "spoof"})
+            assert "error" not in s, s
+            o = tortoise_create_object("sweep-obj", "core:metric",
+                                       props={"actor_user_id": "evil",
+                                              "agent_id": "spoof"})
+            assert "error" not in o, o
+            import tortoise.hosted_api as _ha
+            sdk = _ha._make_sdk(namespace="team-sweep-2600")
+            rows = sdk._get_proj().g.query(
+                "MATCH (n) WHERE n.name IN ['sweep-subj','sweep-obj'] "
+                "RETURN n.actor_user_id, n.initiated_by, n.agent_id").result_set
+            assert rows, "both entities must be created"
+            for r in rows:
+                assert list(r) == [None, None, None], rows

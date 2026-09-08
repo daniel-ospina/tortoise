@@ -714,8 +714,25 @@ _SERVER_MANAGED_PROPS = frozenset({
     "is_episodic", "sourcePath", "source_path", "id", "_server_id"})
 
 
-def _reject_server_managed_props(props: dict) -> str | None:
-    """Return an error message if tenant props attempt server-managed fields."""
+# #2600: client-supplied actor claims are STRIP-AND-IGNORE (never a 4xx —
+# the server owns attribution). Same frozenset literal as the SDK-side
+# _RESERVED_ACTOR_PROPS (tortoise/sdk.py) — keep in sync. authoredBy is
+# deliberately NOT here (pre-existing client author-label residual).
+_RESERVED_ACTOR_PROPS = frozenset(
+    {"actor_user_id", "owner", "initiated_by", "agent_id"})
+
+
+def _reject_server_managed_props(props: dict | None) -> str | None:
+    """Strip client-forged actor claims, then reject remaining server-managed
+    fields (#329/#1486). Returns an error message or None."""
+    # #2600: strip + ignore FIRST — never stored, never a 4xx. Runs inside
+    # this single choke point (11 tool call sites) so no per-tool strip is
+    # missed. Guard None (optional props= kwargs on entity tools call with
+    # no props dict).
+    if not props:
+        return None
+    for k in _RESERVED_ACTOR_PROPS:
+        props.pop(k, None)
     bad = _SERVER_MANAGED_PROPS & set(props or {})
     if not bad:
         return None
