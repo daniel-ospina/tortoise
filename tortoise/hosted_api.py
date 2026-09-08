@@ -8332,7 +8332,7 @@ async def commit_session(request: Request, team: dict = Depends(get_current_team
 
 
 @app.get("/v1/sessions")
-async def list_sessions(team: dict = Depends(get_current_team_session_ungated)):  # noqa: B008
+async def list_sessions(request: Request, team: dict = Depends(get_current_team_session_ungated)):  # noqa: B008
     """List captured sessions with turn and extracted point counts (#714).
 
     #1828: dual-auth (session JWT OR tt_ key) — the dashboard's overview
@@ -8344,16 +8344,40 @@ async def list_sessions(team: dict = Depends(get_current_team_session_ungated)):
     #1591: FAIL SOFT — a missing team graph (half-failed provisioning)
     returns an empty list, never a 500 (a 500 also strips the CORS headers
     and surfaces as a misleading 'CORS blocked' to the browser).
+
+    #2600: ?actor_user_id=<uuid> optional filter (GET has no body) — the
+    filter EXCLUDES null-actor (legacy) rows by construction (a MATCH-level
+    WHERE on a property a legacy Session does not have can never match).
+    Malformed (non-UUID) filter → 422 (a client error, never a silent empty
+    result). When absent the query is byte-identical to the pre-#2600 shape
+    + two appended RETURN columns (actor_user_id/harness — appended at the
+    END so the positional r[0..3] count mapping is unchanged).
     """
     _require_scope(team, "graphs:read", "list_sessions")
+    actor_filter = (request.query_params.get("actor_user_id") or "").strip()
+    if actor_filter:
+        from tortoise.sdk import _is_uuid_shape  # noqa: PLC0415
+        if not _is_uuid_shape(actor_filter):
+            raise HTTPException(
+                status_code=422,
+                detail="actor_user_id must be a UUID")
     sdk = _data_sdk(team)
     try:
-        rows = sdk._get_proj().g.query(
+        # #2600: actor filter rides a MATCH-level WHERE (before the OPTIONAL
+        # CONTAINS so the count(p) grouping semantics hold); the appended
+        # RETURN columns (actor_user_id/harness) sit AFTER count(p) so the
+        # existing r[0..3] mapping is untouched.
+        query = (
             "MATCH (s:Session) "
-            "OPTIONAL MATCH (s)-[:CONTAINS]->(p:Point) "
+            + (f"WHERE s.actor_user_id = $uid " if actor_filter else "")
+            + "OPTIONAL MATCH (s)-[:CONTAINS]->(p:Point) "
             "WHERE p.pointKind IN ['decision', 'statement'] "
-            "RETURN s.id, s.created_at, s.turn_count, count(p) "
+            "RETURN s.id, s.created_at, s.turn_count, count(p), "
+            "s.actor_user_id, s.harness "
             "ORDER BY s.created_at DESC LIMIT 50"
+        )
+        rows = sdk._get_proj().g.query(
+            query, params={"uid": actor_filter} if actor_filter else None
         ).result_set
     except Exception:
         import logging
@@ -8361,10 +8385,50 @@ async def list_sessions(team: dict = Depends(get_current_team_session_ungated)):
             "list_sessions graph unavailable (fail-soft): %s", team["team_id"],
             exc_info=True)
         rows = []
+    # #2600: actor display — ONE membership fetch per request (never N per
+    # row); the any-actor gate lives in _actor_display_map (an all-legacy
+    # row set never touches the CP). Empty rows (graph fail-soft / no
+    # sessions) pass an empty list → no fetch → [] stay 200.
+    actor_ids = [r[4] for r in rows if r[4]]
+    members_by_id = await asyncio.to_thread(
+        _actor_display_map, actor_ids, team["team_id"]) if actor_ids else {}
     return {"sessions": [
-        {"id": r[0], "created_at": r[1], "turns": r[2], "extracted": r[3]}
+        {
+            "id": r[0], "created_at": r[1], "turns": r[2], "extracted": r[3],
+            "actor_user_id": r[4], "harness": r[5],
+            "actor_display": None if not r[4]
+            else (members_by_id.get(r[4]) or r[4]),
+        }
         for r in rows
     ]}
+
+
+def _actor_display_map(actor_ids: list[str], team_id: str) -> dict:
+    """actor_user_id -> display email, for the NON-NULL actor ids in a row
+    set (#2600). The any-actor gate lives HERE: an empty list returns before
+    any CP read, so a response with no attributed rows never fires the fetch.
+    Supabase lane: team_members invited_email seam (an accepted-invite row
+    that retained invited_email maps; everything else is NOT in the map → the
+    caller falls back to the raw id). Registry lane: Membership nodes carry
+    NO email → {} always → raw-id display in v1. Fail-soft: any exception
+    (CP down, mode flip mid-flight) → {} → raw id, never a 500."""
+    if not actor_ids:
+        return {}
+    try:
+        from tortoise.supabase_control import (  # noqa: PLC0415
+            get_control_plane, is_supabase_enabled, team_members,
+        )
+        if not is_supabase_enabled():
+            return {}  # registry: no email seam for members
+        members = team_members(get_control_plane(), team_id)
+    except Exception:
+        return {}  # never a doomed call, never a 500 — raw-id fallback
+    email_of = {
+        m.get("user_id"): (m.get("email") or "")
+        for m in members
+        if m.get("user_id") and m.get("email")
+    }
+    return {uid: email_of[uid] for uid in actor_ids if uid in email_of}
 
 
 @app.get("/v1/sessions/{session_id}")
@@ -8397,13 +8461,26 @@ async def get_session_detail(session_id: str, team: dict = Depends(get_current_t
             team["team_id"], exc_info=True)
         return {"session": None}  # #1591 fail-soft
 
-    # Session node
+    # Session node — #2600: actor_user_id/harness APPENDED at the END so
+    # the existing sess[0..2] (id/created_at/turns) mapping is unchanged.
     sess_rows = proj.g.query(
-        "MATCH (s:Session {id:$sid}) RETURN s.id, s.created_at, s.turn_count",
+        "MATCH (s:Session {id:$sid}) RETURN s.id, s.created_at, "
+        "s.turn_count, s.actor_user_id, s.harness",
         params={"sid": session_id},
     ).result_set
     if not sess_rows:
         raise HTTPException(status_code=404, detail="Session not found")
+    sess = sess_rows[0]
+    # #2600: actor display — SAME shared helper as list_sessions (never a
+    # divergent second resolution). Any-actor gate: a null-actor session
+    # passes an empty list → no CP fetch → actor_display: null. Fail-soft
+    # → raw id.
+    actor_ids = [sess[3]] if sess[3] else []
+    members_by_id = await asyncio.to_thread(
+        _actor_display_map, actor_ids, team["team_id"]) if actor_ids else {}
+    actor_user_id = sess[3]
+    actor_display = None if not actor_user_id else \
+        (members_by_id.get(actor_user_id) or actor_user_id)
 
     # Extracted point count (#822: LLM-extracted Points are untyped —
     # pointKind is NULL for M2 conversation extraction — so the legacy
@@ -8458,9 +8535,14 @@ async def get_session_detail(session_id: str, team: dict = Depends(get_current_t
         })
 
     return {
-        "id": sess_rows[0][0],
-        "created_at": sess_rows[0][1],
-        "turns": sess_rows[0][2],
+        "id": sess[0],
+        "created_at": sess[1],
+        "turns": sess[2],
+        # #2600: actor + harness on the detail dict (raw actor_user_id +
+        # resolved display; null for legacy sessions).
+        "actor_user_id": actor_user_id,
+        "harness": sess[4],
+        "actor_display": actor_display,
         "extracted": extracted_count,
         "turn_points": turns,
         "extracted_points": extracted,

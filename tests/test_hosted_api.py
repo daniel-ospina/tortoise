@@ -7066,3 +7066,360 @@ class TestCreatePointForgedActorSilentlyDropped:
             "MATCH (p:Point {id:$id}) RETURN count(p)",
             params={"id": pid}).result_set
         assert rows and rows[0][0] == 1, rows
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# #2600 (Phase 1, Task 5) — list_sessions/get_session_detail actor read path.
+# These are real-auth REGISTRY-lane tests (docker CP; minted tt_ keys — no
+# DI override). The registry lane carries NO membership email seam, so the
+# actor display contract here is RAW-ID-ONLY (email never appears on the
+# docker lane — the supabase email branch is pinned in
+# TestActorDisplayMap2600 directly against the shared helper + a
+# FakeControlPlane). Where a session must carry an actor, it is seeded
+# DIRECTLY in the team data graph namespace (Session + CONTAINS decision
+# Point) — the read surface does not care how the actor landed.
+
+class TestSessionActorReadPath2600:
+    """Read path: rows expose actor_user_id + harness + actor_display
+    (raw id on the registry lane); ?actor_user_id filter excludes legacy
+    null-actor rows; malformed filter → 422; value-level r[0..5] mapping
+    regression; one _actor_display_map call per request, zero when every
+    row is legacy."""
+
+    def _data_sdk(self, team_id: str):
+        import tortoise.hosted_api as ha_mod
+        return ha_mod._make_sdk(namespace=team_id)
+
+    def _setup(self, tmp_path, tag: str):
+        """Temp registry + seeded pro team + real-auth TestClient. Returns
+        (sdk, team_id, client, proj) with a FRESH team per call."""
+        import tortoise.hosted_api as ha_mod
+        db_path = os.path.join(tmp_path, f"rd_{tag}.db")
+        _orig = _patch_tortoise_sdk_init(db_path)
+        os.environ["TORTOISE_DB_PATH"] = db_path
+        sdk = ha_mod._make_sdk(namespace="registry")
+        tid = f"team-2600-rd-{tag}"
+        _seed_team_graphs(sdk, tid, "pro", None)
+        proj = self._data_sdk(tid)._get_proj()
+        try:
+            with TestClient(ha_mod.app,
+                            raise_server_exceptions=False) as tc:
+                yield sdk, tid, tc, proj
+        finally:
+            os.environ.pop("TORTOISE_DB_PATH", None)
+            _restore_tortoise_sdk_init(_orig)
+
+    def _seed_session(self, proj, sid: str, *, actor: str | None,
+                      created_at: str, turn_count: int = 1,
+                      harness: str | None = None,
+                      with_claim: bool = False) -> None:
+        """Seed a Session (+ optional CONTAINS decision Point for the
+        extracted count) directly in the team data graph."""
+        sets = f"created_at:$now, turn_count:$tc, is_episodic:true" \
+               f"{', actor_user_id:$uid' if actor else ''}" \
+               f"{', harness:$har' if harness else ''}"
+        params: dict = {"sid": sid, "now": created_at, "tc": turn_count}
+        if actor:
+            params["uid"] = actor
+        if harness:
+            params["har"] = harness
+        if with_claim:
+            pid = f"{sid}_c0"
+            proj.g.query(
+                f"CREATE (s:Session {{id:$sid, {sets}}})"
+                "-[:CONTAINS]->(p:Point {id:$pid, pointKind:'decision', "
+                "is_episodic:true})",
+                params={**params, "pid": pid})
+        else:
+            proj.g.query(
+                f"CREATE (s:Session {{id:$sid, {sets}}})", params=params)
+
+    def test_list_value_level_regression_all_six_bindings(self, tmp_path):
+        """Seed an attributed session with KNOWN created_at/turn_count/
+        harness + one decision claim and a legacy null-actor session; GET
+        /v1/sessions; assert id/created_at/turns/extracted/actor_user_id/
+        harness all equal the graph on the SAME row dict (catches an
+        off-by-N RETURN reshuffle) + actor_display == raw id (registry)."""
+        import tortoise.hosted_api as ha_mod
+        gen = self._setup(tmp_path, "vreg")
+        sdk, tid, tc, proj = next(gen)
+        try:
+            now = "2026-09-09T12:00:00.000000+00:00"
+            key = sdk.apikey_create(tid, _2600_UUID_A)
+            h = {"Authorization": f"Bearer {key['api_key']}"}
+            self._seed_session(proj, "s-rd-vreg-a", actor=_2600_UUID_A,
+                               created_at=now, turn_count=2,
+                               harness="claude", with_claim=True)
+            self._seed_session(proj, "s-rd-vreg-leg", actor=None,
+                               created_at="2026-09-09T11:00:00.000000+00:00",
+                               turn_count=1)
+            r = tc.get("/v1/sessions", headers=h)
+            assert r.status_code == 200, r.text
+            rows = {s["id"]: s for s in r.json()["sessions"]}
+            a = rows["s-rd-vreg-a"]
+            assert a["created_at"] == now
+            assert a["turns"] == 2
+            assert a["extracted"] == 1
+            assert a["actor_user_id"] == _2600_UUID_A
+            assert a["harness"] == "claude"
+            # registry lane: raw-id display, never an email
+            assert a["actor_display"] == _2600_UUID_A
+            leg = rows["s-rd-vreg-leg"]
+            assert leg["actor_user_id"] is None
+            assert leg["actor_display"] is None
+            assert leg["harness"] is None
+            assert leg["turns"] == 1 and leg["extracted"] == 0
+        finally:
+            gen.close()
+
+    def test_filter_returns_only_that_actor_and_excludes_legacy(
+            self, tmp_path):
+        gen = self._setup(tmp_path, "filt")
+        sdk, tid, tc, proj = next(gen)
+        try:
+            key = sdk.apikey_create(tid, _2600_UUID_A)
+            h = {"Authorization": f"Bearer {key['api_key']}"}
+            self._seed_session(proj, "s-rd-fil-a", actor=_2600_UUID_A,
+                               created_at="2026-09-09T12:00:00.000000+00:00")
+            self._seed_session(proj, "s-rd-fil-b", actor=_2600_UUID_B,
+                               created_at="2026-09-09T13:00:00.000000+00:00")
+            self._seed_session(proj, "s-rd-fil-leg", actor=None,
+                               created_at="2026-09-09T14:00:00.000000+00:00")
+            r = tc.get("/v1/sessions", headers=h,
+                       params={"actor_user_id": _2600_UUID_A})
+            assert r.status_code == 200, r.text
+            got = {s["id"] for s in r.json()["sessions"]}
+            assert got == {"s-rd-fil-a"}, got
+            # a legacy null-actor session NEVER appears under any filter
+            assert "s-rd-fil-leg" not in got
+            # other UUID → empty
+            r2 = tc.get("/v1/sessions", headers=h,
+                        params={"actor_user_id":
+                                "33333333-3333-4333-8333-333333333333"})
+            assert r2.status_code == 200 and r2.json()["sessions"] == [], r2.text
+        finally:
+            gen.close()
+
+    def test_filter_malformed_422(self, tmp_path):
+        gen = self._setup(tmp_path, "badf")
+        sdk, tid, tc, proj = next(gen)
+        try:
+            key = sdk.apikey_create(tid, _2600_UUID_A)
+            h = {"Authorization": f"Bearer {key['api_key']}"}
+            for bad in ("email@example.com", "api", "garbage",
+                        "urn:uuid:11111111-1111-4111-8111-111111111111"):
+                r = tc.get("/v1/sessions", headers=h,
+                           params={"actor_user_id": bad})
+                assert r.status_code == 422, (bad, r.text)
+        finally:
+            gen.close()
+
+    def test_display_resolution_called_once_per_request(self, tmp_path,
+                                                       monkeypatch):
+        """3 sessions with DISTINCT actors → the membership fetch
+        (_actor_display_map) is called EXACTLY ONCE per list request (never
+        per row)."""
+        import tortoise.hosted_api as ha_mod
+        gen = self._setup(tmp_path, "once")
+        sdk, tid, tc, proj = next(gen)
+        try:
+            key = sdk.apikey_create(tid, _2600_UUID_A)
+            h = {"Authorization": f"Bearer {key['api_key']}"}
+            third = "33333333-3333-4333-8333-333333333333"
+            calls: list[list[str]] = []
+            _orig = ha_mod._actor_display_map
+
+            def _spy(actor_ids, team_id):
+                calls.append(list(actor_ids))
+                return _orig(actor_ids, team_id)
+
+            monkeypatch.setattr(ha_mod, "_actor_display_map", _spy)
+            for i, uid in enumerate((_2600_UUID_A, _2600_UUID_B, third)):
+                self._seed_session(proj, f"s-rd-once-{i}", actor=uid,
+                                   created_at=f"2026-09-09T1{i}:00:00.000000+00:00")
+            r = tc.get("/v1/sessions", headers=h)
+            assert r.status_code == 200, r.text
+            assert len(calls) == 1, f"expected ONE display fetch, got {len(calls)}"
+            assert set(calls[0]) == {_2600_UUID_A, _2600_UUID_B, third}, calls
+        finally:
+            gen.close()
+
+    def test_legacy_all_null_suppresses_display_fetch(self, tmp_path,
+                                                      monkeypatch):
+        """All rows null-actor (the universal legacy state at ship time) →
+        the display helper is NOT fired at all; response stays 200 with
+        actor_display: null (the any-actor gate in the shared helper)."""
+        import tortoise.hosted_api as ha_mod
+        gen = self._setup(tmp_path, "legall")
+        sdk, tid, tc, proj = next(gen)
+        try:
+            key = sdk.apikey_create(tid, _2600_UUID_A)
+            h = {"Authorization": f"Bearer {key['api_key']}"}
+            calls = []
+            _orig = ha_mod._actor_display_map
+            monkeypatch.setattr(
+                ha_mod, "_actor_display_map",
+                lambda actor_ids, team_id: (
+                    calls.append(list(actor_ids)), _orig(actor_ids, team_id))[1])
+            for i in range(2):
+                self._seed_session(proj, f"s-rd-legall-{i}", actor=None,
+                                   created_at=f"2026-09-09T1{i}:00:00.000000+00:00")
+            r = tc.get("/v1/sessions", headers=h)
+            assert r.status_code == 200, r.text
+            # the any-actor gate lives at the CALLER too: a legacy-only row
+            # set never invokes the display helper (never a CP fetch)
+            assert calls == [], calls
+            for s in r.json()["sessions"]:
+                assert s["actor_display"] is None
+        finally:
+            gen.close()
+
+    def test_detail_carries_actor_and_display(self, tmp_path, monkeypatch):
+        """get_session_detail: attributed session carries actor_user_id +
+        harness + actor_display (raw id on registry); the shared display
+        helper is called exactly once (never N) — and NOT called at all on
+        a null-actor detail."""
+        import tortoise.hosted_api as ha_mod
+        gen = self._setup(tmp_path, "det")
+        sdk, tid, tc, proj = next(gen)
+        try:
+            key = sdk.apikey_create(tid, _2600_UUID_A)
+            h = {"Authorization": f"Bearer {key['api_key']}"}
+            now = "2026-09-09T12:00:00.000000+00:00"
+            self._seed_session(proj, "s-rd-det-a", actor=_2600_UUID_A,
+                               created_at=now, turn_count=2, harness="pi",
+                               with_claim=True)
+            self._seed_session(proj, "s-rd-det-leg", actor=None,
+                               created_at="2026-09-09T11:00:00.000000+00:00")
+            calls = []
+            _orig = ha_mod._actor_display_map
+            monkeypatch.setattr(
+                ha_mod, "_actor_display_map",
+                lambda actor_ids, team_id: (
+                    calls.append(list(actor_ids)), _orig(actor_ids, team_id))[1])
+            ra = tc.get("/v1/sessions/s-rd-det-a", headers=h)
+            assert ra.status_code == 200, ra.text
+            body = ra.json()
+            assert body["actor_user_id"] == _2600_UUID_A
+            assert body["harness"] == "pi"
+            assert body["actor_display"] == _2600_UUID_A
+            assert body["turns"] == 2 and body["extracted"] == 1
+            # attributed detail → helper called ONCE with that actor
+            assert calls == [[_2600_UUID_A]], calls
+            calls.clear()
+            rl = tc.get("/v1/sessions/s-rd-det-leg", headers=h)
+            assert rl.status_code == 200, rl.text
+            assert rl.json()["actor_user_id"] is None
+            assert rl.json()["actor_display"] is None
+            # null-actor detail → helper NOT called (any-actor gate)
+            assert calls == [], calls
+        finally:
+            gen.close()
+
+    def test_list_explain_index_seek_on_actor_filter(self, tmp_path):
+        """E2E-8 EXPLAIN bound: the actor-filtered read is a Node By Index
+        Scan on Session.actor_user_id (never an All Node Scan). FILTER-FIRST
+        probe shape (no ORDER BY — a tiny graph could otherwise
+        label-scan+sort). Literal-inlined predicate (in-repo EXPLAIN
+        convention — test_indexes.py)."""
+        gen = self._setup(tmp_path, "explain")
+        sdk, tid, tc, proj = next(gen)
+        try:
+            self._seed_session(proj, "s-rd-exp-a", actor=_2600_UUID_A,
+                               created_at="2026-09-09T12:00:00.000000+00:00")
+            self._seed_session(proj, "s-rd-exp-leg", actor=None,
+                               created_at="2026-09-09T11:00:00.000000+00:00")
+            plan = str(proj.g.explain(
+                "MATCH (s:Session {actor_user_id:'" + _2600_UUID_A +
+                "'}) RETURN s.id"))
+            assert "Node By Index Scan" in plan, plan
+            assert "All Node Scan" not in plan, plan
+            # REAL-QUERY drift pin: the parameterized list shape with the
+            # actor filter substituted (OPTIONAL MATCH + ORDER BY + LIMIT
+            # intact) — the actor predicate still plans as an index seek
+            # (the sort rides above it; on a tiny seeded graph the planner
+            # does not demote the seek).
+            real = str(proj.g.explain(
+                "MATCH (s:Session) WHERE s.actor_user_id = '" + _2600_UUID_A +
+                "' OPTIONAL MATCH (s)-[:CONTAINS]->(p:Point) "
+                "WHERE p.pointKind IN ['decision', 'statement'] "
+                "RETURN s.id, s.created_at, s.turn_count, count(p), "
+                "s.actor_user_id, s.harness "
+                "ORDER BY s.created_at DESC LIMIT 50"))
+            assert "Node By Index Scan" in real, real
+            assert "All Node Scan" not in real, real
+        finally:
+            gen.close()
+
+
+class TestActorDisplayMap2600:
+    """Direct unit coverage of the SHARED _actor_display_map helper — the
+    registry-lane HTTP tests above exercise only the raw-id branch (docker
+    CP has no membership email). These pin the SUPABASE email seam against
+    FakeControlPlane rows of the REAL team_members output shape, the
+    any-actor gate, and full fail-soft — without an HTTP round trip."""
+
+    def test_registry_lane_returns_empty(self, monkeypatch):
+        """is_supabase_enabled() False (registry CP / no creds) → {} always
+        (no email seam for members) → caller falls back to raw id."""
+        import tortoise.hosted_api as ha_mod
+        import tortoise.supabase_control as sc_mod
+        monkeypatch.setattr(sc_mod, "is_supabase_enabled", lambda: False)
+        assert ha_mod._actor_display_map([_2600_UUID_A], "team-x") == {}
+
+    def test_empty_actor_ids_never_touches_cp(self, monkeypatch):
+        """The any-actor gate: [] returns BEFORE any CP read (all-legacy row
+        sets never fire the fetch)."""
+        import tortoise.hosted_api as ha_mod
+        import tortoise.supabase_control as sc_mod
+        boom = RuntimeError("CP must not be touched for []")
+        monkeypatch.setattr(sc_mod, "is_supabase_enabled",
+                            lambda: (_ for _ in ()).throw(boom))
+        assert ha_mod._actor_display_map([], "team-x") == {}
+
+    def test_supabase_email_seam_real_shape(self, monkeypatch):
+        """FakeControlPlane rows of the REAL team_members output shape:
+        accepted-invite ACTIVE row that retained invited_email → email
+        shown; active row WITHOUT invited_email → not in map (raw id);
+        invite-pending row (user_id None) → filtered (raw id); unknown id →
+        not in map (raw id)."""
+        import tortoise.hosted_api as ha_mod
+        import tortoise.supabase_control as sc_mod
+        from tests.fake_control_plane import FakeControlPlane
+        fake = FakeControlPlane()
+        fake.seed("team_memberships", [
+            {"team_id": "team-x", "user_id": _2600_UUID_A, "identity": None,
+             "role": "owner", "status": "active",
+             "invited_email": "ada@example.com"},
+            {"team_id": "team-x", "user_id": _2600_UUID_B, "identity": None,
+             "role": "member", "status": "active", "invited_email": None},
+            {"team_id": "team-x", "user_id": None, "identity": "anon-1",
+             "role": "agent", "status": "invited",
+             "invited_email": "pending@example.com"},
+        ])
+        monkeypatch.setattr(sc_mod, "is_supabase_enabled", lambda: True)
+        monkeypatch.setattr(sc_mod, "get_control_plane", lambda: fake)
+        got = ha_mod._actor_display_map(
+            [_2600_UUID_A, _2600_UUID_B,
+             "33333333-3333-4333-8333-333333333333"], "team-x")
+        assert got == {_2600_UUID_A: "ada@example.com"}, got
+        # B (no email) + unknown id absent → caller falls back to raw id
+
+    def test_fail_soft_members_fetch_raising(self, monkeypatch):
+        """team_members raising (CP outage) → {} (never a doomed call, never
+        a 500) → caller falls back to raw id."""
+        import tortoise.hosted_api as ha_mod
+        import tortoise.supabase_control as sc_mod
+        monkeypatch.setattr(sc_mod, "is_supabase_enabled", lambda: True)
+        monkeypatch.setattr(sc_mod, "get_control_plane",
+                            lambda: (_ for _ in ()).throw(RuntimeError("cp down")))
+        assert ha_mod._actor_display_map([_2600_UUID_A], "team-x") == {}
+
+    def test_fail_soft_supabase_disabled_raise(self, monkeypatch):
+        """is_supabase_enabled itself raising (env flip mid-flight) → {}."""
+        import tortoise.hosted_api as ha_mod
+        import tortoise.supabase_control as sc_mod
+        monkeypatch.setattr(
+            sc_mod, "is_supabase_enabled",
+            lambda: (_ for _ in ()).throw(RuntimeError("mode flip")))
+        assert ha_mod._actor_display_map([_2600_UUID_A], "team-x") == {}
