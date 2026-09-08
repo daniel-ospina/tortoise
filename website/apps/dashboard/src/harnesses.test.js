@@ -87,8 +87,17 @@ test('DE2E-5: 4 self-install harnesses carry a config-write command + skill inst
     const cmd = UNIVERSAL_COMMAND[h](KEY)
     assert.match(cmd, /install-tortoise-skills\.sh/, `${h}: skill install line`)
     assert.match(cmd, /tortoise_health/, `${h}: tortoise_health verify`)
+  }
+  // Post-#593 (auto-complete on first agent write): the 3 key-config
+  // harnesses still hand off with the harness-connected checkpoint phrase;
+  // Pi's copy dropped the checkpoint ceremony (onboarding auto-completes on
+  // the first graph write) — it must end on the eager-connect verify instead.
+  for (const h of ['claude', 'codex', 'cursor']) {
+    const cmd = UNIVERSAL_COMMAND[h](KEY)
     assert.match(cmd, /harness-connected/, `${h}: harness-connected checkpoint`)
   }
+  assert.match(pi, /connected/, 'pi: connect verify sentence (no checkpoint ceremony)')
+  assert.ok(!pi.includes('harness-connected'), 'pi: checkpoint handoff copy removed (#593)')
 })
 
 test('DE2E-5: teach-human harnesses carry exact manual steps + verify handoff (Claude Desktop/Web)', () => {

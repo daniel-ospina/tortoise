@@ -70,19 +70,10 @@ codex mcp add tortoise --url ${cn} --bearer-token-env-var TORTOISE_API_KEY`,curs
 2. Create or merge .mcp.json in this project with:
 ${JSON.stringify(Gm,null,2)}
 3. Run: curl -fsSL ${Ai} | bash -s -- --harness pi
-4. Run '/reload' in Pi (or restart Pi) — Pi reads .mcp.json and skills at
-   startup; '/reload' re-scans them without a full restart.
-5. Run '/mcp connect tortoise' in Pi — connects the Tortoise MCP server
-   (lazy by default), then call tortoise_health — when it passes, tell me
-   "Tortoise is connected" and checkpoint harness-connected.
-6. Session capture (#1727 T1): recording is on by default (ToS-covered) —
-   switch it off anytime from the dashboard (Memory sources > Agent
-   sessions; the server returns a 409 while disabled). The extension fires
-   an install-probe on load (harness + timestamp only, no content) and
-   files sessions to Tortoise Cloud when capture is enabled. Backfill past
-   sessions with:
-   tortoise sessions import --harness pi --file <session.jsonl>
-   (local receipt written only on a 2xx).`,chatgpt:()=>sf},Ai="https://app.premiselabs.co/install-tortoise-skills.sh",_m={"claude-web":"Copy prompt",pi:"Copy prompt",codexDesktop:"Copy instructions",chatgpt:"Copy prompt"},jm={"claude-web":"I've pasted it — Continue →",chatgpt:"I've connected it — Continue →"},Sy={claude:`# Session capture (#1727 T1): recording is on by default (ToS-covered); the
+4. Reload Pi (run "/reload" — tortoise connects eagerly at startup).
+   Then call tortoise_health — when it passes, tell me "Tortoise is
+   connected". The first time you write a point or file a decision,
+   onboarding auto-completes (no separate ceremony needed).`,chatgpt:()=>sf},Ai="https://app.premiselabs.co/install-tortoise-skills.sh",_m={"claude-web":"Copy prompt",pi:"Copy prompt",codexDesktop:"Copy instructions",chatgpt:"Copy prompt"},jm={"claude-web":"I've pasted it — Continue →",chatgpt:"I've connected it — Continue →"},Sy={claude:`# Session capture (#1727 T1): recording is on by default (ToS-covered); the
 # hooks file every session to Tortoise Cloud unless switched off (Memory
 # sources > Agent sessions — the server returns a 409 while disabled).
 # Install from your Tortoise checkout:
@@ -164,13 +155,9 @@ curl -fsSL ${Ai} | bash -s -- --harness cursor
    env var, never the key):
 ${JSON.stringify(Gm,null,2)}
 3. Run: curl -fsSL ${Ai} | bash -s -- --harness pi
-4. Run '/reload' in Pi (or restart Pi) — Pi reads .mcp.json at startup;
-   '/reload' re-scans configs, skills, and MCP registrations without a full
-   restart.
-5. Run '/mcp connect tortoise' in Pi — connects the Tortoise MCP server
-   (lazy by default), then call tortoise_health — when it passes, tell me
-   "Tortoise is connected" and checkpoint harness-connected (I've set it
-   up — Continue on the dashboard covers it).`,"claude-desktop":u=>`# Tortoise — universal setup command (Claude Desktop — manual setup)
+4. Reload Pi (run "/reload" — tortoise connects eagerly at startup).
+   Then call tortoise_health — when it passes, tell me "Tortoise is
+   connected".`,"claude-desktop":u=>`# Tortoise — universal setup command (Claude Desktop — manual setup)
 # Claude Desktop has no local shell, so YOU complete the steps below, then the
 # agent verifies after:
 # 1. Open ~/Library/Application Support/Claude/claude_desktop_config.json
