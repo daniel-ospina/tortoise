@@ -223,7 +223,7 @@ the profile itself.
 | Cell classes | `battery/report/classify.py` `CLASSIFICATIONS` | STRONG / STRUCTURAL / PARITY / WEAK / `insufficient_n`. STRONG/WEAK margin = `classification-delta` 0.10 (thresholds.yaml cal) vs the best comparator arm. STRUCTURAL only where family ∈ `STRUCTURAL_FAMILIES` {R1, R4} **and** a4 actually won (a4 loss surfaces WEAK, never masked). `insufficient_n` = attempted-but-unmeasured cell (probe no-data sentinel) — reported, never dropped, never enters the verdict (no vacuous pass). |
 | Load-bearing flag | `battery/report/classify.py` `LOAD_BEARING_FAMILIES` | R1–R5, L1–L5, D3, D4 are load-bearing; L6, D2 are not (by code). The flag rides with each classified cell — never asserted in prose alone. |
 | Verdict outcomes | `battery/report/verdict.py` `VERDICTS` | UNIQUE / MECHANISM-NOT-UNIQUE / WEAK-UNMITIGATED / INCONCLUSIVE. INCONCLUSIVE branch is driven by `matched_recall` (`trigger_fired` AND `subset_pct` < 0.5) — §3.2.1. |
-| Report status | `profile.json` (plan §5) | `complete` \| `incomplete_missing_metrics` — incomplete blocks claim shipping; missing metrics are flagged, never fabricated. |
+| Report status | `profile.json` (plan §4 Data Model + §6 Interfaces) | `complete` \| `incomplete_missing_metrics` — incomplete blocks claim shipping; missing metrics are flagged, never fabricated. |
 
 Doc rows consume these vocabularies verbatim; any mismatch between this
 file and classify.py / verdict.py is drift and fails review.
