@@ -140,10 +140,11 @@ class TestTeamNameSanitization:
         assert result["name"] == "my-team_123"
         assert result["api_key"].startswith("tt_")
 
-    def test_team_name_with_spaces_rejected(self, sdk):
-        """Spaces are not allowed in team names."""
-        with pytest.raises(ValueError, match="alphanumeric"):
-            sdk.team_create("my team")
+    def test_team_name_with_spaces_allowed(self, sdk):
+        """Spaces are now allowed in team names."""
+        result = sdk.team_create("my team")
+        assert result["name"] == "my team"
+        assert result["api_key"].startswith("tt_")
 
     def test_team_name_with_special_chars_rejected(self, sdk):
         """Special characters are rejected."""

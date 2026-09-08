@@ -180,6 +180,14 @@ STATE_VALUE_CARVE_OUT = (
 # S2_TMPL / S4_TMPL). S1 (the story summarizer) deliberately does NOT get it
 # — S1 keeps the narrative register and a routine aside simply does not
 # change the story.
+#
+# #2424 RESIDUAL (clause-level): a sealed write-path run still leaked BOTH
+# wp03 distractors (d_01 + d_02) — the emission-level NOOP gates whole
+# candidates, so a routine aside that rides INSIDE the prose of an
+# otherwise-durable point slips through (a real point whose content also
+# carries "the on-call room has been quiet lately" as decoration). The
+# second paragraph below closes that hole at the same granularity the leak
+# takes: the CLAUSE, not the candidate.
 ANTI_ROUTINE_EXCLUSION = (
     "ANTI-ROUTINE EXCLUSION (true-but-routine content is a NOOP): routine "
     "operational asides, status-quo/banal remarks, filler, and small talk "
@@ -190,7 +198,25 @@ ANTI_ROUTINE_EXCLUSION = (
     "state, or belief? If only the moment is interesting it is a NOOP for "
     "memory — emit nothing. Do NOT emit such content to hang an operator on "
     "it (a routine aside gets no MITIGATES/NAND relevance attack — omit it "
-    "outright)."
+    "outright).\n"
+    "CLAUSE-LEVEL STRIP (an aside embedded in an otherwise-durable point's "
+    "prose is stripped — NEVER a whole point): the emission NOOP above "
+    "gates whole candidates; the strip below operates only on the PROSE of "
+    "a point you have already decided to emit. A durable candidate — a "
+    "decision, plan, goal, requirement, measurement, or entity-state change "
+    "— is ALWAYS emitted with its core, and NEVER skipped or emptied "
+    "because part of its context reads routine. Within an emitted point, "
+    "strip only genuine conversational decoration: status-quo/banal room "
+    "reports, small talk, non-load-bearing fillers ('we route alerts by "
+    "service ownership; the on-call room has been quiet lately' emits the "
+    "routing decision; the quiet-room clause is decoration, not content). "
+    "NEVER strip: the decision itself, its plan/scope, the entity or "
+    "subject it acts on, workload/roster state (someone pulling double "
+    "duty IS durable entity state), or concrete values — dates, deadlines, "
+    "targets, measurements stay EXACT under VALUE FIDELITY below (a "
+    "severity-preflight decision keeps its date; a migration plan keeps "
+    "'two sprints'). When in doubt, EMIT — the strip is for decoration "
+    "only, never for durable substance."
 )
 
 # #2453 companion (renders with ANTI_ROUTINE_EXCLUSION at the SAME
@@ -217,7 +243,9 @@ VALUE_FIDELITY_RULE = (
 def _s2s4_rules() -> str:
     """The shared rule block inserted at the {anti_routine} slot of the S2
     and S4 mapping prompts: the anti-routine NOOP gate (#2424) paired with
-    the value-fidelity rule (#2453). One source, both stages."""
+    the value-fidelity rule (#2453). One source, both stages. The #2424
+    residual clause-level strip (routine asides embedded in durable prose)
+    lives inside ANTI_ROUTINE_EXCLUSION, so it reaches both stages too."""
     return ANTI_ROUTINE_EXCLUSION + "\n\n" + VALUE_FIDELITY_RULE
 
 

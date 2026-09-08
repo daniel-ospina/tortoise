@@ -254,7 +254,7 @@ def test_fresh_session_login_renders_session_only_with_zero_mint(page: Page) -> 
 
 def test_welcome_mode_provisions_and_reveals_key_once(page: Page) -> None:
     """#1566/#2323: a first-timer (valid session, NO teams) lands on the
-    welcome card + W1 orientation — NOT auto-provisioned at mount (the
+    welcome card + W1 orientation removed — org-create is now step 0.
     mount-time provisioning was removed by #2323 Option B). The org-create
     step submit provisions in-app (tenant-provision → 201; the canonical
     delivery is the post-write membership poll → reveal_api_key RPC, atomic
@@ -345,11 +345,11 @@ def test_welcome_mode_provisions_and_reveals_key_once(page: Page) -> None:
 
     page.route("**/*", handle)
     page.goto(APP_HOST + "/", wait_until="domcontentloaded", timeout=30_000)
-    # #2323 (Option B): teamless first-timer → welcome card + orientation,
-    # no key anywhere yet.
+    # #2323 (Option B): teamless first-timer → welcome card (orientation
+    # removed per epic #2534), no key anywhere yet.
     expect(page.locator("body")).to_contain_text("Welcome to Tortoise", timeout=20_000)
     expect(page.locator("body")).not_to_contain_text("tt_welcome_key_1234567890abcdef")
-    page.get_by_role("button", name="Continue →").click()
+    # Orientation removed — directly on org-create step (was Step 1).
     expect(page.locator("body")).to_contain_text("Create your Organization", timeout=10_000)
     page.get_by_label("Organization name").fill("acme")
     expect(page.locator("body")).not_to_contain_text("tt_welcome_key_1234567890abcdef")
