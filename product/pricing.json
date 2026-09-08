@@ -136,8 +136,8 @@
   "annual_default": true,
   "license_self_hosted": "BSL 1.1 + $5M AUG (free <$5M trailing-12mo revenue); Mozilla Public License 2.0 (MPL-2.0) conversion after 4 years; hosted excluded from grant",
   "segments": {
-   "use": "Use Tortoise — memory for you and your team: connect your agents, remember decisions, MCP integration",
-   "build": "Build with Tortoise — embedded memory via API for your product: REST/MCP, per-team keys, usage-based pricing"
+   "use": "Use Tortoise — memory for you and your organization: connect your agents, remember decisions, MCP integration",
+   "build": "Build with Tortoise — embedded memory via API for your product: REST/MCP, per-organization keys, usage-based pricing"
   },
   "why_hosted": "No setup, no servers — your agents just work. Memory backed up and managed for you. Upgrade as you grow.",
   "overage_line": "$5 per additional 10k write ops",
