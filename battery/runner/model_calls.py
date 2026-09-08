@@ -39,21 +39,32 @@ class RealModelCaller:
     call the inner adapter's ``last_prompt_tokens`` /
     ``last_completion_tokens`` hold the per-call usage. Fail-closed when
     OPENROUTER_API_KEY is absent — a real caller is never a silent mock.
+
+    ``pin`` (a full model slug, default None): when given, the caller is
+    built from arms.yaml's ``resolve_pinned_model`` — the SAME resolution
+    the run's pre-flight validates — so the model that executes is never
+    pinned by coincidence (review #2604 P1: the hardcoded registry key
+    only matched the pin today). None => the decision-(a) registry default.
     """
 
-    def __init__(self, key_env: str = "OPENROUTER_API_KEY"):
+    def __init__(self, pin: str | None = None,
+                 key_env: str = "OPENROUTER_API_KEY"):
         import os
         if not os.environ.get(key_env):
             raise ConfigError(
                 f"RealModelCaller refuses to start: {key_env} absent "
                 f"(fail-closed — real model calls are spend-gated, never "
                 f"a silent mock)")
-        from tortoise import model_adapters
-        try:
-            self._real = model_adapters.MODELS["deepseek-flash"]()
-        except KeyError as e:  # pragma: no cover — registry drift guard
-            raise ConfigError(
-                "model_adapters.MODELS['deepseek-flash'] missing") from e
+        if pin:
+            from battery.config.arms import resolve_pinned_model
+            self._real = resolve_pinned_model(pin)
+        else:
+            from tortoise import model_adapters
+            try:
+                self._real = model_adapters.MODELS["deepseek-flash"]()
+            except KeyError as e:  # pragma: no cover — registry drift guard
+                raise ConfigError(
+                    "model_adapters.MODELS['deepseek-flash'] missing") from e
 
     @property
     def model_id(self) -> str:

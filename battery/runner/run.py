@@ -222,7 +222,8 @@ def _execute_real_episode(*, config: RunConfig, arm, scenario: Scenario,
         return ([ModelCallOutcome.FAILED], 0, [], {"error": "read-failed"})
 
     caller = (config.caller_factory() if config.caller_factory
-              else UsageRecordingCaller(RealModelCaller()))
+              else UsageRecordingCaller(RealModelCaller(
+                  pin=getattr(arm, "model_id", None))))
     render = render_reader_prompt(scenario.to_render_dict())
     # memory-context injection (Task 9 v1): the arm's retrieved memories are
     # the ONLY arm-to-arm difference in what the model sees — a0 retrieves
@@ -271,13 +272,20 @@ def _execute_real_episode(*, config: RunConfig, arm, scenario: Scenario,
                 continue
             if not claims:
                 break
+            # source credibility derives from the agent's stated confidence
+            # (review #2604 P2): a low-confidence claim is never filed at
+            # full 'high' strength — >=0.7 => high, else the medium default
+            # (never below the standard rung).
+            conf = env.stated_confidence if env.stated_confidence else 0.0
+            credibility = "high" if conf >= 0.7 else "medium"
             ref = None
             try:
                 ref = arm.record(
                     write_ctx,
                     Memory(id=f"s{idx}", content=env.position,
                            confidence=None, kind="nand",
-                           target_id=claims[0].id, credibility="high"))
+                           target_id=claims[0].id,
+                           credibility=credibility))
             except ArmUnavailable:
                 ref = None
             if ref:
