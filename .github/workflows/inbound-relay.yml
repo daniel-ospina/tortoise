@@ -75,6 +75,10 @@ jobs:
               title: issue.title,
               body: issue.body || '',
               reporter: issue.user.login,
+              actor: {
+                login: issue.user.login,
+                type: issue.user.type,
+              },
               labels: issue.labels.map(l => typeof l === 'string' ? l : l.name),
               url: issue.html_url,
               source_item_id: `issue-${issueNumber}`,
@@ -125,6 +129,10 @@ jobs:
               title: pr.title,
               body: pr.body || '',
               reporter: pr.user.login,
+              actor: {
+                login: pr.user.login,
+                type: pr.user.type,
+              },
               labels: pr.labels.map(l => l.name || l),
               url: pr.html_url,
               source_item_id: `pr-${prNumber}`,
@@ -164,6 +172,10 @@ jobs:
                 },
                 context_ref: issue.html_url,
                 reporter: issue.user.login,
+                actor: {
+                  login: issue.user.login,
+                  type: issue.user.type,
+                },
                 severity: null,
               };
             } else {
@@ -182,6 +194,10 @@ jobs:
                 },
                 context_ref: pr.html_url,
                 reporter: pr.user.login,
+                actor: {
+                  login: pr.user.login,
+                  type: pr.user.type,
+                },
                 severity: null,
               };
             }
