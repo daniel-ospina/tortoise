@@ -9709,8 +9709,15 @@ async def delete_graph(graph_id: str, team_id: str,
 async def _require_owner_admin_session(user: dict, team_id: str) -> None:
     """#2304: owner/admin membership gate for the trash surfaces (403
     otherwise). Session-only by construction — trash endpoints never accept
-    a key context."""
-    membership = await _membership_team(user.get("user_id") or "", team_id)
+    a key context. #2564 (re-audit P3): a control-plane transport outage
+    during the membership read surfaces as 503 control_plane_unavailable
+    (#2380), not a raw 500 with the internal seam message."""
+    try:
+        membership = await _membership_team(
+            user.get("user_id") or "", team_id)
+    except Exception as _exc:
+        _raise_503_if_cp_outage(_exc)
+        raise
     if membership is None or membership.get("role") not in ("owner", "admin"):
         raise HTTPException(
             status_code=403, detail="Requires owner or admin role in team")
@@ -9752,32 +9759,39 @@ async def _graph_row_probe(team_id: str, graph_id: str) -> dict | None:
         get_control_plane,
         is_supabase_enabled,
     )
-    if is_supabase_enabled():
-        rows = get_control_plane().query(
-            "graphs",
-            select=["kind", "status", "name", "namespace",
-                    "deleted_at", "purged_at"],
-            filters=[("id", "eq", graph_id), ("team_id", "eq", team_id)],
-        )
+    try:
+        if is_supabase_enabled():
+            rows = get_control_plane().query(
+                "graphs",
+                select=["kind", "status", "name", "namespace",
+                        "deleted_at", "purged_at"],
+                filters=[("id", "eq", graph_id),
+                         ("team_id", "eq", team_id)],
+            )
+            if not rows:
+                return None
+            r = rows[0]
+            return {"kind": r.get("kind"), "status": r.get("status"),
+                    "name": r.get("name"),
+                    "namespace": r.get("namespace"),
+                    "deleted_at": r.get("deleted_at"),
+                    "purged_at": r.get("purged_at")}
+        rows = sdk._get_registry().query(
+            "MATCH (g:Graph {id:$gid, team_id:$tid}) "
+            "RETURN g.kind, coalesce(g.status, 'active'), g.name, g.namespace, "
+            "g.deleted_at, g.purged_at",
+            params={"gid": graph_id, "tid": team_id},
+        ).result_set
         if not rows:
             return None
-        r = rows[0]
-        return {"kind": r.get("kind"), "status": r.get("status"),
-                "name": r.get("name"),
-                "namespace": r.get("namespace"),
-                "deleted_at": r.get("deleted_at"),
-                "purged_at": r.get("purged_at")}
-    rows = sdk._get_registry().query(
-        "MATCH (g:Graph {id:$gid, team_id:$tid}) "
-        "RETURN g.kind, coalesce(g.status, 'active'), g.name, g.namespace, "
-        "g.deleted_at, g.purged_at",
-        params={"gid": graph_id, "tid": team_id},
-    ).result_set
-    if not rows:
-        return None
-    return {"kind": rows[0][0], "status": rows[0][1],
-            "name": rows[0][2], "namespace": rows[0][3],
-            "deleted_at": rows[0][4], "purged_at": rows[0][5]}
+        return {"kind": rows[0][0], "status": rows[0][1],
+                "name": rows[0][2], "namespace": rows[0][3],
+                "deleted_at": rows[0][4], "purged_at": rows[0][5]}
+    except Exception as _exc:
+        # #2564 (re-audit P3): a control-plane outage during the probe must
+        # surface as 503 (#2380), not a raw 500.
+        _raise_503_if_cp_outage(_exc)
+        raise
 
 
 async def _rollback_restore_name_race(team_id: str, graph_id: str) -> None:
@@ -9821,25 +9835,30 @@ async def _trash_name_conflict(team_id: str, name: str,
     """True when a LIVE (non-deleted) graph already holds ``name`` — a
     restored graph must never duplicate an active display name (create-
     graph uniqueness among actives, #2304). The tombstone itself is
-    excluded by the self_gid comparison (it is deleted — never listed)."""
+    excluded by the self_gid comparison (it is deleted — never listed).
+    #2564: CP transport errors map to 503, not a raw 500."""
     sdk = _make_sdk(namespace="registry")
     from tortoise.supabase_control import (
         get_control_plane,
         is_supabase_enabled,
     )
-    if is_supabase_enabled():
-        rows = get_control_plane().query(
-            "graphs", select=["id"],
-            filters=[("team_id", "eq", team_id), ("name", "eq", name),
-                     ("status", "eq", "active")],
-        )
-        return any(r.get("id") != self_gid for r in rows)
-    rows = sdk._get_registry().query(
-        "MATCH (g:Graph {team_id:$tid, name:$name}) "
-        "RETURN g.id, coalesce(g.status, 'active')",
-        params={"tid": team_id, "name": name},
-    ).result_set
-    return any(r[0] != self_gid and r[1] != "deleted" for r in rows)
+    try:
+        if is_supabase_enabled():
+            rows = get_control_plane().query(
+                "graphs", select=["id"],
+                filters=[("team_id", "eq", team_id), ("name", "eq", name),
+                         ("status", "eq", "active")],
+            )
+            return any(r.get("id") != self_gid for r in rows)
+        rows = sdk._get_registry().query(
+            "MATCH (g:Graph {team_id:$tid, name:$name}) "
+            "RETURN g.id, coalesce(g.status, 'active')",
+            params={"tid": team_id, "name": name},
+        ).result_set
+        return any(r[0] != self_gid and r[1] != "deleted" for r in rows)
+    except Exception as _exc:
+        _raise_503_if_cp_outage(_exc)
+        raise
 
 
 @app.get("/v1/graphs/trash")
