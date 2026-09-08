@@ -9780,6 +9780,42 @@ async def _graph_row_probe(team_id: str, graph_id: str) -> dict | None:
             "deleted_at": rows[0][4], "purged_at": rows[0][5]}
 
 
+async def _rollback_restore_name_race(team_id: str, graph_id: str) -> None:
+    """#2468: roll a just-restored row back to the trash when a concurrent
+    create won the name (registry lane — no unique index, so the flip
+    succeeded and left two live rows sharing a name). Best-effort with loud
+    logging: the endpoint already 409s; the rollback restores the invariant
+    (never leave duplicate live names). The deleted_at stamp restarts the
+    recovery window."""
+    sdk = _make_sdk(namespace="registry")
+    now = datetime.now(UTC).isoformat()
+    try:
+        from tortoise.supabase_control import (
+            get_control_plane,
+            is_supabase_enabled,
+        )
+        if is_supabase_enabled():
+            get_control_plane().query(
+                "graphs", method="PATCH",
+                filters=[("id", "eq", graph_id),
+                         ("team_id", "eq", team_id)],
+                json_body={"status": "deleted", "deleted_at": now,
+                           "purged_at": None, "purged_residual": False},
+            )
+        else:
+            sdk._get_registry().query(
+                "MATCH (g:Graph {id:$gid, team_id:$tid}) "
+                "SET g.status = 'deleted', g.deleted_at = $ts "
+                "REMOVE g.purged_at, g.purged_residual",
+                params={"gid": graph_id, "tid": team_id, "ts": now},
+            )
+    except Exception:
+        _logger.error(
+            "restore-name-race rollback failed for team=%s graph=%s "
+            "(duplicate live name possible — operator check)",
+            team_id, graph_id, exc_info=True)
+
+
 async def _trash_name_conflict(team_id: str, name: str,
                                self_gid: str) -> bool:
     """True when a LIVE (non-deleted) graph already holds ``name`` — a
@@ -9938,13 +9974,29 @@ async def _restore_trash_graph_locked(request: Request, user: dict,
         get_control_plane,
         is_supabase_enabled,
     )
-    if is_supabase_enabled():
-        from tortoise.supabase_control import restore_graph as sb_restore
-        restored = await asyncio.to_thread(
-            sb_restore, get_control_plane(), team_id, graph_id)
-    else:
-        restored = await asyncio.to_thread(sdk.graph_restore, team_id,
-                                           graph_id)
+    try:
+        if is_supabase_enabled():
+            from tortoise.supabase_control import restore_graph as sb_restore
+            restored = await asyncio.to_thread(
+                sb_restore, get_control_plane(), team_id, graph_id)
+        else:
+            restored = await asyncio.to_thread(sdk.graph_restore, team_id,
+                                               graph_id)
+    except RuntimeError as e:
+        # #2468: a concurrent create landing the freed name between the
+        # pre-check and the flip trips the partial unique index on the
+        # SUPABASE lane (uq_graphs_team_name_active → PostgREST 409 →
+        # RuntimeError "... HTTP 409" — cp.query() does NOT carry the
+        # PostgREST body, so the match keys on the status line, mirroring
+        # create_graph / invitation_mint conventions). Map to the
+        # client-facing 409 instead of a 500.
+        if is_supabase_enabled() and "HTTP 409" in str(e):
+            raise HTTPException(
+                status_code=409,
+                detail=f"The name {name!r} was taken by a concurrent create "
+                       "— rename the other graph or try the restore again") \
+                from None
+        raise
     if not restored:
         # Still reachable only if the row flipped between the probe and the
         # flip despite the lock (lane-level anomaly) — refuse loudly.
@@ -9952,6 +10004,15 @@ async def _restore_trash_graph_locked(request: Request, user: dict,
             status_code=410,
             detail="Graph was purged before the restore completed — not "
                    "restorable")
+    # #2468 (registry lane — no unique index): a create that raced the flip
+    # succeeded, leaving TWO live graphs sharing the name. Roll our row back
+    # to the trash (never leave duplicate live names) and 409 with a retry.
+    if name and await _trash_name_conflict(team_id, name, graph_id):
+        await _rollback_restore_name_race(team_id, graph_id)
+        raise HTTPException(
+            status_code=409,
+            detail=f"The name {name!r} was taken by a concurrent create — "
+                   "rename the other graph or try the restore again")
     _acl_user_create_hook(graph_id, team_id)
     await _async_audit_trash_restore(request, user, team_id, graph_id)
     return {"graph_id": graph_id, "status": "restored",
