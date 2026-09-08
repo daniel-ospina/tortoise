@@ -58,26 +58,39 @@ import pytest
 import tools.longmem_eval.ingest  # noqa: F401
 from tortoise.sdk import TortoiseSDK
 
-# ── Live-FalkorDB availability (the FTS backend the loop needs) ────────────
-_URI = os.environ.get(
-    "TORTOISE_DB_URI",
-    "docker://:falkordb@localhost:6379/tortoise_test_matrix").rstrip("/")
-FALKORDB_AVAILABLE = False
-_OLD_URI = os.environ.get("TORTOISE_DB_URI")
-try:
-    os.environ["TORTOISE_DB_URI"] = f"{_URI}_probe"
-    from tortoise.sdk import TortoiseSDK as _ProbeSDK
-    _probe = _ProbeSDK()
-    _probe._get_proj().g.query("RETURN 1")
-    _probe.close()
-    FALKORDB_AVAILABLE = True
-except Exception:
-    FALKORDB_AVAILABLE = False
-finally:
-    if _OLD_URI is not None:
-        os.environ["TORTOISE_DB_URI"] = _OLD_URI
-    else:
-        os.environ.pop("TORTOISE_DB_URI", None)
+
+# ── Live-FalkorDB availability (the FTS backend the loop needs) ────────
+def _falkordb_available() -> bool:
+    """Probe a live FalkorDB; reads TORTOISE_DB_URI at CALL time so the
+    module never captures it at import (#221 test-isolation lint)."""
+    uri = os.environ.get(
+        "TORTOISE_DB_URI",
+        "docker://:falkordb@localhost:6379/tortoise_test_matrix").rstrip("/")
+    old = os.environ.get("TORTOISE_DB_URI")
+    try:
+        os.environ["TORTOISE_DB_URI"] = f"{uri}_probe"
+        from tortoise.sdk import TortoiseSDK as _ProbeSDK
+        _probe = _ProbeSDK()
+        _probe._get_proj().g.query("RETURN 1")
+        _probe.close()
+        return True
+    except Exception:
+        return False
+    finally:
+        if old is not None:
+            os.environ["TORTOISE_DB_URI"] = old
+        else:
+            os.environ.pop("TORTOISE_DB_URI", None)
+
+
+FALKORDB_AVAILABLE = _falkordb_available()
+
+
+def _uri() -> str:
+    """Current TORTOISE_DB_URI (or the default), read at CALL time."""
+    return os.environ.get(
+        "TORTOISE_DB_URI",
+        "docker://:falkordb@localhost:6379/tortoise_test_matrix").rstrip("/")
 
 pytestmark = pytest.mark.skipif(
     not FALKORDB_AVAILABLE, reason="Live FalkorDB (Docker) not available")
@@ -101,7 +114,7 @@ def _fresh_uri() -> str:
     """A dedicated per-test graph on the docker server — fresh indexes and
     an empty graph make the differential hermetic (no leftovers from other
     tests in the shared matrix can seed anchors or pollute the pool)."""
-    return f"{_URI}_{uuid.uuid4().hex[:10]}"
+    return f"{_uri()}_{uuid.uuid4().hex[:10]}"
 
 
 @pytest.fixture(autouse=True)
