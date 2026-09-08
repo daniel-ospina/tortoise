@@ -6,6 +6,7 @@ surfaces:
   - test_abuse_integration.py
   - test_acl_graph_users.py   # C4 #2113: per-graph FalkorDB ACL layer (docker-lane; skipif no URI)
   - test_battery_corpus_v11.py
+  - test_battery_ep_outcome.py
   - test_battery_lane_matrix.py
   - test_battery_loader_fidelity.py
   - test_battery_parity_hash.py

@@ -126,8 +126,14 @@ class A4TortoiseArm:
         draft/terminal filtering per product semantics. The probe query is
         the episode's own user message when present, else the scenario's
         primary planted claim (the everyday "what do I know about X" read).
-        Memory.confidence stays None until Task 4 fills EP means. Raises
-        ArmUnavailable on failure (never partial memories).
+        Memory.confidence = the claim's EP posterior mean (row.ep.
+        confidence_mean) — never None on the real path (uncalibrated rows
+        fall back to the product's documented neutral 0.5). Operator ids
+        surfaced by the state read's nands/arguments attachments are
+        emitted as operator-kind Memories (content = the attached edge
+        label when given, else "") so the WRITE closed set can carry
+        operators for #901 mitigate routing. Raises ArmUnavailable on
+        failure (never partial memories).
         """
         sdk = self._sdk(context.scenario)
         try:
@@ -138,6 +144,7 @@ class A4TortoiseArm:
             results = sdk.recall_state(
                 query=query or None, kind=None, limit=20)
             out: list[Memory] = []
+            seen_op_ids: set[str] = set()
             for row in results or []:
                 if not isinstance(row, dict):
                     continue
@@ -153,12 +160,96 @@ class A4TortoiseArm:
                 rid = str(row.get("id") or "")
                 if not rid:
                     continue
+                ep = row.get("ep") if isinstance(row.get("ep"), dict) else {}
+                mean = ep.get("confidence_mean")
+                confidence = (float(mean) if isinstance(mean, (int, float))
+                              else 0.5)
+                confidence = max(0.0, min(1.0, confidence))
                 out.append(Memory(
-                    id=rid, content=content, confidence=None,
+                    id=rid, content=content, confidence=confidence,
                     kind=_CLAIM_MEMORY_KIND))
+                # Operator attachments (contested/high-contention rows carry
+                # them) → the write closed set.
+                for key in ("nands", "arguments"):
+                    for att in (row.get(key) or []):
+                        oid = att.get("id") if isinstance(att, dict) else None
+                        if not oid or oid in seen_op_ids:
+                            continue
+                        seen_op_ids.add(oid)
+                        out.append(Memory(
+                            id=str(oid), content="", confidence=None,
+                            kind="operator"))
             return out
         except Exception as e:  # noqa: BLE001, RUF100
             raise ArmUnavailable(f"a4 graph read: {e}") from e
+
+    # ── ep_outcome terminal table (#2291 I-4) ───────────────────────────
+    def ep_terminal_outcome(self, scenario: Scenario, *,
+                            variance_threshold: float = 0.04) -> dict:
+        """Honest episode-end terminal outcome over the product EP engine.
+
+        Derivation rules (plan §1; review P1-4/P2-5):
+        - decisive = compute_confidence returns a NON-EMPTY affected set AND
+          no vacuous diagnostic — an empty affected set is NEVER decisive
+          (derived from the public return, never private state).
+        - contested = MAX per-claim posterior variance over the affected set
+          EXCEEDS ``variance_threshold`` ([cal] ep-variance row passed
+          explicitly) — NON-DECISIVE BY CONSTRUCTION even when the engine
+          converged (mechanism convergence != decisiveness); numeric
+          converged + variance retained.
+        - decide cap (DECIDE_CYCLES_CAP) reached ⇒ the process stopped —
+          never forced CONVERGED: outcome undec (loopy scenario) or
+          non_converged, unless contested (state persists, capped flag set).
+        - engine non-convergence ⇒ undec (loopy/graph_script scenario, per
+          task_type tie-break) or non_converged. NOTE (probe 2026-09-07):
+          the damped embedded engine converges the authored lp NAND
+          triangles (iterations 13, converged=true) — the engine-diagnostic
+          undec leg is currently UNREACHABLE on the committed corpus; undec
+          is reached honestly via the decide-cap path. Never forced.
+
+        Returns {outcome, converged, iterations, max_variance,
+        affected_count, decide_cycles, capped}. Consumers (Task-8 liveness,
+        verify-at-scope, R3 scorer) read DECISIVE within-row outcomes only.
+        """
+        sdk = self._sdk(scenario)
+        cc = sdk.compute_confidence(
+            factors=None, anchors=_live_claim_ids(sdk, scenario))
+        conf = cc.get("confidences") or {}
+        diagnostic = cc.get("diagnostic")
+        converged = bool(cc.get("converged"))
+        iterations = int(cc.get("iterations") or 0)
+        vacuous = (not conf) or bool(diagnostic)
+        variances = {}
+        for cid, entry in conf.items():
+            if isinstance(entry, dict) and entry.get("variance") is not None:
+                try:
+                    variances[cid] = float(entry["variance"])
+                except (TypeError, ValueError):  # noqa: PERF203
+                    continue
+        max_var = max(variances.values(), default=0.0)
+        affected = len(conf)
+        decide = self.decide_cycles
+        capped = decide >= DECIDE_CYCLES_CAP and decide > 0
+        if decide == 0 and affected == 0:
+            outcome = "no-op"
+        elif max_var > float(variance_threshold):
+            outcome = "contested"  # non-decisive BY CONSTRUCTION
+        elif capped:
+            outcome = "undec" if _is_loopy(scenario) else "non_converged"
+        elif not converged:
+            outcome = "undec" if _is_loopy(scenario) else "non_converged"
+        elif vacuous:
+            # converged but no decisive affected set — mechanism convergence
+            # with no epistemic movement is never CONVERGED.
+            outcome = "undec" if _is_loopy(scenario) else "non_converged"
+        else:
+            outcome = "converged"
+        return {
+            "outcome": outcome, "converged": converged,
+            "iterations": iterations, "max_variance": max_var,
+            "affected_count": affected, "decide_cycles": decide,
+            "capped": capped,
+        }
 
     # ── record ──────────────────────────────────────────────────────────
     def record(self, context: AgentContext, item: Memory) -> None:
@@ -237,6 +328,37 @@ class A4TortoiseArm:
             except Exception:  # noqa: BLE001, RUF100
                 pass
         self._sdk_by_id = {}
+
+
+def _live_claim_ids(sdk, scenario: Scenario) -> list[str]:
+    """Live claim ids for the terminal-table EP run (the decide anchors).
+    Read via the product state surface (recall_state), never raw queries."""
+    try:
+        probe = _scenario_probe_query(scenario) or None
+        rows = sdk.recall_state(query=probe, kind=None, limit=50)
+        out = []
+        for r in rows or []:
+            if not isinstance(r, dict):
+                continue
+            if r.get("entity_type") != "point" or r.get("is_operator"):
+                continue
+            c = str(r.get("content") or "")
+            if not c or _is_seed_manifest(c) or c.startswith("[MITIGATION]"):
+                continue
+            rid = str(r.get("id") or "")
+            if rid:
+                out.append(rid)
+        return out
+    except Exception:  # noqa: BLE001, RUF100
+        return []
+
+
+def _is_loopy(scenario: Scenario) -> bool:
+    """task_type tie-break: loopy/graph_script scenarios classify
+    non-convergence as undec (never forced CONVERGED); other scenarios as
+    non_converged."""
+    tt = getattr(scenario, "task_type", None)
+    return bool(tt == "loopy" or getattr(scenario, "graph_script", None))
 
 
 def _scenario_probe_query(scenario: Scenario) -> str:
