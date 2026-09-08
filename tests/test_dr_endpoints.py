@@ -183,6 +183,98 @@ class TestDrStatus:
         assert ls["graph_error_streaks"] == {"team_x:g_a": 2}
 
 
+class TestDrLock:
+    """#2319: /status lock block + /v1/internal/backups/verify-lock."""
+
+    def test_status_lock_block_absent_when_disabled(self, client, mem_storage):
+        r = client.get("/v1/internal/backups/status", headers=INTERNAL_HEADERS)
+        assert r.status_code == 200
+        assert r.json()["lock"] is None  # no surface change until lock is on
+
+    def test_status_lock_unverifiable_without_token(self, client, dr_env, mem_storage, monkeypatch):
+        monkeypatch.setenv("BACKUP_LOCK_ENABLED", "true")
+        monkeypatch.setenv("BACKUP_LOCK_DAYS", "3")
+        r = client.get("/v1/internal/backups/status", headers=INTERNAL_HEADERS)
+        assert r.status_code == 200
+        lock = r.json()["lock"]
+        assert lock["enabled"] is True
+        assert lock["expected_days"] == 3
+        assert lock["prefix"] == "backups/"
+        assert lock["status"] == "unverifiable"  # no CF_API_TOKEN → runbook path
+
+    def test_verify_lock_absent_when_not_enabled(self, client, dr_env, mem_storage):
+        r = client.post("/v1/internal/backups/verify-lock", headers=INTERNAL_HEADERS, json={})
+        assert r.status_code == 200
+        assert r.json()["status"] == "absent"
+        assert r.json()["enabled"] is False
+
+    def test_verify_lock_verified_with_token_and_rule(
+            self, client, dr_env, mem_storage, monkeypatch):
+        monkeypatch.setenv("BACKUP_LOCK_ENABLED", "true")
+        monkeypatch.setenv("BACKUP_LOCK_DAYS", "3")
+        monkeypatch.setenv("CF_API_TOKEN", "cf-token")
+        import tortoise.hosted_backup as hb
+
+        rules = [{"id": "backups-lock-3d", "enabled": True, "prefix": "backups/",
+                  "condition": {"type": "Age", "maxAgeSeconds": 3 * 86400}}]
+        monkeypatch.setattr(
+            hb, "_lock_rules_http_get",
+            lambda url, headers, timeout: {"success": True, "result": {"rules": rules}})
+        r = client.post("/v1/internal/backups/verify-lock", headers=INTERNAL_HEADERS, json={})
+        assert r.status_code == 200
+        body = r.json()
+        assert body["status"] == "verified"
+        assert body["enabled"] is True
+        assert body["bucket"] == "tortoise-backups"
+
+    def test_verify_lock_reports_drift_and_unverifiable(
+            self, client, dr_env, mem_storage, monkeypatch):
+        monkeypatch.setenv("BACKUP_LOCK_ENABLED", "true")
+        monkeypatch.setenv("BACKUP_LOCK_DAYS", "3")
+        monkeypatch.setenv("CF_API_TOKEN", "cf-token")
+        import tortoise.hosted_backup as hb
+
+        # rule shorter than the contract window → drift
+        monkeypatch.setattr(
+            hb, "_lock_rules_http_get",
+            lambda url, headers, timeout: {"success": True, "result": {"rules": [
+                {"id": "r", "enabled": True, "prefix": "backups/",
+                 "condition": {"type": "Age", "maxAgeSeconds": 86400}}]}})
+        r = client.post("/v1/internal/backups/verify-lock", headers=INTERNAL_HEADERS, json={})
+        assert r.json()["status"] == "drift"
+
+        # transport failure → unverifiable (never 500, never blocks backups)
+        def boom(url, headers, timeout):
+            from tortoise.hosted_backup import LockVerificationError
+            raise LockVerificationError("cannot read R2 bucket-lock rules: boom")
+
+        monkeypatch.setattr(hb, "_lock_rules_http_get", boom)
+        r = client.post("/v1/internal/backups/verify-lock", headers=INTERNAL_HEADERS, json={})
+        assert r.status_code == 200
+        assert r.json()["status"] == "unverifiable"
+
+    def test_verify_lock_override_target_store(
+            self, client, dr_env, mem_storage, monkeypatch):
+        """The body {account_id, bucket} override lets the runbook check the
+        mirror store with the same rule contract."""
+        monkeypatch.setenv("BACKUP_LOCK_ENABLED", "true")
+        monkeypatch.setenv("CF_API_TOKEN", "cf-token")
+        import tortoise.hosted_backup as hb
+
+        seen = {}
+        monkeypatch.setattr(
+            hb, "_lock_rules_http_get",
+            lambda url, headers, timeout: (seen.update(url=url) or
+                                           {"success": True, "result": {"rules": []}}))
+        r = client.post(
+            "/v1/internal/backups/verify-lock", headers=INTERNAL_HEADERS,
+            json={"account_id": "mirror-acct", "bucket": "tortoise-backups-mirror"})
+        assert r.status_code == 200
+        assert r.json()["bucket"] == "tortoise-backups-mirror"
+        assert "mirror-acct" in seen["url"]
+        assert r.json()["status"] == "absent"  # empty rules → absent
+
+
 class TestDrSimulate:
     def test_simulate_403_when_disabled(self, client, dr_env, mem_storage):
         r = client.post("/v1/internal/backups/simulate-stale", headers=INTERNAL_HEADERS)

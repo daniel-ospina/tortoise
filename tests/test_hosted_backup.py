@@ -20,17 +20,22 @@ import pytest
 
 from tortoise.hosted_backup import (
     DUMP_FORMAT,
+    LockVerificationError,
     MemoryStorage,
     R2Storage,
     RestoreVerificationError,
     create_backup,
     decrypt_backup,
     dump_graph,
+    effective_lock_seconds,
     encrypt_backup,
+    fetch_r2_bucket_lock_rules,
     list_backups,
+    mirror_backup,
     prune_backups,
     restore_backup,
     restore_graph,
+    verify_bucket_lock,
 )
 from tortoise.projection import FalkorProjection
 
@@ -2106,3 +2111,253 @@ def test_prune_per_graph_isolation_and_legacy_team_pool():
     # legacy flat artifact is gone; nested keys were not cross-deleted
     assert sorted(list_backups(store, "team_x"), key=lambda m: m["backup_id"])[0]["backup_id"].startswith("team_x/g_a/")
     assert len(list_backups(store, "team_x")) == 2
+
+
+# ── #2319 bucket-lock immutability + second-region mirror ───────────────────
+
+
+class _LockedPrefixStorage(MemoryStorage):
+    """MemoryStorage that refuses deletes under one prefix — simulates an R2
+    bucket-lock retention rule (delete/overwrite blocked inside the window,
+    403 AccessDenied / R2 10069 ObjectLockedByBucketPolicy)."""
+
+    def __init__(self, locked_prefix: str) -> None:
+        super().__init__()
+        self._locked_prefix = locked_prefix
+        self.locked_delete_attempts = 0
+
+    def delete(self, key: str) -> None:
+        if key.startswith(self._locked_prefix):
+            self.locked_delete_attempts += 1
+            raise RuntimeError(
+                "An error occurred (403) when calling the DeleteObject "
+                "operation: AccessDenied — object is protected by a bucket "
+                "lock rule (10069 ObjectLockedByBucketPolicy)"
+            )
+        super().delete(key)
+
+
+class _CorruptingReadbackStorage(MemoryStorage):
+    """Mirror store whose dump read-back returns corrupted bytes (detects
+    whether mirror_backup actually verifies the copy)."""
+
+    def download(self, key: str) -> bytes:
+        data = super().download(key)
+        if key.endswith("dump.enc"):
+            return data + b"CORRUPT"
+        return data
+
+
+def test_prune_tolerates_locked_objects_and_keeps_pruning():
+    """#2319: a bucket-lock rule blocks deletion inside the window; the prune
+    must skip the locked object (retried after the window expires) and STILL
+    prune the rest of the pool — a locked object never wedges retention."""
+    store = _LockedPrefixStorage(locked_prefix="")
+    team_id = "team_z"
+    ids = _seed_old_backups(store, team_id, [30, 37, 44, 51, 58, 65])
+    # 4 weekly anchors kept (30/37/44/51); 58 and 65 are the candidates.
+    store._locked_prefix = f"backups/{ids[65]}/"
+
+    deleted = prune_backups(store, team_id, keep_daily=7, keep_weekly=4)
+
+    # the unlocked candidate was pruned; the locked one was skipped + logged
+    assert deleted == [ids[58]]
+    assert store.locked_delete_attempts >= 1
+    remaining = [k for k in store.list(f"backups/{team_id}/")
+                 if k.endswith("manifest.json")]
+    assert len(remaining) == 5  # 4 anchors + the still-locked 65
+    assert any(ids[65] in k for k in remaining)
+
+
+def test_prune_zero_windows_tolerates_locked_deletes():
+    """Even a zero-window prune (delete EVERYTHING) must not raise when some
+    objects are locked — the unlocked ones go, locked ones stay for later."""
+    store = _LockedPrefixStorage(locked_prefix="")
+    team_id = "team_l"
+    ids = _seed_old_backups(store, team_id, [5, 10, 15])
+    store._locked_prefix = f"backups/{ids[10]}/"
+
+    deleted = prune_backups(store, team_id, keep_daily=0, keep_weekly=0,
+                            keep_hourly=0)
+
+    assert sorted(deleted) == sorted([ids[5], ids[15]])
+    remaining = [k for k in store.list(f"backups/{team_id}/")]
+    # only the locked pair survives
+    assert len(remaining) == 2
+    assert all(ids[10] in k for k in remaining)
+
+
+def test_is_locked_delete_error_classification():
+    from tortoise.hosted_backup import _is_locked_delete_error
+
+    assert _is_locked_delete_error(RuntimeError("403 AccessDenied — bucket lock"))
+    assert _is_locked_delete_error(RuntimeError("10069 ObjectLockedByBucketPolicy"))
+    assert _is_locked_delete_error(RuntimeError("access denied ... protected"))
+    assert not _is_locked_delete_error(RuntimeError("connection reset by peer"))
+    assert not _is_locked_delete_error(RuntimeError("503 slow down"))
+
+
+def test_mirror_backup_copies_and_sha256_verifies():
+    primary = MemoryStorage()
+    mirror = MemoryStorage()
+    blob = b"encrypted-dump-blob"
+    sha = hashlib.sha256(blob).hexdigest()
+    bid = "team_m/20260101T000000Z_abcd"
+    primary.upload(f"backups/{bid}/dump.enc", blob)
+    primary.upload(f"backups/{bid}/manifest.json", json.dumps({
+        "backup_id": bid, "team_id": "team_m", "graph_name": "tortoise",
+        "created_at": "2026-01-01T00:00:00+00:00", "node_count": 3,
+        "edge_count": 1, "sha256": sha, "format": DUMP_FORMAT,
+    }).encode(), content_type="application/json")
+
+    res = mirror_backup(primary, mirror, bid)
+
+    assert res["verified"] is True
+    assert res["backup_id"] == bid
+    assert mirror.download(f"backups/{bid}/dump.enc") == blob
+    assert json.loads(mirror.download(f"backups/{bid}/manifest.json"))["sha256"] == sha
+
+
+def test_mirror_backup_detects_corrupted_readback():
+    """The mirror copy is read-back verified against the manifest sha256 — a
+    store that corrupts the copy must fail loudly (never a silent false-OK)."""
+    primary = MemoryStorage()
+    blob = b"encrypted-dump-blob"
+    sha = hashlib.sha256(blob).hexdigest()
+    bid = "team_m/20260101T000000Z_abcd"
+    primary.upload(f"backups/{bid}/dump.enc", blob)
+    primary.upload(f"backups/{bid}/manifest.json", json.dumps({
+        "backup_id": bid, "team_id": "team_m", "graph_name": "tortoise",
+        "created_at": "2026-01-01T00:00:00+00:00", "node_count": 3,
+        "edge_count": 1, "sha256": sha, "format": DUMP_FORMAT,
+    }).encode())
+
+    with pytest.raises(RuntimeError, match="sha256 mismatch"):
+        mirror_backup(primary, _CorruptingReadbackStorage(), bid)
+
+
+def test_mirror_backup_requires_manifest_sha256():
+    primary = MemoryStorage()
+    bid = "team_m/20260101T000000Z_abcd"
+    primary.upload(f"backups/{bid}/dump.enc", b"blob")
+    primary.upload(f"backups/{bid}/manifest.json",
+                   json.dumps({"backup_id": bid}).encode())
+
+    with pytest.raises(RuntimeError, match="sha256 missing"):
+        mirror_backup(primary, MemoryStorage(), bid)
+
+
+def test_effective_lock_seconds_prefix_coverage():
+    age3 = {"enabled": True, "prefix": "backups/",
+            "condition": {"type": "Age", "maxAgeSeconds": 3 * 86400}}
+    # a rule for another prefix does NOT cover backups/
+    other = {"enabled": True, "prefix": "logs/",
+             "condition": {"type": "Age", "maxAgeSeconds": 90 * 86400}}
+    assert effective_lock_seconds([age3]) == 3 * 86400
+    assert effective_lock_seconds([other]) is None
+    assert effective_lock_seconds([other, age3]) == 3 * 86400
+    # the empty prefix rule covers everything
+    all_bucket = {"enabled": True, "prefix": "",
+                  "condition": {"type": "Age", "maxAgeSeconds": 86400}}
+    assert effective_lock_seconds([all_bucket]) == 86400
+    # strictest of several covering rules wins
+    assert effective_lock_seconds([
+        {"enabled": True, "prefix": "backups/",
+         "condition": {"type": "Age", "maxAgeSeconds": 86400}},
+        age3]) == 3 * 86400
+
+
+def test_effective_lock_seconds_modes_and_disabled():
+    assert effective_lock_seconds([]) is None
+    assert effective_lock_seconds(None) is None
+    # disabled rules never lock
+    disabled = {"enabled": False, "prefix": "backups/",
+                "condition": {"type": "Age", "maxAgeSeconds": 999 * 86400}}
+    assert effective_lock_seconds([disabled]) is None
+    # Indefinite covers → infinite retention
+    indefinite = {"enabled": True, "prefix": "backups/",
+                  "condition": {"type": "Indefinite"}}
+    assert effective_lock_seconds([indefinite]) == float("inf")
+    # malformed rules are skipped, not fatal
+    assert effective_lock_seconds(
+        [{"enabled": True, "prefix": "backups/", "condition": "bogus"}]) is None
+    assert effective_lock_seconds(
+        [{"enabled": True, "prefix": "backups/",
+          "condition": {"type": "Age", "maxAgeSeconds": "NaN"}}]) is None
+
+
+def test_verify_bucket_lock_statuses():
+    rule = {"enabled": True, "prefix": "backups/",
+            "condition": {"type": "Age", "maxAgeSeconds": 5 * 86400}}
+    # absent — no rule covers the protected prefix
+    assert verify_bucket_lock([], expected_days=3)["status"] == "absent"
+    assert verify_bucket_lock(
+        [{"enabled": True, "prefix": "ops/",
+          "condition": {"type": "Age", "maxAgeSeconds": 999 * 86400}}],
+        expected_days=3)["status"] == "absent"
+    # drift — retention below the contract window (the #2319 alarm state)
+    drift = verify_bucket_lock(
+        [{"enabled": True, "prefix": "backups/",
+          "condition": {"type": "Age", "maxAgeSeconds": 86400}}],
+        expected_days=3)
+    assert drift["status"] == "drift"
+    assert drift["retention_days"] == 1.0
+    # verified — meets the expected window
+    assert verify_bucket_lock([rule], expected_days=3)["status"] == "verified"
+    # infinite retention also verifies
+    assert verify_bucket_lock(
+        [{"enabled": True, "prefix": "backups/",
+          "condition": {"type": "Indefinite"}}],
+        expected_days=3)["status"] == "verified"
+
+
+def test_fetch_lock_rules_parses_payload(monkeypatch):
+    from tortoise import hosted_backup as hb
+
+    rules = [{"id": "r1", "enabled": True, "prefix": "backups/",
+              "condition": {"type": "Age", "maxAgeSeconds": 259200}}]
+    seen = {}
+
+    def fake_get(url, headers, timeout):
+        seen["url"] = url
+        seen["auth"] = headers["Authorization"]
+        return {"success": True, "result": {"rules": rules}}
+
+    monkeypatch.setattr(hb, "_lock_rules_http_get", fake_get)
+    got = fetch_r2_bucket_lock_rules("acct-1", "tok", "tortoise-backups")
+    assert got == rules
+    assert seen["url"] == (
+        "https://api.cloudflare.com/client/v4/accounts/acct-1/r2/buckets/"
+        "tortoise-backups/lock")
+    assert seen["auth"] == "Bearer tok"
+
+
+def test_fetch_lock_rules_failure_modes(monkeypatch):
+    from tortoise import hosted_backup as hb
+
+    # unconfigured (no token) → LockVerificationError
+    with pytest.raises(LockVerificationError, match="unconfigured"):
+        fetch_r2_bucket_lock_rules("acct", "", "bucket")
+
+    # transport error propagates as LockVerificationError
+    def boom(url, headers, timeout):
+        raise LockVerificationError("cannot read R2 bucket-lock rules: boom")
+
+    monkeypatch.setattr(hb, "_lock_rules_http_get", boom)
+    with pytest.raises(LockVerificationError, match="boom"):
+        fetch_r2_bucket_lock_rules("acct", "tok", "bucket")
+
+    # Cloudflare API error body (success: false)
+    monkeypatch.setattr(
+        hb, "_lock_rules_http_get",
+        lambda url, headers, timeout: {"success": False,
+                                       "errors": [{"code": 10000}]})
+    with pytest.raises(LockVerificationError, match="Cloudflare API error"):
+        fetch_r2_bucket_lock_rules("acct", "tok", "bucket")
+
+    # unexpected payload shape (result without rules)
+    monkeypatch.setattr(
+        hb, "_lock_rules_http_get",
+        lambda url, headers, timeout: {"success": True, "result": {}})
+    with pytest.raises(LockVerificationError, match="payload shape"):
+        fetch_r2_bucket_lock_rules("acct", "tok", "bucket")

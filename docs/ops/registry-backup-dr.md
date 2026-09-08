@@ -94,6 +94,167 @@ per-team restores. Every drill (manual or scheduled) records `duration_s` /
 RESTORE_DRILL_FAILED incident on failure OR when the measured time breaches
 ≤15 min (restore speed is a target, not an accident).
 
+## #2319 Backup immutability (R2 bucket-lock) + regional-durability decision
+
+Owner-recorded threat-model decision (issue #2319 — follow-up to the
+2026-09-06 DR best-practices audit gaps 5 + 7). Decisions (a)/(b) below are
+the recorded stance; the code/config surface implementing them ships with the
+issue.
+
+### (a) Regional-durability stance — single-region ACCEPTED (phase 1), mirror mechanism SHIPPED
+
+**Recorded:** single-region R2 + single-region FalkorDB Cloud is **accepted for
+the current phase** (pre-beta, chronic 0-team state), **with the second-store
+mirror mechanism implemented and env-guarded now** — adopting dual-region is
+provisioning a store + one env flag, no code change.
+
+Rationale: the audit verdict is that backups are already offsite (separate
+blast radius from the DB). R2 has **no native cross-region replication** and
+its S3 layer reports region `auto`, so regional separation requires a separate
+store (a second Cloudflare account / region-locked bucket, or another
+S3-compatible region) plus our own copy job. At 0 eligible teams the expected
+loss from a correlated region failure is nil, so paying recurring dual-store
+storage + an always-on job now is premature — but the enabling mechanism is
+cheap, so it ships behind `BACKUP_MIRROR_ENABLED` (below).
+
+**Flip criteria** (re-check at each paid-team milestone / customer P0): ≥1
+paying team with real data, any customer storing regulated or high-value
+content, or any published SLA/RPO that assumes regional redundancy. Flip = §(c)
+provisioning + §Verify step 4.
+
+### (b) Bucket-lock immutability — ADOPTED (prefix `backups/`, Age 3 days, 1..6 bound)
+
+**Adopted:** one R2 bucket-lock rule, prefix `backups/` exactly (NEVER the
+whole bucket — the sweep rewrites `ops/*` state/heartbeat objects in place),
+Age retention **3 days** (configurable 1..6, default 3).
+
+Why the window:
+- **Protection:** the lock blocks delete/overwrite within the window. The
+  recovery-critical archives (hourly, RPO ≤2h) are ≤24h old — 3 days keeps the
+  newest ~3 days of archives intact even against a key-holder who deletes
+  everything older. Dumps never overwrite (unique keys), so only deletion is
+  the live threat.
+- **Purge-erasure honesty (#2304):** a deleted custom graph's backup artifacts
+  must be physically erasable when the purge runs (≥7-day trash grace after
+  the graph DELETE; the newest artifact is ≤~1h old at delete). At purge time
+  artifacts are ≥7 days old, so any lock ≤6 days has expired — the **1..6-day
+  bound is enforced in config** (a ≥7-day lock would stamp purged rows while
+  locked artifacts persist — dishonest erasure). Default 3 keeps a 4-day margin.
+- **Prune compatibility:** the prune (keep_hourly=24) deletes day-bucket losers
+  from ~25h old — younger than any useful lock window — so the prune is
+  **lock-tolerant**: a locked object is skipped + logged and retried after the
+  window; the pool never wedges. Transient over-retention is bounded (~2 extra
+  days of hourly dumps ≈ ≤48 objects/pool while locked objects age out); pools
+  converge back to the ~35-object budget. Full-history immutability (lock ≥ the
+  4-week horizon) is **rejected** — it would break the erasure obligation.
+
+Mechanics that matter (Cloudflare docs, 2026):
+- R2 bucket locks are **NOT S3 Object Lock**. They are prefix-scoped rules
+  (`{id, enabled, prefix, condition}` with Age `maxAgeSeconds` / `Indefinite` /
+  a date), managed via the dashboard, Wrangler (`r2 bucket lock add|list`), or
+  the REST API — **never via the S3 seam**. R2's S3 compatibility layer does
+  not implement `GetBucketVersioning` / `GetObjectLockConfiguration` / object-
+  lock `CreateBucket`, and `x-amz-bypass-governance-retention` is unsupported
+  (no bypass exists). Rules apply to new AND existing objects; strictest rule
+  wins; removing a rule does NOT unlock objects still inside their window.
+- Deleting a locked object over the S3 seam fails 403 `AccessDenied` (R2 code
+  10069 `ObjectLockedByBucketPolicy`) — the prune/purge paths must tolerate it
+  (they do; see below).
+
+### Repo config contract + drift bounds
+
+| Knob | Documented value | Enforced |
+|---|---|---|
+| `BACKUP_LOCK_ENABLED` | `true` ONLY after the rule is provisioned | `backup_config.py` (parsed when sweep enabled) |
+| `BACKUP_LOCK_DAYS` | `3` (allowed **1..6** — must stay < the 7-day #2304 grace) | `backup_config.py` ConfigError out of range; drift test `test_backup_config.py` |
+| rule prefix | `backups/` (module constant `_LOCK_PREFIX`) | code + docs |
+| `CF_API_TOKEN` | optional; R2-scoped (Account → Cloudflare R2 → Edit) | live verification only when present; else `unverifiable` |
+| `BACKUP_MIRROR_ENABLED` | `true` only with the four creds below | ConfigError when true + missing creds |
+| `R2_MIRROR_ACCOUNT_ID/_ACCESS_KEY_ID/_SECRET_ACCESS_KEY/_BUCKET` | second store's own account/region + bucket | required-when-enabled |
+| `R2_MIRROR_ENDPOINT` | optional override; default `https://{account_id}.r2.cloudflarestorage.com` | parsed |
+
+### (c) Code-side additions
+
+1. **Prune lock tolerance** (`hosted_backup.prune_backups` →
+   `_delete_backup_objects`): per-object delete failures (incl. locked) are
+   skipped + logged, never a pool abort; only actually-deleted ids are
+   returned. Tests: `test_prune_tolerates_locked_objects_and_keeps_pruning`.
+2. **Lock health check** — `POST /v1/internal/backups/verify-lock` (internal
+   key; optional body `{account_id, bucket}` to check a different store, e.g.
+   the mirror) reads the Cloudflare REST lock rules and compares the strictest
+   retention covering `backups/` against `BACKUP_LOCK_DAYS`. `GET
+   /v1/internal/backups/status` carries a `lock` block with the same result
+   when `BACKUP_LOCK_ENABLED` is set. Statuses: `verified` | `drift` |
+   `absent` | `unverifiable`. Unreachable / no token → `unverifiable` with a
+   runbook pointer — a lock READ failure never fails backups (and there is NO
+   boot-time check: protecting the #545 boot blast radius).
+3. **Second-region mirror** (env-guarded): when the sweep (the hourly cron's
+   core action) accepts an archive — every guard passed — it is copied to the
+   mirror store and **read-back sha256-verified** against its manifest
+   (`hosted_backup.mirror_backup`, wired in `backup_sweep._backup_graph`).
+   A mirror failure is **loud** (per-graph error + /status `last_sweep`
+   graph_failures streak) — never a silent durability gap; the primary backup
+   is already durable and is never failed by a mirror hiccup (the next run
+   re-mirrors a fresh archive). Mirror covers newly-created per-graph archives;
+   a one-time backfill seeds history into a fresh mirror (§Verify step 4).
+
+### Provisioning (console / Wrangler / REST — there is NO S3 path)
+
+Console (simplest): R2 → `tortoise-backups` → **Settings** → **Bucket lock
+rules** → Add rule: prefix `backups/`, retention **3 days** (or your chosen
+`BACKUP_LOCK_DAYS`), save. Apply the same rule to the mirror bucket.
+
+Wrangler (CLI):
+
+    npx wrangler r2 bucket lock add tortoise-backups --prefix backups/ --retention-days 3
+    # flags per `npx wrangler r2 bucket lock add --help`; verify by listing:
+    npx wrangler r2 bucket lock list tortoise-backups
+
+REST (exact — the PUT body shape from the Cloudflare docs):
+
+    curl -X PUT "https://api.cloudflare.com/client/v4/accounts/<R2_ACCOUNT_ID>/r2/buckets/tortoise-backups/lock" \
+      -H "Authorization: Bearer <CF_API_TOKEN>" -H "Content-Type: application/json" \
+      -d '{"rules":[{"id":"backups-lock-3d","enabled":true,"prefix":"backups/","condition":{"type":"Age","maxAgeSeconds":259200}}]}'
+
+(3 days = 259200 s. The API token needs Account → Cloudflare R2 → Edit;
+jurisdiction-restricted buckets require the `cf-r2-jurisdiction` header.)
+
+### Verify (operator runbook)
+
+1. Config contract present: `curl $API/v1/internal/backups/status` (internal
+   key) → `lock` block shows `enabled:true`; without `CF_API_TOKEN` it shows
+   `status:unverifiable` — verify with (2)/(3) instead.
+2. Live drift check: `curl -sS -X POST -H "Authorization: Bearer $FASTAPI_INTERNAL_KEY" \
+   $API/v1/internal/backups/verify-lock` → expect `"status":"verified"`
+   (`drift`/`absent` = the rule is missing or shorter than `BACKUP_LOCK_DAYS`).
+3. Rule-list check (no app/token needed): `npx wrangler r2 bucket lock list
+   tortoise-backups` — confirm the `backups/` rule with the expected days.
+4. Mirror adoption: provision the second store (own account/region), set
+   `R2_MIRROR_*` + `BACKUP_MIRROR_ENABLED=true` on Fly (`fly secrets set`),
+   then one-time backfill of existing history:
+   `aws s3 sync s3://<primary>/backups s3://<mirror>/backups \
+   --endpoint-url <mirror-endpoint> --region auto` (s3 sync is append-only by
+   default — it never propagates primary deletions; the sweep keeps the mirror
+   fresh afterwards). Verify a mirrored archive read-back hash matches its
+   manifest.
+5. Block-in-window drill: with a test object under `backups/`, `aws s3api
+   delete-object --bucket $R2_BUCKET --key <test-key>` fails while locked;
+   confirm the sweep prune logs "bucket-locked … skipping" for in-window
+   objects and still prunes the rest, and that an in-window object is pruned
+   normally once the window passes.
+6. Mirror check: `curl … /v1/internal/backups/verify-lock -d '{"account_id":"<R2_MIRROR_ACCOUNT_ID>","bucket":"<R2_MIRROR_BUCKET>"}'`
+   (same rule must protect the mirror).
+
+### Residuals (recorded with this decision)
+- A guard-rejected archive (P0 / empty / data-loss) whose immediate delete is
+  blocked by the lock lingers ≤ the lock window (restore refuses it — the
+  guards are fail-closed — and an incident is filed; bounded and visible).
+- Purge drills with `grace_days` below the lock window leave artifacts until
+  the window expires (logged residual; production purge at the 7-day grace is
+  unaffected — artifacts are ≥7d old).
+- Mirror covers new per-graph archives; `ops/*` and legacy flat objects are
+  not mirrored (reconstructible / drained); the one-time sync seeds them.
+
 ## Architecture
 - **Driver:** `.github/workflows/registry-backup-cron.yml` (hourly, GH Actions) → internal-key endpoints. Independent failure domain — an OOM crash-loop (#545) must not blind the pipeline.
 - **Watcher (driver-disabled leg):** in-process read-only staleness daemon (spawned in `_lifespan`) that files GitHub issues + pushes Telegram ITSELF — covered by construction when the workflow is disabled.
