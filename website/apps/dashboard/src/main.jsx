@@ -7101,7 +7101,7 @@ sdk.create_point(text="My first point")
                 {graphsStatus === 'ok' && graphs.length === 0 && <tr><td colSpan="5" className="dim">No graphs yet — create your first one above.</td></tr>}
                 {graphsStatus === 'ok' && sortedGraphRows(graphs).map((g) => (
                   <tr key={g.graph_id} className={confirmDeleteId === g.graph_id ? 'graph-delete-arm' : undefined}>
-                    <td><code>{g.name}</code>{g.kind === 'default' && <span className="badge">default</span>}</td>
+                    <td><code>{g.name}</code></td>
                     <td>{g.kind}</td>
                     <td>{g.status === 'active' ? 'active' : <span className="revoked">{g.status}</span>}</td>
                     <td>{g.key_count != null ? g.key_count : '—'}</td>
