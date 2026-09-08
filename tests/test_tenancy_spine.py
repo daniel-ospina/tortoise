@@ -206,15 +206,15 @@ def test_backup_vanished_graph_fails_closed(spine_env):
     import tortoise.hosted_api as ha_mod
     from tortoise import pricing as _pricing
     try:
-        _orig_gate = _pricing.daily_backups_enabled
-        _pricing.daily_backups_enabled = lambda tier: tier == "pro"
+        _orig_gate = _pricing.hourly_backups_enabled
+        _pricing.hourly_backups_enabled = lambda tier: tier == "pro"
         _orig_key = ha_mod._backup_storage
         ha_mod._backup_storage = lambda: type("S", (), {"put": lambda *a, **k: None})()
         token = _mint_key(sdk, tid, scopes=["graphs:read"],
                           graph_id="g_ghost_backup")
         r = tc.post("/backups", headers={"Authorization": f"Bearer {token}"})
     finally:
-        _pricing.daily_backups_enabled = _orig_gate
+        _pricing.hourly_backups_enabled = _orig_gate
         ha_mod._backup_storage = _orig_key
     assert r.status_code == 403, r.text
     detail = r.json().get("detail")
@@ -256,8 +256,8 @@ def test_backup_graph_bound_custom_keys_under_gid_via_seam(spine_env):
 
     cap = _CaptureStorage()
     try:
-        _orig_gate = _pricing.daily_backups_enabled
-        _pricing.daily_backups_enabled = lambda tier: tier == "pro"
+        _orig_gate = _pricing.hourly_backups_enabled
+        _pricing.hourly_backups_enabled = lambda tier: tier == "pro"
         _orig_key = ha_mod._backup_storage
         ha_mod._backup_storage = lambda: cap
         # hosted create requires the backup key (encryption) — provide one.
@@ -267,7 +267,7 @@ def test_backup_graph_bound_custom_keys_under_gid_via_seam(spine_env):
                           graph_id=g["graph_id"])
         r = tc.post("/backups", headers={"Authorization": f"Bearer {token}"})
     finally:
-        _pricing.daily_backups_enabled = _orig_gate
+        _pricing.hourly_backups_enabled = _orig_gate
         ha_mod._backup_storage = _orig_key
         if _bak_key is None:
             os.environ.pop("TORTOISE_BACKUP_KEY", None)

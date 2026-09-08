@@ -24,6 +24,7 @@ from tortoise.backup_sweep import (
     enumerate_eligible_teams,
     enumerate_teams,
     enumerate_team_tombstones,
+    list_drill_candidates,
     read_graph_state,
     read_ops_state,
     read_team_state,
@@ -2261,3 +2262,53 @@ def test_purge_residual_still_erases_artifacts(shared_proj):
     assert store.list(f"backups/team_x/{gid}/") == []
     assert store.list(f"backups/{bid}/") == []
     assert _tombstone_props(proj, gid).get("purged_residual") is True
+
+
+# ── #2317 scheduled-restore-drill archive selection (pure storage) ──────────
+
+
+def test_list_drill_candidates_nested_only_oldest_first():
+    """Only 5-segment NESTED per-graph pools qualify (legacy flat 4-segment
+    keys never — their shape does not name a graph); results are oldest-first
+    by manifest created_at."""
+    store = MemoryStorage()
+    # nested default + custom pools (5 segments)
+    for bid, created in (
+        ("team_x/default/20260102T000000Z_aa", "2026-01-02T00:00:00+00:00"),
+        ("team_x/default/20260103T000000Z_bb", "2026-01-03T00:00:00+00:00"),
+        ("team_x/g_c1/20260101T000000Z_cc", "2026-01-01T00:00:00+00:00"),
+        ("team_y/default/20260101T120000Z_dd", "2026-01-01T12:00:00+00:00"),
+    ):
+        store.upload(f"backups/{bid}/dump.enc", b"blob")
+        store.upload(
+            f"backups/{bid}/manifest.json",
+            json.dumps({"created_at": created, "node_count": 1}).encode(),
+        )
+    # legacy flat (4 segments) + a manifest-less dump — never candidates
+    store.upload("backups/team_z/20260104T000000Z_ee/dump.enc", b"flat")
+    store.upload("backups/team_x/default/20260104T000000Z_ff/dump.enc", b"nomanifest")
+
+    rows = list_drill_candidates(store)
+    assert [r["backup_key"] for r in rows] == [
+        "backups/team_x/g_c1/20260101T000000Z_cc/dump.enc",   # oldest overall
+        "backups/team_y/default/20260101T120000Z_dd/dump.enc",
+        "backups/team_x/default/20260102T000000Z_aa/dump.enc",
+        "backups/team_x/default/20260103T000000Z_bb/dump.enc",
+    ]
+    assert all(r["graph_id"] for r in rows)
+    assert rows[0]["team_id"] == "team_x" and rows[0]["graph_id"] == "g_c1"
+
+
+def test_list_drill_candidates_max_candidates_and_empty():
+    """The candidate list is bounded; an empty store yields []."""
+    store = MemoryStorage()
+    assert list_drill_candidates(store) == []
+    for i in range(12):
+        bid = f"team_x/default/2026010{i % 9 + 1}T000000Z_{i:02x}"
+        store.upload(f"backups/{bid}/dump.enc", b"blob")
+        store.upload(
+            f"backups/{bid}/manifest.json",
+            json.dumps({"created_at": f"2026-01-0{i % 9 + 1}T00:00:00+00:00"}).encode(),
+        )
+    assert len(list_drill_candidates(store)) == 8  # default max_candidates
+    assert len(list_drill_candidates(store, max_candidates=3)) == 3

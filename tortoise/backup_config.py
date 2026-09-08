@@ -58,7 +58,6 @@ class BackupConfig:
     driver_down_threshold_min: int = 240
     watcher_grace_min: int = 120
     size_guard_max_nodes: int = 100_000
-    skip_fresh_min: int = 45
     retention_hourly: int = 24
     retention_daily: int = 7
     retention_weekly: int = 4
@@ -200,7 +199,6 @@ def _load_from_env() -> BackupConfig:
         driver_down_threshold_min=_env_int("BACKUP_DRIVER_DOWN_THRESHOLD_MIN", 240),
         watcher_grace_min=_env_int("BACKUP_WATCHER_GRACE_MIN", 120),
         size_guard_max_nodes=_env_int("BACKUP_SIZE_GUARD_MAX_NODES", 100_000),
-        skip_fresh_min=_env_int("BACKUP_SKIP_FRESH_MIN", 45),
         retention_hourly=_env_int("BACKUP_RETENTION_HOURLY", 24),
         retention_daily=_env_int("BACKUP_RETENTION_DAILY", 7),
         retention_weekly=_env_int("BACKUP_RETENTION_WEEKLY", 4),

@@ -34,7 +34,7 @@
    "support": "none",
    "features": {
     "per_graph_keys": false,
-    "daily_backups": false,
+    "hourly_backups": false,
     "usage_dashboard": false,
     "webhooks": false,
     "export": false,
@@ -55,7 +55,7 @@
    "loss_leader": true,
    "features": {
     "per_graph_keys": false,
-    "daily_backups": false,
+    "hourly_backups": false,
     "usage_dashboard": "basic",
     "webhooks": false,
     "export": false,
@@ -79,7 +79,7 @@
    ],
    "features": {
     "per_graph_keys": "planned",
-    "daily_backups": "planned",
+    "hourly_backups": "planned",
     "usage_dashboard": "planned",
     "webhooks": "planned",
     "export": "planned",
@@ -102,7 +102,7 @@
     "roles_rbac": "owner / admin / member",
     "reBAC_per_graph": "future",
     "per_graph_keys": "planned",
-    "daily_backups": "planned",
+    "hourly_backups": "planned",
     "usage_dashboard": "planned",
     "webhooks": "planned",
     "export": "planned",
@@ -121,7 +121,7 @@
    "support": "none",
    "features": {
     "per_graph_keys": false,
-    "daily_backups": false,
+    "hourly_backups": false,
     "usage_dashboard": false,
     "webhooks": false,
     "export": false,

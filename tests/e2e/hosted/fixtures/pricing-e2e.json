@@ -33,7 +33,7 @@
       "support": "none",
       "features": {
         "per_graph_keys": false,
-        "daily_backups": false,
+        "hourly_backups": false,
         "usage_dashboard": false,
         "webhooks": false,
         "export": false,
@@ -54,7 +54,7 @@
       "loss_leader": true,
       "features": {
         "per_graph_keys": false,
-        "daily_backups": false,
+        "hourly_backups": false,
         "usage_dashboard": "basic",
         "webhooks": false,
         "export": false,
@@ -78,7 +78,7 @@
       ],
       "features": {
         "per_graph_keys": "planned",
-        "daily_backups": true,
+        "hourly_backups": true,
         "usage_dashboard": "planned",
         "webhooks": "planned",
         "export": "planned",
@@ -101,7 +101,7 @@
         "roles_rbac": "owner / admin / member",
         "reBAC_per_graph": "future",
         "per_graph_keys": "planned",
-        "daily_backups": true,
+        "hourly_backups": true,
         "usage_dashboard": "planned",
         "webhooks": "planned",
         "export": "planned",
@@ -120,7 +120,7 @@
       "support": "none",
       "features": {
         "per_graph_keys": false,
-        "daily_backups": false,
+        "hourly_backups": false,
         "usage_dashboard": false,
         "webhooks": false,
         "export": false,
@@ -141,5 +141,5 @@
     "overage_line": "$5 per additional 10k write ops",
     "integrations_line": "Unlimited integrations at every tier"
   },
-  "$e2e_note": "E2E fixture (#303) \u2014 product/pricing.json copy with pro/team daily_backups=true and an e2e_small cap tier. Served via TORTOISE_PRICING_PATH to the E2E server only."
+  "$e2e_note": "E2E fixture (#303) \u2014 product/pricing.json copy with pro/team hourly_backups=true and an e2e_small cap tier. Served via TORTOISE_PRICING_PATH to the E2E server only."
 }
