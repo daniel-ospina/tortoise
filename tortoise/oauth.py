@@ -1043,10 +1043,19 @@ _CONSENT_HTML = """<!DOCTYPE html>
   }
 
   async function fetchPreview(accessToken) {
-    const res = await fetch("/oauth/consent/preview?resource=" +
-        encodeURIComponent(PARAMS.resource || ""), {
-      headers: { "Authorization": "Bearer " + accessToken },
-    });
+    let res;
+    try {
+      res = await fetch("/oauth/consent/preview?resource=" +
+          encodeURIComponent(PARAMS.resource || ""), {
+        headers: { "Authorization": "Bearer " + accessToken },
+      });
+    } catch {
+      // network throw (offline blip, DNS, server restart) — transient:
+      // the Retry affordance must appear (never a dead-end reload).
+      const err = new Error("Could not reach Tortoise — check your connection and retry.");
+      err.transient = true;
+      throw err;
+    }
     if (res.status === 401) return null;   // stale/rejected session
     if (!res.ok) {
       // Terminal 4xx (suspended team, no usable team) carries an actionable
