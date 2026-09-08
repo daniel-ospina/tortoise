@@ -98,15 +98,27 @@ def test_claim_b_never_preseeded_in_seed_mode(tmp_path, monkeypatch):
 
 
 def test_retrieve_pre_k_has_only_claim_a_evidence(tmp_path):
+    """Pre-k (before the ¬A turn) the retrieved surface contains ONLY
+    claim_a-side material — never ¬A. The round-2 hardening makes seeded
+    EVIDENCE STATUS DRAFT until the turn-k operator write promotes it, so
+    pre-k retrieval is not expected to surface draft evidence rows; claim_a
+    itself is seeded live and is retrievable via the everyday probe (the
+    arm's no-query path = the scenario's planted claim, not the system-
+    prompt prefix — the render[:200] text is the reader instructions and
+    matches nothing but the setup node)."""
     sc = _cts()[0]
     store = seeds.setup_seed_mode(tmp_path, sc.id)
     try:
+        # No-leak: ¬A fragments never appear pre-k, whatever the query.
         mems = store.retrieve(sc.to_episode_context()["render"][:200])
         texts = " ".join(str(m) for m in mems)
         assert not any(f in texts for f in _fragments(sc))
-        assert sc.contradiction_pairs[0].claim_a[:40] in texts or any(
-            sc.contradiction_pairs[0].claim_a[:40] in (m.content or "")
-            for m in mems)
+        # Positive half: claim_a's live position IS retrievable pre-k via
+        # the everyday probe (the empty-query path the arm uses when no
+        # user message is present — _scenario_probe_query).
+        probe = store.retrieve("")
+        probe_texts = " ".join(str(m) for m in probe)
+        assert sc.contradiction_pairs[0].claim_a[:40] in probe_texts
     finally:
         store.close()
 
