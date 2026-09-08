@@ -3796,7 +3796,7 @@ class TortoiseSDK:
                 # fresh ULID — or every operator referencing the
                 # content-derived ev_<sha> endpoint drops again at commit
                 # (the exact hole this fix closes; ULID would reopen it).
-                from tortoise.ids import content_hash  # noqa: PLC0415
+                from tortoise.ids import content_hash
                 # Cap-parity with the sibling ev_ content-address paths
                 # (_stream_to_payload + extractor_v2 fold both hash
                 # content[:1000]) — a longer blank-id payload would otherwise
