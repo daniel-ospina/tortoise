@@ -94,6 +94,19 @@ def _parser() -> argparse.ArgumentParser:
     vj.add_argument("--mock", action="store_true",
                     help="hermetic mock-judge run (no model API)")
 
+    probe = sub.add_parser(
+        "probe", help="#2292 real-model probe (measured tokens + evidence)")
+    probe.add_argument("--scenarios", nargs="+", required=True,
+                       help="scenario ids (decision + contradiction + "
+                            "calibration minimum; 3-5 recommended)")
+    probe.add_argument("--arms", nargs="+", default=["a0", "a4"],
+                       help="arms to probe (default a0 a4)")
+    probe.add_argument("--seed", type=int, default=7,
+                       help="pinned seed")
+    probe.add_argument("--out", default=_DEFAULT_OUT,
+                       help="probe artifacts dir (probe_tokens.json + "
+                            "probe_validation_bundle.json + transcripts)")
+
     report = sub.add_parser("report", help="verdict report (#1415)")
     report.add_argument("--config", default=None, help="config dir")
     report.add_argument("--out", default=_DEFAULT_OUT, help="artifacts dir")
@@ -602,6 +615,34 @@ def _cmd_run(args: argparse.Namespace) -> ExitCode:
     return run_battery(config)
 
 
+def _cmd_probe(args: argparse.Namespace) -> ExitCode:
+    """battery probe --scenarios <ids> --arms a0,a4 --seed N --out <dir>
+
+    #2292-owned real-model probe: bounded REAL run (pre-authorized spend
+    under budget.yaml probe_cap_usd; fail-closed when OPENROUTER_API_KEY
+    is absent). Emits probe_tokens.json (per-phase 95th-pct tables),
+    probe_manifest.json (model block + usage), probe_validation_bundle.json
+    (rubric -> per-anchor arm-neutral evidence renders for Task 4) and
+    per-episode real transcripts."""
+    from battery.config.budget import load_budget
+    from battery.probes.probe_runner import ProbeBudget, run_probe
+    budget = load_budget(_Path(args.config_dir) / "budget.yaml")
+    run_probe(config=args.config_dir, arms=list(args.arms),
+              scenario_ids=list(args.scenarios), out_dir=args.out,
+              budget=ProbeBudget(cap_usd=budget.probe_cap_usd),
+              seed=args.seed)
+    print(f"probe complete: {len(args.scenarios)} scenarios x "
+          f"{len(args.arms)} arms -> {args.out}")
+    return ExitCode.OK
+
+
+_validate_judge_help = (
+    "validate-judge --rubric <id> [--evidence <bundle.json>] — the JSON "
+    "rubric path uses the declarative anchored-yes/no protocol (Task 2); "
+    "--evidence (Task 4) feeds real probe renders for the retest/IRT/gold "
+    "legs over the anchored items.")
+
+
 def _dispatch(args: argparse.Namespace) -> ExitCode:
     handlers = {
         "run": _cmd_run,
@@ -609,6 +650,7 @@ def _dispatch(args: argparse.Namespace) -> ExitCode:
         "calibrate": _cmd_calibrate,
         "validate-judge": _cmd_validate_judge,
         "report": _cmd_report,
+        "probe": _cmd_probe,
     }
     return handlers[args.subcommand](args)
 

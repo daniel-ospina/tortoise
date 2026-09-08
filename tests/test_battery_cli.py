@@ -37,12 +37,12 @@ def _empty_config(tmp_path) -> Path:
 
 
 class TestSubcommandSurface:
-    def test_all_five_subcommands_registered(self):
+    def test_all_six_subcommands_registered(self):
         parser = _parser()
         subs = next(a for a in parser._actions
                     if getattr(a, "dest", None) == "subcommand").choices
         assert set(subs) == {"run", "parity", "calibrate", "validate-judge",
-                             "report"}
+                             "report", "probe"}  # probe: #2292 Task 3
 
     def test_run_flag_surface(self):
         args = _parser().parse_args([

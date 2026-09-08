@@ -27,6 +27,13 @@ class JudgeCall:
     verdict: str
     confidence: float
     outcome: ModelCallOutcome = ModelCallOutcome.OK
+    #: Usage capture (#2292 Task 3): real OpenRouter usage block parsed into
+    #: the JudgeCall so judge spend is METERED (decision (c) — judge spend
+    #: accumulates under its own line, never folded into the model-under-test
+    #: row). Zero on mock calls.
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    cost_usd: float = 0.0
 
 
 class JudgeClient:
@@ -70,7 +77,11 @@ class JudgeClient:
         verdict = str(out.get("verdict", ""))
         conf = float(out.get("confidence", 0.5))
         return JudgeCall(rubric_id=rubric_id, item_id=item_id,
-                         verdict=verdict, confidence=conf)
+                         verdict=verdict, confidence=conf,
+                         prompt_tokens=int(out.get("prompt_tokens", 0) or 0),
+                         completion_tokens=int(
+                             out.get("completion_tokens", 0) or 0),
+                         cost_usd=float(out.get("cost_usd", 0.0) or 0.0))
 
     def _mock_judge(self, prompt: str) -> dict:
         """Deterministic mock: seeds from the prompt hash so validation
@@ -96,10 +107,40 @@ class JudgeClient:
         with urllib.request.urlopen(req, timeout=30) as resp:
             data = json.loads(resp.read().decode())
         content = data["choices"][0]["message"]["content"]
+        usage = data.get("usage") or {}
+        # Metered judge spend (decision (c)): parse the OpenRouter usage
+        # block so the --evidence path can HARD-STOP against the reserve.
+        pt = int(usage.get("prompt_tokens", 0) or 0)
+        ct = int(usage.get("completion_tokens", 0) or 0)
+        cost = float(usage.get("cost", 0.0)
+                     or _openrouter_cost(data.get("model", ""), pt, ct))
         try:
-            return json.loads(content)
+            parsed = json.loads(content)
+            parsed.setdefault("prompt_tokens", pt)
+            parsed.setdefault("completion_tokens", ct)
+            parsed.setdefault("cost_usd", cost)
+            return parsed
         except json.JSONDecodeError:
-            return {"verdict": content.strip(), "confidence": 0.5}
+            return {"verdict": content.strip(), "confidence": 0.5,
+                    "prompt_tokens": pt, "completion_tokens": ct,
+                    "cost_usd": cost}
+
+
+def _openrouter_cost(model: str, pt: int, ct: int) -> float:
+    """OpenRouter per-1M-token price table (fallback when the usage block
+    omits ``cost``). Judge-model rows only — approximate is fine for a
+    reserve HARD STOP (the cap is a guard, never a bill)."""
+    prices = {
+        "gpt-4o": (2.50, 10.00), "gpt-4o-2024-08-06": (2.50, 10.00),
+        "opus": (15.00, 75.00), "claude": (3.00, 15.00),
+        "deepseek": (0.27, 1.10),
+    }
+    p_in, p_out = (0.0, 0.0)
+    for key, (i_, o_) in prices.items():
+        if key in model.lower():
+            p_in, p_out = i_, o_
+            break
+    return (pt * p_in + ct * p_out) / 1_000_000.0
 
 
 def build_abba_prompts(item_a: str, item_b: str, rubric_text: str,
