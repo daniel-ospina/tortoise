@@ -9709,17 +9709,27 @@ async def delete_graph(graph_id: str, team_id: str,
 async def _require_owner_admin_session(user: dict, team_id: str) -> None:
     """#2304: owner/admin membership gate for the trash surfaces (403
     otherwise). Session-only by construction — trash endpoints never accept
-    a key context."""
-    membership = await _membership_team(user.get("user_id") or "", team_id)
+    a key context. #2564 (re-audit P3): a control-plane transport outage
+    during the membership read surfaces as 503 control_plane_unavailable
+    (#2380), not a raw 500 with the internal seam message."""
+    try:
+        membership = await _membership_team(
+            user.get("user_id") or "", team_id)
+    except Exception as _exc:
+        _raise_503_if_cp_outage(_exc)
+        raise
     if membership is None or membership.get("role") not in ("owner", "admin"):
         raise HTTPException(
             status_code=403, detail="Requires owner or admin role in team")
 
 
 # #2304 default recovery window — MUST mirror backup_sweep.
-# _GRAPH_PURGE_GRACE_DAYS (the purge's erasure cutoff): restore and purge
-# share one window. If one changes the other must too.
-_TRASH_GRACE_DAYS = 7
+# #2566 (re-audit P3): ONE canonical window constant — backup_sweep's
+# _GRAPH_PURGE_GRACE_DAYS (the purge's erasure cutoff) is the single source;
+# restore's window aliases it so the two can never drift again.
+from tortoise.backup_sweep import (  # noqa: E402
+    _GRAPH_PURGE_GRACE_DAYS as _TRASH_GRACE_DAYS,
+)
 
 
 def _trash_grace_expired(deleted_at: object, now: datetime | None = None,
@@ -9752,32 +9762,39 @@ async def _graph_row_probe(team_id: str, graph_id: str) -> dict | None:
         get_control_plane,
         is_supabase_enabled,
     )
-    if is_supabase_enabled():
-        rows = get_control_plane().query(
-            "graphs",
-            select=["kind", "status", "name", "namespace",
-                    "deleted_at", "purged_at"],
-            filters=[("id", "eq", graph_id), ("team_id", "eq", team_id)],
-        )
+    try:
+        if is_supabase_enabled():
+            rows = get_control_plane().query(
+                "graphs",
+                select=["kind", "status", "name", "namespace",
+                        "deleted_at", "purged_at"],
+                filters=[("id", "eq", graph_id),
+                         ("team_id", "eq", team_id)],
+            )
+            if not rows:
+                return None
+            r = rows[0]
+            return {"kind": r.get("kind"), "status": r.get("status"),
+                    "name": r.get("name"),
+                    "namespace": r.get("namespace"),
+                    "deleted_at": r.get("deleted_at"),
+                    "purged_at": r.get("purged_at")}
+        rows = sdk._get_registry().query(
+            "MATCH (g:Graph {id:$gid, team_id:$tid}) "
+            "RETURN g.kind, coalesce(g.status, 'active'), g.name, g.namespace, "
+            "g.deleted_at, g.purged_at",
+            params={"gid": graph_id, "tid": team_id},
+        ).result_set
         if not rows:
             return None
-        r = rows[0]
-        return {"kind": r.get("kind"), "status": r.get("status"),
-                "name": r.get("name"),
-                "namespace": r.get("namespace"),
-                "deleted_at": r.get("deleted_at"),
-                "purged_at": r.get("purged_at")}
-    rows = sdk._get_registry().query(
-        "MATCH (g:Graph {id:$gid, team_id:$tid}) "
-        "RETURN g.kind, coalesce(g.status, 'active'), g.name, g.namespace, "
-        "g.deleted_at, g.purged_at",
-        params={"gid": graph_id, "tid": team_id},
-    ).result_set
-    if not rows:
-        return None
-    return {"kind": rows[0][0], "status": rows[0][1],
-            "name": rows[0][2], "namespace": rows[0][3],
-            "deleted_at": rows[0][4], "purged_at": rows[0][5]}
+        return {"kind": rows[0][0], "status": rows[0][1],
+                "name": rows[0][2], "namespace": rows[0][3],
+                "deleted_at": rows[0][4], "purged_at": rows[0][5]}
+    except Exception as _exc:
+        # #2564 (re-audit P3): a control-plane outage during the probe must
+        # surface as 503 (#2380), not a raw 500.
+        _raise_503_if_cp_outage(_exc)
+        raise
 
 
 async def _rollback_restore_name_race(team_id: str, graph_id: str) -> None:
@@ -9821,25 +9838,30 @@ async def _trash_name_conflict(team_id: str, name: str,
     """True when a LIVE (non-deleted) graph already holds ``name`` — a
     restored graph must never duplicate an active display name (create-
     graph uniqueness among actives, #2304). The tombstone itself is
-    excluded by the self_gid comparison (it is deleted — never listed)."""
+    excluded by the self_gid comparison (it is deleted — never listed).
+    #2564: CP transport errors map to 503, not a raw 500."""
     sdk = _make_sdk(namespace="registry")
     from tortoise.supabase_control import (
         get_control_plane,
         is_supabase_enabled,
     )
-    if is_supabase_enabled():
-        rows = get_control_plane().query(
-            "graphs", select=["id"],
-            filters=[("team_id", "eq", team_id), ("name", "eq", name),
-                     ("status", "eq", "active")],
-        )
-        return any(r.get("id") != self_gid for r in rows)
-    rows = sdk._get_registry().query(
-        "MATCH (g:Graph {team_id:$tid, name:$name}) "
-        "RETURN g.id, coalesce(g.status, 'active')",
-        params={"tid": team_id, "name": name},
-    ).result_set
-    return any(r[0] != self_gid and r[1] != "deleted" for r in rows)
+    try:
+        if is_supabase_enabled():
+            rows = get_control_plane().query(
+                "graphs", select=["id"],
+                filters=[("team_id", "eq", team_id), ("name", "eq", name),
+                         ("status", "eq", "active")],
+            )
+            return any(r.get("id") != self_gid for r in rows)
+        rows = sdk._get_registry().query(
+            "MATCH (g:Graph {team_id:$tid, name:$name}) "
+            "RETURN g.id, coalesce(g.status, 'active')",
+            params={"tid": team_id, "name": name},
+        ).result_set
+        return any(r[0] != self_gid and r[1] != "deleted" for r in rows)
+    except Exception as _exc:
+        _raise_503_if_cp_outage(_exc)
+        raise
 
 
 @app.get("/v1/graphs/trash")
@@ -9998,8 +10020,19 @@ async def _restore_trash_graph_locked(request: Request, user: dict,
                 from None
         raise
     if not restored:
-        # Still reachable only if the row flipped between the probe and the
-        # flip despite the lock (lane-level anomaly) — refuse loudly.
+        # #2563 (re-audit P3): False from the conditional flip ALSO means the
+        # row was ALREADY restored (double-click / retry in another tab — the
+        # lane flip matches 0 rows because the row is active, not deleted).
+        # Re-probe and distinguish that from a genuine purge instead of
+        # answering a misleading 410 "was purged".
+        again = await _graph_row_probe(team_id, graph_id)
+        if again and again.get("status") == "active" \
+                and not again.get("purged_at"):
+            raise HTTPException(
+                status_code=409,
+                detail="Graph was already restored (it is active) — "
+                       "nothing to restore")
+        # Purged (or vanished) — refuse loudly.
         raise HTTPException(
             status_code=410,
             detail="Graph was purged before the restore completed — not "
@@ -10083,7 +10116,10 @@ async def trash_graph_points(graph_id: str, team_id: str,
             manifests.append(k)
     flat_bids: set[str] = set()
     try:
-        from tortoise.backup_sweep import read_legacy_flat_index
+        from tortoise.backup_sweep import (
+            read_legacy_flat_index,
+            read_purge_flat_ghosts,
+        )
         index = await asyncio.to_thread(read_legacy_flat_index, storage,
                                         team_id)
         ns = str(row.get("namespace") or "")
@@ -10092,6 +10128,13 @@ async def trash_graph_points(graph_id: str, team_id: str,
                     str(ent.get("graph_id") or "") == graph_id
                     or (ns and str(ent.get("graph_name") or "") == ns)):
                 flat_bids.add(str(bid))
+        # #2561 (re-audit): a purge that erased this graph's flat dumps
+        # records them as ghosts (#2466) even when its index rewrite was
+        # skipped (partial delete failure) — Inspect must not count bids
+        # whose objects the purge already erased.
+        ghosts = await asyncio.to_thread(read_purge_flat_ghosts, storage,
+                                         team_id)
+        flat_bids -= {str(b) for b in (ghosts or {})}
     except Exception:
         flat_bids = set()  # unreadable index → nested pool only
     latest: dict | None = None
@@ -19239,10 +19282,22 @@ async def backups_purge(request: Request, body: dict | None = None):
     registry = reg_sdk._get_registry()
     db = reg_sdk._get_proj().db
     storage = _backup_storage()
-    grace_days = int((body or {}).get("grace_days") or 7)
+    grace_days = int((body or {}).get("grace_days")
+                     or _TRASH_GRACE_DAYS)
     if not 1 <= grace_days <= 365:
         raise HTTPException(status_code=422,
                             detail="grace_days must be 1..365")
+    if grace_days < _TRASH_GRACE_DAYS and not (body or {}).get(
+            "confirm_short_grace"):
+        # #2566 (re-audit P3): an operator grace_days override SHORTENS the
+        # user-visible recovery window the trash UI/restore API still
+        # promise — a drill with a small value permanently erases rows
+        # inside the promised window with no restore escape. Require an
+        # explicit confirmation.
+        raise HTTPException(
+            status_code=422,
+            detail="grace_days below the standard recovery window "
+                   f"({_TRASH_GRACE_DAYS}) requires confirm_short_grace: true")
     if _PURGE_INFLIGHT.locked():
         return {"status": "already_running", "purged": []}
     async with _PURGE_INFLIGHT:
