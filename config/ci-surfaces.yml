@@ -518,6 +518,7 @@ surfaces:
   - test_reader.py
   - test_reader_abstention_calibration.py
   - test_entity_key_expansion.py  # #2518 (docker-lane leg, mirrors test_retrieval.py)
+  - test_assembly_fixtures.py  # #2165 Task 1: connected-assembly fixture substrate + R16(b) calibration (docker-lane)
   - test_retrieval.py
   - test_sdk.py
   - test_sdk_dedup.py
