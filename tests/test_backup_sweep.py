@@ -1858,6 +1858,48 @@ def test_enumerate_team_tombstones_excludes_active_and_purged(shared_proj):
     assert purged not in ids  # purged rows are never re-purged
 
 
+def test_purge_skips_team_whose_lock_is_stuck(shared_proj, monkeypatch):
+    """#2562 (re-audit P3): the purge per-team acquisition is TIMED — a
+    stuck holder (restore whose locked body wedged) must not block the team
+    pass forever; the team is skipped with a loud error and other teams
+    still purge."""
+    if shared_proj is None:
+        return
+    proj = _make_env(None, shared_proj)
+    store = MemoryStorage()
+    gid = f"g_lk_{os.urandom(2).hex()}"
+    _seed_custom_tombstone(
+        proj, "team_locked", gid, "stuck",
+        deleted_at=(datetime.now(UTC) - timedelta(days=30)).isoformat())
+    gid2 = f"g_lk2_{os.urandom(2).hex()}"
+    _seed_custom_tombstone(
+        proj, "team_free", gid2, "free",
+        deleted_at=(datetime.now(UTC) - timedelta(days=30)).isoformat())
+    import tortoise.backup_sweep as bs_mod
+
+    monkeypatch.setattr(bs_mod, "_TEAM_LOCK_TIMEOUT_S", 1)
+    import threading as _threading
+
+    held = _threading.Lock()
+    held.acquire()
+    locks = {"team_locked": held,
+             "team_free": _threading.Lock()}
+
+    def lock_for(tid):
+        return locks[tid]
+
+    reg = proj.db.select_graph(_REGISTRY_GRAPH)
+    res = run_graph_purge(db=proj.db, registry=reg, storage=store,
+                          team_ids=["team_locked", "team_free"],
+                          lock_for=lock_for)
+    # team_locked skipped loudly; team_free purged normally.
+    assert any("team lock busy" in str(e.get("error"))
+               for e in res["errors"])
+    assert any(p["graph_id"] == gid2 for p in res["purged"])
+    assert all(p["graph_id"] != gid for p in res["purged"])
+    held.release()
+
+
 def test_purge_drops_erased_graphs_from_ops_state_rollup(shared_proj):
     """#2471: after a purge, /status bookkeeping (graph_failures +
     graph_error_streaks) must stop referencing the erased graph — no-op

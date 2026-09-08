@@ -46,6 +46,42 @@ from typing import Any, Callable  # noqa: UP035
 from .backup_config import BackupConfig
 from .hosted_backup import _is_supabase_source, create_backup, prune_backups
 
+# #2562 (re-audit P3): the sweep/purge per-team acquisitions are TIMED too
+# — a stuck holder (a restore whose locked body wedged) must not block that
+# team's pass forever. Same horizon as the restore wait (#2470).
+_TEAM_LOCK_TIMEOUT_S = 300
+
+
+def _team_lock_ctx(lock_for: Callable[[str], Any] | None, team_id: str):
+    """#2562: acquire the per-team lock for a sweep/purge with a TIMEOUT.
+    Returns (ctx, acquired). A lock held past the horizon skips the team
+    (the caller records an error and moves on — never wedges the pass); a
+    timeout never leaves the lock held. lock_for may also return a
+    contextmanager (legacy seam) — used as-is, untimed."""
+    if lock_for is None:
+        return nullcontext(), True
+    lock = lock_for(team_id)
+    # Duck-type: threading.Lock is a factory function (not a type) on
+    # Python < 3.13, so isinstance is unusable — a lock-shaped object
+    # (acquire/release) gets the timed path; anything else (a
+    # contextmanager seam) is used as-is, untimed.
+    if not (hasattr(lock, "acquire") and hasattr(lock, "release")):
+        return lock, True
+    got = lock.acquire(timeout=_TEAM_LOCK_TIMEOUT_S)
+    if not got:
+        return nullcontext(), False
+
+    class _ReleaseOnExit:
+        def __enter__(self):
+            return lock
+
+        def __exit__(self, *_exc):
+            lock.release()
+            return False
+
+    return _ReleaseOnExit(), True
+
+
 logger = logging.getLogger(__name__)
 
 OPS_STATE_KEY = "ops/state.json"
@@ -1013,7 +1049,16 @@ def run_backup_sweep(
     results: dict[str, Any] = {}
     resolution_failures = 0
     for team_id in sorted(team_ids):
-        ctx = lock_for(team_id) if lock_for else nullcontext()
+        ctx, acquired = _team_lock_ctx(lock_for, team_id)
+        if not acquired:
+            # #2562: a stuck holder must not wedge the pass — skip the team
+            # with a loud error (next run retries it).
+            results[team_id] = {
+                "status": "error", "team_id": team_id,
+                "error": "team lock busy past the timeout "
+                         "(a restore or purge holds it)",
+            }
+            continue
         with ctx:
             try:
                 res = _sweep_team(
@@ -1451,7 +1496,14 @@ def run_graph_purge(
     errors: list[dict[str, Any]] = []
     teams_purged = 0
     for team_id in sorted(team_ids or []):
-        ctx = lock_for(team_id) if lock_for else nullcontext()
+        ctx, acquired = _team_lock_ctx(lock_for, team_id)
+        if not acquired:
+            # #2562: a stuck holder must not wedge the purge pass — record
+            # the team as an error (next run retries it).
+            errors.append({"team_id": team_id,
+                           "error": "team lock busy past the timeout "
+                                    "(a restore or purge holds it)"})
+            continue
         with ctx:
             try:
                 tombs = enumerate_team_tombstones(registry, team_id)
