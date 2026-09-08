@@ -1062,3 +1062,487 @@ def test_walker_docker_hub_cap_binds_per_subject(_docker_sdk):
     assert slices.admission["rows_admitted"] == 20 + len(dogbed_rows)
     assert len(dogbed_rows) == 2, \
         "base graph dog bed: pA-dogbed-chewed + pA-vet (2 anchored points)"
+# ══════════════════════════════════════════════════════════════════════════
+# #2165 Task 5 — renderer: synthesized hits, date-sorted sections,
+# deterministic ordering/diff (R1/R2/R3-5/R6/R12, R17 P2-1). RED→GREEN:
+# synthesize_hits is a new symbol in tortoise/assembly.py. The synthesized
+# dicts are what assemble_context/_render_block render unchanged in Task 6 —
+# the EXACT content strings pinned here become Task 6's byte-goldens.
+# ══════════════════════════════════════════════════════════════════════════
+
+from tortoise.assembly import AssemblySlices, synthesize_hits  # noqa: E402
+
+
+def _rfixture_current():
+    """couch (superseded by sofa, pinned 2026-09-01) + one dated sold-point
+    (09-01) + pX-undated; sofa is NOT among the resolved subjects."""
+    port = _fixture_walker_port()
+    port._g["obj-couch"]["points"].append(
+        {"object_id": "obj-couch", "kind": "point", "id": "pB-sold",
+         "content": "sold the old couch and ordered a new sofa instead",
+         "when": "2026-09-01", "created_at": "2026-09-01", "status": "live",
+         "valid_from": "2026-09-01", "ep_alpha": 9.0, "ep_beta": 1.0,
+         "quote": "sold the old couch", "search_keys": "couch sold sofa",
+         "event_id": None, "lme_session_index": 1})
+    slices = collect_slices(port, [_cand("obj-couch", "couch", 0)],
+                            shape=AssemblyShape.CURRENT_STATE)
+    return slices, port
+
+
+def test_render_current_state_header_and_spine():
+    """current-state: the state-header hit embeds the label
+    'STATE (couch): superseded by sofa on 2026-09-01' (sofa VERIFIED via
+    successors_verified — the fired path probes successor existence in
+    Task 6); dated spine follows chronologically (undated last); real point
+    rows keep their canonical id; synthesized rows carry NO id."""
+    slices, _ = _rfixture_current()
+    hits = synthesize_hits(slices, shape=AssemblyShape.CURRENT_STATE,
+                           candidates=[_cand("obj-couch", "couch", 0)],
+                           successors_verified={"sofa"})
+    assert hits and hits[0]["content"] == \
+        "STATE (couch): superseded by sofa on 2026-09-01", \
+        f"header golden drifted: {hits[0]['content']!r}"
+    assert "id" not in hits[0], \
+        "synthesized state rows carry NO id (why.enrich skips them)"
+    point_hits = [h for h in hits if h.get("id")]
+    ids = [h["id"] for h in point_hits]
+    assert "pB-sold" in ids
+    assert point_hits[-1]["id"] == "pX-undated", \
+        "undated real row must stay LAST"
+    # real rows must NOT expose a point_id key (W4-OUTPUT-only) nor the
+    # pure walker derivation keys tier/date; object_id is an inert
+    # passthrough (inert keys never reach the rendered line)
+    for h in point_hits:
+        assert "point_id" not in h and "tier" not in h \
+            and "date" not in h, h.keys()
+
+
+def test_render_state_row_superseded_by_dict_shaped():
+    """R17 P2-1: the state-header hit carries dict-shaped superseded_by
+    (never a flat string); empty snippet keeps the rendered line clean (the
+    content label is authoritative) while the shape survives for W4."""
+    slices, _ = _rfixture_current()
+    hits = synthesize_hits(slices, shape=AssemblyShape.CURRENT_STATE,
+                           candidates=[_cand("obj-couch", "couch", 0)],
+                           successors_verified={"sofa"})
+    sb = hits[0].get("superseded_by")
+    assert isinstance(sb, dict) and not isinstance(sb, str), sb
+    assert sb.get("content_snippet") == "sofa", sb
+
+
+def test_render_ordering_line_and_sections():
+    """ordering: line computed THROUGH the shared date helper (couch
+    earliest 2026-08-10 < dog bed earliest 2026-08-10, subject_index 0
+    breaks the same-day tie); per-subject sectioning keeps the subjects
+    separate; both subjects present even when one has an undated row."""
+    from datetime import date as _d
+
+    from tortoise.assembly import _norm_date
+    assert _norm_date("2026-08-10T23:30:00Z") == _d(2026, 8, 10)
+    # fresh walk over BOTH subjects (the compare fired path resolves both)
+    port = _fixture_walker_port()
+    port._g["obj-couch"]["points"].append(
+        {"object_id": "obj-couch", "kind": "point", "id": "pB-sold",
+         "content": "sold the old couch and ordered a new sofa instead",
+         "when": "2026-09-01", "created_at": "2026-09-01", "status": "live",
+         "ep_alpha": 9.0, "ep_beta": 1.0, "quote": "sold the old couch",
+         "search_keys": "couch sold sofa", "event_id": None,
+         "lme_session_index": 1})
+    cands = [_cand("obj-couch", "couch", 0),
+             _cand("obj-dogbed", "dog bed", 1)]
+    slices = collect_slices(port, cands, shape=AssemblyShape.ORDERING)
+    hits = synthesize_hits(slices, shape=AssemblyShape.ORDERING,
+                           candidates=cands)
+    assert hits[0]["content"] == "couch came first on 2026-08-10", \
+        f"ordering line golden drifted: {hits[0]['content']!r}"
+    by_oid = {}
+    for h in hits:
+        oid = h.get("object_id")
+        if oid:
+            by_oid.setdefault(oid, []).append(h)
+    # per-subject sectioning: couch rows in one group, dog-bed rows in the
+    # other — the undated couch row sorts LAST within the couch section
+    assert by_oid["obj-couch"] and by_oid["obj-dogbed"]
+    couch_ids = [h["id"] for h in by_oid["obj-couch"]]
+    assert couch_ids[-1] == "pX-undated"
+
+
+def test_render_interval_diff_via_shared_helper():
+    """interval: the diff line uses the SHARED _norm_date helper (same date
+    semantics as the as-of boundary): buying (2026-08-10) -> selling
+    (2026-09-01) = 22 days; both halves resolve to the SAME object (the
+    canary 'how many days between buying the couch and selling the couch'),
+    so the window is the object's story span (min..max dated row)."""
+    from datetime import date as _d
+
+    from tortoise.assembly import _norm_date
+    assert (_d(2026, 9, 1) - _d(2026, 8, 10)).days == 22
+    assert _norm_date("2026-08-10T23:30:00Z") == _d(2026, 8, 10)
+    slices, _ = _rfixture_current()  # couch dated rows 08-10 + 09-01
+    hits = synthesize_hits(slices, shape=AssemblyShape.INTERVAL,
+                           candidates=[_cand("obj-couch", "couch", 0)],
+                           halves=["buying the couch", "selling the couch"])
+    assert hits[0]["content"] == \
+        "22 days between buying the couch and selling the couch", \
+        f"interval golden drifted: {hits[0]['content']!r}"
+
+
+def test_render_same_name_collision_two_sections():
+    """R12/C7: two same-named entities (distinct ids) render as SEPARATE
+    state headers labeled with the object id — never merged."""
+    dup = [{"object_id": "obj-a", "name": "bike", "status": "live",
+            "superseded_by": None, "superseded_at": None},
+           {"object_id": "obj-b", "name": "bike", "status": "live",
+            "superseded_by": None, "superseded_at": None}]
+    slices = AssemblySlices(state_rows=tuple(dup), timeline_rows=(),
+                            evidence_rows=(),
+                            admission={"rows_requested": 0,
+                                       "rows_admitted": 0,
+                                       "truncated": False})
+    cands = [_cand("obj-a", "bike", 0), _cand("obj-b", "bike", 1)]
+    hits = synthesize_hits(slices, shape=AssemblyShape.CURRENT_STATE,
+                           candidates=cands)
+    labels = [h["content"] for h in hits]
+    assert any("(bike #obj-a)" in c for c in labels), labels
+    assert any("(bike #obj-b)" in c for c in labels), labels
+    # live rows render the LIVE label (no fabricated date/successor)
+    assert all("superseded by" not in c and "on " not in c
+               for c in labels), labels
+
+
+def test_render_live_state_header_label():
+    """A LIVE state row renders 'STATE (name): live' — the reader sees the
+    subject IS current (the 'as of now' semantics live in the label)."""
+    slices = AssemblySlices(
+        state_rows=({"object_id": "obj-d", "name": "dog bed",
+                     "status": "live", "superseded_by": None,
+                     "superseded_at": None},),
+        timeline_rows=(), evidence_rows=(),
+        admission={"rows_requested": 0, "rows_admitted": 0,
+                   "truncated": False})
+    hits = synthesize_hits(slices, shape=AssemblyShape.CURRENT_STATE,
+                           candidates=[_cand("obj-d", "dog bed", 0)])
+    assert hits[0]["content"] == "STATE (dog bed): live", hits
+
+
+def test_render_successor_absent_name_only_annotation():
+    """R12/C6(a): supersededBy names a successor that resolves to ZERO
+    visible nodes (never created) → NAME-ONLY annotation (no fabricated
+    date/evidence line, no fabricated content_snippet beyond the name)."""
+    slices = AssemblySlices(
+        state_rows=({"object_id": "obj-orphan", "name": "orphan-src",
+                     "status": "superseded",
+                     "superseded_by": "successor-never-created",
+                     "superseded_at": "2026-09-01T00:00:00Z"},),
+        timeline_rows=(), evidence_rows=(),
+        admission={"rows_requested": 0, "rows_admitted": 0,
+                   "truncated": False})
+    hits = synthesize_hits(slices, shape=AssemblyShape.CURRENT_STATE,
+                           candidates=[_cand("obj-orphan",
+                                             "orphan-src", 0)])
+    content = hits[0]["content"]
+    assert "STATE (orphan-src): superseded" in content
+    assert "successor-never-created" in content
+    assert "no successor record found" in content, content
+
+
+def test_render_torn_row_empty_superseded_by():
+    """R12/C6(b): status='superseded' with EMPTY supersededBy (hand-written
+    /torn row) → 'successor unknown' annotation; the EMPTY value must not
+    fabricate a link and must not flip retrieval_degraded at Task 6 (the
+    fired path passes [] to the D8 gate)."""
+    slices = AssemblySlices(
+        state_rows=({"object_id": "obj-torn", "name": "torn-row",
+                     "status": "superseded", "superseded_by": "",
+                     "superseded_at": "2026-09-01T00:00:00Z"},),
+        timeline_rows=(), evidence_rows=(),
+        admission={"rows_requested": 0, "rows_admitted": 0,
+                   "truncated": False})
+    hits = synthesize_hits(slices, shape=AssemblyShape.CURRENT_STATE,
+                           candidates=[_cand("obj-torn", "torn-row", 0)])
+    content = hits[0]["content"]
+    assert "STATE (torn-row): superseded" in content
+    assert "successor unknown" in content, content
+    sb = hits[0].get("superseded_by") or {}
+    assert not (sb.get("content_snippet") or ""), \
+        "no fabricated snippet on a torn row"
+
+
+def test_render_terminal_point_retained_with_status():
+    """TERMINAL POINT rows stay in the render (D8 carrier — legacy parity);
+    their status rides the dict for assemble_context/W4, never dropped from
+    a current-state render."""
+    port = _fixture_walker_port()
+    port._g["obj-couch"]["points"].append(
+        {"object_id": "obj-couch", "kind": "point", "id": "pRetr",
+         "content": "an older note later retracted", "when": None,
+         "created_at": "2026-08-11", "status": "retracted",
+         "ep_alpha": None, "ep_beta": None})
+    slices = collect_slices(port, [_cand("obj-couch", "couch", 0)],
+                            shape=AssemblyShape.CURRENT_STATE)
+    hits = synthesize_hits(slices, shape=AssemblyShape.CURRENT_STATE,
+                           candidates=[_cand("obj-couch", "couch", 0)])
+    p_hits = [h for h in hits if h.get("id") == "pRetr"]
+    assert p_hits and p_hits[0].get("status") == "retracted"
+
+
+def test_render_superseded_by_truncated_not_fabricated():
+    """R12/C6: a >200-char supersededBy name is annotated truncated, never
+    fabricated into a date/evidence line."""
+    long_name = "z" * 250
+    slices = AssemblySlices(
+        state_rows=({"object_id": "obj-l", "name": "long-row",
+                     "status": "superseded", "superseded_by": long_name,
+                     "superseded_at": "2026-09-01T00:00:00Z"},),
+        timeline_rows=(), evidence_rows=(),
+        admission={"rows_requested": 0, "rows_admitted": 0,
+                   "truncated": False})
+    hits = synthesize_hits(slices, shape=AssemblyShape.CURRENT_STATE,
+                           candidates=[_cand("obj-l", "long-row", 0)])
+    content = hits[0]["content"]
+    assert "z" * 200 in content and "z" * 250 not in content
+    assert len(content) < 320
+
+
+# ── Task-5 closing pins (reviewer cycles: matched controls, dedupe, ──────
+#    near-midnight shared-helper math, honest-key passthrough, S1/S4) ────
+
+def test_render_ordering_near_midnight_full_iso_shared_helper():
+    """Ordering line math THROUGH the shared helper for full-ISO rows near
+    midnight: couch when=2026-08-10T23:30:00Z vs dogbed created_at=
+    2026-08-09T23:59:59Z -> dog bed came first on 2026-08-09 (UTC DATE
+    truncation — NOT 08-10/08-10, which a local-zone naive date() would
+    produce on western hosts). Expected value computed THROUGH _norm_date
+    inside the test body."""
+    from datetime import date as _d
+
+    from tortoise.assembly import _norm_date
+    port = _fixture_walker_port()
+    port._g["obj-couch"]["points"] = [
+        {"object_id": "obj-couch", "kind": "point", "id": "pMid",
+         "content": "couch event near midnight", "when": "2026-08-10T23:30:00Z",
+         "created_at": "2026-08-10T23:30:00Z", "status": "live",
+         "ep_alpha": None, "ep_beta": None}]
+    port._g["obj-dogbed"]["points"] = [
+        {"object_id": "obj-dogbed", "kind": "point", "id": "pD",
+         "content": "dog bed event", "when": None,
+         "created_at": "2026-08-09T23:59:59Z", "status": "live",
+         "ep_alpha": None, "ep_beta": None}]
+    cands = [_cand("obj-couch", "couch", 0),
+             _cand("obj-dogbed", "dog bed", 1)]
+    slices = collect_slices(port, cands, shape=AssemblyShape.ORDERING)
+    hits = synthesize_hits(slices, shape=AssemblyShape.ORDERING,
+                           candidates=cands)
+    expected = ("dog bed came first on "
+                f"{_norm_date('2026-08-09T23:59:59Z').isoformat()}")
+    assert hits[0]["content"] == expected, hits[0]["content"]
+    # rollover row is NOT truncated to the wrong day
+    assert _norm_date("2026-08-10T23:30:00Z") == _d(2026, 8, 10)
+
+
+def test_render_interval_expected_through_shared_helper():
+    """Interval expected value computed THROUGH _norm_date (never an
+    independent date-lib subtraction): 2026-09-01 - 2026-08-10T23:30:00Z."""
+    from tortoise.assembly import _norm_date
+    port = _fixture_walker_port()
+    port._g["obj-couch"]["points"] = [
+        {"object_id": "obj-couch", "kind": "point", "id": "pA1",
+         "content": "bought", "when": "2026-08-10T23:30:00Z",
+         "created_at": "2026-08-10T23:30:00Z", "status": "live",
+         "ep_alpha": None, "ep_beta": None},
+        {"object_id": "obj-couch", "kind": "point", "id": "pA2",
+         "content": "sold", "when": "2026-09-01", "created_at": "2026-09-01",
+         "status": "live", "ep_alpha": None, "ep_beta": None}]
+    slices = collect_slices(port, [_cand("obj-couch", "couch", 0)],
+                            shape=AssemblyShape.INTERVAL)
+    hits = synthesize_hits(slices, shape=AssemblyShape.INTERVAL,
+                           candidates=[_cand("obj-couch", "couch", 0)],
+                           halves=["buying the couch", "selling the couch"])
+    days = (_norm_date("2026-09-01") - _norm_date("2026-08-10T23:30:00Z")).days
+    assert days == 22  # UTC-truncated 2026-09-01 minus 2026-08-10
+    assert hits[0]["content"] == (f"{days} days between buying the couch "
+                                  f"and selling the couch"), hits[0]
+
+
+def test_render_interval_single_dated_instance_no_line():
+    """Degenerate window (ONE dated row instance) suppresses the interval
+    line — never a fabricated '0 days' (sparse `when` is the design)."""
+    port = _fixture_walker_port()
+    port._g["obj-couch"]["points"] = [
+        {"object_id": "obj-couch", "kind": "point", "id": "pOnly",
+         "content": "only dated event", "when": "2026-08-10",
+         "created_at": "2026-08-10", "status": "live",
+         "ep_alpha": None, "ep_beta": None},
+        {"object_id": "obj-couch", "kind": "point", "id": "pUnd",
+         "content": "undated companion", "when": None,
+         "created_at": "1970-01-01T00:00:00Z", "status": "live",
+         "ep_alpha": None, "ep_beta": None}]
+    slices = collect_slices(port, [_cand("obj-couch", "couch", 0)],
+                            shape=AssemblyShape.INTERVAL)
+    hits = synthesize_hits(slices, shape=AssemblyShape.INTERVAL,
+                           candidates=[_cand("obj-couch", "couch", 0)],
+                           halves=["buying the couch", "selling the couch"])
+    assert not hits or hits[0].get("kind") != "interval", hits[:1]
+    # section rows still render (undated last)
+    assert [h["id"] for h in hits if h.get("id")][-1] == "pUnd"
+
+
+def test_render_order_shuffle_matched_control():
+    """Matched control: identical slices rendered under swapped candidate
+    order flip the SAME-DAY tie winner deterministically (subject_index
+    decides), and re-running yields byte-identical content."""
+    port = _fixture_walker_port()
+    cands_ab = [_cand("obj-couch", "couch", 0),
+                _cand("obj-dogbed", "dog bed", 1)]
+    cands_ba = [_cand("obj-dogbed", "dog bed", 0),
+                _cand("obj-couch", "couch", 1)]
+    slices = collect_slices(port, cands_ab, shape=AssemblyShape.ORDERING)
+    ab = synthesize_hits(slices, shape=AssemblyShape.ORDERING,
+                         candidates=cands_ab)
+    ab2 = synthesize_hits(slices, shape=AssemblyShape.ORDERING,
+                          candidates=cands_ab)
+    ba = synthesize_hits(slices, shape=AssemblyShape.ORDERING,
+                         candidates=cands_ba)
+    # couch (earliest 08-10) before dog bed (earliest 08-10): same day ->
+    # index order decides
+    assert ab[0]["content"] == "couch came first on 2026-08-10"
+    assert ab2[0]["content"] == ab[0]["content"]
+    assert ba[0]["content"] == "dog bed came first on 2026-08-10"
+
+
+def test_render_superseded_state_matched_delta():
+    """+superseded matched control: identical state minus the supersession
+    clause renders the LIVE label; adding superseded_by flips ONLY the
+    header clause + dict shape (no line-count drift)."""
+    def _hits(superseded: bool):
+        sr = {"object_id": "obj-c", "name": "couch",
+              "status": "superseded" if superseded else "live",
+              "superseded_by": "sofa" if superseded else None,
+              "superseded_at": "2026-09-01T00:00:00Z" if superseded
+              else None}
+        slices = AssemblySlices(state_rows=(sr,), timeline_rows=(),
+                                evidence_rows=(),
+                                admission={"rows_requested": 0,
+                                           "rows_admitted": 0,
+                                           "truncated": False})
+        return synthesize_hits(slices, shape=AssemblyShape.CURRENT_STATE,
+                               candidates=[_cand("obj-c", "couch", 0)],
+                               successors_verified={"sofa"})
+    live = _hits(False)
+    sup = _hits(True)
+    assert live[0]["content"] == "STATE (couch): live"
+    assert sup[0]["content"] == ("STATE (couch): superseded by sofa on "
+                               "2026-09-01")
+    assert isinstance(sup[0]["superseded_by"], dict)
+    assert len(live) == len(sup) == 1
+
+
+def test_render_same_subject_duplicate_id_deduped():
+    """Same-subject duplicate id (a re-read row) dedupes to ONE line."""
+    port = _fixture_walker_port()
+    dup = {"object_id": "obj-couch", "kind": "point", "id": "pDup",
+           "content": "duplicated point", "when": "2026-08-11",
+           "created_at": "2026-08-11", "status": "live",
+           "ep_alpha": None, "ep_beta": None}
+    port._g["obj-couch"]["points"].append(dup)
+    port._g["obj-couch"]["points"].append(dict(dup))
+    slices = collect_slices(port, [_cand("obj-couch", "couch", 0)],
+                            shape=AssemblyShape.CURRENT_STATE)
+    hits = synthesize_hits(slices, shape=AssemblyShape.CURRENT_STATE,
+                           candidates=[_cand("obj-couch", "couch", 0)])
+    n = sum(1 for h in hits if h.get("id") == "pDup")
+    assert n == 1, n
+
+
+def test_render_cross_subject_dedupe_per_section_not_global():
+    """A point aboutObject-anchored to BOTH compare subjects renders once
+    PER subject section (2 total — NOT globally deduped to 1): expected
+    line count pinned. obj-couch section: pShared + pA-couch-bought;
+    obj-dogbed section: pShared + pA-dogbed-chewed."""
+    port = _fixture_walker_port()
+    shared = {"object_id": None, "kind": "point", "id": "pShared",
+              "content": "shared anchor point", "when": "2026-08-11",
+              "created_at": "2026-08-11", "status": "live",
+              "ep_alpha": None, "ep_beta": None}
+    for oid in ("obj-couch", "obj-dogbed"):
+        row = dict(shared)
+        row["object_id"] = oid
+        port._g[oid]["points"].append(row)
+    cands = [_cand("obj-couch", "couch", 0),
+             _cand("obj-dogbed", "dog bed", 1)]
+    slices = collect_slices(port, cands, shape=AssemblyShape.ORDERING)
+    hits = synthesize_hits(slices, shape=AssemblyShape.ORDERING,
+                           candidates=cands)
+    n_shared = sum(1 for h in hits if h.get("id") == "pShared")
+    assert n_shared == 2, f"once per section, not global: {n_shared}"
+    # 1 ordering line + couch section (pA-couch-bought, pShared,
+    # pX-undated) + dogbed section (pA-dogbed-chewed, pShared) = 6 hits
+    assert len(hits) == 6, [h.get("id") or h.get("content") for h in hits]
+    # the dog-bed section's pShared proves per-section not global
+    dogbed_ids = [h.get("id") for h in hits
+                  if h.get("object_id") == "obj-dogbed"]
+    assert dogbed_ids == ["pA-dogbed-chewed", "pShared"], dogbed_ids
+
+
+def test_render_honest_key_passthrough_session_speaker():
+    """Real rows pass honest session_date/speaker/validity keys through
+    unchanged (the Task-6 decorate + byte-parity seam: _render_block reads
+    lme_session_index/session_date/speaker/valid_from)."""
+    port = _fixture_walker_port()
+    port._g["obj-couch"]["points"] = [
+        {"object_id": "obj-couch", "kind": "point", "id": "pSpk",
+         "content": "told a friend about the couch", "when": None,
+         "created_at": "2026-08-10", "status": "live",
+         "valid_from": "2026-08-10", "ep_alpha": None, "ep_beta": None,
+         "speaker": "user", "session_date": "2026-08-10",
+         "lme_session_index": 3}]
+    slices = collect_slices(port, [_cand("obj-couch", "couch", 0)],
+                            shape=AssemblyShape.CURRENT_STATE)
+    hits = synthesize_hits(slices, shape=AssemblyShape.CURRENT_STATE,
+                           candidates=[_cand("obj-couch", "couch", 0)])
+    p_hits = [h for h in hits if h.get("id") == "pSpk"]
+    assert p_hits and p_hits[0]["speaker"] == "user"
+    assert p_hits[0]["session_date"] == "2026-08-10"
+    assert p_hits[0]["valid_from"] == "2026-08-10"
+    assert p_hits[0]["lme_session_index"] == 3
+
+
+def test_render_recall_excluded_successor_name_only():
+    """S1: a successor that EXISTS but is recall-excluded (the fired path's
+    probe returns it excluded -> successors_verified empty) renders the
+    NAME-ONLY annotation — the renderer cannot distinguish 'never created'
+    from 'excluded' and must not fabricate either way."""
+    slices = AssemblySlices(
+        state_rows=({"object_id": "obj-c", "name": "couch",
+                     "status": "superseded",
+                     "superseded_by": "sofa",
+                     "superseded_at": "2026-09-01T00:00:00Z"},),
+        timeline_rows=(), evidence_rows=(),
+        admission={"rows_requested": 0, "rows_admitted": 0,
+                   "truncated": False})
+    hits = synthesize_hits(slices, shape=AssemblyShape.CURRENT_STATE,
+                           candidates=[_cand("obj-c", "couch", 0)],
+                           successors_verified=frozenset())
+    content = hits[0]["content"]
+    assert "STATE (couch): superseded by sofa" in content
+    assert "no successor record found" in content, content
+    assert " on 2026-09-01" not in content
+
+
+def test_render_headers_follow_candidate_order_not_state_rows():
+    """P2-1: CURRENT_STATE headers follow the CANDIDATE subject sequence,
+    never the raw state_rows order (docker state query has no ORDER BY)."""
+    sr_beta = {"object_id": "obj-beta", "name": "beta", "status": "live",
+               "superseded_by": None, "superseded_at": None}
+    sr_alpha = {"object_id": "obj-alpha", "name": "alpha", "status": "live",
+                "superseded_by": None, "superseded_at": None}
+    slices = AssemblySlices(state_rows=(sr_beta, sr_alpha),
+                            timeline_rows=(), evidence_rows=(),
+                            admission={"rows_requested": 0,
+                                       "rows_admitted": 0,
+                                       "truncated": False})
+    cands = [_cand("obj-alpha", "alpha", 0), _cand("obj-beta", "beta", 1)]
+    hits = synthesize_hits(slices, shape=AssemblyShape.CURRENT_STATE,
+                           candidates=cands)
+    assert [h["content"] for h in hits] == ["STATE (alpha): live",
+                                            "STATE (beta): live"]

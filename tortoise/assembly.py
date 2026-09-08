@@ -711,3 +711,232 @@ def docker_walker_port(sdk) -> WalkerPort:
     import types
     return types.SimpleNamespace(state_rows=state_rows,
                                  spine_rows=spine_rows)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# #2165 Task 5 — renderer: synthesized hits + deterministic ordering/diff
+# (R1/R2/R3-5/R6/R12, R17 P2-1). Slices -> ordinary annotated hit dicts the
+# UNCHANGED assemble_context/_render_block render (Task 6's byte-parity
+# invariant). CONTRACT (pinned here — Task 6 captures the byte-goldens):
+#   * state/section labels EMBED in hit content ("STATE (couch): superseded
+#     by sofa on 2026-09-01" / "STATE (bike #obj-b): live"); synthesized
+#     rows carry NO `id` (why.enrich skips them) and lme_session_index-less
+#     -> _render_block prefixes "[session ?]".
+#   * superseded_by is DICT-shaped ({"content_snippet": name-or-snippet});
+#     empty supersededBy -> {"content_snippet": ""} (the fired path passes
+#     [] to the D8 gate at Task 6 — never flips retrieval_degraded).
+#   * successor-absent (verified-empty) and torn rows render NAME-ONLY
+#     annotations — a successor is never fabricated into a date/evidence
+#     line; >200-char names truncate.
+#   * real rows pass through unchanged minus the pure walker derivation
+#     keys {date, tier} (no point_id — W4-OUTPUT-only).
+#   * per-subject sectioning (R12/C7): subject-major line blocks in
+#     candidate order, rows chronological within a section; a point
+#     anchored to two subjects renders once PER section (not globally).
+#   * ordering/diff arithmetic uses the SAME _norm_date helper as the as-of
+#     boundary (second-model P2-3) — one date source everywhere.
+# ══════════════════════════════════════════════════════════════════════════
+
+_MAX_SUCC_NAME = 200
+
+
+def _fmt_date(d: _date) -> str:
+    return d.isoformat() if d is not None else ""
+
+
+def _as_str(v) -> str:
+    """Never-raise string coercion: a non-str value on a hand-built slice
+    (AssemblySlices is a public pure type) must not crash the renderer nor
+    leak ``b'...'`` reprs into the reader text."""
+    if isinstance(v, str):
+        return v
+    return "" if v is None else str(v)
+
+
+def _subject_names(slices: AssemblySlices) -> dict[str, str]:
+    """object_id -> display name from the state slice."""
+    names: dict[str, str] = {}
+    for sr in slices.state_rows:
+        oid = sr.get("object_id")
+        if oid and not names.get(oid):
+            names[oid] = _as_str(sr.get("name")).strip() or "(unnamed)"
+    return names
+
+
+def _display_label(name: str, oid: str, colliding: bool) -> str:
+    """Section/state label: bare name, or name + '#<oid>' when two
+    same-named entities share this assembly (R12/C7 disambiguation)."""
+    return f"{name} #{oid}" if colliding else name
+
+
+def _oid_rows(slices: AssemblySlices, oid: str) -> list[dict]:
+    return [r for r in slices.timeline_rows
+            if r.get("object_id") == oid]
+
+
+def _subject_order(slices: AssemblySlices,
+                   candidates: tuple | list) -> list[tuple[str, str]]:
+    """Ordered (object_id, name) list: candidate order when supplied (else
+    state-row order, then spine-only oids)."""
+    out: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    names = _subject_names(slices)
+    for c in candidates:
+        oid = c.object_id
+        if oid in seen:
+            continue
+        seen.add(oid)
+        if _oid_rows(slices, oid) or oid in names:
+            out.append((oid, (c.name or "").strip() or names.get(oid,
+                        "(unnamed)")))
+    for sr in slices.state_rows:
+        oid = sr.get("object_id")
+        if oid and oid not in seen:
+            seen.add(oid)
+            out.append((oid, names.get(oid, "(unnamed)")))
+    for r in slices.timeline_rows:
+        oid = r.get("object_id")
+        if oid and oid not in seen:
+            seen.add(oid)
+            out.append((oid, names.get(oid, "(unnamed)")))
+    return out
+
+
+def _dated_instances(rows: list[dict]) -> list[_date]:
+    """Per-ROW normalized dates over the rows, read from the walker's OWN
+    tier date (the R2 ladder already ran inside collect_slices — when ->
+    createdAt -> startedAt with parse FALL-THROUGH, UTC truncation). NEVER
+    re-derive here: an or-chain would silently drop a row whose truthy but
+    unparseable `when` shadows a valid createdAt (P1: silent wrong math)."""
+    out: list[_date] = []
+    for r in rows:
+        d = r.get("date")
+        if isinstance(d, _date):
+            out.append(d)
+    return out
+
+
+def _date_anchors(rows: list[dict]) -> tuple[_date | None, _date | None]:
+    """(earliest, latest) dated row dates — identical date semantics to the
+    walker's tier sort (one date source everywhere)."""
+    ds = _dated_instances(rows)
+    return (min(ds), max(ds)) if ds else (None, None)
+
+
+def _state_header_hit(sr: dict, label: str,
+                      successors_verified: frozenset[str],
+                      ) -> dict:
+    status = _as_str(sr.get("status")).strip()
+    succ = _as_str(sr.get("superseded_by")).strip()
+    if len(succ) > _MAX_SUCC_NAME:
+        succ = succ[: _MAX_SUCC_NAME] + "…"
+    date = _norm_date(sr.get("superseded_at"))
+    if status == "superseded":
+        if not succ:
+            text = f"STATE ({label}): superseded (successor unknown)"
+            sb = {"content_snippet": ""}
+        elif succ in successors_verified:
+            on = f" on {_fmt_date(date)}" if date else ""
+            text = f"STATE ({label}): superseded by {succ}{on}"
+            sb = {"content_snippet": succ}
+        else:
+            # name-only annotation — the successor resolved to zero visible
+            # nodes (never created / recall-excluded / the fired path's
+            # probe found nothing); NEVER fabricate a date/evidence line
+            text = (f"STATE ({label}): superseded by {succ} — "
+                    f"no successor record found")
+            sb = {"content_snippet": ""}
+    else:
+        text = f"STATE ({label}): {status or 'live'}"
+        sb = {"content_snippet": ""}
+    return {"content": text, "kind": "state", "status": status,
+            "superseded_by": sb}
+
+
+def synthesize_hits(
+    slices: AssemblySlices, *, shape: AssemblyShape,
+    candidates: tuple | list = (), halves: tuple | list = (),
+    successors_verified: frozenset[str] = frozenset(),
+) -> list[dict]:
+    """Render slices -> annotated hit dicts (the assemble_context input).
+
+    Deterministic: subject-major sections in candidate order, rows
+    chronological within a section; state/ordering/interval lines computed
+    through the SHARED _norm_date helper (never an independent date lib).
+    """
+    cands = list(candidates)
+    order = _subject_order(slices, cands)
+    # colliding names -> disambiguate every label for those names
+    by_name_rows: dict[str, int] = {}
+    for _oid, name in order:
+        by_name_rows[name] = by_name_rows.get(name, 0) + 1
+    collide: set[str] = {n for n, k in by_name_rows.items() if k > 1}
+
+    state_by_oid = {sr.get("object_id"): sr for sr in slices.state_rows}
+    hits: list[dict] = []
+    if shape is AssemblyShape.INTERVAL:
+        # span over DISTINCT dated row instances across the pair — a window
+        # with < 2 distinct dates is degenerate and must NOT fabricate a
+        # "0 days" line (sparse `when` is the fixture's primary design)
+        spans = sorted(_dated_instances(list(slices.timeline_rows)))
+        if len(spans) >= 2 and spans[-1] > spans[0]:
+            days = (spans[-1] - spans[0]).days
+            halves_l = [h for h in halves if h and _as_str(h).strip()]
+            if len(halves_l) >= 2:
+                phrase = (f"{days} days between {_as_str(halves_l[0]).strip()} "
+                          f"and {_as_str(halves_l[1]).strip()}")
+            elif len(order) >= 2:
+                l0 = _display_label(order[0][1], order[0][0],
+                                    order[0][1] in collide)
+                l1 = _display_label(order[1][1], order[1][0],
+                                    order[1][1] in collide)
+                phrase = f"{days} days between {l0} and {l1}"
+            else:
+                phrase = f"{days} days between the events described"
+            hits.append({"content": phrase, "kind": "interval"})
+    elif shape is AssemblyShape.ORDERING:
+        dated: list[tuple[str, str, _date, int]] = []
+        for i, (oid, name) in enumerate(order):
+            lo, _hi = _date_anchors(_oid_rows(slices, oid))
+            if lo is not None:
+                dated.append((oid, name, lo, i))
+        dated.sort(key=lambda t: (t[2], t[3]))
+        if len(dated) >= 2:
+            # (earliest-date, subject_index) — a same-day tie is decided by
+            # the candidate/transcript order, deterministically
+            oid_a, name_a, da, _i = dated[0]
+            label = _display_label(name_a, oid_a, name_a in collide)
+            hits.append({"content": f"{label} came first on "
+                                   f"{_fmt_date(da)}",
+                         "kind": "ordering"})
+    elif shape is AssemblyShape.CURRENT_STATE:
+        # headers follow the SAME candidate-ordered subject sequence as the
+        # sections below — never the raw state_rows order (the docker state
+        # query has no ORDER BY; P2-1 determinism)
+        for oid, name in order:
+            sr = state_by_oid.get(oid)
+            if sr is None:
+                continue
+            label = _display_label(name, oid, name in collide)
+            hits.append(_state_header_hit(sr, label,
+                                          successors_verified))
+
+    # per-subject sections (subject-major). Rows are re-sorted internally on
+    # (date, id) so synthesize_hits output is INDEPENDENT of the input row
+    # order — the chronological-within-a-section contract never depends on
+    # the caller having pre-sorted (matched-control order-shuffle safe).
+    for oid, _name in order:
+        section_rows = _oid_rows(slices, oid)
+        section_rows.sort(key=lambda r: (r.get("date") or _date.max,
+                                         _as_str(r.get("id"))))
+        seen: set[str] = set()
+        for r in section_rows:
+            rid = r.get("id")
+            if rid is not None:
+                if rid in seen:
+                    continue  # cross-subject anchor: once PER section
+                seen.add(rid)
+            cleaned = {k: v for k, v in r.items()
+                       if k not in ("date", "tier")}
+            hits.append(cleaned)
+    return hits
