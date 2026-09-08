@@ -112,7 +112,9 @@ def build_summary(*, arms: list[dict[str, Any]], exit_code: int,
                   run_mode: str = "mock",
                   timestamps: dict[str, str],
                   sessions: int = 1,
-                  l4_underpopulated: bool = False) -> dict[str, Any]:
+                  l4_underpopulated: bool = False,
+                  budget_stopped: bool = False,
+                  budget_skipped: list[str] | None = None) -> dict[str, Any]:
     """Assemble a schema-v1.1 run summary (per-arm + run-level). The
     run-level ``run.run_mode`` records the mode the runner RESOLVED at run
     end (mock iff every arm resolved mock; PR #2341 review round 2, P2) so
@@ -122,15 +124,19 @@ def build_summary(*, arms: list[dict[str, Any]], exit_code: int,
 
     ``sessions`` / ``l4_underpopulated`` (Task 10): the stream dimension
     + the runner-stamped L4 underpopulation flag (a real run that included
-    L4 scenarios at sessions < 2). The CLI report composes the run-level
-    report_status from these."""
+    L4 scenarios at sessions < 2). ``budget_stopped``/``budget_skipped``
+    (review #2629 P1-1): the mid-run dollar cap tripped — stamped with the
+    skipped unit ids so the stop is never a silent truncation. The CLI
+    report composes the run-level report_status from these."""
     return {
         "schema_version": SCHEMA_VERSION,
         "arms": arms,
         "run": {"exit_code": exit_code, "run_ids": run_ids,
                 "artifacts": artifacts, "seed": seed, "run_mode": run_mode,
                 "sessions": sessions,
-                "l4_underpopulated": l4_underpopulated},
+                "l4_underpopulated": l4_underpopulated,
+                "budget_stopped": budget_stopped,
+                "budget_skipped": budget_skipped or []},
         "timestamps": timestamps,
     }
 

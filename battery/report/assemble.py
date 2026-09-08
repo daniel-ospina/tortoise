@@ -62,7 +62,7 @@ REPORT_STATUS_L4_UNDERPOPULATED = "incomplete_l4_underpopulated"
 REPORT_STATUSES = (
     REPORT_STATUS_OK, REPORT_STATUS_INCOMPLETE, REPORT_STATUS_EMITTER_GAP,
     REPORT_STATUS_REAL_NO_EPISODES, REPORT_STATUS_REAL_PARTIAL,
-    REPORT_STATUS_REAL_OVER_BUDGET,
+    REPORT_STATUS_REAL_OVER_BUDGET, REPORT_STATUS_L4_UNDERPOPULATED,
 )
 
 #: Writer file names (glob contract for the CLI readers).
@@ -189,8 +189,6 @@ def compose_run_status(*, run_mode: str, exit_code: int,
         return REPORT_STATUS_EMITTER_GAP
     if over_budget:
         return REPORT_STATUS_REAL_OVER_BUDGET
-    if l4_underpopulated:
-        return REPORT_STATUS_L4_UNDERPOPULATED
     if measured_cells == 0:
         # No-episodes is reserved for runs that ATTEMPTED episodes but
         # measured none: all-excluded / all-insufficient / cap-stopped /
@@ -203,6 +201,11 @@ def compose_run_status(*, run_mode: str, exit_code: int,
                 or excluded_episodes > 0):
             return REPORT_STATUS_REAL_NO_EPISODES
         return None
+    if l4_underpopulated:
+        # After the no-episodes branch (review #2629 P2-1): an all-excluded
+        # real L4 session-1 run is a no-episodes state first; the L4
+        # underpopulation is only reachable when episodes actually ran.
+        return REPORT_STATUS_L4_UNDERPOPULATED
     if insufficient_cells > 0 or excluded_episodes > 0:
         return REPORT_STATUS_REAL_PARTIAL
     return None

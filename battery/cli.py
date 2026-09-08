@@ -626,7 +626,7 @@ def _load_report_inputs(args) -> tuple[dict, dict | None, dict]:
         "excluded_gap": any(_excluded_snapshot_gap(a) for a in arts),
         "over_budget": any(
             "budget" in str(a.get("excluded", {}).get("reason", "")).lower()
-            for a in arts),
+            for a in arts) or bool(summary.get("run", {}).get("budget_stopped")),
         # Task 10: runner-stamped on the summary when a real run included
         # L4 scenarios at sessions < 2 (never attempted cross-session).
         "l4_underpopulated": bool(

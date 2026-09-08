@@ -103,8 +103,9 @@ def _config_dir(tmp_path: Path, sessions: int = 1) -> Path:
     (golds / "g.txt").write_text("gold", encoding="utf-8")
     sha = hashlib.sha256(b"gold").hexdigest()
     corpus = {"scenarios": [
-        {"id": f"s{i}", "tier": "probe", "family": "d", "task_type": "decision",
-         "k": 0, "prompt": {"preamble": f"Resolve scenario {i}."},
+        {"id": f"s{i}", "tier": "stream", "family": "L1",
+         "task_type": "decision", "k": 0,
+         "prompt": {"preamble": f"Resolve scenario {i}."},
          "question": f"what should we do about case {i}?",
          "gold_ref": {"path": "g.txt", "sha256": sha}}
         for i in range(2)]}
@@ -266,13 +267,15 @@ def test_differential_tier_smoke(tmp_path) -> None:
     assert code is ExitCode.OK
     attempt = sorted(out.iterdir())[0]
     summary = json.loads((attempt / "summary.json").read_text())
-    # differential scenario ran 2 streamed sessions on the real scaffold
-    assert summary["arms"][0]["valid_episodes"] == 6  # 3 scenarios x 2
+    # differential (D4) is a SINGLE-SESSION measure (review #2629 P1-3):
+    # sessions=2 applies only to the L1 stream scenarios (2x2 = 4); the D4
+    # scenario runs once on the same scaffold (5 units total).
+    assert summary["arms"][0]["valid_episodes"] == 5
     recall = json.loads((attempt / "recall.json").read_text())
     d4_rows = [r for r in recall.get("episodes", [])
                if r["scenario_id"] == "d4-001"]
-    assert len(d4_rows) == 2
-    assert sorted(r["session_index"] for r in d4_rows) == [0, 1]
+    assert len(d4_rows) == 1
+    assert [r["session_index"] for r in d4_rows] == [0]
     # per-cell discipline: an attempted-but-unmeasured D cell is
     # insufficient_n — reported, never classified STRONG/PARITY from a gap
     cell = classify_cell("D4", "a0", None, best_comparator=0.0)

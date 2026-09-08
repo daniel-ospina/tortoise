@@ -56,7 +56,6 @@ class EpisodeResult:
     #: keep an EMPTY log (allowed — never claimed real).
     event_log: list[dict] = field(default_factory=list)
     #: run_mode discriminator (mock|real) — mock is never scored as real.
-    run_mode: str = "mock"
     #: Task 10: session index within the scenario's stream (0 for the
     #: single-session default; >0 only when config.sessions > 1).
     session_index: int = 0

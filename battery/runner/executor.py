@@ -297,18 +297,27 @@ def state_events(*, ep_outcome: str, decide_cycles: int,
 
 
 def surfacing_event(*, within_turn: int, event_ref: str,
-                    explicit: bool = False) -> dict:
-    """ONE tool_event entry per declared surfacing intent — emission-loss-
+                    explicit: bool = False,
+                    declared_as: str = "file_nand") -> dict:
+    """ONE tool_event entry per FILED surfacing intent — emission-loss-
     proof: the executor calls this for every register_conflict/file_nand
-    intent it acts on (a genuine surfacing NEVER silently drops). Carries
-    the Amend-1 event_ref (product event-store reference) — the log never
-    re-records product op payloads."""
+    intent that received a real product ref (a genuine surfacing NEVER
+    silently drops). Carries the Amend-1 event_ref (product event-store
+    reference) — the log never re-records product op payloads.
+
+    ``declared_as`` records the model's ORIGINAL intent verb when the
+    executor canonicalized it (register_conflict files the same NAND op as
+    file_nand; the registry pins field contradiction_surfaced -> event
+    file_nand, so the canonical event name is file_nand and the true
+    declared intent rides in the payload — never mislabeled, review #2629).
+    """
     return {
         "type": "tool_event", "event": "file_nand", "at": _now(),
         "field": "contradiction_surfaced",
         "payload": {"value": True, "event_ref": event_ref,
                     "surfaced_within_turn": int(within_turn),
-                    "explicit_resolution": bool(explicit)},
+                    "explicit_resolution": bool(explicit),
+                    "declared_as": declared_as},
     }
 
 

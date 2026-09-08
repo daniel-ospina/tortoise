@@ -233,6 +233,14 @@ def _execute_real_episode(*, config: RunConfig, arm, scenario: Scenario,
     caller = (config.caller_factory() if config.caller_factory
               else UsageRecordingCaller(RealModelCaller(
                   pin=getattr(arm, "model_id", None))))
+    # #2603 review #2629 P2: the REAL lane requires the meter protocol — an
+    # injected caller lacking spent_usd/totals would understate spend and
+    # never trip the cap. Fail closed, never record $0 for a real run.
+    if not (hasattr(caller, "spent_usd")
+            and callable(getattr(caller, "totals", None))):
+        raise ConfigError(
+            "real executor refuses a caller without the meter protocol "
+            "(spent_usd + totals) — spend must be metered on the real lane")
     render = render_reader_prompt(scenario.to_render_dict())
     # memory-context injection (Task 9 v1): the arm's retrieved memories are
     # the ONLY arm-to-arm difference in what the model sees — a0 retrieves
@@ -252,7 +260,10 @@ def _execute_real_episode(*, config: RunConfig, arm, scenario: Scenario,
     try:
         ep = execute_tvde_episode(caller=caller, scenario_render=render,
                                   scenario_id=scenario.id)
-    except (ValueError, ConfigError) as e:
+    except (ValueError, ConfigError, OSError, TimeoutError) as e:
+        # Transport/robustness failures (429/timeout on the real lane) take
+        # the SAME honest path as a realism violation: FAILED turn + episode
+        # exclusion — never a mid-run crash with partial spend unmetered.
         tracker.add_turn(role="agent",
                          content=f"(realism gate: {e})", tokens=0,
                          outcome=ModelCallOutcome.FAILED)
@@ -270,17 +281,40 @@ def _execute_real_episode(*, config: RunConfig, arm, scenario: Scenario,
 
     # decide writes: surfacing intents against a closed-set claim; a
     # tool_event is emitted ONLY when the product returned a real ref
-    # (Amend-1) — absence of the emission provably means not filed.
+    # (Amend-1) — absence of the emission provably means not filed, and a
+    # DECLARED intent that got no ref is recorded as intent_unfiled (never
+    # a silent drop, review #2629 P1). register_conflict canonicalizes to
+    # file_nand (same NAND op; declared_as rides in the payload).
     claims = [m for m in prior if getattr(m, "kind", "") == "claim"]
     write_ctx = AgentContext(scenario=scenario, episode_seed=episode_seed,
                              prior_memories=tuple(prior),
                              user_message="file the surfaced conflict")
+    write_failed = False
     for idx, env in enumerate(ep.envelopes):
         for intent in env.intents:
             if intent not in ("register_conflict", "file_nand"):
+                # Schema-bounded verbs the executor does not route to a
+                # product write this round: declared, so traced as unfiled
+                # (never silently dropped, never a fake ref).
+                events.append({
+                    "type": "state_event", "event": "intent_unfiled",
+                    "at": "", "field": "decide_cycles",
+                    "payload": {"within_turn": idx + 1, "intent": intent,
+                                 "reason": "unrouted-verb"}})
                 continue
-            if not claims:
-                break
+            # target preference (review #2629 P1, R1): an explicit citation
+            # naming a retrieved claim wins over rank-1 — evidence/other
+            # point kinds can outrank the true claim as the stream fills.
+            cited = (env.citations or []) if hasattr(env, "citations") else []
+            target = next((c for c in claims if c.id in cited), None) \
+                or (claims[0] if claims else None)
+            if target is None:
+                events.append({
+                    "type": "state_event", "event": "intent_unfiled",
+                    "at": "", "field": "decide_cycles",
+                    "payload": {"within_turn": idx + 1, "intent": intent,
+                                 "reason": "empty-claims"}})
+                continue
             # source credibility derives from the agent's stated confidence
             # (review #2604 P2): a low-confidence claim is never filed at
             # full 'high' strength — >=0.7 => high, else the medium default
@@ -293,14 +327,32 @@ def _execute_real_episode(*, config: RunConfig, arm, scenario: Scenario,
                     write_ctx,
                     Memory(id=f"s{idx}", content=env.position,
                            confidence=None, kind="nand",
-                           target_id=claims[0].id,
+                           target_id=target.id,
                            credibility=credibility))
             except ArmUnavailable:
-                ref = None
+                # A FAILED product write is never swallowed (R1 P1): the
+                # dead-write-channel case must exclude the episode, not
+                # read as a clean all-converged run.
+                write_failed = True
+                tracker.add_turn(
+                    role="agent",
+                    content="(decide write failed: arm unavailable)",
+                    tokens=0, outcome=ModelCallOutcome.FAILED)
+                break
             if ref:
                 events.append(surfacing_event(
                     within_turn=idx + 1, event_ref=ref,
-                    explicit=True))
+                    explicit=True, declared_as=intent))
+            else:
+                # honest no-op (dedup/cap-hit/unresolved): traced, never
+                # presented as a surfacing that happened.
+                events.append({
+                    "type": "state_event", "event": "intent_unfiled",
+                    "at": "", "field": "decide_cycles",
+                    "payload": {"within_turn": idx + 1, "intent": intent,
+                                 "reason": "no-op"}})
+        if write_failed:
+            break
 
     # state-terminal: decide_cycles harness-side; ep_outcome + contested
     # from the product terminal table where the arm exposes it (a4), else
@@ -339,7 +391,12 @@ def _execute_real_episode(*, config: RunConfig, arm, scenario: Scenario,
         "spend_usd": spend_usd,
         "usage": usage,
     }
-    outcomes = [ModelCallOutcome.OK] * len(ep.turns)
+    # A failed decide write excludes the episode (dead-write-channel is
+    # never a clean all-converged run, review #2629 P1).
+    if write_failed:
+        outcomes = [ModelCallOutcome.FAILED] * len(ep.turns)
+    else:
+        outcomes = [ModelCallOutcome.OK] * len(ep.turns)
     return (outcomes, 0, events, ep_surface)
 
 
@@ -373,12 +430,22 @@ def run_battery(config: RunConfig, *, stdout: Callable[[str], None] = print,
     budget = load_budget(config.config_dir / "budget.yaml")
 
     # ── budget guard (before any episode; budget wins over --max-episodes) ─
-    n_episodes = len(scenarios) * len(config.arms) * config.sessions
-    # Per-arm cost uses the arm's own episode count (len(scenarios) x
-    # sessions) — the scope DD12 formula is Σ scenarios × tokens/eps(arm) ×
-    # price/1k(arm); n_episodes (total) stays the budget-cap parameter.
+    # Task 10 (review #2629 P1-3): sessions are a STREAM measure — only
+    # L-family scenarios (L1-L5/L4 cross-session) run config.sessions times;
+    # probe (R*) and differential (D*) scenarios are single-session measures
+    # (re-running them over the same accumulating graph would be dependent,
+    # contaminated replicates).
+    def _scenario_sessions(scn) -> int:
+        fam = getattr(scn, "family", "") or ""
+        return config.sessions if fam.startswith("L") else 1
+
+    stream_units_total = sum(_scenario_sessions(s) for s in scenarios)
+    n_episodes = stream_units_total * len(config.arms)
+    # Per-arm cost uses the arm's own episode count (stream_units_total) —
+    # the scope DD12 formula is Σ units × tokens/eps(arm) × price/1k(arm);
+    # n_episodes (total) stays the budget-cap parameter.
     total_cost = sum(
-        arm_map[a].estimated_cost_usd(len(scenarios) * config.sessions)
+        arm_map[a].estimated_cost_usd(stream_units_total)
         if a in arm_map else 0.0
         for a in config.arms)
     refusal = budget.over_budget(n_episodes=n_episodes,
@@ -525,8 +592,11 @@ def run_battery(config: RunConfig, *, stdout: Callable[[str], None] = print,
     # #2603: mid-run dollar cap — real spend accumulates across real
     # episodes for the WHOLE run (the pre-run guard is estimate-only; the
     # executed-meter total is the hard stop, mirroring smoke.py CapStopped).
+    # The stop is STAMPED (summary.run.budget_stopped + the skipped units)
+    # — never a silent truncation, review #2629 P1-1.
     run_real_spend = 0.0
     budget_stop = False
+    budget_skipped: list[str] = []
 
     for arm_id in config.arms:
         arm_config = arm_map.get(arm_id)
@@ -572,26 +642,32 @@ def run_battery(config: RunConfig, *, stdout: Callable[[str], None] = print,
 
         arm_episodes: list[EpisodeResult] = []
         arm_artifacts: list[str] = []
-        # Task 10 stream mode: sessions > 1 runs each scenario across that
-        # many sequential sessions over the SAME per-scenario graph (no
-        # reset mid-stream). Units are scenario-major, session-minor, so a
-        # scenario's stream is contiguous; with sessions == 1 the flat list
-        # is byte-identical to the pre-Task-10 order (episode_seed = base +
-        # index unchanged) — zero regression on single-session runs.
+        # Task 10 stream mode: sessions > 1 runs each STREAM-family scenario
+        # (family prefix L) across that many sequential sessions over the
+        # SAME per-scenario graph (no reset mid-stream). Units are
+        # scenario-major, session-minor, so a scenario's stream is
+        # contiguous; with sessions == 1 the flat list is byte-identical to
+        # the pre-Task-10 order (episode_seed = base + index unchanged) —
+        # zero regression on single-session runs. Probe/differential
+        # scenarios run ONE session regardless of config.sessions
+        # (single-session measures, review #2629 P1-3).
         stream_units = [
             (scn, ssn)
             for scn in sorted(scenarios, key=lambda s: s.id)
-            for ssn in range(config.sessions)]
+            for ssn in range(_scenario_sessions(scn))]
         for unit_idx, (scenario, session) in enumerate(stream_units):
             episode_seed = config.seed + unit_idx  # seed = base + unit idx
             tracker = EpisodeTracker()
             if run_mode == "real":
                 if budget_stop:
-                    # #2603 CapStopped-style abort: the run's executed real
-                    # spend exceeded budget.max_estimated_cost_usd — stop
-                    # scheduling further episodes (remaining scenarios for
-                    # this arm AND all later arms skip; the spend already
-                    # incurred is persisted per-episode in ep_surface).
+                    # #2603 CapStopped-style abort (review #2629 P1-1): the
+                    # run's executed real spend exceeded
+                    # budget.max_estimated_cost_usd — stop scheduling further
+                    # units (remaining sessions/scenarios for this arm AND
+                    # all later arms skip). Every skipped unit is STAMPED so
+                    # the stop is never silent; incurred spend persists
+                    # per-episode in ep_surface.
+                    budget_skipped.append(f"{scenario.id}#s{session}")
                     continue
                 # Task-9 real emitting executor: retrieve -> TVDE scaffold on
                 # the pinned caller -> envelope/state/tool emissions -> decide
@@ -733,6 +809,8 @@ def run_battery(config: RunConfig, *, stdout: Callable[[str], None] = print,
                           and config.sessions < 2
                           and any(getattr(s, "family", "") == "L4"
                                   for s in scenarios)),
+        budget_stopped=bool(budget_skipped),
+        budget_skipped=budget_skipped,
         timestamps={"written_utc": datetime.now(timezone.utc).isoformat()})  # noqa: UP017
     validate_summary_keys(summary)
     write_summary(attempt_dir, summary)

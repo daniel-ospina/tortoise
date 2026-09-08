@@ -150,23 +150,25 @@ class A4TortoiseArm:
         draft/terminal filtering per product semantics. The probe query is
         the episode's own user message when present, else the scenario's
         primary planted claim (the everyday "what do I know about X" read).
-        Memory.confidence = the claim's EP posterior mean (row.ep.
-        confidence_mean) — never None on the real path (uncalibrated rows
-        fall back to the product's documented neutral 0.5). Operator ids
-        surfaced by the state read's nands/arguments attachments are
-        emitted as operator-kind Memories (content = the attached edge
-        label when given, else "") so the WRITE closed set can carry
-        operators for #901 mitigate routing. Raises ArmUnavailable on
-        failure (never partial memories). The per-episode decide counter
-        resets when the episode MOVES to a different scenario (episodes are
-        per-scenario sequential — a late scenario must not inherit an early
-        one's cycle count toward the cap).
+
+        EPISODE BOUNDARY (Task 10 streams): each retrieve() starts a NEW
+        episode, so the per-episode decide counter resets here — with
+        stream sessions the scenario stays the same across N sessions but
+        the DECIDE_CYCLES_CAP budget belongs to ONE episode (= one session:
+        retrieve -> decide writes -> terminal). Without the reset, session-1
+        writes would silently cap every later session (record -> None,
+        no surfacing event) while each session is billed as measured.
+
+        Memory.confidence is the claim's EP posterior mean — never None on
+        the real path (uncalibrated rows fall back to neutral 0.5);
+        operator ids from the state read's nands/arguments attachments are
+        emitted as operator-kind Memories so the WRITE closed set can carry
+        operators for #901 mitigate routing.
+
+        Raises ArmUnavailable on failure (never partial memories).
         """
-        # Episode boundary: reset decide_cycles when the scenario changes.
+        self.decide_cycles = 0
         sid = context.scenario.id
-        if self._active_scenario is not None and self._active_scenario != sid:
-            self.decide_cycles = 0
-        self._active_scenario = sid
         sdk = self._sdk(context.scenario)
         try:
             query = (context.user_message or "").strip()
@@ -362,11 +364,14 @@ class A4TortoiseArm:
                     strength = 0.3  # decide-tooling default, in-range
                 op_target = (item.target_id if item.target_id is not None
                              else ops[0].id)
-                sdk.mitigate_operator(
+                mit = sdk.mitigate_operator(
                     op_target, reason=item.content or "", strength=strength)
                 filed.add(mit_key)
                 self.decide_cycles += 1
-                return None
+                if isinstance(mit, dict) and isinstance(mit.get("id"), str) \
+                        and mit["id"]:
+                    return mit["id"]  # real product ref (review #2629 P2)
+                return str(mit)  # fallback ref: the mitigation point
             claims = [m for m in closed if m.kind == _CLAIM_MEMORY_KIND]
             if not claims:
                 return None  # empty/claim-less closed set ⇒ zero writes (no-op)
