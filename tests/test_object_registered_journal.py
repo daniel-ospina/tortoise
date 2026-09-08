@@ -674,3 +674,108 @@ class TestLineOrder:
         finally:
             sdk.close()
 
+
+class TestCasReplayParity:
+    """#2242: the live-path CAS must NOT leak into replay. Rebuild/restore
+    fold ObjectSuperseded lines BLIND (cas=False default) — byte-identical
+    to pre-CAS: duplicate/divergent lines and incarnation-reuse shapes
+    (delete→recreate→re-supersede) resolve LAST-wins on BOTH replay
+    surfaces (rebuild_all sweep + rebuild(EventLog) chronological dispatch).
+    """
+
+    def test_fold_reg_fold_recreate_last_wins_unchanged(self, tmp_path,
+                                                        caplog):
+        """delete→recreate→re-supersede: [Reg(fr-B), OS(fr-B→B), <delete,
+        no tombstone>, Reg(fr-B), OS(fr-B→C)] replays with the SAME last-wins
+        outcome as pre-CAS on both surfaces → supersededBy == fr-succ-C
+        (live truth — the CURRENT incarnation was superseded by C). A cas
+        leak into replay would CAS-miss the second line → B (first-wins)."""
+        import logging
+        events = tmp_path / "events"
+        events.mkdir()
+        sdk = TortoiseSDK(str(tmp_path / "t16.db"),
+                          event_log_path=str(events / "events.jsonl"))
+        try:
+            proj = sdk._get_proj()
+            name = "fr-B"
+            oid = _entity_name_id("Object", name)
+            sdk.create_entity("object", name, objectKind="core:other",
+                              is_episodic=False)                  # Reg 1
+            sdk._emit_event("ObjectSuperseded", id=oid, name=name,
+                            supersedes_by="fr-succ-B",
+                            evidence="first fold")
+            assert sdk._delete_entity(oid) is True               # no tombstone
+            sdk.create_entity("object", name, objectKind="core:other",
+                              is_episodic=False)                 # Reg 2
+            sdk._emit_event("ObjectSuperseded", id=oid, name=name,
+                            supersedes_by="fr-succ-C",
+                            evidence="second fold")
+            with caplog.at_level(logging.WARNING,
+                                 logger="tortoise.projection"):
+                proj.rebuild_all(str(events))
+            rows = _object_row(proj, name, "status", "supersededBy")
+            assert rows and rows[0] == ["superseded", "fr-succ-C"], (
+                "rebuild_all must resolve fold-Reg-fold LAST-wins "
+                "(pre-CAS parity): the CAS must not leak into the sweep")
+            assert not any("matched no Object" in r.message
+                           for r in caplog.records), caplog.records
+            # dispatch arm — chronological rebuild (the backup-restore path)
+            proj.rebuild(EventLog(str(events / "events.jsonl")))
+            rows = _object_row(proj, name, "status", "supersededBy")
+            assert rows and rows[0] == ["superseded", "fr-succ-C"], (
+                "rebuild() dispatch must resolve fold-Reg-fold LAST-wins — "
+                "mutually consistent with rebuild_all")
+        finally:
+            sdk.close()
+
+    def test_dup_fold_lines_unchanged_silent(self, tmp_path, caplog):
+        """Duplicate ObjectSuperseded lines (crash-retry dup class, same
+        successor) replay SILENTLY with the pre-CAS parity outcome on both
+        replay surfaces.
+
+        REVIEW (round 1, P1): the dup shape is INVARIANT under first-wins on
+        status+supersededBy alone (both modes write dup-succ) — a cas=True
+        leak into the sweep would CAS-miss the second line and survive a
+        status+supersededBy-only assert. The discriminating observables are
+        (a) NO "matched no Object" sweep warn (a leaked CAS fold on the
+        terminal second line emits it) and (b) supersededAt == the SECOND
+        line's ts (blind last-wins keeps the later stamp; a CAS leak keeps
+        the first)."""
+        import logging
+        events = tmp_path / "events"
+        events.mkdir()
+        sdk = TortoiseSDK(str(tmp_path / "t17.db"),
+                          event_log_path=str(events / "events.jsonl"))
+        try:
+            proj = sdk._get_proj()
+            name = "dup-B"
+            oid = _entity_name_id("Object", name)
+            sdk.create_entity("object", name, objectKind="core:other",
+                              is_episodic=False)
+            sdk._emit_event("ObjectSuperseded", id=oid, name=name,
+                            supersedes_by="dup-succ", evidence="fold 1",
+                            ts="2026-09-07T10:00:00Z")
+            sdk._emit_event("ObjectSuperseded", id=oid, name=name,
+                            supersedes_by="dup-succ", evidence="fold 2 (dup)",
+                            ts="2026-09-07T11:00:00Z")
+            for surface in ("rebuild_all", "rebuild"):
+                with caplog.at_level(logging.WARNING,
+                                     logger="tortoise.projection"):
+                    if surface == "rebuild_all":
+                        proj.rebuild_all(str(events))
+                    else:
+                        proj.rebuild(EventLog(str(events / "events.jsonl")))
+                rows = _object_row(proj, name, "status", "supersededBy",
+                                   "supersededAt")
+                assert rows and rows[0][:2] == ["superseded", "dup-succ"], (
+                    f"[{surface}] dup lines same outcome: {rows}")
+                assert rows[0][2] == "2026-09-07T11:00:00Z", (
+                    f"[{surface}] blind last-wins must keep the SECOND "
+                    f"line's ts (a cas leak keeps the first): {rows}")
+                assert not any("matched no Object" in r.message
+                               for r in caplog.records), (
+                    f"[{surface}] dup lines must replay SILENTLY — a leaked "
+                    f"CAS fold on the terminal second line warns")
+                caplog.clear()
+        finally:
+            sdk.close()

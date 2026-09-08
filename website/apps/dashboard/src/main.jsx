@@ -3749,7 +3749,7 @@ function claimIntentInFlight() {
         // so the actual fork renders (the Continue button needs it)
         setWizardForkError('This organization already chose how it uses Tortoise.')
         refreshOnboarding().catch(() => {})
-        setWizardStep(2)
+        setWizardStep(1)
       } else if (e?.status === 503) {
         setWizardForkError('The graph is temporarily unavailable — try again in a moment.')
       } else {
@@ -5457,7 +5457,7 @@ function claimIntentInFlight() {
                     </div>
                   )}
 
-                  {wizardStep === 2 && (
+                  {wizardStep === 1 && (
                     <div className="fork-card">
                       {wizardForkError && (
                         <p className="error" role="alert" style={{ marginBottom: '0.9rem' }}>{wizardForkError}</p>
@@ -5495,7 +5495,7 @@ function claimIntentInFlight() {
                         </div>
                       )}
                       <div className="wizard-nav">
-                        <button type="button" className="ghost" onClick={() => setWizardStep(1)}>← Back</button>
+                        <button type="button" className="ghost" onClick={() => setWizardStep(0)}>← Back</button>
                         <div className="wizard-nav-actions">
                           {wizardForkChosen || (onboarding && onboarding.fork) ? (
                             <button type="button" className="btn-primary" onClick={() => setWizardStep(2)}>Continue →</button>
@@ -5507,7 +5507,7 @@ function claimIntentInFlight() {
                     </div>
                   )}
 
-                  {wizardStep === 3 && (
+                  {wizardStep === 2 && (
                     <div className="harness">
                       <div className="harness-tabs">
                         {HARNESS_ORDER.map((h) => (

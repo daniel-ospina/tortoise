@@ -1464,8 +1464,14 @@ class FalkorProjection(
         # caught on the NEXT rebuild, but this rebuild's graph is honest
         # about what it could not fold.
         for ev in supersede_folds:
-            matched = self._fold_object_superseded(ev)
-            if matched == 0:
+            # #2242: replay folds run under the DEFAULT cas=False (blind) —
+            # byte-identical to pre-CAS. The live-path CAS must not leak
+            # into replay: first-wins replay would regress incarnation-reuse
+            # shapes (delete→recreate→re-supersede resolves LAST-wins). The
+            # tuple return: folded == 0 ≡ today's matched == 0 (cas=False
+            # returns (matched, matched)).
+            folded, _ = self._fold_object_superseded(ev)
+            if folded == 0:
                 logger.warning(
                     "rebuild: ObjectSuperseded fold matched no Object "
                     "(event_id=%s supersedes_by=%r) — object not "
