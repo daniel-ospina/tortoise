@@ -553,3 +553,73 @@ class TestMcpToolSweepStripActor:
             assert rows, "both entities must be created"
             for r in rows:
                 assert list(r) == [None, None, None], rows
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# #2600 Phase 1 Task 6 — deterministic LLM-free two-actor dedup (E2E-5,
+# SDK lane). The load-bearing dedup-actor contract: writer A's PointAdded
+# GraphEvent keeps A; writer B's identical content dedup-hits the canonical
+# and emits NOTHING (no second PointAdded with B). This survives even if a
+# hosted capture event leg is dropped (the plan's escape-hatch precision).
+
+class TestTwoActorDedupSdkLane:
+    """Two writers, one shared claim — first writer's event keeps the actor;
+    the second write returns the canonical and emits no B event."""
+
+    def _graph_events(self, sdk, type_: str):
+        import json
+        rows = sdk._get_proj().g.query(
+            "MATCH (e:GraphEvent {type:$t}) RETURN e.payload ORDER BY e.seq",
+            params={"t": type_}).result_set
+        return [json.loads(r[0]) for r in rows]
+
+    def test_first_writer_event_keeps_actor_second_emits_nothing(self, tmp_path):
+        from tortoise.sdk import TortoiseSDK, _current_actor_user_id
+        sdk = TortoiseSDK(db_path=str(tmp_path / "dedup2.db"))
+        try:
+            content = "shared dedup claim (two writers, one memory)"
+            tok = _current_actor_user_id.set(UUID_A)
+            try:
+                p1 = sdk.create_or_update_point("statement", content)
+            finally:
+                _current_actor_user_id.reset(tok)
+            # B's identical write → canonical returned, NO new PointAdded
+            tok = _current_actor_user_id.set(UUID_B)
+            try:
+                p2 = sdk.create_or_update_point("statement", content)
+            finally:
+                _current_actor_user_id.reset(tok)
+            assert p1["id"] == p2["id"], \
+                "identical content must resolve the SAME canonical point"
+            adds = self._graph_events(sdk, "PointAdded")
+            # exactly ONE PointAdded — the first writer's (B emitted nothing)
+            assert len(adds) == 1, adds
+            assert adds[0]["id"] == p1["id"], adds
+            assert adds[0]["actor_user_id"] == UUID_A, \
+                f"first writer's PointAdded must keep A: {adds}"
+        finally:
+            sdk.close()
+
+    def test_distinct_claims_each_carry_their_writer(self, tmp_path):
+        """Control: two DISTINCT claims (no dedup) → each PointAdded carries
+        its own writer (proves the dedup leg above is what suppressed B)."""
+        from tortoise.sdk import TortoiseSDK, _current_actor_user_id
+        sdk = TortoiseSDK(db_path=str(tmp_path / "dedup2b.db"))
+        try:
+            tok = _current_actor_user_id.set(UUID_A)
+            try:
+                sdk.create_or_update_point("statement", "claim by writer A")
+            finally:
+                _current_actor_user_id.reset(tok)
+            tok = _current_actor_user_id.set(UUID_B)
+            try:
+                sdk.create_or_update_point("statement", "claim by writer B")
+            finally:
+                _current_actor_user_id.reset(tok)
+            adds = self._graph_events(sdk, "PointAdded")
+            assert len(adds) == 2, adds
+            by_id = {a["content_hash"]: a.get("actor_user_id") for a in adds}
+            assert len(by_id) == 2, by_id
+            assert UUID_A in by_id.values() and UUID_B in by_id.values(), by_id
+        finally:
+            sdk.close()

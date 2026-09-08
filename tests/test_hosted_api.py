@@ -7423,3 +7423,437 @@ class TestActorDisplayMap2600:
             sc_mod, "is_supabase_enabled",
             lambda: (_ for _ in ()).throw(RuntimeError("mode flip")))
         assert ha_mod._actor_display_map([_2600_UUID_A], "team-x") == {}
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# #2600 (Phase 1, Task 6) — E2E-4 lane matrix (b1 supabase / b2 registry),
+# E2E-3 REST attribution negative + E2E-6 REST revocation. All drive the
+# REAL auth faces (minted keys with UUID creators / supabase api_keys rows)
+# — never the DI override (an override dict bypasses the registry/supabase
+# created_by → actor_user_id alias + _data_sdk ContextVar set, so a
+# DI-seam write would be actor-less for the wrong reason).
+
+class TestRestAttributionE2E2600:
+    """REST create_point via a REAL member-minted key → the :GraphEvent
+    PointAdded payload carries the key's server-resolved actor; a forged
+    actor claim in the raw JSON body is silently dropped (Pydantic
+    extra="ignore") — never stored, never a 422 (E2E-3 negative REST leg)."""
+
+    def _graph_point_added(self, team_id: str):
+        """Read :GraphEvent PointAdded payloads from the team data graph."""
+        import json
+        import tortoise.hosted_api as ha_mod
+        sdk = ha_mod._make_sdk(namespace=team_id)
+        rows = sdk._get_proj().g.query(
+            "MATCH (e:GraphEvent {type:'PointAdded'}) RETURN e.payload "
+            "ORDER BY e.seq").result_set
+        return [json.loads(r[0]) for r in rows]
+
+    def test_b2_registry_key_create_point_carries_actor(self, tmp_path):
+        """Registry CP: key minted with created_by=<uuidA> → REST
+        create_point → GraphEvent PointAdded payload actor == uuidA; a
+        forged actor_user_id in the raw body is dropped (2xx, node clean)."""
+        import tortoise.hosted_api as ha_mod
+        db_path = os.path.join(tmp_path, "e24b2.db")
+        _orig = _patch_tortoise_sdk_init(db_path)
+        os.environ["TORTOISE_DB_PATH"] = db_path
+        sdk = ha_mod._make_sdk(namespace="registry")
+        tid = "team-2600-e24b2"
+        _seed_team_graphs(sdk, tid, "pro", None)
+        try:
+            keyA = sdk.apikey_create(tid, _2600_UUID_A)
+            h = {"Authorization": f"Bearer {keyA['api_key']}"}
+            with TestClient(ha_mod.app,
+                            raise_server_exceptions=False) as tc:
+                r = tc.post("/v1/points", headers=h, json={
+                    "content": "b2 registry attributed point"})
+                assert r.status_code == 200, r.text
+                pid = r.json()["id"]
+                # forged claim in the raw body — silently dropped, 2xx
+                r2 = tc.post("/v1/points", headers=h, json={
+                    "content": "b2 forged body point",
+                    "actor_user_id": "forged-actor-xyz"})
+                assert r2.status_code == 200, r2.text
+                forged_pid = r2.json()["id"]
+            adds = self._graph_point_added(tid)
+            assert adds, "PointAdded events must exist on the team graph"
+            by_id = {a["id"]: a for a in adds}
+            assert by_id[pid]["actor_user_id"] == _2600_UUID_A, by_id[pid]
+            # the forged write still carries the SERVER-resolved actor (never
+            # the forged value — E2E-3: stored actor == server actor)
+            assert by_id[forged_pid]["actor_user_id"] == _2600_UUID_A, \
+                by_id[forged_pid]
+            # node never carries the forged key
+            proj = ha_mod._make_sdk(namespace=tid)._get_proj()
+            rows = proj.g.query(
+                "MATCH (p:Point {id:$id}) RETURN p.actor_user_id",
+                params={"id": forged_pid}).result_set
+            assert rows and rows[0][0] is None, \
+                f"forged key must never reach the node: {rows}"
+        finally:
+            os.environ.pop("TORTOISE_DB_PATH", None)
+            _restore_tortoise_sdk_init(_orig)
+
+    def test_b1_supabase_key_create_point_carries_actor(self, tmp_path,
+                                                        monkeypatch):
+        """Supabase CP (FakeControlPlane): api_keys.created_by=<uuidA> →
+        REST create_point → GraphEvent PointAdded actor == uuidA; forged
+        body claim silently dropped. Real tt_ key auth (no DI override)."""
+        import uuid as _uuid
+        import tortoise.hosted_api as ha_mod
+        import tortoise.supabase_control as sc_mod
+        from tests.fake_control_plane import FakeControlPlane
+        from tortoise.auth import lookup_hash as _lh
+        from tests.test_supabase_control import FREE_TEAM, _membership_row
+
+        db_path = os.path.join(tmp_path, "e24b1.db")
+        _orig = _patch_tortoise_sdk_init(db_path)
+        os.environ["TORTOISE_DB_PATH"] = db_path
+        monkeypatch.setenv("TORTOISE_CONTROL_PLANE", "supabase")
+        monkeypatch.setenv("SUPABASE_URL", "https://e24b1.supabase.co")
+        monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "svc-e24b1")
+        fake = FakeControlPlane({
+            "teams": [], "api_keys": [], "team_memberships": [],
+            "invitations": [],
+        })
+        fake.seed("teams", [dict(FREE_TEAM)])
+        fake.seed("team_memberships",
+                  [_membership_row(user_id=_2600_UUID_A,
+                                   team_id="team-free-001")])
+        token = "tt_" + _uuid.uuid4().hex
+        fake.seed("api_keys", [{
+            "id": "k-e24b1", "team_id": "team-free-001",
+            "lookup_hash": _lh(token), "key_prefix": token[:10],
+            "created_via": "provisioned", "created_by": _2600_UUID_A,
+            "created_at": "2026-09-02T00:00:00Z", "revoked_at": None,
+            "expires_at": None, "graph_id": None, "scopes": [],
+            "created_by_key_id": None, "delegation_depth": None,
+        }])
+        monkeypatch.setattr(sc_mod, "get_control_plane", lambda: fake)
+        try:
+            with TestClient(ha_mod.app,
+                            raise_server_exceptions=False) as tc:
+                h = {"Authorization": f"Bearer {token}"}
+                r = tc.post("/v1/points", headers=h, json={
+                    "content": "b1 supabase attributed point"})
+                assert r.status_code == 200, r.text
+                pid = r.json()["id"]
+                r2 = tc.post("/v1/points", headers=h, json={
+                    "content": "b1 forged body point",
+                    "owner": "forged-owner"})
+                assert r2.status_code == 200, r2.text
+                forged_pid = r2.json()["id"]
+            adds = self._graph_point_added("team-free-001")
+            by_id = {a["id"]: a for a in adds}
+            assert by_id[pid]["actor_user_id"] == _2600_UUID_A, by_id[pid]
+            assert by_id[forged_pid]["actor_user_id"] == _2600_UUID_A, \
+                by_id[forged_pid]
+        finally:
+            os.environ.pop("TORTOISE_DB_PATH", None)
+            monkeypatch.delenv("TORTOISE_CONTROL_PLANE", raising=False)
+            monkeypatch.delenv("SUPABASE_URL", raising=False)
+            monkeypatch.delenv("SUPABASE_SERVICE_ROLE_KEY", raising=False)
+            _restore_tortoise_sdk_init(_orig)
+
+    def test_e26_revoke_rest_write_401_keeps_prior_actor(self, tmp_path):
+        """E2E-6 (REST lane): revoke the key → subsequent REST writes 401 →
+        no orphaned attribution; the PRE-revocation PointAdded event keeps
+        its actor (the event store is not touched by revocation)."""
+        import tortoise.hosted_api as ha_mod
+        db_path = os.path.join(tmp_path, "e26.db")
+        _orig = _patch_tortoise_sdk_init(db_path)
+        os.environ["TORTOISE_DB_PATH"] = db_path
+        sdk = ha_mod._make_sdk(namespace="registry")
+        tid = "team-2600-e26"
+        _seed_team_graphs(sdk, tid, "pro", None)
+        try:
+            keyA = sdk.apikey_create(tid, _2600_UUID_A)
+            h = {"Authorization": f"Bearer {keyA['api_key']}"}
+            with TestClient(ha_mod.app,
+                            raise_server_exceptions=False) as tc:
+                # pre-revocation write → PointAdded with actor
+                r = tc.post("/v1/points", headers=h, json={
+                    "content": "pre-revoke attributed write"})
+                assert r.status_code == 200, r.text
+                # revoke keyA via a SECOND owner key (session lane is
+                # unavailable on the registry CP docker face — key-auth
+                # revoke requires keys:manage, owner class passes)
+                keyB = sdk.apikey_create(tid, _2600_UUID_B)
+                hB = {"Authorization": f"Bearer {keyB['api_key']}"}
+                kid = keyA["id"]
+                rr = tc.delete(f"/v1/team/keys/{kid}", headers=hB)
+                assert rr.status_code == 200, rr.text
+                # post-revoke write → 401 (key resolved per request; no
+                # cache on the REST lane)
+                r2 = tc.post("/v1/points", headers=h, json={
+                    "content": "post-revoke must 401"})
+                assert r2.status_code == 401, r2.text
+            # pre-revocation event keeps its actor
+            adds = self._graph_point_added(tid)
+            assert adds and all(
+                a.get("actor_user_id") == _2600_UUID_A for a in adds), adds
+        finally:
+            os.environ.pop("TORTOISE_DB_PATH", None)
+            _restore_tortoise_sdk_init(_orig)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# #2600 (Phase 1, Task 6, Step 2) — E2E-5 dedup keeps BOTH actors (REAL
+# hosted auth faces). POST /v1/sessions is key-only; two members =
+# registry-seeded keys with distinct UUID creators authenticated through the
+# REAL registry auth face (sdk.apikey_create — NOT the DI override seam).
+# A FRESH PRIVATE team per test (final-verification P1: the mock v2 seam
+# mints a suite-wide constant claim, so a shared team namespace would make
+# A's own capture dedup-hit a pre-existing canonical — red for the wrong
+# reason). Assert: per-session actor via direct graph read + list read-back;
+# the shared claim has exactly ONE PointAdded GraphEvent (A's — B's
+# identical write returns the canonical and emits nothing).
+
+class TestE2E5TwoActorDedup2600:
+    def _data_sdk(self, team_id: str):
+        import tortoise.hosted_api as ha_mod
+        return ha_mod._make_sdk(namespace=team_id)
+
+    def _setup(self, tmp_path, tag: str):
+        import tortoise.hosted_api as ha_mod
+        db_path = os.path.join(tmp_path, f"e25_{tag}.db")
+        _orig = _patch_tortoise_sdk_init(db_path)
+        os.environ["TORTOISE_DB_PATH"] = db_path
+        sdk = ha_mod._make_sdk(namespace="registry")
+        tid = f"team-2600-e25-{tag}"
+        _seed_team_graphs(sdk, tid, "pro", None)
+        try:
+            with TestClient(ha_mod.app,
+                            raise_server_exceptions=False) as tc:
+                yield sdk, tid, tc
+        finally:
+            os.environ.pop("TORTOISE_DB_PATH", None)
+            _restore_tortoise_sdk_init(_orig)
+
+    def _session_actor(self, team_id: str, session_id: str):
+        rows = self._data_sdk(team_id)._get_proj().g.query(
+            "MATCH (s:Session {id:$sid}) RETURN s.actor_user_id",
+            params={"sid": session_id}).result_set
+        return rows[0][0] if rows else None
+
+    def _point_added_events(self, team_id: str):
+        import json
+        rows = self._data_sdk(team_id)._get_proj().g.query(
+            "MATCH (e:GraphEvent {type:'PointAdded'}) RETURN e.payload "
+            "ORDER BY e.seq").result_set
+        return [json.loads(r[0]) for r in rows]
+
+    def test_two_members_shared_claim_keeps_both_actors(self, tmp_path):
+        """A captures session_A (claim minted, DEDUP_NEW) → B captures
+        session_B with the SAME conversation (dedup-hit canonical, no new
+        PointAdded). Session_A.actor == A, Session_B.actor == B; exactly
+        ONE PointAdded GraphEvent for the shared claim content_hash — A's
+        (B emits nothing)."""
+        gen = self._setup(tmp_path, "dedup")
+        sdk, tid, tc = next(gen)
+        try:
+            # freshness precondition: zero Points on this FRESH team
+            proj = self._data_sdk(tid)._get_proj()
+            pre = proj.g.query("MATCH (p:Point) RETURN count(p)").result_set
+            assert pre and pre[0][0] == 0, pre
+            keyA = sdk.apikey_create(tid, _2600_UUID_A)
+            keyB = sdk.apikey_create(tid, _2600_UUID_B)
+            hA = {"Authorization": f"Bearer {keyA['api_key']}"}
+            hB = {"Authorization": f"Bearer {keyB['api_key']}"}
+            # the conversation the mock v2 seam deterministically turns into
+            # the suite-wide constant claim (dedup-keyed by content_hash)
+            conv = [
+                {"role": "user", "content": "we should invest in the strategy."},
+                {"role": "assistant", "content": "agreed — durable."},
+            ]
+            r1 = tc.post("/v1/sessions", headers=hA, json={
+                "conversation": conv, "session_id": "e25-2600-a"})
+            assert r1.status_code == 200, r1.text[:300]
+            b1 = r1.json()
+            r2 = tc.post("/v1/sessions", headers=hB, json={
+                "conversation": conv, "session_id": "e25-2600-b"})
+            assert r2.status_code == 200, r2.text[:300]
+            b2 = r2.json()
+            # per-session actor (deterministic, unconditional)
+            assert self._session_actor(tid, "e25-2600-a") == _2600_UUID_A
+            assert self._session_actor(tid, "e25-2600-b") == _2600_UUID_B
+            # B's capture dedup-hit the canonical claim(s) — zero net-new
+            # PointAdded events beyond A's (the seam mints the same claims
+            # for the same conversation; B's writes return canonicals)
+            adds = self._point_added_events(tid)
+            if b1.get("points"):
+                # event leg fires (mock seam determinism) → assert the
+                # two-actor dedup negative: no PointAdded carries B
+                assert adds, "seam minted claims, so PointAdded must exist"
+                assert all(a.get("actor_user_id") != _2600_UUID_B for a in adds), \
+                    f"B's dedup-hit must not mint PointAdded events: {adds}"
+                assert any(a.get("actor_user_id") == _2600_UUID_A
+                           for a in adds), adds
+                # exactly as many PointAdded as net-new claims (no dup)
+                assert len(adds) == len(b1["points"]), \
+                    f"PointAdded count must equal A's net-new claims: {adds}"
+            # list read-back (Task 5 surface) exposes both actors
+            keyA_r = tc.get("/v1/sessions", headers=hA).json()["sessions"]
+            by_sid = {s["id"]: s for s in keyA_r}
+            assert by_sid["e25-2600-a"]["actor_user_id"] == _2600_UUID_A, by_sid
+            assert by_sid["e25-2600-b"]["actor_user_id"] == _2600_UUID_B, by_sid
+        finally:
+            gen.close()
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# #2600 (Phase 1, Task 6, Step 3) — E2E-10 read-path attribution display,
+# ENDPOINT-PINNED on the SUPABASE lane (the registry lane is raw-id-only;
+# the email case is structurally impossible there). Drives list_sessions +
+# get_session_detail through the REAL supabase auth face (FakeControlPlane
+# + a real tt_ key minted in api_keys) and seeds Sessions directly in the
+# team graph. The email seam shape is the REAL one team_members produces:
+# an accepted-invite ACTIVE row that retained invited_email → email shown;
+# a row without invited_email / an unknown id → raw id; legacy null-actor →
+# actor_display null.
+
+class TestE2E10ReadPathDisplaySupabase2600:
+    def _setup_supabase(self, tmp_path, monkeypatch, *, members,
+                        key_creator=_2600_UUID_A, team_id="team-2600-e10",
+                        seed_sessions=None):
+        """Supabase-mode env + FakeControlPlane (team + membership rows +
+        api_keys with a UUID creator) + real-auth TestClient. Sessions are
+        seeded into the team graph namespace by the CALLER-supplied
+        seed_sessions(sdk) hook (so each test controls Session actor
+        shapes). Returns (tid, token, tc)."""
+        import uuid as _uuid
+        import tortoise.hosted_api as ha_mod
+        import tortoise.supabase_control as sc_mod
+        from tests.fake_control_plane import FakeControlPlane
+        from tortoise.auth import lookup_hash as _lh
+
+        db_path = os.path.join(tmp_path, "e10.db")
+        _orig = _patch_tortoise_sdk_init(db_path)
+        os.environ["TORTOISE_DB_PATH"] = db_path
+        monkeypatch.setenv("TORTOISE_CONTROL_PLANE", "supabase")
+        monkeypatch.setenv("SUPABASE_URL", "https://e10.supabase.co")
+        monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "svc-e10")
+        fake = FakeControlPlane({
+            "teams": [], "api_keys": [], "team_memberships": [],
+            "invitations": [],
+        })
+        fake.seed("teams", [{"id": team_id, "name": "E10", "tier": "pro",
+                             "deleted_at": None}])
+        fake.seed("team_memberships", members)
+        token = "tt_" + _uuid.uuid4().hex
+        fake.seed("api_keys", [{
+            "id": "k-e10", "team_id": team_id,
+            "lookup_hash": _lh(token), "key_prefix": token[:10],
+            "created_via": "provisioned", "created_by": key_creator,
+            "created_at": "2026-09-02T00:00:00Z", "revoked_at": None,
+            "expires_at": None, "graph_id": None, "scopes": [],
+            "created_by_key_id": None, "delegation_depth": None,
+        }])
+        monkeypatch.setattr(sc_mod, "get_control_plane", lambda: fake)
+        try:
+            with TestClient(ha_mod.app,
+                            raise_server_exceptions=False) as tc:
+                yield team_id, token, tc
+        finally:
+            os.environ.pop("TORTOISE_DB_PATH", None)
+            monkeypatch.delenv("TORTOISE_CONTROL_PLANE", raising=False)
+            monkeypatch.delenv("SUPABASE_URL", raising=False)
+            monkeypatch.delenv("SUPABASE_SERVICE_ROLE_KEY", raising=False)
+            _restore_tortoise_sdk_init(_orig)
+
+    def test_list_and_detail_show_email_for_accepted_invite_member(
+            self, tmp_path, monkeypatch):
+        """(i) Attributed session whose actor is an accepted-invite ACTIVE
+        member that retained invited_email → actor_user_id present AND
+        actor_display == the retained email on BOTH list_sessions and
+        get_session_detail (endpoint-pinned)."""
+        import tortoise.hosted_api as ha_mod
+        gen = self._setup_supabase(
+            tmp_path, monkeypatch,
+            members=[{"team_id": "team-2600-e10", "user_id": _2600_UUID_A,
+                      "identity": None, "role": "owner", "status": "active",
+                      "invited_email": "ada@example.com"}])
+        tid, token, tc = next(gen)
+        try:
+            sdk = ha_mod._make_sdk(namespace=tid)
+            proj = sdk._get_proj()
+            proj.g.query(
+                "CREATE (s:Session {id:$sid, created_at:$now, turn_count:2, "
+                "actor_user_id:$uid, is_episodic:true})",
+                params={"sid": "s-e10-email",
+                        "now": "2026-09-09T12:00:00.000000+00:00",
+                        "uid": _2600_UUID_A})
+            h = {"Authorization": f"Bearer {token}"}
+            rl = tc.get("/v1/sessions", headers=h)
+            assert rl.status_code == 200, rl.text
+            row = rl.json()["sessions"][0]
+            assert row["actor_user_id"] == _2600_UUID_A
+            assert row["actor_display"] == "ada@example.com", row
+            rd = tc.get("/v1/sessions/s-e10-email", headers=h)
+            assert rd.status_code == 200, rd.text
+            assert rd.json()["actor_display"] == "ada@example.com", rd.json()
+            assert rd.json()["actor_user_id"] == _2600_UUID_A, rd.json()
+        finally:
+            gen.close()
+
+    def test_list_shows_raw_id_when_membership_has_no_email(self, tmp_path,
+                                                            monkeypatch):
+        """(ii) Attributed session whose actor's membership row has NO
+        invited_email (the structurally common active-member shape) → raw
+        id display, never a fabricated email."""
+        import tortoise.hosted_api as ha_mod
+        gen = self._setup_supabase(
+            tmp_path, monkeypatch,
+            members=[{"team_id": "team-2600-e10", "user_id": _2600_UUID_B,
+                      "identity": None, "role": "member", "status": "active",
+                      "invited_email": None}],
+            key_creator=_2600_UUID_B)
+        tid, token, tc = next(gen)
+        try:
+            sdk = ha_mod._make_sdk(namespace=tid)
+            sdk._get_proj().g.query(
+                "CREATE (s:Session {id:$sid, created_at:$now, turn_count:1, "
+                "actor_user_id:$uid, is_episodic:true})",
+                params={"sid": "s-e10-raw",
+                        "now": "2026-09-09T12:00:00.000000+00:00",
+                        "uid": _2600_UUID_B})
+            h = {"Authorization": f"Bearer {token}"}
+            r = tc.get("/v1/sessions", headers=h)
+            assert r.status_code == 200, r.text
+            row = r.json()["sessions"][0]
+            assert row["actor_user_id"] == _2600_UUID_B
+            # no email seam → raw id (never an empty/None display)
+            assert row["actor_display"] == _2600_UUID_B, row
+        finally:
+            gen.close()
+
+    def test_legacy_null_actor_display_null_on_supabase_lane(self, tmp_path,
+                                                             monkeypatch):
+        """(iii) Legacy null-actor session → actor_user_id null →
+        actor_display null on the supabase lane too (the API contract is
+        lane-independent; the client renders '—')."""
+        import tortoise.hosted_api as ha_mod
+        gen = self._setup_supabase(
+            tmp_path, monkeypatch,
+            members=[{"team_id": "team-2600-e10", "user_id": _2600_UUID_A,
+                      "identity": None, "role": "owner", "status": "active",
+                      "invited_email": "ada@example.com"}])
+        tid, token, tc = next(gen)
+        try:
+            sdk = ha_mod._make_sdk(namespace=tid)
+            sdk._get_proj().g.query(
+                "CREATE (s:Session {id:$sid, created_at:$now, turn_count:1, "
+                "is_episodic:true})",
+                params={"sid": "s-e10-legacy",
+                        "now": "2026-09-09T12:00:00.000000+00:00"})
+            h = {"Authorization": f"Bearer {token}"}
+            rl = tc.get("/v1/sessions", headers=h)
+            assert rl.status_code == 200, rl.text
+            row = rl.json()["sessions"][0]
+            assert row["actor_user_id"] is None
+            assert row["actor_display"] is None, row
+            rd = tc.get("/v1/sessions/s-e10-legacy", headers=h)
+            assert rd.status_code == 200, rd.text
+            assert rd.json()["actor_display"] is None, rd.json()
+        finally:
+            gen.close()
