@@ -4133,6 +4133,16 @@ function claimIntentInFlight() {
         setGraphs(list)
         setGraphsLoaded(true) // Round-26
         setGraphsStatus('ok')
+        // #2303: post-#2083 C7 reconciliation — loadGraphs is the single
+        // funnel every graphs-list refresh passes through (deleteGraphRow,
+        // createGraph, restore, team switch). A reloaded list that no
+        // longer contains the open key-panel's graph (deleted here, in
+        // another tab/session, or by a teammate) must drop the panel — a
+        // dangling panelGraphId would otherwise keep the panel's keys
+        // list/mint/revoke targeting a deleted graph. deleteGraphRow's
+        // synchronous same-row close (below) covers the delete path; this
+        // catches every other list-drop path that would strand the panel.
+        if (panelGraphId && !list.some((x) => x.graph_id === panelGraphId)) closeGraphPanel()
       }
     } catch {
       // #1842 P2-1: transport/parse failure → terminal 'error', never eternal shimmer
