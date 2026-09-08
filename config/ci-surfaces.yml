@@ -420,6 +420,7 @@ surfaces:
   - test_ep_draft_filter.py
   - test_ep_dirty_persist.py
   - test_ep_local_395.py
+  - test_ep_mitigation.py
   - test_ep_terminal_ghost.py
   - test_ep_nary_falsification.py
   - test_ep_operatorless.py
@@ -427,6 +428,7 @@ surfaces:
   - test_ep_quadrature.py
   - test_ep_selector.py
   - test_pointsuperseded_rebuild.py
+  - test_weights_mitigation.py
   - test_ep_sources.py
   - test_2199_decide_calibration.py
   - test_file_human_approval.py
