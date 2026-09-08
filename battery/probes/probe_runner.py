@@ -138,12 +138,11 @@ def _scenario_context(config: str | Path, sid: str) -> dict:
     stub otherwise (hermetic probe tests feed ids outside the corpus)."""
     try:
         from battery.config.corpus import load_corpus
-        corpus = load_corpus(Path(config) / "corpus.yaml")
-        sc = corpus.get(sid)
+        scenarios = load_corpus(Path(config) / "corpus.yaml")
+        by_id = {s.id: s for s in scenarios}
+        sc = by_id.get(sid)
         if sc is not None:
-            return {"id": sid, "render":
-                    sc.render_reader_prompt() if hasattr(sc, "render_reader_prompt")
-                    else _render(sc)}
+            return {"id": sid, "render": _render(sc)}
     except Exception:  # noqa: BLE001, RUF100 — fall through to synthetic
         pass
     return {"id": sid, "render": f"Scenario {sid}: resolve the situation described."}
@@ -236,6 +235,10 @@ def run_probe(*, config: str | Path, arms: list[str],
     }
     transcripts: list[dict] = []
     evidence_by_rubric: dict[str, list[dict]] = {}
+    #: per-EPISODE deliberation token totals (the measured re-lock unit for
+    #: arms.yaml expected_tokens_per_episode — per-CALL rows would feed a
+    #: 4x-wrong basis into Task 6's p95 formula).
+    per_episode_deliberation: list[int] = []
     model_block = {
         "model_id": getattr(caller, "model_id", "deepseek/deepseek-v4-flash"),
         "provider": "openrouter",
@@ -281,9 +284,14 @@ def run_probe(*, config: str | Path, arms: list[str],
                 "position_clear": bool(episode["turns"][0]["content"]),
                 "revised": bool(revised),
             }
-            phases["envelope"].record(0, 0)  # assembled, not a model call
             episode["envelope"] = envelope
             transcripts.append(episode)
+            per_episode_deliberation.append(
+                phases["deliberation"].prompt_tokens[-4:]
+                and sum(p + c for p, c in zip(
+                    phases["deliberation"].prompt_tokens[-4:],
+                    phases["deliberation"].completion_tokens[-4:],
+                    strict=True)))
 
             # Evidence render (arm-neutral, tool-stripped): the revise-turn
             # content + the risk/deepen turns, scrubbed + linted. Feeding
@@ -303,10 +311,8 @@ def run_probe(*, config: str | Path, arms: list[str],
     if out is not None:
         rows = {p: a.totals() for p, a in phases.items()}
         per_phase_lists = {
-            "deliberation": [p + c for p, c in zip(
-                phases["deliberation"].prompt_tokens,
-                phases["deliberation"].completion_tokens,
-                strict=True)],
+            # per-EPISODE deliberation totals (the re-lock unit)
+            "deliberation": per_episode_deliberation,
             "envelope": [],
             "judge": [],
         }
