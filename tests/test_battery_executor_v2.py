@@ -222,3 +222,62 @@ def test_stale_pre_fix_graph_refuses(tmp_path) -> None:
     seed_full_legacy(ns, "ct-001")
     with pytest.raises(ConfigError):
         setup_seed_mode(ns, "ct-001", purge=False)
+
+
+def test_l4_cross_session_surfacing_product_read(tmp_path) -> None:
+    """Task-10 step 3 (hermetic, REAL a4 scaffold on the embedded lane):
+    L4 A/¬A across sessions via the product read surface. Session 0
+    retrieves the seeded A side only (the ¬A marker is ABSENT); a
+    contradiction is filed between sessions through the real arm record
+    path (executor-identical decide-write, returns a real product ref);
+    session 1 re-opens the SAME graph and its retrieve surfaces BOTH sides
+    — surfaced at the right session, never earlier."""
+    from battery.arms.base import AgentContext, Memory
+    from battery.testing.seeds import setup_seed_mode
+
+    marker = "L4-S2-MARKER the opposite is true"
+    ns = tmp_path / "l4-ns"
+
+    # session 0 — fresh seed: the ¬A marker must NOT be retrievable yet
+    s0 = setup_seed_mode(ns, "ct-001")
+    try:
+        claims = [m for m in s0.retrieve("") if getattr(m, "kind", "") == "claim"]
+        assert claims, "seed_mode ct graph must carry claim_a pre-k"
+        assert marker not in s0.surface_text(), \
+            "session-0 retrieve must NOT show session-2 content"
+        target = claims[0]
+    finally:
+        s0.close()
+
+    # between sessions: the executor-identical decide write (file_nand)
+    mid = setup_seed_mode(ns, "ct-001", purge=False)
+    arm = mid._arm
+    try:
+        ctx = AgentContext(scenario=mid._scenario, episode_seed=7,
+                           prior_memories=tuple(mid.retrieve("")),
+                           user_message="file")
+        ref = arm.record(ctx, Memory(
+            id="l4-s2", content=marker, confidence=None, kind="nand",
+            target_id=target.id, credibility="high"))
+        assert ref, "the product write must return a real ref"
+    finally:
+        arm.close()
+
+    # session 1 — re-open the SAME graph: BOTH sides surface now
+    s1 = setup_seed_mode(ns, "ct-001", purge=False)
+    try:
+        surface = s1.surface_text()
+        assert marker in surface, \
+            "session-1 retrieve must surface the cross-session contradiction"
+        hits = s1.find_content("L4-S2-MARKER")
+        assert hits, "the ¬A node must be retrievable by content"
+    finally:
+        s1.close()
+
+    # cross-scenario isolation: a DIFFERENT scenario's namespace never sees
+    # this session's content (fresh per-scenario namespace by design)
+    iso = setup_seed_mode(tmp_path / "l4-other-ns", "ct-002")
+    try:
+        assert marker not in iso.surface_text()
+    finally:
+        iso.close()
