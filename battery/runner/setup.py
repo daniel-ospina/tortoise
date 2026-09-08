@@ -47,7 +47,7 @@ from __future__ import annotations
 import hashlib
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from pathlib import Path  # noqa: F401
+from pathlib import Path
 from typing import Any, Callable, Iterable, Sequence  # noqa: F401, UP035
 
 from battery.config.corpus import Scenario
@@ -581,11 +581,8 @@ def _sdk_marker_present(sdk, scenario: Scenario) -> bool:
     (ingest mints server ids — the derive id is a raw-lane artifact). Read
     via the product fts surface, never raw queries."""
     want = seed_manifest_content(scenario.id)
-    rows = sdk.tortoise_fts_query("battery:seed_manifest", limit=20)
-    for r in rows or []:
-        if str(r.get("content") or "") == want:
-            return True
-    return False
+    rows = sdk.tortoise_fts_query("battery:seed_manifest", limit=20) or []
+    return any(str(r.get("content") or "") == want for r in rows)
 
 
 def _refuse_stale_pre_fix_sdk(sdk, scenario: Scenario) -> None:

@@ -174,13 +174,8 @@ def test_cal_row_present_and_readable(ep_variance) -> None:
     """thresholds.yaml [cal] ep-variance row exists (0.04) and is the arm's
     explicit variance_threshold source (no inline constant in the arm)."""
     assert ep_variance == 0.04
-    import ast
     from pathlib import Path
     src = Path("battery/arms/a4_tortoise.py").read_text()
-    tree = ast.parse(src)
-    # default only on the method signature; call sites must pass explicitly
-    calls = [n for n in ast.walk(tree) if isinstance(n, ast.Call)
-             and getattr(n.func, "attr", "") == "ep_terminal_outcome"]
     # tests/consumers pass variance_threshold; the arm internal default is
     # the documented product default, but the ROW is the authoritative value.
     assert "variance_threshold" in src

@@ -33,7 +33,7 @@ from pathlib import Path
 
 from battery.arms.base import AgentContext, ArmAdapter, ArmUnavailable, Memory  # noqa: F401
 from battery.config.corpus import Scenario
-from battery.runner.setup import open_reference_projection, scenario_namespace
+from battery.runner.setup import scenario_namespace
 
 #: Evidence-point kind used for agent writes (decision-part semantics: live
 #: with a stamped starting belief — the product's own write surface).
@@ -113,7 +113,7 @@ class A4TortoiseArm:
         """READ-ONLY test-support handle over the scenario graph (used by
         battery.testing.seeds.SeededStore.find_content). Never a runtime
         write path."""
-        proj = self._sdk(scenario)._get_proj()  # noqa: SLF001  (test support)
+        proj = self._sdk(scenario)._get_proj()
         return proj.db.select_graph(scenario_namespace(scenario.id))
 
     # ── retrieve ────────────────────────────────────────────────────────
@@ -224,7 +224,7 @@ class A4TortoiseArm:
             if isinstance(entry, dict) and entry.get("variance") is not None:
                 try:
                     variances[cid] = float(entry["variance"])
-                except (TypeError, ValueError):  # noqa: PERF203
+                except (TypeError, ValueError):
                     continue
         max_var = max(variances.values(), default=0.0)
         affected = len(conf)
@@ -234,9 +234,7 @@ class A4TortoiseArm:
             outcome = "no-op"
         elif max_var > float(variance_threshold):
             outcome = "contested"  # non-decisive BY CONSTRUCTION
-        elif capped:
-            outcome = "undec" if _is_loopy(scenario) else "non_converged"
-        elif not converged:
+        elif capped or not converged:
             outcome = "undec" if _is_loopy(scenario) else "non_converged"
         elif vacuous:
             # converged but no decisive affected set — mechanism convergence
