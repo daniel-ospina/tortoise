@@ -5,14 +5,13 @@ fallback). Reuses the repo's model-adapter pattern (tools/judge_harness.py
 → tests/model_adapters.py OpenRouterModel) so validation runs are hermetic
 when no model key is present (mock judge) and real when configured.
 """
-from __future__ import annotations  # noqa: I001
+from __future__ import annotations
 
 import json
-
-from dataclasses import dataclass
-from typing import Callable  # noqa: UP035
 import os
 import random
+import re
+from dataclasses import dataclass
 
 from battery.arms.base import ArmUnavailable
 from battery.enums import ModelCallOutcome
@@ -77,7 +76,8 @@ class JudgeClient:
         verdict = str(out.get("verdict", ""))
         conf = float(out.get("confidence", 0.5))
         return JudgeCall(rubric_id=rubric_id, item_id=item_id,
-                         verdict=verdict, confidence=conf,
+                         verdict=_canonical_verdict(verdict),
+                         confidence=conf,
                          prompt_tokens=int(out.get("prompt_tokens", 0) or 0),
                          completion_tokens=int(
                              out.get("completion_tokens", 0) or 0),
@@ -124,6 +124,23 @@ class JudgeClient:
             return {"verdict": content.strip(), "confidence": 0.5,
                     "prompt_tokens": pt, "completion_tokens": ct,
                     "cost_usd": cost}
+
+
+_VERDICT_WORD = re.compile(r"\b(yes|no|better|worse|tie)\b")
+
+
+def _canonical_verdict(raw: str) -> str:
+    """Normalize a model verdict into the canonical vocabulary label.
+
+    Real judges answer plain text ("YES", "No.", "The answer is NO
+    because ...") not always JSON — case/punctuation/prose noise would
+    otherwise make byte-identical retest prompts disagree and collapse the
+    retest/kappa/gold legs on parse artifacts, never on judge behavior.
+    """
+    if not raw:
+        return ""
+    m = _VERDICT_WORD.search(raw.strip().lower())
+    return m.group(1) if m else raw.strip()
 
 
 def _openrouter_cost(model: str, pt: int, ct: int) -> float:
