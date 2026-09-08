@@ -18561,6 +18561,57 @@ def _backup_storage() -> R2Storage | MemoryStorage:
     return R2Storage()
 
 
+def _backup_mirror_storage(cfg) -> R2Storage | None:
+    """#2319 geo-mirror store from config (BACKUP_MIRROR_ENABLED +
+    R2_MIRROR_*). None when mirroring is disabled — the sweep then runs
+    byte-for-byte mirror-free. Construction cannot fail here when the config
+    is valid: backup_config validates the four R2_MIRROR_* creds
+    required-when-enabled (and derives the endpoint from the account id)."""
+    if cfg is None or not cfg.mirror_enabled:
+        return None
+    return R2Storage(
+        endpoint_url=cfg.mirror_endpoint,
+        access_key_id=cfg.mirror_access_key_id,
+        secret_access_key=cfg.mirror_secret_access_key,
+        bucket=cfg.mirror_bucket,
+    )
+
+
+def _lock_status_block(cfg) -> dict | None:
+    """#2319 live bucket-lock drift block for /status. None when lock is not
+    enabled (no /status surface change until an operator flips the lock on).
+    On-demand single GET with a short timeout; failures report unverifiable
+    (never block /status, never block the pipeline — the runbook is the
+    fallback verification path)."""
+    if cfg is None or not cfg.lock_enabled:
+        return None
+    from tortoise.hosted_backup import (
+        LockVerificationError,
+        fetch_r2_bucket_lock_rules,
+        verify_bucket_lock,
+    )
+
+    out: dict = {
+        "enabled": True,
+        "prefix": "backups/",
+        "expected_days": cfg.lock_days,
+    }
+    if not cfg.cf_api_token:
+        out.update({
+            "status": "unverifiable",
+            "detail": "CF_API_TOKEN not set — verify via the ops runbook "
+                       "(docs/ops/registry-backup-dr.md §#2319, console/wrangler)",
+        })
+        return out
+    try:
+        rules = fetch_r2_bucket_lock_rules(
+            cfg.r2_account_id, cfg.cf_api_token, cfg.r2_bucket)
+        out.update(verify_bucket_lock(rules, expected_days=cfg.lock_days))
+    except LockVerificationError as e:
+        out.update({"status": "unverifiable", "detail": str(e)})
+    return out
+
+
 def _require_backup_tier(team: dict) -> None:
     """Backups gated on pricing.json daily_backups feature flag (#656).
 
@@ -19228,6 +19279,11 @@ async def backups_sweep(request: Request):
     registry = reg_sdk._get_registry()
     db = reg_sdk._get_proj().db
     storage = _backup_storage()
+    try:
+        mirror = _backup_mirror_storage(cfg)
+    except RuntimeError as e:
+        raise HTTPException(status_code=503,
+                            detail=f"Mirror storage misconfigured: {e}") from e
 
     # In-flight guard: a concurrent sweep returns 202 (no queueing — the next
     # hourly run retries). This is what the driver's 202 branch keys on.
@@ -19240,7 +19296,7 @@ async def backups_sweep(request: Request):
         try:
             result = await asyncio.to_thread(
                 run_backup_sweep, db=db, registry=registry, storage=storage,
-                config=cfg, lock_for=lock_for,
+                config=cfg, lock_for=lock_for, mirror=mirror,
             )
         except RuntimeError as e:
             raise HTTPException(status_code=503, detail=f"Sweep failed: {e}")  # noqa: B904
@@ -19314,6 +19370,61 @@ async def backups_purge(request: Request, body: dict | None = None):
                                 detail=f"Purge failed: {e}") from e
 
 
+@app.post("/v1/internal/backups/verify-lock")
+async def backups_verify_lock(request: Request, body: dict | None = None):
+    """#2319 — live R2 bucket-lock drift check. Internal-key only.
+
+    Reads the Cloudflare REST lock-rules configuration for the primary backup
+    bucket (default) or an override ``{"account_id", "bucket"}`` (e.g. the
+    second-region mirror store — the same rule must protect it) and compares
+    the strictest retention covering the ``backups/`` prefix against
+    ``BACKUP_LOCK_DAYS``.
+
+    Returns ``{"status": verified|drift|absent|unverifiable, ...}``. The R2
+    S3 seam cannot read lock state (Object-Lock/versioning APIs are
+    unimplemented), so this requires an R2-scoped ``CF_API_TOKEN`` (account
+    token, set out-of-band on Fly). Without one the status is unverifiable
+    and the ops runbook (docs/ops/registry-backup-dr.md §#2319) is the
+    verification path. A lock-read failure never fails backups themselves.
+    """
+    _check_internal(request)
+    cfg = _backup_config_safe()
+    if cfg is None:
+        raise HTTPException(status_code=503, detail="Backup sweep disabled")
+    from tortoise.hosted_backup import (
+        LockVerificationError,
+        fetch_r2_bucket_lock_rules,
+        verify_bucket_lock,
+    )
+
+    account_id = (body or {}).get("account_id") or cfg.r2_account_id
+    bucket = (body or {}).get("bucket") or cfg.r2_bucket
+    out: dict = {"enabled": cfg.lock_enabled, "bucket": bucket,
+                 "prefix": "backups/",
+                 "expected_days": cfg.lock_days}
+    if not cfg.lock_enabled:
+        out.update({
+            "status": "absent",
+            "detail": "BACKUP_LOCK_ENABLED is not set — provision the rule "
+                       "(runbook) and set it before relying on immutability",
+        })
+        return out
+    if not cfg.cf_api_token:
+        out.update({
+            "status": "unverifiable",
+            "detail": "CF_API_TOKEN not set — verify via the ops runbook "
+                       "(console/wrangler steps)",
+        })
+        return out
+    try:
+        rules = fetch_r2_bucket_lock_rules(
+            str(account_id), cfg.cf_api_token, str(bucket))
+        out.update(verify_bucket_lock(rules, expected_days=cfg.lock_days))
+    except LockVerificationError as e:
+        out.update({"status": "unverifiable", "detail": str(e)})
+    return out
+
+
 @app.get("/v1/internal/backups/status")
 async def backups_status(request: Request):
     """Operator/driver status — per-team tri-state, watcher + driver liveness."""
@@ -19332,6 +19443,7 @@ async def backups_status(request: Request):
     except RuntimeError as e:
         return {"enabled": False, "app_time": datetime.now(UTC).isoformat(),
                 "storage_error": str(e), "per_team": {}, "no_teams": False}
+    lock_block = _lock_status_block(cfg)
     watcher = _WATCHER
     now = datetime.now(UTC)
     watcher_status = watcher._watcher._last_status if watcher else {}
@@ -19390,6 +19502,7 @@ async def backups_status(request: Request):
         "config_error": config_error,
         "storage_error": storage_error,
         "app_time": now.isoformat(),
+        "lock": lock_block,
         "per_team": watcher_status.get("per_team", {}),
         "no_teams": watcher_status.get("no_teams", False),
         "unknown": watcher_status.get("unknown", False),

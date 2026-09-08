@@ -460,6 +460,253 @@ class MemoryStorage:
         return True
 
 
+# ── #2319 bucket-lock immutability + second-region mirror ────────────────────
+# R2 bucket locks are prefix-scoped retention RULES (Cloudflare dashboard /
+# Wrangler / REST API) — NOT S3 Object Lock: R2's S3 layer does not implement
+# GetBucketVersioning / GetObjectLockConfiguration / PutObjectLockConfiguration,
+# so lock state can only be READ via the Cloudflare REST API with an
+# account-scoped API token (CF_API_TOKEN), never via boto3. When no token is
+# configured the verification reports "unverifiable" and the ops runbook
+# (docs/ops/registry-backup-dr.md §#2319) is the verification path.
+#
+# Prune compatibility: R2 locks block DELETE (and overwrite) inside the
+# window, so the prune (which deletes day-bucket losers from ~25h old) must
+# tolerate locked objects — skip + log + retry on a later run — never abort
+# the pool (#2319; the #2304 purge path was already best-effort per object).
+_LOCK_PREFIX = "backups/"  # the ONLY prefix ever locked — never ops/*
+_LOCK_CF_API = "https://api.cloudflare.com/client/v4"
+_LOCK_READ_TIMEOUT_S = 6.0
+
+
+class LockVerificationError(RuntimeError):
+    """The live bucket-lock configuration could not be read (HTTP/transport
+    failure, missing CF_API_TOKEN, or an unexpected payload). Callers surface
+    it as "unverifiable" + point at the runbook — a lock read failure must
+    never block the backup pipeline itself."""
+
+
+def _is_locked_delete_error(e: Exception) -> bool:
+    """Best-effort classification of a delete failure caused by an R2
+    bucket-lock retention rule. R2 reports code 10069
+    (ObjectLockedByBucketPolicy) and a 403 AccessDenied over the S3 seam.
+    Loose string matching is intentional — it only decorates the prune log;
+    prune tolerates ALL delete failures identically."""
+    msg = str(e).lower()
+    markers = (
+        "accessdenied", "access denied", "10069",
+        "objectlockedbybucketpolicy", "bucket lock", "locked by",
+    )
+    return any(m in msg for m in markers)
+
+
+def _delete_backup_objects(storage, backup_id: str) -> bool:
+    """Best-effort delete of a backup's dump.enc + manifest.json pair.
+
+    Returns True when BOTH objects were deleted. A locked (or otherwise
+    failed) delete is logged and returns False — never raises — so the prune
+    keeps pruning the rest of the pool (#2319: bucket locks block deletion
+    inside the window; the object is retried on a later run once the
+    retention expires). A partial delete (dump gone, manifest delete failed)
+    converges on the next run: the manifest is re-listed and the missing dump
+    delete is a no-op success.
+    """
+    ok = True
+    for suffix in ("dump.enc", "manifest.json"):
+        key = f"backups/{backup_id}/{suffix}"
+        try:
+            storage.delete(key)
+        except Exception as e:
+            ok = False
+            if _is_locked_delete_error(e):
+                logger.warning(
+                    "prune: %s is bucket-locked (retention window) — "
+                    "skipping; retried once the lock expires: %s", key, e,
+                )
+            else:
+                logger.warning("prune delete failed for %s: %s", key, e)
+    return ok
+
+
+def _lock_rules_url(account_id: str, bucket: str) -> str:
+    return f"{_LOCK_CF_API}/accounts/{account_id}/r2/buckets/{bucket}/lock"
+
+
+def _lock_rules_http_get(url: str, headers: dict, timeout: float):
+    """GET ``url`` and return the parsed JSON payload. Module-level so tests
+    can monkeypatch it (urllib is imported lazily — the lock verification path
+    is optional and must not weigh on the core import)."""
+    import json as _json
+    import urllib.error as _urlerr
+    import urllib.request as _urlreq
+
+    req = _urlreq.Request(url, headers=headers)
+    try:
+        with _urlreq.urlopen(req, timeout=timeout) as resp:
+            return _json.loads(resp.read().decode("utf-8"))
+    except (_urlerr.HTTPError, _urlerr.URLError, TimeoutError,
+            OSError, ValueError) as e:
+        raise LockVerificationError(
+            f"cannot read R2 bucket-lock rules: {e}") from e
+
+
+def fetch_r2_bucket_lock_rules(
+    account_id: str,
+    token: str,
+    bucket: str,
+    *,
+    timeout: float = _LOCK_READ_TIMEOUT_S,
+) -> list[dict]:
+    """Read the R2 bucket-lock rule configuration via the Cloudflare REST
+    API (GET /accounts/{id}/r2/buckets/{bucket}/lock — the ONLY supported
+    lock read; R2's S3 layer has no Object-Lock/versioning reads).
+
+    Returns ``result.rules``. Raises LockVerificationError when
+    unconfigured, on transport/HTTP failure, or on an unexpected payload.
+    """
+    if not (account_id and token and bucket):
+        raise LockVerificationError(
+            "lock verification unconfigured — set R2_ACCOUNT_ID + R2_BUCKET "
+            "and an R2-scoped CF_API_TOKEN"
+        )
+    payload = _lock_rules_http_get(
+        _lock_rules_url(account_id, bucket),
+        {"Authorization": f"Bearer {token}",
+         "Content-Type": "application/json"},
+        timeout,
+    )
+    if not isinstance(payload, dict) or not payload.get("success"):
+        raise LockVerificationError(
+            f"Cloudflare API error: {payload.get('errors') if isinstance(payload, dict) else payload}"
+        )
+    result = payload.get("result") or {}
+    rules = result.get("rules") if isinstance(result, dict) else None
+    if not isinstance(rules, list):
+        raise LockVerificationError("unexpected bucket-lock rules payload shape")
+    return rules
+
+
+def _rule_retention_seconds(rule: dict) -> float | None:
+    """Retention of ONE enabled rule in seconds: Age → maxAgeSeconds;
+    Indefinite / Date (absolute deadline) → infinity (can only extend
+    coverage). None when disabled or malformed."""
+    if not isinstance(rule, dict) or rule.get("enabled") is False:
+        return None
+    cond = rule.get("condition")
+    if not isinstance(cond, dict):
+        return None
+    ctype = str(cond.get("type") or "")
+    if ctype == "Age":
+        try:
+            secs = float(cond["maxAgeSeconds"])
+        except (KeyError, TypeError, ValueError):
+            return None
+        if secs != secs:  # NaN — a malformed rule must never lock/compare
+            return None
+        return secs
+    if ctype in ("Indefinite", "Date"):
+        return float("inf")
+    return None
+
+
+def effective_lock_seconds(rules, prefix: str = _LOCK_PREFIX) -> float | None:
+    """Strictest retention (seconds) among enabled rules COVERING ``prefix``.
+    A rule covers the prefix when the rule's ``prefix`` is a key-prefix of it
+    (the empty rule prefix covers everything — the #2319 rule is scoped to
+    ``backups/`` exactly so the frequently-rewritten ops/* objects are never
+    locked). None when no enabled rule covers the prefix."""
+    best: float | None = None
+    for rule in rules or []:
+        if not isinstance(rule, dict):
+            continue
+        rp = str(rule.get("prefix") or "")
+        if not prefix.startswith(rp):
+            continue
+        secs = _rule_retention_seconds(rule)
+        if secs is None:
+            continue
+        best = secs if best is None else max(best, secs)
+    return best
+
+
+def verify_bucket_lock(
+    rules,
+    *,
+    expected_days: int,
+    prefix: str = _LOCK_PREFIX,
+) -> dict:
+    """Pure drift check: is the strictest retention covering ``prefix`` >=
+    ``expected_days``? Returns the #2319 verification block with
+    ``status``: "verified" | "drift" | "absent" (never raises — the caller
+    maps LockVerificationError from the transport layer to "unverifiable").
+    """
+    eff = effective_lock_seconds(rules, prefix=prefix)
+    base = {"prefix": prefix, "expected_days": expected_days}
+    if eff is None:
+        return {
+            "status": "absent", **base,
+            "detail": "no enabled bucket-lock rule covers the prefix",
+        }
+    if eff == float("inf"):
+        return {
+            "status": "verified", **base, "retention_days": None,
+            "detail": "an indefinite/date bucket-lock rule covers the prefix",
+        }
+    retention_days = eff / 86400.0
+    if retention_days + 1e-9 >= expected_days:
+        return {
+            "status": "verified", **base,
+            "retention_days": round(retention_days, 3),
+            "detail": "strictest retention meets the expected window",
+        }
+    return {
+        "status": "drift", **base,
+        "retention_days": round(retention_days, 3),
+        "detail": (
+            f"strictest retention {retention_days:.2f}d is below the "
+            f"expected {expected_days}d window — backups under this prefix "
+            "are NOT protected by the configured lock window"
+        ),
+    }
+
+
+def mirror_backup(storage, mirror, backup_id: str) -> dict:
+    """Copy one ACCEPTED backup (dump.enc + manifest.json) from ``storage``
+    to the second-region ``mirror`` store and read-back verify the ciphertext
+    against the manifest sha256 (#2319 geo decision c). Keys are preserved
+    byte-for-byte so the mirror holds the same restore paths.
+
+    Returns {"backup_id", "mirrored": [keys], "verified": true}. Raises
+    RuntimeError on copy or verification failure — callers surface it as a
+    per-graph mirror error; the PRIMARY backup is already durable and is
+    never affected by a mirror failure (a later run mirrors the next archive).
+    """
+    dump_key = f"backups/{backup_id}/dump.enc"
+    manifest_key = f"backups/{backup_id}/manifest.json"
+    blob = storage.download(dump_key)
+    manifest_raw = storage.download(manifest_key)
+    try:
+        sha = str((json.loads(manifest_raw) or {}).get("sha256") or "")
+    except ValueError:
+        sha = ""
+    mirror.upload(dump_key, blob)
+    mirror.upload(manifest_key, manifest_raw, content_type="application/json")
+    if not sha:
+        raise RuntimeError(
+            f"mirror verify impossible for {backup_id}: manifest sha256 missing"
+        )
+    if hashlib.sha256(mirror.download(dump_key)).hexdigest() != sha:
+        raise RuntimeError(
+            f"mirror verification failed for {backup_id}: mirrored dump.enc "
+            "sha256 mismatch"
+        )
+    return {
+        "backup_id": backup_id,
+        "mirrored": [dump_key, manifest_key],
+        "verified": True,
+    }
+
+
+
 # ── pipeline ─────────────────────────────────────────────────────────────────
 
 
@@ -1070,10 +1317,10 @@ def prune_backups(
                 created = created.replace(tzinfo=timezone.utc)  # naive → assume UTC  # noqa: UP017
         except (ValueError, TypeError):
             # corrupt/naive-mismatch timestamps are deleted — a bad date must
-            # never abort pruning of the team's other backups
-            deleted.append(backup_id)
-            for suffix in ("dump.enc", "manifest.json"):
-                storage.delete(f"backups/{backup_id}/{suffix}")
+            # never abort pruning of the team's other backups (#2319: a
+            # bucket-locked object is skipped + logged, never a pool abort)
+            if _delete_backup_objects(storage, backup_id):
+                deleted.append(backup_id)
             continue
 
         # Hourly window (sub-daily mode): keep everything younger than
@@ -1104,7 +1351,10 @@ def prune_backups(
             if week not in kept_weekly and len(kept_weekly) < keep_weekly:
                 kept_weekly.add(week)
                 continue
-        deleted.append(backup_id)
-        for suffix in ("dump.enc", "manifest.json"):
-            storage.delete(f"backups/{backup_id}/{suffix}")
+        # #2319: bucket-lock-tolerant delete — a locked object is skipped +
+        # logged (retried once the retention expires); only actually-deleted
+        # backups are returned, so over-retention is bounded and the pool
+        # never wedges on a locked object.
+        if _delete_backup_objects(storage, backup_id):
+            deleted.append(backup_id)
     return deleted
