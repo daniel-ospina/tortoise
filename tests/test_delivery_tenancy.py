@@ -18,6 +18,12 @@ redislite has no per-graph FalkorDB users — the app layer alone enforces):
      graph-bound MCP key's session lands in ITS graph (C5 residual close).
   5. Supabase seam: set_graph_recording + graph_metadata default-row read
      (unit, FakeControlPlane).
+  6. #2302 MCP surface: tortoise_graph_set_recording mirrors the REST PATCH
+     (same shared helper + auth gate — team:manage or legacy full access;
+     strict bool/null; 'default' + custom gids; 404 unknown) so the
+     recording-off 409 can point callers at a REAL surface; the graph-layer
+     409 copy names both the PATCH and the MCP tool (REST/MCP same text —
+     shared _capture_session_impl).
 
 Mirror helpers from tests/test_tenancy_spine.py (mint matrix + temp-db
 patch/restore in ONE scope — cross-file pollution lesson).
@@ -518,3 +524,176 @@ def test_supabase_set_graph_recording_custom_and_default():
     meta = graph_metadata(cp, "t1")
     default = next(m for m in meta if m["kind"] == "default")
     assert default["recording"] is None
+
+
+# ── 6. #2302: the recording-on MCP surface (mirror of REST PATCH) ─────────
+
+def _run_with_mcp_ctx(tid, fn, *, scopes, legacy=False, graph=None,
+                      max_points=100000):
+    """Set the tenant-MCP resolution ContextVars around fn() (the shape
+    TeamResolutionMiddleware installs per request) and reset after — a
+    graph-bound key also carries graph_id/namespace (C5 #2114)."""
+    from tortoise.mcp_auth import (
+        _current_graph_id,
+        _current_graph_namespace,
+        _current_legacy_full_access,
+        _current_scopes,
+        _current_team_id,
+        _current_team_limits,
+    )
+    toks = []
+
+    def _push(var, val):
+        toks.append((var, var.set(val)))
+
+    _push(_current_team_id, tid)
+    _push(_current_team_limits, {"tier": "pro", "max_points": max_points})
+    if graph is not None:
+        _push(_current_graph_id, graph["graph_id"])
+        _push(_current_graph_namespace, graph["namespace"])
+    _push(_current_scopes, scopes)
+    _push(_current_legacy_full_access, legacy)
+    try:
+        return fn()
+    finally:
+        for var, tok in toks:
+            var.reset(tok)
+
+
+def _mcp_set_recording(recording, graph_id=None):
+    from tortoise.mcp_server import tortoise_graph_set_recording
+    return tortoise_graph_set_recording(recording=recording, graph_id=graph_id)
+
+
+def test_mcp_graph_set_recording_sets_clears_and_defaults(spine_env):
+    """The MCP tool mirrors REST PATCH semantics (shared write helper):
+    true/false set the override, null clears it (inherit), the 'default'
+    literal + custom gids resolve, and the write lands on the SAME node
+    the REST PATCH leg writes (no surface drift)."""
+    sdk, tid, g, tc, _def_pt = spine_env
+    # team-wide manager key → explicit custom gid
+    r = _run_with_mcp_ctx(
+        tid, lambda: _mcp_set_recording(False, g["graph_id"]),
+        scopes=["team:manage"])
+    assert r == {"graph_id": g["graph_id"], "recording": False}, r
+    assert _node_recording(sdk, tid, g["graph_id"]) is False
+    # REST PATCH leg (same key class) writes the SAME node — drift check
+    mgr = _mint_key(sdk, tid, scopes=["team:manage"])
+    rc = tc.patch(f"/v1/graphs/{g['graph_id']}?team_id={tid}",
+                  json={"recording": True},
+                  headers={"Authorization": f"Bearer {mgr}"})
+    assert rc.status_code == 200, rc.text
+    assert _node_recording(sdk, tid, g["graph_id"]) is True
+    # null clears → node prop gone (inherit team default)
+    r = _run_with_mcp_ctx(
+        tid, lambda: _mcp_set_recording(None, g["graph_id"]),
+        scopes=["team:manage"])
+    assert r == {"graph_id": g["graph_id"], "recording": None}, r
+    assert _node_recording(sdk, tid, g["graph_id"]) is None
+    # DEFAULT graph (graph 0) via the 'default' literal — settable like PATCH
+    r = _run_with_mcp_ctx(
+        tid, lambda: _mcp_set_recording(False, "default"),
+        scopes=["team:manage"])
+    assert r == {"graph_id": "default", "recording": False}, r
+    assert _node_recording(sdk, tid, _default_node_id(sdk, tid)) is False
+
+
+def test_mcp_graph_set_recording_implicit_bound_graph(spine_env):
+    """A graph-bound key's implicit target is ITS OWN graph (the override
+    the capture gate reads) — a bare call without graph_id never touches
+    the team default graph."""
+    sdk, tid, g, _tc, _def_pt = spine_env
+    r = _run_with_mcp_ctx(
+        tid, lambda: _mcp_set_recording(False),
+        scopes=["graphs:write", "team:manage"], graph=g)
+    assert r == {"graph_id": g["graph_id"], "recording": False}, r
+    assert _node_recording(sdk, tid, g["graph_id"]) is False
+    assert _node_recording(sdk, tid, _default_node_id(sdk, tid)) is None
+
+
+def test_mcp_graph_set_recording_permission_matrix(spine_env):
+    """#2302 permission gate mirrors the REST PATCH auth: a data-scoped
+    (capture-role) key 403s — per-graph recording is team-management state;
+    the legacy full-access class passes; a graph-bound key carrying
+    team:manage (owner-minted) manages ANY graph incl. graph 0."""
+    sdk, tid, g, _tc, _def_pt = spine_env
+    # graph data scopes alone → 403, nothing written
+    r = _run_with_mcp_ctx(
+        tid, lambda: _mcp_set_recording(True, g["graph_id"]),
+        scopes=["graphs:read", "graphs:write"])
+    assert r.get("status") == 403, r
+    assert "team:manage" in r.get("error", ""), r
+    assert _node_recording(sdk, tid, g["graph_id"]) is None
+    # legacy full-access class (deleg NULL, scopes []) → allowed
+    r = _run_with_mcp_ctx(
+        tid, lambda: _mcp_set_recording(True, g["graph_id"]),
+        scopes=[], legacy=True)
+    assert r == {"graph_id": g["graph_id"], "recording": True}, r
+    # graph-bound + team:manage (owner-minted child policy) may manage the
+    # DEFAULT graph too — explicit graph_id wins over the bound graph
+    r = _run_with_mcp_ctx(
+        tid, lambda: _mcp_set_recording(False, "default"),
+        scopes=["graphs:write", "team:manage"], graph=g)
+    assert r == {"graph_id": "default", "recording": False}, r
+    assert _node_recording(sdk, tid, _default_node_id(sdk, tid)) is False
+
+
+def test_mcp_graph_set_recording_unknown_graph_and_strict_body(spine_env):
+    """Unknown gid → 404 (no dead write); a non-bool non-null recording →
+    422 — the REST no-truthy-coercion rule survives the MCP boundary."""
+    _sdk, tid, _g, _tc, _def_pt = spine_env
+    r = _run_with_mcp_ctx(
+        tid, lambda: _mcp_set_recording(True, "g_doesnotexist"),
+        scopes=["team:manage"])
+    assert r.get("status") == 404, r
+    r = _run_with_mcp_ctx(
+        tid, lambda: _mcp_set_recording("yes"),
+        scopes=["team:manage"])
+    assert r.get("status") == 422, r
+    assert "recording must be true, false or null" in r.get("error", ""), r
+
+
+def test_mcp_graph_set_recording_requires_hosted_mode():
+    """Stdio/selfhost (no tenant team context) → honest hosted-mode error —
+    never a silent local write (capture-tool parity)."""
+    r = _mcp_set_recording(True, "default")
+    assert "hosted mode" in r.get("error", ""), r
+
+
+def test_capture_409_graph_layer_names_real_surfaces(spine_env, monkeypatch):
+    """#2302: the graph-layer recording-off 409 routes callers to surfaces
+    that EXIST — the REST PATCH AND the new MCP tool (interpolating the
+    concrete graph id). REST and MCP surface the SAME text (shared
+    _capture_session_impl — the S11 drift invariant), and neither surface
+    writes a Session."""
+    monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
+    sdk, tid, g, tc, _def_pt = spine_env
+    mgr = _mint_key(sdk, tid, scopes=["team:manage"])
+    rc = tc.patch(f"/v1/graphs/{g['graph_id']}?team_id={tid}",
+                  json={"recording": False},
+                  headers={"Authorization": f"Bearer {mgr}"})
+    assert rc.status_code == 200, rc.text
+    key = _mint_key(sdk, tid, scopes=["graphs:read", "graphs:write"],
+                    graph_id=g["graph_id"])
+    rest = tc.post("/v1/sessions", json={
+        "session_id": "s-2302-copy", "conversation": _CONV,
+    }, headers={"Authorization": f"Bearer {key}"})
+    assert rest.status_code == 409, rest.text
+    rest_detail = rest.json()["detail"]
+    assert "PATCH /v1/graphs/" in rest_detail and \
+        f"/v1/graphs/{g['graph_id']}" in rest_detail, rest_detail
+    assert "tortoise_graph_set_recording" in rest_detail, rest_detail
+
+    def _capture_mcp():
+        from tortoise.mcp_server import tortoise_session_capture
+        return tortoise_session_capture(conversation=_CONV, harness="pi",
+                                        session_id="s-2302-copy-mcp")
+
+    mcp_res = _run_with_mcp_ctx(
+        tid, _capture_mcp,
+        scopes=["graphs:read", "graphs:write"], graph=g)
+    assert mcp_res.get("status") == 409, mcp_res
+    assert mcp_res.get("error") == rest_detail, (
+        "REST + MCP must surface the SAME graph-layer 409 text (shared "
+        f"impl): REST={rest_detail!r} MCP={mcp_res!r}")
+    assert _session_count(g["namespace"], tid) == 0

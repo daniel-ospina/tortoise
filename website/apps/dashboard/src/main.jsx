@@ -35,6 +35,7 @@ import {
   canManageGraphKeys,
   graphCanDelete,
   graphKeyPanelEmptyLine,
+  graphKeysSuppressed,
   graphMintBody,
   graphsMeter,
   sortedGraphRows,
@@ -1480,7 +1481,7 @@ function claimIntentInFlight() {
   const [panelKeysStatus, setPanelKeysStatus] = React.useState('closed') // closed|loading|ok|error
   const [graphKeyName, setGraphKeyName] = React.useState('')
   const [graphBusy, setGraphBusy] = React.useState(false) // panel mint / graph delete in flight
-  const [graphMsg, setGraphMsg] = React.useState('') // inline panel error (402/409/409 etc.)
+  const [graphMsg, setGraphMsg] = React.useState('') // inline PANEL error (mint/revoke — renders inside the open key panel only; #2301: delete failures are page-level, never here)
   const [confirmDeleteId, setConfirmDeleteId] = React.useState(null) // custom row awaiting delete confirm
   // #2304 trash (delete = 7-day recovery window): rows + restore/inspect.
   const [trash, setTrash] = React.useState([])
@@ -4134,6 +4135,16 @@ function claimIntentInFlight() {
         setGraphs(list)
         setGraphsLoaded(true) // Round-26
         setGraphsStatus('ok')
+        // #2303: post-#2083 C7 reconciliation — loadGraphs is the single
+        // funnel every graphs-list refresh passes through (deleteGraphRow,
+        // createGraph, restore, team switch). A reloaded list that no
+        // longer contains the open key-panel's graph (deleted here, in
+        // another tab/session, or by a teammate) must drop the panel — a
+        // dangling panelGraphId would otherwise keep the panel's keys
+        // list/mint/revoke targeting a deleted graph. deleteGraphRow's
+        // synchronous same-row close (below) covers the delete path; this
+        // catches every other list-drop path that would strand the panel.
+        if (panelGraphId && !list.some((x) => x.graph_id === panelGraphId)) closeGraphPanel()
       }
     } catch {
       // #1842 P2-1: transport/parse failure → terminal 'error', never eternal shimmer
@@ -4333,7 +4344,12 @@ function claimIntentInFlight() {
     const _teamAtCall = currentTeamId
     if (!graphId || !currentTeamId) return
     setGraphBusy(true)
-    setGraphMsg('')
+    // #2301: delete errors surface PAGE-LEVEL. graphMsg renders only inside
+    // the open key panel (mint/revoke — panel-bound actions), so a failed
+    // DELETE with the panel closed would vanish there. The global error
+    // banner is the same sink createGraph (402/409/generic) and revokeKey
+    // use — destructive graph/row actions stay legible wherever they run.
+    setError('')
     try {
       const tok = sessionTokenRef.current
       if (!tok) throw new Error('No session')
@@ -4354,7 +4370,10 @@ function claimIntentInFlight() {
       await Promise.all([loadGraphs(currentTeamId), loadTeams()]) // count meter refresh
       if (isOwnerAdmin) await loadTrash(currentTeamId) // the row just entered the trash
     } catch (e) {
-      if (teamIdRef.current === _teamAtCall) setGraphMsg(e.message || 'Could not delete graph — try again.')
+      // #2301: failure keeps the row ARMED (Delete/Cancel = retry/escape)
+      // and lands the reason in the page-level banner — visible with the
+      // key panel open or closed.
+      if (teamIdRef.current === _teamAtCall) setError(e.message || 'Could not delete graph — try again.')
     } finally {
       setGraphBusy(false)
     }
@@ -7102,10 +7121,33 @@ sdk.create_point(text="My first point")
                 {graphsStatus === 'ok' && graphs.length === 0 && <tr><td colSpan="5" className="dim">No graphs yet — create your first one above.</td></tr>}
                 {graphsStatus === 'ok' && sortedGraphRows(graphs).map((g) => (
                   <tr key={g.graph_id} className={confirmDeleteId === g.graph_id ? 'graph-delete-arm' : undefined}>
-                    <td><code>{g.name}</code>{g.kind === 'default' && <span className="badge">default</span>}</td>
+                    <td><code>{g.name}</code></td>
                     <td>{g.kind}</td>
                     <td>{g.status === 'active' ? 'active' : <span className="revoked">{g.status}</span>}</td>
-                    <td>{g.key_count != null ? g.key_count : '—'}</td>
+                    <td>
+                      {graphKeysSuppressed(g) ? (
+                        /* #2306: the default graph has NO per-graph keys —
+                        its key_count is 0 in both lanes and its keys (the
+                        team-wide graph_id-NULL rows) are managed on the
+                        API Keys tab, never through a per-graph panel. Suppress
+                        the numeric cell on default rows and offer the tab
+                        affordance instead of a dead 0 (supabase) or an
+                        unmanageable bound-default count (registry capstone). */
+                        <span className="default-keys-cell" title="The default graph has no per-graph keys — its team-wide keys are managed on the API Keys tab.">
+                          <span className="dim" aria-hidden="true">—</span>{' '}
+                          <button
+                            type="button"
+                            className="ghost small"
+                            onClick={() => setTab('keys')}
+                            aria-label="The default graph has no per-graph keys — manage its team-wide keys on the API Keys tab"
+                          >
+                            API Keys tab
+                          </button>
+                        </span>
+                      ) : (
+                        g.key_count != null ? g.key_count : '—'
+                      )}
+                    </td>
                     <td>
                       {canManageGraphKeys(g) && (
                         <button

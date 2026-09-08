@@ -1224,6 +1224,17 @@ def _build_fingerprint(*, reader_model: str, judge_model: str,
                        # C2 knob (a boosted/expanded checkpoint resumed
                        # without the arm is refused by the fingerprint gate).
                        entity_key_expansion: bool | None = None,
+                       # C3-1 (#2519, #2567): the coverage-completeness
+                       # loop arm — conditional presence (a looped
+                       # checkpoint resumed without the arm is refused by
+                       # the fingerprint gate; the 2×2 with #2518 stays
+                       # reconstructable).
+                       coverage_loop: bool | None = None,
+                       # C5 (#2521, #2513): the aggregative-intent coverage-
+                       # check arm — conditional presence like the other C2/C5
+                       # knobs (a flagged checkpoint resumed without the arm
+                       # is refused by the fingerprint gate).
+                       aggregative_flag: bool | None = None,
                        max_chunks_per_session: int | None = None,
                        # #1786 (P1-1/P1-2/P2-4): the write-path retry knobs —
                        # ALWAYS present (results-relevant by construction: a
@@ -1330,6 +1341,11 @@ def _build_fingerprint(*, reader_model: str, judge_model: str,
             ("evidence_boost_verbatim", evidence_boost_verbatim),
             ("evidence_boost_source", evidence_boost_source),
             ("entity_key_expansion", entity_key_expansion),
+            ("coverage_loop", coverage_loop),
+            # C5 (#2521, #2513): the aggregative-intent coverage-check arm
+            # — conditional presence like the C2 knob (a flagged checkpoint
+            # resumed without the arm is refused by the fingerprint gate).
+            ("aggregative_flag", aggregative_flag),
             ("max_chunks_per_session", max_chunks_per_session),
             # #1786 (R5): the eval's hybrid retrieval budget — conditional
             # presence (the eval always passes 1500, so a pre-feature /
@@ -2476,6 +2492,224 @@ def _p95(values: list[float]) -> float:
     return s[min(len(s) - 1, max(0, round(0.95 * len(s)) - 1))]
 
 
+# ── ingest-cache seam (#2080 fast-cycle protocol) ──────────────────────────
+#: Per-question graphs persisted on the eval DB keyed by an INGEST
+#: fingerprint (extractor code version + extraction model + extraction
+#: prompt mode + question) can be REUSED by a later run whose fingerprint
+#: matches — the LLM extraction (the wall-clock dominant cost, ~4.5
+#: min/question) is skipped and retrieval/reader/judge run against the
+#: cached graph. The seam is INGEST-LEVEL only (graph state): the outcome
+#: checkpoint fingerprint (_build_fingerprint) stays untouched, so a
+#: cache-mode run resumes/compares byte-identically to a no-cache run
+#: over the same graphs. Opt-in (fail-safe OFF): --cache-ingest /
+#: --no-cache-ingest + TORTOISE_LME_CACHE_INGEST (explicit flag > env >
+#: OFF); cache mode requires the docker lane (--db) — embedded tempdirs
+#: have no cross-question persistence by construction.
+
+#: Graph label of the per-question cache marker node (see
+#: _cache_marker_write). The node carries ``lme_question_id`` so the
+#: fresh-run targeted wipe removes it with the stale content on a cache
+#: miss, but is NOT a :Point/:Session — every census (label-scanned
+#: ns_count, CONTAINS-traversal ratio, presence tiers) ignores it.
+INGEST_CACHE_MARKER_LABEL = "lme_ingest_cache"
+
+#: Files whose content IS the v2 extractor pipeline (the "extractor code
+#: version" dimension of the ingest fingerprint): ingest_v2.py (the
+#: eval-side pipeline + payload writer) and tortoise/extractor_v2.py (the
+#: production 5-stage extractor). A content change to either invalidates
+#: every cached per-question graph automatically — no manual cache-bust.
+INGEST_CACHE_CODE_FILES = (
+    Path(__file__).resolve().parent / "ingest_v2.py",
+    Path(__file__).resolve().parent.parent.parent
+    / "tortoise" / "extractor_v2.py",
+)
+
+#: Env knobs whose values change the EXTRACTION OUTPUT while leaving code
+#: + model untouched (P1 #2607-review-style gap on the seam): the prompt
+#: mode toggle, the S2/S4 label-order shuffle + its seed, the classify-
+#: later pipeline switch, and the stage token caps/truncation. ANY of them
+#: toggled between QA cycles must invalidate cached ingests — a silent
+#: reuse across modes would corrupt the very A/B this seam exists for.
+INGEST_CACHE_PROMPT_ENVS: tuple[str, ...] = (
+    "TORTOISE_EXTRACTOR_PROMPT",       # compact ↔ default render
+    "TORTOISE_LABEL_ORDER",            # S2/S4 shuffled kind-order renders
+    "TORTOISE_LABEL_SEED",             # the shuffle seed (with the above)
+    "TORTOISE_CLASSIFY_LATER",         # classify-now ↔ classify-later pipeline
+    "TORTOISE_EXTRACTOR_MAX_TOKENS",   # stage output caps / truncation
+    "TORTOISE_EXTRACTOR_ESCALATION_TOKENS",  # escalation cap
+)
+
+
+def ingest_code_fingerprint(paths: tuple[Path, ...] | None = None) -> str:
+    """sha256 (full hex) over the extractor pipeline module contents — the
+    ``extractor code version`` dimension of the ingest fingerprint.
+
+    Reads the files at run start (cheap: two small modules); the digest is
+    stable within a process and identical across processes on the same
+    checkout. ``paths`` is injectable for hermetic tests (fake files). An
+    unreadable file hashes as empty content (never aborts a run — a
+    missing module would fail the ingest itself long before). P1 (#2607-
+    review class): the two modules' IMPORT CLOSURE (chain_enforcer,
+    kind_classifier, commit_ops, model_adapters, embeddings …) also shapes
+    extraction output but is not in ``paths`` — so the repo ``git_sha``
+    rides as a second dimension: ANY repo code change (in or out of the
+    closure) invalidates cached ingests automatically. ``git_sha`` is the
+    conservative net; ``paths`` keeps the digest sensitive to the two
+    hot files even across an uncommitted local edit (dirty-tree runs)."""
+    files = list(INGEST_CACHE_CODE_FILES) if paths is None else list(paths)
+    h = hashlib.sha256()
+    for p in files:
+        h.update(str(p).encode("utf-8", "replace"))
+        h.update(b"\x00")
+        with contextlib.suppress(OSError):
+            h.update(Path(p).read_bytes())
+        h.update(b"\x00")
+    h.update(b"repo:")
+    h.update(git_sha().encode("utf-8", "replace"))
+    return h.hexdigest()
+
+
+def extractor_prompt_digest() -> str:
+    """The extraction-prompt dimension of the ingest fingerprint: sha16 of
+    the output-shaping env knobs ("" = default full prompt / default
+    behavior). Read per run — the extractor reads these env knobs per
+    session at extract time, so the digest must too. A knob absent from
+    this tuple that changes extraction output is a silent-stale-HIT bug;
+    add it here when the extractor gains a new env switch."""
+    h = hashlib.sha256()
+    for name in INGEST_CACHE_PROMPT_ENVS:
+        raw = os.environ.get(name, "").strip()
+        h.update(name.encode("utf-8", "replace"))
+        h.update(b"=")
+        h.update((raw or "<unset>").encode("utf-8", "replace"))
+        h.update(b"\x1f")
+    return h.hexdigest()[:16]
+
+
+def ingest_cache_fingerprint(*, question: dict, extractor_model: Any,
+                             code_hash: str, prompt_digest: str,
+                             chunk_turns: int) -> str:
+    """Deterministic per-question INGEST fingerprint (#2080): sha256 over
+    (extractor code version + extraction model id + extraction prompt
+    hash + question id + question content + chunk_turns).
+
+    ``extractor_model`` uses the SAME identity source as the outcome
+    checkpoint (``_model_id`` — M7 #1739: wire id + tuning; the
+    session_workers>1 run fingerprints the worker-factory config).
+    ``chunk_turns`` rides the digest because it changes the raw-chunk leg
+    (R1 #1540 graph content); the full question JSON rides it so a dataset
+    revision under a stable qid cannot false-hit a stale graph. Identical
+    inputs → identical hash across processes (no repr/address)."""
+    qid = str(question.get("question_id") or "?")
+    content = json.dumps(question, sort_keys=True, default=str)
+    h = hashlib.sha256()
+    for part in (code_hash,
+                 _model_id(extractor_model) or "none",
+                 prompt_digest, qid, content, str(int(chunk_turns))):
+        h.update(part.encode("utf-8", "replace"))
+        h.update(b"\x1f")
+    return h.hexdigest()
+
+
+def cache_hit_decision(*, marker_fp: str | None, graph_present: bool,
+                       current_fp: str) -> bool:
+    """Pure cache decision (#2080 design 2/4): a graph is cached+valid iff
+    a stored marker carries the matching ingest fingerprint AND the graph
+    exists (contains its Session/points). A partial graph WITHOUT the
+    marker (a crash mid-ingest, or a peer mid-write) is treated as absent
+    → miss → re-ingest. The marker is written ONLY after an ingest
+    completes, so mid-write vs complete is distinguishable by
+    construction."""
+    return bool(marker_fp == current_fp and graph_present)
+
+
+def cache_ingest_enabled(cli: bool | None) -> bool:
+    """#2080 tri-state resolution (mirrors the R6 rerank / revalidate
+    precedent — explicit flag > TORTOISE_LME_CACHE_INGEST env > OFF): the
+    CLI wins when given, else the env when truthy (1/true/yes/on), else
+    OFF. Fail-safe default — byte-identical to today without the explicit
+    opt-in."""
+    if cli is not None:
+        return cli
+    raw = os.environ.get("TORTOISE_LME_CACHE_INGEST", "").strip().lower()
+    return raw in _TRUTHY
+
+
+def _cache_snapshot(stats: dict) -> str:
+    """JSON payload stored on the cache marker: the ingest_stats of the
+    ingest that BUILT the cached graph (the gate denominators + graph
+    provenance the outcome reports). Compact + JSON-serializable (no
+    created_point_ids on the live v2 path — matching main)."""
+    return json.dumps(stats, sort_keys=True, default=str)
+
+
+def _cache_restore_stats(snapshot: str) -> dict:
+    """Cache-hit ingest_stats: the stored graph-provenance stats (gate
+    denominators + counts) with THIS run's live costs zeroed — extraction
+    did not run here, so llm calls / retries / write-stage retries / fresh
+    recovery telemetry are honestly 0 and errors are empty (only clean
+    ingests are ever cached)."""
+    try:
+        stats = json.loads(snapshot)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        stats = {}
+    if not isinstance(stats, dict):
+        stats = {}
+    stats["llm"] = {"calls": 0, "retries": 0, "truncated": 0}
+    stats["recovery"] = {}
+    stats["ingest_retries"] = 0
+    stats["errors"] = []
+    stats["error_census"] = {}
+    return stats
+
+
+def _cache_marker_read(proj: Any, namespace: str) -> dict | None:
+    """Read the namespace's cache marker node → {"fp", "snapshot"} or None
+    (absent / unreadable — a query failure is a cache MISS, never a
+    crash; the marker is advisory)."""
+    try:
+        rows = proj.g.query(
+            "MATCH (m:" + INGEST_CACHE_MARKER_LABEL + " {namespace:$ns}) "
+            "RETURN m.fp, m.snapshot",
+            params={"ns": namespace}).result_set
+    except Exception:  # noqa: BLE001, RUF100 — missing graph / hiccup = miss
+        return None
+    if not rows or rows[0][0] is None:
+        return None
+    return {"fp": str(rows[0][0]), "snapshot": rows[0][1]}
+
+
+def _cache_graph_present(proj: Any, qid: str) -> bool:
+    """True when the question's graph contains ingest content (Session or
+    Point nodes carrying lme_question_id). The cache marker node is
+    label-excluded by both scans — presence means REAL content, never a
+    bare marker."""
+    for label in ("Point", "Session"):
+        try:
+            rows = proj.g.query(
+                "MATCH (n:" + label + " {lme_question_id:$q}) RETURN count(n)",
+                params={"q": qid}).result_set
+        except Exception:  # noqa: BLE001, RUF100 — missing graph = absent
+            return False
+        if rows and rows[0][0]:
+            return True
+    return False
+
+
+def _cache_marker_write(proj: Any, *, namespace: str, qid: str, fp: str,
+                        snapshot: str) -> None:
+    """Write/refresh the namespace's cache marker node AFTER a clean ingest
+    completes (the ONLY writer; callers hold the run marker, so no
+    concurrent writer races the MERGE). Carries lme_question_id so the
+    fresh-run targeted wipe removes it together with stale content."""
+    proj.g.query(
+        "MERGE (m:" + INGEST_CACHE_MARKER_LABEL + " {namespace:$ns}) "
+        "SET m.lme_question_id=$q, m.fp=$fp, m.snapshot=$snapshot, "
+        "    m.ingested_utc=$utc",
+        params={"ns": namespace, "q": qid, "fp": fp,
+                "snapshot": snapshot, "utc": _utc_now().isoformat()})
+
+
 # ── live-run markers (plan cycle4-P1-13 / cycle4-P2-37) ────────────────────
 #: Out-of-band JSON sentinel keyed by per-question namespace in the work
 #: dir (NOT a Point property — §9 no-schema-changes). Content: run_key +
@@ -3028,6 +3262,24 @@ def run_evaluation(
     # the methodology — an expanded checkpoint resumed without the arm is
     # refused by the fingerprint gate (same contract as evidence_boost).
     entity_key_expansion: bool | None = None,
+    # C3-1 (#2519, #2567): the coverage-completeness loop — tri-state
+    # (explicit flag > ``TORTOISE_LME_COVERAGE_LOOP`` env > OFF, the #1745
+    # fail-safe default). The #2519 all-or-nothing lever (2×2 covariate
+    # with #2518): resolved once, fingerprinted, and recorded in the
+    # methodology — a looped checkpoint resumed without the arm is refused
+    # by the fingerprint gate (same contract as evidence_boost).
+    coverage_loop: bool | None = None,
+    # C5 (#2521, #2513): aggregative-intent detection + per-facet coverage
+    # check — tri-state (explicit flag > ``TORTOISE_LME_AGGREGATIVE_FLAG``
+    # env > OFF, the #1745 fail-safe default). The A/B switch that MEASURES
+    # the #2521 detector for the C3-3 coverage-signal routing (#2519):
+    # resolved once, fingerprinted, and recorded in the methodology — a
+    # flagged checkpoint resumed without the arm is refused by the
+    # fingerprint gate (same contract as entity_key_expansion). It does NOT
+    # change retrieval behavior (the completeness loop is C3-1/C3-3) — it
+    # records {detected_intent, facet_coverage, missing_facets} per outcome
+    # under the arm.
+    aggregative_flag: bool | None = None,
     # R5 (#1544): TR knobs — temporal-reasoning questions get the events
     # union pool, the engine recency date weight, the TR-constraint window
     # filter, time-ascending rendering, and the tighter tr_top_k cap
@@ -3091,6 +3343,20 @@ def run_evaluation(
     # encodings across questions/processes.
     db_uri: str | None = None,
     encode_cache: Any | None = None,
+    # #2080 ingest-cache seam (fast-cycle protocol): ``cache_ingest`` (opt-
+    # in, fail-safe OFF — explicit flag > TORTOISE_LME_CACHE_INGEST env >
+    # OFF) persists clean per-question v2 ingests under their namespace and
+    # reuses them when the ingest fingerprint matches (see
+    # ingest_cache_fingerprint). Cache mode requires the docker lane
+    # (``db_uri``) + a fresh (non-resume) run + ingest_mode v2 + no
+    # per-session census replay — otherwise inert (byte-identical).
+    # ``sweep_cache`` (--sweep-cache) is the hygiene escape hatch: wipe the
+    # question's graph (content + marker) right after the question finishes
+    # so the eval DB never accumulates namespaces. BOTH are results-
+    # irrelevant — deliberately NOT fingerprinted (a cache-mode run
+    # resumes a no-cache checkpoint and vice versa).
+    cache_ingest: bool = False,
+    sweep_cache: bool = False,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Run the full per-question pipeline over ``instances``.
 
@@ -3144,6 +3410,24 @@ def run_evaluation(
         eke_env = (os.environ.get("TORTOISE_LME_ENTITY_KEY_EXPANSION")
                    or "")
         entity_key_expansion = eke_env.strip().lower() in _TRUTHY
+    # C3-1 (#2519, #2567): resolve the coverage-completeness loop tri-state
+    # ONCE, before the loop — same contract as evidence_boost/entity_key_
+    # expansion: a None with the TORTOISE_LME_COVERAGE_LOOP env set must
+    # not record `false` in the methodology while the per-question
+    # retrieval looped (methodology records the knobs truthfully; fail-safe
+    # OFF: only 1/true/yes/on enables — the #1745 default decision).
+    if coverage_loop is None:
+        cl_env = (os.environ.get("TORTOISE_LME_COVERAGE_LOOP") or "")
+        coverage_loop = cl_env.strip().lower() in _TRUTHY
+    # C5 (#2521, #2513): resolve the aggregative-intent coverage-check arm
+    # tri-state ONCE, before the loop — same contract as the C2 knobs: a
+    # None with the TORTOISE_LME_AGGREGATIVE_FLAG env set must not record
+    # `false` in the methodology while the per-question retrieval flagged
+    # (methodology records the knobs truthfully; fail-safe OFF: only
+    # 1/true/yes/on enables).
+    if aggregative_flag is None:
+        af_env = (os.environ.get("TORTOISE_LME_AGGREGATIVE_FLAG") or "")
+        aggregative_flag = af_env.strip().lower() in _TRUTHY
     # C1/C2 (#1745): resolve the remaining boost knobs ONCE, before the
     # loop — the methodology and the fingerprint must record EXACTLY what
     # the per-question retrieval serves (CLI > env > default, mirroring
@@ -3246,6 +3530,14 @@ def run_evaluation(
         # fingerprint — an expanded checkpoint resumed without the arm is
         # refused by the fingerprint gate (A/B arm isolation).
         entity_key_expansion=bool(entity_key_expansion),
+        # C3-1 (#2519, #2567): the resolved coverage-loop arm rides the
+        # fingerprint — a looped checkpoint resumed without the arm is
+        # refused by the fingerprint gate (2×2 arm isolation with #2518).
+        coverage_loop=bool(coverage_loop),
+        # C5 (#2521, #2513): the resolved aggregative-check arm rides the
+        # fingerprint — a flagged checkpoint resumed without the arm is
+        # refused by the fingerprint gate (A/B arm isolation).
+        aggregative_flag=bool(aggregative_flag),
         max_chunks_per_session=max_chunks_per_session,
         # #1786 (P1-1/P1-2/P2-4): the three retry knobs (ALWAYS present —
         # results-relevant) + the hybrid retrieval budget (conditional
@@ -3349,6 +3641,26 @@ def run_evaluation(
         # in-try save snapshotted ``done`` OUTSIDE the lock → a concurrent
         # ``done`` mutation raised RuntimeError → bogus failure entry).
         _save_remove_failures: list[str] | None = None
+        # #2080 ingest-cache seam (per-question state — computed ONCE per
+        # question, shared across the R2 whole-question-retry attempts):
+        # armed only on the docker lane (``db_uri`` — embedded tempdirs
+        # have no persistence surface) + FRESH runs (resume re-attempts
+        # keep their presence-primary re-ingest contract — byte-identical)
+        # + ingest_mode v2 (the LLM-extraction surface the seam exists to
+        # skip) + cache_ingest ON + no per-session census replay (a
+        # measurement instrument; the cache would hide its ingest). When
+        # armed, ``_cache_fp`` is this question's deterministic ingest
+        # fingerprint (code + model + prompt + question + chunk_turns).
+        _cache_armed = bool(cache_ingest and db_uri and not resumed_run
+                            and ingest_mode == "v2" and not per_session_census)
+        _sweep_armed = bool(sweep_cache and db_uri)
+        _cache_fp: str | None = None
+        if _cache_armed:
+            _cache_fp = ingest_cache_fingerprint(
+                question=question, extractor_model=extractor_model,
+                code_hash=ingest_code_fingerprint(),
+                prompt_digest=extractor_prompt_digest(),
+                chunk_turns=chunk_turns)
         try:
             # #1786 (code-review F9 cycle 2): acquire-then-claim INSIDE the
             # try — (a) the limiter slot is released by the outer finally even
@@ -3388,25 +3700,62 @@ def run_evaluation(
                         work_dir=work_dir)
                     try:
                         _sdk_cleanup = cleanup
+                        # #2080 ingest-cache seam: on a FRESH v2 docker run
+                        # with the cache armed, the namespace cache is read
+                        # FIRST (pure reads — never clobber anything). A
+                        # cache HIT (matching-fingerprint marker node AND
+                        # graph content present) skips the namespace wipe
+                        # AND the ingest — the persisted graph is reused
+                        # read-only and the outcome records
+                        # ``ingest_cached: true``. A miss/stale/absent
+                        # graph falls through to the existing fresh-run
+                        # cleanup below; ``_cache_wipe_ok`` records that
+                        # THIS attempt owns a clean namespace (guard passed
+                        # + wipe ran) — the only condition under which the
+                        # ingest result may be persisted as a cache entry
+                        # (a graph another process is mid-writing is never
+                        # reused NOR cached). Default runs (cache off) take
+                        # the identical path to today's byte-for-byte.
+                        _cache_hit = False
+                        _cache_wipe_ok = False
+                        _cache_marker: dict | None = None
+                        if _cache_armed:
+                            _cache_marker = _cache_marker_read(
+                                sdk._get_proj(), namespace)
+                            _cache_hit = cache_hit_decision(
+                                marker_fp=(_cache_marker.get("fp")
+                                           if _cache_marker else None),
+                                graph_present=_cache_graph_present(
+                                    sdk._get_proj(), qid),
+                                current_fp=_cache_fp or "")
+                            if _cache_hit:
+                                # we reuse the namespace for the question's
+                                # duration — hold it against a peer's wipe
+                                # (_write_run_marker never overwrites a
+                                # LIVE foreign marker).
+                                _write_run_marker(
+                                    work_dir, namespace, run_key)
                         # #1785 (Task 1 Step 2): FRESH-run per-question
                         # namespace cleanup — the ratio denominator is only
                         # meaningful on a clean namespace (leftover nodes from
                         # a prior partial run would push the ratio > 1.0 →
                         # ``census_overflow`` on a clean question). SKIPPED on
-                        # resume (presence is primary; leftovers expected) and
-                        # in embedded mode (fresh tempdir — isolation by
-                        # construction). The cleanup REFUSES while a LIVE peer
-                        # marker exists on the same namespace — never clobber
-                        # a concurrent run's in-flight question graph (plan
-                        # cycle3-P2-33 / cycle4-P2-37: 'never clobbered'
-                        # fallback). ORDERING PINNED (review P1): the guard is
-                        # checked BEFORE our own marker is written — a
-                        # write-before-check ordering would overwrite the
-                        # peer's LIVE marker with our pid and the cleanup
-                        # would proceed, clobbering the peer's in-flight
-                        # graph. Our marker is written only AFTER the guard
-                        # passes (heartbeats refresh it at the gate sites).
-                        if (db_uri and not resumed_run
+                        # resume (presence is primary; leftovers expected), in
+                        # embedded mode (fresh tempdir — isolation by
+                        # construction) and on a #2080 cache HIT (the cached
+                        # graph IS the clean state). The cleanup REFUSES while
+                        # a LIVE peer marker exists on the same namespace —
+                        # never clobber a concurrent run's in-flight question
+                        # graph (plan cycle3-P2-33 / cycle4-P2-37: 'never
+                        # clobbered' fallback). ORDERING PINNED (review P1):
+                        # the guard is checked BEFORE our own marker is
+                        # written — a write-before-check ordering would
+                        # overwrite the peer's LIVE marker with our pid and
+                        # the cleanup would proceed, clobbering the peer's
+                        # in-flight graph. Our marker is written only AFTER
+                        # the guard passes (heartbeats refresh it at the gate
+                        # sites).
+                        if (not _cache_hit and db_uri and not resumed_run
                                 and _namespace_cleanup_allowed(
                                     work_dir, namespace, run_key)):
                             _write_run_marker(work_dir, namespace, run_key)
@@ -3418,11 +3767,18 @@ def run_evaluation(
                             # removes every node this question's ingest can
                             # write (operator Points carry no
                             # lme_question_id and are NOT counted by the
-                            # label-scan census anyway).
+                            # label-scan census anyway) INCLUDING a stale
+                            # cache marker (it carries lme_question_id).
                             with contextlib.suppress(Exception):
                                 sdk._get_proj().g.query(
                                     "MATCH (n) WHERE n.lme_question_id = $q "
                                     "DETACH DELETE n", params={"q": qid})
+                                # clean namespace ONLY when the wipe query
+                                # succeeded — a suppressed wipe failure must
+                                # not claim a clean namespace (the gate's
+                                # census_overflow backstop also refuses, but
+                                # never cache on an unconfirmed wipe).
+                                _cache_wipe_ok = True
                         # M7 (D5): ingest is timed in isolation — the write-path
                         # cost is a report component (extractor vs retrieve vs
                         # reader vs judge attribution).
@@ -3488,15 +3844,28 @@ def run_evaluation(
                             return ingest_haystack(
                                 _sdk, question, chunk_turns=chunk_turns)
 
-                        t_ingest = time.monotonic()
-                        if _replay_census is not None:
-                            with _replay_census:
-                                ingest_stats = _run_ingest(sdk)
-                            _replay_census.finalize(ingest_stats)
+                        # #2080 ingest-cache HIT: the ingest (and its LLM
+                        # spend) is SKIPPED — the cached graph's stored
+                        # provenance stats are restored (gate denominators
+                        # + graph counts) with this run's live costs zeroed.
+                        # The subsequent pool census + integrity gate then
+                        # re-verify the LIVE cached graph against those
+                        # expectations (a corrupted cache gates red exactly
+                        # like a truncated fresh ingest).
+                        if _cache_hit:
+                            ingest_stats = _cache_restore_stats(
+                                (_cache_marker or {}).get("snapshot") or "{}")
+                            ingest_latency_ms = 0.0
                         else:
-                            ingest_stats = _run_ingest(sdk)
-                        ingest_latency_ms = round(
-                            (time.monotonic() - t_ingest) * 1000.0, 2)
+                            t_ingest = time.monotonic()
+                            if _replay_census is not None:
+                                with _replay_census:
+                                    ingest_stats = _run_ingest(sdk)
+                                _replay_census.finalize(ingest_stats)
+                            else:
+                                ingest_stats = _run_ingest(sdk)
+                            ingest_latency_ms = round(
+                                (time.monotonic() - t_ingest) * 1000.0, 2)
                         # M7 (D3): the authoritative live graph pool size — the
                         # retrieval-pool denominator the methodology documents.
                         # #1785: FOLDED pool_rows (plan P2-2/P2-5) — a single
@@ -3549,6 +3918,26 @@ def run_evaluation(
                         if db_uri and not resumed_run:
                             _write_run_marker(work_dir, namespace, run_key)
                         gate_reasons = list(_gate["reasons"])
+                        # #2080 ingest-cache: persist the just-ingested graph
+                        # as a cache entry — ONLY when this attempt owns a
+                        # clean namespace (guard passed + wipe ran — never a
+                        # peer's mid-write graph), the ingest completed
+                        # without extraction errors, and the pre-retrieval
+                        # integrity gate is GREEN (the cache holds gate-green
+                        # graphs only — an errorful/truncated ingest is
+                        # re-extracted by the next run, honestly). Written
+                        # AFTER ingest + gate, so a partial/mid-write graph
+                        # never carries a marker (cache-hit_decision treats
+                        # it as absent).
+                        if (_cache_armed and not _cache_hit and _cache_wipe_ok
+                                and not gate_reasons
+                                and not ingest_stats.get("errors")
+                                and not ingest_stats.get("error_census")):
+                            with contextlib.suppress(Exception):
+                                _cache_marker_write(
+                                    sdk._get_proj(), namespace=namespace,
+                                    qid=qid, fp=_cache_fp or "",
+                                    snapshot=_cache_snapshot(ingest_stats))
                         _gate_ratio = _gate.get("ratio")
                         _consec_census = (0 if GATE_REASON_CENSUS_ERROR
                                           not in gate_reasons
@@ -3577,6 +3966,16 @@ def run_evaluation(
                             # key expansion arm (resolved above; OFF by
                             # default — the sealed A/B decides adoption).
                             entity_key_expansion=entity_key_expansion,
+                            # C3-1 (#2519, #2567): the coverage-completeness
+                            # loop arm (resolved above; OFF by default — the
+                            # sealed A/B decides adoption).
+                            coverage_loop=coverage_loop,
+                            # C5 (#2521, #2513): the aggregative-intent
+                            # coverage-check arm (resolved above; OFF by
+                            # default — records the per-outcome verdict
+                            # under the arm only; the C3-3 routing decides
+                            # adoption).
+                            aggregative_flag=aggregative_flag,
                             # #1786 (R5): the eval's elevated HYBRID-arm
                             # retrieval deadline via the existing seam (the
                             # vector arm keeps VECTOR_TIMEOUT_MS=5000).
@@ -3658,6 +4057,22 @@ def run_evaluation(
                                 what=f"judge for {qid}", retries=max_retries)
                             judge_ms = (time.monotonic() - t0) * 1000.0
                     finally:
+                        # #2080 ingest-cache hygiene (--sweep-cache): wipe
+                        # the question's graph (content + cache marker) right
+                        # after the question finishes so the eval DB never
+                        # accumulates namespaces. Guarded by the peer
+                        # liveness check — a graph a live foreign peer is
+                        # mid-question on is never swept (our OWN marker /
+                        # no marker passes; a live peer refuses). Runs in
+                        # the per-attempt finally (an R2-retried partial
+                        # attempt's debris is removed before the retry).
+                        if (_sweep_armed and namespace is not None
+                                and _namespace_cleanup_allowed(
+                                    work_dir, namespace, run_key)):
+                            with contextlib.suppress(Exception):
+                                sdk._get_proj().g.query(
+                                    "MATCH (n) WHERE n.lme_question_id = $q "
+                                    "DETACH DELETE n", params={"q": qid})
                         sdk.close()
                         with contextlib.suppress(Exception):
                             _sdk_cleanup()
@@ -3769,6 +4184,23 @@ def run_evaluation(
                         # reconstructs which arm each outcome ran on).
                         "entity_key_expansion": ret.get(
                             "entity_key_expansion"),
+                        # C3-1 (#2519, #2567): the coverage-completeness
+                        # loop arm per question — the resolved bool + the §8
+                        # per-outcome markers (loop_iterations /
+                        # loop_fired_facet / loop_merged_added) ride the
+                        # outcome so the flip census and the 2×2 with #2518
+                        # stay reconstructable (read via .get — absent on
+                        # pre-feature checkpoints).
+                        "coverage_loop": ret.get("coverage_loop"),
+                        "coverage_loop_stats": ret.get("coverage_loop_stats"),
+                        # C5 (#2521, #2513): the aggregative-check arm marker
+                        # + the per-outcome verdict — the marker reconstructs
+                        # which arm ran; the verdict (present under the arm
+                        # only) records {detected_intent, facet_coverage,
+                        # missing_facets} for the C3-3 routing decision.
+                        "aggregative_flag": ret.get("aggregative_flag"),
+                        "aggregative_verdict": ret.get(
+                            "aggregative_verdict"),
                         # R6 (#1545): the rerank pass + latency ride the outcome —
                         # they stay ABSENT on baseline outcomes (the projection in
                         # outcomes_to_report adds them conditionally).
@@ -3787,6 +4219,11 @@ def run_evaluation(
                         # NEVER ingest_retries, as the R2-fired signal (P1-4).
                         "ingest_retries": ingest_stats.get("ingest_retries", 0),
                         "whole_question_retries": r2_attempted,
+                        # #2080 ingest-cache seam: per-outcome marker —
+                        # recorded ONLY on cache-armed runs (default runs
+                        # keep the outcome dict byte-identical).
+                        **({"ingest_cached": bool(_cache_hit)}
+                           if _cache_armed else {}),
                     }
                     # #2185: drain the qid's CUMULATIVE usage envelope — the
                     # outcome carries ``llm_usage`` ONLY when an LLM was
@@ -4164,6 +4601,16 @@ def run_evaluation(
             # arm — recorded verbatim in the methodology (published numbers
             # carry which A/B arm produced them).
             "entity_key_expansion": bool(entity_key_expansion),
+            # C3-1 (#2519, #2567): the coverage-completeness loop arm —
+            # recorded verbatim in the methodology (published numbers carry
+            # which of the 2×2 arms produced them; the §5 gate deltas are
+            # denominated on the recorded arm).
+            "coverage_loop": bool(coverage_loop),
+            # C5 (#2521, #2513): the aggregative-intent coverage-check arm
+            # — recorded verbatim in the methodology (published numbers
+            # carry which A/B arm produced them; OFF by default — the C3-3
+            # routing #2519 decides adoption).
+            "aggregative_flag": bool(aggregative_flag),
             # #1786 (Task 2 Step 5): the recoverable-class resume-mode flag
             # + the write-path retry knobs recorded in the methodology so
             # the revalidation comparison can distinguish retried outcomes
@@ -4332,6 +4779,16 @@ def outcomes_to_report(
                 # arm marker rides the projection (read via o.get — absent
                 # on pre-feature checkpoints).
                 "entity_key_expansion",
+                # C3-1 (#2519, #2567): the coverage-completeness loop arm +
+                # the §8 per-outcome markers ride the projection (read via
+                # o.get — absent on pre-feature checkpoints).
+                "coverage_loop", "coverage_loop_stats",
+                # C5 (#2521, #2513): the aggregative-check arm marker + the
+                # per-outcome verdict ride the projection (read via o.get —
+                # absent until the outcome carries them; pre-feature
+                # checkpoints resume without KeyError).
+                "aggregative_flag",
+                "aggregative_verdict",
                 # #1948: the reader-surface metric rides the projection
                 # alongside reader_evidence@k (absent until the outcome
                 # carries it — pre-#1948 checkpoints resume without
@@ -4782,6 +5239,53 @@ def _build_parser() -> argparse.ArgumentParser:
                     help="disable the C2 entity/fact-augmented key expansion "
                          "even when TORTOISE_LME_ENTITY_KEY_EXPANSION is set "
                          "(tri-state: explicit flags beat the env)")
+    # C3-1 (#2519, #2567): the coverage-completeness loop — tri-state
+    # --coverage-loop / --no-coverage-loop (None default so the
+    # TORTOISE_LME_COVERAGE_LOOP env still applies; OFF by default in code
+    # — the sealed #2519 A/B decides adoption). The A/B switch for the
+    # all-or-nothing lever: identical questions run once with the arm OFF
+    # (baseline) and once ON (2×2 covariate with the #2518 entity-key
+    # expansion arm); the report's shared-question recall_all@5 deltas + the
+    # per-outcome loop markers (loop_iterations / loop_fired_facet /
+    # loop_merged_added) gate the §5 acceptance.
+    cl = p.add_mutually_exclusive_group()
+    cl.add_argument("--coverage-loop", dest="coverage_loop",
+                    action="store_true", default=None,
+                    help="enable the C3-1 coverage-completeness loop "
+                         "(retrieve → rule-based facet census → check → ONE "
+                         "targeted second pass for the missing facet → "
+                         "session-diverse additive merge; fires only on "
+                         "entity-scoped facet-incompleteness — open-ended "
+                         "never fires; default: env "
+                         "TORTOISE_LME_COVERAGE_LOOP — OFF by default in "
+                         "code, #2567)")
+    cl.add_argument("--no-coverage-loop", dest="coverage_loop",
+                    action="store_false", default=None,
+                    help="disable the C3-1 coverage-completeness loop even "
+                         "when TORTOISE_LME_COVERAGE_LOOP is set (tri-state: "
+                         "explicit flags beat the env)")
+    # C5 (#2521, #2513): aggregative-intent detection + per-facet coverage
+    # check — tri-state --aggregative-flag / --no-aggregative-flag (None
+    # default so the TORTOISE_LME_AGGREGATIVE_FLAG env still applies; OFF
+    # by default in code — the C3-3 routing #2519 decides adoption). The
+    # A/B switch that MEASURES the #2521 detector: identical questions run
+    # once OFF (baseline) and once ON; the per-outcome verdict
+    # {detected_intent, facet_coverage, missing_facets} is what the
+    # coverage-signal routing will consume. Retrieval behavior is NOT
+    # changed by the arm (the completeness loop is C3-1/C3-3).
+    af = p.add_mutually_exclusive_group()
+    af.add_argument("--aggregative-flag", dest="aggregative_flag",
+                    action="store_true", default=None,
+                    help="enable the C5 aggregative-intent detection + "
+                         "per-facet coverage check (records the hermetic "
+                         "detector + coverage verdict per outcome; default: "
+                         "env TORTOISE_LME_AGGREGATIVE_FLAG — OFF by default "
+                         "in code, #2521)")
+    af.add_argument("--no-aggregative-flag", dest="aggregative_flag",
+                    action="store_false", default=None,
+                    help="disable the C5 aggregative-intent detection even "
+                         "when TORTOISE_LME_AGGREGATIVE_FLAG is set "
+                         "(tri-state: explicit flags beat the env)")
     p.add_argument("--evidence-boost-verbatim", type=float, default=None,
                    help="verbatim/raw-chunk mark rank-offset multiplier "
                         "(env TORTOISE_LME_EVIDENCE_BOOST_VERBATIM; default "
@@ -4823,6 +5327,37 @@ def _build_parser() -> argparse.ArgumentParser:
                         "eval ingest is itself a load generator (5 workers × "
                         "~25 min ingest per question on a shared FalkorDB "
                         "container stalls the write path)")
+    # #2080 ingest-cache seam: tri-state --cache-ingest / --no-cache-ingest
+    # (None default so the TORTOISE_LME_CACHE_INGEST env still applies;
+    # fail-safe OFF — default behavior unchanged: always ingest + always
+    # cleanup). Cache mode requires --db + --ingest-mode v2 + a fresh
+    # checkpoint (see run_evaluation).
+    ci = p.add_mutually_exclusive_group()
+    ci.add_argument("--cache-ingest", dest="cache_ingest",
+                    action="store_true", default=None,
+                    help="#2080 ingest cache: persist each clean v2 ingest "
+                         "under its per-question namespace keyed by an ingest "
+                         "fingerprint (extractor code version + extraction "
+                         "model + prompt + question + chunk_turns); a later "
+                         "run whose fingerprint matches SKIPS the LLM "
+                         "extraction and runs retrieval/reader/judge against "
+                         "the cached graph (fast cycles: first run ingests, "
+                         "subsequent unchanged-extractor runs hit the cache; "
+                         "extractor changes auto-invalidate). Requires --db + "
+                         "--ingest-mode v2 (default: env "
+                         "TORTOISE_LME_CACHE_INGEST — OFF by default)")
+    ci.add_argument("--no-cache-ingest", dest="cache_ingest",
+                    action="store_false", default=None,
+                    help="disable the #2080 ingest cache even when "
+                         "TORTOISE_LME_CACHE_INGEST is set — byte-identical "
+                         "to today (always ingest + always cleanup; "
+                         "tri-state: explicit flags beat the env)")
+    p.add_argument("--sweep-cache", action="store_true",
+                   help="#2080 ingest-cache hygiene: wipe the question's "
+                        "graph (content + cache marker) right after the "
+                        "question finishes so the eval DB never accumulates "
+                        "per-question namespaces (escape hatch; respects the "
+                        "peer marker guard)")
     # R6 (#1545): the rerank layer — tri-state --rerank/--no-rerank (None
     # default so the TORTOISE_LME_RERANK env still applies), pool/cap/lambda
     # validated at parse time (boundary values accepted; the env path is
@@ -5250,6 +5785,27 @@ def _run_main(parser: argparse.ArgumentParser, args,
         eke_env = (os.environ.get("TORTOISE_LME_ENTITY_KEY_EXPANSION")
                    or "")
         entity_key_expansion = eke_env.strip().lower() in _TRUTHY
+    # C3-1 (#2519, #2567): coverage-completeness loop — tri-state (CLI flag
+    # > TORTOISE_LME_COVERAGE_LOOP env > OFF — fail-safe: only
+    # 1/true/yes/on enables, mirroring the boost gate above). Resolved once
+    # and threaded into run_evaluation (methodology == actual; the #2519
+    # all-or-nothing A/B switch, 2×2 covariate with the entity-key arm).
+    if args.coverage_loop is not None:
+        coverage_loop = args.coverage_loop
+    else:
+        cl_env = (os.environ.get("TORTOISE_LME_COVERAGE_LOOP") or "")
+        coverage_loop = cl_env.strip().lower() in _TRUTHY
+    # C5 (#2521, #2513): aggregative-intent detection + per-facet coverage
+    # check — tri-state (CLI flag > TORTOISE_LME_AGGREGATIVE_FLAG env >
+    # OFF — fail-safe: only 1/true/yes/on enables, mirroring the C2 gates
+    # above). Resolved once and threaded into run_evaluation (methodology
+    # == actual; the A/B switch that measures the #2521 detector for the
+    # C3-3 routing #2519).
+    if args.aggregative_flag is not None:
+        aggregative_flag = args.aggregative_flag
+    else:
+        af_env = (os.environ.get("TORTOISE_LME_AGGREGATIVE_FLAG") or "")
+        aggregative_flag = af_env.strip().lower() in _TRUTHY
     # R5 (#1544) TR knobs: argparse defaults (12 / 0.5 / events-on),
     # recorded verbatim in the report methodology (D7).
     tr_top_k = args.tr_top_k
@@ -5444,6 +6000,15 @@ def _run_main(parser: argparse.ArgumentParser, args,
                 # arm (tri-state resolved above; OFF by default — the
                 # sealed #2513 A/B decides adoption).
                 entity_key_expansion=entity_key_expansion,
+                # C3-1 (#2519, #2567): coverage-completeness loop arm
+                # (tri-state resolved above; OFF by default — the sealed
+                # #2519 A/B decides adoption).
+                coverage_loop=coverage_loop,
+                # C5 (#2521, #2513): the aggregative-intent coverage-check
+                # arm (tri-state resolved above; OFF by default — records
+                # the per-outcome verdict under the arm; the C3-3 routing
+                # #2519 decides adoption).
+                aggregative_flag=aggregative_flag,
                 tr_top_k=tr_top_k, tr_date_weight=tr_date_weight,
                 tr_events=tr_events,
                 rerank=rr["rerank_on"], rerank_model=rr["model"],
@@ -5482,6 +6047,12 @@ def _run_main(parser: argparse.ArgumentParser, args,
                 replay_load_workers=args.replay_load_workers,
                 replay_signature_reproduced=(
                     args.replay_signature_reproduced),
+                # #2080 ingest-cache seam: tri-state CLI pair > env > OFF
+                # (fail-safe default — byte-identical to today without the
+                # explicit opt-in). Results-irrelevant: deliberately NOT
+                # fingerprinted.
+                cache_ingest=cache_ingest_enabled(args.cache_ingest),
+                sweep_cache=args.sweep_cache,
             )
         except FatalProviderError as e:
             print("[longmem_eval] RUN ABORTED — fatal provider error mid-run "

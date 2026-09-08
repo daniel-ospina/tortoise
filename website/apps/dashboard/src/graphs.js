@@ -11,6 +11,15 @@
 //   default graph") and its keys are the TEAM-WIDE rows (graph_id NULL,
 //   managed on the API Keys tab). So the [Keys] panel applies to CUSTOM
 //   graphs only — mirror the [Delete] lock on kind==='default' rows.
+//   #2306: the default row's key_count is 0 in BOTH lanes (the server
+//   short-circuits default-kind rows before any lane count — the supabase
+//   FK makes a bound-default row structurally impossible and the registry
+//   lane must not count legacy bound-default APIKey nodes against the
+//   default node's real gid). The Graphs tab therefore SUPPRESSES the
+//   numeric cell on default rows and points at the API Keys tab instead of
+//   showing a number it cannot act on (canManageGraphKeys is kind-gated).
+//   Legacy bound-default keys (registry pre-guard mints / raw writes) stay
+//   listable + revocable on the API Keys tab's unfiltered list.
 // - POST /v1/team/keys {graph_id, scopes, name?} session mint: owner-class
 //   scoped mint for an EXISTING custom graph; per-graph keys require >=1
 //   explicit scope (422 otherwise); unknown/default graph 404s. Dashboard
@@ -75,6 +84,18 @@ export function graphsMeter(rows, cap) {
 export function canManageGraphKeys(g) {
   if (!g) return false
   return g.kind !== 'default'
+}
+
+// #2306: the default row's Keys cell NEVER renders a numeric count. The
+// server reports key_count 0 for it in both lanes (no per-graph keys exist
+// for the default graph) — and the supabase lane's old always-0 cell and the
+// registry lane's bound-default "1" both communicated nothing actionable.
+// Suppress the number on default rows and render the API-Keys-tab
+// affordance instead (its keys — the team-wide graph_id-NULL rows — are
+// managed there). Any legacy bound-default count the server might still
+// send must never render on a row the UI cannot act on.
+export function graphKeysSuppressed(g) {
+  return !g || isDefaultGraph(g)
 }
 
 // Per-graph key mint body (session scoped mint). Scopes ride the body so a

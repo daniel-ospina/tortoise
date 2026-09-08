@@ -678,7 +678,11 @@ def run_benchmark(
                         f"{operator_audit['planted']} planted operator edges graded "
                         "edge_correct (audit dimension only — not yet a gated "
                         "metric); the m2 echo lane has no relation extraction, "
-                        "so 0 is structural there, never a bar"
+                        "so 0 is structural there, never a bar. #2552: endpoint "
+                        "anchors + mitigation reasons grade verbatim-first with "
+                        "the #2405-style paraphrase band — a correctly wired "
+                        "edge whose endpoint claim was distilled still grades "
+                        "edge_correct"
                     )
     finally:
         if owned_sdk:

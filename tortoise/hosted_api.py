@@ -6580,9 +6580,22 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     recording_ok, rec_layer = _session_recording_allowed(team)
     if not recording_ok:
         if rec_layer == "graph":
-            detail = ("Session recording is disabled for this graph. Enable "
-                      "it via PATCH /v1/graphs/{graph_id} (recording) or "
-                      "clear the override to inherit the team setting.")
+            # #2302 (recording-on surface): the graph-layer 409 copy names
+            # surfaces that EXIST — the REST PATCH AND the MCP tool. The
+            # shared impl means REST + MCP surface the SAME text (S11
+            # drift invariant); the concrete graph id is interpolated so
+            # remediation is direct: a bound key → its graph,
+            # team-wide/session → 'default'.
+            gid = team.get("graph_id") or "default"
+            detail = (
+                "Session recording is disabled for this graph (override). "
+                "Enable it via PATCH /v1/graphs/" + gid + " with "
+                "{recording: true} (or {recording: null} to inherit the "
+                "team default), or via the tortoise_graph_set_recording "
+                "MCP tool — both need a team:manage key; otherwise ask "
+                "your team owner or admin to turn recording on for this "
+                "graph."
+            )
         else:
             detail = ("Session recording is disabled for this team. Enable it "
                       "in the dashboard (Memory sources > Agent sessions) or "
@@ -9499,15 +9512,19 @@ class GraphRecordingPatch(BaseModel):
         return v
 
 
-@app.patch("/v1/graphs/{graph_id}")
-async def patch_graph_recording(graph_id: str, body: GraphRecordingPatch,
-                                team_id: str,
-                                key_ctx: dict = Depends(get_current_team_session)):  # noqa: B008
-    """C6 #2115 — set a graph's session_recording override (epic §6.3).
+async def _apply_graph_recording_override(
+        graph_id: str, body: GraphRecordingPatch, team_id: str,
+        key_ctx: dict) -> dict:
+    """C6 #2115 / #2302 — SHARED core for PATCH /v1/graphs/{graph_id} (REST)
+    and the ``tortoise_graph_set_recording`` MCP tool: auth + graph
+    resolution + override write in ONE place so the two surfaces can never
+    drift on permission or semantics.
 
     Auth: a key with the ``team:manage`` scope (or the legacy full-access
     class — deleg NULL + scopes []), or an owner/admin session user (the
-    dual-auth dependency resolves BOTH faces like delete_graph). A MINTED
+    REST dual-auth dependency resolves BOTH faces like delete_graph; the MCP
+    tool builds the equivalent key_ctx from its tenant ContextVars — keys
+    only, so the session-owner face is exercised through REST). A MINTED
     deleg=0 key never carries team:manage (C2/C3 child policy) → 403.
     team:manage is a TEAM-WIDE management scope — a graph-bound key that
     carries it (owner-minted) manages ANY graph in the team, mirroring the
@@ -9516,8 +9533,7 @@ async def patch_graph_recording(graph_id: str, body: GraphRecordingPatch,
     Body: ``{recording: true|false|null}`` — null removes the override
     (inherit team default). The DEFAULT graph is settable too (recording is
     per-graph, incl. graph 0 — registry kind='default' node / supabase
-    kind='default' row). Unknown graph → 404. Suspended team → 403 (the
-    shared dual-auth dependency enforces it).
+    kind='default' row). Unknown graph → 404. Suspended team → 403.
     """
     if key_ctx.get("team_id") != team_id:
         raise HTTPException(status_code=404, detail="Unknown team")
@@ -9586,6 +9602,20 @@ async def patch_graph_recording(graph_id: str, body: GraphRecordingPatch,
     if not written:
         raise HTTPException(status_code=404, detail="Unknown graph")
     return {"graph_id": graph_id, "recording": body.recording}
+
+
+@app.patch("/v1/graphs/{graph_id}")
+async def patch_graph_recording(graph_id: str, body: GraphRecordingPatch,
+                                team_id: str,
+                                key_ctx: dict = Depends(get_current_team_session)):  # noqa: B008
+    """C6 #2115 — set a graph's session_recording override (epic §6.3).
+
+    Thin REST wrapper over ``_apply_graph_recording_override`` — the MCP
+    tool (tortoise_graph_set_recording, #2302) shares the same core so the
+    two surfaces can never drift. Auth + semantics live on the helper.
+    """
+    return await _apply_graph_recording_override(
+        graph_id, body, team_id, key_ctx)
 
 
 @app.delete("/v1/graphs/{graph_id}")
@@ -10163,7 +10193,12 @@ async def trash_graph_points(graph_id: str, team_id: str,
 async def list_graphs(team_id: str, user: dict = Depends(get_current_user)):  # noqa: B008
     """E7 — list graphs in a team (graph switcher). C2 (#2111): rows gain
     status + key_count; point_count dropped (no consumer; a per-row
-    data-plane count on every list). Default-first via the seam."""
+    data-plane count on every list). Default-first via the seam.
+
+    #2306: the DEFAULT row's key_count is ALWAYS 0 (the default graph has
+    NO per-graph keys — invariant below). The count is only computed for
+    custom rows; the dashboard suppresses the default row's cell and
+    points at the API-Keys tab instead."""
     membership = await _membership_team(user["user_id"], team_id)
     if membership is None:
         raise HTTPException(status_code=403, detail="No membership in team")
@@ -10182,7 +10217,25 @@ async def list_graphs(team_id: str, user: dict = Depends(get_current_user)):  # 
     for g in graphs:
         if g.get("status") == "deleted":
             continue  # tombstones not listed (C2 D5; C7 may add with_deleted)
-        if is_supabase_enabled():
+        # #2306: the DEFAULT graph has no per-graph keys — its key_count is
+        # ALWAYS 0, in BOTH lanes, so the two lanes can never disagree about
+        # the default row again. Supabase enforces this structurally
+        # (api_keys.graph_id REFERENCES graphs(id): the default row's id is
+        # the DERIVED literal 'default', never a graphs.id, so no api_keys
+        # row can reference it — team-wide rows are graph_id NULL and the
+        # keys that RESOLVE to the default graph are exactly those rows,
+        # managed on the API-Keys tab, never counted on a graph row). The
+        # registry kind='default' node is equally not key-bindable
+        # (_ensure_graph_exists 404s default-kind mints) — counting APIKey
+        # nodes whose graph_id equals its real gid would resurface legacy
+        # bound-default keys (pre-guard mints / raw control-plane writes)
+        # as a number the Graphs tab cannot act on (no per-graph key
+        # surface; canManageGraphKeys is kind-gated). Such legacy rows stay
+        # LISTABLE + REVOCABLE via the unfiltered GET /v1/team/keys (the
+        # API-Keys tab) — that is their management path, not this row.
+        if g.get("kind") == "default":
+            key_count = 0
+        elif is_supabase_enabled():
             key_count = count_graph_keys(
                 get_control_plane(), team_id, g["graph_id"])
         else:
@@ -17278,6 +17331,12 @@ async def github_connect(body: GitHubConnectRequest | None = None,
 
     #1828 review P3: same non-gated dual-auth as the other onboarding
     endpoints — the dashboard calls this with useSession: true."""
+    # #2300: team-level control-plane surface (starts a TEAM-wide OAuth +
+    # registers team CSRF state) — graph-bound keys rejected (parity with
+    # the github index/reindex endpoints; MCP twin tortoise_onboarding_
+    # github_connect rejects graph-bound keys). A per-graph key must never
+    # initiate the team's GitHub connection.
+    _reject_graph_bound_team_surface(team, "github connect")
     import secrets
     from urllib.parse import urlencode
     client_id = os.environ.get("GITHUB_CLIENT_ID")
@@ -17513,6 +17572,10 @@ async def github_status(team: dict = Depends(get_current_team_session_ungated)):
     self-heals a legacy team_id-as-org (see _heal_github_org) so the
     selector's org is real.
     """
+    # #2300: reads team-level GitHub credential state (control-plane) —
+    # graph-bound keys rejected (MCP twin tortoise_onboarding_github_status
+    # parity). A per-graph key must never observe the team's GitHub org.
+    _reject_graph_bound_team_surface(team, "github status")
     encrypted, org = _github_credentials(team["team_id"])
     if not encrypted:
         return {"connected": False, "org": None, "repos_count": None}
@@ -17548,6 +17611,10 @@ async def github_repos(team: dict = Depends(get_current_team_session_ungated)): 
     ``connected: false`` + ``resolve_error`` is the "stored-but-now-failing"
     shape; a clean disconnect returns connected:false WITHOUT the flag.
     """
+    # #2300: lists the TEAM's connected org repos (control-plane credential
+    # state) — graph-bound keys rejected (MCP/onboarding-github parity). A
+    # per-graph key must never enumerate the team's GitHub org repos.
+    _reject_graph_bound_team_surface(team, "github repos")
     encrypted, org = _github_credentials(team["team_id"])
     if not encrypted:
         return {"connected": False, "org": None, "repos": []}
@@ -17597,6 +17664,11 @@ async def github_branches(repo: str,
     picker can label/seed its default option truthfully for repos whose
     default is neither main nor master.
     """
+    # #2300: lists the TEAM's connected repo branches (control-plane
+    # credential state) — graph-bound keys rejected (onboarding-github
+    # family parity — a per-graph key must never enumerate the team's
+    # GitHub branches).
+    _reject_graph_bound_team_surface(team, "github branches")
     encrypted, org = _github_credentials(team["team_id"])
     if not encrypted:
         return {"connected": False, "org": None, "repo": repo,

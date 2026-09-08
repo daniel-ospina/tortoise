@@ -4629,3 +4629,285 @@ class TestKindClassifierAdjudication2134:
         with open(kc.__file__) as _f:
             src = _f.read()
         assert "escalate=False" in src
+
+
+# ── #2552 layer-2 operator-emission semantics (remaining fix waves) ───────
+
+
+class TestOperatorSemantics2552:
+    """Hermetic emission-semantics pins for the #2552 remaining waves — the
+    #2514 operator corpus measured 0/4 edge_correct (diagnosis in PR #2556):
+    op_02 NEGATE src/dst inverted, op_03 MITIGATES emission gap (risk point
+    fused into the action, no mitigation structure), op_04 SUPERSEDE partial
+    (no point-level decision-reversal → CORRECTS path), plus the grader leg
+    (paraphrase band — graded in test_write_path_grading.py). Prompt-render
+    pins assert the emission CONTRACT reaches both mapping stages; the
+    execute_embed pins assert the deterministic folds. No API — hermetic."""
+
+    # ── prompt/output-contract pins ──────────────────────────────────────
+
+    def test_s2s4_prompts_carry_nand_direction_rule(self):
+        """op_02: both mapping stages instruct the NAND direction — src =
+        the ATTACKING counter-claim (the newer claim), dst = the claim under
+        attack (NAND points AT what it refutes, #909 new-claim-attacks-
+        existing). The inverted emission measured on the corpus (older
+        hypothesis listed as the attacker) must not survive an informed
+        mapper."""
+        for prompt in (v2.render_s2_prompt(), v2.render_s4_prompt("S", {}, {}),
+                       v2.render_s2_prompt(core_only=True),
+                       v2.render_s4_prompt("S", {}, {}, core_only=True)):
+            assert "new-claim-attacks-existing" in prompt
+            assert "NAND points AT what it refutes" in prompt
+            assert "ATTACKING counter-claim" in prompt
+        # the S2 semantic core (verbose) carries its own direction bullet
+        assert "NAND DIRECTION (#909" in v2.S2_TMPL
+
+    def test_s2s4_prompts_carry_risk_and_mitigation_structure(self):
+        """op_03: a risk/concern claim is its OWN durable point (never fused
+        into the action that closes it) and a mitigation is a graded
+        dampener ON AN OPERATOR edge (src = action content, target_edge =
+        the dampened edge, strength 0.10-0.50, w*(1-strength) never a
+        refutation) — the shared rule block reaches both mapping stages."""
+        for prompt in (v2.render_s2_prompt(), v2.render_s4_prompt("S", {}, {}),
+                       v2.render_s2_prompt(core_only=True),
+                       v2.render_s4_prompt("S", {}, {}, core_only=True)):
+            assert "RISK/RELEVANCE CLAIMS ARE DURABLE POINTS" in prompt
+            assert "MITIGATES = graded relevance dampener ON AN OPERATOR edge" in prompt
+            assert "w_eff = w * (1 - strength)" in prompt
+
+    def test_s4_prompt_carries_decision_reversal_rule_and_contract_key(self):
+        """op_04: the S4 rules carry the DECISION/CLAIM REVERSAL recipe
+        (point supersedes only against an EARLIER-session claim surfaced by
+        search; in-session reversals are state/validity semantics) and the
+        OUTPUT_CONTRACT's points fragment advertises the ``supersedes`` key
+        (id|content|null) so both mapping stages can emit it."""
+        assert "DECISION/CLAIM REVERSAL" in v2.S4_TMPL
+        assert '"supersedes": "existing-id|content|null"' in v2.OUTPUT_CONTRACT
+        for prompt in (v2.render_s2_prompt(), v2.render_s4_prompt("S", {}, {})):
+            assert "existing-id|content|null" in prompt
+
+    def test_anti_routine_gate_carves_out_risk_claims(self):
+        """op_03 guard: #2542 clause discipline stays inviolate — the risk/
+        relevance carve-out is ADDITIVE (never suppresses a durable claim),
+        and the operator rule block explicitly exempts risk claims from the
+        ANTI-ROUTINE NOOP gate."""
+        assert "NOT a routine aside under the ANTI-ROUTINE gate" in v2.OPERATOR_SEMANTICS_RULE
+        # carve-out is a carve-out: nothing in the NOOP gate text regresses
+        # the durable-substance strip guarantee (#2542)
+        assert "NEVER strip" in v2.ANTI_ROUTINE_EXCLUSION
+        assert "When in doubt" in v2.ANTI_ROUTINE_EXCLUSION
+
+    # ── deterministic folds ─────────────────────────────────────────────
+
+    NAND_EDUS = [  # noqa: RUF012
+        {"index": 0, "role": "user",
+         "text": "the flip must have raced the lease renewal when the region cut over"},
+        {"index": 1, "role": "user",
+         "text": "the flag did not cause the duplicates, it had been stable for two hours"},
+    ]
+    NAND_HYP = ("the flip must have raced the lease renewal when the "
+                "region cut over")
+    NAND_COUNTER = ("the flag did not cause the duplicates, it had been "
+                    "stable for two hours")
+
+    def _nand_embed(self, src: str, dst: str) -> dict:
+        pts = [
+            {"content": self.NAND_HYP, "pointKind": "statement",
+             "quote": self.NAND_HYP},
+            {"content": self.NAND_COUNTER, "pointKind": "statement",
+             "quote": self.NAND_COUNTER},
+        ]
+        return {"entities": [], "events": [], "points": pts,
+                "operators": [{"src": src, "dst": dst, "op_type": "NAND"}]}
+
+    def _nand_ids(self, result) -> dict:
+        return {p["content"]: p["id"] for p in result["payload"]["points"]}
+
+    def test_nand_inverted_emission_is_canonicalized_newer_src(self):
+        """op_02: a NAND whose src is the OLDER claim (asserted at an earlier
+        turn than dst) contradicts the #909 extraction default — execute_embed
+        swaps it so the newer counter-claim is src, with a counted warning.
+        The corpus gold geometry: the t11 counter-claim must src the t5
+        hypothesis it refutes."""
+        embed = self._nand_embed(self.NAND_HYP, self.NAND_COUNTER)  # inverted
+        r = v2.execute_embed(embed, {}, session_id="s1", edus=self.NAND_EDUS)
+        ids = self._nand_ids(r)
+        op = r["payload"]["operators"][0]
+        assert op["op_type"] == "NAND"
+        assert op["src"] == ids[self.NAND_COUNTER], "newer counter-claim must be src"
+        assert op["dst"] == ids[self.NAND_HYP]
+        assert op["direction"] == "unidirectional"
+        assert any("NAND direction canonicalized" in w for w in r["warnings"])
+
+    def test_nand_correct_direction_never_swapped(self):
+        """op_02 control: an already-correct emission (newer counter-claim
+        first) is left untouched — no warning, no swap."""
+        embed = self._nand_embed(self.NAND_COUNTER, self.NAND_HYP)
+        r = v2.execute_embed(embed, {}, session_id="s1", edus=self.NAND_EDUS)
+        ids = self._nand_ids(r)
+        op = r["payload"]["operators"][0]
+        assert op["src"] == ids[self.NAND_COUNTER]
+        assert op["dst"] == ids[self.NAND_HYP]
+        assert not any("canonicalized" in w for w in r["warnings"])
+
+    def test_nand_no_turn_ids_never_swapped(self):
+        """op_02 never-guess: without resolved source turns (no edus — e.g.
+        an endpoint is an existing-graph/event node or an unquoted point)
+        the fold keeps the model's order; the prompt rule is the lever."""
+        embed = self._nand_embed(self.NAND_HYP, self.NAND_COUNTER)
+        r = v2.execute_embed(embed, {}, session_id="s1")  # no edus
+        ids = self._nand_ids(r)
+        op = r["payload"]["operators"][0]
+        assert op["src"] == ids[self.NAND_HYP] and op["dst"] == ids[self.NAND_COUNTER]
+        assert not any("canonicalized" in w for w in r["warnings"])
+
+    def test_risk_point_minted_and_mitigates_folds_on_target_edge(self):
+        """op_03: the recipe folds end-to-end — the risk claim stays its OWN
+        payload point (never absorbed by the action point), and a MITIGATES
+        with src = the action point content + a target_edge present in the
+        SAME payload emits a payload operator with the resolved point ids,
+        the intact IMPL target, and the graded strength."""
+        obs = "the region clock drifted eleven seconds"
+        risk = "clock skew between regions can make lease expiry unsafe"
+        action = ("the skew-tolerant grace period is in place so a lagging "
+                  "region's renewal cannot clobber a live lease")
+        embed = {
+            "entities": [], "events": [],
+            "points": [
+                {"content": obs, "pointKind": "statement"},
+                {"content": risk, "pointKind": "statement"},
+                {"content": action, "pointKind": "statement"},
+            ],
+            "operators": [
+                {"src": obs, "dst": risk, "op_type": "IMPL"},
+                {"src": action, "dst": risk, "op_type": "MITIGATES",
+                 "target_edge": {"src": obs, "dst": risk, "op_type": "IMPL"},
+                 "strength": 0.3},
+            ],
+        }
+        r = v2.execute_embed(embed, {}, session_id="s1")
+        contents = {p["content"] for p in r["payload"]["points"]}
+        assert risk in contents and action in contents and obs in contents
+        ids = {p["content"]: p["id"] for p in r["payload"]["points"]}
+        types = [o["op_type"] for o in r["payload"]["operators"]]
+        assert types == ["IMPL", "MITIGATES"]
+        mit = r["payload"]["operators"][1]
+        assert mit["src"] == ids[action] and mit["dst"] == ids[risk]
+        assert mit["target"] == {"src": ids[obs], "dst": ids[risk],
+                                 "op_type": "IMPL"}
+        assert mit["strength"] == 0.3
+        assert not any("MITIGATES target edge not emitted" in w for w in r["warnings"])
+
+    def test_mitigates_without_target_edge_drops_loudly_not_fabricated(self):
+        """op_03 honesty: a MITIGATES whose target edge was not emitted is
+        dropped with a warning (the write path has nothing to dampen) —
+        the deterministic fold never fabricates a target operator."""
+        risk = "clock skew between regions can make lease expiry unsafe"
+        action = ("the skew-tolerant grace period is in place so a lagging "
+                  "region's renewal cannot clobber a live lease")
+        obs = "the region clock drifted eleven seconds"
+        embed = {
+            "entities": [], "events": [],
+            "points": [
+                {"content": risk, "pointKind": "statement"},
+                {"content": action, "pointKind": "statement"},
+            ],
+            "operators": [
+                {"src": action, "dst": risk, "op_type": "MITIGATES",
+                 "target_edge": {"src": obs, "dst": risk, "op_type": "IMPL"},
+                 "strength": 0.3},
+            ],
+        }
+        r = v2.execute_embed(embed, {}, session_id="s1")
+        assert r["payload"]["operators"] == []
+        assert any("MITIGATES target edge not emitted" in w for w in r["warnings"])
+
+    def test_decision_reversal_point_supersedes_folds_corrects_record(self):
+        """op_04: the direct decision-reversal path — a NEW point whose
+        ``supersedes`` names an EARLIER-session decision (surfaced by the S3
+        search, cross-session by construction) folds a point-level pt_
+        supersession record that the write path applies as a CORRECTS
+        supersession (sdk.supersede). This is the channel the corpus's
+        cross-session SUPERSEDE (wp07 → wp06) needs — previously only the
+        content-revision UPDATE fold formed pt_ records."""
+        old_content = ("ship the lease fix all-at-once behind a single "
+                       "global kill flag")
+        search = {"entities": [], "events": [],
+                  "points": [{"id": "pt_d1", "content": old_content,
+                              "kind": "statement"}]}
+        embed = {
+            "entities": [], "events": [],
+            "points": [
+                {"content": "roll out per-service flags instead of one "
+                            "global kill flag",
+                 "pointKind": "statement",
+                 "supersedes": old_content},
+            ],
+            "operators": [],
+        }
+        r = v2.execute_embed(embed, search, session_id="s1")
+        new_pid = r["payload"]["points"][0]["id"]
+        assert new_pid.startswith("pt_")
+        record = next((s for s in r["supersessions"]
+                       if s["superseded"] == "pt_d1"), None)
+        assert record is not None, r["supersessions"]
+        assert record["supersedes_by"] == new_pid
+        assert "reversal" in record["evidence"]
+        # rides the payload's canonical supersessions channel (commit id)
+        assert any(s == record for s in r["payload"]["supersessions"])
+
+    def test_decision_reversal_unresolved_or_ambiguous_never_guesses(self):
+        """op_04 never-guess: a ``supersedes`` ref that matches no S3 prior
+        (or matches >1) is skipped with a warning — no fabricated record."""
+        old_content = ("ship the lease fix all-at-once behind a single "
+                       "global kill flag")
+        search = {"entities": [], "events": [],
+                  "points": [{"id": "pt_d1", "content": old_content,
+                              "kind": "statement"}]}
+        embed = {
+            "entities": [], "events": [],
+            "points": [
+                {"content": "roll out per-service flags instead of one "
+                            "global kill flag",
+                 "pointKind": "statement",
+                 "supersedes": "some decision that never existed"},
+            ],
+            "operators": [],
+        }
+        r = v2.execute_embed(embed, search, session_id="s1")
+        new_pid = r["payload"]["points"][0]["id"]
+        assert not any(s["supersedes_by"] == new_pid for s in r["supersessions"])
+        assert any("matches no S3 prior" in w for w in r["warnings"])
+        # ambiguous (two priors, same content) → skipped (never guess)
+        search2 = {"entities": [], "events": [],
+                   "points": [{"id": "pt_a", "content": old_content,
+                               "kind": "statement"},
+                              {"id": "pt_b", "content": old_content,
+                               "kind": "statement"}]}
+        embed["points"][0]["supersedes"] = old_content
+        r2 = v2.execute_embed(embed, search2, session_id="s1")
+        assert not any(s["supersedes_by"] == new_pid
+                       for s in r2["supersessions"])
+        assert any("ambiguous" in w for w in r2["warnings"])
+
+    def test_point_supersede_self_ref_skipped(self):
+        """op_04 self guard: a ref resolving to the point ITSELF (same id)
+        is skipped with a warning — a self-CORRECTS would poison the graph."""
+        content = "roll out per-service flags instead of one global kill flag"
+        # identical content in the search ⇒ the candidate is NOOP-folded and
+        # never emitted; the self-guard fires when the resolved prior id ==
+        # the emitted point id (defensive — content-addressing makes the
+        # honest path a NOOP first)
+        from tortoise.extractor_v2 import _content_id
+        pid = _content_id("pt", content)
+        search = {"entities": [], "events": [],
+                  "points": [{"id": pid, "content": content,
+                              "kind": "statement"}]}
+        embed = {"entities": [], "events": [],
+                 "points": [{"content": content, "pointKind": "statement",
+                             "supersedes": content}],
+                 "operators": []}
+        r = v2.execute_embed(embed, search, session_id="s1")
+        # NOOP fold — no payload point, no record, no CORRECTS
+        assert r["payload"]["points"] == []
+        assert all(s["superseded"] != s["supersedes_by"] for s in r["supersessions"])

@@ -249,6 +249,10 @@ def _resume_fingerprint() -> dict:
         # run_evaluation fingerprints the RESOLVED bool (always present on
         # the run path), so a hand-written resume checkpoint must carry it.
         entity_key_expansion=False,
+        # C5 (#2521, #2513): the aggregative-intent coverage-check arm —
+        # run_evaluation fingerprints the RESOLVED bool (always present on
+        # the run path), so a hand-written resume checkpoint must carry it.
+        aggregative_flag=False,
         max_chunks_per_session=runner._env_int(
             "TORTOISE_LME_MAX_CHUNKS_PER_SESSION",
             runner.DEFAULT_MAX_CHUNKS_PER_SESSION))

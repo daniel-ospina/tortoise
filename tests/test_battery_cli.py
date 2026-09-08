@@ -151,3 +151,23 @@ class TestDispatchMapping:
 
 def _raise(exc):
     raise exc
+
+
+class TestRealExecutorCliWiring:
+    """#1416: the run subcommand exposes the pinned real executor + the
+    product-store db path (E2E-1.1 canonical invocation)."""
+
+    def test_run_parses_executor_real_and_db_path(self):
+        from battery.cli import _parser
+        args = _parser().parse_args(
+            ["run", "--arms", "a4,a0", "--executor", "real",
+             "--db-path", "/tmp/x.db", "--seed", "3"])
+        assert args.executor == "real"
+        assert args.db_path == "/tmp/x.db"
+        assert args.seed == 3
+
+    def test_run_defaults_to_mock_and_no_db(self):
+        from battery.cli import _parser
+        args = _parser().parse_args(["run", "--arms", "a0"])
+        assert args.executor is None  # _cmd_run resolves None -> "mock"
+        assert args.db_path is None
