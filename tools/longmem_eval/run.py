@@ -2524,11 +2524,20 @@ INGEST_CACHE_CODE_FILES = (
     / "tortoise" / "extractor_v2.py",
 )
 
-#: Env knob whose value changes the EXTRACTION PROMPT while leaving code +
-#: model untouched (extractor_v2's compact S1-S4 prompt research toggle).
-#: It must ride the ingest fingerprint or a compact↔default toggle would
-#: silently reuse graphs built by the other prompt mode.
-INGEST_CACHE_PROMPT_ENV = "TORTOISE_EXTRACTOR_PROMPT"
+#: Env knobs whose values change the EXTRACTION OUTPUT while leaving code
+#: + model untouched (P1 #2607-review-style gap on the seam): the prompt
+#: mode toggle, the S2/S4 label-order shuffle + its seed, the classify-
+#: later pipeline switch, and the stage token caps/truncation. ANY of them
+#: toggled between QA cycles must invalidate cached ingests — a silent
+#: reuse across modes would corrupt the very A/B this seam exists for.
+INGEST_CACHE_PROMPT_ENVS: tuple[str, ...] = (
+    "TORTOISE_EXTRACTOR_PROMPT",       # compact ↔ default render
+    "TORTOISE_LABEL_ORDER",            # S2/S4 shuffled kind-order renders
+    "TORTOISE_LABEL_SEED",             # the shuffle seed (with the above)
+    "TORTOISE_CLASSIFY_LATER",         # classify-now ↔ classify-later pipeline
+    "TORTOISE_EXTRACTOR_MAX_TOKENS",   # stage output caps / truncation
+    "TORTOISE_EXTRACTOR_ESCALATION_TOKENS",  # escalation cap
+)
 
 
 def ingest_code_fingerprint(paths: tuple[Path, ...] | None = None) -> str:
@@ -2539,7 +2548,14 @@ def ingest_code_fingerprint(paths: tuple[Path, ...] | None = None) -> str:
     stable within a process and identical across processes on the same
     checkout. ``paths`` is injectable for hermetic tests (fake files). An
     unreadable file hashes as empty content (never aborts a run — a
-    missing module would fail the ingest itself long before)."""
+    missing module would fail the ingest itself long before). P1 (#2607-
+    review class): the two modules' IMPORT CLOSURE (chain_enforcer,
+    kind_classifier, commit_ops, model_adapters, embeddings …) also shapes
+    extraction output but is not in ``paths`` — so the repo ``git_sha``
+    rides as a second dimension: ANY repo code change (in or out of the
+    closure) invalidates cached ingests automatically. ``git_sha`` is the
+    conservative net; ``paths`` keeps the digest sensitive to the two
+    hot files even across an uncommitted local edit (dirty-tree runs)."""
     files = list(INGEST_CACHE_CODE_FILES) if paths is None else list(paths)
     h = hashlib.sha256()
     for p in files:
@@ -2548,16 +2564,26 @@ def ingest_code_fingerprint(paths: tuple[Path, ...] | None = None) -> str:
         with contextlib.suppress(OSError):
             h.update(Path(p).read_bytes())
         h.update(b"\x00")
+    h.update(b"repo:")
+    h.update(git_sha().encode("utf-8", "replace"))
     return h.hexdigest()
 
 
 def extractor_prompt_digest() -> str:
     """The extraction-prompt dimension of the ingest fingerprint: sha16 of
-    the TORTOISE_EXTRACTOR_PROMPT mode ("" = the default full prompt,
-    "compact" = the compact render). Read per run — the extractor reads it
-    per session at extract time, so the digest must too."""
-    raw = os.environ.get(INGEST_CACHE_PROMPT_ENV, "").strip()
-    return _sha16(raw or "default")
+    the output-shaping env knobs ("" = default full prompt / default
+    behavior). Read per run — the extractor reads these env knobs per
+    session at extract time, so the digest must too. A knob absent from
+    this tuple that changes extraction output is a silent-stale-HIT bug;
+    add it here when the extractor gains a new env switch."""
+    h = hashlib.sha256()
+    for name in INGEST_CACHE_PROMPT_ENVS:
+        raw = os.environ.get(name, "").strip()
+        h.update(name.encode("utf-8", "replace"))
+        h.update(b"=")
+        h.update((raw or "<unset>").encode("utf-8", "replace"))
+        h.update(b"\x1f")
+    return h.hexdigest()[:16]
 
 
 def ingest_cache_fingerprint(*, question: dict, extractor_model: Any,
