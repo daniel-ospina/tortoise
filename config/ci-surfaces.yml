@@ -363,6 +363,8 @@ surfaces:
   - test_relationships_bounded.py
   - test_remove_context_migration.py
   - test_render.py
+  - test_coverage_loop.py  # #2567: evidence-completeness loop E2E (C3-1, docker-lane)
+  - test_coverage_loop_rules.py  # #2567: evidence-completeness loop hermetic rules
   - test_entity_key_expansion.py  # #2518: entity/fact-augmented key expansion (C2, docker-lane)
   - test_aggregative_facet_coverage.py  # #2521: aggregative-intent + facet coverage check (C5, docker-lane)
   - test_aggregative_intent.py          # #2521: hermetic detector + coverage-math table (C5)
@@ -519,6 +521,8 @@ surfaces:
   - test_namespace_uri_mode.py
   - test_reader.py
   - test_reader_abstention_calibration.py
+  - test_coverage_loop.py  # #2567 (docker-lane leg, mirrors test_retrieval.py)
+  - test_coverage_loop_rules.py  # #2567 (hermetic rules leg)
   - test_entity_key_expansion.py  # #2518 (docker-lane leg, mirrors test_retrieval.py)
   - test_aggregative_facet_coverage.py  # #2521 (docker-lane leg, mirrors test_retrieval.py)
   - test_retrieval.py
