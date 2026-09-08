@@ -94,10 +94,10 @@ export function ReauthDialog({ open, busy, onClose, onPassword, onProvider, erro
   // primary control; give it (and only it) initial focus.
   const focusProvider = !showPasswordForm
   return (
-    <div className="modal-backdrop" onClick={onClose}>
+    <div className="modal-backdrop" onClick={() => { if (!busy) onClose() }}>
       <div className="modal" role="dialog" aria-modal="true" aria-label="Confirm it's you"
            onClick={(e) => e.stopPropagation()}
-           onKeyDown={(e) => { if (e.key === 'Escape') onClose() }}>
+           onKeyDown={(e) => { if (e.key === 'Escape' && !busy) onClose() }}>
         <h2>Confirm it's you</h2>
         <p className="dim">{passwordMode
           ? 'You re-authenticated — now choose your new password.'
@@ -131,7 +131,7 @@ export function ReauthDialog({ open, busy, onClose, onPassword, onProvider, erro
           {available.length === 0 && <p className="dim">Sign in again with your password above.</p>}
         </div>
         {error && <p className="error" role="alert">{error}</p>}
-        <button className="ghost small" onClick={onClose} aria-label="Close">✕</button>
+        <button className="ghost small" onClick={() => { if (!busy) onClose() }} aria-label="Close" disabled={busy}>✕</button>
       </div>
     </div>
   )

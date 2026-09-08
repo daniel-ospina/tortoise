@@ -1501,6 +1501,14 @@ function claimIntentInFlight() {
   // time the response lands, busy has disabled the trigger and focus has
   // already dropped to <body>.
   const revealRestoreRef = React.useRef(null)
+  // #2392 (review P1): backdrop-click dismissal must never fire on a drag
+  // that STARTED inside the card. The reveal modal shows a long wrapped
+  // plaintext the user may select by hand (clipboard-failure fallback); a
+  // selection drag that overshoots the card boundary completes on the
+  // backdrop, and a plain onClick there would destroy the one-time secret
+  // mid-copy. Track the pointerdown origin — only a press that began on the
+  // backdrop itself may dismiss.
+  const revealBackdropPressRef = React.useRef(false)
   // #2392 (a11y): the single create-team/reveal-key close path — every close
   // (backdrop, Escape, Cancel/Upgrade, success, Copy & done, I saved it)
   // restores focus to the opening trigger instead of dropping it on <body>.
@@ -7214,7 +7222,23 @@ function claimIntentInFlight() {
                  the plaintext exists nowhere else (hash-only storage) — no
                  show-key route ever re-renders it. Clipboard failure keeps
                  the key visible in the modal text; dismissing clears state. */
-              <div className="modal-backdrop" onClick={closeRevealKey}>
+              <div className="modal-backdrop"
+                   onPointerDown={(e) => {
+                     // Track where the press began: only a pointerdown on the
+                     // backdrop itself may later dismiss via click. A press that
+                     // started inside the card (text-selection drag, coarse
+                     // pointer) must never destroy the one-time secret (#2392
+                     // review P1) — even if the drag releases over the backdrop,
+                     // the click's common-ancestor target is the backdrop and a
+                     // plain onClick there would fire mid-copy.
+                     revealBackdropPressRef.current = !(e.target && e.target.closest && e.target.closest('.modal'))
+                   }}
+                   onClick={() => {
+                     if (revealBackdropPressRef.current) {
+                       revealBackdropPressRef.current = false
+                       closeRevealKey()
+                     }
+                   }}>
                 <div className="modal" role="dialog" aria-modal="true" aria-label="New key — shown once"
                      onClick={(e) => e.stopPropagation()}
                      onKeyDown={(e) => { if (e.key === 'Escape') closeRevealKey() }}>
