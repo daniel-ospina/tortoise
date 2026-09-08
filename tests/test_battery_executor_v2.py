@@ -244,6 +244,7 @@ def test_differential_tier_smoke(tmp_path) -> None:
     unmeasured D-family cell classifies insufficient_n (reported, never a
     vacuous measured cell)."""
     import hashlib as _h
+
     from battery.report.classify import classify_cell
     cfg = _config_dir(tmp_path)
     golds = tmp_path / "golds"
