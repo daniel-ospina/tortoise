@@ -201,7 +201,15 @@ def run_evidence_validation(*, config_dir: str | Path, rubric_id: str,
     record = validate_rubric(
         rubric_id, rubric_text, a, retest_pairs, labels_a, labels_b,
         n_items=n_items, vocabulary=DECLARATIVE_VOCAB,
-        irt_renders=irt_renders, gold_anchors=spec.gold_anchors)
+        irt_renders=irt_renders, gold_anchors=spec.gold_anchors,
+        # Owner decision A (2026-09-08): REAL-text inter-judge reliability
+        # is gated on Gwet's AC1 >= 0.70 (paradox-resistant on the
+        # necessarily yes-skewed pool of real deliberation); Cohen's kappa
+        # stays the gate on judge-balanced mock pools (gate default). The
+        # IRT leg is MEASURED but not gating here: per-item infit at the
+        # probe corpus's ~3 renders/item is under-powered (real-path IRT
+        # re-arms at the #2284 Task-8 exposure pool).
+        reliability_bar="ac1", irt_gate=False)
 
     registry = RubricRegistry(records_path)
     registry.save(record)

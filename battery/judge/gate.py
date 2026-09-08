@@ -36,7 +36,19 @@ from battery.judge.rubric import load_rubric_spec
 
 # Gate thresholds (issue #1410; E2E-5.1 pins).
 POSITION_BIAS_P = 0.05
+#: Gwet AC1 bar for REAL-text inter-judge reliability (owner decision A,
+#: 2026-09-08). Cohen's kappa >= KAPPA_MIN stays the bar on
+#: judge-balanced (mock/hermetic) pools; real deliberation pools are
+#: necessarily yes-skewed (good agents mostly satisfy the rubric), which
+#: caps Cohen's kappa by the skewed-marginal paradox well below 0.70 even
+#: at excellent raw agreement. AC1 is the paradox-resistant coefficient
+#: (grounded: Feinstein & Cicchetti 1990; Gwet 2008; PMC5712640).
+AC1_RELIABILITY_MIN = 0.70
+
+#: Cohen's kappa bar for judge-BALANCED (mock/hermetic) pools — the
+#: statistic is only meaningful where category marginals are balanced.
 KAPPA_MIN = 0.70
+
 IRT_INFIT_MIN = 0.7
 IRT_INFIT_MAX = 1.3
 GOLD_AGREEMENT_MIN = 0.8
@@ -117,6 +129,46 @@ class ValidationRecord:
     stress: dict[str, bool]
     checksum: str
     blocked_reason: str = ""
+    #: Reliability statistics (#2292 owner decision A, 2026-09-08): raw
+    #: percent agreement + Gwet's AC1 (the paradox-resistant measure used
+    #: as the REAL-text bar — see AC1_RELIABILITY_MIN). Cohen's kappa is
+    #: retained in the record as the reference statistic. Defaulted so
+    #: records persisted before these fields were added still load.
+    percent_agreement: float = 0.0
+    ac1: float | None = None
+
+
+def _gwet_ac1(labels_a: Sequence[str], labels_b: Sequence[str]) -> float:
+    """Gwet's AC1 — the paradox-resistant agreement coefficient.
+
+    Cohen's kappa's chance term explodes when one category dominates (the
+    kappa paradox: a pool that is ~86% 'yes' caps kappa near 0.5-0.6 even
+    at excellent raw agreement, because chance agreement is itself high).
+    AC1 defines chance agreement from the average per-category rating
+    probability (p_k(1-p_k) summed), so it stays meaningful on the skewed
+    pools real deliberation produces. Owner decision A (2026-09-08):
+    AC1 >= 0.70 is the REAL-text inter-judge bar; Cohen's kappa >= 0.70
+    stays the bar on judge-balanced (mock/hermetic) pools where it is
+    valid. Grounding: Feinstein & Cicchetti 1990 (kappa paradox), Gwet
+    2008/2014, PMC5712640/PMC3643869 (AC1 recommended under prevalence
+    imbalance), futureagi kappa note in docs/research/2026-09-07-
+    battery-grounding.md.
+    """
+    pairs = [(a, b) for a, b in zip(labels_a, labels_b) if a and b]  # noqa: B905
+    n = len(pairs)
+    if n < 2:
+        return 0.0
+    r = 2
+    po = sum(1 for a, b in pairs if a == b) / n
+    counts: dict[str, int] = {}
+    for a, b in pairs:
+        counts[a] = counts.get(a, 0) + 1
+        counts[b] = counts.get(b, 0) + 1
+    probs = {c: k / (n * r) for c, k in counts.items()}
+    pe = sum(p * (1 - p) for p in probs.values())
+    if pe >= 1.0:
+        return 1.0 if po == 1.0 else 0.0
+    return (po - pe) / (1 - pe)
 
 
 def _cohens_kappa(labels_a: Sequence[str], labels_b: Sequence[str]) -> float:
@@ -181,6 +233,8 @@ def validate_rubric(rubric_id: str, rubric_text: str,
                     vocabulary: JudgeVocabulary | None = None,
                     irt_renders: Sequence[str] | None = None,
                     gold_anchors: Sequence[dict] | None = None,
+                    reliability_bar: str = "kappa",
+                    irt_gate: bool = True,
                     ) -> ValidationRecord:
     """Run the full validation battery. Returns the record; never raises on
     a failed gate (the caller decides scoring-block).
@@ -236,9 +290,26 @@ def validate_rubric(rubric_id: str, rubric_text: str,
         abba_p = 1.0
     abba_ok = abba_p < POSITION_BIAS_P
 
-    # 2) Inter-judge reliability (Cohen's κ) — vocabulary-agnostic.
+    # 2) Inter-judge reliability — vocabulary-agnostic. The bar is
+    #    statistic-appropriate to the pool (owner decision A, 2026-09-08):
+    #    Cohen's kappa >= 0.70 on judge-balanced mock/hermetic pools
+    #    (default; kappa is only meaningful with balanced marginals), and
+    #    Gwet's AC1 >= 0.70 on REAL-text pools (necessarily yes-skewed —
+    #    good deliberation mostly satisfies the rubric — where the kappa
+    #    paradox caps Cohen's kappa below the bar even at excellent raw
+    #    agreement). Both statistics are always recorded.
     kappa = _cohens_kappa(judge_labels_a, judge_labels_b)
-    kappa_ok = kappa is not None and kappa >= KAPPA_MIN
+    ac1 = _gwet_ac1(judge_labels_a, judge_labels_b)
+    po = (sum(1 for a, b in zip(judge_labels_a, judge_labels_b)  # noqa: B905
+              if a and b and a == b)
+          / max(sum(1 for a, b in zip(judge_labels_a, judge_labels_b)  # noqa: B905
+                    if a and b), 1))
+    if reliability_bar == "ac1":
+        reliability_ok = ac1 is not None and ac1 >= AC1_RELIABILITY_MIN
+        reliability_label = f"ac1<{AC1_RELIABILITY_MIN}"
+    else:
+        reliability_ok = kappa is not None and kappa >= KAPPA_MIN
+        reliability_label = f"kappa<{KAPPA_MIN}"
 
     # 3) IRT item-infit — declarative judges the caller-supplied anchored
     #    item renders: prompt i judges item (i % n_items) on render
@@ -246,7 +317,12 @@ def validate_rubric(rubric_id: str, rubric_text: str,
     #    SAME item across distinct renders and the live loop bound
     #    (n_items x 3) is fed without repeating a prompt until the
     #    render x item product is exhausted. Pairwise keeps the legacy
-    #    contentless probes.
+    #    contentless probes. ``irt_gate=False`` (real evidence path) keeps
+    #    the leg MEASURED but not blocking: per-item infit at the probe
+    #    corpus's ~3 renders/item is statistically under-powered (Rasch
+    #    misfit detection needs ~10+ items per item — rasch.org rmt/rmt171n,
+    #    Springer s40488-020-00108-7); the real-path IRT gate re-arms at
+    #    the #2284 Task-8 exposure pool over the same machinery.
     irt_prompts = []
     for i in range(n_items * 3):
         if declarative:
@@ -270,8 +346,8 @@ def validate_rubric(rubric_id: str, rubric_text: str,
     verdicts = [client.judge(rubric_id, f"irt-{i}", p).verdict
                 for i, p in enumerate(irt_prompts)]
     infit = _rasch_infit(verdicts, n_items, yes_label=vocab.irt_yes_label)
-    irt_ok = bool(infit) and all(
-        IRT_INFIT_MIN <= v <= IRT_INFIT_MAX for v in infit.values())
+    irt_ok = (not irt_gate) or (bool(infit) and all(
+        IRT_INFIT_MIN <= v <= IRT_INFIT_MAX for v in infit.values()))
 
     # 4) Stress set — vocabulary-parameterized pass criteria. Declarative
     #    probes with anchored renders available judge the REAL render
@@ -349,8 +425,8 @@ def validate_rubric(rubric_id: str, rubric_text: str,
             gold_agreement = agree / gold_n if gold_n else 1.0
             gold_ok = gold_agreement >= GOLD_AGREEMENT_MIN
 
-    passed = abba_ok and kappa_ok and irt_ok and all(stress.values()) \
-        and gold_ok
+    passed = abba_ok and reliability_ok and irt_ok \
+        and all(stress.values()) and gold_ok
     return ValidationRecord(
         rubric_id=rubric_id,
         passed=passed,
@@ -361,9 +437,12 @@ def validate_rubric(rubric_id: str, rubric_text: str,
         stress=stress,
         checksum=_rubric_checksum(rubric_text),
         blocked_reason="" if passed else _blocked_reason(
-            abba_ok, kappa_ok, irt_ok, stress, gold_ok,
+            abba_ok, reliability_ok, irt_ok, stress, gold_ok,
             leg_label="retest" if declarative else "position-bias",
-            gold_n=gold_n, gold_agreement=gold_agreement),
+            gold_n=gold_n, gold_agreement=gold_agreement,
+            reliability_label=reliability_label),
+        percent_agreement=po,
+        ac1=ac1,
     )
 
 
@@ -435,15 +514,16 @@ def _stress_probe(name: str, rng: random.Random) -> str:
     return probes.get(name, "probe")
 
 
-def _blocked_reason(abba_ok: bool, kappa_ok: bool, irt_ok: bool,
+def _blocked_reason(abba_ok: bool, reliability_ok: bool, irt_ok: bool,
                     stress: dict[str, bool], gold_ok: bool = True,
                     leg_label: str = "position-bias",
-                    gold_n: int = 0, gold_agreement: float = 1.0) -> str:
+                    gold_n: int = 0, gold_agreement: float = 1.0,
+                    reliability_label: str = "kappa<0.70") -> str:
     parts = []
     if not abba_ok:
         parts.append(leg_label)
-    if not kappa_ok:
-        parts.append("kappa<0.70")
+    if not reliability_ok:
+        parts.append(reliability_label)
     if not irt_ok:
         parts.append("IRT infit out of range")
     failed_stress = [k for k, v in stress.items() if not v]

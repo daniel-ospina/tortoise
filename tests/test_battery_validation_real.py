@@ -1,5 +1,20 @@
 """#2292 Task 4 — pre-exposure validation on REAL probe evidence (hermetic:
-fixture bundle + mock judges; the REAL run is spend-gated Step 4.2)."""
+fixture bundle + mock judges; the REAL run is spend-gated Step 4.2).
+
+Owner decision A (2026-09-08) — documented in the test that enforces it:
+real deliberation pools are necessarily YES-SKEWED (good agents mostly
+satisfy the rubric), and on a skewed pool Cohen's kappa is capped below
+0.70 by the skewed-marginal kappa paradox (Feinstein & Cicchetti 1990;
+Gwet 2008) even at ~0.86 raw two-model agreement — our measured real run:
+po 0.86 / kappa 0.60 with two frontier judges at temp 0. The REAL-text
+inter-judge bar is therefore Gwet's AC1 >= 0.70 (paradox-resistant;
+measured ~0.84, passes); Cohen's kappa >= 0.70 remains the gate on
+judge-balanced mock/hermetic pools where the statistic is valid (the
+gate.py default). The IRT leg is measured-but-not-gating on the real
+path (per-item infit at ~3 renders/item is under-powered — Rasch misfit
+detection needs ~10+ per item); the real-path IRT gate re-arms at the
+#2284 Task-8 exposure pool over the same machinery.
+"""
 from __future__ import annotations
 
 import json
@@ -113,3 +128,23 @@ def test_gold_anchor_all_yes_judge_fails(tmp_path):
         judge_b=_AllYesJudge(), records_path=_record_path(tmp_path),
         reserve_usd=10.0)
     assert not rec.passed and "gold-anchor" in rec.blocked_reason
+
+
+def test_ac1_bar_passes_kappa_paradox_pool():
+    """Owner decision A: on a yes-skewed real-text pool Cohen's kappa is
+    capped below 0.70 by the skewed-marginal paradox even at high raw
+    agreement (our measured real run: po 0.86 / kappa 0.60). The real-text
+    bar is Gwet's AC1 >= 0.70, which stays meaningful on skewed pools."""
+    from battery.judge.gate import _cohens_kappa as _ck, _gwet_ac1
+    # 30 pairs: 28 agree-yes + 2 disagreements (po = 0.93; judge A is
+    # all-yes over a yes-skewed pool -> Cohen's kappa collapses to ~0 by
+    # the skewed-marginal paradox while AC1 stays ~0.93.
+    a = ["yes"] * 30
+    b = ["yes"] * 27 + ["no", "no", "yes"]
+    po = sum(1 for x, y in zip(a, b) if x == y) / len(a)
+    k = _ck(a, b)
+    ac1 = _gwet_ac1(a, b)
+    assert po >= 0.85     # raw agreement is good
+    assert ac1 >= 0.70    # AC1 bar clears (decision A)
+    assert ac1 > k        # kappa < AC1 on the skewed pool (the paradox)
+
