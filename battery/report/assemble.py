@@ -54,6 +54,10 @@ REPORT_STATUS_EMITTER_GAP = "incomplete_emitter_gap"
 REPORT_STATUS_REAL_NO_EPISODES = "incomplete_real_no_episodes"
 REPORT_STATUS_REAL_PARTIAL = "incomplete_real_partial"
 REPORT_STATUS_REAL_OVER_BUDGET = "incomplete_real_over_budget"
+#: Task 10: a REAL run that included L4-family scenarios but ran with
+#: sessions < 2 cannot have attempted a single cross-session surfacing —
+#: L4 is underpopulated by construction (never reported as measured).
+REPORT_STATUS_L4_UNDERPOPULATED = "incomplete_l4_underpopulated"
 
 REPORT_STATUSES = (
     REPORT_STATUS_OK, REPORT_STATUS_INCOMPLETE, REPORT_STATUS_EMITTER_GAP,
@@ -155,7 +159,8 @@ def compose_run_status(*, run_mode: str, exit_code: int,
                        excluded_episodes: int,
                        emitter_gap: bool = False,
                        excluded_gap: bool = False,
-                       over_budget: bool = False) -> str | None:
+                       over_budget: bool = False,
+                       l4_underpopulated: bool = False) -> str | None:
     """Run-level report_status precedence (Task 5 acceptance — each branch
     driven by run_mode + summary exit_code + per-episode statuses). Returns
     None when the base missing-family rule in ``assemble`` should decide
@@ -165,7 +170,12 @@ def compose_run_status(*, run_mode: str, exit_code: int,
     snapshot (excluded.expected vs excluded.emitted — recorded by run.py)
     is non-empty ALSO composes ``incomplete_emitter_gap``: the artifact
     exemption is retained, but an exclusion can never hide an emitter that
-    stopped covering the episode's expected fields."""
+    stopped covering the episode's expected fields.
+
+    ``l4_underpopulated`` (Task 10): a REAL run that included L4-family
+    scenarios with sessions < 2 — the run never attempted a cross-session
+    surfacing, so L4 must compose ``incomplete_l4_underpopulated`` (never
+    a measured-looking partial)."""
     if run_mode != "real":
         # Mock runs stay incomplete_missing_metrics even with a probe scorer
         # wired (all cells insufficient_n) — never the emitter-gap/real-*
@@ -179,6 +189,8 @@ def compose_run_status(*, run_mode: str, exit_code: int,
         return REPORT_STATUS_EMITTER_GAP
     if over_budget:
         return REPORT_STATUS_REAL_OVER_BUDGET
+    if l4_underpopulated:
+        return REPORT_STATUS_L4_UNDERPOPULATED
     if measured_cells == 0:
         # No-episodes is reserved for runs that ATTEMPTED episodes but
         # measured none: all-excluded / all-insufficient / cap-stopped /

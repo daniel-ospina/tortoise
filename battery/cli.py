@@ -627,6 +627,10 @@ def _load_report_inputs(args) -> tuple[dict, dict | None, dict]:
         "over_budget": any(
             "budget" in str(a.get("excluded", {}).get("reason", "")).lower()
             for a in arts),
+        # Task 10: runner-stamped on the summary when a real run included
+        # L4 scenarios at sessions < 2 (never attempted cross-session).
+        "l4_underpopulated": bool(
+            summary.get("run", {}).get("l4_underpopulated")),
     }
     return matrix, ctx, control
 

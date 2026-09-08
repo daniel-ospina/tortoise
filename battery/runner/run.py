@@ -724,6 +724,15 @@ def run_battery(config: RunConfig, *, stdout: Callable[[str], None] = print,
     summary = build_summary(
         arms=arms_out, exit_code=int(exit_code), run_ids=all_run_ids,
         artifacts=all_artifacts, seed=config.seed, run_mode=run_level_mode,
+        sessions=config.sessions,
+        # Task 10: L4 (cross-session surfacing) requires >= 2 sessions — a
+        # real run that included L4-family scenarios at sessions < 2 never
+        # attempted a single cross-session surfacing. The runner stamps the
+        # flag; the CLI report composes incomplete_l4_underpopulated.
+        l4_underpopulated=(run_level_mode == "real"
+                          and config.sessions < 2
+                          and any(getattr(s, "family", "") == "L4"
+                                  for s in scenarios)),
         timestamps={"written_utc": datetime.now(timezone.utc).isoformat()})  # noqa: UP017
     validate_summary_keys(summary)
     write_summary(attempt_dir, summary)

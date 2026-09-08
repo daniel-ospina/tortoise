@@ -179,6 +179,64 @@ def test_sessions_zero_refused(tmp_path) -> None:
                   sessions=0)
 
 
+def _corpus_with_L4(d: Path) -> None:
+    """Append an L4-family scenario to a fixture corpus."""
+    import hashlib as _h
+    golds = d.parent / "golds"
+    (golds / "g.txt").write_text("gold", encoding="utf-8")
+    sha = _h.sha256(b"gold").hexdigest()
+    path = d / "corpus.yaml"
+    data = yaml.safe_load(path.read_text())
+    data["scenarios"].append({
+        "id": "l4-001", "tier": "stream", "family": "L4",
+        "task_type": "decision", "k": 0,
+        "prompt": {"preamble": "Stream scenario."},
+        "question": "cross-session question?",
+        "gold_ref": {"path": "g.txt", "sha256": sha}})
+    path.write_text(yaml.safe_dump(data), encoding="utf-8")
+
+
+def test_l4_underpopulated_stamped_at_sessions_1(tmp_path) -> None:
+    """Task-10 step 5 (status branch): a REAL run including an L4 scenario
+    at sessions == 1 stamps summary.run.l4_underpopulated (never attempted
+    a cross-session surfacing); the CLI report composes
+    incomplete_l4_underpopulated from it."""
+    from battery.report.assemble import REPORT_STATUS_L4_UNDERPOPULATED, compose_run_status
+    cfg = _config_dir(tmp_path)
+    _corpus_with_L4(cfg)
+    out = tmp_path / "out"
+    run_battery(RunConfig(config_dir=cfg, out_dir=out, executor="real",
+                          arms=["a0"], caller_factory=_ScriptedCaller,
+                          sessions=1), stdout=lambda _: None)
+    attempt = sorted(out.iterdir())[0]
+    summary = json.loads((attempt / "summary.json").read_text())
+    assert summary["run"]["sessions"] == 1
+    assert summary["run"]["l4_underpopulated"] is True
+    status = compose_run_status(
+        run_mode="real", exit_code=0, measured_cells=1, insufficient_cells=0,
+        excluded_episodes=0, l4_underpopulated=True)
+    assert status == REPORT_STATUS_L4_UNDERPOPULATED
+    # precedence: emitter-gap / over-budget still win over the L4 state
+    assert compose_run_status(
+        run_mode="real", exit_code=0, measured_cells=1, insufficient_cells=0,
+        excluded_episodes=0, emitter_gap=True, l4_underpopulated=True) \
+        == "incomplete_emitter_gap"
+
+
+def test_l4_not_stamped_when_sessions_ge_2(tmp_path) -> None:
+    """sessions >= 2 (a real stream that CAN surface cross-session) never
+    stamps the underpopulated flag."""
+    cfg = _config_dir(tmp_path)
+    _corpus_with_L4(cfg)
+    out = tmp_path / "out"
+    run_battery(RunConfig(config_dir=cfg, out_dir=out, executor="real",
+                          arms=["a0"], caller_factory=_ScriptedCaller,
+                          sessions=2), stdout=lambda _: None)
+    attempt = sorted(out.iterdir())[0]
+    summary = json.loads((attempt / "summary.json").read_text())
+    assert summary["run"]["l4_underpopulated"] is False
+
+
 # ── seed-mode accumulation + stale refuse (embedded a4 real lane) ───────
 
 
