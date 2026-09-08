@@ -1230,6 +1230,11 @@ def _build_fingerprint(*, reader_model: str, judge_model: str,
                        # the fingerprint gate; the 2×2 with #2518 stays
                        # reconstructable).
                        coverage_loop: bool | None = None,
+                       # C5 (#2521, #2513): the aggregative-intent coverage-
+                       # check arm — conditional presence like the other C2/C5
+                       # knobs (a flagged checkpoint resumed without the arm
+                       # is refused by the fingerprint gate).
+                       aggregative_flag: bool | None = None,
                        max_chunks_per_session: int | None = None,
                        # #1786 (P1-1/P1-2/P2-4): the write-path retry knobs —
                        # ALWAYS present (results-relevant by construction: a
@@ -1337,6 +1342,10 @@ def _build_fingerprint(*, reader_model: str, judge_model: str,
             ("evidence_boost_source", evidence_boost_source),
             ("entity_key_expansion", entity_key_expansion),
             ("coverage_loop", coverage_loop),
+            # C5 (#2521, #2513): the aggregative-intent coverage-check arm
+            # — conditional presence like the C2 knob (a flagged checkpoint
+            # resumed without the arm is refused by the fingerprint gate).
+            ("aggregative_flag", aggregative_flag),
             ("max_chunks_per_session", max_chunks_per_session),
             # #1786 (R5): the eval's hybrid retrieval budget — conditional
             # presence (the eval always passes 1500, so a pre-feature /
@@ -3042,6 +3051,17 @@ def run_evaluation(
     # methodology — a looped checkpoint resumed without the arm is refused
     # by the fingerprint gate (same contract as evidence_boost).
     coverage_loop: bool | None = None,
+    # C5 (#2521, #2513): aggregative-intent detection + per-facet coverage
+    # check — tri-state (explicit flag > ``TORTOISE_LME_AGGREGATIVE_FLAG``
+    # env > OFF, the #1745 fail-safe default). The A/B switch that MEASURES
+    # the #2521 detector for the C3-3 coverage-signal routing (#2519):
+    # resolved once, fingerprinted, and recorded in the methodology — a
+    # flagged checkpoint resumed without the arm is refused by the
+    # fingerprint gate (same contract as entity_key_expansion). It does NOT
+    # change retrieval behavior (the completeness loop is C3-1/C3-3) — it
+    # records {detected_intent, facet_coverage, missing_facets} per outcome
+    # under the arm.
+    aggregative_flag: bool | None = None,
     # R5 (#1544): TR knobs — temporal-reasoning questions get the events
     # union pool, the engine recency date weight, the TR-constraint window
     # filter, time-ascending rendering, and the tighter tr_top_k cap
@@ -3167,6 +3187,15 @@ def run_evaluation(
     if coverage_loop is None:
         cl_env = (os.environ.get("TORTOISE_LME_COVERAGE_LOOP") or "")
         coverage_loop = cl_env.strip().lower() in _TRUTHY
+    # C5 (#2521, #2513): resolve the aggregative-intent coverage-check arm
+    # tri-state ONCE, before the loop — same contract as the C2 knobs: a
+    # None with the TORTOISE_LME_AGGREGATIVE_FLAG env set must not record
+    # `false` in the methodology while the per-question retrieval flagged
+    # (methodology records the knobs truthfully; fail-safe OFF: only
+    # 1/true/yes/on enables).
+    if aggregative_flag is None:
+        af_env = (os.environ.get("TORTOISE_LME_AGGREGATIVE_FLAG") or "")
+        aggregative_flag = af_env.strip().lower() in _TRUTHY
     # C1/C2 (#1745): resolve the remaining boost knobs ONCE, before the
     # loop — the methodology and the fingerprint must record EXACTLY what
     # the per-question retrieval serves (CLI > env > default, mirroring
@@ -3273,6 +3302,10 @@ def run_evaluation(
         # fingerprint — a looped checkpoint resumed without the arm is
         # refused by the fingerprint gate (2×2 arm isolation with #2518).
         coverage_loop=bool(coverage_loop),
+        # C5 (#2521, #2513): the resolved aggregative-check arm rides the
+        # fingerprint — a flagged checkpoint resumed without the arm is
+        # refused by the fingerprint gate (A/B arm isolation).
+        aggregative_flag=bool(aggregative_flag),
         max_chunks_per_session=max_chunks_per_session,
         # #1786 (P1-1/P1-2/P2-4): the three retry knobs (ALWAYS present —
         # results-relevant) + the hybrid retrieval budget (conditional
@@ -3608,6 +3641,12 @@ def run_evaluation(
                             # loop arm (resolved above; OFF by default — the
                             # sealed A/B decides adoption).
                             coverage_loop=coverage_loop,
+                            # C5 (#2521, #2513): the aggregative-intent
+                            # coverage-check arm (resolved above; OFF by
+                            # default — records the per-outcome verdict
+                            # under the arm only; the C3-3 routing decides
+                            # adoption).
+                            aggregative_flag=aggregative_flag,
                             # #1786 (R5): the eval's elevated HYBRID-arm
                             # retrieval deadline via the existing seam (the
                             # vector arm keeps VECTOR_TIMEOUT_MS=5000).
@@ -3809,6 +3848,14 @@ def run_evaluation(
                         # pre-feature checkpoints).
                         "coverage_loop": ret.get("coverage_loop"),
                         "coverage_loop_stats": ret.get("coverage_loop_stats"),
+                        # C5 (#2521, #2513): the aggregative-check arm marker
+                        # + the per-outcome verdict — the marker reconstructs
+                        # which arm ran; the verdict (present under the arm
+                        # only) records {detected_intent, facet_coverage,
+                        # missing_facets} for the C3-3 routing decision.
+                        "aggregative_flag": ret.get("aggregative_flag"),
+                        "aggregative_verdict": ret.get(
+                            "aggregative_verdict"),
                         # R6 (#1545): the rerank pass + latency ride the outcome —
                         # they stay ABSENT on baseline outcomes (the projection in
                         # outcomes_to_report adds them conditionally).
@@ -4209,6 +4256,11 @@ def run_evaluation(
             # which of the 2×2 arms produced them; the §5 gate deltas are
             # denominated on the recorded arm).
             "coverage_loop": bool(coverage_loop),
+            # C5 (#2521, #2513): the aggregative-intent coverage-check arm
+            # — recorded verbatim in the methodology (published numbers
+            # carry which A/B arm produced them; OFF by default — the C3-3
+            # routing #2519 decides adoption).
+            "aggregative_flag": bool(aggregative_flag),
             # #1786 (Task 2 Step 5): the recoverable-class resume-mode flag
             # + the write-path retry knobs recorded in the methodology so
             # the revalidation comparison can distinguish retried outcomes
@@ -4381,6 +4433,12 @@ def outcomes_to_report(
                 # the §8 per-outcome markers ride the projection (read via
                 # o.get — absent on pre-feature checkpoints).
                 "coverage_loop", "coverage_loop_stats",
+                # C5 (#2521, #2513): the aggregative-check arm marker + the
+                # per-outcome verdict ride the projection (read via o.get —
+                # absent until the outcome carries them; pre-feature
+                # checkpoints resume without KeyError).
+                "aggregative_flag",
+                "aggregative_verdict",
                 # #1948: the reader-surface metric rides the projection
                 # alongside reader_evidence@k (absent until the outcome
                 # carries it — pre-#1948 checkpoints resume without
@@ -4856,6 +4914,28 @@ def _build_parser() -> argparse.ArgumentParser:
                     help="disable the C3-1 coverage-completeness loop even "
                          "when TORTOISE_LME_COVERAGE_LOOP is set (tri-state: "
                          "explicit flags beat the env)")
+    # C5 (#2521, #2513): aggregative-intent detection + per-facet coverage
+    # check — tri-state --aggregative-flag / --no-aggregative-flag (None
+    # default so the TORTOISE_LME_AGGREGATIVE_FLAG env still applies; OFF
+    # by default in code — the C3-3 routing #2519 decides adoption). The
+    # A/B switch that MEASURES the #2521 detector: identical questions run
+    # once OFF (baseline) and once ON; the per-outcome verdict
+    # {detected_intent, facet_coverage, missing_facets} is what the
+    # coverage-signal routing will consume. Retrieval behavior is NOT
+    # changed by the arm (the completeness loop is C3-1/C3-3).
+    af = p.add_mutually_exclusive_group()
+    af.add_argument("--aggregative-flag", dest="aggregative_flag",
+                    action="store_true", default=None,
+                    help="enable the C5 aggregative-intent detection + "
+                         "per-facet coverage check (records the hermetic "
+                         "detector + coverage verdict per outcome; default: "
+                         "env TORTOISE_LME_AGGREGATIVE_FLAG — OFF by default "
+                         "in code, #2521)")
+    af.add_argument("--no-aggregative-flag", dest="aggregative_flag",
+                    action="store_false", default=None,
+                    help="disable the C5 aggregative-intent detection even "
+                         "when TORTOISE_LME_AGGREGATIVE_FLAG is set "
+                         "(tri-state: explicit flags beat the env)")
     p.add_argument("--evidence-boost-verbatim", type=float, default=None,
                    help="verbatim/raw-chunk mark rank-offset multiplier "
                         "(env TORTOISE_LME_EVIDENCE_BOOST_VERBATIM; default "
@@ -5334,6 +5414,17 @@ def _run_main(parser: argparse.ArgumentParser, args,
     else:
         cl_env = (os.environ.get("TORTOISE_LME_COVERAGE_LOOP") or "")
         coverage_loop = cl_env.strip().lower() in _TRUTHY
+    # C5 (#2521, #2513): aggregative-intent detection + per-facet coverage
+    # check — tri-state (CLI flag > TORTOISE_LME_AGGREGATIVE_FLAG env >
+    # OFF — fail-safe: only 1/true/yes/on enables, mirroring the C2 gates
+    # above). Resolved once and threaded into run_evaluation (methodology
+    # == actual; the A/B switch that measures the #2521 detector for the
+    # C3-3 routing #2519).
+    if args.aggregative_flag is not None:
+        aggregative_flag = args.aggregative_flag
+    else:
+        af_env = (os.environ.get("TORTOISE_LME_AGGREGATIVE_FLAG") or "")
+        aggregative_flag = af_env.strip().lower() in _TRUTHY
     # R5 (#1544) TR knobs: argparse defaults (12 / 0.5 / events-on),
     # recorded verbatim in the report methodology (D7).
     tr_top_k = args.tr_top_k
@@ -5532,6 +5623,11 @@ def _run_main(parser: argparse.ArgumentParser, args,
                 # (tri-state resolved above; OFF by default — the sealed
                 # #2519 A/B decides adoption).
                 coverage_loop=coverage_loop,
+                # C5 (#2521, #2513): the aggregative-intent coverage-check
+                # arm (tri-state resolved above; OFF by default — records
+                # the per-outcome verdict under the arm; the C3-3 routing
+                # #2519 decides adoption).
+                aggregative_flag=aggregative_flag,
                 tr_top_k=tr_top_k, tr_date_weight=tr_date_weight,
                 tr_events=tr_events,
                 rerank=rr["rerank_on"], rerank_model=rr["model"],
