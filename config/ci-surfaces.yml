@@ -9,6 +9,7 @@ surfaces:
   - test_battery_ep_outcome.py
   - test_battery_exposure_liveness.py
   - test_battery_exposure_oracle.py
+  - test_battery_exposure_usage_cap.py
   - test_battery_judge_declarative.py
   - test_battery_lane_matrix.py
   - test_battery_loader_fidelity.py
