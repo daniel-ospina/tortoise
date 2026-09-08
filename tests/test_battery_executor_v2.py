@@ -473,3 +473,92 @@ def test_run2_fresh_namespace_no_run1_memories(tmp_path) -> None:
         assert _content_sig(s1) == baseline
     finally:
         s1.close()
+
+
+class _DeclaringCaller(_ScriptedCaller):
+    """Declares surfacing intents even without memory (empty-claims path)
+    + an unrouted verb — exercises the intent_unfiled trace events that
+    round-1/convergence found untested (convergence P1/P2)."""
+
+    def __init__(self, seed: int = 0, *, unrouted: bool = False):
+        super().__init__(seed)
+        self._unrouted = unrouted
+
+    def call(self, *, prompt: str) -> str:
+        self.calls += 1
+        self.rows.append(_Row(20))
+        self.last_prompt = prompt
+        if self._unrouted:
+            env = {"position": "supersede the standing view",
+                   "stated_confidence": 0.8, "undecided": False,
+                   "defeat_conditions": [],
+                   "intents": ["supersede"], "citations": ["src-1"]}
+        else:
+            env = {"position": "the opposite view is worth recording",
+                   "stated_confidence": 0.8, "undecided": False,
+                   "defeat_conditions": [],
+                   "intents": ["file_nand"], "citations": ["none-1"]}
+        return (f"I weigh the migration risk against the benefit.\n"
+                f"{json.dumps(env)}")
+
+
+def test_intent_unfiled_traced_not_crash(tmp_path) -> None:
+    """Convergence P1: declared-but-unfiled intents must be TRACED (never
+    crash artifact assembly — the registry field pin is bypassed by
+    emitting field-less trace entries). a0 has no store: every declared
+    file_nand hits the empty-claims path and records intent_unfiled."""
+    cfg = _config_dir(tmp_path)
+    out = tmp_path / "out"
+    code = run_battery(RunConfig(
+        config_dir=cfg, out_dir=out, executor="real", arms=["a0"],
+        caller_factory=_DeclaringCaller), stdout=lambda _: None)
+    assert code is ExitCode.OK  # no crash at artifact assembly
+    attempt = sorted(out.iterdir())[0]
+    summary = json.loads((attempt / "summary.json").read_text())
+    assert summary["arms"][0]["valid_episodes"] == 2
+    artifacts = [json.loads(p.read_text())
+                 for p in sorted(attempt.glob("*.json"))
+                 if p.name not in ("summary.json", "recall.json",
+                                   "family_d.json")]
+    unfiled = [e for a in artifacts
+               for e in a.get("event_log", [])
+               if e.get("event") == "intent_unfiled"]
+    assert unfiled, "declared-unfiled intents must be traced"
+    assert all("field" not in e for e in unfiled), (
+        "trace entries must not carry a registry-pinned field")
+
+
+def test_intent_unrouted_verb_traced(tmp_path) -> None:
+    """A schema-bounded verb the executor does not route (supersede) is
+    declared -> traced as intent_unfiled (unrouted-verb), never dropped
+    and never a fake ref."""
+    cfg = _config_dir(tmp_path)
+    out = tmp_path / "out"
+    code = run_battery(RunConfig(
+        config_dir=cfg, out_dir=out, executor="real", arms=["a0"],
+        caller_factory=lambda: _DeclaringCaller(unrouted=True)),
+        stdout=lambda _: None)
+    assert code is ExitCode.OK
+    attempt = sorted(out.iterdir())[0]
+    artifacts = [json.loads(p.read_text())
+                 for p in sorted(attempt.glob("*.json"))
+                 if p.name not in ("summary.json", "recall.json",
+                                   "family_d.json")]
+    unrouted = [e for a in artifacts
+                for e in a.get("event_log", [])
+                if e.get("event") == "intent_unfiled"
+                and (e.get("payload") or {}).get("reason") == "unrouted-verb"
+                and (e.get("payload") or {}).get("intent") == "supersede"]
+    assert unrouted, "unrouted declared verb must be traced"
+
+
+def test_surfacing_declared_as_unit() -> None:
+    """register_conflict canonicalizes to file_nand with declared_as in the
+    payload — registry-valid (FIELD_SUBTYPES pins contradiction_surfaced ->
+    file_nand)."""
+    from battery.runner.executor import surfacing_event, validate_emitted
+    ev = surfacing_event(within_turn=2, event_ref="ns:42",
+                         explicit=True, declared_as="register_conflict")
+    assert ev["event"] == "file_nand"
+    assert ev["payload"]["declared_as"] == "register_conflict"
+    validate_emitted([ev])  # must not raise

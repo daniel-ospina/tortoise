@@ -298,7 +298,10 @@ def _execute_real_episode(*, config: RunConfig, arm, scenario: Scenario,
                 # (never silently dropped, never a fake ref).
                 events.append({
                     "type": "state_event", "event": "intent_unfiled",
-                    "at": "", "field": "decide_cycles",
+                    "at": "",
+                    # no field: intent_unfiled is a trace-only entry (never a
+                    # probe-consumed semantic field); a field here would trip
+                    # the registry's 1:1 field->subtype pin (convergence P1).
                     "payload": {"within_turn": idx + 1, "intent": intent,
                                  "reason": "unrouted-verb"}})
                 continue
@@ -311,7 +314,7 @@ def _execute_real_episode(*, config: RunConfig, arm, scenario: Scenario,
             if target is None:
                 events.append({
                     "type": "state_event", "event": "intent_unfiled",
-                    "at": "", "field": "decide_cycles",
+                    "at": "",
                     "payload": {"within_turn": idx + 1, "intent": intent,
                                  "reason": "empty-claims"}})
                 continue
@@ -348,7 +351,7 @@ def _execute_real_episode(*, config: RunConfig, arm, scenario: Scenario,
                 # presented as a surfacing that happened.
                 events.append({
                     "type": "state_event", "event": "intent_unfiled",
-                    "at": "", "field": "decide_cycles",
+                    "at": "",
                     "payload": {"within_turn": idx + 1, "intent": intent,
                                  "reason": "no-op"}})
         if write_failed:
