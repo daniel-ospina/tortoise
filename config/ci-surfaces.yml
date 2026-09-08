@@ -378,7 +378,8 @@ surfaces:
   - test_topic_summarization.py
   - test_tortoise_search.py
   - test_trash_quota.py            # #2467 restore respects the max_graphs quota (fake CP)
-  - test_trash_inspect.py        # #2469 Inspect archive-run counting (fake CP)
+  - test_trash_inspect.py          # #2469 Inspect archive-run counting (fake CP)
+  - test_trash_lock.py             # #2470 restore lock timeout (fake CP)
   - test_tripwire.py
   - test_uri_env_mutations_declared.py
   - test_validity_windows.py
@@ -419,6 +420,7 @@ surfaces:
   - test_ep_draft_filter.py
   - test_ep_dirty_persist.py
   - test_ep_local_395.py
+  - test_ep_mitigation.py
   - test_ep_terminal_ghost.py
   - test_ep_nary_falsification.py
   - test_ep_operatorless.py
@@ -426,6 +428,7 @@ surfaces:
   - test_ep_quadrature.py
   - test_ep_selector.py
   - test_pointsuperseded_rebuild.py
+  - test_weights_mitigation.py
   - test_ep_sources.py
   - test_2199_decide_calibration.py
   - test_file_human_approval.py

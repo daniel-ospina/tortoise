@@ -502,8 +502,9 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
             node_id=str(op_id),
             detail=(f"Low-confidence operator {op_id} (conf={conf}) → "
                     f"'{tgt_content}' has no mitigation"),
-            # strength= is the SDK/MCP kwarg (0-1, 0=neutralized); the value
-            # sits in the skill's documented relevance-attack range 0.10-0.50.
+            # strength= is the SDK/MCP kwarg — sanctioned band [0.10, 0.50],
+            # 0.50 = strongest dampening (single source: tortoise/weights.py
+            # module docstring, #2315); the skill's relevance-attack range.
             fix=(f"tortoise_mitigate_operator('{op_id}', 'Relevant because...', "
                  "strength=0.3)"),
         )

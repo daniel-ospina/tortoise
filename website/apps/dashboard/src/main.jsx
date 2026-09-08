@@ -657,7 +657,7 @@ const supabaseStorage = {
     if (!value) { this.removeItem(key); return }
     let encoded = encodeURIComponent(value)
     // Size guard (#1835, mirrors supabase-session.js): an OAuth session with
-    // provider tokens can exceed the 4096-byte cookie limit. provider tokens
+    // provider tokens AND user metadata can exceed the 4096-byte cookie limit. provider tokens
     // are only needed by the initiating flow — strip them first; if still
     // over the cap, attempt the write anyway with a warning.
     if (encoded.length > SIZE_GUARD) {
@@ -665,6 +665,20 @@ const supabaseStorage = {
         const obj = JSON.parse(value)
         delete obj.provider_token
         delete obj.provider_refresh_token
+        // Strip large metadata bloat — identities array and user_metadata fields
+        // are not needed for auth and can exceed the cookie size cap.
+        if (obj.user) {
+          delete obj.user.identities
+          if (obj.user.user_metadata) {
+            // Keep only what the dashboard reads (display_name, avatar_url)
+            var keep = {}
+            if (obj.user.user_metadata.display_name) keep.display_name = obj.user.user_metadata.display_name
+            if (obj.user.user_metadata.avatar_url) keep.avatar_url = obj.user.user_metadata.avatar_url
+            if (obj.user.user_metadata.full_name) keep.full_name = obj.user.user_metadata.full_name
+            if (obj.user.user_metadata.name) keep.name = obj.user.user_metadata.name
+            obj.user.user_metadata = keep
+          }
+        }
         encoded = encodeURIComponent(JSON.stringify(obj))
       } catch { /* not JSON — leave as-is */ }
       if (encoded.length > SIZE_GUARD + 100) {
@@ -3734,7 +3748,7 @@ function claimIntentInFlight() {
         // so the actual fork renders (the Continue button needs it)
         setWizardForkError('This organization already chose how it uses Tortoise.')
         refreshOnboarding().catch(() => {})
-        setWizardStep(2)
+        setWizardStep(1)
       } else if (e?.status === 503) {
         setWizardForkError('The graph is temporarily unavailable — try again in a moment.')
       } else {
@@ -5346,11 +5360,6 @@ function claimIntentInFlight() {
                 <span className="sr-only" role="status" aria-live="polite">
                   {welcomeProvisioning ? 'Creating your organization' : (welcomeHasOrg && shownOrgName ? `${shownOrgName} is set up` : '')}
                 </span>
-                <p className="dim" style={{ marginBottom: '1.25rem' }}>
-                  {welcomeHasOrg
-                    ? 'Your Organization is set up. Choose how you\'ll use it and connect your agent — your API key is shown once at the connect step.'
-                    : 'Set up your Organization in the steps below — it\'s created when you name it, and your API key is shown once at the connect step.'}
-                </p>
                 {/* #1997 (W1): the 4 HUMAN steps (epic plan P1) — org-create/join
                     → fork card → connect-consent → done (orientation removed per
                     epic #2534).
@@ -5365,19 +5374,13 @@ function claimIntentInFlight() {
                     ))}
                   </div>
                   <p className="wizard-title">{WIZARD_STEPS[wizardStep].label}</p>
-                  <p className="wizard-sub" style={{ marginBottom: '1rem' }}>
-                    {wizardStep === 0 && welcomeHasOrg
-                      // #2323 (review P2): the shared step-0 sub ('Name your
-                      // organization…') is a contradiction for an org-holding
-                      // account on the read-only step — branch the copy.
-                      ? "You're already in an organization — you won't create another here. Pick how you'll use it next."
-                      : (wizardStep === 3 && effectivelyPaused)
-                        // #2361 review-r3/r4: the done SUB claimed 'Your agent takes
-                        // over from here' above a paused body — branch it, and only
-                        // when the org truly never connected (server checkpoint).
+                  {wizardStep !== 0 && (
+                    <p className="wizard-sub" style={{ marginBottom: '1rem' }}>
+                      {(wizardStep === 3 && effectivelyPaused)
                         ? "You're set up, but your agent isn't connected yet. Reconnect any time from Settings → Setup guide."
                         : WIZARD_STEPS[wizardStep].sub}
-                  </p>
+                    </p>
+                  )}
 
                   {wizardStep === 0 && (
                     <div className="org-create">
@@ -5413,15 +5416,12 @@ function claimIntentInFlight() {
                               style={{ padding: '0.5rem 0.7rem', background: 'var(--surface,#0d1a2d)', border: '1px solid var(--border,#1e293b)', borderRadius: 8, fontSize: 14 }}
                             />
                           </label>
-                          <p className="dim small" style={{ margin: '0 0 0.9rem', lineHeight: 1.5 }}>
-                            This creates your organization — one per account on the free plan. Your API key is created here and shown once at the connect step.
-                          </p>
                           {wizardOrgError && (
                             <p className="error" role="alert" style={{ marginBottom: '0.9rem' }}>{wizardOrgError}</p>
                           )}
                           {(!pendingInvites || pendingInvites.length === 0) && (
                             <p className="dim small" style={{ margin: '0 0 0.9rem', lineHeight: 1.5, fontStyle: 'italic' }}>
-                              Want to join an existing organization? Ask your admin to invite you to your email, then reload this page.
+                              Looking to join an existing organization? Ask your admin to invite you to your email, then reload this page.
                             </p>
                           )}
                           <div className="wizard-nav-actions">
@@ -5456,7 +5456,7 @@ function claimIntentInFlight() {
                     </div>
                   )}
 
-                  {wizardStep === 2 && (
+                  {wizardStep === 1 && (
                     <div className="fork-card">
                       {wizardForkError && (
                         <p className="error" role="alert" style={{ marginBottom: '0.9rem' }}>{wizardForkError}</p>
@@ -5494,7 +5494,7 @@ function claimIntentInFlight() {
                         </div>
                       )}
                       <div className="wizard-nav">
-                        <button type="button" className="ghost" onClick={() => setWizardStep(1)}>← Back</button>
+                        <button type="button" className="ghost" onClick={() => setWizardStep(0)}>← Back</button>
                         <div className="wizard-nav-actions">
                           {wizardForkChosen || (onboarding && onboarding.fork) ? (
                             <button type="button" className="btn-primary" onClick={() => setWizardStep(2)}>Continue →</button>
@@ -5506,7 +5506,7 @@ function claimIntentInFlight() {
                     </div>
                   )}
 
-                  {wizardStep === 3 && (
+                  {wizardStep === 2 && (
                     <div className="harness">
                       <div className="harness-tabs">
                         {HARNESS_ORDER.map((h) => (

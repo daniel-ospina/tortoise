@@ -526,14 +526,14 @@ def test_create_team_success(page: Page):
     # organization' with an 'Organization name' input (main.jsx #1877 modal
     # — aria-label + input aria-label). The menu entry now matches.
     expect(page.get_by_role("dialog", name="Create a new organization")).to_be_visible()
-    # validation mirrors the API (spaces rejected) — inline error, no POST
-    page.get_by_label("Organization name").fill("bad name")
+    # special characters (not spaces) are rejected — inline error, no POST
+    page.get_by_label("Organization name").fill("bad@name!")
     page.locator(".modal .btn-primary").click(force=True)
     expect(page.locator(".modal")).to_contain_text("Invalid team name", timeout=10000)
-    page.get_by_label("Organization name").fill("newteam")
+    page.get_by_label("Organization name").fill("good name with spaces")
     page.locator(".modal .btn-primary").click(force=True)  # busy-state re-render detaches the name-changed button
     # the dashboard switches to the new team (the blob shows its name)
-    expect(page.get_by_role("button", name=re.compile(r"Account menu"))).to_contain_text("newteam", timeout=15000)
+    expect(page.get_by_role("button", name=re.compile(r"Account menu"))).to_contain_text("good name with spaces", timeout=15000)
 
 
 def test_create_team_free_capped_gate(page: Page):

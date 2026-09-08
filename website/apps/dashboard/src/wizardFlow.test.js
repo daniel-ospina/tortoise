@@ -72,7 +72,7 @@ test('DE2E-3: org-name validation — required + charset mirror of the server', 
   assert.match(orgNameError(''), /required/i)
   assert.match(orgNameError('   '), /required/i)
   assert.match(orgNameError('a'.repeat(65)), /invalid/i)
-  assert.match(orgNameError('has space'), /invalid/i)
+  assert.equal(orgNameError('has space'), null)
   assert.equal(orgNameError('acme'), null)
   assert.equal(orgNameError('acme-prod_2'), null)
 })

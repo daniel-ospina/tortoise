@@ -131,8 +131,8 @@ export function durableKeyName(orgName, date = new Date(), existingNames = []) {
 export function orgNameError(name) {
   const trimmed = String(name || '').trim()
   if (!trimmed) return 'Organization name is required'
-  if (trimmed.length > 64 || !/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/.test(trimmed)) {
-    return 'Invalid organization name — letters, numbers, dash, underscore only'
+  if (trimmed.length > 64 || !/^[a-zA-Z0-9][a-zA-Z0-9_ -]{0,63}$/.test(trimmed)) {
+    return 'Invalid organization name — letters, numbers, spaces, dash, underscore only'
   }
   return null
 }

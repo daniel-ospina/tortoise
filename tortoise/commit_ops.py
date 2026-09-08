@@ -72,9 +72,11 @@ def apply_payload_operators(proj, sdk, operators: list, *,
     IMPL/NAND first via ``sdk.create_operator`` (promote_source=False, #780);
     MITIGATES second via ``sdk.mitigate_operator`` — mitigation Point +
     (m)-[:IMPL]->(op) + (op)-[:mitigated_by]->(m), strength in [0.10, 0.50]
-    (advisory metadata: strength = how much the reason reduces the edge, NOT
-    how true it is; EP does not read it — the mitigation point's own Beta
-    prior is what EP consumes, #2199 knock-on decision 3).
+    (single source: tortoise/weights.py module docstring, #2315 — strength
+    = the graded dampener of the operator's effective weight via
+    w_eff = w * (1 - strength); NOT how true the reason is, NOT fused into
+    the mitigation point's own Beta prior, #2199 knock-on decision 3).
+    EP consumes mitigation_strength through compute_operator_weight.
     Deep-miss (target IMPL edge absent) -> logged warning, mitigation dropped
     (support-edge-first convention, DE2E-11 negative). Never raises on a
     missing target. ``point_content_by_id(pid) -> str`` supplies the
