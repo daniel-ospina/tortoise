@@ -81,13 +81,14 @@ class TestRegistryEquivalence:
             assert excluded not in HTTP_ALLOWED, f"{excluded} must be HTTP-excluded"
 
     def test_registry_count(self):
-        """98 tools = the merged census (97 + #1999 tortoise_onboarding_seed).
+        """99 tools = the merged census (98 + #2302 tortoise_graph_set_recording).
         The census is bumped per add."""
         from tortoise.tool_registry import TOOL_REGISTRY
-        assert len(TOOL_REGISTRY) == 98, f"Expected 98, got {len(TOOL_REGISTRY)}"
+        assert len(TOOL_REGISTRY) == 99, f"Expected 99, got {len(TOOL_REGISTRY)}"
         names = {t.name for t in TOOL_REGISTRY}
         assert "tortoise_validate_domain" in names, "Missing #405 validate_domain tool"
         assert "tortoise_packs_list" in names, "Missing #318 packs_list tool"
+        assert "tortoise_graph_set_recording" in names, "Missing #2302 graph_set_recording tool"
         onboarding = {"tortoise_onboarding_demo_create", "tortoise_onboarding_state",
                       "tortoise_onboarding_session_recording",
                       "tortoise_onboarding_github_connect",
@@ -165,6 +166,22 @@ class TestCurationGroups:
         assert entry.group == "sessions", f"got {entry.group}"
         assert entry.http_policy is True, "must be exposed on HTTP surfaces"
         assert any(t.name == "tortoise_session_capture"
+                   for t in tools_by_group("sessions"))
+
+    def test_graph_set_recording_tool_grouped_sessions(self):
+        """#2302: tortoise_graph_set_recording groups under "sessions" with
+        capture + graph listing (per-graph recording is session-capture
+        management state) — pinned so a future edit can't silently drop it
+        to the "memory" default and filter it off sessions-group surfaces."""
+        from tortoise.tool_registry import TOOL_REGISTRY, tools_by_group
+        entry = next(t for t in TOOL_REGISTRY
+                     if t.name == "tortoise_graph_set_recording")
+        assert entry.group == "sessions", f"got {entry.group}"
+        assert entry.http_policy is True, "must be exposed on HTTP surfaces"
+        assert entry.annotations is not None \
+            and entry.annotations.readOnlyHint is False, \
+            "override writes are mutations (write-classified)"
+        assert any(t.name == "tortoise_graph_set_recording"
                    for t in tools_by_group("sessions"))
 
     def test_groups_reachable_via_helpers(self):

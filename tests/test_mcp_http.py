@@ -1302,3 +1302,84 @@ class TestSC5IndexFilesSurface:
         text = "".join(c.get("text", "") for c in body.get("result", {}).get("content", []))
         assert "-32004" in text or "not available over HTTP" in text, \
             f"expected excluded error, got: {body}"
+
+
+# ── #2302: tortoise_graph_set_recording HTTP contract ───────────────────
+
+class TestGraphSetRecordingHTTP:
+    """#2302 — the per-graph recording override MCP surface is REGISTERED
+    (tools/list) and CALLABLE over the mounted tenant HTTP stack, with the
+    same semantics as PATCH /v1/graphs/{graph_id} (true/false/null override,
+    'default' graph resolution). The override write is control-plane state —
+    the registry Graph node prop — verified directly after the call."""
+
+    @staticmethod
+    def _unwrap(body: dict) -> dict:
+        result = body.get("result", {})
+        sc = result.get("structuredContent")
+        if sc is not None:
+            return sc
+        for item in result.get("content", []):
+            text = item.get("text")
+            if text:
+                import json as _json
+                try:
+                    return _json.loads(text)
+                except Exception:
+                    continue
+        return result
+
+    def test_registered_and_callable_set_clear_default_graph(self, tmp_path,
+                                                             monkeypatch):
+        from tortoise.mcp_server import create_http_app
+
+        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+        db = str(tmp_path / "rec.db")
+        monkeypatch.setenv("TORTOISE_DB_PATH", db)
+        reg = TortoiseSDK(db_path=db, namespace="registry")
+        team = reg.team_create("rec-http-team")
+        reg._graph_create(team["id"], "default", kind="default")
+        key = reg.apikey_create(team["id"], "r")["api_key"]
+
+        app = create_http_app(allowed_origins=["https://app.premiselabs.co"],
+                              _registry_sdk=reg)
+        tc = _mounted_test_client(app)
+        tc.headers.update({
+            "Authorization": f"Bearer {key}",
+            "Accept": "application/json, text/event-stream",
+            "Content-Type": "application/json",
+        })
+        with tc:
+            # Advertised to agents (registered + HTTP_ALLOWED + sessions group).
+            r, body = _mcp_post(tc, {"jsonrpc": "2.0", "id": 1,
+                                     "method": "tools/list", "params": {}})
+            assert r.status_code == 200, r.text
+            names = {t.get("name")
+                     for t in body.get("result", {}).get("tools", [])}
+            assert "tortoise_graph_set_recording" in names, (
+                "the recording-on surface must be discoverable over HTTP")
+            # Set true on the DEFAULT graph (no graph_id = team-wide default).
+            r, body = _mcp_post(tc, {"jsonrpc": "2.0", "id": 2,
+                                     "method": "tools/call",
+                                     "params": {
+                                         "name": "tortoise_graph_set_recording",
+                                         "arguments": {"recording": True}}})
+            assert r.status_code == 200, r.text
+            result = self._unwrap(body)
+            assert result.get("graph_id") == "default", body
+            assert result.get("recording") is True, body
+            # Clear back to inherit (null) — node prop gone.
+            r, body = _mcp_post(tc, {"jsonrpc": "2.0", "id": 3,
+                                     "method": "tools/call",
+                                     "params": {
+                                         "name": "tortoise_graph_set_recording",
+                                         "arguments": {"recording": None}}})
+            assert r.status_code == 200, r.text
+            result = self._unwrap(body)
+            assert result.get("recording") is None, body
+            rows = reg._get_registry().query(
+                "MATCH (g:Graph {team_id:$tid, kind:'default'}) "
+                "RETURN g.recording",
+                params={"tid": team["id"]},
+            ).result_set
+            assert rows and rows[0][0] is None, rows

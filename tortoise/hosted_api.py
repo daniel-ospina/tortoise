@@ -6580,9 +6580,22 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     recording_ok, rec_layer = _session_recording_allowed(team)
     if not recording_ok:
         if rec_layer == "graph":
-            detail = ("Session recording is disabled for this graph. Enable "
-                      "it via PATCH /v1/graphs/{graph_id} (recording) or "
-                      "clear the override to inherit the team setting.")
+            # #2302 (recording-on surface): the graph-layer 409 copy names
+            # surfaces that EXIST — the REST PATCH AND the MCP tool. The
+            # shared impl means REST + MCP surface the SAME text (S11
+            # drift invariant); the concrete graph id is interpolated so
+            # remediation is direct: a bound key → its graph,
+            # team-wide/session → 'default'.
+            gid = team.get("graph_id") or "default"
+            detail = (
+                "Session recording is disabled for this graph (override). "
+                "Enable it via PATCH /v1/graphs/" + gid + " with "
+                "{recording: true} (or {recording: null} to inherit the "
+                "team default), or via the tortoise_graph_set_recording "
+                "MCP tool — both need a team:manage key; otherwise ask "
+                "your team owner or admin to turn recording on for this "
+                "graph."
+            )
         else:
             detail = ("Session recording is disabled for this team. Enable it "
                       "in the dashboard (Memory sources > Agent sessions) or "
@@ -9499,15 +9512,19 @@ class GraphRecordingPatch(BaseModel):
         return v
 
 
-@app.patch("/v1/graphs/{graph_id}")
-async def patch_graph_recording(graph_id: str, body: GraphRecordingPatch,
-                                team_id: str,
-                                key_ctx: dict = Depends(get_current_team_session)):  # noqa: B008
-    """C6 #2115 — set a graph's session_recording override (epic §6.3).
+async def _apply_graph_recording_override(
+        graph_id: str, body: GraphRecordingPatch, team_id: str,
+        key_ctx: dict) -> dict:
+    """C6 #2115 / #2302 — SHARED core for PATCH /v1/graphs/{graph_id} (REST)
+    and the ``tortoise_graph_set_recording`` MCP tool: auth + graph
+    resolution + override write in ONE place so the two surfaces can never
+    drift on permission or semantics.
 
     Auth: a key with the ``team:manage`` scope (or the legacy full-access
     class — deleg NULL + scopes []), or an owner/admin session user (the
-    dual-auth dependency resolves BOTH faces like delete_graph). A MINTED
+    REST dual-auth dependency resolves BOTH faces like delete_graph; the MCP
+    tool builds the equivalent key_ctx from its tenant ContextVars — keys
+    only, so the session-owner face is exercised through REST). A MINTED
     deleg=0 key never carries team:manage (C2/C3 child policy) → 403.
     team:manage is a TEAM-WIDE management scope — a graph-bound key that
     carries it (owner-minted) manages ANY graph in the team, mirroring the
@@ -9516,8 +9533,7 @@ async def patch_graph_recording(graph_id: str, body: GraphRecordingPatch,
     Body: ``{recording: true|false|null}`` — null removes the override
     (inherit team default). The DEFAULT graph is settable too (recording is
     per-graph, incl. graph 0 — registry kind='default' node / supabase
-    kind='default' row). Unknown graph → 404. Suspended team → 403 (the
-    shared dual-auth dependency enforces it).
+    kind='default' row). Unknown graph → 404. Suspended team → 403.
     """
     if key_ctx.get("team_id") != team_id:
         raise HTTPException(status_code=404, detail="Unknown team")
@@ -9586,6 +9602,20 @@ async def patch_graph_recording(graph_id: str, body: GraphRecordingPatch,
     if not written:
         raise HTTPException(status_code=404, detail="Unknown graph")
     return {"graph_id": graph_id, "recording": body.recording}
+
+
+@app.patch("/v1/graphs/{graph_id}")
+async def patch_graph_recording(graph_id: str, body: GraphRecordingPatch,
+                                team_id: str,
+                                key_ctx: dict = Depends(get_current_team_session)):  # noqa: B008
+    """C6 #2115 — set a graph's session_recording override (epic §6.3).
+
+    Thin REST wrapper over ``_apply_graph_recording_override`` — the MCP
+    tool (tortoise_graph_set_recording, #2302) shares the same core so the
+    two surfaces can never drift. Auth + semantics live on the helper.
+    """
+    return await _apply_graph_recording_override(
+        graph_id, body, team_id, key_ctx)
 
 
 @app.delete("/v1/graphs/{graph_id}")

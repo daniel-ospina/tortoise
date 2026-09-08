@@ -616,6 +616,23 @@ TOOL_REGISTRY: list[ToolDefinition] = [
         sdk_method="",
     ),
     ToolDefinition(
+        name="tortoise_graph_set_recording",
+        description="Set or clear a graph's session-recording override (#2302) — the MCP "
+                    "twin of PATCH /v1/graphs/{graph_id} (recording), sharing the same "
+                    "hosted_api core so the surfaces never drift. recording: true/false "
+                    "sets the per-graph override, null removes it (inherit the team "
+                    "default — never flips a team ON). Requires hosted mode + a "
+                    "team:manage-scoped key (or legacy full-access) — the capture 409 "
+                    "('Session recording is disabled for this graph') routes agents here; "
+                    "call this tool to turn recording back on, then retry the capture.",
+        annotations=_rw(),
+        http_policy=True,
+        # Custom handler in mcp_server.py (ContextVar auth gate); the REST twin
+        # is the hand-written PATCH /v1/graphs/{graph_id} in hosted_api.py — no
+        # rest_spec so the router adapter never double-registers it.
+        sdk_method="",
+    ),
+    ToolDefinition(
         name="tortoise_issue_insight",
         description="Return a compact 'there's more in the graph' insight for a would-be "
                     "issue — call BEFORE filing. Surfaces cross-session decisions / EP-tagged "
@@ -1256,6 +1273,10 @@ GROUP_BY_NAME: dict[str, str] = {
     # "sessions" (else it falls to the "memory" default and is filtered out
     # of sessions-group surfaces — pinned by test_session_tool_grouped_sessions).
     "tortoise_session_capture": "sessions",
+    # #2302: the per-graph recording override write rides the sessions
+    # curation group with capture + graph listing (graph recording settings
+    # are session-capture management state).
+    "tortoise_graph_set_recording": "sessions",
     # journal
     "tortoise_checkpoint": "journal", "tortoise_diary_write": "journal",
     "tortoise_diary_read": "journal", "tortoise_file_decision": "journal",
