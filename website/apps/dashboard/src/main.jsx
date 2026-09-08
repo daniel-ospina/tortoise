@@ -39,6 +39,7 @@ import {
   sortedGraphRows,
   sortedTrashRows,
   tierCreateLocked,
+  TRASH_GRACE_DAYS,
   trashDaysLeft,
   trashEraseLabel,
 } from './graphs.js'
@@ -7139,27 +7140,50 @@ function claimIntentInFlight() {
                       <strong>Inspect {trashInspect.name || trashInspectId}</strong>
                       <button className="ghost small" onClick={() => { setTrashInspectId(null); setTrashInspect(null) }}>Close</button>
                     </div>
-                    <p className="dim small">Read-only rescue view — restore brings everything back as an active graph.</p>
-                    <ul className="dim small">
-                      <li>Deleted: {trashInspect.deleted_at ? fmtTime(trashInspect.deleted_at) : '—'}</li>
-                      <li>Restorable archives: {trashInspect.archive_count != null ? trashInspect.archive_count : 0}</li>
-                      {trashInspect.latest_backup ? (
-                        <li>
-                          Latest backup:{' '}
-                          {trashInspect.latest_backup.created_at ? fmtTime(trashInspect.latest_backup.created_at) : 'recently'}
-                          {trashInspect.latest_backup.node_count != null
-                            ? ` · ${trashInspect.latest_backup.node_count.toLocaleString()} nodes / ${trashInspect.latest_backup.edge_count != null ? trashInspect.latest_backup.edge_count.toLocaleString() : '?'} edges`
-                            : ''}
-                        </li>
-                      ) : trashInspect.archive_count > 0 ? (
-                        // #2469: archives exist but no readable manifest
-                        // (dump-only runs / crash window) — say so honestly.
-                        <li>Backups exist — no readable manifest for details.</li>
-                      ) : (
-                        <li>No backups yet for this graph.</li>
-                      )}
-                    </ul>
-                    <p className="dim small">After 7 days, the graph and its backups are permanently erased.</p>
+                    {(() => {
+                      // #2565 (re-audit P3): the rescue copy must match what
+                      // the server will actually do for THIS row. Past-window
+                      // + legacy rows are NOT restorable (server 410s them) —
+                      // the panel must not promise "restore brings everything
+                      // back". Restore also never pulls archives (separate
+                      // POST /v1/backups step) and a partially-deleted row
+                      // restores as an empty graph.
+                      const trow = trash.find((x) => x.graph_id === trashInspectId)
+                      const rowRestorable = !!(trow && trow.deleted_at && trashDaysLeft(trow.deleted_at) > 0)
+                      return (
+                        <>
+                          <p className="dim small">
+                            {rowRestorable
+                              ? 'Rescue view — restore brings the graph\'s live state back. Backup archives are restored separately (a partially-deleted graph restores as an empty graph).'
+                              : 'Past the recovery window — this graph is pending permanent erasure and cannot be restored. The archives below are its last remaining artifacts.'}
+                          </p>
+                          <ul className="dim small">
+                            <li>Deleted: {trashInspect.deleted_at ? fmtTime(trashInspect.deleted_at) : '—'}</li>
+                            <li>Restorable archives: {trashInspect.archive_count != null ? trashInspect.archive_count : 0}</li>
+                            {trashInspect.latest_backup ? (
+                              <li>
+                                Latest backup:{' '}
+                                {trashInspect.latest_backup.created_at ? fmtTime(trashInspect.latest_backup.created_at) : 'recently'}
+                                {trashInspect.latest_backup.node_count != null
+                                  ? ` · ${trashInspect.latest_backup.node_count.toLocaleString()} nodes / ${trashInspect.latest_backup.edge_count != null ? trashInspect.latest_backup.edge_count.toLocaleString() : '?'} edges`
+                                  : ''}
+                              </li>
+                            ) : trashInspect.archive_count > 0 ? (
+                              // #2469: archives exist but no readable manifest
+                              // (dump-only runs / crash window) — say so honestly.
+                              <li>Backups exist — no readable manifest for details.</li>
+                            ) : (
+                              <li>No backups yet for this graph.</li>
+                            )}
+                          </ul>
+                          <p className="dim small">
+                            {rowRestorable
+                              ? `After ${TRASH_GRACE_DAYS} days, the graph and its backups are permanently erased.`
+                              : 'Kept only until the operator purge runs — nothing here can be restored.'}
+                          </p>
+                        </>
+                      )
+                    })()}
                   </div>
                 )}
               </details>
