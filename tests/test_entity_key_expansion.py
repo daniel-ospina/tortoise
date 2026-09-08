@@ -38,7 +38,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import pytest  # noqa: I001
+import pytest
 
 from tortoise.sdk import TortoiseSDK
 

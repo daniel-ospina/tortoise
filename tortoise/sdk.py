@@ -12392,7 +12392,7 @@ class TortoiseSDK:
         """
         if not fts_hits or not query or not query.strip():
             return None
-        from .sparse import expansion_tokens, tokenize_sparse_query
+        from .sparse import tokenize_sparse_query
         original_tokens = tokenize_sparse_query(
             query, keep_numeric=keep_numeric)
         if not original_tokens:
