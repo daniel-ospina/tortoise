@@ -10083,7 +10083,10 @@ async def trash_graph_points(graph_id: str, team_id: str,
             manifests.append(k)
     flat_bids: set[str] = set()
     try:
-        from tortoise.backup_sweep import read_legacy_flat_index
+        from tortoise.backup_sweep import (
+            read_legacy_flat_index,
+            read_purge_flat_ghosts,
+        )
         index = await asyncio.to_thread(read_legacy_flat_index, storage,
                                         team_id)
         ns = str(row.get("namespace") or "")
@@ -10092,6 +10095,13 @@ async def trash_graph_points(graph_id: str, team_id: str,
                     str(ent.get("graph_id") or "") == graph_id
                     or (ns and str(ent.get("graph_name") or "") == ns)):
                 flat_bids.add(str(bid))
+        # #2561 (re-audit): a purge that erased this graph's flat dumps
+        # records them as ghosts (#2466) even when its index rewrite was
+        # skipped (partial delete failure) — Inspect must not count bids
+        # whose objects the purge already erased.
+        ghosts = await asyncio.to_thread(read_purge_flat_ghosts, storage,
+                                         team_id)
+        flat_bids -= {str(b) for b in (ghosts or {})}
     except Exception:
         flat_bids = set()  # unreadable index → nested pool only
     latest: dict | None = None
