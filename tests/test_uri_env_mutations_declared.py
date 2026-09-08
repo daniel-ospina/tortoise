@@ -127,11 +127,6 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # ── DELIBERATE_EMBEDDED_LANE: battery hermetic-store suites force the
     #    embedded lane so scenario graphs materialize under their own names
     #    (a URI redirect folds graphs per test — ep_outcome/provenance/
-    #    seed_ingest/write_channel module fixtures + lane_matrix/r1_seed
-    #    inline strips; the pop/delenv IS the point) ────────────────────────
-    # ── DELIBERATE_EMBEDDED_LANE: battery hermetic-store suites force the
-    #    embedded lane so scenario graphs materialize under their own names
-    #    (a URI redirect folds graphs per test — ep_outcome/provenance/
     #    seed_ingest/write_channel module fixtures + lane_matrix inline
     #    strips; the pop/delenv IS the point; r1_seed uses the fixture-param
     #    delenv form) ───────────────────────────────────────────────────────

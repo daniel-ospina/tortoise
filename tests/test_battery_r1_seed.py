@@ -284,7 +284,7 @@ def test_xs_planted_pairs_never_preseeded(tmp_path, scenario_id):
         texts = " ".join(str(m) for m in mems)
         for pair in sc.contradiction_pairs:
             assert pair.claim_a[:40] in texts or any(
-                pair.claim_a[:40] in str(m.get("content", "")) for m in mems)
+                pair.claim_a[:40] in m.content for m in mems)
             assert pair.claim_b[:40] not in texts
     finally:
         store.close()
