@@ -93,6 +93,25 @@ def _parser() -> argparse.ArgumentParser:
     vj.add_argument("--out", default=_DEFAULT_OUT, help="records output dir")
     vj.add_argument("--mock", action="store_true",
                     help="hermetic mock-judge run (no model API)")
+    vj.add_argument(
+        "--evidence", default=None,
+        help="probe evidence bundle JSON (#2292 Task 4): run the "
+             "declarative validation battery over REAL deliberation "
+             "renders (retest/IRT/gold legs) with TWO judge configs "
+             "(BATTERY_JUDGE_MODEL + BATTERY_JUDGE_MODEL_2)")
+
+    probe = sub.add_parser(
+        "probe", help="#2292 real-model probe (measured tokens + evidence)")
+    probe.add_argument("--scenarios", nargs="+", required=True,
+                       help="scenario ids (decision + contradiction + "
+                            "calibration minimum; 3-5 recommended)")
+    probe.add_argument("--arms", nargs="+", default=["a0", "a4"],
+                       help="arms to probe (default a0 a4)")
+    probe.add_argument("--seed", type=int, default=7,
+                       help="pinned seed")
+    probe.add_argument("--out", default=_DEFAULT_OUT,
+                       help="probe artifacts dir (probe_tokens.json + "
+                            "probe_validation_bundle.json + transcripts)")
 
     report = sub.add_parser("report", help="verdict report (#1415)")
     report.add_argument("--config", default=None, help="config dir")
@@ -112,13 +131,57 @@ def _stub(name: str, owner: str) -> Callable[[argparse.Namespace], ExitCode]:
 
 def _cmd_validate_judge(args: argparse.Namespace) -> ExitCode:
     """battery validate-judge --rubric <id> — run the validation battery for
-    one rubric (issue #1410; E2E-5.1). Exit 2 when the gate blocks."""
+    one rubric (issue #1410; E2E-5.1). Exit 2 when the gate blocks.
+
+    ``--evidence <bundle.json>`` (#2292 Task 4): the PRE-EXPOSURE
+    validation run over real probe deliberation text — declarative
+    anchored-yes/no protocol over the itemized rubric, TWO judge configs
+    (inter-judge kappa, fail-closed when BATTERY_JUDGE_MODEL_2 is
+    absent on the real path), judge spend metered against the
+    judge_leg_reserve_usd reserve (HARD STOP)."""
     from battery.judge.client import JudgeClient
     from battery.judge.gate import RubricRegistry, validate_rubric
+    from battery.judge.rubric import load_rubric_spec
     rubric_id = args.rubric
+
+    if getattr(args, "evidence", None):
+        # Pre-exposure validation over the REAL probe evidence bundle.
+        from pathlib import Path as _P2
+
+        from battery.config.budget import load_budget
+        from battery.judge.evidence import run_evidence_validation
+        cfg_dir = _P2(getattr(args, "config", None) or args.config_dir)
+        budget = load_budget(cfg_dir / "budget.yaml")
+        reserve = budget.judge_leg_reserve_usd if not args.mock else None
+        record = run_evidence_validation(
+            config_dir=cfg_dir, rubric_id=rubric_id,
+            evidence=args.evidence, force_mock=bool(args.mock),
+            records_path=_P2(args.out or _DEFAULT_OUT)
+            / "judge" / "records.json",
+            reserve_usd=reserve)
+        print(f"rubric {rubric_id}: {'VALIDATED' if record.passed else 'BLOCKED'} "
+              f"(retest={record.abba_agreement:.2f} kappa={record.kappa} "
+              f"reason={record.blocked_reason or 'ok'})")
+        return ExitCode.OK if record.passed else ExitCode.GATE_BLOCKED
+
     rubric_text = _load_rubric_text(args, rubric_id)
     pairs = _default_probe_pairs(rubric_id)
     client = JudgeClient(force_mock=args.mock)
+    # Itemized rubric => the declarative anchored-yes/no protocol (Task 2):
+    # item count + vocabulary; the gold-anchor leg auto-resolves from the
+    # rubric store. Legacy .md rubrics keep the pairwise #1410 battery.
+    n_items = 4
+    vocabulary = None
+    spec = None
+    try:
+        spec = load_rubric_spec(args.config_dir or args.config_dir
+                                or _DEFAULT_CONFIG, rubric_id)
+    except Exception:  # noqa: BLE001, RUF100 — no rubric file: pairwise fallback
+        spec = None
+    if spec is not None and spec.is_itemized:
+        n_items = max(len(spec.items), 1)
+        from battery.judge.gate import DECLARATIVE_VOCAB
+        vocabulary = DECLARATIVE_VOCAB
     # Kappa leg: two judge passes over the SAME probe items (E2E-5.1
     # chance-corrected reliability is actually measured, not hardcoded).
     labels_a = [client.judge(rubric_id, f"kappa-a{i}", p[0]).verdict
@@ -126,7 +189,8 @@ def _cmd_validate_judge(args: argparse.Namespace) -> ExitCode:
     labels_b = [client.judge(rubric_id, f"kappa-b{i}", p[1]).verdict
                 for i, p in enumerate(pairs)]
     record = validate_rubric(rubric_id, rubric_text, client, pairs,
-                             labels_a, labels_b, n_items=4)
+                             labels_a, labels_b, n_items=n_items,
+                             vocabulary=vocabulary)
     from pathlib import Path as _Path
     records_path = _Path(args.out or _DEFAULT_OUT) / "judge" / "records.json"
     registry = RubricRegistry(records_path)
@@ -138,13 +202,20 @@ def _cmd_validate_judge(args: argparse.Namespace) -> ExitCode:
 
 
 def _load_rubric_text(args, rubric_id: str) -> str:
-    from pathlib import Path
-    config_dir = Path(args.config or args.config_dir or _DEFAULT_CONFIG)
-    rubrics = config_dir / "rubrics" / f"{rubric_id}.md"
-    if rubrics.is_file():
-        return rubrics.read_text(encoding="utf-8")
-    # Fallback: minimal rubric from the id (mock-mode validation).
-    return f"{rubric_id}: judge the response for coverage and correctness."
+    """Rubric text for the gate: JSON-first itemized rubrics render their
+    canonical judge prompt; legacy .md rubrics return raw text verbatim
+    (back-compat — pre-#2292 rubric_text contract byte-identical)."""
+    from pathlib import Path as _Path
+
+    from battery.judge.rubric import load_rubric_spec, render_rubric_prompt
+    config_dir = _Path(args.config or getattr(args, "config_dir", None)
+                       or _DEFAULT_CONFIG)
+    try:
+        spec = load_rubric_spec(config_dir, rubric_id)
+    except Exception:
+        # Fallback: minimal rubric from the id (mock-mode validation).
+        return f"{rubric_id}: judge the response for coverage and correctness."
+    return render_rubric_prompt(spec)
 
 
 def _default_probe_pairs(rubric_id: str) -> list[tuple[str, str]]:
@@ -351,6 +422,12 @@ def _cmd_calibrate(args: argparse.Namespace) -> ExitCode:
     print("cal table hash: "
           + cal_table_hash(thresholds.cal_rows,
                            thresholds.determinism_tolerances))
+    # #2292 Task 6: the measured-token reviewable-change hash rides the
+    # same print surface as the [cal] hash (print-only, never auto).
+    from battery.config.arms import load_arms, token_table_hash
+    arms = load_arms(_Path(args.config or args.config_dir
+                           or _DEFAULT_CONFIG) / "arms.yaml")
+    print("token table hash: " + token_table_hash(arms))
     for line in print_deltas(thresholds.cal_rows, _load_cal_measured(args)):
         print(line)
     print("PRINT ONLY — re-lock is a reviewable table change (never auto).")
@@ -595,6 +672,38 @@ def _cmd_run(args: argparse.Namespace) -> ExitCode:
     return run_battery(config)
 
 
+def _cmd_probe(args: argparse.Namespace) -> ExitCode:
+    """battery probe --scenarios <ids> --arms a0,a4 --seed N --out <dir>
+
+    #2292-owned real-model probe: bounded REAL run (pre-authorized spend
+    under budget.yaml probe_cap_usd; fail-closed when OPENROUTER_API_KEY
+    is absent). Emits probe_tokens.json (per-phase 95th-pct tables),
+    probe_manifest.json (model block + usage), probe_validation_bundle.json
+    (rubric -> per-anchor arm-neutral evidence renders for Task 4) and
+    per-episode real transcripts."""
+    from battery.config.budget import load_budget
+    from battery.probes.probe_runner import ProbeBudget, run_probe
+    # subcommand --config is only defined on some subparsers — read it
+    # defensively (review #2575 convergence P1: args.config absent on the
+    # probe subparser crashed every invocation).
+    cfg = _Path(getattr(args, "config", None) or args.config_dir)
+    budget = load_budget(cfg / "budget.yaml")
+    run_probe(config=cfg, arms=list(args.arms),
+              scenario_ids=list(args.scenarios), out_dir=args.out,
+              budget=ProbeBudget(cap_usd=budget.probe_cap_usd),
+              seed=args.seed)
+    print(f"probe complete: {len(args.scenarios)} scenarios x "
+          f"{len(args.arms)} arms -> {args.out}")
+    return ExitCode.OK
+
+
+_validate_judge_help = (
+    "validate-judge --rubric <id> [--evidence <bundle.json>] — the JSON "
+    "rubric path uses the declarative anchored-yes/no protocol (Task 2); "
+    "--evidence (Task 4) feeds real probe renders for the retest/IRT/gold "
+    "legs over the anchored items.")
+
+
 def _dispatch(args: argparse.Namespace) -> ExitCode:
     handlers = {
         "run": _cmd_run,
@@ -602,6 +711,7 @@ def _dispatch(args: argparse.Namespace) -> ExitCode:
         "calibrate": _cmd_calibrate,
         "validate-judge": _cmd_validate_judge,
         "report": _cmd_report,
+        "probe": _cmd_probe,
     }
     return handlers[args.subcommand](args)
 
