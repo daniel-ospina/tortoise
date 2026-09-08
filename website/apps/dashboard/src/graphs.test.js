@@ -5,6 +5,7 @@ import {
   GRAPH_KEY_SCOPES,
   canManageGraphKeys,
   graphCanDelete,
+  graphKeyPanelEmptyLine,
   graphMintBody,
   graphsMeter,
   isDefaultGraph,
@@ -80,6 +81,19 @@ test('sortedGraphRows: empty + null-safe', () => {
   assert.deepEqual(sortedGraphRows([]), [])
   assert.deepEqual(sortedGraphRows(null), [])
   assert.deepEqual(sortedGraphRows(undefined), [])
+})
+
+test('graphKeyPanelEmptyLine: #2307 owner/admin keeps mint CTA; member gets who-can-create', () => {
+  // Owner/admin panel renders the mint form next to the empty line — the
+  // actionable "mint one above" copy stays truthful for them.
+  assert.equal(
+    graphKeyPanelEmptyLine(true),
+    'No keys for this graph yet — mint one above (shown once).')
+  assert.equal(
+    graphKeyPanelEmptyLine(false),
+    'No keys for this graph yet — only owners and admins can create keys.')
+  // The member branch must never point at the owner-only mint control.
+  assert.ok(!graphKeyPanelEmptyLine(false).includes('mint'))
 })
 
 test('graphMintBody: graph-bound data-plane scopes', () => {
