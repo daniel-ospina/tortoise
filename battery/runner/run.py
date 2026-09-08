@@ -312,12 +312,23 @@ def _execute_real_episode(*, config: RunConfig, arm, scenario: Scenario,
     events += state_events(ep_outcome=ep_outcome,
                            decide_cycles=ep.decide_cycles,
                            ep_contested=ep_contested)
+    # #2603: per-episode real spend + usage totals from the caller
+    # meter — persisted into the artifact/recall ep_markers so real
+    # campaign spend is recoverable after the run (never a throwaway).
+    # getattr-guarded: injected/scripted callers without the meter
+    # protocol record zero rather than crash the hermetic lane.
+    spend_usd = round(float(getattr(caller, "spent_usd", 0.0) or 0.0), 6)
+    usage = getattr(caller, "totals", lambda: {})()
+    if not isinstance(usage, dict):
+        usage = {}
     ep_surface = {
         "outcome": ep_outcome,
         "contested": bool(ep_contested),
         "decide_cycles": ep.decide_cycles,
         "converged_early": ep.converged_early,
         "scenario_render_len": len(render),
+        "spend_usd": spend_usd,
+        "usage": usage,
     }
     outcomes = [ModelCallOutcome.OK] * len(ep.turns)
     return (outcomes, 0, events, ep_surface)
@@ -501,6 +512,11 @@ def run_battery(config: RunConfig, *, stdout: Callable[[str], None] = print,
     all_run_ids: list[str] = []
     recall_rows: list[dict[str, Any]] = []
     any_arm_failed = False
+    # #2603: mid-run dollar cap — real spend accumulates across real
+    # episodes for the WHOLE run (the pre-run guard is estimate-only; the
+    # executed-meter total is the hard stop, mirroring smoke.py CapStopped).
+    run_real_spend = 0.0
+    budget_stop = False
 
     for arm_id in config.arms:
         arm_config = arm_map.get(arm_id)
@@ -550,6 +566,13 @@ def run_battery(config: RunConfig, *, stdout: Callable[[str], None] = print,
             episode_seed = config.seed + idx  # per-episode seed = base + index
             tracker = EpisodeTracker()
             if run_mode == "real":
+                if budget_stop:
+                    # #2603 CapStopped-style abort: the run's executed real
+                    # spend exceeded budget.max_estimated_cost_usd — stop
+                    # scheduling further episodes (remaining scenarios for
+                    # this arm AND all later arms skip; the spend already
+                    # incurred is persisted per-episode in ep_surface).
+                    continue
                 # Task-9 real emitting executor: retrieve -> TVDE scaffold on
                 # the pinned caller -> envelope/state/tool emissions -> decide
                 # writes. Zero fabricated turns (realism gate inside).
@@ -557,6 +580,9 @@ def run_battery(config: RunConfig, *, stdout: Callable[[str], None] = print,
                     _execute_real_episode(
                         config=config, arm=arm, scenario=scenario,
                         episode_seed=episode_seed, tracker=tracker)
+                run_real_spend += ep_surface.get("spend_usd", 0.0)
+                if run_real_spend > budget.max_estimated_cost_usd:
+                    budget_stop = True
                 evlog = ep_events
             else:
                 outcomes, re_deriv = execute_mock_episode(
@@ -649,7 +675,9 @@ def run_battery(config: RunConfig, *, stdout: Callable[[str], None] = print,
             arm_id, arm_present=True, run_mode=run_mode,
             scenarios=len(scenarios), valid_episodes=agg.valid_episodes,
             excluded=agg.excluded_count, excluded_ids=list(agg.excluded_episode_ids),
-            excluded_reason=agg.excluded_reason, artifacts=arm_artifacts))
+            excluded_reason=agg.excluded_reason, artifacts=arm_artifacts,
+            spend_usd=sum((e.ep_surface or {}).get("spend_usd", 0.0)
+                          for e in arm_episodes)))
         if agg.valid_episodes == 0:
             any_arm_failed = True  # all-failed → exit 4 (after artifacts)
 
@@ -876,7 +904,8 @@ def _arm_summary_block(arm_id: str, *, arm_present: bool, scenarios: int = 0,
                        excluded_reason: str = "none",
                        artifacts: list[str] | None = None,
                        run_mode: str = "mock",
-                       reason: str | None = None) -> dict[str, Any]:
+                       reason: str | None = None,
+                       spend_usd: float = 0.0) -> dict[str, Any]:
     return {
         "arm_id": arm_id,
         "arm_present": arm_present,
@@ -885,6 +914,7 @@ def _arm_summary_block(arm_id: str, *, arm_present: bool, scenarios: int = 0,
         "valid_episodes": valid_episodes,
         "excluded": {"count": excluded, "episode_ids": excluded_ids or [],
                      "reason": excluded_reason},
+        "real_spend_usd": round(spend_usd, 6) if run_mode == "real" else None,
         "artifacts": artifacts or [],
         "init_failure": reason or ("" if arm_present else "arm unavailable"),
     }

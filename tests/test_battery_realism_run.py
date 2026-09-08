@@ -66,6 +66,21 @@ class _ScriptedRealCaller:
         self.calls = 0
         self.last_prompt_tokens = 10
         self.last_completion_tokens = 20
+        # #2603 meter protocol: per-call cost is nominal in the scripted
+        # lane; tests override ``spend_usd`` to exercise the mid-run cap.
+        self._spend_usd = 0.0001
+
+    @property
+    def spent_usd(self) -> float:
+        return self._spend_usd
+
+    def totals(self) -> dict:
+        return {
+            "calls": self.calls,
+            "prompt_tokens": 0,
+            "completion_tokens": sum(r.completion_tokens for r in self.rows),
+            "cost_usd": round(self._spend_usd, 6),
+        }
 
     def call(self, *, prompt: str) -> str:
         self.calls += 1
@@ -136,3 +151,32 @@ def test_real_executor_never_excludes_all_ok(tmp_path):
     summary = json.loads((attempt / "summary.json").read_text())
     assert summary["run"]["exit_code"] == 0
     assert summary["arms"][0]["valid_episodes"] == 2
+
+
+def test_real_executor_mid_run_budget_stop(tmp_path):
+    """#2603: executed real spend beyond budget.max_estimated_cost_usd
+    aborts scheduling (CapStopped-style) and the spend is persisted per
+    episode + per arm — never a throwaway meter."""
+    class _OverBudgetCaller(_ScriptedRealCaller):
+        def __init__(self):
+            super().__init__()
+            self._spend_usd = 60.0  # over the $50 fixture cap per episode
+
+    cfg = _config_dir(tmp_path)
+    out = tmp_path / "out"
+    # pre-run estimate passes (100 tok x 0.5/1k x 2 scenarios = $0.10 << 50)
+    code = run_battery(RunConfig(
+        config_dir=cfg, out_dir=out, executor="real", arms=["a0"],
+        caller_factory=_OverBudgetCaller), stdout=lambda _: None)
+    assert code is ExitCode.OK
+    attempt = sorted(out.iterdir())[0]
+    summary = json.loads((attempt / "summary.json").read_text())
+    arm = summary["arms"][0]
+    assert arm["valid_episodes"] == 1, (  # 2nd scenario skipped by the cap
+        "mid-run budget stop must skip the remaining episode")
+    assert arm["real_spend_usd"] == 60.0, "spend must be persisted per arm"
+    # per-episode persistence: the executed artifact's ep_markers carry spend
+    recall = json.loads((attempt / "recall.json").read_text())
+    rows = recall.get("episodes", []) if isinstance(recall, dict) else []
+    assert len(rows) == 1
+    assert rows[0]["ep_markers"].get("spend_usd") == 60.0
