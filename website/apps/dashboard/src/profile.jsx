@@ -58,7 +58,7 @@ export function AddLoginMethodButtons({ busy, onOAuth, onEmail, error }) {
       {showEmail && (
         <form
           className="inline-form claim-email-form"
-          onSubmit={(e) => { e.preventDefault(); onEmail(email, password); setShowEmail(false); setEmail(''); setPassword('') }}
+          onSubmit={(e) => { e.preventDefault(); onEmail(email, password) }}
         >
           <input
             type="email" placeholder="you@example.com" aria-label="Email"
