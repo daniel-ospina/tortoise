@@ -99,6 +99,9 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     "test_embedded_concurrency.py": [r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"',
                                       r"os\.environ\.pop\(\s*['\"]TORTOISE_DB_URI['\"]"],
     "test_ep_directed_nand.py": [r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],  # MCP-tool + SDK shared-store contract (PR #1684)
+    "test_ep_mitigation.py": [r'os\.environ\[\s*["\']TORTOISE_DB_URI["\']\]\s*=',
+                               r'os\.environ\.pop\(\s*["\']TORTOISE_DB_URI["\']',
+                               r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"'],  # #2315: docker-lane EP mitigation tests force the URI (the setenv IS the point — live-EP delta + schema-reject assertions against the real server)
     "test_extractor_reliability.py": [r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
     "test_hard_reject.py": [r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
     "test_hosted_api.py": [r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"',  # #1686: register/provision journal tests force the embedded lane (the delenv IS the point)
