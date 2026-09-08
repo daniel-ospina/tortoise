@@ -683,25 +683,32 @@ def docker_walker_port(sdk) -> WalkerPort:
             prow = proj.g.query(
                 "MATCH (o:Object {id:$oid})<-[:aboutObject]-(p:Point) "
                 "RETURN 'point' AS kind, p.id, p.content, p.when, "
-                "p.createdAt, p.status, p.validFrom, p.ep_alpha, p.ep_beta, "
-                "p.quote, p.search_keys, p.eventId, p.lme_session_index "
+                "p.createdAt, p.status, p.validFrom, p.validTo, "
+                "p.expiredAt, p.ep_alpha, p.ep_beta, p.quote, "
+                "p.search_keys, p.eventId, p.lme_session_index "
                 "ORDER BY p.id LIMIT $cap",
                 params={"oid": oid, "cap": per_subject_cap}).result_set
             for r in prow:
+                # validTo/expiredAt mirror the FTS-hit shape (validity-window
+                # marker parity — P1-2: [valid X -> Y] vs a misleading
+                # open-ended [valid since X] on the fired render)
                 out.append({"object_id": oid, "kind": r[0], "id": r[1],
                             "content": r[2], "when": r[3],
                             "created_at": r[4], "status": r[5],
-                            "valid_from": r[6], "ep_alpha": r[7],
-                            "ep_beta": r[8], "quote": r[9],
-                            "search_keys": r[10], "event_id": r[11],
-                            "lme_session_index": r[12]})
+                            "valid_from": r[6], "valid_to": r[7],
+                            "expired_at": r[8], "ep_alpha": r[9],
+                            "ep_beta": r[10], "quote": r[11],
+                            "search_keys": r[12], "event_id": r[13],
+                            "lme_session_index": r[14]})
             erow = proj.g.query(
                 "MATCH (o:Object {id:$oid})<-[:aboutObject]-(e:Event) "
-                "RETURN 'event' AS kind, e.eventId, e.content, e.startedAt, "
+                "RETURN 'event' AS kind, e.eventId, e.name, e.startedAt, "
                 "e.status, e.lme_event_id, e.lme_session_index "
                 "ORDER BY e.eventId LIMIT $cap",
                 params={"oid": oid, "cap": per_subject_cap}).result_set
             for r in erow:
+                # the Event node stores its human text under `name`
+                # (create_event's first arg) — NOT `content`
                 out.append({"object_id": oid, "kind": r[0], "id": r[1],
                             "content": r[2], "started_at": r[3],
                             "status": r[4], "lme_event_id": r[5],
@@ -940,3 +947,179 @@ def synthesize_hits(
                        if k not in ("date", "tier")}
             hits.append(cleaned)
     return hits
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# #2165 Task 6 — _assemble_connected (R5/R6/R11/R14/R17): the product seam.
+# One single-source fired path shared by ask()'s pre-retrieval branch and
+# the public sdk.ask_assembled(). R14 drift pin: this function is imported
+# ONLY by sdk.ask()'s branch and sdk.ask_assembled (a source-text test
+# enforces it). The fired envelope wraps ONLY the content stages
+# (classify->resolve->walk->render->decorate->enrich->assemble); the ONE
+# reader call stays under the shared ask()/ask_assembled reader envelope.
+# ══════════════════════════════════════════════════════════════════════════
+
+# Object recall-excluded statuses (the successor-EXISTENCE probe treats an
+# excluded successor as invisible -> the renderer's NAME-ONLY annotation).
+_RECALL_OBJECT_EXCLUDED_STATUSES = frozenset(
+    {"superseded", "deprecated", "archived", "retracted"})
+
+
+@dataclass(frozen=True)
+class _AssembledBlock:
+    """Internal fired block (content stages only — NO reader, NO answer).
+    Ask() and ask_assembled() both consume this and add their own envelope
+    (shared reader machinery, metering, response shape)."""
+    fired: bool
+    shape: str | None
+    subjects: tuple
+    slices: dict
+    admission: dict
+    post_cap_lines: list
+    # NOTE: evidence/context_tokens are NOT computed here — ask()/the
+    # assembled path render post_cap_lines through the SHARED
+    # render_context/estimate path so the alignment invariant
+    # (context_tokens == estimate_tokens(evidence)) holds by construction.
+
+
+@dataclass
+class AssemblyAnswer:
+    """Public ask_assembled() return shape (pinned — Task 7's eval arm reads
+    post_cap_lines for gold-id admission and answer for conversion; field
+    names are the arm's contract)."""
+    fired: bool
+    shape: str | None
+    question_type: str
+    subjects: list
+    slices: dict
+    post_cap_lines: list
+    admission: dict
+    evidence: str
+    context_tokens: int
+    answer: str | None
+    retrieval_degraded: bool
+
+
+def _probe_visible_successors(sdk, slices: AssemblySlices) -> frozenset[str]:
+    """Successor-EXISTENCE probe (docker): each distinct non-empty
+    superseded_by name in the state slice -> verified ONLY when >= 1 Object
+    with that name exists AND is not recall-excluded. The renderer turns an
+    unverified name into a NAME-ONLY annotation (never a fabricated link)."""
+    names = {(_as_str(sr.get("superseded_by")) or "").strip()
+             for sr in slices.state_rows}
+    names.discard("")
+    if not names:
+        return frozenset()
+    try:
+        proj = sdk._get_proj()
+        # ONE batch query: name -> set of visible (non-excluded) statuses
+        rows = proj.g.query(
+            "MATCH (o:Object) WHERE o.name IN $names "
+            "RETURN o.name AS nm, o.status",
+            params={"names": sorted(names)}).result_set
+    except Exception:  # noqa: BLE001, RUF100 — probe fails open to empty
+        rows = []
+    statuses_by_name: dict[str, set] = {}
+    for nm, st in rows:
+        statuses_by_name.setdefault(nm, set()).add(st or "")
+    verified = {nm for nm in names
+                if statuses_by_name.get(nm)
+                and not (statuses_by_name[nm]
+                         & _RECALL_OBJECT_EXCLUDED_STATUSES)}
+    return frozenset(verified)
+
+
+def _assemble_connected(sdk, question: str, *, question_date: str | None = None,
+                        caps: dict | None = None) -> _AssembledBlock:
+    """The fired content pipeline (env-gated at the CALLER — ask() reads
+    TORTOISE_ASK_CONNECTED_ASSEMBLY BEFORE calling; this function assumes
+    the gate already passed and fires when the question routes).
+
+    classify -> resolve (both-halves gate R1) -> walk (typed slices) ->
+    render (synthesize_hits) -> decorate real rows (annotate_ask_hits —
+    synthesized rows have no id and are untouched) -> explicit
+    why.enrich_items when W4 is on (R5/R17; id-less rows skipped by the
+    guard) -> assemble_context(caps). NEVER raises untyped: the ask()
+    envelope maps any raise to AskRetrievalUnavailable.
+    """
+    from tortoise.retrieval import assemble_context
+    if caps is None:
+        from tortoise.retrieval import resolve_ask_retrieval_caps
+        caps = resolve_ask_retrieval_caps()
+
+    shape = classify_question(question)
+    if shape is None:
+        return _AssembledBlock(fired=False, shape=None, subjects=(),
+                               slices={}, admission={}, post_cap_lines=[])
+    terms = extract_subject_terms(question, shape)
+    if not terms:
+        return _AssembledBlock(fired=False, shape=None, subjects=(),
+                               slices={}, admission={}, post_cap_lines=[])
+    resolved = resolve_subjects(docker_resolver_port(sdk), terms, shape=shape)
+    if not resolved.both_halves_ok(shape):
+        # one half failed to resolve (or a both-subject shape lacks one) ->
+        # the R1 gate: fire NOTHING, let legacy fall through
+        return _AssembledBlock(fired=False, shape=None, subjects=(),
+                               slices={}, admission={}, post_cap_lines=[])
+    candidates = list(resolved.candidates)
+    slices = collect_slices(
+        docker_walker_port(sdk), candidates, shape=shape,
+        question_date=question_date,
+        per_subject_cap=caps.get("limit") or 200)
+    verified = _probe_visible_successors(sdk, slices)
+    hits = synthesize_hits(slices, shape=shape, candidates=candidates,
+                           halves=terms, successors_verified=verified)
+    # decorate REAL rows (id-keyed additive session/speaker join); the
+    # synthesized no-id state/section lines ride through untouched
+    import contextlib as _contextlib
+    with _contextlib.suppress(Exception):
+        hits = sdk.annotate_ask_hits(hits)
+    # D8 claim-level marker parity (P1-2): the SAME decoration source the
+    # FTS path uses attaches superseded_by/supersedes to real POINT rows
+    # (id-keyed additive; synthesized no-id rows untouched). Fail-open.
+    with _contextlib.suppress(Exception):
+        from tortoise.search_engine import fetch_point_epistemic_state
+        ids = [h.get("id") for h in hits if h.get("id")]
+        state = fetch_point_epistemic_state(sdk._get_proj().g, ids) or {}
+        out = []
+        for h in hits:
+            pid = h.get("id")
+            st = state.get(str(pid))
+            if st is None:
+                out.append(h)
+                continue
+            e = dict(h)
+            for k in ("status", "superseded_by", "supersedes"):
+                if k in st and st[k] is not None:
+                    e[k] = st[k]
+            out.append(e)
+        hits = out
+    # W4 enrich real rows when the flag is on (id-less rows skipped by the
+    # enrich_items guard). Fail-open degrade: block WITHOUT why keys.
+    with _contextlib.suppress(Exception):
+        from tortoise.why import enrich_items, w4_enrichment_enabled
+        if w4_enrichment_enabled():
+            hits = enrich_items(sdk._get_proj(), hits)
+    selected = assemble_context(
+        hits, top_k=caps.get("context_item_cap", 40),
+        max_context_tokens=caps.get("context_token_cap", 8000),
+        question_date=question_date,
+        context_item_cap=caps.get("context_item_cap", 40),
+        byte_cap=32768)
+    if not selected:
+        # P1-1: both halves resolved but the assembly has NOTHING to say
+        # (content-less subjects) — firing would replace legacy evidence
+        # with an empty block and burn the ONE reader call on nothing.
+        # Fall through to legacy (the R1 spirit: fire only when the fired
+        # block is a REAL replacement).
+        return _AssembledBlock(fired=False, shape=None, subjects=(),
+                               slices={}, admission={}, post_cap_lines=[])
+    subs = [{"object_id": c.object_id, "name": c.name,
+             "confidence": c.confidence}
+            for c in candidates]
+    return _AssembledBlock(
+        fired=True, shape=shape.value, subjects=tuple(subs),
+        slices={"state_rows": list(slices.state_rows),
+                "timeline_rows": list(slices.timeline_rows),
+                "evidence_rows": list(slices.evidence_rows)},
+        admission=dict(slices.admission), post_cap_lines=selected)
