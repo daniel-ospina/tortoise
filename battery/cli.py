@@ -71,6 +71,10 @@ def _parser() -> argparse.ArgumentParser:
                      help="output dir (run artifacts + summary)")
     run.add_argument("--max-episodes", type=int, default=None,
                      help="cap episodes (budget.max_episodes wins)")
+    run.add_argument("--sessions", type=int, default=1,
+                     help="Task 10 stream mode: run each scenario across N "
+                          "sequential sessions on the SAME per-scenario graph "
+                          "(default 1 = single session)")
 
     parity = sub.add_parser("parity", help="benchmark parity leg (#1414)")
     parity.add_argument("--config", default=None, help="config dir")
@@ -622,7 +626,11 @@ def _load_report_inputs(args) -> tuple[dict, dict | None, dict]:
         "excluded_gap": any(_excluded_snapshot_gap(a) for a in arts),
         "over_budget": any(
             "budget" in str(a.get("excluded", {}).get("reason", "")).lower()
-            for a in arts),
+            for a in arts) or bool(summary.get("run", {}).get("budget_stopped")),
+        # Task 10: runner-stamped on the summary when a real run included
+        # L4 scenarios at sessions < 2 (never attempted cross-session).
+        "l4_underpopulated": bool(
+            summary.get("run", {}).get("l4_underpopulated")),
     }
     return matrix, ctx, control
 
@@ -668,6 +676,7 @@ def _cmd_run(args: argparse.Namespace) -> ExitCode:
         arms=args.arms.split(",") if args.arms else None,
         mock=args.mock, batch_setup=args.batch_setup,
         scorer_specs=args.scorer, max_episodes=args.max_episodes,
+        sessions=getattr(args, "sessions", 1),
     )
     return run_battery(config)
 

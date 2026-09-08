@@ -195,12 +195,13 @@ class TestDeterminismTolerances:
             t1.cal_rows, t1.determinism_tolerances)
 
     def test_arms_tokens_annotations_post_2292_relock(self):
-        """#2292 Task 6 re-lock annotation contract: the probe-MEASURED
-        arms (a0/a4) carry the measured basis (p95 x headroom + scaffold
-        scope, 2026-09-08); the NOT-YET-measured arms (a1/a2/a2b/a3) keep
-        their authored guesses with a TBD(EXPOSURE) annotation — a stale
-        guess never masquerades as a measured row. mock's 64 stays the
-        exempt lane cap."""
+        """#2292 Task 6 / #2284 Task 8 re-lock annotation contract: the
+        probe-MEASURED arms (a0/a4) carry the measured basis (p95 x
+        headroom + scaffold scope + exposure part-1 finalization,
+        2026-09-08); the NOT-YET-measured arms (a1/a2/a2b/a3) keep their
+        authored guesses with a TBD(EXPOSURE) annotation — a stale guess
+        never masquerades as a measured row. mock's 64 stays the exempt
+        lane cap."""
         text = (CONFIG / "arms.yaml").read_text(encoding="utf-8")
         from battery.config import load_arms
         arms = load_arms(CONFIG / "arms.yaml")
@@ -212,8 +213,8 @@ class TestDeterminismTolerances:
                          if b.splitlines()[0].strip() == arm_id)
             assert "expected_tokens_per_episode:" in block
             if arm_id in ("a0", "a4"):
-                assert "measured (2026-09-08" in block, \
-                    f"arm {arm_id}: measured row lacks the measured basis"
+                assert "MEASURED + EXPOSURE-FINALIZED" in block, \
+                    f"arm {arm_id}: measured row lacks the exposure basis"
             else:
                 assert "TBD(EXPOSURE)" in block, \
                     f"arm {arm_id}: unmeasured row must carry TBD(EXPOSURE)"

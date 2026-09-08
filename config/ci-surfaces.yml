@@ -7,6 +7,11 @@ surfaces:
   - test_acl_graph_users.py   # C4 #2113: per-graph FalkorDB ACL layer (docker-lane; skipif no URI)
   - test_battery_corpus_v11.py
   - test_battery_ep_outcome.py
+  - test_battery_executor_v1.py
+  - test_battery_executor_v2.py
+  - test_battery_exposure_liveness.py
+  - test_battery_exposure_oracle.py
+  - test_battery_exposure_usage_cap.py
   - test_battery_judge_declarative.py
   - test_battery_lane_matrix.py
   - test_battery_loader_fidelity.py
@@ -16,6 +21,8 @@ surfaces:
   - test_battery_probe_measured.py
   - test_battery_provenance.py
   - test_battery_r1_seed.py
+  - test_battery_realism.py
+  - test_battery_realism_run.py
   - test_battery_report_writers.py
   - test_battery_rubric_authoring.py
   - test_battery_schema_v11.py
