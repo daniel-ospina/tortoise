@@ -159,3 +159,11 @@ Skipped — plan touches zero third-party dependencies (pure graph reads over th
 - Re-scoped per human gate 2026-09-08 (dual-lane); assembler acceptance is synthetic-graph + no-regression, NOT the 13-Q score. ask() ships (de-provisionalized same date). No new reader fragments/qtype/wire fields in v1.
 
 <!-- plan-review: cycles=6, status=clean, version=2.3.0 -->
+
+
+## Status — census (2026-09-08)
+133-Q LongMemEval-S temporal corpus classified (artifact: `tests/_assembly_census.json`, committed Task 1):
+- **ordering/compare 34 · interval 19 · current-state 2** → the deterministic both-halves/state family PRCA v1 fires on ≈ **55/133 (41%)** — CORRECTS R13's implied "~76% in scope" (assumed, never measured — R15's census exists to catch exactly this).
+- recency/current-state 8 + recency 2 (12): "most recent" sub-set partially deterministic (date-max) — candidate v1.5.
+- **Negative set for Task 2's precision floor (measured, from the census):** ago-relative 31 · frequency/count 12 · duration-state 7 ("how long had I been X when Y") · relative-date-lookup 6 (Valentine's/last Saturday) · nary-ordering 4 · other 6 · pattern/recurring 1 · offset-comparison 1 ≈ **68 non-firing** + the misfire fixtures (two-option preference with compare syntax).
+- Follow-up triggers (Task 7 Step 7 filings): ago-relative (31 — LLM anchor+offset, constraint 6), duration-state (7), N-ary ordering (4), relative-date-lookup (6). LLM-resolution-fallback trigger: the positive-FTS paraphrase tests (Task 6).
