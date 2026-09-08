@@ -40,8 +40,8 @@ class _ScriptedCaller:
 def test_probe_accumulates_usage_per_phase(tmp_path):
     # scripted caller whose usage capture returns (10, 20) tokens per call
     # → per-phase accumulator rows sum per-call prompt+completion tokens
-    out = run_probe(config=CONFIG, arms=["a0", "a4"], scenario_ids=["S1", "S2"],
-                    caller=_ScriptedCaller(), out_dir=tmp_path)
+    run_probe(config=CONFIG, arms=["a0", "a4"], scenario_ids=["S1", "S2"],
+              caller=_ScriptedCaller(), out_dir=tmp_path)
     tok = json.loads((tmp_path / "probe_tokens.json").read_text())
     assert "deliberation" in tok and "judge" in tok     # per-phase tables
     assert tok["judge"]["calls"] >= 0                   # judge-leg accounted

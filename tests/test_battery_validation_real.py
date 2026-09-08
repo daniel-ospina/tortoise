@@ -142,7 +142,7 @@ def test_ac1_bar_passes_kappa_paradox_pool():
     # the skewed-marginal paradox while AC1 stays ~0.93.
     a = ["yes"] * 30
     b = ["yes"] * 27 + ["no", "no", "yes"]
-    po = sum(1 for x, y in zip(a, b) if x == y) / len(a)
+    po = sum(1 for x, y in zip(a, b, strict=True) if x == y) / len(a)
     k = _ck(a, b)
     ac1 = _gwet_ac1(a, b)
     assert po >= 0.85     # raw agreement is good
