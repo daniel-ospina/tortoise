@@ -291,6 +291,28 @@ OPERATOR_EDGE_QUERY = (
     "WHERE a.id IN $ids AND b.id IN $ids "
     "RETURN type(r), a.id, b.id"
 )
+# #2514: reified operator-mediated edges — operator nodes are :Point
+# {is_operator:true} WITHOUT eventId, so they never enter the eventId-keyed
+# memory layer and the query above (both endpoints in the seen set) never
+# matches their (op)-[:IMPL|NAND]->(endpoint) fan-out.  This query surfaces
+# them: every operator node that touches a session memory point, with its
+# mechanism (op_type property), direction, semantic label, and per-endpoint
+# INPUT index (idx 0 = the epistemically active source).
+OPERATOR_NODE_EDGE_QUERY = (
+    "MATCH (o:Point {is_operator:true})-[r]->(p:Point) "
+    "WHERE p.id IN $ids AND type(r) <> 'INPUT' "
+    "RETURN o.id, o.op_type, o.direction, o.label, type(r) AS rtype, p.id, r.idx"
+)
+# #2514: mitigation Points on operators that touch the session —
+# (op)-[:mitigated_by]->(m) with m.content the mitigation reason (the write
+# path passes the src point's content as mitigate_operator's reason).
+MITIGATION_QUERY = (
+    "MATCH (o:Point {is_operator:true})-[r]->(p:Point) "
+    "WHERE p.id IN $ids AND type(r) <> 'INPUT' "
+    "WITH DISTINCT o "
+    "MATCH (o)-[mb:mitigated_by]->(m:Point) "
+    "RETURN o.id, m.id, m.content"
+)
 
 
 def snapshot_session(sdk, session_id: str) -> dict:
@@ -339,6 +361,7 @@ def snapshot_session(sdk, session_id: str) -> dict:
     # raw IMPL/NAND counts the report audits).
     rephrase_edges: list[tuple[str, str]] = []
     operator_counts: dict[str, int] = {}
+    direct_edges: list[dict] = []
     if seen:
         edge_rows = g.query(
             OPERATOR_EDGE_QUERY, params={"ids": list(seen)}
@@ -347,11 +370,41 @@ def snapshot_session(sdk, session_id: str) -> dict:
             operator_counts[etype] = operator_counts.get(etype, 0) + 1
             if etype == "REPHRASE":
                 rephrase_edges.append((a, b))
+            direct_edges.append({"rel_type": etype, "from_id": a, "to_id": b})
+    # #2514: the reified-operator surface (operator nodes + mitigation Points
+    # touching this session's memory points) — additive snapshot keys the
+    # planted-operator grader consumes (see grading.py).
+    operator_edges: list[dict] = []
+    mitigations: list[dict] = []
+    if seen:
+        op_rows = g.query(
+            OPERATOR_NODE_EDGE_QUERY, params={"ids": list(seen)}
+        ).result_set
+        by_op: dict[str, dict] = {}
+        for oid, op_type, direction, label, _rtype, pid, idx in op_rows:
+            entry = by_op.setdefault(
+                oid,
+                {"op_id": oid, "op_type": op_type, "direction": direction,
+                 "label": label, "endpoints": {}, "source_id": None},
+            )
+            entry["endpoints"][pid] = idx
+        for entry in by_op.values():
+            idx0 = [pid for pid, i in entry["endpoints"].items() if i == 0]
+            entry["source_id"] = idx0[0] if len(idx0) == 1 else None
+            operator_edges.append(entry)
+        mit_rows = g.query(
+            MITIGATION_QUERY, params={"ids": list(seen)}
+        ).result_set
+        for oid, mid, content in mit_rows:
+            mitigations.append({"op_id": oid, "point_id": mid, "content": content or ""})
     return {
         "points": points,
         "rephrase_edges": rephrase_edges,
         "turn_ids": sorted(turn_ids),
         "operator_counts": operator_counts,
+        "direct_edges": direct_edges,
+        "operator_edges": operator_edges,
+        "mitigations": mitigations,
     }
 
 
@@ -422,12 +475,12 @@ def run_benchmark(
     None (the CLI opens one from the ambient env posture — namespace-scoped
     server graph under TORTOISE_DB_URI, transient embedded file otherwise).
 
-    Returns the run report (receipt-ready)::
-
-        {"run_id", "date", "run_status", "verdict", "failure_origin",
-         "commit", "corpus_hash", "judge_pin", "resolved_config", "cost_usd",
-         "metrics", "session_results": [...], "notes": [...]}
-
+    Returns ``{"run_id", "date", "run_status", "verdict", "failure_origin",
+     "commit", "corpus_hash", "judge_pin", "resolved_config", "cost_usd",
+     "metrics", "session_results": [...], "notes": [...]}`` — plus, on a
+    completed run, the additive ``operator_audit`` (issue #2514 planted-
+    operator layer-2 grading: ``{planted, edge_correct, content_ok,
+    by_session}`` — NOT a gated metric in this change).
     On a pre-flight failure or a control-lane violation the report comes back
     with run_status "failed" + the named origin — it NEVER raises mid-run
     (the umbrella aggregates receipts).
@@ -582,6 +635,51 @@ def run_benchmark(
                 session_results = fresh
             except Exception as exc:
                 runner_errors.append(f"dream EP pass raised {type(exc).__name__}: {exc}")
+
+        # #2514 planted-operator (layer-2) grading — corpus-wide (the cross-
+        # session SUPERSEDE resolves its to-anchor in another session's memory
+        # layer).  The EP pass only rewrites confidence, so the operator
+        # surface is re-snapshotted once here (post-dream state).  Additive
+        # AUDIT dimension carried on every run (both lanes) — NOT a
+        # METRIC_VALUES member in this change (scoping note 2026-09-07-2514-).
+        # On the m2 echo lane it is structural 0 (no relation extraction) —
+        # expected and noted, never a quality bar.
+        operator_audit = None
+        if not runner_errors:
+            golds = {sid: corpus.load_gold(sid, root) for sid in selected}
+            points_by_session: dict[str, list] = {}
+            surfaces_by_session: dict[str, dict] = {}
+            for sid in selected:
+                try:
+                    snap = snapshot_session(sdk, sid)
+                except Exception as exc:
+                    runner_errors.append(
+                        f"{sid}: operator snapshot raised {type(exc).__name__}: {exc}"
+                    )
+                    snap = {"points": [], "direct_edges": [],
+                            "operator_edges": [], "mitigations": []}
+                points_by_session[sid] = snap.get("points", [])
+                surfaces_by_session[sid] = snap
+            if not runner_errors:
+                operator_audit = grading.grade_planted_operators(
+                    golds, points_by_session, surfaces_by_session
+                )
+                for result in session_results:
+                    sid = result["session_id"]
+                    owned = [
+                        d for d in operator_audit["results"].values()
+                        if d.get("owner_session") == sid
+                    ]
+                    result["planted_operators"] = owned
+                if operator_audit["planted"]:
+                    notes.append(
+                        f"operator-edge audit (#2514): "
+                        f"{operator_audit['edge_correct']}/"
+                        f"{operator_audit['planted']} planted operator edges graded "
+                        "edge_correct (audit dimension only — not yet a gated "
+                        "metric); the m2 echo lane has no relation extraction, "
+                        "so 0 is structural there, never a bar"
+                    )
     finally:
         if owned_sdk:
             _close_and_wipe(sdk)
@@ -679,6 +777,7 @@ def run_benchmark(
         "cost_usd": round(total_cost, 6),  # partial-sum when mixed; 0.0 + note when untracked
         "metrics": metrics,
         "quote_spans_total": quote_spans_total,
+        "operator_audit": operator_audit,
         "session_results": session_results,
         "notes": notes,
         "log": log,
@@ -822,6 +921,11 @@ def build_receipt(report: dict, *, justification: str | None = None) -> dict:
                 "provenance": r["provenance"],
                 "memory_points": r["memory_point_count"],
                 "operator_counts": r.get("operator_counts", {}),
+                "planted_operators": [
+                    {k: d.get(k) for k in ("id", "expected_kind", "verdict",
+                                          "edge_correct", "forms_found")}
+                    for d in r.get("planted_operators", []) if isinstance(d, dict)
+                ],
                 "failed_units": [
                     {"id": uid, "failure": d["failure"]}
                     for uid, d in r.get("unit_detail", {}).items()
@@ -836,6 +940,14 @@ def build_receipt(report: dict, *, justification: str | None = None) -> dict:
     receipt["session_results"] = detail["session_results"]
     receipt["notes"] = detail["notes"]
     receipt["log"] = detail["log"]
+    # #2514 additive operator-edge audit (a completed-run dimension only).
+    audit = report.get("operator_audit")
+    if audit is not None:
+        receipt["operator_audit"] = {
+            "planted": audit.get("planted"),
+            "edge_correct": audit.get("edge_correct"),
+            "content_ok": audit.get("content_ok"),
+        }
     return receipt
 
 

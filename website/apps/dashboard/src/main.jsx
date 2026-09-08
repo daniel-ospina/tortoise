@@ -39,6 +39,7 @@ import {
   sortedGraphRows,
   sortedTrashRows,
   tierCreateLocked,
+  trashDaysLeft,
   trashEraseLabel,
 } from './graphs.js'
 // #1893: pure source-scope reconcile/serialize/job-body helpers (node --test
@@ -657,7 +658,7 @@ const supabaseStorage = {
     if (!value) { this.removeItem(key); return }
     let encoded = encodeURIComponent(value)
     // Size guard (#1835, mirrors supabase-session.js): an OAuth session with
-    // provider tokens can exceed the 4096-byte cookie limit. provider tokens
+    // provider tokens AND user metadata can exceed the 4096-byte cookie limit. provider tokens
     // are only needed by the initiating flow — strip them first; if still
     // over the cap, attempt the write anyway with a warning.
     if (encoded.length > SIZE_GUARD) {
@@ -665,6 +666,20 @@ const supabaseStorage = {
         const obj = JSON.parse(value)
         delete obj.provider_token
         delete obj.provider_refresh_token
+        // Strip large metadata bloat — identities array and user_metadata fields
+        // are not needed for auth and can exceed the cookie size cap.
+        if (obj.user) {
+          delete obj.user.identities
+          if (obj.user.user_metadata) {
+            // Keep only what the dashboard reads (display_name, avatar_url)
+            var keep = {}
+            if (obj.user.user_metadata.display_name) keep.display_name = obj.user.user_metadata.display_name
+            if (obj.user.user_metadata.avatar_url) keep.avatar_url = obj.user.user_metadata.avatar_url
+            if (obj.user.user_metadata.full_name) keep.full_name = obj.user.user_metadata.full_name
+            if (obj.user.user_metadata.name) keep.name = obj.user.user_metadata.name
+            obj.user.user_metadata = keep
+          }
+        }
         encoded = encodeURIComponent(JSON.stringify(obj))
       } catch { /* not JSON — leave as-is */ }
       if (encoded.length > SIZE_GUARD + 100) {
@@ -3734,7 +3749,7 @@ function claimIntentInFlight() {
         // so the actual fork renders (the Continue button needs it)
         setWizardForkError('This organization already chose how it uses Tortoise.')
         refreshOnboarding().catch(() => {})
-        setWizardStep(2)
+        setWizardStep(1)
       } else if (e?.status === 503) {
         setWizardForkError('The graph is temporarily unavailable — try again in a moment.')
       } else {
@@ -5442,7 +5457,7 @@ function claimIntentInFlight() {
                     </div>
                   )}
 
-                  {wizardStep === 2 && (
+                  {wizardStep === 1 && (
                     <div className="fork-card">
                       {wizardForkError && (
                         <p className="error" role="alert" style={{ marginBottom: '0.9rem' }}>{wizardForkError}</p>
@@ -5480,7 +5495,7 @@ function claimIntentInFlight() {
                         </div>
                       )}
                       <div className="wizard-nav">
-                        <button type="button" className="ghost" onClick={() => setWizardStep(1)}>← Back</button>
+                        <button type="button" className="ghost" onClick={() => setWizardStep(0)}>← Back</button>
                         <div className="wizard-nav-actions">
                           {wizardForkChosen || (onboarding && onboarding.fork) ? (
                             <button type="button" className="btn-primary" onClick={() => setWizardStep(2)}>Continue →</button>
@@ -5492,7 +5507,7 @@ function claimIntentInFlight() {
                     </div>
                   )}
 
-                  {wizardStep === 3 && (
+                  {wizardStep === 2 && (
                     <div className="harness">
                       <div className="harness-tabs">
                         {HARNESS_ORDER.map((h) => (
@@ -6971,7 +6986,13 @@ function claimIntentInFlight() {
                 <table>
                   <thead><tr><th>Name</th><th>Deleted</th><th>Recovery</th><th><span className="sr-only">Actions</span></th></tr></thead>
                   <tbody>
-                    {sortedTrashRows(trash).map((t) => (
+                    {sortedTrashRows(trash).map((t) => {
+                      // #2465: past-window + legacy rows are NOT restorable
+                      // (server 410s them — pending permanent erasure). Show
+                      // Inspect only, so the UI never offers a restore that
+                      // the server refuses.
+                      const restorable = !!(t.deleted_at && trashDaysLeft(t.deleted_at) > 0)
+                      return (
                       <tr key={t.graph_id} className={confirmRestoreId === t.graph_id ? 'graph-delete-arm' : undefined}>
                         <td><code>{t.name}</code></td>
                         <td>{t.deleted_at ? fmtTime(t.deleted_at) : '—'}</td>
@@ -6985,15 +7006,17 @@ function claimIntentInFlight() {
                             </span>
                           ) : (
                             <>
-                              <button
-                                className="ghost small"
-                                disabled={graphBusy}
-                                onClick={() => { setConfirmRestoreId(t.graph_id); setTrashMsg('') }}
-                                aria-label={`Restore graph ${t.name}`}
-                              >
-                                Restore
-                              </button>
-                              {' '}
+                              {restorable && (
+                                <button
+                                  className="ghost small"
+                                  disabled={graphBusy}
+                                  onClick={() => { setConfirmRestoreId(t.graph_id); setTrashMsg('') }}
+                                  aria-label={`Restore graph ${t.name}`}
+                                >
+                                  Restore
+                                </button>
+                              )}
+                              {restorable && ' '}
                               <button
                                 className="ghost small"
                                 disabled={graphBusy}
@@ -7007,7 +7030,8 @@ function claimIntentInFlight() {
                           )}
                         </td>
                       </tr>
-                    ))}
+                      )
+                    })}
                   </tbody>
                 </table>
                 {trashInspectId && trashInspect && trashInspect.graph_id === trashInspectId && (

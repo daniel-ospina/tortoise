@@ -60,6 +60,22 @@ DISTRACTOR_LEAKAGE_TOLERANCE = 1
 HARNESS_VALUES = frozenset({"claude", "claude-desktop", "claude-web", "codex", "cursor", "pi"})
 ROLE_VALUES = frozenset({"user", "assistant"})
 KIND_VALUES = frozenset({"fact", "idea", "decision", "vibe", "entity"})
+
+# #2514 planted-OPERATOR (layer-2) gold vocabulary.  ``expected_kind`` is the
+# ISSUE/task-language operator name; the mechanical grader maps each kind to
+# the graph surface it asserts (see grading.py ``operator_edge_detail``):
+# SUPERSEDE -> a CORRECTS edge (new -> superseded old), NEGATE -> a NAND
+# operator edge (counter-claim attacks the claim), MITIGATES -> the write
+# path's MITIGATES mitigation structure, SUPPORTS -> an IMPL operator edge
+# (evidence -> claim).  Direction convention: ``from`` is the epistemically
+# ACTIVE source (newer decision / attacker / evidence / mitigation action),
+# ``to`` is the object it acts on (superseded decision / attacked claim /
+# risk claim / hypothesis).  Ontology ambiguity for SUPERSEDE + MITIGATES is
+# recorded (scoping note 2026-09-07-2514-operator-corpus.md findings F1/F2),
+# not resolved here.
+PLANTED_OPERATOR_KIND_VALUES = frozenset(
+    {"SUPERSEDE", "NEGATE", "MITIGATES", "SUPPORTS"}
+)
 NOTABILITY_VALUES = frozenset({"high", "medium", "low"})
 # Research-grounded Cat-35 enumeration (research-brief W2 row + raw-notes
 # 10:10Z gold line-ref): the third of the session the unit was planted in.
@@ -534,6 +550,7 @@ def validate_gold(gold: dict, fixture: dict | None = None) -> list[str]:
                     "attribution_hazards",
                     "salient_units",
                     "distractor_leakage_tolerance",
+                    "planted_operators",
                 }
             ),
             "gold",
@@ -553,6 +570,7 @@ def validate_gold(gold: dict, fixture: dict | None = None) -> list[str]:
         _validate_distractors(gold, fixture, issues)
         _validate_hazards(gold, fixture, issues)
         _validate_salient_units(gold, issues)
+        _validate_planted_operators(gold, fixture, issues)
         tolerance = _expect_int(
             gold, "distractor_leakage_tolerance", "gold", issues, minimum=1
         )
@@ -561,6 +579,195 @@ def validate_gold(gold: dict, fixture: dict | None = None) -> list[str]:
                 f"gold.distractor_leakage_tolerance: expected "
                 f"{DISTRACTOR_LEAKAGE_TOLERANCE} (research-recommended ≤1/run), got {tolerance}"
             )
+    return issues
+
+
+# ── Planted operators (sealed layer-2 gold, #2514) ─────────────────────────
+
+
+# Allowed sub-keys of a planted-operator endpoint (from/to).
+_OPERATOR_ENDPOINT_KEYS = frozenset({"session_id", "verbatim_anchor", "planted_turn"})
+
+
+def _validate_operator_endpoint(endpoint: object, where: str, issues: list[str]) -> None:
+    """Validate one planted-operator endpoint (``from``/``to``).
+
+    ``session_id`` is OPTIONAL and defaults to the gold's own session (the
+    endpoint's fixture); a non-default session_id names the OTHER session an
+    anchor lives in (the #2514 cross-session SUPERSEDE — the only mechanism
+    by which today's v2 extractor can form a point-level CORRECTS in one
+    sequential corpus capture).  Cross-session grounding is verified at the
+    corpus level (``validate_planted_operators_cross_session``), because one
+    gold's validator only sees its own fixture.
+    """
+    _require_mapping(endpoint, where, issues)
+    if not isinstance(endpoint, dict):
+        return
+    _reject_unknown_keys(endpoint, _OPERATOR_ENDPOINT_KEYS, where, issues)
+    session_id = endpoint.get("session_id")
+    if session_id is not None and (
+        not isinstance(session_id, str) or not session_id.strip()
+    ):
+        issues.append(f"{where}.session_id: expected a non-empty string, got {session_id!r}")
+    _expect_str(endpoint, "verbatim_anchor", where, issues)
+    _expect_int(endpoint, "planted_turn", where, issues, minimum=1)
+
+
+def _validate_planted_operators(gold: dict, fixture: dict | None, issues: list[str]) -> None:
+    """Validate the sealed gold's ``planted_operators`` section.
+
+    Section is OPTIONAL (existing wp01-wp05 golds predate #2514 and carry no
+    operator gold); when present it must be a list of operator entries.  Each
+    entry names the expected operator kind + the two anchored endpoints it
+    must connect.  Anchors whose endpoint session is the gold's OWN session
+    are grounded here against the fixture (normalized-substring discipline,
+    identical to planted_units); anchors living in ANOTHER session are
+    cross-checked corpus-wide (see the cross-session helper below).
+    """
+    ops = gold.get("planted_operators")
+    if ops is None:
+        return
+    if not isinstance(ops, list):
+        issues.append("gold.planted_operators: expected a list, got "
+                      f"{type(ops).__name__}")
+        return
+    own_session = gold.get("session_id")
+    seen_ids: set[str] = set()
+    for i, op in enumerate(ops):
+        where = f"gold.planted_operators[{i}]"
+        _require_mapping(op, where, issues)
+        if not isinstance(op, dict):
+            continue
+        _reject_unknown_keys(
+            op,
+            frozenset({"id", "expected_kind", "from", "to", "relation_turn", "reason"}),
+            where,
+            issues,
+        )
+        op_id = _expect_str(op, "id", where, issues)
+        if op_id is not None:
+            if op_id in seen_ids:
+                issues.append(f"{where}.id: duplicate planted-operator id {op_id!r}")
+            seen_ids.add(op_id)
+        _expect_enum(
+            op, "expected_kind", PLANTED_OPERATOR_KIND_VALUES, where, issues
+        )
+        relation_turn = _expect_int(op, "relation_turn", where, issues, minimum=1)
+        _expect_str(op, "reason", where, issues)
+        # from/to endpoints (anchor grounding below; equal anchors are a
+        # degenerate edge — a self-loop cannot be a planted operator).
+        endpoints: dict[str, dict | None] = {}
+        for side in ("from", "to"):
+            endpoint = op.get(side)
+            where_e = f"{where}.{side}"
+            _require_mapping(endpoint, where_e, issues)
+            if not isinstance(endpoint, dict):
+                endpoints[side] = None
+                continue
+            _validate_operator_endpoint(endpoint, where_e, issues)
+            endpoints[side] = endpoint
+        f_endpoint, t_endpoint = endpoints.get("from"), endpoints.get("to")
+        if (
+            isinstance(f_endpoint, dict)
+            and isinstance(t_endpoint, dict)
+            and f_endpoint.get("session_id", own_session)
+            == t_endpoint.get("session_id", own_session)
+            and isinstance(f_endpoint.get("verbatim_anchor"), str)
+            and f_endpoint.get("verbatim_anchor")
+            == t_endpoint.get("verbatim_anchor")
+        ):
+            issues.append(
+                f"{where}: from/to anchors are identical ({f_endpoint.get('verbatim_anchor')!r}) "
+                "— a planted operator must connect two distinct claims"
+            )
+        if relation_turn is not None and fixture is not None:
+            turn = _safe_turn(fixture, relation_turn, where, issues)
+            if turn is None:
+                issues.append(
+                    f"{where}.relation_turn: {relation_turn} is out of range for the "
+                    "own-session fixture — the relation must be STATED in the owning "
+                    "session's transcript"
+                )
+        # Own-session endpoints: ground their anchors against the own fixture.
+        if fixture is None:
+            continue
+        for side in ("from", "to"):
+            endpoint = endpoints[side]
+            if not isinstance(endpoint, dict):
+                continue
+            if endpoint.get("session_id") is not None and endpoint["session_id"] != own_session:
+                continue  # cross-session anchor — checked corpus-wide
+            anchor = endpoint.get("verbatim_anchor")
+            planted_turn = endpoint.get("planted_turn")
+            if anchor is None or planted_turn is None:
+                continue
+            turn = _safe_turn(fixture, planted_turn, where, issues)
+            if turn is None:
+                continue
+            content = turn.get("content")
+            if not isinstance(content, str):
+                issues.append(
+                    f"{where}.{side}.verbatim_anchor: fixture turn {planted_turn - 1} "
+                    "content is not a string (fixture malformed); cannot verify grounding"
+                )
+                continue
+            if not anchor_present(anchor, content):
+                issues.append(
+                    f"{where}.{side}.verbatim_anchor: {anchor!r} is not a normalized "
+                    f"substring of conversation[{planted_turn - 1}] content "
+                    "(fixture/gold drift)"
+                )
+
+
+def validate_planted_operators_cross_session(
+    gold: dict, fixtures_by_session: dict[str, dict]
+) -> list[str]:
+    """Corpus-level cross-session anchor grounding for one gold's operators.
+
+    An endpoint whose ``session_id`` names a session OTHER than the gold's own
+    must ground in that OTHER session's fixture (the one-gold validator above
+    skips it — its fixture is not in scope).  Unknown ``session_id`` values and
+    out-of-range turns are reported.  Called by the generator's committed-dir
+    validation with all fixtures in hand.
+    """
+    issues: list[str] = []
+    own_session = gold.get("session_id")
+    ops = gold.get("planted_operators") or []
+    if not isinstance(ops, list):
+        return issues
+    for i, op in enumerate(ops):
+        if not isinstance(op, dict):
+            continue
+        where = f"gold.planted_operators[{i}] (cross-session)"
+        for side in ("from", "to"):
+            endpoint = op.get(side)
+            if not isinstance(endpoint, dict):
+                continue
+            sid = endpoint.get("session_id")
+            if sid is None or sid == own_session:
+                continue  # own-session grounding already checked
+            fixture = fixtures_by_session.get(sid)
+            if fixture is None:
+                issues.append(
+                    f"{where}.{side}: endpoint names unknown session {sid!r}"
+                )
+                continue
+            planted_turn = endpoint.get("planted_turn")
+            anchor = endpoint.get("verbatim_anchor")
+            if planted_turn is None or anchor is None:
+                continue
+            turn = _safe_turn(fixture, planted_turn, where, issues)
+            if turn is None:
+                continue
+            content = turn.get("content")
+            if not isinstance(content, str):
+                continue
+            if not anchor_present(anchor, content):
+                issues.append(
+                    f"{where}.{side}.verbatim_anchor: {anchor!r} is not a normalized "
+                    f"substring of {sid} conversation[{planted_turn - 1}] content "
+                    "(cross-session fixture/gold drift)"
+                )
     return issues
 
 

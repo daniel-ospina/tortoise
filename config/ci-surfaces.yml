@@ -6,11 +6,16 @@ surfaces:
   - test_abuse_integration.py
   - test_acl_graph_users.py   # C4 #2113: per-graph FalkorDB ACL layer (docker-lane; skipif no URI)
   - test_battery_corpus_v11.py
+  - test_battery_ep_outcome.py
+  - test_battery_lane_matrix.py
   - test_battery_loader_fidelity.py
   - test_battery_parity_hash.py
+  - test_battery_provenance.py
   - test_battery_r1_seed.py
   - test_battery_report_writers.py
   - test_battery_schema_v11.py
+  - test_battery_seed_ingest.py
+  - test_battery_write_channel.py
   - test_delivery_tenancy.py  # C6 #2115: delivery-shape tenancy + session_recording per-graph override
   - test_onboarding_email_http.py
   - test_sentry.py
@@ -381,6 +386,7 @@ surfaces:
   - test_trash_inspect.py          # #2469 Inspect archive-run counting (fake CP)
   - test_trash_name_race.py        # #2468 restore-vs-create name race (fake CP)
   - test_trash_lock.py             # #2470 restore lock timeout (fake CP)
+  - test_trash_grace.py            # #2465 trash recovery-window grace (supabase lane, fake CP)
   - test_tripwire.py
   - test_uri_env_mutations_declared.py
   - test_validity_windows.py
@@ -421,6 +427,7 @@ surfaces:
   - test_ep_draft_filter.py
   - test_ep_dirty_persist.py
   - test_ep_local_395.py
+  - test_ep_mitigation.py
   - test_ep_terminal_ghost.py
   - test_ep_nary_falsification.py
   - test_ep_operatorless.py
@@ -428,6 +435,7 @@ surfaces:
   - test_ep_quadrature.py
   - test_ep_selector.py
   - test_pointsuperseded_rebuild.py
+  - test_weights_mitigation.py
   - test_ep_sources.py
   - test_2199_decide_calibration.py
   - test_file_human_approval.py

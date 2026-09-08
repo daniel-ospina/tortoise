@@ -9716,10 +9716,37 @@ async def _require_owner_admin_session(user: dict, team_id: str) -> None:
             status_code=403, detail="Requires owner or admin role in team")
 
 
+# #2304 default recovery window — MUST mirror backup_sweep.
+# _GRAPH_PURGE_GRACE_DAYS (the purge's erasure cutoff): restore and purge
+# share one window. If one changes the other must too.
+_TRASH_GRACE_DAYS = 7
+
+
+def _trash_grace_expired(deleted_at: object, now: datetime | None = None,
+                         grace_days: int = _TRASH_GRACE_DAYS) -> bool:
+    """#2465: True when the trash recovery window has passed — the graph is
+    pending permanent erasure (past-grace rows are NOT restorable; only the
+    purge clears them). A legacy tombstone (no deleted_at — predates #2304)
+    is past-grace by definition. Malformed stamps count as expired (they can
+    never be younger than the grace window). ISO-8601 UTC compare."""
+    if not deleted_at:
+        return True
+    try:
+        ts = datetime.fromisoformat(str(deleted_at).replace("Z", "+00:00"))
+    except ValueError:
+        return True
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=UTC)
+    now_ts = now or datetime.now(UTC)
+    if now_ts.tzinfo is None:
+        now_ts = now_ts.replace(tzinfo=UTC)
+    return now_ts > ts + timedelta(days=max(0, grace_days))
+
+
 async def _graph_row_probe(team_id: str, graph_id: str) -> dict | None:
     """Fetch ONE graph row (any status) across the mode branch — the
     trash-restore decision probe. Returns {kind, status, name, namespace,
-    purged_at} or None (unknown graph)."""
+    deleted_at, purged_at} or None (unknown graph)."""
     sdk = _make_sdk(namespace="registry")
     from tortoise.supabase_control import (
         get_control_plane,
@@ -9728,26 +9755,29 @@ async def _graph_row_probe(team_id: str, graph_id: str) -> dict | None:
     if is_supabase_enabled():
         rows = get_control_plane().query(
             "graphs",
-            select=["kind", "status", "name", "namespace", "purged_at"],
+            select=["kind", "status", "name", "namespace",
+                    "deleted_at", "purged_at"],
             filters=[("id", "eq", graph_id), ("team_id", "eq", team_id)],
         )
         if not rows:
             return None
         r = rows[0]
         return {"kind": r.get("kind"), "status": r.get("status"),
-                "name": r.get("name"), "namespace": r.get("namespace"),
+                "name": r.get("name"),
+                "namespace": r.get("namespace"),
+                "deleted_at": r.get("deleted_at"),
                 "purged_at": r.get("purged_at")}
     rows = sdk._get_registry().query(
         "MATCH (g:Graph {id:$gid, team_id:$tid}) "
         "RETURN g.kind, coalesce(g.status, 'active'), g.name, g.namespace, "
-        "g.purged_at",
+        "g.deleted_at, g.purged_at",
         params={"gid": graph_id, "tid": team_id},
     ).result_set
     if not rows:
         return None
     return {"kind": rows[0][0], "status": rows[0][1],
             "name": rows[0][2], "namespace": rows[0][3],
-            "purged_at": rows[0][4]}
+            "deleted_at": rows[0][4], "purged_at": rows[0][5]}
 
 
 async def _rollback_restore_name_race(team_id: str, graph_id: str) -> None:
@@ -9819,9 +9849,10 @@ async def list_trash(team_id: str,
     Owner/admin session only. Rows: [{graph_id, name, kind, deleted_at}]
     — purged rows (data physically erased) are never listed; the default
     graph can never be here. ``deleted_at`` absent = legacy tombstone
-    (predates #2304 — treated as past-grace by the purge). The purge sweep
-    erases past-grace rows on its cadence; until then they remain listed
-    and restorable (the recovery window is enforced by the purge)."""
+    (predates #2304 — treated as past-grace by the purge). Past-window and
+    legacy rows remain LISTED (pending the purge) but are NOT restorable:
+    restore 410s them (#2465 — the 7-day window is a hard server-side
+    bound); the purge erases them on its cadence."""
     await _require_owner_admin_session(user, team_id)
     team = await _team_node(team_id)
     if team is None:
@@ -9913,6 +9944,16 @@ async def _restore_trash_graph_locked(request: Request, user: dict,
             status_code=410,
             detail="Graph was purged (data physically erased) — not "
                    "restorable; re-create it from scratch")
+    # #2465: the recovery window is a HARD server-side bound — a row past
+    # its 7 days (or a legacy tombstone with no deleted_at) is pending
+    # permanent erasure and no longer restorable, matching the UI copy and
+    # privacy §6 ("refused for restoration once the window has passed").
+    # Only the purge clears these rows (operator cadence — #2317).
+    if _trash_grace_expired(row.get("deleted_at")):
+        raise HTTPException(
+            status_code=410,
+            detail="The 7-day recovery window has passed — this graph is "
+                   "pending permanent erasure and can no longer be restored")
     name = (row.get("name") or "").strip()
     if name and await _trash_name_conflict(team_id, name, graph_id):
         raise HTTPException(

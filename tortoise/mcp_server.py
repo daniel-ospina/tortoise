@@ -1550,16 +1550,18 @@ def tortoise_mitigate_operator(id: str, reason: str, strength: float = 0.5,
                                credibility: str | int | float | None = None) -> dict:
     """Create a mitigation Point that modulates an operator's edge strength.
 
-    MITIGATION STRENGTH SEMANTICS (single-sourced — issue #2199 knock-on
-    decision 3): ``strength`` means how much this reason reduces the edge —
-    0 = fully neutralized, 1 = fully intact (default 0.5). It is NOT a
-    statement of how true the reason is and is NOT fused into the mitigation
-    point's prior. Strength is currently ADVISORY metadata (EP does not read
-    mitigation_strength yet); the decide tooling clamps to [0.10, 0.50] for
-    relevance edges.
+    MITIGATION STRENGTH SEMANTICS — single source of truth is the
+    tortoise/weights.py module docstring (#2315; product decision
+    2026-09-07: mitigation is a GRADED DAMPENER, not a refutation).
+    Sanctioned band: [0.10, 0.50] — 0.10 minor caveat (weakest), 0.50
+    major counter-evidence (STRONGEST; never >0.50 — would invert the
+    claim, use NAND). Formula: w_eff = w * (1 - strength); EP reads
+    mitigation_strength via compute_operator_weight (weights.py). Strength
+    is NOT how true the reason is and is NOT fused into the mitigation
+    point's prior. The decide tooling clamps to the band before writing.
 
     reason: Why the edge is weaker than it appears.
-    strength: 0-1 — 0=fully neutralized, 1=fully intact (default 0.5).
+    strength: dampening strength in [0.10, 0.50] (0.50 = strong).
     credibility: optional starting belief for the mitigation reason itself
       (plain-language ladder gold/high/medium/low/unverified, T0-T4, or
       numeric 0-4) — stamped 'set-by-author'. Omit for the #2199 system
