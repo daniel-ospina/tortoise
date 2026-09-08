@@ -15,9 +15,20 @@ aboutObjects:
 
 The registry graph is a dedicated FalkorDB namespace (`registry`) storing control-plane entities for the Tortoise Hosted Platform. It is separate from tenant namespaces. Control-plane data migrates to Supabase under #669 (managed backups + PITR); until then it has no operator-controlled backup — see #596/#669.
 
+## Definitions — account layer vs in-graph Subjects (#2311)
+
+Two layers coexist and must not share one word:
+
+- **Organization account** — the account-level unit of the product (owner direction 2026-09-06). An organization account owns **one or more graphs** and carries billing/tenure/membership. This is what the registry `Team` entity below (and the `teams` table, `/v1/teams`, `team_id`, …) represents: those **legacy code/API/DB identifiers still read "team"** and are deliberately unchanged in this vocabulary-first phase (phase-2 candidates). User-facing copy and docs call this unit an *organization account* (or *organization* where UI shorthand is established).
+- **In-graph Subjects** — `organization` and `team` **Subject kinds inside a memory graph** (ONTOLOGY.md §5/§6), e.g. the onboarding seed's org Subject + person. These live in the knowledge layer and are semantically distinct from the account layer; the Subject kinds are **not renamed** by #2311.
+
+Cross-references: ONTOLOGY.md §5 (Subject Kind Vocabulary) / §6 (Subclass Model); docs/00_index.md.
+
 ## Entity Types
 
 ### Team
+
+> The `Team` entity is the control-plane row for an **organization account** (see Definitions above). The name is a legacy code identifier — unchanged in phase 1 of #2311.
 
 ```
 (:Team {

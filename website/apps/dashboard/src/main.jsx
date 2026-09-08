@@ -1861,7 +1861,7 @@ function claimIntentInFlight() {
           await fetchIdentity()
           setTab('profile')
           if (res.adoption_signal) {
-            setProfileError("This email is also used by another team — reach out if that's unexpected.")
+            setProfileError("This email is also used by another organization — reach out if that's unexpected.")
           }
         } catch (e) {
           setProfileError(e.message || 'Could not complete linking — refresh your profile')
@@ -2724,7 +2724,7 @@ function claimIntentInFlight() {
         // #1566 (code-review P2): the guard must NOT dead-end — offer the
         // claim card (the welcome.html 'Go claim my team' pattern).
         setWelcomeProvisionError(
-          'You have an anonymous team waiting to be claimed — attach your ' +
+          'You have an anonymous organization waiting to be claimed — attach your ' +
           'GitHub or Google identity to claim it (same key, same graph).')
         return { routedAway: true }
       }
@@ -2855,7 +2855,7 @@ function claimIntentInFlight() {
             })
             if (inviteRes.ok) {
               try { sessionStorage.removeItem(INVITE_TOKEN_STORAGE) } catch { /* best-effort */ }
-              setBanner('Welcome to the team! Your membership is active.')
+              setBanner('Welcome to the organization! Your membership is active.')
               // #2538: propagate the accepted invite to wizard state so
               // loadTeams fires and the welcomeHasOrg chain triggers the
               // dashboard route guard (invited users skip onboarding).
@@ -3086,14 +3086,14 @@ function claimIntentInFlight() {
               setChecking(false)
               return
             }
-            throw new Error('Could not load your teams — try again.')
+            throw new Error('Could not load your organizations — try again.')
           }
         } catch (e) {
           // #1566 (review P2): fail CLOSED for any non-array/empty result —
           // the throw's premise is 'not a valid teams array'.
           if (!Array.isArray(teamsList) || !teamsList.length) {
             setAuthed(false)
-            setMountError((e && e.message) || 'Could not load your teams — try again.')
+            setMountError((e && e.message) || 'Could not load your organizations — try again.')
             setChecking(false)
             return
           }
@@ -3700,7 +3700,7 @@ function claimIntentInFlight() {
     const name = createTeamName.trim()
     if (!name) { setCreateTeamError('Organization name required'); return }
     if (name.length > 64 || !/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/.test(name)) {
-      setCreateTeamError('Invalid team name — letters, numbers, dash, underscore only')
+      setCreateTeamError('Invalid organization name — letters, numbers, dash, underscore only')
       return
     }
     setCreateTeamBusy(true)
@@ -3717,10 +3717,10 @@ function claimIntentInFlight() {
       if (res?.team_id) switchTeam(res.team_id)
     } catch (e) {
       if (e?.status === 402) {
-        setCreateTeamError(e.message || 'Create another team requires a paid plan')
+        setCreateTeamError(e.message || 'Create another organization requires a paid plan')
         setCreateTeamUpgrade(true)
       } else {
-        setCreateTeamError(e?.message || 'Could not create the team')
+        setCreateTeamError(e?.message || 'Could not create the organization')
       }
     } finally {
       setCreateTeamBusy(false)
@@ -4499,7 +4499,7 @@ function claimIntentInFlight() {
         const b = await res.json().catch(() => ({}))
         if (res.status === 402) {
           // #1875: render the API's detail (upgrade vs at-capacity)
-          setError(typeof b.detail === 'string' ? b.detail : 'Invites require the Pro or Team tier — upgrade to invite teammates.')
+          setError(typeof b.detail === 'string' ? b.detail : 'Invites require the Pro or Team tier — upgrade to invite members.')
           setBusy(false)
           return
         }
@@ -4521,7 +4521,7 @@ function claimIntentInFlight() {
   async function removeMember(userId) {
     const _teamAtCall = currentTeamId // Round-16: mutation identity guard — a switch mid-flight must not act on the previous team
     if (busy) return // Round-24/25: double-click guard BEFORE confirm (a second click must not re-pop the dialog)
-    if (!confirm('Remove this member from the team?')) return
+    if (!confirm('Remove this member from the organization?')) return
     setBusy(true)
     setError('')
     try {
@@ -5186,7 +5186,7 @@ function claimIntentInFlight() {
           <div className="protect-banner protect-full">
             <h2 className="protect-banner-title">🔑 Claim your organization</h2>
             <p>
-              Paste the key for your unclaimed team, then attach a login to
+              Paste the key for your unclaimed organization, then attach a login to
               finish setting up your account.
             </p>
             <div className="inline-form claim-email-form">
@@ -5435,7 +5435,7 @@ function claimIntentInFlight() {
                 </h1>
                 <p className="error" role="alert">{welcomeProvisionError}</p>
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
-                  {/anonymous team waiting/.test(welcomeProvisionError) ? (
+                  {/anonymous organization waiting/.test(welcomeProvisionError) ? (
                     // #1566 (code-review P2): the claim-guard must not
                     // dead-end — the claim card is the escape.
                     <a className="btn-primary" href="https://app.premiselabs.co/?claim=1">Go claim my organization →</a>
@@ -6543,7 +6543,7 @@ sdk.create_point(text="My first point")
         </p>
         {suspended && (
           <div className="error banner" role="alert">
-            ⚠️ {suspended.message || 'This team has been suspended due to unusual activity.'}
+            ⚠️ {suspended.message || 'This organization has been suspended due to unusual activity.'}
             {suspended.appeal_url && (
               <span>
                 {' '}— <a href={suspended.appeal_url} target="_blank" rel="noreferrer">Appeal suspension</a>
@@ -7370,13 +7370,13 @@ sdk.create_point(text="My first point")
         {tab === 'members' && (
           <section>
             <div className="row">
-              <h2>Team members</h2>
+              <h2>Members</h2>
               {isOwnerAdmin && (
                 <div className="inline-form">
                   <input
                     type="email"
-                    placeholder="teammate@example.com"
-                    aria-label="Teammate email"
+                    placeholder="member@example.com"
+                    aria-label="Member email"
                     value={inviteEmail}
                     onChange={(e) => setInviteEmail(e.target.value)}
                   />
@@ -7395,7 +7395,7 @@ sdk.create_point(text="My first point")
                 for Free/Solo (the old copy rendered for Pro too and
                 contradicted the working invite form). */}
             {team && team.tier !== 'pro' && team.tier !== 'team' && isOwnerAdmin && (
-              <p className="dim small">Invites require the Pro or Team tier — <a href="https://tortoise.premiselabs.co/product.html#pricing" target="_blank" rel="noreferrer">upgrade to add teammates</a>.</p>
+              <p className="dim small">Invites require the Pro or Team tier — <a href="https://tortoise.premiselabs.co/product.html#pricing" target="_blank" rel="noreferrer">upgrade to add members</a>.</p>
             )}
             <table>
               <thead><tr><th>Email / User</th><th>Role</th><th>Status</th><th></th></tr></thead>
@@ -7437,13 +7437,13 @@ sdk.create_point(text="My first point")
         {tab === 'billing' && team && (
           <section className="billing">
             <div className="row">
-              <h2>Billing — {currentTeamName || 'this team'}</h2>
+              <h2>Billing — {currentTeamName || 'this organization'}</h2>
               {/* #1876: per-tenant billing — in-section context selector
                   (reuses switchTeam; single-team users get the name only). */}
               {teams.length > 1 && (
                 <select
                   className="billing-team-select"
-                  aria-label="Billing team"
+                  aria-label="Billing organization"
                   value={currentTeamId || ''}
                   onChange={(e) => { switchTeam(e.target.value); setTab('billing') }}
                 >
