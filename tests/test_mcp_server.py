@@ -454,6 +454,55 @@ class TestToolFunctions:
             _asyncio.set_event_loop(None)
 
 
+class TestGraphBoundTeamSurfaceReject:
+    """#2300 completeness sweep: EVERY MCP tool that touches team-level
+    state (the seven onboarding tools + pack install) must reject a
+    graph-bound resolution outright — no tool left asymmetric vs the REST
+    team-surface reject set (C5 #2114). Direct function-body probe with the
+    resolution ContextVars set (the same context the HTTP middleware
+    attaches to a deleg=0 per-graph key after #2300's registry-lane fix).
+    """
+
+    # tool name → call kwargs the function body needs BEFORE its reject
+    # fires (required params only — the reject is the first gate in every
+    # body; only demo_create checks team_id first, so the probe sets it).
+    TOOL_ARGS = {  # noqa: RUF012
+        "tortoise_onboarding_demo_create": {},
+        "tortoise_onboarding_state": {},
+        "tortoise_onboarding_seed": {},
+        "tortoise_onboarding_session_recording": {"enabled": True},
+        "tortoise_onboarding_github_connect": {},
+        "tortoise_onboarding_github_index": {"org": "acme"},
+        "tortoise_onboarding_github_status": {},
+        "tortoise_pack_install": {"manifest_yaml": "x: 1"},
+    }
+
+    def test_every_team_surface_tool_rejects_graph_bound(self):
+        from fastmcp.exceptions import AuthorizationError  # noqa: I001
+        from tortoise.mcp_auth import (
+            _current_graph_id, _current_graph_namespace,
+            _current_legacy_full_access, _current_scopes, _current_team_id,
+        )
+        toks = [
+            _current_team_id.set("gb-team"),
+            _current_graph_id.set("g_gb"),
+            _current_graph_namespace.set("team_gb_g_gb"),
+            _current_scopes.set(["graphs:read", "graphs:write"]),
+            _current_legacy_full_access.set(False),
+        ]
+        try:
+            for tool, args in sorted(self.TOOL_ARGS.items()):
+                fn = getattr(mcp_mod, tool, None)
+                assert fn is not None, f"{tool} has no module-level handler"
+                with pytest.raises(AuthorizationError) as exc:
+                    fn(**args)
+                assert "Graph-scoped keys cannot access" in str(
+                    exc.value), f"{tool}: {exc.value}"
+        finally:
+            for tok in reversed(toks):
+                tok.var.reset(tok)
+
+
 class TestToolIntegration:
     """Integration tests that require FalkorDB."""
 

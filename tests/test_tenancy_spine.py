@@ -297,3 +297,69 @@ def test_team_level_surface_rejects_graph_bound(spine_env):
     assert r.status_code == 200, r.text
 
 
+# ── #2300: onboarding/GitHub REST twins vs graph-bound keys ───────────────
+# Post-#2083 parity (REST half): onboarding state already rejects graph-bound
+# keys (C5 #2114); #2300 closes the github-status/connect/repos/branches REST
+# residual so REST + MCP reject sets are identical (Indicator 2 — no tool
+# left asymmetric in either direction).
+
+
+def test_onboarding_state_rejects_graph_bound(spine_env):
+    """GET /v1/onboarding/state (REST twin of tortoise_onboarding_state)
+    rejects a deleg=0 per-graph key — GRAPH_SCOPED_TEAM_SURFACE, the C5
+    signal the MCP surface now mirrors. Team-wide key unaffected."""
+    sdk, tid, g, tc, _def_pt = spine_env
+    token = _mint_key(sdk, tid, scopes=["graphs:read"],
+                      graph_id=g["graph_id"], deleg=0)
+    r = tc.get("/v1/onboarding/state",
+               headers={"Authorization": f"Bearer {token}"})
+    assert r.status_code == 403, r.text
+    detail = r.json().get("detail")
+    assert detail.get("error_code") == "GRAPH_SCOPED_TEAM_SURFACE", detail
+    wide = _mint_key(sdk, tid, scopes=["graphs:read"])
+    r = tc.get("/v1/onboarding/state",
+               headers={"Authorization": f"Bearer {wide}"})
+    assert r.status_code == 200, r.text
+
+
+def test_github_rest_family_rejects_graph_bound(spine_env):
+    """REST github twins (status/repos/branches/connect) reject graph-bound
+    keys — the #2300 REST residual close (the MCP github tools reject after
+    #2300; github index/reindex already rejected in C5). The dashboard's
+    session flows and team-wide keys keep working."""
+    sdk, tid, g, tc, _def_pt = spine_env
+    ro = _mint_key(sdk, tid, scopes=["graphs:read"],
+                   graph_id=g["graph_id"], deleg=0)
+    rw = _mint_key(sdk, tid, scopes=["graphs:read", "graphs:write"],
+                   graph_id=g["graph_id"], deleg=0)
+    h_ro = {"Authorization": f"Bearer {ro}"}
+    h_rw = {"Authorization": f"Bearer {rw}"}
+    for path in (
+        "/v1/onboarding/github/status",
+        "/v1/onboarding/github/repos",
+        "/v1/onboarding/github/branches?repo=probe",
+    ):
+        r = tc.get(path, headers=h_ro)
+        assert r.status_code == 403, (path, r.status_code, r.text)
+        detail = r.json().get("detail")
+        assert detail.get("error_code") == "GRAPH_SCOPED_TEAM_SURFACE", detail
+    r = tc.post("/v1/onboarding/github/connect", headers=h_rw, json={})
+    assert r.status_code == 403, r.text
+    detail = r.json().get("detail")
+    assert detail.get("error_code") == "GRAPH_SCOPED_TEAM_SURFACE", detail
+    # Team-wide scoped key: the authz gate passes (no credentials seeded in
+    # this spine env → the endpoints report disconnected, never 403).
+    wide = _mint_key(sdk, tid, scopes=["graphs:read"])
+    h_wide = {"Authorization": f"Bearer {wide}"}
+    for path in (
+        "/v1/onboarding/github/status",
+        "/v1/onboarding/github/repos",
+        "/v1/onboarding/github/branches?repo=probe",
+    ):
+        r = tc.get(path, headers=h_wide)
+        assert r.status_code == 200, (path, r.status_code, r.text)
+    r = tc.post("/v1/onboarding/github/connect", headers=h_wide, json={})
+    # 503 (OAuth env unset) is PAST the authz gate — never GRAPH_SCOPED.
+    assert r.status_code in (200, 503), r.text
+
+
