@@ -168,7 +168,6 @@ class A4TortoiseArm:
         Raises ArmUnavailable on failure (never partial memories).
         """
         self.decide_cycles = 0
-        sid = context.scenario.id
         sdk = self._sdk(context.scenario)
         try:
             query = (context.user_message or "").strip()
