@@ -76,10 +76,21 @@ def test_seed_full_legacy_is_the_prefix_derivation(tmp_path):
     assert sc.contradiction_pairs[0].claim_b in contents
 
 
-def test_claim_b_never_preseeded_in_seed_mode(tmp_path):
+def test_claim_b_never_preseeded_in_seed_mode(tmp_path, monkeypatch):
+    """seed_mode never pre-seeds ¬A; positive control first (claim_a IS
+    findable) so the absence assert can never pass vacuously."""
+    # Cross-lane: raw-content checks must observe graphs as named — force
+    # embedded semantics (a URI redirect folds graphs per test).
+    monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+    monkeypatch.delenv("TORTOISE_DB_PATH", raising=False)
     sc = _cts()[0]
     store = seeds.setup_seed_mode(tmp_path, sc.id)
     try:
+        pairs = sc.contradiction_pairs or []
+        if pairs:
+            ca = pairs[0].claim_a[:40]
+            assert store.find_content(ca), \
+                "positive control failed: seeded claim_a not findable"
         hits = _search(store, _fragments(sc))
         assert not [h for _, h in hits if h], f"¬A leaked pre-k: {hits}"
     finally:
@@ -119,13 +130,19 @@ def test_no_leak_full_policy_surface_all_arms(tmp_path, scenario_id):
 
 
 @pytest.mark.parametrize("n", range(1, 7))
-def test_bct_benign_store_never_carries_twin_counterclaim(tmp_path, n):
+def test_bct_benign_store_never_carries_twin_counterclaim(tmp_path, monkeypatch, n):
     """bct-001..006 benign stores + policy carry NO ¬A content of their
     ct-00N twin (the benign surface has no planted pair to leak)."""
+    # Cross-lane: raw-content checks must observe graphs as named — force
+    # embedded semantics (a URI redirect folds graphs per test).
+    monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+    monkeypatch.delenv("TORTOISE_DB_PATH", raising=False)
     ct_id, bct_id = f"ct-00{n}", f"bct-00{n}"
     twin = _scenario(ct_id)
     store = seeds.setup_seed_mode(tmp_path, bct_id)
     try:
+        assert store.retrieve(""), \
+            "positive control failed: benign bct store must surface content"
         hits = _search(store, _fragments(twin))
         surface = seeds.prek_policy_render(_scenario(bct_id))
         assert not [h for _, h in hits if h], f"bct-00{n} carries twin ¬A"
@@ -217,11 +234,6 @@ def test_seed_mode_store_owns_seed_manifest_marker(tmp_path, monkeypatch):
 
 def test_record_never_targets_seed_manifest_marker(tmp_path, monkeypatch):
     """A4 record() claim-targets exclude the seeder-owned marker (the
-    # Cross-lane test: SDK-lane/guard tests must observe graphs as named —
-    # force embedded semantics (a URI redirect folds graphs per test).
-    monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
-    monkeypatch.delenv("TORTOISE_DB_PATH", raising=False)
-
     retrieve exclusion is mirrored on the write path) — an agent-filed
     NAND/IMPL edge lands on a seeded statement, never on the marker.
 

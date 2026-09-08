@@ -63,9 +63,8 @@ class A4TortoiseArm:
         self._sdk_by_id: dict[str, object] = {}
         self.decide_cycles = 0
         self._active_scenario: str | None = None
-        #: per-scenario memo of evidence content already filed this setup
-        #: (idempotency: an identical re-file is a true no-op — no duplicate
-        #: operator, no double cycle; product content-hash keeps one point).
+        #: per-scenario memo of filed records this setup (true-no-op keys:
+        #: evidence = (op_kind, target, content); mitigate = content).
         self._filed_content: dict[str, set[str]] = {}
 
     # ── setup ───────────────────────────────────────────────────────────
@@ -311,6 +310,8 @@ class A4TortoiseArm:
         if self._db_path is None:
             return
         sdk = self._sdk(context.scenario)
+        sid = context.scenario.id
+        filed = self._filed_content.setdefault(sid, set())
         try:
             if self.decide_cycles >= DECIDE_CYCLES_CAP:
                 return  # cap-hit: honest no-op (never forced CONVERGED)
@@ -320,6 +321,9 @@ class A4TortoiseArm:
                 ops = [m for m in closed if m.kind == "operator"]
                 if not ops:
                     return  # unresolved operator target ⇒ honest no-op
+                mit_key = f"mitigate::{item.content}"
+                if mit_key in filed:
+                    return  # identical re-mitigation: TRUE no-op
                 c = item.confidence
                 if isinstance(c, float) and math.isfinite(c):
                     # clamp raw numeric confidence into [0.10, 0.50]
@@ -329,16 +333,20 @@ class A4TortoiseArm:
                     strength = 0.3  # decide-tooling default, in-range
                 sdk.mitigate_operator(
                     ops[0].id, reason=item.content or "", strength=strength)
+                filed.add(mit_key)
                 self.decide_cycles += 1
                 return
             claims = [m for m in closed if m.kind == _CLAIM_MEMORY_KIND]
             if not claims:
                 return  # empty/claim-less closed set ⇒ zero writes (no-op)
-            sid = context.scenario.id
-            filed = self._filed_content.setdefault(sid, set())
-            if item.content in filed:
-                return  # identical re-file this setup: TRUE no-op
             target = claims[0].id
+            # True-no-op key spans (scenario, content, op kind, target): an
+            # identical re-file is never duplicated, but a NAND then an IMPL
+            # of the SAME evidence content are two DISTINCT decisions.
+            op_kind = item.kind if item.kind in ("nand",) else "imply"
+            dedup_key = f"{op_kind}::{target}::{item.content}"
+            if dedup_key in filed:
+                return  # identical re-file this setup: TRUE no-op
             created = sdk.create_point(kind=_EVIDENCE_KIND, content=item.content,
                                        dedup=True, status="draft",
                                        source_harness="battery",
@@ -356,7 +364,7 @@ class A4TortoiseArm:
                 # Evidence stays DRAFT (promote_source fires only on operator
                 # success) ⇒ inert residue, never a live orphan.
                 raise ArmUnavailable(f"a4 operator write failed: {e}") from e
-            filed.add(item.content)
+            filed.add(dedup_key)
             self.decide_cycles += 1  # one cycle per NEW record
         except ArmUnavailable:
             raise

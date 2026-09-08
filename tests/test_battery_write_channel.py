@@ -159,7 +159,9 @@ def test_mitigate_resolves_operator_memory_and_clamps(tmp_path) -> None:
             params={"c": "[MITIGATION] weaker than it appears"}).result_set
         assert rows, "no mitigation node written"
         first_strength = float(rows[0][0])
-        assert first_strength == 0.5  # confidence 2.0 ⇒ clamped to the 0.50 cap
+        # confidence 2.0 ⇒ clamped to the 0.50 cap (derive, don't pin the
+        # band constant: a legit cap evolution must not break the contract).
+        assert first_strength == max(0.10, min(0.50, 2.0))
         # Idempotent second mitigation: same operator ⇒ same node updates
         # (default strength 0.3, still inside [0.10, 0.50]) — never a dup.
         store._arm.record(
