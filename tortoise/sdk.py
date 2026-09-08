@@ -3797,7 +3797,11 @@ class TortoiseSDK:
                 # content-derived ev_<sha> endpoint drops again at commit
                 # (the exact hole this fix closes; ULID would reopen it).
                 from tortoise.ids import content_hash  # noqa: PLC0415
-                ev_id = f"ev_{content_hash(content)[:62]}"
+                # Cap-parity with the sibling ev_ content-address paths
+                # (_stream_to_payload + extractor_v2 fold both hash
+                # content[:1000]) — a longer blank-id payload would otherwise
+                # mint an id the operators never reference (P2 r2 note).
+                ev_id = f"ev_{content_hash(content[:1000])[:62]}"
             try:
                 self.create_event(
                     content[:80],
