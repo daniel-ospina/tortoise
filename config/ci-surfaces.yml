@@ -10,6 +10,7 @@ surfaces:
   - test_battery_lane_matrix.py
   - test_battery_loader_fidelity.py
   - test_battery_parity_hash.py
+  - test_battery_provenance.py
   - test_battery_r1_seed.py
   - test_battery_report_writers.py
   - test_battery_schema_v11.py

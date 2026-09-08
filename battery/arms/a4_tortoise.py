@@ -303,7 +303,9 @@ class A4TortoiseArm:
                 return  # empty/claim-less closed set ⇒ zero writes (no-op)
             target = claims[0].id
             created = sdk.create_point(kind=_EVIDENCE_KIND, content=item.content,
-                                       dedup=True)
+                                       dedup=True,
+                                       source_harness="battery",
+                                       source_session=context.scenario.id)
             ev_id = created.get("id") if isinstance(created, dict) else None
             if not ev_id:
                 raise ArmUnavailable("a4 create_point returned no id")
