@@ -101,7 +101,12 @@ def test_retrieve_pre_k_has_only_claim_a_evidence(tmp_path):
     sc = _cts()[0]
     store = seeds.setup_seed_mode(tmp_path, sc.id)
     try:
-        mems = store.retrieve(sc.to_episode_context()["render"][:200])
+        # Empty-message everyday read -> arm's _scenario_probe_query (claim_a as
+        # probe). Deterministic under TF-IDF degrade (CI runners without the
+        # embedding model): a raw render[:200] query only surfaces the system
+        # prompt there and claim_a is lost (see #2573). Mirrors the sibling
+        # positive-control retrieves below.
+        mems = store.retrieve("")
         texts = " ".join(str(m) for m in mems)
         assert not any(f in texts for f in _fragments(sc))
         # Memory is a frozen dataclass (.content attribute) — never a dict.
