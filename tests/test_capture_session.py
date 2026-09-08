@@ -7,7 +7,9 @@ no provider key or network is needed.
 """
 import json
 import logging
+import os
 import re
+from urllib.parse import urlparse
 
 import pytest
 from fastapi.testclient import TestClient
@@ -16,6 +18,19 @@ from tests._http_fixtures import patched_tortoise_sdk
 from tortoise import hosted_api as _ha
 from tortoise.hosted_api import app, get_current_team
 from tortoise.sdk import TortoiseSDK
+
+
+# #2242 concurrency test docker-lane guard — mirrors
+# tests/test_commit_supersession_parity.py:56-71 (constant + helper only, no
+# module-level pytestmark). Single-statement CAS atomicity is server-mode only
+# (metering.py doctrine) → the race test skips on URI-less lanes.
+_SUPPORTED = {"docker", "redis", "rediss"}
+
+
+def _server_uri_set() -> bool:
+    uri = os.environ.get("TORTOISE_DB_URI") or ""
+    scheme = uri.split("://", 1)[0]
+    return scheme in _SUPPORTED and bool(urlparse(uri).hostname)
 
 
 def test_commit_session_threads_session_date(sdk, monkeypatch):
@@ -4718,3 +4733,77 @@ def test_capture_true_retry_heals_unstamped_first_attempt(
     assert unstamped2 == 0, (
         f"retry must heal the un-stamped claim ({len(unstamped1)} -> "
         f"{unstamped2})")
+
+
+def test_apply_supersessions_concurrent_divergent_fold_one_wins(
+        tmp_path, monkeypatch):
+    """#2242 indicator 3: two threads drive apply_supersessions on the SAME
+    shared server graph (two TortoiseSDKs with the SAME db_path — the docker
+    redirect derives one test_* server graph per path) superseding the same
+    live Object with DIVERGENT successors, barrier-synced INSIDE the fold so
+    BOTH threads pass the terminal/visible gates (both probe race-O live) and
+    emit before either folds. Exactly ONE fold lands (applied total == 1),
+    the loser warns (the live-path CAS "lost a concurrent race"), the end
+    state is a SINGLE successor. Pre-fix (unconditional SET): both folds land
+    → applied == 2, silent last-wins. Server-mode single-statement atomicity
+    is the mechanism under test (metering.py doctrine) → docker lane only."""
+    if not _server_uri_set():
+        pytest.skip("requires TORTOISE_DB_URI (docker test-server lane)")
+    import threading
+    from tortoise.commit_ops import apply_supersessions
+
+    shared = str(tmp_path / "race-shared.db")
+    sdk1 = TortoiseSDK(shared)
+    sdk2 = TortoiseSDK(shared)  # SAME path → SAME derived test_* graph
+    proj1 = sdk1._get_proj()
+    proj2 = sdk2._get_proj()
+    try:
+        sdk1.create_entity("object", "race-O", objectKind="core:strategy")
+        sdk1.create_entity("object", "race-B", objectKind="core:strategy")
+        sdk1.create_entity("object", "race-C", objectKind="core:strategy")
+        barrier = threading.Barrier(2)
+        orig = proj1.__class__._fold_object_superseded
+
+        def _synced(self, ev, *, cas=False):
+            barrier.wait(timeout=15)  # both threads passed the gates+emit
+            return orig(self, ev, cas=cas)  # forward cas (commit_ops → True)
+
+        monkeypatch.setattr(proj1.__class__, "_fold_object_superseded",
+                            _synced)
+        results: list = []
+
+        def _run(sdk_, proj_, sby):
+            warns: list[str] = []
+            applied = apply_supersessions(
+                proj_, sdk_,
+                [{"superseded": "race-O", "supersedes_by": sby,
+                  "evidence": "race"}],
+                session_id=f"sess_race_{sby}", warn=warns.append)
+            results.append((applied, warns, sby))
+
+        t1 = threading.Thread(target=_run, args=(sdk1, proj1, "race-B"))
+        t2 = threading.Thread(target=_run, args=(sdk2, proj2, "race-C"))
+        t1.start()
+        t2.start()
+        t1.join(30)
+        t2.join(30)
+        assert not t1.is_alive() and not t2.is_alive(), "threads deadlocked"
+        applied_total = sum(r[0] for r in results)
+        assert applied_total == 1, f"exactly ONE fold must land: {results}"
+        warn_joined = " | ".join(w for r in results for w in r[1])
+        assert "lost a concurrent race" in warn_joined, \
+            f"loser must warn (live-path CAS): {warn_joined}"
+        rows = proj1.g.query(
+            "MATCH (o:Object {name:'race-O'}) RETURN o.status, o.supersededBy",
+        ).result_set
+        assert rows and rows[0][0] == "superseded"
+        assert rows[0][1] in ("race-B", "race-C"), \
+            f"single successor, never both: {rows}"
+        assert _object_superseded_events(proj1) == 2, (
+            "both commits journaled (emit-before-fold; the concurrent "
+            "journal-order residual is documented — rebuild resolves "
+            "last-wins as today)")
+    finally:
+        sdk1.close()
+        sdk2.close()
+        # monkeypatch auto-restores at teardown even on exceptions

@@ -389,26 +389,31 @@ class TestProjectionFold:
         sdk = _fresh_sdk()
         try:
             proj = sdk._get_proj()
-            name = "legacy-F"
-            # raw legacy Object — NO id property at all
-            proj.g.query("CREATE (o:Object {name:$n, status:'live'})",
-                         params={"n": name})
             fold = proj._fold_object_superseded
-            # id branch misses (no node carries the synthesized id) — the
-            # name fallback must fold and report the matched row
-            matched = fold({"id": _entity_name_id("Object", name),
-                            "name": name,
-                            "supersedes_by": "successor-F"})
-            assert matched == 1, \
-                "id-miss + name-present fold must fall back to the name branch"
-            rows = proj.g.query(
-                "MATCH (o:Object {name:$n}) RETURN o.status, o.supersededBy",
-                params={"n": name}).result_set
-            assert rows and rows[0][0] == "superseded", rows
-            assert rows[0][1] == "successor-F", rows
-            # id-miss + NO name stays a 0 no-op (id-only/§6b legacy shapes)
+            # #2242: a FRESH legacy node per cas mode — the cas=False pass
+            # folds (blind) and would leave the cas=True pass a terminal
+            # re-fold (0,1); each arm must assert a first-fold fallback.
+            for cas in (False, True):
+                name = f"legacy-F-{int(cas)}"
+                # raw legacy Object — NO id property at all
+                proj.g.query("CREATE (o:Object {name:$n, status:'live'})",
+                             params={"n": name})
+                matched = fold({"id": _entity_name_id("Object", name),
+                                "name": name,
+                                "supersedes_by": "successor-F"}, cas=cas)
+                assert matched == (1, 1), \
+                    "id-miss + name-present fold must fall back to the name " \
+                    f"branch (cas={cas}): {matched}"
+                rows = proj.g.query(
+                    "MATCH (o:Object {name:$n}) RETURN o.status, o.supersededBy",
+                    params={"n": name}).result_set
+                assert rows and rows[0][0] == "superseded", rows
+                assert rows[0][1] == "successor-F", rows
+            # id-miss + NO name stays a (0,0) no-op (id-only/§6b legacy shapes)
             assert fold({"id": "no-such-id", "name": "",
-                         "supersedes_by": "x"}) == 0
+                         "supersedes_by": "x"}, cas=False) == (0, 0)
+            assert fold({"id": "no-such-id", "name": "",
+                         "supersedes_by": "x"}, cas=True) == (0, 0)
         finally:
             sdk.close()
 
@@ -439,12 +444,15 @@ class TestProjectionFold:
         sdk = _fresh_sdk()
         try:
             fold = sdk._get_proj()._fold_object_superseded
-            # (1) fold on a MISSING Object id → 0 (fold-miss signal)
+            # #2242: the classified contract — (folded, matched). The CAS
+            # contract asserts pass cas=True EXPLICITLY (the default is
+            # False/blind — replay parity).
+            # (1) fold on a MISSING Object id → (0,0) (fold-miss signal)
             assert fold({"id": "no-such-object", "name": "",
-                          "supersedes_by": "strategy-B"}) == 0
-            # (1b) empty id AND empty name → 0 (early return, never None)
+                          "supersedes_by": "strategy-B"}, cas=True) == (0, 0)
+            # (1b) empty id AND empty name → (0,0) (early return)
             assert fold({"id": "", "name": "",
-                          "supersedes_by": "strategy-B"}) == 0
+                          "supersedes_by": "strategy-B"}, cas=True) == (0, 0)
             # (2) fold on an EXISTING Object (create + resolve canonical id)
             sdk.create_entity("object", "strategy-A",
                               objectKind="core:strategy")
@@ -452,23 +460,87 @@ class TestProjectionFold:
                 "MATCH (o:Object {name:$n}) RETURN o.id",
                 params={"n": "strategy-A"}).result_set[0][0]
             assert fold({"id": oid, "name": "strategy-A",
-                          "supersedes_by": "strategy-B"}) == 1
-            # (3) re-fold (already superseded, same successor) → 1 and the
-            #     stored values are unchanged (idempotency preserved)
+                          "supersedes_by": "strategy-B"}, cas=True) == (1, 1)
+            # (3) re-fold (already superseded, same successor) → (0,1): the
+            #     CAS keeps first-fold stamps (no re-SET) and reports the
+            #     terminal target; stored values unchanged
             assert fold({"id": oid, "name": "strategy-A",
-                          "supersedes_by": "strategy-B"}) == 1
-            # (3b) name-branch also returns the match count (legacy no-id
-            #     shape — regression guard for the name-branch RETURN)
+                          "supersedes_by": "strategy-B"}, cas=True) == (0, 1)
+            # (3b) name-branch CAS (legacy no-id shape)
             assert fold({"id": "", "name": "strategy-A",
-                          "supersedes_by": "strategy-B"}) == 1
+                          "supersedes_by": "strategy-B"}, cas=True) == (0, 1)
             assert fold({"id": "", "name": "no-such-object",
-                          "supersedes_by": "strategy-B"}) == 0
+                          "supersedes_by": "strategy-B"}, cas=True) == (0, 0)
             rows = sdk._get_proj().g.query(
                 "MATCH (o:Object {id:$id}) RETURN o.status, o.supersededBy",
                 params={"id": oid}).result_set
             assert rows and rows[0][0] == "superseded"
             assert rows[0][1] == "strategy-B", \
                 "re-fold must not clobber the successor"
+        finally:
+            sdk.close()
+
+
+    def test_fold_cas_terminal_target_not_reflipped(self):
+        """#2242: the LIVE-path fold (cas=True) against an already-terminal
+        Object must NOT re-flip it — returns (0, 1) and leaves status,
+        supersededBy, supersededAt BYTE-IDENTICAL (first-fold stamps kept).
+        Pre-fix the fold was an unconditional SET — a divergent re-fold
+        clobbered the successor."""
+        sdk = _fresh_sdk()
+        try:
+            proj = sdk._get_proj()
+            sdk.create_entity("object", "cas-A", objectKind="core:strategy")
+            sdk.create_entity("object", "cas-B", objectKind="core:strategy")
+            sdk.create_entity("object", "cas-C", objectKind="core:strategy")
+            fold = proj._fold_object_superseded
+            ts1 = "2026-09-07T00:00:00Z"
+            # cas=True EXPLICIT (the default is False/blind — replay parity)
+            assert fold({"name": "cas-A", "supersedes_by": "cas-B",
+                         "ts": ts1}, cas=True) == (1, 1)
+            rows = proj.g.query(
+                "MATCH (o:Object {name:$n}) "
+                "RETURN o.status, o.supersededBy, o.supersededAt",
+                params={"n": "cas-A"}).result_set
+            assert rows and rows[0] == ["superseded", "cas-B", ts1], rows
+            # divergent re-fold → CAS keeps first stamps, reports the loss
+            ts2 = "2026-09-07T01:00:00Z"
+            assert fold({"name": "cas-A", "supersedes_by": "cas-C",
+                         "ts": ts2}, cas=True) == (0, 1)
+            rows = proj.g.query(
+                "MATCH (o:Object {name:$n}) "
+                "RETURN o.status, o.supersededBy, o.supersededAt",
+                params={"n": "cas-A"}).result_set
+            assert rows and rows[0] == ["superseded", "cas-B", ts1], \
+                "CAS must keep the FIRST fold's stamps on a terminal re-fold"
+        finally:
+            sdk.close()
+
+    def test_fold_cas_false_replay_keeps_blind_last_wins(self):
+        """#2242: the REPLAY-path fold (default cas=False) keeps the legacy
+        blind SET — a re-fold OVERWRITES status/supersededBy/supersededAt
+        (last-wins — the pre-CAS rebuild contract; incarnation-reuse shapes
+        delete→recreate→re-supersede depend on it)."""
+        sdk = _fresh_sdk()
+        try:
+            proj = sdk._get_proj()
+            sdk.create_entity("object", "bl-A", objectKind="core:strategy")
+            sdk.create_entity("object", "bl-B", objectKind="core:strategy")
+            sdk.create_entity("object", "bl-C", objectKind="core:strategy")
+            fold = proj._fold_object_superseded
+            ts1 = "2026-09-07T00:00:00Z"
+            # default cas=False (no cas= arg) — blind, pre-CAS parity
+            assert fold({"name": "bl-A", "supersedes_by": "bl-B",
+                         "ts": ts1}) == (1, 1)
+            ts2 = "2026-09-07T01:00:00Z"
+            assert fold({"name": "bl-A", "supersedes_by": "bl-C",
+                         "ts": ts2}) == (1, 1)
+            rows = proj.g.query(
+                "MATCH (o:Object {name:$n}) "
+                "RETURN o.status, o.supersededBy, o.supersededAt",
+                params={"n": "bl-A"}).result_set
+            assert rows and rows[0] == ["superseded", "bl-C", ts2], \
+                "replay (cas=False) must be blind last-wins — pre-CAS parity"
         finally:
             sdk.close()
 
