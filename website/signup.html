@@ -435,7 +435,8 @@
       <a href="https://tortoise.premiselabs.co/">Product</a>
       <a href="/docs">Docs</a>
     </nav>
-    <a class="login" href="/auth" onclick="setAuthMode(false); return false;">Login</a>
+    <a class="login" id="topbar-login" href="/auth" onclick="setAuthMode(false); return false;">Login</a>
+    <script>try { if (window.location.pathname === '/auth') document.getElementById('topbar-login').style.display = 'none'; } catch (e) {}</script>
   </div>
 
   <!-- TEMP BETA GATE (#beta-gate): covers every sign-in option until the code
