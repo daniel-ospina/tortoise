@@ -43,9 +43,13 @@ import pytest
 from tortoise.sdk import TortoiseSDK
 
 # ── Live-FalkorDB availability (the FTS backend the expansion needs) ───────
-_URI = os.environ.get(
-    "TORTOISE_DB_URI",
-    "docker://:falkordb@localhost:6379/tortoise_test_matrix").rstrip("/")
+# Empty-string TORTOISE_DB_URI (tier-2 URI-less legs write "" — present-but-
+# empty) must fall through to the docker default: os.environ.get(..., default)
+# returns "" when the key exists, which would turn the probe URI into a bare
+# "_probe" file path (embedded) instead of the docker lane. Mirrors the
+# empty-URI guard in test_hnsw_vector_index's probe.
+_URI = (os.environ.get("TORTOISE_DB_URI") or
+        "docker://:falkordb@localhost:6379/tortoise_test_matrix").rstrip("/")
 FALKORDB_AVAILABLE = False
 _OLD_URI = os.environ.get("TORTOISE_DB_URI")
 try:
