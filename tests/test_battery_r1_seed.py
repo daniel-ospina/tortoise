@@ -105,7 +105,7 @@ def test_retrieve_pre_k_has_only_claim_a_evidence(tmp_path):
         texts = " ".join(str(m) for m in mems)
         assert not any(f in texts for f in _fragments(sc))
         assert sc.contradiction_pairs[0].claim_a[:40] in texts or any(
-            sc.contradiction_pairs[0].claim_a[:40] in str(m.get("content", ""))
+            sc.contradiction_pairs[0].claim_a[:40] in (m.content or "")
             for m in mems)
     finally:
         store.close()

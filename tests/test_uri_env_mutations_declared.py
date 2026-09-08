@@ -91,6 +91,26 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
                        r'monkeypatch\.setenv\(\s*$'],
     "test_billing.py": [r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
     "test_body_cap_sweep.py": [r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],  # #2032: embedded lane via delenv (the test_billing pattern — registry-lane determinism for register/agent mints)
+    # #2291 battery hermetic store runs: the module autouse fixture pops the
+    # URI to force the embedded lane (test_embedded_lifecycle contract) and
+    # restores it in finally — declare the raw pop + restore-assign lines.
+    "test_battery_ep_outcome.py": [r'os\.environ\.pop\(\s*["\']TORTOISE_DB_URI["\']',
+                                   r'os\.environ\["TORTOISE_DB_URI"\]\s*='],
+    "test_battery_lane_matrix.py": [r'os\.environ\.pop\(\s*["\']TORTOISE_DB_URI["\']',
+                                    r'os\.environ\["TORTOISE_DB_URI"\]\s*='],
+    "test_battery_provenance.py": [r'os\.environ\.pop\(\s*["\']TORTOISE_DB_URI["\']',
+                                   r'os\.environ\["TORTOISE_DB_URI"\]\s*='],
+    "test_battery_seed_ingest.py": [r'os\.environ\.pop\(\s*["\']TORTOISE_DB_URI["\']',
+                                    r'os\.environ\["TORTOISE_DB_URI"\]\s*='],
+    "test_battery_write_channel.py": [r'os\.environ\.pop\(\s*["\']TORTOISE_DB_URI["\']',
+                                      r'os\.environ\["TORTOISE_DB_URI"\]\s*='],
+    "test_battery_r1_seed.py": [r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
+    # #2518 entity-key expansion FTS probe + per-test URI-mode redirects: the
+    # module-top probe assigns a dedicated probe URI and restores _OLD_URI in
+    # finally; the tests redirect via monkeypatch.setenv (auto-undo).
+    "test_entity_key_expansion.py": [r'os\.environ\["TORTOISE_DB_URI"\]\s*=',
+                                     r'os\.environ\.pop\(\s*["\']TORTOISE_DB_URI["\']',
+                                     r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"'],
     "test_bridge_mcp.py": [r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI",\s*""'],
     "test_chain_enforcer.py": [r'monkeypatch\.delenv\("TORTOISE_DB_URI"'],
     "test_github_index_lifecycle.py": [r'monkeypatch\.delenv\("TORTOISE_DB_URI"',

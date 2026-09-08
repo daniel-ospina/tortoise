@@ -29,8 +29,10 @@ def _force_embedded_lane() -> None:
     (battery_ct-001 …) — a TORTOISE_DB_URI redirect folds graphs per test
     and voids the assertions. Force the embedded lane for this module
     (embedded-file-contract; precedent: test_embedded_lifecycle)."""
-    saved = os.environ.pop("TORTOISE_DB_URI", None)
-    saved_path = os.environ.pop("TORTOISE_DB_PATH", None)
+    saved = os.environ.get("TORTOISE_DB_URI", None)
+    saved_path = os.environ.get("TORTOISE_DB_PATH", None)
+    os.environ.pop("TORTOISE_DB_URI", None)
+    os.environ.pop("TORTOISE_DB_PATH", None)
     try:
         yield
     finally:
