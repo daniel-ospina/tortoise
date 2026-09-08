@@ -426,6 +426,12 @@ def test_outcomes_to_report_golden_shape():
         # marker — o.get-based projection, None on golden outcomes (absent
         # until the outcome carries it; pre-feature checkpoints render).
         "entity_key_expansion": None,
+        # C5 (#2521, #2513): the aggregative-check arm marker + verdict —
+        # o.get-based projection, None on golden outcomes (absent until the
+        # outcome carries them under the arm; pre-feature checkpoints
+        # render).
+        "aggregative_flag": None,
+        "aggregative_verdict": None,
         # #1948: the reader-surface metric (points+chunks in the FULL
         # reader context) rides the projection parallel to
         # reader_evidence@k — o.get-based, None on golden outcomes.
