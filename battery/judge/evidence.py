@@ -163,9 +163,12 @@ def run_evidence_validation(*, config_dir: str | Path, rubric_id: str,
 
     # Kappa leg: TWO judge configs over the SAME anchored item renders
     # (inter-judge reliability — never one model at temp 0). The pool is
-    # the full item x render product (balanced enough for a meaningful
-    # Cohen's kappa — a pool that is ~all-yes collapses kappa to ~0 even
-    # on 7/8 agreement, the skewed-marginal kappa paradox).
+    # the item x render product SUPPLEMENTED with the rubric's own
+    # gold-anchor renders judged on their items: a yes-skewed pool (real
+    # deliberation mostly satisfies the rubric) caps Cohen's kappa below
+    # the 0.70 bar by the skewed-marginal kappa paradox even at ~0.91 raw
+    # agreement — the gold block (>= 1 expected-no, no-share > 20%) is the
+    # rubric's own balanced negative material and belongs in the pool.
     items = spec.items
     kappa_prompts: list[str] = []
     for ridx in range(len(renders)):
@@ -174,6 +177,14 @@ def run_evidence_validation(*, config_dir: str | Path, rubric_id: str,
             kappa_prompts.append(
                 f"Rubric item: {it['text']}\n\nEvidence: {renders[ridx]}\n"
                 f"Answer YES or NO.")
+    for ga in spec.gold_anchors:
+        item_text = next(
+            (str(i.get("text")) for i in items
+             if i.get("id") == ga.get("item_id")), None)
+        if item_text:
+            kappa_prompts.append(
+                f"Rubric item: {item_text}\n\n"
+                f"Evidence: {ga.get('render', '')}\nAnswer YES or NO.")
     labels_a = [a.judge(rubric_id, f"kappa-a{i}", p).verdict
                 for i, p in enumerate(kappa_prompts)]
     labels_b = [b.judge(rubric_id, f"kappa-b{i}", p).verdict
