@@ -17278,6 +17278,12 @@ async def github_connect(body: GitHubConnectRequest | None = None,
 
     #1828 review P3: same non-gated dual-auth as the other onboarding
     endpoints — the dashboard calls this with useSession: true."""
+    # #2300: team-level control-plane surface (starts a TEAM-wide OAuth +
+    # registers team CSRF state) — graph-bound keys rejected (parity with
+    # the github index/reindex endpoints; MCP twin tortoise_onboarding_
+    # github_connect rejects graph-bound keys). A per-graph key must never
+    # initiate the team's GitHub connection.
+    _reject_graph_bound_team_surface(team, "github connect")
     import secrets
     from urllib.parse import urlencode
     client_id = os.environ.get("GITHUB_CLIENT_ID")
@@ -17513,6 +17519,10 @@ async def github_status(team: dict = Depends(get_current_team_session_ungated)):
     self-heals a legacy team_id-as-org (see _heal_github_org) so the
     selector's org is real.
     """
+    # #2300: reads team-level GitHub credential state (control-plane) —
+    # graph-bound keys rejected (MCP twin tortoise_onboarding_github_status
+    # parity). A per-graph key must never observe the team's GitHub org.
+    _reject_graph_bound_team_surface(team, "github status")
     encrypted, org = _github_credentials(team["team_id"])
     if not encrypted:
         return {"connected": False, "org": None, "repos_count": None}
@@ -17548,6 +17558,10 @@ async def github_repos(team: dict = Depends(get_current_team_session_ungated)): 
     ``connected: false`` + ``resolve_error`` is the "stored-but-now-failing"
     shape; a clean disconnect returns connected:false WITHOUT the flag.
     """
+    # #2300: lists the TEAM's connected org repos (control-plane credential
+    # state) — graph-bound keys rejected (MCP/onboarding-github parity). A
+    # per-graph key must never enumerate the team's GitHub org repos.
+    _reject_graph_bound_team_surface(team, "github repos")
     encrypted, org = _github_credentials(team["team_id"])
     if not encrypted:
         return {"connected": False, "org": None, "repos": []}
@@ -17597,6 +17611,11 @@ async def github_branches(repo: str,
     picker can label/seed its default option truthfully for repos whose
     default is neither main nor master.
     """
+    # #2300: lists the TEAM's connected repo branches (control-plane
+    # credential state) — graph-bound keys rejected (onboarding-github
+    # family parity — a per-graph key must never enumerate the team's
+    # GitHub branches).
+    _reject_graph_bound_team_surface(team, "github branches")
     encrypted, org = _github_credentials(team["team_id"])
     if not encrypted:
         return {"connected": False, "org": None, "repo": repo,

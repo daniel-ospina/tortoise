@@ -2786,6 +2786,11 @@ def tortoise_onboarding_demo_create() -> dict:
 
 def tortoise_onboarding_state() -> dict:
     """Return this team's onboarding progress (Q6 verification step)."""
+    # #2300: reads the team's DEFAULT-graph/control-plane onboarding
+    # projection (team-level surface) — graph-bound keys rejected (REST
+    # twin GET /v1/onboarding/state parity, C5 #2114). A per-graph key must
+    # never observe the team's onboarding state outside its graph.
+    _reject_graph_bound_mcp_team_surface("onboarding state")
     return _onboarding_state()
 
 
@@ -2853,6 +2858,11 @@ def tortoise_onboarding_session_recording(enabled: bool) -> dict:
 
 def tortoise_onboarding_github_connect(org: str | None = None) -> dict:
     """Initiate GitHub OAuth — returns the authorize URL + CSRF state (Q1)."""
+    # #2300: initiates team-level GitHub OAuth + stores team CSRF/org state
+    # (control-plane) — graph-bound keys rejected (REST twin
+    # POST /v1/onboarding/github/connect parity, #2300 closes the REST
+    # residual). A per-graph key must never start a TEAM-wide OAuth.
+    _reject_graph_bound_mcp_team_surface("github connect")
     team_id = _current_team_id.get()
     if team_id is None:
         return {"error": "No team context (HTTP mode required)"}
@@ -2883,6 +2893,10 @@ def tortoise_onboarding_github_connect(org: str | None = None) -> dict:
 
 def tortoise_onboarding_github_status() -> dict:
     """Return GitHub connection status for this team (Q1 verify)."""
+    # #2300: reads team-level GitHub credential state (control-plane) —
+    # graph-bound keys rejected (REST twin GET /v1/onboarding/github/status
+    # parity, #2300 closes the REST residual).
+    _reject_graph_bound_mcp_team_surface("github status")
     team_id = _current_team_id.get()
     if team_id is None:
         return {"error": "No team context (HTTP mode required)"}
