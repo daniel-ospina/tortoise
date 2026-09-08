@@ -422,6 +422,10 @@ def test_outcomes_to_report_golden_shape():
         "reader_evidence@k": None,
         "ranked_ids_pre_boost": None,
         "evidence_boost": None,
+        # C2 (#2518, #2513): the entity/fact-augmented key expansion arm
+        # marker — o.get-based projection, None on golden outcomes (absent
+        # until the outcome carries it; pre-feature checkpoints render).
+        "entity_key_expansion": None,
         # #1948: the reader-surface metric (points+chunks in the FULL
         # reader context) rides the projection parallel to
         # reader_evidence@k — o.get-based, None on golden outcomes.

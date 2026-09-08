@@ -245,6 +245,10 @@ def _resume_fingerprint() -> dict:
                                          runner.DEFAULT_CONTEXT_ITEM_CAP),
         evidence_boost=False, evidence_boost_verbatim=None,
         evidence_boost_source=None,
+        # C2 (#2518, #2513): the entity/fact-augmented key expansion arm —
+        # run_evaluation fingerprints the RESOLVED bool (always present on
+        # the run path), so a hand-written resume checkpoint must carry it.
+        entity_key_expansion=False,
         max_chunks_per_session=runner._env_int(
             "TORTOISE_LME_MAX_CHUNKS_PER_SESSION",
             runner.DEFAULT_MAX_CHUNKS_PER_SESSION))

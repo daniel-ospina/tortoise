@@ -1219,6 +1219,11 @@ def _build_fingerprint(*, reader_model: str, judge_model: str,
                        evidence_boost: bool | None = None,
                        evidence_boost_verbatim: float | None = None,
                        evidence_boost_source: float | None = None,
+                       # C2 (#2518, #2513): the entity/fact-augmented key
+                       # expansion arm — conditional presence like the other
+                       # C2 knob (a boosted/expanded checkpoint resumed
+                       # without the arm is refused by the fingerprint gate).
+                       entity_key_expansion: bool | None = None,
                        max_chunks_per_session: int | None = None,
                        # #1786 (P1-1/P1-2/P2-4): the write-path retry knobs —
                        # ALWAYS present (results-relevant by construction: a
@@ -1324,6 +1329,7 @@ def _build_fingerprint(*, reader_model: str, judge_model: str,
             ("evidence_boost", evidence_boost),
             ("evidence_boost_verbatim", evidence_boost_verbatim),
             ("evidence_boost_source", evidence_boost_source),
+            ("entity_key_expansion", entity_key_expansion),
             ("max_chunks_per_session", max_chunks_per_session),
             # #1786 (R5): the eval's hybrid retrieval budget — conditional
             # presence (the eval always passes 1500, so a pre-feature /
@@ -3015,6 +3021,13 @@ def run_evaluation(
     evidence_boost: bool | None = None,
     evidence_boost_verbatim: float | None = None,
     evidence_boost_source: float | None = None,
+    # C2 (#2518, #2513): entity/fact-augmented key expansion — tri-state
+    # (explicit flag > ``TORTOISE_LME_ENTITY_KEY_EXPANSION`` env > OFF, the
+    # #1745 fail-safe default). The A/B switch for the multi-session
+    # partial-evidence lever: resolved once, fingerprinted, and recorded in
+    # the methodology — an expanded checkpoint resumed without the arm is
+    # refused by the fingerprint gate (same contract as evidence_boost).
+    entity_key_expansion: bool | None = None,
     # R5 (#1544): TR knobs — temporal-reasoning questions get the events
     # union pool, the engine recency date weight, the TR-constraint window
     # filter, time-ascending rendering, and the tighter tr_top_k cap
@@ -3121,6 +3134,16 @@ def run_evaluation(
     if evidence_boost is None:
         eb_env = (os.environ.get("TORTOISE_LME_EVIDENCE_BOOST") or "")
         evidence_boost = eb_env.strip().lower() in _TRUTHY
+    # C2 (#2518, #2513): resolve the entity/fact-augmented key expansion
+    # tri-state ONCE, before the loop — same contract as evidence_boost: a
+    # None with the TORTOISE_LME_ENTITY_KEY_EXPANSION env set must not
+    # record `false` in the methodology while the per-question retrieval
+    # expanded (methodology records the knobs truthfully; fail-safe OFF:
+    # only 1/true/yes/on enables).
+    if entity_key_expansion is None:
+        eke_env = (os.environ.get("TORTOISE_LME_ENTITY_KEY_EXPANSION")
+                   or "")
+        entity_key_expansion = eke_env.strip().lower() in _TRUTHY
     # C1/C2 (#1745): resolve the remaining boost knobs ONCE, before the
     # loop — the methodology and the fingerprint must record EXACTLY what
     # the per-question retrieval serves (CLI > env > default, mirroring
@@ -3219,6 +3242,10 @@ def run_evaluation(
         evidence_boost=bool(evidence_boost),
         evidence_boost_verbatim=evidence_boost_verbatim,
         evidence_boost_source=evidence_boost_source,
+        # C2 (#2518, #2513): the resolved expansion arm rides the
+        # fingerprint — an expanded checkpoint resumed without the arm is
+        # refused by the fingerprint gate (A/B arm isolation).
+        entity_key_expansion=bool(entity_key_expansion),
         max_chunks_per_session=max_chunks_per_session,
         # #1786 (P1-1/P1-2/P2-4): the three retry knobs (ALWAYS present —
         # results-relevant) + the hybrid retrieval budget (conditional
@@ -3546,6 +3573,10 @@ def run_evaluation(
                             evidence_boost=evidence_boost,
                             evidence_boost_verbatim=evidence_boost_verbatim,
                             evidence_boost_source=evidence_boost_source,
+                            # C2 (#2518, #2513): the entity/fact-augmented
+                            # key expansion arm (resolved above; OFF by
+                            # default — the sealed A/B decides adoption).
+                            entity_key_expansion=entity_key_expansion,
                             # #1786 (R5): the eval's elevated HYBRID-arm
                             # retrieval deadline via the existing seam (the
                             # vector arm keeps VECTOR_TIMEOUT_MS=5000).
@@ -3733,6 +3764,11 @@ def run_evaluation(
                         "ranked_ids_pre_boost": ret.get("ranked_ids_pre_boost"),
                         "evidence_turn_matches": ret.get("evidence_turn_matches"),
                         "evidence_boost": ret.get("evidence_boost"),
+                        # C2 (#2518, #2513): the entity/fact-augmented key
+                        # expansion arm per question (the A/B arm marker —
+                        # reconstructs which arm each outcome ran on).
+                        "entity_key_expansion": ret.get(
+                            "entity_key_expansion"),
                         # R6 (#1545): the rerank pass + latency ride the outcome —
                         # they stay ABSENT on baseline outcomes (the projection in
                         # outcomes_to_report adds them conditionally).
@@ -4124,6 +4160,10 @@ def run_evaluation(
                 evidence_boost_source
                 if evidence_boost_source is not None
                 else DEFAULT_EVIDENCE_BOOST_SOURCE),
+            # C2 (#2518, #2513): the entity/fact-augmented key expansion
+            # arm — recorded verbatim in the methodology (published numbers
+            # carry which A/B arm produced them).
+            "entity_key_expansion": bool(entity_key_expansion),
             # #1786 (Task 2 Step 5): the recoverable-class resume-mode flag
             # + the write-path retry knobs recorded in the methodology so
             # the revalidation comparison can distinguish retried outcomes
@@ -4288,6 +4328,10 @@ def outcomes_to_report(
                 # them).
                 "reader_evidence@k", "ranked_ids_pre_boost",
                 "evidence_boost",
+                # C2 (#2518, #2513): the entity/fact-augmented key expansion
+                # arm marker rides the projection (read via o.get — absent
+                # on pre-feature checkpoints).
+                "entity_key_expansion",
                 # #1948: the reader-surface metric rides the projection
                 # alongside reader_evidence@k (absent until the outcome
                 # carries it — pre-#1948 checkpoints resume without
@@ -4716,6 +4760,27 @@ def _build_parser() -> argparse.ArgumentParser:
                     action="store_false", default=None,
                     help="disable the C2 evidence-mark boost even when "
                          "TORTOISE_LME_EVIDENCE_BOOST is set "
+                         "(tri-state: explicit flags beat the env)")
+    # C2 (#2518, #2513): entity/fact-augmented key expansion — tri-state
+    # --entity-key-expansion / --no-entity-key-expansion (None default so
+    # the TORTOISE_LME_ENTITY_KEY_EXPANSION env still applies; OFF by
+    # default in code — the sealed #2513 A/B decides adoption). The A/B
+    # switch: identical questions run once with the arm OFF (baseline) and
+    # once ON; the report's shared-question evidence_recall@k / recall_all@5
+    # deltas gate the +recall claim.
+    ek = p.add_mutually_exclusive_group()
+    ek.add_argument("--entity-key-expansion", dest="entity_key_expansion",
+                    action="store_true", default=None,
+                    help="enable the C2 entity/fact-augmented key expansion "
+                         "(the query's entity anchors + their linked points' "
+                         "E3 search_keys re-run the sparse OR leg so "
+                         "same-subject points from ALL sessions can surface; "
+                         "default: env TORTOISE_LME_ENTITY_KEY_EXPANSION — "
+                         "OFF by default in code, #2518)")
+    ek.add_argument("--no-entity-key-expansion", dest="entity_key_expansion",
+                    action="store_false", default=None,
+                    help="disable the C2 entity/fact-augmented key expansion "
+                         "even when TORTOISE_LME_ENTITY_KEY_EXPANSION is set "
                          "(tri-state: explicit flags beat the env)")
     p.add_argument("--evidence-boost-verbatim", type=float, default=None,
                    help="verbatim/raw-chunk mark rank-offset multiplier "
@@ -5174,6 +5239,17 @@ def _run_main(parser: argparse.ArgumentParser, args,
                 DEFAULT_EVIDENCE_BOOST_SOURCE, args.evidence_boost_source)
         evidence_boost_verbatim = None
         evidence_boost_source = None
+    # C2 (#2518, #2513): entity/fact-augmented key expansion — tri-state
+    # (CLI flag > TORTOISE_LME_ENTITY_KEY_EXPANSION env > OFF — fail-safe:
+    # only 1/true/yes/on enables, mirroring the boost gate above). Resolved
+    # once and threaded into run_evaluation (methodology == actual; the
+    # A/B switch for the #2513 partial-evidence lever).
+    if args.entity_key_expansion is not None:
+        entity_key_expansion = args.entity_key_expansion
+    else:
+        eke_env = (os.environ.get("TORTOISE_LME_ENTITY_KEY_EXPANSION")
+                   or "")
+        entity_key_expansion = eke_env.strip().lower() in _TRUTHY
     # R5 (#1544) TR knobs: argparse defaults (12 / 0.5 / events-on),
     # recorded verbatim in the report methodology (D7).
     tr_top_k = args.tr_top_k
@@ -5364,6 +5440,10 @@ def _run_main(parser: argparse.ArgumentParser, args,
                 evidence_boost=evidence_boost,
                 evidence_boost_verbatim=evidence_boost_verbatim,
                 evidence_boost_source=evidence_boost_source,
+                # C2 (#2518, #2513): entity/fact-augmented key expansion
+                # arm (tri-state resolved above; OFF by default — the
+                # sealed #2513 A/B decides adoption).
+                entity_key_expansion=entity_key_expansion,
                 tr_top_k=tr_top_k, tr_date_weight=tr_date_weight,
                 tr_events=tr_events,
                 rerank=rr["rerank_on"], rerank_model=rr["model"],

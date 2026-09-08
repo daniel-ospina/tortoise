@@ -657,7 +657,8 @@ def hybrid_search(sdk: TortoiseSDK, query: str, limit: int,
                    recency_fields: dict[str, str] | None = None,
                    recency_boost: float = 0.0,
                    leg_trace: list[dict] | None = None,
-                   retrieval_budget_ms: int | None = None) -> list[dict]:
+                   retrieval_budget_ms: int | None = None,
+                   entity_key_expansion: bool = False) -> list[dict]:
     """Hybrid retrieval over the question's ingested graph.
 
     R5 (#1544) D4: ``entity_types`` selects the retrieval pool — TR
@@ -699,6 +700,13 @@ def hybrid_search(sdk: TortoiseSDK, query: str, limit: int,
     amplifier). structural_kind deliberately does NOT post-filter: the pool
     must keep the R1 union (turn points + raw transcripts + extracted
     points).
+
+    #2518 (C2 #2513): ``entity_key_expansion`` (default False = off) —
+    threads into ``tortoise_fts_query`` so the entity/fact-augmented key
+    expansion second sparse pass arms the hybrid arm. The eval resolves the
+    knob (``TORTOISE_LME_ENTITY_KEY_EXPANSION`` env / explicit flag) and
+    passes the resolved bool — the product's ``tortoise_fts_query`` owns the
+    mechanism (default OFF there too).
     """
     merged: dict[str, dict] = {}
     for et in entity_types:
@@ -713,6 +721,9 @@ def hybrid_search(sdk: TortoiseSDK, query: str, limit: int,
             # #1786 (R5): the eval's elevated hybrid-arm deadline via the
             # existing benchmark-only seam (SDK default 500 ms untouched).
             _elevated_timeout_ms=retrieval_budget_ms,
+            # #2518 (C2 #2513): the entity/fact-augmented key expansion
+            # sparse-leg pass (default False — byte-identical when off).
+            entity_key_expansion=entity_key_expansion,
         ):
             merged[h["id"]] = h
     # deterministic union: RRF score desc, then id (no namespace collision
@@ -865,6 +876,17 @@ def retrieve_for_question(
     evidence_boost_answer_string: float | None = None,
     evidence_boost_verbatim: float | None = None,
     evidence_boost_source: float | None = None,
+    # C2 (#2518, #2513): entity/fact-augmented key expansion — tri-state
+    # (True/False explicit, None = env ``TORTOISE_LME_ENTITY_KEY_EXPANSION``;
+    # only 1/true/yes/on enables — fail-safe OFF, the #1745 default
+    # decision). Arms the product's additive second sparse pass
+    # (``tortoise_fts_query(entity_key_expansion=…)``): the query's entity
+    # anchors resolve through the Object-name index and their linked points'
+    # E3 ``search_keys`` re-run the sparse OR leg so same-subject points
+    # from ALL sessions can surface. The A/B switch for the #2513 partial-
+    # evidence lever: identical questions, expansion ON vs OFF, deltas on
+    # evidence_recall@k / recall_all@5 (C1 metrics).
+    entity_key_expansion: bool | None = None,
     # #1786 (R5): the hybrid-arm collective retrieval deadline (ms) — the
     # eval passes EVAL_RETRIEVAL_BUDGET_MS (1500); None = SDK default
     # 500 ms. Threads ONLY the hybrid arm (``hybrid_search`` →
@@ -989,22 +1011,45 @@ def retrieve_for_question(
     # recorded outcome. Default-None callers are byte-identical. ──
     legs: list[dict] = []
     start = time.monotonic()
+    # C2 (#2518, #2513): resolve the entity/fact-augmented key expansion
+    # tri-state once, before retrieval — explicit flag wins, else the
+    # ``TORTOISE_LME_ENTITY_KEY_EXPANSION`` env (fail-safe OFF: only
+    # 1/true/yes/on enables — the #1745 default decision). Mirrors the
+    # evidence-boost gate above; the outcome records the resolved bool so
+    # the A/B arms are reconstructable (identical questions, ON vs OFF).
+    if entity_key_expansion is not None:
+        entity_key_expansion_on = entity_key_expansion
+    else:
+        from .rerank import _TRUTHY
+        _eek_env = (os.environ.get("TORTOISE_LME_ENTITY_KEY_EXPANSION")
+                    or "")
+        entity_key_expansion_on = _eek_env.strip().lower() in _TRUTHY
     # R1: pool-depth headroom — a monopolizing session's points must not
     # crowd other sessions out BEFORE dedup runs (E2E-1).
     # R5 (D4): TR questions fetch the point+event union (E2E-4's "no
     # point-only filter"); non-TR keeps the exact points-only path.
+    # C2 (#2518, #2513): the entity/fact-augmented key expansion kwarg
+    # rides ONLY the ON path — the OFF path passes NO new kwarg
+    # (byte-identical, and hermetic hybrid_search stubs with strict
+    # signatures stay compatible, matching the off-path conventions of the
+    # R5/R6 retrieval knobs above).
+    _hybrid_kwargs: dict = {}
+    if entity_key_expansion_on:
+        _hybrid_kwargs["entity_key_expansion"] = True
     hits = hybrid_search(
         sdk, question["question"],
         limit=pool_limit,
         leg_trace=legs,
         entity_types=("point", "event") if (is_tr and tr_events)
         else ("point",),
-        recency_fields=({"point": "createdAt", "event": "startedAt"}
-                        if is_tr else None),
+        recency_fields=(
+            {"point": "createdAt", "event": "startedAt"}
+            if is_tr else None),
         recency_boost=tr_date_weight if is_tr else 0.0,
         # #1786 (R5): the eval's elevated hybrid-arm deadline (None keeps
         # the SDK-default 500 ms collective cap byte-identical).
         retrieval_budget_ms=retrieval_budget_ms,
+        **_hybrid_kwargs,
     )
     latency_ms = (time.monotonic() - start) * 1000.0
 
@@ -1355,6 +1400,11 @@ def retrieve_for_question(
         # multipliers + read-time mark census + pre-boost order. Always
         # present (applied=False on the default off path).
         "evidence_boost": evidence_boost_stats,
+        # C2 (#2518, #2513): the entity/fact-augmented key expansion arm —
+        # the resolved tri-state bool (explicit flag / env; fail-safe OFF).
+        # Reconstructs which arm a question ran on for the shared-question
+        # A/B deltas (identical questions, expansion ON vs OFF).
+        "entity_key_expansion": entity_key_expansion_on,
         # R5 (#1544): TR-constraint surface — the detected kind (TR only)
         # and whether the window filter fell back to the unfiltered pool
         # (never starve the reader into abstention).

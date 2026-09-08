@@ -355,6 +355,7 @@ surfaces:
   - test_relationships_bounded.py
   - test_remove_context_migration.py
   - test_render.py
+  - test_entity_key_expansion.py  # #2518: entity/fact-augmented key expansion (C2, docker-lane)
   - test_retrieval.py
   - test_review_connections.py
   - test_round_trip_parity.py
@@ -508,6 +509,7 @@ surfaces:
   - test_namespace_uri_mode.py
   - test_reader.py
   - test_reader_abstention_calibration.py
+  - test_entity_key_expansion.py  # #2518 (docker-lane leg, mirrors test_retrieval.py)
   - test_retrieval.py
   - test_sdk.py
   - test_sdk_dedup.py
