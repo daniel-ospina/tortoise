@@ -237,6 +237,48 @@ def test_l4_not_stamped_when_sessions_ge_2(tmp_path) -> None:
     assert summary["run"]["l4_underpopulated"] is False
 
 
+def test_differential_tier_smoke(tmp_path) -> None:
+    """Task-10 step 4 (smoke): differential-family scenarios (D3/D4) run
+    under the SAME byte-identical scaffold — real executor, session
+    streaming, MANDATORY emission coverage, spend metering — and an
+    unmeasured D-family cell classifies insufficient_n (reported, never a
+    vacuous measured cell)."""
+    import hashlib as _h
+    from battery.report.classify import classify_cell
+    cfg = _config_dir(tmp_path)
+    golds = tmp_path / "golds"
+    (golds / "g.txt").write_text("gold", encoding="utf-8")
+    sha = _h.sha256(b"gold").hexdigest()
+    path = cfg / "corpus.yaml"
+    data = yaml.safe_load(path.read_text())
+    data["scenarios"].append({
+        "id": "d4-001", "tier": "differential", "family": "D4",
+        "task_type": "decision", "k": 0,
+        "prompt": {"preamble": "Differential scenario."},
+        "question": "compare arms question?",
+        "gold_ref": {"path": "g.txt", "sha256": sha}})
+    path.write_text(yaml.safe_dump(data), encoding="utf-8")
+    out = tmp_path / "out"
+    code = run_battery(RunConfig(
+        config_dir=cfg, out_dir=out, executor="real", arms=["a0"],
+        caller_factory=_ScriptedCaller, sessions=2), stdout=lambda _: None)
+    assert code is ExitCode.OK
+    attempt = sorted(out.iterdir())[0]
+    summary = json.loads((attempt / "summary.json").read_text())
+    # differential scenario ran 2 streamed sessions on the real scaffold
+    assert summary["arms"][0]["valid_episodes"] == 6  # 3 scenarios x 2
+    recall = json.loads((attempt / "recall.json").read_text())
+    d4_rows = [r for r in recall.get("episodes", [])
+               if r["scenario_id"] == "d4-001"]
+    assert len(d4_rows) == 2
+    assert sorted(r["session_index"] for r in d4_rows) == [0, 1]
+    # per-cell discipline: an attempted-but-unmeasured D cell is
+    # insufficient_n — reported, never classified STRONG/PARITY from a gap
+    cell = classify_cell("D4", "a0", None, best_comparator=0.0)
+    assert cell.classification == "insufficient_n"
+    assert cell.load_bearing is False
+
+
 # ── seed-mode accumulation + stale refuse (embedded a4 real lane) ───────
 
 
