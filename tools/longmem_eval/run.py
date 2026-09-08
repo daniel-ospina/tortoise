@@ -1224,6 +1224,12 @@ def _build_fingerprint(*, reader_model: str, judge_model: str,
                        # C2 knob (a boosted/expanded checkpoint resumed
                        # without the arm is refused by the fingerprint gate).
                        entity_key_expansion: bool | None = None,
+                       # C3-1 (#2519, #2567): the coverage-completeness
+                       # loop arm — conditional presence (a looped
+                       # checkpoint resumed without the arm is refused by
+                       # the fingerprint gate; the 2×2 with #2518 stays
+                       # reconstructable).
+                       coverage_loop: bool | None = None,
                        max_chunks_per_session: int | None = None,
                        # #1786 (P1-1/P1-2/P2-4): the write-path retry knobs —
                        # ALWAYS present (results-relevant by construction: a
@@ -1330,6 +1336,7 @@ def _build_fingerprint(*, reader_model: str, judge_model: str,
             ("evidence_boost_verbatim", evidence_boost_verbatim),
             ("evidence_boost_source", evidence_boost_source),
             ("entity_key_expansion", entity_key_expansion),
+            ("coverage_loop", coverage_loop),
             ("max_chunks_per_session", max_chunks_per_session),
             # #1786 (R5): the eval's hybrid retrieval budget — conditional
             # presence (the eval always passes 1500, so a pre-feature /
@@ -3028,6 +3035,13 @@ def run_evaluation(
     # the methodology — an expanded checkpoint resumed without the arm is
     # refused by the fingerprint gate (same contract as evidence_boost).
     entity_key_expansion: bool | None = None,
+    # C3-1 (#2519, #2567): the coverage-completeness loop — tri-state
+    # (explicit flag > ``TORTOISE_LME_COVERAGE_LOOP`` env > OFF, the #1745
+    # fail-safe default). The #2519 all-or-nothing lever (2×2 covariate
+    # with #2518): resolved once, fingerprinted, and recorded in the
+    # methodology — a looped checkpoint resumed without the arm is refused
+    # by the fingerprint gate (same contract as evidence_boost).
+    coverage_loop: bool | None = None,
     # R5 (#1544): TR knobs — temporal-reasoning questions get the events
     # union pool, the engine recency date weight, the TR-constraint window
     # filter, time-ascending rendering, and the tighter tr_top_k cap
@@ -3144,6 +3158,15 @@ def run_evaluation(
         eke_env = (os.environ.get("TORTOISE_LME_ENTITY_KEY_EXPANSION")
                    or "")
         entity_key_expansion = eke_env.strip().lower() in _TRUTHY
+    # C3-1 (#2519, #2567): resolve the coverage-completeness loop tri-state
+    # ONCE, before the loop — same contract as evidence_boost/entity_key_
+    # expansion: a None with the TORTOISE_LME_COVERAGE_LOOP env set must
+    # not record `false` in the methodology while the per-question
+    # retrieval looped (methodology records the knobs truthfully; fail-safe
+    # OFF: only 1/true/yes/on enables — the #1745 default decision).
+    if coverage_loop is None:
+        cl_env = (os.environ.get("TORTOISE_LME_COVERAGE_LOOP") or "")
+        coverage_loop = cl_env.strip().lower() in _TRUTHY
     # C1/C2 (#1745): resolve the remaining boost knobs ONCE, before the
     # loop — the methodology and the fingerprint must record EXACTLY what
     # the per-question retrieval serves (CLI > env > default, mirroring
@@ -3246,6 +3269,10 @@ def run_evaluation(
         # fingerprint — an expanded checkpoint resumed without the arm is
         # refused by the fingerprint gate (A/B arm isolation).
         entity_key_expansion=bool(entity_key_expansion),
+        # C3-1 (#2519, #2567): the resolved coverage-loop arm rides the
+        # fingerprint — a looped checkpoint resumed without the arm is
+        # refused by the fingerprint gate (2×2 arm isolation with #2518).
+        coverage_loop=bool(coverage_loop),
         max_chunks_per_session=max_chunks_per_session,
         # #1786 (P1-1/P1-2/P2-4): the three retry knobs (ALWAYS present —
         # results-relevant) + the hybrid retrieval budget (conditional
@@ -3577,6 +3604,10 @@ def run_evaluation(
                             # key expansion arm (resolved above; OFF by
                             # default — the sealed A/B decides adoption).
                             entity_key_expansion=entity_key_expansion,
+                            # C3-1 (#2519, #2567): the coverage-completeness
+                            # loop arm (resolved above; OFF by default — the
+                            # sealed A/B decides adoption).
+                            coverage_loop=coverage_loop,
                             # #1786 (R5): the eval's elevated HYBRID-arm
                             # retrieval deadline via the existing seam (the
                             # vector arm keeps VECTOR_TIMEOUT_MS=5000).
@@ -3769,6 +3800,15 @@ def run_evaluation(
                         # reconstructs which arm each outcome ran on).
                         "entity_key_expansion": ret.get(
                             "entity_key_expansion"),
+                        # C3-1 (#2519, #2567): the coverage-completeness
+                        # loop arm per question — the resolved bool + the §8
+                        # per-outcome markers (loop_iterations /
+                        # loop_fired_facet / loop_merged_added) ride the
+                        # outcome so the flip census and the 2×2 with #2518
+                        # stay reconstructable (read via .get — absent on
+                        # pre-feature checkpoints).
+                        "coverage_loop": ret.get("coverage_loop"),
+                        "coverage_loop_stats": ret.get("coverage_loop_stats"),
                         # R6 (#1545): the rerank pass + latency ride the outcome —
                         # they stay ABSENT on baseline outcomes (the projection in
                         # outcomes_to_report adds them conditionally).
@@ -4164,6 +4204,11 @@ def run_evaluation(
             # arm — recorded verbatim in the methodology (published numbers
             # carry which A/B arm produced them).
             "entity_key_expansion": bool(entity_key_expansion),
+            # C3-1 (#2519, #2567): the coverage-completeness loop arm —
+            # recorded verbatim in the methodology (published numbers carry
+            # which of the 2×2 arms produced them; the §5 gate deltas are
+            # denominated on the recorded arm).
+            "coverage_loop": bool(coverage_loop),
             # #1786 (Task 2 Step 5): the recoverable-class resume-mode flag
             # + the write-path retry knobs recorded in the methodology so
             # the revalidation comparison can distinguish retried outcomes
@@ -4332,6 +4377,10 @@ def outcomes_to_report(
                 # arm marker rides the projection (read via o.get — absent
                 # on pre-feature checkpoints).
                 "entity_key_expansion",
+                # C3-1 (#2519, #2567): the coverage-completeness loop arm +
+                # the §8 per-outcome markers ride the projection (read via
+                # o.get — absent on pre-feature checkpoints).
+                "coverage_loop", "coverage_loop_stats",
                 # #1948: the reader-surface metric rides the projection
                 # alongside reader_evidence@k (absent until the outcome
                 # carries it — pre-#1948 checkpoints resume without
@@ -4782,6 +4831,31 @@ def _build_parser() -> argparse.ArgumentParser:
                     help="disable the C2 entity/fact-augmented key expansion "
                          "even when TORTOISE_LME_ENTITY_KEY_EXPANSION is set "
                          "(tri-state: explicit flags beat the env)")
+    # C3-1 (#2519, #2567): the coverage-completeness loop — tri-state
+    # --coverage-loop / --no-coverage-loop (None default so the
+    # TORTOISE_LME_COVERAGE_LOOP env still applies; OFF by default in code
+    # — the sealed #2519 A/B decides adoption). The A/B switch for the
+    # all-or-nothing lever: identical questions run once with the arm OFF
+    # (baseline) and once ON (2×2 covariate with the #2518 entity-key
+    # expansion arm); the report's shared-question recall_all@5 deltas + the
+    # per-outcome loop markers (loop_iterations / loop_fired_facet /
+    # loop_merged_added) gate the §5 acceptance.
+    cl = p.add_mutually_exclusive_group()
+    cl.add_argument("--coverage-loop", dest="coverage_loop",
+                    action="store_true", default=None,
+                    help="enable the C3-1 coverage-completeness loop "
+                         "(retrieve → rule-based facet census → check → ONE "
+                         "targeted second pass for the missing facet → "
+                         "session-diverse additive merge; fires only on "
+                         "entity-scoped facet-incompleteness — open-ended "
+                         "never fires; default: env "
+                         "TORTOISE_LME_COVERAGE_LOOP — OFF by default in "
+                         "code, #2567)")
+    cl.add_argument("--no-coverage-loop", dest="coverage_loop",
+                    action="store_false", default=None,
+                    help="disable the C3-1 coverage-completeness loop even "
+                         "when TORTOISE_LME_COVERAGE_LOOP is set (tri-state: "
+                         "explicit flags beat the env)")
     p.add_argument("--evidence-boost-verbatim", type=float, default=None,
                    help="verbatim/raw-chunk mark rank-offset multiplier "
                         "(env TORTOISE_LME_EVIDENCE_BOOST_VERBATIM; default "
@@ -5250,6 +5324,16 @@ def _run_main(parser: argparse.ArgumentParser, args,
         eke_env = (os.environ.get("TORTOISE_LME_ENTITY_KEY_EXPANSION")
                    or "")
         entity_key_expansion = eke_env.strip().lower() in _TRUTHY
+    # C3-1 (#2519, #2567): coverage-completeness loop — tri-state (CLI flag
+    # > TORTOISE_LME_COVERAGE_LOOP env > OFF — fail-safe: only
+    # 1/true/yes/on enables, mirroring the boost gate above). Resolved once
+    # and threaded into run_evaluation (methodology == actual; the #2519
+    # all-or-nothing A/B switch, 2×2 covariate with the entity-key arm).
+    if args.coverage_loop is not None:
+        coverage_loop = args.coverage_loop
+    else:
+        cl_env = (os.environ.get("TORTOISE_LME_COVERAGE_LOOP") or "")
+        coverage_loop = cl_env.strip().lower() in _TRUTHY
     # R5 (#1544) TR knobs: argparse defaults (12 / 0.5 / events-on),
     # recorded verbatim in the report methodology (D7).
     tr_top_k = args.tr_top_k
@@ -5444,6 +5528,10 @@ def _run_main(parser: argparse.ArgumentParser, args,
                 # arm (tri-state resolved above; OFF by default — the
                 # sealed #2513 A/B decides adoption).
                 entity_key_expansion=entity_key_expansion,
+                # C3-1 (#2519, #2567): coverage-completeness loop arm
+                # (tri-state resolved above; OFF by default — the sealed
+                # #2519 A/B decides adoption).
+                coverage_loop=coverage_loop,
                 tr_top_k=tr_top_k, tr_date_weight=tr_date_weight,
                 tr_events=tr_events,
                 rerank=rr["rerank_on"], rerank_model=rr["model"],

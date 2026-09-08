@@ -125,6 +125,11 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     #    import; the probe asserts the docker lane) ──────────────────────────
     "test_directional_impl.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])'],
     "test_directional_impl_fix.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])'],
+    # C3-1 #2567: docker-lane coverage-loop tests — module-level live probe
+    # (set + restore) + per-test fresh-graph fixture (the test_entity_key_
+    # expansion pattern; the monkeypatch.setenv is auto-restored).
+    "test_coverage_loop.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])',
+                               r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"'],
     "test_ep_directional.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])',
                                r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"'],
     "test_event_provenance.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])'],
