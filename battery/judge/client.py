@@ -62,6 +62,12 @@ class JudgeClient:
     def real(self) -> bool:
         return self._real
 
+    @property
+    def model_id(self) -> str:
+        """Resolved model id ("" in mock mode). Public so the evidence
+        validation pair-guard can compare the two judge configs."""
+        return self._model_id
+
     def judge(self, rubric_id: str, item_id: str, prompt: str,
               temperature: float = 0.0) -> JudgeCall:
         """Score one item against the rubric. Raises ArmUnavailable on
