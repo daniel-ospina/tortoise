@@ -9,10 +9,13 @@ from datetime import datetime, timedelta, UTC
 
 import pytest
 
+import tortoise.backup_sweep as backup_sweep
+
 from tortoise.backup_config import BackupConfig
 from tortoise.backup_sweep import (
     OPS_STATE_KEY,
     _check_per_label_drift,
+    _stamp_purged,
     _write_flat_index_filtered,
     read_purge_flat_ghosts,
     resolve_active_graph,
@@ -1932,6 +1935,72 @@ def test_purge_skips_row_restored_between_enumeration_and_drop(shared_proj):
     props = _tombstone_props(proj, gid)
     assert not props.get("purged_at")
     assert store.list(f"backups/team_x/{gid}/") != []
+
+
+@pytest.mark.skipif(_DOCKER_LANE, reason="purge erasure unit tests run embedded; docker lane covered by the hosted trash E2E (#2304)")
+def test_registry_stamp_raises_when_row_no_longer_a_tombstone(shared_proj):
+    """#2559 (re-audit P2): the REGISTRY-lane stamp must observe whether its
+    conditional MATCH…SET matched — a 0-row SET silently succeeded before, so
+    a cross-process restore flipping the row to ACTIVE between the pre-drop
+    verify and the stamp reported `purged` on a live, unstamped, already-
+    erased row. Mirrors the supabase lane (#2464): raises instead."""
+    if shared_proj is None:
+        return
+    proj = _make_env(None, shared_proj)
+    reg = proj.db.select_graph(_REGISTRY_GRAPH)
+    gid = f"g_stamp_{os.urandom(2).hex()}"
+    # Row is ACTIVE (a concurrent restore flipped it) — not a tombstone.
+    reg.query(
+        "CREATE (g:Graph {id:$gid, team_id:'team_x', name:$gid, "
+        "kind:'custom', namespace:$ns, status:'active', purged_at:null})",
+        params={"gid": gid, "ns": f"team_team_x_{gid}"})
+    with pytest.raises(RuntimeError, match="stamp refused"):
+        _stamp_purged(reg, "team_x", gid,
+                      datetime.now(UTC).isoformat(), residual=False)
+    # The live row is untouched.
+    props = _tombstone_props(proj, gid)
+    assert props.get("status") == "active"
+    assert not props.get("purged_at")
+
+
+@pytest.mark.skipif(_DOCKER_LANE, reason="purge erasure unit tests run embedded; docker lane covered by the hosted trash E2E (#2304)")
+def test_purge_reports_error_when_registry_stamp_refused(shared_proj,
+                                                         monkeypatch):
+    """#2559 integration: a mid-purge restore on the registry lane surfaces
+    as an error entry (never a silent `purged`) — _stamp_purged's raise
+    propagates through run_graph_purge's per-graph isolation."""
+    if shared_proj is None:
+        return
+    proj = _make_env(None, shared_proj)
+    store = MemoryStorage()
+    gid = f"g_refuse_{os.urandom(2).hex()}"
+    _seed_custom_tombstone(
+        proj, "team_x", gid, "refuse",
+        deleted_at=(datetime.now(UTC) - timedelta(days=30)).isoformat())
+    reg = proj.db.select_graph(_REGISTRY_GRAPH)
+    orig_stamp = backup_sweep._stamp_purged
+
+    def _flip_before_stamp(source, team_id, graph_id, now_iso, *,
+                           residual):
+        # A cross-process restore flips the row right before the stamp.
+        reg.query(
+            "MATCH (g:Graph {id:$gid, team_id:'team_x'}) "
+            "SET g.status = 'active' REMOVE g.deleted_at, g.purged_at",
+            params={"gid": graph_id})
+        return orig_stamp(source, team_id, graph_id, now_iso,
+                          residual=residual)
+
+    monkeypatch.setattr(backup_sweep, "_stamp_purged",
+                        _flip_before_stamp)
+    res = run_graph_purge(db=proj.db, registry=reg, storage=store,
+                          team_ids=["team_x"])
+    # Not reported as purged; surfaced as an error; row live, unstamped.
+    assert all(p["graph_id"] != gid for p in res["purged"])
+    assert any(e.get("graph_id") == gid and "stamp refused" in str(e.get("error"))
+               for e in res["errors"])
+    props = _tombstone_props(proj, gid)
+    assert props.get("status") == "active"
+    assert not props.get("purged_at")
 
 
 @pytest.mark.skipif(_DOCKER_LANE, reason="purge erasure unit tests run embedded; docker lane covered by the hosted trash E2E (#2304)")

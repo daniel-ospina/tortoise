@@ -1410,12 +1410,24 @@ def _stamp_purged(source, team_id: str, graph_id: str, now_iso: str,
                 f"purge stamp refused for {team_id}/{graph_id}: row is "
                 "no longer a deleted tombstone (restored concurrently?)")
         return
-    source.query(
+    rows = source.query(
         "MATCH (g:Graph {id:$gid, team_id:$tid, status:'deleted'}) "
-        "SET g.purged_at = $ts, g.purged_residual = $r",
+        "SET g.purged_at = $ts, g.purged_residual = $r RETURN count(g)",
         params={"gid": graph_id, "tid": team_id, "ts": now_iso,
                 "r": bool(residual)},
-    )
+    ).result_set
+    # #2559 (re-audit P2): the registry stamp must OBSERVE whether its
+    # conditional MATCH matched — a 0-row MATCH…SET silently succeeds, so a
+    # cross-process restore that flipped the row to ACTIVE between the
+    # pre-drop verify and the stamp would report `purged` on a live,
+    # unstamped, already-erased row. Mirror the supabase lane (#2464):
+    # refuse loudly so the caller records the race instead of silently
+    # succeeding.
+    matched = bool(rows and rows[0] and rows[0][0])
+    if not matched:
+        raise RuntimeError(
+            f"purge stamp refused for {team_id}/{graph_id}: row is "
+            "no longer a deleted tombstone (restored concurrently?)")
 
 
 def run_graph_purge(
