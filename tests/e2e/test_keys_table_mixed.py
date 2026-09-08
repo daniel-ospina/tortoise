@@ -35,6 +35,15 @@ dashboard fixture (scope doc §S5, AC5 follow-up #2178):
   - Rotate is exercised on a NON-held durable row and MUST NOT rewrite
     localStorage (no held install — the replacement is shown once only).
 
+#2476 additions (Last used column):
+  - Row 1 (the active_ctl positive control) carries a now-relative
+    last_used_at (2h ago — mid-bucket, so the relative label is stable for a
+    wide window) -> its Last used cell shows "2 hr ago" + an absolute-date
+    title tooltip; every other row stays last_used_at None -> plain "Never"
+    text (never span.dim — #2426: the status cell's dim identifies
+    'disabled', and the disabled row 2's dim assertion would strict-mode
+    double-match a Never-in-dim cell).
+
 Harness (pinned in scope doc §S5 — "own layered route handler; gate.py's 4
 empty-keys tests untouched"):
 - Same two-server harness as test_session_login_flow.py / test_dashboard_gate.py:
@@ -57,6 +66,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import urllib.parse
 
 import pytest
@@ -145,9 +155,12 @@ def _mixed_keys_fixture() -> list[dict]:
     """§S5 mixed fixture — every row a UNIQUE key_prefix (load-bearing)."""
     p = PREFIXES
     return [
-        # 1. provisioned, enabled -> active + full actions (positive control)
+        # 1. provisioned, enabled -> active + full actions (positive control).
+        #    #2476: also the ONE used row — a now-relative last_used_at so the
+        #    Last used cell renders a live relative label (the remaining rows
+        #    stay never-used -> plain 'Never').
         _key_row("key_mixed_01", p["active_ctl"], "ci runner",
-                 created_via="provisioned"),
+                 created_via="provisioned", last_used_at=_last_used_2h_ago()),
         # 2. provisioned, disabled -> truthful "disabled", toggle off + actions
         _key_row("key_mixed_02", p["disabled"], "staging",
                  created_via="provisioned", enabled=False),
@@ -196,6 +209,15 @@ def _future_expiry_30d() -> str:
     (fixed dates would decay — the Expires cell is wall-clock-relative)."""
     from datetime import UTC, datetime, timedelta
     return (datetime.now(UTC) + timedelta(days=30)).isoformat()
+
+
+def _last_used_2h_ago() -> str:
+    """#2476: a now-relative last_used_at for the used-row fixture — 2h back
+    sits mid-bucket for formatRelativeTime (>= 1h -> "N hr ago", so the label
+    stays "2 hr ago" until the stamp ages past 3h — a CI run is seconds, not
+    hours). Fixed dates would decay the same way #2426's expires_at does."""
+    from datetime import UTC, datetime, timedelta
+    return (datetime.now(UTC) - timedelta(hours=2)).isoformat()
 
 
 def _absent_via_legacy() -> dict:
@@ -337,10 +359,25 @@ def test_mixed_table_shows_only_durable_rows_with_truthful_statuses(page: Page) 
     # held row exists to be rotate-only (#2229's scope dies with held state).
     expect(ctl.locator(".key-rotate")).to_be_visible()
 
+    # — #2476: the USED row's Last used cell (Created | Last used | Expires
+    #   | Status — cell 4 of 7) shows the formatted relative label with an
+    #   absolute-date title tooltip. The stamp is now-relative 2h (mid hour-
+    #   bucket), so the label is exactly "2 hr ago" for the whole CI run.
+    used_lu = ctl.locator("td").nth(3)
+    expect(used_lu).to_have_text("2 hr ago")
+    expect(used_lu.locator("span")).to_have_attribute("title", re.compile(r"^Last used "))
+
     # — Row 2: disabled is "disabled", NOT "active" (the #2166 lie) —
     dis = page.locator("tbody tr", has_text=PREFIXES["disabled"])
+    # #2476: span.dim stays EXCLUSIVE to the disabled status — the Last used
+    # cell's 'Never' is plain text (a Never-in-dim cell would double-match
+    # this strict-mode assertion, the #2426 e2e lesson).
+    expect(dis.locator("span.dim")).to_have_count(1)
     expect(dis.locator("span.dim")).to_contain_text("disabled")
     expect(dis).not_to_contain_text("active")
+    # #2476: never-used -> the Last used cell reads plain "Never", no span.
+    expect(dis.locator("td").nth(3)).to_have_text("Never")
+    expect(dis.locator("td").nth(3).locator("span")).to_have_count(0)
     expect(dis.locator(".key-toggle")).to_have_attribute("aria-checked", "false")
     expect(dis.locator(".key-toggle")).to_have_attribute("data-on", "false")
     # A disabled durable key stays manageable (toggle back on / rename /
@@ -394,7 +431,15 @@ def test_mixed_table_shows_only_durable_rows_with_truthful_statuses(page: Page) 
 
     # — #2426: the expiring durable renders (prefix visible) with an
     #   Expires cell; bootstrap rows NEVER render (prefix-scoped) —
+    expiring_row = page.locator("tbody tr", has_text=PREFIXES["expiring"])
     expect(page.locator("code", has_text=PREFIXES["expiring"])).to_have_count(1)
+    # #2476: the expiring row is ALSO never-used — its Last used cell reads
+    # plain "Never" while the Expires cell carries the future date (a row-
+    # scoped bare "Never" grep would be ambiguous here; the cell pin is not).
+    expect(expiring_row.locator("td").nth(3)).to_have_text("Never")
+    # The new column's header renders exactly once (Created | Last used |
+    # Expires | Status order is pinned by the client unit tripwire).
+    expect(page.locator("thead th", has_text="Last used")).to_have_count(1)
     for never in (PREFIXES["boot_active"], PREFIXES["boot_swept"],
                   PREFIXES["boot_expired"]):
         expect(page.locator("code", has_text=never)).to_have_count(0)

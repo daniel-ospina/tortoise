@@ -5,8 +5,10 @@
 // greps below make the FEATURE'S LOAD-BEARING SHAPES hard regressions:
 //   1. the create form's expiry presets (30d DEFAULT / Custom / Never),
 //      minted as expires_in days ONLY (never the expires_at body param);
-//   2. the keys-table Expires column (Created | Expires | Status) fed by the
-//      fmtExpiry derivation (Never / amber in-N-days / terminal expired);
+//   2. the keys-table columns (Name | Prefix | Created | Last used | Expires |
+//      Status) fed by the fmtExpiry derivation (Never / amber in-N-days /
+//      terminal expired) + the #2476 Last-used cell (relative-time label,
+//      plain-text Never);
 //   3. rotate re-applying the old row's lifetime span + confirm copy stating
 //      the replacement expiry; the show-once card echoing the mint expiry;
 //   4. isManagedKey staying bootstrap-exclusion-only (an expiring durable
@@ -58,17 +60,32 @@ test('#2426: Custom dates are clamped to the 1-366-day window (server 422 parity
   assert.match(mainJsx, /return \(days >= 1 && days <= KEY_MAX_EXPIRY_DAYS\) \? days : null/, '1-366 clamp')
 })
 
-// 2. Keys-table Expires column (Created | Expires | Status) + fmtExpiry states.
-test('#2426: the keys table has an Expires column between Created and Status', () => {
+// 2. Keys-table columns (Name | Prefix | Created | Last used | Expires |
+// Status) + fmtExpiry states.
+test('#2476/#2426: the keys table is Name | Prefix | Created | Last used | Expires | Status', () => {
   const header = mainJsx.match(/<th scope="col">Name<\/th>.*<\/thead>/s)
   assert.ok(header, 'keys-table thead found')
   const cols = header[0].match(/<th scope="col">([^<]*)<\/th>/g) || []
   const names = cols.map((c) => c.replace(/<[^>]+>/g, ''))
-  assert.ok(names.indexOf('Created') !== -1 && names.indexOf('Expires') !== -1 && names.indexOf('Status') !== -1,
-    `Expires must sit between Created and Status, got: ${names}`)
-  assert.ok(names.indexOf('Expires') > names.indexOf('Created'), 'Expires after Created')
+  assert.ok(names.indexOf('Created') !== -1 && names.indexOf('Last used') !== -1
+    && names.indexOf('Expires') !== -1 && names.indexOf('Status') !== -1,
+    `Expected Created | Last used | Expires | Status columns, got: ${names}`)
+  assert.ok(names.indexOf('Created') < names.indexOf('Last used'), 'Last used after Created')
+  assert.ok(names.indexOf('Last used') < names.indexOf('Expires'), 'Expires after Last used')
   assert.ok(names.indexOf('Expires') < names.indexOf('Status'), 'Expires before Status')
-  assert.match(mainJsx, /colSpan="6"/, 'empty-state colSpan widened for the 6th column')
+  assert.match(mainJsx, /colSpan="7"/, 'empty-state colSpan widened for the 7th column')
+})
+
+test('#2476: the Last-used cell renders formatRelativeTime output and a plain-text Never', () => {
+  // The cell must feed formatRelativeTime (memory-sources parity — the util is
+  // already imported) and fall back to PLAIN 'Never' (no span.dim — #2426: the
+  // status cell's dim identifies 'disabled'; a Never-in-dim cell double-matched
+  // e2e strict mode).
+  assert.match(mainJsx, /const rel = formatRelativeTime\(lu, now\)/, 'cell uses formatRelativeTime')
+  assert.match(mainJsx, /if \(!rel\) return 'Never'/, "never-used rows render plain 'Never'")
+  assert.match(mainJsx, /title=\{`Last used \$\{fmtTime\(lu\)\}`\}/, 'used rows carry the absolute-date title tooltip')
+  assert.ok(!/formatRelativeTime\(k\.last_used_at,\s*now\)[\s\S]{0,400}className="dim"/.test(mainJsx),
+    'the Last-used Never must never sit in a span.dim cell')
 })
 
 test('#2426: fmtExpiry renders Never / amber in-N-days / terminal expired', () => {
