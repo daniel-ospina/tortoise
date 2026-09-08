@@ -141,6 +141,20 @@ def test_team_sweep_enabled_even_when_sweep_disabled(monkeypatch):
     assert cfg.team_sweep_enabled is True  # team-sweep flag still read
 
 
+def test_dead_skip_fresh_knob_removed(monkeypatch):
+    """#2317: BACKUP_SKIP_FRESH_MIN (parsed but never consumed) is REMOVED —
+    the env var must not silently re-enter the config contract (the original
+    registry-era skip window is superseded by the in-flight 202 guard +
+    per-team locks + retention prune)."""
+    env = _good_env()
+    env["BACKUP_SKIP_FRESH_MIN"] = "1"
+    monkeypatch.setattr(os, "environ", env)
+    cfg = load_config()
+    assert cfg.enabled is True
+    assert not hasattr(cfg, "skip_fresh_min"), \
+        "skip_fresh_min dead knob must stay removed from BackupConfig"
+
+
 def test_env_dict_injection_does_not_leak(monkeypatch):
     """load_config(env=...) must not mutate the real process environment."""
     before = dict(os.environ)

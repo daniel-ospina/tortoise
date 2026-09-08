@@ -128,6 +128,49 @@ def test_second_judge_absent_fails_closed(tmp_path, monkeypatch):
             records_path=_record_path(tmp_path))
 
 
+@pytest.mark.parametrize("model_a, model_b", [
+    ("openai/gpt-4o", "openai/gpt-4o"),       # byte-identical pair
+    (" openai/GPT-4O ", "openai/gpt-4o"),      # ws-strip + case-fold equal
+])
+def test_same_model_pair_fails_closed(tmp_path, monkeypatch, model_a,
+                                       model_b):
+    # #2601: two env configs that RESOLVE to the same model are as
+    # degenerate as a missing second config — identical temp-0 judges emit
+    # byte-identical verdicts, so AC1/kappa == 1.0 by construction and the
+    # inter-judge leg "passes" without measuring inter-judge reliability.
+    # The guard must ConfigError BEFORE any judge call (no network).
+    monkeypatch.setenv("BATTERY_JUDGE_MODEL", model_a)
+    monkeypatch.setenv("BATTERY_JUDGE_MODEL_2", model_b)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-fake")
+
+    def _no_judge_call(*args, **kwargs):
+        raise AssertionError("judge() invoked — distinctness guard must "
+                             "fire at construction, before any call")
+    monkeypatch.setattr(JudgeClient, "judge", _no_judge_call)
+    with pytest.raises(ConfigError, match="both resolve to"):
+        run_evidence_validation(
+            config_dir=CONFIG, rubric_id="r2-coverage",
+            evidence=_fixture_bundle(),
+            records_path=_record_path(tmp_path))
+
+
+def test_distinct_model_pair_constructs_no_raise(tmp_path, monkeypatch):
+    # #2601 companion: a genuine two-model env pair must NOT trip the
+    # distinctness guard. Construction-only assertion — judge() is stubbed
+    # (deterministic content answer) so no live network call happens.
+    monkeypatch.setenv("BATTERY_JUDGE_MODEL", "openai/gpt-4o")
+    monkeypatch.setenv("BATTERY_JUDGE_MODEL_2",
+                       "anthropic/claude-3.5-sonnet")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-fake")
+    monkeypatch.setattr(JudgeClient, "judge", _GoodJudge.judge)
+    rec = run_evidence_validation(
+        config_dir=CONFIG, rubric_id="r2-coverage",
+        evidence=_fixture_bundle(), records_path=_record_path(tmp_path),
+        reserve_usd=10.0)
+    assert rec is not None  # no ConfigError: distinct pair constructs fine
+
+
+
 def test_judge_leg_cap_refusal(tmp_path):
     # judge spend metered + HARD-STOPPED against the reserve: a $1.00/call
     # judge over a $1.50 reserve aborts mid-run (never a silent overshoot).

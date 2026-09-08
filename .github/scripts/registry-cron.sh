@@ -10,7 +10,8 @@
 #   2. GET /status (classify: connect-fail → APP_DOWN; app-503/429 → up)
 #   3. kill-switch check (enabled:false → exit 0, no filings)
 #   4. POST /backups/sweep (202 = lock held)
-#   5. POST /reconcile ride-along (skipped when the sweep returned 202)
+#   5. POST /backups/purge + /reconcile ride-along (skipped on 202; #2304 purge
+#      erases expired trash on the hourly cadence — wired by #2317)
 #   6. POST /driver/heartbeat
 #   7. self-heal: close open APP_DOWN/WATCHER_DOWN on success
 set -euo pipefail
@@ -235,13 +236,31 @@ RUN="$(curl -sS -m 600 -X POST -H "Authorization: Bearer $KEY" \
 RUN_STATUS="$(printf '%s' "$RUN" | jq -r '.status // "error"' 2>/dev/null || echo error)"
 log "sweep status: $RUN_STATUS"
 
-# ── 4. reconcile ride-along (#654) — skipped when the sweep returned 202 ────
-# Non-2xx is a hard failure (the cron driver MUST NOT blind the pipeline —
-# a silently skipped reconcile step is the same class of silent-no-op that
-# left this endpoint uninvoked before #654). We track the failure and exit
-# AFTER heartbeat + self-heal so the driver still files health signals.
+# ── 4. trash purge ride-along (#2304, wired #2317) + reconcile ride-along (#654) ──
+# Both are skipped when the sweep returned 202 (the lock-holder is running;
+# purge/reconcile would only queue behind it). Non-2xx is a hard failure for
+# reconcile (the cron driver MUST NOT blind the pipeline — a silently skipped
+# reconcile step is the same class of silent-no-op that left this endpoint
+# uninvoked before #654). The purge erases EXPIRED trash tombstones (> 7-day
+# grace) so the runbook's "erased within a day of expiry" claim stays true;
+# a purge body of status "errors" (per-tombstone failures) is loud too — the
+# per-team lock/retry anchors keep it safe to re-run next hour. We track both
+# failures and exit AFTER heartbeat + self-heal so the driver still files
+# health signals.
+PURGE_FAILED=0
 RECONCILE_FAILED=0
 if [ "$RUN_STATUS" != "already_running" ]; then
+  PURGE_CODE="$(curl -sS -o /tmp/purge-resp.json -w '%{http_code}' -m 300 -X POST \
+    -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" -d '{}' \
+    "${API}/v1/internal/backups/purge" 2>/dev/null || echo '000')"
+  PURGE_BODY="$(cat /tmp/purge-resp.json 2>/dev/null || true)"
+  PURGE_ST="$(printf '%s' "$PURGE_BODY" | jq -r '.status // "error"' 2>/dev/null || echo error)"
+  if [ "$PURGE_CODE" = "200" ] && { [ "$PURGE_ST" = "ok" ] || [ "$PURGE_ST" = "already_running" ]; }; then
+    log "purge ride-along OK (status=$PURGE_ST teams_purged=$(printf '%s' "$PURGE_BODY" | jq -r '.teams_purged // 0'))"
+  else
+    log "purge ride-along FAILED (HTTP $PURGE_CODE status=$PURGE_ST): $(printf '%s' "$PURGE_BODY" | head -c 300)"
+    PURGE_FAILED=1
+  fi
   RECONCILE_CODE="$(curl -sS -o /dev/null -w '%{http_code}' -m 120 -X POST \
     -H "Authorization: Bearer $KEY" \
     "${API}/v1/internal/reconcile" 2>/dev/null || echo '000')"
@@ -252,7 +271,7 @@ if [ "$RUN_STATUS" != "already_running" ]; then
     RECONCILE_FAILED=1
   fi
 else
-  log "sweep returned 202 (lock held) — skipping reconcile to avoid racing a restore"
+  log "sweep returned 202 (lock held) — skipping purge/reconcile to avoid racing a restore"
 fi
 
 # ── 5. driver heartbeat (carries r2_ok so the R2_DOWN signal is auditable) ──
@@ -271,6 +290,11 @@ if [ "$RUN_STATUS" = "backed_up" ] || [ "$RUN_STATUS" = "no_teams" ] || [ "$RUN_
     [ -n "$num" ] && gh_close "$num" "Resolved — sweep succeeded ($RUN_STATUS)."
   done
   log "self-heal: closed open incidents for a healthy run"
+fi
+
+if [ "$PURGE_FAILED" = "1" ]; then
+  fail "purge ride-along failed — investigate (expired trash not erased)"
+  exit 1
 fi
 
 if [ "$RECONCILE_FAILED" = "1" ]; then

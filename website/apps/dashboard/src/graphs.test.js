@@ -5,6 +5,8 @@ import {
   GRAPH_KEY_SCOPES,
   canManageGraphKeys,
   graphCanDelete,
+  graphKeyPanelEmptyLine,
+  graphKeysSuppressed,
   graphMintBody,
   graphsMeter,
   isDefaultGraph,
@@ -50,6 +52,20 @@ test('tierCreateLocked: free/anon locked; solo/pro/team/unknown open', () => {
   assert.equal(tierCreateLocked(null), false)
 })
 
+test('graphKeysSuppressed: default rows suppress the Keys cell (its count is 0 in both lanes; keys live on the API Keys tab)', () => {
+  // The server reports key_count 0 for default-kind rows in BOTH lanes and
+  // the UI must never render a bound-default artifact (e.g. the registry
+  // capstone "1") on a row it cannot act on — suppress the whole cell.
+  assert.equal(graphKeysSuppressed(DEFAULT), true)
+  assert.equal(graphKeysSuppressed({ ...DEFAULT, key_count: 1 }), true) // capstone bound-default "1" still suppressed
+  assert.equal(graphKeysSuppressed(CUSTOM('a')), false)
+  assert.equal(graphKeysSuppressed({ ...CUSTOM('a'), key_count: 3 }), false)
+  assert.equal(graphKeysSuppressed(null), true)
+  assert.equal(graphKeysSuppressed(undefined), true)
+  assert.equal(graphKeysSuppressed({ kind: 'default' }), true)
+  assert.equal(graphKeysSuppressed({ kind: 'custom' }), false)
+})
+
 test('canManageGraphKeys: custom graphs only (default keys live on API Keys)', () => {
   assert.equal(canManageGraphKeys(DEFAULT), false)
   assert.equal(canManageGraphKeys(CUSTOM('a')), true)
@@ -80,6 +96,19 @@ test('sortedGraphRows: empty + null-safe', () => {
   assert.deepEqual(sortedGraphRows([]), [])
   assert.deepEqual(sortedGraphRows(null), [])
   assert.deepEqual(sortedGraphRows(undefined), [])
+})
+
+test('graphKeyPanelEmptyLine: #2307 owner/admin keeps mint CTA; member gets who-can-create', () => {
+  // Owner/admin panel renders the mint form next to the empty line — the
+  // actionable "mint one above" copy stays truthful for them.
+  assert.equal(
+    graphKeyPanelEmptyLine(true),
+    'No keys for this graph yet — mint one above (shown once).')
+  assert.equal(
+    graphKeyPanelEmptyLine(false),
+    'No keys for this graph yet — only owners and admins can create keys.')
+  // The member branch must never point at the owner-only mint control.
+  assert.ok(!graphKeyPanelEmptyLine(false).includes('mint'))
 })
 
 test('graphMintBody: graph-bound data-plane scopes', () => {

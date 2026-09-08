@@ -11,6 +11,15 @@
 //   default graph") and its keys are the TEAM-WIDE rows (graph_id NULL,
 //   managed on the API Keys tab). So the [Keys] panel applies to CUSTOM
 //   graphs only — mirror the [Delete] lock on kind==='default' rows.
+//   #2306: the default row's key_count is 0 in BOTH lanes (the server
+//   short-circuits default-kind rows before any lane count — the supabase
+//   FK makes a bound-default row structurally impossible and the registry
+//   lane must not count legacy bound-default APIKey nodes against the
+//   default node's real gid). The Graphs tab therefore SUPPRESSES the
+//   numeric cell on default rows and points at the API Keys tab instead of
+//   showing a number it cannot act on (canManageGraphKeys is kind-gated).
+//   Legacy bound-default keys (registry pre-guard mints / raw writes) stay
+//   listable + revocable on the API Keys tab's unfiltered list.
 // - POST /v1/team/keys {graph_id, scopes, name?} session mint: owner-class
 //   scoped mint for an EXISTING custom graph; per-graph keys require >=1
 //   explicit scope (422 otherwise); unknown/default graph 404s. Dashboard
@@ -77,6 +86,18 @@ export function canManageGraphKeys(g) {
   return g.kind !== 'default'
 }
 
+// #2306: the default row's Keys cell NEVER renders a numeric count. The
+// server reports key_count 0 for it in both lanes (no per-graph keys exist
+// for the default graph) — and the supabase lane's old always-0 cell and the
+// registry lane's bound-default "1" both communicated nothing actionable.
+// Suppress the number on default rows and render the API-Keys-tab
+// affordance instead (its keys — the team-wide graph_id-NULL rows — are
+// managed there). Any legacy bound-default count the server might still
+// send must never render on a row the UI cannot act on.
+export function graphKeysSuppressed(g) {
+  return !g || isDefaultGraph(g)
+}
+
 // Per-graph key mint body (session scoped mint). Scopes ride the body so a
 // future scope-aware UI can narrow them; today's panel always mints the
 // data-plane pair against an existing CUSTOM graph.
@@ -121,6 +142,20 @@ export function trashEraseLabel(deletedAt, nowIso) {
   if (d == null) return deletedAt
   if (d === 0) return 'past window — pending erase'
   return d === 1 ? 'erases in 1 day' : `erases in ${d} days`
+}
+
+// ── #2307 (post-#2083 C7 review): role-aware [Keys] panel empty copy ──────
+// The per-graph mint form is owner/admin-rendered only; a member's panel
+// shows "Only owners and admins can manage graph keys." instead (no mint
+// control exists for them). The never-minted empty state must therefore NOT
+// tell a member to "mint one above" — that control doesn't exist on their
+// panel. Owners/admins keep the actionable line; members get the factual
+// state plus who can create (app-wide member copy precedent: "ask an owner
+// or admin" / "Only owners and admins can create…"), no mint instruction.
+export function graphKeyPanelEmptyLine(isOwnerAdmin) {
+  return isOwnerAdmin
+    ? 'No keys for this graph yet — mint one above (shown once).'
+    : 'No keys for this graph yet — only owners and admins can create keys.'
 }
 
 // Oldest-first (soonest erasure on top — the urgent rows surface first).

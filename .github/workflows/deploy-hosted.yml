@@ -342,6 +342,11 @@ jobs:
           # Optional (env-gated at runtime): only pass when set, so unconfigured
           # backups / GitHub OAuth never fail the deploy.
           [ -n "${{ secrets.TORTOISE_BACKUP_KEY }}" ] && ARGS="$ARGS TORTOISE_BACKUP_KEY=${{ secrets.TORTOISE_BACKUP_KEY }}"
+          # #2318: the RETAINED previous backup key is synced ONLY while the
+          # GitHub secret exists (a rotation overlap window — old user-backup
+          # archives stay decryptable in-app). Absent → the app reads no
+          # *_PREVIOUS candidate. Clear it from GitHub + Fly after the window.
+          [ -n "${{ secrets.TORTOISE_BACKUP_KEY_PREVIOUS }}" ] && ARGS="$ARGS TORTOISE_BACKUP_KEY_PREVIOUS=${{ secrets.TORTOISE_BACKUP_KEY_PREVIOUS }}"
           [ -n "${{ secrets.R2_ACCOUNT_ID }}" ] && ARGS="$ARGS R2_ACCOUNT_ID=${{ secrets.R2_ACCOUNT_ID }}"
           [ -n "${{ secrets.R2_ACCESS_KEY_ID }}" ] && ARGS="$ARGS R2_ACCESS_KEY_ID=${{ secrets.R2_ACCESS_KEY_ID }}"
           [ -n "${{ secrets.R2_SECRET_ACCESS_KEY }}" ] && ARGS="$ARGS R2_SECRET_ACCESS_KEY=${{ secrets.R2_SECRET_ACCESS_KEY }}"
@@ -358,12 +363,16 @@ jobs:
           if [ -n "${{ secrets.TORTOISE_BACKUP_KEY }}" ] && [ -n "${{ secrets.R2_ACCOUNT_ID }}" ] && [ -n "${{ secrets.R2_ACCESS_KEY_ID }}" ] && [ -n "${{ secrets.R2_SECRET_ACCESS_KEY }}" ] && [ -n "${{ secrets.R2_BUCKET }}" ] && [ -n "${{ secrets.TELEGRAM_BOT_TOKEN }}" ] && [ -n "${{ secrets.TELEGRAM_CHAT_ID }}" ] && [ -n "${{ secrets.DR_ISSUES_PAT }}" ] && [ -n "${{ secrets.BACKUP_ALERT_ASSIGNEE }}" ]; then
             ARGS="$ARGS BACKUP_SWEEP_ENABLED=true"
             echo "::notice::BACKUP_SWEEP_ENABLED=true — all backup-sweep secrets present"
-            # REGISTRY_STREAM_KEY is deliberately NOT synced from GH (#661).
-            # The operator must set it out-of-band on Fly:
-            #   fly secrets set REGISTRY_STREAM_KEY=... --app tortoise-y4mjjq
+            # REGISTRY_STREAM_KEY is deliberately NOT synced from GH (#661);
+            # REGISTRY_STREAM_KEY_PREVIOUS (the #2318 rotation-overlap
+            # retained key) is equally never synced. The operator sets both
+            # out-of-band on Fly:
+            #   fly secrets set REGISTRY_STREAM_KEY=... REGISTRY_STREAM_KEY_PREVIOUS=... --app tortoise-y4mjjq
+            # (tools/rotate-backup-keys.py --role registry_stream --emit-commands
+            # prints the exact staged command; --purge prints the unset step.)
             # When BACKUP_SWEEP_ENABLED=true, a missing REGISTRY_STREAM_KEY
             # fails-closed at config-load time (the app boots but /sweep 503s).
-            echo "::notice::REGISTRY_STREAM_KEY — ensure the operator has set this Fly secret out-of-band (#661)"
+            echo "::notice::REGISTRY_STREAM_KEY(_PREVIOUS) — ensure the operator has set these Fly secrets out-of-band (#661, #2318)"
           else
             echo "::warning::backup sweep secrets incomplete — BACKUP_SWEEP_ENABLED left off (fail-closed)"
           fi

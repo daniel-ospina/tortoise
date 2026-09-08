@@ -793,6 +793,156 @@ class TestOnboardingToolGating:
             mcp_server._onboarding_state_cache.clear()
 
 
+# ── #2300: graph-bound keys vs team-level onboarding/GitHub state ────────
+# Post-#2083 parity: a minted per-graph key (deleg=0, graphs:read/write)
+# must be DENIED team-level default-graph/control-plane state over MCP HTTP
+# — the REST twins reject graph-bound keys (C5 #2114 GRAPH_SCOPED_TEAM_
+# SURFACE). tortoise_onboarding_state (the MCP-vs-REST asymmetry found in
+# the post-ship review) + tortoise_onboarding_github_status (read) +
+# tortoise_onboarding_github_connect (OAuth initiation) — while team-wide /
+# legacy keys keep the flows unchanged.
+
+class TestGraphBoundKeyTeamSurfaceReject:
+    """#2300: MCP HTTP authz for the onboarding/GitHub team-surface tools.
+
+    Deleg=0 per-graph keys resolve graph scope on the registry lane
+    (sdk.apikey_verify graph_id/namespace — #2300 C5 registry-lane parity)
+    and hit the tool-body graph-bound rejects; team-wide (deleg NULL) and
+    legacy keys pass. The authz signal mirrors REST's GRAPH_SCOPED_TEAM_SURFACE
+    family: an AuthorizationError isError result whose text names the surface.
+    """
+
+    @staticmethod
+    def _mint_key(reg, tid, *, scopes, graph_id=None, deleg=None):
+        """Raw APIKey node — the hosted mint matrix's registry DB shape
+        (mirror of tests/test_tenancy_spine.py._mint_key)."""
+        import uuid as _uuid
+
+        from tortoise.auth import hash_api_key
+        token = "tk_" + _uuid.uuid4().hex
+        reg._get_registry().query(
+            "CREATE (k:APIKey {id:$id, team_id:$tid, key_hash:$kh, "
+            "key_prefix:$kp, created_by:'#2300', graph_id:$gid, "
+            "scopes:$scopes, delegation_depth:$dd})",
+            params={"id": f"k-{_uuid.uuid4().hex[:8]}", "tid": tid,
+                    "kh": hash_api_key(token), "kp": token[:10],
+                    "gid": graph_id, "scopes": scopes, "dd": deleg},
+        )
+        return token
+
+    def _env(self, tmp_path, monkeypatch, name):
+        """Registry on TORTOISE_DB_PATH + team + default graph + one custom
+        graph (the per-graph keys bind here) + mounted MCP app. Returns
+        (reg, team_id, graph_id, tc)."""
+        from tortoise.mcp_server import create_http_app
+        db_path = str(tmp_path / f"{name}.db")
+        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+        monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
+        reg = TortoiseSDK(db_path=db_path, namespace="registry")
+        team = reg.team_create(name)
+        reg._graph_create(team["id"], "default", kind="default")
+        g = reg._graph_create(team["id"], "bound-g", kind="custom")
+        app = create_http_app(allowed_origins=[], _registry_sdk=reg)
+        return reg, team["id"], g["graph_id"], _mounted_test_client(app)
+
+    @staticmethod
+    def _call(tc, token, tool, args=None):
+        """tools/call over MCP HTTP; returns (result_dict, text)."""
+        r = tc.post("/mcp", headers={
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/json, text/event-stream",
+            "Content-Type": "application/json",
+        }, json={"jsonrpc": "2.0", "method": "tools/call", "id": 1,
+                "params": {"name": tool, "arguments": args or {}}})
+        assert r.status_code == 200, r.text
+        body = _parse_sse_json(r)
+        result = body.get("result") or {}
+        text = "".join(c.get("text", "") for c in result.get("content", [])
+                        if isinstance(c, dict))
+        return result, text
+
+    def _assert_denied(self, tc, token, tool, surface, args=None):
+        result, text = self._call(tc, token, tool, args)
+        assert result.get("isError") is True, (
+            f"{tool} not denied for a graph-bound key: {text}")
+        assert f"Graph-scoped keys cannot access {surface}." in text, (
+            f"{tool} denial text: {text}")
+
+    def test_graph_bound_key_cannot_read_onboarding_state(self, tmp_path,
+                                                          monkeypatch):
+        """The true MCP-vs-REST asymmetry (#2300): tortoise_onboarding_state
+        reads the team DEFAULT-graph/control-plane projection — its REST twin
+        GET /v1/onboarding/state 403s graph-bound keys (C5), the MCP twin did
+        not. A deleg=0 graphs:read per-graph key must now be denied."""
+        _reg, tid, gid, tc = self._env(tmp_path, monkeypatch, "state-gb")
+        bound_ro = self._mint_key(_reg, tid, scopes=["graphs:read"],
+                                  graph_id=gid, deleg=0)
+        with tc:
+            self._assert_denied(tc, bound_ro, "tortoise_onboarding_state",
+                                "onboarding state")
+
+    def test_graph_bound_key_cannot_read_github_status(self, tmp_path,
+                                                       monkeypatch):
+        """#2300: tortoise_onboarding_github_status reads team GitHub
+        credential state — a deleg=0 graphs:read key must be denied (REST
+        twin now rejects too — #2300 closes the REST residual)."""
+        _reg, tid, gid, tc = self._env(tmp_path, monkeypatch, "gstatus-gb")
+        bound_ro = self._mint_key(_reg, tid, scopes=["graphs:read"],
+                                  graph_id=gid, deleg=0)
+        with tc:
+            self._assert_denied(tc, bound_ro,
+                                "tortoise_onboarding_github_status",
+                                "github status")
+
+    def test_graph_bound_write_key_cannot_initiate_github_connect(
+            self, tmp_path, monkeypatch):
+        """#2300: tortoise_onboarding_github_connect starts a TEAM-wide
+        OAuth — even a graphs:read+write per-graph key must be denied (the
+        write scope gate alone is not enough; the team-surface reject fires)."""
+        _reg, tid, gid, tc = self._env(tmp_path, monkeypatch, "gconn-gb")
+        bound_rw = self._mint_key(_reg, tid,
+                                  scopes=["graphs:read", "graphs:write"],
+                                  graph_id=gid, deleg=0)
+        with tc:
+            self._assert_denied(tc, bound_rw,
+                                "tortoise_onboarding_github_connect",
+                                "github connect")
+            # A graphs:read-ONLY bound key hits the dispatch write gate
+            # (write implies read) before the body reject — still an authz
+            # denial, same failure family.
+            bound_ro = self._mint_key(_reg, tid, scopes=["graphs:read"],
+                                      graph_id=gid, deleg=0)
+            result, text = self._call(tc, bound_ro,
+                                      "tortoise_onboarding_github_connect")
+            assert result.get("isError") is True, text
+            assert "graphs:write scope" in text, text
+
+    def test_team_wide_scoped_key_unchanged(self, tmp_path, monkeypatch):
+        """Positive control: a team-wide scoped key (deleg NULL, graphs:read)
+        still reads onboarding state + GitHub status over MCP HTTP — the
+        reject is narrow (graph-bound keys only)."""
+        _reg, tid, _gid, tc = self._env(tmp_path, monkeypatch, "state-wide")
+        wide = self._mint_key(_reg, tid, scopes=["graphs:read"])
+        with tc:
+            result, text = self._call(tc, wide, "tortoise_onboarding_state")
+            assert result.get("isError") is not True, text
+            assert "onboarding_complete" in text, text
+            result, text = self._call(tc, wide,
+                                      "tortoise_onboarding_github_status")
+            assert result.get("isError") is not True, text
+            assert "connected" in text, text
+
+    def test_legacy_key_unchanged(self, tmp_path, monkeypatch):
+        """Positive control: a legacy full-access key (deleg NULL, no
+        scopes) keeps the onboarding-state read."""
+        _reg, tid, _gid, tc = self._env(tmp_path, monkeypatch, "state-legacy")
+        legacy = _reg.apikey_create(tid, "#2300-legacy")["api_key"]
+        with tc:
+            result, text = self._call(tc, legacy, "tortoise_onboarding_state")
+            assert result.get("isError") is not True, text
+            assert "onboarding_complete" in text, text
+
+
 # ── #2210: advertised == served ─────────────────────────────────
 # First-run trial observation: the FastMCPAdapter logged "7 registry entries
 # have no handler — skipped" (the seven onboarding tools + tortoise_session_capture
@@ -1302,3 +1452,84 @@ class TestSC5IndexFilesSurface:
         text = "".join(c.get("text", "") for c in body.get("result", {}).get("content", []))
         assert "-32004" in text or "not available over HTTP" in text, \
             f"expected excluded error, got: {body}"
+
+
+# ── #2302: tortoise_graph_set_recording HTTP contract ───────────────────
+
+class TestGraphSetRecordingHTTP:
+    """#2302 — the per-graph recording override MCP surface is REGISTERED
+    (tools/list) and CALLABLE over the mounted tenant HTTP stack, with the
+    same semantics as PATCH /v1/graphs/{graph_id} (true/false/null override,
+    'default' graph resolution). The override write is control-plane state —
+    the registry Graph node prop — verified directly after the call."""
+
+    @staticmethod
+    def _unwrap(body: dict) -> dict:
+        result = body.get("result", {})
+        sc = result.get("structuredContent")
+        if sc is not None:
+            return sc
+        for item in result.get("content", []):
+            text = item.get("text")
+            if text:
+                import json as _json
+                try:
+                    return _json.loads(text)
+                except Exception:
+                    continue
+        return result
+
+    def test_registered_and_callable_set_clear_default_graph(self, tmp_path,
+                                                             monkeypatch):
+        from tortoise.mcp_server import create_http_app
+
+        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+        db = str(tmp_path / "rec.db")
+        monkeypatch.setenv("TORTOISE_DB_PATH", db)
+        reg = TortoiseSDK(db_path=db, namespace="registry")
+        team = reg.team_create("rec-http-team")
+        reg._graph_create(team["id"], "default", kind="default")
+        key = reg.apikey_create(team["id"], "r")["api_key"]
+
+        app = create_http_app(allowed_origins=["https://app.premiselabs.co"],
+                              _registry_sdk=reg)
+        tc = _mounted_test_client(app)
+        tc.headers.update({
+            "Authorization": f"Bearer {key}",
+            "Accept": "application/json, text/event-stream",
+            "Content-Type": "application/json",
+        })
+        with tc:
+            # Advertised to agents (registered + HTTP_ALLOWED + sessions group).
+            r, body = _mcp_post(tc, {"jsonrpc": "2.0", "id": 1,
+                                     "method": "tools/list", "params": {}})
+            assert r.status_code == 200, r.text
+            names = {t.get("name")
+                     for t in body.get("result", {}).get("tools", [])}
+            assert "tortoise_graph_set_recording" in names, (
+                "the recording-on surface must be discoverable over HTTP")
+            # Set true on the DEFAULT graph (no graph_id = team-wide default).
+            r, body = _mcp_post(tc, {"jsonrpc": "2.0", "id": 2,
+                                     "method": "tools/call",
+                                     "params": {
+                                         "name": "tortoise_graph_set_recording",
+                                         "arguments": {"recording": True}}})
+            assert r.status_code == 200, r.text
+            result = self._unwrap(body)
+            assert result.get("graph_id") == "default", body
+            assert result.get("recording") is True, body
+            # Clear back to inherit (null) — node prop gone.
+            r, body = _mcp_post(tc, {"jsonrpc": "2.0", "id": 3,
+                                     "method": "tools/call",
+                                     "params": {
+                                         "name": "tortoise_graph_set_recording",
+                                         "arguments": {"recording": None}}})
+            assert r.status_code == 200, r.text
+            result = self._unwrap(body)
+            assert result.get("recording") is None, body
+            rows = reg._get_registry().query(
+                "MATCH (g:Graph {team_id:$tid, kind:'default'}) "
+                "RETURN g.recording",
+                params={"tid": team["id"]},
+            ).result_set
+            assert rows and rows[0][0] is None, rows
