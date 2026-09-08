@@ -43,6 +43,12 @@ _CLAIM_MEMORY_KIND = "claim"
 #: Per-episode Challenge/Deepen cycle cap (#2291 I-3 / Task 4 ep_outcome):
 #: cap-hit ⇒ non_converged/undec, never forced CONVERGED.
 DECIDE_CYCLES_CAP = 8
+#: record() verbs routed to an evidence + support (IMPL) write. Anything
+#: outside this set (supersede, claim, operator, …) is an HONEST NO-OP —
+#: never a silent IMPL misroute that flips a replacement/verb into
+#: agreement with the targeted claim. Task-9's executor routes supersede
+#: at its own layer via the product verb.
+_WRITE_KINDS = frozenset({"evidence", "nand", "imply", "support", "statement"})
 #: seed-manifest marker content prefix — never surfaced as a memory.
 _SEED_MANIFEST_PREFIX = "battery:seed_manifest:"
 
@@ -321,7 +327,13 @@ class A4TortoiseArm:
                 ops = [m for m in closed if m.kind == "operator"]
                 if not ops:
                     return  # unresolved operator target ⇒ honest no-op
-                mit_key = f"mitigate::{item.content}"
+                if item.target_id is not None:
+                    op_ids = {o.id for o in ops}
+                    if item.target_id not in op_ids:
+                        return  # target not a closed-set operator ⇒ refuse
+                    mit_key = f"mitigate::{item.target_id}::{item.content}"
+                else:
+                    mit_key = f"mitigate::{item.content}"
                 if mit_key in filed:
                     return  # identical re-mitigation: TRUE no-op
                 c = item.confidence
@@ -331,19 +343,33 @@ class A4TortoiseArm:
                     strength = max(0.10, min(0.50, c))
                 else:
                     strength = 0.3  # decide-tooling default, in-range
+                op_target = (item.target_id if item.target_id is not None
+                             else ops[0].id)
                 sdk.mitigate_operator(
-                    ops[0].id, reason=item.content or "", strength=strength)
+                    op_target, reason=item.content or "", strength=strength)
                 filed.add(mit_key)
                 self.decide_cycles += 1
                 return
             claims = [m for m in closed if m.kind == _CLAIM_MEMORY_KIND]
             if not claims:
                 return  # empty/claim-less closed set ⇒ zero writes (no-op)
-            target = claims[0].id
-            # True-no-op key spans (scenario, content, op kind, target): an
+            if item.kind not in _WRITE_KINDS:
+                # Unknown/not-yet-routed verb (supersede, …): HONEST NO-OP.
+                # Never a silent IMPL misroute that flips a replacement into
+                # agreement with the superseded claim. Task-9's executor
+                # routes supersede at its own layer via the product verb.
+                return
+            if item.target_id is not None:
+                claim_ids = {c.id for c in claims}
+                if item.target_id not in claim_ids:
+                    return  # target not a closed-set claim ⇒ refuse
+                target = item.target_id
+            else:
+                target = claims[0].id
+            # True-no-op key spans (scenario, op kind, target, content): an
             # identical re-file is never duplicated, but a NAND then an IMPL
             # of the SAME evidence content are two DISTINCT decisions.
-            op_kind = item.kind if item.kind in ("nand",) else "imply"
+            op_kind = "nand" if item.kind == "nand" else "imply"
             dedup_key = f"{op_kind}::{target}::{item.content}"
             if dedup_key in filed:
                 return  # identical re-file this setup: TRUE no-op

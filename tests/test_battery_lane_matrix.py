@@ -1,19 +1,22 @@
 """Lane-matrix enforcement (#2291 I-1): zero raw Cypher on the real A4 path.
 
 The A4 arm must measure the PRODUCT, not raw-Cypher mimicry. This module
-source-level audits the arm's runtime write+read paths so a regression that
+source-level audits the arm's runtime surface so a regression that
 reintroduces ``FalkorProjection``/``g.query``/``MERGE``/``MATCH``/``UNWIND``
-on the real path fails loudly — while the REFERENCE lane (the hermetic
-``batch_setup`` seeding path, kept for equivalence + warm-guard tests until
-Task 2 swaps the real channel to ``sdk.ingest``) stays allowlisted
-FUNCTION-SCOPED (a module-level allowlist would let raw Cypher hide in any
-new helper added to the same module by later tasks).
+on the real path fails loudly. The audit covers EVERY method of the
+A4TortoiseArm class and every module-level runtime helper — not a
+hardcoded two-name list — so a raw query added to a future runtime
+surface (ep_terminal_outcome, a new read helper, …) fails the gate. The
+single allowlisted exception is ``_scenario_graph``: raw test-support
+(read-back for assertions), never reachable from the runtime write/read
+path. The reference-lane raw seeder (setup.py ``batch_setup``) lives in
+battery/runner/setup.py and is NOT parsed here — the arm itself holds no
+raw channel (Task-2 swapped the real seed channel to sdk.ingest).
 
 Why source-level and not runtime tracing: every SDK verb internally issues
 ``proj.g.query`` — instrumenting the SDK/projection boundary would flag the
 whole product. The audit therefore parses the ARM module itself and checks
-that no raw-query construct is reachable from retrieve/record, and that
-setup_scenarios contains only the allowlisted ``batch_setup`` call.
+that no raw-query construct is reachable from the runtime surface.
 """
 from __future__ import annotations
 
@@ -30,18 +33,17 @@ ARM_PATH = Path(__file__).resolve().parent.parent / "battery" / "arms" / "a4_tor
 #: Raw-query constructs that must never appear in the A4 runtime paths.
 _FORBIDDEN = ("FalkorProjection", ".query(", "MERGE", "MATCH", "UNWIND", "g.query")
 
-#: Function-scoped allowlist: reference-lane raw seeding ONLY (Task-2 will
-#: swap the real channel to sdk.ingest; until then batch_setup is the only
-#: sanctioned raw writer, and only from setup_scenarios).
-_ALLOWLISTED_CALLS = {"batch_setup"}
+#: Raw test-support read-back (assertion helper) — never on the runtime
+#: write/read path (verify: only tests call it; grep the repo to confirm).
+_RAW_TEST_SUPPORT = {"_scenario_graph"}
 
-#: Runtime write+read functions that must be PURE product-verb surfaces.
-_RUNTIME_FNS = {"retrieve", "record"}
+#: The arm class whose ENTIRE runtime surface must be pure product verbs.
+_ARM_CLASS = "A4TortoiseArm"
 
 
 def _raw_tokens(module: ast.Module, fn_name: str) -> list[str]:
     """Raw-query token occurrences inside ONE function body (nested defs
-    excluded — runtime helpers belong to the function's own surface)."""
+    included — a helper declared inside a runtime method is runtime)."""
     found: list[str] = []
     for node in ast.walk(module):
         if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -62,6 +64,21 @@ def _raw_tokens(module: ast.Module, fn_name: str) -> list[str]:
     return found
 
 
+def _runtime_function_names(module: ast.Module) -> tuple[set[str], set[str]]:
+    """(methods of the arm class, module-level helpers) — the FULL runtime
+    surface, minus raw test-support read-back."""
+    methods: set[str] = set()
+    helpers: set[str] = set()
+    for node in module.body:
+        if isinstance(node, ast.ClassDef) and node.name == _ARM_CLASS:
+            for sub in node.body:
+                if isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    methods.add(sub.name)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            helpers.add(node.name)
+    return (methods - _RAW_TEST_SUPPORT, helpers - _RAW_TEST_SUPPORT)
+
+
 def _module() -> ast.Module:
     return ast.parse(ARM_PATH.read_text())
 
@@ -71,54 +88,20 @@ def arm_ast() -> ast.Module:
     return _module()
 
 
-def _setup_has_only_allowlisted_raw_calls(module: ast.Module) -> list[str]:
-    """setup_scenarios may call batch_setup (reference lane) but must not
-    itself issue raw queries or construct projections."""
-    bad: list[str] = []
-    for node in ast.walk(module):
-        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            continue
-        if node.name != "setup_scenarios":
-            continue
-        for sub in ast.walk(node):
-            if isinstance(sub, ast.Call):
-                fn = sub.func
-                name = getattr(fn, "attr", None) or getattr(fn, "id", None)
-                if name in _ALLOWLISTED_CALLS:
-                    continue
-                if name is None:
-                    # e.g. a method call on an object — inspect the attr.
-                    name = getattr(getattr(fn, "value", None), "attr", None)
-                if isinstance(name, str) and any(
-                        tok in name for tok in _FORBIDDEN):
-                    bad.append(name)
-            if isinstance(sub, ast.Constant) and isinstance(sub.value, str):
-                for tok in _FORBIDDEN:
-                    if tok in sub.value:
-                        bad.append(f"string:{tok}")
-    return bad
-
-
-def test_retrieve_record_have_zero_raw_cypher(arm_ast: ast.Module) -> None:
-    """The A4 runtime read+write paths are PURE product-verb surfaces."""
+def test_full_runtime_surface_has_zero_raw_cypher(arm_ast: ast.Module) -> None:
+    """EVERY arm method + module-level runtime helper is a PURE product-verb
+    surface (retrieve, record, ep_terminal_outcome, _live_claim_ids, …).
+    Only the documented raw test-support read-back (_scenario_graph) is
+    exempt — and it is not on the runtime write/read path."""
+    methods, helpers = _runtime_function_names(arm_ast)
     offenders: dict[str, list[str]] = {}
-    for fn in _RUNTIME_FNS:
+    for fn in sorted(methods | helpers):
         hits = _raw_tokens(arm_ast, fn)
         if hits:
             offenders[fn] = hits
     assert not offenders, (
-        "raw Cypher leaked into A4 runtime paths "
+        "raw Cypher leaked into the A4 runtime surface "
         f"(lane-matrix violation): {offenders}"
-    )
-
-
-def test_setup_only_allowlisted_raw_reference(arm_ast: ast.Module) -> None:
-    """setup_scenarios may seed via the allowlisted reference function only
-    (batch_setup) — never its own raw queries/projection construction."""
-    bad = _setup_has_only_allowlisted_raw_calls(arm_ast)
-    assert not bad, (
-        "setup_scenarios contains raw-query constructs outside the "
-        f"function-scoped allowlist: {bad}"
     )
 
 

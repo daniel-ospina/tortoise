@@ -32,6 +32,12 @@ class Memory:
     confidence: float | None = None
     source: str = ""
     kind: str = "statement"
+    #: Optional WRITE target (a closed-set member id). When an executor
+    #: knows WHICH claim/operator a record is aimed at it sets this; the
+    #: arm validates membership in the retrieved closed set and refuses
+    #: (honest no-op) non-members — never a silent misroute (plan Task-3
+    #: "item.target if present must be a closed-set member").
+    target_id: str | None = None
 
 
 @dataclass(frozen=True)
