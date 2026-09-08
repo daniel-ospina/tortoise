@@ -21,10 +21,14 @@ CONSUMED_FIELDS: tuple[str, ...] = ("coverage_subscore", "decide_cycles")
 class R2CoverageProbe:
     """Adversarial-coverage scoring (judge-gated subscore + mechanism gate)."""
 
-    #: Hyphenated cal-table metric key (thresholds.yaml).
+    #: Canonical report-visible metric key (#2292 Task 7: ONE spelling across
+    #: thresholds.yaml / probe metric / report metric / cal rows — the
+    #: hyphen/underscore split is unified at the loader boundary to the
+    #: HYPHEN form; the schema-v1.1 event-log field ``coverage_subscore`` is
+    #: LOG-internal and stays underscore).
     cal_metric = "coverage-subscore"
     probe_id = "R2"
-    metric = "coverage_subscore"
+    metric = "coverage-subscore"
 
     def score(self, trace: dict[str, Any],
               gold: str | None, threshold: float) -> ProbeResult:
@@ -47,5 +51,9 @@ class R2CoverageProbe:
         return len(ok) / len(traces)
 
     def delta_vs_control(self, treatment: float, control: float) -> float:
-        """AC gate: treatment coverage ≥ 1.5× control."""
-        return treatment / control if control > 0 else 0.0
+        """AC gate (decision (e), ONE canonical form): treatment coverage >=
+        1.5x control WITH the a0=0 floor — control == 0 => the gate passes
+        iff treatment > 0 (never a silent 0/0 collapse to pass or fail)."""
+        if control > 0:
+            return treatment / control
+        return 1.0 if treatment > 0 else 0.0

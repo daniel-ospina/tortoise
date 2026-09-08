@@ -4,3 +4,10 @@
 # the smoke corpus (over-budget refusal is tested via fixture configs).
 max_episodes: 1000
 max_estimated_cost_usd: 50.0
+# #2292 probe sub-cap (Task 3/4): the real-model probe + the pre-exposure
+# validation run's judge spend are pre-authorized INSIDE the dollar cap
+# above under this sub-cap accumulator. judge_leg_reserve_usd is the judge
+# spend reserve line (decision (c)) — judge spend never silently crowds
+# out model-under-test spend; the --evidence path HARD-STOPS against it.
+probe_cap_usd: 3.0
+judge_leg_reserve_usd: 1.5
