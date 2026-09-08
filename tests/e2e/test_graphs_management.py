@@ -29,10 +29,15 @@ Harness posture (mirrors #2246 ADR-010 session-only):
 - GET /v1/team/keys without graph_id returns the API-Keys tab's rows (the
   mount loadAll read); with graph_id returns the per-graph panel rows.
 - POST /v1/team/keys + POST /v1/graphs bodies are captured for assertion.
-- The default graph row (kind 'default') NEVER offers [Keys] or [Delete]:
-  its keys are the team-wide rows managed on the API Keys tab — the server
-  has no per-graph key surface for the default graph (_ensure_graph_exists
-  404s default-kind nodes). Per-graph keys/panels apply to custom rows only.
+- The default graph row (kind 'default') NEVER offers the per-graph [Keys]
+  panel or [Delete]: its keys are the team-wide rows managed on the API
+  Keys tab — the server has no per-graph key surface for the default graph
+  (_ensure_graph_exists 404s default-kind nodes). Per-graph keys/panels
+  apply to custom rows only. #2306: the default row's Keys cell is
+  SUPPRESSED (its key_count is 0 in both lanes — the fixture below carries
+  the registry capstone's bound-default "1" on purpose, and the UI must not
+  render any number on a row it cannot act on) and replaced with an
+  "API Keys tab" affordance that opens the API-Keys tab.
 """
 from __future__ import annotations
 
@@ -59,6 +64,11 @@ if not os.environ.get("RUN_DASHBOARD_E2E"):
 AUTH_ORIGIN = os.environ.get("DASHBOARD_AUTH_BASE", "http://127.0.0.1:8788")
 
 TEAM_ID = "team_graphs2116"
+# #2306: key_count 1 deliberately — the registry-lane capstone artifact
+# (a legacy bound-default APIKey node counted against the default node's
+# real gid). The chosen shape suppresses the default row's Keys cell
+# regardless of the payload, so this fixture also proves the UI never
+# renders a bound-default count it cannot act on.
 DEFAULT_ROW = {
     "graph_id": "default", "name": "default", "kind": "default",
     "status": "active", "key_count": 1, "recording": None,
@@ -285,11 +295,16 @@ def test_graphs_table_rows_default_first_with_actions(page: Page) -> None:
     expect(page.locator('[aria-label="Graph usage meter"]')).to_contain_text("2 graphs · ∞ cap")
     rows = page.locator("table tbody tr")
     expect(rows.first).to_contain_text("default")  # name + badge
-    # The default row: NO Delete AND NO Keys action (its keys are the
-    # team-wide rows on the API Keys tab — P1-1 review fix); custom rows
-    # have both.
+    # The default row: NO Delete, NO per-graph [Keys] panel button (its
+    # keys are the team-wide rows on the API Keys tab — P1-1 review fix),
+    # and NO raw key_count — #2306 suppresses the Keys cell (fixture
+    # payload key_count 1 = the registry bound-default capstone artifact
+    # that must never render) and offers the API-Keys-tab affordance.
     expect(rows.first.get_by_role("button", name="Delete")).to_have_count(0)
-    expect(rows.first.get_by_role("button", name="Keys")).to_have_count(0)
+    expect(rows.first.get_by_role("button", name="Manage keys for graph default")).to_have_count(0)
+    dflt_keys_cell = rows.first.locator("td").nth(3)
+    expect(dflt_keys_cell).to_contain_text("API Keys tab")
+    expect(dflt_keys_cell).not_to_contain_text("1")  # suppressed, not the payload count
     custom_row = rows.filter(has_text="prod")
     expect(custom_row.get_by_role("button", name="Delete")).to_be_visible()
     expect(custom_row.get_by_role("button", name="Keys")).to_be_visible()
@@ -383,13 +398,17 @@ def test_per_graph_key_panel_lists_mints_and_revokes(page: Page) -> None:
 
 
 def test_default_graph_has_no_actions_and_custom_delete_armed(page: Page) -> None:
-    """Indicator 4: the default graph row never offers Delete or Keys; a
-    custom row's Delete arms an inline confirm (cancel keeps the row)."""
+    """Indicator 4: the default graph row never offers the per-graph Keys
+    panel or Delete; its Keys cell is #2306-suppressed (API-Keys-tab
+    affordance instead of a count); a custom row's Delete arms an inline
+    confirm (cancel keeps the row)."""
     _open_graphs_tab(page, _team_row("team", None))
     rows = page.locator("table tbody tr")
     dflt = rows.filter(has_text="default").first
     expect(dflt.get_by_role("button", name="Delete")).to_have_count(0)
-    expect(dflt.get_by_role("button", name="Keys")).to_have_count(0)
+    expect(dflt.get_by_role("button", name="Manage keys for graph default")).to_have_count(0)
+    # #2306 chosen shape: the suppressed cell points at the API Keys tab.
+    expect(dflt.locator("td").nth(3)).to_contain_text("API Keys tab")
     custom_row = rows.filter(has_text="prod")
     custom_row.get_by_role("button", name="Delete").click()
     expect(custom_row).to_contain_text("Delete prod?")
@@ -399,6 +418,34 @@ def test_default_graph_has_no_actions_and_custom_delete_armed(page: Page) -> Non
     custom_row.get_by_role("button", name="Delete").click()
     custom_row.get_by_role("button", name="Delete", exact=True).click()
     expect(custom_row).not_to_be_visible(timeout=15_000)  # list re-fetch drops it
+
+
+def test_default_row_keys_cell_suppressed_with_api_keys_affordance(page: Page) -> None:
+    """#2306 chosen shape: the default row's Keys cell never shows a raw
+    count (the fixture's DEFAULT_ROW.key_count 1 = the registry capstone's
+    bound-default artifact — the supabase lane was a structural always-0;
+    both communicated nothing actionable). The cell renders the suppressed
+    dash + an "API Keys tab" affordance (its keys are the team-wide rows
+    managed there), and clicking it lands on the API-Keys tab."""
+    _open_graphs_tab(page, _team_row("team", None),
+                     graphs=[DEFAULT_ROW, CUSTOM_A])
+    rows = page.locator("table tbody tr")
+    dflt = rows.first
+    keys_cell = dflt.locator("td").nth(3)
+    # Suppressed: no numeric count (payload key_count 1 must not render),
+    # the affordance is the cell's actionable content.
+    expect(keys_cell).not_to_contain_text("1")
+    affordance = dflt.get_by_role("button", name="API Keys tab")
+    expect(affordance).to_be_visible()
+    expect(dflt.get_by_role("button", name="Manage keys for graph default")).to_have_count(0)
+    # Custom rows are untouched: numeric meter + [Keys] panel button.
+    custom_row = rows.filter(has_text="prod")
+    expect(custom_row).to_contain_text("0")
+    expect(custom_row.get_by_role("button", name="Manage keys for graph prod")).to_be_visible()
+    # The affordance navigates to the API Keys tab (where the default
+    # graph's team-wide keys live).
+    affordance.click()
+    expect(page.locator("h2")).to_contain_text("API Keys", timeout=15_000)
 
 
 def test_create_409_cap_error_surfaces_inline(page: Page) -> None:

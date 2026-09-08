@@ -5389,6 +5389,81 @@ class TestGraphLifecycle:
         finally:
             gen.close()
 
+    def test_default_row_key_count_zero_with_bound_default_key(self, tmp_path):
+        """#2306 lane-consistency half (registry): the default graph has NO
+        per-graph keys — GET /v1/graphs reports key_count 0 for the
+        kind='default' row even when a legacy bound-default APIKey node
+        (graph_id = the default node's real gid — minted pre-#2112 guard
+        or via a raw control-plane write) exists. Pre-fix the registry lane
+        surfaced such nodes as a count on the default row (the capstone
+        "1") while the supabase lane structurally cannot (api_keys.graph_id
+        REFERENCES graphs(id); 'default' is a DERIVED id, never a row id) —
+        the two lanes disagreed about the same cell.
+
+        Manageability half: the bound-default key stays LISTABLE and
+        REVOCABLE via the unfiltered key list (the API-Keys tab read) —
+        the default row has no per-graph key surface by design
+        (_ensure_graph_exists 404s default-kind mints; canManageGraphKeys is
+        kind-gated), so the key list is its management path."""
+        import uuid as _uuid
+
+        import tortoise.hosted_api as ha_mod
+        from tortoise.auth import hash_api_key
+        gen = TestProvisioningService()._setup(tmp_path, "pro", None)
+        sdk, tid, tc = next(gen)
+        try:
+            app.dependency_overrides[ha_mod.get_current_user] = \
+                lambda: {"user_id": "list-owner", "email": "o@x.com"}
+            app.dependency_overrides[get_current_team] = \
+                lambda: dict(TEST_TEAM, team_id=tid)
+            sdk._get_registry().query(
+                "MERGE (m:Membership {user_id:'list-owner', team_id:$tid, "
+                "status:'active'}) SET m.role='owner'",
+                params={"tid": tid},
+            )
+            default = next(g for g in sdk.graph_list(tid)
+                           if g["kind"] == "default")
+            # Legacy bound-default key (raw registry write — the pre-guard
+            # artifact shape the capstone showed as a default-row "1").
+            token = "tt_bd_" + _uuid.uuid4().hex[:16]
+            kid = "bd-key-" + _uuid.uuid4().hex[:12]
+            sdk._get_registry().query(
+                "CREATE (k:APIKey {id:$id, team_id:$tid, key_hash:$kh, "
+                "key_prefix:$kp, created_by:'legacy', graph_id:$gid})",
+                params={"id": kid, "tid": tid, "kh": hash_api_key(token),
+                        "kp": token[:10], "gid": default["graph_id"]},
+            )
+            r = tc.get(f"/v1/graphs?team_id={tid}")
+            assert r.status_code == 200, r.text
+            rows = r.json()
+            dflt = next(x for x in rows if x["kind"] == "default")
+            assert dflt["key_count"] == 0, rows  # no per-graph keys
+            # A custom graph's per-graph meter is unaffected (still counts).
+            key = _mint_caller_key(sdk, tid, scopes=["graphs:create"])
+            r = self._provision(tc, tid, key, "metered")
+            assert r.status_code == 201, r.text
+            custom_gid = r.json()["graph"]["id"]
+            r = tc.get(f"/v1/graphs?team_id={tid}")
+            custom = next(x for x in r.json() if x["graph_id"] == custom_gid)
+            assert custom["key_count"] == 1
+            # Manageability: the bound-default key appears on the UNFILTERED
+            # key list (the API-Keys tab's read)…
+            kr = tc.get(f"/v1/team/keys?team_id={tid}")
+            assert kr.status_code == 200, kr.text
+            listed = [k for k in kr.json()["keys"]
+                      if k.get("graph_id") == default["graph_id"]]
+            assert [k["id"] for k in listed] == [kid]
+            # …and revoking it by id from the API-Keys tab works (no
+            # default-row dead end).
+            dr = tc.delete(f"/v1/team/keys/{kid}?team_id={tid}")
+            assert dr.status_code == 200, dr.text
+            assert dr.json()["revoked"] is True
+            assert dr.json()["key_id"] == kid
+        finally:
+            app.dependency_overrides.pop(ha_mod.get_current_user, None)
+            app.dependency_overrides.pop(get_current_team, None)
+            gen.close()
+
 
 class TestProvisioningConcurrency:
     """E2E-11 — concurrent provisioning never oversubscribes."""

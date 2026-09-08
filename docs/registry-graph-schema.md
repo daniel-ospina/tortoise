@@ -100,6 +100,31 @@ Default-graph semantics (the no-migration contract):
   DERIVED, never materialized into a tenant data store: supabase mode reads
   `teams.graph_name`; registry mode has a `kind='default'` Graph node whose
   namespace IS the team namespace. **No backfill, no data move.**
+- **No per-graph keys (epic #2083 C7 follow-up, #2306):** the default graph
+  is NOT key-bindable in either lane — graph-bound mints 404 on the
+  kind='default' node/row (`_ensure_graph_exists`). Consequently the
+  default row's `key_count` on GET /v1/graphs is ALWAYS 0, and the two
+  lanes cannot disagree about it:
+  - Supabase enforces this structurally: `api_keys.graph_id REFERENCES
+    graphs(id)` — the default row's id is the DERIVED literal `'default'`
+    (never a graphs.id), so no api_keys row can reference it; the keys
+    that RESOLVE to the default graph are the TEAM-WIDE rows (graph_id
+    NULL), managed on the API-Keys tab, never counted on a graph row. A
+    kind='default' graphs row exists only after a recording-override
+    upsert (set_graph_recording) and carries its OWN g_ id — any key
+    bound to it references that id, not `'default'`.
+  - Registry (selfhost) is the drift surface: the kind='default' node has a
+    REAL gid (g_<hex>), so `graph_active_key_count` against it counts
+    legacy bound-default APIKey nodes (minted pre-guard / raw
+    control-plane writes). The list seam (#2306) therefore short-circuits
+    default-kind rows to 0 BEFORE any lane count — the node is not
+    key-bindable and such rows must not resurface as a count on the
+    Graphs tab (the pre-fix capstone "1" with no management path).
+  - Legacy bound-default keys are NOT mintable today but stay LISTABLE +
+    REVOCABLE via the unfiltered GET /v1/team/keys (the API-Keys tab) —
+    that is their management path. The dashboard's default row renders the
+    suppressed cell + an "API Keys tab" affordance instead of a number it
+    cannot act on.
 - Existing (pre-epic) API keys have `graph_id` NULL and resolve to the
   default graph — legacy keys keep working untouched (E2E-5 zero-action).
 - The default graph occupies quota slot 1 (`max_graphs_per_team`) and is
