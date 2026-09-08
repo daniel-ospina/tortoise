@@ -5393,7 +5393,6 @@ function claimIntentInFlight() {
                           <div className="wizard-nav-actions">
                               <button type="button" className="btn-primary" onClick={() => setWizardStep(1)}>Continue →</button>
                             </div>
-                          </div>
                         </>
                       ) : (
                         // #2323 (Option B): the first-run provisioning door —
