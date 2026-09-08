@@ -309,6 +309,38 @@ class TestDrDrill:
         assert not rows or rows[0][0] is None, "drill must skip the end-stamp"
         assert not [g for g in graphs if g.startswith("team_team_x") and ("_restore_" in g or "_pre_restore_" in g)]
 
+    def test_drill_old_archive_after_stream_key_rotation(self, client, dr_env, mem_storage):
+        """#2318: after a REGISTRY_STREAM_KEY rotation the app RETAINS the old
+        key (REGISTRY_STREAM_KEY_PREVIOUS) so a pre-rotation sweep archive
+        drills in-app — the DR runbook's manual-recovery path becomes the
+        automated dual-key path."""
+        _seed_team("team_x", nodes=2)
+        # 1. Sweep encrypts under the CURRENT stream key ("s"*32).
+        r = client.post("/v1/internal/backups/sweep", headers=INTERNAL_HEADERS)
+        assert r.json()["status"] == "backed_up"
+        manifest = [  # noqa: RUF015
+            k for k in mem_storage.list("backups/team_x/") if k.endswith("manifest.json")
+        ][0]
+        backup_key = manifest.replace("/manifest.json", "/dump.enc")
+
+        # 2. Rotate: new active stream key, OLD active retained as _PREVIOUS
+        #    (the exact state tools/rotate-backup-keys.py stages on Fly).
+        monkeypatch = pytest.MonkeyPatch()
+        monkeypatch.setenv("REGISTRY_STREAM_KEY", base64.b64encode(b"z" * 32).decode())
+        monkeypatch.setenv("REGISTRY_STREAM_KEY_PREVIOUS", base64.b64encode(b"s" * 32).decode())
+        monkeypatch.setenv("BACKUP_SWEEP_ENABLED", "true")  # keep the sweep config live
+
+        # 3. The drill (which passes cfg.backup_key) must decrypt the OLD
+        #    archive through the retained stream key — no manual recovery.
+        ha_mod._LAST_DRILL_AT = 0.0
+        r2 = client.post(
+            "/v1/internal/backups/drill", headers=INTERNAL_HEADERS,
+            json={"team_id": "team_x", "backup_key": backup_key},
+        )
+        assert r2.status_code == 200, r2.text
+        assert r2.json()["status"] == "drill_ok"
+        monkeypatch.undo()
+
     def test_drill_cooldown(self, client, dr_env, mem_storage):
         _seed_team("team_x", nodes=1)
         client.post("/v1/internal/backups/sweep", headers=INTERNAL_HEADERS)
@@ -695,6 +727,245 @@ class TestDrAclReconcile:
         r = client.post(
             "/v1/internal/backups/acl-reconcile", headers=INTERNAL_HEADERS)
         assert r.status_code == 503
+
+
+# #2317 — scheduled verification-restore drill (monthly, unattended) + the
+# shared drill core's pass/fail + measured-time record. The scheduled leg is
+# exercised through POST /v1/internal/backups/drill-scheduled: auto-selection
+# of the OLDEST eligible nested archive, tombstone-guard skipping, durable
+# ops/drills/last.json records, RESTORE_DRILL_FAILED incident lifecycle, and
+# /status → last_drill surfacing.
+
+class _FakeAlerts:
+    """Recording alert-store stub — captures open/resolve calls (no network)."""
+
+    def __init__(self):
+        self.calls: list = []
+
+    def open_incident(self, kind, team_id="", detail=None):
+        self.calls.append(("open", kind, team_id, dict(detail or {})))
+        return True
+
+    def resolve_incident(self, kind, team_id=""):
+        self.calls.append(("resolve", kind, team_id))
+        return True
+
+
+def _backdate_archive(store, backup_key: str, created_at: str) -> None:
+    """Backdate a stored archive's manifest created_at (sha256 untouched —
+    restore verification still passes; selection order changes)."""
+    mkey = backup_key.replace("/dump.enc", "/manifest.json")
+    manifest = json.loads(store.download(mkey))
+    manifest["created_at"] = created_at
+    store.upload(mkey, json.dumps(manifest).encode())
+
+
+def _default_drill_key(client, mem_storage, team="team_x") -> str:
+    """Sweep the team once and return the NEWEST default-graph archive key
+    (a sweep always adds one archive; retention keeps older ones)."""
+    r = client.post("/v1/internal/backups/sweep", headers=INTERNAL_HEADERS)
+    assert r.json()["status"] == "backed_up", r.text
+    keys = [k for k in mem_storage.list(f"backups/{team}/default/")
+            if k.endswith("dump.enc")]
+    assert keys, f"no default archive for {team}"
+    return sorted(keys)[-1]  # newest (lexicographic ts == chronological)
+
+
+def _has_open(calls, kind, team="global") -> bool:
+    return any(c[0] == "open" and c[1] == kind and c[2] == team for c in calls)
+
+
+def _has_resolve(calls, kind, team="global") -> bool:
+    return any(c[0] == "resolve" and c[1] == kind and c[2] == team for c in calls)
+
+
+class TestDrDrillScheduled:
+    """#2317 scheduled drill endpoint: oldest-eligible selection, records,
+    incidents, cooldown, /status surfacing."""
+
+    def test_requires_config(self, client, mem_storage):
+        r = client.post("/v1/internal/backups/drill-scheduled",
+                        headers=INTERNAL_HEADERS)
+        assert r.status_code == 503  # fail-closed when the sweep is disabled
+
+    def test_no_candidates_records_and_resolves(self, client, dr_env,
+                                                mem_storage, monkeypatch):
+        fake = _FakeAlerts()
+        monkeypatch.setattr(ha_mod, "_alert_store_from", lambda cfg: fake)
+        ha_mod._LAST_DRILL_AT = 0.0
+        r = client.post("/v1/internal/backups/drill-scheduled",
+                        headers=INTERNAL_HEADERS)
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["status"] == "no_candidates"
+        assert body["record"]["status"] == "no_candidates"
+        assert body["record"]["ok"] is False
+        rec = json.loads(mem_storage.download(ha_mod._DRILL_RECORD_KEY))
+        assert rec["status"] == "no_candidates"
+        assert rec["run"] == "scheduled"
+        # no candidates is a benign state → any open incident resolves
+        assert _has_resolve(fake.calls, ha_mod._DRILL_FAILED_KIND)
+
+    def test_restores_oldest_archive_and_records(self, client, dr_env,
+                                                 mem_storage, monkeypatch):
+        _seed_team("team_x", nodes=2)
+        first = _default_drill_key(client, mem_storage)          # T1
+        _backdate_archive(mem_storage, first, "2020-01-01T00:00:00+00:00")
+        second = _default_drill_key(client, mem_storage)         # T2 (now)
+        assert first != second
+        fake = _FakeAlerts()
+        monkeypatch.setattr(ha_mod, "_alert_store_from", lambda cfg: fake)
+        ha_mod._LAST_DRILL_AT = 0.0
+        r = client.post("/v1/internal/backups/drill-scheduled",
+                        headers=INTERNAL_HEADERS)
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["status"] == "drill_ok"
+        assert body["target_graph"].startswith("_drill_")
+        # the OLDEST (backdated) archive was selected, not the newest
+        assert body["record"]["backup_key"] == first
+        assert body["record"]["status"] == "ok" and body["record"]["ok"]
+        assert body["record"]["run"] == "scheduled"
+        # measured restore time vs the committed RTO
+        assert isinstance(body["duration_s"], (int, float))
+        assert body["within_rto"] is True
+        assert body["rto_s"] == ha_mod._DRILL_RTO_S
+        rec = json.loads(mem_storage.download(ha_mod._DRILL_RECORD_KEY))
+        assert rec["backup_key"] == first and rec["status"] == "ok"
+        # success resolves any open incident
+        assert _has_resolve(fake.calls, ha_mod._DRILL_FAILED_KIND)
+
+    def test_skips_tombstoned_oldest_for_next_active(self, client, dr_env,
+                                                     mem_storage, monkeypatch):
+        """The OLDEST candidate is a deleted/quarantined graph's archive
+        (#2304) — it is skipped (never drilled) and the next-oldest ACTIVE
+        archive is restored instead."""
+        _seed_team("team_x", nodes=1)
+        sdk = TortoiseSDK(namespace="registry")
+        _SEED_SDKS.append(sdk)
+        reg = sdk._get_registry()
+        reg.query(
+            "CREATE (g:Graph {id:'g_dead', team_id:'team_x', kind:'custom', "
+            "namespace:'team_team_x_g_dead', status:'active'})")
+        g = sdk._get_proj().db.select_graph("team_team_x_g_dead")
+        g.query("CREATE (p:Point {id:'d-0', content:'d', pointKind:'claim'})")
+        r = client.post("/v1/internal/backups/sweep", headers=INTERNAL_HEADERS)
+        assert r.json()["status"] == "backed_up"
+        dead_key = [  # noqa: RUF015
+            k for k in mem_storage.list("backups/team_x/g_dead/")
+            if k.endswith("dump.enc")
+        ][0]
+        _backdate_archive(mem_storage, dead_key, "2020-01-01T00:00:00+00:00")
+        reg.query("MATCH (g:Graph {id:'g_dead'}) SET g.status = 'deleted'")
+        fake = _FakeAlerts()
+        monkeypatch.setattr(ha_mod, "_alert_store_from", lambda cfg: fake)
+        ha_mod._LAST_DRILL_AT = 0.0
+        r = client.post("/v1/internal/backups/drill-scheduled",
+                        headers=INTERNAL_HEADERS)
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["status"] == "drill_ok"
+        # the tombstoned custom's archive was NOT drilled; the default was
+        assert body["record"]["backup_key"].startswith("backups/team_x/default/")
+
+    def test_failure_opens_incident_and_records(self, client, dr_env,
+                                                mem_storage, monkeypatch):
+        """A genuine drill failure (oldest archive corrupt — integrity check
+        fails) returns 409, records status=rejected, and opens a deduplicated
+        RESTORE_DRILL_FAILED incident; a later SUCCESSFUL run resolves it."""
+        _seed_team("team_x", nodes=2)
+        key = _default_drill_key(client, mem_storage)
+        mem_storage.upload(key, b"corrupt-blob")  # sha256 mismatch
+        fake = _FakeAlerts()
+        monkeypatch.setattr(ha_mod, "_alert_store_from", lambda cfg: fake)
+        ha_mod._LAST_DRILL_AT = 0.0
+        r = client.post("/v1/internal/backups/drill-scheduled",
+                        headers=INTERNAL_HEADERS)
+        assert r.status_code == 409, r.text
+        rec = json.loads(mem_storage.download(ha_mod._DRILL_RECORD_KEY))
+        assert rec["status"] == "rejected" and rec["ok"] is False
+        assert rec["backup_key"] == key
+        assert _has_open(fake.calls, ha_mod._DRILL_FAILED_KIND)
+        # drop the corrupt archive and sweep a fresh one → success resolves
+        mem_storage.delete(key)
+        mem_storage.delete(key.replace("/dump.enc", "/manifest.json"))
+        _default_drill_key(client, mem_storage, "team_x")
+        ha_mod._LAST_DRILL_AT = 0.0
+        r2 = client.post("/v1/internal/backups/drill-scheduled",
+                         headers=INTERNAL_HEADERS)
+        assert r2.status_code == 200, r2.text
+        assert r2.json()["status"] == "drill_ok"
+        assert _has_resolve(fake.calls, ha_mod._DRILL_FAILED_KIND)
+
+    def test_rto_breach_opens_incident_but_returns_drill_ok(self, client,
+                                                            dr_env,
+                                                            mem_storage,
+                                                            monkeypatch):
+        """Restore succeeded but slower than the committed ≤15-min RTO:
+        HTTP 200 with within_rto=false + a rto_breach record + the incident
+        (restore speed is a target, not an accident)."""
+        monkeypatch.setattr(ha_mod, "_DRILL_RTO_S", 0.0)  # any duration breaches
+        fake = _FakeAlerts()
+        monkeypatch.setattr(ha_mod, "_alert_store_from", lambda cfg: fake)
+        _seed_team("team_x", nodes=1)
+        _default_drill_key(client, mem_storage)
+        ha_mod._LAST_DRILL_AT = 0.0
+        r = client.post("/v1/internal/backups/drill-scheduled",
+                        headers=INTERNAL_HEADERS)
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["status"] == "drill_ok"
+        assert body["within_rto"] is False
+        assert body["record"]["status"] == "rto_breach"
+        assert _has_open(fake.calls, ha_mod._DRILL_FAILED_KIND)
+        assert not _has_resolve(fake.calls, ha_mod._DRILL_FAILED_KIND)
+
+    def test_respects_shared_cooldown(self, client, dr_env, mem_storage):
+        import time as _time
+        _seed_team("team_x", nodes=1)
+        _default_drill_key(client, mem_storage)
+        ha_mod._LAST_DRILL_AT = _time.time()  # simulate a drill < 1h ago
+        r = client.post("/v1/internal/backups/drill-scheduled",
+                        headers=INTERNAL_HEADERS)
+        assert r.status_code == 429
+        assert "cooldown" in r.json()["detail"]
+
+    def test_status_surfaces_last_drill(self, client, dr_env, mem_storage,
+                                        monkeypatch):
+        _seed_team("team_x", nodes=1)
+        _default_drill_key(client, mem_storage)
+        monkeypatch.setattr(ha_mod, "_alert_store_from", lambda cfg: _FakeAlerts())
+        ha_mod._LAST_DRILL_AT = 0.0
+        r = client.post("/v1/internal/backups/drill-scheduled",
+                        headers=INTERNAL_HEADERS)
+        assert r.json()["status"] == "drill_ok"
+        s = client.get("/v1/internal/backups/status", headers=INTERNAL_HEADERS)
+        assert s.status_code == 200
+        ld = s.json()["last_drill"]
+        assert ld is not None and ld["status"] == "ok"
+        assert ld["duration_s"] is not None
+
+    def test_manual_drill_records_measured_time(self, client, dr_env,
+                                                mem_storage):
+        """The manual endpoint rides the same record — pass/fail + measured
+        time is written for every drill, not just the scheduled one."""
+        _seed_team("team_x", nodes=2)
+        key = _default_drill_key(client, mem_storage)
+        ha_mod._LAST_DRILL_AT = 0.0
+        r = client.post(
+            "/v1/internal/backups/drill", headers=INTERNAL_HEADERS,
+            json={"team_id": "team_x", "backup_key": key},
+        )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["status"] == "drill_ok"
+        assert isinstance(body["duration_s"], (int, float))
+        assert body["within_rto"] is True
+        assert body["record"]["status"] == "ok"
+        assert body["record"]["run"] == "manual"
+        assert body["record"]["backup_key"] == key
+        rec = json.loads(mem_storage.download(ha_mod._DRILL_RECORD_KEY))
+        assert rec["run"] == "manual" and rec["status"] == "ok"
 
 
 class TestBackupsSurfaceUnits:

@@ -34,6 +34,8 @@ import { isManagedKey, durableConnectKey } from './sessionKey.js'
 import {
   canManageGraphKeys,
   graphCanDelete,
+  graphKeyPanelEmptyLine,
+  graphKeysSuppressed,
   graphMintBody,
   graphsMeter,
   sortedGraphRows,
@@ -1483,7 +1485,7 @@ function claimIntentInFlight() {
   const [panelKeysStatus, setPanelKeysStatus] = React.useState('closed') // closed|loading|ok|error
   const [graphKeyName, setGraphKeyName] = React.useState('')
   const [graphBusy, setGraphBusy] = React.useState(false) // panel mint / graph delete in flight
-  const [graphMsg, setGraphMsg] = React.useState('') // inline panel error (402/409/409 etc.)
+  const [graphMsg, setGraphMsg] = React.useState('') // inline PANEL error (mint/revoke — renders inside the open key panel only; #2301: delete failures are page-level, never here)
   const [confirmDeleteId, setConfirmDeleteId] = React.useState(null) // custom row awaiting delete confirm
   // #2304 trash (delete = 7-day recovery window): rows + restore/inspect.
   const [trash, setTrash] = React.useState([])
@@ -1865,7 +1867,7 @@ function claimIntentInFlight() {
           await fetchIdentity()
           setTab('profile')
           if (res.adoption_signal) {
-            setProfileError("This email is also used by another team — reach out if that's unexpected.")
+            setProfileError("This email is also used by another organization — reach out if that's unexpected.")
           }
         } catch (e) {
           setProfileError(e.message || 'Could not complete linking — refresh your profile')
@@ -2750,7 +2752,7 @@ function claimIntentInFlight() {
         // #1566 (code-review P2): the guard must NOT dead-end — offer the
         // claim card (the welcome.html 'Go claim my team' pattern).
         setWelcomeProvisionError(
-          'You have an anonymous team waiting to be claimed — attach your ' +
+          'You have an anonymous organization waiting to be claimed — attach your ' +
           'GitHub or Google identity to claim it (same key, same graph).')
         return { routedAway: true }
       }
@@ -2881,7 +2883,7 @@ function claimIntentInFlight() {
             })
             if (inviteRes.ok) {
               try { sessionStorage.removeItem(INVITE_TOKEN_STORAGE) } catch { /* best-effort */ }
-              setBanner('Welcome to the team! Your membership is active.')
+              setBanner('Welcome to the organization! Your membership is active.')
               // #2538: propagate the accepted invite to wizard state so
               // loadTeams fires and the welcomeHasOrg chain triggers the
               // dashboard route guard (invited users skip onboarding).
@@ -3112,14 +3114,14 @@ function claimIntentInFlight() {
               setChecking(false)
               return
             }
-            throw new Error('Could not load your teams — try again.')
+            throw new Error('Could not load your organizations — try again.')
           }
         } catch (e) {
           // #1566 (review P2): fail CLOSED for any non-array/empty result —
           // the throw's premise is 'not a valid teams array'.
           if (!Array.isArray(teamsList) || !teamsList.length) {
             setAuthed(false)
-            setMountError((e && e.message) || 'Could not load your teams — try again.')
+            setMountError((e && e.message) || 'Could not load your organizations — try again.')
             setChecking(false)
             return
           }
@@ -3726,7 +3728,7 @@ function claimIntentInFlight() {
     const name = createTeamName.trim()
     if (!name) { setCreateTeamError('Organization name required'); return }
     if (name.length > 64 || !/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/.test(name)) {
-      setCreateTeamError('Invalid team name — letters, numbers, dash, underscore only')
+      setCreateTeamError('Invalid organization name — letters, numbers, dash, underscore only')
       return
     }
     setCreateTeamBusy(true)
@@ -3743,10 +3745,10 @@ function claimIntentInFlight() {
       if (res?.team_id) switchTeam(res.team_id)
     } catch (e) {
       if (e?.status === 402) {
-        setCreateTeamError(e.message || 'Create another team requires a paid plan')
+        setCreateTeamError(e.message || 'Create another organization requires a paid plan')
         setCreateTeamUpgrade(true)
       } else {
-        setCreateTeamError(e?.message || 'Could not create the team')
+        setCreateTeamError(e?.message || 'Could not create the organization')
       }
     } finally {
       setCreateTeamBusy(false)
@@ -4159,6 +4161,16 @@ function claimIntentInFlight() {
         setGraphs(list)
         setGraphsLoaded(true) // Round-26
         setGraphsStatus('ok')
+        // #2303: post-#2083 C7 reconciliation — loadGraphs is the single
+        // funnel every graphs-list refresh passes through (deleteGraphRow,
+        // createGraph, restore, team switch). A reloaded list that no
+        // longer contains the open key-panel's graph (deleted here, in
+        // another tab/session, or by a teammate) must drop the panel — a
+        // dangling panelGraphId would otherwise keep the panel's keys
+        // list/mint/revoke targeting a deleted graph. deleteGraphRow's
+        // synchronous same-row close (below) covers the delete path; this
+        // catches every other list-drop path that would strand the panel.
+        if (panelGraphId && !list.some((x) => x.graph_id === panelGraphId)) closeGraphPanel()
       }
     } catch {
       // #1842 P2-1: transport/parse failure → terminal 'error', never eternal shimmer
@@ -4358,7 +4370,12 @@ function claimIntentInFlight() {
     const _teamAtCall = currentTeamId
     if (!graphId || !currentTeamId) return
     setGraphBusy(true)
-    setGraphMsg('')
+    // #2301: delete errors surface PAGE-LEVEL. graphMsg renders only inside
+    // the open key panel (mint/revoke — panel-bound actions), so a failed
+    // DELETE with the panel closed would vanish there. The global error
+    // banner is the same sink createGraph (402/409/generic) and revokeKey
+    // use — destructive graph/row actions stay legible wherever they run.
+    setError('')
     try {
       const tok = sessionTokenRef.current
       if (!tok) throw new Error('No session')
@@ -4379,7 +4396,10 @@ function claimIntentInFlight() {
       await Promise.all([loadGraphs(currentTeamId), loadTeams()]) // count meter refresh
       if (isOwnerAdmin) await loadTrash(currentTeamId) // the row just entered the trash
     } catch (e) {
-      if (teamIdRef.current === _teamAtCall) setGraphMsg(e.message || 'Could not delete graph — try again.')
+      // #2301: failure keeps the row ARMED (Delete/Cancel = retry/escape)
+      // and lands the reason in the page-level banner — visible with the
+      // key panel open or closed.
+      if (teamIdRef.current === _teamAtCall) setError(e.message || 'Could not delete graph — try again.')
     } finally {
       setGraphBusy(false)
     }
@@ -4525,7 +4545,7 @@ function claimIntentInFlight() {
         const b = await res.json().catch(() => ({}))
         if (res.status === 402) {
           // #1875: render the API's detail (upgrade vs at-capacity)
-          setError(typeof b.detail === 'string' ? b.detail : 'Invites require the Pro or Team tier — upgrade to invite teammates.')
+          setError(typeof b.detail === 'string' ? b.detail : 'Invites require the Pro or Team tier — upgrade to invite members.')
           setBusy(false)
           return
         }
@@ -4547,7 +4567,7 @@ function claimIntentInFlight() {
   async function removeMember(userId) {
     const _teamAtCall = currentTeamId // Round-16: mutation identity guard — a switch mid-flight must not act on the previous team
     if (busy) return // Round-24/25: double-click guard BEFORE confirm (a second click must not re-pop the dialog)
-    if (!confirm('Remove this member from the team?')) return
+    if (!confirm('Remove this member from the organization?')) return
     setBusy(true)
     setError('')
     try {
@@ -5212,7 +5232,7 @@ function claimIntentInFlight() {
           <div className="protect-banner protect-full">
             <h2 className="protect-banner-title">🔑 Claim your organization</h2>
             <p>
-              Paste the key for your unclaimed team, then attach a login to
+              Paste the key for your unclaimed organization, then attach a login to
               finish setting up your account.
             </p>
             <div className="inline-form claim-email-form">
@@ -5461,7 +5481,7 @@ function claimIntentInFlight() {
                 </h1>
                 <p className="error" role="alert">{welcomeProvisionError}</p>
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
-                  {/anonymous team waiting/.test(welcomeProvisionError) ? (
+                  {/anonymous organization waiting/.test(welcomeProvisionError) ? (
                     // #1566 (code-review P2): the claim-guard must not
                     // dead-end — the claim card is the escape.
                     <a className="btn-primary" href="https://app.premiselabs.co/?claim=1">Go claim my organization →</a>
@@ -6641,7 +6661,7 @@ sdk.create_point(text="My first point")
         </p>
         {suspended && (
           <div className="error banner" role="alert">
-            ⚠️ {suspended.message || 'This team has been suspended due to unusual activity.'}
+            ⚠️ {suspended.message || 'This organization has been suspended due to unusual activity.'}
             {suspended.appeal_url && (
               <span>
                 {' '}— <a href={suspended.appeal_url} target="_blank" rel="noreferrer">Appeal suspension</a>
@@ -7182,10 +7202,18 @@ sdk.create_point(text="My first point")
                 <span className="dim small">Sign in required</span>
               )}
             </div>
-            {authMode === 'session' && graphsStatus === 'ok' && graphsLoaded && (
+            {/* #2308: free/anon (tierCreateLocked) SKIP the meter — the 🔒
+                "Your plan includes 1 graph" line + upgrade CTA right above
+                already states the cap; "1/1 graphs used" would restate it
+                in the same screenful. Solo (2) / pro (∞) have no lock line,
+                so the meter stays there. Gated on the LIVE tier so a
+                mid-session upgrade (checkout poll → refreshTeam → setTeam)
+                restores the meter without a reload. */}
+            {authMode === 'session' && graphsStatus === 'ok' && graphsLoaded
+              && !tierCreateLocked(team && team.tier) && (
               /* C7 indicator 1: the graph-count meter (used · cap).
-                 max_graphs null → ∞ (pro/team); free=1 / solo=2 show
-                 used/total. The server's 409 cap-reject is authoritative. */
+                 max_graphs null → ∞ (pro/team); solo=2 shows used/total.
+                 The server's 409 cap-reject is authoritative. */
               <p className="dim small" aria-label="Graph usage meter">
                 {graphsMeter(sortedGraphRows(graphs), team && team.max_graphs).label}
               </p>
@@ -7199,10 +7227,33 @@ sdk.create_point(text="My first point")
                 {graphsStatus === 'ok' && graphs.length === 0 && <tr><td colSpan="5" className="dim">No graphs yet — create your first one above.</td></tr>}
                 {graphsStatus === 'ok' && sortedGraphRows(graphs).map((g) => (
                   <tr key={g.graph_id} className={confirmDeleteId === g.graph_id ? 'graph-delete-arm' : undefined}>
-                    <td><code>{g.name}</code>{g.kind === 'default' && <span className="badge">default</span>}</td>
+                    <td><code>{g.name}</code></td>
                     <td>{g.kind}</td>
                     <td>{g.status === 'active' ? 'active' : <span className="revoked">{g.status}</span>}</td>
-                    <td>{g.key_count != null ? g.key_count : '—'}</td>
+                    <td>
+                      {graphKeysSuppressed(g) ? (
+                        /* #2306: the default graph has NO per-graph keys —
+                        its key_count is 0 in both lanes and its keys (the
+                        team-wide graph_id-NULL rows) are managed on the
+                        API Keys tab, never through a per-graph panel. Suppress
+                        the numeric cell on default rows and offer the tab
+                        affordance instead of a dead 0 (supabase) or an
+                        unmanageable bound-default count (registry capstone). */
+                        <span className="default-keys-cell" title="The default graph has no per-graph keys — its team-wide keys are managed on the API Keys tab.">
+                          <span className="dim" aria-hidden="true">—</span>{' '}
+                          <button
+                            type="button"
+                            className="ghost small"
+                            onClick={() => setTab('keys')}
+                            aria-label="The default graph has no per-graph keys — manage its team-wide keys on the API Keys tab"
+                          >
+                            API Keys tab
+                          </button>
+                        </span>
+                      ) : (
+                        g.key_count != null ? g.key_count : '—'
+                      )}
+                    </td>
                     <td>
                       {canManageGraphKeys(g) && (
                         <button
@@ -7374,7 +7425,12 @@ sdk.create_point(text="My first point")
                 {graphMsg && <div className="error banner">{graphMsg}</div>}
                 {panelKeysStatus === 'loading' && <p className="dim small">Loading keys…</p>}
                 {panelKeysStatus === 'error' && <p className="dim small">Couldn't load keys — try again.</p>}
-                {panelKeysStatus === 'ok' && panelKeys.length === 0 && <p className="dim small">No keys for this graph yet — mint one above (shown once).</p>}
+                {panelKeysStatus === 'ok' && panelKeys.length === 0 && (
+                  // #2307: role-aware empty copy — the "mint one above" line
+                  // is only truthful next to the owner/admin mint form; members
+                  // (no mint control) get who-can-create instead.
+                  <p className="dim small">{graphKeyPanelEmptyLine(isOwnerAdmin)}</p>
+                )}
                 {panelKeysStatus === 'ok' && panelKeys.length > 0 && (
                   <table>
                     <thead><tr><th scope="col">Name</th><th scope="col">Prefix</th><th scope="col">Created</th><th scope="col">Status</th><th scope="col"><span className="sr-only">Actions</span></th></tr></thead>
@@ -7468,13 +7524,13 @@ sdk.create_point(text="My first point")
         {tab === 'members' && (
           <section>
             <div className="row">
-              <h2>Team members</h2>
+              <h2>Members</h2>
               {isOwnerAdmin && (
                 <div className="inline-form">
                   <input
                     type="email"
-                    placeholder="teammate@example.com"
-                    aria-label="Teammate email"
+                    placeholder="member@example.com"
+                    aria-label="Member email"
                     value={inviteEmail}
                     onChange={(e) => setInviteEmail(e.target.value)}
                   />
@@ -7493,7 +7549,7 @@ sdk.create_point(text="My first point")
                 for Free/Solo (the old copy rendered for Pro too and
                 contradicted the working invite form). */}
             {team && team.tier !== 'pro' && team.tier !== 'team' && isOwnerAdmin && (
-              <p className="dim small">Invites require the Pro or Team tier — <a href="https://tortoise.premiselabs.co/product.html#pricing" target="_blank" rel="noreferrer">upgrade to add teammates</a>.</p>
+              <p className="dim small">Invites require the Pro or Team tier — <a href="https://tortoise.premiselabs.co/product.html#pricing" target="_blank" rel="noreferrer">upgrade to add members</a>.</p>
             )}
             <table>
               <thead><tr><th>Email / User</th><th>Role</th><th>Status</th><th></th></tr></thead>
@@ -7535,13 +7591,13 @@ sdk.create_point(text="My first point")
         {tab === 'billing' && team && (
           <section className="billing">
             <div className="row">
-              <h2>Billing — {currentTeamName || 'this team'}</h2>
+              <h2>Billing — {currentTeamName || 'this organization'}</h2>
               {/* #1876: per-tenant billing — in-section context selector
                   (reuses switchTeam; single-team users get the name only). */}
               {teams.length > 1 && (
                 <select
                   className="billing-team-select"
-                  aria-label="Billing team"
+                  aria-label="Billing organization"
                   value={currentTeamId || ''}
                   onChange={(e) => { switchTeam(e.target.value); setTab('billing') }}
                 >

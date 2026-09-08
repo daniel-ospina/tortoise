@@ -700,7 +700,7 @@ class TestCreateTeam:
         store = MemoryStorage()  # SHARED — _backup_storage is called per request
         monkeypatch.setattr(ha_mod, "_backup_storage", lambda: store)
         monkeypatch.setattr(
-            _pricing, "daily_backups_enabled", lambda tier: tier == "pro"
+            _pricing, "hourly_backups_enabled", lambda tier: tier == "pro"
         )
         r = tc.post("/v1/teams", json={"name": "acme"})
         assert r.status_code == 200, r.text
@@ -955,6 +955,33 @@ class TestGraphSurface:
                            "kind": "default", "status": "active",
                            "recording": None,  # C6 #2115 read-back
                            "key_count": 0}]
+        # #2306 (supabase lane pin of the lane-consistency fix): the default
+        # row's key_count stays 0 even with keys present — the team-wide rows
+        # (graph_id NULL, the keys that resolve to the default graph) are
+        # managed on the API-Keys tab and never counted on a graph row, while
+        # an active custom-bound key counts on ITS OWN row (revoked excluded).
+        fake.seed("api_keys", [
+            {"id": "tw-a", "team_id": "team-free-001", "lookup_hash": "h1",
+             "graph_id": None, "revoked_at": None},
+            {"id": "gb-a", "team_id": "team-free-001", "lookup_hash": "h2",
+             "graph_id": "g_custom000001", "revoked_at": None},
+            {"id": "gb-r", "team_id": "team-free-001", "lookup_hash": "h3",
+             "graph_id": "g_custom000001",
+             "revoked_at": "2026-09-01T00:00:00Z"},
+        ])
+        fake.seed("graphs", [{
+            "id": "g_custom000001", "team_id": "team-free-001",
+            "name": "research", "kind": "custom",
+            "namespace": "team_team-free-001_g_g_custom000001",
+            "status": "active", "created_at": "2026-09-01T00:00:00Z",
+        }])
+        r = tc.get("/v1/graphs?team_id=team-free-001")
+        rows = r.json()
+        assert len(rows) == 2
+        default_row = next(x for x in rows if x["kind"] == "default")
+        assert default_row["key_count"] == 0  # team-wide keys never counted
+        custom_row = next(x for x in rows if x["kind"] == "custom")
+        assert custom_row["key_count"] == 1  # active bound keys only
 
     def test_list_my_teams_uses_derived_graphs(self, user_client):
         """E6: team switcher — graph_count/default_graph_id come from the
@@ -1262,10 +1289,10 @@ class TestBackupEndpointsSupabaseGraphName:
         )
         store = MemoryStorage()  # SHARED — _backup_storage is called per request
         monkeypatch.setattr(ha_mod, "_backup_storage", lambda: store)
-        # Backups gate: pro passes (pricing.json still marks daily_backups
+        # Backups gate: pro passes (pricing.json still marks hourly_backups
         # "planned", so the allowlist is patched like test_hosted_api does).
         monkeypatch.setattr(
-            _pricing, "daily_backups_enabled", lambda tier: tier == "pro"
+            _pricing, "hourly_backups_enabled", lambda tier: tier == "pro"
         )
         # SDK-created team: the graph is named per teams.graph_name — NOT
         # team_{id} (#768). team_myapp != team_team-pro-924, so a team_{id}

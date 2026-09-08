@@ -90,6 +90,10 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     "test_audit.py": [r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"',
                        r'monkeypatch\.setenv\(\s*$'],
     "test_billing.py": [r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
+    # #2291 battery campaign (hermetic per-run store tests force the
+    # embedded lane; the delenv IS the point — a URI redirect would fold
+    # graphs per test):
+    "test_battery_lane_matrix.py": [r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],  # hermetic env-strip test (fixture-param monkeypatch — auto-undo)
     "test_body_cap_sweep.py": [r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],  # #2032: embedded lane via delenv (the test_billing pattern — registry-lane determinism for register/agent mints)
     "test_bridge_mcp.py": [r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI",\s*""'],
     "test_chain_enforcer.py": [r'monkeypatch\.delenv\("TORTOISE_DB_URI"'],
@@ -135,6 +139,8 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     "test_ep_directional.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])',
                                r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"'],
     "test_event_provenance.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])'],
+    "test_entity_key_expansion.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])',
+                                      r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"'],  # #2518 entity-key expansion: module live-FalkorDB probe (DELIBERATE_URI) + per-test docker force
     "test_hnsw_vector_index.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])'],
     "test_ingest.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])'],
     "test_integration_search.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])'],
@@ -810,6 +816,36 @@ def test_bare_monkeypatch_without_undo_reds():
     assert violations, (
         "pytest.MonkeyPatch() without .undo() must be flagged — the "
         "forgotten-undo variant of the #2062 class")
+
+
+def test_battery_fixture_undo_is_evidence_not_comment():
+    """#2558 pin: the four converted battery _force_embedded_lane fixtures
+    (bare pytest.MonkeyPatch + mp.undo at module teardown) must keep the
+    guard's bare-instance undo check FIRING on the REAL call — comment text
+    inside the fixture body must not launder the evidence (a naive '.undo('
+    substring scan would stay green if a comment mentioned the call and the
+    real mp.undo() were later deleted, silently re-admitting the #2062
+    leak class). Loads the real module source, strips the real call, and
+    asserts the guard reds; the real source (with the call) stays green."""
+    battery_fixtures = ("test_battery_ep_outcome", "test_battery_provenance",
+                        "test_battery_seed_ingest", "test_battery_write_channel")
+    real = [(f"{name}.py", (_TESTS_ROOT / f"{name}.py").read_text(encoding="utf-8"))
+            for name in battery_fixtures]
+    # real source: the undo call is present and in the fixture body — green
+    assert not _restoration_violations(real), (
+        "converted battery fixtures with mp.undo() present must stay green")
+    # strip the real call: the guard must RED even though the comments
+    # mention the undo pattern — a comment is not a restoration mechanism
+    stripped = []
+    for fname, src in real:
+        marker = "\n    mp.undo()\n"
+        assert marker in src, f"mp.undo() call not found in {fname}"
+        stripped.append((fname, src.replace(marker, "\n", 1)))
+    violations = _restoration_violations(stripped)
+    assert len(violations) == len(battery_fixtures), (
+        "stripping the real mp.undo() must red ALL converted battery "
+        "fixtures (comments must not launder the evidence): "
+        + "; ".join(violations))
 
 
 def test_restoration_patterns_green():

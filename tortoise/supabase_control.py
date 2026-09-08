@@ -2660,7 +2660,15 @@ def set_graph_recording(cp, team_id: str, graph_id: str,
 
 def count_graph_keys(cp, team_id: str, graph_id: str) -> int:
     """Active (non-revoked) api_keys bound to a graph — the key_count
-    source for GET /v1/graphs (surface 5)."""
+    source for GET /v1/graphs (surface 5).
+
+    #2306: only ever called with a CUSTOM graph's row id. The default row's
+    id is the DERIVED literal 'default' (never a graphs.id — api_keys.graph_id
+    REFERENCES graphs(id)), so this seam can never match a default-row count
+    and the list short-circuits kind='default' rows to 0 before reaching it.
+    Team-wide rows (graph_id NULL) are the keys that RESOLVE to the default
+    graph; they are counted nowhere on a graph row (managed on the API-Keys
+    tab) — do NOT special-case 'default' here to count them."""
     rows = cp.query(
         "api_keys", select=["id"],
         filters=[("graph_id", "eq", graph_id), ("team_id", "eq", team_id),
