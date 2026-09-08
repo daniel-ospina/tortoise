@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from battery.judge.rubric import (  # noqa: I001
+from battery.judge.rubric import (
     lint_evidence_neutral,
     lint_rubric_items,
     load_rubric_spec,

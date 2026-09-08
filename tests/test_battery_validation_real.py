@@ -135,7 +135,8 @@ def test_ac1_bar_passes_kappa_paradox_pool():
     capped below 0.70 by the skewed-marginal paradox even at high raw
     agreement (our measured real run: po 0.86 / kappa 0.60). The real-text
     bar is Gwet's AC1 >= 0.70, which stays meaningful on skewed pools."""
-    from battery.judge.gate import _cohens_kappa as _ck, _gwet_ac1
+    from battery.judge.gate import _cohens_kappa as _ck
+    from battery.judge.gate import _gwet_ac1
     # 30 pairs: 28 agree-yes + 2 disagreements (po = 0.93; judge A is
     # all-yes over a yes-skewed pool -> Cohen's kappa collapses to ~0 by
     # the skewed-marginal paradox while AC1 stays ~0.93.

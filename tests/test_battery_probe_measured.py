@@ -34,7 +34,7 @@ class _ScriptedCaller:
         self.calls.append(prompt)
         self.last_prompt_tokens = 10      # scripted usage capture: (10, 20)
         self.last_completion_tokens = 20  # tokens per call — accumulated per phase
-        return "The agent weighs the counter-argument and revises its position."  # noqa: E501
+        return "The agent weighs the counter-argument and revises its position."
 
 
 def test_probe_accumulates_usage_per_phase(tmp_path):

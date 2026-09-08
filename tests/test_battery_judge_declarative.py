@@ -3,8 +3,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
 from battery.judge.client import JudgeCall, JudgeClient
 from battery.judge.gate import DECLARATIVE_VOCAB, validate_rubric
 from battery.judge.rubric import load_rubric_spec

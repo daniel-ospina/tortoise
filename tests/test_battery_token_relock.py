@@ -6,8 +6,7 @@ from __future__ import annotations
 from dataclasses import replace
 from pathlib import Path
 
-from battery.config.arms import ArmConfig, load_arms, token_table_hash
-from battery.exceptions import ConfigError
+from battery.config.arms import load_arms, token_table_hash
 
 CONFIG = Path(__file__).resolve().parents[1] / "battery/config"
 
