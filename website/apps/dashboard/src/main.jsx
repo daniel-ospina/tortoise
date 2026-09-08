@@ -5295,6 +5295,11 @@ function claimIntentInFlight() {
   // #2328: the Codex connect step renders one of two surfaces — 'codex'
   // (CLI) or 'codexDesktop' (GUI). Other harnesses pass through unchanged.
   const wizardConnectHarness = (wizardHarness === 'codex' && wizardCodexDesktop) ? 'codexDesktop' : wizardHarness
+  // #1998 fork-aware connect: the fork choice determines what the connect step
+  // shows — 'build' users see API key + SDK code; 'self' users see harness
+  // picker + setup command.
+  const wizardFork = wizardForkChosen || (onboarding && onboarding.fork) || ''
+  const isBuildFork = wizardFork === 'build'
 
   if (welcomeMode && authed) {
     // #2323 (Option B): name-first first-run — the welcome card renders the
@@ -5506,7 +5511,68 @@ function claimIntentInFlight() {
                     </div>
                   )}
 
-                  {wizardStep === 2 && (
+                  {wizardStep === 2 && (isBuildFork ? (
+                    <div className="connect-build">
+                      {!harnessKey ? (
+                        <>
+                          {isOwnerAdmin ? (
+                            <button type="button" className="btn-primary" onClick={wizardMintDurableKey} disabled={wizardDurableBusy}
+                              style={{ marginBottom: '0.75rem' }}>
+                              {wizardDurableBusy ? 'Creating…' : `Create an API key for ${shownOrgName || 'your organization'}`}
+                            </button>
+                          ) : (
+                            <p className="dim" style={{ marginBottom: '0.75rem' }}>
+                              Only owners and admins can create API keys. Ask an owner or admin to create one.
+                            </p>
+                          )}
+                          <button type="button" className="ghost small" onClick={() => { window.history.replaceState({}, '', '#/keys'); setWelcomeMode(false); setTab('keys'); finishWelcomeLoads('keys') }}>
+                            Manage API keys →
+                          </button>
+                        </>
+                      ) : (
+                        <>
+                          <p className="dim small" style={{ marginBottom: '0.4rem' }}>
+                            Your API key is shown once — copy it now.
+                          </p>
+                          <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', marginBottom: '1.25rem' }}>
+                            <code style={{ flex: 1, padding: '0.6rem 0.8rem', background: 'var(--surface,#0d1a2d)', border: '1px solid var(--border,#1e293b)', borderRadius: 8, fontSize: 13, wordBreak: 'break-all' }}>
+                              {harnessKey}
+                            </code>
+                            <button type="button" className="btn-primary" onClick={() => navigator.clipboard?.writeText(harnessKey)}>
+                              Copy
+                            </button>
+                          </div>
+                          <p className="dim" style={{ marginBottom: '0.75rem', lineHeight: 1.6 }}>
+                            Add it to your <code>.env</code> or use it with the Tortoise SDK:
+                          </p>
+                          <pre className="snippet" style={{ marginBottom: '0.75rem' }}>
+{`from tortoise import TortoiseSDK
+
+sdk = TortoiseSDK(api_key="${harnessKey}")
+sdk.create_point(text="My first point")
+# See the docs for the full API`}
+                          </pre>
+                          <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center' }}>
+                            <button type="button" className="btn-primary" onClick={wizardHarnessContinue} disabled={wizardConnectBusy}>
+                              {wizardConnectBusy ? 'Saving…' : "I've set it up — Continue →"}
+                            </button>
+                            <a className="ghost" href="https://tortoise.premiselabs.co/docs" target="_blank" rel="noreferrer">
+                              SDK documentation →
+                            </a>
+                          </div>
+                        </>
+                      )}
+                      {wizardDurableError && (
+                        <p className="error" role="alert" style={{ margin: '0.6rem 0 0', fontSize: 13 }}>{wizardDurableError}</p>
+                      )}
+                      <div className="wizard-nav" style={{ marginTop: '0.75rem' }}>
+                        <button type="button" className="ghost" onClick={() => setWizardStep(1)}>← Back</button>
+                        <div className="wizard-nav-actions">
+                          <button type="button" className="ghost" onClick={() => { setWizardPaused(true); setWizardStep(3) }}>Skip for now</button>
+                        </div>
+                      </div>
+                    </div>
+                  ) : (
                     <div className="harness">
                       <div className="harness-tabs">
                         {HARNESS_ORDER.map((h) => (
@@ -5778,7 +5844,7 @@ function claimIntentInFlight() {
                         </>
                       )}
                     </div>
-                  )}
+                  ))}
 
                   {wizardStep === 3 && (
                     <div className="done">
