@@ -5346,11 +5346,6 @@ function claimIntentInFlight() {
                 <span className="sr-only" role="status" aria-live="polite">
                   {welcomeProvisioning ? 'Creating your organization' : (welcomeHasOrg && shownOrgName ? `${shownOrgName} is set up` : '')}
                 </span>
-                <p className="dim" style={{ marginBottom: '1.25rem' }}>
-                  {welcomeHasOrg
-                    ? 'Your Organization is set up. Choose how you\'ll use it and connect your agent — your API key is shown once at the connect step.'
-                    : 'Set up your Organization in the steps below — it\'s created when you name it, and your API key is shown once at the connect step.'}
-                </p>
                 {/* #1997 (W1): the 4 HUMAN steps (epic plan P1) — org-create/join
                     → fork card → connect-consent → done (orientation removed per
                     epic #2534).
@@ -5365,19 +5360,13 @@ function claimIntentInFlight() {
                     ))}
                   </div>
                   <p className="wizard-title">{WIZARD_STEPS[wizardStep].label}</p>
-                  <p className="wizard-sub" style={{ marginBottom: '1rem' }}>
-                    {wizardStep === 0 && welcomeHasOrg
-                      // #2323 (review P2): the shared step-0 sub ('Name your
-                      // organization…') is a contradiction for an org-holding
-                      // account on the read-only step — branch the copy.
-                      ? "You're already in an organization — you won't create another here. Pick how you'll use it next."
-                      : (wizardStep === 3 && effectivelyPaused)
-                        // #2361 review-r3/r4: the done SUB claimed 'Your agent takes
-                        // over from here' above a paused body — branch it, and only
-                        // when the org truly never connected (server checkpoint).
+                  {wizardStep !== 0 && (
+                    <p className="wizard-sub" style={{ marginBottom: '1rem' }}>
+                      {(wizardStep === 3 && effectivelyPaused)
                         ? "You're set up, but your agent isn't connected yet. Reconnect any time from Settings → Setup guide."
                         : WIZARD_STEPS[wizardStep].sub}
-                  </p>
+                    </p>
+                  )}
 
                   {wizardStep === 0 && (
                     <div className="org-create">
@@ -5413,15 +5402,12 @@ function claimIntentInFlight() {
                               style={{ padding: '0.5rem 0.7rem', background: 'var(--surface,#0d1a2d)', border: '1px solid var(--border,#1e293b)', borderRadius: 8, fontSize: 14 }}
                             />
                           </label>
-                          <p className="dim small" style={{ margin: '0 0 0.9rem', lineHeight: 1.5 }}>
-                            This creates your organization — one per account on the free plan. Your API key is created here and shown once at the connect step.
-                          </p>
                           {wizardOrgError && (
                             <p className="error" role="alert" style={{ marginBottom: '0.9rem' }}>{wizardOrgError}</p>
                           )}
                           {(!pendingInvites || pendingInvites.length === 0) && (
                             <p className="dim small" style={{ margin: '0 0 0.9rem', lineHeight: 1.5, fontStyle: 'italic' }}>
-                              Want to join an existing organization? Ask your admin to invite you to your email, then reload this page.
+                              Looking to join an existing organization? Ask your admin to invite you to your email, then reload this page.
                             </p>
                           )}
                           <div className="wizard-nav-actions">

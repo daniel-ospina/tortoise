@@ -8859,9 +8859,8 @@ async def create_team(body: dict, user: dict = Depends(get_current_user)):  # no
     if len(name) > 64:
         raise HTTPException(status_code=422, detail="Team name must be ≤ 64 characters")
     import re as _re
-    # #750.6: align with sdk.team_create — spaces are rejected there, so accept
-    # them here too (stricter wins; surface as 422 not a 500 ControlPlaneError).
-    if not _re.match(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$", name):
+    # spaces are now allowed in team names (onboarding wizard needs them)
+    if not _re.match(r"^[a-zA-Z0-9][a-zA-Z0-9_ -]{0,63}$", name):
         raise HTTPException(status_code=422, detail="Invalid team name")
 
     # #1954: the 429/409/402 gates + provision are read-then-write — the
@@ -16722,7 +16721,7 @@ async def create_onboarding_team(body: dict,
     if not name or len(name) > 64:
         raise HTTPException(status_code=400, detail="name is required (max 64 chars)")
     import re
-    if not re.match(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$", name):
+    if not re.match(r"^[a-zA-Z0-9][a-zA-Z0-9_ -]{0,63}$", name):
         raise HTTPException(status_code=400, detail="Invalid team name")
     # #1748: the session user owns the sub-team. Session JWT →
     # session_user_id (get_current_team_session); key-auth → created_by

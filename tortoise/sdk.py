@@ -13626,12 +13626,12 @@ class TortoiseSDK:
             raise ControlPlaneError("Team name must not be empty")
         if len(name) > 64:
             raise ControlPlaneError("Team name must be 64 characters or fewer")
-        if not re.match(r'^[a-zA-Z0-9][a-zA-Z0-9_-]*$', name):
+        if not re.match(r'^[a-zA-Z0-9][a-zA-Z0-9_ -]*$', name):
             raise ControlPlaneError(
-                f"Invalid team name: {name!r}. Use alphanumeric, hyphens, underscores."
+                f"Invalid team name: {name!r}. Use alphanumeric, hyphens, underscores, spaces."
             )
 
-        graph_name = f"team_{name}"
+        graph_name = f"team_{name}".replace(' ', '_')
         proj = self._get_proj()
         reg = self._get_registry()
         now = datetime.now(timezone.utc).isoformat()  # noqa: UP017
