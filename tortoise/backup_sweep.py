@@ -913,6 +913,69 @@ def _sweep_team(
     return team_res
 
 
+# ── #2317 scheduled-restore-drill archive selection ───────────────────────
+# The scheduled (monthly, unattended) drill restores the OLDEST eligible
+# archive into _drill_* scratch. Selection is a pure storage walk (no
+# control-plane query): only NESTED per-graph pools qualify
+# (backups/{team}/{graph}/{ts}_{rnd}/dump.enc — 5 key segments). Legacy
+# FLAT 4-segment artifacts are excluded: their key shape does not name a
+# graph, and the operator-invoked drill surface already covers the pre-#2313
+# shapes. The caller resolves each candidate through the ACTIVE-graph seam
+# (tombstone guard), so a quarantined/deleted graph's archive is skipped,
+# never drilled (#2304).
+
+
+def list_drill_candidates(storage, *, max_candidates: int = 8) -> list[dict[str, Any]]:
+    """Oldest-first eligible nested archives across all teams.
+
+    Returns candidate rows ``[{team_id, graph_id, backup_key, created_at}]``
+    sorted by manifest ``created_at`` ascending (oldest first). Dumps with an
+    unreadable/missing manifest are skipped (restore_backup manifest-verifies
+    whatever is drilled anyway). Raises RuntimeError on a storage-list
+    failure — the caller must never guess an empty archive set off a failed
+    read (the same never-confirm-empty invariant as the watcher).
+    """
+    from .hosted_backup import _parse_backup_key
+
+    rows: list[dict[str, Any]] = []
+    for key in storage.list("backups/"):
+        if not key.endswith("/dump.enc"):
+            continue
+        if len(key.split("/")) != 5:  # backups/{team}/{graph}/{ts}_{rnd}/dump.enc
+            continue  # legacy flat (4 segments) and any future shape
+        try:
+            team_id, graph_id, _ = _parse_backup_key(key)
+        except ValueError:
+            continue
+        if not graph_id:
+            continue
+        try:
+            manifest = _read_json(storage, key.replace("/dump.enc", "/manifest.json"))
+        except Exception:
+            continue  # no usable manifest — never a drill source
+        created_at = str(manifest.get("created_at") or "")
+        if not created_at:
+            continue
+        rows.append(
+            {
+                "team_id": team_id,
+                "graph_id": graph_id,
+                "backup_key": key,
+                "created_at": created_at,
+            }
+        )
+
+    def _sort_key(row: dict[str, Any]):
+        try:
+            ts = datetime.fromisoformat(row["created_at"])
+        except ValueError:
+            ts = datetime.min.replace(tzinfo=UTC)
+        return (ts, row["backup_key"])
+
+    rows.sort(key=_sort_key)
+    return rows[:max_candidates]
+
+
 def resolve_active_graph(source, team_id: str, graph_id: str) -> dict[str, Any]:
     """Resolve a restore/re-baseline target graph to its ACTIVE sweep row.
 

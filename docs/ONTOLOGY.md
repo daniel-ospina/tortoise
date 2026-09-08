@@ -546,6 +546,8 @@ meetingNotes, experimentResults, evidenceLog, handoff, transcript, roadmap, brie
 organization, team, role, legalPerson, naturalPerson, other
 ```
 
+> **Account layer vs in-graph Subjects (#2311):** the `organization` / `team` kinds above (and their §6 subclasses) are **in-graph Subjects inside a memory** — semantically distinct from the control-plane account unit that owns the graph(s), the **organization account** (billing/tenure; legacy code/API/DB identifiers still read "team"). Subject kinds are not renamed by #2311. Definitions note: docs/registry-graph-schema.md ("Definitions — account layer vs in-graph Subjects").
+
 ### Source Type Vocabulary (core) + Credibility Tier
 
 ```

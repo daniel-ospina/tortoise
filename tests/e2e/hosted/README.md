@@ -72,7 +72,7 @@ Every case carries ≥2 negative tests.
 
 - `TORTOISE_BACKUP_STORAGE=memory` (#303 seam in `hosted_api._backup_storage`)
   + `fixtures/pricing-e2e.json` via `TORTOISE_PRICING_PATH` (pro/team
-  `daily_backups: true`, `e2e_small` cap tier) → E2E-5-D.
+  `hourly_backups: true`, `e2e_small` cap tier) → E2E-5-D.
 - Self-signed Stripe webhooks against a local `STRIPE_WEBHOOK_SECRET` with a
   local `STRIPE_PRICE_IDS` catalog → hermetic tier bump, zero Stripe network
   (E2E-3-D; the real-checkout live leg stays with the precedent suite

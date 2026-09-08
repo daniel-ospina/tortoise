@@ -9,8 +9,6 @@ no-ops; targets never touch the seed-manifest marker.
 """
 from __future__ import annotations
 
-import os
-
 import pytest
 
 from battery.arms.a4_tortoise import DECIDE_CYCLES_CAP
@@ -29,15 +27,14 @@ def _force_embedded_lane() -> None:
     (battery_ct-001 …) — a TORTOISE_DB_URI redirect folds graphs per test
     and voids the assertions. Force the embedded lane for this module
     (embedded-file-contract; precedent: test_embedded_lifecycle)."""
-    saved = os.environ.pop("TORTOISE_DB_URI", None)
-    saved_path = os.environ.pop("TORTOISE_DB_PATH", None)
-    try:
-        yield
-    finally:
-        if saved is not None:
-            os.environ["TORTOISE_DB_URI"] = saved
-        if saved_path is not None:
-            os.environ["TORTOISE_DB_PATH"] = saved_path
+    # #2062/#2084 pattern (test_export_cli precedent): bare MonkeyPatch
+    # auto-restores both vars at module teardown. The guard's bare-instance
+    # check requires the real call in this body — keep it intact.
+    mp = pytest.MonkeyPatch()
+    mp.delenv("TORTOISE_DB_URI", raising=False)
+    mp.delenv("TORTOISE_DB_PATH", raising=False)
+    yield
+    mp.undo()
 
 
 

@@ -22,7 +22,12 @@ Pipeline (per team graph):
   prune_backups:  keep N daily + M weekly (newest-first).
 
 Env:
-- TORTOISE_BACKUP_KEY — base64 32-byte key for AES-256-GCM (required for encrypt/decrypt).
+- TORTOISE_BACKUP_KEY — base64 32-byte ACTIVE key for AES-256-GCM (encrypt
+  + decrypt; required). Managed by the secret store (#2318): a RETAINED
+  previous key (TORTOISE_BACKUP_KEY_PREVIOUS, or an older file-store version)
+  is kept as a DECRYPT candidate during a rotation overlap window — see
+  _decrypt_candidate_keys. Sweep archives additionally carry
+  REGISTRY_STREAM_KEY(_PREVIOUS) (#661) — Fly-only, never in GitHub.
 - R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_BUCKET — R2 storage config.
   (R2Storage lazy-imports boto3 — install with `pip install "tortoise[backups]"`.)
 """
@@ -59,7 +64,10 @@ class RestoreVerificationError(RuntimeError):
 
 
 def _get_backup_key() -> bytes:
-    """Return the 32-byte AES-256-GCM key from TORTOISE_BACKUP_KEY (base64).
+    """Return the ACTIVE 32-byte AES-256-GCM key from TORTOISE_BACKUP_KEY (base64).
+
+    #2318: this is the ENCRYPT key (the rotation overlap window keeps a
+    retained previous key only for DECRYPT — see ``_decrypt_candidate_keys``).
 
     Fail loudly — never encrypt with a default.
     """
@@ -81,40 +89,72 @@ def _get_backup_key() -> bytes:
         )
     return key
 
-def _alternate_backup_key(key: bytes | None) -> bytes | None:
-    """Return the OTHER configured backup key (#661 key separation).
+def _decrypt_candidate_keys(explicit: bytes | None = None) -> tuple[bytes, ...]:
+    """Active-first, fingerprint-deduped decrypt candidate chain (#2318).
 
-    Sweep archives encrypt with REGISTRY_STREAM_KEY; user backups with
-    TORTOISE_BACKUP_KEY. Given one key, return the other so restore can try
-    both. None when no alternate is configured.
+    Rotation retention (#2318): during the overlap window a role holds TWO
+    keys — the active (encrypt) key and the retained previous key (the
+    ``*_PREVIOUS`` env var or an older file-store version). Decrypt must try
+    both for BOTH roles: the #661 cross-role seam is preserved (a sweep
+    archive restores through the user-backup path and vice versa) and an
+    archive encrypted under a rotated-out key stays decryptable in-app for as
+    long as the old key is retained.
+
+    Order: the explicit key first (the caller's chosen role), then the config
+    chains (backup role, then registry_stream role — when the sweep config is
+    enabled). When NO explicit key is given (auto mode: the hosted
+    user-facing restore endpoint passes key=None) and the config is disabled,
+    the raw env-level chains apply (sweep-disabled / selfhost restores, so a
+    manually-rotated TORTOISE_BACKUP_KEY + ``_PREVIOUS`` still decrypts). An
+    explicit key stays authoritative when the config is disabled — pre-#2318
+    semantics: decrypt fails if the supplied key is wrong (an env key never
+    silently substitutes for an explicitly-chosen key). No key material is
+    ever logged — candidates are identified by fingerprint only.
     """
+    from . import secret_store as ss
     from .backup_config import load_config as _load_cfg
+
+    out: list[bytes] = []
+    seen: set[str] = set()
+
+    def _add(key: bytes) -> None:
+        fp = ss.key_fingerprint(key)
+        if fp not in seen:
+            seen.add(fp)
+            out.append(key)
+
+    if explicit is not None:
+        _add(explicit)
     try:
         cfg = _load_cfg()
     except Exception:
-        return None
-    candidates = [cfg.backup_key, cfg.registry_stream_key]
-    if key is not None and key in candidates:
-        return candidates[0] if key == candidates[1] else candidates[1]
-    # key is None (env fallback) — try the stream key as the alternate.
-    return cfg.registry_stream_key or None
+        cfg = None
+    if cfg is not None and cfg.enabled:
+        for chain in (cfg.backup_key_chain, cfg.registry_stream_key_chain):
+            for key in chain:
+                _add(key)
+    elif explicit is None:
+        # Auto mode (no explicit key): env-level chains cover sweep-disabled /
+        # selfhost restores — including a manually-rotated *_PREVIOUS key.
+        env_store = ss.EnvKeyStore()
+        for role_name in ss.ROLES:
+            for key in env_store.candidates(role_name):
+                _add(key)
+    return tuple(out)
 
-    if not raw:  # noqa: F821
-        raise RuntimeError(
-            "TORTOISE_BACKUP_KEY not set — required for hosted backups. Generate with: "
-            "python -c \"import base64,secrets; print(base64.b64encode(secrets.token_bytes(32)).decode())\""
-        )
-    try:
-        key = base64.b64decode(raw.strip(), validate=True)  # tolerate trailing newline  # noqa: F821
-    except Exception as e:
-        raise RuntimeError(
-            f"TORTOISE_BACKUP_KEY must be base64-encoded (got {raw[:8]!r}...): {e}"  # noqa: F821
-        ) from e
-    if len(key) != _AES_KEY_SIZE:
-        raise RuntimeError(
-            f"TORTOISE_BACKUP_KEY must decode to {_AES_KEY_SIZE} bytes (got {len(key)})"
-        )
-    return key
+
+def _try_decrypt_with_chain(blob: bytes, keys: tuple[bytes, ...]) -> bytes:
+    """Decrypt with the first candidate that authenticates. Raises ValueError
+    (tamper/wrong key) when none match."""
+    last: ValueError | None = None
+    for candidate in keys:
+        try:
+            return decrypt_backup(blob, key=candidate)
+        except ValueError as e:
+            last = e
+    if last is not None:
+        raise last
+    raise ValueError("Backup decryption failed — no decrypt key available")
 
 
 def encrypt_backup(data: bytes, key: bytes | None = None) -> bytes:
@@ -1206,14 +1246,17 @@ def restore_backup(
         payload = json.loads(decrypt_backup(blob, key=key))
     except ValueError as e:
         # #661: sweep archives encrypt with REGISTRY_STREAM_KEY, user-facing
-        # backups with TORTOISE_BACKUP_KEY — try the alternate key before
-        # failing so both restore paths accept both archive types.
-        alt = _alternate_backup_key(key)
-        if alt is None:
+        # backups with TORTOISE_BACKUP_KEY — try the FULL candidate chain
+        # (#2318: both roles' active + retained-previous keys, deduped) before
+        # failing, so both restore paths accept both archive types AND archives
+        # encrypted under a rotated-out key stay decryptable during the overlap
+        # window.
+        candidates = _decrypt_candidate_keys(key)
+        if not candidates:
             raise ValueError(f"Cannot restore: {e}") from e
         try:
-            payload = json.loads(decrypt_backup(blob, key=alt))
-        except Exception:
+            payload = json.loads(_try_decrypt_with_chain(blob, candidates))
+        except ValueError:
             raise ValueError(f"Cannot restore: {e}") from e
     if not isinstance(payload, dict) or payload.get("format") != DUMP_FORMAT:
         raise ValueError("Decrypted payload is not a tortoise logical dump")
