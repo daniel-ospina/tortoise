@@ -624,13 +624,28 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None):
             fold_ev = {"name": obj_name, "supersedes_by": supersedes_by}
             if not legacy_no_id:
                 fold_ev["id"] = obj_id
-            matched = proj._fold_object_superseded(fold_ev)
-            if matched == 0:
-                # fold-miss: event stays journaled (rebuild retains the
-                # truth), but the live status flip failed — make it visible.
-                warn(f"ObjectSuperseded emitted for {obj_name!r} but the "
-                     f"fold matched no Object — event stays journaled "
-                     f"(rebuild retains the truth)")
+            folded, fold_matched = proj._fold_object_superseded(
+                fold_ev, cas=True)  # #2242: the LIVE path opts into the CAS
+            if folded == 0:
+                # #2242 classified outcome: (0,0) = no node matched (the
+                # fold-miss below — event stays journaled, rebuild retains
+                # the truth); (0,N) = the node exists but is ALREADY
+                # terminal — a concurrent commit folded it between this
+                # record's gate probe and the fold (the keep-first loser).
+                # The emitted event stays journaled; the fold is NOT applied
+                # and NOT counted. Sequential paths can never reach here
+                # (the terminal/visible gates precede the fold in the same
+                # sync block) — this warn is exactly the cross-commit
+                # concurrency signal (#2242 indicator 1).
+                if fold_matched == 0:
+                    warn(f"ObjectSuperseded emitted for {obj_name!r} but the "
+                         f"fold matched no Object — event stays journaled "
+                         f"(rebuild retains the truth)")
+                else:
+                    warn(f"ObjectSuperseded emitted for {obj_name!r} but the "
+                         f"fold lost a concurrent race — the Object is "
+                         f"already superseded (keep-first); event stays "
+                         f"journaled (rebuild retains the truth)")
             else:
                 applied += 1
         except Exception as exc:
