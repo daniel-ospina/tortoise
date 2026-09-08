@@ -560,6 +560,69 @@ the deterministic cell is a context-token/underfill view only. The chosen
 value feeds the pilot and the 500-Q run; the report's methodology records it
 (`chunk_turns` in the methodology).
 
+## Ingest cache + fast-cycle protocol (#2080)
+
+The per-question v2 ingest (LLM extraction over long session histories) is
+the wall-clock killer (~4.5 min/question → a 50-Q cycle ≈ 3.5-4 h). The
+fast-cycle protocol makes **iteration** cheap: the first run ingests
+(slow); subsequent runs over the SAME slice with an **unchanged extractor**
+hit the per-question ingest cache and skip the LLM extraction entirely
+(retrieval/reader/judge run against the persisted graph — minutes, not
+hours). Extractor changes **auto-invalidate** the cache (no manual bust).
+
+```bash
+# first run over the slice — SLOW (ingests + persists every question's graph)
+python -m tools.longmem_eval.run --split s --limit 50 --cache-ingest --db docker://:falkordb@localhost:6379/tortoise \
+    --checkpoint /tmp/lme-50q.json --output /tmp/lme-50q-report.json
+
+# second run, same slice, same extractor — FAST (cache hits; zero extractor calls)
+python -m tools.longmem_eval.run --split s --limit 50 --cache-ingest --db docker://:falkordb@localhost:6379/tortoise \
+    --checkpoint /tmp/lme-50q.json --output /tmp/lme-50q-report-v2.json
+```
+
+### Contract
+
+- **Opt-in, fail-safe OFF.** `--cache-ingest` / `--no-cache-ingest` + env
+  `TORTOISE_LME_CACHE_INGEST` (explicit flag > env > OFF). Without the
+  explicit opt-in the runner is byte-identical to today (always ingest +
+  always cleanup). Results-irrelevant by design — the mode is deliberately
+  NOT part of the checkpoint fingerprint (a cache-mode run resumes a
+  no-cache checkpoint and vice versa).
+- **Requires** `--db` (the docker lane — per-question graphs persist under
+  their namespace), `--ingest-mode v2` and a FRESH (non-resume) run;
+  embedded tempdirs have no persistence surface, so the cache is inert
+  there. A resume re-attempt keeps its presence-primary re-ingest
+  contract.
+- **Key.** Per-question INGEST fingerprint = sha256 over (extractor code
+  version [content hash of `tortoise/extractor_v2.py` +
+  `tools/longmem_eval/ingest_v2.py`] + extraction model id + extraction
+  prompt mode + question id/content + `chunk_turns`). The model uses the
+  SAME identity source as the outcome checkpoint (M7 #1739); any of those
+  changing → fingerprint changes → automatic re-ingest.
+- **Marker lifecycle.** After a clean ingest whose pre-retrieval integrity
+  gate is green, a marker node (`:lme_ingest_cache`, carrying the
+  fingerprint + the ingest's stats snapshot) is written on the question's
+  graph — ONLY after the ingest completes, so a partial/mid-write graph
+  never carries a marker. Cache validity = matching marker AND graph
+  content present.
+- **Semantics.** Cache hit → ingest (extractor calls) skipped; outcome
+  records `ingest_cached: true`. Miss/stale → namespace wipe → ingest →
+  marker (graph persists as the cache). The outcome checkpoint stays
+  strict (arms/fingerprint refused on mismatch) — this seam is INGEST-level
+  only.
+- **Concurrency.** The existing marker-file peer guard still holds: a
+  cache-mode miss under a LIVE foreign run marker never wipes the peer's
+  in-flight graph AND never writes a cache marker (a graph another process
+  is actively writing is never reused or cached). The cached graph is only
+  ever reused read-only.
+- **Hygiene escape hatch.** `--sweep-cache` wipes the question's graph
+  (content + marker) right after the question finishes so the eval DB never
+  accumulates namespaces.
+
+Each outcome carries `ingest_cached: true/false` on cache-mode runs; the
+report records `chunk_turns`, the extraction approach, and (per question)
+the gate health of the (possibly cached) graph it retrieved from.
+
 ## Reader pinning (M5, #1525)
 
 The reader model + prompt are **pinned constants for the run**: the code

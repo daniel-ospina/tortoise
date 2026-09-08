@@ -255,6 +255,7 @@ surfaces:
   - test_epic903_warmstart.py
   - test_eval_metrics.py
   - test_eval_report_integrity.py
+  - test_eval_ingest_cache.py  # #2080 ingest-cache seam (hermetic + docker-lane legs, mirrors test_integrity_gate_docker)
   - test_event_log.py
   - test_event_provenance.py
   - test_event_store.py
@@ -509,6 +510,7 @@ surfaces:
   - test_config.py
   - test_cross_lens.py
   - test_crypto.py
+  - test_eval_ingest_cache.py  # #2080 ingest-cache seam (docker-lane leg — the retriever/namespace surface, mirrors test_retrieval.py)
   - test_operator_dedup_parity.py
   - test_postmerge_dedup.py
   - test_ci_timing.py
