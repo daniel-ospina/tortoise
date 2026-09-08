@@ -109,6 +109,18 @@ def _load_json_spec(rubrics_dir: Path, rubric_id: str) -> RubricSpec | None:
     lint_rubric_items(items)
     for g in gold:
         lint_evidence_neutral(str(g.get("render", "")))
+    # loader-level gold-block guard (review #2575 A-P2): a gold block with
+    # NO expected-no at >20% share makes the gold leg vacuous (an all-yes
+    # degenerate judge passes 100% on all-yes anchors). Refuse at load — a
+    # rubric whose anchors cannot catch degeneracy never loads.
+    if gold:
+        no_renders = [g for g in gold if (g.get("expected") or "").lower()
+                      in ("no", "expected-no", "expected_no")]
+        if not no_renders or len(no_renders) / len(gold) <= 0.20:
+            raise ConfigError(
+                f"rubric {rubric_id!r} gold block needs >=1 expected-no anchor "
+                f"at >20% share (found {len(no_renders)}/{len(gold)}) — an "
+                f"all-yes gold block cannot catch a degenerate judge")
     extra = {k: v for k, v in data.items()
              if k not in ("rubric_id", "items", "gold_anchors")}
     return RubricSpec(rubric_id=rubric_id, items=items, gold_anchors=gold,

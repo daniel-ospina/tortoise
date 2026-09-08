@@ -67,6 +67,18 @@ _SCRUB = re.compile(
 )
 
 
+#: Pinned deepseek-v4-flash (OpenRouter) per-1M-token rates — the probe's
+#: spend meter rows (matches the judge reserve table's deepseek row so ONE
+#: price source governs both spend legs; review #2575 B-P1).
+_PROBE_RATES_PER_1M_USD: tuple[float, float] = (0.27, 1.10)
+
+
+def _call_cost_usd(prompt_tok: int, completion_tok: int) -> float:
+    p_in, p_out = _PROBE_RATES_PER_1M_USD
+    return (float(prompt_tok) * p_in
+            + float(completion_tok) * p_out) / 1_000_000.0
+
+
 @dataclass(frozen=True)
 class ProbeBudget:
     """Probe spend sub-cap (budget.yaml ``probe_cap_usd``)."""
@@ -226,6 +238,29 @@ def run_probe(*, config: str | Path, arms: list[str],
 
     if caller is None:
         caller = _make_caller()
+        # pin-coupling guard (review #2575 B-P2): the real probe measures
+        # the decision-(a) pin; a sibling re-lock of arms.yaml to another
+        # measured model must NOT leave the probe silently measuring
+        # deepseek (token tables re-locking expected_tokens_per_episode
+        # would be misattributed). Resolve each requested arm's pin and
+        # refuse on caller/model mismatch.
+        from battery.config.arms import load_arms, resolve_pinned_model
+        try:
+            arm_map = load_arms(Path(config) / "arms.yaml")
+        except Exception:  # noqa: BLE001, RUF100 — guard is best-effort
+            arm_map = {}
+        for arm in arms:
+            ac = arm_map.get(arm)
+            if ac is None or arm == "mock" or not ac.model_pin:
+                continue
+            resolved = resolve_pinned_model(ac.model_pin)
+            if getattr(resolved, "id", "") != caller.model_id:
+                raise ConfigError(
+                    f"probe pin coupling: arm {arm!r} pin "
+                    f"{ac.model_pin!r} resolves to "
+                    f"{getattr(resolved, 'id', '?')!r} but the probe caller "
+                    f"measures {caller.model_id!r} — the probe would "
+                    f"misattribute token tables; refuse")
 
     ctxs = [_scenario_context(cfg_dir, sid) for sid in scenario_ids]
     phases = {
@@ -233,6 +268,8 @@ def run_probe(*, config: str | Path, arms: list[str],
         "envelope": _PhaseAccumulator(),
         "judge": _PhaseAccumulator(),
     }
+    #: cumulative probe spend in USD (mid-run HARD STOP against cap)
+    spent: float = 0.0
     transcripts: list[dict] = []
     evidence_by_rubric: dict[str, list[dict]] = {}
     #: per-EPISODE deliberation token totals (the measured re-lock unit for
@@ -258,15 +295,27 @@ def run_probe(*, config: str | Path, arms: list[str],
                     raise ConfigError(
                         f"probe model call failed (scenario {sid}, arm {arm}, "
                         f"turn {phase_name}): {e}") from e
+                # spend meter (review #2575 B-P1): the probe is the only
+                # path this slice runs a live model over an unbounded
+                # scenarios x arms x 4 matrix — the cap HARD-STOPS mid-run,
+                # not just at pre-flight. Cost rows from the per-call usage
+                # capture at the pinned rates (overshoot <= one call).
+                ptok = getattr(caller, "last_prompt_tokens", 0)
+                ctok = getattr(caller, "last_completion_tokens", 0)
+                spent += _call_cost_usd(int(ptok), int(ctok))
+                if spent > budget.cap_usd:
+                    raise ConfigError(
+                        f"probe sub-cap ${budget.cap_usd:.2f} exceeded after "
+                        f"{phases['deliberation'].calls + 1} deliberation "
+                        f"calls (${spent:.4f}) — HARD STOP (overshoot <= one "
+                        f"call)")
                 if not text or not str(text).strip():
                     raise ValueError(
                         f"probe produced an EMPTY deliberation turn "
                         f"(scenario {sid}, arm {arm}, turn {phase_name}) — "
                         f"zero fabricated turns permitted")
                 text = str(text).strip()
-                phases["deliberation"].record(
-                    getattr(caller, "last_prompt_tokens", 0),
-                    getattr(caller, "last_completion_tokens", 0))
+                phases["deliberation"].record(ptok, ctok)
                 episode["turns"].append(
                     {"phase": phase_name, "content": text})
             # Envelope scalars: assembled from the deliberation text

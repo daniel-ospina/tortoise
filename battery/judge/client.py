@@ -153,7 +153,10 @@ def _openrouter_cost(model: str, pt: int, ct: int) -> float:
         "opus": (15.00, 75.00), "claude": (3.00, 15.00),
         "deepseek": (0.27, 1.10),
     }
-    p_in, p_out = (0.0, 0.0)
+    p_in, p_out = (15.00, 75.00)  # fail-closed default: the table MAX — an
+    # unknown judge model is NEVER unmetered (a 0-cost fallback would let an
+    # unmetered model sail past the reserve; over-estimating trips the HARD
+    # STOP early, the safe direction). Review #2575 B-P2.
     for key, (i_, o_) in prices.items():
         if key in model.lower():
             p_in, p_out = i_, o_

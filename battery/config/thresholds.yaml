@@ -27,12 +27,13 @@ determinism:
     total_tokens: 1e-6            # derived/objective — measured |Δ|=0.0
     # PROVISIONAL real-path row (#2292 Task 7, Step 7.4 dedicated two-run
     # determinism probe 2026-09-08: 2 scenarios d-001/ct-001 x a0/a4, seed
-    # 7, 4 episodes/run): probe-emittable usage/token rows are NOT
+    # 7, 4 episodes/run; receipts determinism_run{1,2}_tokens.json hold
+    # per-run aggregates): probe-emittable usage/token rows are NOT
     # transcript-locked — the mock-lane 1e-6 seed never applies to real
-    # usage. Measured two-run per-episode deliberation |Δ|: mean 127
-    # (2392 vs 2519), p95 219 (2576 vs 2357). Tolerance 250 covers the
-    # measured spread + margin. Real-path confirmation + finalization at
-    # #2284 Task 8 exposure.
+    # usage. Measured two-run run-aggregate |Δ|: |Δmean| 127 (2392
+    # vs 2519), |Δp95| 219 (2576 vs 2357). Tolerance 250 covers the
+    # measured spread + margin; a true per-episode |Δ| re-lock needs the
+    # per-episode series + happens at #2284 Task-8 exposure.
     probe_usage_tokens_episode: 250.0
 
 cal:
@@ -40,10 +41,12 @@ cal:
   # reviewable table change (calibration mode prints, never silently tunes).
   # The differential classification margin (STRONG/WEAK vs best comparator)
   # is itself [cal]-locked (issue #1415 P2-3).
-  # NOTE (PR #2341 round 4, deferred): the false-positive-rate [cal] row is
-  # pending sibling B (#2292 cal re-locks) — no row is added here; the FP
-  # gate path consumes profile.json control_records once Task 9 emits bct
-  # control verdicts.
+  # NOTE (PR #2341 round 4, deferred AT THAT TIME): the
+  # false-positive-rate [cal] row was pending sibling B (#2292 cal
+  # re-locks) — no row was added then. SUPERSEDED 2026-09-08 (#2292 Task
+  # 7): the placeholder-locked false-positive-rate row below now carries
+  # the lock; the FP gate path consumes profile.json control_records once
+  # Task 9 (executor) emits bct control verdicts.
   classification-delta: 0.10
   # Post-I-1 seed-mode semantics (#2292 Task 7): the a4 expectation is the
   # MOCK-LANE MEASURED planted-population surfaced rate under the seed-mode

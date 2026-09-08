@@ -288,6 +288,7 @@ def run_battery(config: RunConfig, *, stdout: Callable[[str], None] = print,
         from battery.config.arms import resolve_pinned_model
         real_arm_ids = [a for a in config.arms if a != "mock"]
         _pinned_temps: dict[str, float] = {}
+        _pinned_provider: dict[str, str] = {}
         for arm_id in real_arm_ids:
             ac = arm_map.get(arm_id)
             if ac is None:
@@ -298,12 +299,30 @@ def run_battery(config: RunConfig, *, stdout: Callable[[str], None] = print,
                     f"arms.yaml must carry a measured concrete pin before "
                     f"any real run (decision a: "
                     f"deepseek/deepseek-v4-flash, temp 0)")
+            resolved = None
             try:
-                resolve_pinned_model(ac.model_pin)
+                resolved = resolve_pinned_model(ac.model_pin)
             except ConfigError as e:
                 raise ConfigError(
                     f"arm {arm_id!r}: {e} — real run refuses (unpinned or "
                     f"unresolvable model)") from e
+            # pin-factory CONSISTENCY (review #2575 B-P2): resolvability
+            # alone never proves the factory honors the arms.yaml temp /
+            # UNCAPPED posture — the factory's temperature must equal the
+            # yaml (a protocol-hash input) and max_tokens must be None
+            # (decision (a): real runs UNCAPPED).
+            if abs(float(getattr(resolved, "temperature", -1.0))
+                   - ac.temperature) > 1e-9:
+                raise ConfigError(
+                    f"arm {arm_id!r}: pin factory temperature "
+                    f"{getattr(resolved, 'temperature', '?')} != arms.yaml "
+                    f"{ac.temperature} — real run refuses (temperature is a "
+                    f"protocol-hash input)")
+            if getattr(resolved, "max_tokens", None) is not None:
+                raise ConfigError(
+                    f"arm {arm_id!r}: pin factory caps max_tokens="
+                    f"{resolved.max_tokens} — decision (a) real runs are "
+                    f"UNCAPPED (max_tokens=None); real run refuses")
             cls = _resolve_arm(arm_id, ac, mock=False)
             if getattr(cls, "model_id", "") == "fixed":
                 raise ConfigError(
@@ -311,6 +330,8 @@ def run_battery(config: RunConfig, *, stdout: Callable[[str], None] = print,
                     f"model_id='fixed' sentinel (Task 9 parameterizes arms "
                     f"off it) — real run refuses")
             _pinned_temps[arm_id] = ac.temperature
+            _pinned_provider[arm_id] = getattr(
+                resolved, "provider", "openrouter")
         if real_arm_ids and len({_pinned_temps[a] for a in real_arm_ids}) > 1:
             raise ConfigError(
                 "temperature differs across requested real arms "
@@ -352,7 +373,9 @@ def run_battery(config: RunConfig, *, stdout: Callable[[str], None] = print,
             # #2292 Task 5: the artifact model block records the PINNED
             # arm config (never the class 'fixed' sentinel) — model_id +
             # provider + temperature are the parity protocol-hash inputs.
-            model = {"provider": "openrouter",
+            # provider derives from the pin factory (review #2575 B-P2:
+            # never hardcoded 'openrouter').
+            model = {"provider": _pinned_provider.get(arm_id, "openrouter"),
                      "model_id": arm_config.model_pin,
                      "temperature": arm_config.temperature}
         else:

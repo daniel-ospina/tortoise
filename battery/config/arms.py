@@ -79,15 +79,19 @@ def load_arms(path: str | Path) -> dict[str, ArmConfig]:
 def _registry_key_for_pin(pin: str) -> str | None:
     """Map a full model slug (arms.yaml ``model_pin``) to the
     model_adapters.MODELS registry key. The registry's key->id table
-    covers extractor keys; judge/reader-only keys pass through id==key."""
+    covers extractor keys; judge/reader-only keys pass through id==key.
+    A slug served by MULTIPLE keys (deepseek/deepseek-v4-flash via the
+    OpenRouter + direct routes) must resolve EXPLICITLY — never by dict
+    insertion order (review #2575 B-P2): non-``-direct`` keys win
+    (decision (a)'s measured basis ran the OpenRouter adapter)."""
     from tortoise import model_adapters
-    id_to_key: dict[str, str] = {}
     table = getattr(model_adapters, "_REGISTRY_KEY_TO_ID", None) or {}
-    for k, v in table.items():
-        id_to_key.setdefault(str(v), k)
-    for k in model_adapters.MODELS:
-        id_to_key.setdefault(k, k)
-    return id_to_key.get(pin)
+    cands = [k for k, v in table.items() if str(v) == pin]
+    cands += [k for k in model_adapters.MODELS if k == pin]
+    non_direct = [k for k in cands if not k.endswith("-direct")]
+    if non_direct:
+        return sorted(non_direct)[0]
+    return sorted(cands)[0] if cands else None
 
 
 def resolve_pinned_model(pin: str):

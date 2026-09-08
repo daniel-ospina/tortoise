@@ -78,6 +78,26 @@ class _CostlyJudge(_GoodJudge):
                          call.confidence, cost_usd=1.0)
 
 
+class _FramingFlipJudge(JudgeClient):
+    """Length/framing-biased judge (review #2575 A-P2): flips its verdict
+    on the PROMPT FRAMING alone — 'yes' when the evidence is framed
+    'concise', 'no' when framed 'detailed elaboration' — same content. In
+    declarative anchored mode this must trip the verbosity_bias stress leg
+    (a length-biased judge flips on framing; content is identical)."""
+
+    def judge(self, rubric_id, item_id, prompt, temperature=0.0):
+        low = prompt.lower()
+        if "concise" in low:
+            verdict = "yes"
+        elif "detailed elaboration" in low:
+            verdict = "no"
+        else:  # non-stress prompts: answer from content like _GoodJudge
+            no_hint = ("listed reasons to proceed" in low
+                       or "without weighing any opposing" in low)
+            verdict = "no" if no_hint else "yes"
+        return JudgeCall(rubric_id, item_id, verdict, 0.9)
+
+
 def _record_path(tmp_path) -> Path:
     return tmp_path / "judge" / "records.json"
 
@@ -128,6 +148,19 @@ def test_gold_anchor_all_yes_judge_fails(tmp_path):
         judge_b=_AllYesJudge(), records_path=_record_path(tmp_path),
         reserve_usd=10.0)
     assert not rec.passed and "gold-anchor" in rec.blocked_reason
+
+
+def test_framing_flip_judge_trips_stress(tmp_path):
+    # the declarative verbosity_bias leg must actually DISCRIMINATE: a
+    # judge that flips on prompt framing (concise vs detailed-elaboration,
+    # identical content) trips the leg — the anchor-contingent stress legs
+    # are never vacuous "v != ''" passes (review #2575 A-P2).
+    rec = run_evidence_validation(
+        config_dir=CONFIG, rubric_id="r2-coverage",
+        evidence=_fixture_bundle(), judge_a=_FramingFlipJudge(),
+        judge_b=_FramingFlipJudge(), records_path=_record_path(tmp_path),
+        reserve_usd=10.0)
+    assert not rec.passed and "stress" in rec.blocked_reason
 
 
 def test_ac1_bar_passes_kappa_paradox_pool():

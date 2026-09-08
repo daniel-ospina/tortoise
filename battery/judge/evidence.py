@@ -127,6 +127,13 @@ def run_evidence_validation(*, config_dir: str | Path, rubric_id: str,
     if not renders:
         raise ConfigError(
             f"evidence bundle has no renders for rubric {rubric_id!r}")
+    # second neutral guard (review #2575 A-P2): an EXTERNALLY supplied
+    # --evidence bundle bypasses the probe producer's scrub+lint — re-lint
+    # every render before it can reach a judge prompt (a leaked tool verb /
+    # arm id / edge count never enters a graded construct).
+    from battery.judge.rubric import lint_evidence_neutral
+    for r in renders:
+        lint_evidence_neutral(r)
 
     spec = load_rubric_spec(Path(config_dir), rubric_id)
     if not spec.is_itemized:

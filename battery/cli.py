@@ -150,10 +150,11 @@ def _cmd_validate_judge(args: argparse.Namespace) -> ExitCode:
 
         from battery.config.budget import load_budget
         from battery.judge.evidence import run_evidence_validation
-        budget = load_budget(_P2(args.config_dir) / "budget.yaml")
+        cfg_dir = _P2(args.config or args.config_dir)
+        budget = load_budget(cfg_dir / "budget.yaml")
         reserve = budget.judge_leg_reserve_usd if not args.mock else None
         record = run_evidence_validation(
-            config_dir=args.config_dir, rubric_id=rubric_id,
+            config_dir=cfg_dir, rubric_id=rubric_id,
             evidence=args.evidence, force_mock=bool(args.mock),
             records_path=_P2(args.out or _DEFAULT_OUT)
             / "judge" / "records.json",
@@ -682,8 +683,9 @@ def _cmd_probe(args: argparse.Namespace) -> ExitCode:
     per-episode real transcripts."""
     from battery.config.budget import load_budget
     from battery.probes.probe_runner import ProbeBudget, run_probe
-    budget = load_budget(_Path(args.config_dir) / "budget.yaml")
-    run_probe(config=args.config_dir, arms=list(args.arms),
+    cfg = _Path(args.config or args.config_dir)
+    budget = load_budget(cfg / "budget.yaml")
+    run_probe(config=cfg, arms=list(args.arms),
               scenario_ids=list(args.scenarios), out_dir=args.out,
               budget=ProbeBudget(cap_usd=budget.probe_cap_usd),
               seed=args.seed)
