@@ -26,6 +26,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from battery.exceptions import ConfigError
+from battery.runner.emit import validate_event_entry
 
 # ── Envelope schema (the ONLY scalar channel) ─────────────────────────
 #: Closed intent vocabulary the envelope may declare (the emission
@@ -245,3 +246,93 @@ def execute_tvde_episode(*, caller, scenario_render: str,
         scenario_id=scenario_id,
         turns=tuple(turns), envelopes=tuple(envelopes),
         decide_cycles=cycles, converged_early=converged_early)
+
+
+# ── Event-log emission (schema-v1.1, registry-valid) ───────────────────
+# Every emitted entry MUST pass validate_event_entry (registry field->kind
+# ->subtype + payload-shape). The envelope is the only scalar channel and
+# the log is the only trace: the executor emits MANDATORY envelope/state
+# entries for EVERY real episode + a tool_event entry per declared
+# surfacing intent — emission-loss-proof (a surfacing the agent declared is
+# never silently dropped; validate_event_entry fails closed on a malformed
+# entry, so CONDITIONAL absence is provably non-occurrence).
+from datetime import datetime, timezone  # noqa: E402
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat()  # noqa: UP017
+
+
+def envelope_events(envelope: Envelope) -> list[dict]:
+    """MANDATORY envelope-field entries (stated_confidence /
+    stated_undecided / stated_defeat_conditions). Registry-valid."""
+    return [
+        {"type": "envelope", "event": "declared", "at": _now(),
+         "field": "stated_confidence",
+         "payload": {"value": envelope.stated_confidence}},
+        {"type": "envelope", "event": "declared", "at": _now(),
+         "field": "stated_undecided",
+         "payload": {"value": envelope.undecided}},
+        {"type": "envelope", "event": "declared", "at": _now(),
+         "field": "stated_defeat_conditions",
+         "payload": {"value": list(envelope.defeat_conditions)}},
+    ]
+
+
+def state_events(*, ep_outcome: str, decide_cycles: int,
+                 ep_contested: bool | None = None) -> list[dict]:
+    """MANDATORY state-terminal entries (ep_outcome, decide_cycles) plus the
+    CONDITIONAL ep_contested marker when known."""
+    events = [
+        {"type": "state_event", "event": "ep_snapshot", "at": _now(),
+         "field": "ep_outcome", "payload": {"value": ep_outcome}},
+        {"type": "state_event", "event": "decide_cycle_inc", "at": _now(),
+         "field": "decide_cycles", "payload": {"value": decide_cycles}},
+    ]
+    if ep_contested is not None:
+        events.append(
+            {"type": "state_event", "event": "ep_snapshot", "at": _now(),
+             "field": "ep_contested", "payload": {"value": bool(ep_contested)}})
+    return events
+
+
+def surfacing_event(*, within_turn: int, event_ref: str,
+                    explicit: bool = False) -> dict:
+    """ONE tool_event entry per declared surfacing intent — emission-loss-
+    proof: the executor calls this for every register_conflict/file_nand
+    intent it acts on (a genuine surfacing NEVER silently drops). Carries
+    the Amend-1 event_ref (product event-store reference) — the log never
+    re-records product op payloads."""
+    return {
+        "type": "tool_event", "event": "file_nand", "at": _now(),
+        "field": "contradiction_surfaced",
+        "payload": {"value": True, "event_ref": event_ref,
+                    "surfaced_within_turn": int(within_turn),
+                    "explicit_resolution": bool(explicit)},
+    }
+
+
+def emitted_trace(events: list[dict]) -> dict:
+    """Flatten registry-valid events into the semantic-key trace dict the
+    probes read (a field present in the log => present in the trace)."""
+    out: dict = {}
+    for e in events:
+        field = e.get("field")
+        if field is None:
+            continue
+        val = (e.get("payload") or {}).get("value")
+        out[field] = val
+        if field == "contradiction_surfaced":
+            out.setdefault("surfaced_within_turn",
+                           (e.get("payload") or {}).get("surfaced_within_turn"))
+            out.setdefault("explicit_resolution",
+                           (e.get("payload") or {}).get("explicit_resolution"))
+    return out
+
+
+def validate_emitted(events: list[dict]) -> None:
+    """Registry-validate every entry — a malformed entry fails CLOSED (an
+    emission that cannot validate is a hard executor failure, never a
+    silent drop)."""
+    for e in events:
+        validate_event_entry(e)
