@@ -19,7 +19,6 @@ from tortoise import hosted_api as _ha
 from tortoise.hosted_api import app, get_current_team
 from tortoise.sdk import TortoiseSDK
 
-
 # #2242 concurrency test docker-lane guard — mirrors
 # tests/test_commit_supersession_parity.py:56-71 (constant + helper only, no
 # module-level pytestmark). Single-statement CAS atomicity is server-mode only
@@ -1701,8 +1700,10 @@ def test_apply_supersessions_same_payload_idempotent(sdk):
     supersession records; (2) the S3 terminal probe — a folded Object stops
     resolving, so record formation dies at the source; (3) the helper's
     terminal rules — pt_ records hit the terminal probe, entity records hit
-    this same-successor silent no-op; (4) the idempotent SET fold
-    (_fold_object_superseded re-applies the same SET); (5) benign duplicate
+    this same-successor silent no-op; (4) the live-path CAS fold
+    (_fold_object_superseded: a terminal re-apply returns (0, 1) — the
+    first-fold stamps are never re-SET; the LOSING concurrent line stays
+    journaled and warns "lost a concurrent race"); (5) benign duplicate
     journals — a replay re-emits the same event and the projection fold
     converges. Hosted capture writes NO CommitRecord, so there is no
     client_commit_id dedup between capture and commit (the commit-id key is
@@ -4750,6 +4751,7 @@ def test_apply_supersessions_concurrent_divergent_fold_one_wins(
     if not _server_uri_set():
         pytest.skip("requires TORTOISE_DB_URI (docker test-server lane)")
     import threading
+
     from tortoise.commit_ops import apply_supersessions
 
     shared = str(tmp_path / "race-shared.db")
