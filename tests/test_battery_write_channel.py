@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import pytest
 
-from battery.arms.a4_tortoise import A4TortoiseArm, DECIDE_CYCLES_CAP
+from battery.arms.a4_tortoise import DECIDE_CYCLES_CAP
 from battery.arms.base import AgentContext, Memory
 from battery.testing.seeds import setup_seed_mode
 
@@ -90,7 +90,7 @@ def test_nand_targets_closed_set_claim_never_marker(tmp_path) -> None:
         # targeted claim (o→each input) — assert a closed-set CLAIM is
         # NAND-targeted and the marker is never an edge target.
         assert any(tid in claim_ids for tid, _ in rows), rows
-        for tid, content in rows:
+        for _tid, content in rows:
             assert str(content) != want
     finally:
         store.close()
@@ -113,7 +113,7 @@ def test_mitigate_resolves_operator_memory_and_clamps(tmp_path) -> None:
         oid = op.get("id")
         assert oid
         op_mem = Memory(id=oid, content="edge", kind="operator")
-        prior = tuple(mems) + (op_mem,)
+        prior = (*tuple(mems), op_mem)
         # confidence 2.0 → clamp to 0.50; both calls must succeed (product
         # surface) without raising and without touching claim-EP deltas.
         store._arm.record(

@@ -9,13 +9,10 @@ lane equivalence (same content contract, no ¬A pre-k on either lane).
 """
 from __future__ import annotations
 
-from pathlib import Path
-
 import pytest
 
 from battery.testing import seeds
 from battery.testing.seeds import setup_seed_mode, setup_seed_mode_raw
-from battery.runner.setup import seed_manifest_content
 
 _CT = "ct-001"
 
@@ -27,7 +24,6 @@ def _scenario(store) -> object:
 def test_no_require_calibration_false_anywhere() -> None:
     """Audit: the harness never opts out of the calibration gate — the ban
     binds battery/, never the product's own seams."""
-    import ast
     from pathlib import Path as P
     root = P(__file__).resolve().parent.parent / "battery"
     offenders: list[str] = []

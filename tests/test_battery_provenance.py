@@ -9,12 +9,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from battery.arms.base import AgentContext, Memory
-from battery.runner.setup import scenario_namespace, seed_manifest_content
-from battery.testing.seeds import seed_full_legacy, setup_seed_mode
-from battery.exceptions import ConfigError
-
 import pytest
+
+from battery.arms.base import AgentContext, Memory
+from battery.exceptions import ConfigError
+from battery.testing.seeds import seed_full_legacy, setup_seed_mode
 
 
 def _store(tmp_path, sid: str = "ct-001"):
@@ -62,8 +61,8 @@ def test_event_log_correlation_per_scenario(tmp_path) -> None:
     store = _store(tmp_path)
     try:
         sdk = store._arm._sdk(store._scenario)
-        assert sdk._event_log_path  # noqa: SLF001
-        log = Path(sdk._event_log_path)  # noqa: SLF001
+        assert sdk._event_log_path
+        log = Path(sdk._event_log_path)
         assert log.exists(), "per-scenario event log missing"
         before = log.read_text(errors="replace")
         assert "PointAdded" in before
