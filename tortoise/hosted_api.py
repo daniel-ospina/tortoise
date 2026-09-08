@@ -9836,17 +9836,29 @@ async def restore_trash_graph(request: Request, graph_id: str, team_id: str,
     # Timed acquire in a worker thread — never block the event loop, and a
     # TIMED acquire can time out WITHOUT holding the lock (an orphaned
     # untimed acquire would wedge the team lock forever once it eventually
-    # succeeded — VGATE round-3 fix).
-    acquired = await asyncio.to_thread(lock.acquire, True, 20)
+    # succeeded — VGATE round-3 fix). #2470: the hourly sweep holds the lock
+    # across the ENTIRE team pass (default + every custom graph, R2 uploads
+    # of large dumps routinely exceed the old 20s) — the timeout is now
+    # sweep-scale and the message is neutral (a PURGE also holds it).
+    acquired = await asyncio.to_thread(lock.acquire, True,
+                                       _TRASH_RESTORE_LOCK_TIMEOUT_S)
     if not acquired:
         raise HTTPException(
             status_code=503,
-            detail="Restore busy (team sweep in flight)") from None
+            headers={"Retry-After": "300"},
+            detail="Another backup operation is in flight for this team — "
+                   "try again in a few minutes") from None
     try:
         return await _restore_trash_graph_locked(request, user, team_id,
                                                  graph_id)
     finally:
         lock.release()
+
+
+# #2470: the per-team lock is held for the whole sweep/purge team pass (which
+# can run minutes on a large team), so a restore waits sweep-scale before
+# 503ing with a Retry-After.
+_TRASH_RESTORE_LOCK_TIMEOUT_S = 300
 
 
 async def _restore_trash_graph_locked(request: Request, user: dict,
