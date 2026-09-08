@@ -374,6 +374,7 @@ surfaces:
   - test_search_engine_nameerror.py
   - test_search_promoted_fields.py
   - test_search_sessions_temporal.py
+  - test_secret_store.py   # #2318: managed backup-key store + rotation (embedded)
   - test_security.py
   - test_semantic_extractor.py
   - test_skip_guard.py

@@ -114,31 +114,94 @@ because the key lives only on Fly, set by the operator out-of-band.
 
 **Setup (operator, once):**
 ```bash
-# Generate the key (do NOT commit or share):
-python -c "import base64,secrets; print(base64.b64encode(secrets.token_bytes(32)).decode())"
+# Rotate/seed via the automation tool (recommended — generates + emits the
+# exact commands; NO plaintext in this runbook):
+uv run python tools/rotate-backup-keys.py --role registry_stream --emit-commands --fly-app tortoise-y4mjjq
 
-# Set it directly on Fly (NEVER add to GitHub secrets):
+# Manual equivalent (do NOT commit or share the value):
+python -c "import base64,secrets; print(base64.b64encode(secrets.token_bytes(32)).decode())"
 fly secrets set REGISTRY_STREAM_KEY=<generated-key> --app tortoise-y4mjjq
 ```
 
 **Deploy safety:** `deploy-hosted.yml` deliberately EXCLUDES
-`REGISTRY_STREAM_KEY` from the secret-sync loop — there is no active
-negative check (the workflow can't check Fly-side state), but the key is
-never read from `secrets.*` in the YAML. A missing key causes the sweep
-endpoint (`POST /v1/internal/backups/sweep`) to 503 fail-closed — the app
-boots and serves normally, but no sweep backups are created until the key
-is set.
+`REGISTRY_STREAM_KEY` (and the retained `REGISTRY_STREAM_KEY_PREVIOUS`,
+#2318) from the secret-sync loop — there is no active negative check (the
+workflow can't check Fly-side state), but the key is never read from
+`secrets.*` in the YAML. A missing key causes the sweep endpoint
+(`POST /v1/internal/backups/sweep`) to 503 fail-closed — the app boots and
+serves normally, but no sweep backups are created until the key is set.
 
-**Rotating:**
+### Secret store + automated rotation (#2318)
+
+Backup keys (`REGISTRY_STREAM_KEY` and `TORTOISE_BACKUP_KEY`) are managed
+through a secret-store seam (`tortoise/secret_store.py`):
+
+- **Providers:** `env` (default — Fly/GH env secrets, back-compat) and
+  `file` (versioned 0600 store at `BACKUP_KEY_STORE_PATH` for
+  selfhost/tests). Selection: `BACKUP_KEY_STORE=env|file`. The file layout
+  (per-role version list, newest = active) maps 1:1 onto a cloud KMS.
+- **Cloud KMS (AWS/GCP/Vault/Cloudflare) is the documented extension
+  point** — no provider is implemented because this runtime has no KMS
+  credentials. To add one: implement the `KeyStore` protocol against the
+  cloud SDK and register it in `open_key_store()`;
+  `BACKUP_KEY_STORE=kms` fails closed until then. The hosted deployment
+  remains on Fly secrets (Fly's managed secret store) today.
+- **Dual-key rotation:** a rotation mints a NEW active key while the old
+  active key is RETAINED as the decrypt candidate (`*_PREVIOUS` env var or
+  an older file version). During the overlap window BOTH old and new
+  archives decrypt in-app — the app's restore path walks an
+  active-first candidate chain per role (`_decrypt_candidate_keys` in
+  `hosted_backup.py`), keeping the #661 cross-role seam (a sweep archive
+  restores through the user-backup path and vice versa). Encrypt always
+  uses the ACTIVE key.
+- **No plaintext key material in code, git, or logs:** surfaces expose
+  8-hex sha256 fingerprints only (same convention as the export header);
+  test fixtures use synthetic keys; this runbook never contains a real
+  value.
+
+**Rotating `REGISTRY_STREAM_KEY` (operator, automated — dual-key window):**
 ```bash
-# 1. Generate a new key
-# 2. Set it on Fly (overwrites the old key):
-fly secrets set REGISTRY_STREAM_KEY=<new-key> --app tortoise-y4mjjq
-# 3. Deploy to pick up the new secret value:
+# 1. Generate + stage (prints fingerprints; add --emit-commands for the
+#    secret values; --verify-dump proves an OLD archive still decrypts
+#    with the retained key):
+uv run python tools/rotate-backup-keys.py --role registry_stream \
+  --emit-commands --fly-app tortoise-y4mjjq
+#    A single `fly secrets set` sets BOTH vars (new active + old retained):
+#      fly secrets set REGISTRY_STREAM_KEY=<new> REGISTRY_STREAM_KEY_PREVIOUS=<old> --app tortoise-y4mjjq
+# 2. Deploy to pick up the new secret value:
 fly deploy --app tortoise-y4mjjq
-# 4. Old archives remain decryptable with the OLD key — recover via manual
-#    decryption with TORTOISE_BACKUP_KEY (GH-secret, retained for recovery).
+# 3. VERIFY the rotation run: drill the OLDEST archive (must restore with
+#    the RETAINED key — in-app, no manual decryption):
+#      curl -sS -X POST -H "Authorization: Bearer $FASTAPI_INTERNAL_KEY" \
+#        -H "Content-Type: application/json" \
+#        -d '{"team_id":"<team>","backup_key":"backups/<team>/.../dump.enc"}' \
+#        https://api.premiselabs.co/v1/internal/backups/drill
+# 4. AFTER the overlap window (old archives pruned/verified), purge the
+#    retained key (second rotation does this automatically):
+uv run python tools/rotate-backup-keys.py --role registry_stream \
+  --purge --fly-app tortoise-y4mjjq
+#    → fly secrets unset REGISTRY_STREAM_KEY_PREVIOUS --app tortoise-y4mjjq + deploy
 ```
+
+> Pre-#2318 runbook note (corrected): old stream-key archives are NOT
+> decryptable with `TORTOISE_BACKUP_KEY` after a rotation — each key is
+> independent. Recovery requires the OLD key; with #2318 the old key is
+> retained in-app (`REGISTRY_STREAM_KEY_PREVIOUS`) for the overlap window,
+> so the drill path (above) replaces the old manual-decryption recovery.
+> A second rotation drops the previous-previous key — verify old archives
+> before rotating again.
+
+**Rotating `TORTOISE_BACKUP_KEY`** (user-facing backups; GH-syncable): same
+pattern with `--role backup`. `TORTOISE_BACKUP_KEY_PREVIOUS` is synced by
+`deploy-hosted.yml` only when the GH secret is set (optional — a rotation
+keeps the old value there until the overlap ends, then the operator clears
+it from GitHub + Fly).
+
+**Selfhost / file store:** `tools/rotate-backup-keys.py --role <role>
+--store file --path <store>` rotates in place (atomic 0600 write, bounded
+retention — active + one previous). `--purge` drops the retained version
+post-overlap. Point the app at the store with `BACKUP_KEY_STORE=file` +
+`BACKUP_KEY_STORE_PATH`.
 
 **Verification (operator, post-setup):**
 ```bash

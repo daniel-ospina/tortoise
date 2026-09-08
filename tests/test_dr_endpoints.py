@@ -309,6 +309,38 @@ class TestDrDrill:
         assert not rows or rows[0][0] is None, "drill must skip the end-stamp"
         assert not [g for g in graphs if g.startswith("team_team_x") and ("_restore_" in g or "_pre_restore_" in g)]
 
+    def test_drill_old_archive_after_stream_key_rotation(self, client, dr_env, mem_storage):
+        """#2318: after a REGISTRY_STREAM_KEY rotation the app RETAINS the old
+        key (REGISTRY_STREAM_KEY_PREVIOUS) so a pre-rotation sweep archive
+        drills in-app — the DR runbook's manual-recovery path becomes the
+        automated dual-key path."""
+        _seed_team("team_x", nodes=2)
+        # 1. Sweep encrypts under the CURRENT stream key ("s"*32).
+        r = client.post("/v1/internal/backups/sweep", headers=INTERNAL_HEADERS)
+        assert r.json()["status"] == "backed_up"
+        manifest = [  # noqa: RUF015
+            k for k in mem_storage.list("backups/team_x/") if k.endswith("manifest.json")
+        ][0]
+        backup_key = manifest.replace("/manifest.json", "/dump.enc")
+
+        # 2. Rotate: new active stream key, OLD active retained as _PREVIOUS
+        #    (the exact state tools/rotate-backup-keys.py stages on Fly).
+        monkeypatch = pytest.MonkeyPatch()
+        monkeypatch.setenv("REGISTRY_STREAM_KEY", base64.b64encode(b"z" * 32).decode())
+        monkeypatch.setenv("REGISTRY_STREAM_KEY_PREVIOUS", base64.b64encode(b"s" * 32).decode())
+        monkeypatch.setenv("BACKUP_SWEEP_ENABLED", "true")  # keep the sweep config live
+
+        # 3. The drill (which passes cfg.backup_key) must decrypt the OLD
+        #    archive through the retained stream key — no manual recovery.
+        ha_mod._LAST_DRILL_AT = 0.0
+        r2 = client.post(
+            "/v1/internal/backups/drill", headers=INTERNAL_HEADERS,
+            json={"team_id": "team_x", "backup_key": backup_key},
+        )
+        assert r2.status_code == 200, r2.text
+        assert r2.json()["status"] == "drill_ok"
+        monkeypatch.undo()
+
     def test_drill_cooldown(self, client, dr_env, mem_storage):
         _seed_team("team_x", nodes=1)
         client.post("/v1/internal/backups/sweep", headers=INTERNAL_HEADERS)
