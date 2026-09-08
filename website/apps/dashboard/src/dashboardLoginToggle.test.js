@@ -23,7 +23,9 @@ const src = readFileSync(join(__dirname, 'main.jsx'), 'utf8')
 
 // ── toggle handler body (toggleDashboardKeyLogin) ──────────────────────────
 const TOGGLE_DEF = 'async function toggleDashboardKeyLogin() {'
-const TAB_DEF = "const [tab, setTab] = React.useState('overview')"
+// the handler's closing brace is immediately followed by the initialTab
+// IIFE (a stable anchor — the tab state init directly after the handler).
+const TAB_DEF = 'const initialTab = (() => {'
 
 function toggleBody() {
   const start = src.indexOf(TOGGLE_DEF)
