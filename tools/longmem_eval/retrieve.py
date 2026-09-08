@@ -81,6 +81,7 @@ that report.py aggregates alongside the legacy evidence_recall@k.
 # ═════════════════════════════════════════════════════════════════════════
 from __future__ import annotations
 
+import logging
 import math
 import os
 import re
@@ -887,6 +888,20 @@ def retrieve_for_question(
     # evidence lever: identical questions, expansion ON vs OFF, deltas on
     # evidence_recall@k / recall_all@5 (C1 metrics).
     entity_key_expansion: bool | None = None,
+    # C5 (#2521, #2513): aggregative-intent detection + per-facet coverage
+    # check — tri-state (True/False explicit, None = env
+    # ``TORTOISE_LME_AGGREGATIVE_FLAG``; only 1/true/yes/on enables —
+    # fail-safe OFF, the #1745 default decision). When ON, each question's
+    # retrieval outcome records the hermetic detector verdict
+    # (``detect_aggregative_intent``) and — for entity-scoped aggregation
+    # only — the per-facet coverage verdict over the anchor spine vs the
+    # deduped pool (``tortoise/aggregate.py``: ``aggregative_verdict``),
+    # emitted as ``aggregative_verdict``. The A/B switch that MEASURES the
+    # #2521 detector for the C3-3 coverage-signal routing (#2519): it does
+    # NOT change retrieval behavior yet (the completeness loop is C3-1/
+    # C3-3) — it records {detected_intent, facet_coverage, missing_facets}
+    # per outcome so the routing's signal-to-flag mapping is decidable.
+    aggregative_flag: bool | None = None,
     # #1786 (R5): the hybrid-arm collective retrieval deadline (ms) — the
     # eval passes EVAL_RETRIEVAL_BUDGET_MS (1500); None = SDK default
     # 500 ms. Threads ONLY the hybrid arm (``hybrid_search`` →
@@ -1024,6 +1039,18 @@ def retrieve_for_question(
         _eek_env = (os.environ.get("TORTOISE_LME_ENTITY_KEY_EXPANSION")
                     or "")
         entity_key_expansion_on = _eek_env.strip().lower() in _TRUTHY
+    # C5 (#2521, #2513): resolve the aggregative-intent coverage-check arm
+    # tri-state the same way (explicit flag > env > OFF — fail-safe: only
+    # 1/true/yes/on enables). The resolved bool rides the outcome as the
+    # arm marker; the verdict itself is recorded ONLY under the arm (the
+    # off-path dict keeps today's exact shape, D2).
+    if aggregative_flag is not None:
+        aggregative_flag_on = aggregative_flag
+    else:
+        from .rerank import _TRUTHY as _AGG_TRUTHY
+        _agg_env = (os.environ.get("TORTOISE_LME_AGGREGATIVE_FLAG")
+                    or "")
+        aggregative_flag_on = _agg_env.strip().lower() in _AGG_TRUTHY
     # R1: pool-depth headroom — a monopolizing session's points must not
     # crowd other sessions out BEFORE dedup runs (E2E-1).
     # R5 (D4): TR questions fetch the point+event union (E2E-4's "no
@@ -1329,6 +1356,43 @@ def retrieve_for_question(
             len(ctx_evidence_ids) / reader_surface_denom
             if reader_surface_denom else None)
 
+    # ── C5 (#2521, #2513): aggregative-intent + per-facet coverage verdict
+    # (MEASUREMENT seam — retrieval behavior is untouched; the completeness
+    # loop is C3-1/C3-3 #2519). Under the arm ONLY: run the hermetic
+    # detector over the question (zero cost, no IO) and, when it is an
+    # entity-scoped aggregation, resolve the query's entity anchors through
+    # the Object-name spine (the #2518 surface) and check the per-facet
+    # coverage of the retrieval's TOP-K window (``pool[:top_k]`` — the
+    # ranked window that can reach the reader; a known facet present only
+    # at a deeper pool rank is EXACTLY the measured starved-facet shape
+    # #2513 targets, because the eval's structural leg admits every
+    # statement point into the pool while the rank cut decides what the
+    # reader sees). Emits the structured verdict {detected_intent,
+    # facet_coverage, missing_facets} riding the outcome. Fail-open
+    # contract (the #1745 default + the never-flag rule): the product
+    # library never raises; a defensive guard here records ``None`` on any
+    # unexpected failure (the arm marker still rides, so a failed check is
+    # never mistaken for a clean no-signal).
+    aggregative_verdict_out: dict | None = None
+    if aggregative_flag_on:
+        try:
+            from tortoise.aggregate import aggregative_verdict
+            aggregative_verdict_out = aggregative_verdict(
+                query=question["question"], proj=sdk._get_proj(),
+                # P2 (#2607 review): sample the window the READER actually
+                # receives — TR questions keep the pinned ``tr_top_k`` cap
+                # (the pool may retain more under the pool-only arm), so a
+                # wider sample would over-approximate k and flip a real
+                # partial into a false complete on the R5 slice.
+                retrieved_points=pool[:effective_top_k])
+        except Exception:
+            # fail-open (never break a working retrieval lane): log and
+            # record no verdict — the arm marker stays for reconstruction
+            logging.getLogger(__name__).warning(
+                "aggregative coverage verdict failed open for %s",
+                question.get("question_id", "?"), exc_info=True)
+            aggregative_verdict_out = None
+
     out = {
         "question_id": qid,
         "hits": pool,  # pinned contract: the deduped pool (R1 #1540)
@@ -1405,6 +1469,11 @@ def retrieve_for_question(
         # Reconstructs which arm a question ran on for the shared-question
         # A/B deltas (identical questions, expansion ON vs OFF).
         "entity_key_expansion": entity_key_expansion_on,
+        # C5 (#2521, #2513): the aggregative-intent coverage-check arm —
+        # the resolved tri-state bool (explicit flag / env; fail-safe OFF),
+        # always present so the A/B arms are reconstructable even when the
+        # verdict below is absent (off-path, D2).
+        "aggregative_flag": aggregative_flag_on,
         # R5 (#1544): TR-constraint surface — the detected kind (TR only)
         # and whether the window filter fell back to the unfiltered pool
         # (never starve the reader into abstention).
@@ -1450,6 +1519,12 @@ def retrieve_for_question(
     if rerank_on and rerank_pass.get("applied"):
         match_source_counts["rerank"] = rerank_pass.get("dropped", 0)
     out["match_source_counts"] = match_source_counts
+    # C5 (#2521, #2513): the aggregative verdict rides the outcome ONLY
+    # under the arm (D2 — the off-path dict keeps today's exact shape; the
+    # report projection reads it via o.get so pre-feature checkpoints and
+    # the OFF arm render identically).
+    if aggregative_flag_on:
+        out["aggregative_verdict"] = aggregative_verdict_out
     # Conditional keys (D2): the off-path dict keeps today's exact shape.
     if rerank_on:
         out["rerank_pass"] = rerank_pass
