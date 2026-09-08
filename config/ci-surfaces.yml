@@ -21,6 +21,7 @@ surfaces:
   - test_battery_probe_measured.py
   - test_battery_provenance.py
   - test_battery_r1_seed.py
+  - test_battery_real_deadline.py
   - test_battery_realism.py
   - test_battery_realism_run.py
   - test_battery_report_writers.py
