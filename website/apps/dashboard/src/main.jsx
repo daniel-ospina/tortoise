@@ -1479,7 +1479,7 @@ function claimIntentInFlight() {
   const [panelKeysStatus, setPanelKeysStatus] = React.useState('closed') // closed|loading|ok|error
   const [graphKeyName, setGraphKeyName] = React.useState('')
   const [graphBusy, setGraphBusy] = React.useState(false) // panel mint / graph delete in flight
-  const [graphMsg, setGraphMsg] = React.useState('') // inline panel error (402/409/409 etc.)
+  const [graphMsg, setGraphMsg] = React.useState('') // inline PANEL error (mint/revoke — renders inside the open key panel only; #2301: delete failures are page-level, never here)
   const [confirmDeleteId, setConfirmDeleteId] = React.useState(null) // custom row awaiting delete confirm
   // #2304 trash (delete = 7-day recovery window): rows + restore/inspect.
   const [trash, setTrash] = React.useState([])
@@ -4332,7 +4332,12 @@ function claimIntentInFlight() {
     const _teamAtCall = currentTeamId
     if (!graphId || !currentTeamId) return
     setGraphBusy(true)
-    setGraphMsg('')
+    // #2301: delete errors surface PAGE-LEVEL. graphMsg renders only inside
+    // the open key panel (mint/revoke — panel-bound actions), so a failed
+    // DELETE with the panel closed would vanish there. The global error
+    // banner is the same sink createGraph (402/409/generic) and revokeKey
+    // use — destructive graph/row actions stay legible wherever they run.
+    setError('')
     try {
       const tok = sessionTokenRef.current
       if (!tok) throw new Error('No session')
@@ -4353,7 +4358,10 @@ function claimIntentInFlight() {
       await Promise.all([loadGraphs(currentTeamId), loadTeams()]) // count meter refresh
       if (isOwnerAdmin) await loadTrash(currentTeamId) // the row just entered the trash
     } catch (e) {
-      if (teamIdRef.current === _teamAtCall) setGraphMsg(e.message || 'Could not delete graph — try again.')
+      // #2301: failure keeps the row ARMED (Delete/Cancel = retry/escape)
+      // and lands the reason in the page-level banner — visible with the
+      // key panel open or closed.
+      if (teamIdRef.current === _teamAtCall) setError(e.message || 'Could not delete graph — try again.')
     } finally {
       setGraphBusy(false)
     }
