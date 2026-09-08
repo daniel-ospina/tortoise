@@ -3770,17 +3770,58 @@ class TortoiseSDK:
                     "node — deferred surface)")
 
         # ── events ──
+        # #2552: payload events are created under their CONTENT-ADDRESSED
+        # ``ev_<sha>`` ids (the ``_server_id`` channel — the same id
+        # execute_embed computed over the payload content and the same shape
+        # the hosted §7 commit path MERGEs, so a re-capture/duplicate content
+        # is an idempotent no-op, never a duplicate node) with the FULL payload
+        # content stored (name stays capped at 80 like the hosted §7 event
+        # write). Pre-fix the seam dropped the payload id (fresh ULID) and
+        # stored only the 80-char prefix → every payload operator whose
+        # endpoint was an Event (the S2 OUTPUT_CONTRACT allows
+        # point→event/event→point operators) resolved against a NON-EXISTENT
+        # ``ev_<sha>`` node and was dropped at commit (apply_payload_operators
+        # → create_operator existence check) — a silent operator-loss parity
+        # hole vs the hosted §7 path (commit_ops #1532 D3) and vs the points
+        # loop below it, which passes the payload id (``id=pid``).
+        event_failures: list[str] = []
         for ev in payload.get("events", []) or []:
             content = str(ev.get("content", "")).strip()
             if not content:
                 continue
-            try:  # noqa: SIM105
+            ev_id = str(ev.get("id") or "").strip()
+            if not ev_id:
+                # P2 (#2556 review r1): a payload event with a blank/missing
+                # id must still be content-addressed (ev_<sha>) — never a
+                # fresh ULID — or every operator referencing the
+                # content-derived ev_<sha> endpoint drops again at commit
+                # (the exact hole this fix closes; ULID would reopen it).
+                from tortoise.ids import content_hash
+                # Cap-parity with the sibling ev_ content-address paths
+                # (_stream_to_payload + extractor_v2 fold both hash
+                # content[:1000]) — a longer blank-id payload would otherwise
+                # mint an id the operators never reference (P2 r2 note).
+                ev_id = f"ev_{content_hash(content[:1000])[:62]}"
+            try:
                 self.create_event(
                     content[:80],
                     str(ev.get("eventKind", "core:occurrence")).rsplit(":", 1)[-1],
-                    sessionId=session_id, is_episodic=True)
-            except Exception:  # noqa: BLE001, RUF100
-                pass
+                    sessionId=session_id, is_episodic=True,
+                    _server_id=ev_id or None,
+                    content=content,
+                )
+            except Exception as exc:  # noqa: BLE001, RUF100 — non-fatal like
+                # the entity loop above: an event write failure is
+                # warning-grade (an operator referencing the event is then
+                # dropped by create_operator's existence check and logged by
+                # apply_payload_operators); capture itself stays ok.
+                event_failures.append(
+                    f"{type(exc).__name__}: event write failed for "
+                    f"{content[:60]!r}: {exc}")
+        if event_failures:
+            warnings.extend(event_failures)
+            warnings.append(
+                f"{len(event_failures)} extracted event(s) failed to write")
 
         # ── operators (IMPL/NAND + MITIGATES — shared commit semantics,
         #    #1532 D3: same artifact + deep-miss drop as the commit path via

@@ -1276,9 +1276,102 @@ def test_extract_session_v2_counts_point_write_skips(sdk, monkeypatch):
     assert meta["mode"] == "error", "a failed point write is a capture failure"
 
 
+# ── #2552: payload operators with EVENT endpoints land at capture ──────
+
+
+def test_extract_session_v2_wires_operator_to_event_endpoint(sdk, monkeypatch):
+    """#2552: a payload operator whose endpoint is an extracted EVENT must
+    reach the graph. Pre-fix the v2 capture seam created payload events under
+    fresh ULID ids (dropping the content-addressed ``ev_<sha>`` id the payload
+    and its operators reference) — create_operator's existence check then
+    failed and EVERY event-endpoint operator was silently skipped (the
+    apply_payload_operators "operator write skipped (inputs missing?)" log).
+    The events loop now passes the payload id through the sanctioned
+    ``_server_id`` channel (hosted §7 commit parity), so the operator edge
+    lands on the node the payload names."""
+    import tortoise.extractor_v2 as ev2
+    from tortoise.extractor_v2 import _content_id
+
+    ev_content = "the skew-tolerant lease grace period shipped to every region"
+    eid = _content_id("ev", ev_content)  # exactly what execute_embed computes
+    assert eid.startswith("ev_")
+    pid = "pt-2552-ev-op"
+    payload = {"session_id": "sess_p1", "story_arc": "", "entities": [],
+               "points": [{"id": pid,
+                           "content": "clock skew between regions can make "
+                                       "lease expiry unsafe",
+                           "pointKind": "statement"}],
+               "events": [{"id": eid, "content": ev_content,
+                           "eventKind": "core:occurrence"}],
+               "operators": [{"src": pid, "dst": eid, "op_type": "IMPL",
+                              "direction": "unidirectional"}],
+               "supersessions": [], "client_commit_id": "ccid"}
+    monkeypatch.setattr(ev2, "extract_session_v2",
+                        lambda *a, **kw: _v2_out(payload=payload))
+    _extracted, meta = sdk._extract_session_v2(
+        CONV, "sess_p1", "2026-08-20T00:00:00+00:00")
+    assert not meta["errors"], meta
+    assert not [w for w in meta["warnings"] if "event" in w.lower()], meta
+    proj = sdk._get_proj()
+    # 1) the Event node exists under its content-addressed payload id.
+    ev_rows = proj.g.query(
+        "MATCH (e:Event {id:$eid}) RETURN e.eventId",
+        params={"eid": eid}).result_set
+    assert ev_rows and ev_rows[0][0] == eid, ev_rows
+    # 2) the IMPL operator node is wired onto that Event endpoint (the
+    #    pre-fix behavior dropped this operator: the ev_ node did not exist).
+    op_rows = proj.g.query(
+        "MATCH (o:Point {is_operator:true, op_type:'IMPL'})"
+        "-[:IMPL]->(e:Event {id:$eid}) RETURN count(o)",
+        params={"eid": eid}).result_set
+    assert op_rows and op_rows[0][0] == 1, op_rows
+
+
+def test_extract_session_v2_blank_event_id_falls_back_to_content_addressing(
+        sdk, monkeypatch):
+    """#2552 P2 (review r1): a payload event with a blank/missing id must
+    still be created under its content-derived ``ev_<sha>`` id — never a
+    fresh ULID — or every operator referencing the content-addressed
+    ``ev_<sha>`` endpoint drops again at commit (ULID would silently reopen
+    the exact hole the content-addressed fix closed)."""
+    import tortoise.extractor_v2 as ev2
+    from tortoise.extractor_v2 import _content_id
+
+    ev_content = "the fallback lease event carried no payload id at all"
+    eid = _content_id("ev", ev_content)
+    pid = "pt-2552-ev-blank"
+    payload = {"session_id": "sess_p2", "story_arc": "", "entities": [],
+               "points": [{"id": pid, "content": "lease expiry needs the "
+                            "grace period", "pointKind": "statement"}],
+               # id is BLANK — the seam must content-address it itself.
+               "events": [{"id": "", "content": ev_content,
+                           "eventKind": "core:occurrence"}],
+               "operators": [{"src": pid, "dst": eid,
+                              "op_type": "IMPL",
+                              "direction": "unidirectional"}],
+               "supersessions": [], "client_commit_id": "ccid"}
+    monkeypatch.setattr(ev2, "extract_session_v2",
+                        lambda *a, **kw: _v2_out(payload=payload))
+    _extracted, meta = sdk._extract_session_v2(
+        CONV, "sess_p2", "2026-08-20T00:00:00+00:00")
+    assert not meta["errors"], meta
+    proj = sdk._get_proj()
+    # the Event exists under the content-derived id (not a fresh ULID), and
+    # the operator referencing it is wired — not dropped.
+    ev_rows = proj.g.query(
+        "MATCH (e:Event {id:$eid}) RETURN e.eventId",
+        params={"eid": eid}).result_set
+    assert ev_rows and ev_rows[0][0] == eid, ev_rows
+    op_rows = proj.g.query(
+        "MATCH (o:Point {is_operator:true, op_type:'IMPL'})"
+        "-[:IMPL]->(e:Event {id:$eid}) RETURN count(o)",
+        params={"eid": eid}).result_set
+    assert op_rows and op_rows[0][0] == 1, op_rows
+
 # ── #2164 Task 3: capture applies payload supersessions (shared
 #    apply_supersessions helper — entity-level records fold Object.status
 #    via ObjectSuperseded + the projection fold; pt_ records CORRECTS) ────
+
 
 def test_extract_session_v2_folds_entity_supersession(sdk, monkeypatch):
     """#2164 (Task 3): a payload supersession record (entity ref) is APPLIED
