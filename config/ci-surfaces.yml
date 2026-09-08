@@ -556,6 +556,7 @@ surfaces:
   - eval/retrieval/test_oracle.py
   - eval/retrieval/test_run.py
   - longmem_eval/test_vector_arm.py
+  - longmem_eval/test_assembly_arm.py  # #2165 Task 7: v2-lane eval arm A/A-widened/B admission + R9 geometry (docker-lane)
   - eval/write_path/test_write_path_corpus.py
   - eval/write_path/test_write_path_grading.py
   - eval/write_path/test_write_path_runner.py
