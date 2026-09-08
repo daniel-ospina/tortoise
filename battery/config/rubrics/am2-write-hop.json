@@ -1,0 +1,44 @@
+{
+  "rubric_id": "am2-write-hop",
+  "construct": "Amendment-2 write/surfacing-hop rubric — deliberation-content items judged on the WRITE/SURFACING HOP evidence (the deliberation turn that first names the contradiction plus its product-action reference), rendered arm-neutral (arm identity and tool names excluded). #2080 W2 write-path mechanics reused, never forked (cross-note #2080 — battery QA layered on top).",
+  "status": "owner-check-pending",
+  "surfacing_leg": {
+    "status": "owner-check-pending",
+    "operational_definition": "PROPOSED (owner check pending, #2292 Task 1 Step 1.7 / Amend 3 §1): an anchored-yes item family judged on the write/surfacing HOP evidence — the deliberation turn that first names the contradiction plus its product-action reference — with the arm-neutral evidence render excluding arm identity and tool names. Scoring semantics consume #2291's read-surface (recall_state Memory surface: claims + operator-kind attachments) and #2080 W2 mechanics in #2284 executor v2 (Task 10). #2292 authors the rubric FILES only; scoring-code semantics pause on the owner check. Items key on: (1) does the surfaced record name BOTH sides of the contradiction it addresses; (2) does the record reference the specific deliberation content that motivated the write (a named consideration, risk, or revision), never generic content; (3) is the record's support/oppose direction consistent with the deliberation position it claims to advance. NO graph-only language is graded (no edge counts / tool names / arm identity)."
+  },
+  "items": [
+    {
+      "id": "am2-w1",
+      "text": "Does the surfaced record name both sides of the contradiction it addresses — the position it advances and the opposing position it rejects — rather than restating only one side?",
+      "decision_rule": "yes",
+      "hop": "surfacing",
+      "status": "owner-check-pending"
+    },
+    {
+      "id": "am2-w2",
+      "text": "Does the write reference the specific deliberation content that motivated it — a named consideration, risk, downside, or revision — rather than generic or empty content?",
+      "decision_rule": "yes",
+      "hop": "write"
+    },
+    {
+      "id": "am2-w3",
+      "text": "Is the direction of the write consistent with the deliberation position it claims to advance (it supports the side its reasoning favored and opposes the side its reasoning rejected)?",
+      "decision_rule": "yes",
+      "hop": "write"
+    }
+  ],
+  "gold_anchors": [
+    {
+      "item_id": "am2-w2",
+      "render": "The surfaced consideration named the specific migration risk the agent had weighed before filing.",
+      "expected": "yes",
+      "note": "specific deliberation content referenced"
+    },
+    {
+      "item_id": "am2-w1",
+      "render": "The record restated the agent's favored position only, with no mention of the position it rejected.",
+      "expected": "no",
+      "note": "one-sided surfacing — both-sides anchor not met"
+    }
+  ]
+}

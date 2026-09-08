@@ -138,13 +138,20 @@ def _cmd_validate_judge(args: argparse.Namespace) -> ExitCode:
 
 
 def _load_rubric_text(args, rubric_id: str) -> str:
-    from pathlib import Path
-    config_dir = Path(args.config or args.config_dir or _DEFAULT_CONFIG)
-    rubrics = config_dir / "rubrics" / f"{rubric_id}.md"
-    if rubrics.is_file():
-        return rubrics.read_text(encoding="utf-8")
-    # Fallback: minimal rubric from the id (mock-mode validation).
-    return f"{rubric_id}: judge the response for coverage and correctness."
+    """Rubric text for the gate: JSON-first itemized rubrics render their
+    canonical judge prompt; legacy .md rubrics return raw text verbatim
+    (back-compat — pre-#2292 rubric_text contract byte-identical)."""
+    from pathlib import Path as _Path
+
+    from battery.judge.rubric import load_rubric_spec, render_rubric_prompt
+    config_dir = _Path(args.config or getattr(args, "config_dir", None)
+                       or _DEFAULT_CONFIG)
+    try:
+        spec = load_rubric_spec(config_dir, rubric_id)
+    except Exception:
+        # Fallback: minimal rubric from the id (mock-mode validation).
+        return f"{rubric_id}: judge the response for coverage and correctness."
+    return render_rubric_prompt(spec)
 
 
 def _default_probe_pairs(rubric_id: str) -> list[tuple[str, str]]:
