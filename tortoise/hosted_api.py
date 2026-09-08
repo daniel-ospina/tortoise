@@ -9724,9 +9724,12 @@ async def _require_owner_admin_session(user: dict, team_id: str) -> None:
 
 
 # #2304 default recovery window — MUST mirror backup_sweep.
-# _GRAPH_PURGE_GRACE_DAYS (the purge's erasure cutoff): restore and purge
-# share one window. If one changes the other must too.
-_TRASH_GRACE_DAYS = 7
+# #2566 (re-audit P3): ONE canonical window constant — backup_sweep's
+# _GRAPH_PURGE_GRACE_DAYS (the purge's erasure cutoff) is the single source;
+# restore's window aliases it so the two can never drift again.
+from tortoise.backup_sweep import (  # noqa: E402
+    _GRAPH_PURGE_GRACE_DAYS as _TRASH_GRACE_DAYS,
+)
 
 
 def _trash_grace_expired(deleted_at: object, now: datetime | None = None,
@@ -19279,10 +19282,22 @@ async def backups_purge(request: Request, body: dict | None = None):
     registry = reg_sdk._get_registry()
     db = reg_sdk._get_proj().db
     storage = _backup_storage()
-    grace_days = int((body or {}).get("grace_days") or 7)
+    grace_days = int((body or {}).get("grace_days")
+                     or _TRASH_GRACE_DAYS)
     if not 1 <= grace_days <= 365:
         raise HTTPException(status_code=422,
                             detail="grace_days must be 1..365")
+    if grace_days < _TRASH_GRACE_DAYS and not (body or {}).get(
+            "confirm_short_grace"):
+        # #2566 (re-audit P3): an operator grace_days override SHORTENS the
+        # user-visible recovery window the trash UI/restore API still
+        # promise — a drill with a small value permanently erases rows
+        # inside the promised window with no restore escape. Require an
+        # explicit confirmation.
+        raise HTTPException(
+            status_code=422,
+            detail="grace_days below the standard recovery window "
+                   f"({_TRASH_GRACE_DAYS}) requires confirm_short_grace: true")
     if _PURGE_INFLIGHT.locked():
         return {"status": "already_running", "purged": []}
     async with _PURGE_INFLIGHT:

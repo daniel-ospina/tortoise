@@ -20,7 +20,39 @@ from tests._http_fixtures import patched_tortoise_sdk
 from tests.fake_control_plane import FakeControlPlane
 from tests.test_export_delete import _close_seed_sdks, _enable_supabase
 from tests.test_supabase_control import FREE_TEAM
+from tortoise.backup_sweep import _GRAPH_PURGE_GRACE_DAYS
 from tortoise.hosted_api import _trash_grace_expired, app, get_current_user
+
+
+# #2566 (re-audit P3): restore and purge must share ONE window constant —
+# the alias import makes drift impossible, but pin the invariant + the
+# boundary semantics (purge erases at >= the window, restore refuses only
+# strictly after it) so a regression is caught at the test layer too.
+def test_grace_window_constant_is_single_sourced():
+    from tortoise.hosted_api import _TRASH_GRACE_DAYS
+
+    assert _TRASH_GRACE_DAYS == _GRAPH_PURGE_GRACE_DAYS == 7
+
+
+def test_grace_purge_vs_restore_boundary_agreement():
+    """A row aged exactly the window is purge-eligible (>=) but restore-until-
+    the-purge (strictly >) — assert the two helpers agree on the boundary so
+    drift cannot silently move either cutoff."""
+    from tortoise.backup_sweep import _graph_purged_at_expired
+
+    now = datetime.now(UTC)
+    at_boundary = (now - timedelta(days=_GRAPH_PURGE_GRACE_DAYS)).isoformat()
+    cutoff = (now - timedelta(days=_GRAPH_PURGE_GRACE_DAYS)).isoformat()
+    # Purge erases AT the cutoff (<=); restore refuses only AFTER it (>).
+    assert _graph_purged_at_expired(at_boundary, cutoff) is True
+    assert _trash_grace_expired(at_boundary, now=now) is False
+    # Just inside: neither erases nor refuses.
+    inside = (now - timedelta(days=_GRAPH_PURGE_GRACE_DAYS,
+                               seconds=-1)).isoformat()
+    assert _graph_purged_at_expired(inside, cutoff) is False
+    assert _trash_grace_expired(inside, now=now) is False
+
+
 
 _TEAM = "team-free-001"
 _GID = "g_grace000000000001"

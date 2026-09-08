@@ -628,6 +628,34 @@ class TestReconcile:
         assert isinstance(body["notes"], list)
 
 
+class TestDrPurgeGraceGate:
+    """#2566 (re-audit P3): the internal purge endpoint must refuse a
+    grace_days override SHORTER than the standard recovery window unless the
+    operator explicitly confirms it (a drill with a small value would
+    otherwise permanently erase rows the trash UI/API still promise)."""
+    def test_short_grace_requires_confirmation(self, client, dr_env,
+                                               mem_storage):
+        r = client.post("/v1/internal/backups/purge",
+                        headers=INTERNAL_HEADERS,
+                        json={"grace_days": 1})
+        assert r.status_code == 422, r.text
+        assert "confirm_short_grace" in r.json()["detail"]
+
+    def test_short_grace_runs_with_confirmation(self, client, dr_env,
+                                                mem_storage):
+        r = client.post("/v1/internal/backups/purge",
+                        headers=INTERNAL_HEADERS,
+                        json={"grace_days": 1, "confirm_short_grace": True})
+        assert r.status_code == 200, r.text
+        assert r.json()["purged"] == []
+
+    def test_standard_grace_needs_no_confirmation(self, client, dr_env,
+                                                  mem_storage):
+        r = client.post("/v1/internal/backups/purge",
+                        headers=INTERNAL_HEADERS, json={})
+        assert r.status_code == 200, r.text
+
+
 class TestDrAclReconcile:
     """#2313 folded delta: post-restore per-graph ACL rebuild — the endpoint
     replays create_acl_user (idempotent upsert) for every ACTIVE custom graph
