@@ -657,7 +657,7 @@ const supabaseStorage = {
     if (!value) { this.removeItem(key); return }
     let encoded = encodeURIComponent(value)
     // Size guard (#1835, mirrors supabase-session.js): an OAuth session with
-    // provider tokens can exceed the 4096-byte cookie limit. provider tokens
+    // provider tokens AND user metadata can exceed the 4096-byte cookie limit. provider tokens
     // are only needed by the initiating flow — strip them first; if still
     // over the cap, attempt the write anyway with a warning.
     if (encoded.length > SIZE_GUARD) {
@@ -665,6 +665,20 @@ const supabaseStorage = {
         const obj = JSON.parse(value)
         delete obj.provider_token
         delete obj.provider_refresh_token
+        // Strip large metadata bloat — identities array and user_metadata fields
+        // are not needed for auth and can exceed the cookie size cap.
+        if (obj.user) {
+          delete obj.user.identities
+          if (obj.user.user_metadata) {
+            // Keep only what the dashboard reads (display_name, avatar_url)
+            var keep = {}
+            if (obj.user.user_metadata.display_name) keep.display_name = obj.user.user_metadata.display_name
+            if (obj.user.user_metadata.avatar_url) keep.avatar_url = obj.user.user_metadata.avatar_url
+            if (obj.user.user_metadata.full_name) keep.full_name = obj.user.user_metadata.full_name
+            if (obj.user.user_metadata.name) keep.name = obj.user.user_metadata.name
+            obj.user.user_metadata = keep
+          }
+        }
         encoded = encodeURIComponent(JSON.stringify(obj))
       } catch { /* not JSON — leave as-is */ }
       if (encoded.length > SIZE_GUARD + 100) {
