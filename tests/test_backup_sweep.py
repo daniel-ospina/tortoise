@@ -2025,6 +2025,61 @@ def test_purge_erases_reclassified_legacy_flats_by_namespace(shared_proj):
 
 
 @pytest.mark.skipif(_DOCKER_LANE, reason="purge erasure unit tests run embedded; docker lane covered by the hosted trash E2E (#2304)")
+class _FlakyDeleteStore(MemoryStorage):
+    """#2561 test double: deletes under one object prefix fail once (a
+    partial R2 failure), everything else succeeds."""
+    def __init__(self, fail_prefix: str):
+        super().__init__()
+        self._fail_prefix = fail_prefix
+        self._failed = False
+
+    def delete(self, key: str):
+        if key.startswith(self._fail_prefix) and not self._failed:
+            self._failed = True
+            raise RuntimeError(f"simulated delete failure: {key}")
+        return super().delete(key)
+
+
+def test_purge_partial_flat_delete_failure_still_rewrites_index(
+        shared_proj):
+    """#2561 (re-audit P3): when the flat-family deletion partially errors,
+    the purge must STILL rewrite the legacy-flat index (drop the erased
+    bids) + record the ghosts — the old `if not errors` gate left stale
+    index entries whose objects were gone (Inspect over-counted and the
+    sweep could resurrect them)."""
+    if shared_proj is None:
+        return
+    proj = _make_env(None, shared_proj)
+    store = _FlakyDeleteStore("backups/team_x/flat_fail_")
+    gid = f"g_partial_{os.urandom(2).hex()}"
+    ns = _seed_custom_tombstone(
+        proj, "team_x", gid, "partial",
+        deleted_at=(datetime.now(UTC) - timedelta(days=30)).isoformat())
+    ok_bid = f"team_x/flat_ok_{os.urandom(2).hex()}"
+    fail_bid = f"team_x/flat_fail_{os.urandom(2).hex()}"
+    store.upload(f"backups/{ok_bid}/dump.enc", b"ok")
+    store.upload(f"backups/{fail_bid}/dump.enc", b"fail")
+    store.upload(
+        "ops/legacy-flat-index/team_x.json",
+        json.dumps({
+            ok_bid: {"graph_name": ns, "graph_id": ""},
+            fail_bid: {"graph_name": ns, "graph_id": ""},
+        }).encode())
+    res = run_graph_purge(db=proj.db, registry=proj.db.select_graph(
+        _REGISTRY_GRAPH), storage=store, team_ids=["team_x"])
+    purged = [p for p in res["purged"] if p["graph_id"] == gid]
+    assert len(purged) == 1
+    # The flaky delete errored but the index was STILL rewritten: both bids
+    # dropped (their objects are forfeit — the row is stamped), and both
+    # recorded as ghosts so the sweep cannot resurrect them.
+    assert any("simulated delete failure" in str(e)
+               for e in purged[0]["artifacts"]["errors"])
+    idx = json.loads(store.download("ops/legacy-flat-index/team_x.json"))
+    assert ok_bid not in idx and fail_bid not in idx
+    ghosts = json.loads(store.download("ops/purge-flat-ghosts/team_x.json"))
+    assert ok_bid in ghosts and fail_bid in ghosts
+
+
 def test_purge_residual_still_erases_artifacts(shared_proj):
     """#2462: when the ownership guard trips (namespace retained), the
     tombstone's OWN artifacts (nested pool + its flats) are still erased —

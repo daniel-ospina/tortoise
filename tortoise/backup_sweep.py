@@ -1290,21 +1290,27 @@ def _purge_graph_storage(storage, team_id: str, graph_id: str,
                         out["errors"].append(f"delete {k}: {e}")
             except Exception as e:
                 out["errors"].append(f"list backups/{bid}/: {e}")
-        if not out["errors"]:
-            try:
-                _write_json(
-                    storage, _legacy_flat_index_key(team_id),
-                    {bid: ent for bid, ent in (index or {}).items()
-                     if bid not in flat_bids},
-                )
-                # #2466: record the erased bids so a concurrent/stale sweep
-                # reclassification can never resurrect these index entries
-                # (R2 last-writer-wins — the sweep rewrites the whole index).
-                _record_purged_flat_bids(
-                    storage, team_id, flat_bids,
-                    datetime.now(timezone.utc).isoformat())  # noqa: UP017
-            except Exception as e:
-                out["errors"].append(f"index rewrite: {e}")
+        # #2561 (re-audit): rewrite the index + record the ghosts even when
+        # some deletes errored — the previous `if not out["errors"]` gate
+        # left the index carrying bids whose objects were already erased
+        # whenever a partial R2 failure hit (the tombstone is stamped
+        # regardless, so the row is never re-enumerated to correct the
+        # index). A stale index entry then over-counted Inspect and could
+        # be resurrected by the next sweep's reclassification.
+        try:
+            _write_json(
+                storage, _legacy_flat_index_key(team_id),
+                {bid: ent for bid, ent in (index or {}).items()
+                 if bid not in flat_bids},
+            )
+            # #2466: record the erased bids so a concurrent/stale sweep
+            # reclassification can never resurrect these index entries
+            # (R2 last-writer-wins — the sweep rewrites the whole index).
+            _record_purged_flat_bids(
+                storage, team_id, flat_bids,
+                datetime.now(timezone.utc).isoformat())  # noqa: UP017
+        except Exception as e:
+            out["errors"].append(f"index rewrite: {e}")
     return out
 
 
