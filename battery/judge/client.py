@@ -12,6 +12,7 @@ import os
 import random
 import re
 from dataclasses import dataclass
+from typing import Callable  # noqa: UP035
 
 from battery.arms.base import ArmUnavailable
 from battery.enums import ModelCallOutcome
