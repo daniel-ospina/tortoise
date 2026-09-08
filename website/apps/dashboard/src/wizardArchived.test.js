@@ -45,7 +45,7 @@ test('live wizard renders WIZARD_STEPS (the 5 human steps), not legacy labels', 
 test('DE2E-2 copy sweep: org-create dialog + wizard copy say Organization', () => {
   assert.ok(src.includes('Create a new organization'), 'create-team dialog header')
   assert.ok(src.includes('Organization name required'), 'validation error copy')
-  assert.ok(src.includes('Your Organization is set up'), 'welcome ready copy')
+  assert.ok(src.includes('Your organization is set up'), 'welcome ready copy')
   assert.ok(src.includes('Creating your Organization and API key'), 'provisioning copy')
   assert.ok(src.includes('Your Organization and API key are live'), 're-entry + first-data cards')
 })

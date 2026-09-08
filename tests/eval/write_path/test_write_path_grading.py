@@ -524,3 +524,141 @@ def test_metric_vocabulary_roundtrip():
     ]
     metrics = grading.aggregate_metrics(results)
     assert set(metrics) == schema.METRIC_VALUES
+
+
+# ── #2514 planted-operator (layer-2) edge grading — hermetic ──────────────
+
+
+def _pt(pid: str, content: str) -> dict:
+    return {"point_id": pid, "content": content,
+            "provenance_present": True, "ep_updated": True}
+
+
+def _edge(op_type: str, endpoints: dict, *, op_id: str = "op1",
+          direction: str = "unidirectional", label: str | None = None,
+          source_id: str | None = None) -> dict:
+    if source_id is None:
+        source_id = next((p for p, i in sorted(endpoints.items(), key=lambda kv: kv[1])
+                          if i == 0), None)
+    return {"op_id": op_id, "op_type": op_type, "direction": direction,
+            "label": label, "endpoints": endpoints, "source_id": source_id}
+
+
+_PLANTED_NEGATE = {
+    "id": "synthetic_op_01", "expected_kind": "NEGATE",
+    "from": {"verbatim_anchor": "the flag did not cause the duplicates"},
+    "to": {"verbatim_anchor": "the flip raced the lease renewal"},
+}
+
+
+def test_operator_edge_detail_correct_edge_per_kind() -> None:
+    """Each planted kind is graded edge_correct exactly when its mapped graph
+    form connects the two anchored points (SUPPORTS→IMPL, NEGATE→NAND,
+    SUPERSEDE→CORRECTS, MITIGATES→mitigation-on-operator)."""
+    from_point = _pt("pf", "the flag did not cause the duplicates, it was stable")
+    to_point = _pt("pt", "the flip raced the lease renewal window")
+    empty = {"direct_edges": [], "operator_edges": [], "mitigations": []}
+    # SUPPORTS → IMPL operator edge.
+    supports = dict(_PLANTED_NEGATE, expected_kind="SUPPORTS")
+    snap = {**empty, "operator_edges": [_edge("IMPL", {"pf": 0, "pt": 1})]}
+    detail = grading.operator_edge_detail(supports, [from_point], [to_point], snap)
+    assert detail["verdict"] == "edge_correct" and detail["edge_correct"]
+    # NEGATE → NAND operator edge.
+    snap = {**empty, "operator_edges": [_edge("NAND", {"pf": 0, "pt": 1})]}
+    detail = grading.operator_edge_detail(_PLANTED_NEGATE, [from_point], [to_point], snap)
+    assert detail["verdict"] == "edge_correct"
+    # SUPERSEDE → direct CORRECTS edge new→old.
+    supersede = dict(_PLANTED_NEGATE, expected_kind="SUPERSEDE",
+                     to={"verbatim_anchor": "ship all-at-once behind a global flag"})
+    old_point = _pt("pold", "ship all-at-once behind a single global kill flag")
+    snap = {**empty, "direct_edges": [{"rel_type": "CORRECTS", "from_id": "pf", "to_id": "pold"}]}
+    detail = grading.operator_edge_detail(supersede, [from_point], [old_point], snap)
+    assert detail["verdict"] == "edge_correct"
+    # MITIGATES → mitigation Point (content carries the from-anchor) on an
+    # operator touching the to-anchor claim.
+    mitigates = dict(_PLANTED_NEGATE, expected_kind="MITIGATES")
+    mitigates["from"] = {"verbatim_anchor": "renewal cannot clobber a live lease"}
+    mitigates["to"] = {"verbatim_anchor": "clock skew makes lease expiry unsafe"}
+    risk_point = _pt("pr", "clock skew between regions can make lease expiry unsafe")
+    action_point = _pt("pm", "with the grace window a lagging region's renewal cannot clobber a live lease")
+    snap = {**empty, "operator_edges": [_edge("IMPL", {"px": 0, "pr": 1}, op_id="opi")],
+            "mitigations": [{"op_id": "opi", "point_id": "m1",
+                             "content": "renewal cannot clobber a live lease"}]}
+    detail = grading.operator_edge_detail(mitigates, [action_point], [risk_point], snap)
+    assert detail["verdict"] == "edge_correct", detail
+
+
+def test_operator_edge_detail_bare_point_is_edge_missing() -> None:
+    """The issue-#2514 defect under measurement: both anchored claims survive
+    as Points but NO operator edge connects them (a bare new point)."""
+    from_point = _pt("pf", "the flag did not cause the duplicates, it was stable")
+    to_point = _pt("pt", "the flip raced the lease renewal window")
+    empty = {"direct_edges": [], "operator_edges": [], "mitigations": []}
+    detail = grading.operator_edge_detail(_PLANTED_NEGATE, [from_point], [to_point], empty)
+    assert detail["verdict"] == "edge_missing" and not detail["edge_correct"]
+
+
+def test_operator_edge_detail_wrong_kind_and_content_missing() -> None:
+    from_point = _pt("pf", "the flag did not cause the duplicates")
+    to_point = _pt("pt", "the flip raced the lease renewal")
+    # Wrong kind: an IMPL (support) where a NAND (contradict) is planted.
+    snap = {"direct_edges": [], "operator_edges": [_edge("IMPL", {"pf": 0, "pt": 1})],
+            "mitigations": []}
+    detail = grading.operator_edge_detail(_PLANTED_NEGATE, [from_point], [to_point], snap)
+    assert detail["verdict"] == "edge_missing"
+    # Content missing on one endpoint (extractor never minted the claim).
+    empty = {"direct_edges": [], "operator_edges": [], "mitigations": []}
+    detail = grading.operator_edge_detail(_PLANTED_NEGATE, [], [to_point], empty)
+    assert detail["verdict"] == "from_content_missing"
+    detail = grading.operator_edge_detail(_PLANTED_NEGATE, [from_point], [], empty)
+    assert detail["verdict"] == "to_content_missing"
+
+
+def test_operator_edge_detail_flags_reversed_direction() -> None:
+    """The RIGHT edge kind between the right points is the primary assertion;
+    a reversed source is recorded as direction_off (auditable, non-blocking)."""
+    from_point = _pt("pf", "the flag did not cause the duplicates")
+    to_point = _pt("pt", "the flip raced the lease renewal")
+    snap = {"direct_edges": [],
+            "operator_edges": [_edge("NAND", {"pf": 1, "pt": 0}, source_id="pt")],
+            "mitigations": []}
+    detail = grading.operator_edge_detail(_PLANTED_NEGATE, [from_point], [to_point], snap)
+    assert detail["verdict"] == "edge_correct"
+    assert detail.get("direction_off") is True
+
+
+def test_grade_planted_operators_corpus_aggregation_and_cross_session() -> None:
+    """Corpus-level grade resolves each endpoint's anchor in ITS OWN session's
+    memory layer — the cross-session SUPERSEDE's to-anchor lives in the prior
+    session (wp07 → wp06) and is found there."""
+    supersede = dict(_PLANTED_NEGATE, id="wp07_x_op_04", expected_kind="SUPERSEDE")
+    supersede["from"] = {"verbatim_anchor": "per-service flags instead of one global flag"}
+    supersede["to"] = {"session_id": "wp06_x",
+                        "verbatim_anchor": "ship the lease fix all-at-once behind a single global kill flag"}
+    golds = {
+        "wp06_x": {"session_id": "wp06_x", "planted_operators": []},
+        "wp07_x": {"session_id": "wp07_x", "planted_operators": [supersede]},
+    }
+    points = {
+        "wp07_x": [_pt("pd2", "we ship per-service flags instead of one global flag now")],
+        "wp06_x": [_pt("pd1", "ship the lease fix all-at-once behind a single global kill flag")],
+    }
+    surfaces = {
+        "wp07_x": {"direct_edges": [{"rel_type": "CORRECTS", "from_id": "pd2", "to_id": "pd1"}],
+                   "operator_edges": [], "mitigations": []},
+        "wp06_x": {"direct_edges": [], "operator_edges": [], "mitigations": []},
+    }
+    audit = grading.grade_planted_operators(golds, points, surfaces)
+    assert audit["planted"] == 1
+    assert audit["edge_correct"] == 1
+    detail = audit["results"]["wp07_x_op_04"]
+    assert detail["owner_session"] == "wp07_x"
+    assert detail["from_session"] == "wp07_x" and detail["to_session"] == "wp06_x"
+    assert detail["verdict"] == "edge_correct"
+    # The SUPERSEDE lands under its OWNER session's bucket.
+    assert audit["by_session"]["wp07_x"]["planted"] == 1
+    assert audit["by_session"]["wp07_x"]["edge_correct"] == 1
+    # When the old decision never became a Point, the to-anchor is missing.
+    audit2 = grading.grade_planted_operators(
+        golds, {"wp07_x": points["wp07_x"], "wp06_x": []}, surfaces)
+    assert audit2["results"]["wp07_x_op_04"]["verdict"] == "to_content_missing"

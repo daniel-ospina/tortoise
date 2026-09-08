@@ -6,11 +6,16 @@ surfaces:
   - test_abuse_integration.py
   - test_acl_graph_users.py   # C4 #2113: per-graph FalkorDB ACL layer (docker-lane; skipif no URI)
   - test_battery_corpus_v11.py
+  - test_battery_ep_outcome.py
+  - test_battery_lane_matrix.py
   - test_battery_loader_fidelity.py
   - test_battery_parity_hash.py
+  - test_battery_provenance.py
   - test_battery_r1_seed.py
   - test_battery_report_writers.py
   - test_battery_schema_v11.py
+  - test_battery_seed_ingest.py
+  - test_battery_write_channel.py
   - test_delivery_tenancy.py  # C6 #2115: delivery-shape tenancy + session_recording per-graph override
   - test_onboarding_email_http.py
   - test_sentry.py
@@ -350,6 +355,7 @@ surfaces:
   - test_relationships_bounded.py
   - test_remove_context_migration.py
   - test_render.py
+  - test_entity_key_expansion.py  # #2518: entity/fact-augmented key expansion (C2, docker-lane)
   - test_retrieval.py
   - test_review_connections.py
   - test_round_trip_parity.py
@@ -379,7 +385,9 @@ surfaces:
   - test_tortoise_search.py
   - test_trash_quota.py            # #2467 restore respects the max_graphs quota (fake CP)
   - test_trash_inspect.py          # #2469 Inspect archive-run counting (fake CP)
+  - test_trash_name_race.py        # #2468 restore-vs-create name race (fake CP)
   - test_trash_lock.py             # #2470 restore lock timeout (fake CP)
+  - test_trash_grace.py            # #2465 trash recovery-window grace (supabase lane, fake CP)
   - test_tripwire.py
   - test_uri_env_mutations_declared.py
   - test_validity_windows.py
@@ -501,6 +509,7 @@ surfaces:
   - test_namespace_uri_mode.py
   - test_reader.py
   - test_reader_abstention_calibration.py
+  - test_entity_key_expansion.py  # #2518 (docker-lane leg, mirrors test_retrieval.py)
   - test_retrieval.py
   - test_sdk.py
   - test_sdk_dedup.py

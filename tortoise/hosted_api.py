@@ -9716,10 +9716,37 @@ async def _require_owner_admin_session(user: dict, team_id: str) -> None:
             status_code=403, detail="Requires owner or admin role in team")
 
 
+# #2304 default recovery window — MUST mirror backup_sweep.
+# _GRAPH_PURGE_GRACE_DAYS (the purge's erasure cutoff): restore and purge
+# share one window. If one changes the other must too.
+_TRASH_GRACE_DAYS = 7
+
+
+def _trash_grace_expired(deleted_at: object, now: datetime | None = None,
+                         grace_days: int = _TRASH_GRACE_DAYS) -> bool:
+    """#2465: True when the trash recovery window has passed — the graph is
+    pending permanent erasure (past-grace rows are NOT restorable; only the
+    purge clears them). A legacy tombstone (no deleted_at — predates #2304)
+    is past-grace by definition. Malformed stamps count as expired (they can
+    never be younger than the grace window). ISO-8601 UTC compare."""
+    if not deleted_at:
+        return True
+    try:
+        ts = datetime.fromisoformat(str(deleted_at).replace("Z", "+00:00"))
+    except ValueError:
+        return True
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=UTC)
+    now_ts = now or datetime.now(UTC)
+    if now_ts.tzinfo is None:
+        now_ts = now_ts.replace(tzinfo=UTC)
+    return now_ts > ts + timedelta(days=max(0, grace_days))
+
+
 async def _graph_row_probe(team_id: str, graph_id: str) -> dict | None:
     """Fetch ONE graph row (any status) across the mode branch — the
     trash-restore decision probe. Returns {kind, status, name, namespace,
-    purged_at} or None (unknown graph)."""
+    deleted_at, purged_at} or None (unknown graph)."""
     sdk = _make_sdk(namespace="registry")
     from tortoise.supabase_control import (
         get_control_plane,
@@ -9728,26 +9755,65 @@ async def _graph_row_probe(team_id: str, graph_id: str) -> dict | None:
     if is_supabase_enabled():
         rows = get_control_plane().query(
             "graphs",
-            select=["kind", "status", "name", "namespace", "purged_at"],
+            select=["kind", "status", "name", "namespace",
+                    "deleted_at", "purged_at"],
             filters=[("id", "eq", graph_id), ("team_id", "eq", team_id)],
         )
         if not rows:
             return None
         r = rows[0]
         return {"kind": r.get("kind"), "status": r.get("status"),
-                "name": r.get("name"), "namespace": r.get("namespace"),
+                "name": r.get("name"),
+                "namespace": r.get("namespace"),
+                "deleted_at": r.get("deleted_at"),
                 "purged_at": r.get("purged_at")}
     rows = sdk._get_registry().query(
         "MATCH (g:Graph {id:$gid, team_id:$tid}) "
         "RETURN g.kind, coalesce(g.status, 'active'), g.name, g.namespace, "
-        "g.purged_at",
+        "g.deleted_at, g.purged_at",
         params={"gid": graph_id, "tid": team_id},
     ).result_set
     if not rows:
         return None
     return {"kind": rows[0][0], "status": rows[0][1],
             "name": rows[0][2], "namespace": rows[0][3],
-            "purged_at": rows[0][4]}
+            "deleted_at": rows[0][4], "purged_at": rows[0][5]}
+
+
+async def _rollback_restore_name_race(team_id: str, graph_id: str) -> None:
+    """#2468: roll a just-restored row back to the trash when a concurrent
+    create won the name (registry lane — no unique index, so the flip
+    succeeded and left two live rows sharing a name). Best-effort with loud
+    logging: the endpoint already 409s; the rollback restores the invariant
+    (never leave duplicate live names). The deleted_at stamp restarts the
+    recovery window."""
+    sdk = _make_sdk(namespace="registry")
+    now = datetime.now(UTC).isoformat()
+    try:
+        from tortoise.supabase_control import (
+            get_control_plane,
+            is_supabase_enabled,
+        )
+        if is_supabase_enabled():
+            get_control_plane().query(
+                "graphs", method="PATCH",
+                filters=[("id", "eq", graph_id),
+                         ("team_id", "eq", team_id)],
+                json_body={"status": "deleted", "deleted_at": now,
+                           "purged_at": None, "purged_residual": False},
+            )
+        else:
+            sdk._get_registry().query(
+                "MATCH (g:Graph {id:$gid, team_id:$tid}) "
+                "SET g.status = 'deleted', g.deleted_at = $ts "
+                "REMOVE g.purged_at, g.purged_residual",
+                params={"gid": graph_id, "tid": team_id, "ts": now},
+            )
+    except Exception:
+        _logger.error(
+            "restore-name-race rollback failed for team=%s graph=%s "
+            "(duplicate live name possible — operator check)",
+            team_id, graph_id, exc_info=True)
 
 
 async def _trash_name_conflict(team_id: str, name: str,
@@ -9783,9 +9849,10 @@ async def list_trash(team_id: str,
     Owner/admin session only. Rows: [{graph_id, name, kind, deleted_at}]
     — purged rows (data physically erased) are never listed; the default
     graph can never be here. ``deleted_at`` absent = legacy tombstone
-    (predates #2304 — treated as past-grace by the purge). The purge sweep
-    erases past-grace rows on its cadence; until then they remain listed
-    and restorable (the recovery window is enforced by the purge)."""
+    (predates #2304 — treated as past-grace by the purge). Past-window and
+    legacy rows remain LISTED (pending the purge) but are NOT restorable:
+    restore 410s them (#2465 — the 7-day window is a hard server-side
+    bound); the purge erases them on its cadence."""
     await _require_owner_admin_session(user, team_id)
     team = await _team_node(team_id)
     if team is None:
@@ -9877,6 +9944,16 @@ async def _restore_trash_graph_locked(request: Request, user: dict,
             status_code=410,
             detail="Graph was purged (data physically erased) — not "
                    "restorable; re-create it from scratch")
+    # #2465: the recovery window is a HARD server-side bound — a row past
+    # its 7 days (or a legacy tombstone with no deleted_at) is pending
+    # permanent erasure and no longer restorable, matching the UI copy and
+    # privacy §6 ("refused for restoration once the window has passed").
+    # Only the purge clears these rows (operator cadence — #2317).
+    if _trash_grace_expired(row.get("deleted_at")):
+        raise HTTPException(
+            status_code=410,
+            detail="The 7-day recovery window has passed — this graph is "
+                   "pending permanent erasure and can no longer be restored")
     name = (row.get("name") or "").strip()
     if name and await _trash_name_conflict(team_id, name, graph_id):
         raise HTTPException(
@@ -9897,13 +9974,29 @@ async def _restore_trash_graph_locked(request: Request, user: dict,
         get_control_plane,
         is_supabase_enabled,
     )
-    if is_supabase_enabled():
-        from tortoise.supabase_control import restore_graph as sb_restore
-        restored = await asyncio.to_thread(
-            sb_restore, get_control_plane(), team_id, graph_id)
-    else:
-        restored = await asyncio.to_thread(sdk.graph_restore, team_id,
-                                           graph_id)
+    try:
+        if is_supabase_enabled():
+            from tortoise.supabase_control import restore_graph as sb_restore
+            restored = await asyncio.to_thread(
+                sb_restore, get_control_plane(), team_id, graph_id)
+        else:
+            restored = await asyncio.to_thread(sdk.graph_restore, team_id,
+                                               graph_id)
+    except RuntimeError as e:
+        # #2468: a concurrent create landing the freed name between the
+        # pre-check and the flip trips the partial unique index on the
+        # SUPABASE lane (uq_graphs_team_name_active → PostgREST 409 →
+        # RuntimeError "... HTTP 409" — cp.query() does NOT carry the
+        # PostgREST body, so the match keys on the status line, mirroring
+        # create_graph / invitation_mint conventions). Map to the
+        # client-facing 409 instead of a 500.
+        if is_supabase_enabled() and "HTTP 409" in str(e):
+            raise HTTPException(
+                status_code=409,
+                detail=f"The name {name!r} was taken by a concurrent create "
+                       "— rename the other graph or try the restore again") \
+                from None
+        raise
     if not restored:
         # Still reachable only if the row flipped between the probe and the
         # flip despite the lock (lane-level anomaly) — refuse loudly.
@@ -9911,6 +10004,15 @@ async def _restore_trash_graph_locked(request: Request, user: dict,
             status_code=410,
             detail="Graph was purged before the restore completed — not "
                    "restorable")
+    # #2468 (registry lane — no unique index): a create that raced the flip
+    # succeeded, leaving TWO live graphs sharing the name. Roll our row back
+    # to the trash (never leave duplicate live names) and 409 with a retry.
+    if name and await _trash_name_conflict(team_id, name, graph_id):
+        await _rollback_restore_name_race(team_id, graph_id)
+        raise HTTPException(
+            status_code=409,
+            detail=f"The name {name!r} was taken by a concurrent create — "
+                   "rename the other graph or try the restore again")
     _acl_user_create_hook(graph_id, team_id)
     await _async_audit_trash_restore(request, user, team_id, graph_id)
     return {"graph_id": graph_id, "status": "restored",

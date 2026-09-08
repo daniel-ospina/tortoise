@@ -25,9 +25,9 @@ def scenarios():
     return load_corpus(CORPUS)[:6]
 
 
-def _ctx(arm, scenario, msg="Vendor A is the best choice"):
+def _ctx(arm, scenario, msg="Vendor A is the best choice", prior=()):
     return AgentContext(scenario=scenario, episode_seed=7,
-                        prior_memories=(), user_message=msg)
+                        prior_memories=tuple(prior), user_message=msg)
 
 
 class TestAllArmsIsolation:
@@ -126,7 +126,12 @@ class TestA4Graph:
     def test_record_wires_evidence(self, scenarios, tmp_path):
         a = A4TortoiseArm(db_path=str(tmp_path / "a4b.db"))
         a.setup_scenarios([scenarios[0]])
-        a.record(_ctx(a, scenarios[0]), Memory(id="e1", content="finding",
-                                              kind="nand"))
+        # Closed-set write contract (#2291 I-1): the agent reads first, then
+        # records against the retrieved memories (targets from the closed
+        # set only).
+        prior = a.retrieve(_ctx(a, scenarios[0]))
+        assert prior, "seeded claims retrievable pre-record"
+        a.record(_ctx(a, scenarios[0], prior=prior), Memory(
+            id="e1", content="finding", kind="nand"))
         assert a.decide_cycles >= 1  # R2 mechanism-gate trajectory field
         a.close()

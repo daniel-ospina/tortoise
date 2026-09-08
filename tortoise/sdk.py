@@ -758,6 +758,23 @@ def _raise_update_point_status_error(proj, id: str) -> None:
 
 _logger = logging.getLogger(__name__)
 
+#: C2 (#2518, #2513): max Object-spine anchors resolved from the query text
+#: (the entity/fact-augmented key expansion pass's additive term source).
+#: Bounded small: entity grounding needs the SUBJECT anchors, not the whole
+#: Object vocabulary — a larger window would harvest noise keys from
+#: co-matching unrelated entities.
+_ENTITY_ANCHOR_LIMIT = 3
+# Wider DB-side fetch for C2 anchor resolution: run_fts_query applies its
+# own LIMIT in Cypher BEFORE the Python (score, id) re-sort, so a bare top-3
+# fetch would cut equal-score ties DB-side in arbitrary order (P2 #2557
+# review). Fetch a candidate pool and take the deterministic top-3 below.
+_ENTITY_ANCHOR_CANDIDATES = 20
+# Bound on the harvested alias pool before tokenization (P2 #2557 review:
+# a high-degree anchor is otherwise the only bound — every linked Point's
+# search_keys get collect()ed and tokenized per query).
+_ENTITY_ALIAS_MAX = 200
+_ENTITY_ALIAS_PER_ANCHOR = 64
+
 # #1709: process-local serialization for the registry recovery mint (FalkorDB
 # has no transactions; parity with the Supabase lane's FOR UPDATE row lock —
 # concurrent same-token recoveries must not overshoot the non-bootstrap key
@@ -3770,17 +3787,58 @@ class TortoiseSDK:
                     "node — deferred surface)")
 
         # ── events ──
+        # #2552: payload events are created under their CONTENT-ADDRESSED
+        # ``ev_<sha>`` ids (the ``_server_id`` channel — the same id
+        # execute_embed computed over the payload content and the same shape
+        # the hosted §7 commit path MERGEs, so a re-capture/duplicate content
+        # is an idempotent no-op, never a duplicate node) with the FULL payload
+        # content stored (name stays capped at 80 like the hosted §7 event
+        # write). Pre-fix the seam dropped the payload id (fresh ULID) and
+        # stored only the 80-char prefix → every payload operator whose
+        # endpoint was an Event (the S2 OUTPUT_CONTRACT allows
+        # point→event/event→point operators) resolved against a NON-EXISTENT
+        # ``ev_<sha>`` node and was dropped at commit (apply_payload_operators
+        # → create_operator existence check) — a silent operator-loss parity
+        # hole vs the hosted §7 path (commit_ops #1532 D3) and vs the points
+        # loop below it, which passes the payload id (``id=pid``).
+        event_failures: list[str] = []
         for ev in payload.get("events", []) or []:
             content = str(ev.get("content", "")).strip()
             if not content:
                 continue
-            try:  # noqa: SIM105
+            ev_id = str(ev.get("id") or "").strip()
+            if not ev_id:
+                # P2 (#2556 review r1): a payload event with a blank/missing
+                # id must still be content-addressed (ev_<sha>) — never a
+                # fresh ULID — or every operator referencing the
+                # content-derived ev_<sha> endpoint drops again at commit
+                # (the exact hole this fix closes; ULID would reopen it).
+                from tortoise.ids import content_hash
+                # Cap-parity with the sibling ev_ content-address paths
+                # (_stream_to_payload + extractor_v2 fold both hash
+                # content[:1000]) — a longer blank-id payload would otherwise
+                # mint an id the operators never reference (P2 r2 note).
+                ev_id = f"ev_{content_hash(content[:1000])[:62]}"
+            try:
                 self.create_event(
                     content[:80],
                     str(ev.get("eventKind", "core:occurrence")).rsplit(":", 1)[-1],
-                    sessionId=session_id, is_episodic=True)
-            except Exception:  # noqa: BLE001, RUF100
-                pass
+                    sessionId=session_id, is_episodic=True,
+                    _server_id=ev_id or None,
+                    content=content,
+                )
+            except Exception as exc:  # noqa: BLE001, RUF100 — non-fatal like
+                # the entity loop above: an event write failure is
+                # warning-grade (an operator referencing the event is then
+                # dropped by create_operator's existence check and logged by
+                # apply_payload_operators); capture itself stays ok.
+                event_failures.append(
+                    f"{type(exc).__name__}: event write failed for "
+                    f"{content[:60]!r}: {exc}")
+        if event_failures:
+            warnings.extend(event_failures)
+            warnings.append(
+                f"{len(event_failures)} extracted event(s) failed to write")
 
         # ── operators (IMPL/NAND + MITIGATES — shared commit semantics,
         #    #1532 D3: same artifact + deep-miss drop as the commit path via
@@ -11461,6 +11519,12 @@ class TortoiseSDK:
         recency_boost: float = 0.0,
         keep_numeric: bool = False,
         search_keys_prf: bool = False,
+        # #2518 (C2 #2513): entity/fact-augmented key expansion — a caller-
+        # gated ADDITIVE sparse-leg pass (default False = byte-identical).
+        # The eval arms it (TORTOISE_LME_ENTITY_KEY_EXPANSION); the product
+        # ask/search lanes adopt it only after the sealed A/B delta lands
+        # (the #1745 fail-safe default decision).
+        entity_key_expansion: bool = False,
         fusion_weights: dict | None = None,
         fusion_k: int = 60,
         w4_enrich: bool = True,
@@ -11552,6 +11616,20 @@ class TortoiseSDK:
             retrieved pool's top-5 hits' ``search_keys`` (never replacing
             original tokens; bounded raise to 12 + 8 terms). Default False =
             single pass, byte-identical. Ask lane passes True.
+        entity_key_expansion (C2 #2518, #2513): entity/fact-augmented key
+            expansion — the multi-session evidence-surface lever. The query's
+            own entities are resolved THROUGH THE INDEX (bounded FTS over the
+            Object-name spine); their linked points' E3 ``search_keys`` +
+            entity anchors (ALL sessions, via the ``aboutObject`` edges) become
+            ADDITIVE OR terms for a second sparse pass, so subject-matching
+            points from sessions the one-shot top-k starves can join the pool.
+            Fail-open (any fetch/query failure keeps the original fts leg),
+            additive-only, bounded (3 anchors; the A4 expansion-term cap 8),
+            deterministic. Default False = byte-identical (single pass).
+            OFF by default in the product (the #1745 fail-safe decision — the
+            sealed #2513 A/B gate decides adoption); the eval arms it via
+            ``TORTOISE_LME_ENTITY_KEY_EXPANSION`` / its ``--entity-key-
+            expansion`` flag.
         fusion_weights (A3 #2070): explicit per-strategy RRF weights
             override. Default None = the shared global resolution
             (TORTOISE_FUSION_WEIGHTS env → the shipped ``{"vector": 1.5}``)
@@ -11780,6 +11858,33 @@ class TortoiseSDK:
                 # must not have them silently re-introduced by the PRF pass
                 # (the alias harvest stays numeric-aware; only the original
                 # query's re-tokenization honors the opt-out).
+                keep_numeric=keep_numeric,
+            )
+            if expanded_fts is not None:
+                raw_results["fts"] = expanded_fts
+
+        # C2 (#2518, #2513): entity/fact-augmented key expansion (caller-
+        # gated, default OFF — the #1745 fail-safe posture). Additive-only
+        # and fail-open exactly like A4: the query's entity anchors resolve
+        # through the Object-name index and their linked points' E3
+        # ``search_keys`` re-run the sparse OR leg so same-subject points
+        # from OTHER sessions can surface; any failure keeps the ORIGINAL
+        # fts leg (byte-identical). Runs after A4 so the two second passes
+        # compose when both are on (each operates on the current fts leg).
+        # Point-only by design: the harvest resolves :Point linked to the
+        # anchors (search_keys live on points), so expanding an 'event' or
+        # 'operator' arm would merge POINT ids into an event/operator top-k
+        # and silently truncate the real hits (P1 #2557 review — the event
+        # arm returned [] where OFF returned the event).
+        if (entity_key_expansion and entity_type == "point"
+                and raw_results.get("fts")):
+            expanded_fts = self._entity_key_expansion_pass(
+                query, raw_results["fts"],
+                str_limit=str_limit,
+                excluded_statuses=() if include_terminal else None,
+                leg_trace=leg_trace,
+                # the anchor + alias tokenization honors the caller's A1
+                # numeric policy (same posture as the A4 P1-fix).
                 keep_numeric=keep_numeric,
             )
             if expanded_fts is not None:
@@ -12270,6 +12375,175 @@ class TortoiseSDK:
         if leg_trace is not None:
             # the second pass's own per-leg entry rides the shared trace
             # (the FIRST pass's entry was already merged by degradation_chain)
+            leg_trace.extend(_exp_trace)
+        seen = {pid for pid, _score in expanded}
+        merged = list(expanded)
+        merged.extend((pid, s) for pid, s in fts_hits if pid not in seen)
+        return merged
+
+    # ── C2 (#2518, #2513): entity/fact-augmented key expansion ─────────────
+    # The multi-session evidence-surface lever (scoping §4 C2): per-point
+    # entity anchors + E3 ``search_keys`` that extraction already writes but
+    # retrieval never queried. Entity anchors: at most ``_ENTITY_ANCHOR_LIMIT``
+    # Object-spine nodes resolved FROM THE QUERY (bounded FTS over the
+    # Object-name index); harvest: the anchors' names + the E3 ``search_keys``
+    # of EVERY linked Point across ALL sessions (the ``aboutObject`` join —
+    # the cross-session join key (b) of the scoping doc). The alias pool
+    # re-enters ``build_or_query``'s bounded expansion tail (never displaces
+    # original query tokens — the A4 slot-reservation regression guard).
+    def _entity_key_expansion_pass(
+        self,
+        query: str,
+        fts_hits: list[tuple[str, float]],
+        *,
+        str_limit: int,
+        excluded_statuses: tuple | None,
+        leg_trace: list[dict] | None,
+        keep_numeric: bool = False,
+    ) -> list[tuple[str, float]] | None:
+        """C2 (#2518): entity/fact-augmented key expansion — bounded second
+        sparse pass with ADDITIVE entity anchors + linked points' E3 keys.
+
+        Three deterministic steps (each bounded, each fail-open):
+
+        1. **Anchor resolution (the query's own entities, via the index)** —
+           bounded FTS over the Object-name spine with the query text
+           (``run_fts_query(entity_type="object")``, top ``_ENTITY_ANCHOR_LIMIT``
+           by (score, id) — stable tiebreak). A question that names its
+           subject maps to the Object nodes whose names share its tokens;
+           a question with no entity-name overlap resolves zero anchors and
+           the pass no-ops (quality gate by construction).
+        2. **Key harvest (the entity spine join)** — for each resolved
+           anchor, the anchor's own name + the E3 ``search_keys`` of EVERY
+           Point linked ``-[:aboutObject]->`` to it, across ALL sessions
+           (one batched Cypher query; the cross-session subject join).
+        3. **Additive sparse re-run** — ``run_fts_query(expansion_terms=…)``:
+           original query tokens keep their OR slots and the harvested
+           aliases fill the bounded expansion tail (``build_or_query``'s
+           A4 cap — never displacing an original token). Points in OTHER
+           sessions that carry the subject's keys in their index text
+           (content \u222a search_keys) now match and join the fts leg.
+
+        Fail-open contract (mirrors A4 #2070): any fetch/query failure or an
+        empty harvest returns ``None`` and the caller keeps the ORIGINAL fts
+        leg — byte-identical behavior; the expansion can never turn a working
+        lane into a broken one. Returns the MERGED fts leg (expanded run
+        first, first-pass-only ids appended in their original order) when the
+        expansion ran and returned hits; ``None`` otherwise.
+        """
+        if not fts_hits or not query or not query.strip():
+            return None
+        from .sparse import tokenize_sparse_query
+        original_tokens = tokenize_sparse_query(
+            query, keep_numeric=keep_numeric)
+        if not original_tokens:
+            return None
+        proj = self._get_proj()
+        # Step 1 — anchor resolution via the Object-name FTS index. No
+        # leg_trace here: this is entity RESOLUTION, not the point fts leg
+        # (recording it as an "fts" entry would mislabel the trace).
+        try:
+            from .search_engine import run_fts_query
+            anchor_rows = run_fts_query(
+                proj.g, query, entity_type="object",
+                limit=_ENTITY_ANCHOR_CANDIDATES,
+                keep_numeric=keep_numeric)
+        except Exception:
+            _logger.warning(
+                "C2 anchor resolution failed — keeping the original fts "
+                "leg", exc_info=True)
+            return None
+        if not anchor_rows:
+            return None
+        # stable deterministic order: (score desc, id asc) normalizes the
+        # engine's row order before the harvest (no cross-run drift).
+        anchors = sorted(
+            anchor_rows, key=lambda r: (-r[1], r[0]))[:_ENTITY_ANCHOR_LIMIT]
+        anchor_ids = [pid for pid, _score in anchors]
+        # Step 2 — one batched harvest: anchor names + the E3 search_keys of
+        # every linked Point (ANY session — the spine join that lets a
+        # same-subject point from a session the one-shot top-k starves match
+        # the expanded OR union via its own alias keys).
+        try:
+            rows = proj.g.query(
+                "MATCH (o:Object) WHERE o.id IN $ids "
+                "OPTIONAL MATCH (o)<-[:aboutObject]-(p:Point) "
+                "RETURN o.id, o.name, collect(coalesce(p.search_keys, ''))",
+                params={"ids": anchor_ids},
+            ).result_set
+        except Exception:
+            _logger.warning(
+                "C2 key harvest failed — keeping the original fts leg",
+                exc_info=True)
+            return None
+        aliases: list[str] = []
+        for row in rows or []:
+            name = str(row[1] or "").strip()
+            if name:
+                aliases.append(name)
+            # Bound per-anchor fan-out client-side (the collect() has no
+            # LIMIT — a high-degree anchor must not unboundedly feed the
+            # tokenizer; P2 #2557 review).
+            per_anchor = 0
+            for v in (row[2] or []):
+                if per_anchor >= _ENTITY_ALIAS_PER_ANCHOR:
+                    break
+                # search_keys is stored FLAT (R2 D3) but older nodes may
+                # still carry arrays — accept both (expansion_tokens does).
+                if isinstance(v, (list, tuple)):
+                    values = [str(x) for x in v if x]
+                elif v:
+                    values = [str(v)]
+                else:
+                    values = []
+                for x in values:
+                    x = x.strip()
+                    if x and per_anchor < _ENTITY_ALIAS_PER_ANCHOR:
+                        aliases.append(x)
+                        per_anchor += 1
+        # Deterministic pool: DB row/collect order is not cross-run stable,
+        # and the expansion tokenizer's stable length-desc sort preserves
+        # ties — so equal-length candidates must not arrive in arbitrary
+        # order (P2 #2557 review). Sort (alias asc), dedupe, cap.
+        seen_alias: set[str] = set()
+        ordered: list[str] = []
+        for a in sorted(aliases):
+            if a in seen_alias:
+                continue
+            seen_alias.add(a)
+            ordered.append(a)
+            if len(ordered) >= _ENTITY_ALIAS_MAX:
+                break
+        aliases = ordered
+        if not aliases:
+            return None
+        # An alias pool that tokenizes to ONLY original-query tokens cannot
+        # add recall (build_or_query's reserved-slot contract would drop it
+        # all) — no-op instead of a wasted identical second pass.
+        orig_set = set(original_tokens)
+        new_toks: set[str] = set()
+        for alias in aliases:
+            new_toks.update(tokenize_sparse_query(alias, keep_numeric=True))
+        if not (new_toks - orig_set):
+            return None
+        # Step 3 — the additive second sparse pass (A4 merge contract).
+        _exp_trace: list[dict] = []
+        try:
+            expanded = run_fts_query(
+                proj.g, query, entity_type="point", limit=str_limit,
+                excluded_statuses=excluded_statuses,
+                keep_numeric=keep_numeric,
+                expansion_terms=aliases,
+                leg_trace=_exp_trace,
+            )
+        except Exception:
+            _logger.warning(
+                "C2 expansion FTS pass failed — keeping the original fts "
+                "leg", exc_info=True)
+            return None
+        if not expanded:
+            return None
+        if leg_trace is not None:
             leg_trace.extend(_exp_trace)
         seen = {pid for pid, _score in expanded}
         merged = list(expanded)

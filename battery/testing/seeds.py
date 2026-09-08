@@ -218,6 +218,52 @@ def seed_full_legacy(namespace: str | Path, scenario_id: str) -> None:
         proj.close()
 
 
+def setup_seed_mode_raw(namespace: str | Path, scenario_id: str) -> SeededStore:
+    """RAW reference-lane seed (#2291 I-2 equivalence): FalkorProjection +
+    batch_setup DIRECTLY (bypassing the arm — the real arm now seeds via
+    the SDK ingest lane). Same content contract (derive_scenario_graph +
+    seed_mode); used ONLY by the equivalence test, never the real path.
+    The owned namespace is always purged first on the server lane; the
+    projection is closed after seeding so a later SDK handle can reopen the
+    same store."""
+    sc = _scenario(scenario_id)
+    Path(namespace).mkdir(parents=True, exist_ok=True)
+    purge_owned_namespace(namespace, scenario_id)
+    proj = _open_proj(namespace)
+    try:
+        from battery.runner.setup import batch_setup
+        batch_setup(proj, [sc], namespaced=True, seed_mode=True)
+    finally:
+        proj.close()
+    arm = A4TortoiseArm(db_path=str(_db_file(namespace)))
+    # Read-side handles only (no re-seeding — the raw graph was written by
+    # the projection on the same file); retrieve goes through the arm's
+    # product read surface for parity.
+    arm.setup_scenarios([sc], seed_lane=False)
+    return _RawSeededStore(arm, sc)
+
+
+class _RawSeededStore:
+    """Read-side facade over the RAW reference-lane store (equivalence
+    mirror of SeededStore: retrieve via the arm's read surface)."""
+
+    def __init__(self, arm: A4TortoiseArm, scenario: Scenario):
+        self._arm = arm
+        self._scenario = scenario
+
+    def retrieve(self, context_text: str = ""):
+        return SeededStore(self._arm, self._scenario).retrieve(context_text)
+
+    def surface_text(self) -> str:
+        return " ".join(str(m) for m in self.retrieve(""))
+
+    def find_content(self, fragment: str) -> list[str]:
+        return SeededStore(self._arm, self._scenario).find_content(fragment)
+
+    def close(self) -> None:
+        self._arm.close()
+
+
 def _hermetic(arm_cfg) -> bool:
     """Hermetic-store arms: a4 by adapter family, or any arm whose arms.yaml
     config declares HERMETIC_CAPABILITY_KEY (documented capability seam —
