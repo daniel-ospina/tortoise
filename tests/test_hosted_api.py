@@ -2923,12 +2923,12 @@ class TestBackupEndpoints:
         _store = _MS()  # SHARED instance — _backup_storage is called per request
         monkeypatch.setattr(_ha, "_backup_storage", lambda: _store)
         # Decouple the machinery tests from the tier gate (#656): pricing.json
-        # marks pro.daily_backups "planned" (not live), so no tier passes the
+        # marks pro.hourly_backups "planned" (not live), so no tier passes the
         # gate today. This fixture represents "Pro WITH the feature enabled" —
         # the gate allowlist itself is tested by test_backup_tier_allowlist_from_pricing.
         from tortoise import pricing as _pricing
         monkeypatch.setattr(
-            _pricing, "daily_backups_enabled", lambda tier: tier == "pro"
+            _pricing, "hourly_backups_enabled", lambda tier: tier == "pro"
         )
         app.dependency_overrides[get_current_team] = lambda: dict(TEST_TEAM, tier="pro")
         # Epic #1647 (docker lane): the backup/restore seam resolves the team
@@ -2957,7 +2957,7 @@ class TestBackupEndpoints:
         assert r.status_code == 402
 
     def test_backup_solo_tier_402(self, client):
-        """Solo tier cannot create backups (daily_backups:false in pricing.json).
+        """Solo tier cannot create backups (hourly_backups:false in pricing.json).
 
         Regression test for #656 — the old gate blocked only (None, 'free'),
         so a solo-tier team would have slipped past the backups gate.
@@ -2980,7 +2980,7 @@ class TestBackupEndpoints:
 
     def test_backup_tier_allowlist_from_pricing(self, client):
         """The gate strictly mirrors pricing.json: only a real JSON `true`
-        for features.daily_backups passes. "planned" (string) is NOT live —
+        for features.hourly_backups passes. "planned" (string) is NOT live —
         so today NO tier passes (feature not shipped), and flipping pricing.json
         to `true` enables a tier with zero code change (#656).
 
@@ -2992,13 +2992,13 @@ class TestBackupEndpoints:
         pricing = _load_pricing()
         expected_allowed = [
             tier for tier, spec in pricing.get("tiers", {}).items()
-            if spec.get("features", {}).get("daily_backups") is True
+            if spec.get("features", {}).get("hourly_backups") is True
         ]
         expected_blocked = [
             tier for tier in pricing.get("tiers", {})
             if tier not in expected_allowed
         ]
-        # Every tier in pricing.json behaves per its daily_backups flag.
+        # Every tier in pricing.json behaves per its hourly_backups flag.
         for tier in expected_allowed:
             app.dependency_overrides[get_current_team] = lambda t=tier: dict(
                 TEST_TEAM, tier=t
@@ -3006,7 +3006,7 @@ class TestBackupEndpoints:
             try:
                 r = client.post("/backups")
                 assert r.status_code != 402, (
-                    f"{tier} has daily_backups:true in pricing.json but was blocked: {r.text}"
+                    f"{tier} has hourly_backups:true in pricing.json but was blocked: {r.text}"
                 )
             finally:
                 app.dependency_overrides.clear()
@@ -3017,7 +3017,7 @@ class TestBackupEndpoints:
             try:
                 r = client.post("/backups")
                 assert r.status_code == 402, (
-                    f"{tier} lacks daily_backups:true in pricing.json but passed the gate"
+                    f"{tier} lacks hourly_backups:true in pricing.json but passed the gate"
                 )
             finally:
                 app.dependency_overrides.clear()

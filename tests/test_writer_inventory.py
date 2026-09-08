@@ -700,7 +700,7 @@ class TestCreateTeam:
         store = MemoryStorage()  # SHARED — _backup_storage is called per request
         monkeypatch.setattr(ha_mod, "_backup_storage", lambda: store)
         monkeypatch.setattr(
-            _pricing, "daily_backups_enabled", lambda tier: tier == "pro"
+            _pricing, "hourly_backups_enabled", lambda tier: tier == "pro"
         )
         r = tc.post("/v1/teams", json={"name": "acme"})
         assert r.status_code == 200, r.text
@@ -1289,10 +1289,10 @@ class TestBackupEndpointsSupabaseGraphName:
         )
         store = MemoryStorage()  # SHARED — _backup_storage is called per request
         monkeypatch.setattr(ha_mod, "_backup_storage", lambda: store)
-        # Backups gate: pro passes (pricing.json still marks daily_backups
+        # Backups gate: pro passes (pricing.json still marks hourly_backups
         # "planned", so the allowlist is patched like test_hosted_api does).
         monkeypatch.setattr(
-            _pricing, "daily_backups_enabled", lambda tier: tier == "pro"
+            _pricing, "hourly_backups_enabled", lambda tier: tier == "pro"
         )
         # SDK-created team: the graph is named per teams.graph_name — NOT
         # team_{id} (#768). team_myapp != team_team-pro-924, so a team_{id}

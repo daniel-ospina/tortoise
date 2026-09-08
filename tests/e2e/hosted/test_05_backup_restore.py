@@ -3,7 +3,7 @@
 Reconstructed case (#303; E2E-5-D appears nowhere in the surviving repo —
 reconstructed from its journey position between billing and export/delete).
 The full journey through the REAL HTTP surface: Pro tenant (hermetic webhook
-bump; fixture pricing enables daily_backups) → POST /backups → mutate the
+bump; fixture pricing enables hourly_backups) → POST /backups → mutate the
 live graph → /backups/restore(confirm=true) → original content restored.
 Enabled by the #303 TORTOISE_BACKUP_STORAGE=memory seam + TORTOISE_PRICING_PATH.
 

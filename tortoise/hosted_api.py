@@ -18634,18 +18634,20 @@ def _backup_storage() -> R2Storage | MemoryStorage:
 
 
 def _require_backup_tier(team: dict) -> None:
-    """Backups gated on pricing.json daily_backups feature flag (#656).
+    """Backups gated on pricing.json hourly_backups feature flag (#656).
 
-    The allowlist is derived from product/pricing.json (NOT hardcoded) so
-    the gate can never drift from the canonical pricing source.
+    #2317: named for the ACTUAL delivered cadence — the sweep driver runs
+    hourly (RPO ≤1h typical / ≤2h worst), not daily. The allowlist is derived
+    from product/pricing.json (NOT hardcoded) so the gate can never drift
+    from the canonical pricing source.
     """
-    from tortoise.pricing import daily_backups_enabled
+    from tortoise.pricing import hourly_backups_enabled
 
     tier = team.get("tier")
-    if not daily_backups_enabled(tier):
+    if not hourly_backups_enabled(tier):
         raise HTTPException(
             status_code=402,
-            detail="Backups are a Pro feature — upgrade to enable daily backups",
+            detail="Backups are a Pro feature — upgrade to enable hourly backups",
         )
 
 
@@ -19111,6 +19113,15 @@ _WATCHER: BackupWatcher | None = None  # spawned in _lifespan (driver-disabled l
 _DRIVER_HEARTBEAT_KEY = "ops/driver-heartbeat.json"
 _LAST_DRILL_AT: float = 0.0  # in-memory drill cooldown (single-instance, resets on restart)
 _DRILL_COOLDOWN_S = 3600
+# #2317: committed per-team restore RTO — restore-op ≤ 15 min measured from
+# drill accept to verified scratch restore (drill_ok), carried from the
+# retired registry-era target (docs/ops/registry-backup-dr.md). Every drill
+# records duration_s and compares to this; the SCHEDULED drill opens a
+# RESTORE_DRILL_FAILED incident when the RTO is breached (restore succeeded
+# but too slowly) or the drill fails outright.
+_DRILL_RTO_S = 900.0
+_DRILL_RECORD_KEY = "ops/drills/last.json"
+_DRILL_FAILED_KIND = "RESTORE_DRILL_FAILED"
 _SWEEP_TEAM_LOCKS: dict[str, threading.Lock] = {}
 _SWEEP_LOCKS_GUARD = threading.Lock()
 _SWEEP_INFLIGHT = asyncio.Lock()
@@ -19443,6 +19454,18 @@ async def backups_status(request: Request):
         pass  # not-yet-written driver heartbeat is benign
     except Exception as e:
         storage_error = f"{storage_error}; driver-heartbeat read: {e}" if storage_error else f"driver-heartbeat read: {e}"
+    # #2317: surface the last drill record (ops/drills/last.json — pass/fail
+    # + measured restore time vs the committed RTO) so scheduled-restore-drill
+    # outcomes are REPORTED, not just logged in the workflow.
+    last_drill = None
+    try:
+        parsed = _json.loads(storage.download(_DRILL_RECORD_KEY))
+        if isinstance(parsed, dict):
+            last_drill = parsed
+    except KeyError:
+        pass  # no drill ever ran — benign
+    except Exception as e:
+        storage_error = f"{storage_error}; drill-record read: {e}" if storage_error else f"drill-record read: {e}"
 
     watcher_age_min = None
     if hb.get("last_poll_at"):
@@ -19466,6 +19489,7 @@ async def backups_status(request: Request):
         "no_teams": watcher_status.get("no_teams", False),
         "unknown": watcher_status.get("unknown", False),
         "last_sweep": last_sweep,
+        "last_drill": last_drill,
         "watcher": {
             "running": bool(watcher and watcher._thread and watcher._thread.is_alive()),
             "last_poll_at": hb.get("last_poll_at"),
@@ -19585,11 +19609,201 @@ async def backups_rebaseline(request: Request, body: dict):
             "graph_id": graph_id, "node_count": count}
 
 
+def _drill_record(
+    *,
+    run: str,
+    status: str,
+    team_id: str,
+    graph_id: str,
+    backup_key: str,
+    duration_s: float | None,
+    detail: dict | None = None,
+) -> dict:
+    """#2317 drill record — pass/fail + measured restore time vs the RTO.
+
+    ``status`` is one of ``ok`` (restored within RTO), ``rto_breach``
+    (restored but slower than the committed ≤15-min target), ``rejected``
+    (ValueError — unresolvable/foreign/corrupt archive), ``failed``
+    (RuntimeError — storage/DB fault) or ``no_candidates`` (scheduled drill
+    found no eligible nested archive). Written to ops/drills/last.json and
+    surfaced on GET /v1/internal/backups/status → last_drill.
+    """
+    within = None
+    if duration_s is not None:
+        within = bool(duration_s <= _DRILL_RTO_S)
+    return {
+        "run": run,
+        "at": datetime.now(UTC).isoformat(),
+        "status": status,  # ok | rto_breach | rejected | failed | no_candidates
+        "ok": status == "ok",
+        "team_id": team_id,
+        "graph_id": graph_id,
+        "backup_key": backup_key,
+        "duration_s": round(float(duration_s), 3) if duration_s is not None else None,
+        "rto_s": _DRILL_RTO_S,
+        "within_rto": within,
+        "detail": detail or {},
+    }
+
+
+def _write_drill_record(storage, record: dict) -> bool:
+    """Best-effort durable drill record (ops/drills/last.json). A record-write
+    failure never fails the drill itself — the /status.last_drill surface
+    simply stays at its previous value until the next successful write."""
+    try:
+        storage.upload(
+            _DRILL_RECORD_KEY,
+            _json.dumps(record, indent=2).encode("utf-8"),
+            content_type="application/json",
+        )
+        return True
+    except Exception as e:
+        _logger.warning("drill record write failed: %s", e)
+        return False
+
+
+def _drill_execute(
+    *,
+    cfg,
+    registry,
+    db,
+    storage,
+    team_id: str,
+    backup_key: str,
+    graph_name: str | None = None,
+    run: str = "manual",
+) -> dict:
+    """One drill attempt — resolve → restore → scratch cleanup → record.
+
+    Sync (blocking redis/R2 round-trips) — the endpoints run it in a worker
+    thread. ``graph_name`` may be pre-resolved by a caller (drill-scheduled
+    pre-filters candidates through the ACTIVE seam); None resolves here (the
+    manual drill surface). Restores the real archive into ``_drill_*``
+    scratch (zero production writes — asserted server-side; the registry
+    end-stamp is skipped via drill=True).
+
+    Raises ValueError (drill REJECTED: unresolvable/foreign/corrupt archive)
+    and RuntimeError (drill FAILED: storage/DB fault) — the endpoints map to
+    HTTP 409/503. Both paths record the outcome first.
+
+    Returns the ``drill_ok`` payload: ``{status, target_graph, duration_s,
+    rto_s, within_rto, record, **restore_result}``.
+    """
+    from tortoise.hosted_backup import _parse_backup_key, restore_backup
+
+    ts = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
+    target_graph = f"_drill_{ts}"
+    graph_id = ""
+    start = time.monotonic()
+    try:
+        if graph_name is None:
+            from tortoise.backup_sweep import resolve_active_graph
+
+            _parsed_team, _parsed_graph, _ = _parse_backup_key(backup_key)
+            graph_id = _parsed_graph or "default"
+            # #2313: the artifact's key shape names its graph; resolve the
+            # target through the ACTIVE-graph seam (tombstone guard — a drill
+            # of a deleted/quarantined graph is refused) so the drill
+            # exercises the REAL graph's name, not a hardcoded team_{id}.
+            graph_name = resolve_active_graph(registry, team_id, graph_id)["graph_name"]
+        else:
+            try:  # parse only for the record (graph_name already resolved)
+                _parsed_team, _parsed_graph, _ = _parse_backup_key(backup_key)
+                graph_id = _parsed_graph or "default"
+            except ValueError:
+                graph_id = ""
+        result = restore_backup(
+            db, registry, storage, backup_key,
+            team_id=team_id, graph_name=graph_name,
+            key=cfg.backup_key, target_graph=target_graph, drill=True,
+        )
+        duration_s = time.monotonic() - start
+    except ValueError as e:
+        _write_drill_record(
+            storage,
+            _drill_record(
+                run=run, status="rejected", team_id=team_id, graph_id=graph_id,
+                backup_key=backup_key, duration_s=time.monotonic() - start,
+                detail={"error": str(e)},
+            ),
+        )
+        raise
+    except RuntimeError as e:
+        _write_drill_record(
+            storage,
+            _drill_record(
+                run=run, status="failed", team_id=team_id, graph_id=graph_id,
+                backup_key=backup_key, duration_s=time.monotonic() - start,
+                detail={"error": str(e)},
+            ),
+        )
+        raise
+    # Cleanup the scratch graph (best-effort; boot GC is the backstop).
+    try:  # noqa: SIM105
+        db.select_graph(target_graph).delete()
+    except Exception:
+        pass
+    within_rto = duration_s <= _DRILL_RTO_S
+    record = _drill_record(
+        run=run, status="ok" if within_rto else "rto_breach",
+        team_id=team_id, graph_id=graph_id, backup_key=backup_key,
+        duration_s=duration_s, detail={"restored": result.get("restored")},
+    )
+    _write_drill_record(storage, record)
+    return {
+        "status": "drill_ok",
+        "target_graph": target_graph,
+        "duration_s": round(duration_s, 3),
+        "rto_s": _DRILL_RTO_S,
+        "within_rto": within_rto,
+        "record": record,
+        **result,
+    }
+
+
+def _scheduled_drill(*, cfg, registry, db, storage) -> dict:
+    """Scheduled (monthly, unattended) drill body — sync; worker-threaded.
+
+    Picks the OLDEST eligible nested archive across teams (see
+    ``backup_sweep.list_drill_candidates``), skips candidates whose graph is
+    no longer ACTIVE (quarantined/deleted — #2304 tombstone guard), drills
+    the first eligible one, and records pass/fail + measured restore time.
+    With no eligible archive it records ``no_candidates`` and returns that
+    status (the chronic no-archive state is the existing LIVENESS_NO_WORK /
+    NEVER_BACKED_UP alarm's job, not a drill failure).
+    """
+    from tortoise.backup_sweep import list_drill_candidates, resolve_active_graph
+
+    candidates = list_drill_candidates(storage)  # RuntimeError on list failure
+    for cand in candidates:
+        try:  # skip candidates whose graph is not ACTIVE (never a drill source)
+            row = resolve_active_graph(registry, cand["team_id"], cand["graph_id"])
+        except ValueError:
+            continue
+        return _drill_execute(
+            cfg=cfg, registry=registry, db=db, storage=storage,
+            team_id=cand["team_id"], backup_key=cand["backup_key"],
+            graph_name=row["graph_name"], run="scheduled",
+        )
+    record = _drill_record(
+        run="scheduled", status="no_candidates", team_id="", graph_id="",
+        backup_key="", duration_s=None,
+        detail={
+            "reason": "no eligible nested archive across teams",
+            "candidates_seen": len(candidates),
+        },
+    )
+    _write_drill_record(storage, record)
+    return {"status": "no_candidates", "record": record}
+
+
 @app.post("/v1/internal/backups/drill")
 async def backups_drill(request: Request, body: dict):
     """Drill-only restore: scratch target, internal-key auth, zero production
     writes (drill:true skips the registry end-stamp; live-phase binds the
-    scratch target). Cooldown ≥1h between drill accepts (in-memory)."""
+    scratch target). Cooldown ≥1h between drill accepts (in-memory). #2317:
+    every drill now records pass/fail + measured restore time to
+    ops/drills/last.json (surfaced on /status → last_drill)."""
     _check_internal(request)
     global _LAST_DRILL_AT
     cfg = _backup_config_safe()
@@ -19606,38 +19820,99 @@ async def backups_drill(request: Request, body: dict):
         raise HTTPException(status_code=429, detail="drill cooldown — ≥1h between drills")
     _LAST_DRILL_AT = _time.time()
 
-    from tortoise.backup_sweep import resolve_active_graph
-    from tortoise.hosted_backup import _parse_backup_key, restore_backup
+    reg_sdk = _registry_sdk()
+    registry = reg_sdk._get_registry()
+    db = reg_sdk._get_proj().db
+    storage = _backup_storage()
+    try:
+        return await asyncio.to_thread(
+            _drill_execute, cfg=cfg, registry=registry, db=db, storage=storage,
+            team_id=team_id, backup_key=backup_key,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=f"Drill rejected: {e}") from e
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=f"Drill failed: {e}") from e
+
+
+@app.post("/v1/internal/backups/drill-scheduled")
+async def backups_drill_scheduled(request: Request):
+    """#2317: SCHEDULED (monthly, unattended) verification-restore drill.
+
+    Auto-selects the OLDEST eligible nested archive across teams (tombstoned/
+    deleted graphs' archives are skipped, never drilled — #2304), restores it
+    into ``_drill_*`` scratch via the shared drill core, and records
+    pass/fail + measured restore time to ops/drills/last.json (surfaced on
+    /status → last_drill). A failed drill OR an RTO breach (restore slower
+    than the committed ≤15 min) opens a deduplicated RESTORE_DRILL_FAILED
+    incident (GitHub issue + Telegram, existing dual-channel); success and
+    the no-candidates state resolve it. Same ≥1h cooldown and boot-GC
+    backstop as the manual drill. Intended caller: the monthly
+    registry-drill-cron workflow.
+    """
+    _check_internal(request)
+    global _LAST_DRILL_AT
+    cfg = _backup_config_safe()
+    if cfg is None:
+        raise HTTPException(status_code=503, detail="Backup sweep disabled")
+    import time as _time
+
+    if _time.time() - _LAST_DRILL_AT < _DRILL_COOLDOWN_S:
+        raise HTTPException(status_code=429, detail="drill cooldown — ≥1h between drills")
+    _LAST_DRILL_AT = _time.time()
 
     reg_sdk = _registry_sdk()
     registry = reg_sdk._get_registry()
     db = reg_sdk._get_proj().db
     storage = _backup_storage()
-    ts = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
-    target_graph = f"_drill_{ts}"
+    alerts = _alert_store_from(cfg)
     try:
-        # #2313: the artifact's key shape names its graph; resolve the target
-        # through the ACTIVE-graph seam (tombstone guard — a drill of a
-        # deleted/quarantined graph is refused) so the drill exercises the
-        # REAL graph's name, not a hardcoded team_{id}.
-        _parsed_team, _parsed_graph, _ = _parse_backup_key(backup_key)
-        _graph_id = _parsed_graph or "default"
-        _row = resolve_active_graph(registry, team_id, _graph_id)
         result = await asyncio.to_thread(
-            restore_backup, db, registry, storage, backup_key,
-            team_id=team_id, graph_name=_row["graph_name"],
-            key=cfg.backup_key, target_graph=target_graph, drill=True,
+            _scheduled_drill, cfg=cfg, registry=registry, db=db, storage=storage,
         )
     except ValueError as e:
-        raise HTTPException(status_code=409, detail=f"Drill rejected: {e}")  # noqa: B904
+        try:
+            await asyncio.to_thread(
+                alerts.open_incident, _DRILL_FAILED_KIND, "global",
+                {"error": str(e), "source": "drill-scheduled"},
+            )
+        except Exception:
+            _logger.warning("RESTORE_DRILL_FAILED open failed (ValueError path)", exc_info=True)
+        raise HTTPException(status_code=409, detail=f"Drill rejected: {e}") from e
     except RuntimeError as e:
-        raise HTTPException(status_code=503, detail=f"Drill failed: {e}")  # noqa: B904
-    # Cleanup the scratch graph (best-effort; boot GC is the backstop).
-    try:  # noqa: SIM105
-        db.select_graph(target_graph).delete()
-    except Exception:
-        pass
-    return {"status": "drill_ok", "target_graph": target_graph, **result}
+        try:
+            await asyncio.to_thread(
+                alerts.open_incident, _DRILL_FAILED_KIND, "global",
+                {"error": str(e), "source": "drill-scheduled"},
+            )
+        except Exception:
+            _logger.warning("RESTORE_DRILL_FAILED open failed (RuntimeError path)", exc_info=True)
+        raise HTTPException(status_code=503, detail=f"Drill failed: {e}") from e
+    if result.get("status") == "drill_ok" and not result.get("within_rto", True):
+        # Restore succeeded but missed the committed RTO — incident-worthy
+        # (restore speed is a target, not an accident).
+        try:
+            await asyncio.to_thread(
+                alerts.open_incident, _DRILL_FAILED_KIND, "global",
+                {
+                    "error": "restore exceeded the committed RTO",
+                    "duration_s": result.get("duration_s"),
+                    "rto_s": result.get("rto_s"),
+                    "team_id": (result.get("record") or {}).get("team_id"),
+                    "backup_key": (result.get("record") or {}).get("backup_key"),
+                },
+            )
+        except Exception:
+            _logger.warning("RESTORE_DRILL_FAILED open failed (RTO-breach path)", exc_info=True)
+    else:
+        # success (or no eligible archive) closes any open incident
+        try:
+            await asyncio.to_thread(
+                alerts.resolve_incident, _DRILL_FAILED_KIND, "global"
+            )
+        except Exception:
+            _logger.warning("RESTORE_DRILL_FAILED resolve failed", exc_info=True)
+    return result
 
 
 def _dashboard_base() -> str:

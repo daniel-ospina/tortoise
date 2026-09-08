@@ -1,0 +1,41 @@
+name: registry-drill-cron
+
+# #2317 scheduled verification-restore drill — monthly, unattended. Restores
+# the OLDEST eligible nested archive into _drill_* scratch via the existing
+# drill machinery (endpoint cooldown + tombstone guard + boot GC reused) and
+# records pass/fail + measured restore time server-side (ops/drills/last.json,
+# surfaced on /status → last_drill; docs/ops/registry-backup-dr.md).
+#
+# Alerting is app-side: a failed drill or an RTO breach (> 15 min) opens a
+# deduplicated RESTORE_DRILL_FAILED incident (GH issue + Telegram) using the
+# app's DR_ISSUES_PAT/Telegram secrets — this workflow carries NO R2/alert
+# credentials, only the internal key (R2 + DR_ISSUES_PAT + Telegram live on
+# the app; see deploy-hosted.yml). The exit code makes the job green/red.
+#
+# Seeded-archive validation: dispatch this workflow manually against a deploy
+# with ≥1 seeded archive (or production's oldest live archive) — the
+# "scheduled drill green on a seeded archive" acceptance.
+on:
+  schedule:
+    - cron: '23 4 1 * *'   # monthly, 1st at 04:23 UTC (off-hour; GH schedule
+                           # jitter is a rounding error vs a monthly cadence)
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: registry-drill
+  cancel-in-progress: false
+
+jobs:
+  drill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      INTERNAL_API_URL: ${{ secrets.INTERNAL_API_URL }}
+      FASTAPI_INTERNAL_KEY: ${{ secrets.FASTAPI_INTERNAL_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run scheduled restore drill
+        run: bash .github/scripts/registry-drill-scheduled.sh
