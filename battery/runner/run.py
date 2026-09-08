@@ -204,6 +204,45 @@ _DEFAULT_PLAN = ({"turn": 1, "tokens": 50, "tool_calls": 0,
                   "re_derivations": 0},)
 
 
+def _run_with_deadline(fn, seconds: float = 240.0):
+    """Run ``fn`` under a wall-clock deadline in a worker thread. A hung
+    call (0% CPU, no timeout firing — the #1416 real run hit this) must
+    become an honest TimeoutError -> FAILED + exclusion, never a silent
+    infinite hang with the episode unmetered/unattributed.
+
+    NOTE (review): never use ThreadPoolExecutor for this — its workers are
+    NON-daemon, so a hung worker blocks interpreter exit even after the
+    deadline fires (the CLI would never terminate), and the context
+    manager's shutdown(wait=True) joins the worker forever. The fn runs on
+    a DAEMON thread: on deadline the worker is abandoned and the process
+    can still exit.
+    """
+    import threading
+
+    box: dict = {}
+
+    def _runner() -> None:
+        try:
+            box["value"] = fn()
+        except BaseException as e:
+            box["error"] = e
+
+    t = threading.Thread(target=_runner, daemon=True)
+    t.start()
+    t.join(timeout=seconds)
+    if t.is_alive():
+        raise TimeoutError(
+            f"episode exceeded the {seconds:.0f}s wall-clock deadline") \
+            from None
+    if "error" in box:
+        raise box["error"]
+    return box.get("value")
+
+
+#: #1416: per-episode wall-clock deadline (seconds) for the real executor.
+_REAL_EPISODE_DEADLINE_S = 240.0
+
+
 def _execute_real_episode(*, config: RunConfig, arm, scenario: Scenario,
                           episode_seed: int, tracker: EpisodeTracker,
                           ) -> tuple[list[ModelCallOutcome], int, list[dict],
@@ -258,17 +297,28 @@ def _execute_real_episode(*, config: RunConfig, arm, scenario: Scenario,
                   + "\n\n[memory — what I know so far]\n"
                   + "\n".join(mem_lines))
     try:
-        ep = execute_tvde_episode(caller=caller, scenario_render=render,
-                                  scenario_id=scenario.id)
+        ep = _run_with_deadline(
+            lambda: execute_tvde_episode(
+                caller=caller, scenario_render=render,
+                scenario_id=scenario.id),
+            seconds=_REAL_EPISODE_DEADLINE_S)
     except (ValueError, ConfigError, OSError, TimeoutError) as e:
-        # Transport/robustness failures (429/timeout on the real lane) take
-        # the SAME honest path as a realism violation: FAILED turn + episode
-        # exclusion — never a mid-run crash with partial spend unmetered.
+        # Transport/robustness failures (429/timeout/hang on the real lane)
+        # take the SAME honest path as a realism violation: FAILED turn +
+        # episode exclusion — never a mid-run crash with partial spend
+        # unmetered, never an infinite hang. Spend already incurred before
+        # the failure is read from the caller meter and PERSISTED (review
+        # P2: the error surface must not drop rows the #2603 meter accrued).
+        _spend = round(float(getattr(caller, "spent_usd", 0.0) or 0.0), 6)
+        _usage = getattr(caller, "totals", lambda: {})()
+        if not isinstance(_usage, dict):
+            _usage = {}
         tracker.add_turn(role="agent",
                          content=f"(realism gate: {e})", tokens=0,
                          outcome=ModelCallOutcome.FAILED)
         return ([ModelCallOutcome.FAILED], 0, [],
-                {"error": f"realism-gate: {e}"})
+                {"error": f"realism-gate: {e}",
+                 "spend_usd": _spend, "usage": _usage})
 
     events: list[dict] = []
     for env in ep.envelopes:
