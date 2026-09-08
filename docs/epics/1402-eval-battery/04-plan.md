@@ -74,7 +74,13 @@ Verdict report shape (the PO-facing artifact) — non-UNIQUE state shown (MECHAN
 ```
 Profile: metric × arm delta matrix (all 14 families: R1–R5, L1–L6, D2–D4)
   R1  surfaced-rate      A4 0.92 | A2 0.00 | A0 0.00    → STRUCTURAL (mechanism)
-  R2  coverage subscore  A4 0.51 | A2 0.50 | A0 0.50    → PARITY
+  R2  coverage subscore  A4 0.50 | A2 n/a  | A0 0.00    → STRONG
+      (AMENDMENT #2292: the mock-era "A4 0.51 | A0 0.50 -> PARITY" row was
+      STALE — it predates the arm-neutral JUDGED subscore (validated rubric,
+      #2292) and the canonical gate form (decision (e): ratio >= 1.5x WITH
+      the a0=0 floor — control == 0 => pass iff treatment > 0). a0 (no-store
+      control) judged subscore = 0.00 floor; A4 0.50 clears the floor.
+      Measured values land with #1416's real run.)
   R3  Brier              A4 0.26 | A2 0.27 | A0 0.27    → PARITY
   R4  defeat-condition   A4 0.80 | A2 n/a  | A0 n/a     → STRUCTURAL (mechanism)
   R5  update-correct     A4 0.55 | A2 0.54 | A0 0.53    → PARITY
@@ -168,7 +174,7 @@ Fleshes out the 7 high-level E2Es from scope into executable scenarios (setup / 
 **E2E-1.1 — Tier-1 battery produces gate values, not just emission**
 **Setup:** corpus v1 (≥60 scenarios: 20 decision, 15 contradiction-pair with pinned k=5, 15 calibration-with-known-outcome, 10 retraction); thresholds [cal]-locked; arms A4 + A0; seed S; temp 0.
 **Steps:** `battery run --tier 1 --arms a4,a0`.
-**Assert:** per-scenario `run_artifact.json` exists with run_id = seed+arm+scenario; **each probe's value is checked against its AC gate** (R1: surfaced ≥90%, flip-flop ≤10%, FP ≤5%; R2: coverage subscore delta ≥1.5× vs A0 AND Tier-1 mechanism gate ≥80% of decisions reach 3+ Challenge/Deepen cycles; R3: Brier ≤ A0 − 0.05 AND honest-undecided ≥80% AND confident-wrong ≤10%; R4: defeat-condition precision ≥70% AND ≥1 real defeat condition per decision; R5: correct-direction ≥90%, over-reaction ≤10%); thresholds read from thresholds.yaml (behavioral boundary assertion, not filename coupling); zero fallback/failed episodes or count reported <5%.
+**Assert:** per-scenario `run_artifact.json` exists with run_id = seed+arm+scenario; **each probe's value is checked against its AC gate** (R1: surfaced ≥90%, flip-flop ≤10%, FP ≤5%; R2: JUDGED coverage subscore ratio ≥1.5× vs A0 WITH the a0=0 floor (control == 0 ⇒ gate passes iff treatment > 0; one canonical form — #2292 decision (e); the Tier-1 mechanism gate ≥80% of decisions reach 3+ Challenge/Deepen cycles stays a separate diagnostic, never a Tier-3 verdict input); R3: Brier ≤ A0 − 0.05 AND honest-undecided ≥80% AND confident-wrong ≤10%; R4: defeat-condition precision ≥70% AND ≥1 real defeat condition per decision; R5: correct-direction ≥90%, over-reaction ≤10%); thresholds read from thresholds.yaml (behavioral boundary assertion, not filename coupling); zero fallback/failed episodes or count reported <5%.
 
 **E2E-1.2 — Contradiction pair fires (R1)**
 **Setup:** the 15 contradiction scenarios, k=5 fixed (injection-turn field), N ≥ 20 runs (15 × ≥2 seeds).

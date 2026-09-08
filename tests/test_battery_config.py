@@ -142,9 +142,15 @@ class TestDeterminismTolerances:
         tols = dict(t.determinism_tolerances)
         # the seeded per-metric rows exist and sit at the transcript-locked
         # epsilon floor — every value asserted AGAINST the loaded epsilon,
-        # never a literal constant in the test
+        # never a literal constant in the test. EXCEPT the #2292
+        # provisional real-path usage row (probe_usage_tokens_episode 250.0
+        # from the measured two-run spread) — real usage is NOT
+        # transcript-locked, so the mock-lane 1e-6 floor never applies to it.
         assert tols, "determinism.tolerances must not be empty"
-        assert all(v == t.determinism_epsilon for v in tols.values())
+        provisional = {"probe_usage_tokens_episode"}
+        assert all(v == t.determinism_epsilon
+                   for k, v in tols.items() if k not in provisional)
+        assert tols["probe_usage_tokens_episode"] > 0.0
         # the measured mock-lane metrics are all seeded (transcript-locked
         # derived/objective — measured |Δ| = 0.0, ≤ the epsilon floor)
         for mid in ("n_turns", "n_tool_calls", "re_derivations",
