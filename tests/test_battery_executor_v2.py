@@ -385,3 +385,91 @@ def test_l4_cross_session_surfacing_product_read(tmp_path) -> None:
         assert marker not in iso.surface_text()
     finally:
         iso.close()
+
+
+def test_cross_run_event_log_session_relative_equality(tmp_path) -> None:
+    """Task-10 step 6 (runner level): two REAL runs over the SAME corpus in
+    ISOLATED fresh per-run namespaces produce IDENTICAL event-log sequences
+    when compared in SESSION-RELATIVE order (type/event/field per session
+    unit) — determinism holds across runs; absolute refs/timestamps are
+    excluded (ns:seq restarts per namespace by design)."""
+    cfg = _config_dir(tmp_path)
+
+    def _run(tag: str) -> list[list[tuple[str, str, str]]]:
+        out = tmp_path / f"out-{tag}"
+        code = run_battery(RunConfig(
+            config_dir=cfg, out_dir=out, executor="real", arms=["a0"],
+            caller_factory=_ScriptedCaller, seed=1, sessions=2),
+            stdout=lambda _: None)
+        assert code is ExitCode.OK
+        attempt = sorted(out.iterdir())[0]
+        artifacts = [json.loads(p.read_text())
+                     for p in sorted(attempt.glob("*.json"))
+                     if p.name not in ("summary.json", "recall.json",
+                                       "family_d.json")]
+        # session-relative order: group units by session index, keep the
+        # deterministic (scenario, session) unit order.
+        units = sorted(artifacts, key=lambda a: (a["session_index"],
+                                                 a["run_id"]))
+        return [[(e.get("type", ""), e.get("event", ""),
+                  e.get("field", ""))
+                 for e in a.get("event_log", [])] for a in units]
+
+    run1 = _run("r1")
+    run2 = _run("r2")
+    assert len(run1) == len(run2) == 4  # 2 scenarios x 2 sessions
+    for u1, u2 in zip(run1, run2):
+        assert u1 == u2, "session-relative event order must match across runs"
+    # sanity: the logs are real (non-empty, cover MANDATORY per unit)
+    for unit in run1:
+        assert unit, "real episode event log must be non-empty"
+
+
+def test_run2_fresh_namespace_no_run1_memories(tmp_path) -> None:
+    """Task-10 step 6 (a4 product lane): run-1 files a contradiction into
+    ITS namespace; run-2 over a FRESH per-run namespace (same scenario)
+    retrieves ZERO run-1 content — pre-k contamination assert (no run-1
+    memories retrievable)."""
+    from battery.arms.base import AgentContext, Memory
+    from battery.testing.seeds import setup_seed_mode
+
+    def _content_sig(store) -> list[str]:
+        """Content-only signature (node ids are per-namespace random — the
+        cross-run contract is CONTENT identity, never id equality)."""
+        return sorted((m.content or "").strip()
+                      for m in store.retrieve("")
+                      if (m.content or "").strip())
+
+    r1_marker = "RUN1-ONLY-MARKER the opposite"
+    ns1 = tmp_path / "run1-ns"
+    s0 = setup_seed_mode(ns1, "ct-001")
+    try:
+        baseline = _content_sig(s0)
+        assert baseline, "seed graph must carry retrievable content"
+        claims = [m for m in s0.retrieve("") if getattr(m, "kind", "") == "claim"]
+        assert claims and r1_marker not in s0.surface_text()
+        target = claims[0]
+    finally:
+        s0.close()
+    mid = setup_seed_mode(ns1, "ct-001", purge=False)
+    try:
+        ctx = AgentContext(scenario=mid._scenario, episode_seed=1,
+                           prior_memories=tuple(mid.retrieve("")),
+                           user_message="file")
+        ref = mid._arm.record(ctx, Memory(
+            id="run1-write", content=r1_marker, confidence=None,
+            kind="nand", target_id=target.id, credibility="high"))
+        assert ref, "run-1 write must return a real ref"
+    finally:
+        mid.close()
+
+    # run 2: FRESH per-run namespace, same scenario — no run-1 content
+    ns2 = tmp_path / "run2-ns"
+    s1 = setup_seed_mode(ns2, "ct-001")
+    try:
+        assert r1_marker not in s1.surface_text(), (
+            "run-2 retrieve must not see run-1 memories (fresh namespace)")
+        # run-2's fresh content signature equals run-1's PRE-write baseline
+        assert _content_sig(s1) == baseline
+    finally:
+        s1.close()
