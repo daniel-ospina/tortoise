@@ -7130,16 +7130,22 @@ function claimIntentInFlight() {
                     </td>
                     <td><code>{k.key_prefix || k.id?.slice(0, 12)}</code></td>
                     <td>{fmtTime(k.created_at || k.createdAt)}</td>
-                    {/* #2476: Last used cell — relative time (formatRelativeTime
-                        parity with the memory-sources panel) + an absolute-date
+                    {/* #2476: Last used cell — relative time + an absolute-date
                         title tooltip when the row has a last_used_at (#685 writes
                         it through on use; list_api_keys serializes null for
                         never-used keys). 'Never' is PLAIN text — no span.dim (#2426
                         lesson: the status cell's dim identifies 'disabled'; a
-                        Never-in-dim cell double-matched the e2e strict mode). */}
+                        Never-in-dim cell double-matched the e2e strict mode).
+                        Clock: Date.now() per render — NOT App's skeleton-gated
+                        `now` (that one ticks only while the Overview tab has a live
+                        loading floor; on the keys tab it would freeze and the label
+                        could read 'just now' forever after a reload surfaced a newer
+                        stamp). Per-render freshness is the same semantics as the
+                        sibling Expires cell (fmtExpiry's Date.now() default) and
+                        formatRelativeTime's callers in the memory-sources panel. */}
                     <td>{(() => {
                       const lu = k.last_used_at
-                      const rel = formatRelativeTime(lu, now)
+                      const rel = formatRelativeTime(lu, Date.now())
                       if (!rel) return 'Never'
                       return <span title={`Last used ${fmtTime(lu)}`}>{rel}</span>
                     })()}</td>

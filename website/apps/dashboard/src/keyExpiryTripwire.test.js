@@ -77,15 +77,24 @@ test('#2476/#2426: the keys table is Name | Prefix | Created | Last used | Expir
 })
 
 test('#2476: the Last-used cell renders formatRelativeTime output and a plain-text Never', () => {
-  // The cell must feed formatRelativeTime (memory-sources parity — the util is
-  // already imported) and fall back to PLAIN 'Never' (no span.dim — #2426: the
-  // status cell's dim identifies 'disabled'; a Never-in-dim cell double-matched
-  // e2e strict mode).
-  assert.match(mainJsx, /const rel = formatRelativeTime\(lu, now\)/, 'cell uses formatRelativeTime')
+  // The cell must feed formatRelativeTime (memory-sources util parity) and
+  // fall back to PLAIN 'Never' (no span.dim — #2426: the status cell's dim
+  // identifies 'disabled'; a Never-in-dim cell double-matched e2e strict
+  // mode). Clock: Date.now() per render (the App-level `now` only ticks on
+  // the Overview skeleton and would freeze on the keys tab).
+  assert.match(mainJsx, /const rel = formatRelativeTime\(lu, Date\.now\(\)\)/, 'cell uses formatRelativeTime')
   assert.match(mainJsx, /if \(!rel\) return 'Never'/, "never-used rows render plain 'Never'")
   assert.match(mainJsx, /title=\{`Last used \$\{fmtTime\(lu\)\}`\}/, 'used rows carry the absolute-date title tooltip')
-  assert.ok(!/formatRelativeTime\(k\.last_used_at,\s*now\)[\s\S]{0,400}className="dim"/.test(mainJsx),
-    'the Last-used Never must never sit in a span.dim cell')
+  // Structural dim-exclusion guard (#2426): the whole Last-used cell body
+  // (from the lu binding to the closing td) must never wrap the Never fallback
+  // (or the label) in a span.dim. Slice-based so the guard cannot rot into a
+  // vacuous never-matching regex.
+  const cellStart = mainJsx.indexOf('const lu = k.last_used_at')
+  assert.ok(cellStart !== -1, 'Last-used cell lu binding found')
+  const cellBody = mainJsx.slice(cellStart, mainJsx.indexOf('})()}</td>', cellStart))
+  assert.ok(cellBody.includes("return 'Never'"), 'plain-text Never branch inside the cell')
+  assert.ok(!cellBody.includes('className="dim"'),
+    'the Last-used Never must never sit in a span.dim cell (#2426)')
 })
 
 test('#2426: fmtExpiry renders Never / amber in-N-days / terminal expired', () => {
