@@ -91,7 +91,8 @@ class RunConfig:
                  mock: bool = False, batch_setup: bool = False,  # noqa: F811
                  scorer_specs: list[str] | None = None, max_episodes: int | None = None,
                  db_path: str | None = None, executor: str = "mock",
-                 caller_factory: Callable | None = None):
+                 caller_factory: Callable | None = None,
+                 sessions: int = 1):
         self.config_dir = Path(config_dir) if config_dir else DEFAULT_CONFIG_DIR
         self.out_dir = Path(out_dir) if out_dir else DEFAULT_OUT_DIR
         self.seed = seed
@@ -113,6 +114,14 @@ class RunConfig:
         #: None => the pinned real caller (RealModelCaller) is built (real
         #: mode is spend-gated + fail-closed without OPENROUTER_API_KEY).
         self.caller_factory = caller_factory
+        #: Task 10 stream-mode: sessions > 1 runs each scenario across that
+        #: many sequential sessions over the SAME per-scenario graph (no
+        #: reset mid-stream; setup happens once per arm at arm-init). Each
+        #: session is its own episode/artifact/run_id (deterministic seed =
+        #: base + idx*sessions + session).
+        if sessions < 1:
+            raise ValueError(f"sessions must be >= 1, got {sessions}")
+        self.sessions = sessions
 
 
 def arm_run_mode(config: RunConfig, arm) -> str:
@@ -364,12 +373,13 @@ def run_battery(config: RunConfig, *, stdout: Callable[[str], None] = print,
     budget = load_budget(config.config_dir / "budget.yaml")
 
     # ── budget guard (before any episode; budget wins over --max-episodes) ─
-    n_episodes = len(scenarios) * len(config.arms)
-    # Per-arm cost uses the arm's own episode count (len(scenarios)) — the
-    # scope DD12 formula is Σ scenarios × tokens/eps(arm) × price/1k(arm);
-    # n_episodes (total) stays the budget-cap parameter.
+    n_episodes = len(scenarios) * len(config.arms) * config.sessions
+    # Per-arm cost uses the arm's own episode count (len(scenarios) x
+    # sessions) — the scope DD12 formula is Σ scenarios × tokens/eps(arm) ×
+    # price/1k(arm); n_episodes (total) stays the budget-cap parameter.
     total_cost = sum(
-        arm_map[a].estimated_cost_usd(len(scenarios)) if a in arm_map else 0.0
+        arm_map[a].estimated_cost_usd(len(scenarios) * config.sessions)
+        if a in arm_map else 0.0
         for a in config.arms)
     refusal = budget.over_budget(n_episodes=n_episodes,
                                  estimated_cost_usd=total_cost,
@@ -562,8 +572,18 @@ def run_battery(config: RunConfig, *, stdout: Callable[[str], None] = print,
 
         arm_episodes: list[EpisodeResult] = []
         arm_artifacts: list[str] = []
-        for idx, scenario in enumerate(sorted(scenarios, key=lambda s: s.id)):
-            episode_seed = config.seed + idx  # per-episode seed = base + index
+        # Task 10 stream mode: sessions > 1 runs each scenario across that
+        # many sequential sessions over the SAME per-scenario graph (no
+        # reset mid-stream). Units are scenario-major, session-minor, so a
+        # scenario's stream is contiguous; with sessions == 1 the flat list
+        # is byte-identical to the pre-Task-10 order (episode_seed = base +
+        # index unchanged) — zero regression on single-session runs.
+        stream_units = [
+            (scn, ssn)
+            for scn in sorted(scenarios, key=lambda s: s.id)
+            for ssn in range(config.sessions)]
+        for unit_idx, (scenario, session) in enumerate(stream_units):
+            episode_seed = config.seed + unit_idx  # seed = base + unit idx
             tracker = EpisodeTracker()
             if run_mode == "real":
                 if budget_stop:
@@ -601,6 +621,7 @@ def run_battery(config: RunConfig, *, stdout: Callable[[str], None] = print,
                                  if not _all_ok(outcomes) else None),
                 run_mode=run_mode,
                 event_log=evlog,
+                session_index=session,
             )
             # Expected set computed on the episode BEFORE scoring via the
             # scorer seam (default HarnessScorer -> empty expected => gap
@@ -656,6 +677,7 @@ def run_battery(config: RunConfig, *, stdout: Callable[[str], None] = print,
                           else None),
             )
             validate_artifact_keys(artifact)
+            artifact["session_index"] = session  # Task 10 stream marker
             path = write_run_artifact(attempt_dir, artifact)
             arm_artifacts.append(path.name)
             all_artifacts.append(path.name)
@@ -665,6 +687,7 @@ def run_battery(config: RunConfig, *, stdout: Callable[[str], None] = print,
                 "run_id": artifact["run_id"],
                 "arm": arm_id,
                 "scenario_id": scenario.id,
+                "session_index": session,
                 "excluded": not episode.valid,
                 "retrieved": [],  # executor capture lands with Task 9
                 "ep_markers": dict(episode.ep_surface or {}),

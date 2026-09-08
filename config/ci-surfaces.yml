@@ -8,6 +8,7 @@ surfaces:
   - test_battery_corpus_v11.py
   - test_battery_ep_outcome.py
   - test_battery_executor_v1.py
+  - test_battery_executor_v2.py
   - test_battery_exposure_liveness.py
   - test_battery_exposure_oracle.py
   - test_battery_exposure_usage_cap.py
