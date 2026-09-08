@@ -47,6 +47,42 @@ from typing import Any, Callable  # noqa: UP035
 from .backup_config import BackupConfig
 from .hosted_backup import _is_supabase_source, create_backup, prune_backups
 
+# #2562 (re-audit P3): the sweep/purge per-team acquisitions are TIMED too
+# — a stuck holder (a restore whose locked body wedged) must not block that
+# team's pass forever. Same horizon as the restore wait (#2470).
+_TEAM_LOCK_TIMEOUT_S = 300
+
+
+def _team_lock_ctx(lock_for: Callable[[str], Any] | None, team_id: str):
+    """#2562: acquire the per-team lock for a sweep/purge with a TIMEOUT.
+    Returns (ctx, acquired). A lock held past the horizon skips the team
+    (the caller records an error and moves on — never wedges the pass); a
+    timeout never leaves the lock held. lock_for may also return a
+    contextmanager (legacy seam) — used as-is, untimed."""
+    if lock_for is None:
+        return nullcontext(), True
+    lock = lock_for(team_id)
+    # Duck-type: threading.Lock is a factory function (not a type) on
+    # Python < 3.13, so isinstance is unusable — a lock-shaped object
+    # (acquire/release) gets the timed path; anything else (a
+    # contextmanager seam) is used as-is, untimed.
+    if not (hasattr(lock, "acquire") and hasattr(lock, "release")):
+        return lock, True
+    got = lock.acquire(timeout=_TEAM_LOCK_TIMEOUT_S)
+    if not got:
+        return nullcontext(), False
+
+    class _ReleaseOnExit:
+        def __enter__(self):
+            return lock
+
+        def __exit__(self, *_exc):
+            lock.release()
+            return False
+
+    return _ReleaseOnExit(), True
+
+
 logger = logging.getLogger(__name__)
 
 OPS_STATE_KEY = "ops/state.json"
@@ -1040,7 +1076,16 @@ def run_backup_sweep(
     results: dict[str, Any] = {}
     resolution_failures = 0
     for team_id in sorted(team_ids):
-        ctx = lock_for(team_id) if lock_for else nullcontext()
+        ctx, acquired = _team_lock_ctx(lock_for, team_id)
+        if not acquired:
+            # #2562: a stuck holder must not wedge the pass — skip the team
+            # with a loud error (next run retries it).
+            results[team_id] = {
+                "status": "error", "team_id": team_id,
+                "error": "team lock busy past the timeout "
+                         "(a restore or purge holds it)",
+            }
+            continue
         with ctx:
             try:
                 res = _sweep_team(
@@ -1318,21 +1363,27 @@ def _purge_graph_storage(storage, team_id: str, graph_id: str,
                         out["errors"].append(f"delete {k}: {e}")
             except Exception as e:
                 out["errors"].append(f"list backups/{bid}/: {e}")
-        if not out["errors"]:
-            try:
-                _write_json(
-                    storage, _legacy_flat_index_key(team_id),
-                    {bid: ent for bid, ent in (index or {}).items()
-                     if bid not in flat_bids},
-                )
-                # #2466: record the erased bids so a concurrent/stale sweep
-                # reclassification can never resurrect these index entries
-                # (R2 last-writer-wins — the sweep rewrites the whole index).
-                _record_purged_flat_bids(
-                    storage, team_id, flat_bids,
-                    datetime.now(timezone.utc).isoformat())  # noqa: UP017
-            except Exception as e:
-                out["errors"].append(f"index rewrite: {e}")
+        # #2561 (re-audit): rewrite the index + record the ghosts even when
+        # some deletes errored — the previous `if not out["errors"]` gate
+        # left the index carrying bids whose objects were already erased
+        # whenever a partial R2 failure hit (the tombstone is stamped
+        # regardless, so the row is never re-enumerated to correct the
+        # index). A stale index entry then over-counted Inspect and could
+        # be resurrected by the next sweep's reclassification.
+        try:
+            _write_json(
+                storage, _legacy_flat_index_key(team_id),
+                {bid: ent for bid, ent in (index or {}).items()
+                 if bid not in flat_bids},
+            )
+            # #2466: record the erased bids so a concurrent/stale sweep
+            # reclassification can never resurrect these index entries
+            # (R2 last-writer-wins — the sweep rewrites the whole index).
+            _record_purged_flat_bids(
+                storage, team_id, flat_bids,
+                datetime.now(timezone.utc).isoformat())  # noqa: UP017
+        except Exception as e:
+            out["errors"].append(f"index rewrite: {e}")
     return out
 
 
@@ -1438,12 +1489,24 @@ def _stamp_purged(source, team_id: str, graph_id: str, now_iso: str,
                 f"purge stamp refused for {team_id}/{graph_id}: row is "
                 "no longer a deleted tombstone (restored concurrently?)")
         return
-    source.query(
+    rows = source.query(
         "MATCH (g:Graph {id:$gid, team_id:$tid, status:'deleted'}) "
-        "SET g.purged_at = $ts, g.purged_residual = $r",
+        "SET g.purged_at = $ts, g.purged_residual = $r RETURN count(g)",
         params={"gid": graph_id, "tid": team_id, "ts": now_iso,
                 "r": bool(residual)},
-    )
+    ).result_set
+    # #2559 (re-audit P2): the registry stamp must OBSERVE whether its
+    # conditional MATCH matched — a 0-row MATCH…SET silently succeeds, so a
+    # cross-process restore that flipped the row to ACTIVE between the
+    # pre-drop verify and the stamp would report `purged` on a live,
+    # unstamped, already-erased row. Mirror the supabase lane (#2464):
+    # refuse loudly so the caller records the race instead of silently
+    # succeeding.
+    matched = bool(rows and rows[0] and rows[0][0])
+    if not matched:
+        raise RuntimeError(
+            f"purge stamp refused for {team_id}/{graph_id}: row is "
+            "no longer a deleted tombstone (restored concurrently?)")
 
 
 def run_graph_purge(
@@ -1479,7 +1542,14 @@ def run_graph_purge(
     errors: list[dict[str, Any]] = []
     teams_purged = 0
     for team_id in sorted(team_ids or []):
-        ctx = lock_for(team_id) if lock_for else nullcontext()
+        ctx, acquired = _team_lock_ctx(lock_for, team_id)
+        if not acquired:
+            # #2562: a stuck holder must not wedge the purge pass — record
+            # the team as an error (next run retries it).
+            errors.append({"team_id": team_id,
+                           "error": "team lock busy past the timeout "
+                                    "(a restore or purge holds it)"})
+            continue
         with ctx:
             try:
                 tombs = enumerate_team_tombstones(registry, team_id)

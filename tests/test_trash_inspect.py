@@ -109,3 +109,37 @@ def test_inspect_no_archives_reports_zero(sb_client, as_owner, monkeypatch):
     r = tc.get(f"/v1/graphs/trash/{_GID}/points?team_id={_TEAM}")
     assert r.status_code == 200, r.text
     assert r.json()["archive_count"] == 0
+
+
+def test_inspect_excludes_purge_ghosted_flat_bids(sb_client, as_owner,
+                                                   monkeypatch):
+    """#2561 (re-audit P3): Inspect must not count legacy-flat bids whose
+    objects a purge already erased — the purge records them as ghosts even
+    when its index rewrite was skipped (partial delete failure)."""
+    tc, fake, _ = sb_client
+    _seed(fake)
+    store = _seed_storage(monkeypatch)
+    # The purge erased flat01's dumps and ghost-recorded the bid; the index
+    # rewrite was skipped (partial failure), so the stale entry remains.
+    store.delete(f"backups/{_TEAM}/flat01/dump.enc")
+    store.upload("ops/purge-flat-ghosts/team-free-001.json",
+                 b'{"team-free-001/flat01": {"erased_at": "2026-09-02T00:00:00Z"}}')
+    as_owner()
+    r = tc.get(f"/v1/graphs/trash/{_GID}/points?team_id={_TEAM}")
+    assert r.status_code == 200, r.text
+    # runA + runB only — flat01 is ghosted out.
+    assert r.json()["archive_count"] == 2, r.json()
+
+
+def test_inspect_counts_flat_when_not_ghosted(sb_client, as_owner,
+                                              monkeypatch):
+    """A non-ghosted flat (index entry, objects present) still counts."""
+    tc, fake, _ = sb_client
+    _seed(fake)
+    store = _seed_storage(monkeypatch)
+    store.upload("ops/purge-flat-ghosts/team-free-001.json",
+                 b'{"team-free-001/OTHER-bid": {"erased_at": "2026-09-02T00:00:00Z"}}')
+    as_owner()
+    r = tc.get(f"/v1/graphs/trash/{_GID}/points?team_id={_TEAM}")
+    assert r.status_code == 200, r.text
+    assert r.json()["archive_count"] == 3, r.json()

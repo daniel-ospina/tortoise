@@ -685,6 +685,33 @@ def mcnemar_exact(w: int, l: int) -> float:  # noqa: E741 — w/l = A-wins/B-win
     return min(1.0, 2.0 * p)
 
 
+def build_methodology(*, seed: int, reader_model: str, temperature: float,
+                     event_schema: str,
+                     reader_prompt_hash: str = "",
+                     judge_rubric_id_hash: str = "") -> dict:
+    """#2292 Task 8 — the #1144 baseline-record PRODUCER methodology seam.
+
+    Emits the methodology base INCLUDING ``protocol_hash`` (additive key;
+    a baseline recorded through this builder carries the protocol leg, so
+    the parity unchanged-check sees protocol deltas — model pin / temp /
+    schema / tool surface — end to end). Reuses
+    battery.parity.runner.protocol_hash + TOOL_SURFACE_IDS: ONE protocol
+    derivation, never a second copy. Old-format reports (recorded before
+    this key) keep comparing on the 2-tuple with the existing warn path
+    (back-compat).
+    """
+    from battery.parity.runner import TOOL_SURFACE_IDS, protocol_hash
+    ph = protocol_hash(
+        seed=seed,
+        model={"model_id": reader_model, "temperature": float(temperature)},
+        event_schema=event_schema,
+        tool_surface=tuple(TOOL_SURFACE_IDS))
+    return {"reader_prompt_hash": reader_prompt_hash,
+            "judge_rubric_id_hash": judge_rubric_id_hash,
+            "protocol_hash": ph,
+            "reader_model": reader_model}
+
+
 def git_sha() -> str:
     try:
         out = subprocess.run(
