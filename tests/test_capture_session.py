@@ -1326,6 +1326,48 @@ def test_extract_session_v2_wires_operator_to_event_endpoint(sdk, monkeypatch):
         params={"eid": eid}).result_set
     assert op_rows and op_rows[0][0] == 1, op_rows
 
+
+def test_extract_session_v2_blank_event_id_falls_back_to_content_addressing(
+        sdk, monkeypatch):
+    """#2552 P2 (review r1): a payload event with a blank/missing id must
+    still be created under its content-derived ``ev_<sha>`` id — never a
+    fresh ULID — or every operator referencing the content-addressed
+    ``ev_<sha>`` endpoint drops again at commit (ULID would silently reopen
+    the exact hole the content-addressed fix closed)."""
+    import tortoise.extractor_v2 as ev2
+    from tortoise.extractor_v2 import _content_id
+
+    ev_content = "the fallback lease event carried no payload id at all"
+    eid = _content_id("ev", ev_content)
+    pid = "pt-2552-ev-blank"
+    payload = {"session_id": "sess_p2", "story_arc": "", "entities": [],
+               "points": [{"id": pid, "content": "lease expiry needs the "
+                            "grace period", "pointKind": "statement"}],
+               # id is BLANK — the seam must content-address it itself.
+               "events": [{"id": "", "content": ev_content,
+                           "eventKind": "core:occurrence"}],
+               "operators": [{"src": pid, "dst": eid,
+                              "op_type": "IMPL",
+                              "direction": "unidirectional"}],
+               "supersessions": [], "client_commit_id": "ccid"}
+    monkeypatch.setattr(ev2, "extract_session_v2",
+                        lambda *a, **kw: _v2_out(payload=payload))
+    _extracted, meta = sdk._extract_session_v2(
+        CONV, "sess_p2", "2026-08-20T00:00:00+00:00")
+    assert not meta["errors"], meta
+    proj = sdk._get_proj()
+    # the Event exists under the content-derived id (not a fresh ULID), and
+    # the operator referencing it is wired — not dropped.
+    ev_rows = proj.g.query(
+        "MATCH (e:Event {id:$eid}) RETURN e.eventId",
+        params={"eid": eid}).result_set
+    assert ev_rows and ev_rows[0][0] == eid, ev_rows
+    op_rows = proj.g.query(
+        "MATCH (o:Point {is_operator:true, op_type:'IMPL'})"
+        "-[:IMPL]->(e:Event {id:$eid}) RETURN count(o)",
+        params={"eid": eid}).result_set
+    assert op_rows and op_rows[0][0] == 1, op_rows
+
 # ── #2164 Task 3: capture applies payload supersessions (shared
 #    apply_supersessions helper — entity-level records fold Object.status
 #    via ObjectSuperseded + the projection fold; pt_ records CORRECTS) ────

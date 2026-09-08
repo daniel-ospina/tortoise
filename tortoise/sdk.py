@@ -3790,6 +3790,14 @@ class TortoiseSDK:
             if not content:
                 continue
             ev_id = str(ev.get("id") or "").strip()
+            if not ev_id:
+                # P2 (#2556 review r1): a payload event with a blank/missing
+                # id must still be content-addressed (ev_<sha>) — never a
+                # fresh ULID — or every operator referencing the
+                # content-derived ev_<sha> endpoint drops again at commit
+                # (the exact hole this fix closes; ULID would reopen it).
+                from tortoise.ids import content_hash  # noqa: PLC0415
+                ev_id = f"ev_{content_hash(content)[:62]}"
             try:
                 self.create_event(
                     content[:80],
