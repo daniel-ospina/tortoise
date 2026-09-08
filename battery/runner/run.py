@@ -567,6 +567,31 @@ def run_battery(config: RunConfig, *, stdout: Callable[[str], None] = print,
                     f"arm {arm_id!r} still hardcodes the class-level "
                     f"model_id='fixed' sentinel (Task 9 parameterizes arms "
                     f"off it) — real run refuses")
+            # ── per-arm VENDOR-KEY pre-flight (#2633) ─────────────
+            #    a2/a2b real requests without their vendor credential pass
+            #    every pin/temp gate above and would run real-model spend
+            #    against the adapter's seeded in-process MOCK store under
+            #    run_mode=real (a false differential measure). The adapter
+            #    module OWNS its credential surface (class attr
+            #    ``required_env_keys``; never hardcoded here or in
+            #    arms.yaml); arms with no vendor surface (a0/a1/a3/a4)
+            #    carry no attr and are unaffected. Fail closed naming the
+            #    key + arm BEFORE the attempt dir (zero orphaned
+            #    artifacts); an empty-string key counts as absent — the
+            #    adapter's ``_real_mode()`` reads the same truthiness, so
+            #    an empty var is still the mock contract.
+            required_keys = tuple(
+                getattr(cls, "required_env_keys", ()) or ())
+            missing_keys = [k for k in required_keys
+                            if not os.environ.get(k)]
+            if missing_keys:
+                raise ConfigError(
+                    f"arm {arm_id!r} (real): vendor key(s) "
+                    f"{', '.join(missing_keys)} absent from the "
+                    f"environment — a real run without the credential "
+                    f"silently exercises the adapter's seeded in-process "
+                    f"MOCK store under run_mode=real (false differential); "
+                    f"export the key(s) or drop the arm from --arms")
             _pinned_temps[arm_id] = ac.temperature
             _pinned_provider[arm_id] = getattr(
                 resolved, "provider", "openrouter")

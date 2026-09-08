@@ -75,6 +75,15 @@ def _parser() -> argparse.ArgumentParser:
                      help="Task 10 stream mode: run each scenario across N "
                           "sequential sessions on the SAME per-scenario graph "
                           "(default 1 = single session)")
+    run.add_argument("--executor", choices=["mock", "real"], default=None,
+                     help="executor mode: real = the pinned real-model TVDE "
+                          "executor (#2284 Task 9; fail-closed without "
+                          "OPENROUTER_API_KEY + #2633 vendor-key pre-flight); "
+                          "default mock (hermetic seeded trajectory)")
+    run.add_argument("--db-path", dest="db_path", default=None,
+                     help="product-store db path for store arms (a4): an "
+                          "embedded file for hermetic real runs; required "
+                          "when --executor real selects a store arm")
 
     parity = sub.add_parser("parity", help="benchmark parity leg (#1414)")
     parity.add_argument("--config", default=None, help="config dir")
@@ -677,6 +686,11 @@ def _cmd_run(args: argparse.Namespace) -> ExitCode:
         mock=args.mock, batch_setup=args.batch_setup,
         scorer_specs=args.scorer, max_episodes=args.max_episodes,
         sessions=getattr(args, "sessions", 1),
+        # #1416 CLI real path (E2E-1.1 canonical invocation): the pinned
+        # real-model executor + an explicit product-store db path for store
+        # arms. getattr-guarded — not every entry point defines them.
+        executor=getattr(args, "executor", None) or "mock",
+        db_path=getattr(args, "db_path", None),
     )
     return run_battery(config)
 
