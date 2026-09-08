@@ -160,3 +160,22 @@ def test_registry_rollback_on_post_flip_name_conflict(sb_client, as_owner,
     rows = [g for g in fake.tables["graphs"] if g["id"] == _GID]
     assert rows and rows[0]["status"] == "deleted"
     assert rows[0]["deleted_at"]
+
+
+def test_trash_surfaces_503_on_cp_outage(sb_client, as_owner, monkeypatch):
+    """#2564 (re-audit P3): a control-plane transport outage while an owner
+    opens the trash surface must surface as 503 control_plane_unavailable
+    (#2380), not a raw 500 with the internal seam message."""
+    tc, fake, _ = sb_client
+    _seed(fake)
+    as_owner()
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("Supabase control-plane query failed "
+                           "(team_memberships): HTTP 500")
+
+    fake.query = _boom  # FakeControlPlane.query drives the CP reads
+    r = tc.get(f"/v1/graphs/trash?team_id={_TEAM}")
+    assert r.status_code == 503, r.text
+    assert (r.json().get("detail") or {}).get("error_code") == \
+        "control_plane_unavailable"
