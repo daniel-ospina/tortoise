@@ -105,6 +105,10 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     "test_battery_write_channel.py": [r'os\.environ\.pop\(\s*["\']TORTOISE_DB_URI["\']',
                                       r'os\.environ\["TORTOISE_DB_URI"\]\s*='],
     "test_battery_r1_seed.py": [r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
+    "test_battery_executor_v2.py": [r'os\.environ\.pop\(\s*["\']TORTOISE_DB_URI["\']',
+                                    r'os\.environ\["TORTOISE_DB_URI"\]\s*='],
+    "test_battery_exposure_liveness.py": [r'os\.environ\.pop\(\s*["\']TORTOISE_DB_URI["\']',
+                                          r'os\.environ\["TORTOISE_DB_URI"\]\s*='],
     # #2518 entity-key expansion FTS probe + per-test URI-mode redirects: the
     # module-top probe assigns a dedicated probe URI and restores _OLD_URI in
     # finally; the tests redirect via monkeypatch.setenv (auto-undo).

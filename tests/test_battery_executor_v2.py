@@ -28,8 +28,10 @@ from battery.runner.run import RunConfig, run_battery
 
 @pytest.fixture(autouse=True, scope="module")
 def _force_embedded_lane() -> None:
-    saved = os.environ.pop("TORTOISE_DB_URI", None)
-    saved_path = os.environ.pop("TORTOISE_DB_PATH", None)
+    saved = os.environ.get("TORTOISE_DB_URI", None)
+    saved_path = os.environ.get("TORTOISE_DB_PATH", None)
+    os.environ.pop("TORTOISE_DB_URI", None)
+    os.environ.pop("TORTOISE_DB_PATH", None)
     try:
         yield
     finally:
