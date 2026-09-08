@@ -195,6 +195,7 @@ surfaces:
   - test_battery_run.py
   - test_battery_runner.py
   - test_battery_setup.py
+  - test_battery_real_run_gate.py  # #2633 real-run vendor-key pre-flight gate (hermetic)
   core:
   - test_about_edges.py
   - test_about_event_untangle.py
