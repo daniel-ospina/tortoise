@@ -573,7 +573,6 @@ class TestConsentPreview:
         400 (a ChatGPT-style client cannot declare an RFC 8707 resource)."""
         tc, _ = api_client
         session_user(_U1)
-        cp = None
         # seed the second membership via the fixture's control plane
         _join_second_team(api_client)
         r = tc.get("/oauth/consent/preview", params={"resource": ""},
