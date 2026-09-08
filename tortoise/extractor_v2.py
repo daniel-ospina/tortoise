@@ -240,13 +240,56 @@ VALUE_FIDELITY_RULE = (
 )
 
 
+# #2552 (layer-2 operator-emission semantics — the remaining waves after the
+# #2556 persistence fix, measured 0/4 on the #2514 operator corpus): the
+# operator-structure rule block. Rendered into BOTH mapping stages (S2/S4)
+# from the SAME {anti_routine} slot as its siblings. The product semantics
+# are DECIDED (scoping findings F1/F2 — do not revisit): a mitigation
+# attacks the OPERATOR (the connection) as a graded dampener
+# (w_eff = w * (1 - strength)), never a refutation; a same-session decision
+# reversal is state/validity semantics; a CROSS-SESSION point correction is
+# a CORRECTS supersession — point-level "supersedes" refs resolve against
+# the S3 search results, so they are cross-session by construction.
+OPERATOR_SEMANTICS_RULE = (
+    "OPERATOR STRUCTURE (direction, relevance, supersede — #2552):\n"
+    "- NAND IS DIRECTED (extraction default #909 — new-claim-attacks-existing):\n"
+    "  src = the ATTACKING counter-claim, dst = the claim under attack. When a\n"
+    "  LATER claim contradicts an EARLIER one, the newer counter-claim is src\n"
+    "  and the older claim is dst — NAND points AT what it refutes. An explicit\n"
+    "  negation in a later turn ('the flag did not cause the duplicates') marks\n"
+    "  THAT later claim as the attacker. Never put the claim under attack first.\n"
+    "- RISK/RELEVANCE CLAIMS ARE DURABLE POINTS: a risk or concern claim\n"
+    "  ('clock skew between regions can make lease expiry unsafe') is its OWN\n"
+    "  point — never fuse it into the point/event for the action that later\n"
+    "  closes it. A risk claim changes future decisions (it motivates a\n"
+    "  mitigation), so it is NOT a routine aside under the ANTI-ROUTINE gate.\n"
+    "- MITIGATES = graded relevance dampener ON AN OPERATOR edge (F1): when a\n"
+    "  shipped action or measure closes or reduces a risk, emit the action as\n"
+    "  its OWN point and emit MITIGATES with src = the action point's exact\n"
+    "  content, dst = the risk point's exact content, target_edge = the\n"
+    "  operator edge whose relevance the action dampens, strength 0.10-0.50\n"
+    "  (w_eff = w * (1 - strength) — a graded dampener, NEVER a refutation.\n"
+    "  A direct point-to-point refutation is NAND territory (a separate\n"
+    "  operator), not a stronger MITIGATES).\n"
+    "- POINT-LEVEL SUPERSEDE (cross-session reversal — F2): when a new point\n"
+    "  REPLACES a claim or decision from an EARLIER session, set its\n"
+    "  \"supersedes\" to the existing point's id or EXACT content copied from\n"
+    "  the graph search results — the write path folds a point-level CORRECTS\n"
+    "  supersession (the old point is marked outdated). Same-session\n"
+    "  reversals are state/validity semantics — never a point supersede.\n"
+    "  Never invent an id or content: resolve against the search results only."
+)
+
+
 def _s2s4_rules() -> str:
     """The shared rule block inserted at the {anti_routine} slot of the S2
     and S4 mapping prompts: the anti-routine NOOP gate (#2424) paired with
-    the value-fidelity rule (#2453). One source, both stages. The #2424
-    residual clause-level strip (routine asides embedded in durable prose)
-    lives inside ANTI_ROUTINE_EXCLUSION, so it reaches both stages too."""
-    return ANTI_ROUTINE_EXCLUSION + "\n\n" + VALUE_FIDELITY_RULE
+    the value-fidelity rule (#2453) and the operator-structure rule (#2552).
+    One source, all stages — S2 and S4 map with the SAME operator semantics
+    (the #2424 residual clause-level strip and the operator rules live in
+    the shared blocks, so every mapping stage carries them)."""
+    return (ANTI_ROUTINE_EXCLUSION + "\n\n" + VALUE_FIDELITY_RULE
+            + "\n\n" + OPERATOR_SEMANTICS_RULE)
 
 
 CORE_OBJECT_KEYS = (
@@ -967,6 +1010,7 @@ OUTPUT_CONTRACT = """{
               "tier": "A|B",            # Tier-A state-value marker (E2); omit = Tier-B
               "quote": str|null,          # verbatim source text, <=200 chars (E3)
               "search_keys": [str, ...],  # 2-4 aliases + verbatim value tokens (E3)
+              "supersedes": "existing-id|content|null",  # replaces a prior-session point found in search (CORRECTS fold; omit = none)
               "source_turn_id": int|null}],  # {index}: turn in the SOURCE TRANSCRIPT (E3)
   "operators": [
     {"src": str, "dst": str, "op_type": "IMPL|NAND"},
@@ -1016,6 +1060,13 @@ MASTER LIST
 
 CONDENSED SEMANTIC CORE (from the how-to-use-tortoise skill)
 - Edge types: IMPL = supports/implies; NAND = contradicts.
+- NAND DIRECTION (#909 extraction default — new-claim-attacks-existing):
+  NAND is a DIRECTED attack — src = the ATTACKING counter-claim, dst = the
+  claim under attack. When a LATER claim contradicts an EARLIER one, the
+  newer counter-claim is src and the older claim is dst (NAND points AT
+  what it refutes; the execution fold canonicalizes this order). An
+  explicit negation in a later turn ("the flag did not cause it") marks
+  that later claim as the attacker — never put the attacked claim first.
 - TRUTH vs WEIGHT — two different tools for two different problems:
   * A claim that is FACTUALLY WRONG → NAND the Point directly (truth attack).
     Truth lives on the POINT.
@@ -1917,6 +1968,15 @@ Rules:
   ("the old strategy") resolves to the existing item. Emit ONE statement
   point capturing the replacement wired to BOTH entities (about_entities =
   [new, superseded]).
+- DECISION/CLAIM REVERSAL — POINT-LEVEL SUPERSEDE (cross-session only,
+  #2552): when this conversation OVERTURNS a decision or claim made in an
+  EARLIER session and the search results contain that existing point, emit
+  the new decision as its own point AND set its "supersedes" to the
+  existing point's id or EXACT content — the write path folds a point-level
+  CORRECTS supersession (the old point is marked outdated). Never point
+  "supersedes" at an in-session claim (same-session reversals are
+  state/validity semantics, not CORRECTS) and never invent an id or
+  content — copy from the search results only.
 - DECISION EVENTS only when a real decision exists — never fabricate one for
   a supersession or completion.
 - A point that already exists in the graph (same content) → lifecycle
@@ -1947,10 +2007,14 @@ Rules:
   or event emitted in THIS output (copy verbatim, no paraphrasing). If an
   endpoint has no point yet, CREATE the point first. NEVER use an entity name
   as an operator endpoint — entities wire via about_entities.
-- MITIGATES: relevance attack on the OPERATOR edge, strength 0.10-0.50.
-  NAND: truth attack on a FACTUALLY WRONG point. Golden rule: relevance lives
-  on the OPERATOR, truth lives on the POINT. Never NAND an option/criterion
-  for being a bad fit.
+- MITIGATES: relevance attack on the OPERATOR edge, strength 0.10-0.50 —
+  src = the action point's exact content, target_edge = the edge whose
+  relevance the action dampens (a risk claim the action closes stays its
+  OWN point, never fused into the action). NAND: truth attack on a
+  FACTUALLY WRONG point — src = the attacking counter-claim (the NEWER
+  claim), dst = the claim under attack (NAND points AT what it refutes).
+  Golden rule: relevance lives on the OPERATOR, truth lives on the POINT.
+  Never NAND an option/criterion for being a bad fit.
 - RETRACTIONS (E7): when the conversation explicitly WITHDRAWS a previously-
   stated fact ("forget my gym schedule", "scratch that", "that is no longer
   true"), add {"content": "<the exact prior claim>"} or {"id": "<existing-id>"}
@@ -3220,6 +3284,43 @@ def _resolve_retraction(ref: dict, search: dict,
     return None
 
 
+def _resolve_point_supersede(ref: str, search: dict,
+                             *, warnings: list[str]) -> dict | None:
+    """Resolve a point-level ``supersedes`` ref (a point REPLACES a claim/
+    decision from an EARLIER session) to the S3 prior POINT using the
+    never-guess discipline (mirror of ``_resolve_retraction``): by id
+    (unique), else by normalized-content equality — the S4 render copies
+    search-result content verbatim, so exact equality is the honest match
+    (a paraphrase ref does not resolve: the caller warns + fails open).
+    0 or >1 matches → None (the caller warns; never guesses). S3 only
+    returns live priors (terminal excluded at the search layer, #1391), so
+    a resolved target is live by construction. Resolution against the S3
+    search — which ran BEFORE this capture's writes — makes the point
+    supersede CROSS-SESSION by construction (the #2552 F2 decision:
+    same-session reversals are state/validity semantics, never a CORRECTS
+    record)."""
+    ref = (ref or "").strip()
+    if not ref or ref in ("null", "None"):
+        return None
+    points = [p for p in (search or {}).get("points", []) or []
+              if isinstance(p, dict) and p.get("id")]
+    for p in points:
+        if str(p.get("id")) == ref:
+            return p
+    norm = _norm(ref)
+    matches = [p for p in points
+               if _norm(str(p.get("content") or "")) == norm]
+    if not matches:
+        warnings.append(f"point supersedes={ref[:60]!r} matches no S3 prior "
+                        "— skipped (fail-open)")
+        return None
+    if len(matches) > 1:
+        warnings.append(f"point supersedes={ref[:60]!r} is ambiguous "
+                        f"({len(matches)} priors) — skipped (never guess)")
+        return None
+    return matches[0]
+
+
 def _supersession_records(entity_refs: list[dict], search: dict,
                           *, warnings: list | None = None) -> list[dict]:
     """Shared supersession-record builder — the ONE resolution discipline for
@@ -3460,6 +3561,28 @@ def _object_kind_forms(master: dict) -> set[str]:
     return forms | _PACK_OBJECT_FORMS
 
 
+def _canonicalize_nand_direction(src: str, dst: str, turns: dict) -> \
+        tuple[str, str] | None:
+    """#2552 (op_02, measured inversion on the #2514 corpus): NAND-direction
+    canonicalization — the extraction default (#909) is new-claim-attacks-
+    existing, so the ATTACKER (src) must be the LATER-asserted endpoint.
+    When BOTH endpoints are fresh session points carrying known source turns
+    and src is the EARLIER one, the model inverted the direction — swap
+    src/dst so the newer counter-claim is src (the corpus gold geometry:
+    the t11 counter-claim 'the flag did not cause it' must src the t5
+    hypothesis it refutes). Never guess: either endpoint without a known
+    turn (an existing-graph/event endpoint, an unquoted point) or a tie
+    (same turn) → None (keep the model's order; the prompt rule is the
+    primary lever there). Returns (src, dst) canonicalized or None."""
+    s_t = turns.get(src)
+    d_t = turns.get(dst)
+    if s_t is None or d_t is None:
+        return None
+    if not (type(s_t) is int and type(d_t) is int) or s_t >= d_t:
+        return None
+    return (dst, src)
+
+
 def execute_embed(embed_list: dict, search: dict, *, session_id: str,
                   story_arc: str = "", summary: str = "",
                   extractor_version: str = "value@0.5.0+v2",
@@ -3663,6 +3786,13 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
     point_ids: dict[str, str] = {}   # norm content → point id
     tier_a_points = 0                # E2 (#1534): Tier-A state-value count
     noops: list[dict] = []           # E7 (D4): folded duplicates — result-level
+    # #2552 (op_04, F2): point-level supersede refs collected from the
+    # embed points (a NEW point whose ``supersedes`` names an EARLIER-session
+    # claim surfaced by the S3 search) — resolved after the loop against the
+    # search index (cross-session by construction) into pt_ supersession
+    # records, deduped against the UPDATE-fold records below.
+    point_supersede_refs: list[dict] = []
+    pt_record_pairs: set[tuple[str, str]] = set()
     for p in embed_list.get("points", []) or []:
         if not isinstance(p, dict):
             warnings.append(f"non-dict point entry {p!r} skipped")
@@ -3742,6 +3872,7 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
             # sites). Self-supersede guard — never fires for revises (new
             # content ⇒ new content-addressed id), kept for discipline.
             if existing_id and existing_id != pid:
+                pt_record_pairs.add((existing_id, pid))
                 supersessions.append({
                     "superseded": existing_id, "supersedes_by": pid,
                     "evidence": "fact-value contradiction (later session "
@@ -3751,6 +3882,15 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
             link_before_create.append({
                 "searched_for": f"point '{content[:60]}'", "found": False,
                 "note": "no match — created"})
+        # #2552 (op_04): collect an explicit point-level ``supersedes`` ref
+        # (the DECISION-REVERSAL channel — a NEW decision/claim replaces a
+        # prior-session one). Resolution runs after the loop against the S3
+        # search, so only points actually emitted here (NEW or REVISES —
+        # NOOPs continued above) can carry a record; a self-referential or
+        # unemitted ref never reaches the record builder.
+        supersede_ref = str(p.get("supersedes") or "").strip()
+        if supersede_ref and supersede_ref not in ("null", "None"):
+            point_supersede_refs.append({"point_id": pid, "ref": supersede_ref})
         point_ids[n] = pid
         turn_idx = _resolve_source_turn(p, edus, warnings=warnings)
         pt_entry = {
@@ -3782,6 +3922,45 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
         if when_valid:
             pt_entry["when"] = when_valid
         payload_points.append(pt_entry)
+
+    # #2552 (op_04): resolve the collected point-level supersede refs against
+    # the S3 search (never-guess: id or exact-content match; 0/>1 → warn +
+    # skip) and append pt_ supersession records — the deterministic
+    # DECISION-REVERSAL → CORRECTS channel. The search index holds only
+    # points that existed BEFORE this capture, so a resolved target is an
+    # EARLIER-session claim by construction (same-session reversals are
+    # state/validity semantics, never a CORRECTS record — F2). Deduped
+    # against the UPDATE-fold records above.
+    for sr in point_supersede_refs:
+        pid = sr["point_id"]
+        ref = sr["ref"]
+        prior = _resolve_point_supersede(ref, search, warnings=warnings)
+        if prior is None:
+            continue
+        old_id = str(prior.get("id") or "").strip()
+        if not old_id or old_id == pid:
+            warnings.append(f"point supersedes={ref[:60]!r} is the point "
+                            "itself — skipped (never guess)")
+            continue
+        if (old_id, pid) in pt_record_pairs:
+            continue
+        pt_record_pairs.add((old_id, pid))
+        supersessions.append({
+            "superseded": old_id, "supersedes_by": pid,
+            "evidence": "point-level supersede ref (claim/decision "
+                        "reversal; cross-session correction)"})
+        link_before_create.append({
+            "searched_for": f"point '{str(prior.get('content') or '')[:60]}'",
+            "found": True,
+            "note": f"superseded by new point {pid} — CORRECTS fold"})
+
+    # source-turn map over the emitted payload points — the NAND-direction
+    # canonicalizer's input (#2552 op_02: newer counter-claim must be src).
+    turn_by_point: dict[str, int] = {}
+    for _pt in payload_points:
+        t = _pt.get("source_turn_id")
+        if type(t) is int:
+            turn_by_point[_pt["id"]] = t
 
     # ── operators (dependency order 4) — TWO-PASS ─────────────────────────
     # Pass 1 emits IMPL/NAND and collects the emitted edges; pass 2 processes
@@ -3815,6 +3994,19 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
                             f"emitted point/event ({o.get('src')!r} → {o.get('dst')!r})")
             continue
         if op_type in ("IMPL", "NAND"):
+            if op_type == "NAND":
+                # #2552 (op_02): canonicalize the NAND direction so the
+                # newer counter-claim is src (new-claim-attacks-existing,
+                # #909) — an inverted emission (older claim listed first)
+                # is swapped with a counted warning, never silent.
+                canon = _canonicalize_nand_direction(src, dst, turn_by_point)
+                if canon is not None:
+                    warnings.append(
+                        f"NAND direction canonicalized (#909 — new-claim-"
+                        f"attacks-existing): src was asserted before dst; "
+                        f"swapped so the newer counter-claim is src "
+                        f"({src[:60]!r} ↔ {dst[:60]!r})")
+                    src, dst = canon
             payload_operators.append({
                 "src": src, "dst": dst, "op_type": op_type,
                 "direction": "unidirectional"})
