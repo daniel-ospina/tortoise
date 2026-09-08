@@ -333,7 +333,7 @@ Deno.serve(async (req: Request) => {
     // "Acme" — code-review P3: the display-name fallback keeps lowercasing).
     const bodyTeamName =
       typeof body.team_name === "string" ? body.team_name.trim() : "";
-    const TEAM_NAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/;
+    const TEAM_NAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9_ -]{0,63}$/;
     let safeName = "";
     if (bodyTeamName && TEAM_NAME_RE.test(bodyTeamName)) {
       safeName = bodyTeamName;
