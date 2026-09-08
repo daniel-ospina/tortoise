@@ -3,22 +3,29 @@
 from __future__ import annotations  # noqa: I001
 
 import json
+import hashlib
 import os
 import tempfile
 from datetime import datetime, timedelta, UTC
 
 import pytest
 
+import tortoise.backup_sweep as backup_sweep
+
 from tortoise.backup_config import BackupConfig
 from tortoise.backup_sweep import (
     OPS_STATE_KEY,
     _check_per_label_drift,
+    _drop_purged_graphs_from_ops_state,
+    _noop_ops_state_write,
+    _stamp_purged,
     _write_flat_index_filtered,
     read_purge_flat_ghosts,
     resolve_active_graph,
     enumerate_eligible_teams,
     enumerate_teams,
     enumerate_team_tombstones,
+    list_drill_candidates,
     read_graph_state,
     read_ops_state,
     read_team_state,
@@ -1858,6 +1865,48 @@ def test_enumerate_team_tombstones_excludes_active_and_purged(shared_proj):
     assert purged not in ids  # purged rows are never re-purged
 
 
+def test_purge_skips_team_whose_lock_is_stuck(shared_proj, monkeypatch):
+    """#2562 (re-audit P3): the purge per-team acquisition is TIMED — a
+    stuck holder (restore whose locked body wedged) must not block the team
+    pass forever; the team is skipped with a loud error and other teams
+    still purge."""
+    if shared_proj is None:
+        return
+    proj = _make_env(None, shared_proj)
+    store = MemoryStorage()
+    gid = f"g_lk_{os.urandom(2).hex()}"
+    _seed_custom_tombstone(
+        proj, "team_locked", gid, "stuck",
+        deleted_at=(datetime.now(UTC) - timedelta(days=30)).isoformat())
+    gid2 = f"g_lk2_{os.urandom(2).hex()}"
+    _seed_custom_tombstone(
+        proj, "team_free", gid2, "free",
+        deleted_at=(datetime.now(UTC) - timedelta(days=30)).isoformat())
+    import tortoise.backup_sweep as bs_mod
+
+    monkeypatch.setattr(bs_mod, "_TEAM_LOCK_TIMEOUT_S", 1)
+    import threading as _threading
+
+    held = _threading.Lock()
+    held.acquire()
+    locks = {"team_locked": held,
+             "team_free": _threading.Lock()}
+
+    def lock_for(tid):
+        return locks[tid]
+
+    reg = proj.db.select_graph(_REGISTRY_GRAPH)
+    res = run_graph_purge(db=proj.db, registry=reg, storage=store,
+                          team_ids=["team_locked", "team_free"],
+                          lock_for=lock_for)
+    # team_locked skipped loudly; team_free purged normally.
+    assert any("team lock busy" in str(e.get("error"))
+               for e in res["errors"])
+    assert any(p["graph_id"] == gid2 for p in res["purged"])
+    assert all(p["graph_id"] != gid for p in res["purged"])
+    held.release()
+
+
 def test_purge_drops_erased_graphs_from_ops_state_rollup(shared_proj):
     """#2471: after a purge, /status bookkeeping (graph_failures +
     graph_error_streaks) must stop referencing the erased graph — no-op
@@ -1903,6 +1952,46 @@ def test_purge_drops_erased_graphs_from_ops_state_rollup(shared_proj):
     assert (state.get("graph_totals") or {}).get("attempted") == 2
 
 
+def test_noop_write_cannot_resurrect_a_purge_dropped_streak(shared_proj):
+    """#2560 (re-audit P3): a no-op run that read ops/state.json BEFORE a
+    concurrent purge dropped an erased graph's streak must NOT write its
+    stale merge back (resurrecting the ghost forever). The no-op write
+    re-reads under _OPS_STATE_LOCK."""
+    if shared_proj is None:
+        return
+    store = MemoryStorage()
+    gid = f"g_nr_{os.urandom(2).hex()}"
+    store.upload(
+        OPS_STATE_KEY,
+        json.dumps({
+            "last_team_count": 1, "last_sweep_at": "2026-09-01T00:00:00Z",
+            "updated_at": "2026-09-01T00:00:00Z",
+            "graph_totals": {"attempted": 2, "backed_up": 1, "errors": 1},
+            "graph_failures": [
+                {"team_id": "team_x", "graph_id": gid,
+                 "error": "boom", "streak": 3},
+                {"team_id": "team_x", "graph_id": "g_live0001",
+                 "error": "x", "streak": 1},
+            ],
+            "graph_error_streaks": {f"team_x:{gid}": 3,
+                                     "team_x:g_live0001": 1},
+        }).encode())
+    # A no-op sweep reads state at RUN START…
+    stale = read_ops_state(store)
+    assert f"team_x:{gid}" in (stale.get("graph_error_streaks") or {})
+    # …then the purge drops the erased graph's keys (#2471)…
+    _drop_purged_graphs_from_ops_state(store, "team_x", {gid})
+    # …then the no-op WRITES. The helper must re-read under the lock so the
+    # drop is not clobbered.
+    _noop_ops_state_write(store, datetime.now(UTC))
+    state = json.loads(store.download(OPS_STATE_KEY))
+    assert f"team_x:{gid}" not in (state.get("graph_error_streaks") or {})
+    assert all(f.get("graph_id") != gid
+               for f in (state.get("graph_failures") or []))
+    assert "team_x:g_live0001" in (state.get("graph_error_streaks") or {})
+    assert state["last_sweep_at"] == "2026-09-01T00:00:00Z"
+
+
 @pytest.mark.skipif(_DOCKER_LANE, reason="purge erasure unit tests run embedded; docker lane covered by the hosted trash E2E (#2304)")
 def test_purge_skips_row_restored_between_enumeration_and_drop(shared_proj):
     """VGATE race regression: if a restore flips the row to active between
@@ -1932,6 +2021,72 @@ def test_purge_skips_row_restored_between_enumeration_and_drop(shared_proj):
     props = _tombstone_props(proj, gid)
     assert not props.get("purged_at")
     assert store.list(f"backups/team_x/{gid}/") != []
+
+
+@pytest.mark.skipif(_DOCKER_LANE, reason="purge erasure unit tests run embedded; docker lane covered by the hosted trash E2E (#2304)")
+def test_registry_stamp_raises_when_row_no_longer_a_tombstone(shared_proj):
+    """#2559 (re-audit P2): the REGISTRY-lane stamp must observe whether its
+    conditional MATCH…SET matched — a 0-row SET silently succeeded before, so
+    a cross-process restore flipping the row to ACTIVE between the pre-drop
+    verify and the stamp reported `purged` on a live, unstamped, already-
+    erased row. Mirrors the supabase lane (#2464): raises instead."""
+    if shared_proj is None:
+        return
+    proj = _make_env(None, shared_proj)
+    reg = proj.db.select_graph(_REGISTRY_GRAPH)
+    gid = f"g_stamp_{os.urandom(2).hex()}"
+    # Row is ACTIVE (a concurrent restore flipped it) — not a tombstone.
+    reg.query(
+        "CREATE (g:Graph {id:$gid, team_id:'team_x', name:$gid, "
+        "kind:'custom', namespace:$ns, status:'active', purged_at:null})",
+        params={"gid": gid, "ns": f"team_team_x_{gid}"})
+    with pytest.raises(RuntimeError, match="stamp refused"):
+        _stamp_purged(reg, "team_x", gid,
+                      datetime.now(UTC).isoformat(), residual=False)
+    # The live row is untouched.
+    props = _tombstone_props(proj, gid)
+    assert props.get("status") == "active"
+    assert not props.get("purged_at")
+
+
+@pytest.mark.skipif(_DOCKER_LANE, reason="purge erasure unit tests run embedded; docker lane covered by the hosted trash E2E (#2304)")
+def test_purge_reports_error_when_registry_stamp_refused(shared_proj,
+                                                         monkeypatch):
+    """#2559 integration: a mid-purge restore on the registry lane surfaces
+    as an error entry (never a silent `purged`) — _stamp_purged's raise
+    propagates through run_graph_purge's per-graph isolation."""
+    if shared_proj is None:
+        return
+    proj = _make_env(None, shared_proj)
+    store = MemoryStorage()
+    gid = f"g_refuse_{os.urandom(2).hex()}"
+    _seed_custom_tombstone(
+        proj, "team_x", gid, "refuse",
+        deleted_at=(datetime.now(UTC) - timedelta(days=30)).isoformat())
+    reg = proj.db.select_graph(_REGISTRY_GRAPH)
+    orig_stamp = backup_sweep._stamp_purged
+
+    def _flip_before_stamp(source, team_id, graph_id, now_iso, *,
+                           residual):
+        # A cross-process restore flips the row right before the stamp.
+        reg.query(
+            "MATCH (g:Graph {id:$gid, team_id:'team_x'}) "
+            "SET g.status = 'active' REMOVE g.deleted_at, g.purged_at",
+            params={"gid": graph_id})
+        return orig_stamp(source, team_id, graph_id, now_iso,
+                          residual=residual)
+
+    monkeypatch.setattr(backup_sweep, "_stamp_purged",
+                        _flip_before_stamp)
+    res = run_graph_purge(db=proj.db, registry=reg, storage=store,
+                          team_ids=["team_x"])
+    # Not reported as purged; surfaced as an error; row live, unstamped.
+    assert all(p["graph_id"] != gid for p in res["purged"])
+    assert any(e.get("graph_id") == gid and "stamp refused" in str(e.get("error"))
+               for e in res["errors"])
+    props = _tombstone_props(proj, gid)
+    assert props.get("status") == "active"
+    assert not props.get("purged_at")
 
 
 @pytest.mark.skipif(_DOCKER_LANE, reason="purge erasure unit tests run embedded; docker lane covered by the hosted trash E2E (#2304)")
@@ -2025,6 +2180,61 @@ def test_purge_erases_reclassified_legacy_flats_by_namespace(shared_proj):
 
 
 @pytest.mark.skipif(_DOCKER_LANE, reason="purge erasure unit tests run embedded; docker lane covered by the hosted trash E2E (#2304)")
+class _FlakyDeleteStore(MemoryStorage):
+    """#2561 test double: deletes under one object prefix fail once (a
+    partial R2 failure), everything else succeeds."""
+    def __init__(self, fail_prefix: str):
+        super().__init__()
+        self._fail_prefix = fail_prefix
+        self._failed = False
+
+    def delete(self, key: str):
+        if key.startswith(self._fail_prefix) and not self._failed:
+            self._failed = True
+            raise RuntimeError(f"simulated delete failure: {key}")
+        return super().delete(key)
+
+
+def test_purge_partial_flat_delete_failure_still_rewrites_index(
+        shared_proj):
+    """#2561 (re-audit P3): when the flat-family deletion partially errors,
+    the purge must STILL rewrite the legacy-flat index (drop the erased
+    bids) + record the ghosts — the old `if not errors` gate left stale
+    index entries whose objects were gone (Inspect over-counted and the
+    sweep could resurrect them)."""
+    if shared_proj is None:
+        return
+    proj = _make_env(None, shared_proj)
+    store = _FlakyDeleteStore("backups/team_x/flat_fail_")
+    gid = f"g_partial_{os.urandom(2).hex()}"
+    ns = _seed_custom_tombstone(
+        proj, "team_x", gid, "partial",
+        deleted_at=(datetime.now(UTC) - timedelta(days=30)).isoformat())
+    ok_bid = f"team_x/flat_ok_{os.urandom(2).hex()}"
+    fail_bid = f"team_x/flat_fail_{os.urandom(2).hex()}"
+    store.upload(f"backups/{ok_bid}/dump.enc", b"ok")
+    store.upload(f"backups/{fail_bid}/dump.enc", b"fail")
+    store.upload(
+        "ops/legacy-flat-index/team_x.json",
+        json.dumps({
+            ok_bid: {"graph_name": ns, "graph_id": ""},
+            fail_bid: {"graph_name": ns, "graph_id": ""},
+        }).encode())
+    res = run_graph_purge(db=proj.db, registry=proj.db.select_graph(
+        _REGISTRY_GRAPH), storage=store, team_ids=["team_x"])
+    purged = [p for p in res["purged"] if p["graph_id"] == gid]
+    assert len(purged) == 1
+    # The flaky delete errored but the index was STILL rewritten: both bids
+    # dropped (their objects are forfeit — the row is stamped), and both
+    # recorded as ghosts so the sweep cannot resurrect them.
+    assert any("simulated delete failure" in str(e)
+               for e in purged[0]["artifacts"]["errors"])
+    idx = json.loads(store.download("ops/legacy-flat-index/team_x.json"))
+    assert ok_bid not in idx and fail_bid not in idx
+    ghosts = json.loads(store.download("ops/purge-flat-ghosts/team_x.json"))
+    assert ok_bid in ghosts and fail_bid in ghosts
+
+
 def test_purge_residual_still_erases_artifacts(shared_proj):
     """#2462: when the ownership guard trips (namespace retained), the
     tombstone's OWN artifacts (nested pool + its flats) are still erased —
@@ -2053,3 +2263,143 @@ def test_purge_residual_still_erases_artifacts(shared_proj):
     assert store.list(f"backups/team_x/{gid}/") == []
     assert store.list(f"backups/{bid}/") == []
     assert _tombstone_props(proj, gid).get("purged_residual") is True
+
+
+# ── #2319 second-region mirror (env-guarded; the cron runs the sweep) ────────
+
+
+class _FailingMirrorStorage(MemoryStorage):
+    """Mirror store that rejects every write — simulates a dead/blocked
+    second-region target."""
+
+    def upload(self, key, data, content_type=None):
+        raise RuntimeError("mirror endpoint unreachable (503)")
+
+
+def test_sweep_mirrors_accepted_archive_when_configured(shared_proj):
+    """#2319: with a mirror store passed in, every ACCEPTED archive is copied
+    (dump.enc + manifest.json) and the per-graph result records the verified
+    mirror — byte-identical keys, sha256-backed."""
+    with tempfile.TemporaryDirectory() as tmp:  # noqa: F841
+        if shared_proj is None:
+            return
+        proj = _make_env(None, shared_proj)
+        reg = proj.db.select_graph(_REGISTRY_GRAPH)
+        store = MemoryStorage()
+        mirror = MemoryStorage()
+        res = run_backup_sweep(
+            db=proj.db, registry=reg, storage=store, config=_config(),
+            mirror=mirror,
+        )
+        assert res["status"] == "backed_up"
+        default_res = res["results"]["team_x"]["graphs"]["default"]
+        assert default_res["status"] == "backed_up"
+        assert default_res["mirror"]["verified"] is True
+
+        prim_keys = sorted(store.list("backups/team_x/"))
+        mir_keys = sorted(mirror.list("backups/team_x/"))
+        assert len(prim_keys) == 2  # dump.enc + manifest.json
+        assert mir_keys == prim_keys  # keys preserved byte-for-byte
+        # read-back integrity: mirrored ciphertext matches the primary
+        for k in prim_keys:
+            assert mirror.download(k) == store.download(k)
+        manifest = json.loads(store.download(
+            next(k for k in prim_keys if k.endswith("manifest.json"))))
+        dump_key = next(k for k in prim_keys if k.endswith("dump.enc"))
+        assert hashlib.sha256(mirror.download(dump_key)).hexdigest() == manifest["sha256"]
+
+
+def test_sweep_without_mirror_is_unchanged(shared_proj):
+    """No mirror arg ⇒ no mirror key on the per-graph result and nothing
+    copied (byte-for-byte mirror-free behaviour)."""
+    with tempfile.TemporaryDirectory() as tmp:  # noqa: F841
+        if shared_proj is None:
+            return
+        proj = _make_env(None, shared_proj)
+        reg = proj.db.select_graph(_REGISTRY_GRAPH)
+        store = MemoryStorage()
+        res = run_backup_sweep(
+            db=proj.db, registry=reg, storage=store, config=_config(),
+        )
+        default_res = res["results"]["team_x"]["graphs"]["default"]
+        assert default_res["status"] == "backed_up"
+        assert default_res.get("mirror") is None
+
+
+def test_sweep_mirror_failure_is_loud_and_primary_survives(shared_proj):
+    """#2319: a mirror failure never fails the (already durable) PRIMARY
+    backup, but it IS a durability-policy breach when mirroring is
+    configured — the graph reports error (visible in /status last_sweep
+    graph_failures + streak), never a silent gap."""
+    with tempfile.TemporaryDirectory() as tmp:  # noqa: F841
+        if shared_proj is None:
+            return
+        proj = _make_env(None, shared_proj)
+        reg = proj.db.select_graph(_REGISTRY_GRAPH)
+        store = MemoryStorage()
+        mirror = _FailingMirrorStorage()
+        res = run_backup_sweep(
+            db=proj.db, registry=reg, storage=store, config=_config(),
+            mirror=mirror,
+        )
+        # headline degrades (default graph errored on the mirror leg)
+        assert res["status"] == "no_work"
+        assert res["graph_totals"]["errors"] == 1
+        default_res = res["results"]["team_x"]["graphs"]["default"]
+        assert default_res["status"] == "error"
+        assert "mirror failed" in default_res["error"]
+        # the primary archive is intact (durable regardless of the mirror)
+        prim_keys = sorted(store.list("backups/team_x/"))
+        assert len(prim_keys) == 2
+        assert [k for k in prim_keys if k.endswith("dump.enc")]
+        # and the streak is recorded so /status surfaces the breach
+        assert res["graph_error_streaks"].get("team_x:default") == 1
+
+# ── #2317 scheduled-restore-drill archive selection (pure storage) ──────────
+
+
+def test_list_drill_candidates_nested_only_oldest_first():
+    """Only 5-segment NESTED per-graph pools qualify (legacy flat 4-segment
+    keys never — their shape does not name a graph); results are oldest-first
+    by manifest created_at."""
+    store = MemoryStorage()
+    # nested default + custom pools (5 segments)
+    for bid, created in (
+        ("team_x/default/20260102T000000Z_aa", "2026-01-02T00:00:00+00:00"),
+        ("team_x/default/20260103T000000Z_bb", "2026-01-03T00:00:00+00:00"),
+        ("team_x/g_c1/20260101T000000Z_cc", "2026-01-01T00:00:00+00:00"),
+        ("team_y/default/20260101T120000Z_dd", "2026-01-01T12:00:00+00:00"),
+    ):
+        store.upload(f"backups/{bid}/dump.enc", b"blob")
+        store.upload(
+            f"backups/{bid}/manifest.json",
+            json.dumps({"created_at": created, "node_count": 1}).encode(),
+        )
+    # legacy flat (4 segments) + a manifest-less dump — never candidates
+    store.upload("backups/team_z/20260104T000000Z_ee/dump.enc", b"flat")
+    store.upload("backups/team_x/default/20260104T000000Z_ff/dump.enc", b"nomanifest")
+
+    rows = list_drill_candidates(store)
+    assert [r["backup_key"] for r in rows] == [
+        "backups/team_x/g_c1/20260101T000000Z_cc/dump.enc",   # oldest overall
+        "backups/team_y/default/20260101T120000Z_dd/dump.enc",
+        "backups/team_x/default/20260102T000000Z_aa/dump.enc",
+        "backups/team_x/default/20260103T000000Z_bb/dump.enc",
+    ]
+    assert all(r["graph_id"] for r in rows)
+    assert rows[0]["team_id"] == "team_x" and rows[0]["graph_id"] == "g_c1"
+
+
+def test_list_drill_candidates_max_candidates_and_empty():
+    """The candidate list is bounded; an empty store yields []."""
+    store = MemoryStorage()
+    assert list_drill_candidates(store) == []
+    for i in range(12):
+        bid = f"team_x/default/2026010{i % 9 + 1}T000000Z_{i:02x}"
+        store.upload(f"backups/{bid}/dump.enc", b"blob")
+        store.upload(
+            f"backups/{bid}/manifest.json",
+            json.dumps({"created_at": f"2026-01-0{i % 9 + 1}T00:00:00+00:00"}).encode(),
+        )
+    assert len(list_drill_candidates(store)) == 8  # default max_candidates
+    assert len(list_drill_candidates(store, max_candidates=3)) == 3

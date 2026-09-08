@@ -20,6 +20,7 @@ ownedBy: epistemic-team
 | Post-flip verification runbook (#669) | `docs/ops/669-post-flip-verification.md` |
 | Ontology | `docs/ONTOLOGY.md` |
 | Registry graph schema (incl. Graph entity + scoped APIKey + quota — epic #2083) | `docs/registry-graph-schema.md` |
+| Definitions — account layer vs in-graph Subjects ("organization account" vocab note, #2311) | `docs/registry-graph-schema.md` (§ Definitions) · `docs/ONTOLOGY.md` §5/§6 |
 | Multi-graph migration runbook — no-forced-migration path + rollback drill (epic #2083, C8 #2117) | `docs/ops/multi-graph-migration-runbook.md` |
 | Retrieval latency benchmark runbook (#316) | `benchmarks/README.md` |
 | Memory-system comparison table + publication/errata discipline (epic #2080 W7) | `docs/benchmarks/comparison-systems.md` |
@@ -43,3 +44,6 @@ ownedBy: epistemic-team
 | Client/server package split (`tortoise-client` thin driver, #526) | `docs/client-server-split.md` |
 | Beta feedback & bug reporting (#1199) | `docs/beta-feedback.md` |
 | Blog keyword research — topic taxonomy + keyword map (#1862) | `docs/research/2026-08-28-tortoise-blog-keywords/research.md` |
+| Tortoise agent daemon epic research — OAuth/attribution second-pass verdict + industry code audit (#2554, 2026-09-08) | `docs/research/2026-09-08-tortoise-agent-daemon.md` |
+| Actor attribution in agent-memory graphs — industry code audit (Zep/Mem0/Letta/LangMem/basic-memory, #2554) | `docs/research/memory-attribution-industry-findings.md` |
+| Epic #2554 scoping (REVISED) — keyless agent connect via per-agent OAuth + human attribution on the graph | `docs/scoping/tortoise-agent-daemon.md` |

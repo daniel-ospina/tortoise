@@ -662,3 +662,97 @@ def test_grade_planted_operators_corpus_aggregation_and_cross_session() -> None:
     audit2 = grading.grade_planted_operators(
         golds, {"wp07_x": points["wp07_x"], "wp06_x": []}, surfaces)
     assert audit2["results"]["wp07_x_op_04"]["verdict"] == "to_content_missing"
+
+
+# ── #2552 grader leg: the paraphrase/content band on edge_correct ─────────
+
+
+def test_operator_anchors_paraphrase_band_grades_wiring_not_text() -> None:
+    """#2552: the layer-2 audit grades WIRING, not surface text — a planted
+    operator edge whose endpoint claims were DISTILLED by the extractor
+    (verbatim anchors absent) still grades edge_correct when a memory Point
+    token-covers each anchor under the #2405-style band (the same recall
+    band the unit metrics use, with the shared polarity gate). Verbatim
+    containment stays the high-precision leg and runs first."""
+    anchor_from = ("the flag did not cause the duplicates, it had been "
+                   "stable for two hours before the anomaly")
+    anchor_to = ("the flip must have raced the lease renewal when the "
+                 "region cut over")
+    from_point = _pt("pf", "the flag stayed stable for two hours before the "
+                           "anomaly, so it did not cause the duplicates")
+    to_point = _pt("pt", "the cutover flip raced the lease renewal")
+    # verbatim legs fail (the pre-#2552 false-negative class)…
+    from tests.eval.write_path import schema
+    assert not schema.anchor_present(anchor_from, from_point["content"])
+    assert not schema.anchor_present(anchor_to, to_point["content"])
+    # …but the paraphrase band resolves both endpoints
+    assert grading.survival_match(from_point["content"], anchor_from)
+    assert grading.survival_match(to_point["content"], anchor_to)
+    snap = {"direct_edges": [], "operator_edges": [
+        _edge("NAND", {"pf": 0, "pt": 1})], "mitigations": []}
+    planted = {**_PLANTED_NEGATE,
+               "from": {"verbatim_anchor": anchor_from},
+               "to": {"verbatim_anchor": anchor_to}}
+    detail = grading.operator_edge_detail(
+        planted,
+        grading._anchor_points([from_point], anchor_from),
+        grading._anchor_points([to_point], anchor_to),
+        snap)
+    assert detail["verdict"] == "edge_correct", detail
+    # No semantic match (a point asserting something unrelated) stays
+    # content_missing — the band never rubber-stamps absent content.
+    unrelated = _pt("px", "the demo room is booked on thursday")
+    assert not grading.survival_match(unrelated["content"], anchor_from)
+    detail = grading.operator_edge_detail(
+        planted,
+        grading._anchor_points([unrelated], anchor_from),
+        grading._anchor_points([to_point], anchor_to),
+        snap)
+    assert detail["verdict"] == "from_content_missing", detail
+
+
+def test_operator_anchor_polarity_gate_blocks_opposite_paraphrase() -> None:
+    """#2552 precision (mirror of the #2405 unit gate): a point asserting
+    the OPPOSITE of a negated anchor never anchors it — a paraphrased point
+    that drops the negator does not resolve the endpoint."""
+    anchor_from = ("the flag did not cause the duplicates, it had been "
+                   "stable for two hours before the anomaly")
+    # The same content tokens WITHOUT the negator — asserts the flag DID
+    # cause the dupes (a paraphrase of the opposite claim). Token coverage
+    # passes; the polarity gate blocks it (the negated anchor is only
+    # retained by a point that also carries a negator).
+    opposite = _pt("pf", "the flag caused the duplicates — it flipped at the "
+                         "cutover before the two stable hours of the anomaly")
+    assert grading.survival_match(opposite["content"], anchor_from) is False
+    assert grading._anchor_points([opposite], anchor_from) == []
+
+
+def test_mitigation_reason_paraphrase_band_grades_mitigated_by() -> None:
+    """#2552 op_03: the MITIGATES leg's reason-content check applies the
+    same paraphrase band — a mitigation reason that distills the planted
+    from-anchor still grades edge_correct on the write path's
+    (op)-[:mitigated_by]->(m) shape."""
+    risk_anchor = "clock skew between regions can make lease expiry unsafe"
+    action_anchor = "a lagging region's renewal cannot clobber a live lease"
+    risk_point = _pt("pr", risk_anchor)  # verbatim risk claim minted
+    # the action point + mitigation reason paraphrase the from-anchor
+    action_point = _pt("pm", "the skew-tolerant grace period means a lagging "
+                             "renewal cannot clobber the live lease")
+    reason = "[MITIGATION] the skew-tolerant grace period means a lagging " \
+             "renewal cannot clobber the live lease"
+    assert not schema.anchor_present(action_anchor, reason)
+    assert grading.survival_match(reason, action_anchor)
+    snap = {
+        "direct_edges": [],
+        "operator_edges": [_edge("IMPL", {"px": 0, "pr": 1}, op_id="opi")],
+        "mitigations": [{"op_id": "opi", "point_id": "m1", "content": reason}],
+    }
+    planted = {**_PLANTED_NEGATE, "expected_kind": "MITIGATES",
+               "from": {"verbatim_anchor": action_anchor},
+               "to": {"verbatim_anchor": risk_anchor}}
+    detail = grading.operator_edge_detail(
+        planted,
+        grading._anchor_points([action_point], action_anchor),
+        grading._anchor_points([risk_point], risk_anchor),
+        snap)
+    assert detail["verdict"] == "edge_correct", detail

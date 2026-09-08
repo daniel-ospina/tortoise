@@ -51,6 +51,23 @@ def _search(store, fragments):            # each fragment separately
 _CT_IDS = [sc.id for sc in _cts()]
 
 
+@pytest.fixture(autouse=True, scope="module")
+def _force_embedded_lane() -> None:
+    """Hermetic per-run store tests materialize scenario graphs as named
+    (ct-001/xs-* …) — a TORTOISE_DB_URI redirect folds graphs per test and
+    voids the assertions (incl. the positive control in
+    test_retrieve_pre_k_has_only_claim_a_evidence). Force the embedded lane
+    for this module — the canonical sibling-file pattern (test_export_cli
+    precedent): bare MonkeyPatch auto-restores both vars at teardown."""
+    mp = pytest.MonkeyPatch()
+    mp.delenv("TORTOISE_DB_URI", raising=False)
+    mp.delenv("TORTOISE_DB_PATH", raising=False)
+    yield
+    mp.undo()
+
+
+
+
 # ── seed_mode content absence (white-box derive + real store) ─────────────
 def test_seed_mode_derive_never_emits_claim_b_k_or_nand():
     """The runner's derivation in seed_mode never emits claim_b / k / NAND
@@ -76,13 +93,11 @@ def test_seed_full_legacy_is_the_prefix_derivation(tmp_path):
     assert sc.contradiction_pairs[0].claim_b in contents
 
 
-def test_claim_b_never_preseeded_in_seed_mode(tmp_path, monkeypatch):
+def test_claim_b_never_preseeded_in_seed_mode(tmp_path):
     """seed_mode never pre-seeds ¬A; positive control first (claim_a IS
     findable) so the absence assert can never pass vacuously."""
     # Cross-lane: raw-content checks must observe graphs as named — force
     # embedded semantics (a URI redirect folds graphs per test).
-    monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
-    monkeypatch.delenv("TORTOISE_DB_PATH", raising=False)
     sc = _cts()[0]
     store = seeds.setup_seed_mode(tmp_path, sc.id)
     try:
@@ -98,15 +113,26 @@ def test_claim_b_never_preseeded_in_seed_mode(tmp_path, monkeypatch):
 
 
 def test_retrieve_pre_k_has_only_claim_a_evidence(tmp_path):
+    """A4 pre-k retrieve over the seeded graph surfaces claim_a + evidence
+    only: claim_a present, never a ¬A fragment.
+
+    The positive control reads through the PROBE path (empty context →
+    the scenario's primary planted claim as the query — the everyday
+    "what do I know about X" read). The probe text IS claim_a's content,
+    so it vocabulary-matches claim_a on ANY embedding lane (real model
+    AND the CI degraded TF-IDF lane): the assert is lane-agnostic. A
+    render[:200]-prefixed query would be system-prompt text only — under
+    degraded embeddings that matches just the system-template point and
+    claim_a drops off the recall surface (the #2558 tier-2 lane)."""
     sc = _cts()[0]
     store = seeds.setup_seed_mode(tmp_path, sc.id)
     try:
-        mems = store.retrieve(sc.to_episode_context()["render"][:200])
+        mems = store.retrieve("")
         texts = " ".join(str(m) for m in mems)
-        assert not any(f in texts for f in _fragments(sc))
         assert sc.contradiction_pairs[0].claim_a[:40] in texts or any(
-            sc.contradiction_pairs[0].claim_a[:40] in str(m.get("content", ""))
+            sc.contradiction_pairs[0].claim_a[:40] in m.content
             for m in mems)
+        assert not any(f in texts for f in _fragments(sc))
     finally:
         store.close()
 
@@ -130,13 +156,11 @@ def test_no_leak_full_policy_surface_all_arms(tmp_path, scenario_id):
 
 
 @pytest.mark.parametrize("n", range(1, 7))
-def test_bct_benign_store_never_carries_twin_counterclaim(tmp_path, monkeypatch, n):
+def test_bct_benign_store_never_carries_twin_counterclaim(tmp_path, n):
     """bct-001..006 benign stores + policy carry NO ¬A content of their
     ct-00N twin (the benign surface has no planted pair to leak)."""
     # Cross-lane: raw-content checks must observe graphs as named — force
     # embedded semantics (a URI redirect folds graphs per test).
-    monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
-    monkeypatch.delenv("TORTOISE_DB_PATH", raising=False)
     ct_id, bct_id = f"ct-00{n}", f"bct-00{n}"
     twin = _scenario(ct_id)
     store = seeds.setup_seed_mode(tmp_path, bct_id)
@@ -159,7 +183,7 @@ def test_bct_twin_surface_equality(n):
 
 
 # ── warm-store fail-closed on stale PRE-FIX graphs ────────────────────────
-def test_seed_mode_warm_store_fails_closed_on_stale(tmp_path, monkeypatch):
+def test_seed_mode_warm_store_fails_closed_on_stale(tmp_path):
     """seed_mode over a stale PRE-FIX full graph refuses (seeder-owned
     marker distinguishes stale-seeder content from agent-filed content: the
     guard tests a seed-manifest marker written by the seeder, never raw
@@ -167,8 +191,6 @@ def test_seed_mode_warm_store_fails_closed_on_stale(tmp_path, monkeypatch):
     false-refuse — locked in Task 10."""
     # Cross-lane test: SDK-lane/guard tests must observe graphs as named —
     # force embedded semantics (a URI redirect folds graphs per test).
-    monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
-    monkeypatch.delenv("TORTOISE_DB_PATH", raising=False)
     seeds.seed_full_legacy(tmp_path, "ct-001")  # pre-fix seeding (fresh store)
     # purge=False: observe the existing legacy namespace — the warm guard
     # must refuse (marker absent + planted content present).
@@ -199,7 +221,7 @@ def test_seed_mode_warm_store_accumulates_over_clean(tmp_path):
         store2.close()
 
 
-def test_seed_mode_store_owns_seed_manifest_marker(tmp_path, monkeypatch):
+def test_seed_mode_store_owns_seed_manifest_marker(tmp_path):
     """The seeder-owned seed-manifest marker is written into the seeded
     namespace (the warm guard's ownership record — Task 10's agent-filed
     content never false-refuses BECAUSE the marker is present) and is NOT
@@ -212,8 +234,6 @@ def test_seed_mode_store_owns_seed_manifest_marker(tmp_path, monkeypatch):
     """
     # Cross-lane test: SDK-lane/guard tests must observe graphs as named —
     # force embedded semantics (a URI redirect folds graphs per test).
-    monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
-    monkeypatch.delenv("TORTOISE_DB_PATH", raising=False)
     from battery.runner.setup import seed_manifest_content
     sc = _cts()[0]
     store = seeds.setup_seed_mode(tmp_path, sc.id)
@@ -232,7 +252,7 @@ def test_seed_mode_store_owns_seed_manifest_marker(tmp_path, monkeypatch):
         store.close()
 
 
-def test_record_never_targets_seed_manifest_marker(tmp_path, monkeypatch):
+def test_record_never_targets_seed_manifest_marker(tmp_path):
     """A4 record() claim-targets exclude the seeder-owned marker (the
     retrieve exclusion is mirrored on the write path) — an agent-filed
     NAND/IMPL edge lands on a seeded statement, never on the marker.
@@ -245,8 +265,6 @@ def test_record_never_targets_seed_manifest_marker(tmp_path, monkeypatch):
     """
     # Cross-lane test: SDK-lane/guard tests must observe graphs as named —
     # force embedded semantics (a URI redirect folds graphs per test).
-    monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
-    monkeypatch.delenv("TORTOISE_DB_PATH", raising=False)
     from battery.arms.base import AgentContext, Memory
     from battery.runner.setup import seed_manifest_point_id
     sc = _cts()[0]
@@ -283,7 +301,7 @@ def test_xs_planted_pairs_never_preseeded(tmp_path, scenario_id):
         texts = " ".join(str(m) for m in mems)
         for pair in sc.contradiction_pairs:
             assert pair.claim_a[:40] in texts or any(
-                pair.claim_a[:40] in str(m.get("content", "")) for m in mems)
+                pair.claim_a[:40] in m.content for m in mems)
             assert pair.claim_b[:40] not in texts
     finally:
         store.close()

@@ -2414,6 +2414,48 @@ class TestGraphLifecycleSeam:
         assert graph_key_ids(fake, "team-c2-001",
                              "g_c2test00000004") == ["k1", "k2"]  # cascade all
 
+    def test_count_graph_keys_literal_default_never_matches(self, fake):
+        """#2306 (supabase structural half of the lane-consistency pin): the
+        default row's key_count is 0 BY CONSTRUCTION — the keys that resolve
+        to the default graph are the TEAM-WIDE rows (graph_id NULL, managed
+        on the API-Keys tab), and api_keys.graph_id REFERENCES graphs(id)
+        with the default row's id being the DERIVED literal 'default' (never
+        a graphs.id), so no api_keys row can reference it. count_graph_keys
+        for 'default' stays 0 with team-wide keys present; even a real
+        kind='default' graphs row (recording-override upsert — its own g_ id)
+        with a raw-bound key is invisible to the literal 'default' count. The
+        list seam (#2306) additionally short-circuits default-kind rows to 0
+        before any lane count runs."""
+        self._seed_team(fake)
+        fake.seed("api_keys", [
+            {"id": "tw1", "team_id": "team-c2-001", "lookup_hash": "h1",
+             "graph_id": None, "revoked_at": None},
+            {"id": "tw2", "team_id": "team-c2-001", "lookup_hash": "h2",
+             "graph_id": None, "revoked_at": None},
+        ])
+        assert count_graph_keys(fake, "team-c2-001", "default") == 0
+        # A kind='default' graphs row exists only after a recording-override
+        # upsert (set_graph_recording); it carries its OWN g_ id, and any
+        # api_keys row bound to it references THAT id (FK), never 'default'.
+        insert_graph(fake, {
+            "id": "g_defrow0000001", "team_id": "team-c2-001",
+            "name": "default", "kind": "default",
+            "namespace": "team_team-c2-001",
+            "status": "active", "recording": None,
+        })
+        fake.seed("api_keys", [
+            {"id": "bd1", "team_id": "team-c2-001", "lookup_hash": "h3",
+             "graph_id": "g_defrow0000001", "revoked_at": None},
+        ])
+        # The default row's count (literal 'default') stays 0 …
+        assert count_graph_keys(fake, "team-c2-001", "default") == 0
+        # … while the raw-bound row IS counted when addressed by its real
+        # row id and remains listable/revocable via the key list.
+        assert count_graph_keys(fake, "team-c2-001",
+                                "g_defrow0000001") == 1
+        assert graph_key_ids(fake, "team-c2-001",
+                             "g_defrow0000001") == ["bd1"]
+
     # ── #2304 trash seam (delete = quarantine → restore / purge) ──────────
     def _seed_tombstone(self, fake, gid="g_c2test00000005", purged_at=None):
         self._seed_team(fake)

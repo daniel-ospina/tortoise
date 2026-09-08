@@ -38,13 +38,50 @@ from __future__ import annotations
 import json
 import logging
 import os
+import threading
 from contextlib import nullcontext
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any, Callable  # noqa: UP035
 
 from .backup_config import BackupConfig
-from .hosted_backup import _is_supabase_source, create_backup, prune_backups
+from .hosted_backup import _is_supabase_source, create_backup, mirror_backup, prune_backups
+
+# #2562 (re-audit P3): the sweep/purge per-team acquisitions are TIMED too
+# — a stuck holder (a restore whose locked body wedged) must not block that
+# team's pass forever. Same horizon as the restore wait (#2470).
+_TEAM_LOCK_TIMEOUT_S = 300
+
+
+def _team_lock_ctx(lock_for: Callable[[str], Any] | None, team_id: str):
+    """#2562: acquire the per-team lock for a sweep/purge with a TIMEOUT.
+    Returns (ctx, acquired). A lock held past the horizon skips the team
+    (the caller records an error and moves on — never wedges the pass); a
+    timeout never leaves the lock held. lock_for may also return a
+    contextmanager (legacy seam) — used as-is, untimed."""
+    if lock_for is None:
+        return nullcontext(), True
+    lock = lock_for(team_id)
+    # Duck-type: threading.Lock is a factory function (not a type) on
+    # Python < 3.13, so isinstance is unusable — a lock-shaped object
+    # (acquire/release) gets the timed path; anything else (a
+    # contextmanager seam) is used as-is, untimed.
+    if not (hasattr(lock, "acquire") and hasattr(lock, "release")):
+        return lock, True
+    got = lock.acquire(timeout=_TEAM_LOCK_TIMEOUT_S)
+    if not got:
+        return nullcontext(), False
+
+    class _ReleaseOnExit:
+        def __enter__(self):
+            return lock
+
+        def __exit__(self, *_exc):
+            lock.release()
+            return False
+
+    return _ReleaseOnExit(), True
+
 
 logger = logging.getLogger(__name__)
 
@@ -540,6 +577,7 @@ def _backup_graph(
     graph: dict[str, Any],
     now: datetime,
     incidents: list[dict[str, Any]],
+    mirror=None,
 ) -> dict[str, Any]:
     """Back up ONE graph (default or custom) of a team (#2313).
 
@@ -698,6 +736,26 @@ def _backup_graph(
             return {"status": "data_loss_candidate", "team_id": team_id,
                     "graph_id": graph_id, "node_count": node_count}
 
+    # ── #2319 geo-mirror (env-guarded second-store copy): an ACCEPTED
+    # archive (every guard passed) is copied to the mirror store and
+    # read-back sha256-verified against its manifest. The primary backup is
+    # already durable — a mirror failure must never fail it — but it IS a
+    # durability-policy breach when BACKUP_MIRROR_ENABLED=true, so it is
+    # reported LOUD (per-graph error + streak on /status last_sweep; the next
+    # run re-mirrors a fresh archive once the mirror is healthy).
+    if mirror is not None:
+        try:
+            mirror_result = mirror_backup(storage, mirror, manifest["backup_id"])
+        except Exception as e:
+            logger.exception(
+                "mirror of %s/%s failed (primary backup durable): %s",
+                team_id, graph_id, e)
+            return {"status": "error", "team_id": team_id,
+                    "graph_id": graph_id,
+                    "error": f"backup accepted but mirror failed: {e}"}
+    else:
+        mirror_result = None
+
     state = {
         "source": "backup",
         "latest_backup_at": manifest.get("created_at"),
@@ -741,6 +799,7 @@ def _backup_graph(
         "graph_id": graph_id,
         "node_count": node_count,
         "pruned": len(deleted),
+        "mirror": mirror_result,
     }
 
 
@@ -753,6 +812,7 @@ def _sweep_team(
     team_id: str,
     now: datetime,
     incidents: list[dict[str, Any]],
+    mirror=None,
 ) -> dict[str, Any]:
     """Sweep ONE team's active graphs (default + customs) (#2313).
 
@@ -775,6 +835,7 @@ def _sweep_team(
             gr = _backup_graph(
                 db=db, registry=registry, storage=storage, config=config,
                 team_id=team_id, graph=graph, now=now, incidents=incidents,
+                mirror=mirror,
             )
         except Exception as e:  # per-graph isolation: one bad graph never
             # aborts the team's other graphs (review P3-2)
@@ -852,6 +913,69 @@ def _sweep_team(
     return team_res
 
 
+# ── #2317 scheduled-restore-drill archive selection ───────────────────────
+# The scheduled (monthly, unattended) drill restores the OLDEST eligible
+# archive into _drill_* scratch. Selection is a pure storage walk (no
+# control-plane query): only NESTED per-graph pools qualify
+# (backups/{team}/{graph}/{ts}_{rnd}/dump.enc — 5 key segments). Legacy
+# FLAT 4-segment artifacts are excluded: their key shape does not name a
+# graph, and the operator-invoked drill surface already covers the pre-#2313
+# shapes. The caller resolves each candidate through the ACTIVE-graph seam
+# (tombstone guard), so a quarantined/deleted graph's archive is skipped,
+# never drilled (#2304).
+
+
+def list_drill_candidates(storage, *, max_candidates: int = 8) -> list[dict[str, Any]]:
+    """Oldest-first eligible nested archives across all teams.
+
+    Returns candidate rows ``[{team_id, graph_id, backup_key, created_at}]``
+    sorted by manifest ``created_at`` ascending (oldest first). Dumps with an
+    unreadable/missing manifest are skipped (restore_backup manifest-verifies
+    whatever is drilled anyway). Raises RuntimeError on a storage-list
+    failure — the caller must never guess an empty archive set off a failed
+    read (the same never-confirm-empty invariant as the watcher).
+    """
+    from .hosted_backup import _parse_backup_key
+
+    rows: list[dict[str, Any]] = []
+    for key in storage.list("backups/"):
+        if not key.endswith("/dump.enc"):
+            continue
+        if len(key.split("/")) != 5:  # backups/{team}/{graph}/{ts}_{rnd}/dump.enc
+            continue  # legacy flat (4 segments) and any future shape
+        try:
+            team_id, graph_id, _ = _parse_backup_key(key)
+        except ValueError:
+            continue
+        if not graph_id:
+            continue
+        try:
+            manifest = _read_json(storage, key.replace("/dump.enc", "/manifest.json"))
+        except Exception:
+            continue  # no usable manifest — never a drill source
+        created_at = str(manifest.get("created_at") or "")
+        if not created_at:
+            continue
+        rows.append(
+            {
+                "team_id": team_id,
+                "graph_id": graph_id,
+                "backup_key": key,
+                "created_at": created_at,
+            }
+        )
+
+    def _sort_key(row: dict[str, Any]):
+        try:
+            ts = datetime.fromisoformat(row["created_at"])
+        except ValueError:
+            ts = datetime.min.replace(tzinfo=UTC)
+        return (ts, row["backup_key"])
+
+    rows.sort(key=_sort_key)
+    return rows[:max_candidates]
+
+
 def resolve_active_graph(source, team_id: str, graph_id: str) -> dict[str, Any]:
     """Resolve a restore/re-baseline target graph to its ACTIVE sweep row.
 
@@ -875,6 +999,24 @@ def resolve_active_graph(source, team_id: str, graph_id: str) -> dict[str, Any]:
         f"graph {graph_id!r} is not an active graph of team {team_id} "
         "-- restore/re-baseline refused (deleted or unknown)"
     )
+
+
+# #2560 (re-audit P3): ALL read-modify-write cycles on the global
+# ops/state.json go through ONE lock — the purge's ghost-drop (#2471), the
+# no-op merge-preserves, and the real-run roll-up otherwise interleave
+# freely (a no-op that read state BEFORE a purge drop writes its stale
+# merge back and resurrects the purged graph's streak keys forever).
+_OPS_STATE_LOCK = threading.Lock()
+
+
+def _noop_ops_state_write(storage, now: datetime) -> None:
+    """#2560: write the merge-preserving no-op roll-up AFTER re-reading the
+    state under _OPS_STATE_LOCK — a no-op run whose start-of-run read
+    predates a concurrent purge's ghost-drop would otherwise resurrect the
+    dropped keys. Serialized against the purge drop + real-run write."""
+    with _OPS_STATE_LOCK:
+        ops_state = read_ops_state(storage)
+        _write_json(storage, OPS_STATE_KEY, _noop_ops_state(ops_state, now))
 
 
 def _noop_ops_state(ops_state: Any, now: datetime) -> dict[str, Any]:
@@ -906,27 +1048,39 @@ def _drop_purged_graphs_from_ops_state(storage, team_id: str,
     attempted)."""
     if not graph_ids:
         return
-    try:
-        prev = read_ops_state(storage)
-    except Exception as e:
-        logger.warning("purge ops-state read failed for %s: %s", team_id, e)
-        return
-    if not isinstance(prev, dict):
-        return
-    keys = {f"{team_id}:{gid}" for gid in graph_ids}
-    failures = [f for f in (prev.get("graph_failures") or [])
-                if not (isinstance(f, dict)
-                        and f.get("team_id") == team_id
-                        and str(f.get("graph_id") or "") in graph_ids)]
-    streaks = {k: v for k, v in (prev.get("graph_error_streaks") or {}).items()
-               if k not in keys}
-    try:
-        prev["graph_failures"] = failures
-        prev["graph_error_streaks"] = streaks
-        prev["updated_at"] = (now or datetime.now(timezone.utc)).isoformat()  # noqa: UP017
-        _write_json(storage, OPS_STATE_KEY, prev)
-    except Exception as e:
-        logger.warning("purge ops-state write failed for %s: %s", team_id, e)
+    # #2560: the read→mutate→write runs under _OPS_STATE_LOCK so a no-op
+    # sweep cannot interleave a stale merge-preserve write between the read
+    # and the write (resurrecting the just-dropped keys).
+    with _OPS_STATE_LOCK:
+        try:
+            prev = read_ops_state(storage)
+        except Exception as e:
+            logger.warning("purge ops-state read failed for %s: %s",
+                           team_id, e)
+            return
+        if not isinstance(prev, dict):
+            return
+        keys = {f"{team_id}:{gid}" for gid in graph_ids}
+        failures = [
+            f for f in (prev.get("graph_failures") or [])
+            if not (isinstance(f, dict)
+                    and f.get("team_id") == team_id
+                    and str(f.get("graph_id") or "") in graph_ids)
+        ]
+        streaks = {
+            k: v
+            for k, v in (prev.get("graph_error_streaks") or {}).items()
+            if k not in keys
+        }
+        try:
+            prev["graph_failures"] = failures
+            prev["graph_error_streaks"] = streaks
+            prev["updated_at"] = (
+                now or datetime.now(UTC)).isoformat()
+            _write_json(storage, OPS_STATE_KEY, prev)
+        except Exception as e:
+            logger.warning("purge ops-state write failed for %s: %s",
+                           team_id, e)
 
 
 def run_backup_sweep(
@@ -938,12 +1092,20 @@ def run_backup_sweep(
     team_ids: list[str] | None = None,
     lock_for: Callable[[str], Any] | None = None,
     now: datetime | None = None,
+    mirror=None,
 ) -> dict[str, Any]:
     """Back up every team's knowledge graphs (default + custom, #2313).
     Returns the run result.
 
     ``lock_for`` is an optional per-team lock factory (the endpoint supplies
     the asyncio-lock seam); the sweep serializes each team's dump under it.
+
+    ``mirror`` (#2319): optional second-store BackupStorage. When provided,
+    every ACCEPTED archive is mirrored (copy + sha256 read-back verify) right
+    after its guards pass; a mirror failure is reported per-graph as an error
+    (loud — never silent) while the primary backup stays durable. Built by
+    the endpoint from BACKUP_MIRROR_ENABLED + R2_MIRROR_* env; None keeps the
+    sweep byte-for-byte mirror-free.
 
     When ``config.team_sweep_enabled`` is True, only Pro teams (tier != 'free'
     AND backup_enabled) are enumerated (#655). A 0-eligible-teams result files
@@ -977,9 +1139,7 @@ def run_backup_sweep(
                     "detail": {"message": "team sweep enabled but 0 eligible (Pro) teams found"},
                 }
             )
-            _write_json(
-                storage, OPS_STATE_KEY, _noop_ops_state(ops_state, now),
-            )
+            _noop_ops_state_write(storage, now)
             return {
                 "status": "no_eligible_teams",
                 "teams_backed_up": 0,
@@ -1001,9 +1161,7 @@ def run_backup_sweep(
                     "detail": {"previous": prev_team_count, "now": 0},
                 }
             )
-        _write_json(
-            storage, OPS_STATE_KEY, _noop_ops_state(ops_state, now),
-        )
+        _noop_ops_state_write(storage, now)
         return {
             "status": "no_teams",
             "teams_backed_up": 0,
@@ -1013,12 +1171,22 @@ def run_backup_sweep(
     results: dict[str, Any] = {}
     resolution_failures = 0
     for team_id in sorted(team_ids):
-        ctx = lock_for(team_id) if lock_for else nullcontext()
+        ctx, acquired = _team_lock_ctx(lock_for, team_id)
+        if not acquired:
+            # #2562: a stuck holder must not wedge the pass — skip the team
+            # with a loud error (next run retries it).
+            results[team_id] = {
+                "status": "error", "team_id": team_id,
+                "error": "team lock busy past the timeout "
+                         "(a restore or purge holds it)",
+            }
+            continue
         with ctx:
             try:
                 res = _sweep_team(
                     db=db, registry=registry, storage=storage, config=config,
                     team_id=team_id, now=now, incidents=incidents,
+                    mirror=mirror,
                 )
             except Exception as e:  # per-team isolation: one bad team never
                 # aborts the sweep for the others (review P3-2)
@@ -1096,17 +1264,18 @@ def run_backup_sweep(
     graph_totals = {"attempted": graphs_attempted,
                     "backed_up": graphs_backed_up,
                     "errors": graph_errors}
-    _write_json(
-        storage, OPS_STATE_KEY,
-        {
-            "last_team_count": len(team_ids),
-            "last_sweep_at": now.isoformat(),
-            "updated_at": now.isoformat(),
-            "graph_totals": graph_totals,
-            "graph_failures": graph_failures[:20],
-            "graph_error_streaks": streaks,
-        },
-    )
+    with _OPS_STATE_LOCK:  # #2560: serialize the real-run roll-up write
+        _write_json(
+            storage, OPS_STATE_KEY,
+            {
+                "last_team_count": len(team_ids),
+                "last_sweep_at": now.isoformat(),
+                "updated_at": now.isoformat(),
+                "graph_totals": graph_totals,
+                "graph_failures": graph_failures[:20],
+                "graph_error_streaks": streaks,
+            },
+        )
 
     backed_up = sum(
         1 for r in results.values() if r.get("status") == "backed_up"
@@ -1290,21 +1459,27 @@ def _purge_graph_storage(storage, team_id: str, graph_id: str,
                         out["errors"].append(f"delete {k}: {e}")
             except Exception as e:
                 out["errors"].append(f"list backups/{bid}/: {e}")
-        if not out["errors"]:
-            try:
-                _write_json(
-                    storage, _legacy_flat_index_key(team_id),
-                    {bid: ent for bid, ent in (index or {}).items()
-                     if bid not in flat_bids},
-                )
-                # #2466: record the erased bids so a concurrent/stale sweep
-                # reclassification can never resurrect these index entries
-                # (R2 last-writer-wins — the sweep rewrites the whole index).
-                _record_purged_flat_bids(
-                    storage, team_id, flat_bids,
-                    datetime.now(timezone.utc).isoformat())  # noqa: UP017
-            except Exception as e:
-                out["errors"].append(f"index rewrite: {e}")
+        # #2561 (re-audit): rewrite the index + record the ghosts even when
+        # some deletes errored — the previous `if not out["errors"]` gate
+        # left the index carrying bids whose objects were already erased
+        # whenever a partial R2 failure hit (the tombstone is stamped
+        # regardless, so the row is never re-enumerated to correct the
+        # index). A stale index entry then over-counted Inspect and could
+        # be resurrected by the next sweep's reclassification.
+        try:
+            _write_json(
+                storage, _legacy_flat_index_key(team_id),
+                {bid: ent for bid, ent in (index or {}).items()
+                 if bid not in flat_bids},
+            )
+            # #2466: record the erased bids so a concurrent/stale sweep
+            # reclassification can never resurrect these index entries
+            # (R2 last-writer-wins — the sweep rewrites the whole index).
+            _record_purged_flat_bids(
+                storage, team_id, flat_bids,
+                datetime.now(timezone.utc).isoformat())  # noqa: UP017
+        except Exception as e:
+            out["errors"].append(f"index rewrite: {e}")
     return out
 
 
@@ -1410,12 +1585,24 @@ def _stamp_purged(source, team_id: str, graph_id: str, now_iso: str,
                 f"purge stamp refused for {team_id}/{graph_id}: row is "
                 "no longer a deleted tombstone (restored concurrently?)")
         return
-    source.query(
+    rows = source.query(
         "MATCH (g:Graph {id:$gid, team_id:$tid, status:'deleted'}) "
-        "SET g.purged_at = $ts, g.purged_residual = $r",
+        "SET g.purged_at = $ts, g.purged_residual = $r RETURN count(g)",
         params={"gid": graph_id, "tid": team_id, "ts": now_iso,
                 "r": bool(residual)},
-    )
+    ).result_set
+    # #2559 (re-audit P2): the registry stamp must OBSERVE whether its
+    # conditional MATCH matched — a 0-row MATCH…SET silently succeeds, so a
+    # cross-process restore that flipped the row to ACTIVE between the
+    # pre-drop verify and the stamp would report `purged` on a live,
+    # unstamped, already-erased row. Mirror the supabase lane (#2464):
+    # refuse loudly so the caller records the race instead of silently
+    # succeeding.
+    matched = bool(rows and rows[0] and rows[0][0])
+    if not matched:
+        raise RuntimeError(
+            f"purge stamp refused for {team_id}/{graph_id}: row is "
+            "no longer a deleted tombstone (restored concurrently?)")
 
 
 def run_graph_purge(
@@ -1451,7 +1638,14 @@ def run_graph_purge(
     errors: list[dict[str, Any]] = []
     teams_purged = 0
     for team_id in sorted(team_ids or []):
-        ctx = lock_for(team_id) if lock_for else nullcontext()
+        ctx, acquired = _team_lock_ctx(lock_for, team_id)
+        if not acquired:
+            # #2562: a stuck holder must not wedge the purge pass — record
+            # the team as an error (next run retries it).
+            errors.append({"team_id": team_id,
+                           "error": "team lock busy past the timeout "
+                                    "(a restore or purge holds it)"})
+            continue
         with ctx:
             try:
                 tombs = enumerate_team_tombstones(registry, team_id)
