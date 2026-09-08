@@ -157,3 +157,5 @@ Skipped — plan touches zero third-party dependencies (pure graph reads over th
 
 ## Accepted divergences (from issue body)
 - Re-scoped per human gate 2026-09-08 (dual-lane); assembler acceptance is synthetic-graph + no-regression, NOT the 13-Q score. ask() ships (de-provisionalized same date). No new reader fragments/qtype/wire fields in v1.
+
+<!-- plan-review: cycles=6, status=clean, version=2.3.0 -->
