@@ -15,8 +15,8 @@ from dataclasses import dataclass
 from typing import Callable  # noqa: UP035
 
 from battery.arms.base import ArmUnavailable
-from battery.exceptions import ConfigError
 from battery.enums import ModelCallOutcome
+from battery.exceptions import ConfigError
 
 
 @dataclass
