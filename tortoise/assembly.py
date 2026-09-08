@@ -263,3 +263,241 @@ def extract_subject_terms(question: str,
         else:
             a = a_raw
     return [_clean(a), _clean(b_raw)]
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# #2165 Task 3 — resolver: recall-first, confidence-tagged, no LLM
+# (R1 both-halves gate, R7 never a silent single-match, R10 embedded
+# degrade, R12/C7 collision-with-ids).
+#
+# Chain per subject term: (1) exact-name/id probe (embedded-safe — one
+# batched query over normalized variants) → high; (2) docker Object
+# name-FTS for paraphrases → med; (3) alias amplifier from anchored
+# points' search_keys → low. Missing/raising FTS/alias legs degrade to []
+# (R10) — a term that still resolves nowhere stays UNRESOLVED (the
+# both-halves gate keeps the fired decision false, R1).
+# ══════════════════════════════════════════════════════════════════════════
+
+from dataclasses import dataclass  # noqa: E402
+from typing import Protocol  # noqa: E402
+
+
+@dataclass(frozen=True)
+class SubjectCandidate:
+    """One resolved Object candidate for one subject term (R7/R12/C7)."""
+
+    subject_index: int          # index into the shape's term list
+    object_id: str
+    name: str
+    confidence: str             # "high" (exact) | "med" (fts) | "low" (alias)
+    source: str                 # "exact" | "fts" | "alias"
+    term: str = ""
+
+
+@dataclass(frozen=True)
+class ResolveResult:
+    candidates: tuple[SubjectCandidate, ...] = ()
+    unresolved: tuple[str, ...] = ()
+
+    def candidates_for(self, subject_index: int) -> list[SubjectCandidate]:
+        return [c for c in self.candidates if c.subject_index == subject_index]
+
+    def both_halves_ok(self, shape: AssemblyShape | None) -> bool:
+        """R1: two-subject shapes admit BOTH halves or fire nothing. A
+        single-subject shape (current-state) fires when its one term
+        resolved. None shape never fires here (classify first)."""
+        if shape is None:
+            return False
+        if shape is AssemblyShape.CURRENT_STATE:
+            # never fire with ZERO candidates — an empty resolved set is an
+            # unresolved subject, not a match
+            return bool(self.candidates) and not self.unresolved
+        # ordering/interval: every term must resolve (a partial admit would
+        # silently narrow the shape to a single subject — forbidden)
+        return not self.unresolved and len(
+            {c.subject_index for c in self.candidates}) == 2
+
+
+class ResolverPort(Protocol):
+    """The graph seam the resolver reads through (dict-stubbed in unit
+    tests; the docker adapter wraps a live TortoiseSDK/projection)."""
+
+    def exact_objects(self, names: list[str]) -> list[dict]: ...
+
+    def fts_objects(self, term: str, limit: int = 8) -> list[dict]: ...
+
+    def alias_objects(self, term: str, limit: int = 8) -> list[dict]: ...
+
+
+# name normalization: leading determiners/possessives/gerunds + a head cut
+# at participial/relative modifiers ("the dog bed getting chewed" → dog bed;
+# "the couch I bought in March" → the couch)
+_LEAD_NOISE = re.compile(
+    r"^(?:the|a|an|my|our|their|your|her|his|its)\s+", re.IGNORECASE)
+_GERUND_LEAD = re.compile(
+    r"^(?:(?:buy|sell|order|get|fix|trim|start|use|visit|attend|join|take|"
+    r"paint|move|replace|purchase|clean|repair|finish|read|watch|meet|see|"
+    r"plant|water|harvest|cancel|cook|host|try|rent|build|adopt|bring|wear|"
+    r"make|collect|receive|deliver|return|lose|find|book|plan|host|attend|"
+    r"participate|complete|set\s+up|sign\s+up\s+for)\w*\s+)", re.IGNORECASE)
+_HEAD_CUT = re.compile(
+    r"\s+(?:(?:i|you|we|they|he|she|it)\s+)?(?:getting|being|bought|"
+    r"sold|delivered|received|ordered|moved|chewed|repaired|painted|fixed|"
+    r"replaced|started|finished|installed|came|went|that|which|who|from|"
+    r"by|with|in)\b", re.IGNORECASE)
+
+
+def _candidate_names(term: str) -> list[str]:
+    """Ordered name variants for the exact probe (raw span → cleaned head →
+    article-stripped head → gerund+article-stripped → quote-stripped).
+    Empty/inert terms yield [] (no probe)."""
+    out: list[str] = []
+    t = term.strip().strip(" ?.,;:—–-")
+    if not t:
+        return []
+    # strip a WRAPPING quote pair so quoted titles reach the exact probe
+    # ("'The Hate U Give'" → The Hate U Give); mid-span quotes untouched
+    if len(t) >= 2 and t[0] in "'\"'" and t[-1] == t[0]:
+        t = t[1:-1].strip()
+    if not t:
+        return []
+    out.append(t)
+    # head cut at a participial/relative modifier
+    m = _HEAD_CUT.search(t)
+    head = t[: m.start()].strip() if m else t
+    for v in (head,):
+        if v and v not in out:
+            out.append(v)
+    v = _LEAD_NOISE.sub("", head, count=1).strip() if head else ""
+    for cand in (v,):
+        if cand and cand not in out:
+            out.append(cand)
+    v2 = _GERUND_LEAD.sub("", t, count=1)
+    for cand in (v2, _LEAD_NOISE.sub("", v2, count=1).strip()):
+        if cand and cand not in out:
+            out.append(cand)
+    return out
+
+
+def resolve_subjects(port: ResolverPort, terms: list[str], *,
+                     shape: AssemblyShape | None) -> ResolveResult:
+    """Deterministic no-LLM resolver: prose terms → Object candidates.
+
+    Confidence/source: exact probe → high/exact; Object name-FTS → med/fts;
+    anchored search_keys alias → low/alias. Never a silent single match
+    (R7): a term matching several Objects yields every candidate with its
+    id. Missing/raising FTS or alias legs degrade to [] (R10 embedded).
+    """
+    candidates: list[SubjectCandidate] = []
+    unresolved: list[str] = []
+    for idx, term in enumerate(terms):
+        names = _candidate_names(term)
+        # leg 1 — exact name/id probe (embedded-safe, batched)
+        found: list[dict] = []
+        if names:
+            try:
+                found = list(port.exact_objects(names) or [])
+            except Exception:
+                found = []
+        if found:
+            seen: set[str] = set()
+            for row in found:
+                oid = str(row.get("id") or "")
+                key = f"{oid}\x00{row.get('name')}"
+                if key in seen:
+                    continue
+                seen.add(key)
+                candidates.append(SubjectCandidate(
+                    subject_index=idx, object_id=oid,
+                    name=str(row.get("name") or ""),
+                    confidence="high", source="exact", term=term))
+            continue
+        # leg 2 — docker Object name-FTS (paraphrase recall)
+        rows: list[dict] = []
+        try:
+            if names:
+                rows = list(port.fts_objects(names[0][:160]) or [])
+        except Exception:
+            rows = []
+        if rows:
+            seen = set()
+            for row in rows:
+                oid = str(row.get("id") or "")
+                key = f"{oid}\x00{row.get('name')}"
+                if key in seen or oid in {c.object_id
+                                          for c in candidates
+                                          if c.subject_index == idx}:
+                    continue
+                seen.add(key)
+                candidates.append(SubjectCandidate(
+                    subject_index=idx, object_id=oid,
+                    name=str(row.get("name") or ""),
+                    confidence="med", source="fts", term=term))
+            continue
+        # leg 3 — alias amplifier (anchored points' search_keys)
+        rows = []
+        try:
+            rows = list(port.alias_objects(term) or [])
+        except Exception:
+            rows = []
+        if rows:
+            seen = set()
+            for row in rows:
+                oid = str(row.get("id") or "")
+                key = f"{oid}\x00{row.get('name')}"
+                if key in seen or oid in {c.object_id
+                                          for c in candidates
+                                          if c.subject_index == idx}:
+                    continue
+                seen.add(key)
+                candidates.append(SubjectCandidate(
+                    subject_index=idx, object_id=oid,
+                    name=str(row.get("name") or ""),
+                    confidence="low", source="alias", term=term))
+            continue
+        unresolved.append(term)
+    return ResolveResult(candidates=tuple(candidates),
+                         unresolved=tuple(unresolved))
+
+
+def docker_resolver_port(sdk) -> ResolverPort:
+    """Adapter over a live TortoiseSDK: exact probe via the projection's
+    Object id/name index (one batched query), FTS via
+    ``tortoise_fts_query(entity_type='object')``, alias via one anchored
+    search_keys query. Function-level imports keep the module import-safe
+    (no sdk import at module scope)."""
+    proj = sdk._get_proj()
+
+    def exact_objects(names: list[str]) -> list[dict]:
+        rows = proj.g.query(
+            "MATCH (o:Object) WHERE o.name IN $names OR o.id IN $names "
+            "RETURN o.id, o.name",
+            params={"names": names}).result_set
+        return [{"id": r[0], "name": r[1]} for r in rows]
+
+    def fts_objects(term: str, limit: int = 8) -> list[dict]:
+        # raises on embedded (no fulltext index) — the resolver degrades
+        hits = sdk.tortoise_fts_query(term, entity_type="object",
+                                      limit=limit)
+        return [{"id": h.get("id", ""), "name": h.get("content", "")}
+                for h in hits or []]
+
+    def alias_objects(term: str, limit: int = 8) -> list[dict]:
+        tokens = [t for t in re.split(r"[^a-z0-9]+", term.lower())
+                  if len(t) >= 3][:6]
+        if not tokens:
+            return []
+        rows = proj.g.query(
+            "MATCH (p:Point)-[:aboutObject]->(o:Object) "
+            "WHERE p.search_keys IS NOT NULL AND "
+            "ANY(t IN $tokens WHERE toLower(p.search_keys) CONTAINS t) "
+            "RETURN o.id, o.name, collect(p.id) LIMIT $limit",
+            params={"tokens": tokens, "limit": limit}).result_set
+        return [{"id": r[0], "name": r[1]} for r in rows]
+
+    import types
+    # SimpleNamespace — NOT a class body: class-local assignment would shadow
+    # the enclosing closure names (the classic class-body scoping gotcha)
+    return types.SimpleNamespace(exact_objects=exact_objects,
+                                 fts_objects=fts_objects,
+                                 alias_objects=alias_objects)

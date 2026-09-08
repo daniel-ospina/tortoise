@@ -38,8 +38,10 @@ import pytest
 
 from tortoise.assembly import (
     AssemblyShape,
+    ResolveResult,
     classify_question,
     extract_subject_terms,
+    resolve_subjects,
 )
 
 _CENSUS = json.loads(
@@ -370,3 +372,272 @@ def test_extraction_matches_classification_consistency():
         sh = classify_question(q)
         assert sh is not None
         assert extract_subject_terms(q) == extract_subject_terms(q, sh)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# #2165 Task 3 — resolver: recall-first, confidence-tagged, no LLM
+# (R1 both-halves gate, R7 never a silent single-match, R10 embedded
+# degrade, R12/C7 collision). RED→GREEN: the functions resolve_subjects /
+# SubjectCandidate / ResolveResult / ResolverPort live in tortoise/assembly.py
+# and did not exist when these tests were authored.
+# ══════════════════════════════════════════════════════════════════════════
+
+
+# ── dict-stubbed ResolverPort (no DB — the R7 exact-probe path) ───────────
+
+class _DictObjectPort:
+    """In-memory ResolverPort: {name: {id, name}} + optional FTS/alias rows."""
+
+    def __init__(self, objects, *, fts=None, alias=None):
+        # name -> list (a collision — two Objects sharing a name — must
+        # SURVIVE the stub: R12/C7 the resolver returns both with ids)
+        self._objects: dict[str, list[dict]] = {}
+        for o in objects:
+            self._objects.setdefault(o["name"], []).append(o)
+        self._fts = fts or (lambda term, limit=8: [])
+        self._alias = alias or (lambda term, limit=8: [])
+
+    def exact_objects(self, names):
+        out = []
+        for n in names:
+            out.extend(self._objects.get(n, []))
+        return out
+
+    def fts_objects(self, term, limit=8):
+        return self._fts(term, limit)
+
+    def alias_objects(self, term, limit=8):
+        return self._alias(term, limit)
+
+
+_O1 = {"id": "obj-1", "name": "couch"}
+_O2 = {"id": "obj-2", "name": "dog bed"}
+_O3 = {"id": "obj-3", "name": "sofa"}
+
+
+def _base_port():
+    return _DictObjectPort([_O1, _O2, _O3])
+
+
+def test_resolver_exact_probe_dict_stub():
+    """R7 exact-name probe: 'the couch'/'the dog bed' resolve to couch /
+    dog bed with confidence=high, source=exact — on a dict stub, no DB."""
+    port = _base_port()
+    res = resolve_subjects(port, ["the couch", "the dog bed"],
+                           shape=AssemblyShape.ORDERING)
+    assert isinstance(res, ResolveResult)
+    assert res.both_halves_ok(AssemblyShape.ORDERING) is True
+    by_index = {c.subject_index: c for c in res.candidates}
+    assert by_index[0].name == "couch"
+    assert by_index[0].confidence == "high"
+    assert by_index[0].source == "exact"
+    assert by_index[0].object_id == "obj-1"
+    assert by_index[1].name == "dog bed"
+
+
+def test_resolver_one_half_unresolved_fires_nothing():
+    """R1 both-halves: an ordering/interval shape whose SECOND subject does
+    not resolve → unresolved flagged, both_halves_ok False (the fired
+    decision stays false — legacy byte-identical)."""
+    port = _base_port()
+    res = resolve_subjects(port, ["the couch", "the exercise bike"],
+                           shape=AssemblyShape.ORDERING)
+    assert res.both_halves_ok(AssemblyShape.ORDERING) is False
+    assert "the exercise bike" in res.unresolved
+    # the resolved half alone must NOT silently pass as a single match (R7)
+    assert [c.name for c in res.candidates] == ["couch"]
+
+
+def test_resolver_collision_returns_both_with_ids():
+    """R12/C7: two Objects sharing one name resolve to BOTH candidates with
+    their distinct ids (the renderer sections per candidate at Task 5)."""
+    dup = [{"id": "obj-a", "name": "bike"}, {"id": "obj-b", "name": "bike"}]
+    port = _DictObjectPort(dup)
+    res = resolve_subjects(port, ["the bike"], shape=AssemblyShape.CURRENT_STATE)
+    assert len(res.candidates) == 2
+    assert {c.object_id for c in res.candidates} == {"obj-a", "obj-b"}
+    assert all(c.name == "bike" for c in res.candidates)
+    # multi-candidate admission keeps per-candidate tags (Task 5 sections
+    # per candidate on object_id — a dedup regression must fail loudly)
+    assert all(c.confidence == "high" and c.source == "exact"
+               for c in res.candidates)
+
+
+def test_resolver_fts_missing_degrades_to_empty():
+    """R10 embedded degrade: the docker-only FTS leg raising (absent index)
+    → [] + no raise; the term stays unresolved (never a fabricated hit)."""
+    class _NoFtsPort:
+        def exact_objects(self, names):
+            return [{"id": "obj-1", "name": "couch"}] \
+                if "couch" in names else []
+
+        def fts_objects(self, term, limit=8):
+            raise RuntimeError("no fulltext index (embedded)")
+
+        def alias_objects(self, term, limit=8):
+            raise RuntimeError("no alias leg")
+
+    res = resolve_subjects(_NoFtsPort(),
+                           ["the couch", "the missing item"],
+                           shape=AssemblyShape.ORDERING)
+    assert res.both_halves_ok(AssemblyShape.ORDERING) is False
+    assert "the missing item" in res.unresolved
+    assert [c.name for c in res.candidates] == ["couch"]
+
+
+def test_resolver_alias_amplifier_low_confidence():
+    """Alias amplifier: an Object whose NAME does not token-match the term
+    but whose anchored Point search_keys do → resolves source=alias,
+    confidence=low."""
+    port = _base_port()
+    port._alias = lambda term, limit=8: (
+        [{"id": "obj-9", "name": "projector"}] if "ikea" in term else [])
+    res = resolve_subjects(port, ["the thing from ikea"],
+                           shape=AssemblyShape.CURRENT_STATE)
+    assert [c.name for c in res.candidates] == ["projector"]
+    assert res.candidates[0].source == "alias"
+    assert res.candidates[0].confidence == "low"
+
+
+def test_resolver_interval_same_subject_both_indexes():
+    """Interval 'buying the couch'/'selling the couch' → both halves resolve
+    to the SAME object under distinct subject_indexes."""
+    port = _base_port()
+    res = resolve_subjects(port, ["buying the couch", "selling the couch"],
+                           shape=AssemblyShape.INTERVAL)
+    assert res.both_halves_ok(AssemblyShape.INTERVAL) is True
+    by_index = {c.subject_index: c for c in res.candidates}
+    assert by_index[0].object_id == by_index[1].object_id == "obj-1"
+
+
+def test_resolver_edge_terms_never_raise():
+    """Degenerate/edge terms (possessives w/o a stored name, mixed case,
+    stopwords-only, empty) → no raise, honest unresolved."""
+    port = _base_port()
+    for term in ["", "   ", "the", "a", "my", "cousin's wedding",
+                 "THE COUCH", "Mark and Sarah", "the thing from ikea xyz"]:
+        res = resolve_subjects(port, [term],
+                               shape=AssemblyShape.CURRENT_STATE)
+        assert isinstance(res, ResolveResult)
+    # mixed case: stored name is lowercase "couch" — "THE COUCH" variants
+    # include "THE COUCH"/"COUCH"; exact probe is case-sensitive (honest
+    # miss — the docker name index is lowercase-stored); must not raise
+    assert isinstance(res, ResolveResult)
+
+
+def test_resolver_empty_candidates_never_fire_current_state():
+    """A zero-candidate ResolveResult must NOT satisfy the current-state
+    gate (an empty resolved set is an unresolved subject, not a match)."""
+    assert ResolveResult().both_halves_ok(AssemblyShape.CURRENT_STATE) is False
+    assert ResolveResult().both_halves_ok(AssemblyShape.ORDERING) is False
+    assert ResolveResult().both_halves_ok(AssemblyShape.INTERVAL) is False
+    assert ResolveResult().both_halves_ok(None) is False
+
+
+# ── docker-lane resolver legs (fixture substrate; skip when the shared
+#    server is unreachable — pure tests above never touch this) ────────────
+
+import contextlib  # noqa: E402
+import uuid  # noqa: E402
+
+from tests import _assembly_graph as _ag  # noqa: E402
+
+_DOCKER_URI = _os_environ_uri = __import__("os").environ.get(
+    "TORTOISE_DB_URI", "")
+_FALKORDB_UP = False
+if _DOCKER_URI:
+    try:
+        import tortoise.sdk as _sdkmod
+
+        _p = _sdkmod.TortoiseSDK()
+        _p._get_proj().g.query("RETURN 1")
+        _p.close()
+        _FALKORDB_UP = True
+    except Exception:
+        _FALKORDB_UP = False
+
+_docker_only = pytest.mark.skipif(
+    not (_DOCKER_URI and _FALKORDB_UP),
+    reason="docker lane unavailable (pure tests unaffected)")
+
+
+@pytest.fixture
+def _docker_sdk(monkeypatch):
+    uri = f"{_DOCKER_URI.rstrip('/')}_{uuid.uuid4().hex[:10]}"
+    monkeypatch.setenv("TORTOISE_DB_URI", uri)
+    from tortoise.sdk import TortoiseSDK
+    s = TortoiseSDK()
+    try:
+        yield s
+    finally:
+        with contextlib.suppress(Exception):
+            s._get_proj().db.select_graph(uri.rsplit("/", 1)[-1]).delete()
+        s.close()
+
+
+@_docker_only
+def test_resolver_docker_exact_and_both_halves(_docker_sdk):
+    """Live graph: 'the couch'/'the dog bed' resolve high/exact through the
+    real Object index; both halves ok on the fixture substrate."""
+    _ag.build_base_graph(_docker_sdk)
+    from tortoise.assembly import docker_resolver_port
+    port = docker_resolver_port(_docker_sdk)
+    res = resolve_subjects(port, ["the couch", "the dog bed"],
+                           shape=AssemblyShape.ORDERING)
+    assert res.both_halves_ok(AssemblyShape.ORDERING) is True
+    by_index = {c.subject_index: c for c in res.candidates}
+    assert by_index[0].name == "couch" and by_index[0].source == "exact"
+    assert by_index[0].confidence == "high"
+    assert by_index[1].name == "dog bed"
+
+
+@_docker_only
+def test_resolver_docker_fts_paraphrase(_docker_sdk):
+    """R7 docker-FTS paraphrase (RESOLUTION-ONLY — the fired-path assembly
+    half is Task 6's): a subject term with NO exact-name head but a stored
+    Object whose NAME token-matches via FTS ('the grey comfy couch from
+    the store' → couch) resolves source='fts' confidence='med'."""
+    _ag.build_base_graph(_docker_sdk)
+    from tortoise.assembly import docker_resolver_port
+    port = docker_resolver_port(_docker_sdk)
+    res = resolve_subjects(port, ["the grey comfy couch from the store"],
+                           shape=AssemblyShape.CURRENT_STATE)
+    assert not res.unresolved
+    assert len(res.candidates) == 1
+    c = res.candidates[0]
+    assert c.name == "couch"
+    assert c.source == "fts"
+    assert c.confidence == "med"
+
+
+@_docker_only
+def test_resolver_docker_unresolved_keeps_legacy(_docker_sdk):
+    """A term matching NO Object stays unresolved on the live lane — the R1
+    fired=False signal (legacy fallback), never an empty/errored fire."""
+    _ag.build_base_graph(_docker_sdk)
+    from tortoise.assembly import docker_resolver_port
+    port = docker_resolver_port(_docker_sdk)
+    res = resolve_subjects(port,
+                           ["the couch", "the teleporting exercise bike"],
+                           shape=AssemblyShape.ORDERING)
+    assert res.both_halves_ok(AssemblyShape.ORDERING) is False
+    assert len(res.unresolved) == 1
+
+
+@_docker_only
+def test_resolver_docker_alias_leg(_docker_sdk):
+    """R7 leg 3 live: the Object NAME does not token-match the term but an
+    anchored Point search_keys does ('the ikea purchase' → couch — couch's
+    bought-point search_keys 'couch ikea 800 dollars'). Exact + FTS both
+    miss (Object names couch/dog bed/sofa share no ikea token)."""
+    _ag.build_base_graph(_docker_sdk)
+    from tortoise.assembly import docker_resolver_port
+    port = docker_resolver_port(_docker_sdk)
+    res = resolve_subjects(port, ["the ikea purchase"],
+                           shape=AssemblyShape.CURRENT_STATE)
+    assert not res.unresolved
+    assert len(res.candidates) == 1
+    c = res.candidates[0]
+    assert c.name == "couch"
+    assert c.source == "alias"
+    assert c.confidence == "low"
