@@ -273,25 +273,47 @@ def validate_rubric(rubric_id: str, rubric_text: str,
     irt_ok = bool(infit) and all(
         IRT_INFIT_MIN <= v <= IRT_INFIT_MAX for v in infit.values())
 
-    # 4) Stress set — vocabulary-parameterized pass criteria.
+    # 4) Stress set — vocabulary-parameterized pass criteria. Declarative
+    #    probes with anchored renders available judge the REAL render
+    #    content (contentless probes make a real judge's verdict a coin
+    #    flip — noise, never a reliability signal).
     stress: dict[str, bool] = {}
-    for name in STRESS_ITEMS:
+    stress_render_pool = list(irt_renders) if (
+        declarative and irt_renders) else None
+    for _si, name in enumerate(STRESS_ITEMS):
         probe = _stress_probe(name, rng)
+        if declarative and stress_render_pool:
+            # Anchor the degenerate probes to a real evidence render so the
+            # judge answers on content, not on probe phrasing. Stable index
+            # (STRESS_ITEMS order) — never a str-hash (PYTHONHASHSEED
+            # randomizes str hashing across runs).
+            probe = (f"Judge this evidence against the anchored items.\n"
+                     f"Evidence: {stress_render_pool[_si % len(stress_render_pool)]}\n"
+                     f"Answer YES or NO.")
         if name == "all_identical":
             v = client.judge(rubric_id, f"stress-{name}", probe).verdict
             if declarative:
-                # two IDENTICAL anchored renders judged twice must return
-                # the SAME yes/no verdict (consistency replaces the
-                # pairwise all-identical -> tie expectation).
                 v2 = client.judge(rubric_id, f"stress-{name}-2", probe).verdict
                 stress[name] = v == v2 and v != ""
             else:
                 stress[name] = v == "tie"
         elif name == "verbosity_bias":
-            v_short = client.judge(rubric_id, f"stress-{name}-s",
-                                   probe + " [short]").verdict
-            v_long = client.judge(rubric_id, f"stress-{name}-l",
-                                  probe + " [long]").verdict
+            if declarative and stress_render_pool:
+                # same CONTENT framed verbosely vs concisely — a length-
+                # biased judge flips on framing alone; content is identical.
+                r_ = stress_render_pool[(_si + 1) % len(stress_render_pool)]
+                v_short = client.judge(
+                    rubric_id, f"stress-{name}-s",
+                    f"Evidence (concise): {r_}\nAnswer YES or NO.").verdict
+                v_long = client.judge(
+                    rubric_id, f"stress-{name}-l",
+                    f"Evidence (detailed elaboration): {r_}\n"
+                    f"Answer YES or NO.").verdict
+            else:
+                v_short = client.judge(rubric_id, f"stress-{name}-s",
+                                       probe + " [short]").verdict
+                v_long = client.judge(rubric_id, f"stress-{name}-l",
+                                      probe + " [long]").verdict
             stress[name] = v_short == v_long and v_short != ""
         elif name == "stochastic_stability":
             v1 = client.judge(rubric_id, f"stress-{name}-1", probe).verdict

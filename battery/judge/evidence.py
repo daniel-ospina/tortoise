@@ -161,24 +161,31 @@ def run_evidence_validation(*, config_dir: str | Path, rubric_id: str,
             f"needs >= {MIN_RETEST_PAIRS} (identical-render pairs)")
     retest_pairs = [(r, r) for r in pair_renders]
 
-    # Kappa leg: TWO judge configs over the same anchored item renders
-    # (inter-judge reliability — never one model at temp 0).
+    # Kappa leg: TWO judge configs over the SAME anchored item renders
+    # (inter-judge reliability — never one model at temp 0). The pool is
+    # the full item x render product (balanced enough for a meaningful
+    # Cohen's kappa — a pool that is ~all-yes collapses kappa to ~0 even
+    # on 7/8 agreement, the skewed-marginal kappa paradox).
     items = spec.items
-    combo_renders = renders[: max(n_items * 3, len(renders))]
     kappa_prompts: list[str] = []
-    for i in range(len(combo_renders)):
-        it = items[i % n_items]
-        kappa_prompts.append(
-            f"Rubric item: {it['text']}\n\nEvidence: {combo_renders[i]}\n"
-            f"Answer YES or NO.")
+    for ridx in range(len(renders)):
+        for iidx in range(n_items):
+            it = items[iidx]
+            kappa_prompts.append(
+                f"Rubric item: {it['text']}\n\nEvidence: {renders[ridx]}\n"
+                f"Answer YES or NO.")
     labels_a = [a.judge(rubric_id, f"kappa-a{i}", p).verdict
                 for i, p in enumerate(kappa_prompts)]
     labels_b = [b.judge(rubric_id, f"kappa-b{i}", p).verdict
                 for i, p in enumerate(kappa_prompts)]
+    if os.environ.get("BATTERY_DEBUG"):
+        from collections import Counter
+        print(f"[debug] kappa labels_a={Counter(labels_a)}",
+              f"labels_b={Counter(labels_b)}", file=__import__("sys").stderr)
 
-    # IRT renders: anchored item renders (item x render combos are cycled
-    # inside the gate at the live 3 x n_items bound).
-    irt_renders = combo_renders
+    # IRT renders: the full anchored render pool (the gate cycles
+    # item x render combos at the live 3 x n_items bound).
+    irt_renders = renders
 
     record = validate_rubric(
         rubric_id, rubric_text, a, retest_pairs, labels_a, labels_b,
