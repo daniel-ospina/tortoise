@@ -161,9 +161,6 @@ tbody tr:last-child td { border-bottom: none; }
 button.tier-badge { background: transparent; font-family: inherit; cursor: pointer; }
 button.tier-badge:disabled { opacity: 0.6; cursor: wait; }
 .inline-form { display: flex; gap: 8px; align-items: center; }
-/* #2426: the API-Keys-tab create form grew an expiry <select> (+ Custom
-   date input) — wrap on narrow viewports instead of overflowing the row */
-.inline-form.key-create-form { flex-wrap: wrap; }
 .inline-form input, .inline-form select {
   background: var(--surface);
   border: 1px solid rgba(255,255,255,0.12);
@@ -705,6 +702,22 @@ input::placeholder, textarea::placeholder {
 }
 .modal h2 { margin: 0 0 0.4rem; font-size: 16px; }
 .modal .claim-actions { justify-content: flex-start; }
+/* #2480: the mint-dialog fields (label + #2426 expiry) moved out of the
+   deleted .inline-form create row into the modal — carry the same dark
+   input chrome over so they render identically; stacked full-width in the
+   modal column (the .inline-form shared rule no longer applies). */
+.mint-fields input, .mint-fields select {
+  width: 100%;
+  background: var(--surface);
+  border: 1px solid rgba(255,255,255,0.12);
+  color: var(--text);
+  border-radius: 8px;
+  padding: 8px 12px;
+  font-size: 14px;
+  font-family: var(--mono);
+  margin-bottom: 10px;
+}
+.mint-fields select { font-family: inherit; }
 
 /* ── #1765: profile tab ────────────────────────────────────────────────── */
 .profile-tab h2 { font-size: 18px; margin: 0 0 0.3rem; }

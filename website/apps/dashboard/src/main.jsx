@@ -873,6 +873,12 @@ function claimIntentInFlight() {
   const [error, setError] = React.useState('')
   const [busy, setBusy] = React.useState(false)
   const [newKey, setNewKey] = React.useState(null)
+  // #2480: the "+ New key" mint dialog — the create fields (name/label +
+  // expiry) live in a MODAL, never on the keys page (the old lone label
+  // input above the table read as a search box). keyMintOpen gates the
+  // backdrop; newKeyTriggerRef receives focus back when the dialog closes.
+  const [keyMintOpen, setKeyMintOpen] = React.useState(false)
+  const newKeyTriggerRef = React.useRef(null)
   const [newKeyName, setNewKeyName] = React.useState('') // key-label: label for the next minted key
   // #2426: expiry choice for the next minted key (presets 30d default /
   // 60d / 90d / 1y / Custom date / Never). Sent as expires_in days; Never
@@ -4747,6 +4753,19 @@ function claimIntentInFlight() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [overviewSkeletonLive, frameStale])
 
+  // #2480: mint-dialog open/close. Open is a plain flip (the create fields
+  // hold their values across opens — same state the inline form kept, so a
+  // failed attempt's draft survives for retry). Close returns focus to the
+  // "+ New key" trigger (the dialog's own focus-on-open comes from the label
+  // input's autoFocus — wizard/team-create precedent).
+  function openKeyMint() {
+    setKeyMintOpen(true)
+  }
+  function closeKeyMint() {
+    setKeyMintOpen(false)
+    if (newKeyTriggerRef.current) newKeyTriggerRef.current.focus()
+  }
+
   async function createKey() {
     // Round-17 (P3): capture the team AT CALL TIME — the previous guard compared
     // teamIdRef.current to currentTeamId, which are always written together and
@@ -4794,6 +4813,11 @@ function claimIntentInFlight() {
       }
     } finally {
       setBusy(false)
+      // #2480: the mint dialog auto-closes when the attempt resolves
+      // (success, cap, server error, or the team-switch guard) — the result
+      // surfaces on the page exactly as the inline form's did (shown-once
+      // card / error banner / cap notice), and focus returns to the trigger.
+      if (keyMintOpen) closeKeyMint()
     }
   }
 
@@ -6850,21 +6874,51 @@ sdk.create_point(text="My first point")
                   POLICY A: the POST /v1/team/keys session lane is
                   owner/admin-gated (_require_owner_admin — POST/DELETE since
                   #2297, PATCH since #1148; list stays member-open #1828).
-                  Every row action + the create form are isOwnerAdmin
-                  render-gated; the dashboard treats key management as
-                  owner/admin-managed (Members tab + wizard member gate
-                  precedent), so members get a notice + the paste-into-setup
-                  escape instead of the create form. P2 (layout): the member
-                  notice renders as a FULL-WIDTH paragraph BELOW this .row
-                  (Members-tab precedent) — as a span inside the flex .row it
-                  wrapped badly beside the h2 on narrow viewports. */}
+                  #2480: the keys page shows ONLY the "+ New key" trigger —
+                  the name/expiry inputs live in a mint dialog (the old lone
+                  label input above the table read as a search box). Every
+                  row action + the trigger are isOwnerAdmin render-gated;
+                  the dashboard treats key management as owner/admin-managed
+                  (Members tab + wizard member gate precedent), so members
+                  get a notice + the paste-into-setup escape instead of the
+                  create trigger. P2 (layout): the member notice renders as
+                  a FULL-WIDTH paragraph BELOW this .row (Members-tab
+                  precedent) — as a span inside the flex .row it wrapped
+                  badly beside the h2 on narrow viewports. */}
               {isOwnerAdmin && (
-                <div className="inline-form key-create-form">
+                <button
+                  ref={newKeyTriggerRef}
+                  onClick={openKeyMint}
+                  aria-haspopup="dialog"
+                >+ New key</button>
+              )}
+            </div>
+            {/* #2480: mint dialog — the create fields (label + #2426 expiry)
+                moved out of the keys page into a modal opened by "+ New key".
+                Reuses the .modal-backdrop/.modal pattern (team-creation
+                precedent): role="dialog" + aria-modal + a descriptive
+                aria-label; Escape / backdrop-click / Cancel close (never
+                while a mint is in flight); focus enters via the label
+                input's autoFocus and returns to the trigger on close. The
+                Create submit keeps the inline form's EXACT semantics:
+                Enter-to-create, disabled until a valid Custom date when
+                Custom is picked, empty-name mints unlabeled (no required
+                validation added), and createKey() auto-closes the dialog
+                when the attempt resolves — the shown-once card / error
+                banner / cap notice then surface on the page as before. */}
+            {keyMintOpen && (
+              <div className="modal-backdrop" onClick={() => { if (!busy) closeKeyMint() }}>
+                <div className="modal" role="dialog" aria-modal="true" aria-label="Create a new API key"
+                     onClick={(e) => e.stopPropagation()}
+                     onKeyDown={(e) => { if (e.key === 'Escape' && !busy) closeKeyMint() }}>
+                  <h2>Create a new API key</h2>
+                  <div className="mint-fields">
                   <input
                     placeholder="Label (e.g. CI, staging)"
                     aria-label="New key label"
                     value={newKeyName}
                     maxLength={64}
+                    autoFocus
                     onChange={(e) => setNewKeyName(e.target.value)}
                     onKeyDown={(e) => e.key === 'Enter' && createKey()}
                   />
@@ -6872,8 +6926,8 @@ sdk.create_point(text="My first point")
                       90d / 1y / Custom date… / No expiration). The preset
                       rides the mint body as expires_in days; Never sends no
                       expiry param. Custom reveals a date input (min/max
-                      bound to the 1-366-day window); + New key stays
-                      disabled until a valid Custom date is picked. */}
+                      bound to the 1-366-day window); Create stays disabled
+                      until a valid Custom date is picked. */}
                   <select
                     aria-label="New key expiry"
                     value={newKeyExpiryPreset}
@@ -6895,13 +6949,17 @@ sdk.create_point(text="My first point")
                       onKeyDown={(e) => { if (e.key === 'Enter' && expiryDaysFromDate(newKeyExpiryDate)) { e.preventDefault(); createKey() } }}
                     />
                   )}
-                  <button
-                    onClick={createKey}
-                    disabled={busy || (newKeyExpiryPreset === 'custom' && !expiryDaysFromDate(newKeyExpiryDate))}
-                  >+ New key</button>
+                  </div>
+                  <div className="row" style={{ marginTop: 12 }}>
+                    <button
+                      onClick={createKey}
+                      disabled={busy || (newKeyExpiryPreset === 'custom' && !expiryDaysFromDate(newKeyExpiryDate))}
+                    >Create</button>
+                    <button className="ghost" disabled={busy} onClick={closeKeyMint}>Cancel</button>
+                  </div>
                 </div>
-              )}
-            </div>
+              </div>
+            )}
             {!isOwnerAdmin && (
               <p className="dim small" style={{ margin: '0 0 1rem' }}>
                 Only owners and admins can create or rotate keys in this dashboard. Paste an existing key into the setup step to connect an agent.

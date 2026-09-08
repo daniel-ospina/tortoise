@@ -715,10 +715,23 @@ def test_durable_create_on_selected_team_lands_on_selected_team(page: Page) -> N
     # select Bravo (≠ first membership Alpha) — session-only (zero keys)
     _switch_to(page, "Bravo")
     expect(page.get_by_role("button", name=re.compile(r"Account menu"))).to_contain_text("Bravo", timeout=15_000)
-    # open the API Keys tab and create a durable key
+    # open the API Keys tab and create a durable key via the #2480 mint
+    # dialog — the keys page itself renders only the table + the "+ New
+    # key" trigger (the old inline label/expiry form read as a search box);
+    # the create fields live inside the dialog and the mint fires only on
+    # its Create button.
     page.locator('[data-tab="keys"]').click()
     expect(page.get_by_role("button", name="+ New key")).to_be_visible(timeout=10_000)
+    # the page holds no stray label/expiry inputs outside the dialog
+    expect(page.locator(".key-create-form")).to_have_count(0)
     page.get_by_role("button", name="+ New key").click()
+    dialog = page.get_by_role("dialog", name="Create a new API key")
+    expect(dialog).to_be_visible(timeout=10_000)
+    expect(dialog.get_by_label("New key label")).to_be_visible()
+    expect(dialog.get_by_label("New key expiry")).to_be_visible()
+    dialog.get_by_label("New key label").fill("bravo-ci")
+    dialog.get_by_label("New key expiry").select_option("365")
+    dialog.get_by_role("button", name="Create").click()
     # the POST carried ?team_id=team_b (rule 4) and the shown-once plaintext
     # card renders
     assert created_keys, "createKey POST must fire"
