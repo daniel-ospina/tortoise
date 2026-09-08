@@ -150,7 +150,7 @@ def _cmd_validate_judge(args: argparse.Namespace) -> ExitCode:
 
         from battery.config.budget import load_budget
         from battery.judge.evidence import run_evidence_validation
-        cfg_dir = _P2(args.config or args.config_dir)
+        cfg_dir = _P2(getattr(args, "config", None) or args.config_dir)
         budget = load_budget(cfg_dir / "budget.yaml")
         reserve = budget.judge_leg_reserve_usd if not args.mock else None
         record = run_evidence_validation(
@@ -683,7 +683,10 @@ def _cmd_probe(args: argparse.Namespace) -> ExitCode:
     per-episode real transcripts."""
     from battery.config.budget import load_budget
     from battery.probes.probe_runner import ProbeBudget, run_probe
-    cfg = _Path(args.config or args.config_dir)
+    # subcommand --config is only defined on some subparsers — read it
+    # defensively (review #2575 convergence P1: args.config absent on the
+    # probe subparser crashed every invocation).
+    cfg = _Path(getattr(args, "config", None) or args.config_dir)
     budget = load_budget(cfg / "budget.yaml")
     run_probe(config=cfg, arms=list(args.arms),
               scenario_ids=list(args.scenarios), out_dir=args.out,

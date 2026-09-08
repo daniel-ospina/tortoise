@@ -27,13 +27,13 @@ class _ScriptedCaller:
     last_prompt_tokens = 0
     last_completion_tokens = 0
 
-    def __init__(self):
+    def __init__(self, tokens: tuple[int, int] = (10, 20)):
         self.calls = []
+        self._tokens = tokens
 
     def call(self, *, prompt: str) -> str:
         self.calls.append(prompt)
-        self.last_prompt_tokens = 10      # scripted usage capture: (10, 20)
-        self.last_completion_tokens = 20  # tokens per call — accumulated per phase
+        self.last_prompt_tokens, self.last_completion_tokens = self._tokens
         return "The agent weighs the counter-argument and revises its position."
 
 
@@ -63,6 +63,21 @@ def test_probe_subcap_refusal(tmp_path):
     with pytest.raises(ConfigError):
         run_probe(config=CONFIG, arms=["a0", "a4"], scenario_ids=["S1", "S2"],
                   budget=budget, out_dir=tmp_path)       # refuses before spend
+
+
+def test_probe_spend_meter_hard_stops_mid_run(tmp_path):
+    # mid-run HARD STOP (review #2575 B-P1 / convergence P2): the cap is
+    # enforced against ACCUMULATED spend, not just at pre-flight. A caller
+    # billing ~$0.0137/call (10k+10k tokens at the pinned rates) over a
+    # $0.02 cap trips on the SECOND call — ConfigError, never overshoot.
+    budget = ProbeBudget(cap_usd=0.02)  # > 0.01 fundable floor
+    with pytest.raises(ConfigError) as ei:
+        run_probe(config=CONFIG, arms=["a0", "a4"],
+                  scenario_ids=["S1", "S2"],
+                  caller=_ScriptedCaller(tokens=(10_000, 10_000)),
+                  budget=budget, out_dir=tmp_path)
+    assert "sub-cap" in str(ei.value)
+    assert "HARD STOP" in str(ei.value)
 
 
 def test_token_tables_95th_pct():
