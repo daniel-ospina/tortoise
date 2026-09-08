@@ -1719,6 +1719,96 @@ def store_github_credentials(cp, team_id: str, *, token_enc: str, org: str) -> N
     )
 
 
+# ── Connector CRUD (#2636, epic #2632) ─────────────────────────────────
+# Follows the github_credentials pattern: service-role seam reads/writes
+# credential_enc; anon/authenticated cannot access the encrypted credential.
+
+def connector_create(cp, *, org_id: str, source_type: str,
+                     config: dict | None = None,
+                     credential_enc: str | None = None) -> dict | None:
+    """Create a connector row. Returns the row dict or None on failure."""
+    rows = cp.query(
+        "connectors",
+        method="POST",
+        json_body={
+            "org_id": org_id,
+            "source_type": source_type,
+            "config": config or {},
+            "credential_enc": credential_enc,
+        },
+        headers={"Prefer": "return=representation"},
+    )
+    return rows[0] if rows else None
+
+
+def connector_by_org(cp, org_id: str) -> list[dict]:
+    """List all connectors for an org (credential_enc is NULL — only the
+    service-role seam reads it)."""
+    return cp.query(
+        "connectors",
+        select=["id", "org_id", "source_type", "config", "sync_status",
+                "sync_cursor", "last_sync_at", "last_error",
+                "created_at", "updated_at"],
+        filters=[("org_id", "eq", org_id)],
+        order="created_at",
+    )
+
+
+def connector_by_id(cp, connector_id: str) -> dict | None:
+    """Read a single connector by id. Returns credential_enc (service role)."""
+    rows = cp.query(
+        "connectors",
+        filters=[("id", "eq", connector_id)],
+    )
+    return rows[0] if rows else None
+
+
+def connector_update(cp, connector_id: str, *, config: dict | None = None,
+                     credential_enc: str | None = None,
+                     sync_status: str | None = None,
+                     sync_cursor: dict | None = None,
+                     last_sync_at: str | None = None,
+                     last_error: str | None = None) -> None:
+    """Update connector fields. Only provided fields are patched."""
+    body: dict = {}
+    if config is not None:
+        body["config"] = config
+    if credential_enc is not None:
+        body["credential_enc"] = credential_enc
+    if sync_status is not None:
+        body["sync_status"] = sync_status
+    if sync_cursor is not None:
+        body["sync_cursor"] = sync_cursor
+    if last_sync_at is not None:
+        body["last_sync_at"] = last_sync_at
+    if last_error is not None:
+        body["last_error"] = last_error
+    cp.query(
+        "connectors",
+        method="PATCH",
+        filters=[("id", "eq", connector_id)],
+        json_body=body,
+    )
+
+
+def connector_delete(cp, connector_id: str) -> None:
+    """Delete a connector row."""
+    cp.query(
+        "connectors",
+        method="DELETE",
+        filters=[("id", "eq", connector_id)],
+    )
+
+
+def connector_list_by_sync_eligible(cp) -> list[dict]:
+    """List connectors with sync_status 'idle' or 'error' (for background
+    sync engine). Returns credential_enc for credential usage."""
+    return cp.query(
+        "connectors",
+        filters=[("sync_status", "in", ["(idle,error)"])],
+    )
+
+
 # ── Team deletion cascade (E2E-6-D, issue #302 security baseline) ──────────
 #
 # Two-phase deletion: soft delete (immediate access kill + grace stamp) then
