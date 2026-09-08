@@ -34,6 +34,7 @@ import { isManagedKey, durableConnectKey } from './sessionKey.js'
 import {
   canManageGraphKeys,
   graphCanDelete,
+  graphKeysSuppressed,
   graphMintBody,
   graphsMeter,
   sortedGraphRows,
@@ -7122,7 +7123,30 @@ sdk.create_point(text="My first point")
                     <td><code>{g.name}</code></td>
                     <td>{g.kind}</td>
                     <td>{g.status === 'active' ? 'active' : <span className="revoked">{g.status}</span>}</td>
-                    <td>{g.key_count != null ? g.key_count : '—'}</td>
+                    <td>
+                      {graphKeysSuppressed(g) ? (
+                        /* #2306: the default graph has NO per-graph keys —
+                        its key_count is 0 in both lanes and its keys (the
+                        team-wide graph_id-NULL rows) are managed on the
+                        API Keys tab, never through a per-graph panel. Suppress
+                        the numeric cell on default rows and offer the tab
+                        affordance instead of a dead 0 (supabase) or an
+                        unmanageable bound-default count (registry capstone). */
+                        <span className="default-keys-cell" title="The default graph has no per-graph keys — its team-wide keys are managed on the API Keys tab.">
+                          <span className="dim" aria-hidden="true">—</span>{' '}
+                          <button
+                            type="button"
+                            className="ghost small"
+                            onClick={() => setTab('keys')}
+                            aria-label="The default graph has no per-graph keys — manage its team-wide keys on the API Keys tab"
+                          >
+                            API Keys tab
+                          </button>
+                        </span>
+                      ) : (
+                        g.key_count != null ? g.key_count : '—'
+                      )}
+                    </td>
                     <td>
                       {canManageGraphKeys(g) && (
                         <button

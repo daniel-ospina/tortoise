@@ -14314,7 +14314,16 @@ class TortoiseSDK:
         key_count source for GET /v1/graphs (parity with the Supabase
         count_graph_keys seam; C2 P2: graph_key_ids is the cascade source
         and must NOT be reused for the meter — after C3's standalone
-        revoke, counting all keys would overcount vs Supabase)."""
+        revoke, counting all keys would overcount vs Supabase).
+
+        #2306: only ever call this with a CUSTOM graph's id. The default
+        graph is not key-bindable (no per-graph keys exist — supabase
+        enforces this structurally, and _ensure_graph_exists 404s
+        default-kind mints) — the list seam short-circuits kind='default'
+        rows to 0 BEFORE this meter, so legacy bound-default APIKey nodes
+        (pre-guard mints / raw control-plane writes, graph_id = the
+        default node's real gid) never resurface as a Graphs-tab count;
+        they stay listable + revocable via the unfiltered key list."""
         reg = self._get_registry()
         rows = reg.query(
             "MATCH (k:APIKey {team_id:$tid, graph_id:$gid}) "

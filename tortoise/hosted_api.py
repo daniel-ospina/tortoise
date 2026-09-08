@@ -10193,7 +10193,12 @@ async def trash_graph_points(graph_id: str, team_id: str,
 async def list_graphs(team_id: str, user: dict = Depends(get_current_user)):  # noqa: B008
     """E7 — list graphs in a team (graph switcher). C2 (#2111): rows gain
     status + key_count; point_count dropped (no consumer; a per-row
-    data-plane count on every list). Default-first via the seam."""
+    data-plane count on every list). Default-first via the seam.
+
+    #2306: the DEFAULT row's key_count is ALWAYS 0 (the default graph has
+    NO per-graph keys — invariant below). The count is only computed for
+    custom rows; the dashboard suppresses the default row's cell and
+    points at the API-Keys tab instead."""
     membership = await _membership_team(user["user_id"], team_id)
     if membership is None:
         raise HTTPException(status_code=403, detail="No membership in team")
@@ -10212,7 +10217,25 @@ async def list_graphs(team_id: str, user: dict = Depends(get_current_user)):  # 
     for g in graphs:
         if g.get("status") == "deleted":
             continue  # tombstones not listed (C2 D5; C7 may add with_deleted)
-        if is_supabase_enabled():
+        # #2306: the DEFAULT graph has no per-graph keys — its key_count is
+        # ALWAYS 0, in BOTH lanes, so the two lanes can never disagree about
+        # the default row again. Supabase enforces this structurally
+        # (api_keys.graph_id REFERENCES graphs(id): the default row's id is
+        # the DERIVED literal 'default', never a graphs.id, so no api_keys
+        # row can reference it — team-wide rows are graph_id NULL and the
+        # keys that RESOLVE to the default graph are exactly those rows,
+        # managed on the API-Keys tab, never counted on a graph row). The
+        # registry kind='default' node is equally not key-bindable
+        # (_ensure_graph_exists 404s default-kind mints) — counting APIKey
+        # nodes whose graph_id equals its real gid would resurface legacy
+        # bound-default keys (pre-guard mints / raw control-plane writes)
+        # as a number the Graphs tab cannot act on (no per-graph key
+        # surface; canManageGraphKeys is kind-gated). Such legacy rows stay
+        # LISTABLE + REVOCABLE via the unfiltered GET /v1/team/keys (the
+        # API-Keys tab) — that is their management path, not this row.
+        if g.get("kind") == "default":
+            key_count = 0
+        elif is_supabase_enabled():
             key_count = count_graph_keys(
                 get_control_plane(), team_id, g["graph_id"])
         else:
