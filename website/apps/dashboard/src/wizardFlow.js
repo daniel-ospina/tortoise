@@ -1,14 +1,14 @@
-// #1997 (W1): the 5 human steps of the onboarding wizard — single source of
+// #1997 (W1): the 4 human steps of the onboarding wizard — single source of
 // truth for step structure + copy. Pure (no React), node --test unit-tested
 // (setupGuide.js pattern).
 //
-// Epic #1976 plan P1 (wizard): orientation → org-create/join → fork card →
+// Epic #1976 plan P1 (wizard): org-create/join → fork card →
 // connect-consent → done. ALL other steps (install/seed/decide) are
 // agent-side or archived (the legacy #1643 wizard render lives in the
 // ARCHIVED section of main.jsx — never deleted, A0 rollback path).
 //
 // Contract (issue #1997 O/I/T + DE2E-1/2/3):
-// - EXACTLY 5 human steps, in this order.
+// - EXACTLY 4 human steps, in this order.
 // - user-facing copy says "Organization" — never "team"/"workspace"
 //   (DE2E-2 copy sweep; the wizardArchived.test.js source-scan asserts the
 //   live render uses WIZARD_STEPS and the org-create dialog says
@@ -22,19 +22,9 @@
 
 export const WIZARD_STEPS = Object.freeze([
   {
-    id: 'orientation',
-    label: 'Orientation',
-    // #2361 review-r1: this sub used to promise 'install → connect → add
-    // your organization and you → make your first decision' — the live 5-step
-    // wizard creates the org first, connects second, and never adds the user
-    // or makes a decision (both are agent-side after connect). State the real
-    // order; the numbered bullets below carry the detail.
-    sub: "Here's what happens next: name your organization, choose how you'll use Tortoise, then connect your agent — your agent takes it from there.",
-  },
-  {
     id: 'org-create',
     label: 'Create your Organization',
-    sub: "Name your organization — it's the memory space your agent files decisions and findings into. Or accept an invitation to join one.",
+    sub: "Name your organization — it's the memory space your agent uses. Or accept an invitation to join one.",
   },
   {
     id: 'fork',
@@ -141,8 +131,8 @@ export function durableKeyName(orgName, date = new Date(), existingNames = []) {
 export function orgNameError(name) {
   const trimmed = String(name || '').trim()
   if (!trimmed) return 'Organization name is required'
-  if (trimmed.length > 64 || !/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/.test(trimmed)) {
-    return 'Invalid organization name — letters, numbers, dash, underscore only'
+  if (trimmed.length > 64 || !/^[a-zA-Z0-9][a-zA-Z0-9_ -]{0,63}$/.test(trimmed)) {
+    return 'Invalid organization name — letters, numbers, spaces, dash, underscore only'
   }
   return null
 }

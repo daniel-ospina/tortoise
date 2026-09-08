@@ -8859,9 +8859,8 @@ async def create_team(body: dict, user: dict = Depends(get_current_user)):  # no
     if len(name) > 64:
         raise HTTPException(status_code=422, detail="Team name must be ≤ 64 characters")
     import re as _re
-    # #750.6: align with sdk.team_create — spaces are rejected there, so accept
-    # them here too (stricter wins; surface as 422 not a 500 ControlPlaneError).
-    if not _re.match(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$", name):
+    # spaces are now allowed in team names (onboarding wizard needs them)
+    if not _re.match(r"^[a-zA-Z0-9][a-zA-Z0-9_ -]{0,63}$", name):
         raise HTTPException(status_code=422, detail="Invalid team name")
 
     # #1954: the 429/409/402 gates + provision are read-then-write — the
@@ -9867,17 +9866,29 @@ async def restore_trash_graph(request: Request, graph_id: str, team_id: str,
     # Timed acquire in a worker thread — never block the event loop, and a
     # TIMED acquire can time out WITHOUT holding the lock (an orphaned
     # untimed acquire would wedge the team lock forever once it eventually
-    # succeeded — VGATE round-3 fix).
-    acquired = await asyncio.to_thread(lock.acquire, True, 20)
+    # succeeded — VGATE round-3 fix). #2470: the hourly sweep holds the lock
+    # across the ENTIRE team pass (default + every custom graph, R2 uploads
+    # of large dumps routinely exceed the old 20s) — the timeout is now
+    # sweep-scale and the message is neutral (a PURGE also holds it).
+    acquired = await asyncio.to_thread(lock.acquire, True,
+                                       _TRASH_RESTORE_LOCK_TIMEOUT_S)
     if not acquired:
         raise HTTPException(
             status_code=503,
-            detail="Restore busy (team sweep in flight)") from None
+            headers={"Retry-After": "300"},
+            detail="Another backup operation is in flight for this team — "
+                   "try again in a few minutes") from None
     try:
         return await _restore_trash_graph_locked(request, user, team_id,
                                                  graph_id)
     finally:
         lock.release()
+
+
+# #2470: the per-team lock is held for the whole sweep/purge team pass (which
+# can run minutes on a large team), so a restore waits sweep-scale before
+# 503ing with a Retry-After.
+_TRASH_RESTORE_LOCK_TIMEOUT_S = 300
 
 
 async def _restore_trash_graph_locked(request: Request, user: dict,
@@ -16763,7 +16774,7 @@ async def create_onboarding_team(body: dict,
     if not name or len(name) > 64:
         raise HTTPException(status_code=400, detail="name is required (max 64 chars)")
     import re
-    if not re.match(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$", name):
+    if not re.match(r"^[a-zA-Z0-9][a-zA-Z0-9_ -]{0,63}$", name):
         raise HTTPException(status_code=400, detail="Invalid team name")
     # #1748: the session user owns the sub-team. Session JWT →
     # session_user_id (get_current_team_session); key-auth → created_by

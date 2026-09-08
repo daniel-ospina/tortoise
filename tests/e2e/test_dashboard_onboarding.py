@@ -1,6 +1,6 @@
 """#1997 (W1) onboarding wizard e2e (RUN_DASHBOARD_E2E opt-in, two-origin harness).
 
-Journey coverage: the 5 HUMAN wizard steps (orientation → org-create →
+Journey coverage: the 4 HUMAN wizard steps (org-create →
 fork card → connect-consent → done), the fork checkpoint (self + build /
 catalog-presented), the durable-key connect gate, and the re-entry card.
 The done step exits WITHOUT patching onboarding_complete (accept-and-drop).
@@ -142,8 +142,8 @@ def _wire(page: Page, *, provision: bool, seed_objects: list = None, onboarding_
 
 def test_first_timer_wizard_human_steps(page: Page) -> None:
     """#1997 (W1) + #2323 (Option B): a returning-style session (team
-    exists, empty graph) walks the NEW 5 HUMAN steps (epic plan P1):
-    orientation → org-create/join → fork card → connect-consent → done.
+    exists, empty graph) walks the NEW 4 HUMAN steps (epic plan P1):
+    org-create/join → fork card → connect-consent → done.
     The org-create step is a READ-ONLY summary for accounts that already
     hold an org — it NEVER mints a second org (cap['org_create'] stays
     empty). The done step exits WITHOUT patching onboarding_complete
@@ -152,29 +152,21 @@ def test_first_timer_wizard_human_steps(page: Page) -> None:
     cap = _wire(page, provision=False)
     page.goto(APP_HOST + "/", wait_until="domcontentloaded", timeout=30_000)
     # Re-entry card (empty graph) → Continue setup opens the wizard at
-    # step 0 (orientation — per the plan, orientation IS a wizard step).
+    # step 0 (org-create — orientation was removed per epic #2534).
     expect(page.locator("body")).to_contain_text("Continue setup", timeout=20_000)
     page.get_by_role("button", name="Continue setup").click()
-    # STEP 0: orientation. W1 (#1997) + W8 (#2004) rework: the orientation
-    # step renders the intro list (wizardFlow.js WIZARD_STEPS[0] + main.jsx
-    # ~4830) — 'Choose how you'll use it' is the orientation-unique item
-    # (the fork step's title is the non-matching 'Choose how you'll use
-    # Tortoise').
-    expect(page.locator("body")).to_contain_text("Orientation", timeout=15_000)
-    expect(page.locator("body")).to_contain_text("Choose how you'll use it", timeout=5_000)
-    page.get_by_role("button", name="Continue →").click()
-    # STEP 1: create/join org — an account that already holds an org sees a
+    # STEP 0: create/join org — an account that already holds an org sees a
     # read-only summary (never a second mint, #2323) and advances.
     expect(page.locator("body")).to_contain_text("Create your Organization", timeout=10_000)
     expect(page.locator("body")).to_contain_text("You're set up in", timeout=5_000)
     page.get_by_role("button", name="Continue →").click()
+    # STEP 1: fork card (was step 2 before orientation removal).
     expect(page.locator("body")).to_contain_text("Choose how you'll use Tortoise", timeout=10_000)
-    # STEP 2: fork card — self-use (presentation fork, once per org).
     expect(page.locator("body")).to_contain_text("Use it for your own agents", timeout=5_000)
     page.get_by_role("button", name="Use it for your own agents").click()
     expect(page.locator("body")).to_contain_text("Connect your agent", timeout=10_000)
     assert any(c.get("fork") == "self" for c in cap["checkpoint"]), f"fork not checkpointed: {cap['checkpoint']}"
-    # STEP 3: connect-consent — the durable-key gate (#1998/#2195/#2246): a
+    # STEP 2: connect-consent — the durable-key gate (#1998/#2195/#2246): a
     # returning user without a mounted key sees the mint/paste surface first
     # (HARNESS_ORDER is 6 self-install/teach harnesses). Paste the durable
     # key → the universal command + copy render.
@@ -186,7 +178,7 @@ def test_first_timer_wizard_human_steps(page: Page) -> None:
     page.get_by_role("button", name="Copy setup").click()
     expect(page.locator("body")).to_contain_text("Copied", timeout=5_000)
     page.get_by_role("button", name="Skip for now").click()
-    # STEP 4: done — agent takes over; NO onboarding_complete PATCH (the
+    # STEP 3: done — agent takes over; NO onboarding_complete PATCH (the
     # node's gate owns completion; accept-and-drop).
     expect(page.locator("body")).to_contain_text("You're all set", timeout=10_000)
     # the done step's exit (wizardComplete) — scoped: the header carries a
@@ -215,16 +207,12 @@ def test_first_timer_wizard_build_fork_marks_catalog(page: Page) -> None:
     page.goto(APP_HOST + "/", wait_until="domcontentloaded", timeout=30_000)
     expect(page.locator("body")).to_contain_text("Continue setup", timeout=20_000)
     page.get_by_role("button", name="Continue setup").click()
-    expect(page.locator("body")).to_contain_text("Orientation", timeout=15_000)
-    page.get_by_role("button", name="Continue →").click()
-    # STEP 1: create/join org — an account that already holds an org sees a
-    # read-only summary (never a second mint, #2323) and advances.
+    # STEP 0: create/join org (orientation removed per epic #2534).
     expect(page.locator("body")).to_contain_text("Create your Organization", timeout=10_000)
     expect(page.locator("body")).to_contain_text("You're set up in", timeout=5_000)
     page.get_by_role("button", name="Continue →").click()
     expect(page.locator("body")).to_contain_text("Choose how you'll use Tortoise", timeout=10_000)
-    expect(page.locator("body")).to_contain_text("Build an application on top", timeout=10_000)
-    page.get_by_role("button", name="Build an application on top").click()
+    # STEP 1: fork card — self-use (presentation fork, once per org).
     # the capability catalog renders on step 2 (build stays; the user
     # reviews what they can build on, then continues) — W8 (#2004): the
     # registry endpoint backs it; these text pins match the canonical names.

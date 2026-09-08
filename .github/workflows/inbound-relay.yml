@@ -1,0 +1,208 @@
+# Inbound GitHub relay (#2441) — close-and-queue external issues/PRs.
+#
+# On issues:opened / pull_request_target: label, comment, close, and relay
+# the record to the canonical intake endpoint (#2439).
+#
+# Safety: runs on pull_request_target for fork PRs (NEVER checks out or
+# executes the PR's code — REST-only: label/comment/close + metadata relay).
+# Supply-chain-safe by construction.
+#
+# v1 = close-only for PRs (reopen-on-approval gated on #2437, now landed).
+#
+# Env secrets:
+#   INBOUND_URL              — inbound-ingest edge function URL
+#   INBOUND_SECRET_GITHUB    — per-source secret for the "github" source
+#                              (set on the tortoise repo, not the swarm repo)
+
+name: "Inbound relay — GitHub → intake"
+on:
+  issues:
+    types: [opened]
+  pull_request_target:
+    types: [opened]
+
+jobs:
+  relay:
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+      pull-requests: write
+    # Safety: never process events from the repo owner/org members —
+    # those flow through normal development, not the intake relay.
+    if: |
+      github.event_name == 'issues' && github.actor != 'daniel-ospina'
+      || github.event_name == 'pull_request_target' && github.actor != 'daniel-ospina'
+    steps:
+      - name: "Comment and close — issue"
+        if: github.event_name == 'issues'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { issue, repository } = context;
+            const owner = repository.owner.login;
+            const repo = repository.name;
+            const issueNumber = issue.number;
+
+            // Add label
+            await github.rest.issues.addLabels({
+              owner, repo, issue_number: issueNumber,
+              labels: ['queued-for-triage'],
+            });
+
+            // Comment
+            await github.rest.issues.createComment({
+              owner, repo, issue_number: issueNumber,
+              body: [
+                '👋 Thanks for submitting!',
+                '',
+                'This has been **queued for triage** and will be processed by our intake agent.',
+                'You\'ll be notified when an agent picks it up.',
+                '',
+                '— Premise Labs (automated relay)',
+              ].join('\n'),
+            });
+
+            // Close
+            await github.rest.issues.update({
+              owner, repo, issue_number: issueNumber,
+              state: 'closed',
+              state_reason: 'not_planned',
+            });
+
+            // Return metadata for the relay POST step
+            return {
+              item_type: 'issue',
+              title: issue.title,
+              body: issue.body || '',
+              reporter: issue.user.login,
+              labels: issue.labels.map(l => typeof l === 'string' ? l : l.name),
+              url: issue.html_url,
+              source_item_id: `issue-${issueNumber}`,
+            };
+
+      - name: "Comment and close — pull request"
+        if: github.event_name == 'pull_request_target'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { issue, repository } = context;
+            const owner = repository.owner.login;
+            const repo = repository.name;
+            const prNumber = context.payload.pull_request.number;
+
+            // Add label
+            await github.rest.issues.addLabels({
+              owner, repo, issue_number: prNumber,
+              labels: ['queued-for-triage'],
+            });
+
+            // Comment
+            await github.rest.issues.createComment({
+              owner, repo, issue_number: prNumber,
+              body: [
+                '👋 Thanks for the contribution!',
+                '',
+                'This PR has been **queued for review** and will be processed by our intake agent.',
+                'You\'ll be notified when an agent picks it up.',
+                '',
+                '> ⚠️ **Note:** External PRs are close-only in v1. If your PR is selected for',
+                '> review, it will be reopened for the review process.',
+                '',
+                '— Premise Labs (automated relay)',
+              ].join('\n'),
+            });
+
+            // Close
+            await github.rest.pulls.update({
+              owner, repo, pull_number: prNumber,
+              state: 'closed',
+            });
+
+            // Return metadata for the relay POST step
+            const pr = context.payload.pull_request;
+            return {
+              item_type: 'pull_request',
+              title: pr.title,
+              body: pr.body || '',
+              reporter: pr.user.login,
+              labels: pr.labels.map(l => l.name || l),
+              url: pr.html_url,
+              source_item_id: `pr-${prNumber}`,
+              head_ref: pr.head.ref,
+              head_repo: pr.head.repo ? pr.head.repo.full_name : 'unknown',
+            };
+
+      - name: "Relay to intake endpoint"
+        id: relay
+        uses: actions/github-script@v7
+        env:
+          INBOUND_URL: ${{ secrets.INBOUND_URL }}
+          INBOUND_SECRET_GITHUB: ${{ secrets.INBOUND_SECRET_GITHUB }}
+        with:
+          script: |
+            const inboundUrl = process.env.INBOUND_URL;
+            const inboundSecret = process.env.INBOUND_SECRET_GITHUB;
+            // Pick the step output — whichever comment-and-close step ran
+            // Note: only one of the two comment steps will have run
+            const core = require('@actions/core');
+
+            // Re-read the event to figure out what we're relaying
+            const event = context.payload;
+            let payload;
+
+            if (context.eventName === 'issues') {
+              const issue = event.issue;
+              payload = {
+                source: 'github',
+                source_item_id: `issue-${issue.number}`,
+                payload: {
+                  subject: issue.title,
+                  body: issue.body || '',
+                  labels: (issue.labels || []).map(l => l.name || l),
+                  url: issue.html_url,
+                  number: issue.number,
+                },
+                context_ref: issue.html_url,
+                reporter: issue.user.login,
+                severity: null,
+              };
+            } else {
+              const pr = event.pull_request;
+              payload = {
+                source: 'github',
+                source_item_id: `pr-${pr.number}`,
+                payload: {
+                  subject: pr.title,
+                  body: pr.body || '',
+                  labels: (pr.labels || []).map(l => l.name || l),
+                  url: pr.html_url,
+                  number: pr.number,
+                  head_ref: pr.head.ref,
+                  head_repo: pr.head.repo ? pr.head.repo.full_name : null,
+                },
+                context_ref: pr.html_url,
+                reporter: pr.user.login,
+                severity: null,
+              };
+            }
+
+            console.log(`Relaying ${payload.source_item_id} to ${inboundUrl}`);
+
+            const response = await fetch(inboundUrl, {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                'x-inbound-secret': inboundSecret,
+              },
+              body: JSON.stringify(payload),
+            });
+
+            if (!response.ok) {
+              const body = await response.text();
+              core.setFailed(`Intake relay failed (${response.status}): ${body}`);
+            } else {
+              const result = await response.json();
+              console.log(`Intake relay OK: ${JSON.stringify(result)}`);
+              core.setOutput('relay_status', result.status);
+              core.setOutput('relay_id', result.id);
+            }

@@ -14,7 +14,7 @@ import { setupGuide } from './setupGuide.js'
 // memory digest, next action), zero toggles. Pure derivations, node --test
 // unit-tested (overview.test.js).
 import { overviewConnection, overviewDigest, overviewNextAction } from './overview.js'
-// #1997 (W1): the 5 human onboarding steps — pure structure + copy + fork
+// #1997 (W1): the 4 human onboarding steps — pure structure + copy + fork
 // options + org-name validation, node --test unit-tested (wizardFlow.test.js).
 import { WIZARD_STEPS, WIZARD_FORK_OPTIONS, resolveBuildCatalog, orgNameError, durableKeyName } from './wizardFlow.js'
 // #1894: indexed-state + job-progress derivations — pure, node --test
@@ -1065,7 +1065,7 @@ function claimIntentInFlight() {
   // step (a re-opener may have connected in a prior session) so the paused
   // gate reads fresh server truth.
   React.useEffect(() => {
-    if (welcomeMode && authed && wizardStep === 4 && !onboardingRefreshedAtDoneRef.current) {
+    if (welcomeMode && authed && wizardStep === 3 && !onboardingRefreshedAtDoneRef.current) {
       onboardingRefreshedAtDoneRef.current = true
       refreshOnboarding().catch(() => {})
     }
@@ -1083,10 +1083,10 @@ function claimIntentInFlight() {
   React.useEffect(() => {
     if (!(welcomeMode && authed)) return
     if (LEGACY_WIZARD_ARCHIVED) return  // A0 rollback owns its own steps (#2361 r3 P3-7)
-    const label = (wizardStep === 4 && effectivelyPaused)
+    const label = (wizardStep === 3 && effectivelyPaused)
       ? 'Setup paused — your agent is not connected yet'
-      : (wizardStep === 1 && welcomeHasOrg ? 'Your Organization' : WIZARD_STEPS[wizardStep].label)
-    setWizardStepAnnounce(`Step ${wizardStep + 1} of 5: ${label}`)
+      : (wizardStep === 0 && welcomeHasOrg ? 'Your Organization' : WIZARD_STEPS[wizardStep].label)
+    setWizardStepAnnounce(`Step ${wizardStep + 1} of 4: ${label}`)
     if (!wizardFocusInit.current) { wizardFocusInit.current = true; return }
     // #2361 review-r4 (P3): focus ONLY on step changes — toggling the paste
     // disclosure (wizardShowPaste) or an invite accept (welcomeHasOrg) must
@@ -1096,8 +1096,8 @@ function claimIntentInFlight() {
     if (!stepChanged) return
     // Skip container focus only when a child control autofocuses on mount:
     // step 1 org input (no org yet) and step 3 owner paste disclosure open.
-    const step3PasteAutofocus = wizardStep === 3 && isOwnerAdmin && wizardShowPaste
-    if (wizardStep === 1 && !welcomeHasOrg) return
+    const step3PasteAutofocus = wizardStep === 2 && isOwnerAdmin && wizardShowPaste
+    if (wizardStep === 0 && !welcomeHasOrg) return
     if (step3PasteAutofocus) return
     if (wizardCardRef.current) wizardCardRef.current.focus()
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -2014,7 +2014,7 @@ function claimIntentInFlight() {
   // #1997 (W1): LEGACY #1643 step labels — ARCHIVED-not-deleted (A0 rollback
   // path, epic §8; the DE2E-1 archived-not-deleted assertion greps this +
   // the LEGACY_WIZARD_ARCHIVED marker below). The LIVE wizard renders
-  // WIZARD_STEPS (wizardFlow.js) — 5 human steps.
+  // WIZARD_STEPS (wizardFlow.js) — 4 human steps.
   const wizardSteps = ['Connect your tool', 'Memory sources', 'Your agent\'s toolkit', 'Seed your graph', 'You\'re set']
   // #1997 (W1): ARCHIVED flag — the legacy #1643 wizard render JSX below
   // stays byte-identical for the A0 gate's rollback path (partial revert
@@ -2763,6 +2763,10 @@ function claimIntentInFlight() {
             if (inviteRes.ok) {
               try { sessionStorage.removeItem(INVITE_TOKEN_STORAGE) } catch { /* best-effort */ }
               setBanner('Welcome to the team! Your membership is active.')
+              // #2538: propagate the accepted invite to wizard state so
+              // loadTeams fires and the welcomeHasOrg chain triggers the
+              // dashboard route guard (invited users skip onboarding).
+              await loadTeams().catch(() => {})
             } else {
               let inviteMsg = `Could not accept invite (HTTP ${inviteRes.status}).`
               try {
@@ -3644,7 +3648,7 @@ function claimIntentInFlight() {
     if (nameErr) { setWizardOrgError(nameErr); return }
     // An account that already holds an org never mints via this step — a
     // stray submit on the read-only path just advances.
-    if (Array.isArray(teams) && teams.length > 0) { setWizardStep(2); return }
+    if (Array.isArray(teams) && teams.length > 0) { setWizardStep(1); return }
     setWizardOrgBusy(true)
     setWizardOrgError('')
     try {
@@ -3678,7 +3682,7 @@ function claimIntentInFlight() {
       refreshTeam('', undefined, teamRefreshSeqRef.current)
         .then((t) => { if (t && t.team_id) loadAlerts(t.team_id) })
         .catch(() => {})
-      setWizardStep(2)
+      setWizardStep(1)
     } catch (e) {
       // #2323 (code-review): never leave the provisioning overlay + busy
       // button stuck on an unexpected rejection — surface + recover.
@@ -3723,7 +3727,7 @@ function claimIntentInFlight() {
           }).catch(() => {})
         }
       } else {
-        setWizardStep(3)
+        setWizardStep(2)
       }
     } catch (e) {
       if (e?.status === 409) {
@@ -3731,7 +3735,7 @@ function claimIntentInFlight() {
         // so the actual fork renders (the Continue button needs it)
         setWizardForkError('This organization already chose how it uses Tortoise.')
         refreshOnboarding().catch(() => {})
-        setWizardStep(3)
+        setWizardStep(2)
       } else if (e?.status === 503) {
         setWizardForkError('The graph is temporarily unavailable — try again in a moment.')
       } else {
@@ -3762,7 +3766,7 @@ function claimIntentInFlight() {
       })
       setWizardPaused(false)
       connectedOnceRef.current = true
-      setWizardStep(4)
+      setWizardStep(3)
     } catch (e) {
       if (e?.status === 503) {
         setWizardConnectError('The graph is temporarily unavailable — try again in a moment.')
@@ -5302,7 +5306,7 @@ function claimIntentInFlight() {
           <button
             className="ghost small"
             disabled={welcomeProvisioning || welcomeProvisionError || !welcomeHasOrg}
-            onClick={() => { window.history.replaceState({}, '', '#/' + tab); setWelcomeMode(false); setWizardDurableKey(''); setWizardDurablePaste(''); setWizardDurableError(''); setWizardShowPaste(false); setWizardPaused(false); connectedOnceRef.current = false; if (wizardStep >= 3) setWelcomeKey(''); finishWelcomeLoads() }}
+            onClick={() => { window.history.replaceState({}, '', '#/' + tab); setWelcomeMode(false); setWizardDurableKey(''); setWizardDurablePaste(''); setWizardDurableError(''); setWizardShowPaste(false); setWizardPaused(false); connectedOnceRef.current = false; if (wizardStep >= 2) setWelcomeKey(''); finishWelcomeLoads() }}
           >
             Open my dashboard →
           </button>
@@ -5343,13 +5347,9 @@ function claimIntentInFlight() {
                 <span className="sr-only" role="status" aria-live="polite">
                   {welcomeProvisioning ? 'Creating your organization' : (welcomeHasOrg && shownOrgName ? `${shownOrgName} is set up` : '')}
                 </span>
-                <p className="dim" style={{ marginBottom: '1.25rem' }}>
-                  {welcomeHasOrg
-                    ? 'Your Organization is set up. Choose how you\'ll use it and connect your agent — your API key is shown once at the connect step.'
-                    : 'Set up your Organization in the steps below — it\'s created when you name it, and your API key is shown once at the connect step.'}
-                </p>
-                {/* #1997 (W1): the 5 HUMAN steps (epic plan P1) — orientation
-                    → org-create/join → fork card → connect-consent → done.
+                {/* #1997 (W1): the 4 HUMAN steps (epic plan P1) — org-create/join
+                    → fork card → connect-consent → done (orientation removed per
+                    epic #2534).
                     All other steps (install/seed/decide) are agent-side or
                     archived. Copy from wizardFlow.js (DE2E-2: 'Organization',
                     never 'team'/'workspace' in user-facing labels). */}
@@ -5361,37 +5361,15 @@ function claimIntentInFlight() {
                     ))}
                   </div>
                   <p className="wizard-title">{WIZARD_STEPS[wizardStep].label}</p>
-                  <p className="wizard-sub" style={{ marginBottom: '1rem' }}>
-                    {wizardStep === 1 && welcomeHasOrg
-                      // #2323 (review P2): the shared step-1 sub ('Name your
-                      // organization…') is a contradiction for an org-holding
-                      // account on the read-only step — branch the copy.
-                      ? "You're already in an organization — you won't create another here. Pick how you'll use it next."
-                      : (wizardStep === 4 && effectivelyPaused)
-                        // #2361 review-r3/r4: the done SUB claimed 'Your agent takes
-                        // over from here' above a paused body — branch it, and only
-                        // when the org truly never connected (server checkpoint).
+                  {wizardStep !== 0 && (
+                    <p className="wizard-sub" style={{ marginBottom: '1rem' }}>
+                      {(wizardStep === 3 && effectivelyPaused)
                         ? "You're set up, but your agent isn't connected yet. Reconnect any time from Settings → Setup guide."
                         : WIZARD_STEPS[wizardStep].sub}
-                  </p>
-
-                  {wizardStep === 0 && (
-                    <div className="wizard-orient">
-                      <ol className="wizard-intro" style={{ margin: '0 0 1rem 1.1rem', padding: 0, lineHeight: 1.7 }}>
-                        <li><strong>Create your Organization</strong> — the shared memory space your agent writes to. Name it, and it's created.</li>
-                        <li><strong>Choose how you'll use it</strong> — for your own agents, or to build an application on top.</li>
-                        <li><strong>Connect your agent</strong> — one command installs the connector and skills your agent needs; your API key is shown once here.</li>
-                        <li><strong>Your agent takes it from there</strong> — it files your decisions and findings to this Organization as you make them.</li>
-                      </ol>
-                      <div className="wizard-nav">
-                        <div className="wizard-nav-actions">
-                          <button type="button" className="btn-primary" onClick={() => setWizardStep(1)}>Continue →</button>
-                        </div>
-                      </div>
-                    </div>
+                    </p>
                   )}
 
-                  {wizardStep === 1 && (
+                  {wizardStep === 0 && (
                     <div className="org-create">
                       {welcomeHasOrg ? (
                         // #2323 (Option B): the account already has an org —
@@ -5402,12 +5380,9 @@ function claimIntentInFlight() {
                           <p className="dim" style={{ marginBottom: '0.9rem' }}>
                             You're set up in <strong>{shownOrgName || 'your organization'}</strong>. Next, choose how you'll use Tortoise.
                           </p>
-                          <div className="wizard-nav">
-                            <button type="button" className="ghost" onClick={() => setWizardStep(0)}>← Back</button>
-                            <div className="wizard-nav-actions">
-                              <button type="button" className="btn-primary" onClick={() => setWizardStep(2)}>Continue →</button>
+                          <div className="wizard-nav-actions">
+                              <button type="button" className="btn-primary" onClick={() => setWizardStep(1)}>Continue →</button>
                             </div>
-                          </div>
                         </>
                       ) : (
                         // #2323 (Option B): the first-run provisioning door —
@@ -5428,20 +5403,19 @@ function claimIntentInFlight() {
                               style={{ padding: '0.5rem 0.7rem', background: 'var(--surface,#0d1a2d)', border: '1px solid var(--border,#1e293b)', borderRadius: 8, fontSize: 14 }}
                             />
                           </label>
-                          <p className="dim small" style={{ margin: '0 0 0.9rem', lineHeight: 1.5 }}>
-                            This creates your organization — one per account on the free plan. Your API key is created here and shown once at the connect step.
-                          </p>
                           {wizardOrgError && (
                             <p className="error" role="alert" style={{ marginBottom: '0.9rem' }}>{wizardOrgError}</p>
                           )}
-                          <div className="wizard-nav">
-                            <button type="button" className="ghost" onClick={() => setWizardStep(0)}>← Back</button>
-                            <div className="wizard-nav-actions">
+                          {(!pendingInvites || pendingInvites.length === 0) && (
+                            <p className="dim small" style={{ margin: '0 0 0.9rem', lineHeight: 1.5, fontStyle: 'italic' }}>
+                              Looking to join an existing organization? Ask your admin to invite you to your email, then reload this page.
+                            </p>
+                          )}
+                          <div className="wizard-nav-actions">
                               <button type="button" className="btn-primary" onClick={handleWizardCreateOrg} disabled={wizardOrgBusy}>
                                 {wizardOrgBusy ? 'Creating…' : 'Create Organization'}
                               </button>
                             </div>
-                          </div>
                         </>
                       )}
                       {pendingInvites && pendingInvites.length > 0 && (
@@ -5510,7 +5484,7 @@ function claimIntentInFlight() {
                         <button type="button" className="ghost" onClick={() => setWizardStep(1)}>← Back</button>
                         <div className="wizard-nav-actions">
                           {wizardForkChosen || (onboarding && onboarding.fork) ? (
-                            <button type="button" className="btn-primary" onClick={() => setWizardStep(3)}>Continue →</button>
+                            <button type="button" className="btn-primary" onClick={() => setWizardStep(2)}>Continue →</button>
                           ) : (
                             <p className="dim small" style={{ margin: 0 }}>Pick how you'll use Tortoise — you choose once per Organization.</p>
                           )}
@@ -5573,7 +5547,7 @@ function claimIntentInFlight() {
                             <p className="error" role="alert" style={{ margin: '0.6rem 0 0', fontSize: 13 }}>{wizardDurableError}</p>
                           )}
                           <div className="wizard-nav" style={{ marginTop: '1rem' }}>
-                            <button type="button" className="ghost" onClick={() => setWizardStep(2)}>← Back</button>
+                            <button type="button" className="ghost" onClick={() => setWizardStep(1)}>← Back</button>
                             <div className="wizard-nav-actions">
                               {isOwnerAdmin && (
                                 <button type="button" className="btn-primary" onClick={wizardMintDurableKey} disabled={wizardDurableBusy}>
@@ -5585,7 +5559,7 @@ function claimIntentInFlight() {
                                 no key yet) must never be trapped on the connect
                                 step — Skip defers; the done step's copy stays
                                 honest ('connect it later'). */}
-                            <button type="button" className="ghost" onClick={() => { setWizardPaused(true); setWizardStep(4) }}>Skip for now</button>
+                            <button type="button" className="ghost" onClick={() => { setWizardPaused(true); setWizardStep(3) }}>Skip for now</button>
                           </div>
                           {/* #2325: the affordances below are ESCAPES, not a
                               second path — a muted contextual 'Manage keys'
@@ -5771,7 +5745,7 @@ function claimIntentInFlight() {
                           </p>
                           )}
                           <div className="wizard-nav">
-                            <button type="button" className="ghost" onClick={() => setWizardStep(2)}>← Back</button>
+                            <button type="button" className="ghost" onClick={() => setWizardStep(1)}>← Back</button>
                             <div className="wizard-nav-actions">
                               {wizardConnectError && (
                                 <p className="error" role="alert" style={{ margin: '0 0.5rem 0 0', fontSize: 13 }}>{wizardConnectError}</p>
@@ -5785,7 +5759,7 @@ function claimIntentInFlight() {
                                   {wizardConnectBusy ? 'Saving…' : (HARNESS_CONTINUE_LABEL[wizardHarness] || (HARNESS_SELF_INSTALL.includes(wizardHarness) ? 'My agent confirmed it — Continue →' : "I've set it up — Continue →"))}
                                 </button>
                               )}
-                              <button type="button" className="ghost" onClick={() => { setWizardPaused(true); setWizardStep(4) }}>Skip for now</button>
+                              <button type="button" className="ghost" onClick={() => { setWizardPaused(true); setWizardStep(3) }}>Skip for now</button>
                             </div>
                           </div>
                         </>
@@ -5793,7 +5767,7 @@ function claimIntentInFlight() {
                     </div>
                   )}
 
-                  {wizardStep === 4 && (
+                  {wizardStep === 3 && (
                     <div className="done">
                       {effectivelyPaused ? (
                         <p className="dim">You're set up, but your agent isn't connected yet — nothing was installed on the connect step. Open Settings → Setup guide to follow what happens next — the setup command there creates a fresh key when you do.</p>
@@ -5801,7 +5775,7 @@ function claimIntentInFlight() {
                         <p className="dim">Your agent is connected — it files your decisions and findings to this Organization's graph from here on. Open Settings → Setup guide to follow what happens next.</p>
                       )}
                       <div className="wizard-nav">
-                        <button type="button" className="ghost" onClick={() => setWizardStep(3)}>← Back</button>
+                        <button type="button" className="ghost" onClick={() => setWizardStep(2)}>← Back</button>
                       </div>
                       <div className="wizard-actions">
                         <button type="button" className="btn-primary" onClick={wizardComplete}>Open my dashboard →</button>

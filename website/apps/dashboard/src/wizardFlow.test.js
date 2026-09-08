@@ -8,10 +8,10 @@ import {
   durableKeyName,
 } from './wizardFlow.js'
 
-test('EXACTLY 5 human steps in the plan order (orientation → org-create → fork → connect → done)', () => {
-  assert.equal(WIZARD_STEPS.length, 5)
+test('EXACTLY 4 human steps in the plan order (org-create → fork → connect → done)', () => {
+  assert.equal(WIZARD_STEPS.length, 4)
   assert.deepEqual(WIZARD_STEPS.map((s) => s.id), [
-    'orientation', 'org-create', 'fork', 'connect', 'done',
+    'org-create', 'fork', 'connect', 'done',
   ])
 })
 
@@ -72,7 +72,7 @@ test('DE2E-3: org-name validation — required + charset mirror of the server', 
   assert.match(orgNameError(''), /required/i)
   assert.match(orgNameError('   '), /required/i)
   assert.match(orgNameError('a'.repeat(65)), /invalid/i)
-  assert.match(orgNameError('has space'), /invalid/i)
+  assert.equal(orgNameError('has space'), null)
   assert.equal(orgNameError('acme'), null)
   assert.equal(orgNameError('acme-prod_2'), null)
 })

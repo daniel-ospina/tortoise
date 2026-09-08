@@ -311,11 +311,27 @@ class TestS2:
         (Mem0 semantics), NEVER emitted as a point/entity/event. The rule
         lives in ONE shared constant and renders into BOTH mapping stages
         (S2 and S4) from the {anti_routine} template slot; a future edit
-        cannot silently drop it from one prompt."""
+        cannot silently drop it from one prompt.
+
+        #2424 residual (clause-level): the same shared constant ALSO carries
+        the CLAUSE-LEVEL STRIP — the emission NOOP alone cannot stop a
+        routine aside that rides inside the prose of an otherwise-durable
+        point (the sealed run leaked BOTH wp03 distractors that way). The
+        strip instruction must render into both stages just like the NOOP.
+        """
         assert "ANTI-ROUTINE EXCLUSION" in v2.ANTI_ROUTINE_EXCLUSION
         assert "NOOP" in v2.ANTI_ROUTINE_EXCLUSION
         assert "points, entities, or events" in v2.ANTI_ROUTINE_EXCLUSION
         assert "the on-call room has been quiet lately" \
+            in v2.ANTI_ROUTINE_EXCLUSION
+        assert "CLAUSE-LEVEL STRIP" in v2.ANTI_ROUTINE_EXCLUSION
+        assert "NEVER a whole point" in v2.ANTI_ROUTINE_EXCLUSION
+        assert "When in doubt, EMIT" in v2.ANTI_ROUTINE_EXCLUSION
+        # the durable-claim example keeps a routine clause separable: the
+        # quiet-room aside must not ride the routing decision's prose
+        assert "emits the routing decision" \
+            in v2.ANTI_ROUTINE_EXCLUSION
+        assert "double duty IS durable entity state" \
             in v2.ANTI_ROUTINE_EXCLUSION
         assert "{anti_routine}" in v2.S2_TMPL       # the single-source slot
         assert "{anti_routine}" in v2.S4_TMPL       # both mapping stages wire it
@@ -325,26 +341,36 @@ class TestS2:
             assert "VALUE FIDELITY" in prompt  # #2453 rides the same slot
             assert "NOOP" in prompt
             assert "the on-call room has been quiet lately" in prompt
+            assert "CLAUSE-LEVEL STRIP" in prompt
+            assert "emits the routing decision" in prompt
+            assert "When in doubt, EMIT" in prompt
             assert "{anti_routine}" not in prompt   # placeholder fully filled
         # S1 (narrative story register) deliberately gets the value clause
-        # but NOT the anti-routine gate — lock the asymmetry.
+        # but NOT the anti-routine gate — lock the asymmetry (the clause
+        # strip is part of the anti-routine block, so it is absent too).
         s1 = (v2.S1_TMPL
               .replace("{memory_granularity}", v2._granularity_text())
               .replace("{date_anchor}", v2._date_anchor(None)))
         assert "ANTI-ROUTINE EXCLUSION" not in s1
         assert "NOOP" not in s1
+        assert "CLAUSE-LEVEL STRIP" not in s1
         assert "OPERATIONAL-VALUE" in s1
 
     def test_s4_prompt_anti_routine_exclusion(self):
         """#2424: S4 (the GAP REVIEWER) applies the SAME anti-routine gate
         — it must not ADD true-but-routine content as gaps (its TASK's
-        process-chatter exclusion extends to routine asides)."""
+        process-chatter exclusion extends to routine asides). The clause-
+        level residual strip (#2424) rides the same shared block into S4:
+        a routine aside embedded in an otherwise-durable S2 point must be
+        stripped from that point's prose, not re-emitted as decoration."""
         for prompt in (v2.render_s4_prompt("STORY", {}, S2_FIXTURE),
                        v2.render_s4_prompt("STORY", {}, S2_FIXTURE,
                                            core_only=True)):
             assert "ANTI-ROUTINE EXCLUSION" in prompt
             assert "VALUE FIDELITY" in prompt  # #2453 rides the same slot
             assert "TRUE IS NOT ENOUGH" in prompt
+            assert "CLAUSE-LEVEL STRIP" in prompt
+            assert "emits the routing decision" in prompt
             assert "{anti_routine}" not in prompt
 
     def test_prompt_supersession_rules(self):
