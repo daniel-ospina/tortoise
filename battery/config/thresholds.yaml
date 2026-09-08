@@ -25,13 +25,15 @@ determinism:
     outcome_timeout: 1e-6         # derived/objective — measured |Δ|=0.0
     re_derivations: 1e-6          # derived/objective — measured |Δ|=0.0
     total_tokens: 1e-6            # derived/objective — measured |Δ|=0.0
-    # PROVISIONAL real-path row (#2292 Task 7): probe-emittable usage/
-    # token rows are NOT transcript-locked — the mock-lane 1e-6 seed never
-    # applies to real usage. Value 1000 = measured two-run probe |Δ|
-    # per-episode deliberation tokens (2026-09-08 runs: mean 3405 vs 4399
-    # tok/ep, same seed 7, 8 episodes; scaffold scope). Real-path
-    # confirmation + finalization at #2284 Task 8 exposure.
-    probe_usage_tokens_episode: 1000.0
+    # PROVISIONAL real-path row (#2292 Task 7, Step 7.4 dedicated two-run
+    # determinism probe 2026-09-08: 2 scenarios d-001/ct-001 x a0/a4, seed
+    # 7, 4 episodes/run): probe-emittable usage/token rows are NOT
+    # transcript-locked — the mock-lane 1e-6 seed never applies to real
+    # usage. Measured two-run per-episode deliberation |Δ|: mean 127
+    # (2392 vs 2519), p95 219 (2576 vs 2357). Tolerance 250 covers the
+    # measured spread + margin. Real-path confirmation + finalization at
+    # #2284 Task 8 exposure.
+    probe_usage_tokens_episode: 250.0
 
 cal:
   # metric -> {arm -> value}. Values are [cal]-locked; re-locking is a
