@@ -12,7 +12,8 @@ test_keys_table_mixed.py):
 
 Covered contracts (issue indicators 1-6):
   1. Meter line — "N graphs · ∞ cap" (pro/team, max_graphs null) vs
-     "N/M graphs used" (free/solo).
+     "N/M graphs used" (solo). Free/anon hide the meter: the 🔒 lock line
+     states the 1-graph cap once (#2308).
   2. Create flow → one-time reveal modal: the C2 nested envelope's
      key_plaintext renders once with Copy; NO route re-shows it; dismissing
      clears state (re-opening the tab shows no key anywhere).
@@ -297,14 +298,19 @@ def test_graphs_table_rows_default_first_with_actions(page: Page) -> None:
     expect(custom_row).to_contain_text("0")  # key_count column
 
 
-def test_meter_free_tier_shows_used_total(page: Page) -> None:
-    """Indicator 1 free/solo shape: '1/1 graphs used' at max_graphs=1 with
-    only the default graph (free cap reached — create is locked)."""
+def test_free_tier_meter_hidden_lock_line_states_cap_once(page: Page) -> None:
+    """#2308: free tier states the 1-graph cap ONCE — the 🔒 lock line
+    ("Your plan includes 1 graph" + upgrade CTA) is the canonical statement;
+    the meter ("1/1 graphs used") is hidden so it can't restate the cap in
+    the same screenful. Solo/pro keep the meter (they have no lock line)."""
     _open_graphs_tab(page, _team_row("free", 1),
                      graphs=[DEFAULT_ROW])
     # Only the default row renders.
     expect(page.locator("table tbody tr")).to_have_count(1)
-    expect(page.locator('[aria-label="Graph usage meter"]')).to_contain_text("1/1 graphs used")
+    # The meter is hidden under the lock line — cap stated once + one CTA.
+    expect(page.locator('[aria-label="Graph usage meter"]')).to_have_count(0)
+    expect(page.locator("section")).to_contain_text("🔒")
+    expect(page.locator("section")).to_contain_text("Upgrade to add more")
 
 
 def test_free_tier_create_locked_with_upgrade_cta(page: Page) -> None:

@@ -7084,10 +7084,18 @@ sdk.create_point(text="My first point")
                 <span className="dim small">Sign in required</span>
               )}
             </div>
-            {authMode === 'session' && graphsStatus === 'ok' && graphsLoaded && (
+            {/* #2308: free/anon (tierCreateLocked) SKIP the meter — the 🔒
+                "Your plan includes 1 graph" line + upgrade CTA right above
+                already states the cap; "1/1 graphs used" would restate it
+                in the same screenful. Solo (2) / pro (∞) have no lock line,
+                so the meter stays there. Gated on the LIVE tier so a
+                mid-session upgrade (checkout poll → refreshTeam → setTeam)
+                restores the meter without a reload. */}
+            {authMode === 'session' && graphsStatus === 'ok' && graphsLoaded
+              && !tierCreateLocked(team && team.tier) && (
               /* C7 indicator 1: the graph-count meter (used · cap).
-                 max_graphs null → ∞ (pro/team); free=1 / solo=2 show
-                 used/total. The server's 409 cap-reject is authoritative. */
+                 max_graphs null → ∞ (pro/team); solo=2 shows used/total.
+                 The server's 409 cap-reject is authoritative. */
               <p className="dim small" aria-label="Graph usage meter">
                 {graphsMeter(sortedGraphRows(graphs), team && team.max_graphs).label}
               </p>
