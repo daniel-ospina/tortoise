@@ -160,7 +160,24 @@ chmod +x .claude/hooks/session-start.sh .claude/hooks/session-end.sh
   cursor: () =>
     `${JSON.stringify(CURSOR_MCP_CONFIG_ENV, null, 2)}`,
   pi: (key) =>
-    `Set up Tortoise for this project:\n1. Add TORTOISE_API_KEY=${key} to my shell profile (~/.zshrc or ~/.bashrc).\n2. Create or merge .mcp.json in this project with:\n${JSON.stringify(PI_MCP_CONFIG_ENV, null, 2)}\n3. Run: curl -fsSL ${SKILLS_INSTALL_URL} | bash -s -- --harness pi\n4. Verify the Tortoise MCP server is configured and the three skills (how-to-use-tortoise, tortoise-decide, tortoise-file-finding) are installed, then tell me what you did.\n5. Session capture (#1727 T1): recording is on by default (ToS-covered) — switch it off anytime from the dashboard (Memory sources > Agent sessions; the server returns a 409 while disabled). The extension fires an install-probe on load (harness + timestamp only, no content) and files sessions to Tortoise Cloud when capture is enabled. Backfill past sessions with: tortoise sessions import --harness pi --file <session.jsonl> (local receipt written only on a 2xx).`,
+    `Set up Tortoise for this project:
+1. Add TORTOISE_API_KEY=${key} to my shell profile (~/.zshrc or ~/.bashrc).
+2. Create or merge .mcp.json in this project with:
+${JSON.stringify(PI_MCP_CONFIG_ENV, null, 2)}
+3. Run: curl -fsSL ${SKILLS_INSTALL_URL} | bash -s -- --harness pi
+4. Run '/reload' in Pi (or restart Pi) — Pi reads .mcp.json and skills at
+   startup; '/reload' re-scans them without a full restart.
+5. Run '/mcp connect tortoise' in Pi — connects the Tortoise MCP server
+   (lazy by default), then call tortoise_health — when it passes, tell me
+   "Tortoise is connected" and checkpoint harness-connected.
+6. Session capture (#1727 T1): recording is on by default (ToS-covered) —
+   switch it off anytime from the dashboard (Memory sources > Agent
+   sessions; the server returns a 409 while disabled). The extension fires
+   an install-probe on load (harness + timestamp only, no content) and
+   files sessions to Tortoise Cloud when capture is enabled. Backfill past
+   sessions with:
+   tortoise sessions import --harness pi --file <session.jsonl>
+   (local receipt written only on a 2xx).`,
   // #1701: ChatGPT — key-less OAuth harness. Copy = WORKFLOWS_PROMPT only;
   // the connector steps live in HARNESS_STEPS / HARNESS_INTRO above the
   // snippet (never in the copied text).
@@ -351,7 +368,19 @@ bearer_token_env_var = "TORTOISE_API_KEY"
   cursor: () =>
     `# Tortoise — universal setup command (Cursor)\n# 1. Export the key — add this line to your shell profile so it persists:\nexport TORTOISE_API_KEY=<your-tortoise-api-key>\n# 2. Create .cursor/mcp.json in this project with:\n${JSON.stringify(CURSOR_MCP_CONFIG_ENV, null, 2)}\n# 3. Install the Tortoise skills (run in a terminal):\ncurl -fsSL ${SKILLS_INSTALL_URL} | bash -s -- --harness cursor\n# 4. Restart Cursor, then tell your agent: "Set up Tortoise" — it verifies\n#    with tortoise_health and reports the harness-connected checkpoint.\n#    (The config references the env var, never the key.)`,
   pi: (key) =>
-    `Set up Tortoise for this project (universal setup command — Pi):\n1. Add TORTOISE_API_KEY=${key} to my shell profile (~/.zshrc or ~/.bashrc).\n2. Create or merge .mcp.json in this project with (the file references the\n   env var, never the key):\n${JSON.stringify(PI_MCP_CONFIG_ENV, null, 2)}\n3. Run: curl -fsSL ${SKILLS_INSTALL_URL} | bash -s -- --harness pi\n4. Verify the Tortoise MCP server is configured, then call tortoise_health —\n   when it passes, tell me "Tortoise is connected" and checkpoint\n   harness-connected (I've set it up — Continue on the dashboard covers it).`,
+    `Set up Tortoise for this project (universal setup command — Pi):
+1. Add TORTOISE_API_KEY=${key} to my shell profile (~/.zshrc or ~/.bashrc).
+2. Create or merge .mcp.json in this project with (the file references the
+   env var, never the key):
+${JSON.stringify(PI_MCP_CONFIG_ENV, null, 2)}
+3. Run: curl -fsSL ${SKILLS_INSTALL_URL} | bash -s -- --harness pi
+4. Run '/reload' in Pi (or restart Pi) — Pi reads .mcp.json at startup;
+   '/reload' re-scans configs, skills, and MCP registrations without a full
+   restart.
+5. Run '/mcp connect tortoise' in Pi — connects the Tortoise MCP server
+   (lazy by default), then call tortoise_health — when it passes, tell me
+   "Tortoise is connected" and checkpoint harness-connected (I've set it
+   up — Continue on the dashboard covers it).`,
   'claude-desktop': (key) =>
     `# Tortoise — universal setup command (Claude Desktop — manual setup)\n# Claude Desktop has no local shell, so YOU complete the steps below, then the\n# agent verifies after:\n# 1. Open ~/Library/Application Support/Claude/claude_desktop_config.json\n#    (macOS) — or Claude > Settings > Developer in the app.\n# 2. MERGE the mcpServers block below into the existing config (never replace\n#    the whole file; the key stays literal here — keep the file private):\n${JSON.stringify({ mcpServers: { tortoise: { url: MCP_URL, headers: { Authorization: `Bearer ${key}` } } } }, null, 2)}\n# 3. Restart Claude Desktop, then say "Set up Tortoise" in a chat — the agent\n#    verifies with tortoise_health. Click "I've set it up — Continue" in the\n#    dashboard connect step when it passes (that writes the checkpoint).`,
   'claude-web': (key) =>
