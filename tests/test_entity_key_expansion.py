@@ -260,6 +260,32 @@ def test_eval_env_gate_failsafe_off(seeded_sdk, monkeypatch):
 
 # ── (c) rank/join mechanics: slot reservation + merge contract ────────────
 
+def test_expansion_never_runs_on_non_point_entity_type(seeded_sdk, monkeypatch):
+    """P1 regression (#2557 review): the expansion harvest is point-only
+    (search_keys live on points), so an 'event'/'operator' arm with the flag
+    ON must NOT run the pass — merging point ids into an event/operator top-k
+    would silently truncate the real hits (measured: event arm returned []
+    where OFF returned the event). The gate is entity-type-scoped before the
+    pass is even entered."""
+    import tortoise.sdk as sdkmod
+    calls = []
+
+    def _boom(*a, **k):
+        calls.append(k)
+        raise AssertionError(
+            "C2 pass must never run for entity_type != 'point'")
+
+    monkeypatch.setattr(sdkmod.TortoiseSDK,
+                        "_entity_key_expansion_pass", _boom)
+    # No events exist in the fixture; the point is the gate fires before any
+    # pass logic — same call shape as the temporal (et="event") arm.
+    out = seeded_sdk.tortoise_fts_query(
+        QUESTION, limit=5, pool_size=60, entity_key_expansion=True,
+        entity_type="event")
+    assert calls == []
+    assert isinstance(out, list)  # the untouched event fts leg
+
+
 def test_expansion_terms_never_displace_original_tokens():
     """The sparse OR-cap regression guard: an injected alias pool (the C2
     harvest shape — entity anchor name + E3 key strings) fills ONLY the

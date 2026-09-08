@@ -764,6 +764,16 @@ _logger = logging.getLogger(__name__)
 #: Object vocabulary — a larger window would harvest noise keys from
 #: co-matching unrelated entities.
 _ENTITY_ANCHOR_LIMIT = 3
+# Wider DB-side fetch for C2 anchor resolution: run_fts_query applies its
+# own LIMIT in Cypher BEFORE the Python (score, id) re-sort, so a bare top-3
+# fetch would cut equal-score ties DB-side in arbitrary order (P2 #2557
+# review). Fetch a candidate pool and take the deterministic top-3 below.
+_ENTITY_ANCHOR_CANDIDATES = 20
+# Bound on the harvested alias pool before tokenization (P2 #2557 review:
+# a high-degree anchor is otherwise the only bound — every linked Point's
+# search_keys get collect()ed and tokenized per query).
+_ENTITY_ALIAS_MAX = 200
+_ENTITY_ALIAS_PER_ANCHOR = 64
 
 # #1709: process-local serialization for the registry recovery mint (FalkorDB
 # has no transactions; parity with the Supabase lane's FOR UPDATE row lock —
@@ -11820,7 +11830,13 @@ class TortoiseSDK:
         # from OTHER sessions can surface; any failure keeps the ORIGINAL
         # fts leg (byte-identical). Runs after A4 so the two second passes
         # compose when both are on (each operates on the current fts leg).
-        if entity_key_expansion and raw_results.get("fts"):
+        # Point-only by design: the harvest resolves :Point linked to the
+        # anchors (search_keys live on points), so expanding an 'event' or
+        # 'operator' arm would merge POINT ids into an event/operator top-k
+        # and silently truncate the real hits (P1 #2557 review — the event
+        # arm returned [] where OFF returned the event).
+        if (entity_key_expansion and entity_type == "point"
+                and raw_results.get("fts")):
             expanded_fts = self._entity_key_expansion_pass(
                 query, raw_results["fts"],
                 str_limit=str_limit,
@@ -12389,7 +12405,8 @@ class TortoiseSDK:
             from .search_engine import run_fts_query
             anchor_rows = run_fts_query(
                 proj.g, query, entity_type="object",
-                limit=_ENTITY_ANCHOR_LIMIT, keep_numeric=keep_numeric)
+                limit=_ENTITY_ANCHOR_CANDIDATES,
+                keep_numeric=keep_numeric)
         except Exception:
             _logger.warning(
                 "C2 anchor resolution failed — keeping the original fts "
@@ -12423,14 +12440,40 @@ class TortoiseSDK:
             name = str(row[1] or "").strip()
             if name:
                 aliases.append(name)
+            # Bound per-anchor fan-out client-side (the collect() has no
+            # LIMIT — a high-degree anchor must not unboundedly feed the
+            # tokenizer; P2 #2557 review).
+            per_anchor = 0
             for v in (row[2] or []):
+                if per_anchor >= _ENTITY_ALIAS_PER_ANCHOR:
+                    break
                 # search_keys is stored FLAT (R2 D3) but older nodes may
                 # still carry arrays — accept both (expansion_tokens does).
                 if isinstance(v, (list, tuple)):
-                    aliases.extend(str(x) for x in v if x)
+                    values = [str(x) for x in v if x]
                 elif v:
-                    aliases.append(str(v))
-        aliases = [a.strip() for a in aliases if a and a.strip()]
+                    values = [str(v)]
+                else:
+                    values = []
+                for x in values:
+                    x = x.strip()
+                    if x and per_anchor < _ENTITY_ALIAS_PER_ANCHOR:
+                        aliases.append(x)
+                        per_anchor += 1
+        # Deterministic pool: DB row/collect order is not cross-run stable,
+        # and the expansion tokenizer's stable length-desc sort preserves
+        # ties — so equal-length candidates must not arrive in arbitrary
+        # order (P2 #2557 review). Sort (alias asc), dedupe, cap.
+        seen_alias: set[str] = set()
+        ordered: list[str] = []
+        for a in sorted(aliases):
+            if a in seen_alias:
+                continue
+            seen_alias.add(a)
+            ordered.append(a)
+            if len(ordered) >= _ENTITY_ALIAS_MAX:
+                break
+        aliases = ordered
         if not aliases:
             return None
         # An alias pool that tokenizes to ONLY original-query tokens cannot
