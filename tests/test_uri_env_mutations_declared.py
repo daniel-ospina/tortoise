@@ -124,6 +124,23 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # ── DELIBERATE_URI: module-level live-FalkorDB probes (set + restore at
     #    import; the probe asserts the docker lane) ──────────────────────────
     "test_directional_impl.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])'],
+    # ── DELIBERATE_EMBEDDED_LANE: battery hermetic-store suites force the
+    #    embedded lane so scenario graphs materialize under their own names
+    #    (a URI redirect folds graphs per test — ep_outcome/provenance/
+    #    seed_ingest/write_channel module fixtures + lane_matrix/r1_seed
+    #    inline strips; the pop/delenv IS the point) ────────────────────────
+    # ── DELIBERATE_EMBEDDED_LANE: battery hermetic-store suites force the
+    #    embedded lane so scenario graphs materialize under their own names
+    #    (a URI redirect folds graphs per test — ep_outcome/provenance/
+    #    seed_ingest/write_channel module fixtures + lane_matrix inline
+    #    strips; the pop/delenv IS the point; r1_seed uses the fixture-param
+    #    delenv form) ───────────────────────────────────────────────────────
+    "test_battery_ep_outcome.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])'],
+    "test_battery_lane_matrix.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])'],
+    "test_battery_provenance.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])'],
+    "test_battery_r1_seed.py": [r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
+    "test_battery_seed_ingest.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])'],
+    "test_battery_write_channel.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])'],
     "test_directional_impl_fix.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])'],
     "test_ep_directional.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])',
                                r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"'],

@@ -123,8 +123,10 @@ def test_hermetic_env_stripped_and_per_scenario_handle(tmp_path) -> None:
     """Hermetic fixture: env stripped; the seeded store is a per-run tmp
     dir; retrieve returns pre-k memories through the real arm surface."""
     # Env-strip: an ambient URI must not redirect the hermetic store.
-    saved = os.environ.pop("TORTOISE_DB_URI", None)
-    saved_path = os.environ.pop("TORTOISE_DB_PATH", None)
+    saved = os.environ.get("TORTOISE_DB_URI")
+    saved_path = os.environ.get("TORTOISE_DB_PATH")
+    os.environ.pop("TORTOISE_DB_URI", None)
+    os.environ.pop("TORTOISE_DB_PATH", None)
     try:
         ns = tmp_path / "run1"
         store = setup_seed_mode(ns, "ct-001")
