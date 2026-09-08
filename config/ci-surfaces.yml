@@ -13,6 +13,7 @@ surfaces:
   - test_battery_report_writers.py
   - test_battery_schema_v11.py
   - test_battery_seed_ingest.py
+  - test_battery_write_channel.py
   - test_delivery_tenancy.py  # C6 #2115: delivery-shape tenancy + session_recording per-graph override
   - test_onboarding_email_http.py
   - test_sentry.py

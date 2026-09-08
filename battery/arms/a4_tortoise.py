@@ -39,6 +39,9 @@ from battery.runner.setup import open_reference_projection, scenario_namespace
 #: with a stamped starting belief — the product's own write surface).
 _EVIDENCE_KIND = "evidence"
 _CLAIM_MEMORY_KIND = "claim"
+#: Per-episode Challenge/Deepen cycle cap (#2291 I-3 / Task 4 ep_outcome):
+#: cap-hit ⇒ non_converged/undec, never forced CONVERGED.
+DECIDE_CYCLES_CAP = 8
 #: seed-manifest marker content prefix — never surfaced as a memory.
 _SEED_MANIFEST_PREFIX = "battery:seed_manifest:"
 
@@ -159,15 +162,31 @@ class A4TortoiseArm:
 
     # ── record ──────────────────────────────────────────────────────────
     def record(self, context: AgentContext, item: Memory) -> None:
-        """Write through the product verb surface.
+        """Write through the product verb surface (#901 routing).
 
-        #901 semantics (Task 1 minimal; Task 3 refines): an evidence point
-        via create_point (kind=evidence → decision-part semantics: lands
-        live with a stamped starting belief), then a NAND (truth edge) or
-        IMPL (support edge) operator via create_operator with targets taken
-        ONLY from the retrieved closed set (context.prior_memories). An
-        unresolved target/operator is an honest no-op — never a fresh store
-        probe, never a content-derived guess.
+        #2291 Task 3 semantics:
+        - Targets come ONLY from the retrieved closed set
+          (context.prior_memories); an EMPTY closed set (or no claim member)
+          ⇒ zero writes + honest no-op (locked: ``empty_set_never_writes``).
+        - kind=evidence content is created idempotently (dedup by content
+          hash — a re-filed finding never duplicates the point/operator).
+        - kind="nand" (truth edge): create_operator NAND, unidirectional,
+          promote_source=True, targeting a closed-set CLAIM.
+        - kind="mitigate" (relevance edge): mitigate_operator on a
+          closed-set OPERATOR-kind memory (surfaced by the Task-4 read
+          mapping); strength = clamp(item.confidence, 0.10, 0.50) when a
+          confidence is given, else the decide-tooling default 0.3 (both
+          inside the product's [0.10, 0.50] convention); reason = content.
+          Mitigation strength is advisory metadata (#2315) — asserted on
+          engine-honored surfaces (call/idempotency/observability), NEVER on
+          claim-EP deltas.
+        - kind default (support edge): create_operator IMPL.
+        - decide_cycles increments per successful record; the per-episode
+          cap (DECIDE_CYCLES_CAP, default 8) makes further records honest
+          no-ops (cap-hit semantics surface in Task 4's ep_outcome table —
+          never forced CONVERGED).
+        - Mid-run failure (CalibrationError/product error) ⇒ ArmUnavailable
+          (never swallow + fabricate from an uncalibrated store).
         """
         if self._db_path is None:
             return
@@ -175,25 +194,36 @@ class A4TortoiseArm:
         try:
             closed = [m for m in (context.prior_memories or ())
                       if m.id and not _is_seed_manifest(m.content)]
-            if not closed:
-                return  # empty closed set ⇒ zero writes (honest no-op)
-            target = next((m.id for m in closed
-                           if m.kind == _CLAIM_MEMORY_KIND), closed[0].id)
-            created = sdk.create_point(kind=_EVIDENCE_KIND, content=item.content)
+            if self.decide_cycles >= DECIDE_CYCLES_CAP:
+                return  # cap-hit: honest no-op (never forced CONVERGED)
+            if item.kind == "mitigate":
+                ops = [m for m in closed if m.kind == "operator"]
+                if not ops:
+                    return  # unresolved operator target ⇒ honest no-op
+                strength = item.confidence if isinstance(item.confidence, float) \
+                    and 0.0 < item.confidence < 1.0 else 0.3
+                strength = max(0.10, min(0.50, strength))
+                sdk.mitigate_operator(
+                    ops[0].id, reason=item.content or "", strength=strength)
+                self.decide_cycles += 1
+                return
+            claims = [m for m in closed if m.kind == _CLAIM_MEMORY_KIND]
+            if not claims:
+                return  # empty/claim-less closed set ⇒ zero writes (no-op)
+            target = claims[0].id
+            created = sdk.create_point(kind=_EVIDENCE_KIND, content=item.content,
+                                       dedup=True)
             ev_id = created.get("id") if isinstance(created, dict) else None
             if not ev_id:
                 raise ArmUnavailable("a4 create_point returned no id")
             if item.kind == "nand":
                 sdk.create_operator(
                     "NAND", ev_id, [target], direction="unidirectional")
-            elif item.kind == "mitigate":
-                # Operator targets require the closed set to carry the
-                # operator (Task 3 read-mapping refinement) — until then an
-                # unresolved operator target is an honest no-op.
-                return
             else:
                 sdk.create_operator("IMPL", ev_id, [target])
             self.decide_cycles += 1  # one Challenge/Deepen cycle per record
+        except ArmUnavailable:
+            raise
         except Exception as e:  # noqa: BLE001, RUF100
             raise ArmUnavailable(f"a4 graph write: {e}") from e
 
