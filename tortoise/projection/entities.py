@@ -444,33 +444,57 @@ class _EntityHandlers:
             ev, self._OBJECT_HANDLED,
         )
 
-    def _fold_object_superseded(self, ev: dict) -> int:
+    def _fold_object_superseded(self, ev: dict, *,
+                               cas: bool = False) -> tuple:
         """#1350: fold an ObjectSuperseded event into Object.status.
 
         Projection-owned cache of the event stream (§11 'derived values may
         be CACHED'): a superseded Object is marked status='superseded' with
-        the successor name + timestamp. Idempotent (a replayed/duplicate
-        event re-applies the same SET); a chain A→B→C leaves A superseded by
+        the successor name + timestamp. A chain A→B→C leaves A superseded by
         B and B superseded by C (each event folds its own target).
 
-        #2164 (Task 2): returns the MATCHED-ROW count (additive fold-miss
-        signal) — 1 = the target Object was found and folded, 0 = no Object
-        matched (missing Object / stale id) or no id+name was supplied. The
-        SET…RETURN form yields a row only when the MATCH bound a node, so
-        the return value makes a fold-miss distinguishable from a successful
-        fold without a separate existence pre-query.
+        #2242 (CAS): the fold is CONDITIONAL when ``cas=True`` — the LIVE
+        path (apply_supersessions, which passes cas=True explicitly) — via a
+        single atomic statement computing ``live = (o.status IS NULL OR NOT
+        (o.status IN $excluded))`` before a ``CASE WHEN live`` SET. The
+        atomicity guarantee is SERVER-mode (single-statement serialization
+        on FalkorDB server — metering.py doctrine); embedded self-host
+        threads share one process and can still race the read-modify-write
+        (documented out-of-scope in the plan). Returns (folded, matched):
+        folded = rows actually flipped (were live), matched = rows bound —
+        (0, 0) = no node (fold-miss), (0, N) = node exists but ALREADY
+        terminal: under the live path that is the keep-first loser (a
+        concurrent commit folded it between this record's gate probe and the
+        fold); direct fold callers can also produce it as an idempotent
+        re-fold. folded > 0 = claimed. First-fold stamps are kept on a
+        terminal re-fold (never re-SET). The id→name fallback (#2164 ISSUE B
+        legacy) fires ONLY on matched == 0 (genuine absence) — never when
+        the id node exists but is terminal (a fallback could fold a dup-name
+        carrier or re-claim a terminal target).
 
-        #2164 review (ISSUE B): when the event carries a truthy id whose
-        id-branch MATCH misses (the node carries no such id — e.g. a legacy
-        id-less Object folded by name at live-write time but journaled with a
-        synthesized canonical id), the fold FALLS BACK to the name branch
-        below (only when a name is present — never for id-only/legacy §6b
-        shapes, which still no-op on an id miss).
+        ``cas=False`` (the DEFAULT — replay/rebuild surfaces: the pass-1b
+        sweep, the apply dispatch, backup restore, consistency, migrate,
+        CLI) is the legacy UNCONDITIONAL SET, byte-identical to pre-CAS —
+        returning (matched, matched) so the sweep's folded == 0 warn
+        condition ≡ today's matched == 0 (the legacy query keeps its
+        ``RETURN o.id LIMIT 1`` — matched ≤ 1 per fold, exactly the pre-CAS
+        count; a multi-node dup-name match folds every bound node but the
+        LIMIT caps the reported row). Replay MUST stay blind last-wins:
+        incarnation-reuse shapes (delete→recreate→re-supersede — two fold
+        lines for one name belonging to DIFFERENT incarnations) resolve
+        LAST-wins (the #2423 point-sweep precedent); a first-wins replay
+        would regress currently-correct rebuilds (plan-review P1). The live
+        path is the ONLY caller that opts in.
+
+        #2164 (Task 2): the return is the tuple (folded, matched) — (0, 0)
+        = no Object matched (missing Object / stale id / no id+name
+        supplied), distinct from a successful fold without a separate
+        existence pre-query.
         """
         oid = ev.get("id")
         name = ev.get("name")
         if not oid and not name:
-            return 0
+            return (0, 0)
         supersedes_by = str(ev.get("supersedes_by") or "")[:200]
         # #2164 final-review P4: prefer the journaled event's ORIGINAL ts —
         # rebuild pass-1b replays the raw journaled event (sdk._emit_event
@@ -478,44 +502,65 @@ class _EntityHandlers:
         # drifted supersededAt to rebuild time. Live callers (apply_super-
         # sessions' fold_ev carries no ts) fall back to now.
         superseded_at = ev.get("ts") or _now_iso()
+        # #2242: the exclusion tuple is imported from commit_ops at function
+        # level (commit_ops has no module-level tortoise imports → no cycle;
+        # single source of truth — the keep-first gate tuple).
+        from tortoise.commit_ops import _RECALL_OBJECT_EXCLUDED_STATUS
+        excluded = list(_RECALL_OBJECT_EXCLUDED_STATUS)
+
+        def _classify(result) -> tuple:
+            rows = result.result_set or []
+            if cas:
+                # RETURN live per row: folded = rows actually flipped
+                folded = sum(1 for r in rows if r and r[0])
+                return (folded, len(rows))
+            # cas=False (blind legacy SET): every matched row folded
+            return (len(rows), len(rows))
+
+        if cas:
+            # Engine-verified form (#2242 round-1 probe): FalkorDB rejects a
+            # bare `NOT IN $param`; `NOT (o.status IN $excluded)` parses and
+            # executes. `live` computed in a WITH BEFORE the CASE WHEN SET;
+            # RETURN the per-row live flag.
+            live = ("WITH o, (o.status IS NULL OR NOT "
+                    "(o.status IN $excluded)) AS live "
+                    "SET o.status = CASE WHEN live THEN 'superseded' "
+                    "                   ELSE o.status END, "
+                    "    o.supersededBy = CASE WHEN live THEN $sb "
+                    "                          ELSE o.supersededBy END, "
+                    "    o.supersededAt = CASE WHEN live THEN $sa "
+                    "                          ELSE o.supersededAt END "
+                    "RETURN live")
+        else:
+            live = ("SET o.status='superseded', o.supersededBy=$sb, "
+                    "    o.supersededAt=$sa RETURN o.id LIMIT 1")
+        common_params = {"sb": supersedes_by, "sa": superseded_at}
+        if cas:
+            common_params["excluded"] = excluded
         if oid:
             result = self.g.query(
-                "MATCH (o:Object {id:$id}) "
-                "SET o.status='superseded', o.supersededBy=$sb, "
-                "    o.supersededAt=$sa "
-                "RETURN o.id LIMIT 1",
-                params={"id": oid, "sb": supersedes_by, "sa": superseded_at})
-            if not result.result_set and name:
+                "MATCH (o:Object {id:$id}) " + live,
+                params={"id": oid, **common_params})
+            folded, matched = _classify(result)
+            if folded == 0 and matched == 0 and name:
                 # #2164 review (P2, ISSUE B): the id branch matched NOTHING
-                # — the event's id is not the key the node carries. For a
-                # legacy id-less Object (raw-created before canonical
-                # obj-<sha26(name)> minting; its journal registration
-                # predates canonical ids) apply_supersessions emits the
-                # SYNTHESIZED canonical id (sdk._entity_name_id) while the
-                # node itself has NO id property (or a pre-canonical
-                # registration id) — a JSONL wipe+rebuild replay selected
-                # the id branch (oid truthy) and silently no-op'd (0 rows),
-                # reverting the Object to status='live'. Fall back to the
-                # name branch — the same name-keyed fold the live path uses
-                # (fold_ev with no id). A name uniquely identifies one
-                # Object (MERGE-by-name), so a same-name fold after an
-                # id-miss is unambiguous; an absent name still no-ops.
+                # — the event's id is not the key the node carries (a legacy
+                # id-less Object journaled with its SYNTHESIZED canonical
+                # id). Fall back to the name branch — the same name-keyed
+                # fold the live path uses. #2242: fallback ONLY on genuine
+                # absence (matched == 0) — a present-but-terminal id node
+                # (0, 1) is a CAS loss and must NOT fall back (a fallback
+                # could fold a dup-name carrier or re-claim a terminal
+                # target under a different name spelling).
                 result = self.g.query(
-                    "MATCH (o:Object {name:$name}) "
-                    "SET o.status='superseded', o.supersededBy=$sb, "
-                    "    o.supersededAt=$sa "
-                    "RETURN o.id LIMIT 1",
-                    params={"name": name, "sb": supersedes_by,
-                            "sa": superseded_at})
-        else:
-            result = self.g.query(
-                "MATCH (o:Object {name:$name}) "
-                "SET o.status='superseded', o.supersededBy=$sb, "
-                "    o.supersededAt=$sa "
-                "RETURN o.id LIMIT 1",
-                params={"name": name, "sb": supersedes_by,
-                        "sa": superseded_at})
-        return len(result.result_set)
+                    "MATCH (o:Object {name:$name}) " + live,
+                    params={"name": name, **common_params})
+                folded, matched = _classify(result)
+            return (folded, matched)
+        result = self.g.query(
+            "MATCH (o:Object {name:$name}) " + live,
+            params={"name": name, **common_params})
+        return _classify(result)
 
     def _upsert_document(self, ev: dict) -> None:
         """MERGE Document node."""
