@@ -52,7 +52,7 @@ export function AddLoginMethodButtons({ busy, onOAuth, onEmail, error }) {
       <button onClick={() => onOAuth('google')} disabled={busy}>
         Connect Google login
       </button>
-      <button className="ghost" onClick={() => setShowEmail(!showEmail)} disabled={busy}>
+      <button onClick={() => setShowEmail(!showEmail)} disabled={busy}>
         Connect email and password
       </button>
       {showEmail && (
