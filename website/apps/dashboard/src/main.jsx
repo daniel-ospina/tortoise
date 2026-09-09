@@ -6518,33 +6518,42 @@ sdk.create_point(text="My first point")
               <>
                 <h2>Create new API key</h2>
                 <div className="inline-form" style={{ marginTop: 8 }}>
-                  <input
-                    placeholder="Name (e.g. CI, staging)"
-                    aria-label="New key name"
-                    value={newKeyName}
-                    maxLength={64}
-                    onChange={(e) => setNewKeyName(e.target.value)}
-                    onKeyDown={(e) => e.key === 'Enter' && !(newKeyExpiryPreset === 'custom' && !expiryDaysFromDate(newKeyExpiryDate)) && (async () => { setKeyModalBusy(true); setKeyModalStage('form'); await createKey(); setKeyModalBusy(false); setKeyModalStage('done') })()}
-                  />
-                  <select
-                    aria-label="Expiry"
-                    value={newKeyExpiryPreset}
-                    onChange={(e) => setNewKeyExpiryPreset(e.target.value)}
-                  >
-                    {KEY_EXPIRY_PRESETS.map((p) => (
-                      <option key={p.id} value={p.id}>{p.label}</option>
-                    ))}
-                  </select>
-                  {newKeyExpiryPreset === 'custom' && (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                    <label className="dim small" style={{ fontSize: 11 }} htmlFor="new-key-name">Name</label>
                     <input
-                      type="date"
-                      aria-label="Custom expiry date"
-                      value={newKeyExpiryDate}
-                      min={new Date(Date.now() + _MS_PER_DAY).toISOString().slice(0, 10)}
-                      max={new Date(Date.now() + KEY_MAX_EXPIRY_DAYS * _MS_PER_DAY).toISOString().slice(0, 10)}
-                      onChange={(e) => setNewKeyExpiryDate(e.target.value)}
+                      id="new-key-name"
+                      placeholder="e.g. CI, staging"
+                      aria-label="Name"
+                      value={newKeyName}
+                      maxLength={64}
+                      onChange={(e) => setNewKeyName(e.target.value)}
+                      onKeyDown={(e) => e.key === 'Enter' && !(newKeyExpiryPreset === 'custom' && !expiryDaysFromDate(newKeyExpiryDate)) && (async () => { setKeyModalBusy(true); setKeyModalStage('form'); await createKey(); setKeyModalBusy(false); setKeyModalStage('done') })()}
                     />
-                  )}
+                  </div>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                    <label className="dim small" style={{ fontSize: 11 }} htmlFor="key-expiry">Expires in</label>
+                    <select
+                      id="key-expiry"
+                      aria-label="Expires in"
+                      value={newKeyExpiryPreset}
+                      onChange={(e) => setNewKeyExpiryPreset(e.target.value)}
+                    >
+                      {KEY_EXPIRY_PRESETS.map((p) => (
+                        <option key={p.id} value={p.id}>{p.label}</option>
+                      ))}
+                    </select>
+                    {newKeyExpiryPreset === 'custom' && (
+                      <input
+                        id="key-expiry-custom"
+                        type="date"
+                        aria-label="Custom expiry date"
+                        value={newKeyExpiryDate}
+                        min={new Date(Date.now() + _MS_PER_DAY).toISOString().slice(0, 10)}
+                        max={new Date(Date.now() + KEY_MAX_EXPIRY_DAYS * _MS_PER_DAY).toISOString().slice(0, 10)}
+                        onChange={(e) => setNewKeyExpiryDate(e.target.value)}
+                      />
+                    )}
+                  </div>
                 </div>
                 <div className="new-key-actions">
                   <button className="ghost" onClick={() => { setKeyModalOpen(false); setNewKey(null); setNewKeyExpiresAt(null) }} disabled={keyModalBusy}>Cancel</button>
