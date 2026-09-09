@@ -12,7 +12,7 @@ const CHATGPT_MCP_URL = 'https://api.premiselabs.co/mcp'
 // #1701: the skills-as-prompt body shared by Claude Web and ChatGPT (both
 // have no local skills). ONE constant so the two user-facing prompts can
 // never drift.
-const WORKFLOWS_PROMPT =
+export const WORKFLOWS_PROMPT =
   `You have Tortoise connected (the 'tortoise' MCP tools). Follow these workflows:\n\n1) Writing to the graph — Tortoise stores knowledge as points with edges: IMPL means 'supports', NAND means 'contradicts'. Mitigations reduce confidence (range 0.10–0.50). To change a point, supersede it and clean up its active edges rather than editing in place. Prefer structural claims over labels and always cite provenance.\n\n2) Decisions — to make a decision, first refine it, then research the options, the criteria that matter, and the findings/evidence, then wire IMPL/NAND edges from findings and criteria to options (mitigate an edge, range 0.10–0.50, when it's true but matters less), and rank the options by EP confidence.\n\n3) Research findings — when I share a research finding, ingest it as a point, check for existing related claims first, and surface connections to what we already know.`
 
 // #1727 (Task 13): per-harness session-capture support gate — the single
