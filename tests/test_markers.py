@@ -83,7 +83,8 @@ ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
     "test_invite_fusion_http.py": {"registry": "prod-coupled"},    # #2003 (W7): registry lane invite-fusion HTTP tests
     "test_invite_fusion_docker.py": {"registry": "prod-coupled"}, # #2003 (W7): docker-lane fusion journeys
     "test_mcp_http.py": {"registry": "prod-coupled"},
-    "test_mcp_server_auth_modes.py": {"registry": "prod-coupled"},   # C2 #2111 TestTenantModeDefault tk_ resolve mirrors test_mcp_http's registry pattern
+    "test_mcp_server_auth_modes.py": {"registry": "prod-coupled",
+                                     "selfhost": "prod-coupled"},   # C2 #2111 TestTenantModeDefault tk_ resolve mirrors test_mcp_http's registry pattern; #2657 TestAskConnectedAssemblyExposure auth_mode="none" resolves the canonical selfhost namespace (graph team_selfhost on the env URI)
     "test_metering.py": {"registry": "prod-coupled"},
     "test_namespace_uri_mode.py": {"registry": "assertion",
                                    "team-abc123": "assertion"},
@@ -142,6 +143,12 @@ ROUTED_SELECT_GRAPH_SITES: dict[str, dict[str, str]] = {
         # server-lane _clean_team_graphs fixture drops team_* graphs per test
         '"team_team_x_g_c1"': "endpoint-constrained",  # custom drill seed write
         '"team_team_x_g_x"': "endpoint-constrained",   # custom drill seed write
+        # #2304 tombstoned-oldest sweep E2E — custom-graph seed named
+        # team_team_x_g_dead (namespace registry row kind:'custom')
+        '"team_team_x_g_dead"': "endpoint-constrained",  # custom drill seed write
+    },
+    "test_eval_ingest_cache.py": {
+        'f"team_{namespace}"': "endpoint-constrained",  # #2626 regression — own-graph cleanup delete (namespace=icache-<tag>-<uuid>, docker lane)
     },
     "test_writer_inventory.py": {
         '"team_myapp"': "endpoint-constrained",  # seed write — backup dumps teams.graph_name
@@ -150,6 +157,11 @@ ROUTED_SELECT_GRAPH_SITES: dict[str, dict[str, str]] = {
         # freshness — main added the literals without routing; gate reds
         # otherwise, #1970 main hygiene).
         'f"team_{team_id}"': "endpoint-constrained",
+    },
+    "test_mcp_server_auth_modes.py": {
+        # #2657 TestAskConnectedAssemblyExposure finally-cleanup — deletes the
+        # team_selfhost graph seeded by the auth_mode="none" ask fixture.
+        '"team_selfhost"': "endpoint-constrained",  # fixture's own seeded graph delete
     },
     "test_onboarding_state_split.py": {
         'f"team_{name}"': "endpoint-constrained",  # #2001 W5 eager-init seed probes
