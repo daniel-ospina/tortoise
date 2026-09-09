@@ -411,7 +411,11 @@ def test_oracle_makes_strategies_distinguishable(tmp_path, monkeypatch):
     assert best_ndcg > 0.6, (
         f"best strategy nDCG {best_ndcg:.3f} — corpus carries no signal"
     )
-    assert res["vector_p5"] != pytest.approx(res["tfidf_p5"], abs=0.02) or True
+    # Distinguishable arms: under the sparse pin the tfidf arm is TRUE
+    # token-overlap while the vector arm scores real bge vectors — the
+    # strategies must not be degenerate-same (was silenced with `or True`
+    # in the no-embedder era when the vector arm fell back to tfidf too).
+    assert res["vector_p5"] != pytest.approx(res["tfidf_p5"], abs=0.02)
 
 
 @pytest.mark.skipif(not _has_embedded(), reason="embedded FalkorDBLite unavailable")

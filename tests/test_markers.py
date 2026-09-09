@@ -375,10 +375,12 @@ def test_no_redirect_stems_registry_exact():
     # new/excised stem is a deliberate epic change (Task 9's carve-out
     # expansion updates this list), never an accidental edit. A carve-out
     # FILE missing its stem silently flips to the server lane at P2.
-    # Task 9 (P3): the registry is the FULL 17-file carve-out set (cycle-3
-    # P2-12 count — 7 Task-5 stems + 10 additions; fixtures/redis-guard/*
-    # are subprocess scripts, not test modules, and test_smoke_embedded is
-    # already one of the 7). Mirrors config/ci-surfaces.yml `carve_out:`.
+    # Task 9 (P3): the registry was the FULL 17-file carve-out set at P3
+    # (cycle-3 P2-12 count — 7 Task-5 stems + 10 additions; fixtures/
+    # redis-guard/* are subprocess scripts, not test modules, and
+    # test_smoke_embedded is already one of the 7). Later reconciliations
+    # grew it past 17 (graph-integrity + eval_* + longmem additions below,
+    # each dated). Mirrors config/ci-surfaces.yml `carve_out:`.
     from tests._embedded import TEST_NO_REDIRECT_STEMS
     expected = frozenset({
         "test_backup_e2e",
@@ -418,7 +420,8 @@ def test_no_redirect_stems_registry_exact():
         "test_longmem_runner",
     })
     assert frozenset(TEST_NO_REDIRECT_STEMS) == expected, (
-        "TEST_NO_REDIRECT_STEMS drifted from the 17 plan stems: "
+        "TEST_NO_REDIRECT_STEMS drifted from the pinned carve-out stems "
+        "(17 at Task-9 P3; dated reconciliations grew the set): "
         f"{sorted(frozenset(TEST_NO_REDIRECT_STEMS) ^ expected)}")
 
 

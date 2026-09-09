@@ -66,7 +66,8 @@ def _worker_stem_embedded_probe(results: list, path: str) -> None:
 # load-bearing for the P4 post-merge-validation full-tests/ run (Task 10
 # Step 1a) and any tier-2/other docker surface that selects a carve-out
 # file — its embedded-specific assertions must never flip to the server
-# lane.
+# lane. (Post-P3 reconciliations grew the set past 17 — graph-integrity,
+# eval_* and longmem stems below are each dated additions.)
 TEST_NO_REDIRECT_STEMS: tuple[str, ...] = (
     "test_backup_e2e",
     "test_config",

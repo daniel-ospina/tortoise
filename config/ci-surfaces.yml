@@ -659,7 +659,8 @@ slow_files:
 # Epic #1647 Task 9 (P3): the 17-file embedded carve-out set (cycle-3 P2-12
 # count — 7 Task-5 stems + 10 additions; fixtures/redis-guard/* are subprocess
 # scripts, not test modules, and test_smoke_embedded is already one of the 7;
-# matches research-brief §4.1 "17 files / 342 tests"). These tests run
+# matches research-brief §4.1 "17 files / 342 tests" at P3 — post-P3 dated
+# reconciliations grew the set past 17). These tests run
 # embedded BY DESIGN in the dedicated URI-unset carve-out job (E2E-4,
 # TORTOISE_TEST_CARVE_OUT=1) and are EXCLUDED from the docker fast + slow
 # legs — the docker lanes create ~zero redislite servers (E2E-7 ≈ 0 orphans).

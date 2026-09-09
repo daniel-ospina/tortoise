@@ -10,8 +10,6 @@ issue — never an opt-out.
 """
 from __future__ import annotations
 
-import os
-
 import pytest
 
 from battery.arms.base import ArmUnavailable
