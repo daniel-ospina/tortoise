@@ -14,14 +14,18 @@ export function removeSession(sessions, sessionId) {
   return sessions.filter((s) => String(s && s.id) !== String(sessionId))
 }
 
-// Row caption meta: {turns, extracted} with safe defaults (a list row from
+// Row caption meta: {turns, extracted, actor} with safe defaults (a list row from
 // /v1/sessions can omit either count — W4's honest states never fabricate).
+// #2600: actor = the server-resolved display (membership email) when the
+// seam provides it, else the raw actor_user_id; legacy null → '' (blank
+// caption, never a crash).
 export function sessionRowMeta(session) {
   const s = session || {}
   return {
     turns: Number.isFinite(s.turns) ? s.turns : 0,
     extracted: Number.isFinite(s.extracted) ? s.extracted : 0,
     id: s.id || '',
+    actor: (s.actor_display || '').trim() || (s.actor_user_id || ''),
   }
 }
 
@@ -43,6 +47,9 @@ export function transcriptModel(detail) {
       turns: Number.isFinite(d.turns) ? d.turns : turns.length,
       extracted: Number.isFinite(d.extracted) ? d.extracted : extracted.length,
     },
+    // #2600: same actor normalization as the list row (display when
+    // present, else raw id; legacy null → '' — blank header, no crash).
+    actor: (d.actor_display || '').trim() || (d.actor_user_id || ''),
   }
 }
 

@@ -19,7 +19,8 @@ from pydantic import ValidationError as PydanticValidationError
 from tortoise.auth import is_dev_mode as _is_dev_mode
 from tortoise.config import is_db_uri as _is_db_uri
 from tortoise.sdk import (TortoiseSDK, INGEST_GRANULARITIES,
-                          INGEST_PROMOTION_POLICIES, _first_non_draft_status)
+                          INGEST_PROMOTION_POLICIES, _first_non_draft_status,
+                          _RESERVED_ACTOR_PROPS)
 from tortoise.schemas import (  # one vocabulary, no duplicated boundary literals (P2-14)
     CODE_IN_FLIGHT_LIMIT,
     CODE_QUOTA_EXCEEDED,
@@ -715,8 +716,34 @@ _SERVER_MANAGED_PROPS = frozenset({
     "is_episodic", "sourcePath", "source_path", "id", "_server_id"})
 
 
-def _reject_server_managed_props(props: dict) -> str | None:
-    """Return an error message if tenant props attempt server-managed fields."""
+# #2600: client-supplied actor claims are STRIP-AND-IGNORE (never a 4xx —
+# the server owns attribution). Imported from tortoise/sdk.py — single
+# source of truth (#2664 code-review P2: no duplicate frozenset drift).
+# authoredBy is deliberately NOT here (pre-existing client author-label
+# residual).
+
+
+def _reject_server_managed_props(props: dict | None) -> str | None:
+    """Strip client-forged actor claims, then reject remaining server-managed
+    fields (#329/#1486). Returns an error message or None."""
+    # #2600: strip + ignore FIRST — never stored, never a 4xx. Runs inside
+    # this single choke point (11 tool call sites) so no per-tool strip is
+    # missed. Guard None (optional props= kwargs on entity tools call with
+    # no props dict).
+    # In-place pop is the contract here: call sites ALWAYS pass a fresh
+    # per-request dict (`props = _parse(props)` above each call — never a
+    # shared/cached object), and the function returns only an error string,
+    # so the stripped dict MUST be the caller's own for the strip to reach
+    # storage. (Unlike sdk._sanitize_props, which copies and returns the
+    # cleaned dict.) A warning is logged when a client-supplied actor key is
+    # stripped, matching the SDK backstop's log evidence.
+    if not props:
+        return None
+    for k in _RESERVED_ACTOR_PROPS:
+        if k in props:
+            _log.warning(
+                "ignoring client-supplied %r at MCP boundary", k)
+            props.pop(k)
     bad = _SERVER_MANAGED_PROPS & set(props or {})
     if not bad:
         return None
@@ -2944,6 +2971,7 @@ def tortoise_session_capture(conversation: list[dict],
         _current_scopes,
         _current_legacy_full_access,
     )
+    from tortoise.sdk import _current_actor_user_id  # #2600
     team_id = _current_team_id.get()
     if not team_id or team_id == SELFHOST_TEAM_ID:
         # stdio / self-host HTTP: no hosted state plane, no receipts — the
@@ -2961,6 +2989,10 @@ def tortoise_session_capture(conversation: list[dict],
     limits = _current_team_limits.get() or {}
     team = {"team_id": team_id, "tier": limits.get("tier", "free"),
             "key_id": None}
+    # #2600: carry the resolved human actor (set by TeamResolutionMiddleware)
+    # into the impl's team dict so the Session MERGE + _data_sdk ContextVar
+    # set see it — never depend on the asyncio.run context bridge.
+    team["actor_user_id"] = _current_actor_user_id.get()
     # C6 #2115 (D-C6-4): a graph-bound key's capture must land in ITS graph
     # — carry the resolution ContextVars into the impl's team dict so
     # _data_sdk routes there (and the per-graph recording gate reads the
