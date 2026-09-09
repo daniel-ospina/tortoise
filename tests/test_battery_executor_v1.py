@@ -168,3 +168,40 @@ def test_empty_turn_never_fabricated():
         execute_tvde_episode(caller=_EmptyCaller(),
                              scenario_render="render",
                              scenario_id="d-001")
+
+
+def test_envelope_extraction_trailing_prose_with_braces():
+    """#1416 real-run fix: trailing model prose that contains braces must
+    not break extraction — the LAST COMPLETE JSON object wins (raw_decode
+    walk), never a naive last-brace slice. Envelope honesty unchanged: the
+    object must still validate."""
+    env = '{"position": "Proceed with the migration", ' \
+          '"stated_confidence": 0.8, "undecided": false, ' \
+          '"defeat_conditions": ["data-loss"], "intents": [], ' \
+          '"citations": ["src-1"]}'
+    text = ("I weigh the migration risk against the benefit; the "
+            "counter-argument names data-loss during migration.\n"
+            f"{env}\n"
+            "I considered option {2} and option {1} before deciding "
+            "(the risk curve favors deferral here).}")
+    e = envelope_from_response(text)
+    assert e.position == "Proceed with the migration"
+    assert e.stated_confidence == 0.8
+
+
+def test_envelope_extraction_requires_last_valid_object():
+    """An earlier malformed object is skipped; the trailing valid envelope
+    wins (the scaffold instructs the model to END with the envelope)."""
+    env = '{"position": "hold", "stated_confidence": 0.6, "undecided": false, ' \
+          '"defeat_conditions": [], "intents": [], "citations": []}'
+    text = ('{"position": "early", "stated_confidence": 0.9, "undecided": false, '
+            '"defeat_conditions": [], "intents": [], "citations": [], }}\n'
+            f"{env}")
+    e = envelope_from_response(text)
+    assert e.position == "hold"
+
+
+def test_envelope_extraction_garbage_still_fails_closed():
+    """No complete object -> ValueError (never prose-mined)."""
+    with pytest.raises(ValueError):
+        envelope_from_response("I think we should defer the migration.")
