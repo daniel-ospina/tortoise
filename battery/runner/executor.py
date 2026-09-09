@@ -140,6 +140,21 @@ _PHASE_PROMPTS: dict[str, str] = {
 #: declared revision, the scaffold converges early (n >= 3 per the plan).
 MAX_REVISION_CYCLES = 3
 
+#: #1416 corrective-repair budget: a non-conforming envelope gets ONE
+#: bounded re-prompt (schema error surfaced to the model, as production
+#: would); the repaired output is still the model's own conforming scalar
+#: envelope. Budget is 1 so a persistently non-conforming turn still
+#: excludes (honest) rather than looping.
+MAX_ENVELOPE_REPAIRS = 1
+
+#: Repair re-prompt (sent after a schema failure; phase context is not
+#: repeated — the model already has the full render in context).
+_REPAIR_PROMPT = (
+    "Your previous response did not end with a valid envelope JSON object "
+    "(position must be a non-empty one-sentence string, stated_confidence "
+    "a real number in 0..1, undecided a boolean). Respond now with ONLY "
+    "the envelope JSON object — no prose.")
+
 #: Envelope-request suffix appended to every phase turn (the model answers
 #: deliberation prose THEN a JSON envelope — envelope is the only channel,
 #: prose is never mined for scalars).
@@ -204,6 +219,8 @@ class TvdeEpisode:
     envelopes: tuple[Envelope, ...]
     decide_cycles: int  # harness-side counter — reported, not scored
     converged_early: bool
+    turn_calls: tuple[int, ...] = ()  # #1416: caller calls per turn (1 +
+    # repairs) so run.py token attribution stays aligned with caller.rows
 
     def declared_revision(self) -> bool:
         """Did any REVISE envelope differ in position from its ALIGN
@@ -229,16 +246,43 @@ def execute_tvde_episode(*, caller, scenario_render: str,
     """
     turns: list[dict[str, Any]] = []
     envelopes: list[Envelope] = []
+    calls_per_turn: list[int] = []
+    _caller_rows = getattr(caller, "rows", None)
 
     def _turn(phase: str) -> Envelope:
+        # Per-turn repair budget (review P1): each turn may make ONE repair
+        # attempt of its own — a later non-conforming turn in the same
+        # episode is not silently starved by an earlier turn's repair, and
+        # the trace's "repaired" flag reflects ONLY this turn.
+        _repaired = False
+        _before = len(_caller_rows) if _caller_rows is not None else 0
         text = caller.call(prompt=tvde_prompt(scenario_render, phase))
         text = str(text or "").strip()
         if not text:
             raise ValueError(
                 f"TVDE {phase} turn returned EMPTY content — zero "
                 f"fabricated turns permitted (realism gate)")
-        env = envelope_from_response(text)
-        turns.append({"phase": phase, "content": text})
+        try:
+            env = envelope_from_response(text)
+        except ValueError as first:
+            # #1416 corrective-repair loop: a schema error is surfaced back
+            # to the model (as it would be in production) with a bounded
+            # repair budget. The repaired envelope is STILL the model's own
+            # conforming scalar output — never mined from prose, never
+            # fabricated — and every repair attempt is a real metered call.
+            repair = caller.call(prompt=_REPAIR_PROMPT)
+            _repaired = True
+            repair = str(repair or "").strip()
+            if not repair:
+                raise ValueError(
+                    f"TVDE {phase} repair returned EMPTY content — "
+                    f"zero fabricated turns permitted (realism gate)") \
+                    from first
+            env = envelope_from_response(repair)
+        calls_per_turn.append(
+            (len(_caller_rows) if _caller_rows is not None else 0) - _before)
+        turns.append({"phase": phase, "content": text,
+                      "repaired": _repaired})
         envelopes.append(env)
         return env
 
@@ -260,7 +304,8 @@ def execute_tvde_episode(*, caller, scenario_render: str,
     return TvdeEpisode(
         scenario_id=scenario_id,
         turns=tuple(turns), envelopes=tuple(envelopes),
-        decide_cycles=cycles, converged_early=converged_early)
+        decide_cycles=cycles, converged_early=converged_early,
+        turn_calls=tuple(calls_per_turn))
 
 
 # ── Event-log emission (schema-v1.1, registry-valid) ───────────────────

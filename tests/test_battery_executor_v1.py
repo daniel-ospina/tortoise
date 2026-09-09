@@ -205,3 +205,68 @@ def test_envelope_extraction_garbage_still_fails_closed():
     """No complete object -> ValueError (never prose-mined)."""
     with pytest.raises(ValueError):
         envelope_from_response("I think we should defer the migration.")
+
+
+def test_envelope_repair_loop_recovers():
+    """#1416 corrective repair: a non-conforming first response gets ONE
+    bounded repair re-prompt; the repaired envelope (still the model's own
+    conforming scalar output) is accepted; a persistently non-conforming
+    turn still excludes (raises)."""
+    import json as _json
+
+    class _RepairCaller:
+        def __init__(self):
+            self.calls = 0
+            self.rows: list = []
+
+        def call(self, *, prompt: str) -> str:
+            self.calls += 1
+            self.rows.append(_Row())
+            if "did not end with a valid envelope" in prompt:
+                env = {"position": "Proceed after repair",
+                       "stated_confidence": 0.7, "undecided": False,
+                       "defeat_conditions": [], "intents": [],
+                       "citations": []}
+                return "Understood.\n" + _json.dumps(env)
+            if self.calls == 1:
+                return ("I weigh the options carefully. No envelope here "
+                        "just prose {without} braces.")  # invalid -> repair
+            env = {"position": "Proceed with the migration",
+                   "stated_confidence": 0.8, "undecided": False,
+                   "defeat_conditions": ["data-loss"], "intents": [],
+                   "citations": ["src-1"]}
+            return "deliberation.\n" + _json.dumps(env)
+
+    from battery.runner.executor import execute_tvde_episode
+
+    class _Row:
+        completion_tokens = 5
+
+    caller = _RepairCaller()
+    ep = execute_tvde_episode(
+        caller=caller, scenario_render="resolve X", scenario_id="x")
+    assert ep.turn_calls[0] == 2, ep.turn_calls
+    assert ep.envelopes[0].position == "Proceed after repair"
+    assert caller.calls >= 5
+
+
+def test_repair_budget_exhausted_still_excludes():
+    """A turn that never conforms after the bounded repair budget raises
+    (excluded) — the repair loop never loops unboundedly."""
+
+    class _Row2:
+        completion_tokens = 5
+
+    class _NeverConforming:
+        def __init__(self):
+            self.rows: list = []
+
+        def call(self, *, prompt: str) -> str:
+            self.rows.append(_Row2())
+            return "just prose, no envelope whatsoever"
+
+    from battery.runner.executor import execute_tvde_episode
+
+    with pytest.raises(ValueError):
+        execute_tvde_episode(caller=_NeverConforming(),
+                             scenario_render="resolve X", scenario_id="x")

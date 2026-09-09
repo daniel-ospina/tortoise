@@ -329,8 +329,15 @@ def _execute_real_episode(*, config: RunConfig, arm, scenario: Scenario,
     for env in ep.envelopes:
         events += envelope_events(env)
     rows = getattr(caller, "rows", [])
+    # #1416: token attribution consumes the caller rows a turn actually made
+    # (1 call, or 1+ repairs) so rows stay aligned after corrective repairs.
+    _row_off = 0
     for i, turn in enumerate(ep.turns):
-        tokens = int(rows[i].completion_tokens) if i < len(rows) else 0
+        n = ep.turn_calls[i] if i < len(ep.turn_calls) else 1
+        seg = rows[_row_off:_row_off + n]
+        _row_off += n
+        tokens = int(sum(getattr(r, "completion_tokens", 0) or 0
+                         for r in seg))
         tracker.add_turn(role="agent", content=turn["content"],
                          tokens=tokens, outcome=ModelCallOutcome.OK)
 
