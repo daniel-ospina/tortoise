@@ -830,16 +830,21 @@ def test_bare_monkeypatch_without_undo_reds():
 
 
 def test_battery_fixture_undo_is_evidence_not_comment():
-    """#2558 pin: the four converted battery _force_embedded_lane fixtures
+    """#2558 pin: the converted battery _force_embedded_lane fixtures
     (bare pytest.MonkeyPatch + mp.undo at module teardown) must keep the
     guard's bare-instance undo check FIRING on the REAL call — comment text
     inside the fixture body must not launder the evidence (a naive '.undo('
     substring scan would stay green if a comment mentioned the call and the
     real mp.undo() were later deleted, silently re-admitting the #2062
     leak class). Loads the real module source, strips the real call, and
-    asserts the guard reds; the real source (with the call) stays green."""
-    battery_fixtures = ("test_battery_ep_outcome", "test_battery_provenance",
-                        "test_battery_seed_ingest", "test_battery_write_channel")
+    asserts the guard reds; the real source (with the call) stays green.
+    (2026-09-09: grew 4 → 7 — #2674 converted executor_v2 +
+    exposure_liveness; r1_seed was converted by the #2558 heal but never
+    added to the pin.)"""
+    battery_fixtures = ("test_battery_ep_outcome", "test_battery_executor_v2",
+                        "test_battery_exposure_liveness", "test_battery_provenance",
+                        "test_battery_r1_seed", "test_battery_seed_ingest",
+                        "test_battery_write_channel")
     real = [(f"{name}.py", (_TESTS_ROOT / f"{name}.py").read_text(encoding="utf-8"))
             for name in battery_fixtures]
     # real source: the undo call is present and in the fixture body — green
