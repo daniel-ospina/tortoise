@@ -881,17 +881,67 @@ def test_cli_defaults_to_dry_run(monkeypatch):
             reap(match, dry_run=False)
 
 
+@pytest.mark.timeout(660)  # full-sweep CLI: reap() serially probes + kills every orphan the carve-out process accumulated — see _run_cli docstring (#1988); the 600s CLI budget exceeds the carve-out job's global --timeout=300 on loaded runners (longmem move added +177 embedded tests to the same process); 660 > sp.run's own 600s cap so ITS child-kill (lock release) governs, never pytest's signal
 def test_cli_no_dry_run_kills(monkeypatch):
-    """--no-dry-run actually kills orphans."""
+    """--no-dry-run actually kills orphans.
+
+    The assertion is pile-size-independent: the CLI is a cron tool whose
+    per-run kill budget is DEFAULT_BATCH_SIZE (50) by design — a fresh
+    orphan behind an ambient pile at/over the cap is legitimately
+    deferred to the next sweep ("remainder converges next sweep"), NOT a
+    --no-dry-run failure. So the kill VERB is pinned by the sweep's
+    observed DEATHS among pre-existing live candidates — the probe gone
+    (reachable pile) or >= 1 ambient socket from the before-snapshot no
+    longer alive (batch-truncated pile) — which no concurrent new spawn
+    can satisfy. The probe must additionally be gone whenever the
+    ambient live-candidate pile sits BELOW the batch cap (the
+    single-sweep guarantee). The carve-out process accumulates ~119 live
+    embedded servers from the longmem module (Linux CI keeps daemonized
+    servers until process-end atexit); batch-truncation semantics
+    themselves are covered by test_cli_batch_size_limits_kills.
+    """
     monkeypatch.setenv("TORTOISE_REAPER_MIN_UPTIME", "0")
     sock = _spawn_orphan()
     try:
-        rc, out, err = _run_cli("--no-dry-run", "--timeout", "600")  # noqa: RUF059
+        from tortoise.embedded_reaper import DEFAULT_BATCH_SIZE, _pid_alive, discover
+
+        def _live_candidates() -> list[dict]:
+            return [
+                r for r in discover()
+                if r.get("classification") == "candidate"
+                and r.get("pid") and _pid_alive(r["pid"])
+            ]
+
+        before = _live_candidates()
+        # Ambient live candidates that predate our probe orphan (pgrep
+        # sorts ascending by PID, so the freshly-spawned probe — highest
+        # PID — sweeps last; the CLI can only reach it when fewer than
+        # the batch cap of OTHER live candidates precede it).
+        ambient_socks = {
+            r["socket_path"] for r in before if r["socket_path"] != sock
+        }
+        rc, out, err = _run_cli("--no-dry-run", "--timeout", "600")
         assert rc == 0
-        from tortoise.embedded_reaper import discover
-        found = discover()
-        match = [s for s in found if s["socket_path"] == sock]
-        assert not match, "orphan not killed by --no-dry-run"
+        after = _live_candidates()
+        # The kill verb, pinned pile-independently by observed deaths
+        # among pre-existing live candidates: probe gone (reachable
+        # pile) or an ambient socket from the before-snapshot died
+        # (batch-truncated pile). A --no-dry-run regression (flag
+        # silently treated as dry-run) kills nothing — neither term
+        # fires. NOTE: the CLI's own "(N killed)" summary is NOT a
+        # reliable pin — it counts acted candidate records, and the
+        # dry-run branch appends to acted too.
+        probe_gone = not any(r["socket_path"] == sock for r in after)
+        ambient_survivors = sum(
+            1 for r in after if r["socket_path"] in ambient_socks
+        )
+        assert probe_gone or ambient_survivors < len(ambient_socks), (
+            f"--no-dry-run killed nothing: probe_gone={probe_gone} "
+            f"ambient {len(ambient_socks)} -> {ambient_survivors} "
+            f"rc={rc} out={out!r} err={err!r}"
+        )
+        if len(ambient_socks) < DEFAULT_BATCH_SIZE:  # single-sweep reach
+            assert probe_gone, "orphan not killed by --no-dry-run"
     finally:
         from tortoise.embedded_reaper import discover, reap
         found = discover()
@@ -918,6 +968,7 @@ def test_cli_json_output(monkeypatch):
             reap(match, dry_run=False)
 
 
+@pytest.mark.timeout(660)  # full-sweep CLI: reap() over the carve-out process's accumulated orphans — see _run_cli docstring (#1988); 600s CLI budget exceeds the job's global --timeout=300 on loaded runners; 660 > sp.run's 600s cap so ITS child-kill governs
 def test_cli_batch_size_limits_kills(monkeypatch):
     """--batch-size N limits kills per run."""
     monkeypatch.setenv("TORTOISE_REAPER_MIN_UPTIME", "0")
@@ -938,6 +989,7 @@ def test_cli_batch_size_limits_kills(monkeypatch):
             reap(match, dry_run=False)
 
 
+@pytest.mark.timeout(660)  # full-sweep CLI (same budget rationale as test_cli_no_dry_run_kills; 660 > sp.run's 600s cap)
 def test_cli_singleton_lock_prevents_concurrent(monkeypatch):
     """Second concurrent instance (lock held mid-sweep) exits 0 with
     'already running'. The lock is held only DURING a sweep, so we hold it
@@ -955,6 +1007,7 @@ def test_cli_singleton_lock_prevents_concurrent(monkeypatch):
         lock.release()
 
 
+@pytest.mark.timeout(660)  # full-sweep CLI (same budget rationale as test_cli_no_dry_run_kills; 660 > sp.run's 600s cap)
 def test_cli_singleton_lock_released_on_sigkill(monkeypatch):
     """SIGKILL the lock-holder -> fcntl auto-releases -> second acquires."""
     import subprocess as sp

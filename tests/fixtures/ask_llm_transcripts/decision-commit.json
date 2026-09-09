@@ -17,6 +17,6 @@
       "session_date": "2026-08-20"
     }
   ],
-  "user_message": "Memory context:\nCurrent Date: 2026-08-29\n\n[session ?] (session date 2026-08-20) I think we should go with the apartment near the park \u2014 it's closer to the office and the rent fits the budget.\n\nQuestion: did we decide on the apartment near the park?\n\nAnswer:",
-  "user_message_hash": "d3c04628bf7ee6df88cddfdf79d2d53507ba82ffda573a49943a2d20aae1e888"
+  "user_message": "Memory context:\nCurrent Date: 2026-08-29\n\n[session ?] (session date 2026-08-20) I think we should go with the apartment near the park \u2014 it's closer to the office and the rent fits the budget.\n\n[session ?] (session date 2026-08-20) Yes, and if the commute is under 30 minutes, I'm ready to sign.\n\nQuestion: did we decide on the apartment near the park?\n\nAnswer:",
+  "user_message_hash": "59699f5a3ad2ebbe4417b3737e1246ecd94fce857b5a6d9a153981fd981727c1"
 }

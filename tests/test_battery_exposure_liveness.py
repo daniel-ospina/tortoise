@@ -10,8 +10,6 @@ issue — never an opt-out.
 """
 from __future__ import annotations
 
-import os
-
 import pytest
 
 from battery.arms.base import ArmUnavailable
@@ -25,15 +23,14 @@ def _force_embedded_lane() -> None:
     (battery_ct-001 …) — a TORTOISE_DB_URI redirect folds graphs per test
     and voids the assertions. Force the embedded lane (precedent:
     test_embedded_lifecycle / test_battery_ep_outcome)."""
-    saved_uri = os.environ.pop("TORTOISE_DB_URI", None)
-    saved_path = os.environ.pop("TORTOISE_DB_PATH", None)
-    try:
-        yield
-    finally:
-        if saved_uri is not None:
-            os.environ["TORTOISE_DB_URI"] = saved_uri
-        if saved_path is not None:
-            os.environ["TORTOISE_DB_PATH"] = saved_path
+    # #2062/#2084 pattern (test_battery_seed_ingest precedent): bare
+    # MonkeyPatch auto-restores both vars at module teardown — the guard's
+    # bare-instance check requires the real call in this body.
+    mp = pytest.MonkeyPatch()
+    mp.delenv("TORTOISE_DB_URI", raising=False)
+    mp.delenv("TORTOISE_DB_PATH", raising=False)
+    yield
+    mp.undo()
 
 
 def test_agent_nand_moves_ep_posterior(tmp_path):

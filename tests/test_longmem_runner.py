@@ -5333,7 +5333,13 @@ def test_preflight_embedder_present_probe_ok():
     status = _preflight_embedder(mock=True)
     assert status["available"] is True
     assert status["reason"] is None
-    assert status["model"] == "all-MiniLM-L6-v2"
+    # #1349 swap: the model identity is the PINNED production default (bge),
+    # not the pre-swap all-MiniLM — compare against the live constant so a
+    # future swap can't strand this assert again (it was dormant behind the
+    # no-embedder skip during the #2573 HF-cache eviction and red'd on the
+    # restored bge cache).
+    from tortoise.embeddings import EMBEDDING_MODEL
+    assert status["model"] == EMBEDDING_MODEL
     assert isinstance(status["sentence_transformers_version"], str)
 
 

@@ -66,7 +66,8 @@ def _worker_stem_embedded_probe(results: list, path: str) -> None:
 # load-bearing for the P4 post-merge-validation full-tests/ run (Task 10
 # Step 1a) and any tier-2/other docker surface that selects a carve-out
 # file — its embedded-specific assertions must never flip to the server
-# lane.
+# lane. (Post-P3 reconciliations grew the set past 17 — graph-integrity,
+# eval_* and longmem stems below are each dated additions.)
 TEST_NO_REDIRECT_STEMS: tuple[str, ...] = (
     "test_backup_e2e",
     "test_config",
@@ -76,6 +77,14 @@ TEST_NO_REDIRECT_STEMS: tuple[str, ...] = (
     "test_eval_ingest_retry",
     "test_eval_resume_retry_failed",
     "test_eval_extraction_health",
+    # #2573-restored bge cache + the P3 lane flip red'd the longmem eval
+    # harness on the docker lane: its D2-D4 vector-leg tests assert
+    # embedded-FalkorDBLite-only semantics (no_embeddings guard, plain-list
+    # poisoning of vec.euclideanDistance, brute-force deadline timeout) that
+    # the server HNSW branch can't produce. The module is a 100% embedded
+    # eval harness (_fresh_sdk(tmp_path) only, zero docker-gated tests) —
+    # same family as the eval_* carve-outs above.
+    "test_longmem_runner",
     "test_flip_gate",
     "test_graph_integrity_gate",
     "test_guard",

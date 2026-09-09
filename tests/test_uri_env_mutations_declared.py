@@ -114,7 +114,8 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     "test_index_restore.py": [r'os\.environ\.pop\(\s*["\']TORTOISE_DB_URI["\']'],  # embedded-file-contract module fixture (PR #1684)
     "test_mcp_client.py": [r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI",\s*""'],
     "test_mcp_http.py": [r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
-    "test_mcp_server_auth_modes.py": [r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],  # C2 #2111: tenant-mode MCP tests force the registry/embedded lane (delenv IS the point — same pattern as test_mcp_http)
+    "test_mcp_server_auth_modes.py": [r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"',
+                                          r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"'],  # C2 #2111: tenant-mode MCP tests force the registry/embedded lane (delenv IS the point) + #2657 ask-exposure: per-test fresh-URI live probe (setenv IS the test input)
     "test_metering.py": [r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
     "test_migration_consumers.py": [r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
     "test_onboarding_integration.py": [r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
@@ -129,6 +130,16 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     #    import; the probe asserts the docker lane) ──────────────────────────
     "test_aggregative_facet_coverage.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])',
                                             r'monkeypatch\.setenv\s*\(\s*"TORTOISE_DB_URI"'],  # #2521: module-level live probe + per-test isolated-graph fixture (DELIBERATE_URI — probe/setenv IS the test input, mirrors #2518's entity-key pattern)
+    # #2165 connected-assembly (merged via #2657): the assembly fixture/sdk
+    # modules run a module-level live-FalkorDB FULLTEXT probe (set+restore at
+    # import; DELIBERATE_URI — the probe asserts the docker lane) and a
+    # per-test fresh-URI sdk fixture (monkeypatch.setenv IS the test input —
+    # dedicated per-test graph, DELETED at teardown).
+    "test_assembly_fixtures.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])',
+                                    r'monkeypatch\.setenv\s*\(\s*"TORTOISE_DB_URI"'],
+    "test_assembly_pure.py": [r'monkeypatch\.setenv\s*\(\s*"TORTOISE_DB_URI"'],  # _docker_sdk fixture: per-test fresh-URI graph (setenv IS the test input)
+    "test_assembly_sdk.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])',
+                              r'monkeypatch\.setenv\s*\(\s*"TORTOISE_DB_URI"'],
     "test_directional_impl.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])'],
     "test_directional_impl_fix.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])'],
     # C3-1 #2567: docker-lane coverage-loop tests — module-level live probe
@@ -819,16 +830,21 @@ def test_bare_monkeypatch_without_undo_reds():
 
 
 def test_battery_fixture_undo_is_evidence_not_comment():
-    """#2558 pin: the four converted battery _force_embedded_lane fixtures
+    """#2558 pin: the converted battery _force_embedded_lane fixtures
     (bare pytest.MonkeyPatch + mp.undo at module teardown) must keep the
     guard's bare-instance undo check FIRING on the REAL call — comment text
     inside the fixture body must not launder the evidence (a naive '.undo('
     substring scan would stay green if a comment mentioned the call and the
     real mp.undo() were later deleted, silently re-admitting the #2062
     leak class). Loads the real module source, strips the real call, and
-    asserts the guard reds; the real source (with the call) stays green."""
-    battery_fixtures = ("test_battery_ep_outcome", "test_battery_provenance",
-                        "test_battery_seed_ingest", "test_battery_write_channel")
+    asserts the guard reds; the real source (with the call) stays green.
+    (2026-09-09: grew 4 → 7 — #2674 converted executor_v2 +
+    exposure_liveness; r1_seed was converted by the #2558 heal but never
+    added to the pin.)"""
+    battery_fixtures = ("test_battery_ep_outcome", "test_battery_executor_v2",
+                        "test_battery_exposure_liveness", "test_battery_provenance",
+                        "test_battery_r1_seed", "test_battery_seed_ingest",
+                        "test_battery_write_channel")
     real = [(f"{name}.py", (_TESTS_ROOT / f"{name}.py").read_text(encoding="utf-8"))
             for name in battery_fixtures]
     # real source: the undo call is present and in the fixture body — green
