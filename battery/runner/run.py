@@ -18,10 +18,9 @@ refused while the real emitting executor is unwired
 (``_REAL_EXECUTOR_WIRED`` — Task 9 wired the live executor, f54f212a6). A
 hermetic real-mode run is real-labeled by construction and supplies its
 event log through the explicit ``RunConfig.emission_seam`` (#2703), which
-stamps ``provenance.emission_seam`` on the episodes it supplies. The
-resolved run-level mode is
-recorded in summary.json (run.run_mode) so the CLI report never re-infers it
-from artifact presence.
+stamps ``provenance.emission_seam`` on the episodes it supplies. The resolved
+run-level mode is recorded in summary.json (run.run_mode) so the CLI report
+never re-infers it from artifact presence.
 """
 from __future__ import annotations
 

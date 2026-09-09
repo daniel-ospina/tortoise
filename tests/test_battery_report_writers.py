@@ -1000,12 +1000,12 @@ class TestRunModeHonesty:
                                                           monkeypatch):
         """Issue 3(a) — re-homed on the post-Task-9 seam (#2703 decision A):
         requesting real mode while the real emitting executor is UNWIRED
-        raises ConfigError BEFORE the attempt dir — a real label over the
-        stock no-op emission seam (mock executor) is refused, never silently
-        produced. f54f212a6 wired the live executor, so "no active real
-        seam" is expressed by ``_REAL_EXECUTOR_WIRED``; the pre-Task-9
-        spelling keyed on the stock ``_episode_log`` identity, which the
-        explicit ``RunConfig.emission_seam`` superseded."""
+        raises ConfigError BEFORE the attempt dir — a real request over an
+        emission-less executor is refused, never silently produced.
+        f54f212a6 wired the live executor, so "no active real seam" is
+        expressed by ``_REAL_EXECUTOR_WIRED``; the pre-Task-9 spelling keyed
+        on the stock ``_episode_log`` identity, which the explicit
+        ``RunConfig.emission_seam`` superseded."""
         from battery.runner import run as run_mod
         from battery.runner.run import RunConfig
         monkeypatch.setattr(run_mod, "_REAL_EXECUTOR_WIRED", False)
