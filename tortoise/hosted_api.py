@@ -6428,6 +6428,13 @@ class SessionRequest(BaseModel):
     # source carries the transcript stem (forwarded by _cmd_session_capture).
     harness: str | None = None
     source: str | None = None
+    # #2599: machine_id and model are CLIENT-CLAIMED informational fields
+    # (forgeable, never security-trusted) — complementing the server-resolved
+    # actor_user_id. Supplied by the capture hook/harness; stored verbatim as
+    # additive Session properties. Absent → renders unattributed ("—").
+    # Length-capped to prevent unbounded amplification onto every Session row.
+    machine_id: str | None = Field(None, max_length=256)
+    model: str | None = Field(None, max_length=128)
 
     # Invalid harness ⇒ 422 at the model boundary (FastAPI validation), never
     # a silent drop or a 200 — a typo'd harness must be visible (Task 11).
@@ -6438,6 +6445,20 @@ class SessionRequest(BaseModel):
             raise ValueError(
                 f"invalid harness {v!r} — must be one of "
                 f"{sorted(_SESSION_HARNESS_VALUES)}")
+        return v
+
+    # #2599: reject non-printable characters in machine_id/model (a newline
+    # or control char in an opaque string can break dashboard display / JS
+    # rendering). Printable-ASCII + common Unicode is allowed; null bytes,
+    # newlines, and control chars are rejected with 422.
+    @field_validator("machine_id", "model")
+    @classmethod
+    def _validate_printable(cls, v):
+        if v is not None:
+            import re as _re
+            if _re.search(r'[\x00-\x1f]', v):
+                raise ValueError(
+                    "machine_id and model must not contain control characters")
         return v
 
 
@@ -6824,6 +6845,20 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         _merge_sets.append(
             "s.actor_user_id=coalesce(s.actor_user_id, $uid)")
         _merge_params["uid"] = _actor_uid
+
+    # #2599: machine_id and model are CLIENT-CLAIMED informational fields
+    # (forgeable, never security-trusted) — set only when the body supplies
+    # them. Uses coalesce for first-writer-wins on idempotent re-POST (same
+    # actor_user_id pattern), preserving the embedded/Docker no-unused-param
+    # contract (mirrors the harness clause).
+    if body.machine_id:
+        _merge_sets.append(
+            "s.machine_id=coalesce(s.machine_id, $mid)")
+        _merge_params["mid"] = body.machine_id
+    if body.model:
+        _merge_sets.append(
+            "s.model=coalesce(s.model, $model)")
+        _merge_params["model"] = body.model
 
     # #1727 Slice 2 (Task 11, T2-P2c): idempotency scope = Session + turn
     # Points. A re-POST of the same session_id (Claude Code's real session id
@@ -8391,13 +8426,15 @@ async def list_sessions(request: Request, team: dict = Depends(get_current_team_
         # CONTAINS so the count(p) grouping semantics hold); the appended
         # RETURN columns (actor_user_id/harness) sit AFTER count(p) so the
         # existing r[0..3] mapping is untouched.
+        # #2599: machine_id and model appended after harness — r[6]/r[7].
         query = (
             "MATCH (s:Session) "
             + ("WHERE s.actor_user_id = $uid " if actor_filter else "")
             + "OPTIONAL MATCH (s)-[:CONTAINS]->(p:Point) "
             "WHERE p.pointKind IN ['decision', 'statement'] "
             "RETURN s.id, s.created_at, s.turn_count, count(p), "
-            "s.actor_user_id, s.harness "
+            "s.actor_user_id, s.harness, "
+            "s.machine_id, s.model "
             "ORDER BY s.created_at DESC LIMIT 50"
         )
         rows = sdk._get_proj().g.query(
@@ -8431,6 +8468,10 @@ async def list_sessions(request: Request, team: dict = Depends(get_current_team_
             "actor_user_id": r[4], "harness": r[5],
             "actor_display": None if not r[4]
             else (members_by_id.get(r[4]) or r[4]),
+            # #2599: machine_id and model — client-claimed informational
+            # fields, null when absent (legacy / hook-less sessions).
+            "machine_id": r[6],
+            "model": r[7],
         }
         for r in rows
     ]}
@@ -8498,9 +8539,11 @@ async def get_session_detail(session_id: str, team: dict = Depends(get_current_t
 
     # Session node — #2600: actor_user_id/harness APPENDED at the END so
     # the existing sess[0..2] (id/created_at/turns) mapping is unchanged.
+    # #2599: machine_id and model appended after harness — sess[4]/sess[5].
     sess_rows = proj.g.query(
         "MATCH (s:Session {id:$sid}) RETURN s.id, s.created_at, "
-        "s.turn_count, s.actor_user_id, s.harness",
+        "s.turn_count, s.actor_user_id, s.harness, "
+        "s.machine_id, s.model",
         params={"sid": session_id},
     ).result_set
     if not sess_rows:
@@ -8578,6 +8621,10 @@ async def get_session_detail(session_id: str, team: dict = Depends(get_current_t
         "actor_user_id": actor_user_id,
         "harness": sess[4],
         "actor_display": actor_display,
+        # #2599: machine_id and model — client-claimed informational
+        # fields, null when absent.
+        "machine_id": sess[5],
+        "model": sess[6],
         "extracted": extracted_count,
         "turn_points": turns,
         "extracted_points": extracted,

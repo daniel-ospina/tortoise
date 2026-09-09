@@ -119,6 +119,7 @@ surfaces:
   - test_ask_api.py
   - test_ask_gating.py
   - test_attribution_actor.py   # #2600: session→human actor stamp + event backstop + forged-claim strip (docker lane)
+  - test_attribution_machine_model.py   # #2599: additive session machine_id + model attribution (docker lane)
   - test_commit_supersession_parity.py
   - test_session_auth.py
   - test_session_capture_e2e.py
