@@ -4330,8 +4330,7 @@ function claimIntentInFlight() {
     const seq = graphPanelReqRef.current // P2-1: op-start seq (see mintGraphKey)
     const row = (panelKeys || []).find((k) => (k.id || k.key_id) === keyId)
     const rowName = (row && row.name) || 'this graph key'
-    const rowDesc = [rowName, row && row.key_prefix, row && (row.created_at || row.createdAt || '')].filter(Boolean).join(' · ')
-    if (!confirm(`Revoke ${rowName}? Applications using it will stop working.\n\n${rowDesc}`)) return
+    if (!confirm(`Revoke ${rowName}? Applications using it will stop working.`)) return
     setGraphMsg('')
     const _teamAtCall = currentTeamId
     try {
@@ -4860,7 +4859,7 @@ function claimIntentInFlight() {
     const replacementExpiry = rowLifetime
       ? `The replacement expires ${fmtExpiryDate(new Date(Date.now() + rowLifetime * _MS_PER_DAY).toISOString())} (the same ${rowLifetime}-day lifetime as this key).`
       : 'The replacement never expires (same as this key).'
-    if (!confirm(`Rotate ${rowName}? A replacement key is created (shown once) and ${rowName} is revoked — applications using the old key will stop working. ${replacementExpiry}\n\n${rowDesc}`)) return
+    if (!confirm(`Rotate ${rowName}? A replacement key is created (shown once) and ${rowName} is revoked — applications using the old key will stop working. ${replacementExpiry}`)) return
     setCapNotice('')
     setError('')
     setBusy(true)
@@ -4987,11 +4986,10 @@ function claimIntentInFlight() {
     const _teamAtCall = currentTeamId
     const row0 = (keys || []).find((k) => (k.id || k.key_id) === keyId)
     const rowName = (row0 && row0.name) || 'this API key'
-    const rowDesc = [rowName, row0 && row0.key_prefix, row0 && (row0.created_at || row0.createdAt || '')].filter(Boolean).join(' · ')
     // #2246 (PM-1): the confirm names the row (name · prefix · created) so a
     // one-click trash never silently kills an agent key the user cannot
     // identify (rows are hash-only; names may be unset).
-    if (!opts.skipConfirm && !confirm(`Revoke ${rowName}? Applications using it will stop working.\n\n${rowDesc}`)) return
+    if (!opts.skipConfirm && !confirm(`Revoke ${rowName}? Applications using it will stop working.`)) return
     setCapNotice('')
     setError('')
     try {
