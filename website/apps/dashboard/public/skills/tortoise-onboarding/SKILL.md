@@ -25,7 +25,9 @@ you run or paste it.
 ## When to use
 
 - The user pastes the dashboard's universal setup command into you (any of
-  the 6 harnesses) or runs it in a terminal.
+  the 6 skill-installer harnesses) or runs it in a terminal. (A 7th harness —
+  ChatGPT — connects key-less via OAuth and never runs this command; see the
+  §2 note.)
 - The Setup guide card / Overview says the organization is waiting on
   "Connect your agent".
 - You are a fresh agent pointed at a Tortoise organization and need to know
@@ -80,6 +82,15 @@ harness-chooser UI** — you adjudicate from the table, then follow YOUR row.
 If you are unsure which row applies (e.g. a wrapper/terminal agent), assume
 the config-writing class — you can verify after writing (section 3, failure
 mode → teach-human fallback).
+
+> **#1701 — ChatGPT is a 7th dashboard harness, outside this table.** ChatGPT
+> connects key-less through OpenAI's Developer-mode OAuth connector (dashboard
+> → ChatGPT tab: Scan Tools → OAuth consent on the hosted endpoint → paste the
+> workflows prompt). It has no local filesystem, shell, or skill installer, so
+> it never runs this skill and has no row here — these six rows are the
+> skill-installer/agent harnesses. (If you are ChatGPT and already have the
+> tortoise MCP tools via OAuth, skip install: section 4's tortoise_health
+> verify still applies.)
 
 ## 3. Install + connect — Docker-first for self-hosted, hosted below
 

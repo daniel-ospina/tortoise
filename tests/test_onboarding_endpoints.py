@@ -967,7 +967,7 @@ def test_cross_surface_harness_vocab_contract():
 
     # 1. server-side subset contract (analytics ⊆ SessionRequest Literal).
     assert _HARNESS_ANALYTICS_VALUES <= _SESSION_HARNESS_VALUES
-    # both surfaces are exactly the pinned 6-harness vocabulary.
+    # both server surfaces stay exactly the pinned 6-harness vocabulary.
     assert set(_HARNESS_ANALYTICS_VALUES) == {
         "claude", "claude-desktop", "claude-web", "codex", "cursor", "pi",
     }
@@ -975,11 +975,16 @@ def test_cross_surface_harness_vocab_contract():
         "claude", "claude-desktop", "claude-web", "codex", "cursor", "pi",
     }) == _SESSION_HARNESS_VALUES
 
-    # 2. the frontend harness set matches the analytics vocab (parse the
-    # dashboard constant — self-contained, no JS toolchain needed).
+    # 2. the frontend harness set SUPERSETS the analytics vocab — and by
+    # exactly the wizard-only chatgpt harness. #1701 R2: chatgpt is key-less
+    # OAuth in the browser — ChatGPT never files sessions or fires copy
+    # attribution (no local skills), so it is intentionally absent from the
+    # server capture/analytics vocabulary. The wizard tab can therefore never
+    # drift the server Literals; only a SECOND wizard-only harness would.
     root = Path(__file__).resolve().parent.parent
     harnesses_js = (root / "website/apps/dashboard/src/harnesses.js").read_text()
     m = re.search(r"export const HARNESS_ORDER\s*=\s*\[([^\]]*)\]", harnesses_js)
     assert m, "HARNESS_ORDER not found in website/apps/dashboard/src/harnesses.js"
     frontend = {s.strip().strip("'\"") for s in m.group(1).split(",") if s.strip()}
-    assert frontend == set(_HARNESS_ANALYTICS_VALUES)
+    assert set(_HARNESS_ANALYTICS_VALUES) <= frontend
+    assert frontend - set(_HARNESS_ANALYTICS_VALUES) == {"chatgpt"}

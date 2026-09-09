@@ -706,7 +706,7 @@ def resolve_api_key(cp, token: str) -> dict | None:
         "created_by": created_by,
         # #1148: per-key enabled state (dashboard toggle)
         "enabled": row.get("enabled", True) if rows else True,
-        "dashboard_key_login": True if _dkl is None else _dkl,
+        "dashboard_key_login": False if _dkl is None else _dkl,
         # #308: enforcement (403 SUSPENDED) + owner notification
         "suspended_at": team_row.get("suspended_at"),
         "flagged_at": team_row.get("flagged_at"),

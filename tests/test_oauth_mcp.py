@@ -67,6 +67,14 @@ def _member(user_id: str, team_id: str, role: str = "owner") -> dict:
             "status": "active"}
 
 
+def _join_second_team(api_client) -> None:
+    """Seed a second active membership for _U1 (team-team-001) on the
+    fixture control plane."""
+    _, cp = api_client
+    cp.tables["team_memberships"].append(
+        _member(_U1, "team-team-001", "member"))
+
+
 def _enable_supabase(monkeypatch, cp: FakeControlPlane) -> FakeControlPlane:
     import tortoise.supabase_control as sc
     monkeypatch.setenv("SUPABASE_URL", "https://test.supabase.co")
@@ -402,6 +410,89 @@ class TestAuthorizePage:
         assert "frame-ancestors 'none'" in csp
         assert r.text.count('nonce="') == 2  # CDN + inline script tags
 
+    # ═════ #1701 R1 — consent page team-chooser + hardening (static strings) ═══
+    # The page JS has no jsdom harness in this repo, so each hardening behavior
+    # is pinned by a static-string assertion on the server-rendered page.
+
+    def _consent_html(self, api_client, *, client_name: str = "test-connector") -> str:
+        tc, _ = api_client
+        reg = _register_client(tc, client_name=client_name)
+        verifier, challenge = _pkce()  # noqa: RUF059
+        r = tc.get("/oauth/authorize", params={
+            "client_id": reg["client_id"], "redirect_uri": REDIRECT,
+            "response_type": "code", "code_challenge": challenge,
+            "code_challenge_method": "S256", "state": "st-1",
+            "scope": "mcp", "resource": ""})
+        assert r.status_code == 200
+        return r.text
+
+    def test_consent_html_team_picker_wiring(self, api_client):
+        html = self._consent_html(api_client)
+        assert 'id="team-select"' in html
+        # the Authorize POST carries the PICKER selection first, then the
+        # client-declared resource (single-team flow unchanged)
+        assert "resource: teamResource || PARAMS.resource || null" in html
+        # options carry each membership's team-scoped resource as the value
+        assert "opt.value = m.resource" in html
+        assert "memberships.forEach" in html
+
+    def test_consent_html_single_team_select_not_visible(self, api_client):
+        html = self._consent_html(api_client)
+        # select present-but-hidden in the shared markup; only unhidden for
+        # memberships.length > 1
+        assert 'id="team-select" style="display:none' in html
+        assert "memberships && memberships.length > 1" in html
+        assert 'id="team-line"' in html
+        assert html.count('id="team-select"') == 1
+
+    def test_consent_html_authorize_disabled_in_markup(self, api_client):
+        html = self._consent_html(api_client)
+        # Authorize starts DISABLED in the markup and is enabled only after
+        # the preview resolves (single team) or an explicit picker selection
+        assert '<button class="btn-auth" id="btn-auth" disabled>' in html
+        assert "function enableAuthorize()" in html
+        assert "function disableAuthorize()" in html
+        assert "if (authBtn().disabled)" in html  # submit guard
+
+    def test_consent_html_picker_placeholder_and_no_autobind(self, api_client):
+        html = self._consent_html(api_client)
+        # no silent auto-bind: a leading disabled placeholder forces an explicit
+        # change event, and teamResource is set ONLY in the change handler
+        assert "Choose a team…" in html
+        assert "placeholder.disabled = true" in html
+        assert 'teamResource = teamSelectEl.value' in html
+        assert "teamResource = null" in html  # reset at every run entry
+        assert "if (teamResource) enableAuthorize(); else disableAuthorize();" in html
+
+    def test_consent_html_401_recovery_refresh_first_no_signout(self, api_client):
+        html = self._consent_html(api_client)
+        # stale session recovery is refresh-first with a one-attempt cap and
+        # NO signOut on the preview-401 path (shared parent-domain session)
+        assert "supabaseClient.auth.refreshSession()" in html
+        assert "staleRefreshes < 1" in html
+        assert "Your session expired — sign in again." in html
+        assert html.count("signOut(") == 0
+
+    def test_consent_html_consent_post_401_refreshes_once(self, api_client):
+        html = self._consent_html(api_client)
+        # the Authorize POST 401 path refreshes once and re-POSTs with the
+        # fresh session token; a second 401 shows the expired-session view
+        assert "res.status === 401" in html
+        assert "refreshSession()" in html
+        assert "d2.session.access_token" in html
+        assert html.count("signOut(") == 0
+
+    def test_consent_html_retry_and_inflight_guard(self, api_client):
+        html = self._consent_html(api_client)
+        assert 'id="btn-retry-preview"' in html
+        # in-flight guard spans the async preview + options are rebuilt from
+        # scratch (no duplicate rows on sequential re-runs)
+        assert "let previewInFlight = false" in html
+        assert "if (previewInFlight) return;" in html
+        assert "while (teamSelect.firstChild) teamSelect.removeChild" in html
+        assert "onAuthStateChange" in html
+        assert 'event === "INITIAL_SESSION"' in html
+
     def test_authorize_invalid_request_redirects_error(self, api_client):
         """A REGISTERED redirect_uri receives the error redirect (RFC 6749
         §4.1.2.1) when the request is invalid (here: missing PKCE)."""
@@ -474,6 +565,119 @@ class TestConsentPreview:
                    params={"resource": team_resource_url(TEST_BASE, "team-team-001")},
                    headers={"Authorization": "Bearer fake"})
         assert r.status_code == 403
+
+    # ═════ #1701 R1 — consent account-chooser (resource-less OAuth clients) ═══
+
+    def test_preview_multi_team_no_resource_returns_memberships(self, api_client, session_user):
+        """Two active teams + no team-scoped resource → the chooser list, not a
+        400 (a ChatGPT-style client cannot declare an RFC 8707 resource)."""
+        tc, _ = api_client
+        session_user(_U1)
+        # seed the second membership via the fixture's control plane
+        _join_second_team(api_client)
+        r = tc.get("/oauth/consent/preview", params={"resource": ""},
+                   headers={"Authorization": "Bearer fake"})
+        assert r.status_code == 200
+        body = r.json()
+        assert body["team_id"] is None
+        assert body["team_name"] is None
+        assert body["resource"] == mcp_resource_url(TEST_BASE)
+        assert [m["team_id"] for m in body["memberships"]] == [
+            "team-free-001", "team-team-001"]  # deterministic sort
+        for m in body["memberships"]:
+            assert m["resource"] == team_resource_url(TEST_BASE, m["team_id"])
+            assert m["team_name"]
+
+    def test_preview_multi_team_origin_root_echo_returns_memberships(self, api_client, session_user):
+        """An OpenAI-style origin-root resource echo is treated as no team
+        scope → the chooser list for a multi-team account."""
+        tc, _ = api_client
+        session_user(_U1)
+        _join_second_team(api_client)
+        r = tc.get("/oauth/consent/preview", params={"resource": TEST_BASE},
+                   headers={"Authorization": "Bearer fake"})
+        assert r.status_code == 200
+        body = r.json()
+        assert body["team_id"] is None
+        assert len(body["memberships"]) == 2
+
+    def test_preview_single_team_origin_root_echo_binds_sole_team(self, api_client, session_user):
+        """Origin-root echo on a single-team account resolves to the sole team
+        (byte-identical shape to today's bare-resource default)."""
+        tc, _ = api_client
+        session_user(_U1)
+        r = tc.get("/oauth/consent/preview", params={"resource": TEST_BASE},
+                   headers={"Authorization": "Bearer fake"})
+        assert r.status_code == 200
+        body = r.json()
+        assert body["team_id"] == "team-free-001"
+        assert "memberships" not in body
+
+    def test_preview_declared_bare_mcp_resource_keeps_resource_field(self, api_client, session_user):
+        """Byte-identical contract: a truthy DECLARED bare-MCP resource keeps
+        today's team-scoped resource field on the single-team preview."""
+        tc, _ = api_client
+        session_user(_U1)
+        r = tc.get("/oauth/consent/preview",
+                   params={"resource": mcp_resource_url(TEST_BASE)},
+                   headers={"Authorization": "Bearer fake"})
+        assert r.status_code == 200
+        body = r.json()
+        assert body["team_id"] == "team-free-001"
+        assert body["resource"] == team_resource_url(TEST_BASE, "team-free-001")
+
+    def test_preview_memberships_exclude_suspended_teams(self, api_client, session_user):
+        """2 active + 1 suspended membership → the chooser lists only the two
+        active teams (a suspended team can never be picked)."""
+        tc, cp = api_client
+        session_user(_U1)
+        _join_second_team(api_client)
+        cp.tables["teams"].append({
+            "id": "team-suspended-001", "name": "Suspended Team",
+            "tier": "free", "suspended_at": "2026-08-15T00:00:00Z"})
+        cp.tables["team_memberships"].append(
+            _member(_U1, "team-suspended-001", "member"))
+        r = tc.get("/oauth/consent/preview", params={"resource": ""},
+                   headers={"Authorization": "Bearer fake"})
+        assert r.status_code == 200
+        body = r.json()
+        assert [m["team_id"] for m in body["memberships"]] == [
+            "team-free-001", "team-team-001"]
+
+    def test_preview_one_active_one_suspended_autobinds_active(self, api_client, session_user):
+        """1 active + 1 suspended membership → sole-ACTIVE-team auto-bind shape
+        (no memberships key; the suspended team never counts)."""
+        tc, cp = api_client
+        session_user(_U1)
+        _join_second_team(api_client)
+        cp.tables["teams"][1]["suspended_at"] = "2026-08-15T00:00:00Z"  # team-team-001
+        r = tc.get("/oauth/consent/preview", params={"resource": ""},
+                   headers={"Authorization": "Bearer fake"})
+        assert r.status_code == 200
+        body = r.json()
+        assert body["team_id"] == "team-free-001"
+        assert "memberships" not in body
+
+    def test_preview_all_teams_suspended_403(self, api_client, session_user):
+        tc, cp = api_client
+        session_user(_U1)
+        cp.tables["teams"][0]["suspended_at"] = "2026-08-15T00:00:00Z"
+        r = tc.get("/oauth/consent/preview", params={"resource": ""},
+                   headers={"Authorization": "Bearer fake"})
+        assert r.status_code == 403
+        assert r.json()["error"] == "invalid_grant"
+
+    def test_preview_declared_resource_suspended_team_403(self, api_client, session_user):
+        """A declared team-scoped resource for a suspended team 403s at
+        preview — never a code that dies at a later exchange."""
+        tc, cp = api_client
+        session_user(_U1)
+        cp.tables["teams"][0]["suspended_at"] = "2026-08-15T00:00:00Z"
+        r = tc.get("/oauth/consent/preview",
+                   params={"resource": team_resource_url(TEST_BASE, "team-free-001")},
+                   headers={"Authorization": "Bearer fake"})
+        assert r.status_code == 403
+        assert r.json()["error"] == "invalid_grant"
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -657,6 +861,45 @@ class TestCodeExchange:
 # ═══════════════════════════════════════════════════════════════════════════
 # P4 — RFC 8707 resource indicator → team mapping (D4)
 # ═══════════════════════════════════════════════════════════════════════════
+
+class TestParseResource:
+    """#1701 R1 — origin-root tolerance (exact equality only) + boundary."""
+
+    def test_origin_root_maps_to_bare_mcp(self):
+        from tortoise.oauth import parse_resource
+        canonical, team_id = parse_resource(TEST_BASE, TEST_BASE)
+        assert canonical == mcp_resource_url(TEST_BASE)
+        assert team_id is None
+        canonical2, team_id2 = parse_resource(TEST_BASE, TEST_BASE + "/")
+        assert canonical2 == mcp_resource_url(TEST_BASE)
+        assert team_id2 is None
+
+    def test_origin_root_rejected_for_foreign_origin(self):
+        from tortoise.oauth import OAuthError, parse_resource
+        with pytest.raises(OAuthError) as ei:
+            parse_resource(TEST_BASE, "https://evil.example/mcp")
+        assert ei.value.status == 400
+        assert ei.value.error == "invalid_resource"
+
+    def test_origin_path_prefix_rejected(self):
+        """Exact equality only — {base}/v1/keys is NOT a bare-MCP alias."""
+        from tortoise.oauth import OAuthError, parse_resource
+        with pytest.raises(OAuthError):
+            parse_resource(TEST_BASE, TEST_BASE + "/v1/keys")
+
+    def test_bare_mcp_trailing_slash_accepted(self):
+        from tortoise.oauth import parse_resource
+        canonical, team_id = parse_resource(TEST_BASE, mcp_resource_url(TEST_BASE) + "/")
+        assert canonical == mcp_resource_url(TEST_BASE)
+        assert team_id is None
+
+    def test_team_scoped_still_parses(self):
+        from tortoise.oauth import parse_resource
+        resource = team_resource_url(TEST_BASE, "team-free-001")
+        canonical, team_id = parse_resource(TEST_BASE, resource)
+        assert canonical == resource
+        assert team_id == "team-free-001"
+
 
 class TestRfc8707Mapping:
     def test_team_scoped_resource_binds_that_team(self, api_client, session_user):
@@ -890,15 +1133,41 @@ class TestSuspensionRevocation:
                   if t["revoked_at"] is None]
         assert active == []
 
-    def test_suspended_team_rejects_code_exchange(self, api_client, session_user):
+    # #1701 R1: suspension now refuses at the consent MINT
+    # (test_suspended_team_consent_mint_refused) AND at a mint-then-suspend
+    # exchange (test_exchange_guard_still_rejects_mint_then_suspend_race).
+
+    def test_suspended_team_consent_mint_refused(self, api_client, session_user):
+        """#1701 R1: a suspended team can never MINT a code — the consent POST
+        (with a declared team resource for the now-suspended team) 403s
+        cleanly instead of minting a code that dies at the later exchange."""
         tc, cp = api_client
         session_user(_U1)
         cp.tables["teams"][0]["suspended_at"] = "2026-08-15T00:00:00Z"
-        flow = _auth_code_flow(tc, cp)
+        r = tc.post("/oauth/consent", json={
+            "client_id": _register_client(tc)["client_id"],
+            "redirect_uri": REDIRECT, "response_type": "code",
+            "code_challenge": "x" * 60, "code_challenge_method": "S256",
+            "scope": "mcp",
+            "resource": team_resource_url(TEST_BASE, "team-free-001")},
+            headers={"Authorization": "Bearer fake"})
+        assert r.status_code == 403
+        assert r.json()["error"] == "invalid_grant"
+        assert cp.tables.get("oauth_codes", []) == []
+
+    def test_exchange_guard_still_rejects_mint_then_suspend_race(self, api_client, session_user):
+        """#1701 R1: the exchange-time backstop stays live — a code minted
+        while the team was ACTIVE, then the team suspended before redemption,
+        must 403 at the token endpoint (no tokens issued)."""
+        tc, cp = api_client
+        session_user(_U1)
+        flow = _auth_code_flow(tc, cp)  # minted while active
+        cp.tables["teams"][0]["suspended_at"] = "2026-08-15T00:00:00Z"
         r = _exchange(tc, client_id=flow["client_id"], code=flow["code"],
                       verifier=flow["verifier"])
         assert r.status_code == 403
         assert r.json()["error"] == "invalid_grant"
+        assert cp.tables.get("oauth_access_tokens", []) == []
 
     def test_lapsed_membership_revokes_refresh(self, api_client, session_user):
         tc, cp = api_client

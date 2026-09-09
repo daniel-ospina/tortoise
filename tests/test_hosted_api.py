@@ -5483,7 +5483,12 @@ class TestProvisioningService:
             "teams": [], "api_keys": [], "team_memberships": [],
             "invitations": [],
         })
-        fake.seed("teams", [dict(FREE_TEAM)])
+        # #2670: dashboard_key_login now DEFAULTS to false for human-created
+        # teams — seed it ON here so the FORCED dashboard-login gate passes
+        # and the minted-key guard below is the guard actually under test.
+        # (Without this, the exchange 403s dashboard_login_disabled first and
+        # the P1-2 minted-key property is never exercised.)
+        fake.seed("teams", [dict(FREE_TEAM, dashboard_key_login=True)])
         fake.seed("team_memberships",
                   [_membership_row(user_id=_U1, team_id="team-free-001")])
         token = "tk_" + uuid.uuid4().hex
