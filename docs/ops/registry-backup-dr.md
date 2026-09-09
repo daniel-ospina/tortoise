@@ -55,10 +55,205 @@ lock (`_sweep_team_lock`, timed 20s via to_thread — never blocks the event
 loop) around its probe+flip; the purge/sweep hold the same lock per team, so a
 restore racing a purge cannot interleave. A lock timeout returns 503.
 
-**Cadence:** operator-invoked today; wiring a fixed purge cadence into
-registry-cron.sh is deferred to #2317 (shared-file coordination). In practice,
-run the purge after the hourly sweep so past-window trash is erased within a
-day of expiry.
+**Cadence:** the purge rides the hourly driver (registry-cron.sh step 5,
+wired by #2317) so past-window trash is erased within a day of expiry — the
+runbook's erase claim is honored by the scheduler, not by operator memory. A
+purge body of status ``errors`` (per-tombstone failures — row kept as the
+retry anchor) or a non-2xx response fails the driver run loudly (red job),
+never a silent skip.
+
+## RPO / RTO contract (#2317)
+
+**Cadence is HOURLY, not daily.** The product/pricing flag is named
+``hourly_backups`` (renamed from the registry-era ``daily_backups`` in
+#2317 — it understated the delivered cadence; it is pre-launch, "planned"/
+false on every tier today). The driver cron (`registry-backup-cron.yml`,
+`17 * * * *`) + per-graph sweep → **RPO ≤ 1 h typical / ≤ 2 h worst-case**
+(#596 §3.4/§3.8 machinery). Retention buckets named ``daily``/``weekly``
+(``keep_daily``/``keep_weekly``) are RETENTION horizons, not cadence.
+
+**Achieved freshness is MEASURED, not assumed** (best-practice gap 6d):
+- per-team/per-graph tri-state archive-age vs `BACKUP_STALE_THRESHOLD_MIN` —
+  watcher poll → `GET /v1/internal/backups/status` → `per_team` (+ heartbeat);
+- per-run sweep roll-up (totals/failures/streaks) — `/status` → `last_sweep`;
+- driver direct-R2 DEFAULT-graph age leg (app-down case) — files STALE with
+  the measured age in minutes;
+- restore-drill records (measured restore time vs RTO) — `/status` →
+  `last_drill`.
+
+**RTO (per-team restore, per tier):**
+
+| Tier | Restore-op RTO | App-bootable |
+|---|---|---|
+| free / solo / anon | n/a (no backup entitlement — `hourly_backups` false) | n/a |
+| pro / team (`hourly_backups` when flipped live) | **≤ 15 min** measured drill-accept → verified scratch restore (`drill_ok`) | **≤ 1 h** from app-bootable state after a full-platform restore |
+
+The ≤15-min/≤1h target CARRIES the retired registry-era commitment (#669) to
+per-team restores. Every drill (manual or scheduled) records `duration_s` /
+`rto_s` / `within_rto` to `ops/drills/last.json`; the scheduled drill opens a
+RESTORE_DRILL_FAILED incident on failure OR when the measured time breaches
+≤15 min (restore speed is a target, not an accident).
+
+## #2319 Backup immutability (R2 bucket-lock) + regional-durability decision
+
+Owner-recorded threat-model decision (issue #2319 — follow-up to the
+2026-09-06 DR best-practices audit gaps 5 + 7). Decisions (a)/(b) below are
+the recorded stance; the code/config surface implementing them ships with the
+issue.
+
+### (a) Regional-durability stance — single-region ACCEPTED (phase 1), mirror mechanism SHIPPED
+
+**Recorded:** single-region R2 + single-region FalkorDB Cloud is **accepted for
+the current phase** (pre-beta, chronic 0-team state), **with the second-store
+mirror mechanism implemented and env-guarded now** — adopting dual-region is
+provisioning a store + one env flag, no code change.
+
+Rationale: the audit verdict is that backups are already offsite (separate
+blast radius from the DB). R2 has **no native cross-region replication** and
+its S3 layer reports region `auto`, so regional separation requires a separate
+store (a second Cloudflare account / region-locked bucket, or another
+S3-compatible region) plus our own copy job. At 0 eligible teams the expected
+loss from a correlated region failure is nil, so paying recurring dual-store
+storage + an always-on job now is premature — but the enabling mechanism is
+cheap, so it ships behind `BACKUP_MIRROR_ENABLED` (below).
+
+**Flip criteria** (re-check at each paid-team milestone / customer P0): ≥1
+paying team with real data, any customer storing regulated or high-value
+content, or any published SLA/RPO that assumes regional redundancy. Flip = §(c)
+provisioning + §Verify step 4.
+
+### (b) Bucket-lock immutability — ADOPTED (prefix `backups/`, Age 3 days, 1..6 bound)
+
+**Adopted:** one R2 bucket-lock rule, prefix `backups/` exactly (NEVER the
+whole bucket — the sweep rewrites `ops/*` state/heartbeat objects in place),
+Age retention **3 days** (configurable 1..6, default 3).
+
+Why the window:
+- **Protection:** the lock blocks delete/overwrite within the window. The
+  recovery-critical archives (hourly, RPO ≤2h) are ≤24h old — 3 days keeps the
+  newest ~3 days of archives intact even against a key-holder who deletes
+  everything older. Dumps never overwrite (unique keys), so only deletion is
+  the live threat.
+- **Purge-erasure honesty (#2304):** a deleted custom graph's backup artifacts
+  must be physically erasable when the purge runs (≥7-day trash grace after
+  the graph DELETE; the newest artifact is ≤~1h old at delete). At purge time
+  artifacts are ≥7 days old, so any lock ≤6 days has expired — the **1..6-day
+  bound is enforced in config** (a ≥7-day lock would stamp purged rows while
+  locked artifacts persist — dishonest erasure). Default 3 keeps a 4-day margin.
+- **Prune compatibility:** the prune (keep_hourly=24) deletes day-bucket losers
+  from ~25h old — younger than any useful lock window — so the prune is
+  **lock-tolerant**: a locked object is skipped + logged and retried after the
+  window; the pool never wedges. Transient over-retention is bounded (~2 extra
+  days of hourly dumps ≈ ≤48 objects/pool while locked objects age out); pools
+  converge back to the ~35-object budget. Full-history immutability (lock ≥ the
+  4-week horizon) is **rejected** — it would break the erasure obligation.
+
+Mechanics that matter (Cloudflare docs, 2026):
+- R2 bucket locks are **NOT S3 Object Lock**. They are prefix-scoped rules
+  (`{id, enabled, prefix, condition}` with Age `maxAgeSeconds` / `Indefinite` /
+  a date), managed via the dashboard, Wrangler (`r2 bucket lock add|list`), or
+  the REST API — **never via the S3 seam**. R2's S3 compatibility layer does
+  not implement `GetBucketVersioning` / `GetObjectLockConfiguration` / object-
+  lock `CreateBucket`, and `x-amz-bypass-governance-retention` is unsupported
+  (no bypass exists). Rules apply to new AND existing objects; strictest rule
+  wins; removing a rule does NOT unlock objects still inside their window.
+- Deleting a locked object over the S3 seam fails 403 `AccessDenied` (R2 code
+  10069 `ObjectLockedByBucketPolicy`) — the prune/purge paths must tolerate it
+  (they do; see below).
+
+### Repo config contract + drift bounds
+
+| Knob | Documented value | Enforced |
+|---|---|---|
+| `BACKUP_LOCK_ENABLED` | `true` ONLY after the rule is provisioned | `backup_config.py` (parsed when sweep enabled) |
+| `BACKUP_LOCK_DAYS` | `3` (allowed **1..6** — must stay < the 7-day #2304 grace) | `backup_config.py` ConfigError out of range; drift test `test_backup_config.py` |
+| rule prefix | `backups/` (module constant `_LOCK_PREFIX`) | code + docs |
+| `CF_API_TOKEN` | optional; R2-scoped (Account → Cloudflare R2 → Edit) | live verification only when present; else `unverifiable` |
+| `BACKUP_MIRROR_ENABLED` | `true` only with the four creds below | ConfigError when true + missing creds |
+| `R2_MIRROR_ACCOUNT_ID/_ACCESS_KEY_ID/_SECRET_ACCESS_KEY/_BUCKET` | second store's own account/region + bucket | required-when-enabled |
+| `R2_MIRROR_ENDPOINT` | optional override; default `https://{account_id}.r2.cloudflarestorage.com` | parsed |
+
+### (c) Code-side additions
+
+1. **Prune lock tolerance** (`hosted_backup.prune_backups` →
+   `_delete_backup_objects`): per-object delete failures (incl. locked) are
+   skipped + logged, never a pool abort; only actually-deleted ids are
+   returned. Tests: `test_prune_tolerates_locked_objects_and_keeps_pruning`.
+2. **Lock health check** — `POST /v1/internal/backups/verify-lock` (internal
+   key; optional body `{account_id, bucket}` to check a different store, e.g.
+   the mirror) reads the Cloudflare REST lock rules and compares the strictest
+   retention covering `backups/` against `BACKUP_LOCK_DAYS`. `GET
+   /v1/internal/backups/status` carries a `lock` block with the same result
+   when `BACKUP_LOCK_ENABLED` is set. Statuses: `verified` | `drift` |
+   `absent` | `unverifiable`. Unreachable / no token → `unverifiable` with a
+   runbook pointer — a lock READ failure never fails backups (and there is NO
+   boot-time check: protecting the #545 boot blast radius).
+3. **Second-region mirror** (env-guarded): when the sweep (the hourly cron's
+   core action) accepts an archive — every guard passed — it is copied to the
+   mirror store and **read-back sha256-verified** against its manifest
+   (`hosted_backup.mirror_backup`, wired in `backup_sweep._backup_graph`).
+   A mirror failure is **loud** (per-graph error + /status `last_sweep`
+   graph_failures streak) — never a silent durability gap; the primary backup
+   is already durable and is never failed by a mirror hiccup (the next run
+   re-mirrors a fresh archive). Mirror covers newly-created per-graph archives;
+   a one-time backfill seeds history into a fresh mirror (§Verify step 4).
+
+### Provisioning (console / Wrangler / REST — there is NO S3 path)
+
+Console (simplest): R2 → `tortoise-backups` → **Settings** → **Bucket lock
+rules** → Add rule: prefix `backups/`, retention **3 days** (or your chosen
+`BACKUP_LOCK_DAYS`), save. Apply the same rule to the mirror bucket.
+
+Wrangler (CLI):
+
+    npx wrangler r2 bucket lock add tortoise-backups --prefix backups/ --retention-days 3
+    # flags per `npx wrangler r2 bucket lock add --help`; verify by listing:
+    npx wrangler r2 bucket lock list tortoise-backups
+
+REST (exact — the PUT body shape from the Cloudflare docs):
+
+    curl -X PUT "https://api.cloudflare.com/client/v4/accounts/<R2_ACCOUNT_ID>/r2/buckets/tortoise-backups/lock" \
+      -H "Authorization: Bearer <CF_API_TOKEN>" -H "Content-Type: application/json" \
+      -d '{"rules":[{"id":"backups-lock-3d","enabled":true,"prefix":"backups/","condition":{"type":"Age","maxAgeSeconds":259200}}]}'
+
+(3 days = 259200 s. The API token needs Account → Cloudflare R2 → Edit;
+jurisdiction-restricted buckets require the `cf-r2-jurisdiction` header.)
+
+### Verify (operator runbook)
+
+1. Config contract present: `curl $API/v1/internal/backups/status` (internal
+   key) → `lock` block shows `enabled:true`; without `CF_API_TOKEN` it shows
+   `status:unverifiable` — verify with (2)/(3) instead.
+2. Live drift check: `curl -sS -X POST -H "Authorization: Bearer $FASTAPI_INTERNAL_KEY" \
+   $API/v1/internal/backups/verify-lock` → expect `"status":"verified"`
+   (`drift`/`absent` = the rule is missing or shorter than `BACKUP_LOCK_DAYS`).
+3. Rule-list check (no app/token needed): `npx wrangler r2 bucket lock list
+   tortoise-backups` — confirm the `backups/` rule with the expected days.
+4. Mirror adoption: provision the second store (own account/region), set
+   `R2_MIRROR_*` + `BACKUP_MIRROR_ENABLED=true` on Fly (`fly secrets set`),
+   then one-time backfill of existing history:
+   `aws s3 sync s3://<primary>/backups s3://<mirror>/backups \
+   --endpoint-url <mirror-endpoint> --region auto` (s3 sync is append-only by
+   default — it never propagates primary deletions; the sweep keeps the mirror
+   fresh afterwards). Verify a mirrored archive read-back hash matches its
+   manifest.
+5. Block-in-window drill: with a test object under `backups/`, `aws s3api
+   delete-object --bucket $R2_BUCKET --key <test-key>` fails while locked;
+   confirm the sweep prune logs "bucket-locked … skipping" for in-window
+   objects and still prunes the rest, and that an in-window object is pruned
+   normally once the window passes.
+6. Mirror check: `curl … /v1/internal/backups/verify-lock -d '{"account_id":"<R2_MIRROR_ACCOUNT_ID>","bucket":"<R2_MIRROR_BUCKET>"}'`
+   (same rule must protect the mirror).
+
+### Residuals (recorded with this decision)
+- A guard-rejected archive (P0 / empty / data-loss) whose immediate delete is
+  blocked by the lock lingers ≤ the lock window (restore refuses it — the
+  guards are fail-closed — and an incident is filed; bounded and visible).
+- Purge drills with `grace_days` below the lock window leave artifacts until
+  the window expires (logged residual; production purge at the 7-day grace is
+  unaffected — artifacts are ≥7d old).
+- Mirror covers new per-graph archives; `ops/*` and legacy flat objects are
+  not mirrored (reconstructible / drained); the one-time sync seeds them.
 
 ## Architecture
 - **Driver:** `.github/workflows/registry-backup-cron.yml` (hourly, GH Actions) → internal-key endpoints. Independent failure domain — an OOM crash-loop (#545) must not blind the pipeline.
@@ -71,6 +266,7 @@ day of expiry.
 - `ops/teams/{team}/state.json` — legacy transition-guard counts (mirror of the default graph's per-graph state; pre-#2313 consumers).
 - `ops/teams/{team}/graphs/{graph_id}/state.json` — per-graph transition-guard counts (#2313).
 - `ops/state.json` — team count (enumeration-delta guard) + sweep timestamps.
+- `ops/drills/last.json` — #2317 drill record (pass/fail + measured restore time vs RTO; overwritten per drill; `/status` → `last_drill`).
 - Alerts are keyed per (kind, subject): team incidents use the team id; CUSTOM-graph incidents use `"{team}:{graph}"` (#2313) — the same subject re-baseline resolves and the watcher opens.
 - `ops/watcher-heartbeat.json`, `ops/driver-heartbeat.json` — mutual supervision.
 - `ops/alerts/`, `ops/pending-push/`, `ops/simulate/`, `ops/suppression.json`.
@@ -91,15 +287,18 @@ day of expiry.
 | SIZE_GUARD_ABORT | team graph > 100k nodes — dump aborted | Investigate graph growth; raise limit deliberately |
 | DATA_LOSS_CANDIDATE | a team's node count dropped >50% (or >0→0) | **Manual close only** — verify + re-baseline or restore |
 | P0_GUARD_FAIL | a dump named the wrong graph or was empty — objects deleted | Investigate the sweep; alert auto-consolidates |
+| RESTORE_DRILL_FAILED | the #2317 scheduled monthly drill failed or breached the ≤15-min RTO (subject `global`; detail carries team/archive/duration) | Investigate the drill record (`ops/drills/last.json`); re-drill after fixing the restore path; auto-resolves on the next successful/no-candidates scheduled run |
 
 ## Restore / drill
-- **Drill endpoint:** `POST /v1/internal/backups/drill` `{team_id, backup_key}` — internal-key only; restores into `_drill_*` scratch (live-phase binds scratch; registry end-stamp skipped; ≥1h cooldown). Zero production writes — asserted server-side. The archive's key shape names its graph; the target resolves through the ACTIVE-graph seam — **drilling a deleted/quarantined graph's archive is refused (409)** (#2313 tombstone guard, #2304).
+- **Drill endpoint:** `POST /v1/internal/backups/drill` `{team_id, backup_key}` — internal-key only; restores into `_drill_*` scratch (live-phase binds scratch; registry end-stamp skipped; ≥1h cooldown). Zero production writes — asserted server-side. The archive's key shape names its graph; the target resolves through the ACTIVE-graph seam — **drilling a deleted/quarantined graph's archive is refused (409)** (#2313 tombstone guard, #2304). #2317: every drill records pass/fail + measured restore time (`duration_s` / `rto_s` / `within_rto`) to `ops/drills/last.json` (surfaced on `/status` → `last_drill`) — restore time is measured against the committed ≤15-min RTO, not assumed.
+- **Scheduled drill (#2317):** `POST /v1/internal/backups/drill-scheduled` (no body) — the monthly, unattended leg driven by `.github/workflows/registry-drill-cron.yml` (`23 4 1 * *`). The app auto-selects the OLDEST eligible NESTED archive across teams (`backup_sweep.list_drill_candidates` — 5-segment per-graph pools only; legacy flat 4-segment artifacts are operator-drill territory), skips candidates whose graph is no longer ACTIVE (tombstone guard), drills the first eligible one through the same core as the manual endpoint (cooldown + boot-GC backstop shared), and records the outcome. Failure or an RTO breach opens a deduplicated **RESTORE_DRILL_FAILED** incident (GH issue + Telegram via the app's own secrets — the workflow carries only the internal key, no R2/PAT creds); success and the `no_candidates` state resolve it. The wrapper `.github/scripts/registry-drill-scheduled.sh` makes the job green/red (429 cooldown and `no_candidates` are benign exits — the chronic 0-archive state is the existing LIVENESS_NO_WORK/NEVER_BACKED_UP alarm's job). Manual drills never file incidents (an operator is present).
 - **ACL rebuild after full-platform restore:** a DR into a fresh FalkorDB server restores graph DATA from R2 — per-graph ACL server users do NOT live in the graph namespace. Run `POST /v1/internal/backups/acl-reconcile` (internal key) to replay the idempotent `create_acl_user` upsert for every active custom graph of every eligible team (default graphs ride the team-scoped ACL; tombstoned graphs never touched).
 - **Production restore (`drill:false`) is NOT in scope (501)** — restore-and-rotate machinery retired with the registry (#669).
-- **Rollout drill:** operator-invoked (documented commands in the drill workflow). Requires ≥1 team archive; in the chronic 0-teams state run against a seeded scratch graph or defer with a recorded reason. **Re-drill after any restore-path code change, R2 layout change, or key rotation.**
+- **Rollout drill:** operator-invoked (documented commands in the drill workflow) or via the scheduled endpoint (`workflow_dispatch` against a seeded archive — the CI/schedule acceptance). Requires ≥1 team archive; in the chronic 0-teams state run against a seeded scratch graph or defer with a recorded reason (the drill record shows `no_candidates`). **Re-drill after any restore-path code change, R2 layout change, or key rotation.**
 - **Mid-drill crash:** boot GC sweeps `_drill_*`/`registry_drill_*`/`*_restore_*`/`*_pre_restore_*` older than 6h.
 
 ## Operator actions
+- **Dead knob removed (#2317):** `BACKUP_SKIP_FRESH_MIN` / `BackupConfig.skip_fresh_min` (the registry-era "skip window") was parsed but never consumed and is DELETED — its original double-dispatch protection is now the sweep in-flight 202 guard + per-team locks + retention prune, and an all-skipped run would have surfaced a misleading "no_work" headline (#2372 truthfulness). Do not re-introduce it.
 - **Suppression:** write `ops/suppression.json` `{"KIND": {"until": "ISO"}}` to pause a kind.
 - **Re-baseline:** `POST /v1/internal/backups/re-baseline` `{team_id}` (+ optional `graph_id`, default `"default"`) after verifying a DATA_LOSS_CANDIDATE is a false positive. Custom-graph incidents resolve under `"{team}:{graph}"`; the default under the bare team.
 - **Simulate (staging):** `POST /v1/internal/backups/simulate-stale|recover` (gated on `BACKUP_SIMULATE_ENABLED`) — proves detection→filing→dedup ≤ 2× poll cadence.
@@ -114,31 +313,94 @@ because the key lives only on Fly, set by the operator out-of-band.
 
 **Setup (operator, once):**
 ```bash
-# Generate the key (do NOT commit or share):
-python -c "import base64,secrets; print(base64.b64encode(secrets.token_bytes(32)).decode())"
+# Rotate/seed via the automation tool (recommended — generates + emits the
+# exact commands; NO plaintext in this runbook):
+uv run python tools/rotate-backup-keys.py --role registry_stream --emit-commands --fly-app tortoise-y4mjjq
 
-# Set it directly on Fly (NEVER add to GitHub secrets):
+# Manual equivalent (do NOT commit or share the value):
+python -c "import base64,secrets; print(base64.b64encode(secrets.token_bytes(32)).decode())"
 fly secrets set REGISTRY_STREAM_KEY=<generated-key> --app tortoise-y4mjjq
 ```
 
 **Deploy safety:** `deploy-hosted.yml` deliberately EXCLUDES
-`REGISTRY_STREAM_KEY` from the secret-sync loop — there is no active
-negative check (the workflow can't check Fly-side state), but the key is
-never read from `secrets.*` in the YAML. A missing key causes the sweep
-endpoint (`POST /v1/internal/backups/sweep`) to 503 fail-closed — the app
-boots and serves normally, but no sweep backups are created until the key
-is set.
+`REGISTRY_STREAM_KEY` (and the retained `REGISTRY_STREAM_KEY_PREVIOUS`,
+#2318) from the secret-sync loop — there is no active negative check (the
+workflow can't check Fly-side state), but the key is never read from
+`secrets.*` in the YAML. A missing key causes the sweep endpoint
+(`POST /v1/internal/backups/sweep`) to 503 fail-closed — the app boots and
+serves normally, but no sweep backups are created until the key is set.
 
-**Rotating:**
+### Secret store + automated rotation (#2318)
+
+Backup keys (`REGISTRY_STREAM_KEY` and `TORTOISE_BACKUP_KEY`) are managed
+through a secret-store seam (`tortoise/secret_store.py`):
+
+- **Providers:** `env` (default — Fly/GH env secrets, back-compat) and
+  `file` (versioned 0600 store at `BACKUP_KEY_STORE_PATH` for
+  selfhost/tests). Selection: `BACKUP_KEY_STORE=env|file`. The file layout
+  (per-role version list, newest = active) maps 1:1 onto a cloud KMS.
+- **Cloud KMS (AWS/GCP/Vault/Cloudflare) is the documented extension
+  point** — no provider is implemented because this runtime has no KMS
+  credentials. To add one: implement the `KeyStore` protocol against the
+  cloud SDK and register it in `open_key_store()`;
+  `BACKUP_KEY_STORE=kms` fails closed until then. The hosted deployment
+  remains on Fly secrets (Fly's managed secret store) today.
+- **Dual-key rotation:** a rotation mints a NEW active key while the old
+  active key is RETAINED as the decrypt candidate (`*_PREVIOUS` env var or
+  an older file version). During the overlap window BOTH old and new
+  archives decrypt in-app — the app's restore path walks an
+  active-first candidate chain per role (`_decrypt_candidate_keys` in
+  `hosted_backup.py`), keeping the #661 cross-role seam (a sweep archive
+  restores through the user-backup path and vice versa). Encrypt always
+  uses the ACTIVE key.
+- **No plaintext key material in code, git, or logs:** surfaces expose
+  8-hex sha256 fingerprints only (same convention as the export header);
+  test fixtures use synthetic keys; this runbook never contains a real
+  value.
+
+**Rotating `REGISTRY_STREAM_KEY` (operator, automated — dual-key window):**
 ```bash
-# 1. Generate a new key
-# 2. Set it on Fly (overwrites the old key):
-fly secrets set REGISTRY_STREAM_KEY=<new-key> --app tortoise-y4mjjq
-# 3. Deploy to pick up the new secret value:
+# 1. Generate + stage (prints fingerprints; add --emit-commands for the
+#    secret values; --verify-dump proves an OLD archive still decrypts
+#    with the retained key):
+uv run python tools/rotate-backup-keys.py --role registry_stream \
+  --emit-commands --fly-app tortoise-y4mjjq
+#    A single `fly secrets set` sets BOTH vars (new active + old retained):
+#      fly secrets set REGISTRY_STREAM_KEY=<new> REGISTRY_STREAM_KEY_PREVIOUS=<old> --app tortoise-y4mjjq
+# 2. Deploy to pick up the new secret value:
 fly deploy --app tortoise-y4mjjq
-# 4. Old archives remain decryptable with the OLD key — recover via manual
-#    decryption with TORTOISE_BACKUP_KEY (GH-secret, retained for recovery).
+# 3. VERIFY the rotation run: drill the OLDEST archive (must restore with
+#    the RETAINED key — in-app, no manual decryption):
+#      curl -sS -X POST -H "Authorization: Bearer $FASTAPI_INTERNAL_KEY" \
+#        -H "Content-Type: application/json" \
+#        -d '{"team_id":"<team>","backup_key":"backups/<team>/.../dump.enc"}' \
+#        https://api.premiselabs.co/v1/internal/backups/drill
+# 4. AFTER the overlap window (old archives pruned/verified), purge the
+#    retained key (second rotation does this automatically):
+uv run python tools/rotate-backup-keys.py --role registry_stream \
+  --purge --fly-app tortoise-y4mjjq
+#    → fly secrets unset REGISTRY_STREAM_KEY_PREVIOUS --app tortoise-y4mjjq + deploy
 ```
+
+> Pre-#2318 runbook note (corrected): old stream-key archives are NOT
+> decryptable with `TORTOISE_BACKUP_KEY` after a rotation — each key is
+> independent. Recovery requires the OLD key; with #2318 the old key is
+> retained in-app (`REGISTRY_STREAM_KEY_PREVIOUS`) for the overlap window,
+> so the drill path (above) replaces the old manual-decryption recovery.
+> A second rotation drops the previous-previous key — verify old archives
+> before rotating again.
+
+**Rotating `TORTOISE_BACKUP_KEY`** (user-facing backups; GH-syncable): same
+pattern with `--role backup`. `TORTOISE_BACKUP_KEY_PREVIOUS` is synced by
+`deploy-hosted.yml` only when the GH secret is set (optional — a rotation
+keeps the old value there until the overlap ends, then the operator clears
+it from GitHub + Fly).
+
+**Selfhost / file store:** `tools/rotate-backup-keys.py --role <role>
+--store file --path <store>` rotates in place (atomic 0600 write, bounded
+retention — active + one previous). `--purge` drops the retained version
+post-overlap. Point the app at the store with `BACKUP_KEY_STORE=file` +
+`BACKUP_KEY_STORE_PATH`.
 
 **Verification (operator, post-setup):**
 ```bash

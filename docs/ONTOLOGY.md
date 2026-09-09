@@ -391,7 +391,9 @@ About edges: `aboutSubject`, `aboutObject`, `aboutEvent`, `aboutPoint`, `aboutDo
 | `name` | string | ✅ | `schema:name` | ⚠️ | Human-readable name (`_upsert_object` writes `title`; `name` aliased) |
 | `objectKind` | string | ✅ | — | ✅ | Project, WorkItem, Problem, document, user, skill, tool, agent, workflow, agreement, standard, other + pack objectKinds |
 | `title` | string | — | `dc:title` | ✅ | Display title (what `_upsert_object` actually stores) |
-| `status` | string | — | `pav:status` | ✅ | Write-through cache of lifecycle events (ObjectRegistered→live; ObjectSuperseded→superseded + `supersededBy`; connector work-item events→in_progress/completed) — **the event stream is the truth (§11 cache doctrine); the property is a performance cache, folded keep-first per Object (divergent re-folds never blind-overwrite — #2193 resolved)** |
+| `status` | string | — | `pav:status` | ✅ | Write-through cache of lifecycle events (ObjectRegistered→live; ObjectSuperseded→superseded + `supersededBy` + `supersededAt`; connector work-item events→in_progress/completed) — **the event stream is the truth (§11 cache doctrine); the property is a performance cache, folded keep-first per Object (divergent re-folds never blind-overwrite — #2193 resolved)** |
+| `supersededAt` | ISO8601 | — | — | ✅ | The fold TIMESTAMP written by the supersession fold (`apply_supersessions` / `ObjectSuperseded` projection, pinned after the fold via `SET o.supersededAt` for byte-reproducible state headers). R17 P3-1 (#2165): `supersededAt` is the connected-assembly state-header's date source — **byte-golden renders depend on it being a pinned story date, never a wall-clock fold time** (Task-1 fixture pins `2026-09-01T00:00:00Z`). Absent on non-superseded Objects. |
+| `supersededBy` | string | — | — | ✅ | Successor name written by the supersession fold (see `status`); the connected-assembly successor probe verifies a VISIBLE (non-recall-excluded) Object exists before rendering a full supersession clause — a never-created / excluded / empty successor renders a NAME-ONLY annotation, never a fabricated link (R12/C6, #2165 Task 5). |
 | `createdAt` | ISO8601 | ✅ | `dc:created` | ✅ | Timestamp (set ON CREATE; adopted ON MATCH only when absent — #2194) |
 | `updatedAt` | ISO8601 | — | `dc:modified` | ❌ | **Not written by `_upsert_object`** — planned follow-up |
 | `passes_frequency_gate` | bool | — | — | ❌ | S5 frequency-gate result flag — false entities are still written, flagged (registered #909 §4.3 #12; planned for the capture path, slice 5+) |
@@ -545,6 +547,8 @@ meetingNotes, experimentResults, evidenceLog, handoff, transcript, roadmap, brie
 ```
 organization, team, role, legalPerson, naturalPerson, other
 ```
+
+> **Account layer vs in-graph Subjects (#2311):** the `organization` / `team` kinds above (and their §6 subclasses) are **in-graph Subjects inside a memory** — semantically distinct from the control-plane account unit that owns the graph(s), the **organization account** (billing/tenure; legacy code/API/DB identifiers still read "team"). Subject kinds are not renamed by #2311. Definitions note: docs/registry-graph-schema.md ("Definitions — account layer vs in-graph Subjects").
 
 ### Source Type Vocabulary (core) + Credibility Tier
 

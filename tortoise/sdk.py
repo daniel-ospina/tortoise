@@ -22,6 +22,7 @@ from time import monotonic as _monotonic
 from typing import Any
 
 from .domain_loader import known_kinds, register_kind
+from .assembly import AssemblyAnswer
 from .cross_lens import DEFAULT_THRESHOLD
 from .ids import ulid
 from .live import TERMINAL_EXCLUDED_STATUSES  # EP terminal vocabulary (shared)
@@ -12821,93 +12822,127 @@ class TortoiseSDK:
         if question_date is None:
             question_date = _dt2.now(UTC).strftime("%Y-%m-%d")
 
-        # 2. Retrieval (whole-retrieval raises → AskRetrievalUnavailable).
-        #    A1/A3/A4/A6 (#2070): the ask-lane retrieval knobs resolve ONCE
-        #    here (env-gated; defaults = historical behavior) and thread into
-        #    the one bounded RAG pass. A6's retrieval-window limit and the
-        #    assembly caps resolve IN TANDEM (``resolve_ask_retrieval_caps``)
-        #    — the gold is cut at ``result_ids[:limit]`` inside the retrieval
-        #    call BEFORE dedup/assemble, so a cap raise that does not also
-        #    raise the window changes nothing.
+        # 2. Connected-assembly branch (#2165 Task 6) — env-gated OFF by
+        #    default (flag OFF / unrouted / unresolved → legacy byte-identical
+        #    by construction: the branch precedes retrieval). Slots AFTER the
+        #    _post_ask delegation AND after _ask_validate (validation always
+        #    precedes the branch: invalid inputs raise AskValidationError on
+        #    fired shapes too). Whole-branch envelope: any assembler-stage
+        #    raise (classify/walk/render/decorate/enrich/date-parse) maps to
+        #    AskRetrievalUnavailable — never an untyped exception. The fired
+        #    block's evidence is rendered by the SHARED reader tail below
+        #    (ONE reader call, legacy AskReaderUnavailable envelope — no
+        #    double metering). R14: _assemble_connected is referenced only
+        #    here and in ask_assembled (source-text drift test).
         caps = resolve_ask_retrieval_caps()
-        keep_numeric = ask_env_bool(
-            "TORTOISE_ASK_NUMERIC_TOKENS", True)       # A1, default ON
-        search_keys_prf = ask_env_bool(
-            "TORTOISE_ASK_SEARCH_KEYS_PRF", True)      # A4, default ON
-        evidence_boost = ask_env_bool(
-            "TORTOISE_ASK_EVIDENCE_BOOST", True)       # A5, default ON
-        from tortoise.retrieval import (  # noqa: I001
-            ASK_FUSION_WEIGHTS_ENV, ASK_FUSION_K_ENV, ask_env_int,
-            ask_env_weights,
-        )
-        fusion_weights = ask_env_weights(ASK_FUSION_WEIGHTS_ENV, None)  # A3
-        fusion_k = ask_env_int(ASK_FUSION_K_ENV, 60)                    # A3
-        leg_trace: list[dict] = []
-        try:
-            hits = self.tortoise_fts_query(
-                question, limit=caps["limit"],
-                pool_size=DEFAULT_POOL_SIZE, include_terminal=True,
-                leg_trace=leg_trace,
-                keep_numeric=keep_numeric,
-                search_keys_prf=search_keys_prf,
-                fusion_weights=fusion_weights,
-                fusion_k=fusion_k)
-        except AskRetrievalUnavailable:
-            raise
-        except Exception as e:  # noqa: BLE001, RUF100 — map to the ask surface
-            raise AskRetrievalUnavailable(
-                f"retrieval unavailable: {type(e).__name__}") from e
+        fired_block = None
+        if ask_env_bool("TORTOISE_ASK_CONNECTED_ASSEMBLY", False):
+            try:
+                from tortoise.assembly import _assemble_connected
+                fired_block = _assemble_connected(
+                    self, question, question_date=question_date, caps=caps)
+            except AskRetrievalUnavailable:
+                raise
+            except Exception as e:  # noqa: BLE001, RUF100 — fired envelope
+                raise AskRetrievalUnavailable(
+                    f"connected assembly unavailable: {type(e).__name__}"
+                ) from e
+        if fired_block is not None and fired_block.fired:
+            # fired: assembled = the assembled post-cap lines; the retrieval
+            # knobs/dedup/boost/rerank never run. hits=[] + leg_trace=[] make
+            # the shared degradation gate below pass [] to the D8 check (R11:
+            # a fired render NEVER reports retrieval_degraded).
+            assembled = fired_block.post_cap_lines
+            hits: list[dict] = []
+            leg_trace: list[dict] = []
+        else:
+            # Legacy lane: retrieval (whole-retrieval raises →
+            # AskRetrievalUnavailable). A1/A3/A4/A6 (#2070): the ask-lane
+            # retrieval knobs resolve ONCE here (env-gated; defaults =
+            # historical behavior) and thread into the one bounded RAG pass.
+            # A6's retrieval-window limit and the assembly caps resolve IN
+            # TANDEM (``resolve_ask_retrieval_caps``) — the gold is cut at
+            # ``result_ids[:limit]`` inside the retrieval call BEFORE
+            # dedup/assemble, so a cap raise that does not also raise the
+            # window changes nothing.
+            keep_numeric = ask_env_bool(
+                "TORTOISE_ASK_NUMERIC_TOKENS", True)  # A1, default ON
+            search_keys_prf = ask_env_bool(
+                "TORTOISE_ASK_SEARCH_KEYS_PRF", True)      # A4, default ON
+            evidence_boost = ask_env_bool(
+                "TORTOISE_ASK_EVIDENCE_BOOST", True)       # A5, default ON
+            from tortoise.retrieval import (  # noqa: I001
+                ASK_FUSION_WEIGHTS_ENV, ASK_FUSION_K_ENV, ask_env_int,
+                ask_env_weights,
+            )
+            fusion_weights = ask_env_weights(ASK_FUSION_WEIGHTS_ENV, None)  # A3
+            fusion_k = ask_env_int(ASK_FUSION_K_ENV, 60)                    # A3
+            leg_trace: list[dict] = []
+            try:
+                hits = self.tortoise_fts_query(
+                    question, limit=caps["limit"],
+                    pool_size=DEFAULT_POOL_SIZE, include_terminal=True,
+                    leg_trace=leg_trace,
+                    keep_numeric=keep_numeric,
+                    search_keys_prf=search_keys_prf,
+                    fusion_weights=fusion_weights,
+                    fusion_k=fusion_k)
+            except AskRetrievalUnavailable:
+                raise
+            except Exception as e:  # noqa: BLE001, RUF100 — map to the ask surface
+                raise AskRetrievalUnavailable(
+                    f"retrieval unavailable: {type(e).__name__}") from e
 
-        # 3. Annotation (batch raise → AskRetrievalUnavailable).
-        try:
-            annotated = self.annotate_ask_hits(hits)
-        except AskRetrievalUnavailable:
-            raise
-        except Exception as e:  # noqa: BLE001, RUF100
-            raise AskRetrievalUnavailable(
-                f"annotation unavailable: {type(e).__name__}") from e
+            # 3. Annotation (batch raise → AskRetrievalUnavailable).
+            try:
+                annotated = self.annotate_ask_hits(hits)
+            except AskRetrievalUnavailable:
+                raise
+            except Exception as e:  # noqa: BLE001, RUF100
+                raise AskRetrievalUnavailable(
+                    f"annotation unavailable: {type(e).__name__}") from e
 
-        # 4. Dedup (annotated session key — P2-20) → A5 evidence boost → A7
-        #    rerank → assembly (8k/40/32KiB caps from ``caps``).
-        try:
-            def _ask_session_key(h: dict) -> str:
-                return (h.get("session_id")
-                        or h.get("session_date")
-                        or f"idx:{h.get('lme_session_index', -1)}")
+            # 4. Dedup (annotated session key — P2-20) → A5 evidence boost → A7
+            #    rerank → assembly (8k/40/32KiB caps from ``caps``).
+            try:
+                def _ask_session_key(h: dict) -> str:
+                    return (h.get("session_id")
+                            or h.get("session_date")
+                            or f"idx:{h.get('lme_session_index', -1)}")
 
-            deduped = dedup_pool(
-                annotated, max_chunks_per_session=DEFAULT_MAX_CHUNKS_PER_SESSION,
-                session_key=_ask_session_key)
-            # A5 (#2070): evidence-mark boost before assembly (mark_for=None =
-            # the stored-``has_answer`` fallback — source-session class,
-            # conservative). Zero marks → byte-identical order (all factors
-            # 1.0); the boost is a rank reorder, never a filter. Real product
-            # graphs carry zero marks until the extractor writes them
-            # (documented — the value is measured on seeded fixtures).
-            if evidence_boost:
-                boost_mult = resolve_ask_boost_multipliers()
-                deduped, _boost_stats = apply_evidence_boost(
-                    deduped,
-                    boost_answer_string=boost_mult["answer_string"],
-                    boost_verbatim=boost_mult["verbatim"],
-                    boost_source=boost_mult["source"],
-                )
-            # A7 (#2070): cross-encoder + MMR rerank (env-gated, default
-            # OFF — phase 2). Degrade-to-current: any failure keeps the
-            # deduped pool untouched; the rerank never raises.
-            from tortoise.rerank import ask_lane_rerank
-            deduped, _rerank_stats = ask_lane_rerank(
-                question, deduped, proj=self._get_proj(),
-                top_k=caps["context_item_cap"])
-            assembled = assemble_context(
-                deduped, top_k=caps["context_item_cap"],
-                max_context_tokens=caps["context_token_cap"],
-                question_date=question_date,
-                context_item_cap=caps["context_item_cap"],
-                byte_cap=32768)
-        except Exception as e:  # noqa: BLE001, RUF100
-            raise AskRetrievalUnavailable(
-                f"context assembly unavailable: {type(e).__name__}") from e
+                deduped = dedup_pool(
+                    annotated, max_chunks_per_session=DEFAULT_MAX_CHUNKS_PER_SESSION,
+                    session_key=_ask_session_key)
+                # A5 (#2070): evidence-mark boost before assembly (mark_for=None =
+                # the stored-``has_answer`` fallback — source-session class,
+                # conservative). Zero marks → byte-identical order (all factors
+                # 1.0); the boost is a rank reorder, never a filter. Real product
+                # graphs carry zero marks until the extractor writes them
+                # (documented — the value is measured on seeded fixtures).
+                if evidence_boost:
+                    boost_mult = resolve_ask_boost_multipliers()
+                    deduped, _boost_stats = apply_evidence_boost(
+                        deduped,
+                        boost_answer_string=boost_mult["answer_string"],
+                        boost_verbatim=boost_mult["verbatim"],
+                        boost_source=boost_mult["source"],
+                    )
+                # A7 (#2070): cross-encoder + MMR rerank (env-gated, default
+                # OFF — phase 2). Degrade-to-current: any failure keeps the
+                # deduped pool untouched; the rerank never raises.
+                from tortoise.rerank import ask_lane_rerank
+                deduped, _rerank_stats = ask_lane_rerank(
+                    question, deduped, proj=self._get_proj(),
+                    top_k=caps["context_item_cap"])
+                assembled = assemble_context(
+                    deduped, top_k=caps["context_item_cap"],
+                    max_context_tokens=caps["context_token_cap"],
+                    question_date=question_date,
+                    context_item_cap=caps["context_item_cap"],
+                    byte_cap=32768)
+            except Exception as e:  # noqa: BLE001, RUF100
+                raise AskRetrievalUnavailable(
+                    f"context assembly unavailable: {type(e).__name__}") from e
 
         # 5. Question type (deterministic detector or caller override).
         qtype = question_type if question_type is not None \
@@ -13047,6 +13082,111 @@ class TortoiseSDK:
                              or h.get("expired_at"))):
                 return True
         return False
+
+    def ask_assembled(self, question: str, *, question_date: str | None = None,
+                      question_type: str | None = None,
+                      caps: dict | None = None,
+                      _reader_factory=None) -> AssemblyAnswer:
+        """#2165 Task 6 — connected-assembly ask (the eval arm's reader path).
+
+        One fired pipeline (classify → resolve → walk → render → decorate →
+        enrich → assemble) with a PURE-ASSEMBLY default: when no reader is
+        supplied the assembly fields populate and ``answer=None`` — the arm
+        measures gold-id admission (``post_cap_lines``) independently of any
+        reader. With a reader via ``_reader_factory`` the ONE reader call
+        fills ``answer`` (the shared reader machinery + legacy
+        AskReaderUnavailable envelope). Fires regardless of the caller's
+        ``question_type``, but the RESPONSE reports the caller/detector value
+        unchanged. ``fired=False`` returns the empty shape (no block, no
+        raise). In hosted-delegated client mode (``TORTOISE_API_URL`` set, no
+        local graph) raises ``AskRetrievalUnavailable`` — the hosted answer
+        surface is #2013-gated and does not expose this branch.
+        """
+        import os as _os
+
+        from tortoise.exceptions import (
+            AskReaderUnavailable,
+            AskRetrievalUnavailable,
+        )
+        if _os.environ.get("TORTOISE_API_URL"):
+            raise AskRetrievalUnavailable(
+                "ask_assembled requires a local graph (TORTOISE_API_URL is "
+                "set — the hosted /v1/ask surface does not expose the "
+                "connected-assembly branch)")
+        from tortoise.assembly import AssemblyAnswer as _AssemblyAnswer
+        from tortoise.assembly import _assemble_connected
+        from tortoise.reader import (
+            NO_EVIDENCE_TEXT,
+            _looks_abstained,
+            build_reader_user_message,
+            detect_question_type,
+            system_prompt_for,
+        )
+        from tortoise.retrieval import (
+            estimate_tokens_ask,
+            render_context,
+            resolve_ask_retrieval_caps,
+        )
+        # validation FIRST (same canonical codes as ask()); date resolved to
+        # server-now-UTC when omitted (identical default semantics)
+        self._ask_validate(question, question_type, question_date)
+        if question_date is None:
+            from datetime import UTC as _UTC2
+            from datetime import datetime as _dt3
+            question_date = _dt3.now(_UTC2).strftime("%Y-%m-%d")
+        if caps is None:
+            caps = resolve_ask_retrieval_caps()
+        try:
+            block = _assemble_connected(
+                self, question, question_date=question_date, caps=caps)
+        except AskRetrievalUnavailable:
+            raise
+        except Exception as e:  # noqa: BLE001, RUF100 — fired envelope
+            raise AskRetrievalUnavailable(
+                f"connected assembly unavailable: {type(e).__name__}") from e
+        qtype = question_type if question_type is not None \
+            else detect_question_type(question)
+        if not block.fired:
+            return _AssemblyAnswer(
+                fired=False, shape=None, question_type=qtype, subjects=[],
+                slices={}, post_cap_lines=[], admission={}, evidence="",
+                context_tokens=0, answer=None, retrieval_degraded=False)
+        evidence = render_context(block.post_cap_lines,
+                                  question_date=question_date)
+        context_tokens = estimate_tokens_ask(evidence)
+        answer: str | None = None
+        if _reader_factory is not None:
+            # the ONE reader call (pure-assembly mode when no reader — the
+            # eval arm decides whether conversion is measured)
+            try:
+                model = self._ask_reader_model(_reader_factory)
+            except Exception as e:  # noqa: BLE001, RUF100
+                raise AskReaderUnavailable(
+                    f"reader unavailable (build): {type(e).__name__}") from e
+            try:
+                raw, _out_tokens = _ask_reader_complete(
+                    model,
+                    system=system_prompt_for(qtype),
+                    user=build_reader_user_message(evidence, question))
+            except AskReaderUnavailable:
+                raise
+            except Exception as e:  # noqa: BLE001, RUF100
+                raise AskReaderUnavailable(
+                    f"reader unavailable: {type(e).__name__}") from e
+            finally:
+                decr = getattr(model, "decr_inflight", None)
+                if decr is not None:
+                    decr()
+            answer = (raw or "").strip()
+            if _looks_abstained(answer) and not answer:
+                answer = NO_EVIDENCE_TEXT
+        return _AssemblyAnswer(
+            fired=True, shape=block.shape, question_type=qtype,
+            subjects=list(block.subjects), slices=block.slices,
+            post_cap_lines=block.post_cap_lines,
+            admission=dict(block.admission), evidence=evidence,
+            context_tokens=context_tokens, answer=answer,
+            retrieval_degraded=False)
 
     # ── Per-namespace reader-model cache (#1987 Task 5) ────────────────────
 
@@ -14415,7 +14555,16 @@ class TortoiseSDK:
         key_count source for GET /v1/graphs (parity with the Supabase
         count_graph_keys seam; C2 P2: graph_key_ids is the cascade source
         and must NOT be reused for the meter — after C3's standalone
-        revoke, counting all keys would overcount vs Supabase)."""
+        revoke, counting all keys would overcount vs Supabase).
+
+        #2306: only ever call this with a CUSTOM graph's id. The default
+        graph is not key-bindable (no per-graph keys exist — supabase
+        enforces this structurally, and _ensure_graph_exists 404s
+        default-kind mints) — the list seam short-circuits kind='default'
+        rows to 0 BEFORE this meter, so legacy bound-default APIKey nodes
+        (pre-guard mints / raw control-plane writes, graph_id = the
+        default node's real gid) never resurface as a Graphs-tab count;
+        they stay listable + revocable via the unfiltered key list."""
         reg = self._get_registry()
         rows = reg.query(
             "MATCH (k:APIKey {team_id:$tid, graph_id:$gid}) "
@@ -14877,6 +15026,17 @@ class TortoiseSDK:
         semantics (mirrors the REST path #742 + the agent_signup mint,
         which now writes expires_at:null) — a legacy selfhost key without
         the prop must keep authenticating.
+
+        #2300 (C5 registry-lane parity): a C1/C2 graph-bound key (graph_id
+        set on the node) also resolves graph_id + graph_namespace (the
+        Graph node's namespace) — the SAME C1 tenancy fields REST's
+        registry lane and the Supabase lane (resolve_api_key) carry, so
+        MCP's TeamResolutionMiddleware routes a per-graph key to ITS graph
+        and the team-surface tool gates can reject it. Missing/drifted
+        Graph node → namespace None (graph-delete revokes the graph's keys,
+        C3, so a real deleted graph never reaches here) — mirrors REST's
+        registry lane, which also resolves None without failing the hash
+        auth.
         """
         from datetime import datetime, timezone as _tz  # noqa: I001
         now_iso = datetime.now(_tz.utc).isoformat()  # noqa: UP017
@@ -14894,7 +15054,28 @@ class TortoiseSDK:
             # at hosted_api.py:1560 — apikey_verify is the MCP registry lane
             # and MUST carry the same field or the C5 scope gate 403s every
             # tt_/legacy owner key on the selfhost MCP surface.
+            # #2300 (C5 registry-lane parity): a C1/C2 graph-bound key
+            # (graph_id on the node) ALSO resolves graph_id/graph_namespace
+            # (the Graph node's namespace) — the same C1 tenancy fields REST's
+            # registry lane and the Supabase lane carry, so MCP's
+            # TeamResolutionMiddleware routes the key to ITS graph and the
+            # team-surface tool gates can reject it. A missing Graph node →
+            # namespace None (graph-delete revokes the graph's keys — C3 — so
+            # a real deleted graph never reaches here; mirrors REST's registry
+            # lane, which resolves None without failing the hash auth).
+            graph_namespace = None
+            graph_id = m.get("graph_id")
+            if graph_id:
+                g_rows = self._get_registry().query(
+                    "MATCH (g:Graph {id:$gid, team_id:$tid}) "
+                    "RETURN g.namespace",
+                    params={"gid": graph_id, "tid": m["team_id"]},
+                ).result_set
+                graph_namespace = (
+                    g_rows[0][0] if (g_rows and g_rows[0][0]) else None)
             return {"team_id": m["team_id"], "key_id": m["id"],
+                    "graph_id": graph_id,
+                    "graph_namespace": graph_namespace,
                     "delegation_depth": delegation_depth,
                     "scopes": scopes,
                     "legacy_full_access": (delegation_depth is None)

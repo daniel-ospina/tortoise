@@ -141,6 +141,20 @@ def test_team_sweep_enabled_even_when_sweep_disabled(monkeypatch):
     assert cfg.team_sweep_enabled is True  # team-sweep flag still read
 
 
+def test_dead_skip_fresh_knob_removed(monkeypatch):
+    """#2317: BACKUP_SKIP_FRESH_MIN (parsed but never consumed) is REMOVED —
+    the env var must not silently re-enter the config contract (the original
+    registry-era skip window is superseded by the in-flight 202 guard +
+    per-team locks + retention prune)."""
+    env = _good_env()
+    env["BACKUP_SKIP_FRESH_MIN"] = "1"
+    monkeypatch.setattr(os, "environ", env)
+    cfg = load_config()
+    assert cfg.enabled is True
+    assert not hasattr(cfg, "skip_fresh_min"), \
+        "skip_fresh_min dead knob must stay removed from BackupConfig"
+
+
 def test_env_dict_injection_does_not_leak(monkeypatch):
     """load_config(env=...) must not mutate the real process environment."""
     before = dict(os.environ)
@@ -148,3 +162,102 @@ def test_env_dict_injection_does_not_leak(monkeypatch):
     assert cfg.enabled is True
     assert dict(os.environ) == before
     assert "BACKUP_SWEEP_ENABLED" not in os.environ
+
+
+# ── #2319 bucket-lock + geo-mirror config contract ──────────────────────────
+
+
+def test_lock_defaults_off_three_days(monkeypatch):
+    """Lock knobs default to disabled with the documented 3-day window."""
+    monkeypatch.setattr(os, "environ", _good_env())
+    cfg = load_config()
+    assert cfg.lock_enabled is False
+    assert cfg.lock_days == 3
+    assert cfg.cf_api_token == ""
+    assert cfg.mirror_enabled is False
+    assert cfg.mirror_endpoint == ""
+
+
+def test_lock_enabled_parses_days_and_token(monkeypatch):
+    env = _good_env()
+    env.update({"BACKUP_LOCK_ENABLED": "true", "BACKUP_LOCK_DAYS": "5",
+                "CF_API_TOKEN": "cf-token"})
+    monkeypatch.setattr(os, "environ", env)
+    cfg = load_config()
+    assert cfg.lock_enabled is True
+    assert cfg.lock_days == 5
+    assert cfg.cf_api_token == "cf-token"
+
+
+def test_lock_days_rejects_out_of_bounds(monkeypatch):
+    """#2319: the lock window must stay below the #2304 trash grace (7d) so
+    purge erasure of a deleted graph's artifacts is never blocked — 0, 7 and
+    negative windows are ConfigErrors."""
+    for bad in ("0", "7", "-1", "31"):
+        env = _good_env()
+        env.update({"BACKUP_LOCK_ENABLED": "true", "BACKUP_LOCK_DAYS": bad})
+        monkeypatch.setattr(os, "environ", env)
+        with pytest.raises(ConfigError, match="BACKUP_LOCK_DAYS"):
+            load_config()
+
+
+def test_lock_days_ignored_when_lock_disabled(monkeypatch):
+    """An out-of-range BACKUP_LOCK_DAYS with the lock DISABLED is inert (the
+    value only binds once the operator flips BACKUP_LOCK_ENABLED on)."""
+    env = _good_env()
+    env["BACKUP_LOCK_DAYS"] = "99"
+    monkeypatch.setattr(os, "environ", env)
+    assert load_config().lock_days == 99  # parsed, but not enforced
+
+
+def test_mirror_enabled_requires_all_creds(monkeypatch):
+    """BACKUP_MIRROR_ENABLED=true without the four R2_MIRROR_* creds is a
+    ConfigError (fail-closed — a silently-dead mirror is a false durability
+    promise, the #101 class)."""
+    env = _good_env()
+    env["BACKUP_MIRROR_ENABLED"] = "true"
+    env["R2_MIRROR_ACCOUNT_ID"] = "mirror-acct"
+    env["R2_MIRROR_ACCESS_KEY_ID"] = "mak"
+    env["R2_MIRROR_SECRET_ACCESS_KEY"] = "msk"
+    monkeypatch.setattr(os, "environ", env)  # R2_MIRROR_BUCKET missing
+    with pytest.raises(ConfigError, match="R2_MIRROR_BUCKET"):
+        load_config()
+
+
+def test_mirror_parses_creds_and_derives_endpoint(monkeypatch):
+    env = _good_env()
+    env.update({"BACKUP_MIRROR_ENABLED": "true",
+                "R2_MIRROR_ACCOUNT_ID": "mirror-acct",
+                "R2_MIRROR_ACCESS_KEY_ID": "mak",
+                "R2_MIRROR_SECRET_ACCESS_KEY": "msk",
+                "R2_MIRROR_BUCKET": "tortoise-backups-mirror"})
+    monkeypatch.setattr(os, "environ", env)
+    cfg = load_config()
+    assert cfg.mirror_enabled is True
+    assert cfg.mirror_endpoint == "https://mirror-acct.r2.cloudflarestorage.com"
+    assert cfg.mirror_bucket == "tortoise-backups-mirror"
+
+
+def test_mirror_endpoint_override_wins(monkeypatch):
+    env = _good_env()
+    env.update({"BACKUP_MIRROR_ENABLED": "true",
+                "R2_MIRROR_ACCOUNT_ID": "mirror-acct",
+                "R2_MIRROR_ACCESS_KEY_ID": "mak",
+                "R2_MIRROR_SECRET_ACCESS_KEY": "msk",
+                "R2_MIRROR_BUCKET": "mirror",
+                "R2_MIRROR_ENDPOINT": "https://s3.example-region.example"})
+    monkeypatch.setattr(os, "environ", env)
+    assert load_config().mirror_endpoint == "https://s3.example-region.example"
+
+
+def test_lock_and_mirror_ignored_when_sweep_disabled(monkeypatch):
+    """The disabled branch keeps lock/mirror at inert defaults — a deploy
+    without the sweep never validates or reads the #2319 knobs."""
+    env = dict(os.environ)
+    env.pop("BACKUP_SWEEP_ENABLED", None)
+    env.update({"BACKUP_LOCK_ENABLED": "true", "BACKUP_MIRROR_ENABLED": "true"})
+    monkeypatch.setattr(os, "environ", env)
+    cfg = load_config()
+    assert cfg.enabled is False
+    assert cfg.lock_enabled is False
+    assert cfg.mirror_enabled is False

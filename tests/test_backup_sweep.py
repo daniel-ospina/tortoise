@@ -3,6 +3,7 @@
 from __future__ import annotations  # noqa: I001
 
 import json
+import hashlib
 import os
 import tempfile
 from datetime import datetime, timedelta, UTC
@@ -24,6 +25,7 @@ from tortoise.backup_sweep import (
     enumerate_eligible_teams,
     enumerate_teams,
     enumerate_team_tombstones,
+    list_drill_candidates,
     read_graph_state,
     read_ops_state,
     read_team_state,
@@ -2261,3 +2263,143 @@ def test_purge_residual_still_erases_artifacts(shared_proj):
     assert store.list(f"backups/team_x/{gid}/") == []
     assert store.list(f"backups/{bid}/") == []
     assert _tombstone_props(proj, gid).get("purged_residual") is True
+
+
+# ── #2319 second-region mirror (env-guarded; the cron runs the sweep) ────────
+
+
+class _FailingMirrorStorage(MemoryStorage):
+    """Mirror store that rejects every write — simulates a dead/blocked
+    second-region target."""
+
+    def upload(self, key, data, content_type=None):
+        raise RuntimeError("mirror endpoint unreachable (503)")
+
+
+def test_sweep_mirrors_accepted_archive_when_configured(shared_proj):
+    """#2319: with a mirror store passed in, every ACCEPTED archive is copied
+    (dump.enc + manifest.json) and the per-graph result records the verified
+    mirror — byte-identical keys, sha256-backed."""
+    with tempfile.TemporaryDirectory() as tmp:  # noqa: F841
+        if shared_proj is None:
+            return
+        proj = _make_env(None, shared_proj)
+        reg = proj.db.select_graph(_REGISTRY_GRAPH)
+        store = MemoryStorage()
+        mirror = MemoryStorage()
+        res = run_backup_sweep(
+            db=proj.db, registry=reg, storage=store, config=_config(),
+            mirror=mirror,
+        )
+        assert res["status"] == "backed_up"
+        default_res = res["results"]["team_x"]["graphs"]["default"]
+        assert default_res["status"] == "backed_up"
+        assert default_res["mirror"]["verified"] is True
+
+        prim_keys = sorted(store.list("backups/team_x/"))
+        mir_keys = sorted(mirror.list("backups/team_x/"))
+        assert len(prim_keys) == 2  # dump.enc + manifest.json
+        assert mir_keys == prim_keys  # keys preserved byte-for-byte
+        # read-back integrity: mirrored ciphertext matches the primary
+        for k in prim_keys:
+            assert mirror.download(k) == store.download(k)
+        manifest = json.loads(store.download(
+            next(k for k in prim_keys if k.endswith("manifest.json"))))
+        dump_key = next(k for k in prim_keys if k.endswith("dump.enc"))
+        assert hashlib.sha256(mirror.download(dump_key)).hexdigest() == manifest["sha256"]
+
+
+def test_sweep_without_mirror_is_unchanged(shared_proj):
+    """No mirror arg ⇒ no mirror key on the per-graph result and nothing
+    copied (byte-for-byte mirror-free behaviour)."""
+    with tempfile.TemporaryDirectory() as tmp:  # noqa: F841
+        if shared_proj is None:
+            return
+        proj = _make_env(None, shared_proj)
+        reg = proj.db.select_graph(_REGISTRY_GRAPH)
+        store = MemoryStorage()
+        res = run_backup_sweep(
+            db=proj.db, registry=reg, storage=store, config=_config(),
+        )
+        default_res = res["results"]["team_x"]["graphs"]["default"]
+        assert default_res["status"] == "backed_up"
+        assert default_res.get("mirror") is None
+
+
+def test_sweep_mirror_failure_is_loud_and_primary_survives(shared_proj):
+    """#2319: a mirror failure never fails the (already durable) PRIMARY
+    backup, but it IS a durability-policy breach when mirroring is
+    configured — the graph reports error (visible in /status last_sweep
+    graph_failures + streak), never a silent gap."""
+    with tempfile.TemporaryDirectory() as tmp:  # noqa: F841
+        if shared_proj is None:
+            return
+        proj = _make_env(None, shared_proj)
+        reg = proj.db.select_graph(_REGISTRY_GRAPH)
+        store = MemoryStorage()
+        mirror = _FailingMirrorStorage()
+        res = run_backup_sweep(
+            db=proj.db, registry=reg, storage=store, config=_config(),
+            mirror=mirror,
+        )
+        # headline degrades (default graph errored on the mirror leg)
+        assert res["status"] == "no_work"
+        assert res["graph_totals"]["errors"] == 1
+        default_res = res["results"]["team_x"]["graphs"]["default"]
+        assert default_res["status"] == "error"
+        assert "mirror failed" in default_res["error"]
+        # the primary archive is intact (durable regardless of the mirror)
+        prim_keys = sorted(store.list("backups/team_x/"))
+        assert len(prim_keys) == 2
+        assert [k for k in prim_keys if k.endswith("dump.enc")]
+        # and the streak is recorded so /status surfaces the breach
+        assert res["graph_error_streaks"].get("team_x:default") == 1
+
+# ── #2317 scheduled-restore-drill archive selection (pure storage) ──────────
+
+
+def test_list_drill_candidates_nested_only_oldest_first():
+    """Only 5-segment NESTED per-graph pools qualify (legacy flat 4-segment
+    keys never — their shape does not name a graph); results are oldest-first
+    by manifest created_at."""
+    store = MemoryStorage()
+    # nested default + custom pools (5 segments)
+    for bid, created in (
+        ("team_x/default/20260102T000000Z_aa", "2026-01-02T00:00:00+00:00"),
+        ("team_x/default/20260103T000000Z_bb", "2026-01-03T00:00:00+00:00"),
+        ("team_x/g_c1/20260101T000000Z_cc", "2026-01-01T00:00:00+00:00"),
+        ("team_y/default/20260101T120000Z_dd", "2026-01-01T12:00:00+00:00"),
+    ):
+        store.upload(f"backups/{bid}/dump.enc", b"blob")
+        store.upload(
+            f"backups/{bid}/manifest.json",
+            json.dumps({"created_at": created, "node_count": 1}).encode(),
+        )
+    # legacy flat (4 segments) + a manifest-less dump — never candidates
+    store.upload("backups/team_z/20260104T000000Z_ee/dump.enc", b"flat")
+    store.upload("backups/team_x/default/20260104T000000Z_ff/dump.enc", b"nomanifest")
+
+    rows = list_drill_candidates(store)
+    assert [r["backup_key"] for r in rows] == [
+        "backups/team_x/g_c1/20260101T000000Z_cc/dump.enc",   # oldest overall
+        "backups/team_y/default/20260101T120000Z_dd/dump.enc",
+        "backups/team_x/default/20260102T000000Z_aa/dump.enc",
+        "backups/team_x/default/20260103T000000Z_bb/dump.enc",
+    ]
+    assert all(r["graph_id"] for r in rows)
+    assert rows[0]["team_id"] == "team_x" and rows[0]["graph_id"] == "g_c1"
+
+
+def test_list_drill_candidates_max_candidates_and_empty():
+    """The candidate list is bounded; an empty store yields []."""
+    store = MemoryStorage()
+    assert list_drill_candidates(store) == []
+    for i in range(12):
+        bid = f"team_x/default/2026010{i % 9 + 1}T000000Z_{i:02x}"
+        store.upload(f"backups/{bid}/dump.enc", b"blob")
+        store.upload(
+            f"backups/{bid}/manifest.json",
+            json.dumps({"created_at": f"2026-01-0{i % 9 + 1}T00:00:00+00:00"}).encode(),
+        )
+    assert len(list_drill_candidates(store)) == 8  # default max_candidates
+    assert len(list_drill_candidates(store, max_candidates=3)) == 3

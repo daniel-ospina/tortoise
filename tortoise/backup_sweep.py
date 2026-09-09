@@ -45,7 +45,7 @@ from types import SimpleNamespace
 from typing import Any, Callable  # noqa: UP035
 
 from .backup_config import BackupConfig
-from .hosted_backup import _is_supabase_source, create_backup, prune_backups
+from .hosted_backup import _is_supabase_source, create_backup, mirror_backup, prune_backups
 
 # #2562 (re-audit P3): the sweep/purge per-team acquisitions are TIMED too
 # — a stuck holder (a restore whose locked body wedged) must not block that
@@ -577,6 +577,7 @@ def _backup_graph(
     graph: dict[str, Any],
     now: datetime,
     incidents: list[dict[str, Any]],
+    mirror=None,
 ) -> dict[str, Any]:
     """Back up ONE graph (default or custom) of a team (#2313).
 
@@ -735,6 +736,26 @@ def _backup_graph(
             return {"status": "data_loss_candidate", "team_id": team_id,
                     "graph_id": graph_id, "node_count": node_count}
 
+    # ── #2319 geo-mirror (env-guarded second-store copy): an ACCEPTED
+    # archive (every guard passed) is copied to the mirror store and
+    # read-back sha256-verified against its manifest. The primary backup is
+    # already durable — a mirror failure must never fail it — but it IS a
+    # durability-policy breach when BACKUP_MIRROR_ENABLED=true, so it is
+    # reported LOUD (per-graph error + streak on /status last_sweep; the next
+    # run re-mirrors a fresh archive once the mirror is healthy).
+    if mirror is not None:
+        try:
+            mirror_result = mirror_backup(storage, mirror, manifest["backup_id"])
+        except Exception as e:
+            logger.exception(
+                "mirror of %s/%s failed (primary backup durable): %s",
+                team_id, graph_id, e)
+            return {"status": "error", "team_id": team_id,
+                    "graph_id": graph_id,
+                    "error": f"backup accepted but mirror failed: {e}"}
+    else:
+        mirror_result = None
+
     state = {
         "source": "backup",
         "latest_backup_at": manifest.get("created_at"),
@@ -778,6 +799,7 @@ def _backup_graph(
         "graph_id": graph_id,
         "node_count": node_count,
         "pruned": len(deleted),
+        "mirror": mirror_result,
     }
 
 
@@ -790,6 +812,7 @@ def _sweep_team(
     team_id: str,
     now: datetime,
     incidents: list[dict[str, Any]],
+    mirror=None,
 ) -> dict[str, Any]:
     """Sweep ONE team's active graphs (default + customs) (#2313).
 
@@ -812,6 +835,7 @@ def _sweep_team(
             gr = _backup_graph(
                 db=db, registry=registry, storage=storage, config=config,
                 team_id=team_id, graph=graph, now=now, incidents=incidents,
+                mirror=mirror,
             )
         except Exception as e:  # per-graph isolation: one bad graph never
             # aborts the team's other graphs (review P3-2)
@@ -887,6 +911,69 @@ def _sweep_team(
         default.get("status") if default else ("backed_up" if any_backed_up else "error")
     )
     return team_res
+
+
+# ── #2317 scheduled-restore-drill archive selection ───────────────────────
+# The scheduled (monthly, unattended) drill restores the OLDEST eligible
+# archive into _drill_* scratch. Selection is a pure storage walk (no
+# control-plane query): only NESTED per-graph pools qualify
+# (backups/{team}/{graph}/{ts}_{rnd}/dump.enc — 5 key segments). Legacy
+# FLAT 4-segment artifacts are excluded: their key shape does not name a
+# graph, and the operator-invoked drill surface already covers the pre-#2313
+# shapes. The caller resolves each candidate through the ACTIVE-graph seam
+# (tombstone guard), so a quarantined/deleted graph's archive is skipped,
+# never drilled (#2304).
+
+
+def list_drill_candidates(storage, *, max_candidates: int = 8) -> list[dict[str, Any]]:
+    """Oldest-first eligible nested archives across all teams.
+
+    Returns candidate rows ``[{team_id, graph_id, backup_key, created_at}]``
+    sorted by manifest ``created_at`` ascending (oldest first). Dumps with an
+    unreadable/missing manifest are skipped (restore_backup manifest-verifies
+    whatever is drilled anyway). Raises RuntimeError on a storage-list
+    failure — the caller must never guess an empty archive set off a failed
+    read (the same never-confirm-empty invariant as the watcher).
+    """
+    from .hosted_backup import _parse_backup_key
+
+    rows: list[dict[str, Any]] = []
+    for key in storage.list("backups/"):
+        if not key.endswith("/dump.enc"):
+            continue
+        if len(key.split("/")) != 5:  # backups/{team}/{graph}/{ts}_{rnd}/dump.enc
+            continue  # legacy flat (4 segments) and any future shape
+        try:
+            team_id, graph_id, _ = _parse_backup_key(key)
+        except ValueError:
+            continue
+        if not graph_id:
+            continue
+        try:
+            manifest = _read_json(storage, key.replace("/dump.enc", "/manifest.json"))
+        except Exception:
+            continue  # no usable manifest — never a drill source
+        created_at = str(manifest.get("created_at") or "")
+        if not created_at:
+            continue
+        rows.append(
+            {
+                "team_id": team_id,
+                "graph_id": graph_id,
+                "backup_key": key,
+                "created_at": created_at,
+            }
+        )
+
+    def _sort_key(row: dict[str, Any]):
+        try:
+            ts = datetime.fromisoformat(row["created_at"])
+        except ValueError:
+            ts = datetime.min.replace(tzinfo=UTC)
+        return (ts, row["backup_key"])
+
+    rows.sort(key=_sort_key)
+    return rows[:max_candidates]
 
 
 def resolve_active_graph(source, team_id: str, graph_id: str) -> dict[str, Any]:
@@ -1005,12 +1092,20 @@ def run_backup_sweep(
     team_ids: list[str] | None = None,
     lock_for: Callable[[str], Any] | None = None,
     now: datetime | None = None,
+    mirror=None,
 ) -> dict[str, Any]:
     """Back up every team's knowledge graphs (default + custom, #2313).
     Returns the run result.
 
     ``lock_for`` is an optional per-team lock factory (the endpoint supplies
     the asyncio-lock seam); the sweep serializes each team's dump under it.
+
+    ``mirror`` (#2319): optional second-store BackupStorage. When provided,
+    every ACCEPTED archive is mirrored (copy + sha256 read-back verify) right
+    after its guards pass; a mirror failure is reported per-graph as an error
+    (loud — never silent) while the primary backup stays durable. Built by
+    the endpoint from BACKUP_MIRROR_ENABLED + R2_MIRROR_* env; None keeps the
+    sweep byte-for-byte mirror-free.
 
     When ``config.team_sweep_enabled`` is True, only Pro teams (tier != 'free'
     AND backup_enabled) are enumerated (#655). A 0-eligible-teams result files
@@ -1091,6 +1186,7 @@ def run_backup_sweep(
                 res = _sweep_team(
                     db=db, registry=registry, storage=storage, config=config,
                     team_id=team_id, now=now, incidents=incidents,
+                    mirror=mirror,
                 )
             except Exception as e:  # per-team isolation: one bad team never
                 # aborts the sweep for the others (review P3-2)

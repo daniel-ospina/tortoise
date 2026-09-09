@@ -40,6 +40,14 @@ from battery.runner.setup import scenario_namespace
 #: with a stamped starting belief — the product's own write surface).
 _EVIDENCE_KIND = "evidence"
 _CLAIM_MEMORY_KIND = "claim"
+#: Author-stated credibility fallback for filed evidence (#2284 exposure
+#: finding): the SDK applies the documented decide default (medium,
+#: Beta(3,1)) ONLY when status is NOT explicitly passed — the arm stages
+#: evidence as draft (draft-first, #2291), so it must state the default
+#: ITSELF or every agent-filed contradiction silently behaves as
+#: unverified (~3x weaker: measured -0.07 vs -0.21 on the target). Single
+#: source: tortoise.sdk.DECIDE_DEFAULT_CREDIBILITY.
+_DEFAULT_EVIDENCE_CREDIBILITY = "medium"
 #: Per-episode Challenge/Deepen cycle cap (#2291 I-3 / Task 4 ep_outcome):
 #: cap-hit ⇒ non_converged/undec, never forced CONVERGED.
 DECIDE_CYCLES_CAP = 8
@@ -142,23 +150,24 @@ class A4TortoiseArm:
         draft/terminal filtering per product semantics. The probe query is
         the episode's own user message when present, else the scenario's
         primary planted claim (the everyday "what do I know about X" read).
-        Memory.confidence = the claim's EP posterior mean (row.ep.
-        confidence_mean) — never None on the real path (uncalibrated rows
-        fall back to the product's documented neutral 0.5). Operator ids
-        surfaced by the state read's nands/arguments attachments are
-        emitted as operator-kind Memories (content = the attached edge
-        label when given, else "") so the WRITE closed set can carry
-        operators for #901 mitigate routing. Raises ArmUnavailable on
-        failure (never partial memories). The per-episode decide counter
-        resets when the episode MOVES to a different scenario (episodes are
-        per-scenario sequential — a late scenario must not inherit an early
-        one's cycle count toward the cap).
+
+        EPISODE BOUNDARY (Task 10 streams): each retrieve() starts a NEW
+        episode, so the per-episode decide counter resets here — with
+        stream sessions the scenario stays the same across N sessions but
+        the DECIDE_CYCLES_CAP budget belongs to ONE episode (= one session:
+        retrieve -> decide writes -> terminal). Without the reset, session-1
+        writes would silently cap every later session (record -> None,
+        no surfacing event) while each session is billed as measured.
+
+        Memory.confidence is the claim's EP posterior mean — never None on
+        the real path (uncalibrated rows fall back to neutral 0.5);
+        operator ids from the state read's nands/arguments attachments are
+        emitted as operator-kind Memories so the WRITE closed set can carry
+        operators for #901 mitigate routing.
+
+        Raises ArmUnavailable on failure (never partial memories).
         """
-        # Episode boundary: reset decide_cycles when the scenario changes.
-        sid = context.scenario.id
-        if self._active_scenario is not None and self._active_scenario != sid:
-            self.decide_cycles = 0
-        self._active_scenario = sid
+        self.decide_cycles = 0
         sdk = self._sdk(context.scenario)
         try:
             query = (context.user_message or "").strip()
@@ -280,8 +289,17 @@ class A4TortoiseArm:
         }
 
     # ── record ──────────────────────────────────────────────────────────
-    def record(self, context: AgentContext, item: Memory) -> None:
+    def record(self, context: AgentContext, item: Memory) -> str | None:
         """Write through the product verb surface (#901 routing).
+
+        Returns the PRODUCT write reference when a write succeeded (the
+        operator edge id for nand/imply writes — the Amend-1 event_ref a
+        tool_event emission carries); None on any honest no-op (cap-hit,
+        empty/claim-less closed set, unknown verb, identical re-file,
+        unresolved target). The executor emits a ``contradiction_surfaced``
+        tool_event ONLY when a real ref came back — emission-loss-proof:
+        absence of the tool_event provably means the conflict was not
+        filed, never a lost emission (#2284 Task 9).
 
         #2291 Task 3 semantics:
         - Targets come ONLY from the retrieved closed set
@@ -314,28 +332,28 @@ class A4TortoiseArm:
           (never swallow + fabricate from an uncalibrated store).
         """
         if self._db_path is None:
-            return
+            return None
         sdk = self._sdk(context.scenario)
         sid = context.scenario.id
         filed = self._filed_content.setdefault(sid, set())
         try:
             if self.decide_cycles >= DECIDE_CYCLES_CAP:
-                return  # cap-hit: honest no-op (never forced CONVERGED)
+                return None  # cap-hit: honest no-op (never forced CONVERGED)
             closed = [m for m in (context.prior_memories or ())
                       if m.id and not _is_seed_manifest(m.content)]
             if item.kind == "mitigate":
                 ops = [m for m in closed if m.kind == "operator"]
                 if not ops:
-                    return  # unresolved operator target ⇒ honest no-op
+                    return None  # unresolved operator target ⇒ honest no-op
                 if item.target_id is not None:
                     op_ids = {o.id for o in ops}
                     if item.target_id not in op_ids:
-                        return  # target not a closed-set operator ⇒ refuse
+                        return None  # target not a closed-set operator ⇒ refuse
                     mit_key = f"mitigate::{item.target_id}::{item.content}"
                 else:
                     mit_key = f"mitigate::{item.content}"
                 if mit_key in filed:
-                    return  # identical re-mitigation: TRUE no-op
+                    return None  # identical re-mitigation: TRUE no-op
                 c = item.confidence
                 if isinstance(c, float) and math.isfinite(c):
                     # clamp raw numeric confidence into [0.10, 0.50]
@@ -345,24 +363,27 @@ class A4TortoiseArm:
                     strength = 0.3  # decide-tooling default, in-range
                 op_target = (item.target_id if item.target_id is not None
                              else ops[0].id)
-                sdk.mitigate_operator(
+                mit = sdk.mitigate_operator(
                     op_target, reason=item.content or "", strength=strength)
                 filed.add(mit_key)
                 self.decide_cycles += 1
-                return
+                if isinstance(mit, dict) and isinstance(mit.get("id"), str) \
+                        and mit["id"]:
+                    return mit["id"]  # real product ref (review #2629 P2)
+                return str(mit)  # fallback ref: the mitigation point
             claims = [m for m in closed if m.kind == _CLAIM_MEMORY_KIND]
             if not claims:
-                return  # empty/claim-less closed set ⇒ zero writes (no-op)
+                return None  # empty/claim-less closed set ⇒ zero writes (no-op)
             if item.kind not in _WRITE_KINDS:
                 # Unknown/not-yet-routed verb (supersede, …): HONEST NO-OP.
                 # Never a silent IMPL misroute that flips a replacement into
                 # agreement with the superseded claim. Task-9's executor
                 # routes supersede at its own layer via the product verb.
-                return
+                return None
             if item.target_id is not None:
                 claim_ids = {c.id for c in claims}
                 if item.target_id not in claim_ids:
-                    return  # target not a closed-set claim ⇒ refuse
+                    return None  # target not a closed-set claim ⇒ refuse
                 target = item.target_id
             else:
                 target = claims[0].id
@@ -372,9 +393,11 @@ class A4TortoiseArm:
             op_kind = "nand" if item.kind == "nand" else "imply"
             dedup_key = f"{op_kind}::{target}::{item.content}"
             if dedup_key in filed:
-                return  # identical re-file this setup: TRUE no-op
+                return None  # identical re-file this setup: TRUE no-op
             created = sdk.create_point(kind=_EVIDENCE_KIND, content=item.content,
                                        dedup=True, status="draft",
+                                       credibility=item.credibility
+                                       or _DEFAULT_EVIDENCE_CREDIBILITY,
                                        source_harness="battery",
                                        source_session=sid)
             ev_id = created.get("id") if isinstance(created, dict) else None
@@ -382,16 +405,21 @@ class A4TortoiseArm:
                 raise ArmUnavailable("a4 create_point returned no id")
             try:
                 if item.kind == "nand":
-                    sdk.create_operator(
+                    op = sdk.create_operator(
                         "NAND", ev_id, [target], direction="unidirectional")
                 else:
-                    sdk.create_operator("IMPL", ev_id, [target])
+                    op = sdk.create_operator("IMPL", ev_id, [target])
             except Exception as e:  # noqa: BLE001, RUF100
                 # Evidence stays DRAFT (promote_source fires only on operator
                 # success) ⇒ inert residue, never a live orphan.
                 raise ArmUnavailable(f"a4 operator write failed: {e}") from e
             filed.add(dedup_key)
             self.decide_cycles += 1  # one cycle per NEW record
+            if isinstance(op, dict):
+                op_id = op.get("id")
+                if isinstance(op_id, str) and op_id:
+                    return op_id
+            return str(ev_id)  # fallback ref: the evidence point the edge promoted
         except ArmUnavailable:
             raise
         except Exception as e:  # noqa: BLE001, RUF100

@@ -2923,12 +2923,12 @@ class TestBackupEndpoints:
         _store = _MS()  # SHARED instance — _backup_storage is called per request
         monkeypatch.setattr(_ha, "_backup_storage", lambda: _store)
         # Decouple the machinery tests from the tier gate (#656): pricing.json
-        # marks pro.daily_backups "planned" (not live), so no tier passes the
+        # marks pro.hourly_backups "planned" (not live), so no tier passes the
         # gate today. This fixture represents "Pro WITH the feature enabled" —
         # the gate allowlist itself is tested by test_backup_tier_allowlist_from_pricing.
         from tortoise import pricing as _pricing
         monkeypatch.setattr(
-            _pricing, "daily_backups_enabled", lambda tier: tier == "pro"
+            _pricing, "hourly_backups_enabled", lambda tier: tier == "pro"
         )
         app.dependency_overrides[get_current_team] = lambda: dict(TEST_TEAM, tier="pro")
         # Epic #1647 (docker lane): the backup/restore seam resolves the team
@@ -2957,7 +2957,7 @@ class TestBackupEndpoints:
         assert r.status_code == 402
 
     def test_backup_solo_tier_402(self, client):
-        """Solo tier cannot create backups (daily_backups:false in pricing.json).
+        """Solo tier cannot create backups (hourly_backups:false in pricing.json).
 
         Regression test for #656 — the old gate blocked only (None, 'free'),
         so a solo-tier team would have slipped past the backups gate.
@@ -2980,7 +2980,7 @@ class TestBackupEndpoints:
 
     def test_backup_tier_allowlist_from_pricing(self, client):
         """The gate strictly mirrors pricing.json: only a real JSON `true`
-        for features.daily_backups passes. "planned" (string) is NOT live —
+        for features.hourly_backups passes. "planned" (string) is NOT live —
         so today NO tier passes (feature not shipped), and flipping pricing.json
         to `true` enables a tier with zero code change (#656).
 
@@ -2992,13 +2992,13 @@ class TestBackupEndpoints:
         pricing = _load_pricing()
         expected_allowed = [
             tier for tier, spec in pricing.get("tiers", {}).items()
-            if spec.get("features", {}).get("daily_backups") is True
+            if spec.get("features", {}).get("hourly_backups") is True
         ]
         expected_blocked = [
             tier for tier in pricing.get("tiers", {})
             if tier not in expected_allowed
         ]
-        # Every tier in pricing.json behaves per its daily_backups flag.
+        # Every tier in pricing.json behaves per its hourly_backups flag.
         for tier in expected_allowed:
             app.dependency_overrides[get_current_team] = lambda t=tier: dict(
                 TEST_TEAM, tier=t
@@ -3006,7 +3006,7 @@ class TestBackupEndpoints:
             try:
                 r = client.post("/backups")
                 assert r.status_code != 402, (
-                    f"{tier} has daily_backups:true in pricing.json but was blocked: {r.text}"
+                    f"{tier} has hourly_backups:true in pricing.json but was blocked: {r.text}"
                 )
             finally:
                 app.dependency_overrides.clear()
@@ -3017,7 +3017,7 @@ class TestBackupEndpoints:
             try:
                 r = client.post("/backups")
                 assert r.status_code == 402, (
-                    f"{tier} lacks daily_backups:true in pricing.json but passed the gate"
+                    f"{tier} lacks hourly_backups:true in pricing.json but passed the gate"
                 )
             finally:
                 app.dependency_overrides.clear()
@@ -5726,6 +5726,81 @@ class TestGraphLifecycle:
                                    f"Bearer {readkey['api_key']}"})
             assert r.status_code == 403, r.text
         finally:
+            gen.close()
+
+    def test_default_row_key_count_zero_with_bound_default_key(self, tmp_path):
+        """#2306 lane-consistency half (registry): the default graph has NO
+        per-graph keys — GET /v1/graphs reports key_count 0 for the
+        kind='default' row even when a legacy bound-default APIKey node
+        (graph_id = the default node's real gid — minted pre-#2112 guard
+        or via a raw control-plane write) exists. Pre-fix the registry lane
+        surfaced such nodes as a count on the default row (the capstone
+        "1") while the supabase lane structurally cannot (api_keys.graph_id
+        REFERENCES graphs(id); 'default' is a DERIVED id, never a row id) —
+        the two lanes disagreed about the same cell.
+
+        Manageability half: the bound-default key stays LISTABLE and
+        REVOCABLE via the unfiltered key list (the API-Keys tab read) —
+        the default row has no per-graph key surface by design
+        (_ensure_graph_exists 404s default-kind mints; canManageGraphKeys is
+        kind-gated), so the key list is its management path."""
+        import uuid as _uuid
+
+        import tortoise.hosted_api as ha_mod
+        from tortoise.auth import hash_api_key
+        gen = TestProvisioningService()._setup(tmp_path, "pro", None)
+        sdk, tid, tc = next(gen)
+        try:
+            app.dependency_overrides[ha_mod.get_current_user] = \
+                lambda: {"user_id": "list-owner", "email": "o@x.com"}
+            app.dependency_overrides[get_current_team] = \
+                lambda: dict(TEST_TEAM, team_id=tid)
+            sdk._get_registry().query(
+                "MERGE (m:Membership {user_id:'list-owner', team_id:$tid, "
+                "status:'active'}) SET m.role='owner'",
+                params={"tid": tid},
+            )
+            default = next(g for g in sdk.graph_list(tid)
+                           if g["kind"] == "default")
+            # Legacy bound-default key (raw registry write — the pre-guard
+            # artifact shape the capstone showed as a default-row "1").
+            token = "tt_bd_" + _uuid.uuid4().hex[:16]
+            kid = "bd-key-" + _uuid.uuid4().hex[:12]
+            sdk._get_registry().query(
+                "CREATE (k:APIKey {id:$id, team_id:$tid, key_hash:$kh, "
+                "key_prefix:$kp, created_by:'legacy', graph_id:$gid})",
+                params={"id": kid, "tid": tid, "kh": hash_api_key(token),
+                        "kp": token[:10], "gid": default["graph_id"]},
+            )
+            r = tc.get(f"/v1/graphs?team_id={tid}")
+            assert r.status_code == 200, r.text
+            rows = r.json()
+            dflt = next(x for x in rows if x["kind"] == "default")
+            assert dflt["key_count"] == 0, rows  # no per-graph keys
+            # A custom graph's per-graph meter is unaffected (still counts).
+            key = _mint_caller_key(sdk, tid, scopes=["graphs:create"])
+            r = self._provision(tc, tid, key, "metered")
+            assert r.status_code == 201, r.text
+            custom_gid = r.json()["graph"]["id"]
+            r = tc.get(f"/v1/graphs?team_id={tid}")
+            custom = next(x for x in r.json() if x["graph_id"] == custom_gid)
+            assert custom["key_count"] == 1
+            # Manageability: the bound-default key appears on the UNFILTERED
+            # key list (the API-Keys tab's read)…
+            kr = tc.get(f"/v1/team/keys?team_id={tid}")
+            assert kr.status_code == 200, kr.text
+            listed = [k for k in kr.json()["keys"]
+                      if k.get("graph_id") == default["graph_id"]]
+            assert [k["id"] for k in listed] == [kid]
+            # …and revoking it by id from the API-Keys tab works (no
+            # default-row dead end).
+            dr = tc.delete(f"/v1/team/keys/{kid}?team_id={tid}")
+            assert dr.status_code == 200, dr.text
+            assert dr.json()["revoked"] is True
+            assert dr.json()["key_id"] == kid
+        finally:
+            app.dependency_overrides.pop(ha_mod.get_current_user, None)
+            app.dependency_overrides.pop(get_current_team, None)
             gen.close()
 
 

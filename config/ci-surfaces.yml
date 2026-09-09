@@ -7,6 +7,11 @@ surfaces:
   - test_acl_graph_users.py   # C4 #2113: per-graph FalkorDB ACL layer (docker-lane; skipif no URI)
   - test_battery_corpus_v11.py
   - test_battery_ep_outcome.py
+  - test_battery_executor_v1.py
+  - test_battery_executor_v2.py
+  - test_battery_exposure_liveness.py
+  - test_battery_exposure_oracle.py
+  - test_battery_exposure_usage_cap.py
   - test_battery_judge_declarative.py
   - test_battery_lane_matrix.py
   - test_battery_loader_fidelity.py
@@ -16,6 +21,9 @@ surfaces:
   - test_battery_probe_measured.py
   - test_battery_provenance.py
   - test_battery_r1_seed.py
+  - test_battery_real_deadline.py
+  - test_battery_realism.py
+  - test_battery_realism_run.py
   - test_battery_report_writers.py
   - test_battery_rubric_authoring.py
   - test_battery_schema_v11.py
@@ -188,6 +196,7 @@ surfaces:
   - test_battery_run.py
   - test_battery_runner.py
   - test_battery_setup.py
+  - test_battery_real_run_gate.py  # #2633 real-run vendor-key pre-flight gate (hermetic)
   core:
   - test_about_edges.py
   - test_about_event_untangle.py
@@ -255,6 +264,7 @@ surfaces:
   - test_epic903_warmstart.py
   - test_eval_metrics.py
   - test_eval_report_integrity.py
+  - test_eval_ingest_cache.py  # #2080 ingest-cache seam (hermetic + docker-lane legs, mirrors test_integrity_gate_docker)
   - test_event_log.py
   - test_event_provenance.py
   - test_event_store.py
@@ -363,7 +373,11 @@ surfaces:
   - test_relationships_bounded.py
   - test_remove_context_migration.py
   - test_render.py
+  - test_coverage_loop.py  # #2567: evidence-completeness loop E2E (C3-1, docker-lane)
+  - test_coverage_loop_rules.py  # #2567: evidence-completeness loop hermetic rules
   - test_entity_key_expansion.py  # #2518: entity/fact-augmented key expansion (C2, docker-lane)
+  - test_aggregative_facet_coverage.py  # #2521: aggregative-intent + facet coverage check (C5, docker-lane)
+  - test_aggregative_intent.py          # #2521: hermetic detector + coverage-math table (C5)
   - test_retrieval.py
   - test_review_connections.py
   - test_round_trip_parity.py
@@ -374,6 +388,7 @@ surfaces:
   - test_search_engine_nameerror.py
   - test_search_promoted_fields.py
   - test_search_sessions_temporal.py
+  - test_secret_store.py   # #2318: managed backup-key store + rotation (embedded)
   - test_security.py
   - test_semantic_extractor.py
   - test_skip_guard.py
@@ -505,6 +520,7 @@ surfaces:
   - test_config.py
   - test_cross_lens.py
   - test_crypto.py
+  - test_eval_ingest_cache.py  # #2080 ingest-cache seam (docker-lane leg — the retriever/namespace surface, mirrors test_retrieval.py)
   - test_operator_dedup_parity.py
   - test_postmerge_dedup.py
   - test_ci_timing.py
@@ -517,7 +533,13 @@ surfaces:
   - test_namespace_uri_mode.py
   - test_reader.py
   - test_reader_abstention_calibration.py
+  - test_coverage_loop.py  # #2567 (docker-lane leg, mirrors test_retrieval.py)
+  - test_coverage_loop_rules.py  # #2567 (hermetic rules leg)
   - test_entity_key_expansion.py  # #2518 (docker-lane leg, mirrors test_retrieval.py)
+  - test_aggregative_facet_coverage.py  # #2521 (docker-lane leg, mirrors test_retrieval.py)
+  - test_assembly_fixtures.py  # #2165 Task 1: connected-assembly fixture substrate + R16(b) calibration (docker-lane)
+  - test_assembly_pure.py  # #2165 Task 2: pure shape classifier + subject extraction (no-DB unit)
+  - test_assembly_sdk.py  # #2165 Task 6: ask() connected-assembly branch + ask_assembled + byte goldens (docker-lane)
   - test_retrieval.py
   - test_sdk.py
   - test_sdk_dedup.py
@@ -553,6 +575,7 @@ surfaces:
   - eval/retrieval/test_oracle.py
   - eval/retrieval/test_run.py
   - longmem_eval/test_vector_arm.py
+  - longmem_eval/test_assembly_arm.py  # #2165 Task 7: v2-lane eval arm A/A-widened/B admission + R9 geometry (docker-lane)
   - eval/write_path/test_write_path_corpus.py
   - eval/write_path/test_write_path_grading.py
   - eval/write_path/test_write_path_runner.py
