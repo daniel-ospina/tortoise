@@ -8410,14 +8410,16 @@ async def list_sessions(request: Request, team: dict = Depends(get_current_team_
     # row set never touches the CP). Empty rows (graph fail-soft / no
     # sessions) pass an empty list → no fetch → [] stay 200.
     # #2664 code-review P2: PII over-read via key-auth — graph-bound keys
-    # (tk_) must NOT resolve member emails. Only session/auth callers
-    # (team has session_user_id) get the email lookup; key-auth callers
-    # fall back to raw actor_user_id (fail-soft to id).
-    if _SESSION_USER_ID_KEY in team:
+    # (tk_, team["graph_id"] set) must NOT resolve member emails (least-
+    # privilege per-graph credentials). Session JWT + team-wide keys
+    # (graph_id None) DO resolve the display-name lookup; graph-bound key
+    # callers fall back to raw actor_user_id (fail-soft to id).
+    if not team.get("graph_id"):
         actor_ids = [r[4] for r in rows if r[4]]
         members_by_id = await asyncio.to_thread(
             _actor_display_map, actor_ids, team["team_id"]) if actor_ids else {}
     else:
+        # graph-bound key (tk_) — least-privilege: no member-email read
         members_by_id = {}
     return {"sessions": [
         {

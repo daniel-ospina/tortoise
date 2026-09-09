@@ -3993,7 +3993,6 @@ def test_mcp_capture_no_actor_leaves_session_unattributed(tmp_path, monkeypatch)
     self-host-shaped captures have no server-resolved human) → the Session
     node is written WITHOUT actor_user_id (byte-identical legacy shape — no
     clause fires, no property present)."""
-    from tortoise.sdk import _current_actor_user_id
     with _mcp_team_context(tmp_path, monkeypatch):
         from tortoise.mcp_server import tortoise_session_capture
         result = tortoise_session_capture(
@@ -4013,7 +4012,7 @@ def test_sdk_mirror_capture_stamps_actor_from_contextvar(tmp_path, monkeypatch):
     mirror call) — actor present → Session.actor_user_id stamped;
     re-POST by another actor keeps the first writer."""
     monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
-    from tortoise.sdk import _current_actor_user_id, TortoiseSDK
+    from tortoise.sdk import TortoiseSDK, _current_actor_user_id
     sdk = TortoiseSDK(db_path=str(tmp_path / "mirror.db"))
     tok = _current_actor_user_id.set(_ACTOR_A)
     try:

@@ -4631,7 +4631,7 @@ class TestSessionActorStamp2600:
             keyB = sdk.apikey_create(tid, _2600_UUID_B)
             hA = {"Authorization": f"Bearer {keyA['api_key']}"}
             hB = {"Authorization": f"Bearer {keyB['api_key']}"}
-            for h, sid, expect in ((hA, "s-stamp-2600-ba", _2600_UUID_A),
+            for h, sid, _expect in ((hA, "s-stamp-2600-ba", _2600_UUID_A),
                                    (hB, "s-stamp-2600-bb", _2600_UUID_B)):
                 r = tc.post("/v1/sessions", headers=h, json={
                     "conversation": [{"role": "user", "content": "member capture."},
@@ -7215,7 +7215,6 @@ class TestSessionActorReadPath2600:
         /v1/sessions; assert id/created_at/turns/extracted/actor_user_id/
         harness all equal the graph on the SAME row dict (catches an
         off-by-N RETURN reshuffle) + actor_display == raw id (registry)."""
-        import tortoise.hosted_api as ha_mod
         gen = self._setup(tmp_path, "vreg")
         sdk, tid, tc, proj = next(gen)
         try:
@@ -7277,7 +7276,7 @@ class TestSessionActorReadPath2600:
 
     def test_filter_malformed_422(self, tmp_path):
         gen = self._setup(tmp_path, "badf")
-        sdk, tid, tc, proj = next(gen)
+        sdk, tid, tc, _proj = next(gen)
         try:
             key = sdk.apikey_create(tid, _2600_UUID_A)
             h = {"Authorization": f"Bearer {key['api_key']}"}
@@ -7398,7 +7397,7 @@ class TestSessionActorReadPath2600:
         label-scan+sort). Literal-inlined predicate (in-repo EXPLAIN
         convention — test_indexes.py)."""
         gen = self._setup(tmp_path, "explain")
-        sdk, tid, tc, proj = next(gen)
+        _sdk, _tid, _tc, proj = next(gen)
         try:
             self._seed_session(proj, "s-rd-exp-a", actor=_2600_UUID_A,
                                created_at="2026-09-09T12:00:00.000000+00:00")
@@ -7423,6 +7422,64 @@ class TestSessionActorReadPath2600:
                 "ORDER BY s.created_at DESC LIMIT 50"))
             assert "Node By Index Scan" in real, real
             assert "All Node Scan" not in real, real
+        finally:
+            gen.close()
+
+    def test_graph_bound_key_never_resolves_member_email(self, tmp_path,
+                                                       monkeypatch):
+        """#2664 code-review P2 #3: graph-bound keys (team dict carries
+        graph_id) must NOT resolve member emails (PII over-read) —
+        list_sessions falls back to the raw actor_user_id and never fires
+        _actor_display_map. The registry lane has no email seam, so the
+        spy call-count is the discriminator: team-wide key → 1 fetch,
+        graph-bound key → 0."""
+        import tortoise.hosted_api as ha_mod
+        from tortoise.auth import hash_api_key
+        gen = self._setup(tmp_path, "gateg")
+        sdk, tid, tc, proj = next(gen)
+        try:
+            # seed one attributed session in the team default graph
+            self._seed_session(proj, "s-gate-2600", actor=_2600_UUID_A,
+                               created_at="2026-09-09T12:00:00.000000+00:00")
+            # graph-bound key: registry APIKey with graph_id set + a Graph
+            # node whose namespace == the team default graph (bound default).
+            gid = "g_gate2600000000000000000000000"
+            gtoken = "tk_gatebound_26000000001"
+            sdk._get_registry().query(
+                "CREATE (k:APIKey {id:$kid, team_id:$tid, key_hash:$kh, "
+                "key_prefix:$kp, created_by:$cb, graph_id:$gid, "
+                "scopes:['graphs:read'], created_via:'provisioned'})",
+                params={"kid": "k-gate2600", "tid": tid,
+                        "kh": hash_api_key(gtoken),
+                        "kp": gtoken[:10], "cb": _2600_UUID_A,
+                        "gid": gid})
+            sdk._get_registry().query(
+                "CREATE (g:Graph {id:$gid, team_id:$tid, name:'default', "
+                "kind:'default', namespace:$ns})",
+                params={"gid": gid, "tid": tid,
+                        "ns": f"team_{tid}"})
+            calls: list[list[str]] = []
+            _orig = ha_mod._actor_display_map
+
+            def _spy(actor_ids, team_id_arg):
+                calls.append(list(actor_ids))
+                return _orig(actor_ids, team_id_arg)
+
+            monkeypatch.setattr(ha_mod, "_actor_display_map", _spy)
+            # graph-bound key → list_sessions must NOT fire the email lookup
+            hg = {"Authorization": f"Bearer {gtoken}"}
+            rg = tc.get("/v1/sessions", headers=hg)
+            assert rg.status_code == 200, rg.text[:300]
+            row = rg.json()["sessions"][0]
+            assert row["actor_user_id"] == _2600_UUID_A, row
+            assert row["actor_display"] == _2600_UUID_A, row  # raw-id fallback
+            assert calls == [], f"graph-bound key must NOT resolve emails: {calls}"
+            # team-wide key (same team graph) → the email lookup fires once
+            key = sdk.apikey_create(tid, _2600_UUID_A)
+            ht = {"Authorization": f"Bearer {key['api_key']}"}
+            rt = tc.get("/v1/sessions", headers=ht)
+            assert rt.status_code == 200, rt.text[:300]
+            assert len(calls) == 1, f"team-wide key should fire ONE fetch, got {calls}"
         finally:
             gen.close()
 
@@ -7517,6 +7574,7 @@ class TestRestAttributionE2E2600:
     def _graph_point_added(self, team_id: str):
         """Read :GraphEvent PointAdded payloads from the team data graph."""
         import json
+
         import tortoise.hosted_api as ha_mod
         sdk = ha_mod._make_sdk(namespace=team_id)
         rows = sdk._get_proj().g.query(
@@ -7575,11 +7633,12 @@ class TestRestAttributionE2E2600:
         REST create_point → GraphEvent PointAdded actor == uuidA; forged
         body claim silently dropped. Real tt_ key auth (no DI override)."""
         import uuid as _uuid
+
         import tortoise.hosted_api as ha_mod
         import tortoise.supabase_control as sc_mod
         from tests.fake_control_plane import FakeControlPlane
-        from tortoise.auth import lookup_hash as _lh
         from tests.test_supabase_control import FREE_TEAM, _membership_row
+        from tortoise.auth import lookup_hash as _lh
 
         db_path = os.path.join(tmp_path, "e24b1.db")
         _orig = _patch_tortoise_sdk_init(db_path)
@@ -7748,7 +7807,6 @@ class TestE2E5TwoActorDedup2600:
             r2 = tc.post("/v1/sessions", headers=hB, json={
                 "conversation": conv, "session_id": "e25-2600-b"})
             assert r2.status_code == 200, r2.text[:300]
-            b2 = r2.json()
             # per-session actor (deterministic, unconditional)
             assert self._session_actor(tid, "e25-2600-a") == _2600_UUID_A
             assert self._session_actor(tid, "e25-2600-b") == _2600_UUID_B
@@ -7797,6 +7855,7 @@ class TestE2E10ReadPathDisplaySupabase2600:
         seed_sessions(sdk) hook (so each test controls Session actor
         shapes). Returns (tid, token, tc)."""
         import uuid as _uuid
+
         import tortoise.hosted_api as ha_mod
         import tortoise.supabase_control as sc_mod
         from tests.fake_control_plane import FakeControlPlane
