@@ -143,6 +143,12 @@ ROUTED_SELECT_GRAPH_SITES: dict[str, dict[str, str]] = {
         '"team_team_x_g_c1"': "endpoint-constrained",  # custom drill seed write
         '"team_team_x_g_x"': "endpoint-constrained",   # custom drill seed write
     },
+    "test_eval_ingest_cache.py": {
+        # eval-ingest-cache cleanup deletes the test's OWN ephemeral
+        # team_<namespace> graph (post-assert teardown) — production-shape
+        # write to a per-test namespace, mirroring the onboarding/DR sites.
+        'f"team_{namespace}"': "endpoint-constrained",
+    },
     "test_writer_inventory.py": {
         '"team_myapp"': "endpoint-constrained",  # seed write — backup dumps teams.graph_name
         # #1903 graph_name-parity sites: raw select_graph(f"team_{team_id}")
