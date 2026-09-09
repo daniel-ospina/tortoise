@@ -486,6 +486,19 @@ function SettingsTab(props) {
                         verticalAlign: 'bottom',
                       }} title={meta.actor}>{meta.actor.includes('@') ? `by ${meta.actor}` : meta.actor}</span>
                     )}
+                    {/* #2599: machine_id + model — client-claimed informational
+                        fields; absent renders nothing (legacy / no-hook). */}
+                    {meta.machineId && meta.model && (
+                      <span className="dim small" style={{ marginLeft: '0.4rem' }} title={`${meta.machineId} · ${meta.model}`}>
+                        · {meta.machineId} · {meta.model}
+                      </span>
+                    )}
+                    {meta.machineId && !meta.model && (
+                      <span className="dim small" style={{ marginLeft: '0.4rem' }} title={meta.machineId}>· {meta.machineId}</span>
+                    )}
+                    {!meta.machineId && meta.model && (
+                      <span className="dim small" style={{ marginLeft: '0.4rem' }} title={meta.model}>· {meta.model}</span>
+                    )}
                     <code className="dim small" style={{ marginLeft: 'auto' }}>{sid.slice(0, 12)}…</code>
                     {/* #2002 (W6): per-row View (expands the transcript
                         panel below) + Delete (confirm → DELETE
@@ -568,6 +581,19 @@ function SessionTranscriptPanel({ sessionId, detail, loading, error, onRetry, on
         {/* #2600: same actor normalization as the row (display or raw id;
             legacy null renders blank, never a crash). */}
         {tm.actor && <span style={{ marginLeft: '0.5rem' }}>{tm.actor.includes('@') ? `by ${tm.actor}` : tm.actor}</span>}
+        {/* #2599: machine_id + model — client-claimed informational; absent
+            renders nothing (legacy / no-hook). */}
+        {tm.machineId && tm.model && (
+          <span className="dim small" style={{ marginLeft: '0.4rem' }} title={`${tm.machineId} · ${tm.model}`}>
+            · {tm.machineId} · {tm.model}
+          </span>
+        )}
+        {tm.machineId && !tm.model && (
+          <span className="dim small" style={{ marginLeft: '0.4rem' }} title={tm.machineId}>· {tm.machineId}</span>
+        )}
+        {!tm.machineId && tm.model && (
+          <span className="dim small" style={{ marginLeft: '0.4rem' }} title={tm.model}>· {tm.model}</span>
+        )}
       </div>
       {tm.turns.length === 0 ? (
         <p className="dim small">No conversation turns stored for this session.</p>

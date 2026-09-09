@@ -2950,7 +2950,9 @@ def tortoise_onboarding_github_status() -> dict:
 
 def tortoise_session_capture(conversation: list[dict],
                              harness: str | None = None,
-                             session_id: str | None = None) -> dict:
+                             session_id: str | None = None,
+                             machine_id: str | None = None,
+                             model: str | None = None) -> dict:
     """File an agent session into the graph (T3 workflows prompt surface).
 
     Server-enforced gates (identical to POST /v1/sessions — VERIFIED order,
@@ -3008,7 +3010,8 @@ def tortoise_session_capture(conversation: list[dict],
         team["max_points"] = int(limits["max_points"])
     try:
         body = SessionRequest(conversation=conversation, harness=harness,
-                              session_id=session_id)
+                              session_id=session_id,
+                              machine_id=machine_id, model=model)
     except Exception as e:
         # Pydantic 422-equivalent (invalid harness / conversation shape).
         return {"error": f"invalid capture payload: {e}", "status": 422}

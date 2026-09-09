@@ -19,6 +19,9 @@ export function removeSession(sessions, sessionId) {
 // #2600: actor = the server-resolved display (membership email) when the
 // seam provides it, else the raw actor_user_id; legacy null → '' (blank
 // caption, never a crash).
+// #2599: machine_id + model are client-claimed informational fields
+// (forgeable, never security-trusted); absent → '' (blank display,
+// "—" in the renderer).
 export function sessionRowMeta(session) {
   const s = session || {}
   return {
@@ -26,6 +29,8 @@ export function sessionRowMeta(session) {
     extracted: Number.isFinite(s.extracted) ? s.extracted : 0,
     id: s.id || '',
     actor: (s.actor_display || '').trim() || (s.actor_user_id || ''),
+    machineId: (s.machine_id || '').trim() || '',
+    model: (s.model || '').trim() || '',
   }
 }
 
@@ -49,7 +54,11 @@ export function transcriptModel(detail) {
     },
     // #2600: same actor normalization as the list row (display when
     // present, else raw id; legacy null → '' — blank header, no crash).
+    // #2599: machine_id + model — client-claimed informational;
+    // absent → '' (blank display).
     actor: (d.actor_display || '').trim() || (d.actor_user_id || ''),
+    machineId: (d.machine_id || '').trim() || '',
+    model: (d.model || '').trim() || '',
   }
 }
 
