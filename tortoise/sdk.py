@@ -854,6 +854,11 @@ def _sanitize_props(props: dict, *, reject_id: bool = False) -> dict:
     node identity / mint tenant-chosen Document ids. Both are rejected with a
     clear ValueError (fail-closed). ``api.add_document``'s explicit
     ``source_path`` parameter is UNTOUCHED — this only guards props passthrough.
+
+    #2600: reserved actor keys (``actor_user_id``, ``owner``,
+    ``initiated_by``, ``agent_id``) are STRIP-AND-IGNORE — never a 4xx,
+    server owns the actor. Popped with a warning after the ``dict(props)``
+    copy so the caller's dict is never mutated.
     """
     props = dict(props)
     # #2600: reserved actor keys are STRIP-AND-IGNORE (never a 4xx — the
@@ -864,7 +869,7 @@ def _sanitize_props(props: dict, *, reject_id: bool = False) -> dict:
     # it only appears as the server-side EventAPI construction arg).
     for _reserved in _RESERVED_ACTOR_PROPS:
         if _reserved in props:
-            logging.getLogger("tortoise.api").warning(
+            _logger.warning(
                 "ignoring client-supplied %r on tenant props", _reserved)
             props.pop(_reserved)
     for key in ("sourcePath", "source_path"):
@@ -2291,10 +2296,10 @@ class TortoiseSDK:
         # when a server-resolved human is present; a rebuild replay restores
         # the ORIGINAL payload dict, whose own actor_user_id — if any — was
         # caller-authored, never forged here). The actor is NOT added to any
-        # replay skip-set.
+        # replay skip-set. The merge is AFTER event.update(extra) below so
+        # the server-resolved actor is always the last write — matching the
+        # graph branch order (code-review #4, PR #2664).
         _jsonl_actor = _current_actor_user_id.get()
-        if _jsonl_actor is not None:
-            event["actor_user_id"] = _jsonl_actor
         if point is not None:
             # Strip embedding — it is recomputed on replay by
             # _upsert_point_props (vecf32 serialization is fragile).
@@ -2314,6 +2319,10 @@ class TortoiseSDK:
         if id is not None:
             event["id"] = id
         event.update(extra)
+        # #2600: server-resolved actor as the LAST write on the envelope
+        # (after event.update(extra)), matching the graph branch order.
+        if _jsonl_actor is not None:
+            event["actor_user_id"] = _jsonl_actor
         try:
             log.append(event)
         except Exception as exc:

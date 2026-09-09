@@ -8374,6 +8374,13 @@ async def list_sessions(request: Request, team: dict = Depends(get_current_team_
             raise HTTPException(
                 status_code=422,
                 detail="actor_user_id must be a UUID")
+        # #2600 code-review P2: canonicalize non-hyphenated UUID forms
+        # (32-hex, braced) to canonical 8-4-4-4-12 before the graph query.
+        # Without this, a valid UUID in non-canonical form passes the shape
+        # gate but silently returns [] 200 (graph equality is verbatim text
+        # against stored canonical hyphenated actor_user_id).
+        import uuid as _canon_uuid  # noqa: PLC0415
+        actor_filter = str(_canon_uuid.UUID(actor_filter))
     sdk = _data_sdk(team)
     try:
         # #2600: actor filter rides a MATCH-level WHERE (before the OPTIONAL
@@ -8402,9 +8409,16 @@ async def list_sessions(request: Request, team: dict = Depends(get_current_team_
     # row); the any-actor gate lives in _actor_display_map (an all-legacy
     # row set never touches the CP). Empty rows (graph fail-soft / no
     # sessions) pass an empty list → no fetch → [] stay 200.
-    actor_ids = [r[4] for r in rows if r[4]]
-    members_by_id = await asyncio.to_thread(
-        _actor_display_map, actor_ids, team["team_id"]) if actor_ids else {}
+    # #2664 code-review P2: PII over-read via key-auth — graph-bound keys
+    # (tk_) must NOT resolve member emails. Only session/auth callers
+    # (team has session_user_id) get the email lookup; key-auth callers
+    # fall back to raw actor_user_id (fail-soft to id).
+    if _SESSION_USER_ID_KEY in team:
+        actor_ids = [r[4] for r in rows if r[4]]
+        members_by_id = await asyncio.to_thread(
+            _actor_display_map, actor_ids, team["team_id"]) if actor_ids else {}
+    else:
+        members_by_id = {}
     return {"sessions": [
         {
             "id": r[0], "created_at": r[1], "turns": r[2], "extracted": r[3],

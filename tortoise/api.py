@@ -51,7 +51,8 @@ class EventAPI:
             **payload,
         }
         # #2600: optional human actor (default None = extraction lanes
-        # byte-identical). Only the EventAPI constructor can name it — no
+        # byte-identical). `actor` is a keyword parameter on `_emit` — the
+        # SDK emitter provides it; EventAPI callers never touch it. No
         # caller change required for existing lanes.
         if actor is not None:
             event["actor_user_id"] = actor

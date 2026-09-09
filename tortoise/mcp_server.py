@@ -19,7 +19,8 @@ from pydantic import ValidationError as PydanticValidationError
 from tortoise.auth import is_dev_mode as _is_dev_mode
 from tortoise.config import is_db_uri as _is_db_uri
 from tortoise.sdk import (TortoiseSDK, INGEST_GRANULARITIES,
-                          INGEST_PROMOTION_POLICIES, _first_non_draft_status)
+                          INGEST_PROMOTION_POLICIES, _first_non_draft_status,
+                          _RESERVED_ACTOR_PROPS)
 from tortoise.schemas import (  # one vocabulary, no duplicated boundary literals (P2-14)
     CODE_IN_FLIGHT_LIMIT,
     CODE_QUOTA_EXCEEDED,
@@ -716,11 +717,10 @@ _SERVER_MANAGED_PROPS = frozenset({
 
 
 # #2600: client-supplied actor claims are STRIP-AND-IGNORE (never a 4xx —
-# the server owns attribution). Same frozenset literal as the SDK-side
-# _RESERVED_ACTOR_PROPS (tortoise/sdk.py) — keep in sync. authoredBy is
-# deliberately NOT here (pre-existing client author-label residual).
-_RESERVED_ACTOR_PROPS = frozenset(
-    {"actor_user_id", "owner", "initiated_by", "agent_id"})
+# the server owns attribution). Imported from tortoise/sdk.py — single
+# source of truth (#2664 code-review P2: no duplicate frozenset drift).
+# authoredBy is deliberately NOT here (pre-existing client author-label
+# residual).
 
 
 def _reject_server_managed_props(props: dict | None) -> str | None:
@@ -730,10 +730,20 @@ def _reject_server_managed_props(props: dict | None) -> str | None:
     # this single choke point (11 tool call sites) so no per-tool strip is
     # missed. Guard None (optional props= kwargs on entity tools call with
     # no props dict).
+    # In-place pop is the contract here: call sites ALWAYS pass a fresh
+    # per-request dict (`props = _parse(props)` above each call — never a
+    # shared/cached object), and the function returns only an error string,
+    # so the stripped dict MUST be the caller's own for the strip to reach
+    # storage. (Unlike sdk._sanitize_props, which copies and returns the
+    # cleaned dict.) A warning is logged when a client-supplied actor key is
+    # stripped, matching the SDK backstop's log evidence.
     if not props:
         return None
     for k in _RESERVED_ACTOR_PROPS:
-        props.pop(k, None)
+        if k in props:
+            _log.warning(
+                "ignoring client-supplied %r at MCP boundary", k)
+            props.pop(k)
     bad = _SERVER_MANAGED_PROPS & set(props or {})
     if not bad:
         return None

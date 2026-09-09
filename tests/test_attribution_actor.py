@@ -383,7 +383,7 @@ class TestStripAndIgnoreActorClaims:
     def test_sanitize_strip_emits_warning(self, caplog):
         import logging
         from tortoise.sdk import _sanitize_props
-        with caplog.at_level(logging.WARNING, logger="tortoise.api"):
+        with caplog.at_level(logging.WARNING, logger="tortoise.sdk"):
             _sanitize_props({"actor_user_id": "forged", "content": "z"})
         hits = [r.getMessage() for r in caplog.records
                 if "ignoring client-supplied" in r.getMessage()]

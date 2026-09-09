@@ -349,19 +349,21 @@ class TeamResolutionMiddleware(BaseHTTPMiddleware):
                     limits = resolve_team_limits(team["team_id"])
                 except Exception:
                     limits = {"team_id": team["team_id"]}
+            # #2600 (#2664, review #8): alias actor_user_id before caching
+            # so the cache always holds an already-aliased dict — never
+            # mutates a cached object on a warm hit.
+            from tortoise.sdk import _alias_actor_user_id
+            _alias_actor_user_id(team)
             if len(self._cache) >= self._max_cache:
                 self._cache.popitem(last=False)  # evict LRU
             self._cache[token] = (now, team, limits)
         _current_team_id.set(team["team_id"])
         _current_team_limits.set(limits)
-        # #2600: canonical actor_user_id alias + ContextVar — runs in this
-        # converged block (AFTER the cache-hit/cache-miss if/else) so warm
-        # 60s-cache hits alias identically (the cached dict keeps the RAW
-        # user_id/created_by the first resolution stored). UUID-gated — a
-        # non-UUID creator ("api"/st_/email) aliases to ABSENT → None
-        # (unattributed, never a fabricated actor).
-        from tortoise.sdk import _alias_actor_user_id, _current_actor_user_id
-        team = _alias_actor_user_id(team)
+        # #2600: canonical actor_user_id ContextVar — the team dict is
+        # already aliased before it was cached (cache-miss) or is carrying
+        # actor_user_id from the cached entry (cache-hit); this line reads
+        # whichever is present (None → unattributed).
+        from tortoise.sdk import _current_actor_user_id
         _current_actor_user_id.set(team.get("actor_user_id"))
         # C5 #2114 (D-C5-4): graph scope rides the resolution — the SAME C1
         # tenancy fields REST get_current_team carries. Session/legacy/OAuth
