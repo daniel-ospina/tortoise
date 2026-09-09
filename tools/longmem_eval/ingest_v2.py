@@ -53,6 +53,36 @@ from .ingest import (SESSION_TRANSCRIPT_KIND, EXTRACTION_POINT_KIND,  # noqa: E4
                      _existing_point_ids, _session_chunks)
 
 
+def _event_about_names(ev: dict) -> list[str]:
+    """#2165 (R8): the event's plural ``about_entities`` as clean name
+    strings. A bare-string (or non-list) ``about_entities`` is truthy and
+    would otherwise be iterated as CHARACTERS — each single char then
+    becomes an UNWIND name that silently matches nothing. Guarded to list
+    only; non-str entries skipped (mirrors the point loop's E7 filter)."""
+    raw = ev.get("about_entities")
+    if not isinstance(raw, list):
+        return []
+    return [str(n) for n in raw if isinstance(n, str) and n.strip()]
+
+
+def _wire_event_about(proj, qid: str, si: int, eid: str,
+                      names: list[str]) -> None:
+    """#2165 (R8): batched (Event)-[:aboutObject]->(Object) MERGE keyed on
+    the event dedup triple (lme_event_id + question + session). Idempotent
+    (MERGE), best-effort row semantics (an unmatched name drops silently —
+    no edge, no phantom Object, no raise). Callable on BOTH the fresh and
+    the dup/resume path."""
+    if not names:
+        return
+    proj.g.query(
+        "UNWIND $names AS name "
+        "MATCH (e:Event {lme_event_id:$eid, "
+        "lme_question_id:$qid, lme_session_index:$si}), "
+        "(o:Object {name:name}) "
+        "MERGE (e)-[:aboutObject]->(o)",
+        params={"eid": eid, "qid": qid, "si": si, "names": names})
+
+
 def _point_status(proj, pid: str) -> str:
     """The point's persisted status — '' when the point does not exist.
     (E7 D6: supersession endpoint statuses now ride the batch probe — this
@@ -280,15 +310,33 @@ def _write_payload(sdk: TortoiseSDK, payload: dict, *, sid: str, qid: str,
                 "RETURN count(*) LIMIT 1",
                 params={"eid": eid, "qid": qid, "si": si},
             ).result_set
+            # #2165 (R8): resolve the event's plural ``about_entities`` to
+            # (Event)-[:aboutObject]->(Object) edges. ``create_event`` wires
+            # only SINGULAR aboutSubject/aboutObject/aboutPoint/aboutDocument
+            # props; a PLURAL list would land as an inert node property and
+            # create NO edges — so resolve each name to an edge here, keyed
+            # on the dedup triple (lme_event_id + question + session — the
+            # same idempotency key the probe above uses), mirroring the
+            # point loop's E7 batched MERGE. Runs on BOTH the fresh path and
+            # the dup/resume path below (the MERGE is idempotent; a retried
+            # payload whose event was created in a prior attempt that then
+            # failed between create_event and the MERGE must not permanently
+            # orphan an edge-less Event — the exact gap R8 closes).
+            ev_names = _event_about_names(ev)
             if dup and dup[0][0]:
-                logger.info("v2 ingest event %r already present — skipping",
-                            eid)
+                # idempotent self-heal: the node already exists (pre-R8
+                # graphs, or a mid-payload retry) — wire any missing edges,
+                # never re-create or double-count
+                _wire_event_about(proj, qid, si, eid, ev_names)
+                logger.info("v2 ingest event %r already present — "
+                            "edges self-healed", eid)
                 continue
             sdk.create_event(
                 event_name, event_kind,
                 sessionId=sid, lme_question_id=qid, lme_session_index=si,
                 is_episodic=True, **event_props,
             )
+            _wire_event_about(proj, qid, si, eid, ev_names)
             stats["events"] += 1
         except Exception as ex:  # noqa: BLE001, RUF100
             # #1786 (R1): see the entity catch — re-raise-when-retryable.

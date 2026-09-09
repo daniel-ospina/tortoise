@@ -13,6 +13,8 @@ import os
 
 os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")
 
+import contextlib
+
 import pytest
 
 from tortoise.mcp_server import create_http_app
@@ -355,3 +357,119 @@ class TestAskExposureGating:
             tc = make_client(auth_mode="none")
             names = self._list_tool_names(tc)
             assert "tortoise_ask" not in names, flag
+
+
+class TestAskConnectedAssemblyExposure:
+    """#2165 Task 6: MCP tortoise_ask exposure inherits the connected-
+    assembly branch via the in-process sdk.ask() — flags ON + fired shape →
+    ASSEMBLED evidence in the tool result; a forced assembler-stage raise
+    maps to the retrieval-unavailable code (never a raw 500/traceback).
+
+    auth_mode="none" sets _current_team_id="selfhost" → the ask tool opens
+    TortoiseSDK(namespace="selfhost") (graph team_selfhost on the env URI),
+    so the fixture is seeded INTO that namespace graph.
+
+    Docker-gated at CALL time (this module is embedded by default in the
+    carve-out CI lane — no docker probe at import)."""
+
+    _call_tool = TestAskExposureGating._call_tool
+
+    @staticmethod
+    def _result_text(body):
+        return "".join(c.get("text", "") for c in
+                       body.get("result", {}).get("content", [])
+                       if isinstance(c, dict))
+
+    def _run(self, monkeypatch, question, *, poison=False):
+        import json as _json
+        import uuid
+
+        import tortoise.assembly as amod
+        import tortoise.embeddings as _emb
+        import tortoise.sdk as sdk_mod
+        from tortoise.sdk import TortoiseSDK
+        base = os.environ.get(
+            "TORTOISE_DB_URI",
+            "docker://:falkordb@localhost:6379/tortoise_test_matrix"
+        ).rstrip("/")
+        uri = f"{base}_{uuid.uuid4().hex[:10]}"
+        monkeypatch.setenv("TORTOISE_DB_URI", uri)
+        _emb.compute_embedding = staticmethod(lambda content: None)
+        _emb.EmbeddingModel.get = staticmethod(lambda: None)
+        # probe FTS on the server first (skip when docker unavailable)
+        from tests.test_ask_sdk import FakeReader
+        from tortoise.sdk import TortoiseSDK as _PSDK
+        try:
+            ps = _PSDK()
+            ps.create_point("statement", "probe zzqfulltext 7f3a9c",
+                            id="pProbe", session_id="sess-p",
+                            is_episodic=True, status="draft")
+            hits = ps.tortoise_fts_query("zzqfulltext 7f3a9c",
+                                         entity_type="point", limit=2)
+            ok = bool(hits and hits[0].get("id") == "pProbe")
+            with contextlib.suppress(Exception):
+                ps._get_proj().db.select_graph(uri.rsplit("/", 1)[-1]).delete()
+            ps.close()
+        except Exception:
+            ok = False
+        if not ok:
+            pytest.skip("Live FalkorDB with fulltext not available")
+        # seed into the SELFHOST namespace graph (what the none-mode ask
+        # tool reads)
+        import tests._assembly_graph as ag
+        s = TortoiseSDK(namespace="selfhost")
+        try:
+            ag.build_base_graph(s)
+            # hermetic reader + assembly flag
+            monkeypatch.setenv("TORTOISE_ASK_CONNECTED_ASSEMBLY", "1")
+            monkeypatch.setattr(sdk_mod, "_default_ask_reader_factory",
+                                lambda: FakeReader(reply="GOLD", tokens_out=6))
+            if poison:
+                def _boom(question, *a, **k):
+                    raise RuntimeError("stage exploded")
+                monkeypatch.setattr(amod, "classify_question", _boom)
+            from tortoise.mcp_server import create_http_app
+            app = create_http_app(
+                allowed_origins=["http://localhost:8000"],
+                auth_mode="none", tool_group="ask")
+            with _mounted_test_client(app) as tc:
+                r = _mcp_post(tc, {
+                    "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                    "params": {"name": "tortoise_ask",
+                               "arguments": {"question": question,
+                                             "question_date": "2026-09-10"}}},
+                    auth_header=None)
+            data_line = next(
+                (ln[6:] for ln in r.text.splitlines()
+                 if ln.startswith("data: ")), r.text)
+            return _json.loads(data_line)
+        finally:
+            with contextlib.suppress(Exception):
+                s._get_proj().db.select_graph("team_selfhost").delete()
+            with contextlib.suppress(Exception):
+                s.close()
+
+    def test_mcp_ask_fired_assembled_evidence(self, monkeypatch):
+        body = self._run(
+            monkeypatch, "what is the current status of the couch?")
+        text = self._result_text(body)
+        assert "STATE (couch): superseded by sofa on 2026-09-01" in text, text
+        assert "SUPERSEDED BY: sofa" in text, text
+
+    def test_mcp_ask_stage_raise_maps_retrieval_unavailable(self, monkeypatch):
+        body = self._run(
+            monkeypatch, "what is the current status of the couch?",
+            poison=True)
+        text = self._result_text(body)
+        assert "retrieval" in text.lower(), text
+        assert "Traceback" not in text and "500" not in text, text
+
+
+def _lifespan_for(app):
+    from contextlib import asynccontextmanager
+
+    @asynccontextmanager
+    async def _lifespan(parent_app):
+        async with app.lifespan(app):
+            yield
+    return _lifespan

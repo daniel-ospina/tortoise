@@ -128,7 +128,6 @@ a { color: var(--accent); }
 
 /* Keys */
 .row { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
-.new-key { background: rgba(74,222,128,0.08); border: 1px solid rgba(74,222,128,0.3); border-radius: 10px; padding: 14px; margin-bottom: 16px; display: flex; flex-direction: column; gap: 8px; align-items: flex-start; }
 .key-value { font-size: 13px; word-break: break-all; }
 
 /* Tables */
@@ -163,7 +162,6 @@ button.tier-badge:disabled { opacity: 0.6; cursor: wait; }
 .inline-form { display: flex; gap: 8px; align-items: center; }
 /* #2426: the API-Keys-tab create form grew an expiry <select> (+ Custom
    date input) — wrap on narrow viewports instead of overflowing the row */
-.inline-form.key-create-form { flex-wrap: wrap; }
 .inline-form input, .inline-form select {
   background: var(--surface);
   border: 1px solid rgba(255,255,255,0.12);
@@ -428,7 +426,7 @@ button:focus-visible, select:focus-visible, a:focus-visible, input:focus-visible
 }
 .key-rename { font-size: 12px; padding: 2px 5px; opacity: 0.55; flex: none; }
 .key-name:hover .key-rename { opacity: 1; }
-.key-name-input { width: 160px; max-width: 100%; padding: 3px 8px; font-size: 13px; }
+.key-name-input { width: 160px; max-width: 100%; padding: 3px 8px; font-size: 13px; background: var(--surface, #0d1a2d); color: var(--text, #e2e8f0); border: 1px solid var(--border, #1e293b); border-radius: 4px; }
 
 /* #1148-ux review: combined login/signup card */
 .auth-mode-toggle { display: flex; gap: 4px; margin-bottom: 16px; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 3px; }
@@ -705,6 +703,12 @@ input::placeholder, textarea::placeholder {
 }
 .modal h2 { margin: 0 0 0.4rem; font-size: 16px; }
 .modal .claim-actions { justify-content: flex-start; }
+
+/* #1003: new-key modal — wider than the standard modal because it holds the key-value <code> block */
+.modal.key-create-modal { max-width: 540px; }
+.key-create-modal .key-value { font-size: 12px; padding: 8px 10px; background: var(--bg-soft, #0f172a); border: 1px solid var(--border, #1e293b); border-radius: 6px; word-break: break-all; margin: 6px 0; }
+.key-create-modal .new-key-actions { display: flex; gap: 8px; margin-top: 10px; }
+.key-create-modal .new-key-actions button { flex: 1; }
 
 /* ── #1765: profile tab ────────────────────────────────────────────────── */
 .profile-tab h2 { font-size: 18px; margin: 0 0 0.3rem; }

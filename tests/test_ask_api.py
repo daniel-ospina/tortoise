@@ -437,3 +437,64 @@ def test_metered_exactly_once_per_hosted_ask(client, monkeypatch):
     usage = get_ask_usage(TEST_TEAM_ID)
     assert usage["ask_calls"] == 3
     assert usage["ask_tokens_in"] > 0
+
+
+# ── #2165 Task 6: hosted /v1/ask exposure (connected-assembly branch) ──────
+
+def _seed_assembly_graph(client) -> None:
+    """Build the #2165 base fixture graph into the TEST_TEAM namespace."""
+    import tests._assembly_graph as ag
+    sdk = ha_mod._make_sdk(namespace=TEST_TEAM_ID)
+    try:
+        ag.build_base_graph(sdk)
+    finally:
+        sdk.close()
+
+
+def test_ask_connected_assembly_fired_200(client, monkeypatch):
+    """#2165 Task 6 exposure: flags ON + fired shape → 200 with ASSEMBLED
+    evidence (the state-header golden text) — the hosted /v1/ask surface
+    inherits the branch via the in-process sdk.ask()."""
+    _seed_assembly_graph(client)
+    _FakeReaderFactory(reply="GOLD").install(monkeypatch)
+    monkeypatch.setenv("TORTOISE_ASK_CONNECTED_ASSEMBLY", "1")
+    try:
+        r = client.post("/v1/ask", json={
+            "question": "what is the current status of the couch?",
+            "question_date": "2026-09-10"})
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert "STATE (couch): superseded by sofa on 2026-09-01" in \
+            body["evidence"], body["evidence"]
+        assert "[SUPERSEDED BY: sofa]" in body["evidence"]
+        assert body["retrieval_degraded"] is False
+        assert body["answer"] == "GOLD"
+    finally:
+        monkeypatch.delenv("TORTOISE_ASK_CONNECTED_ASSEMBLY", raising=False)
+
+
+def test_ask_connected_assembly_stage_raise_502_not_500(client, monkeypatch):
+    """#2165 Task 6 exposure: a forced ASSEMBLER-stage raise maps to the
+    retrieval-unavailable code (502) — NEVER a 500 (the fired envelope maps
+    any stage raise to AskRetrievalUnavailable; the ask route maps that to
+    the canonical 502 body)."""
+    import tortoise.assembly as amod
+    _seed_assembly_graph(client)
+    _FakeReaderFactory(reply="GOLD").install(monkeypatch)
+    monkeypatch.setenv("TORTOISE_ASK_CONNECTED_ASSEMBLY", "1")
+
+    def _boom_classify(question: str, *a, **k):
+        raise RuntimeError("stage exploded")
+
+    monkeypatch.setattr(amod, "classify_question", _boom_classify)
+    try:
+        r = client.post("/v1/ask", json={
+            "question": "what is the current status of the couch?",
+            "question_date": "2026-09-10"})
+        assert r.status_code == 502, r.status_code
+        body = r.json()
+        assert "error" in body, body
+        assert body["error"]["code"] in ("retrieval_unavailable",
+                                         "ask_retrieval_unavailable"), body
+    finally:
+        monkeypatch.delenv("TORTOISE_ASK_CONNECTED_ASSEMBLY", raising=False)

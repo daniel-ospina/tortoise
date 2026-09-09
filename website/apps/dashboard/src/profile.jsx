@@ -157,22 +157,18 @@ export function ProfileTab({
   }
   if (!inv) return null
   const methods = inv.methods || []
-  const keysTier = inv.keys_tier || 0
   const removeDisabled = (n) => !unlinkAllowed(n) || unlinkBusy
   return (
     <section className="profile-tab">
       <h2>Login methods</h2>
-      <p className="dim">
-        Ways to sign in to your account. Add more than one so you can always get
-        back in — API keys are for graph operations, not account recovery.
-      </p>
       {methods.length === 0 && <p className="dim">No login methods yet.</p>}
       <table className="members-table">
-        <thead><tr><th>Method</th><th>Status</th><th /></tr></thead>
+        <thead><tr><th>Method</th><th>Identifier</th><th>Status</th><th /></tr></thead>
         <tbody>
           {methods.map((m) => (
             <tr key={`${m.provider}:${m.provider_id}`}>
               <td>{m.provider === 'email' ? 'Email + password' : m.provider}</td>
+              <td>{m.login ?? '—'}</td>
               <td>
                 {m.provider === 'email' ? 'Password sign-in' : (inv.email_confirmed_at ? 'Connected' : 'Email unconfirmed')}
               </td>
@@ -205,13 +201,6 @@ export function ProfileTab({
       ) : (
         <p className="dim">Adding login methods is not enabled yet — contact hello@premiselabs.co.</p>
       )}
-
-      <h3>Dashboard credentials</h3>
-      <p className="dim">
-        {keysTier} API key{keysTier === 1 ? '' : 's'} minted by your account — manage them on the
-        {' '}<button className="ghost small" onClick={() => document.querySelector('[data-tab="keys"]')?.click()}>API Keys</button>{' '}
-        tab.
-      </p>
 
       {!inv.email_confirmed_at && (
         <button className="ghost small" onClick={onResend} disabled={resendBusy}>

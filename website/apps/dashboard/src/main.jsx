@@ -893,6 +893,10 @@ function claimIntentInFlight() {
   // #2426: the show-once card's authoritative server echo of the minted
   // key's expiry (ISO string, or null = Never). Cleared wherever newKey is.
   const [newKeyExpiresAt, setNewKeyExpiresAt] = React.useState(null)
+  // key-create modal state
+  const [keyModalOpen, setKeyModalOpen] = React.useState(false)
+  const [keyModalBusy, setKeyModalBusy] = React.useState(false)
+  const [keyModalStage, setKeyModalStage] = React.useState('form') // 'form' | 'done'
   // key-label: inline-rename state (which row is being edited + its draft text)
   const [editingKeyId, setEditingKeyId] = React.useState(null)
   const [editingKeyName, setEditingKeyName] = React.useState('')
@@ -4352,8 +4356,7 @@ function claimIntentInFlight() {
     const seq = graphPanelReqRef.current // P2-1: op-start seq (see mintGraphKey)
     const row = (panelKeys || []).find((k) => (k.id || k.key_id) === keyId)
     const rowName = (row && row.name) || 'this graph key'
-    const rowDesc = [rowName, row && row.key_prefix, row && (row.created_at || row.createdAt || '')].filter(Boolean).join(' · ')
-    if (!confirm(`Revoke ${rowName}? Applications using it will stop working.\n\n${rowDesc}`)) return
+    if (!confirm(`Revoke ${rowName}? Applications using it will stop working.`)) return
     setGraphMsg('')
     const _teamAtCall = currentTeamId
     try {
@@ -4871,7 +4874,6 @@ function claimIntentInFlight() {
     if (busy) return
     const row0 = (keys || []).find((k) => (k.id || k.key_id) === keyId)
     const rowName = (row0 && row0.name) || 'this API key'
-    const rowDesc = [rowName, row0 && row0.key_prefix, row0 && (row0.created_at || row0.createdAt || '')].filter(Boolean).join(' · ')
     // #2246 (PM-1): the confirm names the row (name · prefix · created) so a
     // one-click rotate never silently kills an agent key the user cannot
     // identify (rows are hash-only; names may be unset).
@@ -4882,7 +4884,7 @@ function claimIntentInFlight() {
     const replacementExpiry = rowLifetime
       ? `The replacement expires ${fmtExpiryDate(new Date(Date.now() + rowLifetime * _MS_PER_DAY).toISOString())} (the same ${rowLifetime}-day lifetime as this key).`
       : 'The replacement never expires (same as this key).'
-    if (!confirm(`Rotate ${rowName}? A replacement key is created (shown once) and ${rowName} is revoked — applications using the old key will stop working. ${replacementExpiry}\n\n${rowDesc}`)) return
+    if (!confirm(`Rotate ${rowName}? A replacement key is created (shown once) and ${rowName} is revoked — applications using the old key will stop working. ${replacementExpiry}`)) return
     setCapNotice('')
     setError('')
     setBusy(true)
@@ -5009,11 +5011,10 @@ function claimIntentInFlight() {
     const _teamAtCall = currentTeamId
     const row0 = (keys || []).find((k) => (k.id || k.key_id) === keyId)
     const rowName = (row0 && row0.name) || 'this API key'
-    const rowDesc = [rowName, row0 && row0.key_prefix, row0 && (row0.created_at || row0.createdAt || '')].filter(Boolean).join(' · ')
     // #2246 (PM-1): the confirm names the row (name · prefix · created) so a
     // one-click trash never silently kills an agent key the user cannot
     // identify (rows are hash-only; names may be unset).
-    if (!opts.skipConfirm && !confirm(`Revoke ${rowName}? Applications using it will stop working.\n\n${rowDesc}`)) return
+    if (!opts.skipConfirm && !confirm(`Revoke ${rowName}? Applications using it will stop working.`)) return
     setCapNotice('')
     setError('')
     try {
@@ -6465,6 +6466,71 @@ sdk.create_point(text="My first point")
         onPassword={handleReauthPassword}
         onProvider={handleReauthProvider}
       />
+      {/* #api-keys-ux: key creation modal — form stage (name + expiry) transitions to done stage (show key once + copy) */}
+      {keyModalOpen && (
+        <div className="modal-backdrop" onClick={() => { if (!keyModalBusy) { setKeyModalOpen(false); setNewKey(null); setNewKeyExpiresAt(null) } }}>
+          <div className="modal key-create-modal" role="dialog" aria-modal="true" aria-label="Create API key"
+               onClick={(e) => e.stopPropagation()}>
+            {keyModalStage === 'form' && (
+              <>
+                <h2>Create new API key</h2>
+                <div className="inline-form" style={{ marginTop: 8 }}>
+                  <input
+                    placeholder="Name (e.g. CI, staging)"
+                    aria-label="New key name"
+                    value={newKeyName}
+                    maxLength={64}
+                    onChange={(e) => setNewKeyName(e.target.value)}
+                    onKeyDown={(e) => e.key === 'Enter' && !(newKeyExpiryPreset === 'custom' && !expiryDaysFromDate(newKeyExpiryDate)) && (async () => { setKeyModalBusy(true); setKeyModalStage('form'); await createKey(); setKeyModalBusy(false); setKeyModalStage('done') })()}
+                  />
+                  <select
+                    aria-label="Expiry"
+                    value={newKeyExpiryPreset}
+                    onChange={(e) => setNewKeyExpiryPreset(e.target.value)}
+                  >
+                    {KEY_EXPIRY_PRESETS.map((p) => (
+                      <option key={p.id} value={p.id}>{p.label}</option>
+                    ))}
+                  </select>
+                  {newKeyExpiryPreset === 'custom' && (
+                    <input
+                      type="date"
+                      aria-label="Custom expiry date"
+                      value={newKeyExpiryDate}
+                      min={new Date(Date.now() + _MS_PER_DAY).toISOString().slice(0, 10)}
+                      max={new Date(Date.now() + KEY_MAX_EXPIRY_DAYS * _MS_PER_DAY).toISOString().slice(0, 10)}
+                      onChange={(e) => setNewKeyExpiryDate(e.target.value)}
+                    />
+                  )}
+                </div>
+                <div className="new-key-actions">
+                  <button className="ghost" onClick={() => { setKeyModalOpen(false); setNewKey(null); setNewKeyExpiresAt(null) }} disabled={keyModalBusy}>Cancel</button>
+                  <button
+                    onClick={async () => { setKeyModalBusy(true); await createKey(); setKeyModalBusy(false); setKeyModalStage('done') }}
+                    disabled={keyModalBusy || (newKeyExpiryPreset === 'custom' && !expiryDaysFromDate(newKeyExpiryDate))}
+                  >{keyModalBusy ? 'Creating…' : 'Create key'}</button>
+                </div>
+                {error && <p className="error" role="alert" style={{ marginTop: 8 }}>{error}</p>}
+              </>
+            )}
+            {keyModalStage === 'done' && (
+              <>
+                <h2>New API key</h2>
+                <p className="dim">Copy this key now — it is shown once only.</p>
+                <code className="key-value">{newKey}</code>
+                {newKeyExpiresAt ? (
+                  <span className="dim">expires {fmtExpiryDate(newKeyExpiresAt)}</span>
+                ) : (
+                  <span className="dim">never expires</span>
+                )}
+                <div className="new-key-actions">
+                  <button onClick={() => { navigator.clipboard.writeText(newKey); setNewKey(null); setNewKeyExpiresAt(null); setKeyModalOpen(false) }}>Copy &amp; done</button>
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      )}
       {accountMenuOpen && (
             /* P2-1 (a11y, cycle-2): drop role=menu/menuitem — the full APG
                menu pattern (arrow-key roving focus) isn't implemented, and a
@@ -6990,47 +7056,7 @@ sdk.create_point(text="My first point")
                   (Members-tab precedent) — as a span inside the flex .row it
                   wrapped badly beside the h2 on narrow viewports. */}
               {isOwnerAdmin && (
-                <div className="inline-form key-create-form">
-                  <input
-                    placeholder="Label (e.g. CI, staging)"
-                    aria-label="New key label"
-                    value={newKeyName}
-                    maxLength={64}
-                    onChange={(e) => setNewKeyName(e.target.value)}
-                    onKeyDown={(e) => e.key === 'Enter' && createKey()}
-                  />
-                  {/* #2426: expiry preset dropdown (30d default / 60d /
-                      90d / 1y / Custom date… / No expiration). The preset
-                      rides the mint body as expires_in days; Never sends no
-                      expiry param. Custom reveals a date input (min/max
-                      bound to the 1-366-day window); + New key stays
-                      disabled until a valid Custom date is picked. */}
-                  <select
-                    aria-label="New key expiry"
-                    value={newKeyExpiryPreset}
-                    onChange={(e) => setNewKeyExpiryPreset(e.target.value)}
-                    title="When this key stops working — expiry is set at creation and cannot be changed later"
-                  >
-                    {KEY_EXPIRY_PRESETS.map((p) => (
-                      <option key={p.id} value={p.id}>{p.label}</option>
-                    ))}
-                  </select>
-                  {newKeyExpiryPreset === 'custom' && (
-                    <input
-                      type="date"
-                      aria-label="Custom expiry date"
-                      value={newKeyExpiryDate}
-                      min={new Date(Date.now() + _MS_PER_DAY).toISOString().slice(0, 10)}
-                      max={new Date(Date.now() + KEY_MAX_EXPIRY_DAYS * _MS_PER_DAY).toISOString().slice(0, 10)}
-                      onChange={(e) => setNewKeyExpiryDate(e.target.value)}
-                      onKeyDown={(e) => { if (e.key === 'Enter' && expiryDaysFromDate(newKeyExpiryDate)) { e.preventDefault(); createKey() } }}
-                    />
-                  )}
-                  <button
-                    onClick={createKey}
-                    disabled={busy || (newKeyExpiryPreset === 'custom' && !expiryDaysFromDate(newKeyExpiryDate))}
-                  >+ New key</button>
-                </div>
+                <button className="ghost" onClick={() => { setKeyModalOpen(true); setKeyModalStage('form'); setError(''); setNewKeyName(''); setNewKeyExpiryPreset('30'); setNewKeyExpiryDate('') }}>+ New key</button>
               )}
             </div>
             {!isOwnerAdmin && (
@@ -7051,21 +7077,7 @@ sdk.create_point(text="My first point")
                 )}
               </div>
             )}
-            {newKey && (
-              <div className="new-key">
-                <strong>Your new key (shown once):</strong>
-                <code className="key-value">{newKey}</code>
-                {/* #2426: the show-once card states the key's expiry (the
-                    server echo; absent on a Never mint). Rotate/create set
-                    newKeyExpiresAt from the mint response. */}
-                {newKeyExpiresAt ? (
-                  <span className="dim">expires {fmtExpiryDate(newKeyExpiresAt)}</span>
-                ) : (
-                  <span className="dim">never expires</span>
-                )}
-                <button className="ghost small" onClick={() => { navigator.clipboard.writeText(newKey); setNewKey(null); setNewKeyExpiresAt(null) }}>Copy &amp; done</button>
-              </div>
-            )}
+
             {/* #2246 (ADR-010): the keys table is uniform — every durable row
                 carries the same owner action set (rename / toggle / trash /
                 Rotate); no "in use by this dashboard" row, no rotate-only
@@ -7174,11 +7186,6 @@ sdk.create_point(text="My first point")
               </tbody>
             </table>
             </div>
-            {/* #2000 (W4): the Overview Backups stat card relocated here —
-                the count stays reachable now that the Overview is calm
-                (exactly 3 elements, zero toggles). BackupsCard owns its own
-                loading floor (the Overview's frameStale latch never ticks on
-                this tab — review P2-6). */}
             <BackupsCard status={backupsStatus} count={(backupInfo && backupInfo.count) || null} />
           </section>
         )}
