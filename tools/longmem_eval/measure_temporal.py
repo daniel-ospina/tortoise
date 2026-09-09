@@ -292,3 +292,505 @@ def classify_refusal(hypothesis: str | None) -> bool:
     when the hypothesis is an abstention/refusal.
     """
     return bool(_looks_abstained(hypothesis))
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Task 3: arm driver + verdict classification + taxonomy aggregation +
+# rollback-guard readout + reader-constancy + runbook gate output
+# (measure_temporal.py only — run.py untouched; pure over committed dicts).
+# ══════════════════════════════════════════════════════════════════════════
+
+#: Pre-registered rollback margin (never chosen post hoc): an arm whose
+#: reader-refusal rate exceeds the A-default baseline rate by more than this
+#: absolute margin is a flagged rollback-candidate (R5 #1544: the 40k-token-
+#: flood refusal class — refusal growth tied to context-token growth).
+ROLLBACK_MARGIN = 0.10
+
+#: Eval defaults (retrieve.py) the verdict derivation compares pool-depth
+#: facts against when no per-arm override is supplied.
+DEFAULT_POOL_LIMIT = 40
+DEFAULT_TOP_K = 20
+
+#: Indicator-1 taxonomy subclasses that are NOT derivable from the committed
+#: facts — (iii) rerank.py records only per-session counts, never id-level
+#: accounting; (v) ordering-of-admitted-evidence needs a hypothesis-vs-gold
+#: qualitative pass. Never emitted from aggregates (pre-registered plan
+#: boundaries); both are filed follow-ups with a named owner + trigger.
+NOT_DERIVABLE_SUBCLASSES = ("dropped-by-per-session-cap",
+                            "ordering-of-admitted-evidence")
+
+def classify_outcome(outcome: dict, *,
+                     gold_undated: bool = False,
+                     pool_limit: int = DEFAULT_POOL_LIMIT) -> dict:
+    """Classify ONE completed outcome into the 2×2 attribution.
+
+    Reads the Task-1 facts (``measure_facts``) + the judge's bool ``label``
+    (real bool — run.py's Layer-1 projection materializes a missing label as
+    ``None``). Verdict mapping (plan Task 3):
+
+    * label True            -> correct (regardless of admission)
+    * label False + no facts -> unattributed (facts gate OFF — not a
+      measurement run; never reported as evidence)
+    * label False + empty ``gold_admitted_ids`` -> ADMISSION failure; the
+      derivable Indicator-1 subclasses are emitted where the facts support
+      them: (i) admission-outside-rerank-depth (marked gold in pool bands
+      beyond the arm's pool limit), (ii) dropped-by-item-cap (marked gold at
+      reader-horizon ranks — ≤ pool limit — yet absent from the admitted
+      context), (iv) structural-absence-undated-gold (separate flag, from
+      the dataset join: the gold session is undated).
+    * label False + non-empty ``gold_admitted_ids`` -> CONVERSION failure;
+      subclass refusal (Task-2 classifier / Task-1 raw marker) vs
+      reader-wrong.
+
+    ``pool_limit``: the arm's rerank pool depth (default 40) — bands beyond
+    it cannot be admitted by any boost/widening that re-orders within the
+    pool (position-ceiling, hard-truth iii).
+    """
+    qid = outcome.get("question_id")
+    label = outcome.get("label")
+    verdict: dict = {"qid": qid, "correct": None}
+    if not isinstance(label, bool):
+        verdict.update(attribution="unattributed",
+                       reason="no-bool-label",
+                       subclass=None, flags=[])
+        return verdict
+    if label is True:
+        verdict.update(correct=True, attribution="correct", subclass=None,
+                       flags=[])
+        return verdict
+    verdict["correct"] = False
+    mf = outcome.get("measure_facts")
+    if not mf:
+        verdict.update(attribution="unattributed", reason="facts-gate-off",
+                       subclass=None, flags=[])
+        return verdict
+    admitted = list(mf.get("gold_admitted_ids") or [])
+    bands = dict((mf.get("pool_depth") or {}).get("marked_points_bands")
+                 or {})
+    flags: list[str] = []
+    if gold_undated:
+        flags.append("structural-absence-undated-gold")
+    if admitted:
+        refusal = mf.get("reader_refusal")
+        if refusal is None:
+            refusal = classify_refusal(outcome.get("hypothesis"))
+        verdict.update(
+            attribution="conversion",
+            subclass="refusal" if bool(refusal) else "reader-wrong",
+            flags=flags,
+            conversion_refusal=bool(refusal))
+        return verdict
+    # ADMISSION failure — derivable subclasses where the facts support them.
+    # Band lower rank bounds (retrieve.py _mark_bands semantics): a band
+    # whose LOWEST rank exceeds the arm's pool limit holds gold the arm
+    # cannot admit by construction (position-ceiling, hard-truth iii).
+    band_low = {"top-20": 1, "21-40": 21, "41-120": 41, "121+": 121}
+    beyond = sum(n for band, n in bands.items()
+                 if band_low.get(band, 41) > pool_limit)
+    shallow = sum(n for band, n in bands.items()
+                  if band_low.get(band, 41) <= pool_limit)
+    subclasses = []
+    # (i) marked gold beyond the arm's rerank pool horizon: no boost or
+    # within-pool reorder can admit it. Default pool 40 -> the 41-120 band
+    # is beyond (the pinned tr_top_k reach statements name the rank-48-68
+    # gold band — it sits inside 41-120); applied-rerank pool 120 -> only
+    # 121+ is beyond.
+    if beyond > 0:
+        subclasses.append("admission-outside-rerank-depth")
+    # (ii) marked gold at reader-horizon ranks (within the pool) yet absent
+    # from the admitted context — dropped by the item cap / token budget.
+    if shallow > 0 and not subclasses:
+        subclasses.append("dropped-by-item-cap")
+    verdict.update(
+        attribution="admission",
+        subclass=subclasses[0] if subclasses else None,
+        flags=flags,
+        derivable_subclasses=subclasses)
+    return verdict
+
+
+def aggregate_taxonomy(verdicts: list[dict], qid_to_cls: dict[str, str],
+                       *, pool_limit: int = DEFAULT_POOL_LIMIT) -> dict:
+    """Per-census-class 2×2 tables (admission / conversion-refusal /
+    conversion-wrong / correct / unattributed) with Wilson 95% CIs on the
+    correct rate (report.wilson_ci). Verdicts carry qid; the census map
+    supplies the class (rows not in the 55-Q map are dropped — the analysis
+    denominator is the pinned subset).
+    """
+    from tools.longmem_eval.report import wilson_ci
+    rows: dict[str, list[dict]] = {c: [] for c in
+                                   set(qid_to_cls.values())}
+    for v in verdicts:
+        cls_ = qid_to_cls.get(v.get("qid"))
+        if cls_:
+            rows.setdefault(cls_, []).append(v)
+    tables: dict[str, dict] = {}
+    for cls_, vs in rows.items():
+        n = len(vs)
+        correct = sum(1 for v in vs if v.get("correct") is True)
+        admission = sum(1 for v in vs
+                        if v.get("attribution") == "admission")
+        conv = [v for v in vs if v.get("attribution") == "conversion"]
+        conv_refusal = sum(1 for v in conv
+                           if v.get("subclass") == "refusal")
+        conv_wrong = len(conv) - conv_refusal
+        unattributed = sum(1 for v in vs
+                           if v.get("attribution") == "unattributed")
+        tables[cls_] = {
+            "n": n,
+            "correct": correct,
+            "correct_ci": list(wilson_ci(correct, n)) if n else [0.0, 0.0],
+            "admission": admission,
+            "conversion_refusal": conv_refusal,
+            "conversion_wrong": conv_wrong,
+            "unattributed": unattributed,
+        }
+    return tables
+
+
+def _pair_map(verdicts: list[dict]) -> dict[str, dict]:
+    return {v["qid"]: v for v in verdicts if v.get("correct") is not None}
+
+
+def compare_arms_to_baseline(baseline_verdicts: list[dict],
+                             arm_verdicts: list[dict]) -> dict:
+    """McNemar exact (report.mcnemar_exact) between baseline and one
+    widening arm over the common qids + the MINIMUM-DISCRIMINABILITY rule:
+    discordant-pair counts are reported; when conversion-wrong ≈ baseline
+    across arms the matrix is declared conversion-indeterminate (never
+    claimed as decided) — routed to the #2013 strong-reader leg.
+    """
+    from tools.longmem_eval.report import mcnemar_exact
+    b = _pair_map(baseline_verdicts)
+    a = _pair_map(arm_verdicts)
+    common = sorted(set(b) & set(a))
+    wins = losses = 0
+    b_cw = a_cw = 0
+    for qid in common:
+        bv, av = b[qid], a[qid]
+        b_ok = bv["correct"] is True
+        a_ok = av["correct"] is True
+        if a_ok and not b_ok:
+            wins += 1
+        elif b_ok and not a_ok:
+            losses += 1
+        if (bv.get("attribution") == "conversion"
+                and bv.get("subclass") == "reader-wrong"):
+            b_cw += 1
+        if (av.get("attribution") == "conversion"
+                and av.get("subclass") == "reader-wrong"):
+            a_cw += 1
+    return {
+        "common_n": len(common),
+        "discordant_pairs": wins + losses,
+        "arm_wins": wins,
+        "baseline_wins": losses,
+        "p_exact": float(mcnemar_exact(wins, losses))
+        if (wins + losses) else 1.0,
+        "baseline_conversion_wrong": b_cw,
+        "arm_conversion_wrong": a_cw,
+    }
+
+
+def rollback_guard_readout(arm_stats: dict[str, dict],
+                           *, margin: float = ROLLBACK_MARGIN) -> dict:
+    """Per-arm refusal rate vs mean context_tokens; an arm whose refusal
+    rate exceeds the A-default baseline rate by more than the PRE-REGISTERED
+    fixed margin is a flagged rollback-candidate. The margin is a module
+    constant (never chosen post hoc — the pre-registration record pins it).
+    """
+    baseline_rate = (arm_stats.get("A-default") or {}).get(
+        "refusal_rate", 0.0)
+    bound = baseline_rate + margin
+    readout = {"baseline_refusal_rate": baseline_rate,
+               "bound": round(bound, 4),
+               "margin": margin,
+               "arms": []}
+    for arm_id, s in arm_stats.items():
+        rate = s.get("refusal_rate", 0.0)
+        readout["arms"].append({
+            "arm": arm_id,
+            "refusal_rate": rate,
+            "mean_context_tokens": s.get("mean_context_tokens"),
+            "flagged_rollback_candidate": bool(rate > bound),
+        })
+    return readout
+
+
+def assert_reader_constancy(arms_meta: dict[str, dict]) -> None:
+    """Reader/judge/prompt constancy across arms (pre-registered): abort
+    the comparison on a mismatch of reader_model_spec / reader_prompt_hash
+    across the arm methodology blocks. A stub-reader arm raises too (its
+    numbers are ABSTAIN — never evidence).
+    """
+    specs: dict[str, set] = {}
+    for _arm_id, meta in arms_meta.items():
+        for key in ("reader_model_spec", "reader_prompt_hash",
+                    "judge_model"):
+            if key in meta:
+                specs.setdefault(key, set()).add(str(meta[key]))
+    bad = [k for k, vals in specs.items() if len(vals) > 1]
+    if bad:
+        raise ValueError(
+            f"reader-constancy violated across arms — differing {bad}: "
+            + "; ".join(f"{k}={sorted(vals)}" for k, vals in specs.items()
+                        if len(vals) > 1))
+    stub = [aid for aid, meta in arms_meta.items()
+            if str(meta.get("reader_model", "")).startswith("stub")]
+    if stub:
+        raise ValueError(
+            f"stub-reader arms {stub} present — conversion not measured "
+            "(pre-registered ABSTAIN; never reported as evidence)")
+
+
+def _arm_argv(arm: dict, *, data, work_dir, checkpoint, output,
+              split: str = "s", limit: int | None = None,
+              mock: bool = False, base_argv: tuple = ()) -> list[str]:
+    """Build the per-arm run_main argv from the Task-2 arm table: distinct
+    ``--work-dir`` (pre-created by the caller via mkdir -p — the runbook
+    1987-documented ``_ensure_work_dir`` has ZERO call sites on this branch,
+    so a missing dir fails every embedded question), distinct ``--checkpoint``
+    + ``--output`` per arm, and the arm's exact knob argv.
+    """
+    argv = [*base_argv, "--data", str(data),
+            "--split", split,
+            "--work-dir", str(work_dir),
+            "--checkpoint", str(checkpoint),
+            "--output", str(output)]
+    if limit is not None:
+        argv += ["--limit", str(limit)]
+    if mock:
+        argv += ["--mock"]
+    argv += list(arm.get("knobs") or [])
+    return argv
+
+
+def run_one_arm(arm: dict, *, data, arm_dir, output,
+                split: str = "s", limit: int | None = None,
+                mock: bool = False, base_argv: tuple = (),
+                measure_facts_env: str = "1") -> dict:
+    """Run ONE arm through committed ``run_main`` in-process (never re-
+    implements checkpoint/watchdog/resume) with the facts gate ON (env
+    tri-state) and a distinct pre-created work dir. ``CheckpointStaleError``
+    from a fingerprint-mismatched resume PROPAGATES (the driver never
+    swallows it — a cross-arm denominator blend must fail loudly)."""
+    import os
+
+    from tools.longmem_eval.run import run_main
+    arm_dir = str(arm_dir)
+    os.makedirs(arm_dir, exist_ok=True)
+    out_dir = str(output)
+    os.makedirs(out_dir, exist_ok=True)
+    cp = os.path.join(arm_dir, "checkpoint.json")
+    out = os.path.join(out_dir, f"{arm['id']}.json")
+    argv = _arm_argv(arm, data=data, work_dir=arm_dir, checkpoint=cp,
+                     output=out, split=split, limit=limit, mock=mock,
+                     base_argv=base_argv)
+    if measure_facts_env:
+        os.environ["TORTOISE_LME_MEASURE_FACTS"] = measure_facts_env
+    try:
+        return run_main(argv)
+    finally:
+        if measure_facts_env:
+            os.environ.pop("TORTOISE_LME_MEASURE_FACTS", None)
+
+
+def run_arms(arms=ARM_TABLE, *, data, work_root, output,
+             split: str = "s", limit: int | None = None,
+             mock: bool = False, base_argv: tuple = ()) -> dict:
+    """Drive the pinned arm table: each arm in its own pre-created work dir
+    with a distinct checkpoint/output and the facts gate ON."""
+    results: dict[str, dict] = {}
+    for arm in arms:
+        results[arm["id"]] = run_one_arm(
+            arm, data=data, arm_dir=work_root / arm["id"],
+            output=output, split=split, limit=limit, mock=mock,
+            base_argv=base_argv)
+    return results
+
+
+
+
+def _totals(verdicts: list[dict]) -> dict:
+    """Compact per-arm 2x2 totals (correct/admission/conversion-refusal/
+    conversion-wrong over verdicts with a bool label)."""
+    gradable = [v for v in verdicts if v.get("correct") is not None]
+    conv = [v for v in gradable if v.get("attribution") == "conversion"]
+    return {
+        "n": len(gradable),
+        "correct": sum(1 for v in gradable if v["correct"] is True),
+        "admission": sum(1 for v in gradable
+                         if v.get("attribution") == "admission"),
+        "conversion_refusal": sum(
+            1 for v in conv if v.get("subclass") == "refusal"),
+        "conversion_wrong": sum(
+            1 for v in conv if v.get("subclass") == "reader-wrong"),
+    }
+
+
+def branch_decision(totals: dict) -> str:
+    """The pre-registered three-branch decision over aggregated totals.
+
+    Rules (plan Task 2/4 wording restrictions — the gate NEVER claims the
+    assembler fixes conversion from the 2x2):
+    1. admission-attributed: some widening arm reduced ADMISSION failures
+       AND lifted correct answers above baseline.
+    2. conversion-bound: no admission-attributed lift, but residual
+       refusal/wrong on ADMITTED gold is present in some arm, OR correct
+       answers lifted without an admission reduction (the lift came from
+       the reader converting what was already admitted).
+    3. structural-path-evidence: nothing moved — every widening arm left
+       admission AND correct identical to baseline (gold unreachable under
+       every widening).
+    conversion-indeterminate: admission moved (some arm reduced admission)
+    but no arm lifted correct answers and conversion-wrong ~= baseline
+    everywhere (min-discriminability) — routed to the #2013 strong-reader
+    leg, never claimed as decided.
+    """
+    base = totals["baseline"]
+    arms = list(totals["arms"].values())
+    if not arms:
+        return "no-arms"
+    base_correct = base["correct"]
+    base_residual = (base["conversion_refusal"]
+                     + base["conversion_wrong"])
+    any_correct_lift = any(a["correct"] > base_correct for a in arms)
+    any_adm_lift = any(a["admission"] < base["admission"] for a in arms)
+    any_residual_move = any(
+        (a["conversion_refusal"] + a["conversion_wrong"]) != base_residual
+        for a in arms)
+    any_moved = any(
+        (a["admission"] != base["admission"])
+        or (a["correct"] != base_correct)
+        or (a["conversion_refusal"] != base["conversion_refusal"])
+        or (a["conversion_wrong"] != base["conversion_wrong"])
+        for a in arms)
+    if not any_moved:
+        # nothing moved under any widening — gold unreachable under every
+        # widening (or the baseline IS the reader's ceiling): structural-
+        # path evidence for the assembler lane.
+        return "structural-path-evidence"
+    if any_correct_lift:
+        # correct answers moved: attributed to admission when widening also
+        # reduced ADMISSION failures; a lift with no admission reduction is
+        # the reader converting already-admitted gold — conversion-bound.
+        return "admission-attributed" if any_adm_lift else "conversion-bound"
+    if any_residual_move:
+        # no correct lift but the refusal/wrong split on ADMITTED gold moved
+        # (widening admitted gold the reader still refuses or misreads): the
+        # pre-registered conversion null fires — decision-grade bound.
+        return "conversion-bound"
+    # residual totals ~ baseline across all arms but the matrix moved on a
+    # non-attributable axis (admission worsened, refusal<->wrong swap): the
+    # shipped reader cannot be discriminated — conversion-indeterminate,
+    # routed to the #2013 strong-reader leg, never claimed as decided.
+    return "conversion-indeterminate"
+
+def gate_output(*, issue: str, prereg: dict, qid_to_cls: dict[str, str],
+                baseline_verdicts: list[dict],
+                arm_verdicts: dict[str, list[dict]],
+                arm_stats: dict[str, dict],
+                pool_limit: int = DEFAULT_POOL_LIMIT,
+                reader_model: str = "pinned (see methodology)",
+                judge_model: str = "pinned") -> str:
+    """Assemble the runbook gate output (markdown, YAML frontmatter per
+    convention): the 2×2 per census class, the per-arm comparison vs
+    baseline with discordant counts + McNemar, the rollback-guard readout,
+    the reader-constancy assertion, the per-arm reach-vs-observed-gold-
+    depth table, and the THREE pre-registered decision branches.
+
+    Branch logic (plan Task 2 wording restrictions — the gate never claims
+    the assembler fixes conversion):
+    * widening lifts accuracy -> attribute to admission;
+    * residual refusal/wrong on ADMITTED gold -> conversion-bound (honest
+      caveat: wrong-on-admitted is dominated by reader-MODEL derivation
+      errors; a named qualitative pass isolates ordering-of-admitted-
+      evidence — never asserted from the 2×2);
+    * gold unreachable under every widening -> structural-path evidence.
+    * all arms ≈ baseline on conversion-wrong AND admission moved ->
+      conversion-indeterminate-on-the-shipped-reader (#2013 strong-reader
+      leg), never a decided branch.
+    """
+    tables = aggregate_taxonomy(baseline_verdicts, qid_to_cls,
+                                pool_limit=pool_limit)
+    comps = {arm_id: compare_arms_to_baseline(baseline_verdicts, vs)
+             for arm_id, vs in arm_verdicts.items()}
+    guard = rollback_guard_readout(arm_stats)
+    totals = {"baseline": _totals(baseline_verdicts),
+              "arms": {aid: _totals(vs)
+                       for aid, vs in arm_verdicts.items()}}
+    branch = branch_decision(totals)
+    reach_lines = []
+    prereg_arms = {a["id"]: a for a in prereg.get("arms", [])}
+    for arm_id, s in arm_stats.items():
+        reach = prereg_arms.get(arm_id, {}).get("reach", "(unregistered)")
+        reach_lines.append(f"| {arm_id} | {s.get('mean_context_tokens', '—')} "
+                           f"| {reach} |")
+    md = ["# 2578 Temporal Measurement — Gate Output",
+          "",
+          f"> Generated by tools.longmem_eval.measure_temporal.gate_output — "
+          f"reader: {reader_model} · judge: {judge_model} · facts gate ON.",
+          "",
+          "## Decision branch",
+          "",
+          f"**{branch}**",
+          "",
+          "## 2×2 per census class (baseline)",
+          "",
+          "| class | n | correct (95% CI) | admission | conv-refusal | "
+          "conv-wrong | unattributed |",
+          "| --- | --- | --- | --- | --- | --- | --- |",
+          ]
+    for cls_, t in sorted(tables.items()):
+        lo, hi = t["correct_ci"]
+        md.append(f"| {cls_} | {t['n']} | {t['correct']} "
+                  f"({lo:.3f}–{hi:.3f}) | {t['admission']} | "
+                  f"{t['conversion_refusal']} | {t['conversion_wrong']} | "
+                  f"{t['unattributed']} |")
+    md += ["", "## Widening arms vs baseline (McNemar + min-discriminability)",
+           "", "| arm | common_n | discordant | arm_wins | baseline_wins | "
+           "p_exact | base_cw | arm_cw |", "| --- | --- | --- | --- | --- | "
+           "--- | --- | --- |"]
+    for arm_id, c in sorted(comps.items()):
+        md.append(f"| {arm_id} | {c['common_n']} | {c['discordant_pairs']} | "
+                  f"{c['arm_wins']} | {c['baseline_wins']} | "
+                  f"{c['p_exact']:.4f} | {c['baseline_conversion_wrong']} | "
+                  f"{c['arm_conversion_wrong']} |")
+    md += ["", "## Rollback-guard readout (R5)", "",
+           f"Pre-registered bound = baseline refusal rate + "
+           f"{guard['margin']} (module constant, never chosen post hoc). "
+           f"Baseline refusal rate: {guard['baseline_refusal_rate']:.3f} · "
+           f"bound: {guard['bound']:.3f}",
+           "", "| arm | refusal_rate | mean_context_tokens | flagged |",
+           "| --- | --- | --- | --- |"]
+    for r in guard["arms"]:
+        md.append(f"| {r['arm']} | {r['refusal_rate']:.3f} | "
+                  f"{r['mean_context_tokens']} | "
+                  f"{'⚠️' if r['flagged_rollback_candidate'] else ''} |")
+    md += ["", "## Per-arm reach vs observed gold depth", "",
+           "| arm | mean_context_tokens | pre-registered reach |",
+           "| --- | --- | --- |"]
+    md += reach_lines
+    md += ["", "## Three pre-registered decision branches", "",
+           "1. **Widening lifted accuracy** → attribute to ADMISSION "
+           "(the branch fires only with arm_wins > baseline_wins).",
+           "2. **Residual refusal/wrong on ADMITTED gold** → "
+           "conversion-bound — the honest caveat: wrong-on-admitted is "
+           "dominated by reader-MODEL derivation errors (arithmetic/"
+           "interval/count/recency), NOT ordering-of-admitted-evidence; "
+           "the assembler is NEVER claimed from the 2×2 — a named "
+           "qualitative pass (owner: epistemic-team; trigger: "
+           "conversion-bound verdict) isolates ordering-of-admitted-"
+           "evidence.",
+           "3. **Gold unreachable under every widening** → "
+           "structural-path evidence for the assembler lane.",
+           "",
+           "conversion-indeterminate fires when widening moved admission but "
+           "conversion-wrong ≈ baseline across all arms — routed to the "
+           "#2013 strong-reader leg, never claimed as decided."]
+    body = "\n".join(md)
+    frontmatter = (f"---\ntitle: \"2578 Temporal Measurement — Gate Output\"\n"
+                   f"type: operations\ndomain: operations\ndoc_status: live\n"
+                   f"created: 2026-09-09\nownedBy: epistemic-team\n"
+                   f"issue: {issue}\n---\n\n")
+    return frontmatter + body

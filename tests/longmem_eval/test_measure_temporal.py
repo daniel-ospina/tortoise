@@ -217,3 +217,361 @@ def test_classify_refusal_is_the_shared_product_classifier():
     ) is False
     assert mt.classify_refusal(None) is True  # blank = abstained (product)
     assert mt.classify_refusal("") is True
+
+
+# ── Task 3: arm driver ─────────────────────────────────────────────────────
+
+MINI = Path(__file__).resolve().parent.parent / "fixtures" \
+    / "longmemeval_mini.json"
+
+
+def _arm(arm_id: str) -> dict:
+    return next(a for a in mt.ARM_TABLE if a["id"] == arm_id)
+
+
+def test_arm_argv_distinct_workdirs_and_knobs(tmp_path):
+    a = _arm("A-default")
+    b = _arm("tr_top_k16")
+    base = dict(data="d.json", split="s")
+    av = mt._arm_argv(a, work_dir=tmp_path / "A-default",
+                      checkpoint=tmp_path / "A-default" / "cp.json",
+                      output=tmp_path / "out" / "A-default.json", **base)
+    bv = mt._arm_argv(b, work_dir=tmp_path / "tr_top_k16",
+                      checkpoint=tmp_path / "tr_top_k16" / "cp.json",
+                      output=tmp_path / "out" / "tr_top_k16.json", **base)
+    assert "--work-dir" in av and "--checkpoint" in av
+    assert a["id"] in av[-1]  # per-arm output file
+    # knobs appended verbatim from the arm table
+    assert b["knobs"] == ["--tr-top-k", "16"]
+    assert bv[bv.index("--data") + 1] == "d.json"
+    assert "tr_top_k16" in bv[bv.index("--work-dir") + 1]
+
+
+def test_run_one_arm_precreates_work_dir_and_runs_mock(tmp_path):
+    """run_one_arm mkdir -p's the arm dir (runbook 1987: _ensure_work_dir
+    has ZERO call sites — a missing dir fails every embedded question) and
+    runs through committed run_main in-process."""
+    arm_dir = tmp_path / "arms" / "A-default"
+    report = mt.run_one_arm(
+        _arm("A-default"), data=MINI, arm_dir=arm_dir,
+        output=tmp_path / "reports", split="s", limit=2, mock=True)
+    assert arm_dir.is_dir()
+    assert (arm_dir / "checkpoint.json").is_file()
+    assert (tmp_path / "reports" / "A-default.json").is_file()
+    # >= 1: the embedded lane can flake a question (observed msr_002
+    # ConnectionError) — the driver contract here is dir pre-creation +
+    # in-process run_main execution + a persisted report, not 2/2.
+    assert report["n_questions"] >= 1
+
+
+def test_run_one_arm_propagates_stale_checkpoint(tmp_path):
+    """The driver NEVER swallows CheckpointStaleError — a fingerprint-
+    mismatched resume (Task-1 tr_top_k gate) must fail loudly (a silent
+    denominator blend across arms is the exact gap the measurement closes)."""
+    from tools.longmem_eval.run import CheckpointStaleError
+    arm_dir = tmp_path / "arms"
+    mt.run_one_arm(_arm("A-default"), data=MINI, arm_dir=arm_dir,
+                   output=tmp_path / "r1", split="s", limit=2, mock=True)
+    # resume the SAME checkpoint with tr_top_k 16 -> fingerprint mismatch
+    with pytest.raises(CheckpointStaleError, match="tr_top_k"):
+        mt.run_one_arm(_arm("tr_top_k16"), data=MINI, arm_dir=arm_dir,
+                       output=tmp_path / "r2", split="s", limit=2,
+                       mock=True)
+
+
+# ── Task 3: verdict classification (2×2) ───────────────────────────────────
+
+def _mk_outcome(qid: str, label: bool | None, *,
+                admitted: list | None = None,
+                bands: dict | None = None,
+                hypothesis: str | None = None,
+                refusal: bool | None = None,
+                pool_size: int = 60) -> dict:
+    mf = None
+    if label is False:
+        mf = {
+            "gold_admitted_ids": admitted if admitted is not None else [],
+            "pool_depth": {
+                "requested": 40, "pool_size": pool_size,
+                "marked_points_total": sum((bands or {}).values()),
+                "marked_points_in_pool": sum((bands or {}).values()),
+                "marked_points_bands": bands or {},
+                "marked_chunks_in_pool": 0,
+            },
+            "reader_refusal": refusal,
+        }
+    return {"question_id": qid, "label": label, "hypothesis": hypothesis,
+            "measure_facts": mf}
+
+
+def test_classify_correct():
+    v = mt.classify_outcome(_mk_outcome("q1", True))
+    assert v["correct"] is True and v["attribution"] == "correct"
+
+
+def test_classify_no_bool_label_unattributed():
+    v = mt.classify_outcome(_mk_outcome("q1", None))
+    assert v["attribution"] == "unattributed"
+    v2 = mt.classify_outcome({"question_id": "q1", "label": "yes"})
+    assert v2["attribution"] == "unattributed"  # tampered non-bool label
+
+
+def test_classify_wrong_no_facts_unattributed():
+    v = mt.classify_outcome({"question_id": "q1", "label": False,
+                             "hypothesis": "no"})
+    assert v["attribution"] == "unattributed"
+    assert v["reason"] == "facts-gate-off"
+
+
+def test_classify_admission_empty_gold():
+    v = mt.classify_outcome(_mk_outcome("q1", False, admitted=[]))
+    assert v["attribution"] == "admission"
+
+
+def test_classify_conversion_refusal_from_hypothesis():
+    # admitted gold + abstained hypothesis -> CONVERSION with refusal subclass
+    v = mt.classify_outcome(_mk_outcome(
+        "q1", False, admitted=["p1"], hypothesis="I don't know."))
+    assert v["attribution"] == "conversion"
+    assert v["subclass"] == "refusal" and v["conversion_refusal"] is True
+
+
+def test_classify_conversion_refusal_raw_marker_beats_hypothesis():
+    # the Task-1 raw marker (None = not measured) is honored when present
+    v = mt.classify_outcome(_mk_outcome(
+        "q1", False, admitted=["p1"], hypothesis="I don't know.",
+        refusal=False))
+    assert v["attribution"] == "conversion" and v["subclass"] == "reader-wrong"
+
+
+def test_classify_conversion_wrong():
+    v = mt.classify_outcome(_mk_outcome(
+        "q1", False, admitted=["p1"],
+        hypothesis="The answer is 10 days.", refusal=False))
+    assert v["subclass"] == "reader-wrong"
+
+
+def test_classify_admission_outside_rerank_depth():
+    # marked gold beyond the pool horizon (band 121+ at default pool 40)
+    v = mt.classify_outcome(_mk_outcome(
+        "q1", False, admitted=[],
+        bands={"top-20": 0, "21-40": 0, "41-120": 0, "121+": 2}))
+    assert v["attribution"] == "admission"
+    assert v["derivable_subclasses"] == ["admission-outside-rerank-depth"]
+
+
+def test_classify_band_41_120_beyond_default_pool_40():
+    """VGATE round: at the default pool 40 the 41-120 band is BEYOND the
+    arm's rerank pool limit (the pinned tr_top_k reach statements name the
+    rank-48-68 gold band — it sits inside 41-120). It must fire
+    admission-outside-rerank-depth, never dropped-by-item-cap (which would
+    over-claim the item-cap knob could admit gold widening cannot reach)."""
+    v = mt.classify_outcome(_mk_outcome(
+        "q1", False, admitted=[],
+        bands={"top-20": 0, "21-40": 0, "41-120": 1, "121+": 0}))
+    assert v["derivable_subclasses"] == ["admission-outside-rerank-depth"]
+    # mixed shallow + deep gold at pool 40: deep gold dominates the claim
+    v2 = mt.classify_outcome(_mk_outcome(
+        "q1", False, admitted=[],
+        bands={"top-20": 2, "21-40": 0, "41-120": 1, "121+": 0}))
+    assert v2["derivable_subclasses"] == ["admission-outside-rerank-depth"]
+    # applied-rerank pool 120: only 121+ is beyond it
+    v3 = mt.classify_outcome(_mk_outcome(
+        "q1", False, admitted=[],
+        bands={"top-20": 0, "21-40": 0, "41-120": 1, "121+": 0}),
+        pool_limit=120)
+    assert v3["derivable_subclasses"] == ["dropped-by-item-cap"]
+
+
+def test_classify_dropped_by_item_cap():
+    # marked gold at reader-horizon ranks (shallow bands) yet NOT admitted
+    v = mt.classify_outcome(_mk_outcome(
+        "q1", False, admitted=[],
+        bands={"top-20": 3, "21-40": 0, "41-120": 0, "121+": 0}))
+    assert v["derivable_subclasses"] == ["dropped-by-item-cap"]
+
+
+def test_classify_structural_absence_undated_flag():
+    v = mt.classify_outcome(_mk_outcome("q1", False, admitted=[]),
+                            gold_undated=True)
+    assert "structural-absence-undated-gold" in v["flags"]
+
+
+def test_classify_never_emits_non_derivable_subclasses():
+    """(iii) dropped-by-per-session-cap and (v) ordering-of-admitted-
+    evidence are NOT derivable from the committed facts — classify_outcome
+    must never emit them from any path (pre-registered boundaries; both are
+    follow-up qualitative-pass material, not aggregate claims)."""
+    paths = [
+        _mk_outcome("q1", False, admitted=[]),                     # admission
+        _mk_outcome("q2", False, admitted=["p"], hypothesis="x",
+                    refusal=False),  # conversion reader-wrong
+        _mk_outcome("q3", False, admitted=["p"],
+                    hypothesis="I don't know."),  # conversion refusal
+        _mk_outcome("q4", False, admitted=[],
+                    bands={"top-20": 1, "21-40": 0, "41-120": 0,
+                           "121+": 0}),  # dropped-by-item-cap
+    ]
+    for o in paths:
+        v = mt.classify_outcome(o)
+        assert v["subclass"] not in mt.NOT_DERIVABLE_SUBCLASSES
+        assert not (set(v.get("derivable_subclasses") or [])
+                    & set(mt.NOT_DERIVABLE_SUBCLASSES))
+
+
+def test_aggregate_taxonomy_per_class_arithmetic():
+    qid_to_cls = {"q1": "ordering/compare", "q2": "ordering/compare",
+                  "q3": "interval"}
+    verdicts = [
+        mt.classify_outcome(_mk_outcome("q1", True)),
+        mt.classify_outcome(_mk_outcome("q2", False, admitted=[])),
+        mt.classify_outcome(_mk_outcome(
+            "q3", False, admitted=["p1"], hypothesis="I don't know.")),
+    ]
+    tables = mt.aggregate_taxonomy(verdicts, qid_to_cls)
+    oc = tables["ordering/compare"]
+    assert oc["n"] == 2 and oc["correct"] == 1 and oc["admission"] == 1
+    assert len(oc["correct_ci"]) == 2  # Wilson CI present
+    iv = tables["interval"]
+    assert iv["conversion_refusal"] == 1 and iv["conversion_wrong"] == 0
+
+
+def test_compare_arms_mcnemar_and_discordance():
+    baseline = [
+        mt.classify_outcome(_mk_outcome("q1", True)),
+        mt.classify_outcome(_mk_outcome("q2", False, admitted=[])),
+        mt.classify_outcome(_mk_outcome("q3", False, admitted=["p"],
+                                        hypothesis="wrong", refusal=False)),
+    ]
+    arm = [
+        mt.classify_outcome(_mk_outcome("q1", True)),
+        mt.classify_outcome(_mk_outcome("q2", True)),  # arm wins q2
+        mt.classify_outcome(_mk_outcome("q3", False, admitted=["p"],
+                                        hypothesis="wrong", refusal=False)),
+    ]
+    c = mt.compare_arms_to_baseline(baseline, arm)
+    assert c["common_n"] == 3
+    assert c["arm_wins"] == 1 and c["baseline_wins"] == 0
+    assert c["discordant_pairs"] == 1
+    assert c["baseline_conversion_wrong"] == 1
+    assert c["arm_conversion_wrong"] == 1
+
+
+def test_rollback_guard_readout_flags_breach():
+    stats = {
+        "A-default": {"refusal_rate": 0.10, "mean_context_tokens": 2000},
+        "tr_top_k24": {"refusal_rate": 0.45, "mean_context_tokens": 8000},
+    }
+    g = mt.rollback_guard_readout(stats)
+    assert g["bound"] == round(0.10 + mt.ROLLBACK_MARGIN, 4)
+    by_id = {r["arm"]: r for r in g["arms"]}
+    assert by_id["A-default"]["flagged_rollback_candidate"] is False
+    assert by_id["tr_top_k24"]["flagged_rollback_candidate"] is True
+
+
+def test_assert_reader_constancy_aborts_on_mismatch():
+    mt.assert_reader_constancy({
+        "A-default": {"reader_model_spec": "deepseek:deepseek-v4-flash",
+                      "reader_prompt_hash": "abc"},
+        "tr_top_k16": {"reader_model_spec": "deepseek:deepseek-v4-flash",
+                       "reader_prompt_hash": "abc"},
+    })  # ok
+    with pytest.raises(ValueError, match="reader_model_spec"):
+        mt.assert_reader_constancy({
+            "A-default": {"reader_model_spec": "deepseek:deepseek-v4-flash"},
+            "tr_top_k16": {"reader_model_spec": "other:model"},
+        })
+
+
+def test_assert_reader_constancy_rejects_stub_reader():
+    with pytest.raises(ValueError, match="stub"):
+        mt.assert_reader_constancy({
+            "A-default": {"reader_model": "stub-reader"},
+        })
+
+
+# ── Task 3: branch decision + gate output ─────────────────────────────────
+
+def _tot(qid, correct, admission=0, refusal=0, wrong=0):
+    """Build an outcome whose classify totals match the given counts."""
+    if correct:
+        return mt.classify_outcome(_mk_outcome(qid, True))
+    if admission:
+        return mt.classify_outcome(_mk_outcome(qid, False, admitted=[]))
+    if refusal:
+        return mt.classify_outcome(_mk_outcome(
+            qid, False, admitted=["p"], hypothesis="I don't know."))
+    return mt.classify_outcome(_mk_outcome(
+        qid, False, admitted=["p"], hypothesis="wrong", refusal=False))
+
+
+def test_branch_admission_attributed():
+    base = [_tot("q1", True), _tot("q2", True), _tot("q3", False,
+                                                     admission=1)]
+    arm = [_tot("q1", True), _tot("q2", True), _tot("q3", True)]
+    totals = {"baseline": mt._totals(base),
+              "arms": {"tr_top_k24": mt._totals(arm)}}
+    assert mt.branch_decision(totals) == "admission-attributed"
+
+
+def test_branch_conversion_bound_on_admitted_residual():
+    base = [_tot("q1", True), _tot("q2", False, admission=1)]
+    arm = [_tot("q1", True),
+           _tot("q2", False, refusal=1)]  # gold now admitted, reader refuses
+    totals = {"baseline": mt._totals(base),
+              "arms": {"c2-on": mt._totals(arm)}}
+    assert mt.branch_decision(totals) == "conversion-bound"
+    # a correct lift with NO admission reduction is reader-side
+    # (conversion-bound), never admission-attributed
+    base2 = [_tot("q1", False, wrong=1)]  # admitted gold, reader wrong
+    arm2 = [_tot("q1", True)]
+    totals2 = {"baseline": mt._totals(base2),
+               "arms": {"c2-on": mt._totals(arm2)}}
+    assert mt.branch_decision(totals2) == "conversion-bound"
+
+
+def test_branch_structural_path_when_nothing_moves():
+    base = [_tot("q1", True), _tot("q2", False, admission=1)]
+    arm = [_tot("q1", True), _tot("q2", False, admission=1)]
+    totals = {"baseline": mt._totals(base),
+              "arms": {"tr_top_k20": mt._totals(arm)}}
+    assert mt.branch_decision(totals) == "structural-path-evidence"
+
+
+def test_branch_conversion_indeterminate_when_undiscriminable():
+    # correct flat, admission flat, but the residual SPLIT moved on q2
+    # (refusal <-> wrong swap): conversion-wrong ~ baseline across the arm
+    # — the shipped reader cannot be discriminated; routed to #2013, never
+    # claimed as decided.
+    base = [_tot("q1", True), _tot("q2", False, refusal=1)]
+    arm = [_tot("q1", True), _tot("q2", False, wrong=1)]
+    totals = {"baseline": mt._totals(base),
+              "arms": {"applied-rerank": mt._totals(arm)}}
+    assert mt.branch_decision(totals) == "conversion-indeterminate"
+
+
+def test_gate_output_renders_decision_tables_and_reach(tmp_path):
+    prereg = mt.write_preregistration(
+        mt.load_census(CENSUS)["rows"], tmp_path / "prereg.json")
+    qid_to_cls = {"q1": "ordering/compare", "q2": "interval",
+                  "q3": "ordering/compare"}
+    baseline = [_tot("q1", True), _tot("q2", False, admission=1),
+                _tot("q3", False, wrong=1)]
+    arms = {"tr_top_k24": [_tot("q1", True), _tot("q2", True),
+                           _tot("q3", False, wrong=1)]}
+    stats = {"A-default": {"refusal_rate": 0.1,
+                           "mean_context_tokens": 2000},
+             "tr_top_k24": {"refusal_rate": 0.12,
+                            "mean_context_tokens": 5000}}
+    text = mt.gate_output(issue="2578", prereg=prereg,
+                          qid_to_cls=qid_to_cls,
+                          baseline_verdicts=baseline,
+                          arm_verdicts=arms, arm_stats=stats)
+    assert text.startswith("---")
+    assert 'title: "2578 Temporal Measurement — Gate Output"' in text
+    assert "ownedBy: epistemic-team" in text
+    assert "| ordering/compare |" in text and "| interval |" in text
+    assert "| tr_top_k24 |" in text
+    # per-arm reach from the pre-registration rides the output
+    assert "admission-attributed" in text
+    assert "pre-registered reach" in text
