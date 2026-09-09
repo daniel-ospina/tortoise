@@ -4848,7 +4848,6 @@ function claimIntentInFlight() {
     if (busy) return
     const row0 = (keys || []).find((k) => (k.id || k.key_id) === keyId)
     const rowName = (row0 && row0.name) || 'this API key'
-    const rowDesc = [rowName, row0 && row0.key_prefix, row0 && (row0.created_at || row0.createdAt || '')].filter(Boolean).join(' · ')
     // #2246 (PM-1): the confirm names the row (name · prefix · created) so a
     // one-click rotate never silently kills an agent key the user cannot
     // identify (rows are hash-only; names may be unset).
