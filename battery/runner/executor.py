@@ -164,20 +164,35 @@ def tvde_prompt(scenario_render: str, phase: str) -> str:
 def envelope_from_response(text: str) -> Envelope:
     """Parse the envelope from a model response — the trailing JSON block
     (the ONLY scalar channel). Raises ValueError on a missing/unparseable
-    block (never a prose-mined substitute)."""
+    block (never a prose-mined substitute).
+
+    Extraction (#1416 real-run): the LAST COMPLETE top-level JSON object in
+    the response wins (raw_decode walk). The model is instructed to END
+    with the envelope; trailing prose that itself contains braces ("I chose
+    option {2}…") must never make the naive last-brace slice straddle
+    garbage ("Extra data" — 36% of the E2E-1.1 real leg excluded on it).
+    Envelope honesty is untouched: the object still must validate (shape +
+    typed scalars); prose is never mined for any scalar.
+    """
     if not text or not str(text).strip():
         raise ValueError("empty model response — no envelope")
     text = str(text).strip()
-    start = text.rfind("{")
-    end = text.rfind("}")
-    if start == -1 or end <= start:
-        raise ValueError("no JSON envelope block in the model response")
     import json
-    try:
-        raw = json.loads(text[start:end + 1])
-    except json.JSONDecodeError as e:
-        raise ValueError(f"envelope block is not valid JSON: {e}") from e
-    return validate_envelope(raw)
+    decoder = json.JSONDecoder()
+    best: tuple[dict, int] | None = None
+    i = text.find("{")
+    while i != -1:
+        try:
+            obj, _end = decoder.raw_decode(text[i:])
+        except json.JSONDecodeError:
+            i = text.find("{", i + 1)
+            continue
+        if isinstance(obj, dict):
+            best = (obj, i)
+        i = text.find("{", i + 1)
+    if best is None:
+        raise ValueError("no JSON envelope block in the model response")
+    return validate_envelope(best[0])
 
 
 @dataclass(frozen=True)
