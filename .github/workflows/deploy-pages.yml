@@ -161,14 +161,29 @@ jobs:
         # dashboard deploy. Poll until the served index.html references the
         # bundle hash we JUST BUILT (build step runs before this — the
         # committed dist hash is stale by definition).
+        #
+        # #2688 fix: added retry + diagnostics for the local file read edge
+        # case (CI filesystem timing) and better mismatch logging showing
+        # what the served page actually contains.
         run: |
           # P3-1: compare BOTH js and css refs — a vite CSS-only change keeps
           # the JS hash identical, so a stale page with a new JS ref would
           # false-pass on JS alone.
-          EXPECTED=$(grep -oE 'assets/index-[A-Za-z0-9_-]+\.(js|css)' website/apps/dashboard/dist/index.html | sort || true)
+          # P4-2: retry the local file read once if empty (CI filesystem
+          # timing edge case — the build just finished writing).
+          INDEX_HTML="website/apps/dashboard/dist/index.html"
+          EXPECTED=$(grep -oE 'assets/index-[A-Za-z0-9_-]+\.(js|css)' "$INDEX_HTML" | sort || true)
           if [ -z "$EXPECTED" ]; then
-            echo "::error::build produced no assets/index-*.js|css ref — cannot verify deploy (P4-2)"
-            exit 1
+            echo "::warning::local grep returned empty — file content dump follows, retrying in 5s (P4-2)"
+            head -50 "$INDEX_HTML" 2>/dev/null || echo "file not found at $INDEX_HTML"
+            sleep 5
+            EXPECTED=$(grep -oE 'assets/index-[A-Za-z0-9_-]+\.(js|css)' "$INDEX_HTML" | sort || true)
+            if [ -z "$EXPECTED" ]; then
+              echo "::error::build produced no assets/index-*.js|css ref — cannot verify deploy (P4-2)"
+              ls -la "$(dirname "$INDEX_HTML")" 2>/dev/null || true
+              exit 1
+            fi
+            echo "retry succeeded — bundle refs found on second attempt"
           fi
           echo "expected bundle refs: $EXPECTED"
           MAX_ATTEMPTS=20
