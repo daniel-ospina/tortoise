@@ -618,6 +618,7 @@ def collect_slices(port: WalkerPort, candidates: list[SubjectCandidate], *,
 
     timeline: list[dict] = []
     per_subject_counts: dict[str, int] = {}
+    seen_rows: set[tuple[str, str]] = set()
     for row in spine_raw:
         oid = str(row.get("object_id") or "")
         # per-subject cap enforced post-fetch (single batched query)
@@ -625,6 +626,16 @@ def collect_slices(port: WalkerPort, candidates: list[SubjectCandidate], *,
         if per_subject_counts[oid] > per_subject_cap:
             continue
         row = dict(row)
+        # DEDUPE by (object_id, id): when both interval halves resolve to
+        # the SAME object the resolver emits TWO same-oid candidates and the
+        # per-candidate walk returns each row twice — the duplicates must
+        # never double-count dates (interval anchoring) nor double-render
+        rid = row.get("id")
+        if rid is not None:
+            key = (oid, str(rid))
+            if key in seen_rows:
+                continue
+            seen_rows.add(key)
         tier, d = _tier_and_date(row)
         row["tier"] = tier
         row["date"] = d
@@ -832,12 +843,21 @@ def _date_anchors(rows: list[dict]) -> tuple[_date | None, _date | None]:
 
 def _state_header_hit(sr: dict, label: str,
                       successors_verified: frozenset[str],
-                      ) -> dict:
+                      *, question_date: str | None = None) -> dict:
     status = _as_str(sr.get("status")).strip()
     succ = _as_str(sr.get("superseded_by")).strip()
     if len(succ) > _MAX_SUCC_NAME:
         succ = succ[: _MAX_SUCC_NAME] + "…"
     date = _norm_date(sr.get("superseded_at"))
+    qd = _norm_date(question_date) if question_date else None
+    if (status == "superseded" and qd is not None and date is not None
+            and date > qd):
+        # P2-4: as-of BEFORE the supersession date — the subject was NOT yet
+        # superseded at question_date; render the then-state (live), never a
+        # supersession dated AFTER the reader's window
+        status = "live"
+        succ = ""
+        date = None
     if status == "superseded":
         if not succ:
             text = f"STATE ({label}): superseded (successor unknown)"
@@ -864,6 +884,7 @@ def synthesize_hits(
     slices: AssemblySlices, *, shape: AssemblyShape,
     candidates: tuple | list = (), halves: tuple | list = (),
     successors_verified: frozenset[str] = frozenset(),
+    question_date: str | None = None,
 ) -> list[dict]:
     """Render slices -> annotated hit dicts (the assemble_context input).
 
@@ -882,12 +903,28 @@ def synthesize_hits(
     state_by_oid = {sr.get("object_id"): sr for sr in slices.state_rows}
     hits: list[dict] = []
     if shape is AssemblyShape.INTERVAL:
-        # span over DISTINCT dated row instances across the pair — a window
-        # with < 2 distinct dates is degenerate and must NOT fabricate a
-        # "0 days" line (sparse `when` is the fixture's primary design)
-        spans = sorted(_dated_instances(list(slices.timeline_rows)))
-        if len(spans) >= 2 and spans[-1] > spans[0]:
-            days = (spans[-1] - spans[0]).days
+        # Interval anchoring (P1-1 review): the window is computed PER
+        # SUBJECT, never as a global min..max over every dated row of the
+        # assembly (an accumulating object would silently inflate the span
+        # with unrelated later rows).
+        #   * ONE subject in the assembly (both halves name the SAME object
+        #     — e.g. "buying the couch"/"selling the couch"): the story span
+        #     (earliest..latest dated row) is the answer ONLY when the
+        #     subject has exactly TWO dated rows (the anchor pair). More
+        #     dated rows mean the anchors cannot be identified -> SUPPRESS
+        #     (never a confidently-worded wrong integer).
+        #   * TWO distinct subjects: first-known (earliest) date per subject
+        #     — a "between X and Y" window is anchored on each subject's
+        #     earliest dated row; suppress when either is undated.
+        if len(order) == 1:
+            ds = _dated_instances(_oid_rows(slices, order[0][0]))
+            days = ((ds[1] - ds[0]).days
+                    if len(ds) == 2 and ds[1] > ds[0] else None)
+        else:
+            lo_a, _ = _date_anchors(_oid_rows(slices, order[0][0]))
+            lo_b, _ = _date_anchors(_oid_rows(slices, order[1][0]))
+            days = abs((lo_b - lo_a).days) if lo_a and lo_b else None
+        if days is not None:
             halves_l = [h for h in halves if h and _as_str(h).strip()]
             if len(halves_l) >= 2:
                 phrase = (f"{days} days between {_as_str(halves_l[0]).strip()} "
@@ -909,13 +946,26 @@ def synthesize_hits(
                 dated.append((oid, name, lo, i))
         dated.sort(key=lambda t: (t[2], t[3]))
         if len(dated) >= 2:
-            # (earliest-date, subject_index) — a same-day tie is decided by
-            # the candidate/transcript order, deterministically
-            oid_a, name_a, da, _i = dated[0]
-            label = _display_label(name_a, oid_a, name_a in collide)
-            hits.append({"content": f"{label} came first on "
-                                   f"{_fmt_date(da)}",
-                         "kind": "ordering"})
+            da = dated[0][2]
+            if dated[1][2] == da:
+                # same-day tie: claiming a word-order-dependent winner would
+                # be misleading (P2-1 review) — emit the tie phrase in the
+                # CANONICAL object-id order (independent of question phrasing
+                # AND candidate order — a subject shuffle yields zero delta)
+                tie = sorted((dated[0], dated[1]), key=lambda t: t[0])
+                l0 = _display_label(tie[0][1], tie[0][0],
+                                    tie[0][1] in collide)
+                l1 = _display_label(tie[1][1], tie[1][0],
+                                    tie[1][1] in collide)
+                hits.append({"content": f"{l0} and {l1} both appeared on "
+                                        f"{_fmt_date(da)}",
+                             "kind": "ordering"})
+            else:
+                oid_a, name_a, da, _i = dated[0]
+                label = _display_label(name_a, oid_a, name_a in collide)
+                hits.append({"content": f"{label} came first on "
+                                        f"{_fmt_date(da)}",
+                             "kind": "ordering"})
     elif shape is AssemblyShape.CURRENT_STATE:
         # headers follow the SAME candidate-ordered subject sequence as the
         # sections below — never the raw state_rows order (the docker state
@@ -925,8 +975,9 @@ def synthesize_hits(
             if sr is None:
                 continue
             label = _display_label(name, oid, name in collide)
-            hits.append(_state_header_hit(sr, label,
-                                          successors_verified))
+            hits.append(_state_header_hit(
+                sr, label, successors_verified,
+                question_date=question_date))
 
     # per-subject sections (subject-major). Rows are re-sorted internally on
     # (date, id) so synthesize_hits output is INDEPENDENT of the input row
@@ -961,8 +1012,10 @@ def synthesize_hits(
 
 # Object recall-excluded statuses (the successor-EXISTENCE probe treats an
 # excluded successor as invisible -> the renderer's NAME-ONLY annotation).
+# Mirrors the canonical search_engine.TERMINAL_EXCLUDED_STATUSES tuple (P2-3:
+# an 'outdated'-status successor object is recall-excluded too).
 _RECALL_OBJECT_EXCLUDED_STATUSES = frozenset(
-    {"superseded", "deprecated", "archived", "retracted"})
+    {"superseded", "deprecated", "archived", "retracted", "outdated"})
 
 
 @dataclass(frozen=True)
@@ -1022,10 +1075,12 @@ def _probe_visible_successors(sdk, slices: AssemblySlices) -> frozenset[str]:
     statuses_by_name: dict[str, set] = {}
     for nm, st in rows:
         statuses_by_name.setdefault(nm, set()).add(st or "")
+    # P2-2: ANY visible (non-excluded) Object of that name verifies the
+    # successor — a coexisting excluded same-name row must NOT poison it
     verified = {nm for nm in names
                 if statuses_by_name.get(nm)
-                and not (statuses_by_name[nm]
-                         & _RECALL_OBJECT_EXCLUDED_STATUSES)}
+                and (statuses_by_name[nm]
+                     - _RECALL_OBJECT_EXCLUDED_STATUSES)}
     return frozenset(verified)
 
 
@@ -1068,7 +1123,8 @@ def _assemble_connected(sdk, question: str, *, question_date: str | None = None,
         per_subject_cap=caps.get("limit") or 200)
     verified = _probe_visible_successors(sdk, slices)
     hits = synthesize_hits(slices, shape=shape, candidates=candidates,
-                           halves=terms, successors_verified=verified)
+                           halves=terms, successors_verified=verified,
+                           question_date=question_date)
     # decorate REAL rows (id-keyed additive session/speaker join); the
     # synthesized no-id state/section lines ride through untouched
     import contextlib as _contextlib

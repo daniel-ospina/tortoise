@@ -1131,10 +1131,10 @@ def test_render_state_row_superseded_by_dict_shaped():
 
 
 def test_render_ordering_line_and_sections():
-    """ordering: line computed THROUGH the shared date helper (couch
-    earliest 2026-08-10 < dog bed earliest 2026-08-10, subject_index 0
-    breaks the same-day tie); per-subject sectioning keeps the subjects
-    separate; both subjects present even when one has an undated row."""
+    """ordering: line computed THROUGH the shared date helper (couch +
+    dog bed share the earliest day 2026-08-10 -> the order-independent tie
+    phrase); per-subject sectioning keeps the subjects separate; both
+    subjects present even when one has an undated row."""
     from datetime import date as _d
 
     from tortoise.assembly import _norm_date
@@ -1153,8 +1153,11 @@ def test_render_ordering_line_and_sections():
     slices = collect_slices(port, cands, shape=AssemblyShape.ORDERING)
     hits = synthesize_hits(slices, shape=AssemblyShape.ORDERING,
                            candidates=cands)
-    assert hits[0]["content"] == "couch came first on 2026-08-10", \
-        f"ordering line golden drifted: {hits[0]['content']!r}"
+    # couch + dog bed first-known on the SAME day -> the order-INDEPENDENT
+    # tie phrase (P2-1 review: never a word-order-dependent winner claim)
+    assert hits[0]["content"] == \
+        "couch and dog bed both appeared on 2026-08-10", \
+        f"ordering golden drifted: {hits[0]['content']!r}"
     by_oid = {}
     for h in hits:
         oid = h.get("object_id")
@@ -1389,8 +1392,8 @@ def test_render_interval_single_dated_instance_no_line():
 
 def test_render_order_shuffle_matched_control():
     """Matched control: identical slices rendered under swapped candidate
-    order flip the SAME-DAY tie winner deterministically (subject_index
-    decides), and re-running yields byte-identical content."""
+    order produce the SAME order-INDEPENDENT tie phrase (zero delta), and
+    re-running yields byte-identical content."""
     port = _fixture_walker_port()
     cands_ab = [_cand("obj-couch", "couch", 0),
                 _cand("obj-dogbed", "dog bed", 1)]
@@ -1403,11 +1406,13 @@ def test_render_order_shuffle_matched_control():
                           candidates=cands_ab)
     ba = synthesize_hits(slices, shape=AssemblyShape.ORDERING,
                          candidates=cands_ba)
-    # couch (earliest 08-10) before dog bed (earliest 08-10): same day ->
-    # index order decides
-    assert ab[0]["content"] == "couch came first on 2026-08-10"
+    # couch + dog bed same earliest (08-10): the TIE phrase renders and is
+    # CANDIDATE-ORDER-INDEPENDENT — a matched-control shuffle yields ZERO
+    # delta (never a word-order-dependent winner)
+    assert ab[0]["content"] == \
+        "couch and dog bed both appeared on 2026-08-10"
     assert ab2[0]["content"] == ab[0]["content"]
-    assert ba[0]["content"] == "dog bed came first on 2026-08-10"
+    assert ba[0]["content"] == ab[0]["content"]
 
 
 def test_render_superseded_state_matched_delta():

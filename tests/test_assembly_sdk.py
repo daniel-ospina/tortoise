@@ -185,7 +185,7 @@ GOLD_FIRED_CURRENT = """Current Date: 2026-09-10
 [session ?] [valid since 2026-09-01] sold the old couch and ordered a new sofa instead"""
 GOLD_FIRED_COMPARE = """Current Date: 2026-09-10
 
-[session ?] couch came first on 2026-08-10
+[session ?] couch and dog bed both appeared on 2026-08-10
 
 [session ?] [valid since 2026-08-10] bought the grey couch from ikea for 800 dollars
 
@@ -214,7 +214,7 @@ GOLD_FIRED_CURRENT_HOSTED = """Current Date: 2026-09-10
 [session ?] [valid since 2026-09-01] sold the old couch and ordered a new sofa instead"""
 GOLD_FIRED_COMPARE_HOSTED = """Current Date: 2026-09-10
 
-[session ?] couch came first on 2026-08-10
+[session ?] couch and dog bed both appeared on 2026-08-10
 
 [session 0] bought the grey couch from ikea
 
