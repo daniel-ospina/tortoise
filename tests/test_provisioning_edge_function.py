@@ -153,15 +153,15 @@ def test_edge_function_fires_onboarding_email_after_provision():
     assert "/internal/onboarding-email" in src, (
         "Edge Function must fire the onboarding-email internal endpoint"
     )
-    # Fires after the demo seed block, still inside the handler (provision
+    # Fires after the starter-seed block, still inside the handler (provision
     # RPC already committed).
     assert "await fireOnboardingEmail(teamId, display_name);" in src, (
         "onboarding email must be fired after provisioning, passing the "
         "PERSON display_name"
     )
     assert src.index("fireOnboardingEmail(teamId, display_name)") > src.index(
-        "Demo seed failed"), (
-        "onboarding email must fire after the demo seed (independent of it)"
+        "Starter seed failed"), (
+        "onboarding email must fire after the starter seed (independent of it)"
     )
 
 
