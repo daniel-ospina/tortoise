@@ -2131,7 +2131,7 @@ async def _session_user_team(request: Request, user: dict) -> dict:
         "subscription_status": row.get("subscription_status"),
         "customer_email": row.get("customer_email"),
         # session always passes the dashboard-login gate
-        "dashboard_key_login": True,
+        "dashboard_key_login": row.get("dashboard_key_login", False) is not False,
     }
     # #1913: post-auth abuse evaluation — the session-JWT lane was the
     # abuse-blind hole (key lanes call _abuse_post_auth in get_current_team /
@@ -4527,6 +4527,10 @@ async def register_user(request: Request, response: Response):
                 "p_email": email,
                 "p_key_prefix": team_id[:8],
             })
+            # #2668: agent-created teams need API-key dashboard login enabled
+            # by default — the agent has no session to log in with.
+            from tortoise.supabase_control import set_dashboard_key_login
+            set_dashboard_key_login(cp, team_id, True)
         except Exception as _provision_err:
             try:  # noqa: SIM105
                 _make_sdk(namespace=team_id)._get_proj().db.select_graph(graph_name).delete()
@@ -14045,6 +14049,10 @@ async def agent_signup(request: Request):
                 "p_graph_size_cap": nodes,
                 "p_signup_token_hash": signup_token_hash,
             })
+            # #2668: agent-created teams need API-key dashboard login enabled
+            # by default — the agent has no session to log in with.
+            from tortoise.supabase_control import set_dashboard_key_login
+            set_dashboard_key_login(get_control_plane(), team_id, True)
         except Exception:
             raise HTTPException(status_code=500, detail="Agent signup failed")  # noqa: B904
         await _async_audit(request, team_id, "agent_signup", resource_type="team", resource_id=team_id)
