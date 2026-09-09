@@ -160,6 +160,12 @@ class TestSessionMachineModelStamp:
         db_path = os.path.join(tmp_path, "mm-stamp.db")
         _orig = _patch_tortoise_sdk_init(db_path)
         os.environ["TORTOISE_DB_PATH"] = db_path
+        # CI has no LLM provider key → capture fails closed 503 unless the
+        # offline MockModel test seam is on (convention: test_capture_session.py;
+        # the extraction content is irrelevant here — we assert Session-node
+        # stamp fields, not extractor output).
+        _prior_mock = os.environ.get("TORTOISE_SESSION_LLM_MOCK")
+        os.environ["TORTOISE_SESSION_LLM_MOCK"] = "1"
         sdk = ha_mod._make_sdk(namespace="registry")
         _seed_team_graphs(sdk, self._TEAM_ID, "pro", None)
         try:
@@ -167,6 +173,10 @@ class TestSessionMachineModelStamp:
                             raise_server_exceptions=False) as tc:
                 yield sdk, self._TEAM_ID, tc
         finally:
+            if _prior_mock is None:
+                os.environ.pop("TORTOISE_SESSION_LLM_MOCK", None)
+            else:
+                os.environ["TORTOISE_SESSION_LLM_MOCK"] = _prior_mock
             os.environ.pop("TORTOISE_DB_PATH", None)
             _restore_tortoise_sdk_init(_orig)
 
