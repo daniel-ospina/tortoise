@@ -992,6 +992,9 @@ class TestRunModeHonesty:
         assert arts and all(a["run_mode"] == "mock" for a in arts)
         assert all(a["event_log"] == [] for a in arts)
         assert all(a["emitter_gap"] == [] for a in arts)
+        # Review P2: the hermetic marker identifies seam-FABRICATED logs — a
+        # configured-but-unconsumed seam leaves no marker on mock episodes.
+        assert all("emission_seam" not in a["provenance"] for a in arts)
 
     def test_real_mode_without_executor_seam_fails_closed(self, tmp_path,
                                                           monkeypatch):

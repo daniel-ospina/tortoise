@@ -18,7 +18,8 @@ refused while the real emitting executor is unwired
 (``_REAL_EXECUTOR_WIRED`` — Task 9 wired the live executor, f54f212a6). A
 hermetic real-mode run is real-labeled by construction and supplies its
 event log through the explicit ``RunConfig.emission_seam`` (#2703), which
-also stamps ``provenance.emission_seam``. The resolved run-level mode is
+stamps ``provenance.emission_seam`` on the episodes it supplies. The
+resolved run-level mode is
 recorded in summary.json (run.run_mode) so the CLI report never re-infers it
 from artifact presence.
 """
@@ -132,9 +133,9 @@ class RunConfig:
         #: Instance-scoped ON PURPOSE (never a module-global identity flip):
         #: a leaked stub must not be able to downgrade ANOTHER test's real
         #: run. Production never sets it — the wired live executor is the
-        #: only production real path. Seam runs stamp
-        #: ``provenance.emission_seam = "hermetic"`` so a fabricated log is
-        #: never confusable with a live-spend artifact.
+        #: only production real path. Episodes whose log the seam supplied
+        #: (real mode only) stamp ``provenance.emission_seam = "hermetic"``
+        #: so a fabricated log is never confusable with a live-spend one.
         self.emission_seam = emission_seam
         #: Task 10 stream-mode: sessions > 1 runs each scenario across that
         #: many sequential sessions over the SAME per-scenario graph (no
@@ -691,11 +692,6 @@ def run_battery(config: RunConfig, *, stdout: Callable[[str], None] = print,
         "config_files": [p.name for p in (config.config_dir).glob("*.yaml")],
         "cal_table_hash": thresholds.cal_table_hash(),
     }
-    if config.emission_seam is not None:
-        # #2703 (review P2): a seam-fabricated real run is IDENTIFIABLE — a
-        # hermetic artifact can never be mistaken downstream for a
-        # live-spend one.
-        provenance["emission_seam"] = "hermetic"
     python_hash_seed = os.environ.get("PYTHONHASHSEED", "unset")
 
     # ── attempt dir (sub-second stamp — two sequential runs never collide) ─
@@ -787,7 +783,8 @@ def run_battery(config: RunConfig, *, stdout: Callable[[str], None] = print,
             #    covers MANDATORY -> emitter_gap [] (the gate was never
             #    bypassed; its hermetic driver was). config.emission_seam
             #    restores the driver explicitly and instance-scoped.
-            if run_mode == "real" and config.emission_seam is None:
+            seam = config.emission_seam if run_mode == "real" else None
+            if run_mode == "real" and seam is None:
                 if budget_stop:
                     # #2603 CapStopped-style abort (review #2629 P1-1): the
                     # run's executed real spend exceeded
@@ -817,10 +814,17 @@ def run_battery(config: RunConfig, *, stdout: Callable[[str], None] = print,
                 # lane keeps the stock no-op seam, so a seam-supplied
                 # schema-v1.1 log can never be stamped onto a mock-labeled
                 # episode (mock's empty-log invariant holds).
-                seam = config.emission_seam if run_mode == "real" else None
                 evlog = (seam or _episode_log)(
                     scenario, episode_seed=episode_seed, arm_id=arm_id,
                     run_mode=run_mode)
+            # #2703 (review P2): the hermetic marker is stamped ONLY on the
+            # episodes whose event log the seam ACTUALLY supplied (real mode
+            # + seam set) — a mock-lane episode (stock no-op seam) never
+            # carries it, so the marker identifies seam-fabricated logs, not
+            # seam configuration.
+            art_provenance = provenance
+            if seam is not None:
+                art_provenance = {**provenance, "emission_seam": "hermetic"}
             episode = EpisodeResult(
                 scenario_id=scenario.id, seed=episode_seed, arm=arm_id,
                 turns=tracker.turns, re_derivations=re_deriv,
@@ -877,7 +881,7 @@ def run_battery(config: RunConfig, *, stdout: Callable[[str], None] = print,
                 episode=episode, metric_values=metric_values,
                 outcomes=episode.model_call_outcomes,
                 ep_outcome=episode.ep_outcome.value, excluded=excluded,
-                setup_info=setup_info, provenance=provenance,
+                setup_info=setup_info, provenance=art_provenance,
                 python_hash_seed=python_hash_seed, model=model,
                 event_log=episode.event_log,
                 # Phase-2 final coverage validation at artifact assembly over
