@@ -107,9 +107,10 @@ def _run(root: Path, cfg: Path, *, families=frozenset(), mock: bool = True,
 
     #2703 (decision A): the pre-Task-9 spelling monkeypatched the module
     global ``run._episode_log``; f54f212a6 (Task 9) routed real mode to the
-    live executor and left that stub DEAD, so these honesty tests silently
-    made LIVE model calls and read a live MANDATORY-covering log
-    (``emitter_gap`` []). The seam is now instance-scoped + explicit."""
+    live executor and left that stub DEAD, so the real-mode tests that
+    reached the live executor silently made LIVE model calls and read a live
+    MANDATORY-covering log (``emitter_gap`` []). The seam is now
+    instance-scoped + explicit."""
     root.mkdir(parents=True, exist_ok=True)
     specs: list[str] | None = None
     if families:

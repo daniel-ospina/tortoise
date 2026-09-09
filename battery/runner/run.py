@@ -776,12 +776,14 @@ def run_battery(config: RunConfig, *, stdout: Callable[[str], None] = print,
             #    still drives outcomes/turns) so the emitter-gap gate can be
             #    exercised without network/spend. Task 9 (f54f212a6) routed
             #    real mode straight to the live executor and left the old
-            #    stub (a monkeypatched run._episode_log) DEAD: the four
-            #    report-writers honesty tests silently made LIVE model calls
-            #    (OPENROUTER_API_KEY present) and read a live log that
-            #    covers MANDATORY -> emitter_gap [] (the gate was never
-            #    bypassed; its hermetic driver was). config.emission_seam
-            #    restores the driver explicitly and instance-scoped.
+            #    stub (a monkeypatched run._episode_log) DEAD: the
+            #    report-writers honesty tests that reached the live executor
+            #    silently made LIVE model calls (OPENROUTER_API_KEY present)
+            #    and read a live log that covers MANDATORY -> emitter_gap []
+            #    (the gate was never bypassed; its hermetic driver was); the
+            #    excluded-episode ones failed on the same dead stub.
+            #    config.emission_seam restores the driver explicitly and
+            #    instance-scoped.
             seam = config.emission_seam if run_mode == "real" else None
             if run_mode == "real" and seam is None:
                 if budget_stop:
