@@ -305,7 +305,11 @@ REPO-SPECIFIC — Add below this line:
 
 ### Project Identity
 
-Public repository for the Tortoise epistemic graph engine (with internal strategy, research, and operations docs).
+Public repository that houses:
+- **Tortoise:** Python graph engine for semantic/epistemic agent memory (SDK, MCP server, EP belief propagation)
+- **Strategy docs:** product strategy, competitive analysis, pricing research
+- **Internal operations:** agent skills, CI/CD, coordination scripts (shared with premise-labs lineage)
+- **Web presence:** premise-labs / product landing pages under `website/`
 
 ### Language & Runtime Conventions
 
@@ -368,8 +372,9 @@ Public repository for the Tortoise epistemic graph engine (with internal strateg
 ### Model Selection (Pi)
 
 - **Most tasks:** `deepseek-v4-flash` (base default)
-- **Graphics/visual tasks:** `qwen3.8-max` (Qwen 3.8)
-- **Highly complex / tricky tasks:** `qwen3.8-max` (Qwen 3.8)
+- **Graphics/visual tasks:** `qwen3.8-max` (Qwen 3.8) — interactive session only, where configured
+- **Highly complex / tricky tasks:** `qwen3.8-max` (Qwen 3.8) — interactive session only, where configured
+- **`task`-tool / sub-agent dispatch:** DeepSeek ONLY, per the base-head model-override rule ($SECOND_MODEL gate; see AGENTS.md base head, "Sub-agent Dispatch"). Non-DeepSeek models are never used for sub-agents without the env override.
 
 ### Git Workflow
 
