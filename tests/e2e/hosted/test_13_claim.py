@@ -126,6 +126,13 @@ class _SupabaseMockHandler(BaseHTTPRequestHandler):
             return
         self._send(404, b"{}")
 
+    def do_PATCH(self):  # noqa: N802, RUF100
+        url = urlparse(self.path)
+        if url.path.startswith("/rest/v1/"):
+            self._handle_rest_patch(url)
+            return
+        self._send(404, b"{}")
+
     def _handle_rpc(self, url):
         fn = url.path.rsplit("/", 1)[-1]
         length = int(self.headers.get("Content-Length") or 0)
@@ -173,6 +180,36 @@ class _SupabaseMockHandler(BaseHTTPRequestHandler):
         body = json.loads(self.rfile.read(length) or b"{}")
         self.cp.query(table, method="POST", json_body=body)
         self._send(201, json.dumps([body]).encode())
+
+    def _handle_rest_patch(self, url):
+        table = url.path[len("/rest/v1/"):].split("?")[0]
+        length = int(self.headers.get("Content-Length") or 0)
+        body = json.loads(self.rfile.read(length) or b"{}")
+        qs = parse_qs(url.query)
+        filters = []
+        for key, vals in qs.items():
+            if key == "select":
+                continue
+            val = vals[0]
+            if val.startswith("eq."):
+                filters.append((key, "eq", val[3:]))
+            elif val.startswith("neq."):
+                filters.append((key, "neq", val[3:]))
+            elif val.startswith("is.null"):
+                filters.append((key, "is", None))
+            elif val.startswith("gt."):
+                filters.append((key, "gt", val[3:]))
+            elif val.startswith("lt."):
+                filters.append((key, "lt", val[3:]))
+            elif val.startswith("lte."):
+                filters.append((key, "lte", val[4:]))
+            else:
+                filters.append((key, "eq", val))
+        try:
+            self.cp.query(table, method="PATCH", filters=filters, json_body=body)
+            self._send(204, b"")
+        except Exception as e:  # noqa: BLE001, RUF100
+            self._send(500, json.dumps({"message": str(e)}).encode())
 
     def _send(self, code: int, body: bytes):
         self.send_response(code)
