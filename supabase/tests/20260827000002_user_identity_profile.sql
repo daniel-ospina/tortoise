@@ -89,10 +89,10 @@ INSERT INTO auth.users (id, email, email_confirmed_at, encrypted_password) VALUE
   ('40000000-0000-0000-0000-000000001765'::uuid, 'shape3@1765.test', NULL, 'hashed-pwd'),  -- password-only, unconfirmed email
   ('50000000-0000-0000-0000-000000001765'::uuid, 'shape4@1765.test', now(), NULL),         -- confirmed email, no password
   ('60000000-0000-0000-0000-000000001765'::uuid, 'shape5@1765.test', now(), 'hashed-pwd'); -- confirmed email + password + email identity row
-INSERT INTO auth.identities (id, user_id, provider, provider_id) VALUES
-  ('a0000000-0000-0000-0000-000000001765'::uuid, '30000000-0000-0000-0000-000000001765'::uuid, 'github', '1765-gh-unconfirmed'),
-  ('b0000000-0000-0000-0000-000000001765'::uuid, '60000000-0000-0000-0000-000000001765'::uuid, 'google', '1765-g-oauth'),
-  ('c0000000-0000-0000-0000-000000001765'::uuid, '60000000-0000-0000-0000-000000001765'::uuid, 'email',  '1765-g-email');
+INSERT INTO auth.identities (id, user_id, provider, provider_id, identity_data) VALUES
+  ('a0000000-0000-0000-0000-000000001765'::uuid, '30000000-0000-0000-0000-000000001765'::uuid, 'github', '1765-gh-unconfirmed', '{"email": "gh@1765.test"}'::jsonb),
+  ('b0000000-0000-0000-0000-000000001765'::uuid, '60000000-0000-0000-0000-000000001765'::uuid, 'google', '1765-g-oauth', '{"email": "google@1765.test"}'::jsonb),
+  ('c0000000-0000-0000-0000-000000001765'::uuid, '60000000-0000-0000-0000-000000001765'::uuid, 'email',  '1765-g-email', '{"email": "email@1765.test"}'::jsonb);
 
 -- shape0: no methods
 SELECT tests.assert(
@@ -122,6 +122,10 @@ SELECT tests.assert(
 SELECT tests.assert(
   (public.user_identity_inventory('60000000-0000-0000-0000-000000001765'::uuid)->'methods'->0->>'id') IS NOT NULL,
   'inventory methods must carry the identity-row id (unlink contract)');
+SELECT tests.assert(
+  (public.user_identity_inventory('60000000-0000-0000-0000-000000001765'::uuid)->'methods'->0->>'email') IS NOT NULL,
+  'inventory methods must carry the email (identity_data contract)');
+
 -- unknown user: 0 methods, never an error
 SELECT tests.assert(
   (public.user_identity_inventory('ffffffff-ffff-ffff-ffff-ffffffff1765'::uuid)->>'login_methods')::int = 0,
