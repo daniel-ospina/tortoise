@@ -302,7 +302,12 @@ def _execute_real_episode(*, config: RunConfig, arm, scenario: Scenario,
                 caller=caller, scenario_render=render,
                 scenario_id=scenario.id),
             seconds=_REAL_EPISODE_DEADLINE_S)
-    except (ValueError, ConfigError, OSError, TimeoutError) as e:
+    except (ValueError, ConfigError, OSError, TimeoutError, TypeError) as e:
+        # A non-conforming model envelope (validate_envelope raises TypeError
+        # on e.g. stated_confidence=None — seen on the #1416 real run at
+        # scenario 58) is a REALISM VIOLATION, never a run crash: FAILED
+        # turn + episode exclusion, same honest path as 429/timeout/hang.
+        # Broad catch is scoped to the episode body only.
         # Transport/robustness failures (429/timeout/hang on the real lane)
         # take the SAME honest path as a realism violation: FAILED turn +
         # episode exclusion — never a mid-run crash with partial spend
