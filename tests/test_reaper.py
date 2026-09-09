@@ -881,6 +881,7 @@ def test_cli_defaults_to_dry_run(monkeypatch):
             reap(match, dry_run=False)
 
 
+@pytest.mark.timeout(660)  # full-sweep CLI: reap() serially probes + kills every orphan the carve-out process accumulated — see _run_cli docstring (#1988); the 600s CLI budget exceeds the carve-out job's global --timeout=300 on loaded runners (longmem move added +177 embedded tests to the same process); 660 > sp.run's own 600s cap so ITS child-kill (lock release) governs, never pytest's signal
 def test_cli_no_dry_run_kills(monkeypatch):
     """--no-dry-run actually kills orphans."""
     monkeypatch.setenv("TORTOISE_REAPER_MIN_UPTIME", "0")
@@ -918,6 +919,7 @@ def test_cli_json_output(monkeypatch):
             reap(match, dry_run=False)
 
 
+@pytest.mark.timeout(660)  # full-sweep CLI: reap() over the carve-out process's accumulated orphans — see _run_cli docstring (#1988); 600s CLI budget exceeds the job's global --timeout=300 on loaded runners; 660 > sp.run's 600s cap so ITS child-kill governs
 def test_cli_batch_size_limits_kills(monkeypatch):
     """--batch-size N limits kills per run."""
     monkeypatch.setenv("TORTOISE_REAPER_MIN_UPTIME", "0")
@@ -938,6 +940,7 @@ def test_cli_batch_size_limits_kills(monkeypatch):
             reap(match, dry_run=False)
 
 
+@pytest.mark.timeout(660)  # full-sweep CLI (same budget rationale as test_cli_no_dry_run_kills; 660 > sp.run's 600s cap)
 def test_cli_singleton_lock_prevents_concurrent(monkeypatch):
     """Second concurrent instance (lock held mid-sweep) exits 0 with
     'already running'. The lock is held only DURING a sweep, so we hold it
@@ -955,6 +958,7 @@ def test_cli_singleton_lock_prevents_concurrent(monkeypatch):
         lock.release()
 
 
+@pytest.mark.timeout(660)  # full-sweep CLI (same budget rationale as test_cli_no_dry_run_kills; 660 > sp.run's 600s cap)
 def test_cli_singleton_lock_released_on_sigkill(monkeypatch):
     """SIGKILL the lock-holder -> fcntl auto-releases -> second acquires."""
     import subprocess as sp
