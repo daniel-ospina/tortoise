@@ -28,6 +28,21 @@ from tests.test_hosted_api import (
 )
 
 _2599_UUID_A = str(_uuid_lib.uuid4())
+
+
+@pytest.fixture(autouse=True)
+def llm_extraction_provider(monkeypatch):
+    """Install the offline MockModel session extractor (#822).
+
+    Mirrors test_hosted_api.py's module-scoped autouse fixture of the same
+    name EXACTLY — CI has no LLM provider key, so every /v1/sessions capture
+    fails closed 503 unless TORTOISE_SESSION_LLM_MOCK=1 is on. The machine-
+    model tests assert Session-node STAMP fields (machine_id/model/actor), not
+    extractor output, so the offline seam is safe. Importing helpers from
+    test_hosted_api does NOT inherit its autouse fixtures — this module needs
+    its own copy (fixtures are per-module, not import-propagating).
+    """
+    monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
 _2599_MACHINE_ID = "sha256:abc123def456"  # example hashed hostname
 _2599_MODEL = "claude-sonnet-4-20250514"
 
@@ -160,12 +175,6 @@ class TestSessionMachineModelStamp:
         db_path = os.path.join(tmp_path, "mm-stamp.db")
         _orig = _patch_tortoise_sdk_init(db_path)
         os.environ["TORTOISE_DB_PATH"] = db_path
-        # CI has no LLM provider key → capture fails closed 503 unless the
-        # offline MockModel test seam is on (convention: test_capture_session.py;
-        # the extraction content is irrelevant here — we assert Session-node
-        # stamp fields, not extractor output).
-        _prior_mock = os.environ.get("TORTOISE_SESSION_LLM_MOCK")
-        os.environ["TORTOISE_SESSION_LLM_MOCK"] = "1"
         sdk = ha_mod._make_sdk(namespace="registry")
         _seed_team_graphs(sdk, self._TEAM_ID, "pro", None)
         try:
@@ -173,10 +182,6 @@ class TestSessionMachineModelStamp:
                             raise_server_exceptions=False) as tc:
                 yield sdk, self._TEAM_ID, tc
         finally:
-            if _prior_mock is None:
-                os.environ.pop("TORTOISE_SESSION_LLM_MOCK", None)
-            else:
-                os.environ["TORTOISE_SESSION_LLM_MOCK"] = _prior_mock
             os.environ.pop("TORTOISE_DB_PATH", None)
             _restore_tortoise_sdk_init(_orig)
 
