@@ -10,22 +10,30 @@ import {
   HARNESS_COPY_LABEL, HARNESS_CONTINUE_LABEL,
   HARNESS_CAPTURE_INSTALL, HARNESS_CAPTURE_REASON,
   HARNESS_CAPTURE_STATUS_LABEL, HARNESS_CAPTURE_SUPPORT,
+  HARNESS_OAUTH,
 } from './harnesses.js'
 
 const KEY = 'tt_w2_test_key'
 
-test('DE2E-5: the 6-harness vocabulary — self-install (4) + teach-human (2) cover HARNESS_ORDER exactly', () => {
-  assert.equal(HARNESS_ORDER.length, 6)
+test('DE2E-5: the 7-harness vocabulary — self-install (4) + teach-human (3, incl. OAuth chatgpt) cover HARNESS_ORDER exactly', () => {
+  assert.equal(HARNESS_ORDER.length, 7)
   assert.deepEqual([...HARNESS_ORDER].sort(), [...Object.keys(HARNESS_NAMES)].sort())
   const split = [...HARNESS_SELF_INSTALL, ...HARNESS_TEACH_HUMAN].sort()
-  assert.deepEqual(split, [...HARNESS_ORDER].sort(), 'self-install ∪ teach-human == all 6')
+  assert.deepEqual(split, [...HARNESS_ORDER].sort(), 'self-install ∪ teach-human == all 7')
   const overlap = HARNESS_SELF_INSTALL.filter((h) => HARNESS_TEACH_HUMAN.includes(h))
   assert.equal(overlap.length, 0, 'self-install and teach-human are disjoint')
   assert.deepEqual(HARNESS_SELF_INSTALL.sort(), ['claude', 'codex', 'cursor', 'pi'].sort())
-  assert.deepEqual(HARNESS_TEACH_HUMAN.sort(), ['claude-desktop', 'claude-web'].sort())
+  // #1701: chatgpt joins the teach-human vocabulary (no local shell/cloud —
+  // the HUMAN completes the connector steps) AND is the OAuth-only harness.
+  assert.deepEqual(HARNESS_TEACH_HUMAN.sort(), ['claude-desktop', 'claude-web', 'chatgpt'].sort())
+  assert.deepEqual(HARNESS_OAUTH, ['chatgpt'])
+  assert.equal(HARNESS_OAUTH.filter((h) => HARNESS_SELF_INSTALL.includes(h)).length, 0,
+    'OAuth harnesses are never self-install (no key-mint surface)')
+  assert.equal(HARNESS_OAUTH.filter((h) => !HARNESS_TEACH_HUMAN.includes(h)).length, 0,
+    'OAuth harnesses are teach-human')
 })
 
-test('UNIVERSAL_COMMAND covers all 6 harnesses (one command per harness)', () => {
+test('UNIVERSAL_COMMAND covers all 7 harnesses (one command per harness)', () => {
   assert.deepEqual(UNIVERSAL_COMMAND_HARNESSES, HARNESS_ORDER)
   for (const h of HARNESS_ORDER) {
     assert.equal(typeof UNIVERSAL_COMMAND[h], 'function', `${h} universal command`)
@@ -79,11 +87,20 @@ test('DE2E-5: 4 self-install harnesses carry a config-write command + skill inst
     const cmd = UNIVERSAL_COMMAND[h](KEY)
     assert.match(cmd, /install-tortoise-skills\.sh/, `${h}: skill install line`)
     assert.match(cmd, /tortoise_health/, `${h}: tortoise_health verify`)
+  }
+  // Post-#593 (auto-complete on first agent write): the 3 key-config
+  // harnesses still hand off with the harness-connected checkpoint phrase;
+  // Pi's copy dropped the checkpoint ceremony (onboarding auto-completes on
+  // the first graph write) — it must end on the eager-connect verify instead.
+  for (const h of ['claude', 'codex', 'cursor']) {
+    const cmd = UNIVERSAL_COMMAND[h](KEY)
     assert.match(cmd, /harness-connected/, `${h}: harness-connected checkpoint`)
   }
+  assert.match(pi, /connected/, 'pi: connect verify sentence (no checkpoint ceremony)')
+  assert.ok(!pi.includes('harness-connected'), 'pi: checkpoint handoff copy removed (#593)')
 })
 
-test('DE2E-5: 2 teach-human harnesses carry exact manual steps + verify handoff', () => {
+test('DE2E-5: teach-human harnesses carry exact manual steps + verify handoff (Claude Desktop/Web)', () => {
   const desktop = UNIVERSAL_COMMAND['claude-desktop'](KEY)
   assert.match(desktop, /claude_desktop_config\.json/, 'desktop: config file named')
   assert.match(desktop, /mcpServers/, 'desktop: mcpServers block')
@@ -94,6 +111,45 @@ test('DE2E-5: 2 teach-human harnesses carry exact manual steps + verify handoff'
   assert.match(web, /Server URL/, 'web: server URL step')
   assert.match(web, /tortoise_health/, 'web: agent verifies')
   assert.match(web, /harness-connected/, 'web: checkpoint handoff (dashboard Continue)')
+})
+
+test('#1701 DE2E-5: chatgpt is the key-less OAuth harness — OAuth connector steps + skills-as-prompt copy', () => {
+  // connector steps (rendered above the snippet) name the Developer-mode
+  // surface and the OAuth choice; the URL is the NO-slash form
+  const steps = HARNESS_STEPS('chatgpt', KEY)
+  assert.ok(Array.isArray(steps) && steps.length >= 7, 'chatgpt step list present')
+  assert.ok(steps.some((s) => typeof s === 'string' && s.includes('Developer mode')), 'steps: Developer mode')
+  assert.ok(steps.some((s) => typeof s === 'string' && s.includes('chatgpt.com/plugins')), 'steps: plugins surface')
+  const urlStep = steps.find((s) => typeof s === 'object' && s.copy === 'https://api.premiselabs.co/mcp')
+  assert.ok(urlStep, 'steps: MCP URL copy step (exact, no slash)')
+  assert.ok(steps.some((s) => typeof s === 'string' && s.includes('OAuth')), 'steps: OAuth choice named')
+  // the legacy HARNESS_INSTALL copy for chatgpt is the shared skills-as-prompt
+  // body ONLY — byte-identical with Claude Web's (drift pin on WORKFLOWS_PROMPT)
+  const prompt = HARNESS_INSTALL.chatgpt()
+  assert.equal(prompt, HARNESS_INSTALL['claude-web'](), 'claude-web and chatgpt share the identical workflows body')
+  assert.match(prompt, /Follow these workflows/, 'prompt: workflows marker')
+  // the self-contained UNIVERSAL_COMMAND block embeds the connector steps +
+  // prompt + a USER-FACING in-chat verify (no server signal — chatgpt has no
+  // tortoise_health call)
+  const cmd = UNIVERSAL_COMMAND.chatgpt()
+  assert.match(cmd, /Developer mode/, 'command: Developer mode')
+  assert.match(cmd, /chatgpt\.com\/plugins/, 'command: plugins surface')
+  assert.match(cmd, /https:\/\/api\.premiselabs\.co\/mcp[^\/]/, 'command: exact MCP URL (no trailing slash)')
+  assert.match(cmd, /OAuth/, 'command: OAuth')
+  assert.match(cmd, /Follow these workflows/, 'command: workflows prompt embedded')
+  assert.match(cmd, /are we connected\?/, 'command: in-chat verify question')
+  assert.match(cmd, /harness-connected/, 'command: checkpoint handoff (dashboard Continue)')
+  assert.ok(!cmd.includes('tt_'), 'chatgpt copy must never carry a key prefix')
+  assert.ok(!cmd.includes(KEY), 'chatgpt copy must never embed the test key')
+  assert.ok(!cmd.includes('tortoise_health'), 'chatgpt copy verifies IN CHAT — never tortoise_health')
+  assert.ok(!cmd.includes('api.premiselabs.co/mcp/'), 'chatgpt copy must not use the slash URL form')
+  assert.equal(HARNESS_COPY_LABEL.chatgpt, 'Copy prompt')
+  assert.equal(HARNESS_CONTINUE_LABEL.chatgpt, "I've connected it — Continue →")
+  assert.ok(HARNESS_INTRO.chatgpt && HARNESS_INTRO.chatgpt.includes('paste the prompt'), 'chatgpt intro points at the chat paste')
+  // session capture: disabled-with-reason (cloud-hosted — no local signal)
+  assert.equal(HARNESS_CAPTURE_SUPPORT.chatgpt, false)
+  assert.ok(HARNESS_CAPTURE_REASON.chatgpt && HARNESS_CAPTURE_REASON.chatgpt.length > 0,
+    'chatgpt capture row renders a reason (never undefined)')
 })
 
 test('no literal tt_ key in project-scoped/committable configs (env-var indirection)', () => {

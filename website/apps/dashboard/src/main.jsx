@@ -3,7 +3,7 @@ import { createRoot } from 'react-dom/client'
 import './index.css'
 // #1623: plan display data (build-time import of product/pricing.json).
 import { planOptions, STATUS_LABELS, TIER_LABELS } from './pricing.js'
-import { HARNESS_CAPTURE_INSTALL, HARNESS_CAPTURE_REASON, HARNESS_CAPTURE_STATUS_LABEL, HARNESS_CAPTURE_SUPPORT, HARNESS_CONTINUE_LABEL, HARNESS_COPY_LABEL, HARNESS_INSTALL, HARNESS_INTRO, HARNESS_NAMES, HARNESS_ORDER, HARNESS_PERSIST, HARNESS_SELF_INSTALL, HARNESS_SKILLS, HARNESS_SKILLLESS, HARNESS_SKILLS_IN_PROMPT, HARNESS_SKILLS_IN_STEPS, HARNESS_STEPS, UNIVERSAL_COMMAND } from './harnesses.js'
+import { HARNESS_CAPTURE_INSTALL, HARNESS_CAPTURE_REASON, HARNESS_CAPTURE_STATUS_LABEL, HARNESS_CAPTURE_SUPPORT, HARNESS_CONTINUE_LABEL, HARNESS_COPY_LABEL, HARNESS_INSTALL, HARNESS_INTRO, HARNESS_NAMES, HARNESS_OAUTH, HARNESS_ORDER, HARNESS_PERSIST, HARNESS_SELF_INSTALL, HARNESS_SKILLS, HARNESS_SKILLLESS, HARNESS_SKILLS_IN_PROMPT, HARNESS_SKILLS_IN_STEPS, HARNESS_STEPS, UNIVERSAL_COMMAND } from './harnesses.js'
 // #1728 Slice 3 (Tasks 16-17): the SHARED 4-state capture-status derivation
 // (off → install-pending → waiting → active, probe-driven) — pure, node --test
 // unit-tested (captureStatus.test.js). #1927: the re-ask gate predicate was
@@ -937,9 +937,13 @@ function claimIntentInFlight() {
   // key reveal; for returning empty-graph users it re-opens at step 0
   // (harness); step-0 Back returns to the orientation card.
   const [wizardStep, setWizardStepRaw] = React.useState(0)
-  const setWizardStep = React.useCallback((n) => { setWizardStepRaw(n); setWizardCopied((c) => (c === 'harness' ? '' : c)) }, [])
+  const setWizardStep = React.useCallback((n) => { setWizardStepRaw(n); setWizardCopied((c) => (c === 'harness' ? '' : c)); setWizardCopyFailed(false); setWizardConnectError('') }, [])
   const [wizardHarness, setWizardHarness] = React.useState('claude')
   const [wizardCopied, setWizardCopied] = React.useState('')
+  // #1701 R2: a failed clipboard write must not strand the ChatGPT flow — the
+  // error prescribes a manual ⌘/Ctrl-C copy, so the manual-Continue affordance
+  // appears ONLY after a failure (the user explicitly asserts the copy).
+  const [wizardCopyFailed, setWizardCopyFailed] = React.useState(false)
   // #2328: Codex has two surfaces — CLI (shell) and Desktop (GUI app, NO
   // terminal, does not inherit shell exports). The connect step toggles so a
   // Desktop user never faces an export-command they cannot run.
@@ -2229,6 +2233,28 @@ function claimIntentInFlight() {
     }
     api(`/v1/onboarding/state${onboardingTeamQ()}`, { method: 'PATCH', useSession: true,
       body: JSON.stringify({ harness: wizardHarness, section: 'config' }) }).catch(() => {})
+  }
+
+  // #1701 R2: chatgpt's copy handler is AWAITED — Continue (the checkpoint)
+  // must never be reachable without a successful copy, so the clipboard write
+  // resolves BEFORE the sticky wizardCopied='harness' state lands (mirrors
+  // claude-web's gate: copying ≠ setup done). The PATCH beacon fires on
+  // resolution only; wizardCopy above stays fire-and-forget so the 6 keyed
+  // harnesses keep byte-identical behavior.
+  async function wizardCopyChatgpt() {
+    setWizardConnectError('')
+    const text = HARNESS_INSTALL.chatgpt()
+    try {
+      await navigator.clipboard.writeText(text)
+    } catch {
+      setWizardCopyFailed(true)
+      setWizardConnectError('Copy failed — select the prompt below and press ⌘/Ctrl-C, then Continue below')
+      return
+    }
+    setWizardCopyFailed(false)
+    setWizardCopied('harness')
+    api(`/v1/onboarding/state${onboardingTeamQ()}`, { method: 'PATCH', useSession: true,
+      body: JSON.stringify({ harness: 'chatgpt', section: 'config' }) }).catch(() => {})
   }
 
   const stopGithubPoll = () => {
@@ -5702,12 +5728,78 @@ sdk.create_point(text="My first point")
                           <button key={h} type="button"
                             className={'harness-tab' + (wizardHarness === h ? ' active' : '')}
                             aria-pressed={wizardHarness === h}
-                            onClick={() => { setWizardHarness(h); setWizardCopied(''); if (h !== 'codex') setWizardCodexDesktop(false) }}>
+                            onClick={() => { setWizardHarness(h); setWizardCopied(''); setWizardCopyFailed(false); setWizardConnectError(''); if (h !== 'codex') setWizardCodexDesktop(false) }}>
                             {HARNESS_NAMES[h]}
                           </button>
                         ))}
                       </div>
-                      {!harnessKey ? (
+                      {wizardHarness === 'chatgpt' ? (
+                        // #1701 R2: ChatGPT is a KEY-LESS OAuth harness — no
+                        // tt_ key to mint or embed (OpenAI's connector runs
+                        // the MCP OAuth flow against the hosted endpoint).
+                        // The branch sits ABOVE the !harnessKey gate so a
+                        // member or owner, with or without an existing key,
+                        // renders the same flow. wizardCopy's fire-and-forget
+                        // stays untouched — the 6 keyed harnesses keep
+                        // byte-identical copy behavior (see wizardCopyChatgpt).
+                        <>
+                          {HARNESS_STEPS('chatgpt', harnessKey) && (
+                            <ol className="harness-steps" style={{ margin: '0.9rem 0 0.25rem 1.1rem', padding: 0, lineHeight: 1.7 }}>
+                              {HARNESS_STEPS('chatgpt', harnessKey).map((s, i) => (
+                                <li key={i} style={{ marginBottom: '0.35rem', fontSize: 14, color: 'var(--text,#e2e8f0)' }}>
+                                  {typeof s === 'string' ? s : (
+                                    <>
+                                      <span>{s.label}</span>{' '}
+                                      <code style={{ padding: '2px 6px', background: 'var(--surface,#0d1a2d)', border: '1px solid var(--border,#1e293b)', borderRadius: 5, fontSize: 13 }}>{s.code}</code>{' '}
+                                      {s.copy && (
+                                        <button type="button" className="ghost small" onClick={() => wizardCopyStep(s.copy)}>
+                                          {copiedStep === s.copy ? 'Copied ✓' : 'Copy'}
+                                        </button>
+                                      )}
+                                    </>
+                                  )}
+                                </li>
+                              ))}
+                            </ol>
+                          )}
+                          {HARNESS_INTRO.chatgpt && (
+                            <p className="dim small" style={{ margin: '0.9rem 0 0', lineHeight: 1.6 }}>
+                              {HARNESS_INTRO.chatgpt}
+                            </p>
+                          )}
+                          {/* #1701 R2: org-naming line — ChatGPT's consent
+                              picker lists every active team the account
+                              holds, so a multi-team user must pick the org
+                              they're onboarding. Name it here so the chosen
+                              team and the wizard header always agree. */}
+                          {shownOrgName && (
+                            <p className="dim small" style={{ margin: '0.5rem 0 0', lineHeight: 1.6 }}>
+                              When Tortoise asks which team to use, choose <strong>{shownOrgName}</strong>.
+                            </p>
+                          )}
+                          <pre className="snippet" style={{ marginTop: '0.75rem' }}>
+                            {HARNESS_INSTALL.chatgpt()}
+                          </pre>
+                          <div className="wizard-nav">
+                            <button type="button" className="ghost" onClick={() => setWizardStep(1)}>← Back</button>
+                            <div className="wizard-nav-actions">
+                              {wizardConnectError && (
+                                <p className="error" role="alert" style={{ margin: '0 0.5rem 0 0', fontSize: 13 }}>{wizardConnectError}</p>
+                              )}
+                              <button type="button" className={wizardCopied === 'harness' ? 'ghost' : 'btn-primary'}
+                                onClick={wizardCopyChatgpt}>
+                                {wizardCopied === 'harness' ? 'Copied ✓' : (HARNESS_COPY_LABEL.chatgpt || 'Copy prompt')}
+                              </button>
+                              {(wizardCopied === 'harness' || wizardCopyFailed) && (
+                                <button type="button" className="btn-primary" onClick={wizardHarnessContinue} disabled={wizardConnectBusy}>
+                                  {wizardConnectBusy ? 'Saving…' : (wizardCopyFailed ? "I've pasted it manually — Continue →" : (HARNESS_CONTINUE_LABEL.chatgpt || "I've connected it — Continue →"))}
+                                </button>
+                              )}
+                              <button type="button" className="ghost" onClick={() => { setWizardPaused(true); setWizardStep(3) }}>Skip for now</button>
+                            </div>
+                          </div>
+                        </>
+                      ) : !harnessKey ? (
                         // #1998 fold-in (PR #2161 finding): the connect step
                         // must embed a DURABLE key — the 24h bootstrap
                         // session credential would kill an agent configured
@@ -5931,11 +6023,15 @@ sdk.create_point(text="My first point")
                           <pre className="snippet" style={{ marginTop: '0.75rem' }}>
                             {UNIVERSAL_COMMAND[wizardConnectHarness](harnessKey)}
                           </pre>
-                          {/* #1998 (W2): the universal command covers all 6
-                              harnesses — 4 self-install (Claude Code, Cursor,
-                              Codex, Pi), 2 teach-human (Claude Desktop, Claude
-                              Web). The agent self-adjudicates its harness from
-                              the tortoise-onboarding skill's table; the skill
+                          {/* #1998 (W2): the universal command covers the 6
+                              KEYED harnesses — 4 self-install (Claude Code,
+                              Cursor, Codex, Pi), 2 teach-human (Claude
+                              Desktop, Claude Web). ChatGPT is the 7th harness
+                              but key-less (HARNESS_OAUTH) — it renders through
+                              its own OAuth branch above the key gate and never
+                              reaches this universal-command render. The agent
+                              self-adjudicates its harness from the
+                              tortoise-onboarding skill's table; the skill
                               install line above fetches it. */}
                           {!['codexDesktop', 'claude-desktop', 'claude-web'].includes(wizardConnectHarness) && (
                           <p className="dim small" style={{ margin: '0.75rem 0 0', lineHeight: 1.6 }}>
@@ -6020,10 +6116,12 @@ sdk.create_point(text="My first point")
                           </button>
                         ))}
                       </div>
-                      {!harnessKey ? (
+                      {(!harnessKey && !HARNESS_OAUTH.includes(wizardHarness)) ? (
                         // #1831 P2-1: no key after a recoverable mint
                         // failure (#1830) — never emit `Bearer ` with an
                         // empty key. Fall back to a create-a-key message.
+                        // #1701: OAuth harnesses (chatgpt) are key-satisfied
+                        // — they skip this gate even with no tt_ key.
                         <>
                           <p className="dim" style={{ margin: '0.9rem 0 0', lineHeight: 1.6 }}>
                             The setup command embeds your API key — create one

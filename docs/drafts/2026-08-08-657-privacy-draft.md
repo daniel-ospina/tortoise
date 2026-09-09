@@ -159,7 +159,7 @@ Retention carve-outs, stated honestly:
 
 - **Billing and transactional records** are retained as required by applicable law, including tax and accounting obligations (GDPR Art. 17(3) carve-out for legal compliance).
 - **Analytics data** is handled in accordance with the analytics section (§3) and the retention terms of each analytics provider; analytics data is not silently claimed to be deleted.
-- **Knowledge graphs.** Deleting a knowledge graph in the product starts a disclosed 7-day recovery window (the team's "Trash"): during that window the graph can be restored, and its API keys are revoked immediately. After the window ends, the graph is permanently erased — including any stored backup copies of it. Deleted graph data is not retained beyond that recovery window except where required by law or for fraud/security investigations.
+- **Knowledge graphs.** Deleting a knowledge graph in the product starts a disclosed 7-day recovery window (the organization's "Trash"): during that window the graph can be restored, and its API keys are revoked immediately. After the window ends, the graph is permanently erased — including any stored backup copies of it. Deleted graph data is not retained beyond that recovery window except where required by law or for fraud/security investigations.
 - **Backups** may retain data for a limited additional period after deletion to maintain integrity; data in backups is not used for any other purpose. Backup copies of a deleted knowledge graph are erased with the graph after its recovery window, and are refused for restoration once the window has passed.
 
 ## 7. Security (outline ⑦)

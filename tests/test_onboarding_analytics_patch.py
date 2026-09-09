@@ -117,6 +117,22 @@ def test_patch_invalid_harness_or_section_ignored(client, payload):
     assert state_kwargs == {}
 
 
+def test_patch_chatgpt_harness_beacon_is_inert(client):
+    """#1701 R2: the wizard's chatgpt tab fires the same copy-attribution
+    PATCH beacon as the other harnesses ({harness:'chatgpt', section:'config'})
+    — the handler accepts it (200) but emits NO artifact_copied event and
+    leaves onboarding state untouched. chatgpt is INTENTIONALLY beacon-less:
+    it has no local skills and never files sessions, so it stays absent from
+    the server analytics vocabulary (_HARNESS_ANALYTICS_VALUES = 6)."""
+    resp = client.patch("/v1/onboarding/state",
+                        json={"harness": "chatgpt", "section": "config"})
+    assert resp.status_code == 200
+    assert _events(client) == []
+    state_kwargs = {k: v for k, v in client._captured_kwargs.items()
+                    if k != "__team_id__"}
+    assert state_kwargs == {}
+
+
 def test_patch_legit_state_fields_still_merge_alongside_beacon(client):
     """Beacon fields and real state fields can arrive together without leaking."""
     resp = client.patch("/v1/onboarding/state",
