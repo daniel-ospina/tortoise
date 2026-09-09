@@ -394,8 +394,16 @@ class TestAskConnectedAssemblyExposure:
         ).rstrip("/")
         uri = f"{base}_{uuid.uuid4().hex[:10]}"
         monkeypatch.setenv("TORTOISE_DB_URI", uri)
-        _emb.compute_embedding = staticmethod(lambda content: None)
-        _emb.EmbeddingModel.get = staticmethod(lambda: None)
+        # hermetic embedder: monkeypatch-scoped so the process-wide module
+        # state is RESTORED at test teardown (raw assignment here leaked
+        # EmbeddingModel.get/compute_embedding into every later test in the
+        # pytest process — search_engine/session_semantic/session-embedding
+        # reds after this class ran). Mirrors test_assembly_sdk's
+        # _no_embedder(monkeypatch) pattern.
+        monkeypatch.setattr(_emb, "compute_embedding",
+                            staticmethod(lambda content: None))
+        monkeypatch.setattr(_emb.EmbeddingModel, "get",
+                            staticmethod(lambda: None))
         # probe FTS on the server first (skip when docker unavailable)
         from tests.test_ask_sdk import FakeReader
         from tortoise.sdk import TortoiseSDK as _PSDK
@@ -448,6 +456,13 @@ class TestAskConnectedAssemblyExposure:
                 s._get_proj().db.select_graph("team_selfhost").delete()
             with contextlib.suppress(Exception):
                 s.close()
+            # the hermetic FakeReader was cached under ask:selfhost (the
+            # per-namespace reader cache) — without a reset it leaks into
+            # later selfhost/ask tests (selfhost_rest got 'GOLD' instead of
+            # its own fake). Mirrors test_ask_sdk's autouse _clean_ask_state.
+            with contextlib.suppress(Exception):
+                from tortoise.sdk import _reset_ask_reader_cache_for_tests
+                _reset_ask_reader_cache_for_tests()
 
     def test_mcp_ask_fired_assembled_evidence(self, monkeypatch):
         body = self._run(
