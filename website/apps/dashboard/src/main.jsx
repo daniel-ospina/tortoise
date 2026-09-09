@@ -817,7 +817,14 @@ function App() {
   function closeReauth() {
     setReauthOpen(false)
     setProfileBusy('')
-    restoreFocus(reauthRestoreRef)
+    // #2392 a11y: defer restoreFocus to after React commits the busy-clearing
+    // update — a disabled trigger button is not focusable. Calling
+    // synchronously would run against the pre-render DOM where the trigger is
+    // still disabled from profileBusy='reauth'. The rAF fires after React
+    // reconciles, re-enables the button, and the painted DOM is focusable.
+    // (The ref holds a JS reference to the element — it survives the deferred
+    // callback: the element isn't GC'd until the ref is cleared.)
+    requestAnimationFrame(() => restoreFocus(reauthRestoreRef))
   }
   // #1765 review P1: the pre-reauth session user id (verify the provider
   // round-trip didn't switch accounts before resuming the pending action)
@@ -1907,6 +1914,7 @@ function claimIntentInFlight() {
             }
             // re-prompt the NEW password (never persisted across the round-trip)
             pendingReauthRef.current = { email: pending.email, promptPassword: true }
+            setProfileBusy('reauth')
             setReauthOpen(true)
             setReauthPasswordMode(true)
           }
