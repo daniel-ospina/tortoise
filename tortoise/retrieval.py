@@ -791,9 +791,58 @@ _PACKAGE_STOPWORDS = frozenset({
     "to", "in", "on", "at", "for", "with", "from", "by", "about",
     "is", "are", "was", "were", "be", "been", "being", "do", "does",
     "did", "it", "this", "that", "these", "those", "i", "we", "you",
-    "he", "she", "they", "me", "my", "our", "your", "their", "not",
-    "no", "yes", "so", "as", "than", "now",
+    "he", "she", "they", "me", "my", "our", "your", "their",
+    "yes", "so", "as", "than", "now",
+    # NB: "not"/"no" are DELIBERATELY absent (P2 #2687 review): negation
+    # is semantic content for a fact-dedup tokenizer — "did not cost 300"
+    # must never normalize to "cost 300".
 })
+
+
+#: Fact-critical token classes (P1 #2687 review): a collapse that would
+#: merge two texts differing in ANY of these is an information-loss bug —
+#: values, currencies, units, quantities and dates are the aggregation
+#: numerator Slice B protects. Ratio-based overlap can only merge
+#: restatements whose differing tokens are synonym-level; if the differing
+#: set contains a fact-critical token the claims are DIFFERENT facts.
+_NUMERIC_TOKEN_RE = re.compile(r"^[+-]?\d+(?:[.,]\d+)*$")
+_CURRENCY_PREFIX_RE = re.compile(r"^[$£€¥]")
+_UNIT_WORDS = frozenset({
+    "dollars", "dollar", "bucks", "pounds", "pound", "quid", "euros",
+    "euro", "yen", "cents", "cent", "percent", "percentage", "points",
+    "point", "km", "miles", "mile", "meters", "meter", "feet", "foot",
+    "inches", "inch", "kgs", "kg", "lbs", "grams", "gram",
+    "liters", "liter", "hours", "hour", "minutes", "minute", "seconds",
+    "second", "days", "day", "weeks", "week", "months", "month",
+    "years", "year", "times", "time", "degrees", "degree", "items",
+    "item", "prices", "price", "cost", "costs", "worth",
+    "amount", "total", "sum", "count", "number", "qty", "quantity",
+})
+_NEGATION_WORDS = frozenset({"not", "no", "never", "neither", "nor",
+                             "cannot", "can't", "didnt", "doesnt",
+                             "doesn't", "don't"})
+
+
+def _token_is_fact_critical(tok: str) -> bool:
+    """Slice A: True when ``tok`` changes a fact if it differs between two
+    otherwise-similar claims: a number, a currency-denominated amount, a
+    unit/quantity word, or a negation. (Dates: numeric forms are caught by
+    the numeric class; month/weekday names are a documented residual.)"""
+    if _NUMERIC_TOKEN_RE.match(tok) or _CURRENCY_PREFIX_RE.match(tok):
+        return True
+    if tok in _UNIT_WORDS or tok in _NEGATION_WORDS:
+        return True
+    # plural/possessive numeric artifacts ("300s", "400's") normalize to
+    # digits + suffix — the digit prefix is still a value difference.
+    return bool(re.match(r"^[+-]?\d+(?:[.,]\d+)*[a-z']*$", tok))
+
+
+def _differing_tokens(a_toks: set[str], b_toks: set[str]) -> set[str]:
+    """Slice A: the symmetric-difference token set of two normalized
+    contents. If ANY member is fact-critical, the claims differ in a value/
+    negation/unit dimension → they are distinct facts regardless of how
+    much content they share (the P1 #2687 value-safety guard)."""
+    return (a_toks - b_toks) | (b_toks - a_toks)
 
 
 def _pkg_norm(text: str) -> str:
@@ -802,8 +851,10 @@ def _pkg_norm(text: str) -> str:
     Punctuation becomes whitespace so "300 dollars," and "300 dollars"
     tokenize identically for overlap AND containment legs (the role bracket
     survives here — ``_verbatim_core`` strips it before the containment
-    compare)."""
-    t = re.sub(r"[^\w\s\[\]]", " ", str(text or ""))
+    compare). CURRENCY SYMBOLS ARE CONTENT (P2 #2687 review): "£300",
+    "$300" and "300" are different amounts — the symbol must not be
+    erased by the punctuation strip."""
+    t = re.sub(r"[^\w\s\[\]$£€¥]", " ", str(text or ""))
     return re.sub(r"\s+", " ", t.lower()).strip()
 
 
@@ -824,6 +875,21 @@ def _pkg_overlap(a: str, b: str) -> float:
     if not ta or not tb:
         return 0.0
     return len(ta & tb) / min(len(ta), len(tb))
+
+
+def _pkg_differ_value_critical(a: str, b: str) -> bool:
+    """Slice A P1 guard (#2687 review): do ``a`` and ``b`` differ in a
+    fact-critical dimension (a number, currency amount, unit/quantity word,
+    or negation)? The ratio legs may only merge RESTATEMENTS (synonym-level
+    differing tokens); a same-frame different-VALUE claim ("cost 300" vs
+    "cost 400") is a different fact no matter how much content it shares —
+    on production-length quotes (20-35 tokens) the ratio alone is NOT a
+    safe value guard (the reviewer's measured 300-vs-400 collapse)."""
+    ta, tb = _pkg_tokens(a), _pkg_tokens(b)
+    if not ta or not tb:
+        return False
+    return any(_token_is_fact_critical(t)
+               for t in _differing_tokens(ta, tb))
 
 
 def _pkg_session(h: dict) -> str:
@@ -903,26 +969,37 @@ def _same_fact(a: dict, b: dict) -> bool:
     cb = _pkg_norm(str(b.get("content") or ""))
     if ca and ca == cb:
         return True
+    # Content ratio leg (P1 #2687 review): near-verbatim restatement
+    # collapses ONLY when the differing tokens are synonym-level — a
+    # fact-critical differing token (number / currency / negation) means
+    # DIFFERENT facts and refuses the ratio leg even at ≥0.9 on
+    # production-length quotes (the (n-1)/n math only protects toy frames).
     ov = _pkg_overlap(ca, cb)
     if ov >= DEFAULT_PACKAGE_VERBATIM_OVERLAP:
-        return True
+        return not _pkg_differ_value_critical(ca, cb)
     # Same-SOURCE-TURN leg (independent of content overlap — duplicate
     # extractions of ONE utterance can rephrase the surrounding content
     # widely while anchoring the same quote span): same ``source_turn_id``
     # (E3 #1535) AND the verbatim ``quote`` spans overlap ≥
     # ``DEFAULT_PACKAGE_SAME_TURN_OVERLAP`` — the same quote span means the
-    # same fact. Two distinct claims distilled from one turn carry DIFFERENT
-    # quote spans (different values/objects) and never collapse (the
-    # aggregation numerator Slice B protects). Value safety: "cost 300" vs
-    # "cost 400" quote-overlap is 2/3 ≈ 0.667 < 0.75 — distinct.
+    # same fact. The content guard above does NOT gate this leg: two
+    # extractions of one utterance may restate the value in words in the
+    # content while the quote carries the number. Two distinct claims from
+    # one turn carry DIFFERENT quote spans (different values/objects) and
+    # never collapse (the aggregation numerator Slice B protects); a same-
+    # turn quote pair that itself differs in a value is refused by the
+    # quote-value guard below.
     at = str(a.get("source_turn_id") or "")
     bt = str(b.get("source_turn_id") or "")
     if not (at and at == bt):
         return False
     qa = str(a.get("quote") or "")
     qb = str(b.get("quote") or "")
-    return bool(qa and qb and _pkg_overlap(qa, qb)
-                >= DEFAULT_PACKAGE_SAME_TURN_OVERLAP)
+    if not (qa and qb):
+        return False
+    if _pkg_differ_value_critical(qa, qb):
+        return False
+    return _pkg_overlap(qa, qb) >= DEFAULT_PACKAGE_SAME_TURN_OVERLAP
 
 
 #: #1945 mark-class ordering (strongest → weakest) for the value-tier split.

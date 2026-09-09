@@ -1685,11 +1685,13 @@ def retrieve_for_question(
         # verdict below is absent (off-path, D2).
         "aggregative_flag": aggregative_flag_on,
         # A6 (Slice A #2683): the evidence-package assembly arm — resolved
-        # tri-state bool + per-outcome package stats, always present (the
-        # off-arm records on=False/applied=False so the Slice-A A/B is
-        # reconstructable per question).
-        "evidence_assembly": evidence_assembly_on,
-        "evidence_assembly_stats": evidence_assembly_stats,
+        # tri-state bool + per-outcome package stats, present ONLY under the
+        # arm (D2 doctrine: the off-path dict keeps today's exact shape; the
+        # run-config methodology records the arm, like the other arms — P2
+        # #2687 review).
+        **({"evidence_assembly": evidence_assembly_on,
+            "evidence_assembly_stats": evidence_assembly_stats}
+           if evidence_assembly_on else {}),
         # R5 (#1544): TR-constraint surface — the detected kind (TR only)
         # and whether the window filter fell back to the unfiltered pool
         # (never starve the reader into abstention).

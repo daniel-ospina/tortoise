@@ -48,6 +48,8 @@ from tortoise.retrieval import (
     DEFAULT_PACKAGE_MAX_VERBATIM,
     DEFAULT_PACKAGE_SAME_TURN_OVERLAP,
     DEFAULT_PACKAGE_VERBATIM_OVERLAP,
+    _pkg_norm,
+    _pkg_tokens,
     ask_env_bool,
     package_evidence_pool,
 )
@@ -414,3 +416,85 @@ def test_package_bounds_documented():
     assert DEFAULT_PACKAGE_MAX_VERBATIM == 1
     # near-verbatim floor above the same-frame different-value boundary
     assert DEFAULT_PACKAGE_VERBATIM_OVERLAP > DEFAULT_PACKAGE_SAME_TURN_OVERLAP
+
+
+# ── P1/P2 #2687 review regressions: value-safety at PRODUCTION LENGTH ──────
+
+_LONG_300 = (
+    "cousin rachel offered the antique tea set for 300 dollars and i thought "
+    "that was a fair price for such a nice set of china passed down from "
+    "my grandmother")
+_LONG_400 = (
+    "cousin rachel offered the antique tea set for 400 dollars and i thought "
+    "that was a fair price for such a nice set of china passed down from "
+    "my grandmother")
+
+
+def test_production_length_different_values_never_collapse():
+    """P1 (#2687 review) regression: on PRODUCTION-length frames (20-35
+    tokens) the content-overlap ratio alone merges 300 vs 400 (the ratio
+    guard's (n-1)/n math only protects toy frames). The fact-critical
+    differing-token guard must refuse the merge regardless of length."""
+    pool = [
+        _point("pt:1", _LONG_300, quote="300 dollars"),
+        _point("pt:2", _LONG_400, quote="400 dollars"),
+    ]
+    packaged, stats = package_evidence_pool(pool)
+    assert [h["id"] for h in packaged] == ["pt:1", "pt:2"]
+    assert stats["collapsed_duplicates"] == 0
+
+
+def test_currency_symbols_are_semantic_content():
+    """P2 (#2687 review): £300, $300 and 300 are DIFFERENT amounts — the
+    punctuation strip must not erase the currency symbol into byte-equal
+    tokens."""
+    assert _pkg_norm("charged 300 dollars") != _pkg_norm("charged £300")
+    assert _pkg_norm("charged $300") != _pkg_norm("charged £300")
+    pool = [
+        _point("pt:1", "the shop charged $300 for the set"),
+        _point("pt:2", "the shop charged £300 for the set"),
+    ]
+    packaged, stats = package_evidence_pool(pool)
+    assert [h["id"] for h in packaged] == ["pt:1", "pt:2"]
+    assert stats["collapsed_duplicates"] == 0
+
+
+def test_negation_is_not_stripped_from_facts():
+    """P2 (#2687 review): "did not cost 300" is the NEGATION of "cost 300"
+    — a belief and its negation must never share one slot (the stopword set
+    must not erase not/no)."""
+    assert "not" in _pkg_tokens("the set did not cost 300 dollars")
+    pool = [
+        _point("pt:1", "the tea set cost 300 dollars and i was happy"),
+        _point("pt:2", "the tea set did not cost 300 dollars we paid less"),
+    ]
+    packaged, stats = package_evidence_pool(pool)
+    assert [h["id"] for h in packaged] == ["pt:1", "pt:2"]
+    assert stats["collapsed_duplicates"] == 0
+
+
+def test_same_turn_quotes_differing_in_value_never_collapse():
+    """P1 (#2687 review): the same-source-turn quote leg must also refuse a
+    value flip — two quotes from one turn that differ in the amount are
+    different claims even when the spans overlap ≥ 0.75."""
+    pool = [
+        _point("pt:1", "she offered the set for 300", quote="set for 300",
+               source_turn="lme:0:t9"),
+        _point("pt:2", "she offered the set for 400", quote="set for 400",
+               source_turn="lme:0:t9"),
+    ]
+    packaged, stats = package_evidence_pool(pool)
+    assert [h["id"] for h in packaged] == ["pt:1", "pt:2"]
+    assert stats["collapsed_duplicates"] == 0
+
+
+def test_unit_words_differing_never_collapse():
+    """P1 (#2687 review): same frame differing in the UNIT ("5 dollars" vs
+    "5 euros") is a different fact."""
+    pool = [
+        _point("pt:1", "the coffee cost 5 dollars each at the shop"),
+        _point("pt:2", "the coffee cost 5 euros each at the shop"),
+    ]
+    packaged, stats = package_evidence_pool(pool)
+    assert [h["id"] for h in packaged] == ["pt:1", "pt:2"]
+    assert stats["collapsed_duplicates"] == 0
