@@ -791,6 +791,10 @@ def tortoise_create_point(kind: str, content: str,
                           dedup: bool = True) -> dict:
     """Create a Point node (statement, decision, vision, hypothesis, etc.).
 
+    On first successful write from an incomplete org, auto-completes
+    onboarding (files remaining step edges + flips status to complete) —
+    no separate ceremony needed.
+
     dedup=True (default): idempotent — returns existing Point if content matches.
     dedup=False: force-create even if content is identical.
 
@@ -827,7 +831,10 @@ def tortoise_create_point(kind: str, content: str,
             if not isinstance(t, str) or not t.strip() or len(t) > 200:
                 return {"error": f"invalid tag value: {t!r} (must be a non-empty string ≤ 200 chars)"}
     merged["dedup"] = dedup
-    return _safe(_quota_gated(_get_team_sdk().create_point, "points", abuse_weight=1), kind, content, **merged)
+    result = _safe(_quota_gated(_get_team_sdk().create_point, "points", abuse_weight=1), kind, content, **merged)
+    if "error" not in result:
+        _maybe_onboarding_auto_complete()
+    return result
 
 
 def tortoise_query(kind: str | None = None,
@@ -1624,8 +1631,11 @@ def tortoise_file_decision(options: Any, evidence: Any,
     if isinstance(evidence, list) and len(evidence) > MAX_FILE_DECISION_EVIDENCE:
         return {"error": f"file_decision evidence exceeds the cap ({MAX_FILE_DECISION_EVIDENCE})",
                 "code": ERR_QUOTA}
-    return _safe(_quota_gated(_get_team_sdk().file_decision, "points",
+    result = _safe(_quota_gated(_get_team_sdk().file_decision, "points",
                           abuse_weight=lambda r, a, k: 1 + len(a[0] or []) + len(a[1] or [])), options, evidence, choice)
+    if "error" not in result:
+        _maybe_onboarding_auto_complete()
+    return result
 
 
 def tortoise_file_human_approval(approver_id: str, artifact_id: str,
@@ -2936,6 +2946,72 @@ def tortoise_onboarding_github_status() -> dict:
     if not enc:
         return {"connected": False, "org": None, "repos_count": None}
     return {"connected": True, "org": org, "repos_count": None}
+
+
+# ── Auto-complete onboarding on first real write ────────────────
+# When an agent makes its first successful graph write (create_point or
+# file_decision), the server auto-files the remaining onboarding steps and
+# flips status to complete — no agent-side state machine ceremony needed.
+
+def _maybe_onboarding_auto_complete() -> None:
+    """After a successful agent write, auto-complete onboarding if not
+    already done. Idempotent: steps are FWW edges, replay is a no-op.
+
+    Files harness-connected, first-points-filed, and decide-completed step
+    edges and flips status to complete. Invalidates the 60s TTL cache so
+    the MCP tools/list filter picks up the change immediately.
+
+    Only fires in HTTP (hosted) mode with a real team_id — stdio and
+    self-host calls are no-ops."""
+    from tortoise.mcp_auth import SELFHOST_TEAM_ID, _current_team_id
+    team_id = _current_team_id.get()
+    if not team_id or team_id == SELFHOST_TEAM_ID:
+        return  # stdio / self-host: no hosted onboarding state
+    # Fast check: if the 60s cache says complete, skip.
+    now = _time.time()
+    cached = _onboarding_state_cache.get(team_id)
+    if cached is not None and now - cached[0] < _ONBOARDING_STATE_TTL:
+        if cached[1]:
+            return  # already known complete
+    try:
+        from tortoise.hosted_api import (
+            _get_onboarding_projection,
+            _get_onboarding_state,
+            _team_proj,
+        )
+        from tortoise.onboarding.state import (
+            STATUS_COMPLETE as _OS_COMPLETE,
+            write_completed_step as _os_write_step,
+            write_status as _os_write_status,
+        )
+        proj = _team_proj(team_id)
+        projection = _get_onboarding_projection(team_id)
+        prog = projection.get("onboarding_complete")
+        if isinstance(prog, bool) and prog:
+            _onboarding_state_cache[team_id] = (now, True)
+            return  # already complete
+        # File all remaining step edges (idempotent FWW) — safe if some
+        # already exist, skips nothing.
+        # Fork-aware: self fork needs decide-completed, build fork needs
+        # catalog-presented (unknown fork defaults to self behavior).
+        fork = projection.get("fork") or "self"
+        steps = ("harness-connected", "first-points-filed",
+                 "catalog-presented" if fork == "build" else "decide-completed")
+        legacy_mirror = bool(
+            _get_onboarding_state(team_id).get("onboarding_complete"))
+        for step in steps:
+            _os_write_step(proj, team_id, step,
+                           status_from_mirror=legacy_mirror)
+        # Flip status (monotonic — no-op if already complete).
+        _os_write_status(proj, team_id, _OS_COMPLETE,
+                         status_from_mirror=legacy_mirror)
+        # Invalidate cache so tools/list retires onboarding tools
+        # immediately.
+        _onboarding_state_cache[team_id] = (now, True)
+    except Exception:
+        # Fail-open: a transient graph/control-plane error must NOT block
+        # the agent's write. Next write re-triggers this check.
+        return
 
 
 # ── #1727 Slice 2 (Task 13): tortoise_session_capture — the T3 filing tool ──
