@@ -672,6 +672,7 @@ carve_out:
 - test_eval_ingest_retry.py
 - test_eval_resume_retry_failed.py
 - test_eval_extraction_health.py
+- test_longmem_runner.py  # #2573/P3-lane-flip: embedded eval harness (D2-D4 vector-leg asserts are FalkorDBLite-only)
 - test_backup_e2e.py
 - test_config.py
 - test_embedded_concurrency.py

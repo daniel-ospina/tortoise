@@ -21,6 +21,6 @@
       "session_date": "2026-08-18"
     }
   ],
-  "user_message": "Memory context:\nCurrent Date: 2026-08-29\n\n[session ?] (session date 2026-08-15) The new office hours policy is 9am to 5pm, approved at the August meeting.\n\nQuestion: what is the office hours policy?\n\nAnswer:",
-  "user_message_hash": "b5e2275d8448ea53ea4f128c062b8920edaeeaabdd6745c5fd76cdb6658e60a6"
+  "user_message": "Memory context:\nCurrent Date: 2026-08-29\n\n[session ?] (session date 2026-08-15) The new office hours policy is 9am to 5pm, approved at the August meeting.\n\n[session ?] (session date 2026-08-18) Max needs a new collar before winter.\n\n[session ?] (session date 2026-08-10) I finally switched my phone plan to the cheaper carrier and saved $30 a month.\n\nQuestion: what is the office hours policy?\n\nAnswer:",
+  "user_message_hash": "3e06f99c140d8a09bd285c8e39c4c260f0ecdbc6cd348f1d418db1dcb7b0511e"
 }

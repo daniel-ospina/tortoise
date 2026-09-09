@@ -458,10 +458,22 @@ def test_object_centric_ranking():
         sdk.close()
 
 
-def test_recall_state_default_rrf_and_graph_paths_untouched():
+def test_recall_state_default_rrf_and_graph_paths_untouched(monkeypatch):
     """Regression anchor: recall_state is a NEW path — the default RRF path
     carries no recall_ranking annotation, and order_by='graph' still works
     (GraphRanker)."""
+    # #2573-cached bge guard: the two seed points are ANAGRAMS — the test
+    # premises a relevance TIE so persisted EP decides the order (the AC1
+    # premise of sibling test_ranking::test_order_by_graph_ranks_high_ep_above_low_ep).
+    # Under bge the vector leg scores word order (anagrams embed ~2.5%
+    # apart), and min-max normalization over the 2-result set amplifies that
+    # into a 1.0/0.0 similarity swing that swamps the EP term. Pin
+    # EmbeddingModel.get to None so similarity is a true tie and the test
+    # verifies what it claims (same treatment as the oracle tfidf arms).
+    from tortoise import embeddings
+    monkeypatch.setattr(embeddings.EmbeddingModel, "get", classmethod(
+        lambda cls, load_timeout=None: None,
+    ))
     sdk = _fresh_sdk()
     try:
         p1 = sdk.create_point("statement", "orca echolocation frequency range unique analysis")

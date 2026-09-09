@@ -76,6 +76,14 @@ TEST_NO_REDIRECT_STEMS: tuple[str, ...] = (
     "test_eval_ingest_retry",
     "test_eval_resume_retry_failed",
     "test_eval_extraction_health",
+    # #2573-restored bge cache + the P3 lane flip red'd the longmem eval
+    # harness on the docker lane: its D2-D4 vector-leg tests assert
+    # embedded-FalkorDBLite-only semantics (no_embeddings guard, plain-list
+    # poisoning of vec.euclideanDistance, brute-force deadline timeout) that
+    # the server HNSW branch can't produce. The module is a 100% embedded
+    # eval harness (_fresh_sdk(tmp_path) only, zero docker-gated tests) —
+    # same family as the eval_* carve-outs above.
+    "test_longmem_runner",
     "test_flip_gate",
     "test_graph_integrity_gate",
     "test_guard",

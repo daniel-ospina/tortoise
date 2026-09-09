@@ -411,6 +411,11 @@ def test_no_redirect_stems_registry_exact():
         "test_eval_ingest_retry",
         "test_eval_resume_retry_failed",
         "test_eval_extraction_health",
+        # #2573-restored bge cache + P3 lane flip: longmem eval harness is
+        # 100% embedded (_fresh_sdk(tmp_path) only) — its D2-D4 vector-leg
+        # asserts are embedded-FalkorDBLite-only; moved to the carve-out
+        # lane with the other eval_* suites.
+        "test_longmem_runner",
     })
     assert frozenset(TEST_NO_REDIRECT_STEMS) == expected, (
         "TEST_NO_REDIRECT_STEMS drifted from the 17 plan stems: "
