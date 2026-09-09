@@ -11,7 +11,9 @@ check is gapped — never a measured 0.0 from an uncovered log.
 
 HERMETIC: config dirs are tmp-built (corpus.json absent -> the freshness
 gate no-ops for yaml-only fixture dirs; the stale-corpus test builds its
-own sealed corpus.json from the REAL corpus.yaml into tmp)."""
+own sealed corpus.json from the REAL corpus.yaml into tmp). Real-mode
+honesty runs inject a HERMETIC emission seam (``RunConfig.emission_seam``
+— #2703 decision A) so no test ever makes a live model call."""
 from __future__ import annotations
 
 import json
@@ -97,12 +99,19 @@ def _run(root: Path, cfg: Path, *, families=frozenset(), mock: bool = True,
     LATEST attempt dir (summary.json = completion marker). Probe scorers are
     wired when ``families`` is non-empty (R1 for {"R1"}, +R2 for {"R1","R2"}).
 
-    ``emit_only`` switches the run to REAL mode and stubs the executor's
-    per-episode log emission seam (run._episode_log) so hermetic tests can
-    drive the two-phase emitter gate without a real model. Real mode is an
-    EXPLICIT request: pass ``executor="real"`` together with the seam stub
-    (emit_only is not None) — a real request without the stub fails closed
-    (PR #2341 review round 2, P2)."""
+    ``emit_only`` switches the run to REAL mode and injects a HERMETIC
+    emission seam (``RunConfig.emission_seam``) so hermetic tests can drive
+    the two-phase emitter gate without a real model — ZERO network/spend.
+    Real mode is an EXPLICIT request: pass ``executor="real"`` together
+    with the seam (emit_only is not None).
+
+    #2703 (decision A): the pre-Task-9 spelling monkeypatched the module
+    global ``run._episode_log``; f54f212a6 (Task 9) routed real mode to the
+    live executor and left that stub DEAD, so these honesty tests silently
+    made LIVE model calls and read a live MANDATORY-covering log
+    (``emitter_gap`` []). The seam is now instance-scoped + explicit.
+    ``monkeypatch`` stays in the signature for the call sites that patch arm
+    classes before the run; the emission seam no longer rides on it."""
     root.mkdir(parents=True, exist_ok=True)
     specs: list[str] | None = None
     if families:
@@ -110,16 +119,14 @@ def _run(root: Path, cfg: Path, *, families=frozenset(), mock: bool = True,
                                         ("R2", R2_PROBE_SPEC))
                  if fam in families]
         assert specs, f"unknown families {sorted(families)}"
+    seam = None
     if emit_only is not None:
-        import battery.runner.run as run_mod
-
-        def _episode_log(scenario, *, episode_seed, arm_id, run_mode):
+        def seam(scenario, *, episode_seed, arm_id, run_mode):
             return [dict(e) for e in covered_log()
                     if e.get("field") in emit_only]
-        monkeypatch.setattr(run_mod, "_episode_log", _episode_log)
     code = run_battery(RunConfig(config_dir=cfg, out_dir=root, arms=list(arms),
                                  mock=mock, scorer_specs=specs,
-                                 executor=executor),
+                                 executor=executor, emission_seam=seam),
                        stdout=lambda _: None)
     assert code is expect, f"run_battery exit {code} (expected {expect})"
     attempt = attempt_dir_resolve(root)
@@ -987,12 +994,19 @@ class TestRunModeHonesty:
         profile = invoke_report(out, cfg)
         assert profile_status(profile) == "incomplete_missing_metrics"
 
-    def test_real_mode_without_executor_seam_fails_closed(self, tmp_path):
-        """Issue 3(a): requesting real mode (config.executor == "real")
-        without an active real emitting executor seam raises ConfigError
-        BEFORE the attempt dir — a real label over the stock no-op emission
-        seam (mock executor) is refused, never silently produced."""
+    def test_real_mode_without_executor_seam_fails_closed(self, tmp_path,
+                                                          monkeypatch):
+        """Issue 3(a) — re-homed on the post-Task-9 seam (#2703 decision A):
+        requesting real mode while the real emitting executor is UNWIRED
+        raises ConfigError BEFORE the attempt dir — a real label over the
+        stock no-op emission seam (mock executor) is refused, never silently
+        produced. f54f212a6 wired the live executor, so "no active real
+        seam" is expressed by ``_REAL_EXECUTOR_WIRED``; the pre-Task-9
+        spelling keyed on the stock ``_episode_log`` identity, which the
+        explicit ``RunConfig.emission_seam`` superseded."""
+        from battery.runner import run as run_mod
         from battery.runner.run import RunConfig
+        monkeypatch.setattr(run_mod, "_REAL_EXECUTOR_WIRED", False)
         cfg = _config_dir(tmp_path)
         out = tmp_path / "out"
         with pytest.raises(ConfigError):
