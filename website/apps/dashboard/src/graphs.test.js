@@ -4,6 +4,7 @@ import assert from 'node:assert/strict'
 import {
   GRAPH_KEY_SCOPES,
   canManageGraphKeys,
+  deleteTypedMatches,
   graphCanDelete,
   graphKeyPanelEmptyLine,
   graphKeysSuppressed,
@@ -177,4 +178,19 @@ test('sortedTrashRows: empty + null-safe', () => {
   assert.deepEqual(sortedTrashRows([]), [])
   assert.deepEqual(sortedTrashRows(null), [])
   assert.deepEqual(sortedTrashRows(undefined), [])
+})
+
+// ── #2701 delete-modal type-to-confirm gate ──────────────────────────────
+test('deleteTypedMatches: only the literal word "delete" passes', () => {
+  assert.equal(deleteTypedMatches('delete'), true)
+  assert.equal(deleteTypedMatches(' delete '), true)   // trim tolerated
+  assert.equal(deleteTypedMatches('DELETE'), true)     // case-insensitive
+  assert.equal(deleteTypedMatches('Delete'), true)
+  assert.equal(deleteTypedMatches('delet'), false)
+  assert.equal(deleteTypedMatches('deletee'), false)
+  assert.equal(deleteTypedMatches('delete now'), false) // no extra words
+  assert.equal(deleteTypedMatches(''), false)
+  assert.equal(deleteTypedMatches(null), false)
+  assert.equal(deleteTypedMatches(' x delete'), false)  // prefix fails
+  assert.equal(deleteTypedMatches('delete x'), false)   // suffix fails
 })

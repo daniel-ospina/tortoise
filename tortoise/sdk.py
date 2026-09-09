@@ -14713,6 +14713,41 @@ class TortoiseSDK:
         ).result_set
         return int(rows[0][0]) if rows else 0
 
+    def graph_set_name(self, team_id: str, graph_id: str,
+                       name: str) -> bool:
+        """#2701 — rename a graph's DISPLAY name on its registry Graph node.
+
+        Display-name-only: the node's id/kind/namespace (the data-plane
+        storage key) are untouched, so a rename never orphans points/keys
+        (the default graph is renameable too — graph 0's node carries
+        ``name`` as a label distinct from ``namespace``). Resolves the
+        literal ``default`` id to the team's kind='default' node (mode-
+        agnostic callers use either); real gids match directly. Returns
+        True when the node was found (name written), False on unknown
+        graph — callers map to 404. Soft-deleted nodes (status='deleted')
+        are NOT renameable — treat as unknown (mirror list_graphs'
+        tombstone skip + graph_set_recording)."""
+        reg = self._get_registry()
+        rows = reg.query(
+            "MATCH (g:Graph {team_id:$tid}) RETURN g.id, g.kind, "
+            "coalesce(g.status, 'active')",
+            params={"tid": team_id},
+        ).result_set
+        if graph_id == "default":
+            node = next((r[0] for r in rows
+                         if r[1] == "default" and r[2] != "deleted"), None)
+        elif any(r[0] == graph_id and r[2] != "deleted" for r in rows):
+            node = graph_id
+        else:
+            node = None
+        if node is None:
+            return False
+        reg.query(
+            "MATCH (g:Graph {id:$gid, team_id:$tid}) SET g.name = $name",
+            params={"gid": node, "tid": team_id, "name": name},
+        )
+        return True
+
     def team_get(self, team_id: str) -> dict | None:
         """Get a team by ID. Returns None if not found."""
         reg = self._get_registry()

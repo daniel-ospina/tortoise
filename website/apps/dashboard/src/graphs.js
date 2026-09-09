@@ -42,9 +42,12 @@ export function tierCreateLocked(tier) {
   return LIMITED_TIERS.includes(tier)
 }
 
-// The default-graph row (kind 'default') is the only non-deletable row.
-// Custom rows carry the [Delete] action. (Server enforces the same: 403 on
-// the default graph — the UI lock mirrors, never precedes, the API.)
+// The DEFAULT graph can never be deleted (the org's only undeletable row —
+// server 403s it as a code guard). Custom rows carry the [Delete] action.
+// #2701: the row's 🗑 renders DISABLED on non-deletable rows (the reason in
+// the title) instead of hiding — the lock is discoverable, never a dead end.
+// (Server enforces the same: 403 on the default graph — the UI lock mirrors,
+// never precedes, the API.)
 export function graphCanDelete(g) {
   if (!g) return false
   return g.kind !== 'default'
@@ -144,7 +147,15 @@ export function trashEraseLabel(deletedAt, nowIso) {
   return d === 1 ? 'erases in 1 day' : `erases in ${d} days`
 }
 
-// ── #2307 (post-#2083 C7 review): role-aware [Keys] panel empty copy ──────
+// ── #2701 delete-modal derivations (pure) ────────────────────────────────
+// The type-to-confirm gate: the user must literally TYPE the word "delete"
+// (case-insensitive after trim) before the destructive Confirm enables — a
+// strong accidental-delete deterrent on top of the 7-day Trash window.
+export function deleteTypedMatches(typed) {
+  return (typed || '').trim().toLowerCase() === 'delete'
+}
+
+// #2307 (post-#2083 C7 review): role-aware [Keys] panel empty copy ─────────
 // The per-graph mint form is owner/admin-rendered only; a member's panel
 // shows "Only owners and admins can manage graph keys." instead (no mint
 // control exists for them). The never-minted empty state must therefore NOT
