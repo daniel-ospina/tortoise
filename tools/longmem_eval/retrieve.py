@@ -127,6 +127,9 @@ from tortoise.retrieval import (
 from tortoise.retrieval import (
     is_raw_chunk as _is_raw_chunk,
 )
+from tortoise.retrieval import (
+    package_evidence_pool as _package_evidence_pool,
+)
 from tortoise.sdk import TortoiseSDK
 
 from . import encode_cache, evidence
@@ -918,6 +921,23 @@ def retrieve_for_question(
     # C3-3) — it records {detected_intent, facet_coverage, missing_facets}
     # per outcome so the routing's signal-to-flag mapping is decidable.
     aggregative_flag: bool | None = None,
+    # A6 (Slice A #2683, epic #2080): the evidence-package ASSEMBLY arm —
+    # tri-state (True/False explicit, None = env
+    # ``TORTOISE_LME_EVIDENCE_ASSEMBLY``; only 1/true/yes/on enables —
+    # fail-safe OFF, the #1745 default decision). When ON, the reader-
+    # context candidate list is built by ``tortoise.retrieval.package_evidence_pool``
+    # (product, pure): a distilled point's OWN source raw chunks/turns
+    # collapse into ONE package (point + ≤ one verbatim source ref), cross-
+    # item near-dupe points restating the same fact dedupe to one slot, and
+    # the package orders exact-value/verbatim-marked items first. The pool
+    # recall surface (``ret["hits"]``, ``evidence_recall@k``) is UNCHANGED —
+    # packaging only shapes what ``assemble_context`` hands the reader (the
+    # measured context is ``reader_evidence@k`` / ``reader_surface@k``). The
+    # A/B switch that MEASURES the Slice A package (docs/scoping/2026-09-09-
+    # evidence-assembly-wave.md §5): identical questions, assembly ON vs OFF,
+    # deltas on the two C2 context-flooding regressions (qids b6025781 /
+    # 4f54b7c9) recovering under the arms.
+    evidence_assembly: bool | None = None,
     # #1786 (R5): the hybrid-arm collective retrieval deadline (ms) — the
     # eval passes EVAL_RETRIEVAL_BUDGET_MS (1500); None = SDK default
     # 500 ms. Threads ONLY the hybrid arm (``hybrid_search`` →
@@ -1067,6 +1087,18 @@ def retrieve_for_question(
         _agg_env = (os.environ.get("TORTOISE_LME_AGGREGATIVE_FLAG")
                     or "")
         aggregative_flag_on = _agg_env.strip().lower() in _AGG_TRUTHY
+    # A6 (Slice A #2683): resolve the evidence-package assembly tri-state the
+    # same way (explicit flag > env > OFF — fail-safe: only 1/true/yes/on
+    # enables). The resolved bool rides the outcome as the arm marker; the
+    # package stats are recorded ONLY under the arm (off-path dict keeps
+    # today's exact shape, D2).
+    if evidence_assembly is not None:
+        evidence_assembly_on = evidence_assembly
+    else:
+        from .rerank import _TRUTHY as _ASSEMBLY_TRUTHY
+        _ass_env = (os.environ.get("TORTOISE_LME_EVIDENCE_ASSEMBLY")
+                    or "")
+        evidence_assembly_on = _ass_env.strip().lower() in _ASSEMBLY_TRUTHY
     # R1: pool-depth headroom — a monopolizing session's points must not
     # crowd other sessions out BEFORE dedup runs (E2E-1).
     # R5 (D4): TR questions fetch the point+event union (E2E-4's "no
@@ -1417,9 +1449,43 @@ def retrieve_for_question(
 
     # ── context handed to the reader (C1 #1745: budget-capped, rank-
     # interleaved; TR keeps the pinned tr_top_k item cap) ──
+    # A6 (Slice A #2683): when the assembly arm is on, the reader-context
+    # candidate list is the EVIDENCE PACKAGE (tortoise.retrieval.package_evidence_pool
+    # — product, pure): a distilled point's own source raw chunks/turns
+    # collapse into one package, cross-item near-dupe points restating the
+    # same fact dedupe to one slot, and the package orders value/verbatim-
+    # marked items first. The POOL (recall surface, ``ret["hits"]``) is
+    # untouched — packaging only shapes what assemble_context admits to the
+    # reader window (the measured surface is reader_evidence@k /
+    # reader_surface@k below). TR questions keep the R5 time-ascending date
+    # machinery and skip the arm (the same exclusion as the C3-1 loop).
     question_date = question.get("question_date", "") or None
+    evidence_assembly_stats: dict[str, Any] = {
+        "on": evidence_assembly_on,
+        "applied": False,
+        "tr_excluded": bool(is_tr),
+    }
+    context_candidates = pool
+    if evidence_assembly_on and not is_tr and pool:
+        # the eval injects its read-time mark provider (dataset-derived marks
+        # — the same provider apply_evidence_boost uses), so the verbatim /
+        # answer-string value classes drive the package ordering.
+        _packaged, _pkg_stats = _package_evidence_pool(
+            pool, mark_for=evidence.mark_for_question(question))
+        context_candidates = _packaged
+        evidence_assembly_stats = {
+            "on": True,
+            "applied": True,
+            "tr_excluded": False,
+            "pool_items": _pkg_stats["pool_items"],
+            "package_items": _pkg_stats["package_items"],
+            "packages": _pkg_stats["packages"],
+            "collapsed_duplicates": _pkg_stats["collapsed_duplicates"],
+            "verbatim_refs_kept": _pkg_stats["verbatim_refs_kept"],
+            "value_first_packages": _pkg_stats["value_first_packages"],
+        }
     context_points = _assemble_context(
-        pool, top_k=effective_top_k,
+        context_candidates, top_k=effective_top_k,
         max_context_tokens=max_context_tokens,
         question_date=question_date,
         context_item_cap=eff_item_cap)
@@ -1618,6 +1684,12 @@ def retrieve_for_question(
         # always present so the A/B arms are reconstructable even when the
         # verdict below is absent (off-path, D2).
         "aggregative_flag": aggregative_flag_on,
+        # A6 (Slice A #2683): the evidence-package assembly arm — resolved
+        # tri-state bool + per-outcome package stats, always present (the
+        # off-arm records on=False/applied=False so the Slice-A A/B is
+        # reconstructable per question).
+        "evidence_assembly": evidence_assembly_on,
+        "evidence_assembly_stats": evidence_assembly_stats,
         # R5 (#1544): TR-constraint surface — the detected kind (TR only)
         # and whether the window filter fell back to the unfiltered pool
         # (never starve the reader into abstention).

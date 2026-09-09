@@ -12779,6 +12779,14 @@ class TortoiseSDK:
           * A7 rerank — ``TORTOISE_ASK_RERANK`` (default OFF, phase 2):
             cross-encoder + MMR port (tortoise/rerank.py), degrade-to-
             current contract.
+          * A8 evidence-package assembly (Slice A #2683, epic #2080) —
+            ``TORTOISE_ASK_EVIDENCE_ASSEMBLY`` (default OFF, fail-safe):
+            collapses a distilled point's own source raw chunks/turns into
+            ONE reader entry + dedups cross-item near-duplicate facts, so
+            the 40-item reader window admits distinct facts instead of
+            flooding on duplicates. PURE function (package_evidence_pool)
+            — recall surface unchanged, hermetic no-dupe tests prove the
+            ON path is byte-identical on duplicate-free pools.
 
         Returns the 12-field response shape: ``{answer, abstained,
         question_type, question_date, evidence, context_tokens, model,
@@ -12801,6 +12809,7 @@ class TortoiseSDK:
             assemble_context,
             dedup_pool,
             estimate_tokens_ask,
+            package_evidence_pool,
             render_context,
             resolve_ask_boost_multipliers,
             resolve_ask_retrieval_caps,
@@ -12880,6 +12889,16 @@ class TortoiseSDK:
                 "TORTOISE_ASK_SEARCH_KEYS_PRF", True)      # A4, default ON
             evidence_boost = ask_env_bool(
                 "TORTOISE_ASK_EVIDENCE_BOOST", True)       # A5, default ON
+            # A8 (Slice A #2683): the evidence-package assembly arm —
+            # ``TORTOISE_ASK_EVIDENCE_ASSEMBLY`` (default OFF — fail-safe,
+            # the #1745 default decision; hermetic no-dupe tests prove the
+            # ON path is byte-identical to OFF when no near-duplicates
+            # exist). mark_for=None = the stored-``has_answer`` fallback
+            # (source-session class only) — product graphs carry zero value
+            # marks, so the package is pure collapse+ordering-by-rank on
+            # real graphs (never a silent mark-driven reorder).
+            evidence_assembly = ask_env_bool(
+                "TORTOISE_ASK_EVIDENCE_ASSEMBLY", False)
             from tortoise.retrieval import (  # noqa: I001
                 ASK_FUSION_WEIGHTS_ENV, ASK_FUSION_K_ENV, ask_env_int,
                 ask_env_weights,
@@ -12943,6 +12962,20 @@ class TortoiseSDK:
                 deduped, _rerank_stats = ask_lane_rerank(
                     question, deduped, proj=self._get_proj(),
                     top_k=caps["context_item_cap"])
+                # A8 (Slice A #2683): package the evidence pool BEFORE the
+                # reader window fill — a distilled point's own source raw
+                # chunks/turns collapse to one package entry, cross-item
+                # near-dupe points restate one fact in one slot, so the
+                # capped reader window admits distinct facts instead of
+                # flooding on duplicates. Recall surface unchanged; the
+                # package shapes only what ``assemble_context`` hands the
+                # reader. Env-gated OFF by default (fail-safe); hermetic
+                # tests in tests/test_evidence_assembly.py prove the ON
+                # path is byte-identical when the pool has no
+                # near-duplicates.
+                if evidence_assembly:
+                    deduped, _asm_stats = package_evidence_pool(
+                        deduped, mark_for=None)
                 assembled = assemble_context(
                     deduped, top_k=caps["context_item_cap"],
                     max_context_tokens=caps["context_token_cap"],

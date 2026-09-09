@@ -379,6 +379,7 @@ surfaces:
   - test_coverage_loop.py  # #2567: evidence-completeness loop E2E (C3-1, docker-lane)
   - test_coverage_loop_rules.py  # #2567: evidence-completeness loop hermetic rules
   - test_entity_key_expansion.py  # #2518: entity/fact-augmented key expansion (C2, docker-lane)
+  - test_evidence_assembly.py      # #2683: Slice-A evidence-package assembly hermetic rules
   - test_aggregative_facet_coverage.py  # #2521: aggregative-intent + facet coverage check (C5, docker-lane)
   - test_aggregative_intent.py          # #2521: hermetic detector + coverage-math table (C5)
   - test_retrieval.py
@@ -539,6 +540,7 @@ surfaces:
   - test_coverage_loop.py  # #2567 (docker-lane leg, mirrors test_retrieval.py)
   - test_coverage_loop_rules.py  # #2567 (hermetic rules leg)
   - test_entity_key_expansion.py  # #2518 (docker-lane leg, mirrors test_retrieval.py)
+  - test_evidence_assembly.py      # #2683 (hermetic rules leg, mirrors test_retrieval.py)
   - test_aggregative_facet_coverage.py  # #2521 (docker-lane leg, mirrors test_retrieval.py)
   - test_assembly_fixtures.py  # #2165 Task 1: connected-assembly fixture substrate + R16(b) calibration (docker-lane)
   - test_assembly_pure.py  # #2165 Task 2: pure shape classifier + subject extraction (no-DB unit)
