@@ -730,3 +730,452 @@ def _rank_delta(scored: list[tuple[dict, float, int]], orig_index: int) -> bool:
     new_pos = next(pos for pos, (_, _, i) in enumerate(scored)
                    if i == orig_index)
     return new_pos < orig_index
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Slice A (#2683, epic #2080): evidence-package assembly — collapse a fact's
+# own-source duplicates, dedup cross-item near-dupes, then order the package
+# (exact-value/verbatim first, relevance order preserved, recency tiebreak).
+# ---------------------------------------------------------------------------
+# The measured regression the wave attacks (docs/scoping/2026-09-09-evidence-
+# assembly-wave.md §5 Slice A): the reader context floods with near-duplicate
+# evidence — a distilled point + its own source raw chunks + its source turns
+# all restate the same fact, each occupying a window slot. The reader window
+# is a FROZEN measurement lens (never a change target); the EVIDENCE PACKAGE
+# handed to it is the product. These helpers build that package over the
+# annotated pool (pure functions over hit dicts — no graph dependency, so
+# the eval, MCP/SDK consumers and hermetic tests share the identical code).
+#
+# The collapse is deterministic + hermetic by construction: it keys on the
+# provenance fields the ingest wrote (``source_turn_id`` / verbatim ``quote``
+# containment — R1 #1540 keeps the raw chunk text, E3 #1535 writes the
+# point→source-turn link) and on normalized content overlap — NEVER an LLM or
+# an embedder. Arm posture: tri-state fail-safe OFF (only an explicit flag or
+# the env enables it — the #1745 default decision); the OFF path never calls
+# these helpers (byte-identical).
+# ═══════════════════════════════════════════════════════════════════════════
+
+#: Slice A (#2683): max verbatim source refs a single fact package keeps in
+#: the reader window (the point + at most ONE source chunk/turn — the scope's
+#: "one fact occupies one slot" bound).
+DEFAULT_PACKAGE_MAX_VERBATIM = 1
+
+#: Slice A (#2683): min token-overlap (shared / smaller set, stopword-stripped
+#: normalized tokens) for a NEAR-VERBATIM restatement to count as the same
+#: fact. 0.9 on the shorter side = the same claim restated; a same-frame
+#: DIFFERENT-VALUE claim ("the tea set cost 300" vs "cost 400" — the MR
+#: aggregation numerator Slice B protects) shares only ~0.8-0.875 of its
+#: content (the differing value token drops the shared fraction below 0.9)
+#: and stays DISTINCT. Exact normalized-content equality is always the same
+#: fact. Never an LLM (deterministic + hermetic).
+DEFAULT_PACKAGE_VERBATIM_OVERLAP = 0.9
+
+#: Slice A (#2683): min token-overlap for the same-SOURCE-TURN / same-QUOTE
+#: leg — two statements distilled from the SAME source turn (same
+#: ``source_turn_id``, E3 #1535) whose verbatim QUOTES also overlap are
+#: duplicate extractions of one utterance (the same quote span ⇒ the same
+#: fact; two distinct claims from one turn carry distinct quote spans —
+#: different values never collapse).
+DEFAULT_PACKAGE_SAME_TURN_OVERLAP = 0.75
+
+#: The role-bracket shape the deterministic leg writes turn points as (E3
+#: #1535) — used to strip the bracket before verbatim containment compares a
+#: turn's text against its source chunk's text (the chunk stores "Role: …",
+#: the turn point "[role] …").
+_ROLE_PREFIX_RE = re.compile(r"^\[(user|assistant|system|tool|unknown)\]\s*",
+                             re.IGNORECASE)
+
+
+_PACKAGE_STOPWORDS = frozenset({
+    "a", "an", "the", "and", "or", "but", "if", "then", "else", "of",
+    "to", "in", "on", "at", "for", "with", "from", "by", "about",
+    "is", "are", "was", "were", "be", "been", "being", "do", "does",
+    "did", "it", "this", "that", "these", "those", "i", "we", "you",
+    "he", "she", "they", "me", "my", "our", "your", "their",
+    "yes", "so", "as", "than", "now",
+    # NB: "not"/"no" are DELIBERATELY absent (P2 #2687 review): negation
+    # is semantic content for a fact-dedup tokenizer — "did not cost 300"
+    # must never normalize to "cost 300".
+})
+
+
+#: Fact-critical token classes (P1 #2687 review): a collapse that would
+#: merge two texts differing in ANY of these is an information-loss bug —
+#: values, currencies, units, quantities and dates are the aggregation
+#: numerator Slice B protects. Ratio-based overlap can only merge
+#: restatements whose differing tokens are synonym-level; if the differing
+#: set contains a fact-critical token the claims are DIFFERENT facts.
+_NUMERIC_TOKEN_RE = re.compile(r"^[+-]?\d+(?:[.,]\d+)*$")
+_CURRENCY_PREFIX_RE = re.compile(r"^[$£€¥]")
+_UNIT_WORDS = frozenset({
+    "dollars", "dollar", "bucks", "pounds", "pound", "quid", "euros",
+    "euro", "yen", "cents", "cent", "percent", "percentage", "points",
+    "point", "km", "miles", "mile", "meters", "meter", "feet", "foot",
+    "inches", "inch", "kgs", "kg", "lbs", "grams", "gram",
+    "liters", "liter", "hours", "hour", "minutes", "minute", "seconds",
+    "second", "days", "day", "weeks", "week", "months", "month",
+    "years", "year", "times", "time", "degrees", "degree", "items",
+    "item", "prices", "price", "cost", "costs", "worth",
+    "amount", "total", "sum", "count", "number", "qty", "quantity",
+})
+_NEGATION_WORDS = frozenset({"not", "no", "never", "neither", "nor",
+                             "cannot", "can't", "didnt", "doesnt",
+                             "doesn't", "don't"})
+
+
+def _token_is_fact_critical(tok: str) -> bool:
+    """Slice A: True when ``tok`` changes a fact if it differs between two
+    otherwise-similar claims: a number, a currency-denominated amount, a
+    unit/quantity word, or a negation. (Dates: numeric forms are caught by
+    the numeric class; month/weekday names are a documented residual.)"""
+    if _NUMERIC_TOKEN_RE.match(tok) or _CURRENCY_PREFIX_RE.match(tok):
+        return True
+    if tok in _UNIT_WORDS or tok in _NEGATION_WORDS:
+        return True
+    # plural/possessive numeric artifacts ("300s", "400's") normalize to
+    # digits + suffix — the digit prefix is still a value difference.
+    return bool(re.match(r"^[+-]?\d+(?:[.,]\d+)*[a-z']*$", tok))
+
+
+def _differing_tokens(a_toks: set[str], b_toks: set[str]) -> set[str]:
+    """Slice A: the symmetric-difference token set of two normalized
+    contents. If ANY member is fact-critical, the claims differ in a value/
+    negation/unit dimension → they are distinct facts regardless of how
+    much content they share (the P1 #2687 value-safety guard)."""
+    return (a_toks - b_toks) | (b_toks - a_toks)
+
+
+def _pkg_norm(text: str) -> str:
+    """Slice A: case/whitespace + PUNCTUATION-normalized verbatim form
+    (mirrors the eval's ``evidence._normalize`` — deterministic, hermetic).
+    Punctuation becomes whitespace so "300 dollars," and "300 dollars"
+    tokenize identically for overlap AND containment legs (the role bracket
+    survives here — ``_verbatim_core`` strips it before the containment
+    compare). CURRENCY SYMBOLS ARE CONTENT (P2 #2687 review): "£300",
+    "$300" and "300" are different amounts — the symbol must not be
+    erased by the punctuation strip."""
+    t = re.sub(r"[^\w\s\[\]$£€¥]", " ", str(text or ""))
+    return re.sub(r"\s+", " ", t.lower()).strip()
+
+
+def _pkg_tokens(text: str) -> set[str]:
+    """Slice A: stopword-stripped content tokens of ``text`` (the product's
+    own local set — importing the eval's stopword list would invert the
+    layering; the vocabulary is content words only, which is what a
+    restatement shares)."""
+    return {t for t in _pkg_norm(text).split()
+            if t not in _PACKAGE_STOPWORDS and len(t) > 1}
+
+
+def _pkg_overlap(a: str, b: str) -> float:
+    """Slice A: min-denominator content-token overlap — the SHORTER text's
+    coverage decides restatement (a 200-char point restating a 40-char
+    source quote shares 40/40 = 1.0, not 40/200 = 0.2)."""
+    ta, tb = _pkg_tokens(a), _pkg_tokens(b)
+    if not ta or not tb:
+        return 0.0
+    return len(ta & tb) / min(len(ta), len(tb))
+
+
+def _pkg_differ_value_critical(a: str, b: str) -> bool:
+    """Slice A P1 guard (#2687 review): do ``a`` and ``b`` differ in a
+    fact-critical dimension (a number, currency amount, unit/quantity word,
+    or negation)? The ratio legs may only merge RESTATEMENTS (synonym-level
+    differing tokens); a same-frame different-VALUE claim ("cost 300" vs
+    "cost 400") is a different fact no matter how much content it shares —
+    on production-length quotes (20-35 tokens) the ratio alone is NOT a
+    safe value guard (the reviewer's measured 300-vs-400 collapse)."""
+    ta, tb = _pkg_tokens(a), _pkg_tokens(b)
+    if not ta or not tb:
+        return False
+    return any(_token_is_fact_critical(t)
+               for t in _differing_tokens(ta, tb))
+
+
+def _pkg_session(h: dict) -> str:
+    """Slice A: a hit's session identity (the same bucket key the ask lane
+    passes ``dedup_pool`` — session_id first, session_date, lme index
+    fallback; distinct sessions never share a bucket)."""
+    return (h.get("session_id")
+            or h.get("session_date")
+            or f"idx:{h.get('lme_session_index', -1)}")
+
+
+def _is_turn_point(h: dict) -> bool:
+    """Slice A: True for a verbatim source TURN point (kind ``event`` or a
+    ``[role] …`` content — the shape the deterministic leg writes turns as).
+    Distinguished from a distilled statement so own-source turns can collapse
+    INTO their distilled point instead of standing as a duplicate slot."""
+    return (h.get("point_kind") == "event"
+            or bool(_ROLE_PREFIX_RE.match(str(h.get("content") or ""))))
+
+
+def _verbatim_core(h: dict) -> str:
+    """Slice A: the verbatim content of a source ref hit (raw chunk or turn),
+    with a leading role bracket stripped so chunk-vs-turn containment
+    compares the actual utterance (the chunk stores "Role: …" lines, the
+    turn point "[role] …")."""
+    text = str(h.get("content") or "")
+    return _ROLE_PREFIX_RE.sub("", text, count=1)
+
+
+def _is_own_source(chunk_or_turn: dict, point: dict) -> bool:
+    """Slice A: is ``chunk_or_turn`` the ``point``'s OWN source restatement?
+    Deterministic provenance proxy on the annotated surface:
+      * the raw chunk whose verbatim text CONTAINS the point's anchored
+        quote (the D3/M6 quote is verbatim from the source turn, and the
+        chunk is the windowed verbatim transcript that turn lives in), or
+      * the turn node whose id the point records as ``source_turn_id``
+        (E3 #1535 writes the point→source-turn link), or
+      * a turn whose verbatim text contains the quote.
+    The quote-containment leg requires a non-empty quote (no quote → the
+    point has no verbatim provenance to collapse onto — leave it standalone).
+    Same-session: a point's own source chunk/turn always shares its session.
+    """
+    q = _pkg_norm(str(point.get("quote") or ""))
+    if not q:
+        return False
+    if _pkg_session(chunk_or_turn) != _pkg_session(point):
+        return False
+    if chunk_or_turn.get("id") and chunk_or_turn["id"] == point.get(
+            "source_turn_id"):
+        return True
+    core = _verbatim_core(chunk_or_turn)
+    return bool(core) and q in _pkg_norm(core)
+
+
+def _same_fact(a: dict, b: dict) -> bool:
+    """Slice A: do two distilled/statement hits restate the SAME fact?
+    Deterministic, hermetic, no model:
+      * EXACT restatement — normalized content equality (the same statement
+        re-extracted verbatim, any session),
+      * NEAR-VERBATIM restatement — min-denominator content overlap ≥
+        ``DEFAULT_PACKAGE_VERBATIM_OVERLAP`` (the same claim restated
+        near-word-for-word),
+      * same SOURCE TURN (``source_turn_id`` equal — E3 #1535) AND the
+        verbatim ``quote`` spans overlap ≥ ``DEFAULT_PACKAGE_SAME_TURN_OVERLAP``
+        — duplicate extractions of ONE utterance: the same quote span means
+        the same fact even when the surrounding content is rephrased. Two
+        distinct claims distilled from one turn carry DIFFERENT quote spans
+        (different values/objects) and never collapse (the aggregation
+        numerator Slice B protects). This leg is content-overlap-independent
+        by design: extractors can rephrase the wrapper while anchoring the
+        same verbatim quote.
+    Value safety: a same-frame different-value claim ("cost 300" vs
+    "cost 400") shares only ~0.8-0.875 content (< 0.9) and its quote spans
+    overlap 2/3 ≈ 0.667 (< 0.75) — it survives as its own slot. No
+    LLM/embedder anywhere (hermetic-testable)."""
+    ca = _pkg_norm(str(a.get("content") or ""))
+    cb = _pkg_norm(str(b.get("content") or ""))
+    if ca and ca == cb:
+        return True
+    # Content ratio leg (P1 #2687 review): near-verbatim restatement
+    # collapses ONLY when the differing tokens are synonym-level — a
+    # fact-critical differing token (number / currency / negation) means
+    # DIFFERENT facts and refuses the ratio leg even at ≥0.9 on
+    # production-length quotes (the (n-1)/n math only protects toy frames).
+    ov = _pkg_overlap(ca, cb)
+    if ov >= DEFAULT_PACKAGE_VERBATIM_OVERLAP:
+        return not _pkg_differ_value_critical(ca, cb)
+    # Same-SOURCE-TURN leg (independent of content overlap — duplicate
+    # extractions of ONE utterance can rephrase the surrounding content
+    # widely while anchoring the same quote span): same ``source_turn_id``
+    # (E3 #1535) AND the verbatim ``quote`` spans overlap ≥
+    # ``DEFAULT_PACKAGE_SAME_TURN_OVERLAP`` — the same quote span means the
+    # same fact. The content guard above does NOT gate this leg: two
+    # extractions of one utterance may restate the value in words in the
+    # content while the quote carries the number. Two distinct claims from
+    # one turn carry DIFFERENT quote spans (different values/objects) and
+    # never collapse (the aggregation numerator Slice B protects); a same-
+    # turn quote pair that itself differs in a value is refused by the
+    # quote-value guard below.
+    at = str(a.get("source_turn_id") or "")
+    bt = str(b.get("source_turn_id") or "")
+    if not (at and at == bt):
+        return False
+    qa = str(a.get("quote") or "")
+    qb = str(b.get("quote") or "")
+    if not (qa and qb):
+        return False
+    if _pkg_differ_value_critical(qa, qb):
+        return False
+    return _pkg_overlap(qa, qb) >= DEFAULT_PACKAGE_SAME_TURN_OVERLAP
+
+
+#: #1945 mark-class ordering (strongest → weakest) for the value-tier split.
+_PACKAGE_VALUE_CLASSES = ("answer_string", "verbatim", "raw_chunk")
+
+
+def _package_tier(h: dict, mark_for: Callable[[dict], dict[str, bool]] | None
+                  ) -> tuple[int, int]:
+    """Slice A: the package's value tier = (0, rank) when the anchor carries
+    an exact-value/verbatim mark (answer_string / verbatim / raw_chunk — the
+    #1763/#1945 precise classes), else (1, rank). The rank tiebreaks within a
+    tier by the anchor's original pool position (relevance)."""
+    marks = mark_for(h) if mark_for is not None else _stored_marks(h)
+    if any(marks.get(cls) for cls in _PACKAGE_VALUE_CLASSES):
+        return (0, h.get("_pkg_rank", 0))
+    return (1, h.get("_pkg_rank", 0))
+
+
+def package_evidence_pool(
+    pool: list[dict], *,
+    mark_for: Callable[[dict], dict[str, bool]] | None = None,
+    max_verbatim: int = DEFAULT_PACKAGE_MAX_VERBATIM,
+) -> tuple[list[dict], dict[str, Any]]:
+    """Slice A (#2683): build the reader's EVIDENCE PACKAGE from the annotated
+    pool — collapse + dedup + order, pure and hermetic.
+
+    Two passes (order-independent collapse — a raw chunk/turn ranked ABOVE
+    its distilled point must still collapse INTO it, not stand alone):
+
+    Pass 1 — distilled/statement anchors (points first): a statement opens a
+    package; a second statement restating the SAME fact (``_same_fact`` —
+    exact or ≥0.9 near-verbatim content equality, or the same-source-turn
+    same-quote leg) collapses into the earlier package. Same-fact
+    restatement is session-agnostic on the content legs (two sessions
+    restating the same claim are duplicates of ONE fact for the reader
+    window — the window is the scarce resource), and the same-source-turn
+    leg is inherently single-session (``source_turn_id`` is one turn). The
+    higher-value anchor wins (exact-value/verbatim-marked beats source-only;
+    else the earlier pool rank — relevance).
+
+    Pass 2 — verbatim sources (raw chunks + source turns): a chunk/turn that
+    is a distilled anchor's OWN source (same session + its verbatim quote in
+    the chunk/turn text, or the recorded ``source_turn_id`` — ``_is_own_source``)
+    collapses INTO that package as at most ``max_verbatim`` ref(s); extra
+    own-source chunks/turns are DROPPED (one fact occupies ≤ 1 + max_verbatim
+    window slots). A chunk/turn that is no distilled anchor's own source
+    stands alone as evidence; duplicate verbatim content in the SAME session
+    (a turn whose utterance is contained in a kept chunk, or a byte-identical
+    second chunk) dedups to the container/earlier copy.
+
+    Ordering: surviving packages sort value-tier first (exact-value/verbatim-
+    marked anchors lead the window — the #1763/#1945 precise classes), then
+    by original pool relevance order (``_pkg_rank``) WITHIN a tier — the pool
+    order the hybrid search + recency-aware dedup already produced (relevance,
+    recency as its upstream tiebreak), so the package preserves the product's
+    existing order semantics exactly for equal-tier items.
+
+    Semantics contract:
+      * membership is a SUBSET of the pool — never a synthesis (each package
+        renders its own pool hits; ``render_context``/token accounting are
+        unchanged per hit),
+      * deterministic + hermetic — the collapse keys on ingest-written
+        provenance (``quote`` / ``source_turn_id``) + normalized content
+        overlap, never an LLM/embedder (hermetic tests need no model),
+      * the pool recall surface (``ret["hits"]``, ``evidence_recall@k``) is
+        UNCHANGED — the caller computes recall over the pool and feeds the
+        packaged result to ``assemble_context``; the package is what the
+        reader sees (the eval's ``reader_evidence@k`` / ``reader_surface@k``
+        measure it),
+      * OFF-by-default: the caller applies this ONLY when the tri-state arm
+        is on; the default path never calls it (byte-identical).
+
+    ``mark_for`` supplies the read-time mark provider (the eval injects
+    ``evidence.mark_for_question``); default None = the product's stored-mark
+    fallback (source-session class only). Returns ``(packaged, stats)`` with
+    ``stats`` recording the package census + the dropped/collapsed counts.
+    """
+    if max_verbatim < 0:
+        raise ValueError(f"max_verbatim must be >= 0, got {max_verbatim!r}")
+    # rank-stamp every hit ONCE (deterministic tiebreak on shallow copies —
+    # the caller's dicts are never mutated).
+    stamped: list[dict] = []
+    for i, h in enumerate(pool):
+        c = dict(h)
+        c["_pkg_rank"] = i
+        stamped.append(c)
+    points = [h for h in stamped
+              if not is_raw_chunk(h) and not _is_turn_point(h)]
+    sources = [h for h in stamped
+               if is_raw_chunk(h) or _is_turn_point(h)]
+
+    # Pass 1: statement/distilled anchors (pool order = relevance order).
+    packages: list[dict] = []  # each: {anchor, verbatim: [hits], dropped: int}
+    for h in points:
+        merged = None
+        for pkg in packages:
+            if _same_fact(h, pkg["anchor"]):
+                merged = pkg
+                break
+        if merged is not None:
+            # keep the higher-value anchor (value tier, then earlier rank)
+            if _package_tier(h, mark_for) < _package_tier(
+                    merged["anchor"], mark_for):
+                merged["dropped"] += 1
+                merged["anchor"] = h
+            else:
+                merged["dropped"] += 1
+            continue
+        packages.append({"anchor": h, "verbatim": [], "dropped": 0})
+
+    # Pass 2: verbatim sources (raw chunks + source turns) collapse into
+    # their own-source anchor package; unclaimed ones stand alone.
+    for h in sources:
+        owner = None
+        for pkg in packages:
+            if (not is_raw_chunk(pkg["anchor"])
+                    and not _is_turn_point(pkg["anchor"])
+                    and _is_own_source(h, pkg["anchor"])):
+                owner = pkg
+                break
+        if owner is not None:
+            if len(owner["verbatim"]) < max_verbatim:
+                owner["verbatim"].append(h)
+            else:
+                owner["dropped"] += 1
+            continue
+        # no distilled owner: standalone verbatim package — dedup same-session
+        # duplicates (a contained turn vs the chunk holding it, or a
+        # byte-identical second chunk), preferring the CONTAINER (the raw
+        # chunk holds the full window; a contained turn alone would starve
+        # the reader of context) regardless of pool arrival order.
+        dup = None
+        for pkg in packages:
+            a = pkg["anchor"]
+            if not (is_raw_chunk(a) or _is_turn_point(a)):
+                continue
+            if _pkg_session(a) != _pkg_session(h):
+                continue
+            hc = _pkg_norm(_verbatim_core(h))
+            ac = _pkg_norm(_verbatim_core(a))
+            if not hc or not ac:
+                continue
+            # same utterance, or one verbatim text CONTAINED in the other
+            # (the raw chunk holds its turns verbatim)
+            if hc == ac or hc in ac or ac in hc:
+                dup = pkg
+                break
+        if dup is not None:
+            # the container wins the anchor slot (a chunk arriving after its
+            # contained turn REPLACES the turn; the contained hit is dropped).
+            if len(hc) > len(ac) and hc != ac:
+                dup["anchor"] = h
+            dup["dropped"] += 1
+            continue
+        packages.append({"anchor": h, "verbatim": [], "dropped": 0})
+
+    ordered = sorted(
+        packages,
+        key=lambda p: (_package_tier(p["anchor"], mark_for)[0],
+                       p["anchor"].get("_pkg_rank", 0)),
+    )
+    out: list[dict] = []
+    for pkg in ordered:
+        out.append({k: v for k, v in pkg["anchor"].items()
+                    if k != "_pkg_rank"})
+        out.extend({k: v for k, v in v.items() if k != "_pkg_rank"}
+                   for v in pkg["verbatim"])
+    stats: dict[str, Any] = {
+        "applied": True,
+        "pool_items": len(pool),
+        "package_items": len(out),
+        "packages": len(packages),
+        "collapsed_duplicates": sum(p["dropped"] for p in packages),
+        "verbatim_refs_kept": sum(len(p["verbatim"]) for p in packages),
+        "value_first_packages": sum(
+            1 for p in packages
+            if _package_tier(p["anchor"], mark_for)[0] == 0),
+    }
+    return out, stats
