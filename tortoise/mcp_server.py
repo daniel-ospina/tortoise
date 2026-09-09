@@ -2971,7 +2971,7 @@ def tortoise_session_capture(conversation: list[dict],
         _current_scopes,
         _current_legacy_full_access,
     )
-    from tortoise.sdk import _current_actor_user_id  # noqa: I001  # #2600
+    from tortoise.sdk import _current_actor_user_id  # #2600
     team_id = _current_team_id.get()
     if not team_id or team_id == SELFHOST_TEAM_ID:
         # stdio / self-host HTTP: no hosted state plane, no receipts — the

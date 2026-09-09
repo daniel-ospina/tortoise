@@ -6587,11 +6587,11 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     import uuid
     from datetime import datetime
 
-    from tortoise.sdk import _current_actor_user_id  # #2600 actor stamp
     from tortoise.quota import (
         MAX_SESSION_TURNS,
         QuotaCheckError,
     )
+    from tortoise.sdk import _current_actor_user_id  # #2600 actor stamp
 
     # #1927: session_recording is an OPT-OUT now (default ON, ToS-covered) —
     # not an enforced consent gate. C6 #2115 (D-C6-3): the gate resolves
@@ -8369,7 +8369,7 @@ async def list_sessions(request: Request, team: dict = Depends(get_current_team_
     _require_scope(team, "graphs:read", "list_sessions")
     actor_filter = (request.query_params.get("actor_user_id") or "").strip()
     if actor_filter:
-        from tortoise.sdk import _is_uuid_shape  # noqa: PLC0415
+        from tortoise.sdk import _is_uuid_shape
         if not _is_uuid_shape(actor_filter):
             raise HTTPException(
                 status_code=422,
@@ -8379,7 +8379,7 @@ async def list_sessions(request: Request, team: dict = Depends(get_current_team_
         # Without this, a valid UUID in non-canonical form passes the shape
         # gate but silently returns [] 200 (graph equality is verbatim text
         # against stored canonical hyphenated actor_user_id).
-        import uuid as _canon_uuid  # noqa: PLC0415
+        import uuid as _canon_uuid
         actor_filter = str(_canon_uuid.UUID(actor_filter))
     sdk = _data_sdk(team)
     try:
@@ -8389,7 +8389,7 @@ async def list_sessions(request: Request, team: dict = Depends(get_current_team_
         # existing r[0..3] mapping is untouched.
         query = (
             "MATCH (s:Session) "
-            + (f"WHERE s.actor_user_id = $uid " if actor_filter else "")
+            + ("WHERE s.actor_user_id = $uid " if actor_filter else "")
             + "OPTIONAL MATCH (s)-[:CONTAINS]->(p:Point) "
             "WHERE p.pointKind IN ['decision', 'statement'] "
             "RETURN s.id, s.created_at, s.turn_count, count(p), "
@@ -8442,8 +8442,10 @@ def _actor_display_map(actor_ids: list[str], team_id: str) -> dict:
     if not actor_ids:
         return {}
     try:
-        from tortoise.supabase_control import (  # noqa: PLC0415
-            get_control_plane, is_supabase_enabled, team_members,
+        from tortoise.supabase_control import (
+            get_control_plane,
+            is_supabase_enabled,
+            team_members,
         )
         if not is_supabase_enabled():
             return {}  # registry: no email seam for members

@@ -102,8 +102,8 @@ class TestOauthResolverRawActor:
     — indicator 1: the OAuth lane stops dropping the human)."""
 
     def test_resolved_dict_carries_raw_user_id(self, monkeypatch):
-        from datetime import UTC, datetime, timedelta
         import uuid as _uuid
+        from datetime import UTC, datetime, timedelta
 
         from tests.fake_control_plane import FakeControlPlane
 
@@ -136,6 +136,7 @@ class TestOauthResolverRawActor:
 
     def test_revoked_token_returns_none(self, monkeypatch):
         from datetime import UTC, datetime, timedelta
+
         from tests.fake_control_plane import FakeControlPlane
         from tortoise.oauth import _sha256, resolve_oauth_access_token
 
@@ -242,7 +243,7 @@ class TestEmitEventActorBackstop:
         from tortoise.sdk import TortoiseSDK, _current_actor_user_id
         sdk = TortoiseSDK(db_path=str(tmp_path / "emit-none.db"))
         try:
-            _current_actor_user_id.set(None)  # noqa: F841 — explicit reset below
+            _current_actor_user_id.set(None)
             sdk._emit_event("OperatorAdded", {"id": "op-1"})
             payloads = self._graph_payloads(sdk, "OperatorAdded")
             assert payloads and "actor_user_id" not in payloads[0], payloads
@@ -275,7 +276,6 @@ class TestEmitEventActorBackstop:
         """SDK with event_log_path + ContextVar set → the JSONL event line
         carries actor_user_id (additive); the underlying point snapshot is
         untouched."""
-        import json
         from tortoise.log import EventLog
         from tortoise.sdk import TortoiseSDK, _current_actor_user_id
         events = tmp_path / "ev"
@@ -309,10 +309,11 @@ class TestEventApiEmitOptionalActor:
     actor present on the emitted event dict."""
 
     def test_default_none_no_actor_key(self):
-        from tortoise.api import EventAPI
-        from tortoise.log import EventLog
         import tempfile
         from pathlib import Path
+
+        from tortoise.api import EventAPI
+        from tortoise.log import EventLog
         with tempfile.TemporaryDirectory() as d:
             log = EventLog(Path(d) / "api.jsonl")
             api = EventAPI(log, initiated_by="extractor")
@@ -321,10 +322,11 @@ class TestEventApiEmitOptionalActor:
             assert "actor_user_id" not in ev, ev
 
     def test_explicit_actor_present(self):
-        from tortoise.api import EventAPI
-        from tortoise.log import EventLog
         import tempfile
         from pathlib import Path
+
+        from tortoise.api import EventAPI
+        from tortoise.log import EventLog
         with tempfile.TemporaryDirectory() as d:
             log = EventLog(Path(d) / "api.jsonl")
             api = EventAPI(log, initiated_by="extractor")
@@ -382,6 +384,7 @@ class TestStripAndIgnoreActorClaims:
 
     def test_sanitize_strip_emits_warning(self, caplog):
         import logging
+
         from tortoise.sdk import _sanitize_props
         with caplog.at_level(logging.WARNING, logger="tortoise.sdk"):
             _sanitize_props({"actor_user_id": "forged", "content": "z"})
@@ -484,10 +487,10 @@ class TestMcpToolSweepStripActor:
 
     def _ctx(self, tmp_path):
         import contextlib
-        from tortoise.mcp_auth import (_current_team_id, _current_team_limits,
-                                       _transport_mode)
-        from tests._http_fixtures import patched_tortoise_sdk
         import os
+
+        from tests._http_fixtures import patched_tortoise_sdk
+        from tortoise.mcp_auth import _current_team_id, _current_team_limits, _transport_mode
         os.environ.setdefault("TORTOISE_SESSION_LLM_MOCK", "1")
 
         @contextlib.contextmanager
@@ -513,8 +516,7 @@ class TestMcpToolSweepStripActor:
     def test_update_point_forged_actor_stripped(self, tmp_path):
         """update_point with forged actor props → success; the node keeps
         its real props and never gains the forged key."""
-        from tortoise.mcp_server import (tortoise_create_point,
-                                         tortoise_update_point)
+        from tortoise.mcp_server import tortoise_create_point, tortoise_update_point
         with self._ctx(tmp_path):
             created = tortoise_create_point(kind="statement",
                                             content="sweep update target")
@@ -534,8 +536,7 @@ class TestMcpToolSweepStripActor:
     def test_create_subject_object_forged_actor_stripped(self, tmp_path):
         """create_subject / create_object with forged actor props → created
         nodes carry no forged value (entity surfaces)."""
-        from tortoise.mcp_server import (tortoise_create_object,
-                                         tortoise_create_subject)
+        from tortoise.mcp_server import tortoise_create_object, tortoise_create_subject
         with self._ctx(tmp_path):
             s = tortoise_create_subject("sweep-subj", "core:strategy",
                                         props={"actor_user_id": "evil",

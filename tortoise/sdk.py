@@ -780,7 +780,7 @@ def _is_uuid_shape(value: object) -> bool:
     urn:/uuid:-prefixed forms, accept hyphenated / 32-hex-no-hyphen / braced.
     (sdk cannot import supabase_control — this is the neutral copy; keep the
     two in sync.)"""
-    import uuid as _uuid  # noqa: PLC0415 — function-local (lazy import parity)
+    import uuid as _uuid
     if not isinstance(value, str) or not value:
         return False
     probe = value.strip()
