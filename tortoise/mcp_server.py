@@ -458,7 +458,6 @@ WRITE_TOOL_NAMES: frozenset[str] = _QUOTA_GATED | frozenset({
     # onboarding index/demo/toggle tools write DEFAULT-graph/team state;
     # get_source_reliability write-through refreshes the Source cache.
     "tortoise_session_capture",
-    "tortoise_graph_set_recording",  # #2302: per-graph recording override write (team:manage-gated in-function; a graphs:read-only key must never reach it) — REST PATCH /v1/graphs twin
     "tortoise_onboarding_github_index",
     "tortoise_onboarding_session_recording",
     "tortoise_get_source_reliability",
@@ -764,6 +763,10 @@ def tortoise_create_point(kind: str, content: str,
                           dedup: bool = True) -> dict:
     """Create a Point node (statement, decision, vision, hypothesis, etc.).
 
+    On first successful write from an incomplete org, auto-completes
+    onboarding (files remaining step edges + flips status to complete) —
+    no separate ceremony needed.
+
     dedup=True (default): idempotent — returns existing Point if content matches.
     dedup=False: force-create even if content is identical.
 
@@ -800,7 +803,10 @@ def tortoise_create_point(kind: str, content: str,
             if not isinstance(t, str) or not t.strip() or len(t) > 200:
                 return {"error": f"invalid tag value: {t!r} (must be a non-empty string ≤ 200 chars)"}
     merged["dedup"] = dedup
-    return _safe(_quota_gated(_get_team_sdk().create_point, "points", abuse_weight=1), kind, content, **merged)
+    result = _safe(_quota_gated(_get_team_sdk().create_point, "points", abuse_weight=1), kind, content, **merged)
+    if "error" not in result:
+        _maybe_onboarding_auto_complete()
+    return result
 
 
 def tortoise_query(kind: str | None = None,
@@ -1597,8 +1603,11 @@ def tortoise_file_decision(options: Any, evidence: Any,
     if isinstance(evidence, list) and len(evidence) > MAX_FILE_DECISION_EVIDENCE:
         return {"error": f"file_decision evidence exceeds the cap ({MAX_FILE_DECISION_EVIDENCE})",
                 "code": ERR_QUOTA}
-    return _safe(_quota_gated(_get_team_sdk().file_decision, "points",
+    result = _safe(_quota_gated(_get_team_sdk().file_decision, "points",
                           abuse_weight=lambda r, a, k: 1 + len(a[0] or []) + len(a[1] or [])), options, evidence, choice)
+    if "error" not in result:
+        _maybe_onboarding_auto_complete()
+    return result
 
 
 def tortoise_file_human_approval(approver_id: str, artifact_id: str,
@@ -2777,11 +2786,6 @@ def tortoise_onboarding_demo_create() -> dict:
 
 def tortoise_onboarding_state() -> dict:
     """Return this team's onboarding progress (Q6 verification step)."""
-    # #2300: reads the team's DEFAULT-graph/control-plane onboarding
-    # projection (team-level surface) — graph-bound keys rejected (REST
-    # twin GET /v1/onboarding/state parity, C5 #2114). A per-graph key must
-    # never observe the team's onboarding state outside its graph.
-    _reject_graph_bound_mcp_team_surface("onboarding state")
     return _onboarding_state()
 
 
@@ -2849,11 +2853,6 @@ def tortoise_onboarding_session_recording(enabled: bool) -> dict:
 
 def tortoise_onboarding_github_connect(org: str | None = None) -> dict:
     """Initiate GitHub OAuth — returns the authorize URL + CSRF state (Q1)."""
-    # #2300: initiates team-level GitHub OAuth + stores team CSRF/org state
-    # (control-plane) — graph-bound keys rejected (REST twin
-    # POST /v1/onboarding/github/connect parity, #2300 closes the REST
-    # residual). A per-graph key must never start a TEAM-wide OAuth.
-    _reject_graph_bound_mcp_team_surface("github connect")
     team_id = _current_team_id.get()
     if team_id is None:
         return {"error": "No team context (HTTP mode required)"}
@@ -2884,10 +2883,6 @@ def tortoise_onboarding_github_connect(org: str | None = None) -> dict:
 
 def tortoise_onboarding_github_status() -> dict:
     """Return GitHub connection status for this team (Q1 verify)."""
-    # #2300: reads team-level GitHub credential state (control-plane) —
-    # graph-bound keys rejected (REST twin GET /v1/onboarding/github/status
-    # parity, #2300 closes the REST residual).
-    _reject_graph_bound_mcp_team_surface("github status")
     team_id = _current_team_id.get()
     if team_id is None:
         return {"error": "No team context (HTTP mode required)"}
@@ -2909,6 +2904,68 @@ def tortoise_onboarding_github_status() -> dict:
     if not enc:
         return {"connected": False, "org": None, "repos_count": None}
     return {"connected": True, "org": org, "repos_count": None}
+
+
+# ── Auto-complete onboarding on first real write ────────────────
+# When an agent makes its first successful graph write (create_point or
+# file_decision), the server auto-files the remaining onboarding steps and
+# flips status to complete — no agent-side state machine ceremony needed.
+
+def _maybe_onboarding_auto_complete() -> None:
+    """After a successful agent write, auto-complete onboarding if not
+    already done. Idempotent: steps are FWW edges, replay is a no-op.
+
+    Files harness-connected, first-points-filed, and decide-completed step
+    edges and flips status to complete. Invalidates the 60s TTL cache so
+    the MCP tools/list filter picks up the change immediately.
+
+    Only fires in HTTP (hosted) mode with a real team_id — stdio and
+    self-host calls are no-ops."""
+    from tortoise.mcp_auth import SELFHOST_TEAM_ID, _current_team_id
+    team_id = _current_team_id.get()
+    if not team_id or team_id == SELFHOST_TEAM_ID:
+        return  # stdio / self-host: no hosted onboarding state
+    # Fast check: if the 60s cache says complete, skip.
+    now = _time.time()
+    cached = _onboarding_state_cache.get(team_id)
+    if cached is not None and now - cached[0] < _ONBOARDING_STATE_TTL:
+        if cached[1]:
+            return  # already known complete
+    try:
+        from tortoise.hosted_api import (
+            _get_onboarding_projection,
+            _get_onboarding_state,
+            _team_proj,
+        )
+        from tortoise.onboarding.state import (
+            STATUS_COMPLETE as _OS_COMPLETE,
+            write_completed_step as _os_write_step,
+            write_status as _os_write_status,
+        )
+        proj = _team_proj(team_id)
+        projection = _get_onboarding_projection(team_id)
+        prog = projection.get("onboarding_complete")
+        if isinstance(prog, bool) and prog:
+            _onboarding_state_cache[team_id] = (now, True)
+            return  # already complete
+        # File all remaining step edges (idempotent FWW) — safe if some
+        # already exist, skips nothing.
+        legacy_mirror = bool(
+            _get_onboarding_state(team_id).get("onboarding_complete"))
+        for step in ("harness-connected", "first-points-filed",
+                     "decide-completed"):
+            _os_write_step(proj, team_id, step,
+                           status_from_mirror=legacy_mirror)
+        # Flip status (monotonic — no-op if already complete).
+        _os_write_status(proj, team_id, _OS_COMPLETE,
+                         status_from_mirror=legacy_mirror)
+        # Invalidate cache so tools/list retires onboarding tools
+        # immediately.
+        _onboarding_state_cache[team_id] = (now, True)
+    except Exception:
+        # Fail-open: a transient graph/control-plane error must NOT block
+        # the agent's write. Next write re-triggers this check.
+        return
 
 
 # ── #1727 Slice 2 (Task 13): tortoise_session_capture — the T3 filing tool ──
@@ -2989,80 +3046,6 @@ def tortoise_session_capture(conversation: list[dict],
         if status >= 400:
             with contextlib.suppress(Exception):
                 _record_capture_last_error(team_id, harness, str(detail))
-        return {"error": str(detail), "status": status}
-
-
-def tortoise_graph_set_recording(recording: bool | None,
-                                 graph_id: str | None = None) -> dict:
-    """Set or clear a graph's session-recording override (#2302) — the MCP
-    twin of PATCH /v1/graphs/{graph_id} (recording), sharing the SAME
-    hosted_api core (``_apply_graph_recording_override``) so the two
-    surfaces can never drift on permission, semantics, or storage.
-
-    recording: true|false sets the per-graph override; null removes it
-    (inherit the team default — a null never flips a team ON, #1927
-    default-ON preserved). Requires hosted mode + the same management
-    permission as the REST PATCH: a team:manage-scoped key (or the legacy
-    full-access class) — graph data scopes alone are NOT enough. A
-    graph-bound owner-minted manager key may set ANY graph in the team
-    (explicit graph_id), incl. the DEFAULT graph ('default').
-
-    graph_id: the graph to change; when omitted, the calling key's OWN
-    bound graph is the target (the override the capture 409 gate reads),
-    else the team DEFAULT graph ('default').
-
-    The capture 409 ("Session recording is disabled for this graph")
-    routes agents here — call this tool to turn recording back on, then
-    retry the capture. Returns {graph_id, recording}; errors return
-    {error, status} (403 missing scope, 404 unknown graph, 422 bad body).
-    """
-    from tortoise.mcp_auth import (
-        SELFHOST_TEAM_ID,
-        _current_graph_id,
-        _current_legacy_full_access,
-        _current_scopes,
-        _current_team_id,
-    )
-    team_id = _current_team_id.get()
-    if not team_id or team_id == SELFHOST_TEAM_ID:
-        # stdio / self-host HTTP: the per-graph override is control-plane
-        # state with no local registry row to write — honest error, never a
-        # silent local no-op (capture-tool parity).
-        return {"error": "graph recording is a hosted control-plane "
-                           "setting — requires hosted mode"}
-    gid = graph_id or (_current_graph_id.get() or "default")
-    # Permission gate mirrors the REST PATCH key branch: team:manage (or
-    # the legacy full-access class). Graph data scopes alone 403.
-    scopes = _current_scopes.get()
-    legacy = bool(_current_legacy_full_access.get())
-    if not (legacy or scopes is None or "team:manage" in (scopes or [])):
-        return {"error": "Missing team:manage scope — per-graph recording "
-                           "is a team-management setting (mirror of "
-                           "PATCH /v1/graphs/{graph_id})", "status": 403}
-    from tortoise.hosted_api import (
-        GraphRecordingPatch,
-        _apply_graph_recording_override,
-    )
-    key_ctx = {
-        "team_id": team_id,
-        "key_id": "mcp",
-        "scopes": list(scopes) if scopes is not None else None,
-        "legacy_full_access": legacy,
-        "session_user_id": None,
-    }
-    try:
-        # Strict bool/null (no truthy-string coercion) — REST body parity.
-        body = GraphRecordingPatch(recording=recording)
-    except Exception as e:
-        return {"error": f"recording must be true, false or null ({e})",
-                "status": 422}
-    try:
-        import asyncio
-        return asyncio.run(
-            _apply_graph_recording_override(gid, body, team_id, key_ctx))
-    except Exception as e:
-        status = getattr(e, "status_code", 500)
-        detail = getattr(e, "detail", str(e))
         return {"error": str(detail), "status": status}
 
 
