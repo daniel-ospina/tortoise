@@ -125,6 +125,20 @@ SELECT tests.assert(
 SELECT tests.assert(
   (public.user_identity_inventory('60000000-0000-0000-0000-000000001765'::uuid)->'methods'->0->>'email') IS NOT NULL,
   'inventory methods must carry the email (identity_data contract)');
+-- verify the login field resolves to the best identifier
+SELECT tests.assert(
+  (public.user_identity_inventory('60000000-0000-0000-0000-000000001765'::uuid)->'methods'->0->>'login') = 'google@1765.test',
+  'inventory method 0 must use identity_data email as login');
+SELECT tests.assert(
+  (public.user_identity_inventory('60000000-0000-0000-0000-000000001765'::uuid)->'methods'->1->>'login') = 'email@1765.test',
+  'inventory method 1 (email) must use provider_id as login');
+
+-- add a github identity with no email in identity_data → should fall back to user_name
+INSERT INTO auth.identities (id, user_id, provider, provider_id, identity_data) VALUES
+  ('e0000001-0000-0000-0000-000000001765'::uuid, '30000000-0000-0000-0000-000000001765'::uuid, 'github', '1765-gh-noemail', '{"user_name": "octocat"}'::jsonb);
+SELECT tests.assert(
+  (public.user_identity_inventory('30000000-0000-0000-0000-000000001765'::uuid)->'methods'->1->>'login') = 'octocat',
+  'inventory github without email must fall back to user_name');
 
 -- unknown user: 0 methods, never an error
 SELECT tests.assert(

@@ -173,7 +173,7 @@ export function ProfileTab({
           {methods.map((m) => (
             <tr key={`${m.provider}:${m.provider_id}`}>
               <td>{m.provider === 'email' ? 'Email + password' : m.provider}</td>
-              <td>{m.email ?? m.provider_id ?? '—'}</td>
+              <td>{m.login ?? '—'}</td>
               <td>
                 {m.provider === 'email' ? 'Password sign-in' : (inv.email_confirmed_at ? 'Connected' : 'Email unconfirmed')}
               </td>
