@@ -62,7 +62,8 @@ def _seed_team(fake, *, team_id="t1", created_by=_OWNER,
     """Seed a claimed team + an api_keys row created by `created_by`."""
     team_row = {"id": team_id, "name": "Team", "tier": "free",
                 "max_users": 5, "max_graphs": 5, "graph_size_cap": 10000,
-                "ops_allowance": 1000, "email": email}
+                "ops_allowance": 1000, "email": email,
+                "dashboard_key_login": True}
     if team_extra:
         team_row.update(team_extra)
     fake.seed("teams", [team_row])
