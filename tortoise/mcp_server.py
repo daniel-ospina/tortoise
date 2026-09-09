@@ -2970,9 +2970,8 @@ def _maybe_onboarding_auto_complete() -> None:
     # Fast check: if the 60s cache says complete, skip.
     now = _time.time()
     cached = _onboarding_state_cache.get(team_id)
-    if cached is not None and now - cached[0] < _ONBOARDING_STATE_TTL:
-        if cached[1]:
-            return  # already known complete
+    if cached is not None and now - cached[0] < _ONBOARDING_STATE_TTL and cached[1]:
+        return  # already known complete
     try:
         from tortoise.hosted_api import (
             _get_onboarding_projection,
@@ -2981,7 +2980,11 @@ def _maybe_onboarding_auto_complete() -> None:
         )
         from tortoise.onboarding.state import (
             STATUS_COMPLETE as _OS_COMPLETE,
+        )
+        from tortoise.onboarding.state import (
             write_completed_step as _os_write_step,
+        )
+        from tortoise.onboarding.state import (
             write_status as _os_write_status,
         )
         proj = _team_proj(team_id)
@@ -3059,6 +3062,18 @@ def tortoise_session_capture(conversation: list[dict],
                           "tortoise_session_capture tool files to Tortoise "
                           "Cloud (server-enforced recording + receipts); "
                           "self-hosted stdio capture is not available."}
+    from tortoise.session_attribution import (
+        derive_machine_id,
+        sanitize_attribution_field,
+    )
+    # #2681: derive-only fallback when caller does not supply.
+    if machine_id is None:
+        machine_id = derive_machine_id()
+    if machine_id is not None:
+        machine_id = sanitize_attribution_field(machine_id, max_length=256)
+    if model is not None:
+        model = sanitize_attribution_field(model, max_length=128)
+
     from tortoise.hosted_api import (
         SessionRequest,
         _capture_session_impl,
