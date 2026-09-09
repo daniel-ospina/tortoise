@@ -2849,6 +2849,7 @@ def _cmd_session_capture(args, api_key: str, api_url: str) -> int:
     from pathlib import Path
     from urllib.request import Request, urlopen
     from urllib.error import URLError, HTTPError
+    from tortoise.session_attribution import derive_machine_id, sanitize_attribution_field
 
     transcript_path = Path(args.file)
     if not transcript_path.exists():
@@ -2875,6 +2876,18 @@ def _cmd_session_capture(args, api_key: str, api_url: str) -> int:
         payload["harness"] = args.harness
     if getattr(args, "session_id", None):
         payload["session_id"] = args.session_id
+
+    # #2681: derive machine_id + forward model when provided.  Derive-only
+    # sha256 of hostname\0username — never-throw, memoized per process.
+    machine_id = derive_machine_id()
+    if machine_id:
+        sanitized = sanitize_attribution_field(machine_id, max_length=256)
+        if sanitized:
+            payload["machine_id"] = sanitized
+    model = sanitize_attribution_field(
+        getattr(args, "model", None), max_length=128)
+    if model:
+        payload["model"] = model
 
     try:
         data = _json.dumps(payload).encode("utf-8")
@@ -5984,6 +5997,12 @@ def main(argv: list[str] | None = None) -> int:
         "--session-id", default=None,
         help="Idempotency key (Claude Code's real session_id from hook "
              "metadata) — re-captures converge to one Session (#1727 T1-P11)")
+    # #2681: model is runtime-only — the session-entry initial model when
+    # available (e.g. from the hook), else omitted (server accepts blank).
+    session_capture.add_argument(
+        "--model", default=None,
+        help="Session-entry initial model string (e.g. claude-sonnet-4-20250514) "
+             "— omitted when not provided (#2681)")
     session_probe = session_sp.add_parser(
         "probe",
         help="Fire the install-probe beacon (harness + timestamp, no content) "
