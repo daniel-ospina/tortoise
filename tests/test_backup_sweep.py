@@ -3,6 +3,7 @@
 from __future__ import annotations  # noqa: I001
 
 import json
+import hashlib
 import os
 import tempfile
 from datetime import datetime, timedelta, UTC
@@ -2263,6 +2264,96 @@ def test_purge_residual_still_erases_artifacts(shared_proj):
     assert store.list(f"backups/{bid}/") == []
     assert _tombstone_props(proj, gid).get("purged_residual") is True
 
+
+# ── #2319 second-region mirror (env-guarded; the cron runs the sweep) ────────
+
+
+class _FailingMirrorStorage(MemoryStorage):
+    """Mirror store that rejects every write — simulates a dead/blocked
+    second-region target."""
+
+    def upload(self, key, data, content_type=None):
+        raise RuntimeError("mirror endpoint unreachable (503)")
+
+
+def test_sweep_mirrors_accepted_archive_when_configured(shared_proj):
+    """#2319: with a mirror store passed in, every ACCEPTED archive is copied
+    (dump.enc + manifest.json) and the per-graph result records the verified
+    mirror — byte-identical keys, sha256-backed."""
+    with tempfile.TemporaryDirectory() as tmp:  # noqa: F841
+        if shared_proj is None:
+            return
+        proj = _make_env(None, shared_proj)
+        reg = proj.db.select_graph(_REGISTRY_GRAPH)
+        store = MemoryStorage()
+        mirror = MemoryStorage()
+        res = run_backup_sweep(
+            db=proj.db, registry=reg, storage=store, config=_config(),
+            mirror=mirror,
+        )
+        assert res["status"] == "backed_up"
+        default_res = res["results"]["team_x"]["graphs"]["default"]
+        assert default_res["status"] == "backed_up"
+        assert default_res["mirror"]["verified"] is True
+
+        prim_keys = sorted(store.list("backups/team_x/"))
+        mir_keys = sorted(mirror.list("backups/team_x/"))
+        assert len(prim_keys) == 2  # dump.enc + manifest.json
+        assert mir_keys == prim_keys  # keys preserved byte-for-byte
+        # read-back integrity: mirrored ciphertext matches the primary
+        for k in prim_keys:
+            assert mirror.download(k) == store.download(k)
+        manifest = json.loads(store.download(
+            next(k for k in prim_keys if k.endswith("manifest.json"))))
+        dump_key = next(k for k in prim_keys if k.endswith("dump.enc"))
+        assert hashlib.sha256(mirror.download(dump_key)).hexdigest() == manifest["sha256"]
+
+
+def test_sweep_without_mirror_is_unchanged(shared_proj):
+    """No mirror arg ⇒ no mirror key on the per-graph result and nothing
+    copied (byte-for-byte mirror-free behaviour)."""
+    with tempfile.TemporaryDirectory() as tmp:  # noqa: F841
+        if shared_proj is None:
+            return
+        proj = _make_env(None, shared_proj)
+        reg = proj.db.select_graph(_REGISTRY_GRAPH)
+        store = MemoryStorage()
+        res = run_backup_sweep(
+            db=proj.db, registry=reg, storage=store, config=_config(),
+        )
+        default_res = res["results"]["team_x"]["graphs"]["default"]
+        assert default_res["status"] == "backed_up"
+        assert default_res.get("mirror") is None
+
+
+def test_sweep_mirror_failure_is_loud_and_primary_survives(shared_proj):
+    """#2319: a mirror failure never fails the (already durable) PRIMARY
+    backup, but it IS a durability-policy breach when mirroring is
+    configured — the graph reports error (visible in /status last_sweep
+    graph_failures + streak), never a silent gap."""
+    with tempfile.TemporaryDirectory() as tmp:  # noqa: F841
+        if shared_proj is None:
+            return
+        proj = _make_env(None, shared_proj)
+        reg = proj.db.select_graph(_REGISTRY_GRAPH)
+        store = MemoryStorage()
+        mirror = _FailingMirrorStorage()
+        res = run_backup_sweep(
+            db=proj.db, registry=reg, storage=store, config=_config(),
+            mirror=mirror,
+        )
+        # headline degrades (default graph errored on the mirror leg)
+        assert res["status"] == "no_work"
+        assert res["graph_totals"]["errors"] == 1
+        default_res = res["results"]["team_x"]["graphs"]["default"]
+        assert default_res["status"] == "error"
+        assert "mirror failed" in default_res["error"]
+        # the primary archive is intact (durable regardless of the mirror)
+        prim_keys = sorted(store.list("backups/team_x/"))
+        assert len(prim_keys) == 2
+        assert [k for k in prim_keys if k.endswith("dump.enc")]
+        # and the streak is recorded so /status surfaces the breach
+        assert res["graph_error_streaks"].get("team_x:default") == 1
 
 # ── #2317 scheduled-restore-drill archive selection (pure storage) ──────────
 

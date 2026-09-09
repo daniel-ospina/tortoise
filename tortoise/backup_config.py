@@ -22,12 +22,36 @@ _AES_KEY_SIZE = 32
 # Secrets that the deploy workflow can sync from GH → Fly (the "syncable" set).
 # REGISTRY_STREAM_KEY is deliberately EXCLUDED — it must be set out-of-band
 # by the operator on Fly (fly secrets set) and never present in GitHub.
+# Same for the #2319 lock/mirror surface (CF_API_TOKEN + R2_MIRROR_*):
+# optional-when-sweep-enabled, operator-set out-of-band on Fly.
 _SYNCABLE_REQUIRED = (
     "TORTOISE_BACKUP_KEY",
     "R2_ACCOUNT_ID",
     "R2_ACCESS_KEY_ID",
     "R2_SECRET_ACCESS_KEY",
     "R2_BUCKET",
+)
+
+# ── #2319 bucket-lock window contract ────────────────────────────────────────
+# R2 bucket locks (Cloudflare rule API — NOT S3 Object Lock; see
+# docs/ops/registry-backup-dr.md §#2319) are prefix-scoped Age retentions that
+# block delete/overwrite within the window. BACKUP_LOCK_DAYS must stay
+# strictly below the #2304 trash-grace default (7 days — hosted_api
+# _TRASH_GRACE_DAYS) so a purged graph's artifacts (>= grace days old when the
+# purge erases them) are never inside the lock window — the erasure promise
+# stays honest. Default 3 days protects the recovery-critical hourly window.
+LOCK_DAYS_MIN = 1
+LOCK_DAYS_MAX = 6
+DEFAULT_LOCK_DAYS = 3
+
+# Mirror-store creds (second-region/second-account copy, env-guarded). When
+# R2_MIRROR_ENDPOINT is unset the endpoint derives from R2_MIRROR_ACCOUNT_ID
+# (https://{id}.r2.cloudflarestorage.com) — mirror of the primary R2_* shape.
+_MIRROR_REQUIRED = (
+    "R2_MIRROR_ACCOUNT_ID",
+    "R2_MIRROR_ACCESS_KEY_ID",
+    "R2_MIRROR_SECRET_ACCESS_KEY",
+    "R2_MIRROR_BUCKET",
 )
 
 _DEFAULT_GH_REPO = "daniel-ospina/tortoise"
@@ -71,6 +95,16 @@ class BackupConfig:
     retention_weekly: int = 4
     simulate_enabled: bool = False
     team_sweep_enabled: bool = False
+    # #2319: immutability + geo-mirror surface (defaults are the documented
+    # production values; drift-bounds enforced in _load_from_env).
+    lock_enabled: bool = False
+    lock_days: int = DEFAULT_LOCK_DAYS
+    cf_api_token: str = ""  # R2-scoped Cloudflare API token (lock verification)
+    mirror_enabled: bool = False
+    mirror_endpoint: str = ""
+    mirror_access_key_id: str = ""
+    mirror_secret_access_key: str = ""
+    mirror_bucket: str = ""
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -170,6 +204,45 @@ def _load_from_env() -> BackupConfig:
             gh_repo=_DEFAULT_GH_REPO,
             team_sweep_enabled=team_sweep_enabled,
         )
+
+    # ── #2319 immutability contract (validated when the sweep is enabled). ──
+    lock_enabled = _env_bool("BACKUP_LOCK_ENABLED", default=False)
+    lock_days = _env_int("BACKUP_LOCK_DAYS", DEFAULT_LOCK_DAYS)
+    if lock_enabled and not (LOCK_DAYS_MIN <= lock_days <= LOCK_DAYS_MAX):
+        raise ConfigError(
+            f"BACKUP_LOCK_DAYS must be {LOCK_DAYS_MIN}..{LOCK_DAYS_MAX} "
+            f"(got {lock_days}) — the lock window must stay below the "
+            "#2304 trash grace (7d) so purge erasure of a deleted graph's "
+            "backup artifacts is never blocked"
+        )
+    # CF_API_TOKEN is optional: without it the live lock-config verification
+    # (/v1/internal/backups/verify-lock) reports unverifiable and the runbook
+    # (console/wrangler steps) is the verification path (#2319).
+    cf_api_token = os.environ.get("CF_API_TOKEN", "").strip()
+
+    # ── #2319 geo-mirror (second-store copy) — env-guarded, fail-closed. ──
+    mirror_enabled = _env_bool("BACKUP_MIRROR_ENABLED", default=False)
+    mirror_account_id = os.environ.get("R2_MIRROR_ACCOUNT_ID", "").strip()
+    mirror_access_key_id = os.environ.get("R2_MIRROR_ACCESS_KEY_ID", "").strip()
+    mirror_secret_access_key = os.environ.get("R2_MIRROR_SECRET_ACCESS_KEY", "").strip()
+    mirror_bucket = os.environ.get("R2_MIRROR_BUCKET", "").strip()
+    if mirror_enabled:
+        missing = [n for n, v in (
+            ("R2_MIRROR_ACCOUNT_ID", mirror_account_id),
+            ("R2_MIRROR_ACCESS_KEY_ID", mirror_access_key_id),
+            ("R2_MIRROR_SECRET_ACCESS_KEY", mirror_secret_access_key),
+            ("R2_MIRROR_BUCKET", mirror_bucket),
+        ) if not v]
+        if missing:
+            raise ConfigError(
+                "BACKUP_MIRROR_ENABLED=true but mirror store creds missing: "
+                + ", ".join(missing)
+                + " (set them out-of-band on Fly; they never sync from GH)"
+            )
+    mirror_endpoint = (
+        os.environ.get("R2_MIRROR_ENDPOINT", "").strip()
+        or (f"https://{mirror_account_id}.r2.cloudflarestorage.com" if mirror_account_id else "")
+    )
 
     # Enabled — required syncable secrets fail fast at boot. In file-store
     # mode (#2318, BACKUP_KEY_STORE=file) the KEY envs are NOT required — the
@@ -289,4 +362,12 @@ def _load_from_env() -> BackupConfig:
         retention_weekly=_env_int("BACKUP_RETENTION_WEEKLY", 4),
         simulate_enabled=_env_bool("BACKUP_SIMULATE_ENABLED", default=False),
         team_sweep_enabled=_env_bool("BACKUP_TEAM_SWEEP_ENABLED", default=False),
+        lock_enabled=lock_enabled,
+        lock_days=lock_days,
+        cf_api_token=cf_api_token,
+        mirror_enabled=mirror_enabled,
+        mirror_endpoint=mirror_endpoint,
+        mirror_access_key_id=mirror_access_key_id,
+        mirror_secret_access_key=mirror_secret_access_key,
+        mirror_bucket=mirror_bucket,
     )

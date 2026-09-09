@@ -1093,6 +1093,8 @@ function claimIntentInFlight() {
   // whose org ALREADY connected (server checkpoint) must not see the paused
   // 'not connected yet' copy when they skip. Read the projection the client
   // already holds; refreshOnboarding at wizard-open + step-4 keeps it fresh.
+  // ⚠️ MUST be declared BEFORE effectivelyPaused (TDZ fix, #2621):
+  const connectedOnceRef = React.useRef(false)
   const serverHarnessConnected = Array.isArray(onboarding && onboarding.completed_steps) &&
     onboarding.completed_steps.includes('harness-connected')
   const effectivelyPaused = wizardPaused && !connectedOnceRef.current && !serverHarnessConnected
@@ -1111,7 +1113,7 @@ function claimIntentInFlight() {
   }, [wizardStep, welcomeMode, authed])
   // #2361 review-r3 (P2-2): wizardPaused must not out-live a real connection —
   // connect → Back → Skip must still show 'connected', not 'paused'.
-  const connectedOnceRef = React.useRef(false)
+  // (connectedOnceRef declaration moved up for TDZ fix, #2621)
   const [wizardStepAnnounce, setWizardStepAnnounce] = React.useState('')
 
   // #2361 review-r2 (a11y P1): announce + move focus on wizard step change.
