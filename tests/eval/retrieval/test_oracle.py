@@ -412,9 +412,10 @@ def test_oracle_makes_strategies_distinguishable(tmp_path, monkeypatch):
         f"best strategy nDCG {best_ndcg:.3f} — corpus carries no signal"
     )
     # Distinguishable arms: under the sparse pin the tfidf arm is TRUE
-    # token-overlap while the vector arm scores real bge vectors — the
-    # strategies must not be degenerate-same (was silenced with `or True`
-    # in the no-embedder era when the vector arm fell back to tfidf too).
+    # token-overlap while the vector arm scores the stored synthetic
+    # topic-centroid vectors via the passed qv (embedder-independent — see
+    # _force_sparse_tfidf; never bge-encoded). The strategies must not be
+    # degenerate-same.
     assert res["vector_p5"] != pytest.approx(res["tfidf_p5"], abs=0.02)
 
 
