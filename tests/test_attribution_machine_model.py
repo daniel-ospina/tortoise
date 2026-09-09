@@ -66,7 +66,13 @@ class TestSessionRequestValidators:
     def test_accepts_empty_machine_id_accepted_as_none(self):
         """Empty string for optional Field defaults to None via Field(None)
         semantics — Pydantic does NOT coerce '' to None for str | None;
-        but we test the handler strips blanks."""
+        but we test the handler strips blanks.
+
+        Write-path note (review P2): the capture handler gates on truthiness
+        (`if body.machine_id:`), so an empty string is accepted by the
+        validator but NEVER written to the graph — it is treated exactly
+        like None (unattributed). Read path renders the missing graph
+        property as blank/"—". Consistent, if subtle."""
         from tortoise.hosted_api import SessionRequest
         req = SessionRequest(
             conversation=[{"role": "user", "content": "hi"}],
@@ -76,6 +82,23 @@ class TestSessionRequestValidators:
         # Empty strings are accepted by the validator (not control chars)
         assert req.machine_id == ""
         assert req.model == ""
+
+    @pytest.mark.parametrize("field,length", [
+        ("machine_id", 257),
+        ("model", 129),
+    ])
+    def test_rejects_overlong_values(self, field, length):
+        """Field(max_length=...) caps client-claimed values at the Pydantic
+        boundary — an overlong machine_id/model 422s (review P2 test-gap:
+        explicit coverage for the built-in length enforcement)."""
+        from pydantic import ValidationError
+
+        from tortoise.hosted_api import SessionRequest
+        with pytest.raises(ValidationError):
+            SessionRequest(
+                conversation=[{"role": "user", "content": "hi"}],
+                **{field: "a" * length},
+                session_id="s-overlong")
 
     @pytest.mark.parametrize("field,value", [
         ("machine_id", "line\nbreak"),
