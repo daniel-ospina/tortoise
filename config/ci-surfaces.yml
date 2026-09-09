@@ -537,6 +537,9 @@ surfaces:
   - test_coverage_loop_rules.py  # #2567 (hermetic rules leg)
   - test_entity_key_expansion.py  # #2518 (docker-lane leg, mirrors test_retrieval.py)
   - test_aggregative_facet_coverage.py  # #2521 (docker-lane leg, mirrors test_retrieval.py)
+  - test_assembly_fixtures.py  # #2165 Task 1: connected-assembly fixture substrate + R16(b) calibration (docker-lane)
+  - test_assembly_pure.py  # #2165 Task 2: pure shape classifier + subject extraction (no-DB unit)
+  - test_assembly_sdk.py  # #2165 Task 6: ask() connected-assembly branch + ask_assembled + byte goldens (docker-lane)
   - test_retrieval.py
   - test_sdk.py
   - test_sdk_dedup.py
@@ -572,6 +575,7 @@ surfaces:
   - eval/retrieval/test_oracle.py
   - eval/retrieval/test_run.py
   - longmem_eval/test_vector_arm.py
+  - longmem_eval/test_assembly_arm.py  # #2165 Task 7: v2-lane eval arm A/A-widened/B admission + R9 geometry (docker-lane)
   - eval/write_path/test_write_path_corpus.py
   - eval/write_path/test_write_path_grading.py
   - eval/write_path/test_write_path_runner.py
