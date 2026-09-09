@@ -2136,6 +2136,23 @@ class FalkorProjection(
                         logging.getLogger(__name__).error(
                             "Failed to create index on %s.%s: %s", label, prop, e)
 
+        # ── Session.actor_user_id range index (#2600) ──
+        # The actor-filtered session read (list_sessions?actor_user_id, E2E-8)
+        # must be an index seek — plain string single-prop RANGE index
+        # (embedded-safe, mirrors the entity string indexes above; the #522
+        # composite hazard is is_operator-BOOL-specific and does not apply).
+        try:
+            self.g.query(
+                "CREATE INDEX FOR (s:Session) ON (s.actor_user_id)")
+        except Exception as e:
+            msg = str(e).lower()
+            if "already indexed" in msg or "already exists" in msg:
+                pass
+            else:
+                import logging
+                logging.getLogger(__name__).error(
+                    "Failed to create index on Session.actor_user_id: %s", e)
+
         # ── Full-text & vector indexes require FalkorDB 4.x+ (#7779) ──
         _ver = getattr(self, '_falkordb_version', None)
         if _ver is None or _ver[0] >= 4:

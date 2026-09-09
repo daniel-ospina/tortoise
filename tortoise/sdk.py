@@ -17,6 +17,7 @@ import logging
 import os
 import re
 import stat
+from contextvars import ContextVar
 from time import monotonic as _monotonic
 from typing import Any
 
@@ -759,6 +760,55 @@ def _raise_update_point_status_error(proj, id: str) -> None:
 
 _logger = logging.getLogger(__name__)
 
+# ── #2600 server-resolved human actor ───────────────────────────────────────
+# `_current_actor_user_id` carries the server-resolved human actor for
+# session + write-event stamps. SET ONLY at auth seams (mcp_auth
+# TeamResolutionMiddleware dispatch + hosted_api._data_sdk) — NEVER from
+# client input. sdk.py is the neutral home: both mcp_auth and hosted_api
+# already import sdk, and sdk must not import either (no import cycle).
+_current_actor_user_id: ContextVar[str | None] = ContextVar(
+    "_current_actor_user_id", default=None)
+
+
+def _is_uuid_shape(value: object) -> bool:
+    """UUID-shaped string gate for actor aliasing (#2600). ``created_by`` is
+    NOT always a human id: production mints store literal ``"api"``,
+    ``'st_'||hash`` recovery ids, and registry EMAIL self-signup creators.
+    Alias to ``actor_user_id`` ONLY for UUID shapes. Byte-copies
+    supabase_control._is_uuid semantics (the #1738 class) so the gate matches
+    PostgreSQL uuid acceptance on BOTH planes: brace-strip, reject
+    urn:/uuid:-prefixed forms, accept hyphenated / 32-hex-no-hyphen / braced.
+    (sdk cannot import supabase_control — this is the neutral copy; keep the
+    two in sync.)"""
+    import uuid as _uuid
+    if not isinstance(value, str) or not value:
+        return False
+    probe = value.strip()
+    if probe.startswith("{") and probe.endswith("}"):
+        probe = probe[1:-1].strip()
+    if probe.startswith(("urn:", "uuid:")):
+        return False
+    try:
+        _uuid.UUID(probe)
+        return True
+    except (ValueError, TypeError, AttributeError):
+        return False
+
+
+def _alias_actor_user_id(team: dict) -> dict:
+    """#2600: canonical ``actor_user_id`` key on a resolved team dict —
+    UUID-gated, never fabricated. Reads the RAW resolver fields (``user_id``
+    / ``created_by`` / ``session_user_id`` — each auth lane carries whichever
+    applies) and aliases to ``actor_user_id`` ONLY when UUID-shaped. Additive:
+    never removes an existing key. Shared by mcp_auth.TeamResolutionMiddleware
+    and the hosted_api REST DI terminals (single implementation, both planes).
+    """
+    raw = team.get("user_id") or team.get("created_by") or team.get(
+        "session_user_id")
+    if _is_uuid_shape(raw):
+        team["actor_user_id"] = raw
+    return team
+
 #: C2 (#2518, #2513): max Object-spine anchors resolved from the query text
 #: (the entity/fact-augmented key expansion pass's additive term source).
 #: Bounded small: entity grounding needs the SUBJECT anchors, not the whole
@@ -783,6 +833,17 @@ _ENTITY_ALIAS_PER_ANCHOR = 64
 _SIGNUP_TOKEN_RECOVER_LOCK = threading.Lock()
 
 
+#: #2600: client-supplied actor claims are STRIP-AND-IGNORE (never a 4xx
+#: — the server owns attribution). Shared by _sanitize_props (SDK backstop)
+#: and the MCP boundary (_reject_server_managed_props in mcp_server.py —
+#: same frozenset literal kept in sync; agent_id closes the reserved-key
+#: contract for any future props surface, verified no tenant tool declares
+#: it today). authoredBy is deliberately NOT here (pre-existing client
+#: author-label residual — documented).
+_RESERVED_ACTOR_PROPS = frozenset(
+    {"actor_user_id", "owner", "initiated_by", "agent_id"})
+
+
 def _sanitize_props(props: dict, *, reject_id: bool = False) -> dict:
     """#329: reject server-managed fields on tenant write surfaces.
 
@@ -793,8 +854,24 @@ def _sanitize_props(props: dict, *, reject_id: bool = False) -> dict:
     node identity / mint tenant-chosen Document ids. Both are rejected with a
     clear ValueError (fail-closed). ``api.add_document``'s explicit
     ``source_path`` parameter is UNTOUCHED — this only guards props passthrough.
+
+    #2600: reserved actor keys (``actor_user_id``, ``owner``,
+    ``initiated_by``, ``agent_id``) are STRIP-AND-IGNORE — never a 4xx,
+    server owns the actor. Popped with a warning after the ``dict(props)``
+    copy so the caller's dict is never mutated.
     """
     props = dict(props)
+    # #2600: reserved actor keys are STRIP-AND-IGNORE (never a 4xx — the
+    # server owns the actor). Pop BEFORE the reject checks below — the
+    # dict(props) copy above makes the pop safe (the caller's dict never
+    # loses a key). ``agent_id`` closes the reserved-key contract for any
+    # future props surface (verified: no tenant tool declares it today —
+    # it only appears as the server-side EventAPI construction arg).
+    for _reserved in _RESERVED_ACTOR_PROPS:
+        if _reserved in props:
+            _logger.warning(
+                "ignoring client-supplied %r on tenant props", _reserved)
+            props.pop(_reserved)
     for key in ("sourcePath", "source_path"):
         if key in props:
             raise ValueError(
@@ -2174,14 +2251,24 @@ class TortoiseSDK:
         """
         # ── Graph event store (#432) ──────────────────────────────
         if type_ in _GRAPH_EVENT_TYPES:
+            # #2600: copy FIRST — a caller-reused payload dict must never
+            # gain an unexpected key from the actor merge below; then merge
+            # the ContextVar actor (set by mcp_auth middleware / hosted
+            # _data_sdk) when present (additive — legacy/embedded lanes with
+            # no server-resolved human stay byte-identical).
+            actor = _current_actor_user_id.get()
             graph_payload = payload
-            if graph_payload is None:
+            if graph_payload is not None:
+                graph_payload = dict(graph_payload)  # copy FIRST (#2600)
+            else:
                 if point is not None:
                     graph_payload = {"id": point.get("id")}
                 elif id is not None:
                     graph_payload = {"id": id, **extra}
                 else:
                     graph_payload = {}
+            if actor is not None:
+                graph_payload["actor_user_id"] = actor
             try:
                 from .event_store import append_event, ensure_event_schema, next_seq
                 proj = self._get_proj()
@@ -2205,6 +2292,14 @@ class TortoiseSDK:
             "initiated_by": "sdk",
             "projection_version": 2,
         }
+        # #2600: the JSONL envelope carries the actor too (additive — only
+        # when a server-resolved human is present; a rebuild replay restores
+        # the ORIGINAL payload dict, whose own actor_user_id — if any — was
+        # caller-authored, never forged here). The actor is NOT added to any
+        # replay skip-set. The merge is AFTER event.update(extra) below so
+        # the server-resolved actor is always the last write — matching the
+        # graph branch order (code-review #4, PR #2664).
+        _jsonl_actor = _current_actor_user_id.get()
         if point is not None:
             # Strip embedding — it is recomputed on replay by
             # _upsert_point_props (vecf32 serialization is fragile).
@@ -2224,6 +2319,10 @@ class TortoiseSDK:
         if id is not None:
             event["id"] = id
         event.update(extra)
+        # #2600: server-resolved actor as the LAST write on the envelope
+        # (after event.update(extra)), matching the graph branch order.
+        if _jsonl_actor is not None:
+            event["actor_user_id"] = _jsonl_actor
         try:
             log.append(event)
         except Exception as exc:
@@ -2864,6 +2963,17 @@ class TortoiseSDK:
         if harness:
             _merge_sets.append("s.harness=$harness")
             _merge_params["harness"] = harness
+        # #2600 (SDK-mirror parity): actor stamp — same conditional coalesce
+        # clause as the hosted MERGE, reading the ContextVar (set by the
+        # mcp_auth middleware / hosted _data_sdk). Embedded/local captures
+        # have no auth → var unset → sets unchanged → byte-identical legacy
+        # shape. First-writer-wins on idempotent re-POST; backfills legacy-
+        # None on true retry. Keep the two MERGE clauses in sync.
+        _mirror_actor = _current_actor_user_id.get()
+        if _mirror_actor:
+            _merge_sets.append(
+                "s.actor_user_id=coalesce(s.actor_user_id, $uid)")
+            _merge_params["uid"] = _mirror_actor
         # W5 Phase F (#2104, indicator 8 — SDK mirror replay parity): probe
         # session_existed BEFORE the Session MERGE, mirroring the hosted
         # #1727 replay skip — a re-capture of an EXISTING session_id skips
@@ -14978,7 +15088,13 @@ class TortoiseSDK:
                     "delegation_depth": delegation_depth,
                     "scopes": scopes,
                     "legacy_full_access": (delegation_depth is None)
-                    and (scopes == [])}
+                    and (scopes == []),
+                    # #2600: RAW key creator rides the resolved dict (the MCP
+                    # middleware's UUID-gated `actor_user_id` alias reads it —
+                    # sdk cannot import supabase_control, so the gate lives in
+                    # the consuming seam). Additive; None for legacy keys that
+                    # predate created_by.
+                    "created_by": m.get("created_by")}
         return None
 
     # ── Control Plane: Agent signup tokens (#1709, approach C) ────────
