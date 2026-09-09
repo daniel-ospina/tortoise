@@ -3919,6 +3919,146 @@ def test_session_capture_tool_stdio_honest_error(tmp_path, monkeypatch):
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# #2600 (Phase 1, Task 2) — Session.actor_user_id stamp (MCP-lane + SDK
+# mirror). The capture tool calls the impl DIRECTLY in-thread (no HTTP
+# portal), so the sdk._current_actor_user_id ContextVar set here is visible
+# to the impl's ``_merge_sets`` actor clause — the MCP middleware sets the
+# SAME var (mcp_auth.TeamResolutionMiddleware), so the real-auth path and
+# this seam are byte-identical on the var. The hosted REST stamp is covered
+# by the real-auth-face E2E tests (Task 6) — the DI-override fixture is
+# NEVER used for E2E-5 (#2600 constraint), and the REST impl reads the
+# actor from the RESOLVED team dict (registry/session branches alias it),
+# not from a test-set var.
+
+def _session_actor(team_id: str, session_id: str):
+    rows = _ha._make_sdk(namespace=team_id)._get_proj().g.query(
+        "MATCH (s:Session {id:$sid}) RETURN s.actor_user_id",
+        params={"sid": session_id},
+    ).result_set
+    return rows[0][0] if rows and rows[0] else None
+
+
+_ACTOR_A = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+_ACTOR_B = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+
+
+def test_mcp_capture_stamps_resolved_actor(tmp_path, monkeypatch):
+    """#2600 Task 2 (MCP lane): a capture through tortoise_session_capture
+    with the middleware actor var set writes Session.actor_user_id — the
+    coalesce clause fires (fresh session, actor present) and the graph node
+    carries the canonical UUID."""
+    from tortoise.sdk import _current_actor_user_id
+    with _mcp_team_context(tmp_path, monkeypatch):
+        from tortoise.mcp_server import tortoise_session_capture
+        tok = _current_actor_user_id.set(_ACTOR_A)
+        try:
+            result = tortoise_session_capture(
+                conversation=_CONV, harness="pi", session_id="s-mcp-2600-a")
+            stamped = _session_actor("team-1727-mcp", "s-mcp-2600-a")
+        finally:
+            _current_actor_user_id.reset(tok)
+    assert result.get("session_id") == "s-mcp-2600-a", result
+    assert not result.get("error"), result
+    assert stamped == _ACTOR_A, f"actor stamp missing: {stamped}"
+
+
+def test_mcp_capture_actor_first_writer_wins_on_repost(tmp_path, monkeypatch):
+    """#2600 Task 2 (MCP lane, coalesce): a re-POST of the SAME session_id
+    by a DIFFERENT actor never overwrites — Session.actor_user_id keeps the
+    FIRST writer (fresh-capture mint + idempotent MERGE no-op)."""
+    from tortoise.sdk import _current_actor_user_id
+    with _mcp_team_context(tmp_path, monkeypatch):
+        from tortoise.mcp_server import tortoise_session_capture
+        tok = _current_actor_user_id.set(_ACTOR_A)
+        try:
+            r1 = tortoise_session_capture(
+                conversation=_CONV, harness="claude",
+                session_id="s-mcp-2600-fww")
+            assert not r1.get("error"), r1
+            _current_actor_user_id.reset(tok)
+            tok = _current_actor_user_id.set(_ACTOR_B)
+            r2 = tortoise_session_capture(
+                conversation=_CONV, harness="claude",
+                session_id="s-mcp-2600-fww")
+            assert not r2.get("error"), r2
+            stamped = _session_actor("team-1727-mcp", "s-mcp-2600-fww")
+        finally:
+            _current_actor_user_id.reset(tok)
+    assert stamped == _ACTOR_A, \
+        "re-POST by a different actor must NOT overwrite the first writer"
+
+
+def test_mcp_capture_no_actor_leaves_session_unattributed(tmp_path, monkeypatch):
+    """#2600 Task 2 (MCP lane, negative): actor var UNSET (embedded/
+    self-host-shaped captures have no server-resolved human) → the Session
+    node is written WITHOUT actor_user_id (byte-identical legacy shape — no
+    clause fires, no property present)."""
+    with _mcp_team_context(tmp_path, monkeypatch):
+        from tortoise.mcp_server import tortoise_session_capture
+        result = tortoise_session_capture(
+            conversation=_CONV, harness="claude", session_id="s-mcp-2600-none")
+        # Read INSIDE the patched-SDK context (the TORTOISE_DB_PATH pin is
+        # popped at exit — a post-exit _make_sdk resolves a different DB).
+        stamped = _session_actor("team-1727-mcp", "s-mcp-2600-none")
+    assert not result.get("error"), result
+    # Assert PROPERTY ABSENCE, not None-value (a property key set to null
+    # would be the drift this test exists to catch).
+    assert stamped is None
+
+
+def test_sdk_mirror_capture_stamps_actor_from_contextvar(tmp_path, monkeypatch):
+    """#2600 Task 2 (SDK-mirror parity): the SDK capture_session MERGE
+    reads the SAME ContextVar (hosted session plane sets it before the SDK
+    mirror call) — actor present → Session.actor_user_id stamped;
+    re-POST by another actor keeps the first writer."""
+    monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
+    from tortoise.sdk import TortoiseSDK, _current_actor_user_id
+    sdk = TortoiseSDK(db_path=str(tmp_path / "mirror.db"))
+    tok = _current_actor_user_id.set(_ACTOR_A)
+    try:
+        r1 = sdk.capture_session(
+            [{"role": "user", "content": "mirror stamp test."},
+             {"role": "assistant", "content": "confirmed."}],
+            session_id="s-mirror-2600")
+        assert r1["ok"] is True, r1
+        _current_actor_user_id.reset(tok)
+        tok = _current_actor_user_id.set(_ACTOR_B)
+        r2 = sdk.capture_session(
+            [{"role": "user", "content": "mirror stamp test."},
+             {"role": "assistant", "content": "confirmed."}],
+            session_id="s-mirror-2600")
+        assert r2["ok"] is True, r2
+    finally:
+        _current_actor_user_id.reset(tok)
+    proj = sdk._get_proj()
+    rows = proj.g.query(
+        "MATCH (s:Session {id:$sid}) RETURN s.actor_user_id",
+        params={"sid": "s-mirror-2600"}).result_set
+    assert rows and rows[0][0] == _ACTOR_A, \
+        f"SDK mirror first-writer-wins violated: {rows}"
+
+
+def test_sdk_mirror_capture_no_actor_legacy_shape(tmp_path, monkeypatch):
+    """#2600 Task 2 (SDK-mirror negative): var unset → embedded/local
+    capture_session writes the Session with NO actor_user_id property
+    (legacy byte-shape — nothing about the local path changes)."""
+    monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
+    from tortoise.sdk import TortoiseSDK
+    sdk = TortoiseSDK(db_path=str(tmp_path / "mirror-none.db"))
+    r = sdk.capture_session(
+        [{"role": "user", "content": "unattributed mirror capture."},
+         {"role": "assistant", "content": "roger."}],
+        session_id="s-mirror-none-2600")
+    assert r["ok"] is True, r
+    proj = sdk._get_proj()
+    rows = proj.g.query(
+        "MATCH (s:Session {id:$sid}) RETURN s.actor_user_id",
+        params={"sid": "s-mirror-none-2600"}).result_set
+    assert rows and rows[0][0] is None, \
+        f"unattributed mirror must leave actor_user_id ABSENT: {rows}"
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # W5 Phase E (#2104, S11) — ingestion-toggle disclosure marker data.
 # The S11 409 gate / per-harness last-error / toggle read-write contract were
 # shipped by #1927 + W5 Phase A/B and are covered above — Phase E ships ONLY

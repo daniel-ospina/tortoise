@@ -63,10 +63,15 @@ class _EntityHandlers:
         # _emit_event style-3 lines carry event_id/ts/initiated_by (+agent_id
         # on api._emit) + corrects — structural, never node properties. One
         # global skip-set keeps live/replay consistent across entity types.
+        # #2600: actor_user_id rides every SDK journal envelope (_emit_event
+        # stamps it inline) — rebuild replay must NOT leak it as a node
+        # property (the live apply-dict is built from sanitized props that
+        # exclude it).
         "event_id",
         "ts",
         "initiated_by",
         "agent_id",
+        "actor_user_id",
         "corrects",
     })
 

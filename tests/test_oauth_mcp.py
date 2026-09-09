@@ -1301,3 +1301,50 @@ class TestMcpBoundary:
             rr = mcp_tc.post("/mcp", json={
                 "jsonrpc": "2.0", "method": "tools/list", "id": 1})
             assert rr.status_code == 401
+
+    def test_oauth_sessionless_create_point_actor_stamped(self, api_client,
+                                                          session_user):
+        """#2600 Task 3 E2E-4(a): a SESSIONLESS write through the oat_ MCP
+        lane (no tt_ key minting) is attributed to the token's human — the
+        middleware resolves user_id → ContextVar → ``_emit_event`` merges it
+        onto the :GraphEvent node payload (the journaled-event actor
+        backstop). Read via DIRECT graph query on the team namespace."""
+        import json as _json
+        import uuid as _uuid
+
+        import tortoise.hosted_api as ha_mod
+        tc, cp = api_client
+        session_user(_U1)  # browser session subject = the OAuth user
+        flow = _auth_code_flow(tc, cp)
+        r = _exchange(tc, client_id=flow["client_id"], code=flow["code"],
+                      verifier=flow["verifier"])
+        access = r.json()["access_token"]
+        assert access.startswith("oat_"), access
+
+        # distinct content (scoping P2 — dedup=True would no-op a repeat)
+        content = f"e2e4a oat attribution spike {_uuid.uuid4().hex[:10]}"
+        mcp_tc = self._mcp(cp)
+        mcp_tc.headers.update(_mcp_headers(access))
+        with mcp_tc:
+            rr = mcp_tc.post("/mcp", json={
+                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": {"name": "tortoise_create_point",
+                            "arguments": {"kind": "statement",
+                                           "content": content}}})
+            assert rr.status_code == 200, rr.text
+            body = _parse_sse_json(rr)
+            assert "result" in body, body
+            text = "".join(c.get("text", "") for c in
+                            body["result"].get("content", []))
+            assert content.split()[-1] in text or content in text, text
+
+        # the :GraphEvent PointAdded node carries the token user's actor
+        sdk = ha_mod._make_sdk(namespace="team-free-001")
+        rows = sdk._get_proj().g.query(
+            "MATCH (e:GraphEvent {type:'PointAdded'}) "
+            "RETURN e.payload ORDER BY e.seq").result_set
+        payloads = [_json.loads(r[0]) for r in rows]
+        hits = [p for p in payloads if p.get("content_hash")]
+        assert hits, "no PointAdded GraphEvent journaled"
+        newest = hits[-1]
+        assert newest.get("actor_user_id") == _U1, newest

@@ -472,6 +472,20 @@ function SettingsTab(props) {
                   <li key={sid} className="captured-session" style={{ display: 'flex', gap: '0.75rem', alignItems: 'baseline', padding: '0.35rem 0', borderBottom: '1px solid var(--border,#1e293b)' }}>
                     <span className="small">{fmt(s.created_at)}</span>
                     <span className="dim small">{meta.turns} turns · {meta.extracted} extracted</span>
+                    {/* #2600: server-resolved actor (membership email when the
+                        seam retains it, else the raw id) — legacy null renders
+                        nothing, never a crash. */}
+                    {meta.actor && (
+                      <span className="dim small" style={{
+                        marginLeft: '0.4rem',
+                        maxWidth: '22ch',
+                        minWidth: 0,
+                        overflow: 'hidden',
+                        textOverflow: 'ellipsis',
+                        whiteSpace: 'nowrap',
+                        verticalAlign: 'bottom',
+                      }} title={meta.actor}>{meta.actor.includes('@') ? `by ${meta.actor}` : meta.actor}</span>
+                    )}
                     <code className="dim small" style={{ marginLeft: 'auto' }}>{sid.slice(0, 12)}…</code>
                     {/* #2002 (W6): per-row View (expands the transcript
                         panel below) + Delete (confirm → DELETE
@@ -551,6 +565,9 @@ function SessionTranscriptPanel({ sessionId, detail, loading, error, onRetry, on
     <div className="session-detail" aria-label={`Session ${sessionId} transcript`}>
       <div className="dim small" style={{ margin: '0.5rem 0 0.25rem' }}>
         Transcript — {tm.counts.turns} turns · {tm.counts.extracted} extracted memory
+        {/* #2600: same actor normalization as the row (display or raw id;
+            legacy null renders blank, never a crash). */}
+        {tm.actor && <span style={{ marginLeft: '0.5rem' }}>{tm.actor.includes('@') ? `by ${tm.actor}` : tm.actor}</span>}
       </div>
       {tm.turns.length === 0 ? (
         <p className="dim small">No conversation turns stored for this session.</p>
