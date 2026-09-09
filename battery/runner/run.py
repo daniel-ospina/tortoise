@@ -11,12 +11,16 @@ Exit code computed AFTER all episode artifacts + summary are written (exit
 
 run_mode honesty (PR #2341 review round 2, P2): the mock|real discriminator
 derives from the EXECUTOR actually used, never from arms.yaml adapter
-presence. Until the real emitting executor is wired (Task 9) the stock
-episode-log seam is a no-op, so hermetic/fixed-model runs are labeled mock;
-real mode requires an explicit ``config.executor == "real"`` request AND an
-active real executor seam (the pre-flight gate refuses the request without
-one). The resolved run-level mode is recorded in summary.json (run.run_mode)
-so the CLI report never re-infers it from artifact presence.
+presence. The mock lane is the seeded mock trajectory + the stock no-op
+``_episode_log`` seam (hermetic/fixed-model runs are labeled mock). Real
+mode requires an explicit ``config.executor == "real"`` request and is
+refused while the real emitting executor is unwired
+(``_REAL_EXECUTOR_WIRED`` — Task 9 wired the live executor, f54f212a6). A
+hermetic real-mode run is real-labeled by construction and supplies its
+event log through the explicit ``RunConfig.emission_seam`` (#2703), which
+also stamps ``provenance.emission_seam``. The resolved run-level mode is
+recorded in summary.json (run.run_mode) so the CLI report never re-infers it
+from artifact presence.
 """
 from __future__ import annotations
 
@@ -103,10 +107,12 @@ class RunConfig:
         self.max_episodes = max_episodes
         self.db_path = db_path
         #: Executor-mode flag (mock|real, PR #2341 review round 2, P2).
-        #: mock (default) = the seeded mock trajectory + no-op emission seam
-        #: (hermetic/fixed-model runs are labeled mock). real = an explicit
-        #: real-executor request — run_battery refuses it unless the real
-        #: emission seam is active (the real emitting executor is Task 9).
+        #: mock (default) = the seeded mock trajectory + the stock no-op
+        #: emission seam (hermetic/fixed-model runs are labeled mock). real =
+        #: an explicit real-executor request — run_battery refuses it while
+        #: the real emitting executor is unwired (``_REAL_EXECUTOR_WIRED``;
+        #: Task 9 wired it). A supplied ``emission_seam`` swaps the live
+        #: executor for the hermetic path and keeps the real label.
         self.executor = executor
         # --mock sets arms=[mock]; --arms takes precedence when both given.
         self.arms = list(arms) if arms else (["mock"] if mock else ["mock"])  # noqa: RUF034
@@ -126,7 +132,9 @@ class RunConfig:
         #: Instance-scoped ON PURPOSE (never a module-global identity flip):
         #: a leaked stub must not be able to downgrade ANOTHER test's real
         #: run. Production never sets it — the wired live executor is the
-        #: only production real path.
+        #: only production real path. Seam runs stamp
+        #: ``provenance.emission_seam = "hermetic"`` so a fabricated log is
+        #: never confusable with a live-spend artifact.
         self.emission_seam = emission_seam
         #: Task 10 stream-mode: sessions > 1 runs each scenario across that
         #: many sequential sessions over the SAME per-scenario graph (no
@@ -142,12 +150,13 @@ def arm_run_mode(config: RunConfig, arm) -> str:
     """mock|real discriminator (PR #2341 review round 2, P2): the mode
     derives from the EXECUTOR actually used, never from arms.yaml adapter
     presence alone. mock when the adapter is the MockArm (model_id
-    mock-agent) OR the real executor seam is not active — until Task 9 the
-    seeded mock trajectory + no-op emission seam are the ONLY executor, so
-    hermetic/fixed-model runs (model_id="fixed" adapters) are labeled mock;
-    real only when config.executor explicitly requested real mode (the
-    pre-flight gate in run_battery refuses that request without an active
-    real emission seam)."""
+    mock-agent) OR real mode was not explicitly requested (the mock lane's
+    seeded trajectory + stock emission seam). real only when
+    ``config.executor == "real"`` and the pre-flight accepted the request —
+    it refuses while the real emitting executor is unwired
+    (``_REAL_EXECUTOR_WIRED``; Task 9 wired it). Seam presence is NOT a
+    discriminator: a hermetic ``emission_seam`` run is real-labeled and
+    swaps the live executor for the seam (run_battery's episode loop)."""
     if getattr(arm, "model_id", "") == "mock-agent":
         return "mock"
     if config.executor != "real":
@@ -682,6 +691,11 @@ def run_battery(config: RunConfig, *, stdout: Callable[[str], None] = print,
         "config_files": [p.name for p in (config.config_dir).glob("*.yaml")],
         "cal_table_hash": thresholds.cal_table_hash(),
     }
+    if config.emission_seam is not None:
+        # #2703 (review P2): a seam-fabricated real run is IDENTIFIABLE — a
+        # hermetic artifact can never be mistaken downstream for a
+        # live-spend one.
+        provenance["emission_seam"] = "hermetic"
     python_hash_seed = os.environ.get("PYTHONHASHSEED", "unset")
 
     # ── attempt dir (sub-second stamp — two sequential runs never collide) ─
@@ -710,12 +724,10 @@ def run_battery(config: RunConfig, *, stdout: Callable[[str], None] = print,
         arm = _resolve_arm(arm_id, arm_config, mock=config.mock or arm_id == "mock")
         # run_mode mock|real discriminator (PR #2341 review P2 honesty): the
         # mode derives from the EXECUTOR actually used — mock when the
-        # MockArm adapter (model_id mock-agent) serves the slot OR the real
-        # executor seam is not active (until Task 9 the seeded mock
-        # trajectory + no-op emission seam are the only executor, so
-        # hermetic/fixed-model runs are labeled mock); real only when
-        # config.executor explicitly requested real mode (the pre-flight
-        # gate refused that request without an active seam).
+        # MockArm adapter (model_id mock-agent) serves the slot OR real mode
+        # was not requested; real only when config.executor explicitly
+        # requested it and the pre-flight accepted (it refuses while
+        # _REAL_EXECUTOR_WIRED is False). See arm_run_mode.
         run_mode = arm_run_mode(config, arm)
         if run_mode == "real":
             # #2292 Task 5: the artifact model block records the PINNED
@@ -801,7 +813,12 @@ def run_battery(config: RunConfig, *, stdout: Callable[[str], None] = print,
                 outcomes, re_deriv = execute_mock_episode(
                     arm, scenario, episode_seed, tracker)
                 ep_surface = {}
-                evlog = (config.emission_seam or _episode_log)(
+                # The hermetic seam is REAL-MODE ONLY (review P2): the mock
+                # lane keeps the stock no-op seam, so a seam-supplied
+                # schema-v1.1 log can never be stamped onto a mock-labeled
+                # episode (mock's empty-log invariant holds).
+                seam = config.emission_seam if run_mode == "real" else None
+                evlog = (seam or _episode_log)(
                     scenario, episode_seed=episode_seed, arm_id=arm_id,
                     run_mode=run_mode)
             episode = EpisodeResult(
