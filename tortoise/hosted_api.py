@@ -9701,6 +9701,55 @@ class GraphRecordingPatch(BaseModel):
         return v
 
 
+class GraphPatch(BaseModel):
+    """#2701 — PATCH /v1/graphs/{graph_id} REST body: graph rename and/or
+    the session_recording override in ONE PATCH.
+
+    ``{name}`` renames the graph's DISPLAY name (custom + default graph —
+    display-name-only, the namespace/data plane is untouched); ``{recording}``
+    sets/clears the session_recording override (existing C6 #2115 surface,
+    strict bool/null). At least one field must be present; both may ride one
+    PATCH. Unknown fields are rejected (extra=forbid). Recording follows
+    GraphRecordingPatch's strict-bool rule (no truthy-string coercion); name
+    must be a non-empty string after trimming (rename parity with create_graph).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    recording: bool | None = None
+    name: str | None = None
+
+    @field_validator("recording", mode="before")
+    @classmethod
+    def _strict_bool(cls, v):
+        if v is not None and not isinstance(v, bool):
+            raise ValueError("recording must be true, false or null")
+        return v
+
+    @field_validator("name")
+    @classmethod
+    def _clean_name(cls, v):
+        if v is None:
+            return v
+        if not isinstance(v, str):
+            raise ValueError("name must be a string")
+        v = v.strip()
+        if not v:
+            raise ValueError("name must not be empty")
+        return v
+
+    @model_validator(mode="after")
+    def _at_least_one(self):
+        if "recording" not in self.model_fields_set \
+                and "name" not in self.model_fields_set:
+            raise ValueError("provide recording and/or name")
+        # A provided-but-null name has no meaning (unlike recording null =
+        # clear the override) — reject it instead of a silent 200 no-op.
+        if "name" in self.model_fields_set and self.name is None:
+            raise ValueError("name must be a non-empty string")
+        return self
+
+
 async def _apply_graph_recording_override(
         graph_id: str, body: GraphRecordingPatch, team_id: str,
         key_ctx: dict) -> dict:
@@ -9794,17 +9843,143 @@ async def _apply_graph_recording_override(
 
 
 @app.patch("/v1/graphs/{graph_id}")
-async def patch_graph_recording(graph_id: str, body: GraphRecordingPatch,
-                                team_id: str,
-                                key_ctx: dict = Depends(get_current_team_session)):  # noqa: B008
-    """C6 #2115 — set a graph's session_recording override (epic §6.3).
+async def patch_graph(graph_id: str, body: GraphPatch,
+                     team_id: str,
+                     key_ctx: dict = Depends(get_current_team_session)):  # noqa: B008
+    """#2701 / C6 #2115 — PATCH a graph: rename (``{name}``) and/or set the
+    session_recording override (``{recording}``, epic §6.3).
 
-    Thin REST wrapper over ``_apply_graph_recording_override`` — the MCP
-    tool (tortoise_graph_set_recording, #2302) shares the same core so the
-    two surfaces can never drift. Auth + semantics live on the helper.
+    Thin REST wrapper: rename dispatches to ``_apply_graph_rename`` and the
+    recording override to ``_apply_graph_recording_override`` (the MCP tool
+    tortoise_graph_set_recording, #2302, shares the recording core so the
+    two surfaces can never drift — it stays typed to GraphRecordingPatch).
+    Auth + semantics live on the helpers. The response echoes exactly the
+    fields this PATCH changed (recording-only calls keep the pre-#2701
+    {graph_id, recording} shape).
     """
-    return await _apply_graph_recording_override(
-        graph_id, body, team_id, key_ctx)
+    result = {"graph_id": graph_id}
+    if body.name is not None:
+        renamed = await _apply_graph_rename(graph_id, body.name, team_id,
+                                            key_ctx)
+        result["name"] = renamed["name"]
+    if "recording" in body.model_fields_set:
+        rec = await _apply_graph_recording_override(
+            graph_id, GraphRecordingPatch(recording=body.recording),
+            team_id, key_ctx)
+        result["recording"] = rec["recording"]
+    return result
+
+
+async def _apply_graph_rename(
+        graph_id: str, name: str, team_id: str, key_ctx: dict) -> dict:
+    """#2701 — SHARED rename core: auth + graph resolution + live-name
+    conflict + display-name write in ONE place (both lanes), so the REST
+    PATCH surface and any future consumer can never drift on permission or
+    semantics.
+
+    Auth (mirrors the recording core — PATCH is ONE surface with ONE auth
+    class): a key with the ``team:manage`` scope (or the legacy full-access
+    class — deleg NULL + scopes []), or an owner/admin session user. A
+    MINTED deleg=0 key never carries team:manage → 403.
+
+    Rename is DISPLAY-NAME-ONLY: the graph's id/kind/namespace (the
+    data-plane storage key) never change, so points/keys survive a rename
+    and the DEFAULT graph is renameable too (graph 0 carries ``name`` as a
+    label). Live-name conflicts 409 with create_graph's copy ("Graph name
+    already exists"); soft-deleted tombstones don't squat names (create
+    parity). Same-name rename = idempotent 200. Unknown graph → 404;
+    suspended team → 403.
+    """
+    if key_ctx.get("team_id") != team_id:
+        raise HTTPException(status_code=404, detail="Unknown team")
+    team = await _team_node(team_id)
+    if team is None:
+        raise HTTPException(status_code=404, detail="Unknown team")
+    _ensure_not_suspended(team)
+    if key_ctx.get("key_id"):
+        scopes = key_ctx.get("scopes") or []
+        if "team:manage" not in scopes and not key_ctx.get("legacy_full_access"):
+            raise HTTPException(status_code=403,
+                                detail="Missing team:manage scope")
+    else:
+        membership = await _membership_team(
+            key_ctx.get("session_user_id") or "", team_id)
+        if membership is None or membership.get("role") not in ("owner", "admin"):
+            raise HTTPException(status_code=403,
+                                detail="Requires owner or admin role in team")
+    sdk = _make_sdk(namespace="registry")
+    from tortoise.supabase_control import (
+        get_control_plane,
+        is_supabase_enabled,
+    )
+    from tortoise.supabase_control import set_graph_name as sb_set_name
+    # Resolve the graph + the display-row identity used for self-exclusion
+    # in the live-name check. Supabase: the DEFAULT graph's list row id is
+    # the literal 'default' (graph_metadata derives it) — a real gid that
+    # resolves to a kind='default' display row must ALSO self-exclude as
+    # 'default' (its list row carries that id, never the gid). Registry:
+    # the literal 'default' maps to the team's kind='default' node whose
+    # list row id is the REAL gid — resolve to it before comparing.
+    if is_supabase_enabled():
+        cp = get_control_plane()
+        if graph_id == "default":
+            kind = "default"
+        else:
+            rows = cp.query(
+                "graphs", select=["kind"],
+                filters=[("id", "eq", graph_id), ("team_id", "eq", team_id),
+                         ("status", "eq", "active")],
+            )
+            kind = rows[0].get("kind") if rows else None
+        if kind is None:
+            raise HTTPException(status_code=404, detail="Unknown graph")
+        target = "default" if kind == "default" else graph_id
+    else:
+        rows = sdk._get_registry().query(
+            "MATCH (g:Graph {team_id:$tid}) RETURN g.id, g.kind, "
+            "coalesce(g.status, 'active')",
+            params={"tid": team_id},
+        ).result_set
+        if graph_id == "default":
+            node = next((r[0] for r in rows
+                         if r[1] == "default" and r[2] != "deleted"), None)
+            target = node
+        else:
+            target = graph_id if any(
+                r[0] == graph_id and r[2] != "deleted" for r in rows) else None
+        if target is None:
+            raise HTTPException(status_code=404, detail="Unknown graph")
+    # Live-name conflict via the mode-agnostic list seam (create parity:
+    # tombstones don't squat names — only active rows conflict). Run the
+    # check + write under the per-team provision lock (create_graph's guard,
+    # hosted_api create): the registry lane has NO unique index, so the lock
+    # is its only same-worker guard against two renames (or rename-vs-create)
+    # landing the same live name; the supabase lane keeps uq_graphs_team_
+    # name_active as the cross-worker DB backstop, whose violation is mapped
+    # to the same 409 below (create-key parity: "HTTP 409" → 409, never 500).
+    async with _provision_lock(team_id):
+        for row in sdk.graph_list(team_id):
+            if row.get("status") == "deleted":
+                continue
+            if row.get("name") == name and row.get("graph_id") != target:
+                raise HTTPException(status_code=409,
+                                    detail="Graph name already exists")
+        try:
+            if is_supabase_enabled():
+                written = sb_set_name(get_control_plane(), team_id,
+                                      graph_id, name)
+            else:
+                written = sdk.graph_set_name(team_id, graph_id, name)
+        except Exception as _exc:
+            if is_supabase_enabled() and "HTTP 409" in str(_exc):
+                raise HTTPException(
+                    status_code=409,
+                    detail="Graph name already exists") from None
+            raise
+    if not written:
+        raise HTTPException(status_code=404, detail="Unknown graph")
+    return {"graph_id": graph_id, "name": name}
+
 
 
 @app.delete("/v1/graphs/{graph_id}")
