@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from typing import Callable  # noqa: UP035
 
 from battery.arms.base import ArmUnavailable
+from battery.config.prices import RATES_PER_1M_USD
 from battery.enums import ModelCallOutcome
 from battery.exceptions import ConfigError
 
@@ -167,7 +168,9 @@ def _openrouter_cost(model: str, pt: int, ct: int) -> float:
     prices = {
         "gpt-4o": (2.50, 10.00), "gpt-4o-2024-08-06": (2.50, 10.00),
         "opus": (15.00, 75.00), "claude": (3.00, 15.00),
-        "deepseek": (0.27, 1.10),
+        # #2874: the ONE declared basis (battery/config/prices.py) — this row
+        # used to be a local copy that had drifted from every real price.
+        "deepseek": RATES_PER_1M_USD,
     }
     p_in, p_out = (15.00, 75.00)  # fail-closed default: the table MAX — an
     # unknown judge model is NEVER unmetered (a 0-cost fallback would let an

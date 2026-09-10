@@ -25,6 +25,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Protocol
 
+from battery.config.prices import cost_usd
 from battery.parity.executors import ExecutedCell
 from battery.parity.mabench import CR_SHA256, CrItem, score_cr
 
@@ -147,14 +148,9 @@ def _call_cost(caller: ReaderCaller, prompt_tokens: int,
     return float(getattr(caller, "cost_usd", 0.0) or 0.0)
 
 
-#: Mirror of battery/runner/model_calls.py's pinned price basis (deepseek-v4-
-#: flash): ONE price basis across the battery's spend meters.
-_RATES_PER_1M_USD: tuple[float, float] = (0.27, 1.10)
-
-
 def _cost(prompt_tokens: int, completion_tokens: int) -> float:
-    p_in, p_out = _RATES_PER_1M_USD
-    return (prompt_tokens * p_in + completion_tokens * p_out) / 1_000_000.0
+    """The ONE declared basis (#2874) — imported, never re-declared."""
+    return cost_usd(prompt_tokens, completion_tokens)
 
 
 def run_cr_lane(items: tuple[CrItem, ...], caller: ReaderCaller, *,

@@ -16,19 +16,20 @@ import time
 from dataclasses import dataclass, field  # noqa: F401
 from typing import Callable, Protocol  # noqa: UP035
 
+from battery.config.prices import RATES_PER_1M_USD, cost_usd
 from battery.enums import ModelCallOutcome
 from battery.exceptions import ConfigError
 
-#: Pinned deepseek-v4-flash (OpenRouter) per-1M-token rates — the real-
-#: money meter's price source (matches probe_runner._PROBE_RATES_PER_1M_USD
-#: + the judge reserve table's deepseek row: ONE price basis across the
-#: battery's spend meters). #2284 Task 8 Step 3 (usage-capture slice).
-_REAL_RATES_PER_1M_USD: tuple[float, float] = (0.27, 1.10)
+#: The real-money meter's price source: ONE declared basis, imported from
+#: battery/config/prices.py (#2874). It used to be a constant copied into five
+#: places — and it had drifted to 0.27/1.10, which no provider charges for the
+#: pinned model, inflating every published spend figure. Do not reintroduce a
+#: local copy: import it, and a test fails if the copies diverge again.
+_REAL_RATES_PER_1M_USD: tuple[float, float] = RATES_PER_1M_USD
 
 
 def _usage_cost_usd(pt: int, ct: int) -> float:
-    p_in, p_out = _REAL_RATES_PER_1M_USD
-    return (float(pt) * p_in + float(ct) * p_out) / 1_000_000.0
+    return cost_usd(pt, ct)
 
 
 class RealModelCaller:

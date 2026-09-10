@@ -28,6 +28,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from battery.config.prices import RATES_PER_1M_USD
 from battery.exceptions import ConfigError
 from battery.judge.rubric import lint_evidence_neutral
 
@@ -70,7 +71,9 @@ _SCRUB = re.compile(
 #: Pinned deepseek-v4-flash (OpenRouter) per-1M-token rates — the probe's
 #: spend meter rows (matches the judge reserve table's deepseek row so ONE
 #: price source governs both spend legs; review #2575 B-P1).
-_PROBE_RATES_PER_1M_USD: tuple[float, float] = (0.27, 1.10)
+#: Imported from the ONE declared basis (#2874) — a local copy is how the
+#: previous constant drifted away from every real price.
+_PROBE_RATES_PER_1M_USD: tuple[float, float] = RATES_PER_1M_USD
 
 
 def _call_cost_usd(prompt_tok: int, completion_tok: int) -> float:
