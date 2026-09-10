@@ -199,6 +199,15 @@ surfaces:
   - test_battery_parity_executors.py
   - test_battery_parity_mabench.py
   - test_battery_parity_mabench_run.py
+  # #2796 (CI drift repair): test_battery_price_basis.py pins
+  # battery/config/prices.py — the one declared price basis — and its four
+  # consumers (battery/runner/model_calls.py, battery/probes/probe_runner.py,
+  # battery/judge/client.py, battery/parity/mabench_run.py) plus the YAML
+  # guard. battery/ is the source-mapped surface for battery/, so a
+  # source-only edit to any of those must select this file. It merged in
+  # #2890 without a registration, so the drift gate failed every PR (and
+  # main) until this entry — the #2280/#2797/#2800 class.
+  - test_battery_price_basis.py
   - test_battery_probes.py
   - test_battery_differential.py
   - test_battery_streams.py
