@@ -90,7 +90,11 @@ class TestLongMemEvalExecutor:
         with pytest.raises(TypeError):
             ExecutedCell(benchmark="longmemeval", accuracy=0.5, samples=5,
                          revision="d@s")  # lane is keyword-required
-        assert [f.name for f in dataclasses.fields(ExecutedCell)]
+        # lane sits directly after revision (both keyword-required, before
+        # the defaulted `detail`) — the ordering is what makes omission a
+        # TypeError rather than a silent default
+        names = [f.name for f in dataclasses.fields(ExecutedCell)]
+        assert names.index("lane") == names.index("revision") + 1
         assert ExecutedCell(benchmark="longmemeval", accuracy=0.5, samples=5,
                             revision="d@s", lane="real").lane == "real"
 
