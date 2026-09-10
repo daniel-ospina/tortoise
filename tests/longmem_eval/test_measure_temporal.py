@@ -65,23 +65,41 @@ def test_duplicated_session_qid_deduped_before_materialize():
     subset = mt.deterministic_subset(census["rows"])
     qids = {r["qid"] for r in subset}
     assert mt.DUPLICATED_SESSION_QID in qids  # still enumerated (55 pin)
-    # synthetic instance carrying the runbook-documented artifact: a
-    # content-identical duplicated haystack_session_id
-    dupe_sessions = [
-        {"session_id": "s_dup", "role": "user", "content": "same text"},
-        {"session_id": "s_dup", "role": "user", "content": "same text"},
-        {"session_id": "s_other", "role": "assistant", "content": "x"},
-    ]
-    inst = {"question_id": mt.DUPLICATED_SESSION_QID,
-            "haystack_session_ids": ["s_dup", "s_dup", "s_other"],
-            "haystack_sessions": dupe_sessions}
+    # REAL dataset shape: three PARALLEL arrays annotated by index (the
+    # runbook-documented artifact is a content-identical duplicated
+    # haystack_session_id, here at indices 1 and 3).
+    s_dup = [{"role": "user", "content": "same text"}]
+    s_other = [{"role": "assistant", "content": "x"}]
+    inst = {
+        "question_id": mt.DUPLICATED_SESSION_QID,
+        "haystack_session_ids": ["s_dup", "s_dup", "s_other", "s_dup"],
+        "haystack_sessions": [s_dup, s_dup, s_other, s_dup],
+        "haystack_dates": ["d0", "d1", "d2", "d3"],
+    }
     cleaned = mt.dedup_instance_sessions(inst)
-    assert len(cleaned["haystack_sessions"]) == 2  # duplicate removed
+    # every duplicate after the first occurrence is dropped, and ALL THREE
+    # parallel arrays stay aligned (the date shift this guards against)
     assert cleaned["haystack_session_ids"] == ["s_dup", "s_other"]
-    # zero information loss: the kept duplicate is content-identical
-    kept = [s for s in cleaned["haystack_sessions"]
-            if s["session_id"] == "s_dup"]
-    assert kept == [dupe_sessions[0]]
+    assert cleaned["haystack_sessions"] == [s_dup, s_other]
+    assert cleaned["haystack_dates"] == ["d0", "d2"]
+    assert (len(cleaned["haystack_session_ids"])
+            == len(cleaned["haystack_sessions"])
+            == len(cleaned["haystack_dates"]))
+    # zero information loss: the kept copy is content-identical
+    assert cleaned["haystack_sessions"][0] == s_dup
+
+
+def test_dedup_refuses_misaligned_parallel_arrays():
+    """Regression: deduping ids+sessions while leaving dates untouched
+    silently shifts every later session's date (dates are paired by index —
+    the crux of temporal reasoning). The helper must REFUSE misaligned
+    input rather than emit a corrupted instance."""
+    inst = {"question_id": mt.DUPLICATED_SESSION_QID,
+            "haystack_session_ids": ["a", "a"],
+            "haystack_sessions": [[], []],
+            "haystack_dates": ["d0", "d1", "d2"]}  # one date too many
+    with pytest.raises(ValueError, match="misaligned"):
+        mt.dedup_instance_sessions(inst)
 
 
 def test_differing_content_duplicate_kept_for_join_guard():
@@ -92,18 +110,20 @@ def test_differing_content_duplicate_kept_for_join_guard():
     inst = {"question_id": mt.DUPLICATED_SESSION_QID,
             "haystack_session_ids": ["s_x", "s_x", "s_ok"],
             "haystack_sessions": [
-                {"session_id": "s_x", "content": "version a"},
-                {"session_id": "s_x", "content": "version b"},
-                {"session_id": "s_ok", "content": "fine"}]}
+                [{"content": "version a"}],
+                [{"content": "version b"}],
+                [{"content": "fine"}]],
+            "haystack_dates": ["d0", "d1", "d2"]}
     cleaned = mt.dedup_instance_sessions(inst)
-    ids = [s["session_id"] for s in cleaned["haystack_sessions"]]
-    assert ids == ["s_x", "s_x", "s_ok"]  # differing repeat untouched
+    assert cleaned["haystack_session_ids"] == ["s_x", "s_x", "s_ok"]
+    assert cleaned["haystack_dates"] == ["d0", "d1", "d2"]
 
 
 def test_other_instances_pass_through_unchanged():
     inst = {"question_id": "gpt4_fe651585_abs",
             "haystack_session_ids": ["s1"],
-            "haystack_sessions": [{"session_id": "s1", "content": "y"}]}
+            "haystack_sessions": [[{"content": "y"}]],
+            "haystack_dates": ["d0"]}
     assert mt.dedup_instance_sessions(inst) is inst or \
         mt.dedup_instance_sessions(inst) == inst
 

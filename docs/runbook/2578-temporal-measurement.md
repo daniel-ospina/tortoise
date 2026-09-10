@@ -53,6 +53,22 @@ reranking changes nothing (the isolation result the arms were built to
 test). Rerank additionally pushes refusal DOWN (0.982 → 0.782) while the
 reader context grows 94.9 → 624.0 mean tokens.
 
+**Correction (2026-09-10, post-commit):** two questions
+(`gpt4_76048e76`, `gpt4_c27434e8_abs`) were re-measured on all 8 arms. The
+55-Q run file had been built by dropping a content-identical duplicated
+session id while leaving its entry in the parallel `haystack_dates` array —
+retrieval pairs sessions to dates by index, so every session after the drop
+point inherited its predecessor's date annotation (a temporal-measurement
+validity defect, not a cosmetic one). The committed helper
+`dedup_instance_sessions` was also schema-wrong: it expected dict-shaped
+sessions and CRASHED on the real parallel-array shape, so its promised
+dedup never ran at all. Both are fixed (the helper now drops the same index
+from all three arrays and REFUSES misaligned input), with regression tests.
+Re-run effect: totals unchanged except `applied-rerank` conv-refusal 13→12 /
+conv-wrong 3→4 — the decision branch (`admission-attributed`) and every
+other arm are unaffected. Evidence rows and the gate output are regenerated
+from the corrected data.
+
 **Known limitations (recorded, not hidden):**
 1. The R5 rollback guard is non-discriminating on this data — the
    pre-registered bound (baseline refusal 0.982 + margin 0.10 = 1.082)

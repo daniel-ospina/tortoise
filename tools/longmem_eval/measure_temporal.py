@@ -146,33 +146,46 @@ def dedup_instance_sessions(instance: dict) -> dict:
     Only fires for the #1785 vetoed qid (``gpt4_c27434e8_abs``): the benign
     data-entry duplicate ``haystack_session_id`` is dropped (zero
     information loss — runbook 1987-398). All other instances pass through
-    unchanged. ``haystack_sessions`` entries whose ``session_id`` repeats an
-    EARLIER occurrence with identical content are removed; a repeated id
-    with DIFFERENT content is NOT deduped (not the documented artifact —
-    leave it for the join guard to veto).
+    unchanged.
+
+    The dataset stores sessions as PARALLEL ARRAYS —
+    ``haystack_session_ids`` / ``haystack_sessions`` / ``haystack_dates``
+    annotated by index — so a drop must remove the SAME index from all
+    three or every later session silently inherits its predecessor's date
+    (a real, committed-record-corrupting bug this function previously
+    allowed: it expected dict-shaped sessions and crashed on the real
+    shape). A repeated id with DIFFERENT content is NOT deduped (not the
+    documented artifact — leave it for the join guard to veto).
     """
     if instance.get("question_id") != DUPLICATED_SESSION_QID:
         return instance
-    out = dict(instance)
-    sessions = list(out.get("haystack_sessions") or [])
-    seen: dict[str, dict] = {}
-    cleaned = []
-    for s in sessions:
-        sid = s.get("session_id")
-        if sid in seen:
-            if seen[sid] == s:
-                continue  # content-identical duplicate — drop (runbook)
-            # Differing content under a repeated id: NOT the documented
-            # artifact — KEEP it so the #1785 fail-closed join guard sees
-            # the anomaly and vetoes (never silently dedup fail-open).
-            cleaned.append(s)
-            continue
-        seen[sid] = s
-        cleaned.append(s)
-    out["haystack_sessions"] = cleaned
-    out["haystack_session_ids"] = sorted({s.get("session_id")
-                                          for s in cleaned})
-    return out
+    ids = list(instance.get("haystack_session_ids") or [])
+    sessions = list(instance.get("haystack_sessions") or [])
+    dates = list(instance.get("haystack_dates") or [])
+    if not (len(ids) == len(sessions) == len(dates)):
+        raise ValueError(
+            f"{DUPLICATED_SESSION_QID}: parallel haystack arrays are "
+            f"misaligned before dedup — ids={len(ids)} "
+            f"sessions={len(sessions)} dates={len(dates)}; deduping would "
+            "shift the date annotations (refusing).")
+    out_ids: list = []
+    out_sessions: list = []
+    out_dates: list = []
+    seen: dict = {}
+    for i, sid in enumerate(ids):
+        duplicate = sid in seen
+        if duplicate and seen[sid] == sessions[i]:
+            continue  # content-identical duplicate — drop ALL arrays
+        # A repeated id with DIFFERING content falls through and is KEPT so
+        # the #1785 fail-closed join guard sees the anomaly and vetoes
+        # (never silently dedup fail-open with information loss).
+        seen[sid] = sessions[i]
+        out_ids.append(sid)
+        out_sessions.append(sessions[i])
+        out_dates.append(dates[i])
+    return {**instance, "haystack_session_ids": out_ids,
+            "haystack_sessions": out_sessions,
+            "haystack_dates": out_dates}
 
 
 def materialize_run_data(rows: list[dict],

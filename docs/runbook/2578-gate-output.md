@@ -30,7 +30,7 @@ issue: 2578
 
 | arm | common_n | discordant | arm_wins | baseline_wins | p_exact | base_cw | arm_cw |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| applied-rerank | 55 | 6 | 6 | 0 | 0.0312 | 0 | 3 |
+| applied-rerank | 55 | 6 | 6 | 0 | 0.0312 | 0 | 4 |
 | c2-on | 55 | 0 | 0 | 0 | 1.0000 | 0 | 0 |
 | cap3-only | 55 | 5 | 5 | 0 | 0.0625 | 0 | 1 |
 | pool-only-isolation | 55 | 0 | 0 | 0 | 1.0000 | 0 | 0 |
@@ -46,12 +46,12 @@ Pre-registered bound = baseline refusal rate + 0.1 (module constant, never chose
 | --- | --- | --- | --- |
 | A-default | 0.982 | 94.9 |  |
 | tr_top_k16 | 0.982 | 125.9 |  |
-| tr_top_k20 | 0.945 | 156.9 |  |
-| tr_top_k24 | 0.927 | 288.8 |  |
+| tr_top_k20 | 0.964 | 156.9 |  |
+| tr_top_k24 | 0.945 | 288.8 |  |
 | c2-on | 1.000 | 94.9 |  |
-| applied-rerank | 0.782 | 624.0 |  |
+| applied-rerank | 0.764 | 624.0 |  |
 | pool-only-isolation | 1.000 | 94.9 |  |
-| cap3-only | 0.836 | 625.9 |  |
+| cap3-only | 0.818 | 625.9 |  |
 
 > **Guard non-discriminating on this data**: the bound (1.082) exceeds 1.0 because the baseline refusal rate (0.982) sits within 0.1 of the ceiling. A refusal rate cannot exceed 1, so no arm could ever be flagged here. The readout is reported for the record only; the rollback decision must not lean on its silence. (Observed arm refusal rates all moved DOWN/equal — see table.)
 
