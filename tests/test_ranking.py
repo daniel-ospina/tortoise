@@ -163,8 +163,18 @@ def _set_confidence(sdk, pid: str, conf: float):
     )
 
 
-def test_order_by_graph_ranks_high_ep_above_low_ep():
-    """AC1: identical similarity → persisted EP confidence decides order."""
+def test_order_by_graph_ranks_high_ep_above_low_ep(force_sparse_tfidf):
+    """AC1: identical similarity → persisted EP confidence decides order.
+
+    ``force_sparse_tfidf`` (tests/conftest.py, #2794): the premise is
+    "identical similarity" for two bag-of-words-identical points in different
+    word orders. The sparse leg scores those IDENTICALLY (word order is
+    irrelevant to a bag of words) — which is exactly what this test needs. A
+    dense encoder does not: word order changes the vector, similarity then
+    differs between the two points and outranks the EP ``graph_boost`` this
+    test exists to exercise. Pin the sparse baseline for determinism across
+    embedder states (#2573/#2772 class).
+    """
     sdk = _fresh_sdk()
     proj = sdk._get_proj()  # noqa: F841
     p_high = sdk.create_point("statement", "vector embedding cache invalidation strategy")
