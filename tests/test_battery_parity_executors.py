@@ -1,0 +1,190 @@
+"""#2800 — released-benchmark executors + the parity execution seam.
+
+The parity scaffold could always say "methodology unchanged"; it could never
+say "accuracy X" (#2797). These tests pin the seam that produces a number:
+it must come from the released runner's own output, it must carry its sample
+count and the dataset revision actually loaded, and every unavailable path
+must yield an explicitly not-measured cell — never a default.
+"""
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from battery.parity.executors import (
+    EXECUTORS,
+    ExecutedCell,
+    ExecutorUnavailable,
+    longmemeval_executor,
+)
+from battery.parity.runner import methodology_hashes
+
+
+class TestExecutedCellInvariants:
+    def test_accuracy_without_samples_is_refused(self):
+        with pytest.raises(ValueError, match="not a measurement"):
+            ExecutedCell(benchmark="longmemeval", accuracy=0.7, samples=0,
+                         revision="ds@s")
+
+    def test_a_measured_cell_must_name_its_revision(self):
+        """A number without its dataset identity is not comparable."""
+        with pytest.raises(ValueError, match="must name the dataset revision"):
+            ExecutedCell(benchmark="longmemeval", accuracy=0.7, samples=10,
+                         revision="")
+
+    def test_healthy_cell_constructs(self):
+        c = ExecutedCell(benchmark="longmemeval", accuracy=0.7, samples=10,
+                         revision="ds@s")
+        assert c.accuracy == 0.7 and c.samples == 10
+
+
+def _fake_run_main(report):
+    def _f(argv):
+        _f.argv = argv
+        return report
+    return _f
+
+
+class TestLongMemEvalExecutor:
+    """The executor adapts argv and reads the OFFICIAL runner's own fields."""
+
+    def test_reads_official_accuracy_and_samples(self, monkeypatch, tmp_path):
+        import tools.longmem_eval.run as lme
+        monkeypatch.setattr(lme, "run_main", _fake_run_main({
+            "dataset": "xiaowu0162/longmemeval-cleaned", "split": "s",
+            "n_questions": 40,
+            "accuracy": {"overall": 0.775, "task_averaged": 0.79}}))
+        c = longmemeval_executor(mock=True, limit=5, out_dir=tmp_path,
+                                 fixture=_touch(tmp_path / "mini.json"))
+        assert c.accuracy == 0.775 and c.samples == 40
+        assert c.revision == "xiaowu0162/longmemeval-cleaned@s"
+        assert c.detail["task_averaged"] == 0.79
+
+    def test_retrieval_only_report_is_not_measured(self, monkeypatch, tmp_path):
+        """accuracy=None by design (retrieval-only) must stay a not-measured
+        cell — never coerced to 0.0."""
+        import tools.longmem_eval.run as lme
+        monkeypatch.setattr(lme, "run_main", _fake_run_main({
+            "dataset": "d", "split": "s", "n_questions": 40,
+            "accuracy": None}))
+        c = longmemeval_executor(mock=True, limit=5, out_dir=tmp_path,
+                                 fixture=_touch(tmp_path / "mini.json"))
+        assert c.accuracy is None and c.samples == 40
+
+    def test_missing_fixture_fails_closed(self, tmp_path):
+        with pytest.raises(ExecutorUnavailable, match="mini fixture"):
+            longmemeval_executor(mock=True, fixture=tmp_path / "nope.json",
+                                 out_dir=tmp_path)
+
+    def test_runner_failure_is_unavailable_not_a_number(self, monkeypatch,
+                                                        tmp_path):
+        import tools.longmem_eval.run as lme
+
+        def _boom(argv):
+            raise RuntimeError("no OPENROUTER_API_KEY")
+
+        monkeypatch.setattr(lme, "run_main", _boom)
+        with pytest.raises(ExecutorUnavailable, match="no OPENROUTER_API_KEY"):
+            longmemeval_executor(mock=True, out_dir=tmp_path,
+                                 fixture=_touch(tmp_path / "mini.json"))
+
+    def test_runner_sys_exit_is_unavailable(self, monkeypatch, tmp_path):
+        import tools.longmem_eval.run as lme
+
+        def _exit(argv):
+            raise SystemExit(2)
+
+        monkeypatch.setattr(lme, "run_main", _exit)
+        with pytest.raises(ExecutorUnavailable, match="exited"):
+            longmemeval_executor(mock=True, out_dir=tmp_path,
+                                 fixture=_touch(tmp_path / "mini.json"))
+
+
+class TestCliExecutionSeam:
+    """`battery parity --execute` records the runner's number; without it the
+    cell stays explicitly not-measured."""
+
+    def _cfg(self, tmp_path: Path) -> Path:
+        import shutil
+        cfg = Path(__file__).resolve().parent.parent / "battery" / "config"
+        tmp_cfg = tmp_path / "cfg"
+        tmp_cfg.mkdir()
+        shutil.copy(cfg / "arms.yaml", tmp_cfg / "arms.yaml")
+        rp, jr, _ = methodology_hashes("default-reader",
+                                       "longmemeval-official")
+        (tmp_cfg / "parity_baseline.json").write_text(json.dumps(
+            {"reader_prompt_hash": rp, "judge_rubric_id_hash": jr}))
+        return tmp_cfg
+
+    def test_execute_persists_the_measured_cell(self, tmp_path, monkeypatch):
+        import battery.cli as cli
+        import battery.parity.executors as ex
+
+        def _fake_executor(*, mock=False, limit=None, out_dir=None):
+            return ExecutedCell(benchmark="longmemeval", accuracy=0.775,
+                                samples=40,
+                                revision="xiaowu0162/longmemeval-cleaned@s")
+
+        monkeypatch.setitem(ex.EXECUTORS, "longmemeval", _fake_executor)
+        rc = cli.main(["parity", "--config", str(self._cfg(tmp_path)),
+                       "--out", str(tmp_path), "--execute", "--limit", "5"])
+        assert rc == 0
+        record = json.loads((tmp_path / "parity_record.json").read_text())
+        cell = record["benchmarks"]["longmemeval"]
+        assert cell["measured"] is True
+        assert cell["accuracy"] == 0.775 and cell["samples"] == 40
+        assert cell["revision"] == "xiaowu0162/longmemeval-cleaned@s"
+        # a benchmark with no registered executor stays honestly not-measured
+        other = record["benchmarks"]["locomo"]
+        assert other["measured"] is False and other["accuracy"] is None
+
+    def test_executor_unavailable_records_not_measured(self, tmp_path,
+                                                       monkeypatch, capsys):
+        import battery.cli as cli
+        import battery.parity.executors as ex
+
+        def _unavailable(*, mock=False, limit=None, out_dir=None):
+            raise ExecutorUnavailable("longmemeval: no dataset here")
+
+        monkeypatch.setitem(ex.EXECUTORS, "longmemeval", _unavailable)
+        rc = cli.main(["parity", "--config", str(self._cfg(tmp_path)),
+                       "--out", str(tmp_path), "--execute"])
+        assert rc == 0, "an unavailable executor must not crash the leg"
+        out = capsys.readouterr().out
+        assert "executor unavailable" in out
+        record = json.loads((tmp_path / "parity_record.json").read_text())
+        assert record["benchmarks"]["longmemeval"]["measured"] is False
+
+    def test_registry_contains_longmemeval(self):
+        assert "longmemeval" in EXECUTORS
+
+
+def _touch(p: Path) -> Path:
+    p.write_text("{}")
+    return p
+
+
+@pytest.mark.skipif(
+    not __import__("os").environ.get("BATTERY_PARITY_EXECUTOR_E2E"),
+    reason="opt-in: runs the REAL released LongMemEval runner (mock lane, "
+           "1 question, embedded graph) — set BATTERY_PARITY_EXECUTOR_E2E=1")
+def test_longmemeval_real_mock_lane_end_to_end(tmp_path):
+    """The seam against the REAL released runner.
+
+    Not a mocked ``run_main``: this invokes ``tools.longmem_eval`` end to end
+    on the committed mini fixture (mocked reader+judge: no keys, no spend),
+    and asserts the cell carries the runner's OWN accuracy, its sample count,
+    and the dataset revision it loaded. Opt-in because it stands up an
+    embedded graph (~20s); the hermetic tests above cover the seam itself.
+    """
+    cell = longmemeval_executor(mock=True, limit=1, out_dir=tmp_path)
+    assert cell.benchmark == "longmemeval"
+    assert cell.samples == 1, "one question in, one sample out"
+    assert cell.accuracy is not None, "the mock lane publishes an accuracy"
+    assert cell.revision.startswith("xiaowu0162/longmemeval")
+    assert (tmp_path / "longmemeval_official.json").is_file()
