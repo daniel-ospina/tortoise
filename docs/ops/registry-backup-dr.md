@@ -365,19 +365,20 @@ transient/rate-limited response is treated as open so a blip never duplicates.
 the purge failure body and `last_sweep` (whose `graph_failures[].error` carries
 raw per-graph exception text) are published into a **public** GitHub issue +
 Telegram **and** the public Actions log. `redact()` normalises to one line and
-scrubs credential *shapes*: URI/DSN userinfo passwords (with or without a
-scheme), `Basic`/`Bearer`/`token`/`ApiKey` headers, known credential
-**prefixes** (`ghp_`, `github_pat_`, `glpat-`, `xox…`, `AKIA`, `sk-`, at ANY
-length so a short or line-split PAT cannot survive), `*_KEY=`/`"token":"…"`
-assignments (suffix-anchored, so `patch:`/`compatible:`/`author:` are not false
-positives), quoted token values, ≥20-char token-like runs and filesystem paths
-— while **preserving lowercase JSON keys, timestamps and graph ids**, so the
-published `last_sweep` roll-up stays readable. `redact_truncate()` redacts
-*before* truncating so a secret is never cut into a sub-threshold fragment.
-Known residual: a secret with no recognisable prefix that is split by raw
-whitespace into fragments each under 20 characters. The primary control is the
-source — the three key-parsing sites emit a sha256 fingerprint, never the raw
-value.
+scrubs credential *shapes*: URI/DSN userinfo (with or without a scheme, matched
+to the last `@` of the token, so an empty username `docker://:pw@host` — this
+repo's own DSN — and a password containing `/` or `@` are both covered),
+`Basic`/`Bearer`/`token`/`ApiKey` headers, known credential **prefixes**
+(`ghp_`, `github_pat_`, `glpat-`, `xox…`, `AKIA`, `sk-`, at ANY length so a
+short or line-split PAT cannot survive), `*_KEY=`/`"token":"…"` assignments
+(suffix-anchored, so `patch:`/`compatible:`/`author:` are not false positives),
+quoted token values, ≥20-char token-like runs and filesystem paths — while
+**preserving lowercase JSON keys, timestamps and graph ids**, so the published
+`last_sweep` roll-up stays readable. `redact_truncate()` redacts *before*
+truncating so a secret is never cut into a sub-threshold fragment. Known
+residual: a secret with no recognisable prefix that is split by raw whitespace
+into fragments each under 20 characters. The primary control is the source —
+the three key-parsing sites emit a sha256 fingerprint, never the raw value.
 
 **Credential requirement:** the driver **fails closed** if `GITHUB_TOKEN`
 is unset — Actions does not export it into step envs, so

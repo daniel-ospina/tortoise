@@ -72,18 +72,25 @@ finish() {
 # JSON KEY (destroying the diagnostic payload and mangling the JSON) while
 # still missing DSN/URI passwords, Basic/Bearer headers and short tokens. The
 # rules now target credential shapes and preserve lowercase JSON keys/values:
-#   1. URI userinfo password     scheme://user:PASSWORD@host
-#   2. Authorization header      Basic|Bearer|token|ApiKey TOKEN
-#   3. credential PREFIX         ghp_…, github_pat_…, glpat-…, AKIA… (ANY length,
+#   1. URI userinfo password     scheme://[user]:PASSWORD@host — matched
+#                                greedily to the LAST `@` of the token, so an
+#                                empty username (`docker://:pw@host` — this
+#                                repo's canonical DSN) and a password
+#                                containing `/` or `@` are both covered
+#                                (same rule as #720's _mask_uri_userinfo)
+#   2. schemeless userinfo       user:PASSWORD@host
+#   3. Authorization header      Basic|Bearer|token|ApiKey|OAuth TOKEN
+#   4. credential PREFIX         ghp_…, github_pat_…, glpat-…, AKIA… (ANY length,
 #                                so a short or line-split PAT cannot survive)
-#   4. sensitive-key assignment  *_KEY=value, "api_key":"value", token: value
+#   5. sensitive-key assignment  *_KEY=value, "api_key":"value", token: value
 #                                (suffix-anchored, so `patch:`/`compatible:`/
 #                                 `author:` are not false positives)
-#   5. quoted single token       the historical `(got 'AbCdEfGh')` leak vector
-#   6. quoted long token         ≥16 b64/hex-ish, so `"TimeoutError"` and
-#                                `"g_deadbeef01"` stay readable
-#   7. bare token-like run ≥20   a 22-char token escaped the earlier ≥24 floor
-#   8. filesystem path
+#   6. quoted single token       the historical `(got 'AbCdEfGh')` leak vector
+#   7. quoted long token         ≥20 b64/hex-ish, so `"TimeoutError"`,
+#                                `"g_deadbeef01"` and `"graph_error_streaks"`
+#                                stay readable
+#   8. bare token-like run ≥20   a 22-char token escaped the earlier ≥24 floor
+#   9. filesystem path
 #
 # Known residual (bounded, documented in docs/ops/registry-backup-dr.md): a
 # secret with NO recognisable prefix that is split by raw whitespace into
@@ -91,13 +98,13 @@ finish() {
 # key-parsing sites emit a sha256 fingerprint, never the raw value.
 redact() { # text -> text safe for a public issue body / public Actions log
   printf '%s' "$1" | tr '\n\r\t' '   ' | sed -E \
-    -e 's#([A-Za-z][A-Za-z0-9+.-]*://[^/@[:space:]:]+:)[^/@[:space:]]+#\1<redacted>#g' \
-    -e 's/([A-Za-z0-9_.-]+:)[^@[:space:]/]+@/\1<redacted>@/g' \
+    -e 's#([A-Za-z][A-Za-z0-9+.-]*://)[^[:space:]]*@#\1<redacted>@#g' \
+    -e 's#([A-Za-z0-9_.-]+:)[^[:space:]]*@#\1<redacted>@#g' \
     -e 's/(Basic|Bearer|token|ApiKey|OAuth)[[:space:]]+[A-Za-z0-9+/=_.-]+/\1 <redacted>/Ig' \
     -e 's/(^|[^A-Za-z0-9_])(ghp_|gho_|ghu_|ghs_|ghr_|github_pat_|glpat-|xox[baprs]-|AKIA|ASIA|sk-)[^[:space:]]*/\1\2<redacted>/g' \
     -e 's/([A-Za-z0-9_]*(KEY|TOKEN|SECRET|PASSWORD|PASSWD|PAT|AUTH|CREDENTIAL|APIKEY|DSN)[[:space:]]*[=:][[:space:]]*)["'\''"]?[^[:space:]"'\''"]+/\1<redacted>/Ig' \
     -e "s/'([^']{6,})'/'<redacted>'/g" \
-    -e 's/"([A-Za-z0-9+/=_.-]{16,})"/"<redacted>"/g' \
+    -e 's/"([A-Za-z0-9+/=_.-]{20,})"/"<redacted>"/g' \
     -e 's/[A-Za-z0-9+/_.=-]{20,}/<redacted>/g' \
     -e 's#(/[A-Za-z0-9._-]+){3,}#<path>#g' || true
 }
@@ -619,7 +626,7 @@ case "$RUN_STATUS" in
       log "sweep status=$RUN_STATUS_SAFE but ${GRAPHS_BACKED_UP} graph(s) were backed up — coverage is not zero"
     elif [ "$R2_LIST_OK" != "1" ]; then
       # Unknown ≠ empty (review R5): the pool could hold teams we cannot see.
-      log "sweep backed up 0 teams (status=$RUN_STATUS) and the R2 pool could NOT be measured — filing SWEEP_NO_COVERAGE (job red)"
+      log "sweep backed up 0 teams (status=$RUN_STATUS_SAFE) and the R2 pool could NOT be measured — filing SWEEP_NO_COVERAGE (job red)"
       file_alert SWEEP_NO_COVERAGE "[DR] SWEEP_NO_COVERAGE — enabled, 0 teams, pool unmeasurable" \
         "sweep status=${RUN_STATUS} and the R2 pool listing failed (unknown is not empty), so coverage cannot be confirmed. The sweep is enabled but may be backing up nothing (#2823). Check the R2 access key's ListObjects permission and re-run." "global"
       NO_COVERAGE=1
@@ -657,10 +664,12 @@ esac
 PURGE_FAILED=0
 RECONCILE_FAILED=0
 if [ "$RUN_STATUS" != "already_running" ]; then
-  PURGE_CODE="$(curl -sS -o /tmp/purge-resp.json -w '%{http_code}' -m 300 -X POST \
+  PURGE_RESP="$(mktemp)"
+  PURGE_CODE="$(curl -sS -o "$PURGE_RESP" -w '%{http_code}' -m 300 -X POST \
     -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" -d '{}' \
     "${API}/v1/internal/backups/purge" 2>/dev/null || echo '000')"
-  PURGE_BODY="$(cat /tmp/purge-resp.json 2>/dev/null || true)"
+  PURGE_BODY="$(cat "$PURGE_RESP" 2>/dev/null || true)"
+  rm -f "$PURGE_RESP"
   PURGE_ST="$(printf '%s' "$PURGE_BODY" | jq -r '.status // "error"' 2>/dev/null || echo error)"
   PURGE_ST_SAFE="$(redact "$PURGE_ST")"
   if [ "$PURGE_CODE" = "200" ] && { [ "$PURGE_ST" = "ok" ] || [ "$PURGE_ST" = "already_running" ]; }; then
@@ -734,7 +743,7 @@ elif [ "$WATCHER_MEASURED" != "1" ]; then
   log "self-heal: watcher block unmeasurable — leaving WATCHER_DOWN unchanged"
 fi
 if [ "$RUN_STATUS" = "backed_up" ] || [ "$RUN_STATUS" = "degraded" ]; then
-  resolve_global SWEEP_NO_COVERAGE "Resolved — sweep succeeded ($RUN_STATUS)."
+  resolve_global SWEEP_NO_COVERAGE "Resolved — sweep succeeded ($RUN_STATUS_SAFE)."
   log "self-heal: closed open incidents for a healthy run"
 fi
 

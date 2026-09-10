@@ -61,6 +61,10 @@
 #      positives on `compatible:`/`patch:`/`author:`/graph ids/`TimeoutError`
 #  51. the success branch backfills the R2 object with its issue_number (F7)
 #  52. a failed listing blocks the R2_DOWN self-heal (F2)
+#  53. a failed legacy-flat listing is unmeasured (R2_DOWN + RED)
+#  54. an unparseable archive timestamp is never read as fresh
+#  55. a stale watcher AGE alone (running=true, age>30) files WATCHER_DOWN
+#  56. the measurable-empty lock branch is the silent one
 #
 # Fixtures are simulated; the real driver defers nothing.
 
@@ -113,6 +117,11 @@ argval() { # <flag> -> next arg
   done
 }
 echo "AWS $op key=$(argval --key) prefix=$(argval --prefix)" >> "$STUB_LOG"
+# Record the put body so a test can PROVE the backfilled issue_number (as
+# opposed to the create-once attempt, which writes issue_number:null —
+# review: the bare key match was vacuous).
+b="$(argval --body)"
+[ -n "$b" ] && [ -f "$b" ] && echo "AWS $op body=$(cat "$b" 2>/dev/null)" >> "$STUB_LOG"
 case "$op" in
   head-bucket)  [ "${STUB_R2_DOWN:-0}" = "1" ] && exit 1 || exit 0 ;;
   list-objects-v2)
@@ -124,7 +133,9 @@ case "$op" in
       */default/)
         [ "${STUB_LIST_FAIL_TEAM:-0}" = "1" ] && exit 1
         printf '%s' "${R2_DEFAULT_LIST:-}" ;;
-      backups/*/2)  printf '%s' "${R2_FLAT_LIST:-[]}" ;;
+      backups/*/2)
+        [ "${STUB_FLAT_FAIL:-0}" = "1" ] && exit 1
+        printf '%s' "${R2_FLAT_LIST:-[]}" ;;
       *)            printf '' ;;
     esac
     ;;
@@ -256,7 +267,7 @@ reset_case() {
   unset STUB_STATUS_BODY STUB_SWEEP_BODY STUB_PURGE_BODY STUB_PURGE_CODE \
         STUB_RECONCILE_CODE STUB_412 STUB_APP_DOWN STUB_R2_DOWN STUB_GET_BODY \
         SIMULATE_APP_DOWN \
-        STUB_LIST_FAIL STUB_LIST_FAIL_TEAM STUB_INDEX_FAIL GH_ISSUE_STATE STUB_ISSUE_CODE \
+        STUB_LIST_FAIL STUB_LIST_FAIL_TEAM STUB_FLAT_FAIL STUB_INDEX_FAIL GH_ISSUE_STATE STUB_ISSUE_CODE \
         GH_SEARCH_JSON GH_NEW_ISSUE R2_TEAMS R2_DEFAULT_LIST R2_FLAT_LIST \
         GH_ISSUE_SWEEP_CONFIG_ERROR GH_ISSUE_SWEEP_OFF_STALE GH_ISSUE_SWEEP_NO_COVERAGE \
         GH_ISSUE_WATCHER_DOWN GH_ISSUE_APP_DOWN GH_ISSUE_R2_DOWN GH_ISSUE_STALE || true
@@ -511,7 +522,7 @@ export GH_ISSUE_STATE=closed
 run_driver
 assert_eq "$RC" 1 "22. closed-issue recurrence exits RED (1)"
 assert_match "$(cat "$LOG")" "GH POST .*/issues \{" "22. a closed issue RE-FILES (not swallowed)"
-assert_match "$(cat "$LOG")" "AWS put-object key=ops/alerts/SWEEP_CONFIG_ERROR/global.json" "22. the adopted issue number is backfilled"
+assert_match "$(cat "$LOG")" "AWS put-object body=\{\"kind\":\"SWEEP_CONFIG_ERROR\",\"issue_number\":[0-9]" "22. the re-filed issue number is backfilled (body proven)"
 
 # ── 23. WATCHER_DOWN self-heals on watcher EVIDENCE even on no_work (R3) ────
 reset_case
@@ -833,12 +844,13 @@ assert_not_match "$(cat "$LOG")" "GH POST .*/issues .*SWEEP_NO_COVERAGE" "49. no
 reset_case
 export R2_TEAMS=$'backups/teamA/'
 export R2_DEFAULT_LIST="$TS_RECENT"
-export STUB_STATUS_BODY="$(status_body false '"boom ghp_ABCDEFGH\nIJKLMNOPQRSTUVWXYZ0123456789 dsn=user:SuperSecret123@db.internal:6379 compatible: true patch: 3 author: bob"' null)"
+export STUB_STATUS_BODY="$(status_body false '"boom ghp_ABCDEFGH\nIJKLMNOPQRSTUVWXYZ0123456789 dsn=user:SuperSecret123@db.internal:6379 redis://:EmptyUserPw123@db:6379 falkor://user:p/ssw0rd@db:6379 compatible: true patch: 3 author: bob"' null)"
 run_driver
 assert_eq "$RC" 1 "50. a secret-bearing config error exits RED (1)"
-for leaked in SuperSecret123 ghp_ABCDEFGH; do
+for leaked in SuperSecret123 ghp_ABCDEFGH EmptyUserPw123; do
   assert_not_contains "$OUT" "$leaked" "50. '$leaked' is NOT logged"
 done
+assert_not_contains "$OUT" "ssw0rd" "50. a password containing '/' does not leak its tail"
 assert_not_contains "$OUT" "IJKLMNOPQRSTUVWXYZ0123456789" "50. the newline-split token fragment is redacted"
 assert_contains "$OUT" "compatible: true" "50. 'compatible:' is not a false positive"
 assert_contains "$OUT" "patch: 3" "50. 'patch:' is not a false positive"
@@ -852,7 +864,7 @@ export STUB_STATUS_BODY="$(status_body false '"REGISTRY_STREAM_KEY not set"' nul
 run_driver
 assert_eq "$RC" 1 "51. a fresh config incident exits RED (1)"
 assert_match "$(cat "$LOG")" "GH POST .*/issues \{" "51. the incident is created"
-assert_match "$(cat "$LOG")" "AWS put-object key=ops/alerts/SWEEP_CONFIG_ERROR/global.json" "51. the object is rewritten with the issue number"
+assert_match "$(cat "$LOG")" "AWS put-object body=\{\"kind\":\"SWEEP_CONFIG_ERROR\",\"issue_number\":[0-9]" "51. the object is rewritten with a real issue number"
 
 # ── 52. a failed listing blocks the R2_DOWN self-heal (F2) ──────────────
 reset_case
@@ -865,6 +877,46 @@ export GH_ISSUE_R2_DOWN=88
 run_driver
 assert_eq "$RC" 1 "52. a backed_up sweep with a failed listing exits RED (1)"
 assert_not_match "$(cat "$LOG")" "GH PATCH .*/issues/88" "52. R2_DOWN is NOT closed while the pool is unmeasured"
+
+# ── 53. a failed legacy-flat listing is unmeasured ──────────────────────
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_FLAT_LIST='[["backups/teamA/2024/dump.enc","2024-01-01T00:00:00Z"]]'
+export STUB_FLAT_FAIL=1
+export STUB_STATUS_BODY="$(status_body false null null)"
+run_driver
+assert_eq "$RC" 1 "53. a failed flat listing while OFF exits RED (1)"
+assert_match "$OUT" "legacy-flat listing FAILED" "53. the failed flat listing is surfaced"
+
+# ── 54. an unparseable archive timestamp is unmeasurable → loud ─────────
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="not-a-timestamp"
+export STUB_STATUS_BODY="$(status_body false null null)"
+run_driver
+assert_eq "$RC" 1 "54. an unparseable archive timestamp while OFF exits RED (1)"
+assert_match "$OUT" "unparseable archive timestamp" "54. the unparseable timestamp is surfaced"
+assert_filed "$(cat "$LOG")" SWEEP_OFF_STALE "54. an unparseable timestamp is never read as fresh"
+
+# ── 55. a stale watcher AGE alone (running=true) is WATCHER_DOWN ────────
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_STATUS_BODY="$(status_body true null null true 999)"
+export STUB_SWEEP_BODY='{"status":"backed_up","teams_backed_up":1}'
+run_driver
+assert_eq "$RC" 1 "55. a stale watcher AGE alone exits RED (1)"
+assert_match "$(cat "$LOG")" 'GH POST .*/issues .*WATCHER_DOWN' "55. running=true but age>30 files WATCHER_DOWN"
+
+# ── 56. lock + no last_sweep + measured-EMPTY pool is the silent branch ─
+reset_case
+export R2_TEAMS=""
+export STUB_STATUS_BODY='{"enabled":true,"config_error":null,"storage_error":null,"per_team":{},"last_sweep":null,"watcher":{"running":true,"age_minutes":1}}'
+export STUB_SWEEP_BODY='{"status":"already_running"}'
+run_driver
+assert_eq "$RC" 0 "56. a lock with a measured-empty pool exits 0"
+assert_contains "$OUT" "leaving silent" "56. the measured-empty lock is the silent branch"
+assert_not_match "$(cat "$LOG")" "GH POST .*/issues .*SWEEP_NO_COVERAGE" "56. no incident for a measured-empty lock"
 
 echo ""
 echo "registry-cron.test.sh: $PASS passed, $FAIL failed"
