@@ -111,10 +111,12 @@ ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
         "registry": "prod-coupled", "reg-team-1": "team-identity",
     },
     "test_billing_upgrade.py": {"registry": "prod-coupled"},
-    # #2724 churn-wave hygiene (2026-09-09): the #2600 attribution-strip E2E
-    # surfaces — the namespace literal IS the identity under test, so renaming
-    # it would decouple the seed from the resolution the test asserts.
-    "test_attribution_actor.py": {"registry": "prod-coupled",   # :171/:192/:454/:500 — db_path-pinned registry lane; _make_sdk(namespace="registry") mirrors hosted_api
+    # #2724 churn-wave hygiene (2026-09-09): the attribution/oauth registry +
+    # team-identity surfaces — the namespace literal IS the identity under
+    # test, so renaming it would decouple the seed from the resolution the
+    # test asserts. (Files: #2600 attribution (#2599 Phase 2 for the
+    # machine-model file), #524 OAuth for the mcp file.)
+    "test_attribution_actor.py": {"registry": "prod-coupled",   # :171/:192/:454/:500 — db_path-pinned registry lane (TortoiseSDK at :171/:192, _make_sdk at :454/:500) mirrors hosted_api
                                   "team-strip-2600": "team-identity",   # :468 — the registry seed, the contextvar and the read-back all key off this team id
                                   "team-sweep-2600": "team-identity"},  # :530/:550 — the sweep fixture's own seeded team id is its graph
     "test_attribution_machine_model.py": {"registry": "prod-coupled"},   # :178 — _make_sdk(namespace="registry") mirrors the hosted_api registry resolve
