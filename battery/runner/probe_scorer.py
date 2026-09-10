@@ -245,6 +245,55 @@ def trace_from_log(episode, scenario, log: list[dict]) -> dict[str, Any]:
     return trace
 
 
+def _scenario_injection_turn(scenario) -> int | None:
+    """Scenario-authored ¬A injection turn (k), pinned per planted pair
+    (``ContradictionPair.injection_turn``). None when nothing usable is
+    planted — a pair without a k is a scenario defect and the absence stays
+    a gap, never a guessed turn."""
+    for pair in getattr(scenario, "contradiction_pairs", ()) or ():
+        k = getattr(pair, "injection_turn", None)
+        if isinstance(k, int) and not isinstance(k, bool):
+            return k
+    return None
+
+
+def derive_scenario_truth(log: list[dict], scenario) -> None:
+    """Pre-expected derivation of SCENARIO-AUTHORED truth (issue #2740, R1
+    slice): append the planted ¬A turn before ``expected_coverage_for``
+    runs, so a planted episode is measured on R1's surfaced rule instead of
+    falling to the no-data sentinel.
+
+    ``injection_turn`` is authored scenario metadata, not arm behaviour —
+    the harness knows k when the scenario is written, so emitting it at the
+    scoring seam carries exactly the information the executor would have
+    carried from the same source. It can never manufacture, hide or
+    reinterpret an arm action. Emitted only for a scenario that actually
+    plants a pair (never for a benign ``bct`` twin, whose expected set must
+    not contain it), and never with a GUESSED turn when a pair carries no k
+    (the absence stays an honest gap).
+
+    NOT derived here: ``false_positive`` (the FP-control verdict). It is a
+    claim about arm behaviour, and the derive pass cannot see the
+    difference between "the arm stayed quiet" and "the tool channel never
+    logged a conflict write" — deriving False would convert a missing
+    emitter into a measured 0.0, which is exactly the silent pass the
+    emitter gate exists to prevent. It stays executor-owned (the executor
+    knows whether its own tool channel ran), and a verdict-less control
+    keeps the no-verdict sentinel.
+
+    Idempotent: a composite of several probe scorers runs the derive pass
+    over the same episode log, so an entry already present is never
+    duplicated.
+    """
+    if ((getattr(scenario, "contradiction_pairs", ()) or ())
+            and not any(e.get("field") == "injection_turn" for e in log)):
+        k = _scenario_injection_turn(scenario)
+        if k is not None:
+            log.append({"type": "state_event", "event": "injection_seen",
+                        "at": len(log), "field": "injection_turn",
+                        "payload": {"k": k}})
+
+
 def derive_append(log: list[dict], scenario, expected: set[str]) -> None:
     """Derive emission pass (probe-scorer-owned leg; the judge leg is Task
     9's): append the expected gold_store entries whose values the derive
@@ -341,6 +390,11 @@ class ProbeScorer:
             # FP-control cell, never a phantom surfaced-rate cell.
             self._record(None, episode, metric=self._metric_for(scenario))
             return ScorerResult(metrics=())
+        # #2740: the SCENARIO-AUTHORED injection turn must be in the log
+        # before the expected set is built (it is a phase-1 state field, so
+        # a planted episode gaps without it). Arm-behaviour verdicts are
+        # never derived here — see derive_scenario_truth.
+        derive_scenario_truth(episode.event_log, scenario)
         expected = expected_coverage_for(scenario, run_mode="real",
                                          family=self.family,
                                          log=episode.event_log)

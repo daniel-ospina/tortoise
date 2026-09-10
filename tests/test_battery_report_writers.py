@@ -1341,3 +1341,90 @@ class TestEligibilityBeforeLaneSentinels:
         attempt = _run(out, cfg, families={"R1"}, mock=True, arms=["a0"])
         assert not (attempt / "family_R1.json").exists()
         assert list(attempt.glob("family_*.json")) == []
+
+
+class TestDeriveScenarioTruth:
+    """#2740 R1 slice: the SCENARIO-AUTHORED injection turn is derived before
+    the expected-set builder runs, so a planted episode measures on R1's
+    surfaced rule instead of falling to the no-data sentinel. The FP-control
+    verdict is deliberately NOT derived here (it is a claim about arm
+    behaviour the derive pass cannot evidence) and keeps its sentinel."""
+
+    @staticmethod
+    def _log_without(field: str) -> list[dict]:
+        return [dict(e) for e in covered_log() if e.get("field") != field]
+
+    @staticmethod
+    def _drive(scenario, log):
+        from battery.probes.r1_contradiction import R1ContradictionProbe
+        from battery.runner.probe_scorer import ProbeScorer
+        scorer = ProbeScorer(
+            probe=R1ContradictionProbe(),
+            thresholds=ThresholdsConfig(cal_rows=(
+                ("surfaced-rate", "a0", 0.90),
+                ("false-positive-rate", "a0", 0.05))))
+        ep = EpisodeResult(scenario_id=scenario.id, seed=1, arm="a0",
+                           run_mode="real",
+                           event_log=[dict(e) for e in log])
+        scorer.score(ep, scenario)
+        return scorer.last_record()
+
+    def test_injection_turn_derived_from_authored_pair(self):
+        from battery.runner.probe_scorer import derive_scenario_truth
+        ct, _bct = _r1_pop_scenarios()
+        log = self._log_without("injection_turn")
+        derive_scenario_truth(log, ct)
+        got = [e for e in log if e.get("field") == "injection_turn"]
+        assert len(got) == 1
+        assert got[0]["type"] == "state_event"
+        assert got[0]["event"] == "injection_seen"
+        assert got[0]["payload"] == {"k": 3}      # the AUTHORED turn
+        # idempotent: an existing entry is never duplicated
+        derive_scenario_truth(log, ct)
+        assert len([e for e in log
+                    if e.get("field") == "injection_turn"]) == 1
+
+    def test_r1_surfaced_cell_measured_once_turn_is_derived(self):
+        """ACCEPTANCE (#2740): a planted ct episode whose log lacks
+        injection_turn used to be the no-data sentinel; after the derive
+        pass it is MEASURED (never a fabricated value, never None)."""
+        ct, _bct = _r1_pop_scenarios()
+        rec = self._drive(ct, self._log_without("injection_turn"))
+        assert rec is not None and rec.measured, (
+            "the R1 cell must measure once the authored turn is derived")
+        assert rec.value in (0.0, 1.0)
+
+    def test_control_verdict_is_not_derived(self):
+        """The FP-control verdict stays executor-owned: the derive pass must
+        NOT turn a control episode's absent tool channel into a measured
+        0.0 — that would be the silent pass the emitter gate exists to
+        prevent. A control log with no verdict keeps the sentinel."""
+        from battery.runner.probe_scorer import derive_scenario_truth
+        _ct, bct = _r1_pop_scenarios()
+        log = self._log_without("false_positive")
+        derive_scenario_truth(log, bct)
+        assert not [e for e in log if e.get("field") == "false_positive"], (
+            "the derive pass never manufactures an arm-behaviour verdict")
+        rec = self._drive(bct, log)
+        assert rec is not None and not rec.measured, (
+            "a verdict-less control keeps the no-data sentinel")
+
+    def test_planted_episode_never_gets_control_verdict(self):
+        from battery.runner.probe_scorer import derive_scenario_truth
+        ct, _bct = _r1_pop_scenarios()
+        log = self._log_without("false_positive")
+        derive_scenario_truth(log, ct)
+        assert not [e for e in log if e.get("field") == "false_positive"]
+
+    def test_no_guessed_turn_when_pair_carries_no_k(self):
+        """A planted pair without an authored turn stays a gap — the derive
+        pass never invents one."""
+        from types import SimpleNamespace
+
+        from battery.runner.probe_scorer import derive_scenario_truth
+        sc = SimpleNamespace(
+            contradiction_pairs=(SimpleNamespace(injection_turn=None),),
+            task_type="contradiction")
+        log: list[dict] = []
+        derive_scenario_truth(log, sc)
+        assert not [e for e in log if e.get("field") == "injection_turn"]
