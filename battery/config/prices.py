@@ -30,6 +30,11 @@ PRICE_CHECKED_ON = "2026-09-10"
 #: (input, output) USD per 1M tokens. OpenRouter, 2026-09-10.
 RATES_PER_1M_USD: tuple[float, float] = (0.084, 0.168)
 #: Cache-read rate (USD per 1M tokens), for meters that model prompt caching.
+#: Also from `PRICE_SOURCE` above (its `pricing.input_cache_read` field).
+#: NOTE: no production caller passes `cached_tokens` yet, so this rate is
+#: currently inert — every meter prices the full prompt at the input rate,
+#: which OVER-estimates. That is the safe direction for a spend cap; wiring
+#: caching in must not flip it (a cache hit is cheaper, never dearer).
 CACHE_READ_PER_1M_USD = 0.0168
 
 
