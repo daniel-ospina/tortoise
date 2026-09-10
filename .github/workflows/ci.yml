@@ -191,6 +191,7 @@ jobs:
               "dashboard_e2e": any_file(
                   isfile("tests/e2e/test_keys_table_mixed.py"),
                   isfile("tests/e2e/test_graphs_management.py"),
+                  isfile("tests/e2e/test_dashboard_mount_smoke.py"),
                   isfile("tests/e2e/test_session_login_flow.py",
                          "tests/e2e/conftest.py"),
                   startswith("website/apps/dashboard/src/"),
@@ -780,10 +781,10 @@ jobs:
           echo "::error::wrangler (dashboard) dev server failed to start"
           tail -50 /tmp/wrangler-dash.log || true
           exit 1
-      - name: Run keys-table mixed-fixture e2e (#2166/#2178)
+      - name: Run dashboard e2e — keys-table mixed fixture (#2166/#2178) + mount smoke (#2709)
         run: >
           RUN_DASHBOARD_E2E=1
-          python -m pytest tests/e2e/test_keys_table_mixed.py tests/e2e/test_graphs_management.py
+          python -m pytest tests/e2e/test_keys_table_mixed.py tests/e2e/test_graphs_management.py tests/e2e/test_dashboard_mount_smoke.py
           -q -rs -p no:cacheprovider
         env:
           # Epic #1647 Task 10 (P4): URI-less e2e surface — the URI-required
