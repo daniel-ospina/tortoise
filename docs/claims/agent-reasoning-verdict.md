@@ -64,8 +64,9 @@ The E2E-1.1 real leg exists to prove the battery runs the **real** product path 
 > `profile.json` (`ep_markers.usage`: 234,690 prompt + 916,689 completion
 > tokens), and re-pricing them at the corrected basis
 > (`battery/config/prices.py`) gives **0.173718 USD**; the same token counts at
-> the old basis reproduce the published figure (1.071724, the residue being
-> per-call rounding), which is what confirms the correction is a re-pricing and
+> the old basis reproduce the published figure to within 3e-6 USD (1.071724,
+> the residue being 6-decimal rounding of the per-episode accumulated cost over
+> the run's 866 calls), which is what confirms the correction is a re-pricing and
 > not a different run. Nothing else in this report depends on the number — it
 > is a cost statement, not a measurement — and the exclusion rate, the verdict,
 > and the family statuses are unaffected.
