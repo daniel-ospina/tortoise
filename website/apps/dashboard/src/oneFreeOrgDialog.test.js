@@ -36,9 +36,11 @@ const flat = mainJsx.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/\/\/[^\n]*/g, ' 
 
 /** Body of the create-org dialog JSX (from its container to the dialog's
  *  closing marker) — the modal is the only place the three-option copy may
- *  live. Starts at the container so the role/aria-modal contract is included. */
+ *  live. Starts at the modal's aria-labelledby expression (the dialog's own
+ *  identity since #2789 dropped the static aria-label), so the role/aria-modal
+ *  contract is included. */
 function dialogBlock() {
-  const start = flat.indexOf('role="dialog" aria-modal="true" aria-label="Create a new organization"')
+  const start = flat.indexOf('role="dialog" aria-modal="true" aria-labelledby={createTeamMode')
   assert.notEqual(start, -1, 'the create-organization dialog must still exist')
   const end = flat.indexOf('{team && team.tier !== \'team\'', start)
   assert.notEqual(end, -1, 'the dialog block must end before the tier badge')
@@ -70,19 +72,23 @@ test('#2789: the account-menu item pre-checks the cap and opens the gate dialog'
 test('#2789: the client pre-check mirrors the server rule (ownership, not membership)', () => {
   const start = flat.indexOf('const ownedFreeOrgs = (teams || []).filter')
   assert.notEqual(start, -1, 'the ownedFreeOrgs pre-check must exist')
-  const rule = flat.slice(start, flat.indexOf('const hasActiveSubscription', start))
+  const rule = flat.slice(start, flat.indexOf('const newOrgPlanOptions', start))
   // ownership — a collaborator on someone else's free org keeps their own slot
   assert.match(rule, /t\.role === 'owner'/,
     'the count must be OWNER memberships — counting members was the #2789 trap')
+  // the registry (selfhost) lane's tier proxy — without it the client counts a
+  // paid-tier row with no subscription status as free and hides free-create
+  assert.match(rule, /\(t\.tier === 'free' \|\| t\.tier == null\)/,
+    'the pre-check must mirror the registry lane tier predicate (free OR unset)')
   // not on an active/paid plan
   assert.match(rule, /!ACTIVE_STATUSES\.includes\(t\.subscription_status\)/,
     'an active/paid subscription removes the org from the free count')
   // pending_payment is not real yet
   assert.match(rule, /t\.subscription_status !== 'pending_payment'/,
     'a pending_payment org must not consume the allowance (rules table)')
-  // the pre-check reads the fields the teams list already carries (role/tier);
-  // the server-side `subscription_status` row field is asserted in the python
-  // suite (tests/test_one_free_org_entitlement.py) where /v1/teams is served.
+  // the pre-check reads the fields the teams list already carries (role/tier/
+  // subscription_status) — no extra request. The server-side row fields are
+  // asserted in the python suite (tests/test_one_free_org_entitlement.py).
   assert.match(flat, /const ownedFreeOrgs = \(teams \|\| \[\]\)\.filter/,
     'the pre-check must read the in-memory teams list (no extra request)',
   )
@@ -130,20 +136,41 @@ test('#2789: the third action reaches the session-scoped paid-new-org checkout',
     'the purchase flow must call the new-org checkout endpoint')
   assert.match(flat, /body: JSON\.stringify\(\{ name, price_id: priceId \}\)/,
     'the new-org checkout takes the intended name + the server-resolved price id')
-  assert.match(flat, /const res = await api\('\/v1\/billing\/checkout\/new-org'/,
-    'the pre-minted team_id comes back from the response (it rides the success URL)')
-  // The success return waits for the provisioned org, then switches to it.
+  // The client does NOT consume the response's team_id — the PRE-MINTED id
+  // rides the success URL because the SERVER built that URL. What the client
+  // must get right is the MATCH: the poll compares against the URL params.
   assert.match(flat, /const newOrgId = params\.get\('new_org'\)/,
     'the success-return effect must read ?new_org=<id>')
-  assert.match(flat, /\.some\(\(t\) => t && t\.team_id === newOrgId\)/,
-    'the poll must wait for the webhook-provisioned org to appear in /v1/teams')
+  assert.match(flat, /const newOrgName = params\.get\('new_org_name'\)/,
+    'the success-return effect must read ?new_org_name=<name>')
+  assert.match(flat, /\.find\(\(t\) => t && \(t\.team_id === newOrgId \|\| \(newOrgName && t\.team_name === newOrgName\)\)\)/,
+    'the poll must match the id OR the intended name — the pre-minted id is not the real id on the registry (selfhost) lane')
+  assert.match(flat, /if \(switches === 1\) switchTeam\(match\.team_id\)/,
+    'the switch must use the MATCHED team id (lane-agnostic) and fire once')
+  assert.match(flat, /Your new organization is being set up/,
+    'a poll that gives up must TELL the user (paid + no switch) instead of silently staying put')
+  // …and the notice must be REACHABLE: it renders on the Billing tab, while
+  // the checkout success return opens on the overview tab.
+  assert.match(flat, /setBillingNotice\("Your new organization is being set up[^"]*"\) setTab\('billing'\)/,
+    'the give-up branch must land on the tab that renders the notice')
 })
 
 test('#2789: plan choice in the purchase mode is server-resolved (never hardcoded ids)', () => {
   const block = flat.slice(flat.indexOf("createTeamMode === 'purchase'"))
   assert.ok(block.length > 0, 'the purchase mode must exist')
-  assert.match(block, /planOptions\(\)\.filter\(\(p\) => p\.tier !== 'free' && team\.checkout_price_ids\[p\.tier\]\)/,
+  assert.match(block, /newOrgPlanOptions\(team\)\.map\(\(p\) => \(/,
     'paid plans come from the pricing catalog, filtered to tiers the server has a price id for')
+  assert.match(flat, /const newOrgPlanOptions = \(t\) => planOptions\(\)\.filter\(\(p\) => p\.tier !== 'free'/,
+    'the plan list helper must exist and exclude free')
+  assert.match(flat, /const newOrgDefaultPrice = \(t\) => \{/,
+    'the default plan must be derived, not hardcoded')
+  // The default is the FIRST available plan — never an assumed `pro` (a
+  // deployment may sell solo/team only; defaulting to a missing pro both
+  // refuses checkout and contradicts the plans on screen).
+  assert.match(flat, /const first = newOrgPlanOptions\(t\)\[0\]/,
+    'the purchase dialog must default to the first AVAILABLE paid plan')
+  assert.doesNotMatch(flat, /checkout_price_ids\?\.pro/,
+    'no code path may assume the pro price id exists')
   // No hardcoded Stripe price id anywhere (the server resolves them; the
   // match is quoted-literal only so `checkout_price_ids` is not a false hit).
   assert.ok(!/['"]price_[A-Za-z0-9]{3,}['"]/.test(mainJsx),
@@ -153,6 +180,13 @@ test('#2789: plan choice in the purchase mode is server-resolved (never hardcode
 test('#2789: the dialog keeps the #2392 a11y contract in every mode', () => {
   const dialog = dialogBlock()
   assert.match(dialog, /role="dialog" aria-modal="true"/, 'the dialog must stay role=dialog aria-modal=true')
+  // The accessible NAME is the current mode's heading (not a generic label),
+  // so a screen reader hears the gate copy in limit mode.
+  assert.match(dialog, /create-org-title-limit/, 'limit mode must label the dialog from its own heading')
+  assert.match(dialog, /create-org-title-purchase/, 'purchase mode must label the dialog from its own heading')
+  assert.match(dialog, /create-org-title-name/, 'name mode must label the dialog from its own heading')
+  assert.match(dialog, /<h3 id="create-org-title-limit">You can only have one free organization<\/h3>/,
+    'the limit heading must be the element the dialog is labelled by (copy + id together)')
   assert.match(dialog, /if \(e\.key === 'Escape' && !createTeamBusy\) closeCreateTeam\(\)/,
     'Escape must cancel (while not busy)')
   // one autoFocus per mode (limit / purchase / name) = focus moves INTO the

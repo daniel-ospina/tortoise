@@ -20712,15 +20712,43 @@ def _new_org_team_id() -> str:
     return _uuid.uuid4().hex[:26]
 
 
-def _new_org_success_url(new_org_id: str) -> str:
-    """#2789: the standard success URL + ``new_org=<id>``.
+def _new_org_collision_name(org_name: str, team_id: str) -> str:
+    """#2789: the disambiguating name for a collision that happened AFTER
+    checkout — the pre-check cannot see the future (someone else took the name
+    between payment intent and webhook).
+
+    Must stay legal in BOTH lanes, so NO parentheses (the registry SDK's
+    validator is ``^[a-zA-Z0-9][a-zA-Z0-9_ -]*$`` and it rejects them — a
+    paren suffix would make the retry raise forever and strand a paying
+    customer), first char still alphanumeric, and <= 64 chars. 8 id chars (32
+    bits) of entropy keeps a *second* collision vanishingly unlikely; if one
+    did happen the raise surfaces as a 500 + ops log rather than silently
+    stranding money.
+    """
+    suffix = str(team_id or "")[:8]
+    return f"{org_name[: 63 - len(suffix)].rstrip()} {suffix}"
+
+
+def _new_org_success_url(new_org_id: str, org_name: str = "") -> str:
+    """#2789: the standard success URL + ``new_org=<id>`` (+ the intended name).
 
     The dashboard's success-return effect polls until the org appears in
     /v1/teams and then switches to it (the webhook lands seconds later). The
     env template (``{CHECKOUT_SESSION_ID}``) is preserved verbatim — only a
-    separator is chosen."""
+    separator is chosen.
+
+    ``new_org_name`` is carried because the pre-minted id is NOT always the
+    org's real id: on the registry (selfhost) lane ``team_create`` mints its
+    own, so the client matches the id OR the intended name (the name is the
+    one column the webhook only changes on a collision).
+    """
     base = os.environ.get("BILLING_SUCCESS_URL", _billing_default_success_url())
-    return f"{base}{'&' if '?' in base else '?'}new_org={new_org_id}"
+    sep = "&" if "?" in base else "?"
+    url = f"{base}{sep}new_org={new_org_id}"
+    if org_name:
+        from urllib.parse import quote
+        url += f"&new_org_name={quote(str(org_name))}"
+    return url
 
 
 def _billing_checkout_new_org_sync(user: dict, name: str, price_id: str) -> dict:
@@ -20773,7 +20801,7 @@ def _billing_checkout_new_org_sync(user: dict, name: str, price_id: str) -> dict
             new_org_id=new_org_id, price_id=price_id,
             email=user.get("email") or "", user_id=user["user_id"],
             org_name=name, tier=tier,
-            success_url=_new_org_success_url(new_org_id),
+            success_url=_new_org_success_url(new_org_id, name),
             cancel_url=os.environ.get("BILLING_CANCEL_URL", _billing_default_cancel_url()),
         )
     except Exception as e:
@@ -20980,7 +21008,7 @@ def _provision_new_org_from_checkout(sdk, team_id: str, meta: dict) -> str:
                 # replay-safe; the org stays fully functional and ops gets a
                 # warning (the stale TeamMeta display name is accepted — the
                 # org row is the authority).
-                params["p_team_name"] = f"{org_name} ({team_id[:4]})"
+                params["p_team_name"] = _new_org_collision_name(org_name, team_id)
                 _logger.warning(
                     "webhook: org name %r was taken; provisioning as %r (team %s)",
                     org_name, params["p_team_name"], team_id)
@@ -20996,7 +21024,7 @@ def _provision_new_org_from_checkout(sdk, team_id: str, meta: dict) -> str:
         except Exception as e:
             if "already exists" not in str(e):
                 raise
-            alt = f"{org_name} ({team_id[:4]})"
+            alt = _new_org_collision_name(org_name, team_id)
             _logger.warning(
                 "webhook: org name %r was taken; provisioning as %r (team %s)",
                 org_name, alt, team_id)
@@ -21120,10 +21148,17 @@ def _webhook_apply_event(sdk, team_id: str, event: dict) -> tuple[str | None, st
                     "webhook: new org %s fell back to metadata tier %s "
                     "(subscription tier unresolved)", team_id, meta_tier)
             else:
-                _logger.error(
-                    "webhook: new org %s has no resolvable paid tier "
-                    "(metadata tier=%r) — org exists, tier unverified",
-                    team_id, meta_tier)
+                # #2789 (code-review): RAISE, do not ack. The money was taken
+                # and the org now exists on whatever tier `_provision_new_org_
+                # from_checkout` defaulted to (free) — a 200 here would tell
+                # Stripe "processed" and nothing would ever retry, so a paying
+                # customer would sit on free limits with no self-healing. A 500
+                # makes Stripe redeliver (and the ops log records the session)
+                # so the tier can be applied once the cause is fixed.
+                raise RuntimeError(
+                    f"new-org checkout for team {team_id} has no resolvable "
+                    f"paid tier (metadata tier={meta_tier!r}, subscription "
+                    "tier unresolved) — refusing to ack")
         return notify_kind, team_id
 
     if etype == "invoice.payment_failed":

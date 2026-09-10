@@ -575,7 +575,10 @@ def test_create_team_free_capped_gate(page: Page):
     page.locator(".account-menu").get_by_role("button", name="+ Create new organization").click(force=True)  # menu closes → unmounts
     page.get_by_label("Organization name").fill("blocked")
     page.locator(".modal .btn-primary").click(force=True)  # busy-state re-render
-    dialog = page.get_by_role("dialog", name="Create a new organization")
+    # #2789: the limit mode NAMES the dialog from its own heading
+    # (`aria-labelledby`), so a screen reader hears the gate — not the generic
+    # "Create a new organization" of the name mode.
+    dialog = page.get_by_role("dialog", name="You can only have one free organization")
     # #2789: the server's structured code selects the three-option gate.
     expect(dialog).to_contain_text("You can only have one free organization", timeout=15000)
     expect(dialog).to_contain_text(
@@ -628,7 +631,7 @@ def test_create_team_pre_checked_at_cap(page: Page):
     page.goto(DASHBOARD_URL)
     _open_account_menu(page)
     page.locator(".account-menu").get_by_role("button", name="+ Create new organization").click(force=True)
-    dialog = page.get_by_role("dialog", name="Create a new organization")
+    dialog = page.get_by_role("dialog", name="You can only have one free organization")
     expect(dialog).to_contain_text("You can only have one free organization", timeout=15000)
     # The name input is NOT shown — no rejection-after-typing flow.
     expect(dialog.get_by_label("Organization name")).to_have_count(0)
@@ -636,7 +639,7 @@ def test_create_team_pre_checked_at_cap(page: Page):
     assert posted == [], "the pre-check must not POST /v1/teams"
     # The third option opens the paid-new-org flow (name + plan), not a checkout.
     dialog.get_by_role("button", name="Purchase subscription for a new organization").click()
-    dialog = page.get_by_role("dialog", name="Create a new organization")
+    dialog = page.get_by_role("dialog", name="Purchase a subscription for a new organization")
     expect(dialog.get_by_label("Organization name")).to_be_visible()
     expect(dialog.get_by_role("button", name="Continue to checkout")).to_be_visible()
     # paid plan chooser is server-resolved (no hardcoded Stripe ids)

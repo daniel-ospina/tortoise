@@ -162,7 +162,10 @@ test('#2778: the create-org name input relies on the shared rule (no class/style
   // Proximity-scoped: the first <input> after the create-org dialog marker is
   // the name field (the upgrade branch holds only buttons). Pin the exact bug
   // shape — that this field must be themed BY THE SHARED RULE, not by itself.
-  const modalIdx = mainJsx.indexOf('aria-label="Create a new organization"')
+  // #2789 moved the marker: the dialog no longer carries a static aria-label
+  // (each mode's heading names it via aria-labelledby), so the anchor is now
+  // the modal's aria-labelledby expression.
+  const modalIdx = mainJsx.indexOf('create-org-title-limit')
   assert.notEqual(modalIdx, -1, 'the create-organization dialog must still exist')
   const inputStart = mainJsx.indexOf('<input', modalIdx)
   assert.notEqual(inputStart, -1, 'the create-org name input must render after the dialog marker')
