@@ -94,14 +94,23 @@ def test_real_preflight_refuses_unpinned_or_fixed_sentinel(tmp_path,
                             stdout=lambda s: None)
     assert not out.exists() or not [p for p in out.iterdir()]  # no orphaned dir
 
-    # Branch (ii): CONCRETE pin but the arm class still hardcodes the
-    # model_id = "fixed" class sentinel (battery/arms/a4_tortoise.py etc. —
-    # verified present) -> the class-sentinel gate refuses. Asserted
-    # explicitly here (no trailing "..."): it clears only when Task 9's
-    # executor parameterizes the arm classes off the fixed sentinel.
+    # Branch (ii): CONCRETE pin — Task 9 parameterizes the real arm INSTANCE
+    # off the class-level 'fixed' sentinel (run.py `_resolve_arm`), so a
+    # concrete arms.yaml pin must be ACCEPTED and the effective pin must be
+    # the arms.yaml value. Asserted at the resolve seam (unit-level) so this
+    # test never executes live episodes — the previous shape fell through
+    # the pre-flight and made real model calls (~450 s + real spend).
     _write_pin(cfg_dir, "deepseek/deepseek-v4-flash")
-    with pytest.raises(ConfigError):                 # class-sentinel refused
-        run_mod.run_battery(run_mod.RunConfig(config_dir=cfg_dir, arms=["a4"],
-                                              executor="real", out_dir=out),
-                            stdout=lambda s: None)
-    assert not out.exists() or not [p for p in out.iterdir()]  # no orphaned dir
+    from battery.config.arms import load_arms, resolve_pinned_model
+    arm_map = load_arms(cfg_dir / "arms.yaml")
+    resolved = run_mod._resolve_arm("a4", arm_map["a4"], mock=False)
+    assert resolved.model_id == "deepseek/deepseek-v4-flash", (
+        "the arms.yaml pin must win over the class-level 'fixed' sentinel")
+    assert resolved.temperature == 0.0
+    pinned = resolve_pinned_model(resolved.model_id)  # concrete pin resolves
+    assert getattr(pinned, "id", "") == "deepseek/deepseek-v4-flash", (
+        "the resolved factory must be the pinned model, not a default")
+    # …and the placeholder is still refused at the same seam (branch i's
+    # check asserted at the unit boundary).
+    with pytest.raises(ConfigError):
+        resolve_pinned_model("flash-class-placeholder")
