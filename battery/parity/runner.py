@@ -119,6 +119,16 @@ class ParityRun:
     protocol_hash: str | None = None
     protocol_unknown: bool = False
 
+    def __post_init__(self) -> None:
+        # The invariant is enforced at CONSTRUCTION, not only in run_parity
+        # (#2806 review P2): ParityRun is exported and directly
+        # constructible, so a caller could otherwise represent a number with
+        # no samples behind it — exactly the shape #2797 removes.
+        if self.accuracy is not None and self.samples <= 0:
+            raise ValueError(
+                f"parity {self.benchmark}: accuracy={self.accuracy!r} with "
+                f"samples={self.samples} is not a measurement (#2797)")
+
     @property
     def measured(self) -> bool:
         """True only when a benchmark ACTUALLY RAN (#2797).

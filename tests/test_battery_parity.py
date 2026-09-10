@@ -150,3 +150,17 @@ class TestNoFabricatedAccuracy:
             assert cell["measured"] is False, benchmark
             assert cell["accuracy"] is None, benchmark
             assert cell["samples"] == 0, benchmark
+
+    def test_construction_refuses_inconsistent_pair(self):
+        """The invariant holds on the dataclass itself, not only in
+        run_parity — ParityRun is exported and directly constructible."""
+        from battery.parity.runner import ParityRun
+        with pytest.raises(ValueError, match="not a measurement"):
+            ParityRun(benchmark="longmemeval", arm="a4",
+                      version="longmemeval-2025.3", accuracy=0.9,
+                      methodology_matched=True, samples=0)
+        # a measured cell still constructs
+        r = ParityRun(benchmark="longmemeval", arm="a4",
+                      version="longmemeval-2025.3", accuracy=0.9,
+                      methodology_matched=True, samples=5)
+        assert r.measured is True
