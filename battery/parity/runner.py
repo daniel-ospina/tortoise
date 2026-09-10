@@ -119,6 +119,18 @@ class ParityRun:
     protocol_hash: str | None = None
     protocol_unknown: bool = False
 
+    @property
+    def measured(self) -> bool:
+        """True only when a benchmark ACTUALLY RAN (#2797).
+
+        Derived, never settable: an accuracy is a measurement only when
+        samples back it. ``run_parity`` refuses the inconsistent pair
+        (accuracy with samples <= 0), so this property cannot be turned on
+        by a caller-supplied constant. A not-measured cell reads as
+        no-data — never as a score.
+        """
+        return self.accuracy is not None and self.samples > 0
+
 
 def check_pinned_version(benchmark: str, version: str) -> None:
     """Refuse to run on an unpinned/mismatched dataset version (E2E-4.1)."""
@@ -165,6 +177,12 @@ def run_parity(benchmark: str, version: str, arm: str,
     unchanged (the #1414 invisibility hole closed).
     """
     check_pinned_version(benchmark, version)
+    if accuracy is not None and samples <= 0:
+        raise ValueError(
+            f"parity {benchmark}: accuracy={accuracy!r} with samples={samples} "
+            f"is not a measurement (#2797) — a number may only be recorded "
+            f"for a benchmark that actually ran; pass accuracy=None (and "
+            f"samples=0) for a not-measured cell")
     if baseline is None:
         raise BaselineMissingError(
             f"baseline record missing for {benchmark} — the #1144 baseline "
