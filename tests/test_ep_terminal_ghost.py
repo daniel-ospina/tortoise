@@ -790,3 +790,46 @@ def test_w4_boost_never_fires_on_terminal(sdk, monkeypatch):
     rr = ranked[0]["recall_ranking"]
     assert rr["contested"] is False, rr
     assert "w4_contested_boost" not in rr, rr
+def test_outdated_prop_rejected_on_all_write_surfaces(sdk, tmp_path):
+    """#2491: the outdated flag is server-managed (lifecycle-only). Accepting
+    it via props silently flag-flips a live claim to EP-dead with no journal
+    event and no invalidate_factor_messages drop — the #2422 ghost resurfaces
+    (the degenerate factor never re-runs to zero the stale sibling seed).
+
+    Guard lives in _sanitize_props (covers update_point, create_point, the
+    dedup-forward path, AND _update_entity's label-loop, which all sanitize)
+    plus the MCP _SERVER_MANAGED_PROPS boundary.
+    """
+    a = sdk.create_point("statement", "live claim")["id"]
+
+    # update_point: reject + pre-write (flag unset, status unchanged)
+    with pytest.raises(ValueError, match="outdated"):
+        sdk.update_point(a, props={"outdated": True})
+    rows = sdk._get_proj().g.query(
+        "MATCH (n:Point {id:$id}) RETURN n.outdated, n.status",
+        params={"id": a},
+    ).result_set
+    assert rows[0][0] is None, "flag must be unset (guard pre-write)"
+    assert rows[0][1] in ("live", "draft"), "status must be unchanged"
+
+    # create_point: reject on the new-node path
+    with pytest.raises(ValueError, match="outdated"):
+        sdk.create_point("statement", "another", props={"outdated": True})
+
+    # _update_entity surface (routes through _sanitize_props label-loop)
+    with pytest.raises(ValueError, match="outdated"):
+        sdk.update_entity(a, outdated=True)
+
+    # MCP boundary parity: server-managed list rejects with ERR_INVALID shape
+    from tortoise import mcp_server
+
+    msg = mcp_server._reject_server_managed_props({"outdated": True, "note": "x"})
+    assert msg is not None and "outdated" in msg
+
+    # Guard fired pre-write: the flag never reached the graph on ANY surface
+    rows = sdk._get_proj().g.query(
+        "MATCH (n:Point) WHERE n.outdated = true RETURN count(n)",
+    ).result_set
+    assert int(rows[0][0]) == 0, (
+        "rejected outdated prop must never reach the graph (guard pre-write)"
+    )

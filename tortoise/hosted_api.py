@@ -2055,9 +2055,8 @@ async def _session_user_team(request: Request, user: dict) -> dict:
     just the API key — otherwise disabling dashboard-key-login locks out the
     signed-in owner (their own bootstrap key is a tt_ token the gate 403s).
     Uses the user's active membership → teams row → the same dict shape
-    get_current_team produces (team_id, tier, caps, dashboard_key_login=True
-    — a session always passes the gate). Multi-team: honors ?team_id=, else
-    the first membership."""
+    get_current_team produces (team_id, tier, caps, dashboard_key_login).
+    Multi-team: honors ?team_id=, else the first membership."""
     from tortoise.supabase_control import (
         get_control_plane,
         is_supabase_enabled,
@@ -2138,8 +2137,16 @@ async def _session_user_team(request: Request, user: dict) -> dict:
         # plan state from these.
         "subscription_status": row.get("subscription_status"),
         "customer_email": row.get("customer_email"),
-        # session always passes the dashboard-login gate
-        "dashboard_key_login": row.get("dashboard_key_login", False) is not False,
+        # #2475: dashboard_key_login doubles as the UI state the dashboard
+        # switch renders (website/apps/dashboard main.jsx: aria-checked /
+        # data-on = team.dashboard_key_login !== false) — carry the REAL
+        # column with a null→true default (anon/bootstrap/legacy rows AND
+        # additive-drift reads where the column is absent keep the flag
+        # true), mirroring the key lane's `True if _dkl is None else _dkl`.
+        # The GATE itself is untouched: a session JWT bypasses
+        # _check_dashboard_key_login by design, so this lane never consults
+        # the flag for enforcement — only the UI renders from it.
+        "dashboard_key_login": row.get("dashboard_key_login") is not False,
     }
     # #1913: post-auth abuse evaluation — the session-JWT lane was the
     # abuse-blind hole (key lanes call _abuse_post_auth in get_current_team /
@@ -5365,6 +5372,19 @@ def _mint_key(team_id: str, *, graph_id: str | None = None,
 
     # Key-cap gate (pre-check; the caller rolls back on _KeyCapExceeded —
     # the provisioning caller rolls back the graph, no graph-without-key).
+    # #2481 (audit pin): this is the PRIMARY mint gate for every standalone
+    # mint surface (POST /v1/team/keys legacy/scoped/child mints and the
+    # per-graph create_team_graph mint). It counts via quota._count_resource
+    # — the ONE predicate that already excludes revoked rows
+    # (revoked_at IS NULL) and expired rows (#2426), so revoked tombstones
+    # never consume the max_api_keys budget. The session-key mint/rotate
+    # lanes (session_key / _session_key_supabase) and the signup-token
+    # recovery lanes carry their own predicates with the SAME
+    # revoked_at IS NULL + non-bootstrap exclusions. #2426 note: the
+    # recovery lanes' EXPIRY exclusion diverges (the Supabase
+    # recover_team_key RPC still counts expired-but-unrevoked rows while
+    # its registry twin excludes them) — recorded as out of scope for
+    # #2481 (revoked-only); recovery never 402s, so no user wedge.
     from tortoise.quota import _count_resource
     from tortoise.supabase_control import (
         get_control_plane,

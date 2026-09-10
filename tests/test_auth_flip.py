@@ -222,6 +222,35 @@ class TestSessionKeyRoundTrip:
         assert new_rows[0]["revoked_at"] is None  # minted key lands unrevoked
         assert new_rows[0]["created_via"] == "recovery"
 
+    def test_recovery_mint_succeeds_with_only_revoked_tombstones(
+            self, rest_client, authed_user):
+        """#2481 (session-key recovery lane, SUPABASE): revoked api_keys
+        rows are audit tombstones — never max_api_keys budget consumers.
+        A team whose every prior durable row was revoked (active = 0) mints
+        a recovery key immediately (no rotation, no 402), even with a tall
+        revoked-tombstone stack present."""
+        tc, fake = rest_client
+        fake.seed("team_memberships",
+                  [_membership_row(user_id=_USER1, team_id="team-free-001")])
+        fake.seed("api_keys", [
+            _key_row(id=f"tomb-{i}",
+                     created_via=("recovery" if i % 2 else "provisioned"),
+                     created_by=_USER1, lookup_hash=f"h-tomb-{i}",
+                     created_at=f"2026-08-0{1 + i}T00:00:00Z",
+                     revoked_at="2026-08-09T00:00:00Z")
+            for i in range(5)
+        ])
+        r = tc.post("/v1/session/key", json={"purpose": "recovery"})
+        assert r.status_code == 200, r.text
+        assert r.json()["expires_at"] is None  # recovery mint, not bootstrap
+        assert r.json()["rotated"] is False    # slot was free — no rotation
+        # post-mint persistent count == 1 (the fresh recovery key); the five
+        # revoked tombstones consumed nothing
+        persistent = [row for row in fake.tables["api_keys"]
+                      if row.get("revoked_at") is None
+                      and row.get("created_via") != "bootstrap"]
+        assert len(persistent) == 1
+
     def test_recovery_cap_rotates_own_bootstrap_when_all_keys_own(
             self, rest_client, authed_user):
         """#1828 + review P2-1: at max_api_keys with only OWN keys and NO

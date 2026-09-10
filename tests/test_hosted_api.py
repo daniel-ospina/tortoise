@@ -1108,6 +1108,63 @@ class TestKeysExpiry2426:
             app.dependency_overrides.clear()
 
 
+class TestRevokedKeysDoNotConsumeCap2481:
+    """#2481 (REGISTRY lane) — revoked keys are audit tombstones, never
+    max_api_keys budget consumers. The reported bug: after revoking a key
+    a team could not mint a replacement while only revoked tombstones
+    remained. Audit result: every cap seam counts via quota._count_resource
+    with the predicate `revoked_at IS NULL AND (expires_at IS NULL OR > now)`
+    — revoked rows never count. These tests PIN that: revoke-then-mint
+    succeeds at cap, a pre-existing tombstone stack alone can never 402
+    (legacy mint) or 409 (scoped mint), and only a true ACTIVE overage
+    still 402s/409s (active-key semantics unchanged)."""
+
+    def test_revoke_then_mint_succeeds_at_cap(self, client):
+        """Team at max (2 active) revokes one key → the revoked row must
+        not hold the slot; a replacement mint immediately succeeds."""
+        a = client.post("/v1/team/keys")
+        b = client.post("/v1/team/keys")
+        assert a.status_code == 200 and b.status_code == 200
+        # control: at the cap with 2 ACTIVE keys → 402
+        assert client.post("/v1/team/keys").status_code == 402
+        # revoke one key → its tombstone must NOT consume the cap slot
+        r = client.delete(f"/v1/team/keys/{a.json()['id']}")
+        assert r.status_code == 200 and r.json()["revoked"] is True
+        m = client.post("/v1/team/keys", json={"name": "replacement"})
+        assert m.status_code == 200, m.text
+
+    def test_revoked_tombstone_stack_never_blocks_mint(self, client):
+        """Repeated create+revoke leaves only revoked tombstones behind;
+        the team must mint at the cap on every cycle. The 402 (legacy mint)
+        and 409 (scoped mint) gates fire ONLY on a true ACTIVE overage —
+        never on the tombstone stack."""
+        for i in range(4):
+            r = client.post("/v1/team/keys", json={"name": f"cycle-{i}"})
+            assert r.status_code == 200, r.text
+            d = client.delete(f"/v1/team/keys/{r.json()['id']}")
+            assert d.status_code == 200, d.text
+        # every key this team ever minted is now a revoked tombstone → two
+        # fresh mints land; a third 402s ONLY because 2 are ACTIVE.
+        k1 = client.post("/v1/team/keys")
+        k2 = client.post("/v1/team/keys")
+        assert k1.status_code == 200 and k2.status_code == 200
+        assert client.post("/v1/team/keys").status_code == 402
+        # the scoped-mint 409 gate reads the SAME count — tombstones cannot
+        # 409 it either; the 2 active keys can.
+        assert client.post("/v1/team/keys",
+                           json={"scopes": ["graphs:read"]}).status_code == 409
+        # revoke one active key → BOTH the 402 and 409 surfaces free up
+        assert client.delete(
+            f"/v1/team/keys/{k1.json()['id']}").status_code == 200
+        # scoped-mint 409 surface first (tombstones still present)
+        s = client.post("/v1/team/keys", json={"scopes": ["graphs:read"]})
+        assert s.status_code == 200, s.text
+        # legacy-mint 402 surface too
+        assert client.delete(
+            f"/v1/team/keys/{s.json()['id']}").status_code == 200
+        assert client.post("/v1/team/keys").status_code == 200
+
+
 class TestKeysList:
     """GET /v1/team/keys — list API keys (hashes only)."""
 
