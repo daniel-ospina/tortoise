@@ -284,16 +284,21 @@ make the hourly job RED, so a broken pipeline cannot stay green for weeks (the
 | deliberate-off | `enabled:false`, no `config_error`/`storage_error`, pool **measured** fresh | silent `exit 0` — a real operator pause must not page |
 | off-because-broken | `enabled:false` + non-null `config_error` | files **SWEEP_CONFIG_ERROR**, job RED |
 | off-because-storage-down | `enabled:false` + non-null `storage_error` | files **R2_DOWN**, job RED |
-| off-while-pool-stale | `enabled:false`, no config/storage error, a `backups/{team}/default/` archive older than `BACKUP_DRIVER_DOWN_THRESHOLD_MIN` (240) — or a team prefix with **no default archive at all** | files **SWEEP_OFF_STALE**, job RED (the per-team STALE incident still files) |
-| enabled-but-backing-up-nothing | `enabled:true` and the sweep backed up 0 teams (`no_teams` / `no_eligible_teams` / `no_work` / `enum_failed` / `error`) while the R2 pool holds ≥1 team prefix, **or while the pool cannot be measured** | files **SWEEP_NO_COVERAGE**, job RED |
+| off-while-pool-stale | `enabled:false`, no config/storage error, and the pool is not **measured fresh**: a `backups/{team}/default/` archive older than `BACKUP_DRIVER_DOWN_THRESHOLD_MIN` (240), a team prefix with **no default archive at all**, or a listing that failed | files **SWEEP_OFF_STALE**, job RED (the per-team STALE incident still files) |
+| enabled-but-backing-up-nothing | `enabled:true` and the sweep backed up 0 teams (`no_teams` / `no_eligible_teams` / `no_work` / `enum_failed` / `error`) while the R2 pool holds ≥1 team prefix, **or while the pool cannot be measured**, **or** the sweep reported a lock that cannot be verified as recent | files **SWEEP_NO_COVERAGE**, job RED |
 
-**Unknown ≠ empty (the dominant rule).** A failed `list-objects-v2` (or a
-bucket key without `ListObjects`) leaves the pool *unmeasured* — the driver
-then never reads it as fresh and never lets it silence the 0-team envelope. An
-unclassifiable `/status` (no boolean `.enabled`, or a non-JSON 200) fails
-**closed** as SWEEP_NO_COVERAGE rather than being read as a pause, and a
-`202` sweep lock held longer than the driver-down window is SWEEP_NO_COVERAGE
-too (a stuck lock is not a running sweep).
+**Unknown ≠ empty (the dominant rule).** A failed `list-objects-v2` — the
+top-level listing OR any per-team listing — leaves the pool *unmeasured*: the
+driver then never reads it as fresh, never files a false `STALE` from a failed
+read, and never lets it silence the 0-team envelope. A failed read while the
+sweep is OFF is **not** a confirmed deliberate pause, so it files
+SWEEP_OFF_STALE. An unclassifiable `/status` (no boolean `.enabled`, or a
+non-JSON 200) fails **closed** as SWEEP_NO_COVERAGE. A held sweep lock is not
+healthy on its own: a usable `last_sweep_at` older than the driver-down window,
+or an *unverifiable* lock (no usable `last_sweep_at`) with data in the pool,
+is SWEEP_NO_COVERAGE. The `error`/`enum_failed`/unrecognized sweep statuses
+file SWEEP_NO_COVERAGE **regardless of pool state** (only the enumerated-empty
+statuses `no_teams`/`no_eligible_teams`/`no_work` use the 0-team envelope).
 
 **0-team false-positive envelope:** when the sweep finds 0 teams **and the R2
 pool is measured empty**, the chronic pre-beta state is assumed and nothing is
@@ -305,10 +310,11 @@ unmeasured pool) is loud.
 (the app answered). `R2_DOWN` clears **only** when the driver's own
 `head-bucket` preflight succeeded this run — a sweep that "completes" with R2
 down must not close the `R2_DOWN` it just filed (that would re-file and
-re-close forever). `WATCHER_DOWN` clears on **watcher evidence** (a fresh
-`.watcher` heartbeat read this run), not on the sweep — a 0-team sweep says
-nothing about the in-process daemon. `SWEEP_NO_COVERAGE` clears **only** on a
-run that actually backed up (`backed_up`/`degraded`).
+re-close forever). `WATCHER_DOWN` clears on **watcher evidence** (a `.watcher`
+block with a real boolean `running` read this run) — a missing/malformed block
+neither files nor clears it, because unknown is not evidence the daemon is
+alive. `SWEEP_NO_COVERAGE` clears **only** on a run that actually backed up
+(`backed_up`/`degraded`).
 
 **Dedup lifecycle:** incidents are create-once in R2
 (`ops/alerts/{kind}/{subject}.json`) with a GitHub-search fallback. A global
@@ -316,21 +322,32 @@ incident exists under **both** `global.json` (driver) and `_.json` (the
 server-side `AlertStore`); resolve deletes **both**, so a recurrence is a new
 incident on either writer (#2844). Resolution is delete-to-resolve — the object
 is dropped so a recurring condition pages again instead of being swallowed. The
-412 create-race branch trusts the recorded R2 object (and its issue state) over
-a GitHub search, which can lag.
+412 create-race branch reads the recorded R2 object and its issue state: an
+open issue is a no-op, a closed **or deleted (404)** issue re-files, and a
+transient/rate-limited response is treated as open so a blip never duplicates.
 
-**Publication redaction:** `config_error`/`storage_error` are published into a
-**public** GitHub issue + Telegram, and the app's error text can embed key
-material (e.g. `must be base64 (got '<key prefix>'...)`). The driver strips
-quoted tokens, long base64-ish runs and paths before filing.
+**Publication redaction:** `config_error`/`storage_error`, the raw sweep body
+and `last_sweep` (whose `graph_failures[].error` carries raw per-graph
+exception text) are published into a **public** GitHub issue + Telegram. The
+driver normalises to one line and strips quoted tokens, bare token-like runs
+(≥24 chars, including `_`/`-`, so a `ghp_…` PAT is caught) and filesystem paths
+*before* truncating.
+
+**Credential requirement:** the driver now **fails closed** if `GITHUB_TOKEN`
+is unset — Actions does not export it into step envs, so
+`.github/workflows/registry-backup-cron.yml` passes `${{ secrets.GITHUB_TOKEN }}`
+explicitly (`permissions: issues: write`). Without it every incident POST/close
+would 401 while the job could still look green.
 
 **Regression harness:** `bash .github/scripts/registry-cron.test.sh` (CI: the
-`backup-driver-scripts` job in `.github/workflows/ci.yml`). It stubs
-`aws`/`curl`/`date` and asserts all five states, the unmeasurable-pool rule,
-the 0-team envelope, the stuck-lock and unclassifiable-status failsafes,
-redaction, self-heal tiers, and dedup recurrence/refresh. (The driver carries
-the exec bit so the harness invokes it directly — a `$(bash script)` command
-substitution trips the agent worktree guard, #1484.)
+`backup-driver-scripts` job in `.github/workflows/ci.yml`, gated on the
+`registry-cron*` + cron/ci workflow surface). It stubs `aws`/`curl`/`date` and
+asserts all five states, the unmeasurable-pool rule, the 0-team envelope, the
+stuck/unverifiable lock, unclassifiable-status and missing-token failsafes,
+redaction (including bare runs and `last_sweep`), self-heal tiers, the dual-key
+delete, and dedup open/closed/404/blip. (The driver carries the exec bit so the
+harness invokes it directly — a `$(bash script)` command substitution trips the
+agent worktree guard, #1484.)
 
 ## Alert taxonomy + triage
 | Kind | Meaning | Triage |
@@ -345,8 +362,8 @@ substitution trips the agent worktree guard, #1484.)
 | APP_DOWN | app unreachable from the driver | Fly health; cold-start OOM (#545) |
 | WATCHER_DOWN | watcher heartbeat stale (daemon dead) | Check app logs; restart |
 | SWEEP_CONFIG_ERROR | `enabled:false` **with** a non-null `config_error` — the sweep flag says "run" but `load_config()` raised (e.g. missing `REGISTRY_STREAM_KEY`). The pre-#2796 driver exited 0 here. Error text is redacted before filing | Fix the Fly secret/config (`§REGISTRY_STREAM_KEY`); the next healthy run self-heals |
-| SWEEP_OFF_STALE | `enabled:false`, no config/storage error, but a `backups/{team}/default/` archive is older than `BACKUP_DRIVER_DOWN_THRESHOLD_MIN` (240m) — or a team prefix has no default archive at all. A disabled/paused sweep while the pool decays | Re-enable backups or declare a bounded pause; investigate why the flag is off |
-| SWEEP_NO_COVERAGE | `enabled:true` but the sweep backed up 0 teams (the #2823 empty-enumeration class: `no_teams`/`no_work`/`enum_failed`/`error`), **or** the R2 pool could not be measured, **or** `/status` was unclassifiable, **or** a `202` sweep lock outlived `BACKUP_DRIVER_DOWN_THRESHOLD_MIN` | Inspect `last_sweep` on `/status`; the sweep enumerates 0 teams → #2823 / #2340 control-plane resolution |
+| SWEEP_OFF_STALE | `enabled:false`, no config/storage error, and the pool is not **measured fresh**: a `backups/{team}/default/` archive older than `BACKUP_DRIVER_DOWN_THRESHOLD_MIN` (240m), a team prefix with no default archive at all, or a failed listing | Re-enable backups or declare a bounded pause; investigate why the flag is off. If a listing failed, check the R2 access key's `ListObjects` permission |
+| SWEEP_NO_COVERAGE | `enabled:true` but the sweep backed up 0 teams (the #2823 empty-enumeration class: `no_teams`/`no_work`/`no_eligible_teams`/`enum_failed`/`error`), **or** the R2 pool could not be measured, **or** `/status` was unclassifiable, **or** a held sweep lock outlived `BACKUP_DRIVER_DOWN_THRESHOLD_MIN` (or cannot be verified) | Inspect `last_sweep` on `/status`; the sweep enumerates 0 teams → #2823 / #2340 control-plane resolution |
 | LIVENESS_NO_WORK | driver ran but did nothing (sweep skipped + reconcile empty) — reserved kind, **not yet emitted by the driver**; the enabled-but-0-teams case is now SWEEP_NO_COVERAGE (#2796) | Verify teams exist; otherwise expected pre-beta |
 | SIZE_GUARD_ABORT | team graph > 100k nodes — dump aborted | Investigate graph growth; raise limit deliberately |
 | DATA_LOSS_CANDIDATE | a team's node count dropped >50% (or >0→0) | **Manual close only** — verify + re-baseline or restore |

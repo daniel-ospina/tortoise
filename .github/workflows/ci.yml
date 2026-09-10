@@ -184,6 +184,9 @@ jobs:
               "driver_scripts": any_file(
                   startswith(".github/scripts/registry-cron"),
                   isfile(".github/workflows/registry-backup-cron.yml"),
+                  # a job-definition change re-runs its own suite (dashboard_e2e
+                  # precedent) — review R12/Config.
+                  isfile(".github/workflows/ci.yml"),
               ),
               # dashboard-e2e (#2166/#2178): the two-server keys-table suite
               # (mixed fixture — durable-only render regression). Triggers on

@@ -13,8 +13,9 @@
 #      pool → SWEEP_OFF_STALE; an unmeasurable pool is never read as fresh.
 #      Only a genuinely deliberate pause (no config error, no storage error,
 #      a MEASURED fresh pool) stays silent (#2796)
-#   4. POST /backups/sweep (202 = lock held; a lock held past the driver-down
-#      window → SWEEP_NO_COVERAGE)
+#   4. POST /backups/sweep (a held lock whose last real sweep is older than the
+#      driver-down window, or is unverifiable while the pool holds data →
+#      SWEEP_NO_COVERAGE)
 #   4b. enabled-but-nothing — a sweep that backed up 0 teams while the R2 pool
 #      holds team prefixes, or while the pool cannot be measured →
 #      SWEEP_NO_COVERAGE, job red (#2796/#2823)
@@ -55,16 +56,33 @@ fail() { echo "[backup-driver] ERROR: $*" >&2; }
 # fingerprint, see tortoise/backup_config.py). Scrub quoted tokens, long
 # base64-ish runs and filesystem paths before publishing — defence in depth for
 # any other module's error text.
-redact() { # text -> text safe for a public issue body
-  printf '%s' "$1" | sed -E \
+redact() { # text -> text safe for a public issue body / public Actions log
+  # Review R4/Security: the previous rules were bypassable (a GitHub PAT
+  # `ghp_…` contains `_`, so the 40-char run never matched; the double-quote
+  # rule needed 16 chars while the single-quote rule needed 4; sed is
+  # line-oriented and `jq -r` unescapes \n). Normalise to one line first, use
+  # ONE quote threshold, and widen the bare-run class to include `_`/`-`.
+  printf '%s' "$1" | tr '\n\r\t' '   ' | sed -E \
     -e "s/'[^']{4,}'/'<redacted>'/g" \
-    -e 's/"[^"]{16,}"/"<redacted>"/g' \
-    -e 's/[A-Za-z0-9+\/=]{40,}/<redacted>/g' \
+    -e 's/"[^"]{4,}"/"<redacted>"/g' \
+    -e 's/[A-Za-z0-9+\/_.=-]{24,}/<redacted>/g' \
     -e 's#(/[A-Za-z0-9._-]+){3,}#<path>#g' || true
+}
+redact_truncate() { # text max_chars — redact BEFORE truncating (a secret must
+  # not be cut into a sub-threshold fragment that escapes the run rules).
+  redact "$1" | head -c "$2"
 }
 
 if [ -z "$API" ] || [ -z "$KEY" ]; then
   fail "INTERNAL_API_URL / FASTAPI_INTERNAL_KEY not set"
+  exit 1
+fi
+if [ -z "$GH_TOKEN" ]; then
+  # Review (Config/R2b): GitHub Actions does NOT export GITHUB_TOKEN into step
+  # envs — the cron workflow must pass it explicitly. Without it every incident
+  # POST/close is a 401, so the "loud" channel is dead while the job can still
+  # look green. Fail closed.
+  fail "GITHUB_TOKEN not set — DR incidents cannot be filed or closed; refusing to run blind"
   exit 1
 fi
 
@@ -100,17 +118,26 @@ gh_find_open() { # kind id(subject) -> first open issue number whose TITLE subje
     | jq -r --arg suf " — $id" \
       '[.items[] | select(.title | endswith($suf))][0].number // empty' 2>/dev/null || true
 }
-gh_issue_open() { # number -> 0 when OPEN or state unknown; 1 when confirmed closed/missing
-  # #2796 (review R3): the 412 dedup branch must trust the object over a GH
-  # search. Treat an unknown state (rate limit / transient) as OPEN so a blip
-  # can never duplicate the incident; only a confirmed "closed" re-files.
-  local n="${1:-}" state=""
+gh_issue_open() { # number -> 0 when OPEN or unknown; 1 when confirmed closed OR missing
+  # #2796 (review R3/R4): the 412 dedup branch must trust the object over a GH
+  # search, and must be able to tell a DELETED issue (404) from a transient
+  # blip. A 404 is definitively gone → re-file (otherwise the recurrence is
+  # swallowed forever). Rate-limit/5xx/network → assume OPEN, never duplicate.
+  local n="${1:-}" code="" state=""
   [ -n "$GH_TOKEN" ] && [ -n "$n" ] || return 0
+  code="$(curl -sS -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $GH_TOKEN" \
+    -H "Accept: application/vnd.github+json" \
+    "https://api.github.com/repos/${REPO}/issues/${n}" 2>/dev/null || echo 000)"
+  case "$code" in
+    404) return 1 ;;   # definitively missing → re-file
+    200) : ;;
+    *)   return 0 ;;   # transport / rate-limit / 5xx → assume open
+  esac
   state="$(curl -sS -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
     "https://api.github.com/repos/${REPO}/issues/${n}" | jq -r '.state // empty' 2>/dev/null || true)"
   case "$state" in
     open) return 0 ;;
-    "")   return 0 ;;   # unknown → assume open, never duplicate
+    "")   return 0 ;;   # unparseable body on a 200 → assume open
     *)    return 1 ;;   # closed
   esac
 }
@@ -119,7 +146,7 @@ gh_close() { # number comment kind id
   local kind="${3:-}" id="${4:-}"
   curl -sS -X POST -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
     "https://api.github.com/repos/${REPO}/issues/$1/comments" \
-    -d "{\"body\":\"$2\"}" >/dev/null 2>&1 || true
+    -d "$(jq -nc --arg b "$2" '{body:$b}')" >/dev/null 2>&1 || true
   curl -sS -X PATCH -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
     "https://api.github.com/repos/${REPO}/issues/$1" -d '{"state":"closed"}' >/dev/null 2>&1 || true
   # delete-to-resolve: drop the R2 dedup object so a RECURRENCE is a new
@@ -203,12 +230,13 @@ R2_OK=1
 # #2796: pool-level signals retained from the app-independent leg and consumed
 # by the kill-switch classifier (off-while-stale) and the no-coverage check
 # (enabled but 0 teams backed up) below.
-POOL_STALE=0        # a graph's newest default archive is older than DRIVER_DOWN_MIN (or absent/unmeasurable)
+POOL_STALE=0        # a team's newest default archive is older than DRIVER_DOWN_MIN
 R2_TEAM_COUNT=0     # team prefixes present under backups/
 # #2796 (review R5): a FAILED listing is UNKNOWN, not empty. Without this flag
 # an R2 read that lacks ListObjects (or a transient failure) would look like
 # "pool empty" — suppressing SWEEP_NO_COVERAGE and reporting a stale pool as
-# fresh. R2_LIST_OK=1 only when list-objects-v2 actually succeeded.
+# fresh. R2_LIST_OK stays 1 only when the top-level AND every per-team listing
+# succeeded (the whole pool is genuinely measured).
 R2_LIST_OK=0
 # Bucket-scoped probe (head-bucket) — R2's S3 API does not reliably support
 # the account-level ListBuckets call from an object-scoped access key.
@@ -226,11 +254,22 @@ if [ "$R2_OK" = "1" ]; then
     R2_LIST_OK=1
   else
     TEAMS=""
-    log "R2 listing failed — pool state is UNKNOWN (not empty)"
+    log "R2 top-level listing failed — pool state is UNKNOWN (not empty)"
   fi
   if [ -n "$TEAMS" ]; then
-    for prefix in $TEAMS; do
+    # `while read` rather than `for $TEAMS`: an unquoted expansion word-splits
+    # AND glob-expands, so a bucket key containing `*` or whitespace would
+    # fabricate team names carried into R2 keys and incident titles (security
+    # review). Skip keys that are not our validated team-id shape.
+    while IFS= read -r prefix; do
+      [ -n "$prefix" ] || continue
       team="$(basename "$prefix")"
+      case "$team" in
+        ''|*[!A-Za-z0-9_-]*)
+          log "skipping unexpected team prefix '${prefix}' (not a valid team id)"
+          continue
+          ;;
+      esac
       R2_TEAM_COUNT=$((R2_TEAM_COUNT + 1))
       # #2375: DEFAULT-graph freshness ONLY — nested default segment
       # (backups/{team}/default/) + legacy flat (pre-#2313 default dumps;
@@ -242,14 +281,30 @@ if [ "$R2_OK" = "1" ]; then
       # legacy-flat classification index (#2370) additionally excludes
       # C5-era custom flat dumps when present (flat-only fallback is parity
       # pre-index).
-      newest="$(aws s3api list-objects-v2 --endpoint-url "$R2_ENDPOINT" \
+      team_measured=1
+      if ! newest="$(aws s3api list-objects-v2 --endpoint-url "$R2_ENDPOINT" \
         --bucket "$R2_BUCKET" --prefix "backups/${team}/default/" \
         --query "Contents[?ends_with(Key, 'dump.enc')] | sort_by(@, &LastModified) | [-1].LastModified" \
-        --output text 2>/dev/null || true)"
-      flat_list="$(aws s3api list-objects-v2 --endpoint-url "$R2_ENDPOINT" \
+        --output text 2>/dev/null)"; then
+        newest=""
+        team_measured=0
+        log "team ${team}: default-archive listing FAILED — freshness UNKNOWN"
+      fi
+      if ! flat_list="$(aws s3api list-objects-v2 --endpoint-url "$R2_ENDPOINT" \
         --bucket "$R2_BUCKET" --prefix "backups/${team}/2" \
         --query "Contents[?ends_with(Key, 'dump.enc')].[Key,LastModified]" \
-        --output json 2>/dev/null || true)"
+        --output json 2>/dev/null)"; then
+        flat_list="[]"
+        team_measured=0
+        log "team ${team}: legacy-flat listing FAILED — freshness UNKNOWN"
+      fi
+      if [ "$team_measured" = "0" ]; then
+        # A failed per-team read is unmeasurable, never "no archive" (review
+        # R2a): the disabled path must refuse to claim freshness, not file a
+        # false stale.
+        R2_LIST_OK=0
+        continue
+      fi
       if [ -n "$flat_list" ] && [ "$flat_list" != "[]" ]; then
         idx="$(r2_get "ops/legacy-flat-index/${team}.json")"
         if [ -n "$idx" ] && [ "$(printf '%s' "$idx" | jq -r 'type' 2>/dev/null)" = "object" ]; then
@@ -291,7 +346,7 @@ if [ "$R2_OK" = "1" ]; then
         log "team ${team}: team prefix present but no default archive — treating pool as stale"
         POOL_STALE=1
       fi
-    done
+    done <<< "$TEAMS"
   fi
 fi
 
@@ -327,8 +382,11 @@ CONFIG_ERR="$(printf '%s' "$STATUS" | jq -r '.config_error // empty' 2>/dev/null
 CONFIG_ERR_SAFE="$(redact "$CONFIG_ERR")"
 STORAGE_ERR_SAFE="$(redact "$STORAGE_ERR")"
 LAST_SWEEP_AT="$(printf '%s' "$STATUS" | jq -r '.last_sweep.last_sweep_at // empty' 2>/dev/null || true)"
+# Review R2a/R2b/Security: `last_sweep` carries `graph_failures[].error` (raw
+# per-graph exception text) and is published in an incident body — redact it.
+LAST_SWEEP_SAFE="$(redact "$(printf '%s' "$STATUS" | jq -c '.last_sweep' 2>/dev/null || echo null)")"
 log "status: enabled=$ENABLED storage_error=${STORAGE_ERR_SAFE:-none} config_error=${CONFIG_ERR_SAFE:-none}"
-log "raw status: $(redact "$(printf '%s' "$STATUS" | head -c 600)")"
+log "raw status: $(redact_truncate "$STATUS" 600)"
 
 if [ "$ENABLED" = "unknown" ]; then
   # Fail CLOSED, never silent: an unclassifiable /status must not look like a
@@ -365,29 +423,45 @@ if [ "$ENABLED" != "true" ]; then
     fail "backups disabled while the R2 pool is stale (> ${DRIVER_DOWN_MIN}m)"
     exit 1
   fi
-  # Only a MEASURED-fresh pool may clear the off-stale incident (review R5):
-  # an unmeasurable pool is not evidence of freshness.
-  if [ "$R2_LIST_OK" = "1" ]; then
-    resolve_global SWEEP_OFF_STALE "Resolved — the R2 pool is fresh again."
-  else
-    log "R2 pool unmeasured (listing failed) — leaving any SWEEP_OFF_STALE open rather than claiming fresh"
+  # Only a MEASURED-fresh pool may be read as a deliberate pause (review
+  # R5/Agent1): an unmeasurable pool is not evidence of freshness, and an
+  # unverifiable pool while off is exactly the "broken monitoring stays green"
+  # class.
+  if [ "$R2_LIST_OK" != "1" ]; then
+    log "kill-switch off and the R2 pool cannot be measured — a deliberate pause cannot be confirmed; filing SWEEP_OFF_STALE (job red)"
+    file_alert SWEEP_OFF_STALE "[DR] SWEEP_OFF_STALE — backups off, pool unverifiable" \
+      "enabled=false with no config_error, but the R2 pool listing failed (R2_OK=${R2_OK}, R2_LIST_OK=0): pool freshness cannot be established, so this is NOT a confirmed deliberate pause. Check the R2 access key's ListObjects permission." "global"
+    fail "backups disabled and the R2 pool cannot be measured"
+    exit 1
   fi
-  log "kill-switch: backups deliberately disabled (no config/storage error) — skipping"
+  resolve_global SWEEP_OFF_STALE "Resolved — the R2 pool is measured fresh."
+  log "kill-switch: backups deliberately disabled (measured-fresh pool) — skipping"
   exit 0
 fi
 
 # ── 2. watcher supervision (WATCHER_DOWN when the daemon is dead) ────────────
 # #2843: `.watcher.running // true` is dead — jq's `//` treats a boolean
 # false as empty, so a watcher reporting running=false was read as running.
-# Require the boolean explicitly.
-WATCHER_RUNNING="$(printf '%s' "$STATUS" | jq -r 'if (.watcher.running|type)=="boolean" then (.watcher.running|tostring) else "true" end' 2>/dev/null || echo true)"
-WATCHER_AGE="$(printf '%s' "$STATUS" | jq -r '.watcher.age_minutes // 0' 2>/dev/null || echo 0)"
+# Review R2b/Agent1: a MISSING/malformed `.watcher` block must not count as
+# fresh either (unknown ≠ fresh) — it is measured only with a real boolean.
+WATCHER_MEASURED="$(printf '%s' "$STATUS" | jq -r 'if (.watcher.running|type)=="boolean" then "1" else "0" end' 2>/dev/null || echo 0)"
+WATCHER_RUNNING="$(printf '%s' "$STATUS" | jq -r 'if (.watcher.running|type)=="boolean" then (.watcher.running|tostring) else "unknown" end' 2>/dev/null || echo unknown)"
+WATCHER_AGE="$(printf '%s' "$STATUS" | jq -r 'if (.watcher.age_minutes|type)=="number" then (.watcher.age_minutes|tostring) else "unknown" end' 2>/dev/null || echo unknown)"
 WATCHER_STALE=0
-if [ "$WATCHER_RUNNING" != "true" ] || [ "${WATCHER_AGE%.*}" -gt 30 ] 2>/dev/null; then
-  WATCHER_STALE=1
-  log "watcher heartbeat stale (running=$WATCHER_RUNNING age=${WATCHER_AGE}m) — filing WATCHER_DOWN"
-  file_alert WATCHER_DOWN "[DR] WATCHER_DOWN — staleness daemon dead" \
-    "The in-process watcher is not reporting (running=$WATCHER_RUNNING, age=${WATCHER_AGE}m). Check app logs." "global"
+if [ "$WATCHER_MEASURED" = "1" ]; then
+  watcher_bad=0
+  [ "$WATCHER_RUNNING" != "true" ] && watcher_bad=1
+  if [ "$WATCHER_AGE" != "unknown" ] && [ "${WATCHER_AGE%.*}" -gt 30 ] 2>/dev/null; then
+    watcher_bad=1
+  fi
+  if [ "$watcher_bad" = "1" ]; then
+    WATCHER_STALE=1
+    log "watcher heartbeat stale (running=$WATCHER_RUNNING age=${WATCHER_AGE}m) — filing WATCHER_DOWN"
+    file_alert WATCHER_DOWN "[DR] WATCHER_DOWN — staleness daemon dead" \
+      "The in-process watcher is not reporting (running=$WATCHER_RUNNING, age=${WATCHER_AGE}m). Check app logs." "global"
+  fi
+else
+  log "watcher block missing/malformed in /status — cannot assess the watcher; leaving WATCHER_DOWN unchanged"
 fi
 
 # ── 3. run the sweep ────────────────────────────────────────────────────────
@@ -409,27 +483,33 @@ case "$RUN_STATUS" in
   backed_up|degraded)
     ;;
   already_running)
-    # 202 = another sweep holds the lock. A lock that is NEVER released looks
-    # exactly like a healthy running sweep from this leg, so gate on the
-    # sweep's own freshness (#2796 review R5): if the last REAL sweep in
-    # /status is older than the driver-down window, the lock is stuck.
+    # The app reports a held lock as a 200 body status=already_running (not an
+    # HTTP 202). A lock that is NEVER released looks exactly like a healthy
+    # running sweep from this leg, so gate on the sweep's own freshness: a
+    # usable last_sweep_at older than the driver-down window means stuck, and
+    # an UNVERIFIABLE lock with data in the pool is not healthy either
+    # (review R5/R2a/Test).
+    last_ts=0
     if [ -n "$LAST_SWEEP_AT" ]; then
       last_ts="$(date -d "$LAST_SWEEP_AT" +%s 2>/dev/null || echo 0)"
-      if [ "$last_ts" = "0" ]; then
-        log "sweep already running (202); unparseable last_sweep_at '$LAST_SWEEP_AT' — cannot age-check"
+    fi
+    if [ "$last_ts" != "0" ]; then
+      last_age_min=$(( ($(date +%s) - last_ts) / 60 ))
+      if [ "$last_age_min" -gt "$DRIVER_DOWN_MIN" ]; then
+        log "sweep lock held but the last real sweep was ${last_age_min}m ago (> ${DRIVER_DOWN_MIN}m) — filing SWEEP_NO_COVERAGE (job red)"
+        file_alert SWEEP_NO_COVERAGE "[DR] SWEEP_NO_COVERAGE — sweep lock stuck" \
+          "the app reported already_running (lock held) and last_sweep.last_sweep_at is ${last_age_min}m old (> ${DRIVER_DOWN_MIN}m). The lock appears stuck; backups are NOT running. Check the app's sweep lock." "global"
+        NO_COVERAGE=1
       else
-        last_age_min=$(( ($(date +%s) - last_ts) / 60 ))
-        if [ "$last_age_min" -gt "$DRIVER_DOWN_MIN" ]; then
-          log "sweep lock held but the last real sweep was ${last_age_min}m ago (> ${DRIVER_DOWN_MIN}m) — filing SWEEP_NO_COVERAGE (job red)"
-          file_alert SWEEP_NO_COVERAGE "[DR] SWEEP_NO_COVERAGE — sweep lock stuck" \
-            "POST /backups/sweep returned 202 (lock held) and .last_sweep.last_sweep_at is ${last_age_min}m old (> ${DRIVER_DOWN_MIN}m). The lock appears stuck; backups are NOT running. Check the app's sweep lock." "global"
-          NO_COVERAGE=1
-        else
-          log "sweep already running (202); last real sweep ${last_age_min}m ago — healthy"
-        fi
+        log "sweep lock held; last real sweep ${last_age_min}m ago — healthy"
       fi
+    elif [ "$R2_LIST_OK" = "1" ] && [ "${R2_TEAM_COUNT:-0}" -gt 0 ]; then
+      log "sweep lock held but /status carries no usable last_sweep_at while the pool holds ${R2_TEAM_COUNT} team prefix(es) — filing SWEEP_NO_COVERAGE (job red)"
+      file_alert SWEEP_NO_COVERAGE "[DR] SWEEP_NO_COVERAGE — sweep lock unverifiable" \
+        "the app reported already_running (lock held) but /status carries no usable last_sweep.last_sweep_at (the sweep never completed, or ops/state.json is missing) while the R2 pool holds ${R2_TEAM_COUNT} team prefix(es). The lock state cannot be verified — backups may not be running." "global"
+      NO_COVERAGE=1
     else
-      log "sweep already running (202); /status carries no last_sweep timestamp — cannot age-check"
+      log "sweep lock held; no usable last_sweep_at and the pool is empty/unmeasured — cannot classify, leaving silent"
     fi
     ;;
   no_teams|no_eligible_teams|no_work)
@@ -442,23 +522,26 @@ case "$RUN_STATUS" in
     elif [ "${R2_TEAM_COUNT:-0}" -gt 0 ]; then
       log "sweep backed up 0 teams but the R2 pool holds ${R2_TEAM_COUNT} team prefix(es) — filing SWEEP_NO_COVERAGE (job red)"
       file_alert SWEEP_NO_COVERAGE "[DR] SWEEP_NO_COVERAGE — enabled but 0 teams backed up" \
-        "sweep status=${RUN_STATUS} but the R2 pool holds ${R2_TEAM_COUNT} team prefix(es); last_sweep=$(printf '%s' "$STATUS" | jq -c '.last_sweep' 2>/dev/null || echo null). The sweep is enabled yet backed up 0 teams (#2823) — backups are NOT running." "global"
+        "sweep status=${RUN_STATUS} but the R2 pool holds ${R2_TEAM_COUNT} team prefix(es); last_sweep=${LAST_SWEEP_SAFE}. The sweep is enabled yet backed up 0 teams (#2823) — backups are NOT running." "global"
       NO_COVERAGE=1
     else
       log "sweep found 0 teams and the R2 pool is empty — chronic pre-beta state, no incident"
     fi
     ;;
   *)
+    # Any other body status (error / enum_failed / unrecognized) means the
+    # sweep tried and failed — loud REGARDLESS of pool state (the 0-team
+    # envelope applies only to the enumerated-empty statuses above).
     log "sweep did not back up (status=$RUN_STATUS) — filing SWEEP_NO_COVERAGE (job red)"
     file_alert SWEEP_NO_COVERAGE "[DR] SWEEP_NO_COVERAGE — enabled but the sweep backed up nothing" \
-      "sweep status=${RUN_STATUS} (raw: $(redact "$(printf '%s' "$RUN" | head -c 300)")). The sweep is enabled but backed up no team — backups are NOT running." "global"
+      "sweep status=$(redact "$RUN_STATUS") (raw: $(redact_truncate "$RUN" 300)). The sweep is enabled but backed up no team — backups are NOT running." "global"
     NO_COVERAGE=1
     ;;
 esac
 
 # ── 4. trash purge ride-along (#2304, wired #2317) + reconcile ride-along (#654) ──
-# Both are skipped when the sweep returned 202 (the lock-holder is running;
-# purge/reconcile would only queue behind it). Non-2xx is a hard failure for
+# Both are skipped when the sweep reported already_running (the lock-holder is
+# running; purge/reconcile would only queue behind it). Non-2xx is a hard failure for
 # reconcile (the cron driver MUST NOT blind the pipeline — a silently skipped
 # reconcile step is the same class of silent-no-op that left this endpoint
 # uninvoked before #654). The purge erases EXPIRED trash tombstones (> 7-day
@@ -491,12 +574,15 @@ if [ "$RUN_STATUS" != "already_running" ]; then
     RECONCILE_FAILED=1
   fi
 else
-  log "sweep returned 202 (lock held) — skipping purge/reconcile to avoid racing a restore"
+  log "sweep reported already_running (lock held) — skipping purge/reconcile to avoid racing a restore"
 fi
 
 # ── 5. driver heartbeat (carries r2_ok so the R2_DOWN signal is auditable) ──
+# jq-built body (security review): a `status` string from an arbitrary API
+# response must not be interpolated into raw JSON.
+r2_ok=$([ "$R2_OK" = "1" ] && echo true || echo false)
 curl -sS -m 20 -X POST -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
-  -d "{\"run_id\":\"$(date +%s)\",\"status\":\"$RUN_STATUS\",\"r2_ok\":$([ "$R2_OK" = "1" ] && echo true || echo false)}" \
+  -d "$(jq -nc --arg rid "$(date +%s)" --arg s "$RUN_STATUS" --argjson ok "$r2_ok" '{run_id:$rid,status:$s,r2_ok:$ok}')" \
   "${API}/v1/internal/driver/heartbeat" >/dev/null 2>&1 || true
 
 # ── 6. self-heal ────────────────────────────────────────────────────────────
@@ -531,12 +617,13 @@ if [ "$SWEEP_COMPLETED" = "1" ]; then
     log "self-heal: R2 preflight failed this run — leaving R2_DOWN open"
   fi
 fi
-# WATCHER_DOWN self-heals on WATCHER EVIDENCE, not on the sweep (review R3):
-# if step 2 read a fresh heartbeat, any open WATCHER_DOWN is stale — even on a
-# no_teams/no_work run. The watcher is in-process; a 0-team sweep says nothing
-# about it, but the heartbeat read does.
-if [ "$WATCHER_STALE" != "1" ]; then
+# WATCHER_DOWN self-heals only on WATCHER EVIDENCE (a real boolean .watcher
+# block read this run) — review R3 + R2b: a missing/malformed block is not
+# evidence the daemon is alive, so it must not close an open WATCHER_DOWN.
+if [ "$WATCHER_MEASURED" = "1" ] && [ "$WATCHER_STALE" != "1" ]; then
   resolve_global WATCHER_DOWN "Resolved — the watcher heartbeat is fresh."
+elif [ "$WATCHER_MEASURED" != "1" ]; then
+  log "self-heal: watcher block unmeasurable — leaving WATCHER_DOWN unchanged"
 fi
 if [ "$RUN_STATUS" = "backed_up" ] || [ "$RUN_STATUS" = "degraded" ]; then
   resolve_global SWEEP_NO_COVERAGE "Resolved — sweep succeeded ($RUN_STATUS)."

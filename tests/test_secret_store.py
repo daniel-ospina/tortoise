@@ -13,6 +13,7 @@ document the KMS extension point.
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import os
 
@@ -65,9 +66,11 @@ def test_encode_decode_roundtrip():
 def test_decode_rejects_non_base64():
     with pytest.raises(ss.KeyStoreError, match="base64") as exc:
         ss.decode_key("not-base64!!", env_name="TORTOISE_BACKUP_KEY_PREVIOUS")
-    # #2796 review (R2/R4): the malformed value must NOT be echoed.
-    assert "not-base64!!" not in str(exc.value)
-    assert "must be base64-encoded (got <" in str(exc.value)
+    # #2796 review (test-review): assert on the 8-char prefix the pre-fix code
+    # emitted (asserting the full value would pass vacuously) and pin the
+    # fingerprint so a constant placeholder also fails.
+    assert "not-base" not in str(exc.value)
+    assert hashlib.sha256(b"not-base64!!").hexdigest()[:8] in str(exc.value)
 
 
 def test_decode_rejects_wrong_length():
