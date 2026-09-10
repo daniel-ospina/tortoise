@@ -5,11 +5,18 @@ Harness (pinned in the #1511 plan Task 7):
   from website/.
 - Serve the dashboard dist with `wrangler@4 pages dev dist --port 8790`
   from website/apps/dashboard/.
-- The tests simulate the PROD domains via Playwright route interception:
-  `https://tortoise.premiselabs.co/**` → the :8788 server,
-  `https://app.premiselabs.co/**` → the :8790 server. The parent-domain
-  session cookie (`.premiselabs.co`) is written by /auth and read by the
-  dashboard — the exact prod flow, minus the network.
+- #2744: every DOCUMENT load ORIGINATES from the LOCAL preview (`:8790`
+  dashboard, `:8788` auth); a prod-origin URL is used only as an explicitly
+  ASSERTED redirect target (`test_no_cookie_dashboard_redirects_to_auth`),
+  whose content the route handler serves from :8788. The prod hosts stay
+  intercepted to rewrite app-emitted prod-origin redirects/subresources back
+  to the preview: `https://tortoise.premiselabs.co/**` → the :8788 server,
+  `https://app.premiselabs.co/**` → the :8790 server. On the loopback origin
+  the local /auth page writes a host-only session cookie that the loopback
+  dashboard reads (`domainAttr()`/`secureAttr()` are host-conditional);
+  ``_seed_local_session_cookie`` PRE-SEEDS the prod parent-domain
+  `.premiselabs.co` cookie (unless ``parent_domain=False``) only so intercepted
+  prod-origin redirects/subresources stay session-coherent.
 - The exchange (`POST https://api.premiselabs.co/v1/session/login`) is mocked;
   `https://api.premiselabs.co/**` catches the dashboard's other API calls with
   a benign 401 so the app shell renders deterministically.
@@ -20,7 +27,7 @@ Flows (the user's #1511 acceptance):
     dashboard renders (the loop WORKS).
 (b) no cookie → dashboard instantly redirects to /auth.
 (c) anon-team exchange error (403 ANON_TEAM_NO_OWNER) → tt_claim_pending set
-    → redirected to app.premiselabs.co/?claim=1 → claim-paste shows.
+    → redirected to the LOCAL dashboard ?claim=1 → claim-paste shows.
 """
 from __future__ import annotations
 
@@ -48,7 +55,15 @@ AUTH_HOST = "https://tortoise.premiselabs.co"
 APP_HOST = "https://app.premiselabs.co"
 API_HOST = "https://api.premiselabs.co"
 
-AUTH_PAGE = AUTH_HOST + "/auth"
+
+@pytest.fixture(scope="module", autouse=True)
+def _local_preview_servers() -> None:
+    """#2731/#2744: fail fast (ONE clear error) when :8788/:8790 are not
+    serving. Registered here too so the flow module's own tests get the same
+    guard as the two CI specs — without it a missing preview makes the route
+    handlers fall through to production and every failure misdiagnoses as an
+    app-behavior regression."""
+    _preflight_local_servers()
 
 
 def _session_json(user_id: str = "loop-user") -> dict:
@@ -79,17 +94,17 @@ def _proxy_body(route, local_url: str, page: Page) -> None:
     route.fulfill(status=resp.status, content_type=ctype, body=resp.body())
 
 
-# ── #2731: drive the LOCAL committed-dist preview, never the prod origin ──
-# The two CI dashboard specs used to navigate the DOCUMENT to the prod origins
-# and rely on the ``page.route`` proxy to serve local content under them. When
-# the proxy path failed, the request fell through to production and every
-# assertion misreported as an app-behavior failure. In those two specs the
-# document now loads from the local preview directly; the route handlers stay
-# for intercepted prod hosts (API_HOST stubs and the AUTH_HOST -> :8788
-# rewrite). The APP_HOST -> :8790 rewrite is a defensive fallback — those specs
-# emit no prod-app-origin request. This module's own flow tests and the sibling
-# dashboard specs still simulate the prod domains; migrating them (and the
-# auth-page goto in ``_open_auth``) is tracked in #2744.
+# ── #2731/#2744: drive the LOCAL committed-dist preview, never prod ──
+# The dashboard specs used to navigate the DOCUMENT to the prod origins and
+# rely on the ``page.route`` proxy to serve local content under them. When the
+# proxy path failed, the request fell through to production and every
+# assertion misreported as an app-behavior failure. As of #2744 every
+# dashboard/auth DOCUMENT originates from the local preview; the route
+# handlers stay for intercepted prod hosts (API_HOST stubs; the AUTH_HOST ->
+# :8788 rewrite is required for the app-emitted prod-origin /auth bounce, e.g.
+# the dashboard's hardcoded ``https://tortoise.premiselabs.co/auth`` logout
+# target; the APP_HOST -> :8790 rewrite is a DEFENSIVE fallback — no migrated
+# spec originates a prod-app-origin request).
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -122,7 +137,7 @@ def _preflight_local_servers() -> None:
     serving (#2731). Without this, a missing :8788/:8790 preview makes the
     route handlers fall through to production and every test misdiagnoses as
     an app-behavior failure. Called from a module-scoped autouse fixture in
-    the two CI dashboard specs.
+    every migrated dashboard/auth spec (and the #2731 flow module).
 
     ``pytest.exit`` (not ``pytest.fail``) is deliberate: a module-scoped autouse
     fixture that fails is re-raised once per collected test, so ``fail`` would
@@ -168,7 +183,9 @@ def _preflight_local_servers() -> None:
         )
 
 
-def _seed_local_session_cookie(page: Page, user_id: str) -> None:
+def _seed_local_session_cookie(page: Page, user_id: str,
+                              session: dict | None = None,
+                              parent_domain: bool = True) -> None:
     """Seed ``sb-tortoise-auth-token`` for the LOCAL preview origin (#2731).
 
     The browser never sends a ``.premiselabs.co``-domain cookie to
@@ -180,18 +197,54 @@ def _seed_local_session_cookie(page: Page, user_id: str) -> None:
     (#2731 review P2). The prod parent-domain cookie is seeded as well so any
     intercepted prod-origin subresource/redirect stays session-coherent — the
     DOCUMENT is always loaded from the local preview, never prod.
+
+    #2744: ``session`` lets a caller seed a CUSTOM session shape (the sibling
+    specs carried bespoke dicts — user_metadata/display_name/tier variants).
+    When ``session`` is given, ``user_id`` is IGNORED (the dict's own
+    ``user.id`` is what the cookie carries); otherwise the standard
+    ``_session_json(user_id)`` is used. ``parent_domain`` (default True) seeds
+    the ``.premiselabs.co`` cookie as well; pass False when the spec asserts a
+    landing on the /auth page immediately after a session clear (a still-valid
+    parent-domain session would make the intercepted ``/auth`` page's
+    valid-session gate bounce straight back to the dashboard).
     """
-    value = urllib.parse.quote(json.dumps(_session_json(user_id)))
-    page.context.add_cookies([
-        {"name": "sb-tortoise-auth-token", "value": value, "url": DASHBOARD_URL},
-        {"name": "sb-tortoise-auth-token", "value": value,
-         "domain": ".premiselabs.co", "path": "/"},
-    ])
+    value = urllib.parse.quote(json.dumps(session if session is not None else _session_json(user_id)))
+    cookies = [{"name": "sb-tortoise-auth-token", "value": value, "url": DASHBOARD_URL}]
+    if parent_domain:
+        cookies.append({"name": "sb-tortoise-auth-token", "value": value,
+                        "domain": ".premiselabs.co", "path": "/"})
+    page.context.add_cookies(cookies)
 
 
 def _goto_local_dashboard(page: Page) -> None:
     """Load the app DOCUMENT from the local committed-dist preview (#2731)."""
     page.goto(DASHBOARD_URL, wait_until="domcontentloaded", timeout=30_000)
+    # #2744: positive evidence in the run log that the DOCUMENT came from the
+    # local preview. Print the TARGET (not page.url — a gate redirect can land
+    # before this line, and the asserted prod redirect targets are deliberate).
+    print(f"[#2744 local-preview] dashboard document ← {DASHBOARD_URL}")
+
+
+def _goto_local_auth(page: Page) -> None:
+    """Load the /auth DOCUMENT from the local site preview (#2744).
+
+    Mirrors :func:`_goto_local_dashboard`: the prod-origin AUTH page is no
+    longer used as a document origin. The page is served by the local
+    ``wrangler pages dev`` site preview (``AUTH_ORIGIN`` + ``/auth``), and
+    ``window.__AUTH_BASE_URL`` is pointed at the same loopback origin so any
+    redirect target the page computes stays local (prod-origin redirects that
+    a test explicitly ASSERTS keep their own ``__AUTH_BASE_URL``).
+    """
+    page.add_init_script(f"window.__AUTH_BASE_URL = {json.dumps(AUTH_ORIGIN)};")
+    # #2744: keep the post-login redirect on loopback — the local auth page's
+    # session write is host-only for 127.0.0.1, so a redirect to the prod app
+    # origin would lose it. The seam defaults to the prod origin when unset
+    # (no prod behavior change). json.dumps — never manual quoting: the URL is
+    # env-derived and a quote would break the injected JS.
+    page.add_init_script(
+        f"window.__DASHBOARD_BASE_URL = {json.dumps(DASHBOARD_URL.rstrip('/'))};")
+    page.goto(AUTH_ORIGIN + "/auth", wait_until="domcontentloaded", timeout=30_000)
+    print(f"[#2744 local-preview] auth document ← {AUTH_ORIGIN}/auth")
 
 
 def _wire_prod_domains(page: Page, exchange_body=None, exchange_status=200,
@@ -283,7 +336,9 @@ def _wire_prod_domains(page: Page, exchange_body=None, exchange_status=200,
 
 def _open_auth(page: Page) -> None:
     page.add_init_script("localStorage.setItem('tortoise_beta_access','1');")  # TEMP beta-gate unlock (#beta-gate)
-    page.goto(AUTH_PAGE, wait_until="domcontentloaded", timeout=30_000)
+    # #2744: the /auth DOCUMENT is loaded from the local site preview, never
+    # the prod auth origin.
+    _goto_local_auth(page)
     # The auth page must NOT bounce (no session) — the four options are visible.
     expect(page.locator("#btn-apikey")).to_be_visible(timeout=15_000)
 
@@ -298,34 +353,43 @@ def _submit_api_key(page: Page, key: str) -> None:
 
 
 def test_api_key_login_writes_cookie_and_dashboard_renders(page: Page) -> None:
-    """Flow (a): paste tt_ key → exchange 200 → the .premiselabs.co session
-    cookie is written → the dashboard (app.premiselabs.co) renders."""
+    """Flow (a): paste tt_ key → exchange 200 → the loopback session cookie is
+    written → the LOCAL dashboard (127.0.0.1:8790) renders.
+
+    #2744: both documents are loopback — the auth page writes a host-only
+    127.0.0.1 cookie and the __DASHBOARD_BASE_URL seam keeps the post-exchange
+    redirect on the same origin (a prod-app redirect would drop the cookie)."""
     _wire_prod_domains(page, exchange_body=_session_json())
     _submit_api_key(page, "tt_loop_key_abcdef0123456789")
     # The dashboard loads (redirect after the exchange).
-    expect(page).to_have_url(re.compile(r"^https://app\.premiselabs\.co"), timeout=20_000)
+    expect(page).to_have_url(re.compile(r"^" + re.escape(DASHBOARD_URL)), timeout=20_000)
     expect(page.locator("body")).to_contain_text("Graphs", timeout=20_000)
 
 
 def test_no_cookie_dashboard_redirects_to_auth(page: Page) -> None:
     """Flow (b): no session cookie → the dashboard instantly redirects to the
-    /auth page (the gate emits the ABSOLUTE target on the app origin)."""
+    /auth page (the gate emits the ABSOLUTE target on the app origin).
+
+    #2744: the DASHBOARD document is loaded from the local preview; the
+    redirect TARGET is the prod auth origin this test explicitly asserts (the
+    issue's "keep the prod-origin redirect target only when the test asserts
+    it" carve-out) — the route handler serves the intercepted /auth locally."""
     _wire_prod_domains(page)
     page.add_init_script(
         f"window.__AUTH_BASE_URL = '{AUTH_HOST}';")
-    page.goto(APP_HOST + "/", wait_until="domcontentloaded", timeout=30_000)
+    _goto_local_dashboard(page)
     expect(page).to_have_url(re.compile(rf"^{re.escape(AUTH_HOST)}/auth"), timeout=15_000)
 
 
 def test_anon_team_error_funnels_to_claim(page: Page) -> None:
     """Flow (c): a 403 ANON_TEAM_NO_OWNER from the exchange sets
-    tt_claim_pending and redirects to app.premiselabs.co/?claim=1 — the
+    tt_claim_pending and redirects to the LOCAL dashboard ?claim=1 — the
     claim-paste screen shows (D2 funnel, no raw key cross-origin)."""
     _wire_prod_domains(page, exchange_status=403,
                        exchange_body={"detail": {"error_code": "ANON_TEAM_NO_OWNER",
                                                  "message": "unclaimed"}})
     _submit_api_key(page, "tt_anon_key_abcdef0123456789")
-    expect(page).to_have_url(re.compile(r"^https://app\.premiselabs\.co/\?claim=1"), timeout=20_000)
+    expect(page).to_have_url(re.compile(r"^" + re.escape(DASHBOARD_URL) + r"\?claim=1"), timeout=20_000)
     # W1 (#1997 team→Organization rename): the claim-paste card heading is
     # 'Claim your organization' (main.jsx protect-banner).
     expect(page.locator("body")).to_contain_text("Claim your organization", timeout=20_000)

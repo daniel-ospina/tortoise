@@ -11,6 +11,14 @@
   <!-- #1225: cross-subdomain session bridge — loaded in <head> BEFORE the
        gate below (the gate's readValidSession is synchronous at gate time). -->
   <script src="/assets/supabase-session.js"></script>
+  <!-- #2744: dashboard-origin seam. Production leaves it unset → the same
+       hardcoded app origin as before (no behavior change). The local-preview
+       e2e sets window.__DASHBOARD_BASE_URL = http://127.0.0.1:8790 before the
+       gate runs, so the post-login redirect stays on loopback and the
+       loopback session cookie the local dashboard reads is sent. -->
+  <script>
+    window.__DASHBOARD_BASE_URL = window.__DASHBOARD_BASE_URL || "https://app.premiselabs.co";
+  </script>
   <!-- #1494: hard gate — a visitor with a VALID session must reach their
        destination WITHOUT seeing the auth card flash. The shared
        readValidSession enforces STRICT validity (missing/past expires_at =
@@ -30,7 +38,7 @@
         var s = (typeof window.readValidSession === "function") ? window.readValidSession() : null;
         if (!s) return;  // no VALID session → stay on the auth card
         var claim = /(?:^|; )tt_claim_pending=/.test(document.cookie);
-        window.location.replace(claim ? "https://app.premiselabs.co/?claim=1" : "https://app.premiselabs.co");  // #1566: in-app welcome (root)
+        window.location.replace(claim ? window.__DASHBOARD_BASE_URL + "/?claim=1" : window.__DASHBOARD_BASE_URL);  // #1566: in-app welcome (root)
       } catch (e) { /* best-effort — the async bounce below still applies */ }
     })();
   </script>
@@ -639,14 +647,14 @@
     // ── Configuration ──────────────────────────────────────────────────────
     const SUPABASE_URL = "https://ybetwichurajbfswfeqa.supabase.co";
     const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InliZXR3aWNodXJhamJmc3dmZXFhIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODUyNzgzNDYsImV4cCI6MjEwMDg1NDM0Nn0.YHysJAebPualDNDQTU5bnGBUHg5guLe8eBadm0LiEiY";
-    const WELCOME_URL = "https://app.premiselabs.co";  // #1566: OAuth lands on the app ROOT — first-timers get provisioned (welcome mode), returning users get the dashboard home
+    const WELCOME_URL = window.__DASHBOARD_BASE_URL;  // #1566: OAuth lands on the app ROOT — first-timers get provisioned (welcome mode), returning users get the dashboard home
     // #1082 (PR1): claim-intent routing — when a claim is IN FLIGHT
     // (non-secret tt_claim_pending marker set by the dashboard claim card
     // on app.premiselabs.co — the raw tt_ key never leaves app-origin
     // sessionStorage, P1-2), OAuth must land on the dashboard CLAIM ROUTE
     // (?claim=1), NEVER welcome.html (its Phase-2 mint would orphan the
     // claimable anon team).
-    const DASHBOARD_URL = "https://app.premiselabs.co";
+    const DASHBOARD_URL = window.__DASHBOARD_BASE_URL;
     function claimRedirectTarget() {
       try {
         const m = document.cookie.match(/(?:^|; )tt_claim_pending=([^;]*)/);
@@ -1351,7 +1359,7 @@
             // dashboard claim card (the raw key never crosses origins; the
             // user re-pastes it there).
             setClaimPendingMarker();
-            window.location.href = "https://app.premiselabs.co/?claim=1";
+            window.location.href = window.__DASHBOARD_BASE_URL + "/?claim=1";
             return;
           }
           if (code === "KEY_NOT_USER_MINTED") {

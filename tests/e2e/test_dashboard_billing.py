@@ -1,8 +1,10 @@
 """#1623 billing-page e2e (RUN_DASHBOARD_E2E opt-in).
 
-Harness: same two wrangler servers + prod-domain interception as
-test_session_login_flow.py (tortoise.premiselabs.co → :8788 auth page,
-app.premiselabs.co → :8790 dashboard dist, api.premiselabs.co → mocked).
+Harness: same two wrangler servers as test_session_login_flow.py. #2744: the
+DOCUMENT loads from the local preview (:8790 dashboard, :8788 auth) — never
+``app.premiselabs.co``; the prod hosts stay intercepted for app-emitted
+prod-origin redirects/subresources (:8790 dashboard dist, api.premiselabs.co →
+mocked).
 
 Flows:
 1. Free team → Billing tab renders the current-plan card (plan label, usage
@@ -25,10 +27,20 @@ from tests.e2e.test_session_login_flow import (
     APP_HOST,
     AUTH_HOST,
     DASHBOARD_URL,
+    _goto_local_dashboard,
+    _preflight_local_servers,
+    _seed_local_session_cookie,
     _session_json,
     _submit_api_key,
     _wire_prod_domains,
 )
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _local_preview_servers() -> None:
+    """#2744: fail fast (one clear error) when :8788/:8790 are not serving."""
+    _preflight_local_servers()
+
 
 if not os.environ.get("RUN_DASHBOARD_E2E"):
     pytest.skip("dashboard e2e: opt-in via RUN_DASHBOARD_E2E=1", allow_module_level=True)
@@ -58,7 +70,7 @@ def _open_billing(page: Page) -> None:
     _wire_prod_domains(page, exchange_body=_session_json(),
                        team_row=BILLING_ROW, billing_routes=True)
     _submit_api_key(page, "tt_loop_key_abcdef0123456789")
-    expect(page).to_have_url(re.compile(r"^https://app\.premiselabs\.co"), timeout=20_000)
+    expect(page).to_have_url(re.compile("^" + re.escape(DASHBOARD_URL)), timeout=20_000)
     expect(page.locator("body")).to_contain_text("Graphs", timeout=20_000)
     page.locator("nav button", has_text="Billing").click()
     expect(page.locator("body")).to_contain_text("Billing", timeout=10_000)
@@ -106,7 +118,7 @@ def test_active_subscriber_manage_subscription_posts_portal(page: Page) -> None:
                                  "tier": "pro"},
                        billing_routes=True)
     _submit_api_key(page, "tt_loop_key_abcdef0123456789")
-    expect(page).to_have_url(re.compile(r"^https://app\.premiselabs\.co"), timeout=20_000)
+    expect(page).to_have_url(re.compile("^" + re.escape(DASHBOARD_URL)), timeout=20_000)
     expect(page.locator("body")).to_contain_text("Graphs", timeout=20_000)
     # Header manage-subscription button (restored #310 surface) renders.
     expect(page.locator("button.tier-manage")).to_contain_text("Manage subscription")
@@ -134,21 +146,22 @@ def _wire_welcome_flow(page: Page) -> None:
     first-timer welcome flow (no teams → in-app provision → reveal → plan
     step → dashboard)."""
     import time as _time
-    import urllib.parse as _up
     sess = {"access_token": "fake-welcome-access-token",
             "refresh_token": "rt", "expires_in": 3600,
             "expires_at": int(_time.time()) + 3600, "token_type": "bearer",
             "user": {"id": "u-welcome", "email": "welcome@premise-labs.dev",
                      "app_metadata": {}, "user_metadata": {}}}
-    page.context.add_cookies([{"name": "sb-tortoise-auth-token",
-                               "value": _up.quote(json.dumps(sess)),
-                               "domain": ".premiselabs.co", "path": "/"}])
+    # #2744: seed the loopback cookie (the local preview's mount gate) plus the
+    # prod parent-domain cookie — the DOCUMENT is loaded from :8790, not prod.
+    _seed_local_session_cookie(page, "u-welcome", sess)
 
     from tests.e2e.test_session_login_flow import AUTH_ORIGIN, _proxy_body
 
     def handle(route):
         url = route.request.url
-        if "supabase.co" in url:
+        # #2744: the local preview resolves tenant-provision to the emulator
+        # origin (127.0.0.1:54321, main.jsx isLocal branch) — match it too.
+        if "supabase.co" in url or "127.0.0.1:54321" in url:
             if "/functions/v1/tenant-provision" in url and route.request.method == "POST":
                 route.fulfill(status=200, content_type="application/json",
                               body=json.dumps({"api_key": WELCOME_KEY,
@@ -216,7 +229,7 @@ def test_welcome_reveal_shows_welcome_card_then_dashboard_exit(page: Page) -> No
     'Open my dashboard →' exit (enabled once an org exists) opens the
     dashboard at /."""
     _wire_welcome_flow(page)
-    page.goto(APP_HOST + "/", wait_until="domcontentloaded", timeout=30_000)
+    _goto_local_dashboard(page)
     # Teamless first-timer: welcome card (no orientation — removed per epic
     # #2534). Org-create is step 0.
     expect(page.locator("body")).to_contain_text("Welcome to Tortoise", timeout=25_000)
@@ -232,5 +245,8 @@ def test_welcome_reveal_shows_welcome_card_then_dashboard_exit(page: Page) -> No
     # exists) → dashboard shell at /. Scoped to the header — the done-step
     # wizard carries a same-named button.
     page.locator("header").get_by_role("button", name="Open my dashboard →").click()
-    expect(page).to_have_url(re.compile(r"^https://app\.premiselabs\.co/$"), timeout=15_000)
+    # #2744: the exit lands on the local dashboard SHELL root (a hash route is
+    # allowed; any other path/query is not — the pre-migration pin was exact).
+    expect(page).to_have_url(
+        re.compile("^" + re.escape(DASHBOARD_URL) + r"(#.*)?$"), timeout=15_000)
     expect(page.locator("body")).to_contain_text("API Keys", timeout=15_000)
