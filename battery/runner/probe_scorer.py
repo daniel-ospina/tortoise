@@ -245,6 +245,67 @@ def trace_from_log(episode, scenario, log: list[dict]) -> dict[str, Any]:
     return trace
 
 
+def _scenario_injection_turn(scenario) -> int | None:
+    """Scenario-authored ¬A injection turn (k), pinned per planted pair
+    (``ContradictionPair.injection_turn``). None when nothing usable is
+    planted — a pair without a k is a scenario defect and the absence stays
+    a gap, never a guessed turn."""
+    for pair in getattr(scenario, "contradiction_pairs", ()) or ():
+        k = getattr(pair, "injection_turn", None)
+        if isinstance(k, int) and not isinstance(k, bool):
+            return k
+    return None
+
+
+#: tool_event subtypes that WRITE a conflict into the product store — the
+#: only arm actions that can constitute a false alarm on a benign control
+#: surface (the R1 FP-control population).
+_CONFLICT_WRITE_SUBTYPES = frozenset({"file_nand", "register_conflict"})
+
+
+def derive_scenario_truth(log: list[dict], scenario) -> None:
+    """Pre-expected derivation (issue #2740, R1 slice): append the two truth
+    entries the EXPECTED-SET BUILDER itself must see, before
+    ``expected_coverage_for`` runs.
+
+    * ``injection_turn`` — SCENARIO-AUTHORED truth (the planted ¬A turn k),
+      emitted under the registry's ``state_event``/``injection_seen``
+      subtype with payload ``{"k": k}``. This is authored scenario
+      metadata, not arm behaviour: the harness knows k at authoring time,
+      so emitting it at the scoring seam carries exactly the information
+      the executor would have carried from the same source — it can never
+      manufacture, hide or reinterpret an arm action. Emitted only for a
+      scenario that actually plants a pair (never for a benign ``bct``
+      twin, whose expected set must not contain it).
+    * ``false_positive`` — the FP-CONTROL verdict for a benign control
+      episode, DERIVED from that episode's own log: an arm that wrote a
+      conflict (``file_nand`` / ``register_conflict``) onto a benign
+      surface raised a false alarm (True); an arm that wrote nothing
+      stayed quiet (False). Never emitted for a planted episode (a planted
+      contradiction is not a false positive), and never for a non-control
+      population.
+
+    Idempotent: a composite of several probe scorers runs the derive pass
+    over the same episode log, so an entry already present is never
+    duplicated.
+    """
+    if ((getattr(scenario, "contradiction_pairs", ()) or ())
+            and not any(e.get("field") == "injection_turn" for e in log)):
+        k = _scenario_injection_turn(scenario)
+        if k is not None:
+            log.append({"type": "state_event", "event": "injection_seen",
+                        "at": len(log), "field": "injection_turn",
+                        "payload": {"k": k}})
+    if (episode_population(scenario) == "control"
+            and not any(e.get("field") == "false_positive" for e in log)):
+        fp = any(e.get("type") == "tool_event"
+                 and e.get("event") in _CONFLICT_WRITE_SUBTYPES
+                 for e in log)
+        log.append({"type": "derived", "event": "control_verdict",
+                    "at": len(log), "field": "false_positive",
+                    "payload": {"value": bool(fp)}})
+
+
 def derive_append(log: list[dict], scenario, expected: set[str]) -> None:
     """Derive emission pass (probe-scorer-owned leg; the judge leg is Task
     9's): append the expected gold_store entries whose values the derive
@@ -341,6 +402,11 @@ class ProbeScorer:
             # FP-control cell, never a phantom surfaced-rate cell.
             self._record(None, episode, metric=self._metric_for(scenario))
             return ScorerResult(metrics=())
+        # #2740: scenario-authored (injection_turn) + log-derived (the
+        # FP-control verdict) truth the expected-set builder must see — the
+        # FP term joins `expected` only when the derived verdict is already
+        # in the log, and injection_turn is a phase-1 state field.
+        derive_scenario_truth(episode.event_log, scenario)
         expected = expected_coverage_for(scenario, run_mode="real",
                                          family=self.family,
                                          log=episode.event_log)

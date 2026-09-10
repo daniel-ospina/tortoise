@@ -539,6 +539,18 @@ class TestR1PopulationSplit:
         return log
 
     @staticmethod
+    def _quiet_log() -> list[dict]:
+        """A benign bct control log where the arm wrote NOTHING — the
+        conflict-write tool_event is stripped, so the #2740 derive pass
+        records the control verdict as False (stayed quiet), never a
+        fabricated pass."""
+        return [dict(e) for e in covered_log()
+                if not (e.get("type") == "tool_event"
+                        and e.get("event") in ("file_nand",
+                                              "register_conflict"))
+                and e.get("field") != "false_positive"]
+
+    @staticmethod
     def _fp_log() -> list[dict]:
         """A bct episode where the arm FILES a false conflict at a LATER
         turn (turn 5, after the benign conversation) — the control verdict
@@ -572,8 +584,9 @@ class TestR1PopulationSplit:
         for _seed in (1, 2):
             ep = _real_episode(ct.id, self._planted_log())
             scorer.score(ep, ct)
-        # bct WITHOUT a verdict -> no-data sentinel on the FP-control cell.
-        scorer.score(_real_episode(bct.id, self._control_log(fp=None)), bct)
+        # bct that wrote nothing -> derived control verdict False (a
+        # measured 0.0 on the FP-control cell, never a surfaced-rate value).
+        scorer.score(_real_episode(bct.id, self._quiet_log()), bct)
         # bct with a later-turn FP -> FP record (1.0), never surfaced.
         scorer.score(_real_episode(bct.id, self._fp_log()), bct)
         rep = scorer.family_report()
@@ -584,17 +597,16 @@ class TestR1PopulationSplit:
         # populations (3); n is now the additive per-metric map — the
         # planted surfaced-rate count never mixes with the bct FP-control
         # count, and the primary-metric count is n["surfaced-rate"].
-        assert rep["n"] == {"surfaced-rate": 2, "false-positive-rate": 1}
+        assert rep["n"] == {"surfaced-rate": 2, "false-positive-rate": 2}
         assert rep["cells"]["false-positive-rate"] == "measured"
-        assert rep["values"]["false-positive-rate"] == [1.0]
+        assert sorted(rep["values"]["false-positive-rate"]) == [0.0, 1.0]
         assert rep["primary"] == "surfaced-rate"  # headline stamp (RC2/P2)
 
-    def test_bct_no_verdict_insufficient_and_never_surfaced(self):
-        """bct controls with NO control verdict report the FP-control cell as
-        insufficient_n (verdict emission is executor-owned, Task 9) and a
-        benign twin the arm correctly ignores (verdict False) measures a 0.0
-        FP — neither ever produces a surfaced-rate value from the k=0
-        default."""
+    def test_bct_quiet_control_measures_zero_fp_and_never_surfaced(self):
+        """#2740: the FP-control verdict is now DERIVED from the episode log,
+        so a bct control that wrote no conflict measures a 0.0 FP (never the
+        no-data sentinel, never a fabricated value) and never produces a
+        surfaced-rate value from the k=0 default."""
         from battery.probes.r1_contradiction import R1ContradictionProbe
         from battery.runner.probe_scorer import ProbeScorer
         _, bct = _r1_pop_scenarios()
@@ -602,17 +614,17 @@ class TestR1PopulationSplit:
             probe=R1ContradictionProbe(),
             thresholds=ThresholdsConfig(
                 cal_rows=(("surfaced-rate", "a0", 0.90),)))
-        scorer.score(_real_episode(bct.id, self._control_log(fp=None)), bct)
-        scorer.score(_real_episode(bct.id, self._control_log(fp=None)), bct)
+        scorer.score(_real_episode(bct.id, self._quiet_log()), bct)
+        scorer.score(_real_episode(bct.id, self._quiet_log()), bct)
         rep = scorer.family_report()
-        assert rep["values"]["false-positive-rate"] == []
-        assert rep["cells"] == {"false-positive-rate": "insufficient_n"}
+        assert rep["values"]["false-positive-rate"] == [0.0, 0.0]
+        assert rep["cells"] == {"false-positive-rate": "measured"}
         assert "surfaced-rate" not in rep["values"]  # never surfaced-scored
-        # verdict False (benign twin correctly stayed quiet) -> FP 0.0
-        scorer.score(_real_episode(bct.id, self._control_log(fp=False)), bct)
+        # a third quiet control accumulates on the same measured cell
+        scorer.score(_real_episode(bct.id, self._quiet_log()), bct)
         rep = scorer.family_report()
         assert rep["cells"]["false-positive-rate"] == "measured"
-        assert rep["values"]["false-positive-rate"] == [0.0]
+        assert rep["values"]["false-positive-rate"] == [0.0, 0.0, 0.0]
         assert "surfaced-rate" not in rep["values"]
         # headline stamp rides even a secondary-only-measured payload (the
         # report reader refuses it — never a silent FP-mean R1 headline)
@@ -819,11 +831,13 @@ class TestFPControlVerdictGate:
         # never a surfaced-rate value from a control claim either
         assert "surfaced-rate" not in rep["values"]
 
-    def test_verdict_absent_control_episode_sentinels_not_gaps(self):
-        """The verdict-less control episode keeps the round-3 no-verdict
-        sentinel (insufficient_n on the FP-control cell) — the round-4 gate
-        does not phase-2-gap it (false_positive is never expected without a
-        derived verdict) and it never produces a measured cell."""
+    def test_control_episode_derived_verdict_never_gaps(self):
+        """#2740: the control verdict is derived from the episode's OWN log
+        before the expected set is built, so a control episode is MEASURED on
+        the FP-control cell (here 1.0: the fixture log carries a conflict
+        write on a benign surface) instead of falling to the no-verdict
+        sentinel. The derive pass never gaps the episode, and it never
+        produces a surfaced-rate cell for a control."""
         from battery.probes.r1_contradiction import R1ContradictionProbe
         from battery.runner.probe_scorer import ProbeScorer
         _, bct = _r1_pop_scenarios()
@@ -833,8 +847,9 @@ class TestFPControlVerdictGate:
                 cal_rows=(("surfaced-rate", "a0", 0.90),)))
         scorer.score(_real_episode(bct.id, covered_log()), bct)
         rep = scorer.family_report()
-        assert rep["cells"] == {"false-positive-rate": "insufficient_n"}
-        assert rep["n"] == {"false-positive-rate": 0}
+        assert rep["cells"] == {"false-positive-rate": "measured"}
+        assert rep["values"] == {"false-positive-rate": [1.0]}
+        assert "surfaced-rate" not in rep["values"]
 
 
 class TestFamilyFilePerArmAggregation:
@@ -1341,3 +1356,111 @@ class TestEligibilityBeforeLaneSentinels:
         attempt = _run(out, cfg, families={"R1"}, mock=True, arms=["a0"])
         assert not (attempt / "family_R1.json").exists()
         assert list(attempt.glob("family_*.json")) == []
+
+
+class TestDeriveScenarioTruth:
+    """#2740 R1 slice: the two truth entries the expected-set builder needs
+    (scenario-authored injection_turn + log-derived FP-control verdict) so
+    R1 measures on the real lane instead of returning insufficient_n."""
+
+    @staticmethod
+    def _log_without(field: str) -> list[dict]:
+        return [dict(e) for e in covered_log() if e.get("field") != field]
+
+    @staticmethod
+    def _quiet_log() -> list[dict]:
+        """The covered log with every conflict WRITE stripped: this is the
+        benign-control shape (the arm wrote no conflict) — the fixture log
+        carries a file_nand tool_event by default, which IS a false alarm
+        on a control episode."""
+        return [dict(e) for e in covered_log()
+                if e.get("field") != "false_positive"
+                and not (e.get("type") == "tool_event"
+                         and e.get("event") in ("file_nand",
+                                                "register_conflict"))]
+
+    @staticmethod
+    def _drive(scenario, log):
+        from battery.probes.r1_contradiction import R1ContradictionProbe
+        from battery.runner.probe_scorer import ProbeScorer
+        scorer = ProbeScorer(
+            probe=R1ContradictionProbe(),
+            thresholds=ThresholdsConfig(cal_rows=(
+                ("surfaced-rate", "a0", 0.90),
+                ("false-positive-rate", "a0", 0.05))))
+        ep = EpisodeResult(scenario_id=scenario.id, seed=1, arm="a0",
+                           run_mode="real",
+                           event_log=[dict(e) for e in log])
+        scorer.score(ep, scenario)
+        return scorer.last_record(), ep
+
+    def test_injection_turn_derived_from_authored_pair(self):
+        from battery.runner.probe_scorer import derive_scenario_truth
+        ct, _bct = _r1_pop_scenarios()
+        log = self._log_without("injection_turn")
+        derive_scenario_truth(log, ct)
+        got = [e for e in log if e.get("field") == "injection_turn"]
+        assert len(got) == 1
+        assert got[0]["type"] == "state_event"
+        assert got[0]["event"] == "injection_seen"
+        assert got[0]["payload"] == {"k": 3}      # the AUTHORED turn
+        # idempotent: a log that already carries it is never duplicated
+        derive_scenario_truth(log, ct)
+        assert len([e for e in log
+                    if e.get("field") == "injection_turn"]) == 1
+
+    def test_r1_surfaced_cell_measured_once_turn_is_derived(self):
+        """ACCEPTANCE (#2740): a planted ct episode whose log lacks
+        injection_turn was the no-data sentinel before; after the derive
+        pass it is MEASURED (never a fabricated value, and never None)."""
+        ct, _bct = _r1_pop_scenarios()
+        rec, _ep = self._drive(ct, self._log_without("injection_turn"))
+        assert rec is not None and rec.measured, (
+            "the R1 cell must measure once the authored turn is derived")
+        assert rec.value in (0.0, 1.0)
+
+    def test_control_verdict_derived_from_logged_actions(self):
+        from battery.runner.probe_scorer import derive_scenario_truth
+        _ct, bct = _r1_pop_scenarios()
+        quiet = self._quiet_log()
+        derive_scenario_truth(quiet, bct)
+        got = [e for e in quiet if e.get("field") == "false_positive"]
+        assert len(got) == 1 and got[0]["payload"] == {"value": False}, (
+            "an arm that wrote no conflict on a benign surface stayed quiet")
+        loud = self._quiet_log()
+        loud.append({"type": "tool_event", "event": "register_conflict",
+                     "at": 50, "payload": {"event_ref": "ns:seq:1"}})
+        derive_scenario_truth(loud, bct)
+        got = [e for e in loud if e.get("field") == "false_positive"]
+        assert got[0]["payload"] == {"value": True}, (
+            "a conflict write on a benign control IS a false alarm")
+
+    def test_fp_control_cell_measured_after_derive(self):
+        """End-to-end through the adapter: the bct FP-control cell is the
+        sentinel before the derive pass and MEASURED after it."""
+        _ct, bct = _r1_pop_scenarios()
+        rec, _ep = self._drive(bct, self._quiet_log())
+        assert rec is not None and rec.measured
+        assert rec.value == 0.0                   # stayed quiet
+        assert rec.metric == "false-positive-rate"
+
+    def test_planted_episode_never_gets_control_verdict(self):
+        from battery.runner.probe_scorer import derive_scenario_truth
+        ct, _bct = _r1_pop_scenarios()
+        log = self._log_without("false_positive")
+        derive_scenario_truth(log, ct)
+        assert not [e for e in log if e.get("field") == "false_positive"], (
+            "a planted contradiction is not a false positive")
+
+    def test_no_guessed_turn_when_pair_carries_no_k(self):
+        """A planted pair without an authored turn stays a gap — the derive
+        pass never invents one."""
+        from types import SimpleNamespace
+
+        from battery.runner.probe_scorer import derive_scenario_truth
+        sc = SimpleNamespace(
+            contradiction_pairs=(SimpleNamespace(injection_turn=None),),
+            task_type="contradiction")
+        log: list[dict] = []
+        derive_scenario_truth(log, sc)
+        assert not [e for e in log if e.get("field") == "injection_turn"]
