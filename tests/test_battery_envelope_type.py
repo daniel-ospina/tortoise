@@ -120,3 +120,80 @@ def test_bad_envelope_repair_rescues_when_model_recovers(tmp_path):
     assert repaired, "the repaired turn must be recorded in the artifact"
     assert "[[repair]]" in repaired[0]["content"], (
         "the trace must carry the model's repaired answer")
+
+
+def test_shared_caller_rows_attribute_per_episode(tmp_path):
+    """Review #2717 P2: an injected caller_factory may hand back a SHARED
+    caller whose row list already holds earlier episodes' calls. Each
+    episode's turns must be attributed to ITS OWN rows (never from index 0),
+    and a prompt-template position echo must never be scored."""
+    class _Row:
+        def __init__(self, ct):
+            self.prompt_tokens = 1
+            self.completion_tokens = ct
+            self.cost_usd = 0.0
+
+    class _SharedCaller:
+        model_id = "deepseek/deepseek-v4-flash"
+        temperature = 0.0
+
+        def __init__(self):
+            self.rows = []
+            self.calls = 0
+
+        @property
+        def spent_usd(self) -> float:
+            return 0.0
+
+        def totals(self) -> dict:
+            return {"calls": self.calls, "prompt_tokens": 0,
+                    "completion_tokens": 0, "cost_usd": 0.0}
+
+        def call(self, *, prompt: str) -> str:
+            self.calls += 1
+            self.rows.append(_Row(self.calls))  # token == call ordinal
+            env = {"position": "Proceed with mitigation",
+                   "stated_confidence": 0.8, "undecided": False,
+                   "defeat_conditions": ["data-loss"], "intents": [],
+                   "citations": []}
+            return f"deliberation.\n{json.dumps(env)}"
+
+    shared = _SharedCaller()
+    out = tmp_path / "out"
+    code = run_battery(RunConfig(config_dir=_cfg(tmp_path), out_dir=out,
+                                 executor="real", arms=["a0"],
+                                 caller_factory=lambda: shared),
+                       stdout=lambda _: None)
+    assert code is ExitCode.OK
+    attempt = sorted(out.iterdir())[0]
+    summary = json.loads((attempt / "summary.json").read_text())
+    arts = summary["arms"][0]["artifacts"]
+    assert len(arts) == 2
+    per_ep = []
+    for art in arts:
+        tr = json.loads((attempt / art).read_text())
+        per_ep.append([t["tokens"] for t in tr["episode_trace"]["turns"]])
+    # episode 2's tokens must CONTINUE from episode 1 (shared caller), i.e.
+    # they must not restart at 1
+    assert per_ep[1][0] == len(per_ep[0]) + 1, (
+        f"episode 2 turn 1 must read its OWN row, got {per_ep[1][0]} "
+        f"(ep1 had {len(per_ep[0])} turns)")
+    assert min(per_ep[1]) > max(per_ep[0]), (
+        "no episode-1 row may be attributed to episode 2")
+
+
+def test_template_position_echo_rejected():
+    """A verbatim echo of the prompt template token is a harness artifact,
+    never a position — validate_envelope must refuse it."""
+    from battery.runner.executor import validate_envelope
+
+    for bad in ("<one sentence>", "<ONE SENTENCE>", "one sentence"):
+        try:
+            validate_envelope({"position": bad, "stated_confidence": 0.5,
+                               "undecided": False})
+        except ValueError:
+            continue
+        raise AssertionError(f"template echo {bad!r} must be rejected")
+    ok = validate_envelope({"position": "Hire the external finalist.",
+                            "stated_confidence": 0.5, "undecided": False})
+    assert ok.position == "Hire the external finalist."

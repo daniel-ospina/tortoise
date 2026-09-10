@@ -61,6 +61,14 @@ class Envelope:
         }
 
 
+#: Prompt-template tokens that must never be accepted as a position (an
+#: echo of the envelope request itself, not an answer).
+_TEMPLATE_POSITION_ECHOES = frozenset({
+    "<one sentence>", "<one-sentence>", "<position>", "one sentence",
+    "<one sentence position>",
+})
+
+
 def validate_envelope(raw: dict[str, Any]) -> Envelope:
     """Validate one envelope dict — TypeError/ValueError on any violation
     (unknown intent, non-numeric confidence, non-bool undecided,
@@ -72,6 +80,13 @@ def validate_envelope(raw: dict[str, Any]) -> Envelope:
     position = str(raw.get("position", "")).strip()
     if not position:
         raise ValueError("envelope.position is required and non-empty")
+    # Review #2717 P2: a verbatim echo of the prompt's template token is a
+    # harness artifact, never a position — reject it so the metric can
+    # never score the envelope request's own placeholder.
+    if position.lower() in _TEMPLATE_POSITION_ECHOES:
+        raise ValueError(
+            f"envelope.position is the prompt template echo {position!r}, "
+            f"not a position")
     conf = raw.get("stated_confidence")
     if not isinstance(conf, (int, float)) or isinstance(conf, bool):
         raise TypeError(

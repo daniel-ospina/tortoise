@@ -331,10 +331,15 @@ def _execute_real_episode(*, config: RunConfig, arm, scenario: Scenario,
     rows = getattr(caller, "rows", [])
     # #1416: token attribution consumes the caller rows a turn actually made
     # (1 call, or 1+ repairs) so rows stay aligned after corrective repairs.
+    # Review #2717 P2: an injected caller_factory may hand back a SHARED
+    # caller whose row list already holds earlier episodes — slice from this
+    # episode's start, never from 0.
+    _rows_start = len(rows) - sum(ep.turn_calls) if ep.turn_calls else 0
+    _rows_start = max(0, _rows_start)
     _row_off = 0
     for i, turn in enumerate(ep.turns):
         n = ep.turn_calls[i] if i < len(ep.turn_calls) else 1
-        seg = rows[_row_off:_row_off + n]
+        seg = rows[_rows_start + _row_off:_rows_start + _row_off + n]
         _row_off += n
         tokens = int(sum(getattr(r, "completion_tokens", 0) or 0
                          for r in seg))
