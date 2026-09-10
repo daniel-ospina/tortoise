@@ -887,3 +887,16 @@ def test_planted_contradiction_without_authored_turn_is_refused() -> None:
     sc["planted_contradictions"][0]["k"] = 0
     with pytest.raises(ConfigError, match="must be >= 1"):
         _coerce_scenario(sc, Path("."))
+    sc["planted_contradictions"][0]["k"] = "abc"
+    with pytest.raises(ConfigError, match="not an integer"):
+        _coerce_scenario(sc, Path("."))
+
+    # an AUTHORED scenario-level k is a legitimate fallback (not a guess):
+    # the planted path forwards it, so a pair without its own turn still
+    # loads when the scenario authored one.
+    sc["planted_contradictions"] = [
+        {"claim": "plan A is the right choice",
+         "counter_claim": "plan A is not the right choice"}]
+    sc["k"] = 7
+    loaded = _coerce_scenario(sc, Path("."))
+    assert loaded.contradiction_pairs[0].injection_turn == 7

@@ -215,7 +215,8 @@ def _coerce_dict(value: Any, sid: str, label: str) -> dict[str, Any]:
     return dict(value)
 
 
-def _authored_injection_turn(pair: dict, sid: str) -> int:
+def _authored_injection_turn(pair: dict, sid: str,
+                             scenario_k: int | None = None) -> int:
     """The AUTHORED injection turn for one planted contradiction.
 
     A missing turn is REFUSED, never defaulted (#2759): the old inline
@@ -223,8 +224,15 @@ def _authored_injection_turn(pair: dict, sid: str) -> int:
     surfaced-within-1-turn rule plus the ``injection_turn`` emission both
     read it as authored data — a guessed turn scores a real arm against a
     turn the scenario never specified.
+
+    ``scenario_k`` is the AUTHORED scenario-level ``k`` (the
+    ``planted_contradictions`` path forwards it): falling back to it is
+    legitimate — it is authored, not guessed — while a default constant is
+    not.
     """
     raw = pair.get("injection_turn", pair.get("k"))
+    if raw is None:
+        raw = scenario_k
     if raw is None:
         raise ConfigError(
             f"scenario {sid!r}: planted contradiction carries no authored "
@@ -349,7 +357,8 @@ def _coerce_scenario(raw: dict[str, Any], gold_base: Path) -> Scenario:
         pairs = tuple(
             ContradictionPair(
                 claim_a=str(p["claim_a"]), claim_b=str(p["claim_b"]),
-                injection_turn=_authored_injection_turn(p, sid))
+                injection_turn=_authored_injection_turn(p, sid,
+                                                        scenario_k=k))
             for p in pairs_raw or []
         )
         scripts = tuple(str(s) for s in raw.get("evidence_scripts", []))
