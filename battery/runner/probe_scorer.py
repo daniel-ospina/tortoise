@@ -390,10 +390,10 @@ class ProbeScorer:
             # FP-control cell, never a phantom surfaced-rate cell.
             self._record(None, episode, metric=self._metric_for(scenario))
             return ScorerResult(metrics=())
-        # #2740: scenario-authored (injection_turn) + log-derived (the
-        # FP-control verdict) truth the expected-set builder must see — the
-        # FP term joins `expected` only when the derived verdict is already
-        # in the log, and injection_turn is a phase-1 state field.
+        # #2740: the SCENARIO-AUTHORED injection turn must be in the log
+        # before the expected set is built (it is a phase-1 state field, so
+        # a planted episode gaps without it). Arm-behaviour verdicts are
+        # never derived here — see derive_scenario_truth.
         derive_scenario_truth(episode.event_log, scenario)
         expected = expected_coverage_for(scenario, run_mode="real",
                                          family=self.family,
