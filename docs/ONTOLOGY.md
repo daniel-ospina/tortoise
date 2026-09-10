@@ -1,18 +1,58 @@
 ---
-title: "Tortoise — Canonical Ontology v3.10"
+title: "Tortoise — Canonical Ontology v3.11"
 type: data
 domain: data
 status: live
 created: 2026-08-05
-updated: 2026-09-05
+updated: 2026-09-09
 ownedBy: epistemic-team
+aboutSubjects: epistemic-team
+aboutObjects: tortoise
 doc_status: live
 ---
 
-# Tortoise — Canonical Ontology v3.10
+# Tortoise — Canonical Ontology v3.11
 
 > **Status:** LIVE — canonical. Co-located with the code it governs (tortoise repo).
 > **Supersedes:** ONTOLOGY_v2.5.md (eldato repo, deprecated).
+>
+> **Changelog v3.11 (2026-09-09, issues #2726 + #2727 — meeting source kinds + object-kind alignment):**
+> - §4.6/§5: sourceKind vocabulary gains `meeting_transcript` (raw, first-hand)
+>   and `meeting_minutes` (structured, mediated) — the two meeting-capture
+>   kinds. Both register **NEUTRAL** in `SOURCE_KIND_DEFAULTS` (precedent:
+>   operational captures are neutral, like `document` and the connector kinds).
+>   The #398 tier question — is a raw transcript first-hand evidence and are
+>   minutes a mediated summary? — is deliberately **left open**: NEUTRAL changes
+>   no EP inheritance and stays reversible via `register_source_kind_default`.
+> - §4.6/§5: pack-declared `extraction.sourceTypes` now validate against the
+>   registered source-kind registry (`KNOWN_SOURCE_TYPES ∪
+>   SOURCE_KIND_DEFAULTS`, escape hatch unioned at the check) rather than a
+>   narrower hardcoded list — a kind registered at runtime is a first-class
+>   sourceKind for packs too (#2726). The operational captures `agentSession`
+>   and `meeting_summary` moved from `file_indexer`'s import-time block into
+>   `SOURCE_KIND_DEFAULTS`, so registry membership — and therefore pack
+>   validation — no longer depends on `file_indexer`'s import order.
+> - §1/§4.3/§5/§6 (code alignment + subclassability): `CANONICAL_OBJECT_KINDS`
+>   (`tortoise/pack_registry.py`) gains `tag` + the commitment-state family
+>   (`strategy`, `plan`, `goal`, `target`) so the runtime set, the extractor's
+>   `CORE_OBJECT_KEYS`, §5, §6's core-subclass table, §1's parenthetical and
+>   §4.3's `objectKind` row all name the same 17 object kinds; packs may now
+>   declare `subclassOf` against any of them (#2727).
+>   The `subclassOf` PascalCase shape check is scoped to allow canonical
+>   lowercase object kinds — superseding the R6 §1.1 "parent must be a core
+>   PascalCase kind" contract (the `packs/agent-ops` `nearMisses: [standard]`
+>   workaround remains valid and need not migrate).
+>   **Migration note:** the five newly canonical names can no longer be declared
+>   as bare `ontology.objectKinds` (the canonical-collision guard now fires);
+>   packs that declared them must express the relationship via `subclassOf`
+>   instead.
+> - §5 note: the legacy Phase-2 entity stage (`tortoise/extractor.py
+>   _OBJECT_KIND_VOCAB`) intentionally keeps a narrower 13-kind vocab —
+>   `strategy`/`plan`/`goal`/`target` are extraction surfaces of
+>   `extractor_v2.CORE_OBJECT_KEYS` (state-centric), so the legacy intersection
+>   filter drops them from the prompt vocab and `_normalize_object_kind`
+>   collapses any that still appear to `other` by design. Note added under §5's
+>   Object Kind Vocabulary; pinned in tests.
 >
 > **Changelog v3.10 (2026-09-05, #2238 dirty-hub salvage landing — Problem family):**
 > - §5: registers core object kind `Problem` (deviation between actual and desired
@@ -124,7 +164,7 @@ Five core types.
 | 4 | **Event** | `prov:Activity` (instantiated) / `schema:Event` | Temporal occurrence — the verb. Reified middle node: (Subject)-[performs]->(Event)-[produces]->(Object) | What happened |
 | 5 | **Source** | `prov:Entity` (provenance) / `pav:Source` | Provenance anchor — where content was extracted from | Where it came from |
 
-**Core subclass model (§6):** Document ⊂ Object (`objectKind: document`). Object has core subclasses (Project, WorkItem, Problem, document, tag, user, skill, tool, agent, workflow, agreement, standard). Subject has core subclasses (organization, team, role, legalPerson, naturalPerson, other). Expansion packs declare further subclasses via `subclassOf` (§9).
+**Core subclass model (§6):** Document ⊂ Object (`objectKind: document`). Object has core subclasses (Project, WorkItem, Problem, document, tag, user, skill, tool, agent, workflow, agreement, standard, other, strategy, plan, goal, target — the full §5 object-kind vocabulary). Subject has core subclasses (organization, team, role, legalPerson, naturalPerson, other). Expansion packs declare further subclasses via `subclassOf` (§9).
 
 ---
 
@@ -238,7 +278,7 @@ Per-type edges (chosen over single polymorphic edge — FalkorDB matrix-per-type
 |-----------|-----------|-----------|-------------|--------------------|---------|
 | `references` | Source → Document/Event/Object/Source | unidirectional | 1→many | — | The source links to / references this entity — target may be a Document, Event, Object, **or another Source** (producer extension in `link_source_to_entity`, #909 §4.3 #8 — previously validated only Document/Event/Object). Wired in the ingest path — `_upsert_document` links `(Source {url:doc_id})-[:references]->(Document {id:doc_id})` (#205); external artifacts referenced in a captured conversation become external Source nodes that the session Source `references` (referential chain, #909). |
 
-`(Point)-[:extractedFrom]->(Source)-[:references]->(Entity)` — layered provenance. Source carries `sourceKind` (extensible source TYPE vocabulary, e.g. `github_issue`, `github_pr`, `linear_card`, `linear_cycle`, `slack_message`, `document`) and `credibilityTier` (T0-T4 credibility tier — see §4.6, #398).
+`(Point)-[:extractedFrom]->(Source)-[:references]->(Entity)` — layered provenance. Source carries `sourceKind` (extensible source TYPE vocabulary — canonical list: §5 + `SOURCE_KIND_DEFAULTS`; e.g. `github_issue`, `github_pr`, `linear_card`, `linear_cycle`, `slack_message`, `document`, `agentSession`, `meeting_summary`, `meeting_transcript`, `meeting_minutes`) and `credibilityTier` (T0-T4 credibility tier — see §4.6, #398).
 
 Connector entities (GitHub/Linear/Slack) get Source nodes at the projection choke point: `_upsert_event` (projection/entities.py) materializes `(Source {url})-[:references]->(Event {eventId})` from connector event metadata (`sourceKind` + per-entity `sourceUrl`) — #388. The gate fires only on a registered connector `sourceKind` or an explicit `sourceUrl` (never on bare `source` — mining events stay excluded); `sourceKind` is set on CREATE only — a pre-existing Source's kind is authoritative (#398 never-overwrite contract) — and re-materialization does not bump `version` (no churn on re-poll). When no per-entity URL exists, `Source.url` falls back to a container-scope string (`slack:{channel}`, `linear:{team_key}`) — the reference still resolves; the key is just coarser than a permalink. The GitHub entity path additionally wires `(Source)-[:references]->(Object {id})` via an explicit `sourceObjectId` event field (`event.object` is never used as an Object key — it is the entity title on poll/webhook paths).
 
@@ -391,7 +431,7 @@ About edges: `aboutSubject`, `aboutObject`, `aboutEvent`, `aboutPoint`, `aboutDo
 |-------|------|----------|-------------|------|---------|
 | `id` | string | ✅ | `dc:identifier` | ✅ | Canonical identifier |
 | `name` | string | ✅ | `schema:name` | ⚠️ | Human-readable name (`_upsert_object` writes `title`; `name` aliased) |
-| `objectKind` | string | ✅ | — | ✅ | Project, WorkItem, Problem, document, user, skill, tool, agent, workflow, agreement, standard, other + pack objectKinds |
+| `objectKind` | string | ✅ | — | ✅ | The §5 object-kind vocabulary (Project, WorkItem, Problem, document, tag, user, skill, tool, agent, workflow, agreement, standard, other, strategy, plan, goal, target) + pack objectKinds |
 | `title` | string | — | `dc:title` | ✅ | Display title (what `_upsert_object` actually stores) |
 | `status` | string | — | `pav:status` | ✅ | Write-through cache of lifecycle events (ObjectRegistered→live; ObjectSuperseded→superseded + `supersededBy` + `supersededAt`; connector work-item events→in_progress/completed) — **the event stream is the truth (§11 cache doctrine); the property is a performance cache, folded keep-first per Object (divergent re-folds never blind-overwrite — #2193 resolved)** |
 | `supersededAt` | ISO8601 | — | — | ✅ | The fold TIMESTAMP written by the supersession fold (`apply_supersessions` / `ObjectSuperseded` projection, pinned after the fold via `SET o.supersededAt` for byte-reproducible state headers). R17 P3-1 (#2165): `supersededAt` is the connected-assembly state-header's date source — **byte-golden renders depend on it being a pinned story date, never a wall-clock fold time** (Task-1 fixture pins `2026-09-01T00:00:00Z`). Absent on non-superseded Objects. |
@@ -423,6 +463,18 @@ About edges: `aboutSubject`, `aboutObject`, `aboutEvent`, `aboutPoint`, `aboutDo
 | `sourcePath` | string | — | — | ✅ | Filesystem path to the original conversation file — agents can open/search it after finding the session |
 | `_searchText` | string | — | — | ✅ | FTS index text = title + summary + topics (coalesce-null sentinels) |
 
+> **(#2726) Meeting capture — Document ↔ Source pairing (TARGET STATE, writer
+> not yet wired):** once the capture/index writer emits the new kinds, a
+> captured meeting will land as a Document (`documentKind: transcript` for the
+> raw `meeting_transcript` capture; `documentKind: meetingNotes` for structured
+> `meeting_minutes`) whose provenance Source carries the matching `sourceKind`
+> (`meeting_transcript` / `meeting_minutes` — §4.6/§5). Both Source kinds
+> register NEUTRAL (no credibility inheritance); the tier question is deferred
+> to #398. TODAY the index/classifier path still emits `meeting_summary` for a
+> classified meeting file (`CLASSIFIER_TO_SOURCE_KIND`) — wiring the two new
+> kinds into that writer is deliberately out of #2726's scope (registration +
+> validation only), so `meeting_summary` remains the kind actually written.
+
 ### §4.5 Event
 
 | Field | Type | Required | ISO/PROV/DC | Impl | Meaning |
@@ -445,7 +497,7 @@ About edges: `aboutSubject`, `aboutObject`, `aboutEvent`, `aboutPoint`, `aboutDo
 | Field | Type | Required | ISO/PROV/DC | Impl | Meaning |
 |-------|------|----------|-------------|------|---------|
 | `url` | string | ✅ | `dc:source` / `pav:retrievedFrom` | ✅ | Permalink back to original |
-| `sourceKind` | string | ✅ | — | ✅ | Extensible source TYPE vocabulary (github_issue, slack_message, linear_card, document...). Tier-form values (T0-T4) mirror to `credibilityTier` (dual-write, #398) |
+| `sourceKind` | string | ✅ | — | ✅ | Extensible source TYPE vocabulary — §5 (Source Type Vocabulary) + `source_credibility.SOURCE_KIND_DEFAULTS` are canonical; e.g. github_issue, github_pr, slack_message, linear_card, linear_cycle, document, agentSession, meeting_summary, meeting_transcript, meeting_minutes. Tier-form values (T0-T4) mirror to `credibilityTier` (dual-write, #398). The meeting kinds register **NEUTRAL** (#2726) — the tier question is deliberately left open |
 | `credibilityTier` | string | — | — | ✅ | T0-T4 credibility tier — the property the inheritance adapter reads (v3.2) |
 | `contentHash` | string | ✅ | `premis:messageDigest` | ✅ | Idempotency anchor — skip re-extraction if unchanged |
 | `title` | string | — | `dc:title` | ⚠️ | Human-readable label. Defaults to url |
@@ -506,6 +558,14 @@ Project, WorkItem, Problem, document, tag, user, skill, tool, agent, workflow, a
 strategy, plan, goal, target    # commitment-state family (state-centric, 2026-08-12) — states that
                                 # commitments produce; carry lifecycle + derived confidence
 ```
+> **Legacy extraction path (pinned, #2727):** the Phase-2 entity stage in
+> `tortoise/extractor.py` (`_OBJECT_KIND_VOCAB`) intentionally supports a
+> narrower 13-kind subset only — it omits the four commitment-state kinds
+> (`strategy`/`plan`/`goal`/`target`), which are extraction surfaces of
+> `extractor_v2.CORE_OBJECT_KEYS` (state-centric); `_intersect_object_kinds`
+> drops them from the prompt vocabulary and `_normalize_object_kind` collapses
+> any that still appear to `other`. The test
+> `test_legacy_extractor_vocab_is_a_documented_subset` pins exactly that gap.
 > **Problem family (2026-08-31):** `Problem` = a deviation between actual and desired
 > state (anchored in a core `standard`, SLO/target, or declared need). The problem-family
 > parent: packs subclass it (dev:`bug` — code deviates from expected behavior,
@@ -559,7 +619,8 @@ T0 (meta-analysis), T1 (peer-reviewed), T2 (expert), T3 (anecdotal), T4 (unverif
 ```
 
 > **v3.2 (#398):** `sourceKind` is the extensible source TYPE vocabulary — pack-declared
-> kinds (github_issue, github_pr, linear_card, linear_cycle, slack_message, document...)
+> kinds (github_issue, github_pr, linear_card, linear_cycle, slack_message, document,
+> meeting_transcript, meeting_minutes...)
 > resolve to a tier ONLY via explicit registration (`register_source_kind_default`) or
 > an explicit `credibilityTier` assignment; unknown kinds stay neutral (no inheritance).
 > Connector kinds register explicitly neutral in SOURCE_KIND_DEFAULTS
@@ -569,6 +630,15 @@ T0 (meta-analysis), T1 (peer-reviewed), T2 (expert), T3 (anecdotal), T4 (unverif
 > validated model (docs/ep-source-credibility-experiment.md §1.1).
 
 > **Expansion-pack kinds live in the packs, not here.** Pack-declared kinds (dev:epic, product-strategy:product, etc.) are defined in their pack manifests (§9) and registered at load time via the pack registry. This file documents only the core vocabulary; it is not the home for pack kinds.
+
+> **(#2726) Meeting-capture kinds:** `meeting_transcript` (raw, first-hand) and
+> `meeting_minutes` (structured, mediated) are registered source kinds as of
+> v3.11, both **NEUTRAL** (`None`) — operational captures sit outside the
+> research-evidence ladder, so they inherit no tier. The tier question (whether
+> a raw transcript warrants a first-hand tier and minutes a mediated one) is
+> deliberately deferred to #398's mechanism; `register_source_kind_default`
+> makes the eventual choice a one-line, reversible registration. Pack manifests
+> may declare both in `extraction.sourceTypes` (the validator unions the registry).
 
 > **#909 §4.3 #6:** `sourceKind: agentSession` is a registered source-type VALUE (the four-node capture model's session Source — the provenance bridge — carries it; the value belongs to the extensible sourceKind vocabulary above, alongside github_issue/slack_message/linear_card/…). Credibility-tier inheritance is keyed on **sourceKind** (#398): the tier resolves via the kind's registered tier default (`register_source_kind_default`) or an explicit `credibilityTier` assignment; unregistered kinds stay neutral (no inheritance).
 
@@ -629,7 +699,7 @@ At query time, `expand_kind("Project")` returns `["Project", "dev:epic"]`. Queri
 
 | Parent | Core subclasses |
 |--------|-----------------|
-| Object | Project, WorkItem, Problem, document, tag, user, skill, tool, agent, workflow, agreement, standard |
+| Object | Project, WorkItem, Problem, document, tag, user, skill, tool, agent, workflow, agreement, standard, other, strategy, plan, goal, target |
 | Document (⊂ Object) | research, reflectPostmortem, strategyDoc, visionDoc, planDoc, decisionDoc, meetingNotes, experimentResults, evidenceLog, handoff, transcript, roadmap, brief |
 | Subject | organization, team, role, legalPerson, naturalPerson |
 
