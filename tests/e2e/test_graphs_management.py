@@ -10,6 +10,11 @@ test_keys_table_mixed.py):
   `wrangler@4 pages dev . --port 8788` from website/ (auth) +
   `wrangler@4 pages dev dist --port 8790` from website/apps/dashboard/.
 
+  #2731: the app DOCUMENT is loaded from the LOCAL preview (DASHBOARD_URL,
+  :8790) — never the prod origin. The route handler only rewrites
+  prod-hosted subresources/redirects (API_HOST interception + the
+  AUTH_HOST -> :8788 rewrite); it is no longer load-bearing for the document.
+
 Covered contracts (issue indicators 1-6):
   1. Meter line — "N graphs · ∞ cap" (pro/team, max_graphs null) vs
      "N/M graphs used" (solo). Free/anon hide the meter: the 🔒 lock line
@@ -55,14 +60,23 @@ from tests.e2e.test_session_login_flow import (
     APP_HOST,
     AUTH_HOST,
     DASHBOARD_URL,
+    _goto_local_dashboard,
+    _preflight_local_servers,
     _proxy_body,
-    _session_json,
+    _seed_local_session_cookie,
 )
 
 if not os.environ.get("RUN_DASHBOARD_E2E"):
     pytest.skip("dashboard e2e: opt-in via RUN_DASHBOARD_E2E=1", allow_module_level=True)
 
 AUTH_ORIGIN = os.environ.get("DASHBOARD_AUTH_BASE", "http://127.0.0.1:8788")
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _local_preview_servers() -> None:
+    """#2731: fail fast (one clear error) when :8788/:8790 are not serving."""
+    _preflight_local_servers()
+
 
 TEAM_ID = "team_graphs2116"
 # #2306: key_count 1 deliberately — the registry-lane capstone artifact
@@ -250,11 +264,7 @@ def _wire_graphs_harness(page: Page, team_row: dict,
         route.continue_()
 
     page.route("**/*", handle)
-    page.context.add_cookies([{
-        "name": "sb-tortoise-auth-token",
-        "value": urllib.parse.quote(json.dumps(_session_json(user_id))),
-        "domain": ".premiselabs.co", "path": "/",
-    }])
+    _seed_local_session_cookie(page, user_id)
 
 
 def _team_key_rows(graph_keys: dict[str, list[dict]]) -> list[dict]:
@@ -276,7 +286,7 @@ def _open_graphs_tab(page: Page, team_row: dict,
         graph_keys if graph_keys is not None else {"g_prod": [_GRAPH_KEY]},
         **kw,
     )
-    page.goto(APP_HOST + "/", wait_until="domcontentloaded", timeout=30_000)
+    _goto_local_dashboard(page)
     expect(page.locator("body")).to_contain_text("Graphs", timeout=25_000)
     page.locator('[data-tab="graphs"]').click()
     # The graphs table is the active tab's <table> — one row per fixture row.
@@ -666,12 +676,8 @@ def test_two_team_graphs_panel_revoke_pins_selected_team(page: Page) -> None:
         route.continue_()
 
     page.route("**/*", handle)
-    page.context.add_cookies([{
-        "name": "sb-tortoise-auth-token",
-        "value": urllib.parse.quote(json.dumps(_session_json("u-two-team-panel"))),
-        "domain": ".premiselabs.co", "path": "/",
-    }])
-    page.goto(APP_HOST + "/", wait_until="domcontentloaded", timeout=30_000)
+    _seed_local_session_cookie(page, "u-two-team-panel")
+    _goto_local_dashboard(page)
     expect(page.locator("body")).to_contain_text("Graphs", timeout=25_000)
     # Select Bravo (≠ first membership Alpha) via the account menu — the
     # switch's loadAll must pin ?team_id=team_b (a dropped pin cannot

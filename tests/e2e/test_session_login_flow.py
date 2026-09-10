@@ -28,6 +28,8 @@ import json
 import os
 import re
 import time
+import urllib.parse
+import urllib.request
 from pathlib import Path
 
 import pytest
@@ -74,6 +76,72 @@ def _proxy_body(route, local_url: str, page: Page) -> None:
         ctype = "image/png"
     resp = page.request.get(local_url)
     route.fulfill(status=resp.status, content_type=ctype, body=resp.body())
+
+
+# ── #2731: drive the LOCAL committed-dist preview, never the prod origin ──
+# The dashboard specs used to navigate the DOCUMENT to the prod origins and
+# rely on the ``page.route`` proxy to serve local content under them. When the
+# proxy path failed, the request fell through to production and every
+# assertion misreported as an app-behavior failure. The document (and the auth
+# page) now load from the local previews directly; the route handlers remain
+# only for subresources/redirects that reference the prod hosts.
+
+
+def _preflight_local_servers() -> None:
+    """Fail fast — ONE clear error — when the local preview servers are not
+    serving (#2731). Without this, a missing :8788/:8790 preview makes the
+    route handlers fall through to production and every test misdiagnoses as
+    an app-behavior failure. Called from a module-scoped autouse fixture in
+    the two CI dashboard specs."""
+    failures: list[str] = []
+    for label, url in (("auth", AUTH_ORIGIN + "/"), ("dashboard", DASHBOARD_URL)):
+        try:
+            with urllib.request.urlopen(url, timeout=10) as resp:  # localhost only
+                if resp.status >= 400:
+                    failures.append(f"{label} {url} -> HTTP {resp.status}")
+        except Exception as exc:  # any error means the preview is not serving
+            failures.append(f"{label} {url} -> {type(exc).__name__}: {exc}")
+    if failures:
+        pytest.fail(
+            "dashboard e2e: local preview server(s) unreachable — this suite "
+            "drives the LOCAL wrangler previews, never production (#2731). "
+            "Start BOTH before running:\n"
+            "  cd website/apps/dashboard && npx wrangler@4 pages dev dist --port 8790\n"
+            "  cd website && npx wrangler@4 pages dev . --port 8788\n"
+            "Unreachable:\n"
+            + "\n".join(f"  - {f}" for f in failures),
+            pytrace=False,
+        )
+
+
+def _local_dashboard_host() -> str:
+    """The hostname of the local app preview (loopback by default)."""
+    return urllib.parse.urlparse(DASHBOARD_URL).hostname or "127.0.0.1"
+
+
+def _seed_local_session_cookie(page: Page, user_id: str) -> None:
+    """Seed ``sb-tortoise-auth-token`` for the LOCAL preview origin (#2731).
+
+    The browser never sends a ``.premiselabs.co``-domain cookie to
+    ``127.0.0.1``, so the host-only loopback cookie is what the local app's
+    mount gate actually reads (host-conditional ``domainAttr()``/``secureAttr()``
+    in main.jsx make the loopback cookie domain-less and Secure-less by design).
+    The prod parent-domain cookie is seeded as well so any intercepted
+    prod-origin subresource/redirect stays session-coherent — the DOCUMENT is
+    always loaded from the local preview, never prod.
+    """
+    value = urllib.parse.quote(json.dumps(_session_json(user_id)))
+    page.context.add_cookies([
+        {"name": "sb-tortoise-auth-token", "value": value,
+         "domain": _local_dashboard_host(), "path": "/"},
+        {"name": "sb-tortoise-auth-token", "value": value,
+         "domain": ".premiselabs.co", "path": "/"},
+    ])
+
+
+def _goto_local_dashboard(page: Page) -> None:
+    """Load the app DOCUMENT from the local committed-dist preview (#2731)."""
+    page.goto(DASHBOARD_URL, wait_until="domcontentloaded", timeout=30_000)
 
 
 def _wire_prod_domains(page: Page, exchange_body=None, exchange_status=200,
