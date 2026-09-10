@@ -87,6 +87,11 @@ _TESTS_ROOT = Path(__file__).resolve().parent
 DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # ── DELIBERATE_EMBEDDED_LANE: SDK-level tests force the embedded lane so
     #    the constructions never ride the URI (the delenv IS the point) ──────
+    # #2724 churn-wave hygiene (2026-09-09): the two #2600 attribution-strip
+    # E2E tests force the embedded lane (delenv the URI, then pin
+    # TORTOISE_DB_PATH to a tmp_path db) — the delenv IS the point, and the
+    # fixture-param monkeypatch auto-restores at teardown (no lane leak).
+    "test_attribution_actor.py": [r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],  # embedded lane via delenv (the test_billing pattern — db_path-pinned store, so the constructions never ride the URI)
     "test_audit.py": [r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"',
                        r'monkeypatch\.setenv\(\s*$'],
     "test_billing.py": [r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],

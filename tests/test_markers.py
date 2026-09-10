@@ -111,6 +111,14 @@ ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
         "registry": "prod-coupled", "reg-team-1": "team-identity",
     },
     "test_billing_upgrade.py": {"registry": "prod-coupled"},
+    # #2724 churn-wave hygiene (2026-09-09): the #2600 attribution-strip E2E
+    # surfaces — the namespace literal IS the identity under test, so renaming
+    # it would decouple the seed from the resolution the test asserts.
+    "test_attribution_actor.py": {"registry": "prod-coupled",   # :171/:192/:454/:500 — db_path-pinned registry lane; _make_sdk(namespace="registry") mirrors hosted_api
+                                  "team-strip-2600": "team-identity",   # :468 — the registry seed, the contextvar and the read-back all key off this team id
+                                  "team-sweep-2600": "team-identity"},  # :530/:550 — the sweep fixture's own seeded team id is its graph
+    "test_attribution_machine_model.py": {"registry": "prod-coupled"},   # :178 — _make_sdk(namespace="registry") mirrors the hosted_api registry resolve
+    "test_oauth_mcp.py": {"team-free-001": "team-identity"},   # :1342 — the OAuth token's team_id IS the graph namespace the journal assert reads
     # e2e-900 (cycle-4 P2-7 / cycle-5 P1-5): the SHARED non-test team_e2e-900
     # graph of the index suite — routed by REDIRECT DERIVATION, not rename:
     # the SDK maps the literal to team_e2e-900, the redirect derives
