@@ -33,7 +33,10 @@ from playwright.sync_api import Page, expect
 from tests.e2e.test_session_login_flow import (
     APP_HOST,
     AUTH_HOST,
+    _goto_local_dashboard,
+    _preflight_local_servers,
     _proxy_body,
+    _seed_local_session_cookie,
     _session_json,
     _wire_prod_domains,
 )
@@ -49,6 +52,26 @@ AUTH_TARGET = "https://tortoise.premiselabs.co/auth"
 
 # The legal suite's /signup → /auth rewrite serves the same content.
 AUTH_LOCAL = AUTH_ORIGIN + "/auth"
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _local_preview_servers() -> None:
+    """#2744: fail fast (one clear error) when :8788/:8790 are not serving."""
+    _preflight_local_servers()
+
+
+def _seed_gate_session(page: Page, sess: dict, parent_domain: bool = True) -> None:
+    """#2744: seed a gate test's session for the LOCAL preview — the loopback
+    cookie the :8790 mount gate reads, plus (unless ``parent_domain=False``)
+    the prod parent-domain cookie so intercepted prod-origin redirects/
+    subresources stay session-coherent. Pass ``parent_domain=False`` for the
+    /auth-bounce specs (401-clear, logout): a surviving ``.premiselabs.co``
+    session would make the intercepted ``/auth`` page's valid-session gate
+    bounce straight back to the dashboard, so the landing assertion would only
+    pass transiently and never prove the session/cookie was cleared. The spec
+    suites used to seed ONLY the ``.premiselabs.co`` cookie and then navigate
+    ``APP_HOST + "/"`` (a prod-origin DOCUMENT); both change here."""
+    _seed_local_session_cookie(page, sess["user"]["id"], sess, parent_domain=parent_domain)
 
 
 def _mock_bootstrap_200(route, url: str, json_mod, team: dict | None = None) -> bool:
@@ -192,15 +215,12 @@ def test_fresh_session_login_renders_session_only_with_zero_mint(page: Page) -> 
     mint machinery). A regression mint fails loudly (loud-500 tripwire)."""
     import json as _json
     import time as _time
-    import urllib.parse as _up
     mint_calls: list = []
     sess = {"access_token": "fake.eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.sig",
             "refresh_token": "rt", "expires_in": 3600,
             "expires_at": int(_time.time()) + 3600, "token_type": "bearer",
             "user": {"id": "u-mint429", "email": "mint429@premise-labs.dev"}}
-    page.context.add_cookies([{"name": "sb-tortoise-auth-token",
-                               "value": _up.quote(_json.dumps(sess)),
-                               "domain": ".premiselabs.co", "path": "/"}])
+    _seed_gate_session(page, sess)
     def handle(route):
         url = route.request.url
         if "api.premiselabs.co" in url:
@@ -242,7 +262,7 @@ def test_fresh_session_login_renders_session_only_with_zero_mint(page: Page) -> 
         route.continue_()
 
     page.route("**/*", handle)
-    page.goto(APP_HOST + "/", wait_until="domcontentloaded", timeout=30_000)
+    _goto_local_dashboard(page)
     # The dashboard renders session-only (chrome up, no mint banner, never
     # the silent redirect shell).
     expect(page.locator("body")).to_contain_text("Graphs", timeout=25_000)
@@ -263,16 +283,13 @@ def test_welcome_mode_provisions_and_reveals_key_once(page: Page) -> None:
     only). A returning visit (onboarding complete) lands on the dashboard's
     first-run card with NO key (#1885)."""
     import time as _time
-    import urllib.parse as _up
     user_id = "u-welcome1566"
     sess = {"access_token": "fake.eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.sig",
             "refresh_token": "rt", "expires_in": 3600,
             "expires_at": int(_time.time()) + 3600, "token_type": "bearer",
             "user": {"id": user_id, "email": "welcome1566@premise-labs.dev",
                      "user_metadata": {"display_name": "Welcome Test"}}}
-    page.context.add_cookies([{"name": "sb-tortoise-auth-token",
-                               "value": _up.quote(json.dumps(sess)),
-                               "domain": ".premiselabs.co", "path": "/"}])
+    _seed_gate_session(page, sess)
     reveal_calls = {"n": 0}
     fork_payloads: list = []
 
@@ -344,7 +361,7 @@ def test_welcome_mode_provisions_and_reveals_key_once(page: Page) -> None:
         route.continue_()
 
     page.route("**/*", handle)
-    page.goto(APP_HOST + "/", wait_until="domcontentloaded", timeout=30_000)
+    _goto_local_dashboard(page)
     # #2323 (Option B): teamless first-timer → welcome card (orientation
     # removed per epic #2534), no key anywhere yet.
     expect(page.locator("body")).to_contain_text("Welcome to Tortoise", timeout=20_000)
@@ -415,7 +432,7 @@ def test_welcome_mode_provisions_and_reveals_key_once(page: Page) -> None:
             return
         handle(route)
     page.route("**/*", handle_returning)
-    page.goto(APP_HOST + "/", wait_until="domcontentloaded", timeout=30_000)
+    _goto_local_dashboard(page)
     # #1885: a returning user (onboarding complete) lands on the dashboard's
     # first-run card — the key is NEVER re-revealed (reveal_calls stays 0;
     # the welcome-card reveal only fires on the provisioning path).
@@ -439,15 +456,12 @@ def test_welcome_mode_fork_503_stays_and_recovers(page: Page) -> None:
     connect advance, so the failure lane is pinned: the same click retried
     against a 2xx advances to the connect step."""
     import time as _time
-    import urllib.parse as _up
     user_id = "u-wf503"
     sess = {"access_token": "fake.eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.sig",
             "refresh_token": "rt", "expires_in": 3600,
             "expires_at": int(_time.time()) + 3600, "token_type": "bearer",
             "user": {"id": user_id, "email": "wf503@premise-labs.dev"}}
-    page.context.add_cookies([{"name": "sb-tortoise-auth-token",
-                               "value": _up.quote(json.dumps(sess)),
-                               "domain": ".premiselabs.co", "path": "/"}])
+    _seed_gate_session(page, sess)
     checkpoint_calls = {"n": 0}
 
     def handle(route):
@@ -507,7 +521,7 @@ def test_welcome_mode_fork_503_stays_and_recovers(page: Page) -> None:
         route.continue_()
 
     page.route("**/*", handle)
-    page.goto(APP_HOST + "/", wait_until="domcontentloaded", timeout=30_000)
+    _goto_local_dashboard(page)
     expect(page.locator("body")).to_contain_text("Welcome to Tortoise", timeout=20_000)
     page.get_by_role("button", name="Continue →").click()
     expect(page.locator("body")).to_contain_text("Create your Organization", timeout=10_000)
@@ -532,15 +546,12 @@ def test_welcome_mode_provision_failure_shows_error_card(page: Page) -> None:
     flags reset in `finally`) — never a silent stuck shell or a wedged
     spinner (the #1559 pattern applied to the name-first flow)."""
     import time as _time
-    import urllib.parse as _up
     user_id = "u-wfail"
     sess = {"access_token": "fake.eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.sig",
             "refresh_token": "rt", "expires_in": 3600,
             "expires_at": int(_time.time()) + 3600, "token_type": "bearer",
             "user": {"id": user_id, "email": "wfail@premise-labs.dev"}}
-    page.context.add_cookies([{"name": "sb-tortoise-auth-token",
-                               "value": _up.quote(json.dumps(sess)),
-                               "domain": ".premiselabs.co", "path": "/"}])
+    _seed_gate_session(page, sess)
 
     def handle(route):
         url = route.request.url
@@ -565,7 +576,7 @@ def test_welcome_mode_provision_failure_shows_error_card(page: Page) -> None:
         route.continue_()
 
     page.route("**/*", handle)
-    page.goto(APP_HOST + "/", wait_until="domcontentloaded", timeout=30_000)
+    _goto_local_dashboard(page)
     # #2323: provisioning fires on the org-create SUBMIT (mount no longer
     # provisions) — the 500 surfaces the inline step-1 error; the busy flags
     # reset so the submit button recovers and a retry is possible.
@@ -584,15 +595,15 @@ def test_welcome_mode_provision_401_clears_session_and_redirects(page: Page) -> 
     SUBMIT means the session is stale — the app clears it and goes to /auth
     (never an error card or a stuck state)."""
     import time as _time
-    import urllib.parse as _up
     user_id = "u-w401"
     sess = {"access_token": "fake.eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.sig",
             "refresh_token": "rt", "expires_in": 3600,
             "expires_at": int(_time.time()) + 3600, "token_type": "bearer",
             "user": {"id": user_id, "email": "w401@premise-labs.dev"}}
-    page.context.add_cookies([{"name": "sb-tortoise-auth-token",
-                               "value": _up.quote(json.dumps(sess)),
-                               "domain": ".premiselabs.co", "path": "/"}])
+    # #2744: parent_domain=False — the 401 clears the session; a seeded
+    # .premiselabs.co cookie would survive the loopback clear and bounce the
+    # intercepted /auth page straight back to the dashboard.
+    _seed_gate_session(page, sess, parent_domain=False)
 
     def handle(route):
         url = route.request.url
@@ -622,7 +633,7 @@ def test_welcome_mode_provision_401_clears_session_and_redirects(page: Page) -> 
         route.continue_()
 
     page.route("**/*", handle)
-    page.goto(APP_HOST + "/", wait_until="domcontentloaded", timeout=30_000)
+    _goto_local_dashboard(page)
     # #2323: the stale-session 401 now surfaces on the org-create SUBMIT
     # (mount no longer provisions). Drive to it, then expect the /auth bounce.
     expect(page.locator("body")).to_contain_text("Welcome to Tortoise", timeout=20_000)
@@ -697,7 +708,7 @@ def test_oauth_callback_fragment_lands_in_dashboard(page: Page) -> None:
     page.route("**/*", handle)
     # Implicit-flow fragment return (the signup.html OAuth target).
     _FRAG_TOKEN = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiAidS1mcmFnIiwgImF1ZCI6ICJhdXRoZW50aWNhdGVkIiwgInJvbGUiOiAiYXV0aGVudGljYXRlZCIsICJleHAiOiA0MTAyNDQ0ODAwLCAiZW1haWwiOiAiZnJhZ0BwcmVtaXNlLWxhYnMuZGV2In0.sig"
-    page.goto(APP_HOST + "/#access_token=" + _FRAG_TOKEN + "&refresh_token=fake-rt&expires_in=3600&token_type=bearer",
+    page.goto(DASHBOARD_URL + "#access_token=" + _FRAG_TOKEN + "&refresh_token=fake-rt&expires_in=3600&token_type=bearer",
               wait_until="domcontentloaded", timeout=30_000)
     # The gate must NOT bounce to /auth; the session ingests and the app
     # chrome (with a team) renders.
@@ -745,7 +756,6 @@ def test_stored_key_residue_is_purged_on_session_mount(page: Page) -> None:
     old test's key-lane probe 401 is gone; every Authorization header on
     API reads is the session JWT)."""
     import time as _time
-    import urllib.parse as _up
     user_id = "u-drop401"
     dead_key = "tt_dead_abcdef0123456789"
     mint_calls: list = []
@@ -754,9 +764,7 @@ def test_stored_key_residue_is_purged_on_session_mount(page: Page) -> None:
             "refresh_token": "rt", "expires_in": 3600,
             "expires_at": int(_time.time()) + 3600, "token_type": "bearer",
             "user": {"id": user_id, "email": "drop401@premise-labs.dev"}}
-    page.context.add_cookies([{"name": "sb-tortoise-auth-token",
-                               "value": _up.quote(json.dumps(sess)),
-                               "domain": ".premiselabs.co", "path": "/"}])
+    _seed_gate_session(page, sess)
     page.add_init_script(f"localStorage.setItem('tortoise_api_key', '{dead_key}');")
 
     def handle(route):
@@ -793,7 +801,7 @@ def test_stored_key_residue_is_purged_on_session_mount(page: Page) -> None:
         route.continue_()
 
     page.route("**/*", handle)
-    page.goto(APP_HOST + "/", wait_until="domcontentloaded", timeout=30_000)
+    _goto_local_dashboard(page)
     expect(page.locator("body")).to_contain_text("Graphs", timeout=25_000)
     assert mint_calls == [], f"zero-mint: POST /v1/session/key fired: {mint_calls}"
     assert key_authed == [], f"#2246: key-authed requests must not fire: {key_authed}"
@@ -815,7 +823,6 @@ def test_all_suspended_session_purges_residue_and_renders_appeal(page: Page) -> 
     403-teams catch. Never a mint, never a probe, never a drop-vs-keep
     classification."""
     import time as _time
-    import urllib.parse as _up
     user_id = "u-susp"
     held_key = "tt_susp_abcdef0123456789"
     mint_calls: list = []
@@ -824,9 +831,7 @@ def test_all_suspended_session_purges_residue_and_renders_appeal(page: Page) -> 
             "refresh_token": "rt", "expires_in": 3600,
             "expires_at": int(_time.time()) + 3600, "token_type": "bearer",
             "user": {"id": user_id, "email": "susp@premise-labs.dev"}}
-    page.context.add_cookies([{"name": "sb-tortoise-auth-token",
-                               "value": _up.quote(json.dumps(sess)),
-                               "domain": ".premiselabs.co", "path": "/"}])
+    _seed_gate_session(page, sess)
     page.add_init_script(f"localStorage.setItem('tortoise_api_key', '{held_key}');")
 
     def handle(route):
@@ -857,7 +862,7 @@ def test_all_suspended_session_purges_residue_and_renders_appeal(page: Page) -> 
         route.continue_()
 
     page.route("**/*", handle)
-    page.goto(APP_HOST + "/", wait_until="domcontentloaded", timeout=30_000)
+    _goto_local_dashboard(page)
     # the appeal path renders (blocking error card + CTA)
     expect(page.locator("body")).to_contain_text("Suspended for review", timeout=25_000)
     expect(page.locator("body")).to_contain_text("Appeal the suspension", timeout=10_000)
@@ -875,16 +880,13 @@ def test_fresh_login_suspended_team_shows_appeal_banner(page: Page) -> None:
     suspension vector post-mint-removal. The catch parses the dict → the
     appeal banner renders. (Distinct from the stored-durable test above.)"""
     import time as _time
-    import urllib.parse as _up
     user_id = "u-susp2"
     mint_calls: list = []
     sess = {"access_token": "fake.eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.sig",
             "refresh_token": "rt", "expires_in": 3600,
             "expires_at": int(_time.time()) + 3600, "token_type": "bearer",
             "user": {"id": user_id, "email": "susp2@premise-labs.dev"}}
-    page.context.add_cookies([{"name": "sb-tortoise-auth-token",
-                               "value": _up.quote(json.dumps(sess)),
-                               "domain": ".premiselabs.co", "path": "/"}])
+    _seed_gate_session(page, sess)
 
     def handle(route):
         url = route.request.url
@@ -912,7 +914,7 @@ def test_fresh_login_suspended_team_shows_appeal_banner(page: Page) -> None:
         route.continue_()
 
     page.route("**/*", handle)
-    page.goto(APP_HOST + "/", wait_until="domcontentloaded", timeout=30_000)
+    _goto_local_dashboard(page)
     expect(page.locator("body")).to_contain_text("Suspended for review", timeout=25_000)
     expect(page.locator("body")).to_contain_text("Appeal the suspension", timeout=10_000)
     assert mint_calls == [], f"zero-mint: POST /v1/session/key fired: {mint_calls}"
@@ -925,16 +927,13 @@ def test_multi_membership_suspended_first_healthy_second_renders(page: Page) -> 
     BEFORE completeLogin on every session-only landing; the old unpinned
     reads resolved memberships[0] → 403 → error card on every reload)."""
     import time as _time
-    import urllib.parse as _up
     user_id = "u-1912"
     mint_calls: list = []
     sess = {"access_token": "fake.eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.sig",
             "refresh_token": "rt", "expires_in": 3600,
             "expires_at": int(_time.time()) + 3600, "token_type": "bearer",
             "user": {"id": user_id, "email": "u1912@premise-labs.dev"}}
-    page.context.add_cookies([{"name": "sb-tortoise-auth-token",
-                               "value": _up.quote(json.dumps(sess)),
-                               "domain": ".premiselabs.co", "path": "/"}])
+    _seed_gate_session(page, sess)
 
     def handle(route):
         url = route.request.url
@@ -978,7 +977,7 @@ def test_multi_membership_suspended_first_healthy_second_renders(page: Page) -> 
         route.continue_()
 
     page.route("**/*", handle)
-    page.goto(APP_HOST + "/", wait_until="domcontentloaded", timeout=30_000)
+    _goto_local_dashboard(page)
     # the healthy second team renders — chrome up, NO suspension card
     expect(page.locator("body")).to_contain_text("Graphs", timeout=25_000)
     expect(page.locator("body")).not_to_contain_text("Suspended for review")
@@ -995,7 +994,6 @@ def test_stored_residue_on_suspended_team_lands_healthy_alternate(page: Page) ->
     never the blocking suspension card. The residue is purged once at session
     resolution (never classified keep/drop — the probe machinery is gone)."""
     import time as _time
-    import urllib.parse as _up
     user_id = "u-5d-alt"
     held_key = "tt_susal_abcdef0123456789"
     mint_calls: list = []
@@ -1004,9 +1002,7 @@ def test_stored_residue_on_suspended_team_lands_healthy_alternate(page: Page) ->
             "refresh_token": "rt", "expires_in": 3600,
             "expires_at": int(_time.time()) + 3600, "token_type": "bearer",
             "user": {"id": user_id, "email": "susalt@premise-labs.dev"}}
-    page.context.add_cookies([{"name": "sb-tortoise-auth-token",
-                               "value": _up.quote(json.dumps(sess)),
-                               "domain": ".premiselabs.co", "path": "/"}])
+    _seed_gate_session(page, sess)
     page.add_init_script(f"localStorage.setItem('tortoise_api_key', '{held_key}');")
 
     def handle(route):
@@ -1052,7 +1048,7 @@ def test_stored_residue_on_suspended_team_lands_healthy_alternate(page: Page) ->
         route.continue_()
 
     page.route("**/*", handle)
-    page.goto(APP_HOST + "/", wait_until="domcontentloaded", timeout=30_000)
+    _goto_local_dashboard(page)
     # the HEALTHY alternate renders — chrome up, no suspension card
     expect(page.locator("body")).to_contain_text("Graphs", timeout=25_000)
     expect(page.locator("body")).not_to_contain_text("Suspended for review")
@@ -1073,58 +1069,48 @@ def test_logout_redirects_to_auth(page: Page) -> None:
     already purged by the session mount, but logout's removeItem is the
     belt — the slot never survives a sign-out). #2246 review round-1: the
     residue is RE-SEEDED after the mount purge so the logout click is the
-    ONLY remaining wipe — otherwise the final wipe-cookie assert would pass
-    vacuously if logout's own wipe regressed (the mount purge already fired
-    one removeItem). Requires the loop harness: a valid session cookie →
-    dashboard renders → Log out → /auth."""
+    ONLY remaining wipe — otherwise the final residue assert would pass
+    vacuously if logout's own wipe regressed (the mount purge already removed
+    it). #2744: the residue is read from the loopback origin's localStorage in
+    the context storage state (a .premiselabs.co evidence cookie cannot be
+    written from a loopback document). Requires the loop harness: a valid
+    session cookie → dashboard renders → Log out → /auth."""
     durable = "tt_loop_durable_abcdef0123456789"
     _wire_prod_domains(page)
-    page.context.add_cookies([{
-        "name": "sb-tortoise-auth-token",
-        "value": urllib.parse.quote(json.dumps(_session_json())),
-        "domain": ".premiselabs.co", "path": "/",
-    }])
+    _seed_local_session_cookie(page, "u-loop", _session_json(), parent_domain=False)
     page.add_init_script(f"window.__AUTH_BASE_URL = '{AUTH_HOST}';")
     # #2246: legacy residue seeded — the session mount purges it once
     # (never probed/adopted; the mount probe is deleted).
     page.add_init_script(f"localStorage.setItem('tortoise_api_key', '{durable}');")
-    # #2167 rule 8 (F5): the logout wipe is synchronous on the APP origin,
-    # but the /auth bounce lands on the TORTUISE origin (localStorage is
-    # per-origin — a post-navigation read would be vacuous). Patch
-    # Storage.prototype.removeItem to log the KEY_STORAGE wipe into a
-    # PARENT-DOMAIN cookie (readable from /auth after the bounce).
-    page.add_init_script("""
-      (function () {
-        const orig = Storage.prototype.removeItem;
-        Storage.prototype.removeItem = function (k) {
-          if (k === 'tortoise_api_key' && this === window.localStorage) {
-            try { document.cookie = 'tt_wipe_log=1; Domain=.premiselabs.co; Path=/; Max-Age=600'; } catch (e) {}
-          }
-          return orig.apply(this, arguments);
-        };
-      })();
-    """)
-    page.goto(APP_HOST + "/", wait_until="domcontentloaded", timeout=30_000)
+    # #2744: the app origin is now the LOOPBACK preview, so a
+    # .premiselabs.co evidence cookie cannot be written from it (domain
+    # mismatch) — the pre-migration cross-origin cookie bridge is unusable.
+    # The wipe is asserted below from the context's per-origin storage state
+    # instead (Playwright retains each origin's localStorage across the
+    # bounce).
+    _goto_local_dashboard(page)
     expect(page.locator("body")).to_contain_text("Graphs", timeout=20_000)
     # the session mount purged the residue (no held key in state)
     assert page.evaluate("localStorage.getItem('tortoise_api_key')") is None
-    # #2246 review round-1: the mount purge ALREADY fired one removeItem (the
-    # patched wipe cookie above). Re-seed the residue NOW so the logout click
-    # below is the only remaining wipe — the final cookie assert then pins
-    # logout's own removeItem instead of passing on the mount purge's cookie.
+    # #2246 review round-1: the mount purge ALREADY removed the residue.
+    # Re-seed it NOW so the logout click below is the ONLY remaining wipe —
+    # the final assert then pins logout's own removeItem, not the mount purge.
     page.evaluate(f"localStorage.setItem('tortoise_api_key', '{durable}')")
-    # #2246 review round-2: clear the wipe cookie the MOUNT PURGE set — the
-    # round-1 re-seed alone left that cookie in place, so the final presence
-    # assert still passed even if logout's own wipe regressed (the assert was
-    # vacuous against the earlier purge's cookie). With the cookie cleared
-    # here, the post-logout presence assert pins LOGOUT's removeItem only.
-    page.evaluate("document.cookie='tt_wipe_log=; Domain=.premiselabs.co; Path=/; Max-Age=0'")
     page.locator(".account-blob-btn").click()
     expect(page.locator(".account-menu-logout")).to_be_visible()
     page.locator(".account-menu-logout").click()
     expect(page).to_have_url(re.compile(rf"^{re.escape(AUTH_HOST)}/auth"), timeout=20_000)
-    # rule 8: the app-origin wipe fired before the bounce (cookie set by the
-    # patched removeItem) — never "undefined"/"null" residue, never a
-    # surviving credential
-    wiped = page.evaluate("document.cookie.indexOf('tt_wipe_log=1') !== -1")
-    assert wiped, "logout must wipe KEY_STORAGE on the app origin (no tt_wipe_log cookie)"
+    # rule 8: the app-origin wipe fired before the bounce. Read the LOOPBACK
+    # origin's localStorage from the context storage state (per-origin, so it
+    # survives the navigation to /auth) — a surviving re-seeded residue means
+    # logout's removeItem did not fire.
+    loop_prefix = DASHBOARD_URL.rstrip("/")
+    residue = [
+        item["value"]
+        for origin in page.context.storage_state().get("origins", [])
+        if origin.get("origin", "").startswith(loop_prefix)
+        for item in origin.get("localStorage", [])
+        if item.get("name") == "tortoise_api_key"
+    ]
+    assert not residue, (
+        f"logout must wipe KEY_STORAGE on the app origin (residue: {residue})")

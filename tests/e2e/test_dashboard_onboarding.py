@@ -10,7 +10,6 @@ from __future__ import annotations
 import json
 import os
 import time
-import urllib.parse
 
 import pytest
 from playwright.sync_api import Page, expect
@@ -18,7 +17,21 @@ from playwright.sync_api import Page, expect
 if not os.environ.get("RUN_DASHBOARD_E2E"):
     pytest.skip("dashboard e2e: opt-in via RUN_DASHBOARD_E2E=1", allow_module_level=True)
 
-from tests.e2e.test_session_login_flow import APP_HOST, AUTH_HOST, DASHBOARD_URL, _proxy_body
+from tests.e2e.test_session_login_flow import (
+    APP_HOST,
+    AUTH_HOST,
+    DASHBOARD_URL,
+    _goto_local_dashboard,
+    _preflight_local_servers,
+    _proxy_body,
+    _seed_local_session_cookie,
+)
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _local_preview_servers() -> None:
+    """#2744: fail fast (one clear error) when :8788/:8790 are not serving."""
+    _preflight_local_servers()
 
 
 def _session(user_id: str) -> dict:
@@ -30,9 +43,9 @@ def _session(user_id: str) -> dict:
 
 
 def _seed_cookie(page: Page, user_id: str) -> None:
-    page.context.add_cookies([{"name": "sb-tortoise-auth-token",
-                               "value": urllib.parse.quote(json.dumps(_session(user_id))),
-                               "domain": ".premiselabs.co", "path": "/"}])
+    # #2744: seed BOTH the loopback (what the local preview reads) and the
+    # prod parent-domain cookie (session-coherent intercepted redirects).
+    _seed_local_session_cookie(page, user_id, _session(user_id))
 
 
 def _wire(page: Page, *, provision: bool, seed_objects: list = None, onboarding_state: dict | None = None) -> dict:  # noqa: RUF013
@@ -150,7 +163,7 @@ def test_first_timer_wizard_human_steps(page: Page) -> None:
     (accept-and-drop: the node's fork-aware gate owns completion)."""
     _seed_cookie(page, "u-onb")
     cap = _wire(page, provision=False)
-    page.goto(APP_HOST + "/", wait_until="domcontentloaded", timeout=30_000)
+    _goto_local_dashboard(page)
     # Re-entry card (empty graph) → Continue setup opens the wizard at
     # step 0 (org-create — orientation was removed per epic #2534).
     expect(page.locator("body")).to_contain_text("Continue setup", timeout=20_000)
@@ -205,7 +218,7 @@ def test_first_timer_wizard_build_fork_marks_catalog(page: Page) -> None:
     evaluable. #2323: the org-holding journey never mints a second org."""
     _seed_cookie(page, "u-bld")
     cap = _wire(page, provision=False)
-    page.goto(APP_HOST + "/", wait_until="domcontentloaded", timeout=30_000)
+    _goto_local_dashboard(page)
     expect(page.locator("body")).to_contain_text("Continue setup", timeout=20_000)
     page.get_by_role("button", name="Continue setup").click()
     # STEP 0: create/join org (orientation removed per epic #2534).
