@@ -28,10 +28,12 @@ pipeline consumes (plan §5.1 component boundary; the #280/#330 ``_FM_RE`` /
   - ``classify_file`` + ``CLASSIFIER_TO_SOURCE_KIND`` + ``source_kind_for_classifier``
     — deterministic classification precedence and the classify→sourceKind
     mapping (§6.2).
-  - Import-time sourceKind registration (§4.4): ``agentSession`` (ONTOLOGY
-    v3.6 #6 value — snake ``agent_session`` RETIRED as a registry value) and
-    ``meeting_summary``, both NEUTRAL. ``document`` is already registered in
-    ``SOURCE_KIND_DEFAULTS`` and is NOT re-registered here (T2-merge note).
+  - sourceKind registry (§4.4): ``agentSession`` (ONTOLOGY v3.6 #6 value —
+    snake ``agent_session`` RETIRED as a registry value), ``meeting_summary``,
+    ``meeting_transcript`` and ``meeting_minutes`` are registered NEUTRAL in
+    the canonical ``source_credibility.SOURCE_KIND_DEFAULTS`` (NOT here — the
+    registry owns them so every consumer sees the same set regardless of
+    import order). ``document`` is likewise registry-owned.
 
 PURITY: this module imports no graph/SDK code — stdlib + the pure
 ``source_credibility`` registry only. Consumers (sdk.py, session_indexer,
@@ -54,15 +56,19 @@ from pathlib import Path
 from typing import Any, Callable  # noqa: UP035
 from urllib.parse import quote
 
-from .source_credibility import SOURCE_KIND_DEFAULTS, register_source_kind_default
+from .source_credibility import SOURCE_KIND_DEFAULTS
 
-# ── sourceKind registry registration (§4.4) — import-time, idempotent ───────
+# ── sourceKind registry (§4.4) ─────────────────────────────────────────────
 # Sessions/meetings/docs are first-hand internal operational captures —
-# outside the research-evidence tier hierarchy — so NEUTRAL (None) stands
-# (precedent: every comparable operational kind in SOURCE_KIND_DEFAULTS is
-# registered NEUTRAL). ``document`` is already registered and NOT re-registered.
-register_source_kind_default("agentSession", None)     # ONTOLOGY v3.6 #6 value
-register_source_kind_default("meeting_summary", None)  # §4.4
+# outside the research-evidence tier hierarchy — so they register NEUTRAL
+# (None). The registrations live in the CANONICAL registry
+# (``source_credibility.SOURCE_KIND_DEFAULTS``: agentSession, meeting_summary,
+# meeting_transcript, meeting_minutes, document) rather than in an import-time
+# block here: file_indexer-import-time registration made `sourceKind` validity
+# depend on whether this module had been imported yet, so pack validation
+# disagreed with itself across processes (#2726 round-2 review). Consumers
+# (sdk.py, session_indexer, ingest.py, mining.py) import FROM here; this module
+# only READS the registry (source_kind_for_classifier's fail-loud check).
 
 # ── Canonical frontmatter boundary ─────────────────────────────────────────
 # A file starting ``---sessionId: foo\n---`` (no newline after the opening

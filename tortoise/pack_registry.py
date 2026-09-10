@@ -19,6 +19,8 @@ from typing import Any
 
 import yaml
 
+from .source_credibility import SOURCE_KIND_DEFAULTS
+
 log = logging.getLogger(__name__)
 
 # Warn-once sentinel (epic #1891 WF-2, #1930): fallback/isolation warnings on
@@ -41,8 +43,20 @@ CANONICAL_OBJECT_KINDS = frozenset({
     # Core work concepts
     "Project", "WorkItem", "Problem",  # Problem: deviation from desired state — problem-family parent
     # Universal
-    "document", "user", "skill", "tool", "agent",
+    "document", "tag", "user", "skill", "tool", "agent",
     "workflow", "agreement", "standard", "other",
+    # Commitment-state family (ONTOLOGY §5, state-centric 2026-08-12): the STATE
+    # objects commitments produce (lifecycle + derived confidence). Lowercase,
+    # like the rest of the §5 object vocabulary. #2727 aligned this set with
+    # ONTOLOGY §5 and extractor_v2.CORE_OBJECT_KEYS — the three-way diff is now
+    # empty (17 kinds each). `tag` was the other silent omission; both were
+    # missing while the §5 doc + extractor already carried them, which is why a
+    # pack could not declare `subclassOf: target`.
+    # NO §5 object kind is excluded from pack-subclassing: every member here is a
+    # valid `subclassOf` parent (this set is the parent allowlist). Kinds the
+    # ontology does NOT declare (e.g. `aggregate`/`cluster`) are deliberately
+    # absent — the canonical set mirrors §5, it does not invent.
+    "strategy", "plan", "goal", "target",
 })
 
 CANONICAL_EVENT_KINDS = frozenset({
@@ -124,20 +138,59 @@ DECISION_POINT_KINDS = frozenset({
     "decision", "vision", "strategy", "plan", "goal", "target", "humanApproval",
 })
 
-# sourceKind vocabulary (ONTOLOGY §4.6) — extraction.sourceTypes must be ⊂ this
-# (R6 §6.1#3: v1 restrict to conversation/document + allowlist of the
-# connector-registered source kinds).
+# sourceKind vocabulary (ONTOLOGY §4.6) — the §5 core types + connector kinds.
+# NOT the full pack-validation set: extraction.sourceTypes validates against
+# registered_source_types() (this ∪ the registered source-kind registry ∪ the
+# escape hatch). #2726 superseded the R6 §6.1#3 "v1 restrict to conversation/
+# document" resolution — a kind registered via register_source_kind_default is a
+# first-class sourceKind and validates for packs too (the checks had drifted).
 KNOWN_SOURCE_TYPES = frozenset({
     "conversation", "document",
     "github_issue", "slack_message", "linear_card",
 })
 
 # Escape hatch for future connectors (R6 §3.5): packs may reference these
-# without a registry release. Anything outside KNOWN_SOURCE_TYPES ∪
+# without a registry release. Anything outside registered_source_types() ∪
 # SOURCE_TYPE_ESCAPE_HATCH is a validation error (typo protection).
+# #2726 open decision (c) — "escape-hatch entries to remove": reviewed, none.
+# All four values are absent from KNOWN_SOURCE_TYPES and SOURCE_KIND_DEFAULTS,
+# so every entry is still a genuine future-connector placeholder; keep all four.
 SOURCE_TYPE_ESCAPE_HATCH = frozenset({
     "email", "webpage", "discord_message", "notion_page",
 })
+
+# Source kinds a pack may declare in extraction.sourceTypes. Computed LIVE from
+# the canonical registry (never snapshotted at import) so a kind registered
+# after import — e.g. a connector calling register_source_kind_default() at load
+# time — is valid immediately, with no import-order dependence. The union is:
+#   KNOWN_SOURCE_TYPES        — §5 core types + connector kinds
+#   SOURCE_KIND_DEFAULTS      — every registered source kind (document,
+#                               github_pr/linear_cycle #388, agentSession,
+#                               meeting_summary, and
+#                               meeting_transcript/meeting_minutes #2726)
+# SOURCE_TYPE_ESCAPE_HATCH is unioned at the call site, not here.
+# This mirrors the commit_schema.CORE_SOURCE_KINDS SEMANTICS (KNOWN_SOURCE_TYPES
+# | set(SOURCE_KIND_DEFAULTS) | {"agentSession"}). Implementation difference to
+# be aware of: this is a LIVE view; CORE_SOURCE_KINDS is an import-time frozenset
+# and compile_vocab()/refresh_vocab() union that frozen snapshot WITHOUT
+# recomputing it, so a kind registered AFTER import is accepted here immediately
+# but stays rejected by the Layer-1 gate until commit_schema recomputes (tracked
+# as #2742 — do not rely on the two diverging silently).
+# Before #2726 the check used KNOWN_SOURCE_TYPES alone, so a registered kind was
+# valid in create_source/commit_schema but rejected in pack manifests — the
+# drift class this closes. Tier-form registry keys (T0-T4) are accepted too: a
+# source's sourceKind may legitimately BE a tier form (dual-write #398), so
+# `sourceTypes: [T2]` is a meaningful activation predicate, not a typo.
+
+
+def registered_source_types() -> frozenset[str]:
+    """Every source kind currently valid in a pack's ``extraction.sourceTypes``.
+
+    Live view (the registry is mutable via ``register_source_kind_default``),
+    so callers must not cache the result across a registration. Does NOT include
+    the escape hatch — the validation site unions that separately.
+    """
+    return KNOWN_SOURCE_TYPES | frozenset(SOURCE_KIND_DEFAULTS)
 
 # Core mechanism predicates (S3 pipeline emits IMPL/NAND; MITIGATES for
 # mitigations) — valid chain-edge / enforcement targets without a pack relation.
@@ -800,11 +853,12 @@ class PackRegistry:
                     isinstance(s, str) and s for s in source_types):
                 errors.append("extraction.sourceTypes must be a list of strings")
             else:
+                known_source_types = registered_source_types()
                 for st in source_types:
-                    if st not in KNOWN_SOURCE_TYPES and st not in SOURCE_TYPE_ESCAPE_HATCH:
+                    if st not in known_source_types and st not in SOURCE_TYPE_ESCAPE_HATCH:
                         errors.append(
                             f"extraction.sourceTypes: '{st}' is not a known source "
-                            f"type (known: {', '.join(sorted(KNOWN_SOURCE_TYPES))}; "
+                            f"type (known: {', '.join(sorted(known_source_types))}; "
                             f"escape hatch: {', '.join(sorted(SOURCE_TYPE_ESCAPE_HATCH))})"
                         )
             enforcement = extraction.get("enforcement", {})
@@ -892,14 +946,38 @@ class PackRegistry:
                     errors.append(
                         f"subclassOf: '{child}' is not declared in this pack's kinds"
                     )
-                if not parent or not parent[0].isupper():
+                # Parent shape: PascalCase core entity types / named object
+                # kinds (Subject…Source, Project, WorkItem, Problem) OR a
+                # canonical lowercase object kind from ONTOLOGY §5 (document,
+                # tag, strategy, plan, goal, target — #2727). The PascalCase
+                # heuristic predates the commitment-state family and would
+                # reject those valid parents; it is therefore scoped to refs
+                # that are NOT canonical object kinds, so camelCase typos like
+                # `workItem` still error (the membership check below is the
+                # real typo guard).
+                # Known duality (pinned in tests): `document` (§5 objectKind)
+                # and `Document` (core entity type) are BOTH valid parents and
+                # expand SEPARATELY (`expand_kind` keys on the literal string).
+                # That duality is pre-existing in the core_parents membership
+                # set — this relaxation only stops the shape check from
+                # contradicting it for the lowercase half of the vocabulary.
+                # The isinstance guard keeps a malformed manifest value (list,
+                # int) on the shape-error path instead of raising TypeError out
+                # of `_validate` (which surfaced as an opaque dropped-pack error).
+                if (not isinstance(parent, str) or not parent
+                        or (not parent[0].isupper()
+                            and parent not in CANONICAL_OBJECT_KINDS)):
                     errors.append(
                         f"subclassOf: parent kind '{parent}' must be PascalCase "
-                        f"(core kinds use PascalCase)"
+                        f"or a canonical lowercase object kind "
+                        f"(e.g. {', '.join(sorted(CANONICAL_OBJECT_KINDS))})"
                     )
-                # Check parent exists in core object kinds or core concepts
+                # Check parent exists in core object kinds or core concepts.
+                # isinstance guard: a non-string parent already failed the shape
+                # check above — the frozenset membership test would otherwise
+                # raise TypeError for an unhashable value (e.g. a list).
                 core_parents = CANONICAL_OBJECT_KINDS | CORE_ENTITY_TYPES
-                if parent not in core_parents:
+                if isinstance(parent, str) and parent not in core_parents:
                     errors.append(
                         f"subclassOf: parent kind '{parent}' not found in core "
                         f"ontology. Must be a core entity type or core objectKind."
