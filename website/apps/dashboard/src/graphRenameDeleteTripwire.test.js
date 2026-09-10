@@ -87,6 +87,17 @@ test("#2701: the delete modal's Confirm is gated on the typed word 'delete' (typ
     'the modal must state the permanent-erasure endpoint')
 })
 
+test('#2701: the delete modal stops inside-click propagation to the backdrop (P1 regression guard)', () => {
+  // Report-10/11 review: the backdrop's onClick closes the modal. Without
+  // stopPropagation on the dialog, a click ANYWHERE inside (warning text,
+  // the confirm input, even the enabled Delete button) bubbles to the
+  // backdrop and dismisses the modal — breaking both the type-to-confirm
+  // flow and the "failure keeps the modal armed" contract. Mutation-verified:
+  // removing this handler must fail here.
+  assert.match(mainJsx, /className="modal graph-delete-modal"[\s\S]{0,200}?onClick=\{\(e\) => e\.stopPropagation\(\)\}/,
+    'the delete modal dialog must stopPropagation so inside-clicks never reach the backdrop close handler')
+})
+
 test('#2701: a team switch closes the delete modal and the inline rename (no cross-team edit/blur)', () => {
   // Scoped to switchTeam's own body — global occurrences of these setters
   // exist in other handlers and would false-pass (report-10 review P2).
