@@ -237,7 +237,20 @@ jobs:
       falkordb:
         image: falkordb/falkordb-server:latest
         env:
-          REDIS_ARGS: "--requirepass falkordb"
+          # #2216: no periodic RDB snapshot in this lane. Redis refuses a second
+          # fork while any child is active ("Can't fork for module: File exists"
+          # - errno EEXIST, Redis' single-fork-slot rule), and FalkorDB's
+          # GRAPH.COPY forks via RedisModule_Fork with 10 x 5ms retries - a
+          # shorter window than a BGSAVE, so a restore/drill test landing inside
+          # one fails with "GRAPH.COPY failed, could not fork" (main run
+          # 34527934725, test (a): the only failure of 4905). Reproduced locally
+          # 3/3 with the default config and 0/3 with this flag. Automatic
+          # snapshots are worthless in a throwaway test container, and explicit
+          # BGSAVE still works, so the RDB/snapshot tests are unaffected.
+          # (docker-compose.yml spells the same flag --save \"\" for its
+          # persistent dev container; both spellings are verified equivalent
+          # under run.sh's unquoted ${REDIS_ARGS} expansion.)
+          REDIS_ARGS: "--requirepass falkordb --save ''"
         ports:
           - 6379:6379
         options: >-
@@ -247,6 +260,13 @@ jobs:
           --health-retries 10
       falkordb-legacy:
         image: falkordb/falkordb-server:latest
+        env:
+          # #2216: same no-periodic-snapshot rule as the passworded falkordb
+          # service above (see there for the mechanism + the reproduced
+          # evidence). Deliberately NO --requirepass: this is the passwordless
+          # probe lane (tests use docker://:@localhost:16379/) and its
+          # health-cmd is plain `redis-cli ping`.
+          REDIS_ARGS: "--save ''"
         ports:
           - 16379:6379
         options: >-
@@ -401,14 +421,19 @@ jobs:
           # so the run step cannot drift (single source of truth).
           echo "$SLOW_IGNORES" > /tmp/pmv-slow-ignores
           python3 tools/skip-guard.py --emit-manifest "tests/" --marker "not track_b" --ignore tests/e2e $SLOW_IGNORES --output /tmp/pmv-expected-nodeids.txt
-      # #2216: INTERMITTENT GRAPH.COPY "could not fork" — NOT a code regression.
-      # Under full-suite docker memory load on the shared runner, the dr_endpoints /
-      # writer_inventory restore tests (TestDrDrill::*, TestCreateTeam::
-      # test_backup_round_trip_dashboard_created_team) can fail with "Restore swap
-      # failed ... GRAPH.COPY failed, could not fork" — an OS fork/resource
-      # exhaustion, not a product bug. Verified: clears on isolated re-run and
-      # passes locally (docker + embedded) on the identical tree. If a PMV red
-      # shows ONLY this class, re-run instead of investigating as a regression.
+      # #2216: GRAPH.COPY "could not fork" — NOT a code regression.
+      # The dr_endpoints / writer_inventory restore tests (TestDrDrill::*,
+      # TestCreateTeam::test_backup_round_trip_dashboard_created_team) can fail
+      # with "Restore swap failed ... GRAPH.COPY failed, could not fork".
+      # Cause (verified 2026-09-10, reproduced locally — this was previously
+      # recorded here as "OS fork/resource exhaustion", which is wrong): Redis
+      # refuses a second fork while a child is active ("Can't fork for module:
+      # File exists" — EEXIST, its single-fork-slot rule). FalkorDB's GRAPH.COPY
+      # retries 10x5ms, shorter than a BGSAVE, so a restore landing inside a
+      # periodic save window dies. The falkordb service containers now run
+      # --save '' (see the services: block above), which removes the periodic
+      # BGSAVE and with it this class. If a PMV red still shows ONLY this class,
+      # it is still not a regression — re-run.
       - name: Run tests (docker lane, per-test timeout)
         id: tests
         if: needs.dedup-check.outputs.skip != 'true'
