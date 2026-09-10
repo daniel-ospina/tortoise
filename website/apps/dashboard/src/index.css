@@ -128,6 +128,9 @@ a { color: var(--accent); }
 
 /* Keys */
 .row { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
+/* #2735: rotate's one-time replacement reveal (regenerateKey). #2667 dropped
+   this class with the standalone block, but rotate still needs it. */
+.new-key { background: rgba(74,222,128,0.08); border: 1px solid rgba(74,222,128,0.3); border-radius: 10px; padding: 14px; margin-bottom: 16px; display: flex; flex-direction: column; gap: 8px; align-items: flex-start; }
 .key-value { font-size: 13px; word-break: break-all; }
 
 /* Tables */

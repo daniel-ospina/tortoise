@@ -160,6 +160,22 @@ function fmtExpiryDate(iso) {
   return new Date(t).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })
 }
 
+// #2246 (PM-1): the destructive-key confirms (API-Keys revoke + rotate, and
+// the per-graph panel revoke) name their target as "name · prefix · created"
+// so a one-click action never silently kills an agent key the user cannot
+// identify — rows are hash-only and names may be unset. ONE derivation for
+// all three sites (the #2246 contract, not per-site copy).
+function keyRowDisclosure(row, fallbackName) {
+  const name = (row && row.name) || fallbackName || 'this API key'
+  const prefix = (row && row.key_prefix)
+    || String((row && (row.id || row.key_id)) || '').slice(0, 8)
+  const createdIso = row && (row.created_at || row.createdAt)
+  const created = createdIso && !Number.isNaN(Date.parse(createdIso))
+    ? new Date(Date.parse(createdIso)).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })
+    : ''
+  return [name, prefix, created].filter(Boolean).join(' · ')
+}
+
 
 // #2002 (W6): pure captured-sessions view/delete derivations (node --test —
 // capturedSessions.test.js) for the Settings Captured-sessions home.
@@ -991,6 +1007,13 @@ function claimIntentInFlight() {
   // #2426: the show-once card's authoritative server echo of the minted
   // key's expiry (ISO string, or null = Never). Cleared wherever newKey is.
   const [newKeyExpiresAt, setNewKeyExpiresAt] = React.useState(null)
+  // #2735: rotate's one-time replacement reveal — {plaintext, expiresAt}.
+  // DELIBERATELY separate state from newKey/newKeyExpiresAt (the create
+  // modal's key): opening and cancelling the create modal must never destroy
+  // an unread rotate replacement whose old key is already revoked (#2392
+  // class "a click must not destroy the one-time secret"). Cleared on the
+  // reveal's own Copy & done and on logout/team switch.
+  const [rotatedKey, setRotatedKey] = React.useState(null)
   // key-create modal state
   const [keyModalOpen, setKeyModalOpen] = React.useState(false)
   const [keyModalBusy, setKeyModalBusy] = React.useState(false)
@@ -3677,6 +3700,7 @@ function claimIntentInFlight() {
     setSessions([])
     setNewKey(null)
     setNewKeyExpiresAt(null) // #2426: expiry echo rides the show-once card
+    setRotatedKey(null) // #2735: the rotate reveal is one-time plaintext — never survives logout
     // #1082: clear the claim intent on logout (a stale pasted key must not
     // auto-claim the next user's session).
     setClaimKey('')
@@ -4172,6 +4196,7 @@ function claimIntentInFlight() {
     setBackupsStatus('loading') // #1923: mirror the backupInfo reset
     setNewKey(null)        // Round-16: the plaintext key card was shown once on the old team
     setNewKeyExpiresAt(null) // #2426: expiry echo rides the show-once card
+    setRotatedKey(null)    // #2735: the rotate reveal is one-time plaintext — never survives a team switch
     setNewKeyName('')      // key-label: a typed label must not leak onto another team's mint
     setNewKeyExpiryDate('') // #2426: a picked Custom date must not leak onto another team's mint
     setEditingKeyId(null)  // key-label: close any in-flight inline rename across teams
@@ -4484,8 +4509,9 @@ function claimIntentInFlight() {
   async function revokePanelKey(keyId) {
     const seq = graphPanelReqRef.current // P2-1: op-start seq (see mintGraphKey)
     const row = (panelKeys || []).find((k) => (k.id || k.key_id) === keyId)
-    const rowName = (row && row.name) || 'this graph key'
-    if (!confirm(`Revoke ${rowName}? Applications using it will stop working.`)) return
+    // #2246 (PM-1): name · prefix · created — the confirm identifies the key
+    // that stops working (mirrors the API-Keys revokeKey UX).
+    if (!confirm(`Revoke ${keyRowDisclosure(row, 'this graph key')}? Applications using it will stop working.`)) return
     setGraphMsg('')
     const _teamAtCall = currentTeamId
     try {
@@ -5047,8 +5073,8 @@ function claimIntentInFlight() {
     // #2246 (ADR-010): rotate is now available on EVERY durable row (uniform
     // table actions) and NEVER installs the replacement into the browser — no
     // localStorage/teamKeysRef/apiKey write. The replacement is shown once
-    // (setNewKey) for the user to configure into their agent; the old key is
-    // revoked.
+    // (setRotatedKey) for the user to configure into their agent; the old key
+    // is revoked.
     if (busy) return
     const row0 = (keys || []).find((k) => (k.id || k.key_id) === keyId)
     const rowName = (row0 && row0.name) || 'this API key'
@@ -5062,7 +5088,7 @@ function claimIntentInFlight() {
     const replacementExpiry = rowLifetime
       ? `The replacement expires ${fmtExpiryDate(new Date(Date.now() + rowLifetime * _MS_PER_DAY).toISOString())} (the same ${rowLifetime}-day lifetime as this key).`
       : 'The replacement never expires (same as this key).'
-    if (!confirm(`Rotate ${rowName}? A replacement key is created (shown once) and ${rowName} is revoked — applications using the old key will stop working. ${replacementExpiry}`)) return
+    if (!confirm(`Rotate ${keyRowDisclosure(row0, 'this API key')}? A replacement key is created (shown once) and ${rowName} is revoked — applications using the old key will stop working. ${replacementExpiry}`)) return
     setCapNotice('')
     setError('')
     setBusy(true)
@@ -5084,9 +5110,11 @@ function claimIntentInFlight() {
       await revokeKey(keyId, { skipConfirm: true })
       if (teamIdRef.current !== _teamAtCall) return
       // #2246: no held install — the replacement is shown once and managed
-      // from the table like any other durable.
-      setNewKey((mk && (mk.key || mk.api_key)) || '')
-      setNewKeyExpiresAt((mk && mk.expires_at) || null)
+      // from the table like any other durable. #2735: its OWN reveal state
+      // (rotatedKey), never the create modal's newKey — the create modal's
+      // dismiss paths clear newKey, which would destroy this unread
+      // replacement (the old key is already revoked by this point).
+      setRotatedKey({ plaintext: (mk && (mk.key || mk.api_key)) || '', expiresAt: (mk && mk.expires_at) || null })
       await loadAll('')
     } catch (e) {
       if (teamIdRef.current === currentTeamId) {
@@ -5188,11 +5216,10 @@ function claimIntentInFlight() {
     // the old team's key table under the new header.
     const _teamAtCall = currentTeamId
     const row0 = (keys || []).find((k) => (k.id || k.key_id) === keyId)
-    const rowName = (row0 && row0.name) || 'this API key'
     // #2246 (PM-1): the confirm names the row (name · prefix · created) so a
     // one-click trash never silently kills an agent key the user cannot
     // identify (rows are hash-only; names may be unset).
-    if (!opts.skipConfirm && !confirm(`Revoke ${rowName}? Applications using it will stop working.`)) return
+    if (!opts.skipConfirm && !confirm(`Revoke ${keyRowDisclosure(row0, 'this API key')}? Applications using it will stop working.`)) return
     setCapNotice('')
     setError('')
     try {
@@ -5221,8 +5248,8 @@ function claimIntentInFlight() {
       // REVOKED key (an empty-tail the effect cannot see). The direct
       // prefix clear closes it. Also covers regenerateKey's rotate (it
       // revokes the old row via revokeKey skipConfirm) — the replacement
-      // is shown via setNewKey, and the welcome plaintext must not survive
-      // its own row's rotation.
+      // is shown via setRotatedKey, and the welcome plaintext must not
+      // survive its own row's rotation.
       if (row0 && row0.key_prefix) {
         if (welcomeKey && welcomeKey.startsWith(row0.key_prefix)) setWelcomeKey('')
         if (wizardDurableKey && wizardDurableKey.startsWith(row0.key_prefix)) setWizardDurableKey('')
@@ -7088,6 +7115,46 @@ function claimIntentInFlight() {
               </div>
             )}
 
+            {/* #2735: rotate's replacement reveal. #2667 moved create-key
+                into the Create API key modal and DELETED the standalone
+                `.new-key` block — but regenerateKey still set newKey/
+                newKeyExpiresAt, so a rotate minted the replacement and then
+                never showed it (the user could not configure the new key).
+                Restored inline from its OWN state (rotatedKey), so the create
+                modal's dismiss paths (which clear newKey) can never destroy
+                this already-revoked-old-key replacement. */}
+            {rotatedKey && (
+              <div className="new-key">
+                <strong>Your new key (shown once):</strong>
+                <code className="key-value">{rotatedKey.plaintext}</code>
+                {rotatedKey.expiresAt ? (
+                  <span className="dim">expires {fmtExpiryDate(rotatedKey.expiresAt)}</span>
+                ) : (
+                  <span className="dim">never expires</span>
+                )}
+                <button className="ghost small" onClick={async () => {
+                  // #2735: clear the one-time plaintext ONLY after the clipboard
+                  // write resolves. The old key is already revoked, so a failed
+                  // write that still cleared the reveal would destroy the only
+                  // copy of the live replacement (#2392 class). On failure keep
+                  // the key visible + select it for a manual copy — mirrors
+                  // revealKey's fallback.
+                  try {
+                    await navigator.clipboard.writeText(rotatedKey.plaintext)
+                    setRotatedKey(null)
+                  } catch {
+                    const el = document.querySelector('.new-key .key-value')
+                    if (el) {
+                      const range = document.createRange()
+                      range.selectNodeContents(el)
+                      const sel = window.getSelection()
+                      sel.removeAllRanges()
+                      sel.addRange(range)
+                    }
+                  }
+                }}>Copy &amp; done</button>
+              </div>
+            )}
             {/* #2246 (ADR-010): the keys table is uniform — every durable row
                 carries the same owner action set (rename / toggle / trash /
                 Rotate); no "in use by this dashboard" row, no rotate-only

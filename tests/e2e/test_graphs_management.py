@@ -128,6 +128,7 @@ def _wire_graphs_harness(page: Page, team_row: dict,
                          mint_bodies: list | None = None,
                          graph_mint_bodies: list | None = None,
                          key_authed: list | None = None,
+                         rename_bodies: list | None = None,
                          create_status: int = 201,
                          create_body: dict | None = None) -> None:
     """Layered API mock (keys-table style). team_row carries tier/max_graphs
@@ -142,6 +143,7 @@ def _wire_graphs_harness(page: Page, team_row: dict,
     mint_bodies = mint_bodies if mint_bodies is not None else []
     graph_mint_bodies = graph_mint_bodies if graph_mint_bodies is not None else []
     key_authed = key_authed if key_authed is not None else []
+    rename_bodies = rename_bodies if rename_bodies is not None else []
     user_id = "u-graphs2116"
     create_body = create_body if create_body is not None else {
         "graph": {**CUSTOM_B, "created_at": "2026-09-04T00:00:00.000Z"},
@@ -151,7 +153,10 @@ def _wire_graphs_harness(page: Page, team_row: dict,
         "key_plaintext": "tk_live_newgraph1234567890abcdef",
         "revealed_once": True,
     }
-    current_graphs = list(graphs)
+    # Deep-copy: PATCH/DELETE mutate these dicts in place; a shallow
+    # `list(graphs)` would write the rename/delete back into the module-level
+    # fixtures (DEFAULT_ROW/CUSTOM_A/…) and leak across tests in the process.
+    current_graphs = [dict(g) for g in graphs]
     # Deep-copy the per-graph key fixtures so mutations never leak across
     # tests in the same process (the harness list is per-page anyway).
     current_keys: dict[str, list[dict]] = {
@@ -239,6 +244,19 @@ def _wire_graphs_harness(page: Page, team_row: dict,
                                      if g["graph_id"] != gid]
                 route.fulfill(status=204)
                 return
+            if m and route.request.method == "PATCH":
+                # #2701 rename: body is ONLY {name}; capture it and echo the
+                # updated row so the inline edit's optimistic state reconciles.
+                gid = urllib.parse.unquote(m.group(1))
+                rename_bodies.append(route.request.post_data or "")
+                body = json.loads(route.request.post_data or "{}")
+                for g in current_graphs:
+                    if g["graph_id"] == gid:
+                        g["name"] = body.get("name", g["name"])
+                route.fulfill(status=200, content_type="application/json",
+                              body=json.dumps({"graph_id": gid,
+                                               "name": body.get("name")}))
+                return
             if path.endswith("/v1/sessions"):
                 route.fulfill(status=200, content_type="application/json",
                               body=json.dumps({"sessions": []}))
@@ -296,9 +314,10 @@ def _open_graphs_tab(page: Page, team_row: dict,
 
 
 def test_graphs_table_rows_default_first_with_actions(page: Page) -> None:
-    """Indicator 1 + the row model: default row first (no Delete), custom
-    rows carry Keys + Delete; status/key-count columns render; the meter
-    shows the ∞ label for a pro/team tier (max_graphs null)."""
+    """Indicator 1 + the row model: default row first (its trash is
+    DISABLED — #2701), custom rows carry rename + Keys + Delete; status/
+    key-count columns render; the meter shows the ∞ label for a pro/team
+    tier (max_graphs null)."""
     key_authed: list = []
     _open_graphs_tab(page, _team_row("team", None),
                      key_authed=key_authed)
@@ -307,19 +326,35 @@ def test_graphs_table_rows_default_first_with_actions(page: Page) -> None:
     expect(page.locator('[aria-label="Graph usage meter"]')).to_contain_text("2 graphs · ∞ cap")
     rows = page.locator("table tbody tr")
     expect(rows.first).to_contain_text("default")  # name + badge
-    # The default row: NO Delete, NO per-graph [Keys] panel button (its
-    # keys are the team-wide rows on the API Keys tab — P1-1 review fix),
-    # and NO raw key_count — #2306 suppresses the Keys cell (fixture
+    # The default row: NO working Delete, NO per-graph [Keys] panel button
+    # (its keys are the team-wide rows on the API Keys tab — P1-1 review
+    # fix), and NO raw key_count — #2306 suppresses the Keys cell (fixture
     # payload key_count 1 = the registry bound-default capstone artifact
     # that must never render) and offers the API-Keys-tab affordance.
-    expect(rows.first.get_by_role("button", name="Delete")).to_have_count(0)
+    #
+    # #2701: the default row's 🗑 still RENDERS but is DISABLED (the lock
+    # reason rides the aria-label). `exact=True` is load-bearing — Playwright
+    # role-name matching is a case-insensitive SUBSTRING, so the stale
+    # `name="Delete"` locator wrongly selected the disabled trash because
+    # "…can't be deleted" contains "deleted". The lock is the app's design
+    # (never clickable), not evidence of a missing action.
+    expect(rows.first.get_by_role("button", name="Delete", exact=True)).to_have_count(0)
+    dflt_trash = rows.first.locator("button.graph-trash")
+    expect(dflt_trash).to_have_count(1)
+    expect(dflt_trash).to_be_disabled()
+    expect(dflt_trash).to_have_attribute(
+        "aria-label", "The default graph can't be deleted")
     expect(rows.first.get_by_role("button", name="Manage keys for graph default")).to_have_count(0)
     dflt_keys_cell = rows.first.locator("td").nth(3)
     expect(dflt_keys_cell).to_contain_text("API Keys tab")
     expect(dflt_keys_cell).not_to_contain_text("1")  # suppressed, not the payload count
     custom_row = rows.filter(has_text="prod")
-    expect(custom_row.get_by_role("button", name="Delete")).to_be_visible()
+    expect(custom_row.get_by_role("button", name="Delete graph prod")).to_be_visible()
     expect(custom_row.get_by_role("button", name="Keys")).to_be_visible()
+    # #2701: the rename pencil is an owner/admin row action on EVERY row
+    # (rename is not delete-gated — the default graph is renameable).
+    expect(custom_row.get_by_role("button", name="Rename graph prod")).to_be_visible()
+    expect(rows.first.get_by_role("button", name="Rename graph default")).to_be_visible()
     expect(custom_row).to_contain_text("custom")
     expect(custom_row).to_contain_text("0")  # key_count column
 
@@ -415,25 +450,70 @@ def test_per_graph_key_panel_lists_mints_and_revokes(page: Page) -> None:
 
 
 def test_default_graph_has_no_actions_and_custom_delete_armed(page: Page) -> None:
-    """Indicator 4: the default graph row never offers the per-graph Keys
-    panel or Delete; its Keys cell is #2306-suppressed (API-Keys-tab
-    affordance instead of a count); a custom row's Delete arms an inline
-    confirm (cancel keeps the row)."""
-    _open_graphs_tab(page, _team_row("team", None))
+    """Indicator 4 + #2701: the default graph row never offers the per-graph
+    Keys panel or a WORKING delete (its 🗑 is rendered disabled with the
+    reason); its Keys cell is #2306-suppressed (API-Keys-tab affordance
+    instead of a count). A custom row's 🗑 opens the TYPE-TO-CONFIRM modal:
+    cancel keeps the row, typing the literal word + confirming fires DELETE
+    /v1/graphs/{gid}?team_id=…. The inline rename pencil commits a PATCH
+    {name} and the row re-renders with the new name."""
+    rename_bodies: list = []
+    # A second custom row so the rename round-trip cannot disturb the
+    # delete target (each action keeps its own row).
+    _open_graphs_tab(page, _team_row("team", None),
+                     graphs=[DEFAULT_ROW, CUSTOM_A, CUSTOM_B],
+                     rename_bodies=rename_bodies)
     rows = page.locator("table tbody tr")
     dflt = rows.filter(has_text="default").first
-    expect(dflt.get_by_role("button", name="Delete")).to_have_count(0)
+    # #2701: disabled trash (exact=True — the reason substring contains
+    # "deleted", see the sibling test) + the lock reason on the aria-label.
+    expect(dflt.get_by_role("button", name="Delete", exact=True)).to_have_count(0)
+    dflt_trash = dflt.locator("button.graph-trash")
+    expect(dflt_trash).to_have_count(1)
+    expect(dflt_trash).to_be_disabled()
+    expect(dflt_trash).to_have_attribute(
+        "aria-label", "The default graph can't be deleted")
     expect(dflt.get_by_role("button", name="Manage keys for graph default")).to_have_count(0)
     # #2306 chosen shape: the suppressed cell points at the API Keys tab.
     expect(dflt.locator("td").nth(3)).to_contain_text("API Keys tab")
+
+    # ── #2701 rename pencil: inline edit commits PATCH /v1/graphs/{id} {name} ──
+    dev_row = rows.filter(has_text="dev")
+    # PATCH interception is async — arm the response waiter BEFORE the commit
+    # so a slow route handler cannot land after press() returns (the row name
+    # updates optimistically, so only the captured body proves the network leg).
+    with page.expect_response(lambda r: r.request.method == "PATCH"
+                              and "/v1/graphs/" in r.url, timeout=15_000):
+        dev_row.get_by_role("button", name="Rename graph dev").click()
+        # Page-scoped: clicking the pencil REPLACES the row's name cell with the
+        # input, so the `has_text="dev"` row filter can no longer resolve — the
+        # input's aria-label is the stable handle while the edit is armed.
+        rename_input = page.get_by_label("Rename graph dev")
+        expect(rename_input).to_be_visible()
+        rename_input.fill("dev-renamed")
+        rename_input.press("Enter")  # Enter routes to blur → renameGraph
+    assert rename_bodies, "the rename pencil must PATCH the graph"
+    assert json.loads(rename_bodies[-1]) == {"name": "dev-renamed"}, rename_bodies
+    expect(rows.filter(has_text="dev-renamed")).to_be_visible(timeout=15_000)
+
+    # ── #2701 delete 🗑 → type-to-confirm modal on a custom row ──
     custom_row = rows.filter(has_text="prod")
-    custom_row.get_by_role("button", name="Delete").click()
-    expect(custom_row).to_contain_text("Delete prod?")
-    custom_row.get_by_role("button", name="Cancel").click()
-    expect(custom_row).not_to_contain_text("Delete prod?")
-    # Arming then confirming fires DELETE /v1/graphs/{gid}?team_id=…
-    custom_row.get_by_role("button", name="Delete").click()
-    custom_row.get_by_role("button", name="Delete", exact=True).click()
+    custom_row.get_by_role("button", name="Delete graph prod").click()
+    modal = page.locator('[role="dialog"][aria-label="Delete graph"]')
+    expect(modal).to_be_visible()
+    expect(modal).to_contain_text("Delete prod?")
+    # The destructive Confirm is gated on the typed literal word.
+    confirm_btn = modal.get_by_role("button", name="Delete graph", exact=True)
+    expect(confirm_btn).to_be_disabled()
+    modal.get_by_role("button", name="Cancel").click()
+    expect(modal).to_have_count(0)
+    expect(custom_row).to_be_visible()  # cancel keeps the row
+    # Re-arm, type the word, confirm → DELETE drops the row from the refetch.
+    custom_row.get_by_role("button", name="Delete graph prod").click()
+    expect(modal).to_be_visible()
+    modal.get_by_label("Type delete to confirm").fill("delete")
+    expect(confirm_btn).to_be_enabled()
+    confirm_btn.click()
     expect(custom_row).not_to_be_visible(timeout=15_000)  # list re-fetch drops it
 
 
