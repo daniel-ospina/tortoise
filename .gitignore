@@ -60,6 +60,13 @@ battery/config/.gold_store/
 
 # Battery eval run artifacts (local, never committed)
 battery-out/
+
+# Agent QA/review output — Playwright-MCP scratch and local screenshot evidence
+# that issues reference by repo path (e.g. #2710, #2711). Never committed.
+# These were untracked-but-not-ignored, which made the shared main checkout
+# permanently DIRTY and blocked every git op via the M4 hub-state gate (#2238).
+.playwright-mcp/
+review-artifacts/
 # Content-addressed kind-embedding index cache (#1695 Task 3) — the .npz
 # files are gitignored; the directory convention (.gitkeep) is committed.
 data/kind_index/*
