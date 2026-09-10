@@ -1684,6 +1684,22 @@ def test_near_miss_normalization_keeps_internal_punctuation():
     assert _normalize_answer_text("a   b") == "a b"
 
 
+def test_normalization_coerces_non_string_gold_answers():
+    """#2450: gold answers are not always strings — the census dataset carries
+    integer golds (e.g. temporal-reasoning Q71017276, gold=4). The old
+    `(text or "").strip()` returned the int unchanged for truthy values and
+    crashed with AttributeError, dropping the whole question from the run.
+    Non-strings must coerce; None/"" stay empty (never a crash)."""
+    assert _normalize_answer_text(4) == "4"
+    assert _normalize_answer_text(3.14) == "3.14"
+    assert _normalize_answer_text(None) == ""
+    assert _normalize_answer_text("") == ""
+    # End-to-end through the grader the judge lane actually calls.
+    assert classify_answer(4, "4") is AnswerGrade.CORRECT
+    assert classify_answer(4, "five") is AnswerGrade.WRONG
+    assert classify_answer(None, "anything") is AnswerGrade.WRONG
+
+
 def test_mock_reader_returns_evidence():
     r = MockReader()
     hits = [
