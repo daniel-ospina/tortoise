@@ -513,21 +513,16 @@ async def _lifespan(app):
                 from tortoise.backup_sweep import read_team_state
                 from tortoise.backup_watcher import BackupWatcher, WatcherThread
 
-                # #669 post-flip: the watcher's team enumeration must use the
-                # SAME seam as the sweep driver — Supabase teams in Supabase
-                # control-plane mode, the registry handle for selfhost. The
-                # raw registry handle would read an EMPTY graph post-flip
-                # (registry deleted) and file spurious staleness incidents
-                # (post-flip verification finding, #669).
-                from tortoise.supabase_control import (
-                    get_control_plane,
-                    is_supabase_enabled,
-                )
-                if is_supabase_enabled():
-                    team_source = get_control_plane()
-                else:
-                    reg_sdk = _registry_sdk()
-                    team_source = reg_sdk._get_registry()
+                # #669 post-flip: the watcher's team enumeration uses the SAME
+                # seam as the sweep driver — #2823 folded this last hand-rolled
+                # `is_supabase_enabled()` branch onto the shared
+                # `_control_plane_source()`, so no caller re-introduces the
+                # pre-#669 resolution (the raw registry handle reads an EMPTY
+                # graph post-flip — registry deleted — and files spurious
+                # staleness incidents; post-flip verification finding, #669).
+                from tortoise.supabase_control import is_supabase_enabled
+
+                team_source = _control_plane_source()
 
                 def _sweep_teams() -> list[str]:
                     from tortoise.backup_sweep import enumerate_teams
@@ -589,7 +584,13 @@ async def _lifespan(app):
                 _WATCHER.start()
                 if not is_supabase_enabled():
                     try:
-                        _boot_gc_drill_graphs(reg_sdk._get_proj().db)
+                        # Registry lane only: the boot GC sweeps stale `_drill_*`
+                        # scratch graphs. The DATA-plane handle is resolved here
+                        # rather than held above — `team_source` now comes from
+                        # the shared seam, and _make_sdk's process-lifetime
+                        # keepalive anchor keeps the embedded server alive
+                        # (#1475/#1607).
+                        _boot_gc_drill_graphs(_registry_sdk()._get_proj().db)
                     except Exception as exc:
                         # #2922 review: a separate operation, so a separate
                         # message. Reporting a drill-graph GC failure as "the
@@ -19698,13 +19699,11 @@ async def backups_list(team: dict = Depends(get_current_team_session_ungated)): 
                           and len(str(m.get("backup_id", "")).split("/")) == 2
                           and m.get("backup_id") not in (idx or {})]
             if unresolved:
-                from tortoise.supabase_control import (
-                    get_control_plane,
-                    is_supabase_enabled,
-                )
                 try:
-                    cp = (get_control_plane() if is_supabase_enabled()
-                          else _registry_sdk()._get_registry())
+                    # #2823: one shared dialect-aware seam — never a hand-rolled
+                    # `is_supabase_enabled()` branch (that per-caller drift is
+                    # what left the sweep enumerating the empty registry).
+                    cp = _control_plane_source()
                 except Exception as e:
                     _logger.warning("backups list cp unavailable: %s", e)
                     cp = None
@@ -19749,6 +19748,35 @@ def _registry_sdk() -> TortoiseSDK:
         time.sleep(PROBE_RETRY_DELAY)
         sdk._get_proj()  # ONE retry — same SDK; _proj stays None until success
     return sdk
+
+
+def _control_plane_source():
+    """Dialect-aware control-plane source for the backup/DR seam (#669/#2823).
+
+    Supabase lane: the ``SupabaseControlPlane`` (PostgREST adapter). Registry
+    lane (selfhost): the FalkorDB ``registry_control_plane`` graph handle.
+
+    #2823: this is the sanctioned way for the backup/DR OPERATORS to obtain
+    the control plane — every operator that hand-rolled the dialect branch
+    (sweep, purge, re-baseline, drill, scheduled drill, acl-reconcile,
+    `backups_list`, the watcher lifespan) now resolves it here, so the next
+    operator cannot re-introduce the defect per-endpoint (#2340).
+
+    Two older sites still resolve the same pair inline
+    (``backups_create``'s stamp seam, ``backups/restore``'s target resolver):
+    they HOLD the registry SDK as a request-scoped keepalive and close it in
+    their ``finally`` (#1475/#1607), so folding them needs that lifetime
+    preserved — tracked separately rather than risked here.
+
+    A Supabase-mode caller also never opens the registry namespace, which the
+    #669 post-flip verification flagged as an auto-recreate artifact
+    (``_get_registry()`` runs ``CREATE INDEX`` against the deleted graph).
+    """
+    from tortoise.supabase_control import get_control_plane, is_supabase_enabled
+
+    if is_supabase_enabled():
+        return get_control_plane()
+    return _registry_sdk()._get_registry()
 
 
 # Per-team restore serialization: the swap (delete live → copy temp) must not
@@ -20140,8 +20168,10 @@ def _reconcile_acl_users_sync() -> dict:
         raise HTTPException(status_code=503, detail="Backup sweep disabled")
     from tortoise.backup_sweep import _sweep_graph_list, enumerate_eligible_teams
 
-    reg_sdk = _registry_sdk()
-    registry = reg_sdk._get_registry()
+    # #2823/#2340: dialect-aware control plane — the raw registry handle
+    # enumerates an EMPTY graph post-#669, so this returned {"teams": 0} (a
+    # silent no-op success) instead of rebuilding the post-restore ACLs.
+    registry = _control_plane_source()
     try:
         team_ids = enumerate_eligible_teams(registry)
     except RuntimeError as e:
@@ -20219,9 +20249,14 @@ async def backups_sweep(request: Request):
         raise HTTPException(status_code=503, detail="Backup sweep disabled")
     from tortoise.backup_sweep import run_backup_sweep
 
-    reg_sdk = _registry_sdk()
-    registry = reg_sdk._get_registry()
-    db = reg_sdk._get_proj().db
+    # #2823 (P0): the control plane resolves through the SHARED dialect-aware
+    # seam. `_registry_sdk()._get_registry()` is the pre-#669 resolution — the
+    # post-flip graph is DELETED, so the sweep enumerated 0 teams, reported a
+    # benign `no_teams`, and backed nothing up from the flip until now. The
+    # data-plane `db` handle is lane-independent (knowledge graphs stay in
+    # FalkorDB) and is reused exactly as before.
+    registry = _control_plane_source()
+    db = _registry_sdk()._get_proj().db
     storage = _backup_storage()
     try:
         mirror = _backup_mirror_storage(cfg)
@@ -20232,7 +20267,13 @@ async def backups_sweep(request: Request):
     # In-flight guard: a concurrent sweep returns 202 (no queueing — the next
     # hourly run retries). This is what the driver's 202 branch keys on.
     if _SWEEP_INFLIGHT.locked():
-        return {"status": "already_running", "teams_backed_up": 0}
+        # #2823: the dialect rides the 202 too — the driver logs `sweep source:`
+        # for EVERY run, and a lock-held run is the one shape where it would
+        # otherwise report `unknown` (the source is already resolved above).
+        from tortoise.hosted_backup import source_dialect
+
+        return {"status": "already_running", "teams_backed_up": 0,
+                "source": source_dialect(registry)}
     async with _SWEEP_INFLIGHT:
         def lock_for(team_id: str):
             return _sweep_team_lock(team_id)
@@ -20278,9 +20319,11 @@ async def backups_purge(request: Request, body: dict | None = None):
     _check_internal(request)
     from tortoise.backup_sweep import run_graph_purge
 
-    reg_sdk = _registry_sdk()
-    registry = reg_sdk._get_registry()
-    db = reg_sdk._get_proj().db
+    # #2823/#2340: dialect-aware control plane. `run_graph_purge` enumerates
+    # teams through the same seam — off the raw registry handle it purged 0
+    # teams in Supabase mode (expired trash never erased).
+    registry = _control_plane_source()
+    db = _registry_sdk()._get_proj().db
     storage = _backup_storage()
     grace_days = int((body or {}).get("grace_days")
                      or _TRASH_GRACE_DAYS)
@@ -20415,7 +20458,7 @@ async def backups_status(request: Request):
     last_sweep = {
         key: sweep_state.get(key)
         for key in ("last_sweep_at", "last_team_count", "graph_totals",
-                    "graph_failures", "graph_error_streaks")
+                    "graph_failures", "graph_error_streaks", "source")
     }
     if not last_sweep.get("last_sweep_at"):
         last_sweep = None  # sweep never ran — omit the block
@@ -20551,9 +20594,11 @@ async def backups_rebaseline(request: Request, body: dict):
         resolve_active_graph,
     )
 
-    reg_sdk = _registry_sdk()
-    registry = reg_sdk._get_registry()
-    db = reg_sdk._get_proj().db
+    # #2823/#2340: dialect-aware control plane — `resolve_active_graph`
+    # enumerates the team's graphs through this source; the raw registry handle
+    # 400s/409s ACTIVE Supabase-lane graphs.
+    registry = _control_plane_source()
+    db = _registry_sdk()._get_proj().db
     storage = _backup_storage()
     try:
         row = resolve_active_graph(registry, team_id, graph_id)
@@ -20794,9 +20839,9 @@ async def backups_drill(request: Request, body: dict):
         raise HTTPException(status_code=429, detail="drill cooldown — ≥1h between drills")
     _LAST_DRILL_AT = _time.time()
 
-    reg_sdk = _registry_sdk()
-    registry = reg_sdk._get_registry()
-    db = reg_sdk._get_proj().db
+    # #2823/#2340: dialect-aware control plane (see re-baseline).
+    registry = _control_plane_source()
+    db = _registry_sdk()._get_proj().db
     storage = _backup_storage()
     try:
         return await asyncio.to_thread(
@@ -20835,9 +20880,10 @@ async def backups_drill_scheduled(request: Request):
         raise HTTPException(status_code=429, detail="drill cooldown — ≥1h between drills")
     _LAST_DRILL_AT = _time.time()
 
-    reg_sdk = _registry_sdk()
-    registry = reg_sdk._get_registry()
-    db = reg_sdk._get_proj().db
+    # #2823/#2340: dialect-aware control plane — the scheduled drill resolves
+    # its candidate's active graph through this source.
+    registry = _control_plane_source()
+    db = _registry_sdk()._get_proj().db
     storage = _backup_storage()
     alerts = _alert_store_from(cfg)
     try:

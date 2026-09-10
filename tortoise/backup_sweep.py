@@ -45,7 +45,13 @@ from types import SimpleNamespace
 from typing import Any, Callable  # noqa: UP035
 
 from .backup_config import BackupConfig
-from .hosted_backup import _is_supabase_source, create_backup, mirror_backup, prune_backups
+from .hosted_backup import (
+    _is_supabase_source,
+    create_backup,
+    mirror_backup,
+    prune_backups,
+    source_dialect,
+)
 
 # #2562 (re-audit P3): the sweep/purge per-team acquisitions are TIMED too
 # — a stuck holder (a restore whose locked body wedged) must not block that
@@ -177,6 +183,40 @@ def _check_per_label_drift(
     return breaches or None
 
 
+def _refuse_wrong_dialect(source) -> None:
+    """#2823 fail-closed: the enumeration source must match the CONFIGURED lane.
+
+    A Supabase control-plane deployment handed a registry-dialect source is a
+    MISCONFIGURATION, not an empty deployment: post-#669 the registry graph is
+    deleted, so the Cypher branch returns 0 rows forever and the caller reports
+    the chronic NO_TEAMS state this seam's docstring promises to prevent. That
+    is exactly the production defect behind #2823 (sweep: `no_teams`, 0 teams
+    backed up for 31 days) and #2340 (acl-reconcile: `{"teams": 0}` no-op).
+    Raise instead so the caller surfaces `enum_failed` — which the driver does
+    NOT self-heal as a healthy run.
+
+    Deliberately ONE-DIRECTIONAL: a Supabase-dialect source under registry mode
+    (selfhost under test, CI fakes) is legitimate and never refused. A genuinely
+    empty read FROM THE CORRECT LANE stays ``[]`` (confirmed-empty, per the
+    docstring): a fresh deployment has no teams, and the regression signal for a
+    deployment that HAD teams is the ENUM_DELTA guard on the >0 → 0 transition
+    (#2821 filed correctly from production on 2026-09-10).
+    """
+    if _is_supabase_source(source):
+        return
+    try:
+        from .supabase_control import is_supabase_enabled
+    except Exception:  # import guard — never fail the read on it
+        return
+    if is_supabase_enabled():
+        raise RuntimeError(
+            "control-plane dialect mismatch: the Supabase lane is configured "
+            "but the enumeration source is the FalkorDB registry handle "
+            "(deleted/empty post-#669) — resolve the source via the shared "
+            "dialect-aware seam"
+        )
+
+
 def enumerate_teams(source) -> list[str]:
     """Seam: list Team ids from the control-plane source (#669).
 
@@ -188,9 +228,13 @@ def enumerate_teams(source) -> list[str]:
     creation names graphs ``team_{name}``, not ``team_{id}``; see #770).
 
     Confirmed-empty returns []; a query failure raises RuntimeError
-    (fail-closed — never chronic NO_TEAMS).
+    (fail-closed — never chronic NO_TEAMS). #2823 extends that contract to the
+    source itself: a registry-dialect source under a configured Supabase lane
+    is refused loudly (``_refuse_wrong_dialect``) instead of being
+    indistinguishable from an empty deployment.
     """
     try:
+        _refuse_wrong_dialect(source)
         if _is_supabase_source(source):
             rows = source.query("teams", select=["id", "graph_name"])
             return [str(r["id"]) for r in rows if r.get("id")]
@@ -208,9 +252,10 @@ def enumerate_eligible_teams(source) -> list[str]:
     ``enumerate_teams``).
 
     Fail-closed: a query failure raises RuntimeError (same contract as
-    ``enumerate_teams``).
+    ``enumerate_teams``, including the #2823 dialect-mismatch refusal).
     """
     try:
+        _refuse_wrong_dialect(source)
         if _is_supabase_source(source):
             rows = source.query(
                 "teams",
@@ -1030,7 +1075,7 @@ def _noop_ops_state(ops_state: Any, now: datetime) -> dict[str, Any]:
     prev = ops_state if isinstance(ops_state, dict) else {}
     out = {"last_team_count": 0, "updated_at": now.isoformat()}
     for key in ("last_sweep_at", "graph_totals", "graph_failures",
-                "graph_error_streaks"):
+                "graph_error_streaks", "source"):
         if key in prev:
             out[key] = prev[key]
     return out
@@ -1112,18 +1157,24 @@ def run_backup_sweep(
     a deduplicated NO_ELIGIBLE_TEAMS incident — the chronic-no-op alarm.
     """
     now = now or datetime.now(timezone.utc)  # noqa: UP017
+    # #2823: record WHICH control plane this run enumerated. A wrong-dialect
+    # read is otherwise indistinguishable from an empty deployment in every
+    # run result — the reason this defect looked healthy for 31 days.
+    resolved_source = source_dialect(registry)
 
     if team_ids is None:
         if config.team_sweep_enabled:
             try:
                 team_ids = enumerate_eligible_teams(registry)
             except RuntimeError as e:
-                return {"status": "enum_failed", "error": str(e), "teams_backed_up": 0}
+                return {"status": "enum_failed", "error": str(e),
+                        "teams_backed_up": 0, "source": resolved_source}
         else:
             try:
                 team_ids = enumerate_teams(registry)
             except RuntimeError as e:
-                return {"status": "enum_failed", "error": str(e), "teams_backed_up": 0}
+                return {"status": "enum_failed", "error": str(e),
+                        "teams_backed_up": 0, "source": resolved_source}
 
     incidents: list[dict[str, Any]] = []
     ops_state = read_ops_state(storage)
@@ -1143,6 +1194,7 @@ def run_backup_sweep(
             return {
                 "status": "no_eligible_teams",
                 "teams_backed_up": 0,
+                "source": resolved_source,
                 "results": {},
                 "incidents": incidents,
             }
@@ -1165,6 +1217,7 @@ def run_backup_sweep(
         return {
             "status": "no_teams",
             "teams_backed_up": 0,
+            "source": resolved_source,
             "results": {},
             "incidents": incidents,
         }
@@ -1271,6 +1324,7 @@ def run_backup_sweep(
                 "last_team_count": len(team_ids),
                 "last_sweep_at": now.isoformat(),
                 "updated_at": now.isoformat(),
+                "source": resolved_source,  # #2823: which control plane
                 "graph_totals": graph_totals,
                 "graph_failures": graph_failures[:20],
                 "graph_error_streaks": streaks,
@@ -1290,6 +1344,7 @@ def run_backup_sweep(
     return {
         "status": status,
         "teams_backed_up": backed_up,
+        "source": resolved_source,
         "graph_totals": graph_totals,
         "graph_failures": graph_failures,
         "graph_error_streaks": streaks,
