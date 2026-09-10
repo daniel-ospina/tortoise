@@ -101,20 +101,20 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 
 
 def _is_local_preview_host(host: str) -> bool:
-    """True only for ``localhost`` or a loopback/private IP LITERAL.
+    """True only for ``localhost`` or a **loopback** IP literal.
 
-    Stricter than the dashboard's prefix-based ``isLocal()`` (main.jsx) on
-    purpose: a guard whose job is to *reject* non-local origins must not accept
-    a DNS name like ``10.evil.com`` / ``192.168.attacker.io`` just because it
-    starts with a private-range prefix (#2731 review P2).
+    Loopback-only on purpose (#2731 review P2): a guard whose job is to reject
+    non-local origins must not accept a DNS name like ``10.evil.com`` (prefix
+    match), a LAN host (``10.0.0.5``, ``192.168.1.1``), or the cloud-metadata
+    address (``169.254.169.254``). ``urlparse().hostname`` strips the brackets
+    off IPv6 literals, so ``::1`` arrives unbracketed here.
     """
     if host == "localhost":
         return True
     try:
-        ip = ipaddress.ip_address(host)
+        return ipaddress.ip_address(host).is_loopback
     except ValueError:
         return False
-    return ip.is_loopback or (ip.is_private and not ip.is_unspecified)
 
 
 def _preflight_local_servers() -> None:
@@ -131,11 +131,23 @@ def _preflight_local_servers() -> None:
     failures: list[str] = []
     opener = urllib.request.build_opener(_NoRedirect)
     for label, url in (("auth", AUTH_ORIGIN + "/"), ("dashboard", DASHBOARD_URL)):
-        host = urllib.parse.urlparse(url).hostname or ""
+        try:
+            parsed = urllib.parse.urlparse(url)
+            host = parsed.hostname or ""
+        except ValueError:
+            # Malformed authority (e.g. an unbalanced IPv6 bracket) — this must
+            # not escape as a per-test ValueError; it is a preflight failure.
+            failures.append(f"{label} {url} -> unparseable URL")
+            continue
+        if parsed.scheme not in ("http", "https"):
+            failures.append(
+                f"{label} {url} -> unsupported scheme {parsed.scheme!r} "
+                "(only http/https previews are probed)")
+            continue
         if not _is_local_preview_host(host):
             failures.append(
-                f"{label} {url} -> non-local host {host!r} — refusing to drive "
-                "a non-local origin")
+                f"{label} {url} -> non-loopback host {host!r} — refusing to "
+                "drive a non-local origin")
             continue
         try:
             with opener.open(url, timeout=10) as resp:
