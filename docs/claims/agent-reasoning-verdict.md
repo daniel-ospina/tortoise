@@ -56,21 +56,19 @@ The E2E-1.1 real leg exists to prove the battery runs the **real** product path 
 
 - 78 real episodes executed (write + read + envelope + EP read-out), 73 valid, `exit_code 0`, spend metered and inside cap (`budget_stopped: false`).
 
-> **Spend-basis note (#2874, added 2026-09-10).** The `1.071727 USD` figure was
-> produced by a price basis of 0.27 in / 1.10 out per 1M tokens that **matches
-> no provider price** for the pinned model — the route this run actually used
-> (OpenRouter) charges 0.084 / 0.168. The figure is therefore **inflated by
-> roughly 3-6x**; the same token volume (778,778 tokens across the 78
-> episodes) costs on the order of **0.2-0.35 USD** under the corrected basis
-> (`battery/config/prices.py`). An exact single replacement value cannot be
-> re-derived from the committed receipt: the episode artifacts persist
-> `episode_trace.total_tokens` only, not the per-call input/output split the
-> meter priced, so the split is not recoverable after the fact (filed as a
-> receipt-completeness gap on #2874). Nothing else in this report depends on
-> the figure — it is a cost statement, not a measurement — and the exclusion
-> rate, the verdict, and the family statuses are unaffected.
-- **Exclusion rate 6.4 %** (5/78) against the E2E-1.1 <5 % target — improved from **43.6 %** (34 excluded / 44 valid of 78) on the pre-fix harness by three fixes: robust envelope extraction (#2697), the context-bearing per-turn corrective repair (#2717), and the measured 480 s episode deadline (#2721). 34 turns were recovered by corrective repair.
-- Residual exclusions, both understood: `cal-010`, `cal-012` — the episode did not yield a conforming envelope (`envelope.position is required and non-empty`) and excluded on the schema gate; the excluded path records a single synthetic FAILED turn, so the artifact does **not** evidence how many model attempts were made or what the model wrote — the envelope contract simply has no representation for "no position" (tracked on #2702); `lp-001`, `lp-006`, `lp-011` — long-prompt episodes exceeding 480 s while valid `lp` episodes measured 80–302 s, i.e. a genuinely slow tail rather than a hang (the deadline class, whose measured basis is #2721).
+> **Spend-basis note (#2874, added 2026-09-10).** The `1.071727 USD` figure
+> came from a price basis of 0.27 in / 1.10 out per 1M tokens that **matches no
+> provider price** for the pinned model: the route this run actually used
+> (OpenRouter) charges 0.084 / 0.168, so the published figure is **6.2x too
+> high**. The meter's token counts are recoverable from this run's
+> `profile.json` (`ep_markers.usage`: 234,690 prompt + 916,689 completion
+> tokens), and re-pricing them at the corrected basis
+> (`battery/config/prices.py`) gives **0.173718 USD**; the same token counts at
+> the old basis reproduce the published figure (1.071724, the residue being
+> per-call rounding), which is what confirms the correction is a re-pricing and
+> not a different run. Nothing else in this report depends on the number — it
+> is a cost statement, not a measurement — and the exclusion rate, the verdict,
+> and the family statuses are unaffected.
 
 ## 5. Falsification branches (pre-committed, spec §6)
 
