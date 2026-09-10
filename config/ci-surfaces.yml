@@ -185,6 +185,8 @@ surfaces:
   - test_battery_arms.py
   - test_battery_judge.py
   - test_battery_parity.py
+  - test_battery_parity_executors.py
+  - test_battery_parity_mabench.py
   - test_battery_probes.py
   - test_battery_differential.py
   - test_battery_streams.py
