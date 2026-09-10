@@ -5,8 +5,10 @@ Harness (pinned in the #1511 plan Task 7):
   from website/.
 - Serve the dashboard dist with `wrangler@4 pages dev dist --port 8790`
   from website/apps/dashboard/.
-- #2744: the tests load the DOCUMENT from the LOCAL preview (`:8790`
-  dashboard, `:8788` auth) — never the prod origins. The prod hosts stay
+- #2744: every DOCUMENT load ORIGINATES from the LOCAL preview (`:8790`
+  dashboard, `:8788` auth); a prod-origin URL is used only as an explicitly
+  ASSERTED redirect target (`test_no_cookie_dashboard_redirects_to_auth`),
+  whose content the route handler serves from :8788. The prod hosts stay
   intercepted to rewrite app-emitted prod-origin redirects/subresources back
   to the preview: `https://tortoise.premiselabs.co/**` → the :8788 server,
   `https://app.premiselabs.co/**` → the :8790 server. On the loopback origin
@@ -97,7 +99,7 @@ def _proxy_body(route, local_url: str, page: Page) -> None:
 # rely on the ``page.route`` proxy to serve local content under them. When the
 # proxy path failed, the request fell through to production and every
 # assertion misreported as an app-behavior failure. As of #2744 every
-# dashboard/auth DOCUMENT loads from the local preview directly; the route
+# dashboard/auth DOCUMENT originates from the local preview; the route
 # handlers stay for intercepted prod hosts (API_HOST stubs; the AUTH_HOST ->
 # :8788 rewrite is required for the app-emitted prod-origin /auth bounce, e.g.
 # the dashboard's hardcoded ``https://tortoise.premiselabs.co/auth`` logout
