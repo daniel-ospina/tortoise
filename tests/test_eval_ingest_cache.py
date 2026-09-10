@@ -31,7 +31,6 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import json
-import os
 import socket
 import uuid
 from datetime import UTC, datetime

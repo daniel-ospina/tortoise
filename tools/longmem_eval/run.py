@@ -238,7 +238,15 @@ def _make_question_sdk(*, db_uri: str | None, namespace: str | None,
             else:
                 os.environ["TORTOISE_DB_URI"] = prev
 
-        return TortoiseSDK(namespace=namespace), _cleanup
+        try:
+            return TortoiseSDK(namespace=namespace), _cleanup
+        except BaseException:
+            # The caller only receives _cleanup with a successful return, so a
+            # raising constructor must undo the mutation here — otherwise the
+            # #2815 assignment leaks the URI into every later SDK/validation
+            # in the same process (the #1349/#2084 lane-poisoning class).
+            _cleanup()
+            raise
     td = tempfile.TemporaryDirectory(dir=work_dir, prefix="lme-")
     # #1944: under parallel-matrix/CI load the vendored redislite 10s server-
     # start timeout races (RedisLiteServerStartError — the falkordb.so module
