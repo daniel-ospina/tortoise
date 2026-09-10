@@ -1097,3 +1097,93 @@ def test_restoration_exemption_boundary():
         assert f"{carve_out}.py" not in census_names, (
             f"carve-out file {carve_out}.py must not be in the restoration "
             "census")
+
+
+# ── Empty-means-unset read contract (#2815) ─────────────────────────────────
+def _nonempty_default_uri_reads() -> list[str]:
+    """AST census: URI reads carrying a NON-EMPTY literal default.
+
+    Catches `os.environ.get("TORTOISE_DB_URI", "<non-empty>")` and the
+    equivalent `os.getenv("TORTOISE_DB_URI", "<non-empty>")` /
+    `..., default="<non-empty>")` spellings — every shape whose default is
+    reached only when the variable is ABSENT, never when it is
+    set-but-empty.
+
+    `dict.get`'s default is NEVER reached when the variable is set-but-empty —
+    and CI's tier-2 fast leg exports ``TORTOISE_DB_URI=""`` as the URI-less
+    lane signal (epic #1647). A non-empty default read therefore returns ""
+    on that lane: the docker probe builds a scheme-less URI, fails, and the
+    module skips with an availability-family reason the #1436 skip-guard
+    must (and does) red — the #2815 class (blocked every PR, docs-only
+    included). ``tests/_live_utils.live_uri()`` is the honoring read (``or``).
+    """
+    import ast
+
+    out: list[str] = []
+    for path in sorted(_TESTS_ROOT.rglob("*.py")):
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8", errors="replace"))
+        except SyntaxError:
+            continue
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            # os.environ.get / dict.get (Attribute) and os.getenv / a bare
+            # getenv imported from os (Name).
+            attr = getattr(func, "attr", None) or getattr(func, "id", None)
+            if attr not in ("get", "getenv"):
+                continue
+            key = node.args[0] if node.args else None
+            if not (isinstance(key, ast.Constant)
+                    and key.value == "TORTOISE_DB_URI"):
+                continue
+            default = node.args[1] if len(node.args) > 1 else None
+            if default is None:
+                for kw in node.keywords:
+                    if kw.arg == "default":
+                        default = kw.value
+            if (isinstance(default, ast.Constant)
+                    and isinstance(default.value, str) and default.value):
+                rel = path.relative_to(_TESTS_ROOT.parent).as_posix()
+                out.append(f"{rel}:{node.lineno}")
+    return out
+
+
+def test_no_nonempty_default_tortoise_db_uri_reads():
+    """#2815 pin: no test may read TORTOISE_DB_URI with a NON-EMPTY default.
+
+    A non-empty default silently defeats the lane's empty-means-unset contract
+    (CI exports TORTOISE_DB_URI="" on the tier-2 legs, and the redirect seam
+    is truthy-gated), so a docker probe reports "not available" while the
+    job's provisioned falkordb service is up — the guard then reds every
+    tier-2 PR, and the tests' coverage silently vanishes from the PR lane.
+    Covers the get/getenv and positional/keyword-default spellings. Use
+    tests._live_utils.live_uri().
+    """
+    offenders = _nonempty_default_uri_reads()
+    assert not offenders, (
+        'these test files read os.environ.get("TORTOISE_DB_URI", '
+        '<non-empty default>) — empty-means-unset is the lane contract '
+        '(#1647/#2815); use tests._live_utils.live_uri() instead:\n  '
+        + "\n  ".join(offenders))
+
+
+def test_live_uri_treats_empty_as_unset(monkeypatch):
+    """#2815: live_uri() resolves the docker-lane default on BOTH the unset
+    and the set-but-empty (tier-2 CI) shapes, honors a real value, and strips
+    the trailing slash callers append ``_<suffix>`` to."""
+    from tests._live_utils import DOCKER_TEST_URI, live_uri
+
+    monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+    assert live_uri() == DOCKER_TEST_URI
+    monkeypatch.setenv("TORTOISE_DB_URI", "")
+    assert live_uri() == DOCKER_TEST_URI, (
+        'the tier-2 lane exports TORTOISE_DB_URI="" — it must read as unset')
+    assert live_uri("docker://:pw@host:1/g") == "docker://:pw@host:1/g"
+    monkeypatch.setenv(
+        "TORTOISE_DB_URI",
+        "docker://:falkordb@localhost:6379/tortoise_test_matrix/")
+    assert live_uri() == DOCKER_TEST_URI
+    # the per-test graph suffix contract: f"{live_uri()}_{suffix}"
+    assert not live_uri().endswith("/")

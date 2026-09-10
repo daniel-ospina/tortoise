@@ -17,6 +17,7 @@ import contextlib
 
 import pytest
 
+from tests._live_utils import live_uri
 from tortoise.mcp_server import create_http_app
 
 
@@ -388,10 +389,7 @@ class TestAskConnectedAssemblyExposure:
         import tortoise.embeddings as _emb
         import tortoise.sdk as sdk_mod
         from tortoise.sdk import TortoiseSDK
-        base = os.environ.get(
-            "TORTOISE_DB_URI",
-            "docker://:falkordb@localhost:6379/tortoise_test_matrix"
-        ).rstrip("/")
+        base = live_uri()
         uri = f"{base}_{uuid.uuid4().hex[:10]}"
         monkeypatch.setenv("TORTOISE_DB_URI", uri)
         # hermetic embedder: monkeypatch-scoped so the process-wide module

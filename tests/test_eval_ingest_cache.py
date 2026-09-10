@@ -31,25 +31,24 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import json
-import os
 import socket
 import uuid
 from datetime import UTC, datetime
 
 import pytest
 
+from tests._live_utils import live_uri
 from tests.longmem_eval.test_vector_arm import _mini
 from tools.longmem_eval import run as runner
 from tools.longmem_eval.judge import MockJudge
 from tools.longmem_eval.reader import MockReader
 from tortoise.sdk import TortoiseSDK
 
-DB_URI = os.environ.get(
-    "TORTOISE_DB_URI",
-    # CI's falkordb service requires the password (python-ci.yml
-    # `--requirepass falkordb`); local passwordless instances can override.
-    "docker://:falkordb@localhost:6379/tortoise_test_matrix",
-)
+# live_uri() applies the lane contract: CI's tier-2 leg exports
+# TORTOISE_DB_URI="" (empty means unset — #2815), and the docker-lane default
+# carries the password python-ci.yml's falkordb service requires
+# (`--requirepass falkordb`); local passwordless instances can override.
+DB_URI = live_uri()
 
 
 def _falkordb_up() -> bool:

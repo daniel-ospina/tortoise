@@ -29,12 +29,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import pytest
 
 import tests._assembly_graph as ag
+from tests._live_utils import live_uri
 from tortoise.sdk import TortoiseSDK
 
 # ── Live-FalkorDB + FTS availability (same gate as test_assembly_fixtures) ──
-_URI = os.environ.get(
-    "TORTOISE_DB_URI",
-    "docker://:falkordb@localhost:6379/tortoise_test_matrix").rstrip("/")
+_URI = live_uri()
 FALKORDB_AVAILABLE = False
 _OLD_URI = os.environ.get("TORTOISE_DB_URI")
 _PROBE_GRAPH = f"{_URI}_probe"
