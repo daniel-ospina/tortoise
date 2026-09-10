@@ -1060,6 +1060,12 @@ class ForwardedProtoMiddleware(BaseHTTPMiddleware):
     Fly 301s http→https, and POST-following HTTP stacks (MCP TS SDK)
     convert the method to GET per RFC 9110 → ``GET /mcp/`` 405.
 
+    NOTE (#2864): the ``/mcp`` → ``/mcp/`` redirect is itself gone —
+    ``McpPathCanonicalizerMiddleware`` rewrites the scope path so the
+    canonical connector URL is served without a redirect. This middleware
+    remains the scheme fix for every OTHER trailing-slash redirect the app
+    emits, so do not read the note above as covering ``/mcp`` any longer.
+
     This middleware rewrites ``scope["scheme"]`` from the FIRST value of
     the forwarded-proto header so redirect Locations carry the
     client-visible scheme (https). Two trust domains, each gated by its
@@ -1133,6 +1139,50 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
 app.add_middleware(SecurityHeadersMiddleware)
 
 app.add_middleware(AnalyticsMiddleware)
+
+
+class McpPathCanonicalizerMiddleware:
+    """Exact-match ``/mcp`` to ``/mcp/``, so the JSON-RPC POST never 307s (#2864).
+
+    Starlette's ``redirect_slashes`` answers a request for ``/mcp`` with a 307 to
+    ``/mcp/`` (the MCP app is mounted at ``/mcp``). A 307 on a JSON-RPC POST is a
+    correctness hazard: POST-following HTTP stacks convert the method to GET per
+    RFC 9110, and the #985 chain (the Fly edge 301s http to https) makes the
+    round trip doubly lossy. Rewriting the scope path internally means the
+    client-visible URL stays ``https://…/mcp`` — the canonical connector URL —
+    with no redirect at all.
+
+    EXACT match only (on the ROUTE path): ``/mcpfoo``, ``/Mcp`` and ``/mcp/x``
+    are untouched, so the rewrite can never widen the surface or shadow a
+    sibling route. Deliberately
+    pure ASGI rather than ``BaseHTTPMiddleware``: it must mutate the scope
+    *before* routing, and this avoids the response-wrapping overhead on the
+    hottest endpoint in the app.
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http":
+            # Compare on the ROUTE path (Starlette strips root_path there), not
+            # the raw path: under an ASGI mount prefix (`uvicorn --root-path
+            # /x`) scope["path"] is "/x/mcp" while the route path is "/mcp",
+            # so a raw comparison would silently re-enable the 307 — and would
+            # ALSO miss the unprefixed "/mcp" form. One comparison covers both.
+            from starlette.routing import get_route_path
+
+            if get_route_path(scope) == "/mcp":
+                scope = dict(scope)
+                root = scope.get("root_path", "")
+                scope["path"] = f"{root}/mcp/"
+                scope["raw_path"] = scope["path"].encode()
+        await self.app(scope, receive, send)
+
+
+# Added LAST so it is the OUTERMOST middleware: the path is canonicalized before
+# any other middleware or router sees it, and before a redirect can be built.
+app.add_middleware(McpPathCanonicalizerMiddleware)
 # Internal auth key for Edge Function → API communication
 # Read lazily (not at import): tests and multi-app processes set
 # FASTAPI_INTERNAL_KEY after tortoise.hosted_api may already be imported,

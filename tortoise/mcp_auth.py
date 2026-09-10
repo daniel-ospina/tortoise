@@ -112,7 +112,8 @@ ERR_SUSPENDED = -32006
 
 
 def _jsonrpc_error(code: int, message: str, data: dict | None = None,
-                   status: int = 400) -> JSONResponse:
+                   status: int = 400,
+                   headers: dict[str, str] | None = None) -> JSONResponse:
     """Build an MCP-compatible JSON-RPC error response with an HTTP status."""
     body: dict[str, Any] = {
         "jsonrpc": "2.0",
@@ -121,7 +122,48 @@ def _jsonrpc_error(code: int, message: str, data: dict | None = None,
     }
     if data is not None:
         body["error"]["data"] = data
-    return JSONResponse(body, status_code=status)
+    return JSONResponse(body, status_code=status, headers=headers)
+
+
+def _resource_metadata_url(request: Request) -> str:
+    """Absolute PRM URL for the RFC 9728 challenge (#2864).
+
+    Built from ``scheme`` + the ``Host`` header rather than
+    ``request.base_url``: this middleware runs INSIDE the sub-app mounted at
+    ``/mcp`` (``hosted_api.py``: ``app.mount("/mcp", mcp_http_app)``), where
+    ``base_url`` carries ``root_path="/mcp"`` and would yield
+    ``…/mcp/.well-known/oauth-protected-resource/mcp`` — a 404. ``Host`` is the
+    client-visible host in both production and tests, and ``scheme`` has already
+    been corrected by ``ForwardedProtoMiddleware`` (#985).
+    """
+    scheme = request.scope.get("scheme") or "https"
+    host = request.headers.get("host")
+    if not host:
+        server = request.scope.get("server") or ("localhost", 80)
+        port = server[1]
+        is_default_port = (scheme == "http" and port == 80) or (
+            scheme == "https" and port == 443)
+        host = server[0] if is_default_port else f"{server[0]}:{port}"
+    return f"{scheme}://{host}/.well-known/oauth-protected-resource/mcp"
+
+
+def _unauthorized_challenge(request: Request) -> dict[str, str]:
+    """``WWW-Authenticate`` headers for a 401 on the OAuth-protected MCP
+    resource (#2864).
+
+    MCP 2025-11-25 requires the challenge to carry one of ``resource_metadata``
+    or the authorization-server URL; RFC 9728 section 5.1 defines the
+    ``Bearer resource_metadata="…"`` form. Without this header an MCP client has
+    no discoverable path from the 401 to the authorization server — this is the
+    defect that blocks the Claude Desktop/Web connector on accounts lacking the
+    beta ``Request headers`` field.
+
+    NOT used by ``StaticKeyMiddleware`` (self-host): there is no authorization
+    server on that surface, so a challenge would point at a 404.
+    """
+    return {
+        "WWW-Authenticate": f'Bearer resource_metadata="{_resource_metadata_url(request)}"',
+    }
 
 
 class TeamResolutionMiddleware(BaseHTTPMiddleware):
@@ -175,6 +217,7 @@ class TeamResolutionMiddleware(BaseHTTPMiddleware):
                 "Expected format: Authorization: Bearer tt_<key>/tk_<key> "
                 "(or an OAuth access token for #524 OAuth clients)",
                 status=401,
+                headers=_unauthorized_challenge(request),
             )
         token = auth[7:]
         # C2 (#2111): accept tk_ scoped keys too. Lazy import preserves the
@@ -189,12 +232,14 @@ class TeamResolutionMiddleware(BaseHTTPMiddleware):
                     "Expected format: Authorization: Bearer tt_<key>/tk_<key> "
                     "(or an OAuth access token for #524 OAuth clients)",
                     status=401,
+                    headers=_unauthorized_challenge(request),
                 )
             return _jsonrpc_error(
                 ERR_UNAUTHORIZED,
                 "Unauthorized: invalid Bearer token format. "
                 "Expected tt_<tenant key> or an OAuth access token.",
                 status=401,
+                headers=_unauthorized_challenge(request),
             )
         is_oauth = token.startswith("oat_")
         now = time.time()
@@ -256,6 +301,7 @@ class TeamResolutionMiddleware(BaseHTTPMiddleware):
                     "Unauthorized: invalid API key. "
                     "Expected format: Authorization: Bearer tt_<key>/tk_<key>",
                     status=401,
+                    headers=_unauthorized_challenge(request),
                 )
             # C2 (#2111) → C5 (#2114) one-level-deep guard (code-review P1,
             # #2b): a MINTED (deleg=0) key drives MCP tools ONLY when it
