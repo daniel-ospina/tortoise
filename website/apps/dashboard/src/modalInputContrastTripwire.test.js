@@ -159,14 +159,17 @@ test('#2778: a single shared .modal input/textarea/select rule themes dialog fie
 })
 
 test('#2778: the create-org name input relies on the shared rule (no class/style/own background)', () => {
-  // Proximity-scoped: the first <input> after the create-org dialog marker is
-  // the name field (the upgrade branch holds only buttons). Pin the exact bug
-  // shape — that this field must be themed BY THE SHARED RULE, not by itself.
-  // #2789 moved the marker: the dialog no longer carries a static aria-label
-  // (each mode's heading names it via aria-labelledby), so the anchor is now
-  // the modal's aria-labelledby expression.
-  const modalIdx = mainJsx.indexOf('create-org-title-limit')
-  assert.notEqual(modalIdx, -1, 'the create-organization dialog must still exist')
+  // Proximity-scoped: the first <input> after the NAME-mode heading is the
+  // name field. Pin the exact bug shape — that this field must be themed BY
+  // THE SHARED RULE, not by itself.
+  // #2789: the dialog no longer carries a static aria-label (each mode's own
+  // heading names it via aria-labelledby), so the anchor is the name MODE's
+  // heading — not the dialog div, and not the purchase heading.
+  const modalIdx = mainJsx.indexOf('<h3 id="create-org-title-name">')
+  assert.notEqual(modalIdx, -1, 'the create-organization name-mode heading must still exist')
+  // NOTE (#2789): anchored on the NAME-mode heading, not the dialog div — the
+  // purchase mode renders its own input EARLIER in the file, so a
+  // dialog-anchored `indexOf('<input')` would silently test that one instead.
   const inputStart = mainJsx.indexOf('<input', modalIdx)
   assert.notEqual(inputStart, -1, 'the create-org name input must render after the dialog marker')
   const inputEnd = mainJsx.indexOf('/>', inputStart)

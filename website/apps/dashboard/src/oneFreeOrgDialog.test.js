@@ -143,8 +143,40 @@ test('#2789: the third action reaches the session-scoped paid-new-org checkout',
     'the success-return effect must read ?new_org=<id>')
   assert.match(flat, /const newOrgName = params\.get\('new_org_name'\)/,
     'the success-return effect must read ?new_org_name=<name>')
-  assert.match(flat, /\.find\(\(t\) => t && \(t\.team_id === newOrgId \|\| \(newOrgName && t\.team_name === newOrgName\)\)\)/,
-    'the poll must match the id OR the intended name — the pre-minted id is not the real id on the registry (selfhost) lane')
+  assert.match(flat, /\.find\(\(t\) => t && \(t\.team_id === newOrgId \|\| \(newOrgName && t\.team_name === newOrgName\) \|\| \(newOrgNamePrefix && !knownOrgIds\.has\(t\.team_id\) && String\(t\.team_name \|\| ''\)\.startsWith\(newOrgNamePrefix\)\)\)\)/,
+    'the poll must match the id, the intended name, OR the collision-disambiguated name ("<name> <id>") — the pre-minted id is not the real id on the registry (selfhost) lane, and a name collision makes the webhook rename the org')
+  // …and the prefix must be TRUNCATED like the server does, or a 56–64 char
+  // name can never match (the disambiguated name is `name[:55] + " " + id[:8]`).
+  assert.match(flat, /const newOrgNamePrefix = newOrgName \? `\$\{String\(newOrgName\)\.slice\(0, 55\)\.trimEnd\(\)\} ` : ''/,
+    'the collision prefix must mirror _new_org_collision_name\'s server-side truncation (name[:55])')
+  // …and the heuristic arm must only ever consider orgs NEW since the return,
+  // or buying "Beta" while owning "Beta Corp" would switch to the wrong org.
+  // …and the exclusion set is snapshotted when the CHECKOUT STARTS (a `teams`
+  // closure read in the return effect can still be empty while the bootstrap
+  // is in flight, which would leave the guard inert).
+  assert.match(flat, /const knownOrgIds = knownOrgIdsForPoll\(\)/,
+    'the prefix arm must exclude orgs that already existed at poll start')
+  // The snapshot must SURVIVE the document change: the checkout opens in a new
+  // tab and the ?new_org return runs THERE, so an in-memory ref is invisible.
+  // It rides localStorage, written BEFORE window.open…
+  assert.match(flat, /setItem\(NEW_ORG_KNOWN_IDS_KEY, JSON\.stringify\(/,
+    'the pre-purchase org snapshot must ride storage the returning tab can read')
+  assert.match(flat, /localStorage\.removeItem\(NEW_ORG_KNOWN_IDS_KEY\)/,
+    'the snapshot must be cleared when the flow ends')
+  // …and the ordering is load-bearing: a snapshot written AFTER the POST (or
+  // in a finally) would run too late for the popup it is meant to inform.
+  const checkoutBody = flat.slice(
+    flat.indexOf('async function startNewOrgCheckout()'))
+  const snapAt = checkoutBody.indexOf('snapshotKnownOrgIds()')
+  const postAt = checkoutBody.indexOf("api('/v1/billing/checkout/new-org'")
+  assert.notEqual(snapAt, -1, 'startNewOrgCheckout must snapshot the known orgs')
+  assert.notEqual(postAt, -1, 'startNewOrgCheckout must POST the checkout')
+  assert.ok(snapAt < postAt,
+    'the snapshot must be taken BEFORE the checkout POST')
+  assert.match(flat, /setBillingNotice\("Your new organization is being set up[^"]*"\) setTab\('billing'\)/,
+    'the give-up notice must not promise the exact (possibly disambiguated) name')
+  assert.match(flat, /role="dialog" aria-modal="true" aria-labelledby=\{createTeamMode/,
+    'the dialog keeps the #2392 role/aria-modal contract')
   assert.match(flat, /if \(switches === 1\) switchTeam\(match\.team_id\)/,
     'the switch must use the MATCHED team id (lane-agnostic) and fire once')
   assert.match(flat, /Your new organization is being set up/,

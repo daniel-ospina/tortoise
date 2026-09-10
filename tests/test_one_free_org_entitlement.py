@@ -23,6 +23,7 @@ import hmac as hmac_mod
 import json
 import os
 import tempfile
+import uuid
 
 import pytest
 from fastapi.testclient import TestClient
@@ -85,12 +86,9 @@ def client(monkeypatch, supabase_env):
 
         def _patched(self, db_path_arg=None, *, namespace=None, **kwargs):
             _orig(self, db_path, namespace=namespace)
-            if namespace:
-                _SDK_BY_NS[namespace] = self
 
         ha_mod.TortoiseSDK.__init__ = _patched
         ha_mod._FALLBACK_KEEPALIVE.clear()
-        _SDK_BY_NS.clear()
         # #1950: pin TORTOISE_DB_PATH so _make_sdk's keepalive anchor path
         # matches (the anchor is reused, never evicted mid-test).
         os.environ["TORTOISE_DB_PATH"] = db_path
@@ -295,22 +293,136 @@ def _membership_rows(fake, team_id):
             if m.get("team_id") == team_id]
 
 
-# The SDK instance each namespace was last built with (populated by the
-# `client` fixture's patched __init__). Reads must go through the SAME instance
-# the app wrote with: a second instance on the same embedded (redislite) file
-# can attach to a different server and see a stale snapshot — a bare fresh-read
-# assertion here flaked ~1 full-file run in 4.
-_SDK_BY_NS: dict[str, object] = {}
+def _tid(prefix: str) -> str:
+    """A fresh 26-char team id in the pre-minted-id shape (`uuid4().hex[:26]`).
+
+    Unique per PROCESS on purpose: under the docker lane the org graph
+    `team_<id>` lives in a FalkorDB shared with every other suite on the
+    machine, so a fixed literal would collide with a concurrent run of this
+    same file.
+    """
+    return prefix + uuid.uuid4().hex[:25]
 
 
-def _team_meta_count(team_id: str) -> int:
-    """Count the org graph's TeamMeta nodes, through the app's own connection."""
-    sdk = _SDK_BY_NS.get(team_id)
-    if sdk is None:
-        from tortoise.hosted_api import _make_sdk
-        sdk = _make_sdk(namespace=team_id)
-    graph = sdk._get_proj().db.select_graph(f"team_{team_id}")
-    return graph.query("MATCH (m:TeamMeta) RETURN count(m)").result_set[0][0]
+# ── the eager-init guard, observed at the Cypher level ─────────────────────
+# `_eager_provision_org_graph` is probed with a recording stand-in for the
+# projection rather than by reading a live store. Measured reason (VGATE): the
+# embedded redislite store opens one server per TortoiseSDK instance and is not
+# multi-connection-safe (tests/conftest.py), so a SECOND instance reading the
+# writer's graph legitimately sees an empty store — the old
+# `_team_meta_count()` assertion failed repeatedly on full-file runs, and a
+# fully inert redirect (`TORTOISE_TEST_CARVE_OUT=1`, no URI) did not help — the
+# carve-out lane reproduced it too. The
+# statements the guard emits ARE the behaviour under test (probe → CREATE once,
+# short-circuit on retry), and they are deterministic.
+
+
+# The recording state the current test installed (one per test; lets a test
+# inspect params/graph names without threading the object through the call).
+_RECORDED_STATES: list = []
+
+
+class _Result:
+    def __init__(self, result_set):
+        self.result_set = result_set
+
+
+class _RecordingState:
+    """Shared statement log + the ONE bit of graph state the guard reads."""
+
+    def __init__(self):
+        self.statements: list = []
+        self.params: list = []
+        # Which graph each statement went to (VGATE P2: the stand-in used to
+        # drop the name, so a regression of the select_graph TARGET was
+        # invisible — the old count read pinned `team_<tid>`).
+        self.query_graphs: list = []
+        self.team_meta = 0
+
+    def record(self, graph_name, cypher, params=None):
+        c = " ".join(str(cypher).split())
+        self.statements.append(c)
+        self.params.append(params or {})
+        self.query_graphs.append(graph_name)
+        if c.startswith("MATCH (m:TeamMeta) RETURN count(m)"):
+            return _Result([[self.team_meta]])
+        if c.startswith("CREATE (:TeamMeta"):
+            self.team_meta += 1
+        return _Result([])
+
+
+class _RecordingGraph:
+    """What `select_graph(name)` returns.
+
+    The graph NAME rides the handle, not a shared mutable slot: the guard takes
+    ONE handle before the probe and reuses it for the CREATE, so a
+    "current graph" variable would mis-attribute the CREATE to whichever graph
+    the last read touched.
+    """
+
+    def __init__(self, state, name):
+        self._state = state
+        self._name = name
+
+    def query(self, cypher, params=None):
+        return self._state.record(self._name, cypher, params)
+
+
+class _RecordingSDK:
+    """One stand-in SDK per `_make_sdk(namespace=...)` call."""
+
+    def __init__(self, state, namespace=None):
+        self._state = state
+        self._current = f"team_{namespace}" if namespace else None
+
+    def _get_proj(self):
+        state = self._state
+        sdk = self
+
+        def _query(cypher, params=None):
+            # The projection-level read (`read_prior_org_fork` →
+            # `read_onboarding_node`): an EMPTY result models a prior org with
+            # no onboarding node, so the branch runs its real access path and
+            # the 'self' fallback is exercised without an AttributeError being
+            # swallowed by its `except Exception: return None`.
+            return state.record(sdk._current, cypher, params)
+
+        def _select_graph(name):
+            sdk._current = name
+            return _RecordingGraph(state, name)
+
+        _proj = type("_Proj", (), {
+            "db": type("_Db", (), {"select_graph": staticmethod(_select_graph)})(),
+            "query": staticmethod(_query),
+            "close": lambda self: None,
+        })()
+        return _proj
+
+
+def _recording_sdk(monkeypatch) -> list:
+    """Patch `_make_sdk` with the recorder; return the statement log."""
+    import tortoise.hosted_api as ha_mod
+    state = _RecordingState()
+    monkeypatch.setattr(ha_mod, "_make_sdk",
+                        lambda **kw: _RecordingSDK(state, kw.get("namespace")))
+    _RECORDED_STATES.clear()
+    _RECORDED_STATES.append(state)
+    return state.statements
+
+
+def _creates(statements: list) -> list:
+    return [s for s in statements if s.startswith("CREATE (:TeamMeta")]
+
+
+def _last_state():
+    """The recorder the most recent `_recording_sdk` installed."""
+    return _RECORDED_STATES[-1]
+
+
+def _create_graphs(graph) -> set:
+    """Graphs the TeamMeta CREATEs were issued to."""
+    return {g for s_, g in zip(graph.statements, graph.query_graphs, strict=True)
+            if s_.startswith("CREATE (:TeamMeta")}
 
 
 class TestWebhookProvisioning:
@@ -320,9 +432,10 @@ class TestWebhookProvisioning:
         import tortoise.billing as billing
         monkeypatch.setattr(billing.StripeClient, "get_subscription",
                             lambda self, sid: FIXTURE_SUB)
+        statements = _recording_sdk(monkeypatch)
         _seed_team(fake, "team-free-a")
         _seed_membership(fake, "team-free-a")
-        tid = "t" * 26
+        tid = _tid("t")
         event = _checkout_event(tid, org_name="Second Org")
 
         r = _post_signed(tc, event)
@@ -350,8 +463,10 @@ class TestWebhookProvisioning:
         # keyless by policy (#1716/#1921): the org mints keys via
         # POST /v1/session/key, never a dead credential at provision time
         assert not [k for k in fake.query("api_keys") if k.get("team_id") == tid]
-        # the graph is real (switcher/graph_list/key-scope all resolve it)
-        assert _team_meta_count(tid) == 1
+        # the org graph was initialised exactly once (eager TeamMeta — the
+        # switcher/graph_list/key-scope resolve it) and in the team's own graph
+        assert len(_creates(statements)) == 1, statements
+        assert _create_graphs(_last_state()) == {f"team_{tid}"}
         # a PAID org does not consume the free-org allowance: the buyer can
         # still create their one free org later
         from tortoise.supabase_control import owned_free_org_ids
@@ -362,7 +477,8 @@ class TestWebhookProvisioning:
         import tortoise.billing as billing
         monkeypatch.setattr(billing.StripeClient, "get_subscription",
                             lambda self, sid: FIXTURE_SUB)
-        tid = "r" * 26
+        statements = _recording_sdk(monkeypatch)
+        tid = _tid("r")
         event = _checkout_event(tid, event_id="evt_replay_1")
         for _ in range(2):
             assert _post_signed(tc, event).status_code == 200
@@ -370,7 +486,11 @@ class TestWebhookProvisioning:
         assert len(_membership_rows(fake, tid)) == 1
         assert len([e for e in fake.query("webhook_events")
                     if e.get("event_id") == "evt_replay_1"]) == 1
-        assert _team_meta_count(tid) == 1, "no duplicate TeamMeta on replay"
+        # the second delivery short-circuits on team_by_id() and never touches
+        # the graph at all — no second TeamMeta can be minted
+        assert len(_creates(statements)) == 1, statements
+        assert statements.count("MATCH (m:TeamMeta) RETURN count(m)") == 1
+        assert _create_graphs(_last_state()) == {f"team_{tid}"}
 
     def test_retry_after_a_failed_provision_converges(self, monkeypatch, user_client):
         """Stripe retries the SAME event id after a 500. The org row is still
@@ -391,14 +511,17 @@ class TestWebhookProvisioning:
             return real(cp, **kwargs)
 
         monkeypatch.setattr(sc, "provision_team", _flaky)
-        tid = "f" * 26
+        statements = _recording_sdk(monkeypatch)
+        tid = _tid("f")
         event = _checkout_event(tid, event_id="evt_flaky_1")
         assert _post_signed(tc, event).status_code == 500
         assert _team_rows(fake, tid) == []
         # Stripe retries with the same event id
         assert _post_signed(tc, event).status_code == 200
         assert len(_team_rows(fake, tid)) == 1
-        assert _team_meta_count(tid) == 1
+        # the first attempt initialised the graph, so the retry's probe
+        # SHORT-CIRCUITS — exactly one TeamMeta across both deliveries
+        assert len(_creates(statements)) == 1, statements
 
     def test_metadata_tier_carries_when_subscription_fetch_fails(
             self, monkeypatch, user_client):
@@ -409,7 +532,7 @@ class TestWebhookProvisioning:
         monkeypatch.setattr(billing.StripeClient, "get_subscription",
                             lambda self, sid: (_ for _ in ()).throw(
                                 RuntimeError("stripe down")))
-        tid = "m" * 26
+        tid = _tid("m")
         assert _post_signed(tc, _checkout_event(tid)).status_code == 200
         t = _team_rows(fake, tid)[0]
         assert t["tier"] == "pro"
@@ -426,7 +549,7 @@ class TestWebhookProvisioning:
         monkeypatch.setattr(billing.StripeClient, "get_subscription",
                             lambda self, sid: FIXTURE_SUB)
         fake.seed("teams", [dict(FREE_TEAM, id="t-taken", name="Contested")])
-        tid = "c" * 26
+        tid = _tid("c")
         assert _post_signed(
             tc, _checkout_event(tid, org_name="Contested")).status_code == 200
         t = _team_rows(fake, tid)[0]
@@ -474,7 +597,7 @@ class TestWebhookProvisioning:
         # a subscription response with no price → no resolvable tier
         monkeypatch.setattr(billing.StripeClient, "get_subscription",
                             lambda self, sid: {"id": sid, "items": {"data": []}})
-        tid = "u" * 26
+        tid = _tid("u")
         event = _checkout_event(tid, tier="free", event_id="evt_no_tier")
         assert _post_signed(tc, event).status_code == 500
         # and the marker was NOT written, so the redelivery is really re-run
@@ -486,23 +609,62 @@ class TestWebhookProvisioning:
         """A can't-happen event (no org_name) must 500 so Stripe retries —
         never silently provision a nameless org."""
         tc, fake = user_client
-        tid = "z" * 26
+        tid = _tid("z")
         event = _checkout_event(tid, metadata_extra={"org_name": ""})
         assert _post_signed(tc, event).status_code == 500
         assert _team_rows(fake, tid) == []
 
 
 class TestEagerGraphIdempotency:
-    def test_eager_provision_org_graph_never_duplicates_team_meta(self, client):
+    def test_eager_provision_org_graph_never_duplicates_team_meta(
+            self, monkeypatch, client):
         """#2789 review P1: the pre-#2789 eager init was a bare CREATE — a
         retry (Stripe redelivery after a failed RPC) would have left a second
-        TeamMeta node in the same tenant graph."""
-        from tortoise.hosted_api import _eager_provision_org_graph
+        TeamMeta node in the same tenant graph. Asserted at the Cypher level:
+        the second call must SHORT-CIRCUIT on the existence probe."""
+        import tortoise.hosted_api as ha_mod
         _tc, fake = client
-        tid = "g" * 26
-        assert _eager_provision_org_graph(fake, tid, "First", _U1) == f"team_{tid}"
-        assert _eager_provision_org_graph(fake, tid, "Second", _U1) == f"team_{tid}"
-        assert _team_meta_count(tid) == 1
+        statements = _recording_sdk(monkeypatch)
+        tid = _tid("g")
+        assert ha_mod._eager_provision_org_graph(
+            fake, tid, "First", _U1) == f"team_{tid}"
+        assert len(_creates(statements)) == 1, statements
+        assert ha_mod._eager_provision_org_graph(
+            fake, tid, "Second", _U1) == f"team_{tid}"
+        assert len(_creates(statements)) == 1, (
+            "the retry must not mint a second TeamMeta", statements)
+        # the FIRST name wins: a replay must not overwrite the live org's name
+        graph = _last_state()
+        create_i = next(i for i, s_ in enumerate(statements)
+                        if s_.startswith("CREATE (:TeamMeta"))
+        assert graph.params[create_i]["name"] == "First"
+        # …and it landed in THIS team's graph (a wrong select_graph target
+        # would otherwise be invisible — VGATE P2)
+        assert _create_graphs(graph) == {f"team_{tid}"}, graph.query_graphs
+
+    def test_eager_provision_reads_the_prior_org_for_forking(
+            self, monkeypatch, client):
+        """A creator with prior memberships forks from their earliest org and
+        gets a COMPACT init — the prior-graph read must actually run (VGATE P2:
+        the recorder used to lack `.query`, so this branch died in the
+        swallowing `except Exception` of `read_prior_org_fork`)."""
+        import tortoise.hosted_api as ha_mod
+        _tc, fake = client
+        prior = _tid("p")
+        _seed_team(fake, prior)
+        _seed_membership(fake, prior)
+        statements = _recording_sdk(monkeypatch)
+        tid = _tid("g")
+        assert ha_mod._eager_provision_org_graph(
+            fake, tid, "Forked", _U1) == f"team_{tid}"
+        graph = _last_state()
+        # the prior org's graph was READ (not skipped), through the projection
+        assert f"team_{prior}" in graph.query_graphs, graph.query_graphs
+        create_i = next(i for i, s_ in enumerate(statements)
+                        if s_.startswith("CREATE (:TeamMeta"))
+        assert graph.query_graphs[create_i] == f"team_{tid}"
+        # prior memberships ⇒ compact + the earliest org as the fork source
+        assert graph.params[create_i]["os_compact"] is True, graph.params[create_i]
 
 
 # ── the REAL Stripe payload (not monkeypatched away) ────────────────────────
@@ -579,6 +741,17 @@ class TestCollisionNameRule:
         # deterministic — a Stripe redelivery must not compute a different name
         assert (_new_org_collision_name("Second Org", "abcdef1234")
                 == _new_org_collision_name("Second Org", "abcdef1234"))
+        # CROSS-LANGUAGE COUPLING (VGATE P2): the dashboard's collision-prefix
+        # arm mirrors this truncation as `slice(0, 55)`. Assert the REAL
+        # coupling — the exact disambiguated name a 64-char input produces —
+        # so drift in the server's constant (`63`) OR in the pre-minted id
+        # shape (26 hex chars ⇒ suffix 8 ⇒ 55) fails here instead of silently
+        # breaking the client's name match.
+        from tortoise.hosted_api import _new_org_collision_name, _new_org_team_id
+        tid = _new_org_team_id()
+        assert len(tid) == 26, tid
+        assert (_new_org_collision_name("z" * 64, tid)
+                == "z" * 55 + " " + tid[:8])
 
 
 # ── registry (selfhost) lane ───────────────────────────────────────────────

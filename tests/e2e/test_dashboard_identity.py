@@ -523,8 +523,10 @@ def test_create_team_success(page: Page):
     expect(menu.get_by_text("Switch organization")).to_have_count(0)  # single-team: no switch label
     menu.get_by_role("button", name="+ Create new organization").click(force=True)  # menu closes + dialog opens → unmounts
     # W1 (#1997) + #2494: the create dialog renders as 'Create a new
-    # organization' with an 'Organization name' input (main.jsx #1877 modal
-    # — aria-label + input aria-label). The menu entry now matches.
+    # organization' with an 'Organization name' input. Since #2789 the dialog
+    # is named by its own heading (aria-labelledby → the name-mode <h3>, which
+    # reads 'Create a new organization'), so this name still resolves in name
+    # mode; limit/purchase mode announce their own headings.
     expect(page.get_by_role("dialog", name="Create a new organization")).to_be_visible()
     # special characters (not spaces) are rejected — inline error, no POST
     page.get_by_label("Organization name").fill("bad@name!")

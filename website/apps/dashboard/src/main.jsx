@@ -1737,6 +1737,32 @@ function claimIntentInFlight() {
   const teamIdRef = React.useRef(null)
   const teamRefreshSeqRef = React.useRef(0) // #1906 (code-review P2): monotonic seq for the welcome-path team refreshes — a post-seed refire must win over a concurrent exit refresh (a pre-seed point_count must never clobber the post-seed count)
   const authSubRef = React.useRef(null) // Round-6: supabase onAuthStateChange subscription
+  // #2789 review P2/P1: the set of orgs that existed BEFORE the new-org
+  // purchase. The poll's prefix arm is a heuristic, so it must never consider
+  // one of those. It cannot live in a ref: the checkout opens in a NEW TAB
+  // (`window.open`, below) and Stripe's success redirect lands THERE, so the
+  // returning document has its own empty ref. The snapshot is therefore
+  // written to localStorage BEFORE the popup opens and read back on return —
+  // same origin, shared across tabs (sessionStorage's copy-on-open semantics
+  // are not dependable). Cleared in stripReturnParams when the flow ends.
+  const NEW_ORG_KNOWN_IDS_KEY = 'tt_new_org_known_ids'
+
+  function snapshotKnownOrgIds() {
+    try {
+      window.localStorage.setItem(NEW_ORG_KNOWN_IDS_KEY, JSON.stringify(
+        (teams || []).map((t) => t && t.team_id).filter(Boolean)))
+    } catch { /* private mode — the poll falls back to its list snapshot */ }
+  }
+
+  function knownOrgIdsForPoll() {
+    try {
+      const raw = window.localStorage.getItem(NEW_ORG_KNOWN_IDS_KEY)
+      const ids = raw ? JSON.parse(raw) : null
+      if (Array.isArray(ids)) return new Set(ids)
+    } catch { /* unreadable — fall through */ }
+    return new Set((teams || []).map((t) => t && t.team_id).filter(Boolean))
+  }
+
   const checkoutResetTimerRef = React.useRef(null) // Round-16: popup-flow fallback reset
   const apiKeyRef = React.useRef(null) // Round-21: live apiKey for staleness checks (state is closure-stale)
   const [checkoutPending, setCheckoutPending] = React.useState(false)
@@ -2260,6 +2286,8 @@ function claimIntentInFlight() {
       params.delete('new_org')
       params.delete('new_org_name')
       params.delete('checkout')
+      // the new-org flow is over — drop the pre-purchase snapshot with it
+      try { window.localStorage.removeItem(NEW_ORG_KNOWN_IDS_KEY) } catch { /* ignore */ }
       window.history.replaceState({}, '', `${window.location.pathname}${params.toString() ? `?${params}` : ''}${window.location.hash}`)
     }
     if (sessionId || newOrgId) {
@@ -2269,13 +2297,33 @@ function claimIntentInFlight() {
       // OLD team's data under the NEW team's switcher — capture the team at
       // poll start and bail when it changes.
       const teamAtPollStart = teamIdRef.current
+      // #2789 review P2: the orgs that already existed when this purchase
+      // STARTED (a tree-shared snapshot — see NEW_ORG_KNOWN_IDS_KEY). The
+      // prefix arm below is a heuristic, so it must never match one of THESE
+      // — that is what stops buying "Beta" while owning "Beta Corp" from
+      // switching to the wrong org.
+      const knownOrgIds = knownOrgIdsForPoll()
       const poll = setInterval(async () => {
         tries += 1
         try {
           if (newOrgId) {
             const list = await loadTeams()
+            // #2789 review P2: a long name is TRUNCATED server-side when it is
+            // disambiguated (`_new_org_collision_name` → `name[:55] + " " +
+            // id[:8]`), so the prefix arm must truncate the intended name the
+            // same way — otherwise a 56–64 char name never matches and a paid
+            // user is wrongly told provisioning is slow.
+            const newOrgNamePrefix = newOrgName
+              ? `${String(newOrgName).slice(0, 55).trimEnd()} ` : ''
             const match = (list || []).find((t) => t && (t.team_id === newOrgId
-              || (newOrgName && t.team_name === newOrgName)))
+              || (newOrgName && t.team_name === newOrgName)
+              // #2789 review P2: the prefix arm is a HEURISTIC, so it must only
+              // consider orgs that did not exist when the poll started —
+              // otherwise buying "Beta" while owning "Beta Corp" (or re-buying
+              // "Acme" when "Acme <id>" already exists from a prior collision)
+              // would switch the user to that OLD org and suppress the notice.
+              || (newOrgNamePrefix && !knownOrgIds.has(t.team_id)
+                && String(t.team_name || '').startsWith(newOrgNamePrefix))))
             if (match) {
               switches += 1
               if (switches === 1) switchTeam(match.team_id)
@@ -4077,6 +4125,9 @@ function claimIntentInFlight() {
     }
     setCreateTeamBusy(true)
     setCreateTeamError('')
+    // Snapshot the CURRENT orgs BEFORE the popup opens (the return runs in
+    // that popup's document, which cannot see this one's in-memory state).
+    snapshotKnownOrgIds()
     try {
       const res = await api('/v1/billing/checkout/new-org', {
         method: 'POST', useSession: true,
@@ -7058,10 +7109,11 @@ function claimIntentInFlight() {
             account-menu pre-check opens it directly at the cap. */}
         {createTeamOpen && (
           <div className="modal-backdrop" onClick={() => { if (!createTeamBusy) closeCreateTeam() }}>
-            {/* #2789: `createOrgTitleId`/`createOrgDescId` name the CURRENT
-                mode's heading + explanation, so the dialog's accessible name is
-                the gate copy in limit mode (not a generic "Create a new
-                organization"). Defined here to stay adjacent to the modal. */}
+            {/* #2789: the dialog's accessible name is the CURRENT mode's
+                heading, so limit mode announces the gate copy (not a generic
+                "Create a new organization"): `create-org-title-*` ids are the
+                mode headings (name mode has no desc), `create-org-desc-*` are
+                the explanation paragraphs. */}
             <div className="modal" role="dialog" aria-modal="true"
                  aria-labelledby={createTeamMode === 'limit' ? 'create-org-title-limit'
                    : createTeamMode === 'purchase' ? 'create-org-title-purchase'
