@@ -24,10 +24,13 @@ Flows (the user's #1511 acceptance):
 """
 from __future__ import annotations
 
+import ipaddress
 import json
 import os
 import re
 import time
+import urllib.parse
+import urllib.request
 from pathlib import Path
 
 import pytest
@@ -74,6 +77,121 @@ def _proxy_body(route, local_url: str, page: Page) -> None:
         ctype = "image/png"
     resp = page.request.get(local_url)
     route.fulfill(status=resp.status, content_type=ctype, body=resp.body())
+
+
+# ── #2731: drive the LOCAL committed-dist preview, never the prod origin ──
+# The two CI dashboard specs used to navigate the DOCUMENT to the prod origins
+# and rely on the ``page.route`` proxy to serve local content under them. When
+# the proxy path failed, the request fell through to production and every
+# assertion misreported as an app-behavior failure. In those two specs the
+# document now loads from the local preview directly; the route handlers stay
+# for intercepted prod hosts (API_HOST stubs and the AUTH_HOST -> :8788
+# rewrite). The APP_HOST -> :8790 rewrite is a defensive fallback — those specs
+# emit no prod-app-origin request. This module's own flow tests and the sibling
+# dashboard specs still simulate the prod domains; migrating them (and the
+# auth-page goto in ``_open_auth``) is tracked in #2744.
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """#2731 (review P2): never follow a redirect in the preflight — a local
+    preview that 3xx-bounces off-box must not pass a redirect-following check."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def _is_local_preview_host(host: str) -> bool:
+    """True only for ``localhost`` or a **loopback** IP literal.
+
+    Loopback-only on purpose (#2731 review P2): a guard whose job is to reject
+    non-local origins must not accept a DNS name like ``10.evil.com`` (prefix
+    match), a LAN host (``10.0.0.5``, ``192.168.1.1``), or the cloud-metadata
+    address (``169.254.169.254``). ``urlparse().hostname`` strips the brackets
+    off IPv6 literals, so ``::1`` arrives unbracketed here.
+    """
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def _preflight_local_servers() -> None:
+    """Fail fast — ONE clear error — when the local preview servers are not
+    serving (#2731). Without this, a missing :8788/:8790 preview makes the
+    route handlers fall through to production and every test misdiagnoses as
+    an app-behavior failure. Called from a module-scoped autouse fixture in
+    the two CI dashboard specs.
+
+    ``pytest.exit`` (not ``pytest.fail``) is deliberate: a module-scoped autouse
+    fixture that fails is re-raised once per collected test, so ``fail`` would
+    print the same error 16 times. ``exit`` aborts the session with a single
+    message (#2731 review P2)."""
+    failures: list[str] = []
+    opener = urllib.request.build_opener(_NoRedirect)
+    for label, url in (("auth", AUTH_ORIGIN + "/"), ("dashboard", DASHBOARD_URL)):
+        try:
+            parsed = urllib.parse.urlparse(url)
+            host = parsed.hostname or ""
+        except ValueError:
+            # Malformed authority (e.g. an unbalanced IPv6 bracket) — this must
+            # not escape as a per-test ValueError; it is a preflight failure.
+            failures.append(f"{label} {url} -> unparseable URL")
+            continue
+        if parsed.scheme not in ("http", "https"):
+            failures.append(
+                f"{label} {url} -> unsupported scheme {parsed.scheme!r} "
+                "(only http/https previews are probed)")
+            continue
+        if not _is_local_preview_host(host):
+            failures.append(
+                f"{label} {url} -> non-loopback host {host!r} — refusing to "
+                "drive a non-local origin")
+            continue
+        try:
+            with opener.open(url, timeout=10) as resp:
+                if resp.status != 200:
+                    failures.append(f"{label} {url} -> HTTP {resp.status}")
+        except Exception as exc:  # any error means the preview is not serving
+            failures.append(f"{label} {url} -> {type(exc).__name__}: {exc}")
+    if failures:
+        pytest.exit(
+            "dashboard e2e: local preview server(s) unreachable — this suite "
+            "drives the LOCAL wrangler previews, never production (#2731). "
+            "Start BOTH before running:\n"
+            "  cd website/apps/dashboard && npx wrangler@4 pages dev dist --port 8790\n"
+            "  cd website && npx wrangler@4 pages dev . --port 8788\n"
+            "Unreachable:\n"
+            + "\n".join(f"  - {f}" for f in failures),
+            returncode=1,
+        )
+
+
+def _seed_local_session_cookie(page: Page, user_id: str) -> None:
+    """Seed ``sb-tortoise-auth-token`` for the LOCAL preview origin (#2731).
+
+    The browser never sends a ``.premiselabs.co``-domain cookie to
+    ``127.0.0.1``, so the host-only loopback cookie is what the local app's
+    mount gate actually reads (host-conditional ``domainAttr()``/``secureAttr()``
+    in main.jsx make the loopback cookie domain-less and Secure-less by design).
+    Seeding by ``url`` (not ``domain``) keeps IPv6 loopback (``[::1]``) usable —
+    Playwright needs the bracketed form, which ``urlparse().hostname`` strips
+    (#2731 review P2). The prod parent-domain cookie is seeded as well so any
+    intercepted prod-origin subresource/redirect stays session-coherent — the
+    DOCUMENT is always loaded from the local preview, never prod.
+    """
+    value = urllib.parse.quote(json.dumps(_session_json(user_id)))
+    page.context.add_cookies([
+        {"name": "sb-tortoise-auth-token", "value": value, "url": DASHBOARD_URL},
+        {"name": "sb-tortoise-auth-token", "value": value,
+         "domain": ".premiselabs.co", "path": "/"},
+    ])
+
+
+def _goto_local_dashboard(page: Page) -> None:
+    """Load the app DOCUMENT from the local committed-dist preview (#2731)."""
+    page.goto(DASHBOARD_URL, wait_until="domcontentloaded", timeout=30_000)
 
 
 def _wire_prod_domains(page: Page, exchange_body=None, exchange_status=200,

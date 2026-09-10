@@ -49,9 +49,15 @@ empty-keys tests untouched"):
 - Same two-server harness as test_session_login_flow.py / test_dashboard_gate.py:
   `wrangler@4 pages dev . --port 8788` from website/ (auth) +
   `wrangler@4 pages dev dist --port 8790` from website/apps/dashboard/.
-- Cookie-seeded session (sb-tortoise-auth-token on .premiselabs.co) ->
-  app.premiselabs.co (proxied to :8790). #2246: the mount NEVER probes and
-  NEVER mints; POST /v1/session/key is a loud-500 zero-mint tripwire.
+- #2731: the app DOCUMENT is loaded from the LOCAL preview (DASHBOARD_URL,
+  :8790), never the prod origin — the route handler is no longer load-bearing
+  for the document. API_HOST is intercepted and AUTH_HOST is rewritten to
+  :8788; the APP_HOST -> :8790 rewrite stays as a defensive fallback (no
+  request in this module originates from the prod app origin).
+- Host-only loopback session cookie (sb-tortoise-auth-token for 127.0.0.1) +
+  the prod parent-domain cookie so intercepted prod-origin paths stay coherent.
+  #2246: the mount NEVER probes and NEVER mints; POST /v1/session/key is a
+  loud-500 zero-mint tripwire.
 - Mocked /v1/teams rows carry role:'owner' (no existing dashboard e2e mock
   supplies role -> isOwnerAdmin would be false -> every action assertion
   vacuous).
@@ -77,14 +83,23 @@ from tests.e2e.test_session_login_flow import (
     APP_HOST,
     AUTH_HOST,
     DASHBOARD_URL,
+    _goto_local_dashboard,
+    _preflight_local_servers,
     _proxy_body,
-    _session_json,
+    _seed_local_session_cookie,
 )
 
 if not os.environ.get("RUN_DASHBOARD_E2E"):
     pytest.skip("dashboard e2e: opt-in via RUN_DASHBOARD_E2E=1", allow_module_level=True)
 
 AUTH_ORIGIN = os.environ.get("DASHBOARD_AUTH_BASE", "http://127.0.0.1:8788")
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _local_preview_servers() -> None:
+    """#2731: fail fast (one clear error) when :8788/:8790 are not serving."""
+    _preflight_local_servers()
+
 
 TEAM_ID = "team_mixed"
 TEAM_ROW = {
@@ -295,11 +310,7 @@ def _wire_mixed_harness(page: Page, keys: list[dict], mint_calls: list | None = 
         route.continue_()
 
     page.route("**/*", handle)
-    page.context.add_cookies([{
-        "name": "sb-tortoise-auth-token",
-        "value": urllib.parse.quote(json.dumps(_session_json(user_id))),
-        "domain": ".premiselabs.co", "path": "/",
-    }])
+    _seed_local_session_cookie(page, user_id)
     # #2246: legacy residue seeded — the session mount purges it; the suite
     # asserts the purge + zero adoption (never probed, never held).
     page.add_init_script(f"localStorage.setItem('tortoise_api_key', '{LEGACY_RESIDUE}');")
@@ -312,7 +323,7 @@ def _open_keys_tab(page: Page, mint_calls: list | None = None,
     the session JWT, #1828) and render on tab activation."""
     _wire_mixed_harness(page, _mixed_keys_fixture(), mint_calls=mint_calls,
                         key_authed=key_authed)
-    page.goto(APP_HOST + "/", wait_until="domcontentloaded", timeout=30_000)
+    _goto_local_dashboard(page)
     expect(page.locator("body")).to_contain_text("Graphs", timeout=25_000)
     page.locator('[data-tab="keys"]').click()
     # The keys table is the only <table> in the active tab's DOM (BackupsCard
@@ -542,16 +553,12 @@ def test_rotate_durable_key_replaces_in_place_without_holding(page: Page) -> Non
         route.continue_()
 
     page.route("**/*", handle)
-    page.context.add_cookies([{
-        "name": "sb-tortoise-auth-token",
-        "value": urllib.parse.quote(json.dumps(_session_json("u-rot2229"))),
-        "domain": ".premiselabs.co", "path": "/",
-    }])
+    _seed_local_session_cookie(page, "u-rot2229")
     # #2246: legacy residue seeded (the former "held" seed) — the mount
     # purges it; rotate must NEVER re-install anything into the slot.
     page.add_init_script(f"localStorage.setItem('tortoise_api_key', '{LEGACY_RESIDUE}');")
 
-    page.goto(APP_HOST + "/", wait_until="domcontentloaded", timeout=30_000)
+    _goto_local_dashboard(page)
     expect(page.locator("body")).to_contain_text("Graphs", timeout=25_000)
     page.locator('[data-tab="keys"]').click()
     expect(page.locator("tbody tr")).to_have_count(8, timeout=15_000)
@@ -671,12 +678,8 @@ def test_two_team_session_only_backups_pin_selected_team(page: Page) -> None:
         route.continue_()
 
     page.route("**/*", handle)
-    page.context.add_cookies([{
-        "name": "sb-tortoise-auth-token",
-        "value": urllib.parse.quote(json.dumps(_session_json("u-two-team"))),
-        "domain": ".premiselabs.co", "path": "/",
-    }])
-    page.goto(APP_HOST + "/", wait_until="domcontentloaded", timeout=30_000)
+    _seed_local_session_cookie(page, "u-two-team")
+    _goto_local_dashboard(page)
     expect(page.locator("body")).to_contain_text("Graphs", timeout=25_000)
     # Switch to Bravo (≠ first membership) via the account menu — session-only
     # (zero keys held: the switch adopts nothing and mints nothing).
@@ -819,12 +822,8 @@ def test_two_team_key_writes_pin_selected_team(page: Page) -> None:
         route.continue_()
 
     page.route("**/*", handle)
-    page.context.add_cookies([{
-        "name": "sb-tortoise-auth-token",
-        "value": urllib.parse.quote(json.dumps(_session_json("u-key-writes"))),
-        "domain": ".premiselabs.co", "path": "/",
-    }])
-    page.goto(APP_HOST + "/", wait_until="domcontentloaded", timeout=30_000)
+    _seed_local_session_cookie(page, "u-key-writes")
+    _goto_local_dashboard(page)
     expect(page.locator("body")).to_contain_text("Graphs", timeout=25_000)
     # Select Bravo (≠ first membership Alpha) — session-only (zero keys held)
     page.get_by_role("button", name=_re.compile(r"Account menu")).click()
