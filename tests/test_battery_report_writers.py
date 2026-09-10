@@ -11,7 +11,9 @@ check is gapped — never a measured 0.0 from an uncovered log.
 
 HERMETIC: config dirs are tmp-built (corpus.json absent -> the freshness
 gate no-ops for yaml-only fixture dirs; the stale-corpus test builds its
-own sealed corpus.json from the REAL corpus.yaml into tmp)."""
+own sealed corpus.json from the REAL corpus.yaml into tmp). Real-mode
+honesty runs inject a HERMETIC emission seam (``RunConfig.emission_seam``
+— #2703 decision A) so no test ever makes a live model call."""
 from __future__ import annotations
 
 import json
@@ -92,17 +94,23 @@ def _config_dir(tmp_path) -> Path:
 def _run(root: Path, cfg: Path, *, families=frozenset(), mock: bool = True,
          arms=("a0",), emit_only: set[str] | None = None,
          executor: str = "mock",
-         monkeypatch=None, expect: ExitCode = ExitCode.OK) -> Path:
+         expect: ExitCode = ExitCode.OK) -> Path:
     """Run the battery into ``root`` (fresh runs root per test); returns the
     LATEST attempt dir (summary.json = completion marker). Probe scorers are
     wired when ``families`` is non-empty (R1 for {"R1"}, +R2 for {"R1","R2"}).
 
-    ``emit_only`` switches the run to REAL mode and stubs the executor's
-    per-episode log emission seam (run._episode_log) so hermetic tests can
-    drive the two-phase emitter gate without a real model. Real mode is an
-    EXPLICIT request: pass ``executor="real"`` together with the seam stub
-    (emit_only is not None) — a real request without the stub fails closed
-    (PR #2341 review round 2, P2)."""
+    ``emit_only`` (non-None) injects a HERMETIC emission seam
+    (``RunConfig.emission_seam``) so hermetic tests can drive the two-phase
+    emitter gate without a real model — ZERO network/spend. Mode is the
+    caller's job: pass ``executor="real"`` (+ ``mock=False``) for a real-mode
+    run; ``emit_only`` alone does not switch the mode.
+
+    #2703 (decision A): the pre-Task-9 spelling monkeypatched the module
+    global ``run._episode_log``; f54f212a6 (Task 9) routed real mode to the
+    live executor and left that stub DEAD, so the real-mode tests that
+    reached the live executor silently made LIVE model calls and read a live
+    MANDATORY-covering log (``emitter_gap`` []). The seam is now
+    instance-scoped + explicit."""
     root.mkdir(parents=True, exist_ok=True)
     specs: list[str] | None = None
     if families:
@@ -110,16 +118,14 @@ def _run(root: Path, cfg: Path, *, families=frozenset(), mock: bool = True,
                                         ("R2", R2_PROBE_SPEC))
                  if fam in families]
         assert specs, f"unknown families {sorted(families)}"
+    seam = None
     if emit_only is not None:
-        import battery.runner.run as run_mod
-
-        def _episode_log(scenario, *, episode_seed, arm_id, run_mode):
+        def seam(scenario, *, episode_seed, arm_id, run_mode):
             return [dict(e) for e in covered_log()
                     if e.get("field") in emit_only]
-        monkeypatch.setattr(run_mod, "_episode_log", _episode_log)
     code = run_battery(RunConfig(config_dir=cfg, out_dir=root, arms=list(arms),
                                  mock=mock, scorer_specs=specs,
-                                 executor=executor),
+                                 executor=executor, emission_seam=seam),
                        stdout=lambda _: None)
     assert code is expect, f"run_battery exit {code} (expected {expect})"
     attempt = attempt_dir_resolve(root)
@@ -303,18 +309,17 @@ def r1_compute(log: list[dict]):
 # ---------------------------------------------------------------------------
 
 class TestRunWriters:
-    def test_run_writes_family_and_recall(self, tmp_path, monkeypatch):
+    def test_run_writes_family_and_recall(self, tmp_path):
         """battery run --mock --arms a0 + a probe scorer wired for one
         family: the attempt dir carries family_R1.json + recall.json."""
         cfg = _config_dir(tmp_path)
         out = tmp_path / "out"
-        attempt = _run(out, cfg, families={"R1"}, mock=True, arms=["a0"],
-                       monkeypatch=monkeypatch)
+        attempt = _run(out, cfg, families={"R1"}, mock=True, arms=["a0"])
         assert (out / "family_R1.json").exists() is False  # writer files live in the attempt dir
         assert (attempt / "family_R1.json").is_file()
         assert (attempt / "recall.json").is_file()
 
-    def test_report_reads_latest_attempt_dir(self, tmp_path, monkeypatch):
+    def test_report_reads_latest_attempt_dir(self, tmp_path):
         """Cross-attempt isolation: report = LATEST-attempt-only. attempt-2
         (which does NOT measure R1) shows no R1 row — attempt-1's R1 is
         never inherited (no inheritance) and absence never vacuous-passes
@@ -329,8 +334,7 @@ class TestRunWriters:
         wrote a sentinelled "R2 attempted" file over foreign episodes)."""
         cfg = _config_dir(tmp_path)
         out = tmp_path / "out"
-        attempt1 = _run(out, cfg, families={"R1"}, mock=True, arms=["a0"],
-                        monkeypatch=monkeypatch)
+        attempt1 = _run(out, cfg, families={"R1"}, mock=True, arms=["a0"])
         cfg2 = _config_dir(tmp_path / "cfg2")
         corpus = yaml.safe_load(
             (cfg2 / "corpus.yaml").read_text(encoding="utf-8"))
@@ -339,8 +343,7 @@ class TestRunWriters:
             sc["task_type"] = "decision"
         (cfg2 / "corpus.yaml").write_text(yaml.safe_dump(corpus),
                                            encoding="utf-8")
-        attempt2 = _run(out, cfg2, families={"R2"}, mock=True,
-                        arms=["a0"], monkeypatch=monkeypatch)
+        attempt2 = _run(out, cfg2, families={"R2"}, mock=True, arms=["a0"])
         assert attempt1 != attempt2
         assert (attempt1 / "family_R1.json").is_file()      # attempt 1 measured R1
         assert not (attempt2 / "family_R1.json").exists()   # attempt 2 did NOT
@@ -351,14 +354,13 @@ class TestRunWriters:
         assert profile["report_status"] == "incomplete_missing_metrics"  # no vacuous pass
         assert profile["families"]["measured"] == 0   # R2 insufficient_n ≠ measured
 
-    def test_crash_shadow_never_shadows_complete_attempt(self, tmp_path, monkeypatch):
+    def test_crash_shadow_never_shadows_complete_attempt(self, tmp_path):
         """A crashed/cap-stopped attempt dir (episode artifacts + family +
         recall but NO summary.json completion marker) never shadows a prior
         complete attempt."""
         cfg = _config_dir(tmp_path)
         out = tmp_path / "out"
-        complete = _run(out, cfg, families=set(), mock=True, arms=["a0"],
-                        monkeypatch=monkeypatch)
+        complete = _run(out, cfg, families=set(), mock=True, arms=["a0"])
         crashed = out / "99999999-999999-999999"  # lexically NEWER than any run stamp
         crashed.mkdir()
         (crashed / "0-a0-s0.json").write_text("{}", encoding="utf-8")
@@ -367,27 +369,21 @@ class TestRunWriters:
 
 
 class TestEmitterGapHonesty:
-    def test_emitter_gap_flips_report_status(self, tmp_path, monkeypatch):
+    def test_emitter_gap_flips_report_status(self, tmp_path):
         """A REAL artifact whose consumed (mandatory) fields are emitter-less
         carries emitter_gap and the report flips to incomplete_emitter_gap —
         the probe cells are insufficient_n, never a measured value. (The
         fixture corpus is controls-only — no planted pairs — so the R1
         sentinel lands on the FP-control cell.)"""
         cfg = _config_dir(tmp_path)
-        # Task-9-emulation: the hermetic real-run uses the CURRENT armed
-        # a0 class whose model_id='fixed' sentinel the #2292 pin
-        # pre-flight refuses — clear it (the armed classes are
-        # parameterized off the sentinel at Task 9; the pin gate
-        # guards the real classes until then).
-        import battery.arms.a0_plain as _a0m
-        monkeypatch.setattr(_a0m.A0PlainArm, "model_id",
-                            "deepseek/deepseek-v4-flash")
         out = tmp_path / "out"
         attempt = _run(out, cfg, families={"R1"}, mock=False, arms=["a0"],
-                       emit_only={"stated_confidence"}, executor="real",
-                       monkeypatch=monkeypatch)
+                       emit_only={"stated_confidence"}, executor="real")
         art = _run_artifacts(attempt)[0]
         assert art["run_mode"] == "real"
+        # #2703 (review P2): a seam-fabricated real run is identifiable —
+        # never confusable downstream with a live-spend artifact.
+        assert art["provenance"]["emission_seam"] == "hermetic"
         assert art["emitter_gap"]                       # uncovered consumed fields
         payload = read_payload(attempt / "family_R1.json")
         assert payload["cells"] == {"false-positive-rate": "insufficient_n"}
@@ -398,7 +394,7 @@ class TestEmitterGapHonesty:
         assert r1_compute(covered_log()) is not None   # measured (0.0 = legit a0 comparator)
         assert r1_compute(gapped_log()) is None        # never a measured 0.0
 
-    def test_mock_never_flags_emitter_gap(self, tmp_path, monkeypatch):
+    def test_mock_never_flags_emitter_gap(self, tmp_path):
         """mock + probe-scorer locks incomplete_missing_metrics with
         all-insufficient_n cells — mock never false-flags
         incomplete_emitter_gap and never produces measured cells. (The
@@ -406,8 +402,7 @@ class TestEmitterGapHonesty:
         cell, not a phantom surfaced-rate cell.)"""
         cfg = _config_dir(tmp_path)
         out = tmp_path / "out"
-        attempt = _run(out, cfg, families={"R1"}, mock=True, arms=["a0"],
-                       monkeypatch=monkeypatch)
+        attempt = _run(out, cfg, families={"R1"}, mock=True, arms=["a0"])
         payload = read_payload(attempt / "family_R1.json")
         assert payload["cells"] == {"false-positive-rate": "insufficient_n"}
         assert payload["values"]["false-positive-rate"] == []
@@ -454,7 +449,7 @@ class TestEmitterGapHonesty:
                             lambda *a, **k: _UnavailableRealArm())
         attempt = _run(out, cfg, families={"R1"}, mock=False, arms=["a0"],
                        executor="real", emit_only=set(),
-                       monkeypatch=monkeypatch, expect=ExitCode.ARM_FAILED)
+                       expect=ExitCode.ARM_FAILED)
         for art in _run_artifacts(attempt):
             assert art["run_mode"] == "real"
             assert art["excluded"]["count"] == 1
@@ -499,7 +494,7 @@ class TestEmitterGapHonesty:
         # exclusion snapshot is clean (expected - emitted empty).
         attempt = _run(out, cfg, families={"R1"}, mock=False, arms=["a0"],
                        executor="real", emit_only=set(MANDATORY),
-                       monkeypatch=monkeypatch, expect=ExitCode.ARM_FAILED)
+                       expect=ExitCode.ARM_FAILED)
         for art in _run_artifacts(attempt):
             assert art["run_mode"] == "real"
             assert art["excluded"]["count"] == 1
@@ -958,7 +953,7 @@ class TestRunModeHonesty:
                             lambda *a, **k: _InitFailingRealArm())
         attempt = _run(out, cfg, families={"R1"}, mock=False, arms=["a0"],
                        executor="real", emit_only=set(),
-                       monkeypatch=monkeypatch, expect=ExitCode.ARM_FAILED)
+                       expect=ExitCode.ARM_FAILED)
         summary = json.loads((attempt / "summary.json").read_text())
         assert summary["run"]["run_mode"] == "real"     # written at run end
         assert summary["arms"][0]["run_mode"] == "real"
@@ -967,8 +962,7 @@ class TestRunModeHonesty:
         profile = invoke_report(out, cfg)
         assert profile_status(profile) == "incomplete_real_no_episodes"
 
-    def test_hermetic_fixed_model_run_labeled_mock(self, tmp_path,
-                                                  monkeypatch):
+    def test_hermetic_fixed_model_run_labeled_mock(self, tmp_path):
         """Issue 3(a): run_mode derives from the EXECUTOR actually used — a
         hermetic run over a fixed-model adapter (model_id="fixed") with NO
         active real executor seam executes the seeded mock trajectory + no-op
@@ -977,8 +971,7 @@ class TestRunModeHonesty:
         with an empty event_log by construction."""
         cfg = _config_dir(tmp_path)
         out = tmp_path / "out"
-        attempt = _run(out, cfg, families=set(), mock=False, arms=["a0"],
-                       monkeypatch=monkeypatch)
+        attempt = _run(out, cfg, families=set(), mock=False, arms=["a0"])
         summary = json.loads((attempt / "summary.json").read_text())
         assert summary["run"]["run_mode"] == "mock"
         for art in _run_artifacts(attempt):
@@ -987,12 +980,36 @@ class TestRunModeHonesty:
         profile = invoke_report(out, cfg)
         assert profile_status(profile) == "incomplete_missing_metrics"
 
-    def test_real_mode_without_executor_seam_fails_closed(self, tmp_path):
-        """Issue 3(a): requesting real mode (config.executor == "real")
-        without an active real emitting executor seam raises ConfigError
-        BEFORE the attempt dir — a real label over the stock no-op emission
-        seam (mock executor) is refused, never silently produced."""
+    def test_mock_lane_never_consumes_a_hermetic_seam(self, tmp_path):
+        """Review P2 (#2703): the hermetic emission seam is REAL-MODE ONLY.
+        A mock-lane run over a real-class arm keeps the stock no-op seam, so
+        a seam-supplied schema-v1.1 log can never be stamped onto a
+        mock-labeled episode (mock's empty-event-log invariant holds)."""
+        cfg = _config_dir(tmp_path)
+        out = tmp_path / "out"
+        attempt = _run(out, cfg, families=set(), mock=False, arms=["a0"],
+                       emit_only=set(MANDATORY), executor="mock")
+        arts = _run_artifacts(attempt)
+        assert arts and all(a["run_mode"] == "mock" for a in arts)
+        assert all(a["event_log"] == [] for a in arts)
+        assert all(a["emitter_gap"] == [] for a in arts)
+        # Review P2: the hermetic marker identifies seam-FABRICATED logs — a
+        # configured-but-unconsumed seam leaves no marker on mock episodes.
+        assert all("emission_seam" not in a["provenance"] for a in arts)
+
+    def test_real_mode_without_executor_seam_fails_closed(self, tmp_path,
+                                                          monkeypatch):
+        """Issue 3(a) — re-homed on the post-Task-9 seam (#2703 decision A):
+        requesting real mode while the real emitting executor is UNWIRED
+        raises ConfigError BEFORE the attempt dir — a real request over an
+        emission-less executor is refused, never silently produced.
+        f54f212a6 wired the live executor, so "no active real seam" is
+        expressed by ``_REAL_EXECUTOR_WIRED``; the pre-Task-9 spelling keyed
+        on the stock ``_episode_log`` identity, which the explicit
+        ``RunConfig.emission_seam`` superseded."""
+        from battery.runner import run as run_mod
         from battery.runner.run import RunConfig
+        monkeypatch.setattr(run_mod, "_REAL_EXECUTOR_WIRED", False)
         cfg = _config_dir(tmp_path)
         out = tmp_path / "out"
         with pytest.raises(ConfigError):
@@ -1002,25 +1019,16 @@ class TestRunModeHonesty:
         assert not out.exists() or not [p for p in out.iterdir()]
 
     def test_real_harness_run_empty_logs_never_clean_coverage(
-            self, tmp_path, monkeypatch):
+            self, tmp_path):
         """Issue 3(b): end-to-end — a real-mode HARNESS run (no probe scorer)
         whose executor emits nothing records a NON-empty emitter_gap on
         every artifact (MANDATORY is always expected in real mode) and the
         report flips to incomplete_emitter_gap — a real artifact with an
         empty event log is never clean coverage, regardless of scorer."""
         cfg = _config_dir(tmp_path)
-        # Task-9-emulation: the hermetic real-run uses the CURRENT armed
-        # a0 class whose model_id='fixed' sentinel the #2292 pin
-        # pre-flight refuses — clear it (the armed classes are
-        # parameterized off the sentinel at Task 9; the pin gate
-        # guards the real classes until then).
-        import battery.arms.a0_plain as _a0m
-        monkeypatch.setattr(_a0m.A0PlainArm, "model_id",
-                            "deepseek/deepseek-v4-flash")
         out = tmp_path / "out"
         attempt = _run(out, cfg, families=set(), mock=False, arms=["a0"],
-                       executor="real", emit_only=set(),
-                       monkeypatch=monkeypatch)
+                       executor="real", emit_only=set())
         arts = _run_artifacts(attempt)
         assert arts and all(a["run_mode"] == "real" for a in arts)
         assert all(a["emitter_gap"] for a in arts)   # non-vacuous MANDATORY gap
@@ -1074,14 +1082,13 @@ class TestFreshnessGate:
 
 
 class TestFamilyWriteAtomicity:
-    def test_family_writes_atomic(self, tmp_path, monkeypatch):
+    def test_family_writes_atomic(self, tmp_path):
         """A partial/corrupt family file (no tmp+os.replace atomicity) must
         never be readable as a measured cell; writers leave no .tmp debris
         and a fresh write round-trips."""
         cfg = _config_dir(tmp_path)
         out = tmp_path / "out"
-        attempt = _run(out, cfg, families={"R1"}, mock=True, arms=["a0"],
-                       monkeypatch=monkeypatch)
+        attempt = _run(out, cfg, families={"R1"}, mock=True, arms=["a0"])
         assert not list(attempt.glob("*.tmp"))     # atomic writers leave no debris
         (attempt / "family_R1.json").write_text('{"cells":', encoding="utf-8")
         assert read_cells(attempt / "family_R1.json") is None
@@ -1317,8 +1324,7 @@ class TestEligibilityBeforeLaneSentinels:
         assert scorer.last_record() is None
         assert scorer.family_report() is None
 
-    def test_mock_foreign_family_run_writes_no_family_file(self, tmp_path,
-                                                           monkeypatch):
+    def test_mock_foreign_family_run_writes_no_family_file(self, tmp_path):
         """End-to-end: a MOCK R1-probe run over an R4-family corpus writes
         NO family_R1.json (no records → no run-end family payload) — the
         pre-fix run recorded sentinels and emitted family_R1.json claiming
@@ -1332,7 +1338,6 @@ class TestEligibilityBeforeLaneSentinels:
         (cfg / "corpus.yaml").write_text(yaml.safe_dump(corpus),
                                           encoding="utf-8")
         out = tmp_path / "out"
-        attempt = _run(out, cfg, families={"R1"}, mock=True, arms=["a0"],
-                       monkeypatch=monkeypatch)
+        attempt = _run(out, cfg, families={"R1"}, mock=True, arms=["a0"])
         assert not (attempt / "family_R1.json").exists()
         assert list(attempt.glob("family_*.json")) == []
