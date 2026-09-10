@@ -1,6 +1,24 @@
 <!-- research-path: issue-scoping artifact posted on #2833 (no epic brief — Level: task) -->
 
-# Claude Desktop/Web OAuth Connect Implementation Plan
+# Claude Desktop/Web OAuth Connect — Implementation Plan (#2833)
+
+> **⚠️ THIS PLAN WAS DECOMPOSED ON 2026-09-10.** After 2 plan-review cycles, #2833 was
+> re-tiered `task`/`standard` → **`project`/`complex`** and split into four children. The plan is
+> project-shaped and contained a genuine authorization-server bug fix the scoping had not
+> accounted for. The tasks below are now the **source material** for those children — execute
+> from the child issues, not from this document:
+>
+> | Child | This document's tasks |
+> |---|---|
+> | **#2864** server conformance | Task 1 (challenge + route), Task 3, Task 4 |
+> | **#2865** wizard OAuth path | Task 2, Task 6 |
+> | **#2866** DCR capacity policy | Task 5 |
+> | **#2863** AS robustness (new; cycle-2 P0-2) | none — filed separately |
+> | cross-cutting evidence | Task 7, Task 8 |
+>
+> The **"Plan-review disposition"** section at the bottom records all open findings from both
+> review cycles, including the ones the children now carry. Read it before implementing.
+
 
 > **For Pi:** Use `executing-plans` to implement this plan task-by-task.
 
