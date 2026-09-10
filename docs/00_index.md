@@ -46,5 +46,6 @@ ownedBy: epistemic-team
 | Blog keyword research — topic taxonomy + keyword map (#1862) | `docs/research/2026-08-28-tortoise-blog-keywords/research.md` |
 | Tortoise agent daemon epic research — OAuth/attribution second-pass verdict + industry code audit (#2554, 2026-09-08) | `docs/research/2026-09-08-tortoise-agent-daemon.md` |
 | Actor attribution in agent-memory graphs — industry code audit (Zep/Mem0/Letta/LangMem/basic-memory, #2554) | `docs/research/memory-attribution-industry-findings.md` |
+| Standard-harness reuse audit — do we need to invent the battery's key decisions (#1416, 2026-09-10) | `docs/research/2026-09-10-standard-harness-reuse-audit.md` |
 | Epic #2554 scoping (REVISED) — keyless agent connect via per-agent OAuth + human attribution on the graph | `docs/scoping/tortoise-agent-daemon.md` |
 | #2600 Attribution Phase 1 scoping — resolver human actor; sessions + write-events stamped (epic #2554 v1 gate) | `docs/scoping-2600-attribution-phase1.md` |
