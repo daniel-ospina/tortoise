@@ -287,27 +287,42 @@ make the hourly job RED, so a broken pipeline cannot stay green for weeks (the
 | off-while-pool-stale | `enabled:false`, no config/storage error, and the pool is not **measured fresh**: a `backups/{team}/default/` archive older than `BACKUP_DRIVER_DOWN_THRESHOLD_MIN` (240), a team prefix with **no default archive at all**, or a listing that failed | files **SWEEP_OFF_STALE**, job RED (the per-team STALE incident still files) |
 | enabled-but-backing-up-nothing | `enabled:true` and the sweep backed up 0 teams (`no_teams` / `no_eligible_teams` / `no_work` / `enum_failed` / `error`) while the R2 pool holds ≥1 team prefix, **or while the pool cannot be measured**, **or** the sweep reported a lock that cannot be verified as recent | files **SWEEP_NO_COVERAGE**, job RED |
 
-**Any filing makes the job RED.** The taxonomy above is the classifier; the
-job status is simpler and deliberately blunter — `file_alert` sets a run-level
+**Filing ⇒ the job is RED.** The taxonomy above is the classifier; the job
+status is simpler and deliberately blunter — `file_alert` sets a run-level
 `LOUD` flag and every terminal exit goes through it, so *any* incident filed
-this run (APP_DOWN, WATCHER_DOWN, a per-team STALE from the direct-R2 leg, a
-preflight R2_DOWN, a stuck-lock SWEEP_NO_COVERAGE) exits 1. Silent ⟺ nothing
-was filed. This is the actual fix for #2796: the 31-day #2790 outage hid behind
-40 consecutive `success` runs *after* the driver had already filed `STALE`.
+this run (APP_DOWN, WATCHER_DOWN, a per-team STALE from the direct-R2 leg, an
+R2_DOWN — preflight or partial-listing — a stuck-lock SWEEP_NO_COVERAGE) exits
+1. (The converse does not hold: a hard driver/config failure — missing
+`GITHUB_TOKEN`, an unreadable R2 preflight, or a failed purge/reconcile
+ride-along — also exits 1 without filing. RED therefore means "broken or
+unverifiable", which is the point.) This is the actual fix for #2796: the
+31-day #2790 outage hid behind 40 consecutive `success` runs *after* the driver
+had already filed `STALE`.
 
 **Unknown ≠ empty (the dominant rule).** A failed `list-objects-v2` — the
-top-level listing, any per-team listing, or the legacy-flat classification
-index — leaves the pool *unmeasured*: the driver then never reads it as fresh,
-never files a false `STALE` from a failed read, and never lets it silence the
-0-team envelope. A failed read while the sweep is OFF is **not** a confirmed
-deliberate pause, so it files SWEEP_OFF_STALE. An unclassifiable `/status` (no
-boolean `.enabled`, or a non-JSON 200) fails **closed** as SWEEP_NO_COVERAGE. A
-held sweep lock is not healthy on its own: a usable `last_sweep_at` older than
-the driver-down window, or an *unverifiable* lock (no usable `last_sweep_at`)
-when the pool is not **measured empty**, is SWEEP_NO_COVERAGE. The
+top-level listing, any per-team listing — or a failed `get-object` of the
+legacy-flat classification index leaves the pool *unmeasured*: the driver then
+never reads it as fresh, never files a false `STALE` from a failed read, and
+never lets it silence the 0-team envelope. A listing that fails while
+`head-bucket` passes also files **R2_DOWN** (storage partially reachable,
+pool unverifiable) so a "successful" sweep cannot keep the run green. A failed
+read while the sweep is OFF is **not** a confirmed deliberate pause, so it
+files SWEEP_OFF_STALE. An unclassifiable `/status` (no boolean `.enabled`, or a
+non-JSON 200) fails **closed** as SWEEP_NO_COVERAGE. A held sweep lock is not
+healthy on its own: a usable `last_sweep_at` older than the driver-down window,
+or an *unverifiable* lock (no usable `last_sweep_at`) when the pool is not
+**measured empty**, is SWEEP_NO_COVERAGE. The
 `error`/`enum_failed`/unrecognized sweep statuses file SWEEP_NO_COVERAGE
 **regardless of pool state** (only the enumerated-empty statuses
 `no_teams`/`no_eligible_teams`/`no_work` use the 0-team envelope).
+
+**Named residual — an unassessable watcher.** When `enabled:true` and `/status`
+carries no `.watcher` block at all (usually an older app build), the driver
+neither files nor clears `WATCHER_DOWN`; a healthy sweep then exits 0. This is
+an accepted residual, not an oversight: the block's *absence* is not evidence
+the daemon is dead, and the per-graph `STALE`/`NEVER_BACKED_UP` coverage it
+provides is still partly covered by the direct-R2 leg for default graphs.
+Making it loud is tracked separately if a schema-drift incident ever occurs.
 
 **0-team false-positive envelope:** when the sweep finds 0 teams **and the R2
 pool is measured empty**, the chronic pre-beta state is assumed and nothing is
@@ -333,7 +348,8 @@ therefore also clear from the disabled path once storage is proven back.
 boolean `running` read this run) — a missing/malformed block neither files nor
 clears it, because unknown is not evidence the daemon is alive.
 `SWEEP_NO_COVERAGE` clears **only** on a run that actually backed up
-(`backed_up`/`degraded`).
+(`backed_up`/`degraded`), and that judgment is made from
+`graph_totals.backed_up`, not `teams_backed_up`.
 
 **Dedup lifecycle:** incidents are create-once in R2
 (`ops/alerts/{kind}/{subject}.json`) with a GitHub-search fallback. A global
@@ -348,13 +364,20 @@ transient/rate-limited response is treated as open so a blip never duplicates.
 **Publication redaction:** `config_error`/`storage_error`, the raw sweep body,
 the purge failure body and `last_sweep` (whose `graph_failures[].error` carries
 raw per-graph exception text) are published into a **public** GitHub issue +
-Telegram **and** the public Actions log. `redact()` normalises to one line,
-scrubs credential *shapes* (URI/DSN userinfo passwords, `Basic`/`Bearer`
-headers, `*_KEY=`/`"token":"…"` assignments, quoted token-ish values, ≥20-char
-token-like runs, filesystem paths) and — unlike the first cut — **preserves
-lowercase JSON keys and timestamps**, so the published `last_sweep` roll-up is
-still readable. `redact_truncate()` redacts *before* truncating so a secret is
-never cut into a sub-threshold fragment.
+Telegram **and** the public Actions log. `redact()` normalises to one line and
+scrubs credential *shapes*: URI/DSN userinfo passwords (with or without a
+scheme), `Basic`/`Bearer`/`token`/`ApiKey` headers, known credential
+**prefixes** (`ghp_`, `github_pat_`, `glpat-`, `xox…`, `AKIA`, `sk-`, at ANY
+length so a short or line-split PAT cannot survive), `*_KEY=`/`"token":"…"`
+assignments (suffix-anchored, so `patch:`/`compatible:`/`author:` are not false
+positives), quoted token values, ≥20-char token-like runs and filesystem paths
+— while **preserving lowercase JSON keys, timestamps and graph ids**, so the
+published `last_sweep` roll-up stays readable. `redact_truncate()` redacts
+*before* truncating so a secret is never cut into a sub-threshold fragment.
+Known residual: a secret with no recognisable prefix that is split by raw
+whitespace into fragments each under 20 characters. The primary control is the
+source — the three key-parsing sites emit a sha256 fingerprint, never the raw
+value.
 
 **Credential requirement:** the driver **fails closed** if `GITHUB_TOKEN`
 is unset — Actions does not export it into step envs, so
@@ -367,11 +390,14 @@ would 401 while the job could still look green.
 `registry-cron*` + cron/ci workflow surface). It stubs `aws`/`curl`/`date` and
 asserts all five states, the unmeasurable-pool rule, the 0-team envelope, the
 stuck/unverifiable lock, unclassifiable-status and missing-token failsafes,
-redaction (DSN/header/bare/quoted shapes, `last_sweep`, the purge body),
-self-heal tiers, the dual-key delete, the multi-team tab-separated pool, and
-dedup open/closed/404/blip. (The driver carries the exec bit so the harness
-invokes it directly — a `$(bash script)` command substitution trips the agent
-worktree guard, #1484.)
+redaction (DSN/header/prefix/quoted/newline-split shapes and the
+`compatible:`/`patch:`/`author:` false-positive guards, `last_sweep`, the purge
+body), self-heal tiers (incl. `SWEEP_NO_COVERAGE`),
+the dual-key delete, the multi-team tab-separated pool, the enabled+stale and
+enabled+unmeasurable cases, and
+dedup open/closed/404/blip/backfill. (The driver carries the exec bit so the
+harness invokes it directly — a `$(bash script)` command substitution trips the
+agent worktree guard, #1484.)
 
 ## Alert taxonomy + triage
 | Kind | Meaning | Triage |
@@ -381,7 +407,7 @@ worktree guard, #1484.)
 | METADATA_LOST | archives exist but the graph's per-graph state object missing | Re-run sweep (state re-created) |
 | BACKUP_SET_MISSING | state exists but no archives (bulk delete/erroneous prune) | Investigate R2; restore from a retained archive if possible |
 | DRIVER_DOWN | driver heartbeat stale (> 4h) — workflow disabled/dead | Re-enable the workflow; GH 60-day auto-disable |
-| R2_DOWN | R2 unreachable (driver-side signal) | Check R2 creds/billing/bucket policy |
+| R2_DOWN | R2 unreachable or not listable (driver-side signal: `head-bucket` failed, or it passed but `list-objects-v2` failed so the pool is unverifiable) | Check R2 creds/billing/bucket policy and the access key's `ListObjects` permission |
 | ALERTER_DOWN | daemon's GitHub PAT dead (`gh_ok: false`) | Rotate `DR_ISSUES_PAT` |
 | APP_DOWN | app unreachable from the driver | Fly health; cold-start OOM (#545) |
 | WATCHER_DOWN | watcher heartbeat stale (daemon dead) | Check app logs; restart |

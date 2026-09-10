@@ -73,22 +73,31 @@ finish() {
 # still missing DSN/URI passwords, Basic/Bearer headers and short tokens. The
 # rules now target credential shapes and preserve lowercase JSON keys/values:
 #   1. URI userinfo password     scheme://user:PASSWORD@host
-#   2. Authorization header      Basic|Bearer TOKEN
-#   3. sensitive-key assignment  *_KEY=value, "api_key":"value", token: value
-#   4. quoted token-ish value    contains A-Z/0-9/+-/=., so `last_sweep_at`
-#                                (lowercase) survives but 'AbCdEfGh' does not
-#   5. long quoted lowercase run ≥20 (an all-lowercase secret)
-#   6. bare token-like run ≥20 (ghp_…, base64, hex) — 20 rather than 24 after
-#                                 the security review showed a 22-char token
-#                                 escaping; lowercase JSON keys are all <20
-#   7. filesystem path
+#   2. Authorization header      Basic|Bearer|token|ApiKey TOKEN
+#   3. credential PREFIX         ghp_…, github_pat_…, glpat-…, AKIA… (ANY length,
+#                                so a short or line-split PAT cannot survive)
+#   4. sensitive-key assignment  *_KEY=value, "api_key":"value", token: value
+#                                (suffix-anchored, so `patch:`/`compatible:`/
+#                                 `author:` are not false positives)
+#   5. quoted single token       the historical `(got 'AbCdEfGh')` leak vector
+#   6. quoted long token         ≥16 b64/hex-ish, so `"TimeoutError"` and
+#                                `"g_deadbeef01"` stay readable
+#   7. bare token-like run ≥20   a 22-char token escaped the earlier ≥24 floor
+#   8. filesystem path
+#
+# Known residual (bounded, documented in docs/ops/registry-backup-dr.md): a
+# secret with NO recognisable prefix that is split by raw whitespace into
+# fragments each <20 chars. The primary control is at the SOURCE — the three
+# key-parsing sites emit a sha256 fingerprint, never the raw value.
 redact() { # text -> text safe for a public issue body / public Actions log
   printf '%s' "$1" | tr '\n\r\t' '   ' | sed -E \
     -e 's#([A-Za-z][A-Za-z0-9+.-]*://[^/@[:space:]:]+:)[^/@[:space:]]+#\1<redacted>#g' \
-    -e 's/(Basic|Bearer)[[:space:]]+[A-Za-z0-9+/=_.-]+/\1 <redacted>/Ig' \
-    -e 's/([A-Za-z0-9_]*(KEY|TOKEN|SECRET|PASSWORD|PASSWD|PAT|AUTH|CREDENTIAL)[A-Za-z0-9_]*[[:space:]]*[=:][[:space:]]*)["'\''"]?[^[:space:]"'\''"]+/\1<redacted>/Ig' \
-    -e 's/["'\''"]([A-Za-z0-9+/=_.-]*[A-Z0-9+/=.-][A-Za-z0-9+/=_.-]*)["'\''"]/"<redacted>"/g' \
-    -e 's/["'\''"]([a-z0-9+/=_.-]{20,})["'\''"]/"<redacted>"/g' \
+    -e 's/([A-Za-z0-9_.-]+:)[^@[:space:]/]+@/\1<redacted>@/g' \
+    -e 's/(Basic|Bearer|token|ApiKey|OAuth)[[:space:]]+[A-Za-z0-9+/=_.-]+/\1 <redacted>/Ig' \
+    -e 's/(^|[^A-Za-z0-9_])(ghp_|gho_|ghu_|ghs_|ghr_|github_pat_|glpat-|xox[baprs]-|AKIA|ASIA|sk-)[^[:space:]]*/\1\2<redacted>/g' \
+    -e 's/([A-Za-z0-9_]*(KEY|TOKEN|SECRET|PASSWORD|PASSWD|PAT|AUTH|CREDENTIAL|APIKEY|DSN)[[:space:]]*[=:][[:space:]]*)["'\''"]?[^[:space:]"'\''"]+/\1<redacted>/Ig' \
+    -e "s/'([^']{6,})'/'<redacted>'/g" \
+    -e 's/"([A-Za-z0-9+/=_.-]{16,})"/"<redacted>"/g' \
     -e 's/[A-Za-z0-9+/_.=-]{20,}/<redacted>/g' \
     -e 's#(/[A-Za-z0-9._-]+){3,}#<path>#g' || true
 }
@@ -210,7 +219,16 @@ file_alert() { # kind title body dedup_id
         -d "$(jq -nc --arg t "$title" --arg b "$body" '{title:$t, body:$b, labels:["dr:backup"]}')" \
         | jq -r '.number // empty' 2>/dev/null || true)"
     fi
-    [ -n "$num" ] && telegram "🚨 DR alert: ${kind} — issue #${num}"
+    if [ -n "$num" ]; then
+      # Review F7 (coherence): backfill the AUTHORITATIVE R2 object with the
+      # issue number here too. Without it the object keeps issue_number=null
+      # until the next run, so a transient empty GitHub search in that window
+      # would create a duplicate (the 412 object-trust path cannot help).
+      printf '{"kind":"%s","issue_number":%s,"filed_at":"%s"}' "$kind" "$num" "$(date -u +%FT%TZ)" > "$tmp"
+      aws s3api put-object --endpoint-url "$R2_ENDPOINT" --bucket "$R2_BUCKET" \
+        --key "ops/alerts/${kind}/${id}.json" --body "$tmp" >/dev/null 2>&1 || true
+      telegram "🚨 DR alert: ${kind} — issue #${num}"
+    fi
   else
     # 412 — the object exists, so a prior creator won the create-once race.
     # Read it: the object is the AUTHORITATIVE dedup state, and a GH search
@@ -285,6 +303,9 @@ if [ "$R2_OK" = "1" ]; then
     log "R2 top-level listing failed — pool state is UNKNOWN (not empty)"
   fi
   if [ -n "$TEAMS" ]; then
+    # Review F5 (security): a predictable /tmp path is a symlink/overwrite
+    # hazard on a shared runner and can be read back stale. Use mktemp.
+    IDX_ERR="$(mktemp)"
     # `while read` rather than `for $TEAMS`: an unquoted expansion word-splits
     # AND glob-expands, so a bucket key containing `*` or whitespace would
     # fabricate team names carried into R2 keys and incident titles (security
@@ -340,8 +361,8 @@ if [ "$R2_OK" = "1" ]; then
         # (NoSuchKey/404) means the pre-#2370 parity.
         idx=""; idx_rc=0
         idx="$(aws s3api get-object --endpoint-url "$R2_ENDPOINT" --bucket "$R2_BUCKET" \
-          --key "ops/legacy-flat-index/${team}.json" /dev/stdout 2>/tmp/dr-idx-err)" || idx_rc=$?
-        if [ "$idx_rc" != "0" ] && ! grep -qiE 'NoSuchKey|404|Not Found' /tmp/dr-idx-err 2>/dev/null; then
+          --key "ops/legacy-flat-index/${team}.json" /dev/stdout 2>"$IDX_ERR")" || idx_rc=$?
+        if [ "$idx_rc" != "0" ] && ! grep -qiE 'NoSuchKey|404|Not Found' "$IDX_ERR" 2>/dev/null; then
           log "team ${team}: legacy-flat index read FAILED — freshness UNKNOWN"
           R2_LIST_OK=0
           continue
@@ -386,7 +407,20 @@ if [ "$R2_OK" = "1" ]; then
         POOL_STALE=1
       fi
     done < <(printf '%s\n' "$TEAMS" | tr '\t' '\n')
+    rm -f "$IDX_ERR"
   fi
+fi
+
+# A preflight that passes but a listing that fails is a PARTIAL storage outage:
+# the pool cannot be measured, so freshness/coverage cannot be verified (review
+# P3, coherence). This is the same "unknown ≠ empty" rule as everywhere else
+# and it must not be green just because the sweep claims a backup. R2_DOWN is
+# the right kind: its self-heal already requires a measured pool, so it will
+# not be closed by the same blind run.
+if [ "$R2_OK" = "1" ] && [ "$R2_LIST_OK" != "1" ]; then
+  log "R2 preflight passed but the pool listing failed — storage is only partially reachable; filing R2_DOWN"
+  file_alert R2_DOWN "[DR] R2_DOWN — backup storage not listable" \
+    "head-bucket succeeded but one or more list-objects-v2 calls failed (R2_LIST_OK=0). The pool cannot be measured, so archive freshness and coverage cannot be verified. Check the R2 access key's ListObjects permission." "global"
 fi
 
 # ── 1. pre-flight status ────────────────────────────────────────────────────
@@ -630,7 +664,7 @@ if [ "$RUN_STATUS" != "already_running" ]; then
   PURGE_ST="$(printf '%s' "$PURGE_BODY" | jq -r '.status // "error"' 2>/dev/null || echo error)"
   PURGE_ST_SAFE="$(redact "$PURGE_ST")"
   if [ "$PURGE_CODE" = "200" ] && { [ "$PURGE_ST" = "ok" ] || [ "$PURGE_ST" = "already_running" ]; }; then
-    log "purge ride-along OK (status=$PURGE_ST_SAFE teams_purged=$(printf '%s' "$PURGE_BODY" | jq -r '.teams_purged // 0'))"
+    log "purge ride-along OK (status=$PURGE_ST_SAFE teams_purged=$(redact "$(printf '%s' "$PURGE_BODY" | jq -r '.teams_purged // 0')"))"
   else
     # Security review: the purge body is app-controlled and can carry a raw
     # exception string — redact it like the sweep body (it goes to a public log).
@@ -685,8 +719,8 @@ if [ "$SWEEP_COMPLETED" = "1" ]; then
   # failed) must not close the R2_DOWN it just filed — that would re-file and
   # re-close on every run forever. Review R3: a non-null storage_error also
   # proves the app-side storage is still broken — never close on that run.
-  if [ "$R2_OK" = "1" ] && [ -z "$STORAGE_ERR" ]; then
-    resolve_global R2_DOWN "Resolved — the storage answered (R2 preflight + sweep completed, status=$RUN_STATUS_SAFE)."
+  if [ "$R2_OK" = "1" ] && [ -z "$STORAGE_ERR" ] && [ "$R2_LIST_OK" = "1" ]; then
+    resolve_global R2_DOWN "Resolved — the storage answered (R2 preflight + listing OK + sweep completed, status=$RUN_STATUS_SAFE)."
   else
     log "self-heal: R2/storage evidence is not clean this run — leaving R2_DOWN open"
   fi
