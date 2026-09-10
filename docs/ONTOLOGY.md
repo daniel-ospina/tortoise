@@ -178,9 +178,11 @@ Each layer answers a different question. All four are live mechanisms.
 | `IMPL` | Point → Point | default bidirectional; optional unidirectional | N-ary | Epistemic (EP confidence) | A supports/implies B. Direction is an explicit operator flag — **default bidirectional**, option to declare unidirectional (source→target only). Not inferred from label. |
 | `NAND` | Point → Point | default bidirectional; optional unidirectional | N-ary | Epistemic (EP confidence) | A contradicts B (logically mutual — "A and B can't both be true"). Default bidirectional; an agent may declare `unidirectional` for a directed attack (attacker's truth penalizes the target, no back-pressure — #753). **Extraction-emitted NANDs default `unidirectional`** — see extraction policy in the direction-flag note below (#909 §4.3 #5). |
 | `hasPart` | Point → Point | bidirectional (composition) | N-ary | Structural via operator label | A contains B (parts/whole cascade). |
-| `CORRECTS` | Point → Point | unidirectional | 1→1 | — | New point **corrects/replaces** an outdated point (supersession). Marks target `outdated: true`; edge disposition is **restatement-scoped per #2421** (see supersession semantics — semantic edges are triaged carry/drop/pend; v1 still transfers, the triage is pending). Created by `supersede_point` (sdk.py:3870) / `invalidate_point` (sdk.py:3785). |
+| `CORRECTS` | Point → Point | unidirectional | 1→1 | — | New point **corrects/replaces** an outdated point (supersession). Marks target `outdated: true`; edge disposition is **restatement-scoped per #2421** (see supersession semantics — semantic edges are triaged carry/drop/pend; v1 still transfers, the triage is pending). Created by `supersede_point` (sdk.py:4282) / `invalidate_point` (sdk.py:4184). |
 
 > **Supersession semantics:** `CORRECTS` is the structural replacement edge. `supersede_point(old, new)` = mark old `outdated:true` + create `(new)-[:CORRECTS]->(old)` + dispose of old's edges per the **restatement-vs-correction policy** (#2421). `invalidate_point(id, corrected_by)` = mark outdated + CORRECTS only (no edge transfer). Old point retains only the CORRECTS edge as provenance.
+>
+> **Structural-edge transfer is journaled + replayable (#2489):** the 2b structural-edge transfer (`extractedFrom` + snapshot-derivable `about*` edges) is journaled as flat `DirectEdgeRepoint` descriptors `{src=old_id, tgt=<replay key>, target_label, edge_type}` emitted **before** the transfer, and replayed by `rebuild_all` pass-2b (delete the pass-2 resurrection at old + create at the final successor). The journaled set is the **snapshot-derivable rel set only** — `extractedFrom`, `aboutSubject`/`aboutObject`/`aboutEvent`/`aboutDocument`/`aboutPoint` (the edges rebuild pass-2 re-creates from a point's immutable `extractedFrom` prop / `aboutEntities` list). `aboutAction` (Action dissolved in Ontology v3.0), `aboutSource`, and `wasDerivedFrom` are never snapshot-recreated → no descriptor (they never resurrect at old; the A10 raw-edge family is out of scope). Keys are label-scoped and resolved via the shared resolver in `projection/edges.py` (`stub_key`/`resolve_structural_target` — Subjects/Sources MERGE by name/url, Documents by name-or-title; never `target.id`). Full `about*` parity additionally depends on #2501 (create_point never live-wires `aboutEntities` — the only lane where 2b sees live `about*` edges is rebuild→supersede→rebuild). The 2b no-self-edge guard (target node == successor) emits a `delete_only` descriptor instead of a transfer. **Pre-fix journal boundary:** descriptors exist only for supersedes journaled post-deploy — a pre-fix journal rebuilt with this consumer replays with no delete-leg, so old's pass-2 resurrection persists (rebuild does NOT repair pre-existing graphs; a #2500-style backfill is out of scope).
 >
 > **Restatement-vs-correction policy (#2421):** two supersede cases look alike but demand opposite edge handling, so edge disposition is decided **per edge at write time** (never silently bulk-transferred):
 > - **Case 1 — restatement:** the new point says the same thing more precisely (better source, fixed typo, merged duplicate). Every connection still applies; edges and belief transfer — belief-preservation is asserted (eval-spec P6.1/P6.2).
@@ -793,6 +795,28 @@ supersede_point / invalidate_point          (§3.1: mark old outdated:true,
                                             ep.contested in search, #580)
 ```
 
+**Terminal posterior vacuity decay (#2490):** every terminalizing write
+(retract/supersede/invalidate/assess_source + the rebuild folds) decays the
+terminal claim to VACUITY — `confidence=0.5`, posterior `(1,1)` — atomically
+with the status/flag write, so an include-terminal surface never shows a
+frozen pre-terminal posterior. Decay is UNIFORM across #2421 Case-1
+restatement and Case-2 correction (the old claim is terminal either way; the
+successor recomputes independently). `ep_alpha`/`ep_beta` are deliberately
+retained as prior history — there is NO unsupersede path that recovers the
+old claim's posterior, so the retained prior is the SOLE recovery vector.
+Every contested computation (annotate_ep_batch, rankers, `get_contested_claims`,
+`_review_prune`, why, analyze) excludes terminal claims via the shared
+live.py predicate (status ∈ {retracted, superseded, outdated, archived,
+deprecated} OR `outdated=true`).
+
+**#2488 merge-blocker caveat:** on this branch the rebuild-side fold decay
+applies to the *supersede* fold only — the `PointInvalidated` rebuild fold
+(`_fold_point_invalidated`) does not exist until #2488 lands, so an
+invalidate→rebuild cycle on THIS branch resurrects the frozen posterior (no
+fold re-applies decay). #2490's merge is gated on #2488; the rebase appends
+`decay_clause('n')` to `_fold_point_invalidated`'s SET (plan Task 2 step 4)
+and the invalidate→rebuild→vacuity parity test ships with it.
+
 **Design decisions (recorded for the patent filing):**
 
 | Question | Decision |
@@ -800,6 +824,7 @@ supersede_point / invalidate_point          (§3.1: mark old outdated:true,
 | Ontology concept vs implementation detail? | **Derived behavior**, documented here; no new stored entity |
 | Dedicated edge type (DEPENDS_ON)? | **No** — reverse traversal of IMPL/NAND operators is sufficient; a stored DEPENDS_ON edge would duplicate structure and drift |
 | Representation of "potentially invalidated"? | **Elevated posterior variance** (v > 0.04 → contested), not a stored `pointStatus` — statuses are `{live, draft, outdated, archived}`; `outdated` is set only by explicit supersession, never auto-inferred |
+| Terminal claims' posterior after terminalization? | **Decay to vacuity** (0.5, posterior (1,1)) at the terminalizing write + rebuild fold (#2490) — never a frozen pre-terminal posterior; `ep_alpha`/`ep_beta` retained as the sole recovery vector |
 | Interaction with CORRECTS? | CORRECTS is the *structural* replacement; cascading invalidation is the *belief-level* consequence — both fire from the same write (`supersede_point` → `_mark_dirty`) |
 
 Direction-aware EP (§3.1, #86) is the prerequisite that makes reverse

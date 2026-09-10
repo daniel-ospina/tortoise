@@ -884,7 +884,8 @@ def team_by_id(cp, team_id: str) -> dict | None:
 
 def active_api_keys(cp, team_id: str, *, created_via: str | None = None,
                     created_by: str | None = None) -> list[dict]:
-    """Non-revoked, non-expired api_keys rows for a team (#742 expiry).
+    """Non-revoked, non-expired api_keys rows for a team (#742 expiry;
+    #2481 — a REVOKED row is an audit tombstone, never a budget consumer).
 
     Optional created_via/created_by filters (bootstrap cap / recovery cap
     queries). Expiry is filtered here (PostgREST dialect stays minimal).
@@ -2400,21 +2401,29 @@ def graph_metadata(cp, team_id: str) -> list[dict]:
         return []
     # C6 #2115: the default graph's override (kind='default' row, upserted by
     # set_graph_recording) rides the derived default row when present; None =
-    # inherit team default (registry parity, #2110).
+    # inherit team default (registry parity, #2110). #2701: a kind='default'
+    # row also carries the DEFAULT graph's RENAMEABLE display name (upserted
+    # by set_graph_name) — read it so a renamed default stays renamed across
+    # reloads; the fallback stays the historical literal "default". The
+    # namespace (teams.graph_name) is NEVER the display name — display is
+    # cosmetic, the namespace is the data-plane storage key.
     default_rec = None
+    default_name = "default"
     try:
         drow = cp.query(
-            "graphs", select=["recording"],
+            "graphs", select=["recording", "name"],
             filters=[("team_id", "eq", team_id), ("kind", "eq", "default")],
         )
         if drow:
             default_rec = drow[0].get("recording")
+            if drow[0].get("name"):
+                default_name = drow[0]["name"]
     except Exception:
         default_rec = None  # one migration behind → no default row support
     default = {
         "graph_id": "default",
         "team_id": team_id,
-        "name": "default",
+        "name": default_name,
         "kind": "default",
         "namespace": rows[0]["graph_name"],
         "status": "active",
@@ -2575,6 +2584,85 @@ def purge_graph_row(cp, team_id: str, graph_id: str, *, now: str,
     return bool(updated)
 
 
+def set_graph_name(cp, team_id: str, graph_id: str, name: str) -> bool:
+    """#2701: rename a graph's DISPLAY name on a graphs row.
+
+    Custom rows PATCH directly. The DEFAULT graph has NO row (derived from
+    ``teams.graph_name``) — a rename for graph 0 renames the kind='default'
+    display row when one exists (created by set_graph_recording / a prior
+    rename) or upserts a fresh one carrying the new name. The row's
+    namespace is NEVER touched by a rename — it is the team's data-plane
+    storage key (teams.graph_name at upsert; graphs.namespace is text NOT
+    NULL, 20260901000001). Returns True when the name was written against a
+    known graph, False when the custom graph is unknown (the default graph
+    is always known — its display row is created on demand). Live-name
+    uniqueness (uq_graphs_team_name_active) is the DB backstop for the
+    caller's pre-check (409), mirroring create-graph's pre-check-then-
+    insert contract."""
+    if graph_id != "default":
+        rows = cp.query(
+            "graphs", select=["id"],
+            filters=[("id", "eq", graph_id), ("team_id", "eq", team_id),
+                     ("status", "eq", "active")],
+        )
+        if not rows:
+            return False
+        cp.query(
+            "graphs", method="PATCH",
+            filters=[("id", "eq", graph_id), ("team_id", "eq", team_id)],
+            json_body={"name": name},
+        )
+        return True
+    # Default graph: rename the existing kind='default' display row, else
+    # upsert one (namespace = the TEAM graph name — never the display name).
+    rows = cp.query(
+        "graphs", select=["id", "namespace"],
+        filters=[("team_id", "eq", team_id), ("kind", "eq", "default")],
+    )
+    if rows:
+        cp.query(
+            "graphs", method="PATCH",
+            filters=[("id", "eq", rows[0]["id"]),
+                     ("team_id", "eq", team_id)],
+            json_body={"name": name},
+        )
+        return True
+    import uuid as _uuid
+    from datetime import UTC, datetime
+    tro = cp.query(
+        "teams", select=["graph_name"], filters=[("id", "eq", team_id)])
+    team_graph_name = tro[0].get("graph_name") if tro else None
+    gid = f"g_{_uuid.uuid4().hex[:16]}"
+    try:
+        cp.query(
+            "graphs", method="POST",
+            json_body={
+                "id": gid, "team_id": team_id, "name": name,
+                "kind": "default", "namespace": team_graph_name,
+                "status": "active", "recording": None,
+                "created_at": datetime.now(UTC).isoformat(),
+            },
+        )
+    except Exception:
+        # Convergent upsert (mirror set_graph_recording): a concurrent write
+        # created the kind='default' row first — re-read + PATCH the winner.
+        rows = cp.query(
+            "graphs", select=["id"],
+            filters=[("team_id", "eq", team_id),
+                     ("kind", "eq", "default")],
+        )
+        if rows:
+            cp.query(
+                "graphs", method="PATCH",
+                filters=[("id", "eq", rows[0]["id"]),
+                         ("team_id", "eq", team_id)],
+                json_body={"name": name},
+            )
+            return True
+        raise
+    return True
+
+
 def set_graph_recording(cp, team_id: str, graph_id: str,
                         value: bool | None) -> bool:
     """C6 #2115: set the session_recording override on a graphs row.
@@ -2668,7 +2756,8 @@ def count_graph_keys(cp, team_id: str, graph_id: str) -> int:
     and the list short-circuits kind='default' rows to 0 before reaching it.
     Team-wide rows (graph_id NULL) are the keys that RESOLVE to the default
     graph; they are counted nowhere on a graph row (managed on the API-Keys
-    tab) — do NOT special-case 'default' here to count them."""
+    tab) — do NOT special-case 'default' here to count them. #2481: revoked tombstones are
+    excluded — they never consume the team's max_api_keys budget."""
     rows = cp.query(
         "api_keys", select=["id"],
         filters=[("graph_id", "eq", graph_id), ("team_id", "eq", team_id),

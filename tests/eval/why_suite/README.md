@@ -12,7 +12,7 @@ produced by `tortoise.why.assemble_why_blocks` is all the grader ever sees.
 | Issue | #2100 (W3-b) — epic #2080 (gbrain measurable-memory adoption) |
 | Graded artifact | REAL `tortoise.why.assemble_why_blocks` (the W4 assembly, #2101) — the same artifact the search/ask/analyze/MCP surfaces consume |
 | Seeding | Shared E2E-1/E2E-7 planted-conflict corpus — 40 fictional points (30 conflicted incl. 10 P9 / 5 decision / 5 superseded subsets + 10 clean), content-mirrored from W4-a's `_seed_e2e1_corpus` (`tests/test_w4_why_enrichment.py`) and pinned by the jointly-pinned `corpus_manifest.json` |
-| Judge pin | `judge_why_suite_v1` — static prompt file (`judge_why_suite_v1.txt`) whose sha256 is folded into the baseline `judge_pin` (`judge_why_suite_v1:<hex>`); asserted in the grading pre-step; a prompt/grader/gold change is a PROTOCOL change (re-pin + `--bless-protocol`), never a silent compare |
+| Judge pin | `judge_why_suite_v2` — static prompt file (`judge_why_suite_v2.txt`) whose sha256 is folded into the baseline `judge_pin` (`judge_why_suite_v2:<hex>`); asserted in the grading pre-step; a prompt/grader/gold change is a PROTOCOL change (re-pin + `--bless-protocol`), never a silent compare |
 | Lanes | deterministic m2 (`TORTOISE_SESSION_EXTRACTOR=m2`) — the CI can-fail gate, byte-reproducible; llm posture (`main.json`) records the same numbers (this suite is zero-LLM end to end) |
 | A11 gate | if the surfaced context can't answer ≥ 0.95, the W4 ASSEMBLY changes first — a plan change, not a test fix (epic R2) |
 
@@ -24,7 +24,9 @@ functions; no grader ever touches a graph handle):
 
 * **Conflict-surfacing** — does the surfaced context identify the planted
   contradiction?  (`conflicts.contested: true` + ≥ 1 NAND + a dig-deeper
-  `nand` pointer.)  Bar: **≥ 0.95** over the 30 conflicted points.
+  `nand` pointer.)  Bar: **≥ 0.95** over the 25 LIVE conflicted points
+  (issue #2490 — the 5 superseded predecessors are RESOLVED, not live
+  disputes; their graded arm is the resolved arm below).
 * **Dig-deeper navigation** — do the `{label, kind, target}` pointers land
   on the correct planted points (supports → the record, nand → the
   counterargument, superseded → the successor, tradeoff → the EP-favored
@@ -36,6 +38,14 @@ functions; no grader ever touches a graph handle):
   max-ep_weight one).
 * **False-positive arm** — clean points must NOT invent contradictions
   (no conflicts / contested / nand pointer).  Bar: **0 false positives**.
+* **Resolved arm** (issue #2490) — a superseded (terminal) claim's
+  why-block must present it as RESOLVED: `supersession.status ==
+  "superseded"` is served and neither `ep.contested` nor
+  `conflicts.contested` reads true — the ANTI-GHOST (a decayed terminal
+  must never surface as a live open dispute).  The conflict STRUCTURE
+  (nands + successor pointers) is still graded via dig-deeper navigation;
+  `support_chain_sufficient` is not expected (its belief is not measured —
+  `has_ep=false`).
 
 Rates are recorded + compared against posture-scoped baselines
 (`baselines/main.json` + `baselines/m2.json`, pending first publish), with
@@ -95,7 +105,7 @@ TORTOISE_DB_URI='docker://:falkordb@localhost:6379/why_suite_matrix' \
 # publish (at a clean committed head, pending baseline)
 ... runner.py --bless --justification "first publish (m2 numbers at the bar)"
 ... runner.py --bless-corpus --justification "intentional manifest/gold regen"
-... runner.py --bless-protocol --justification "judge_why_suite_v1 → v2 re-pin"
+... runner.py --bless-protocol --justification "judge_why_suite_v2 → v3 re-pin (illustrative)"
 
 # tests
 uv run pytest tests/eval/why_suite/ -q        # hermetic unit tests (docker lane)
@@ -112,7 +122,7 @@ TORTOISE_TEST_CARVE_OUT=1 uv run pytest tests/eval/why_suite/test_why_suite_sche
 * **corpus drift** — manifest/gold edit without corpus-bless ⇒ the gate is
   `inconclusive` (hash mismatch); `generate_corpus.py --check` names the
   drifted file.
-* **judge drift** — a `judge_why_suite_v1.txt` / `grading.py` / `schema.py`
+* **judge drift** — a `judge_why_suite_v2.txt` / `grading.py` / `schema.py`
   edit without a re-pin fails the pre-step as `judge_pin_mismatch`
   (protocol change = new pin + re-run).
 * **a4-not-measured** — recorded (never gating) until the calibrated When-3

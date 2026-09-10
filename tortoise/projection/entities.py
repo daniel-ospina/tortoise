@@ -1,7 +1,17 @@
-"""Entity CRUD handlers for FalkorProjection — Point, Subject, Object, Document, Event, Source."""
+"""Entity CRUD handlers for FalkorProjection — Point, Subject, Object, Document, Event, Source.
+
+#2490 rebuild-decay note (rides #2488, APPLIED): #2488's
+``_fold_point_invalidated`` landed in this module and now appends
+``decay_clause('n')`` to ITS terminalizing SET (both the unconditional and
+``skip_updated_at`` branches) — otherwise INVALIDATED claims resurrect their
+frozen posterior post-rebuild while superseded/retracted decay (the exact
+ghost class #2490 eliminates).
+"""
 from __future__ import annotations
 
 from datetime import datetime, timezone
+
+from tortoise.live import decay_clause  # #2490: rebuild folds decay terminal posteriors
 
 
 def _now_iso() -> str:
@@ -267,7 +277,8 @@ class _EntityHandlers:
         deleted it). Future retractions leave this tombstone.
         """
         self.g.query(
-            "MATCH (n:Point {id:$id}) SET n.status = 'retracted', n.updatedAt = $now",
+            "MATCH (n:Point {id:$id}) SET n.status = 'retracted', n.updatedAt = $now, "
+            f"{decay_clause('n')}",
             params={"id": pid, "now": _now_iso()},
         )
 
@@ -311,7 +322,8 @@ class _EntityHandlers:
         result = self.g.query(
             "MATCH (n:Point {id:$id}) "
             "SET n.status='superseded', n.outdated=true, "
-            "    n.validTo=$vt, n.expiredAt=$ea, n.updatedAt=$ua "
+            "    n.validTo=$vt, n.expiredAt=$ea, n.updatedAt=$ua, "
+            f"    {decay_clause('n')} "
             "RETURN n.id LIMIT 1",
             params={"id": oid, "vt": valid_to, "ea": expired_at,
                     "ua": updated_at},
@@ -321,6 +333,89 @@ class _EntityHandlers:
                 "MATCH (a:Point {id:$new_id}), (b:Point {id:$old_id}) "
                 "MERGE (a)-[:CORRECTS]->(b)",
                 params={"new_id": new_id, "old_id": oid},
+            )
+        return len(result.result_set)
+
+    def _fold_point_invalidated(self, ev: dict, skip_updated_at: bool = False) -> int:
+        """#2488: fold a PointInvalidated event into the outdated flag +
+        validity stamps + CORRECTS edge (NO status write).
+
+        Rebuild-time mirror of ``_fold_point_superseded`` (the sweep replays
+        both families over the journal); the DIVERGENCE is deliberate — do
+        NOT blind-copy the superseded fold:
+          - superseded: status='superseded' (terminal) + successor ``new_id``
+          - invalidated: outdated=true flag ONLY (status stays live — the
+            point remains a normal live node, just excluded from EP/reads via
+            the outdated flag), ``corrected_by`` is the corrector (not a
+            status successor), and neither status nor validFrom is written.
+        Live ``invalidate_point`` (sdk.py) writes exactly this SET + CORRECTS
+        MERGE, so replaying the journaled stamps verbatim reproduces the live
+        node (same #2164-P4 drift class as supersede: stamps come from the
+        journaled payload ts — the ORIGINAL invalidate time — never rebuild
+        time).
+
+        updatedAt is seq-gated, NOT clock-conditional: pass-1a's
+        ``_upsert_point_props`` stamps every replayed node with rebuild-time
+        updatedAt BEFORE the trailing sweep runs, and rebuild-now always
+        postdates the journaled invalidate ts — a ``$ts >= n.updatedAt`` CASE
+        could never fire (the ELSE arm would win every time, pinning rebuilt
+        updatedAt to rebuild-now). The sweep fold is the LAST writer on the
+        id, so it writes the journaled ts UNCONDITIONALLY (exact live parity,
+        the superseded fold's precedent) UNLESS ``skip_updated_at=True`` — a
+        LATER same-id PointRevised/PointPromoted (inline event, pass-1b) is a
+        legitimate newer writer whose rebuild-now stamp must not be clobbered
+        by the older invalidate ts. outdated/validTo/expiredAt/CORRECTS fold
+        ALWAYS — the gate suppresses ONLY the updatedAt column.
+
+        Idempotent (replayed/duplicate events re-apply the same SET/MERGE).
+        Returns the MATCHED-ROW count (the #2164/#2423 additive fold-miss
+        signal): 1 = the target Point was found and folded, 0 = no Point
+        matched (missing Point / stale id). A missing/deleted ``corrected_by``
+        endpoint no-ops ONLY the CORRECTS MERGE arm (best-effort, like the
+        superseded fold's missing successor) without failing the fold or
+        warning — parity with #2423. A raw producer omitting ``corrected_by``
+        entirely still gets the outdated flag + stamps (needs only oid); only
+        the edge arm is gated (code-review P2-2).
+        """
+        oid = ev.get("id")
+        if not oid:
+            return 0
+        corrected_by = ev.get("corrected_by")
+        # Journaled payload stamps (invalidate-time ts = the live SET clock,
+        # replayed verbatim). validTo/expiredAt fall back like supersede;
+        # updatedAt reads the ts key (the emit passes ts=now).
+        valid_to = ev.get("valid_to")
+        expired_at = ev.get("expired_at") or _now_iso()
+        updated_at = ev.get("ts") or _now_iso()
+        if skip_updated_at:
+            # A later same-id PointRevised/PointPromoted already stamped
+            # updatedAt (inline, pass-1b) — omit the column so this fold
+            # cannot clobber the newer stamp with the older invalidate ts.
+            set_clause = ("SET n.outdated=true, n.validTo=$vt, n.expiredAt=$ea, "
+                          f"{decay_clause('n')} ")
+            params = {"id": oid, "vt": valid_to, "ea": expired_at}
+        else:
+            # Unconditional updatedAt write: this sweep fold is the id's last
+            # journal writer → exact live parity (supersede's precedent).
+            set_clause = ("SET n.outdated=true, n.validTo=$vt, "
+                          "n.expiredAt=$ea, n.updatedAt=$ua, "
+                          f"{decay_clause('n')} ")
+            params = {"id": oid, "vt": valid_to, "ea": expired_at,
+                      "ua": updated_at}
+        result = self.g.query(
+            "MATCH (n:Point {id:$id}) " + set_clause + "RETURN n.id LIMIT 1",
+            params=params,
+        )
+        if result.result_set and corrected_by:
+            # Best-effort edge arm: a missing/deleted corrected_by point
+            # (never re-created, hard-deleted) silently no-ops the MERGE.
+            # A RAW producer omitting corrected_by entirely still gets the
+            # outdated flag + stamps (the #2488 fix needs only oid) — only
+            # the CORRECTS arm is gated on it (P2-2, code-review).
+            self.g.query(
+                "MATCH (a:Point {id:$new_id}), (b:Point {id:$old_id}) "
+                "MERGE (a)-[:CORRECTS]->(b)",
+                params={"new_id": corrected_by, "old_id": oid},
             )
         return len(result.result_set)
 

@@ -2,7 +2,7 @@
 
 Registration only (plan-review P2): encode/decode wiring is deferred to the
 first real upcaster task. ClaimStateChanged must NOT be registered
-(plan-review P1) — every claim transition maps to one of the five concrete
+(plan-review P1) — every claim transition maps to one of the eleven concrete
 types; challenged is derived from NAND-edge presence.
 """
 from __future__ import annotations
@@ -16,7 +16,19 @@ from tortoise.shared_state.events import (
     register_event_type,
 )
 
-CLAIM_TYPES = ("PointAdded", "OperatorAdded", "PointRetracted", "PointSuperseded", "OperatorAnnotated")
+CLAIM_TYPES = (
+    "PointAdded",
+    "OperatorAdded",
+    "PointRetracted",
+    "PointSuperseded",
+    "OperatorAnnotated",
+    "PointPromoted",
+    "OperatorPromoted",
+    "DedupeRecorded",
+    "DedupeRejected",
+    "ObjectSuperseded",
+    "PointInvalidated",  # #2488: invalidate_point — outdated flag + CORRECTS (no status)
+)
 
 
 @pytest.fixture(autouse=True)
@@ -32,7 +44,7 @@ def _register_claims(_clear_registry):
 
 
 class TestClaimRegistration:
-    def test_five_claim_types_registered_v1(self):
+    def test_eleven_claim_types_registered_v1(self):
         types = event_types()
         for t in CLAIM_TYPES:
             assert t in types, f"{t} not registered"
@@ -55,7 +67,7 @@ class TestClaimRegistration:
 
 
 class TestClaimRoundTrip:
-    def test_encode_decode_roundtrip_all_five(self):
+    def test_encode_decode_roundtrip_all_eleven(self):
         for t in CLAIM_TYPES:
             ev = EventCodec.encode(t, {"id": "p1", "note": "x"})
             assert ev["type"] == t

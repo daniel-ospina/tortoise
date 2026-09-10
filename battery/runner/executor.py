@@ -61,6 +61,14 @@ class Envelope:
         }
 
 
+#: Prompt-template tokens that must never be accepted as a position (an
+#: echo of the envelope request itself, not an answer).
+_TEMPLATE_POSITION_ECHOES = frozenset({
+    "<one sentence>", "<one-sentence>", "<position>", "one sentence",
+    "<one sentence position>",
+})
+
+
 def validate_envelope(raw: dict[str, Any]) -> Envelope:
     """Validate one envelope dict — TypeError/ValueError on any violation
     (unknown intent, non-numeric confidence, non-bool undecided,
@@ -72,6 +80,13 @@ def validate_envelope(raw: dict[str, Any]) -> Envelope:
     position = str(raw.get("position", "")).strip()
     if not position:
         raise ValueError("envelope.position is required and non-empty")
+    # Review #2717 P2: a verbatim echo of the prompt's template token is a
+    # harness artifact, never a position — reject it so the metric can
+    # never score the envelope request's own placeholder.
+    if position.lower() in _TEMPLATE_POSITION_ECHOES:
+        raise ValueError(
+            f"envelope.position is the prompt template echo {position!r}, "
+            f"not a position")
     conf = raw.get("stated_confidence")
     if not isinstance(conf, (int, float)) or isinstance(conf, bool):
         raise TypeError(
@@ -140,20 +155,18 @@ _PHASE_PROMPTS: dict[str, str] = {
 #: declared revision, the scaffold converges early (n >= 3 per the plan).
 MAX_REVISION_CYCLES = 3
 
-#: #1416 corrective-repair budget: a non-conforming envelope gets ONE
-#: bounded re-prompt (schema error surfaced to the model, as production
-#: would); the repaired output is still the model's own conforming scalar
-#: envelope. Budget is 1 so a persistently non-conforming turn still
-#: excludes (honest) rather than looping.
-MAX_ENVELOPE_REPAIRS = 1
-
-#: Repair re-prompt (sent after a schema failure; phase context is not
-#: repeated — the model already has the full render in context).
-_REPAIR_PROMPT = (
-    "Your previous response did not end with a valid envelope JSON object "
-    "(position must be a non-empty one-sentence string, stated_confidence "
-    "a real number in 0..1, undecided a boolean). Respond now with ONLY "
-    "the envelope JSON object — no prose.")
+#: Corrective suffix appended to the FULL phase prompt on a schema failure.
+#: The repair re-asks the SAME question (the phase render + phase
+#: instruction) with the schema error surfaced — a bare "emit the JSON"
+#: re-prompt loses the question entirely and yields placeholder answers
+#: ("I am responding correctly.") that are schema-valid but semantically
+#: fabricated. The envelope stays the model's own answer to the real
+#: question: never mined from prose, never invented by the harness.
+_REPAIR_SCHEMA = (
+    '. Answer the SAME question again and end with ONLY the envelope JSON '
+    'object ({"position": "<one sentence>", "stated_confidence": <0..1 '
+    'number>, "undecided": <bool>, "defeat_conditions": [...], '
+    '"intents": [...], "citations": [...]}).')
 
 #: Envelope-request suffix appended to every phase turn (the model answers
 #: deliberation prose THEN a JSON envelope — envelope is the only channel,
@@ -255,6 +268,7 @@ def execute_tvde_episode(*, caller, scenario_render: str,
         # episode is not silently starved by an earlier turn's repair, and
         # the trace's "repaired" flag reflects ONLY this turn.
         _repaired = False
+        _repair_text = ""
         _before = len(_caller_rows) if _caller_rows is not None else 0
         text = caller.call(prompt=tvde_prompt(scenario_render, phase))
         text = str(text or "").strip()
@@ -264,25 +278,34 @@ def execute_tvde_episode(*, caller, scenario_render: str,
                 f"fabricated turns permitted (realism gate)")
         try:
             env = envelope_from_response(text)
-        except ValueError as first:
-            # #1416 corrective-repair loop: a schema error is surfaced back
-            # to the model (as it would be in production) with a bounded
-            # repair budget. The repaired envelope is STILL the model's own
-            # conforming scalar output — never mined from prose, never
-            # fabricated — and every repair attempt is a real metered call.
-            repair = caller.call(prompt=_REPAIR_PROMPT)
+        except (ValueError, TypeError) as first:
+            # #1416 corrective-repair loop: a schema violation (malformed
+            # envelope, empty position, null confidence — TypeError or
+            # ValueError alike) is surfaced back to the model, as it would
+            # be in production, with a bounded repair budget. The repair
+            # re-asks the SAME question with the error appended: the
+            # accepted envelope is the model's OWN answer to the real
+            # question — never mined from prose, never a harness invention
+            # — and every repair attempt is a real metered call.
+            repair_prompt = (
+                tvde_prompt(scenario_render, phase)
+                + "\n\n[[schema correction]] Your previous response to THIS "
+                  "question did not end with a valid envelope JSON object: "
+                + f"{first}" + _REPAIR_SCHEMA)
+            repair = caller.call(prompt=repair_prompt)
             _repaired = True
-            repair = str(repair or "").strip()
-            if not repair:
+            _repair_text = str(repair or "").strip()
+            if not _repair_text:
                 raise ValueError(
                     f"TVDE {phase} repair returned EMPTY content — "
                     f"zero fabricated turns permitted (realism gate)") \
                     from first
-            env = envelope_from_response(repair)
+            env = envelope_from_response(_repair_text)
         calls_per_turn.append(
             (len(_caller_rows) if _caller_rows is not None else 0) - _before)
         turns.append({"phase": phase, "content": text,
-                      "repaired": _repaired})
+                      "repaired": _repaired,
+                      "repair_content": _repair_text if _repaired else ""})
         envelopes.append(env)
         return env
 

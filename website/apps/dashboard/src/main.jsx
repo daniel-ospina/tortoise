@@ -33,6 +33,7 @@ import { docsIndexedLabel, formatRelativeTime, jobStatusLine } from './memorySou
 import { isManagedKey, durableConnectKey } from './sessionKey.js'
 import {
   canManageGraphKeys,
+  deleteTypedMatches,
   graphCanDelete,
   graphKeyPanelEmptyLine,
   graphKeysSuppressed,
@@ -1613,7 +1614,12 @@ function claimIntentInFlight() {
   const [graphKeyName, setGraphKeyName] = React.useState('')
   const [graphBusy, setGraphBusy] = React.useState(false) // panel mint / graph delete in flight
   const [graphMsg, setGraphMsg] = React.useState('') // inline PANEL error (mint/revoke — renders inside the open key panel only; #2301: delete failures are page-level, never here)
-  const [confirmDeleteId, setConfirmDeleteId] = React.useState(null) // custom row awaiting delete confirm
+  const [confirmDeleteId, setConfirmDeleteId] = React.useState(null) // custom row whose type-to-confirm delete modal is open
+  const [deleteConfirmTyped, setDeleteConfirmTyped] = React.useState('') // #2701: typed word gate for the delete modal
+  // #2701: inline graph rename (mirrors the API-Keys ✏️ inline edit).
+  const [editingGraphId, setEditingGraphId] = React.useState(null) // row in inline rename (null = none)
+  const [editingGraphName, setEditingGraphName] = React.useState('')
+  const graphRenameCancelRef = React.useRef(false) // Escape-in-edit suppresses the blur-save
   // #2304 trash (delete = 7-day recovery window): rows + restore/inspect.
   const [trash, setTrash] = React.useState([])
   const [trashStatus, setTrashStatus] = React.useState('closed') // closed|loading|ok|error
@@ -4137,6 +4143,9 @@ function claimIntentInFlight() {
     setPanelKeysStatus('closed')
     setGraphMsg('')
     setConfirmDeleteId(null)
+    setDeleteConfirmTyped('')
+    setEditingGraphId(null)
+    graphRenameCancelRef.current = true // #2701: the unmount-blur must not fire a graph rename for the old team
     // #2304: trash state is team-scoped — never flash the previous team's
     // trash rows / rescue panel / notices under a fresh team.
     setTrash([])
@@ -4492,9 +4501,57 @@ function claimIntentInFlight() {
     }
   }
 
+  // #2701: rename a graph's display name — the inline-edit commit (Enter
+  // or blur; Escape cancels via graphRenameCancelRef). Mirrors renameKey's
+  // contract: PATCH /v1/graphs/{id} with ONLY {name} (never echo stale row
+  // fields — a rename must not touch recording/auth state), optimistic local
+  // update with revert-on-error into the page-level banner, and the #2230
+  // team pin captured at call (a mid-flight switch must not rename the new
+  // team's row nor land the error under the wrong header). Server: session
+  // owner/admin or a team:manage key; 409 on a live-name conflict.
+  async function renameGraph(graphId, name) {
+    const _teamAtCall = currentTeamId
+    setEditingGraphId(null)
+    setError('')
+    const next = (name || '').trim()
+    if (!next) {
+      setError('Graph name can\'t be empty.')
+      return
+    }
+    const cur = graphs.find((g2) => g2.graph_id === graphId)
+    // No-op guard: also dedupes the Enter→blur double-fire (blur after Enter
+    // sees the name already applied via the optimistic update's re-render).
+    if (!cur || (cur.name || '') === next) return
+    const prev = cur.name || ''
+    setGraphs((gs) => gs.map((x) => x.graph_id === graphId ? { ...x, name: next } : x))
+    try {
+      const q = (sessionTokenRef.current && _teamAtCall) ? `?team_id=${encodeURIComponent(_teamAtCall)}` : ''
+      const updated = await api(`/v1/graphs/${encodeURIComponent(graphId)}${q}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        useSession: true, // rename is owner/admin-managed (session JWT — mirror key management)
+        body: JSON.stringify({ name: next }),
+      })
+      if (teamIdRef.current !== _teamAtCall) return // stale switch — don't touch the new team's state
+      if (updated && (updated.graph_id || updated.name)) {
+        // Reconcile with the server echo (it strips the name) — the row's
+        // sort position updates via sortedGraphRows at render.
+        setGraphs((gs) => gs.map((x) => x.graph_id === graphId
+          ? { ...x, name: (typeof updated.name === 'string' ? updated.name : next) }
+          : x))
+      }
+    } catch (e) {
+      if (teamIdRef.current !== _teamAtCall) return // stale switch — error belongs to the old team
+      setGraphs((gs) => gs.map((x) => x.graph_id === graphId ? { ...x, name: prev } : x))
+      setError((e && e.message) || 'Couldn\'t rename the graph — try again.')
+    }
+  }
+
   // Delete a CUSTOM graph (indicator 4). The default graph row never shows
-  // the action (graphs.js graphCanDelete) and the server 403s the default
-  // as a code guard. Inline confirm (confirmDeleteId) then DELETE.
+  // the action (graphs.js graphCanDelete — its 🗑 renders disabled) and the
+  // server 403s the default as a code guard. #2701: the row's 🗑 opens a
+  // type-to-confirm modal (deleteConfirmTyped must equal the literal word
+  // "delete" — the destructive gate); confirmDeleteId = the modal-open row.
   async function deleteGraphRow(graphId) {
     const _teamAtCall = currentTeamId
     if (!graphId || !currentTeamId) return
@@ -4521,6 +4578,7 @@ function claimIntentInFlight() {
       }
       if (teamIdRef.current !== _teamAtCall) return
       setConfirmDeleteId(null)
+      setDeleteConfirmTyped('')
       if (panelGraphId === graphId) closeGraphPanel()
       await Promise.all([loadGraphs(currentTeamId), loadTeams()]) // count meter refresh
       if (isOwnerAdmin) await loadTrash(currentTeamId) // the row just entered the trash
@@ -7032,9 +7090,9 @@ function claimIntentInFlight() {
                 320-375px viewports. */}
             <div className="keys-table-wrap">
             <table>
-              <thead><tr><th scope="col">Name</th><th scope="col">Prefix</th><th scope="col">Created</th><th scope="col">Expires</th><th scope="col">Status</th><th scope="col"><span className="sr-only">Actions</span></th></tr></thead>
+              <thead><tr><th scope="col">Name</th><th scope="col">Prefix</th><th scope="col">Created</th><th scope="col">Last used</th><th scope="col">Expires</th><th scope="col">Status</th><th scope="col"><span className="sr-only">Actions</span></th></tr></thead>
               <tbody>
-                {managedKeys.length === 0 && <tr><td colSpan="6" className="dim">No keys yet.</td></tr>}
+                {managedKeys.length === 0 && <tr><td colSpan="7" className="dim">No keys yet.</td></tr>}
                 {managedKeys.map((k) => (
                   <tr key={k.id}>
                     <td>
@@ -7072,6 +7130,25 @@ function claimIntentInFlight() {
                     </td>
                     <td><code>{k.key_prefix || k.id?.slice(0, 12)}</code></td>
                     <td>{fmtTime(k.created_at || k.createdAt)}</td>
+                    {/* #2476: Last used cell — relative time + an absolute-date
+                        title tooltip when the row has a last_used_at (#685 writes
+                        it through on use; list_api_keys serializes null for
+                        never-used keys). 'Never' is PLAIN text — no span.dim (#2426
+                        lesson: the status cell's dim identifies 'disabled'; a
+                        Never-in-dim cell double-matched the e2e strict mode).
+                        Clock: Date.now() per render — NOT App's skeleton-gated
+                        `now` (that one ticks only while the Overview tab has a live
+                        loading floor; on the keys tab it would freeze and the label
+                        could read 'just now' forever after a reload surfaced a newer
+                        stamp). Per-render freshness is the same semantics as the
+                        sibling Expires cell (fmtExpiry's Date.now() default) and
+                        formatRelativeTime's callers in the memory-sources panel. */}
+                    <td>{(() => {
+                      const lu = k.last_used_at
+                      const rel = formatRelativeTime(lu, Date.now())
+                      if (!rel) return 'Never'
+                      return <span title={`Last used ${fmtTime(lu)}`}>{rel}</span>
+                    })()}</td>
                     {/* #2426: Expires cell — absolute date · 'Never' when
                         null · amber 'in N days' at ≤14d · terminal 'expired'
                         (row-dim styling family) when past. Expired rows stay
@@ -7192,7 +7269,42 @@ function claimIntentInFlight() {
                 {graphsStatus === 'ok' && graphs.length === 0 && <tr><td colSpan="5" className="dim">No graphs yet — create your first one above.</td></tr>}
                 {graphsStatus === 'ok' && sortedGraphRows(graphs).map((g) => (
                   <tr key={g.graph_id} className={confirmDeleteId === g.graph_id ? 'graph-delete-arm' : undefined}>
-                    <td><code>{g.name}</code></td>
+                    <td>
+                      {editingGraphId === g.graph_id ? (
+                        /* #2701: inline rename (mirrors the API-Keys ✏️
+                        edit: Enter/blur commits via renameGraph, Escape
+                        cancels via graphRenameCancelRef). Owner/admin-only
+                        (rename is owner/admin-managed server-side). */
+                        <input
+                          autoFocus
+                          className="graph-name-input"
+                          value={editingGraphName}
+                          placeholder="Graph name"
+                          aria-label={`Rename graph ${g.name || g.graph_id}`}
+                          onChange={(e) => setEditingGraphName(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') { e.preventDefault(); e.target.blur() }
+                            if (e.key === 'Escape') { graphRenameCancelRef.current = true; setEditingGraphId(null); e.target.blur() }
+                          }}
+                          onBlur={() => {
+                            if (graphRenameCancelRef.current) { graphRenameCancelRef.current = false; return }
+                            renameGraph(g.graph_id, editingGraphName)
+                          }}
+                        />
+                      ) : (
+                        <span className="graph-name">
+                          <code>{g.name}</code>
+                          {isOwnerAdmin && (
+                            <button
+                              className="ghost small graph-rename"
+                              onClick={() => { graphRenameCancelRef.current = false; setEditingGraphId(g.graph_id); setEditingGraphName(g.name || '') }}
+                              aria-label={`Rename graph ${g.name || g.graph_id}`}
+                              title="Rename graph"
+                            >✏️</button>
+                          )}
+                        </span>
+                      )}
+                    </td>
                     <td>{g.kind}</td>
                     <td>{g.status === 'active' ? 'active' : <span className="revoked">{g.status}</span>}</td>
                     <td>
@@ -7219,7 +7331,7 @@ function claimIntentInFlight() {
                         g.key_count != null ? g.key_count : '—'
                       )}
                     </td>
-                    <td>
+                    <td className="graph-actions">
                       {canManageGraphKeys(g) && (
                         <button
                           className="ghost small"
@@ -7230,28 +7342,91 @@ function claimIntentInFlight() {
                           {panelGraphId === g.graph_id ? 'Close' : 'Keys'}
                         </button>
                       )}
-                      {isOwnerAdmin && graphCanDelete(g) && confirmDeleteId === g.graph_id ? (
-                        <span className="graph-del-confirm">
-                          Delete {g.name}? Keys are revoked now. The graph goes to Trash, where you can restore it for 7 days — then it and its backups are permanently erased.{' '}
-                          <button className="ghost small danger" disabled={graphBusy} onClick={() => deleteGraphRow(g.graph_id)}>Delete</button>{' '}
-                          <button className="ghost small" disabled={graphBusy} onClick={() => setConfirmDeleteId(null)}>Cancel</button>
+                      {/* #2701: trash = delete with a TYPE-TO-CONFIRM modal.
+                          graphCanDelete(g) gates enablement — the default
+                          graph's 🗑 renders DISABLED with the reason (its row
+                          is the org's only undeletable graph; the server 403s
+                          it as a code guard — the UI lock mirrors, never
+                          precedes, the API). */}
+                      {isOwnerAdmin && (
+                        /* #2701: disabled buttons swallow native title
+                           tooltips in major browsers — wrap the locked 🗑
+                           in a span carrying the reason so the "why" is
+                           still discoverable on hover (aria-label covers AT). */
+                        <span
+                          className="graph-trash-wrap"
+                          title={graphCanDelete(g)
+                            ? 'Delete graph — moves it to Trash'
+                            : "The default graph can't be deleted"}
+                        >
+                        <button
+                          className="ghost small graph-trash"
+                          disabled={!graphCanDelete(g) || graphBusy}
+                          aria-disabled={!graphCanDelete(g)}
+                          aria-label={graphCanDelete(g)
+                            ? `Delete graph ${g.name}`
+                            : "The default graph can't be deleted"}
+                          onClick={() => {
+                            if (!graphCanDelete(g)) return
+                            setDeleteConfirmTyped('')
+                            setConfirmDeleteId(g.graph_id)
+                            setError('')
+                          }}
+                        >🗑</button>
                         </span>
-                      ) : (
-                        isOwnerAdmin && graphCanDelete(g) && (
-                          <button
-                            className="ghost small"
-                            onClick={() => { setConfirmDeleteId(g.graph_id); setGraphMsg('') }}
-                            aria-label={`Delete graph ${g.name}`}
-                          >
-                            Delete
-                          </button>
-                        )
                       )}
                     </td>
                   </tr>
                 ))}
               </tbody>
             </table>
+            {/* #2701: type-to-confirm delete modal. Open only for a
+                deletable (custom) row — the default graph's 🗑 is disabled.
+                The gate is the literal word 'delete' typed by hand
+                (deleteConfirmTyped) — a strong accidental-delete deterrent
+                on top of the 7-day Trash recovery window. Failure keeps the
+                modal open (armed retry) and lands the reason in the
+                page-level banner (#2301). */}
+            {isOwnerAdmin && confirmDeleteId && (() => {
+              const dg = graphs.find((x) => x.graph_id === confirmDeleteId)
+              if (!dg) return null
+              const typedOk = deleteTypedMatches(deleteConfirmTyped)
+              return (
+                <div className="modal-backdrop" onClick={() => { if (!graphBusy) { setConfirmDeleteId(null); setDeleteConfirmTyped('') } }}>
+                  <div className="modal graph-delete-modal" role="dialog" aria-modal="true" aria-label="Delete graph" onClick={(e) => e.stopPropagation()}>
+                    <h3>Delete {dg.name || dg.graph_id}?</h3>
+                    <p className="danger-note">This is destructive and permanent — think before you confirm.</p>
+                    <ul className="dim small">
+                      <li><strong>Keys are revoked immediately</strong> — applications using {dg.name || 'this graph'}'s keys stop working now.</li>
+                      <li>The graph moves to <strong>Trash</strong>, where you can restore it for {TRASH_GRACE_DAYS} days.</li>
+                      <li>After {TRASH_GRACE_DAYS} days, the graph <strong>and its backups are permanently erased</strong>.</li>
+                    </ul>
+                    <p className="dim small" style={{ margin: '0.6rem 0 0.4rem' }}>
+                      Type <code>delete</code> to confirm:
+                    </p>
+                    <input
+                      autoFocus
+                      className="delete-confirm-input"
+                      value={deleteConfirmTyped}
+                      aria-label="Type delete to confirm"
+                      onChange={(e) => setDeleteConfirmTyped(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' && typedOk && !graphBusy) { e.preventDefault(); deleteGraphRow(dg.graph_id) }
+                        if (e.key === 'Escape' && !graphBusy) { setConfirmDeleteId(null); setDeleteConfirmTyped('') }
+                      }}
+                    />
+                    <div className="new-key-actions" style={{ marginTop: '0.8rem' }}>
+                      <button className="ghost" disabled={graphBusy} onClick={() => { setConfirmDeleteId(null); setDeleteConfirmTyped('') }}>Cancel</button>
+                      <button
+                        className="danger"
+                        disabled={!typedOk || graphBusy}
+                        onClick={() => deleteGraphRow(dg.graph_id)}
+                      >{graphBusy ? 'Deleting…' : 'Delete graph'}</button>
+                    </div>
+                  </div>
+                </div>
+              )
+            })()}
             {/* #2304 trash (owner/admin): deleted custom graphs inside the
                 7-day recovery window. Purged rows never appear; legacy
                 tombstones (no deleted_at) show as past-window until the

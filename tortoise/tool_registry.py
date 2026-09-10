@@ -505,8 +505,10 @@ TOOL_REGISTRY: list[ToolDefinition] = [
     ToolDefinition(
         name="tortoise_events_poll",
         description="Poll graph/claim events after an opaque cursor (at-least-once). "
-                    "Returns {events, next_cursor}. Event types: PointAdded, "
-                    "OperatorAdded, PointRetracted, PointSuperseded, OperatorAnnotated.",
+                    "Returns {events, next_cursor}. Event types: 11 registered claim "
+                    "types (PointAdded, OperatorAdded, PointRetracted, PointSuperseded, "
+                    "OperatorAnnotated, PointPromoted, OperatorPromoted, DedupeRecorded, "
+                    "DedupeRejected, ObjectSuperseded, PointInvalidated).",
         annotations=_ro(),
         http_policy=True,
         sdk_method="events_poll",

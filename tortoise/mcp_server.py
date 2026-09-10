@@ -713,7 +713,7 @@ ERR_INVALID = -32003
 # unpack can bind the SDK's explicit server-managed params); the SDK's
 # _sanitize_props reject is the fail-closed backstop.
 _SERVER_MANAGED_PROPS = frozenset({
-    "is_episodic", "sourcePath", "source_path", "id", "_server_id"})
+    "is_episodic", "sourcePath", "source_path", "id", "_server_id", "outdated"})
 
 
 # #2600: client-supplied actor claims are STRIP-AND-IGNORE (never a 4xx —
@@ -1707,8 +1707,10 @@ def tortoise_events_poll(after: str | None = None, types: Any = None,
     Returns {events: [...], next_cursor}. after=None → tail (oldest retained).
     Expired cursor → structured error ('cursor expired — replay from tail');
     malformed cursor → 'invalid cursor'. types: comma-free list of event types
-    (PointAdded, OperatorAdded, PointRetracted, PointSuperseded,
-    OperatorAnnotated) or None for all.
+    (11 registered claim types: PointAdded, OperatorAdded, PointRetracted,
+    PointSuperseded, OperatorAnnotated, PointPromoted, OperatorPromoted,
+    DedupeRecorded, DedupeRejected, ObjectSuperseded, PointInvalidated)
+    or None for all.
 
     readOnlyHint covers user-visible state: the poll NEVER mutates user
     content. A rare maintenance purge (retention) may run at most once per

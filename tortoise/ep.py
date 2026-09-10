@@ -13,7 +13,7 @@ import math
 import random
 
 from .quadrature import tilted_moments, moments_to_beta, phi_nand, phi_impl
-from .live import _live_only, TERMINAL_EXCLUDED_STATUSES
+from .live import _live_only, _terminal_excluded, TERMINAL_EXCLUDED_STATUSES
 
 logger = logging.getLogger(__name__)
 
@@ -1154,9 +1154,17 @@ class TortoiseEP:
         }
 
     def get_contested_claims(self, variance_threshold: float = 0.04) -> list[dict]:
+        # #2490: terminal claims (status in the terminal vocab OR the legacy
+        # outdated flag) are EXCLUDED — their posterior decays to vacuity at
+        # the terminalizing write, so include-terminal surfaces must not list
+        # them as contested. Deliberately NO has_ep gate: an unmeasured LIVE
+        # claim (coalesce → Beta(1,1), variance 1/12 > 0.04) MUST list as
+        # contested (test_agent_ops_supersede:169 pin — the post-supersede
+        # unmeasured successor surfaces until a successful dream resolves it).
         rows = self.g.query(
             "MATCH (n:Point) "
             "WHERE n.is_operator = false "
+            f"  AND {_terminal_excluded('n.status')} "
             "WITH n, coalesce(n.posterior_alpha, n.ep_alpha, 1.0) AS a, "
             "     coalesce(n.posterior_beta, n.ep_beta, 1.0) AS b "
             "WITH n, a, b, (a*b)/((a+b)*(a+b)*(a+b+1)) AS v "

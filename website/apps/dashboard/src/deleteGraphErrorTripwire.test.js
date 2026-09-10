@@ -1,13 +1,14 @@
 // deleteGraphErrorTripwire.test.js — #2301 static tripwire (CI-run via
-// dashboard-js-tests). The Graphs-tab delete lifecycle runs from the row's
-// armed confirm (confirmDeleteId) while the per-graph KEY PANEL is typically
-// CLOSED — but deleteGraphRow used to write its failure to graphMsg, whose
-// only render ({graphMsg && <div className="error banner">…}) lives INSIDE
+// dashboard-js-tests). The Graphs-tab delete lifecycle runs from the
+// type-to-confirm modal (confirmDeleteId — #2701) while the per-graph KEY
+// PANEL is typically CLOSED — but deleteGraphRow used to write its failure
+// to graphMsg, whose only render ({graphMsg && <div className="error banner">…}) lives INSIDE
 // the {panelGraphId && (…)} key-panel block. A failed DELETE /v1/graphs
 // (403 scope / 404 unknown / suspended 403 / 409 conflict / network) with
 // the panel closed therefore showed NO error anywhere while confirmDeleteId
-// stayed armed — the row sat in a permanent un-explained "Delete {name}?
-// … Delete/Cancel" state. #2301 routes delete failures to the PAGE-LEVEL
+// stayed armed — the modal sat open with no explanation (the regression
+// state is now a typed-confirm field whose "Delete graph" button stays
+// enabled with no reason shown). #2301 routes delete failures to the PAGE-LEVEL
 // error banner instead (the same setError sink createGraph uses for its
 // 402/409 + generic failures and revokeKey uses for destructive key
 // actions), which renders at <main> top for every tab, panel open or not.

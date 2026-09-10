@@ -464,6 +464,7 @@ surfaces:
   - test_ep_quadrature.py
   - test_ep_selector.py
   - test_pointsuperseded_rebuild.py
+  - test_pointinvalidated_rebuild.py
   - test_weights_mitigation.py
   - test_ep_sources.py
   - test_2199_decide_calibration.py

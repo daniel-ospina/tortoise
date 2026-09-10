@@ -26,6 +26,7 @@ from .assembly import AssemblyAnswer
 from .cross_lens import DEFAULT_THRESHOLD
 from .ids import ulid
 from .live import TERMINAL_EXCLUDED_STATUSES  # EP terminal vocabulary (shared)
+from .live import decay_clause, _terminal_excluded  # #2490 vacuity decay + terminal predicate
 from .embedded_lifecycle import atexit_fast_close  # #1371: registers the batch flush
 from .retrieval import DEFAULT_POOL_SIZE, resolve_pool_size
 from . import monitoring
@@ -730,6 +731,7 @@ _GRAPH_EVENT_TYPES = frozenset({
     "DedupeRecorded",  # #784: content-dedup candidate recorded/merged
     "DedupeRejected",  # #784: content-dedup candidate rejected
     "ObjectSuperseded",  # #1350: Object status fold source (supersession)
+    "PointInvalidated",  # #2488: invalidate_point — outdated flag + CORRECTS (no status)
 })
 
 # Epic #902 A4 (§4.2): JSONL-ONLY batch_id record type — deliberately NOT in
@@ -889,6 +891,19 @@ def _sanitize_props(props: dict, *, reject_id: bool = False) -> dict:
         raise ValueError(
             "'is_episodic' is a server-managed field (quota discriminator) "
             "and cannot be set via props."
+        )
+    # #2491: outdated is the terminalizing flag written ONLY by the lifecycle
+    # writers via raw cypher (invalidate_point/supersede_point SET
+    # n.outdated=true) after they journal + drop EP messages. Accepting it via
+    # props (update_point/create_point/_update_entity label-loop) silently
+    # flag-flips a live claim to EP-dead with NO journal event and NO
+    # invalidate_factor_messages drop — resurrecting the #2422 ghost class
+    # (the degenerate factor never re-runs to zero the stale sibling seed).
+    # Route through invalidate_point()/supersede_point() instead.
+    if "outdated" in props:
+        raise ValueError(
+            "'outdated' is a server-managed lifecycle flag — use "
+            "invalidate_point() or supersede_point() to terminalize a claim."
         )
     if reject_id and "id" in props:
         raise ValueError("'id' is server-managed and cannot be set via props.")
@@ -2239,10 +2254,11 @@ class TortoiseSDK:
            — #548: id + extra fields for JSONL.
 
         **Graph event store (#432):** written when *type_* is in
-        ``_GRAPH_EVENT_TYPES`` (PointAdded, OperatorAdded, PointRetracted,
-        PointSuperseded, OperatorAnnotated). The payload is taken from
-        *payload* if given, otherwise synthesized from ``point["id"]`` or
-        *id* + *extra*.
+        ``_GRAPH_EVENT_TYPES`` (11 registered types — PointAdded,
+        OperatorAdded, PointRetracted, PointSuperseded, OperatorAnnotated,
+        PointInvalidated, plus the promote/dedupe/object-supersede types).
+        The payload is taken from *payload* if given, otherwise synthesized
+        from ``point["id"]`` or *id* + *extra*.
 
         **JSONL event log (#548):** written when *point* is provided (cleaned
         and appended as the ``"point"`` key) or *id* is provided. Events with
@@ -4326,9 +4342,23 @@ class TortoiseSDK:
             )
         now = datetime.now(timezone.utc).isoformat()  # noqa: UP017
 
+        # #2488 (rebuild-parity fix): kwargs-style PointInvalidated emission —
+        # validated-emit-then-mutate (mirrors supersede_point's #432 anti-
+        # phantom pattern). ts=now MUST be passed: the fold's updatedAt reads
+        # ev.get("ts") (fallback clock), and a drift from the live SET clock
+        # breaks exact-stamp rebuild parity. Crash after emit/before write is
+        # convergent: re-run revalidates + re-emits; duplicate events fold
+        # idempotently; double-invalidate is already legal.
+        self._emit_event(
+            "PointInvalidated",
+            id=id, corrected_by=corrected_by_id,
+            ts=now, valid_to=now, expired_at=now,
+        )
+
         proj.g.query(
             "MATCH (n:Point {id:$id}) SET n.outdated = true, "
-            "n.updatedAt = $now, n.validTo = $now, n.expiredAt = $now",
+            "n.updatedAt = $now, n.validTo = $now, n.expiredAt = $now, "
+            f"{decay_clause('n')}",
             params={"id": id, "now": now},
         )
         proj.g.query(
@@ -4647,18 +4677,101 @@ class TortoiseSDK:
 
         # 2b. Transfer plain structural edges (#122) — about*, extractedFrom, wasDerivedFrom, etc.
         # These edges connect the Point to entities (Subject, Object, Source, etc.)
+        #
+        # #2489 (structural-edge transfer parity): the transfer is now JOURNALED
+        # for the snapshot-derivable rel set (extractedFrom +
+        # aboutSubject/Object/Event/Document/Point) as flat DirectEdgeRepoint
+        # descriptors {src=old_id, tgt=<replay key>, target_label=<label>,
+        # edge_type=<rel>} emitted BEFORE the transfer (EMIT-BEFORE-TRANSFER,
+        # §4.4 — same crash discipline as 2a-DIRECT). Rebuild pass-2 resurrects
+        # these edges at OLD from the point's immutable snapshot (extractedFrom
+        # prop / aboutEntities list), so the pass-2b replay must move them to the
+        # final successor AND delete the resurrection at old. Non-derivable rels
+        # (aboutAction — Action dissolved in Ontology v3.0; wasDerivedFrom — A10
+        # raw family) are NEVER snapshot-recreated: no descriptor (do NOT half-
+        # own the A10 raw-edge family). The journal carries the target's LOGICAL
+        # identity only (tgt=<key> or, for the delete-only guard, tgt=new_id) —
+        # never the FalkorDB internal ID (internal ids die at rebuild).
+        from .projection.edges import DERIVABLE_STRUCTURAL_RELS, STRUCTURAL_REL_LABELS, stub_key
         structural_rels = [
             'aboutSubject', 'aboutObject', 'aboutAction', 'aboutEvent',
             'aboutPoint', 'aboutDocument', 'extractedFrom', 'wasDerivedFrom'
         ]
+        # Successor internal node id — runtime-only (never journaled). The 2b
+        # no-self-edge guard compares the structural target's NODE IDENTITY to
+        # the successor (mirror 2a-DIRECT's tid==new_id guard at ~4407): without
+        # it the MERGE below mints a phantom (new)-[:rel]->(new) self-edge when
+        # old's edge terminates at the successor (cycle-26 class — e.g. old
+        # X-[:aboutPoint]->Y live, supersede(X->Y)).
+        succ_rows = proj.g.query(
+            "MATCH (n:Point {id:$id}) RETURN ID(n)",
+            params={"id": new_id},
+        ).result_set
+        succ_internal = succ_rows[0][0] if succ_rows else None
         for rel in structural_rels:
+            derivable = rel in DERIVABLE_STRUCTURAL_RELS
             struct_rows = proj.g.query(
                 f"MATCH (old:Point {{id:$old_id}})-[r:{rel}]->(target) "
-                f"RETURN id(target), target.id, labels(target)",
+                f"RETURN id(target), target.id, labels(target), properties(target)",
                 params={"old_id": old_id},
             ).result_set
             for row in struct_rows:
+                # Row shape: [internal id, logical id, labels, properties] —
+                # #2489 extends the SELECT with properties(target) so the shared
+                # stub_key resolver (projection/edges.py) extracts the per-rel
+                # replay key (name / coalesce(title,name) / url) at emission.
                 target_graph_id = row[0]  # FalkorDB internal node id — exact match
+                target_props = row[3] or {}
+                if (succ_internal is not None
+                        and target_graph_id == succ_internal):
+                    # #2489 no-self-edge guard: the structural target IS the
+                    # successor node. Delete the old edge ONLY — no transfer (a
+                    # transfer would MERGE the phantom (new)-[:rel]->(new)). For
+                    # DERIVABLE rels emit a DELETE-ONLY descriptor so the pass-2b
+                    # replay deletes the pass-2-resurrected edge at old on the
+                    # NEXT rebuild — old's immutable snapshot re-mints the
+                    # phantom on every rebuild, so without the descriptor
+                    # old-side zero-incident is violated in exactly this lane.
+                    # Non-derivable rels emit NOTHING (never snapshot-recreated;
+                    # a delete_only descriptor would journal a permanent no-op
+                    # delete-leg for a family this fix does not own).
+                    if derivable:
+                        self._emit_event(
+                            "DirectEdgeRepoint",
+                            id=f"{old_id}->{new_id}:{rel}:self",
+                            src=old_id, tgt=new_id,
+                            target_label=STRUCTURAL_REL_LABELS.get(rel),
+                            edge_type=rel, delete_only=True,
+                        )
+                    proj.g.query(
+                        f"MATCH (old:Point {{id:$old_id}})-[r:{rel}]->(t) "
+                        f"WHERE id(t) = $tid DELETE r",
+                        params={"old_id": old_id, "tid": target_graph_id},
+                    )
+                    transferred += 1
+                    continue
+                # #2489: per-rel key extraction via the SHARED resolver — never
+                # target.id (Subjects MERGE by name, Sources by url, Documents by
+                # name-or-title). SKIP unresolvable keys (name-less Point from an
+                # id-targeted create_about_edge; url-less extractedFrom target): a
+                # null-key descriptor is un-replayable — those edges die at
+                # rebuild today anyway (zero regression).
+                if derivable:
+                    keyed = stub_key(rel, target_props)
+                    if keyed is not None:
+                        target_label, target_key = keyed
+                        # EMIT-BEFORE-TRANSFER: the structural REPOINT descriptor
+                        # (A10/pass-2b replay consumes it post-rebuild). Event id
+                        # gets a target-key suffix — multi-target same-rel id
+                        # hygiene (2a-DIRECT's id base is
+                        # f"{old_id}->{new_id}:{rtype}").
+                        self._emit_event(
+                            "DirectEdgeRepoint",
+                            id=f"{old_id}->{new_id}:{rel}:{target_key}",
+                            src=old_id, tgt=target_key,
+                            target_label=target_label,
+                            edge_type=rel,
+                        )
                 # Create new edge: new point → same target (MERGE = idempotent, no dupes)
                 proj.g.query(
                     f"MATCH (new:Point {{id:$new_id}}), (t) WHERE id(t) = $tid "
@@ -4682,7 +4795,8 @@ class TortoiseSDK:
         proj.g.query(
             "MATCH (n:Point {id:$id}) SET n.status = 'superseded', "
             "n.outdated = true, n.updatedAt = $now, "
-            "n.validTo = $valid_to, n.expiredAt = $expired_at",
+            "n.validTo = $valid_to, n.expiredAt = $expired_at, "
+            f"{decay_clause('n')}",
             params={"id": old_id, "now": now,
                     "valid_to": succ_vf, "expired_at": now},
         )
@@ -4759,7 +4873,8 @@ class TortoiseSDK:
         r = proj.g.query(
             "MATCH (n:Point {id:$id}) "
             "WHERE (n.status IS NULL OR NOT (n.status IN $terminal)) "
-            "SET n.status = 'retracted', n.updatedAt = $now RETURN properties(n)",
+            "SET n.status = 'retracted', n.updatedAt = $now, "
+            f"{decay_clause('n')} RETURN properties(n)",
             params={"id": id, "now": datetime.now(timezone.utc).isoformat(),  # noqa: UP017
                     "terminal": ["retracted", "superseded", "archived"]})
         if not r.result_set:
@@ -8994,10 +9109,18 @@ class TortoiseSDK:
         # an unmeasured uniform prior is NOT contested) OR an incoming NAND
         # operator edge on a LIVE point (the derived `challenged` condition,
         # ontology §5).
+        # #2490: terminal claims are EXCLUDED from the variance scan — they
+        # decay to vacuity (v=1/12 > threshold) at the terminalizing write and
+        # must surface as "stale" (above), never "contested". Deliberate
+        # asymmetry vs get_contested_claims: THIS scan also requires stored EP
+        # params (unmeasured == not contested) while get_contested_claims
+        # coalesces to Beta(1,1) and lists an unmeasured LIVE claim as
+        # contested (its :169-pin). Do not "harmonize" the two.
         contested: dict[str, dict] = {}
         rows = proj.g.query(
             "MATCH (n:Point) "
             "WHERE n.is_operator = false "
+            f"  AND {_terminal_excluded('n.status')} "
             "  AND (n.posterior_alpha IS NOT NULL OR n.ep_alpha IS NOT NULL) "
             "  AND (n.posterior_beta IS NOT NULL OR n.ep_beta IS NOT NULL) "
             "WITH n, coalesce(n.posterior_alpha, n.ep_alpha, 1.0) AS a, "
@@ -9012,10 +9135,17 @@ class TortoiseSDK:
         # #913 round-1: the derived `challenged` condition (ontology §5) is
         # a NAND edge on a LIVE point — draft/terminal endpoints are already
         # handled by stale/draft semantics and must not double-flag.
+        # #2490 gate-consistency (2nd-model): "live" must ALSO mean
+        # flag-live — the legacy invalidate class keeps status='live' while
+        # setting outdated=true, so a status-only gate would surface that
+        # terminal claim as contested AND stale (the variance scan above
+        # already excludes it via _terminal_excluded — the flag class must
+        # not slip through this leg).
         rows = proj.g.query(
             "MATCH (op:Point {is_operator:true})-[r:NAND]->(n:Point) "
             "WHERE n.is_operator = false "
             "  AND (n.status IS NULL OR n.status = 'live') "
+            "  AND coalesce(n.outdated, false) = false "
             "RETURN DISTINCT n.id",
         ).result_set
         for (pid,) in rows:
@@ -14615,6 +14745,41 @@ class TortoiseSDK:
         ).result_set
         return int(rows[0][0]) if rows else 0
 
+    def graph_set_name(self, team_id: str, graph_id: str,
+                       name: str) -> bool:
+        """#2701 — rename a graph's DISPLAY name on its registry Graph node.
+
+        Display-name-only: the node's id/kind/namespace (the data-plane
+        storage key) are untouched, so a rename never orphans points/keys
+        (the default graph is renameable too — graph 0's node carries
+        ``name`` as a label distinct from ``namespace``). Resolves the
+        literal ``default`` id to the team's kind='default' node (mode-
+        agnostic callers use either); real gids match directly. Returns
+        True when the node was found (name written), False on unknown
+        graph — callers map to 404. Soft-deleted nodes (status='deleted')
+        are NOT renameable — treat as unknown (mirror list_graphs'
+        tombstone skip + graph_set_recording)."""
+        reg = self._get_registry()
+        rows = reg.query(
+            "MATCH (g:Graph {team_id:$tid}) RETURN g.id, g.kind, "
+            "coalesce(g.status, 'active')",
+            params={"tid": team_id},
+        ).result_set
+        if graph_id == "default":
+            node = next((r[0] for r in rows
+                         if r[1] == "default" and r[2] != "deleted"), None)
+        elif any(r[0] == graph_id and r[2] != "deleted" for r in rows):
+            node = graph_id
+        else:
+            node = None
+        if node is None:
+            return False
+        reg.query(
+            "MATCH (g:Graph {id:$gid, team_id:$tid}) SET g.name = $name",
+            params={"gid": node, "tid": team_id, "name": name},
+        )
+        return True
+
     def team_get(self, team_id: str) -> dict | None:
         """Get a team by ID. Returns None if not found."""
         reg = self._get_registry()
@@ -18759,7 +18924,8 @@ class TortoiseSDK:
             "WHERE p.targetSource = $url AND p.assessor = $assessor "
             "  AND p.id <> $new_id "
             "  AND (p.outdated IS NULL OR p.outdated = false) "
-            "SET p.outdated = true "
+            "SET p.outdated = true, "
+            f"{decay_clause('p')} "
             "RETURN p.id",
             params={"url": url, "assessor": str(assessor), "new_id": p["id"]},
         ).result_set

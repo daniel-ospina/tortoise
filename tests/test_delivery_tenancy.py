@@ -697,3 +697,360 @@ def test_capture_409_graph_layer_names_real_surfaces(spine_env, monkeypatch):
         "REST + MCP must surface the SAME graph-layer 409 text (shared "
         f"impl): REST={rest_detail!r} MCP={mcp_res!r}")
     assert _session_count(g["namespace"], tid) == 0
+
+
+# ── 7. #2701: graph rename (PATCH {name}) — display-name-only ─────────────
+
+def _node_name(sdk, tid, gid) -> str | None:
+    """Read a registry Graph node's name prop (None when absent/unknown)."""
+    rows = sdk._get_registry().query(
+        "MATCH (g:Graph {id:$gid, team_id:$tid}) RETURN g.name",
+        params={"gid": gid, "tid": tid},
+    ).result_set
+    return rows[0][0] if rows else None
+
+
+def test_patch_rename_custom_graph(spine_env):
+    """PATCH {name} renames a custom graph's DISPLAY name (registry node
+    prop); the response echoes {graph_id, name}; the list reflects it."""
+    sdk, tid, g, tc, _def_pt = spine_env
+    token = _mint_key(sdk, tid, scopes=["team:manage"])
+    h = {"Authorization": f"Bearer {token}"}
+    r = tc.patch(f"/v1/graphs/{g['graph_id']}?team_id={tid}",
+                 json={"name": "  renamed-bot  "}, headers=h)
+    assert r.status_code == 200, r.text
+    assert r.json() == {"graph_id": g["graph_id"], "name": "renamed-bot"}
+    assert _node_name(sdk, tid, g["graph_id"]) == "renamed-bot"
+    listed = {x["graph_id"]: x for x in sdk.graph_list(tid)}
+    assert listed[g["graph_id"]]["name"] == "renamed-bot"
+    # The rename is display-only: id/kind/namespace are untouched.
+    assert listed[g["graph_id"]]["kind"] == "custom"
+    assert listed[g["graph_id"]]["namespace"] == g["namespace"]
+
+
+def test_patch_rename_default_graph_via_literal(spine_env):
+    """The DEFAULT graph (graph 0) is renameable via the literal 'default':
+    its kind='default' node's name changes, id/kind/namespace do not."""
+    sdk, tid, _g, tc, _def_pt = spine_env
+    token = _mint_key(sdk, tid, scopes=["team:manage"])
+    h = {"Authorization": f"Bearer {token}"}
+    node_id = _default_node_id(sdk, tid)
+    ns_before = {x["graph_id"]: x for x in sdk.graph_list(tid)}[node_id]["namespace"]
+    r = tc.patch(f"/v1/graphs/default?team_id={tid}",
+                 json={"name": "My Memory"}, headers=h)
+    assert r.status_code == 200, r.text
+    assert r.json() == {"graph_id": "default", "name": "My Memory"}
+    assert _node_name(sdk, tid, node_id) == "My Memory"
+    listed = {x["graph_id"]: x for x in sdk.graph_list(tid)}
+    assert listed[node_id]["name"] == "My Memory"
+    assert listed[node_id]["kind"] == "default"
+    # Namespace is the data-plane key — a rename must NEVER move it (the
+    # report-10 review: assert the LISTED namespace itself, not a point
+    # written through an unrelated namespace).
+    assert listed[node_id]["namespace"] == ns_before
+    assert ns_before
+
+
+def test_patch_rename_conflict_409_and_idempotent_same_name(spine_env):
+    """A live-name conflict 409s (create parity: tombstones don't squat);
+    renaming a graph to its OWN current name is an idempotent 200."""
+    sdk, tid, g, tc, _def_pt = spine_env
+    g2 = sdk._graph_create(tid, "second-g", kind="custom")
+    token = _mint_key(sdk, tid, scopes=["team:manage"])
+    h = {"Authorization": f"Bearer {token}"}
+    # g → g2's live name → 409
+    r = tc.patch(f"/v1/graphs/{g['graph_id']}?team_id={tid}",
+                 json={"name": "second-g"}, headers=h)
+    assert r.status_code == 409, r.text
+    assert r.json()["detail"] == "Graph name already exists"
+    # default → the custom's live name → 409 too (the seam compares across
+    # kinds — the default display name is part of the team's name space)
+    r = tc.patch(f"/v1/graphs/default?team_id={tid}",
+                 json={"name": "second-g"}, headers=h)
+    assert r.status_code == 409, r.text
+    # Same-name rename of g2 (unchanged) → 200 no-op
+    r = tc.patch(f"/v1/graphs/{g2['graph_id']}?team_id={tid}",
+                 json={"name": "second-g"}, headers=h)
+    assert r.status_code == 200, r.text
+
+
+def test_patch_rename_auth_matrix(spine_env):
+    """graph:read-only key 403; deleg=0 minted key 403; legacy full-access
+    key OK (mirror the recording PATCH auth class)."""
+    sdk, tid, g, tc, _def_pt = spine_env
+    ro = _mint_key(sdk, tid, scopes=["graphs:read"])
+    r = tc.patch(f"/v1/graphs/{g['graph_id']}?team_id={tid}",
+                 json={"name": "nope"}, headers={"Authorization": f"Bearer {ro}"})
+    assert r.status_code == 403, r.text
+    minted = _mint_key(sdk, tid, scopes=["team:manage"], deleg=0)
+    r = tc.patch(f"/v1/graphs/{g['graph_id']}?team_id={tid}",
+                 json={"name": "nope"},
+                 headers={"Authorization": f"Bearer {minted}"})
+    assert r.status_code == 403, r.text
+    legacy = _mint_key(sdk, tid, scopes=[])
+    r = tc.patch(f"/v1/graphs/{g['graph_id']}?team_id={tid}",
+                 json={"name": "legacy-ok"},
+                 headers={"Authorization": f"Bearer {legacy}"})
+    assert r.status_code == 200, r.text
+
+
+def test_patch_rename_unknown_404_and_bad_body_422(spine_env):
+    """Unknown graph 404; empty body, empty/whitespace/non-string names and
+    truthy-string recording all 422."""
+    sdk, tid, _g, tc, _def_pt = spine_env
+    token = _mint_key(sdk, tid, scopes=["team:manage"])
+    h = {"Authorization": f"Bearer {token}"}
+    r = tc.patch(f"/v1/graphs/g_doesnotexist?team_id={tid}",
+                 json={"name": "x"}, headers=h)
+    assert r.status_code == 404, r.text
+    r = tc.patch(f"/v1/graphs/g_doesnotexist?team_id={tid}", json={}, headers=h)
+    assert r.status_code == 422, r.text  # at least one field required
+    r = tc.patch(f"/v1/graphs/{_g['graph_id']}?team_id={tid}",
+                 json={"name": ""}, headers=h)
+    assert r.status_code == 422, r.text
+    r = tc.patch(f"/v1/graphs/{_g['graph_id']}?team_id={tid}",
+                 json={"name": "   "}, headers=h)
+    assert r.status_code == 422, r.text
+    r = tc.patch(f"/v1/graphs/{_g['graph_id']}?team_id={tid}",
+                 json={"name": 42}, headers=h)
+    assert r.status_code == 422, r.text
+    # An explicitly-null name has no meaning (recording null = clear, name
+    # null = nothing to do) — 422, never a silent 200 no-op.
+    r = tc.patch(f"/v1/graphs/{_g['graph_id']}?team_id={tid}",
+                 json={"name": None}, headers=h)
+    assert r.status_code == 422, r.text
+    r = tc.patch(f"/v1/graphs/{_g['graph_id']}?team_id={tid}",
+                 json={"recording": "yes"}, headers=h)
+    assert r.status_code == 422, r.text  # strict-bool preserved
+
+
+def test_patch_rename_session_owner_ok_member_403(spine_env):
+    """Session users: owner/admin may rename; a member cannot (the PATCH
+    dual-auth dependency resolves the session face via Membership nodes)."""
+    import tortoise.hosted_api as ha_mod
+    from tests.test_hosted_api import TEST_TEAM
+    sdk, tid, g, tc, _def_pt = spine_env
+    # Registry lane: seed Membership nodes so the session face resolves.
+    reg = sdk._get_registry()
+    for uid, role in (("owner-1", "owner"), ("member-1", "member")):
+        reg.query(
+            "CREATE (m:Membership {user_id:$u, team_id:$tid,"
+            " status:'active', role:$r})",
+            params={"u": uid, "tid": tid, "r": role},
+        )
+    base = dict(TEST_TEAM, team_id=tid, key_id=None)
+    ha_mod.app.dependency_overrides[ha_mod.get_current_team_session] = \
+        lambda: dict(base, session_user_id="owner-1", role="owner")
+    r = tc.patch(f"/v1/graphs/{g['graph_id']}?team_id={tid}",
+                 json={"name": "owner-renamed"})
+    assert r.status_code == 200, r.text
+    ha_mod.app.dependency_overrides[ha_mod.get_current_team_session] = \
+        lambda: dict(base, session_user_id="member-1", role="member")
+    r = tc.patch(f"/v1/graphs/{g['graph_id']}?team_id={tid}",
+                 json={"name": "member-nope"})
+    assert r.status_code == 403, r.text
+
+
+def test_patch_rename_and_recording_one_call(spine_env):
+    """{name, recording} in ONE PATCH applies both; the response carries
+    exactly the changed fields."""
+    sdk, tid, g, tc, _def_pt = spine_env
+    token = _mint_key(sdk, tid, scopes=["team:manage"])
+    h = {"Authorization": f"Bearer {token}"}
+    r = tc.patch(f"/v1/graphs/{g['graph_id']}?team_id={tid}",
+                 json={"name": "dual", "recording": False}, headers=h)
+    assert r.status_code == 200, r.text
+    assert r.json() == {"graph_id": g["graph_id"], "name": "dual",
+                        "recording": False}
+    assert _node_name(sdk, tid, g["graph_id"]) == "dual"
+    assert _node_recording(sdk, tid, g["graph_id"]) is False
+
+
+def test_supabase_set_graph_name_custom_and_default():
+    """The supabase seam PATCHes custom rows; the default graph renames the
+    kind='default' display row or upserts one (namespace = teams.graph_name
+    — never the display name); graph_metadata surfaces the renamed name and
+    coexists with the recording override."""
+    from tests.fake_control_plane import FakeControlPlane
+    from tortoise.supabase_control import (
+        graph_metadata, set_graph_name, set_graph_recording,
+    )
+    cp = FakeControlPlane()
+    cp.seed("teams", [{"id": "t1", "graph_name": "team_t1"}])
+    cp.seed("graphs", [{
+        "id": "g1", "team_id": "t1", "name": "acme", "kind": "custom",
+        "namespace": "team_t1_g1", "status": "active", "recording": None,
+    }])
+    # Custom rename → PATCH
+    assert set_graph_name(cp, "t1", "g1", "acme-renamed") is True
+    rows = cp.query("graphs", select=["name"], filters=[("id", "eq", "g1")])
+    assert rows[0]["name"] == "acme-renamed"
+    # Unknown custom → False
+    assert set_graph_name(cp, "t1", "g_zzz", "x") is False
+    # Default graph with NO row → upsert kind='default' display row carrying
+    # the new name + the TEAM graph name as namespace.
+    assert set_graph_name(cp, "t1", "default", "My Memory") is True
+    drow = cp.query("graphs", select=["name", "namespace", "kind"],
+                    filters=[("team_id", "eq", "t1"),
+                             ("kind", "eq", "default")])
+    assert len(drow) == 1, drow
+    assert drow[0]["name"] == "My Memory"
+    assert drow[0]["namespace"] == "team_t1", drow
+    meta = graph_metadata(cp, "t1")
+    default = next(m for m in meta if m["kind"] == "default")
+    assert default["name"] == "My Memory"
+    assert default["namespace"] == "team_t1"
+    # Recording override on the SAME display row (set_graph_recording reuse)
+    # keeps the renamed row — one kind='default' row, both fields live.
+    assert set_graph_recording(cp, "t1", "default", False) is True
+    drow = cp.query("graphs", select=["name", "recording"],
+                    filters=[("team_id", "eq", "t1"),
+                             ("kind", "eq", "default")])
+    assert len(drow) == 1
+    assert drow[0]["name"] == "My Memory"
+    assert drow[0]["recording"] is False
+    meta = graph_metadata(cp, "t1")
+    default = next(m for m in meta if m["kind"] == "default")
+    assert default["name"] == "My Memory"
+    assert default["recording"] is False
+    # Re-rename of the existing default row → PATCH (row count stays 1)
+    assert set_graph_name(cp, "t1", "default", "Renamed Again") is True
+    drow = cp.query("graphs", select=["name"],
+                    filters=[("team_id", "eq", "t1"),
+                             ("kind", "eq", "default")])
+    assert len(drow) == 1 and drow[0]["name"] == "Renamed Again"
+    # No display row yet → graph_metadata falls back to the literal 'default'
+    cp2 = FakeControlPlane()
+    cp2.seed("teams", [{"id": "t2", "graph_name": "team_t2"}])
+    meta = graph_metadata(cp2, "t2")
+    default = next(m for m in meta if m["kind"] == "default")
+    assert default["name"] == "default"
+
+
+# ── 7b. #2701 Supabase-lane REST rename (hosted SOR — prod lane) ───────────
+# The registry-lane §7 tests above exercise the embedded store; these cover
+# the Supabase branch of the SAME endpoint/_apply_graph_rename core (kind
+# resolution incl. the literal-clash 409, the default display-row upsert,
+# graph_metadata name surfacing, and the DB-unique race → 409 mapping) —
+# Supabase is the hosted production SOR (report-10 review P2: previously
+# untested by any executing test). Harness mirrors tests/test_trash_lock.py.
+
+_SB_TEAM = "t-rn-sb"
+_SB_OWNER = "9f2c1a40-0000-4a00-8000-000000000270"
+
+
+def _sb_seed(fake):
+    fake.seed("teams", [{
+        "id": _SB_TEAM, "graph_name": f"team_{_SB_TEAM}", "tier": "pro",
+        "max_graphs": 5, "name": "Org", "status": "active",
+    }])
+    fake.seed("team_memberships", [{
+        "id": "m-rn-1", "team_id": _SB_TEAM, "user_id": _SB_OWNER,
+        "role": "owner", "status": "active",
+    }])
+    fake.seed("graphs", [{
+        "id": "g-rn-custom1", "team_id": _SB_TEAM, "name": "acme",
+        "kind": "custom", "namespace": f"team_{_SB_TEAM}_g-rn-custom1",
+        "status": "active", "recording": None,
+    }])
+
+
+def _sb_env(monkeypatch, fake_cls=None):
+    import tempfile as _tempfile
+    from tests._http_fixtures import patched_tortoise_sdk
+    from tests.fake_control_plane import FakeControlPlane
+    from tests.test_export_delete import _enable_supabase
+    import tortoise.hosted_api as ha_mod
+    fake = (fake_cls or FakeControlPlane)(
+        {"teams": [], "api_keys": [], "team_memberships": [],
+         "invitations": [], "graphs": []})
+    _sb_seed(fake)
+    _enable_supabase(monkeypatch, fake)
+    tmpdir = _tempfile.mkdtemp()
+    patched = patched_tortoise_sdk(os.path.join(tmpdir, "sb.db"))
+    patched.__enter__()
+    tc = TestClient(ha_mod.app)
+    tc.__enter__()
+    ha_mod.app.dependency_overrides[ha_mod.get_current_team_session] = \
+        lambda: {"team_id": _SB_TEAM, "key_id": None,
+                 "session_user_id": _SB_OWNER, "role": "owner"}
+    return tc, fake, (patched, ha_mod)
+
+
+def _sb_teardown(tc, handles):
+    from tests.test_export_delete import _close_seed_sdks
+    patched, ha_mod = handles
+    ha_mod.app.dependency_overrides.clear()
+    try:
+        tc.__exit__(None, None, None)
+    finally:
+        patched.__exit__(None, None, None)
+        _close_seed_sdks()
+
+
+def test_patch_rename_supabase_custom_row(monkeypatch):
+    tc, fake, handles = _sb_env(monkeypatch)
+    try:
+        r = tc.patch(f"/v1/graphs/g-rn-custom1?team_id={_SB_TEAM}",
+                     json={"name": "acme-renamed"})
+        assert r.status_code == 200, r.text
+        assert r.json() == {"graph_id": "g-rn-custom1", "name": "acme-renamed"}
+        rows = fake.query("graphs", select=["name"],
+                          filters=[("id", "eq", "g-rn-custom1")])
+        assert rows[0]["name"] == "acme-renamed"
+    finally:
+        _sb_teardown(tc, handles)
+
+
+def test_patch_rename_supabase_default_display_row_and_conflicts(monkeypatch):
+    tc, fake, handles = _sb_env(monkeypatch)
+    try:
+        # Rename the derived default graph → a kind='default' display row
+        # carrying the new name + the TEAM namespace.
+        r = tc.patch(f"/v1/graphs/default?team_id={_SB_TEAM}",
+                     json={"name": "My Memory"})
+        assert r.status_code == 200, r.text
+        drow = fake.query("graphs", select=["name", "namespace", "kind"],
+                          filters=[("team_id", "eq", _SB_TEAM),
+                                   ("kind", "eq", "default")])
+        assert len(drow) == 1, drow
+        assert drow[0]["name"] == "My Memory"
+        assert drow[0]["namespace"] == f"team_{_SB_TEAM}", drow
+        # A live-name conflict 409s (self-exclusion must treat the default
+        # display row as graph_id 'default' — renaming it to its OWN name is
+        # an idempotent 200, not a self-conflict).
+        r = tc.patch(f"/v1/graphs/g-rn-custom1?team_id={_SB_TEAM}",
+                     json={"name": "My Memory"})
+        assert r.status_code == 409, r.text
+        assert r.json()["detail"] == "Graph name already exists"
+        r = tc.patch(f"/v1/graphs/default?team_id={_SB_TEAM}",
+                     json={"name": "My Memory"})
+        assert r.status_code == 200, r.text
+        # Unknown graph → 404.
+        r = tc.patch(f"/v1/graphs/g_unknown?team_id={_SB_TEAM}",
+                     json={"name": "x"})
+        assert r.status_code == 404, r.text
+    finally:
+        _sb_teardown(tc, handles)
+
+
+def test_patch_rename_supabase_unique_violation_maps_409_not_500(monkeypatch):
+    """A cross-worker race past the pre-check surfaces PostgREST's unique
+    violation as 409 (create-key parity) — never a raw 500."""
+    from tests.fake_control_plane import FakeControlPlane
+
+    class _Flat409(FakeControlPlane):
+        def query(self, table, *a, **kw):
+            if table == "graphs" and kw.get("method") == "PATCH":
+                raise RuntimeError(
+                    "Supabase control-plane query failed (graphs): HTTP 409")
+            return super().query(table, *a, **kw)
+
+    tc, _fake, handles = _sb_env(monkeypatch, fake_cls=_Flat409)
+    try:
+        r = tc.patch(f"/v1/graphs/g-rn-custom1?team_id={_SB_TEAM}",
+                     json={"name": "raced"})
+        assert r.status_code == 409, r.text
+        assert r.json()["detail"] == "Graph name already exists"
+    finally:
+        _sb_teardown(tc, handles)
