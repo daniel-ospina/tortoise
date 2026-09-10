@@ -56,7 +56,10 @@ def _run_probe(args) -> dict:
     is_uri = "://" in db_arg
     if is_uri:
         import os
-        os.environ.setdefault("TORTOISE_DB_URI", db_arg)
+        # #2815: empty means UNSET — setdefault is a no-op for the
+        # set-but-empty lane env, silently discarding --db.
+        if not os.environ.get("TORTOISE_DB_URI"):
+            os.environ["TORTOISE_DB_URI"] = db_arg
         sdk = TortoiseSDK()
     else:
         sdk = TortoiseSDK(db_arg)

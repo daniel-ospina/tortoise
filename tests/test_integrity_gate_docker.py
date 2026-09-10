@@ -37,11 +37,14 @@ from tools.longmem_eval.retrieve import (
 )
 from tortoise.sdk import TortoiseSDK
 
+
 # live_uri() applies the lane contract: CI's tier-2 leg exports
 # TORTOISE_DB_URI="" (empty means unset — #2815), and the docker-lane default
 # carries the password python-ci.yml's falkordb service requires
 # (`--requirepass falkordb`); local passwordless instances can override.
-DB_URI = live_uri()
+# Read at CALL time, never captured at import (#221/#2628 test isolation).
+def _db_uri() -> str:
+    return live_uri()
 
 
 def _falkordb_up() -> bool:
@@ -119,7 +122,7 @@ def _run_question(qid: str, model: str, *, checkpoint=None, work_dir=None,
     return runner.run_evaluation(
         instances, reader=MockReader(), judge=MockJudge(), ks=(5,), top_k=5,
         split="s", work_dir=work_dir, checkpoint=checkpoint,
-        ingest_mode="deterministic", db_uri=DB_URI, model=model,
+        ingest_mode="deterministic", db_uri=_db_uri(), model=model,
         query_prompt="query", **over)
 
 
@@ -279,7 +282,7 @@ def test_docker_mini_pipeline_pool_ratio_per_question():
         outcomes, _ = runner.run_evaluation(
             instances, reader=MockReader(), judge=MockJudge(), ks=(5,),
             top_k=5, split="s", ingest_mode="deterministic",
-            db_uri=DB_URI, model=model, query_prompt="query")
+            db_uri=_db_uri(), model=model, query_prompt="query")
         assert len(outcomes) == len(qids)
         for out in outcomes:
             expected = _expected_denominator(out)
@@ -336,7 +339,7 @@ def test_docker_v2_ingest_retry_gate_pool_ratio(monkeypatch):
         outcomes, _ = runner.run_evaluation(
             instances, reader=MockReader(), judge=MockJudge(), ks=(5,),
             top_k=5, split="s", ingest_mode="v2", extractor_model=_StubModel(),
-            db_uri=DB_URI, model=model, query_prompt="query",
+            db_uri=_db_uri(), model=model, query_prompt="query",
             ingest_write_retries=2)
         assert len(outcomes) == len(qids)
         for out in outcomes:

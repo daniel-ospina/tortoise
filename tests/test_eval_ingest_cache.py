@@ -31,6 +31,7 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import json
+import os
 import socket
 import uuid
 from datetime import UTC, datetime
@@ -44,11 +45,14 @@ from tools.longmem_eval.judge import MockJudge
 from tools.longmem_eval.reader import MockReader
 from tortoise.sdk import TortoiseSDK
 
+
 # live_uri() applies the lane contract: CI's tier-2 leg exports
 # TORTOISE_DB_URI="" (empty means unset — #2815), and the docker-lane default
 # carries the password python-ci.yml's falkordb service requires
 # (`--requirepass falkordb`); local passwordless instances can override.
-DB_URI = live_uri()
+# Read at CALL time, never captured at import (#221/#2628 test isolation).
+def _db_uri() -> str:
+    return live_uri()
 
 
 def _falkordb_up() -> bool:
@@ -221,6 +225,36 @@ def test_cache_ingest_env_resolution(monkeypatch):
     assert runner.cache_ingest_enabled(None) is False
 
 
+def test_question_sdk_honors_db_uri_when_lane_env_is_set_but_empty(monkeypatch):
+    """#2815: an explicit ``db_uri`` must WIN over the set-but-empty lane env.
+
+    CI's tier-2 legs export ``TORTOISE_DB_URI=""``; ``os.environ.setdefault``
+    is a no-op for a set-but-empty variable, so the URI a caller passed to
+    ``_make_question_sdk`` was silently discarded and ``TortoiseSDK`` fell back
+    to the shared canonical embedded store while the probe reported docker —
+    false docker coverage plus writes to a persistent DB. Empty means UNSET
+    (epic #1647).
+    """
+    seen: dict[str, str] = {}
+
+    class _Recorder:
+        def __init__(self, *args, **kwargs):
+            seen["uri"] = os.environ.get("TORTOISE_DB_URI") or "<unset>"
+
+    monkeypatch.setenv("TORTOISE_DB_URI", "")
+    monkeypatch.setattr(runner, "TortoiseSDK", _Recorder)
+    _sdk, cleanup = runner._make_question_sdk(
+        db_uri=_db_uri(), namespace="ns-pin")
+    try:
+        assert seen["uri"] == _db_uri(), (
+            "the explicit db_uri must reach the SDK when the lane env is "
+            'set-but-empty ("" means unset, #2815)')
+    finally:
+        cleanup()
+    assert os.environ.get("TORTOISE_DB_URI") == "", (
+        "cleanup must restore the pre-call (empty) lane value")
+
+
 def test_cache_cli_parser_tristate():
     """The CLI exposes the tri-state pair --cache-ingest / --no-cache-ingest
     (None default so the env still applies) + --sweep-cache."""
@@ -297,7 +331,7 @@ def _run_one_question(monkeypatch, tmp_path, model: str, qid: str,
     return runner.run_evaluation(
         [q], reader=MockReader(), judge=MockJudge(), ks=(5,), top_k=5,
         split="s", work_dir=str(work_dir or tmp_path),
-        ingest_mode="v2", db_uri=DB_URI, model=model,
+        ingest_mode="v2", db_uri=_db_uri(), model=model,
         dataset_fingerprint="icache-test",
         cache_ingest=cache_ingest, sweep_cache=sweep_cache,
         extractor_model=_StableModel(tag))

@@ -406,7 +406,9 @@ def test_live_uri_reason_prefix_is_exempt(tmp_path):
     # exclusion was re-keyed to "requires TORTOISE_DB_URI" but had NO unit
     # test; the old location-based _live_utils.py exclusion cannot survive
     # junitxml because the skip's `file` attribute is the CALLING test file).
-    # The _skip_unless_live_uri reason (tests/_live_utils.py L25-26, verified)
+    # The _skip_unless_live_uri reason (tests/_live_utils.py,
+    # `_skip_unless_live_uri` — symbol, not line numbers: this PR's insertion
+    # moved the reason and a line-numbered reference silently rots)
     # CONTAINS the "FalkorDB" substring AND starts with the exempted family
     # prefix — it must NOT trip the guard (the visible URI-gate is
     # intentional):
