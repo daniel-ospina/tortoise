@@ -306,6 +306,33 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Conflict-marker check (#2802)
+        # A whole-file unresolved conflict block was invisible to every gate and
+        # shipped to main twice (#2802, merge b71aa1534). Two independent gaps:
+        # the `docs` job's markdownlint/lychee steps are SKIPPED on PRs (the
+        # checkout is shallow, so github.event.pull_request.base.sha is absent,
+        # `git diff ... || true` swallows the failure and `files` comes out
+        # empty), and check-doc-affiliation.cjs is not wired into any workflow
+        # (it only validates frontmatter keys anyway). This step is
+        # checkout-depth independent and is today the job's only real content
+        # gate. Repo-wide, fail-closed. `=======` is deliberately NOT matched:
+        # 7 equals is a valid setext H1 underline (a real false positive at
+        # website/apps/dashboard/node_modules/js-tokens/README.md:238), and a
+        # real conflict block always carries the <</>> markers anyway.
+        run: |
+          set +e
+          git grep -nE '^(<{7,}|>{7,}|\|{7,})( |$)' -- .
+          rc=$?
+          set -e
+          if [ "$rc" -eq 0 ]; then
+            echo "::error::unresolved merge conflict marker(s) — resolve before merge"
+            exit 1
+          fi
+          if [ "$rc" -ne 1 ]; then
+            echo "::error::conflict-marker check failed to run (git grep exit $rc) — failing closed"
+            exit 1
+          fi
+          echo "no conflict markers"
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
