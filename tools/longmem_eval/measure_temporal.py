@@ -523,12 +523,24 @@ def assert_reader_constancy(arms_meta: dict[str, dict]) -> None:
     across the arm methodology blocks. A stub-reader arm raises too (its
     numbers are ABSTAIN — never evidence).
     """
+    # A missing or blank methodology field is NOT constancy: without this
+    # guard the check passes vacuously when a caller hands over metadata
+    # blocks that lack the keys (or carry empty strings) — the exact silent
+    # pass that would let a mixed-reader comparison ship as evidence.
+    required = ("reader_model_spec", "reader_prompt_hash", "judge_model")
+    missing = sorted(
+        a for a, meta in arms_meta.items()
+        if not meta or any(not str(meta.get(k) or "").strip()
+                           for k in required))
+    if missing:
+        raise ValueError(
+            "reader-constancy under-specified — arms missing a non-empty "
+            f"{list(required)} methodology block: {missing}. Constancy "
+            "cannot be asserted from absent metadata.")
     specs: dict[str, set] = {}
     for _arm_id, meta in arms_meta.items():
-        for key in ("reader_model_spec", "reader_prompt_hash",
-                    "judge_model"):
-            if key in meta:
-                specs.setdefault(key, set()).add(str(meta[key]))
+        for key in required:
+            specs.setdefault(key, set()).add(str(meta[key]))
     bad = [k for k, vals in specs.items() if len(vals) > 1]
     if bad:
         raise ValueError(
@@ -536,7 +548,8 @@ def assert_reader_constancy(arms_meta: dict[str, dict]) -> None:
             + "; ".join(f"{k}={sorted(vals)}" for k, vals in specs.items()
                         if len(vals) > 1))
     stub = [aid for aid, meta in arms_meta.items()
-            if str(meta.get("reader_model", "")).startswith("stub")]
+            if str(meta.get("reader_model", "")).startswith("stub")
+            or str(meta.get("reader_model_spec", "")).startswith("stub")]
     if stub:
         raise ValueError(
             f"stub-reader arms {stub} present — conversion not measured "
@@ -692,7 +705,8 @@ def gate_output(*, issue: str, prereg: dict, qid_to_cls: dict[str, str],
                 arm_stats: dict[str, dict],
                 pool_limit: int = DEFAULT_POOL_LIMIT,
                 reader_model: str = "pinned (see methodology)",
-                judge_model: str = "pinned") -> str:
+                judge_model: str = "pinned",
+                arms_meta: dict[str, dict] | None = None) -> str:
     """Assemble the runbook gate output (markdown, YAML frontmatter per
     convention): the 2×2 per census class, the per-arm comparison vs
     baseline with discordant counts + McNemar, the rollback-guard readout,
@@ -710,7 +724,13 @@ def gate_output(*, issue: str, prereg: dict, qid_to_cls: dict[str, str],
     * all arms ≈ baseline on conversion-wrong AND admission moved ->
       conversion-indeterminate-on-the-shipped-reader (#2013 strong-reader
       leg), never a decided branch.
+
+    When `arms_meta` (arm_id -> methodology block) is supplied the
+    reader/judge/prompt constancy assertion runs HERE, before any table is
+    emitted — a mixed-reader comparison must never reach the gate output.
     """
+    if arms_meta:
+        assert_reader_constancy(arms_meta)
     tables = aggregate_taxonomy(baseline_verdicts, qid_to_cls,
                                 pool_limit=pool_limit)
     comps = {arm_id: compare_arms_to_baseline(baseline_verdicts, vs)
@@ -767,6 +787,20 @@ def gate_output(*, issue: str, prereg: dict, qid_to_cls: dict[str, str],
         md.append(f"| {r['arm']} | {r['refusal_rate']:.3f} | "
                   f"{r['mean_context_tokens']} | "
                   f"{'⚠️' if r['flagged_rollback_candidate'] else ''} |")
+    if guard["bound"] > 1.0:
+        # Honesty note, emitted from the data: a refusal rate cannot exceed
+        # 1, so a bound above 1 makes the pre-registered guard
+        # mathematically incapable of firing. Reported, never hidden.
+        md += ["",
+               f"> **Guard non-discriminating on this data**: the bound "
+               f"({guard['bound']:.3f}) exceeds 1.0 because the baseline "
+               f"refusal rate ({guard['baseline_refusal_rate']:.3f}) sits "
+               f"within {guard['margin']} of the ceiling. A refusal rate "
+               f"cannot exceed 1, so no arm could ever be flagged here. "
+               f"The readout is reported for the record only; the "
+               f"rollback decision must not lean on its silence. "
+               f"(Observed arm refusal rates all moved DOWN/equal — see "
+               f"table.)"]
     md += ["", "## Per-arm reach vs observed gold depth", "",
            "| arm | mean_context_tokens | pre-registered reach |",
            "| --- | --- | --- |"]
@@ -792,5 +826,6 @@ def gate_output(*, issue: str, prereg: dict, qid_to_cls: dict[str, str],
     frontmatter = (f"---\ntitle: \"2578 Temporal Measurement — Gate Output\"\n"
                    f"type: operations\ndomain: operations\ndoc_status: live\n"
                    f"created: 2026-09-09\nownedBy: epistemic-team\n"
+                   f"aboutSubjects: epistemic-team\naboutObjects: tortoise\n"
                    f"issue: {issue}\n---\n\n")
     return frontmatter + body

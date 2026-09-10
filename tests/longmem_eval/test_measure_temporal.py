@@ -472,21 +472,47 @@ def test_rollback_guard_readout_flags_breach():
 def test_assert_reader_constancy_aborts_on_mismatch():
     mt.assert_reader_constancy({
         "A-default": {"reader_model_spec": "deepseek:deepseek-v4-flash",
-                      "reader_prompt_hash": "abc"},
+                      "reader_prompt_hash": "abc",
+                      "judge_model": "openai/gpt-4o-2024-08-06"},
         "tr_top_k16": {"reader_model_spec": "deepseek:deepseek-v4-flash",
-                       "reader_prompt_hash": "abc"},
+                       "reader_prompt_hash": "abc",
+                       "judge_model": "openai/gpt-4o-2024-08-06"},
     })  # ok
     with pytest.raises(ValueError, match="reader_model_spec"):
         mt.assert_reader_constancy({
-            "A-default": {"reader_model_spec": "deepseek:deepseek-v4-flash"},
-            "tr_top_k16": {"reader_model_spec": "other:model"},
+            "A-default": {"reader_model_spec": "deepseek:deepseek-v4-flash",
+                          "reader_prompt_hash": "abc",
+                          "judge_model": "openai/gpt-4o-2024-08-06"},
+            "tr_top_k16": {"reader_model_spec": "other:model",
+                           "reader_prompt_hash": "abc",
+                           "judge_model": "openai/gpt-4o-2024-08-06"},
+        })
+
+
+def test_assert_reader_constancy_rejects_absent_metadata():
+    """Constancy cannot be asserted from missing/blank methodology — the
+    vacuous pass that would let a mixed or unrecorded reader ship as
+    evidence (regression guard: an all-empty meta dict must RAISE)."""
+    with pytest.raises(ValueError, match="under-specified"):
+        mt.assert_reader_constancy({"A-default": {}, "c2-on": {}})
+    with pytest.raises(ValueError, match="under-specified"):
+        mt.assert_reader_constancy({
+            "A-default": {"reader_model_spec": "",
+                          "reader_prompt_hash": "   ",
+                          "judge_model": "openai/gpt-4o-2024-08-06"},
+            "c2-on": {"reader_model_spec": "deepseek:deepseek-v4-flash",
+                      "reader_prompt_hash": "abc",
+                      "judge_model": "openai/gpt-4o-2024-08-06"},
         })
 
 
 def test_assert_reader_constancy_rejects_stub_reader():
     with pytest.raises(ValueError, match="stub"):
         mt.assert_reader_constancy({
-            "A-default": {"reader_model": "stub-reader"},
+            "A-default": {"reader_model": "stub-reader",
+                          "reader_model_spec": "stub:reader",
+                          "reader_prompt_hash": "abc",
+                          "judge_model": "openai/gpt-4o-2024-08-06"},
         })
 
 
@@ -575,3 +601,48 @@ def test_gate_output_renders_decision_tables_and_reach(tmp_path):
     # per-arm reach from the pre-registration rides the output
     assert "admission-attributed" in text
     assert "pre-registered reach" in text
+
+
+def test_gate_output_enforces_reader_constancy_when_meta_supplied(
+        tmp_path):
+    """The gate output is the comparison record — a mixed-reader arm set
+    must never reach it. Passing arms_meta runs the constancy assertion
+    inside gate_output (regression: it previously claimed the assertion in
+    its docstring while never calling it)."""
+    prereg = mt.write_preregistration(
+        mt.load_census(CENSUS)["rows"], tmp_path / "prereg.json")
+    qid_to_cls = {"q1": "interval"}
+    baseline = [_tot("q1", True)]
+    arms = {"tr_top_k16": [_tot("q1", True)]}
+    stats = {"A-default": {"refusal_rate": 0.1,
+                           "mean_context_tokens": 10},
+             "tr_top_k16": {"refusal_rate": 0.1,
+                            "mean_context_tokens": 10}}
+    good = {
+        "A-default": {"reader_model_spec": "deepseek:deepseek-v4-flash",
+                      "reader_prompt_hash": "abc",
+                      "judge_model": "openai/gpt-4o-2024-08-06"},
+        "tr_top_k16": {"reader_model_spec": "deepseek:deepseek-v4-flash",
+                       "reader_prompt_hash": "abc",
+                       "judge_model": "openai/gpt-4o-2024-08-06"}}
+    mt.gate_output(issue="2578", prereg=prereg, qid_to_cls=qid_to_cls,
+                   baseline_verdicts=baseline, arm_verdicts=arms,
+                   arm_stats=stats, arms_meta=good)  # ok
+    mixed = {**good, "tr_top_k16": {**good["tr_top_k16"],
+                                    "reader_model_spec": "other:model"}}
+    with pytest.raises(ValueError, match="reader_model_spec"):
+        mt.gate_output(issue="2578", prereg=prereg, qid_to_cls=qid_to_cls,
+                       baseline_verdicts=baseline, arm_verdicts=arms,
+                       arm_stats=stats, arms_meta=mixed)
+
+
+def test_assert_reader_constancy_rejects_stub_via_spec_only():
+    """Stub detection must not depend on the non-required `reader_model`
+    key — a stub arm recording only reader_model_spec would otherwise
+    evade the pre-registered ABSTAIN gate."""
+    with pytest.raises(ValueError, match="stub"):
+        mt.assert_reader_constancy({
+            "A-default": {"reader_model_spec": "stub:reader",
+                          "reader_prompt_hash": "abc",
+                          "judge_model": "openai/gpt-4o-2024-08-06"},
+        })

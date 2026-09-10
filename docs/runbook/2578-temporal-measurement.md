@@ -5,6 +5,8 @@ domain: operations
 doc_status: live
 created: 2026-09-09
 ownedBy: epistemic-team
+aboutSubjects: epistemic-team
+aboutObjects: tortoise
 ---
 
 # 2578 Temporal Measurement — Runbook & Gate Output
@@ -32,9 +34,38 @@ See the scoped plan `docs/plans/2026-09-09-2578-temporal-measurement.md`
 
 ## Gate output
 
-(written by the Task-4 operator run — 2×2 per census class, widening-arm
-comparisons, rollback-guard readout, per-arm reach-vs-observed-gold-depth
-table, and the three pre-registered decision branches)
+The Task-4 operator run's gate output is generated (never hand-edited) at
+[`docs/runbook/2578-gate-output.md`](2578-gate-output.md) by
+`measure_temporal.gate_output`: 2×2 per census class, widening-arm
+comparisons (McNemar), rollback-guard readout, per-arm
+reach-vs-observed-gold-depth table, and the three pre-registered decision
+branches. The per-question evidence rows are committed at
+[`docs/runbook/2578-measured-outcomes.jsonl`](2578-measured-outcomes.jsonl)
+(8 arms × 55 questions, one graded outcome per line).
+
+**Measured verdict (2026-09-10):** decision branch =
+**admission-attributed**. `applied-rerank` (`--rerank --rerank-pool 120
+--rerank-cap 3`) is the only arm that moves the needle: baseline 3/55
+correct → 9/55 (McNemar p=0.0312, 6 discordant pairs, 6–0 arm wins), with
+admission-attributed failures 52 → 30. `tr_top_k` 12→16/20/24, `c2-on`,
+and `pool-only-isolation` are all null — widening the pool WITHOUT
+reranking changes nothing (the isolation result the arms were built to
+test). Rerank additionally pushes refusal DOWN (0.982 → 0.782) while the
+reader context grows 94.9 → 624.0 mean tokens.
+
+**Known limitations (recorded, not hidden):**
+1. The R5 rollback guard is non-discriminating on this data — the
+   pre-registered bound (baseline refusal 0.982 + margin 0.10 = 1.082)
+   exceeds the ceiling of a refusal rate (1.0), so no arm could ever be
+   flagged. The guard's silence carries no evidential weight here; the
+   observed arm refusal rates all moved down or equal.
+2. The 55-question subset is the temporal-analysis classes
+   (`ordering/compare` 34, `interval` 19, `current-state` 2) — the
+   `recency/current-state` family (8 questions) is a different knob family
+   and is out of scope by pre-registration.
+3. Correctness levels are low in absolute terms (baseline 3/55) —
+   conversion on admitted gold remains the dominant residual error, with
+   `conv-refusal` 13–17 and `conv-wrong` 1–3 on the reranked arms.
 
 ## 0/13 annotation
 
