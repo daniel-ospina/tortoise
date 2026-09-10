@@ -184,6 +184,14 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     "test_session_capture_e2e.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])'],
     "test_billing_upgrade.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])'],
     # ── DELIBERATE_URI: fixtures/tests that force the docker lane directly ──
+    # #2815: the two docker-lane twins pin the RESOLVED lane URI for the test
+    # duration so the run side (``db_uri=``) and the assertion side
+    # (env-resolved ``TortoiseSDK`` constructions) read ONE store — with CI's
+    # set-but-empty tier-2 env they otherwise split (docker run vs embedded
+    # assertions: `len(_marker_rows) == 0`). Both use the function-scoped
+    # monkeypatch param, so pytest auto-restores at teardown (#2084).
+    "test_eval_ingest_cache.py": [r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI",\s*uri\)'],
+    "test_integrity_gate_docker.py": [r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI",\s*_db_uri\(\)'],
     "test_consolidation_4way.py": [r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"'],
     "test_doctor.py": [r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"'],
     "test_namespace_uri_mode.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])',
