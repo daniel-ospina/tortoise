@@ -7,9 +7,11 @@
 // measured 1.48:1 (WCAG AA needs 4.5:1). The greps below pin the fix's
 // load-bearing shapes so an unstyled dialog field can never ship again:
 //   1. a shared `.modal input/textarea/select` rule that sets a dark
-//      background (the field the bug fell through);
-//   2. the create-org name input actually living inside that `.modal`, so
-//      the shared rule covers it;
+//      background and a boundary that clears WCAG 1.4.11 non-text contrast
+//      (the field the bug fell through);
+//   2. the create-org name input is actually NESTED inside that `.modal`
+//      element, so the shared rule covers it (a proximity window can false-
+//      pass when the input is moved out of the dialog);
 //   3. the destructive `.delete-confirm-input` still out-specifying the
 //      shared default (its red border must not be stripped).
 import { test } from 'node:test'
@@ -34,6 +36,15 @@ test('#2778: a shared .modal input/textarea/select rule themes dialog fields', (
     'index.css must keep a shared `.modal input, .modal textarea, .modal select` rule — the create-org dialog rendered a bare <input> that relied on it',
   )
   const decls = rule[1]
+  // The rule must live in the modal section of the sheet, not just anywhere
+  // in the flattened text (a copy parked in a dead at-rule must not satisfy
+  // this guard).
+  const modalBaseIdx = cssFlat.indexOf('.modal {')
+  assert.ok(modalBaseIdx !== -1, 'the base `.modal` panel rule must exist')
+  assert.ok(
+    rule.index > modalBaseIdx,
+    'the dialog-field default must be declared after the base `.modal` panel rule',
+  )
   // The exact bug: no background was set, so the UA white showed through.
   assert.match(
     decls,
@@ -48,19 +59,35 @@ test('#2778: a shared .modal input/textarea/select rule themes dialog fields', (
   // color/border complete the themed field (the issue measured a default
   // grey border, not just the white background).
   assert.match(decls, /color: var\(--text/, 'the dialog-field default must set `color`')
-  assert.match(decls, /border: 1px solid var\(--border/, 'the dialog-field default must set a themed `border`')
+  assert.match(decls, /border: 1px solid /, 'the dialog-field default must set a border')
+  // The field background is the same as the .modal panel, so the border is the
+  // only cue identifying the control — the 0.12-alpha --border token measures
+  // 1.41:1 there, below the WCAG 1.4.11 non-text 3:1 floor.
+  assert.doesNotMatch(
+    decls,
+    /border: 1px solid var\(--border(,|\))/,
+    'the dialog-field border must not reuse the low-contrast --border token (1.41:1 against the identical panel background) — WCAG 1.4.11 needs 3:1',
+  )
 })
 
-test('#2778: the organization-name input lives inside the create-org .modal', () => {
-  const modalAnchor = mainJsx.indexOf('aria-label="Create a new organization"')
-  assert.notEqual(modalAnchor, -1, 'the create-organization dialog must still exist')
-  // Proximity-scoped: the org-name field must render within this dialog's
-  // block, not somewhere the shared `.modal input` rule cannot reach.
-  const modalSlice = mainJsx.slice(modalAnchor, modalAnchor + 2500)
-  assert.match(
-    modalSlice,
-    /<input[\s\S]{0,400}aria-label="Organization name"/,
-    'the organization-name input must render inside the create-org .modal (the shared rule is scoped to .modal descendants)',
+test('#2778: the organization-name input is nested inside the create-org .modal', () => {
+  // Structural containment, not proximity: count the still-open <div>s
+  // between the dialog's opening tag and the input. A proximity window
+  // false-passes when the input is moved out of the dialog (a P2 finding of
+  // this PR's review) — the input must sit inside the .modal element for the
+  // shared `.modal input` rule to reach it.
+  const modalStart = mainJsx.indexOf(
+    '<div className="modal" role="dialog" aria-modal="true" aria-label="Create a new organization"',
+  )
+  assert.notEqual(modalStart, -1, 'the create-organization dialog must still exist')
+  const inputIdx = mainJsx.indexOf('aria-label="Organization name"', modalStart)
+  assert.notEqual(inputIdx, -1, 'the organization-name input must render after the dialog opens')
+  const segment = mainJsx.slice(modalStart, inputIdx)
+  const opens = (segment.match(/<div\b/g) || []).length
+  const closes = (segment.match(/<\/div>/g) || []).length
+  assert.ok(
+    opens - closes >= 1,
+    `the organization-name input must be nested inside the .modal element (the shared rule only reaches .modal descendants); found ${opens} <div> open(s) and ${closes} close(s) before it`,
   )
 })
 

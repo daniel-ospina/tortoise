@@ -745,12 +745,16 @@ input::placeholder, textarea::placeholder {
    create-organization dialog's bare <input> fell back to the UA white while
    inheriting the dark theme's light text (measured 1.48:1; WCAG AA needs
    4.5:1). Theme every dialog field by default so the next modal cannot
-   repeat it. Explicitly-classed fields keep their own rules: `.inline-form
-   input` resolves to the identical tokens, and `.modal .delete-confirm-input`
-   (0,2,0) out-specifies this one. */
+   repeat it. The border is deliberately stronger than `--border`
+   (rgba(255,255,255,0.12) is only 1.41:1 over the identical --surface panel):
+   with the field background the same as the panel, the border is the only cue
+   that identifies the control, so it must clear the WCAG 1.4.11 non-text 3:1
+   floor — 0.36 measures 3.29:1. Explicitly-classed fields keep their own
+   rules: `.inline-form input` resolves to the same tokens, and
+   `.modal .delete-confirm-input` (0,2,0) out-specifies this one. */
 .modal input, .modal textarea, .modal select {
   background: var(--surface, #0d1a2d);
-  border: 1px solid var(--border, #1e293b);
+  border: 1px solid rgba(255, 255, 255, 0.36);
   color: var(--text, #cbd5e1);
   border-radius: 8px;
   padding: 8px 12px;
