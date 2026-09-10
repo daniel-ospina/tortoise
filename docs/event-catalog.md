@@ -12,13 +12,14 @@
 | `OperatorAdded` | 1 | `TortoiseSDK.create_operator` | `id`, `op_type`, `source_id`, `target_ids` | SDK |
 | `PointRetracted` | 1 | `TortoiseSDK.retract_point` | `id` | SDK |
 | `PointSuperseded` | 1 | `TortoiseSDK.supersede_point` | `id` (old), `new_id` | SDK |
+| `PointInvalidated` | 1 | `TortoiseSDK.invalidate_point` (#2488) | `id`, `corrected_by` | SDK |
 | `PointPromoted` | 1 | `TortoiseSDK.promote_point` (#785) | `point` (full snapshot) | SDK |
 | `OperatorPromoted` | 1 | `TortoiseSDK.promote_point` R16 (#785) | `point` (full snapshot), `id` | SDK |
 | `OperatorAnnotated` | 1 | `TortoiseSDK.annotate_operator` | `id`, `bias`, `precision`, `consistency`, `directness` | SDK |
 | `ObjectSuperseded` | 1 | hosted commit endpoint (`hosted_api._execute_commit_writes` §6b) + capture (`sdk._extract_session_v2`) + eval (`tools/longmem_eval/ingest_v2`) — entity-level supersession records; ALL THREE emit via the shared `commit_ops.apply_supersessions` (id-style kwargs — #1350/#2164/#2193) | `id`, `name`, `supersedes_by`, `session_id`, `evidence` — id-style kwargs. The GraphEvent payload carries all five for every producer; the JSONL line carries them only when the producing SDK is built with an `event_log_path`. In-tree JSONL exercisers build `event_log_path`-configured SDKs and drive `commit_ops.apply_supersessions` (which routes through `sdk._emit_event`): `tests/test_capture_session.py` (`test_apply_supersessions_legacy_idless_object_reaches_jsonl`) plus the #2194 suite (`test_object_registered_journal.py`) — an in-tree exerciser therefore predates #2194. The other `event_log_path`-configured in-tree SDK — offline mining, `tortoise/mining.py` — never emits `ObjectSuperseded` (no supersession path: Object writes are `ObjectRegistered` via `api.add_object`) | Hosted commit endpoint / SDK capture / eval ingest (all via `commit_ops.apply_supersessions`) |
 
 > ⛔ **`ClaimStateChanged` is NOT an event type** (plan-review P1). Every claim
-> transition maps to one of the five concrete types above; **challenged is a
+> transition maps to one of the eleven concrete types above; **challenged is a
 > DERIVED condition** (NAND-operator-edge presence on a live point), not a
 > state or event. Content edits via `update_point` (non-status props) emit
 > NOTHING.
@@ -38,7 +39,7 @@ traversals, EP propagation; see §5 guard).
 |---|---|---|
 | `seq` | int | Per-graph monotonic, atomic in-graph counter (`GraphEventMeta.last_seq`). Indexed. |
 | `ts` | string | ISO8601 UTC (node-level canonical; NOT re-embedded in payload). |
-| `type` | string | One of the five registered types above. |
+| `type` | string | One of the eleven registered types above. |
 | `payload` | string | JSON of the **bare domain payload** (codec encode/decode wiring deferred to the first upcaster task — node props are canonical for v1). |
 | `event_id` | string | Server-side ULID; **unique** (app-side dedup + unique constraint on production FalkorDB). |
 
