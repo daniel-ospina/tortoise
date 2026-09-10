@@ -1743,8 +1743,29 @@ class FalkorProjection(
         # pre-filtered deferred list. A PointInvalidated survivor is NOT a
         # re-point source (invalidate transfers no edges); binding a mixed
         # invalidate→supersede to the invalidate seq would skip legit re-points.
+        #
+        # #2489 STRUCTURAL replay: supersede's 2b transfer (structural edges —
+        # extractedFrom + about*) journals the SAME flat descriptor type for
+        # the snapshot-derivable rel set. The pass-2b branch below routes on
+        # edge_type ∈ the derivable set BEFORE the Point→Point direct-leg
+        # consumer: a structural descriptor's tgt is a bare ENTITY KEY (or,
+        # delete_only, the direct successor's LOGICAL id) — running it through
+        # _final(tgt) + (b:Point{id:key}) would corrupt on a superseded-
+        # point-id∩key collision or silently drop. Pass-ordering constraint
+        # (pinned): this branch's correctness depends on pass-2's snapshot
+        # resurrection (entities.py _upsert_point_edges — name-based, NO
+        # status filter) having re-created the transferred edge at OLD BEFORE
+        # descriptor replay; that holds by pass structure (pass-2 resurrection
+        # precedes the pass-2b sweep). If a future phase reorder moves snapshot
+        # resurrection later, the delete-leg must tolerate late resurrection.
         if supersede_last or direct_repoint_events:
             from tortoise.security import validate_rel_type
+
+            from .edges import (
+                DERIVABLE_STRUCTURAL_RELS,
+                STRUCTURAL_REL_LABELS,
+                resolve_structural_target,
+            )
             # Successor map old→new; resolve transitively to the final live
             # point (chain-safe, cycle-guarded).
             succ: dict[str, str] = {}
@@ -1826,9 +1847,165 @@ class FalkorProjection(
                     )
 
             if direct_repoint_events:
+                # #2489: per-rebuild seen-set for STRUCTURAL descriptor dedupe
+                # (below) — keyed on (src, edge_type, RESOLVED target node
+                # identity), mirroring the operator leg's (op, type, idx,
+                # final). NOT descriptor id (the emission id base
+                # f"{old}->{new}:{rel}" duplicates across multi-target same-rel;
+                # id-keyed dedupe would collapse 2 distinct same-rel targets =
+                # the exact bug class) and NOT the resolved key alone (two
+                # legit transfers to a SHARED node in one journal — X1→S, X2→S
+                # — must not collapse). Objects/Events/Documents are id-keyed
+                # entities: two distinct same-name targets must not collapse.
+                structural_seen: set[tuple] = set()
+
+                def _src_is_terminal(sid: str) -> bool:
+                    """#2489 (code-review P1): the delete-leg must ONLY clean
+                    the pass-2 resurrection at a DEAD (terminal) old point.
+                    Under id-reuse (#2488 survivor filter drops a pre-recreation
+                    supersede fold), src is a re-created LIVE incarnation whose
+                    edges are legitimately its own — deleting them clobbers a
+                    live point. Terminal src = the superseded/retracted/outdated
+                    incarnation whose transferred edges pass-2 resurrected."""
+                    rows = self.g.query(
+                        f"MATCH (x:Point {{id:$sid}}) "
+                        f"WHERE {_terminal_excluded('x.status')} RETURN 1 LIMIT 1",
+                        params={"sid": sid}).result_set
+                    # _terminal_excluded is the NOT-terminal predicate: empty
+                    # rows → the node is terminal (or absent). Absent src =
+                    # nothing to clean — treat as terminal (delete is a no-op).
+                    return not rows
                 for ev in direct_repoint_events:
                     etype = ev.get("edge_type")
                     src, tgt = ev.get("src"), ev.get("tgt")
+
+                    # ── #2489 delete_only structural descriptor (no-self-edge
+                    # guard journal, Task 1 step 4) ── handled BEFORE the
+                    # malformed-isinstance guard: the event carries a literal
+                    # LOGICAL tgt id (the direct successor), so it would survive
+                    # the isinstance check — but recognition must be explicit.
+                    # Delete-leg keys the DIRECT successor (the descriptor's
+                    # literal logical tgt), NOT _final(src): in a chain (guard
+                    # fires supersede(X→Y), then Y→Z is superseded before
+                    # rebuild), pass-2 resurrects the phantom at old from src's
+                    # snapshot to the DIRECT successor Y while _final(X)=Z — a
+                    # final-keyed delete misses and old X keeps its phantom.
+                    # Resurrection is name-based (no status filter), so in a
+                    # chain the phantom may attach to dead Y while a succ-
+                    # resolved delete targets Z — delete BOTH the literal node
+                    # and the succ-resolved node when Y was itself superseded
+                    # (follow _final(Y); the direct node may be gone). Skip
+                    # create (the transfer target IS the successor — creating
+                    # would mint a self-edge).
+                    if ev.get("delete_only") is True:
+                        if (not isinstance(src, str) or not isinstance(tgt, str)
+                                or not isinstance(etype, str)
+                                or etype not in DERIVABLE_STRUCTURAL_RELS):
+                            logger.warning(
+                                "rebuild: malformed delete_only "
+                                "DirectEdgeRepoint event skipped "
+                                "(event_id=%s)", ev.get("event_id"))
+                            continue
+                        if not _src_is_terminal(src):
+                            # code-review P1: src is a LIVE re-created
+                            # incarnation (id-reuse) — its edges are legit;
+                            # the delete-leg must not clobber. Skip the whole
+                            # descriptor (create-skip is implied: a live src
+                            # has no surviving supersede fold).
+                            continue
+                        for tgt_logical in {tgt, _final(tgt) if tgt in succ else None}:
+                            if not tgt_logical:
+                                continue
+                            rows = self.g.query(
+                                "MATCH (t:Point {id:$id}) RETURN ID(t) LIMIT 1",
+                                params={"id": tgt_logical}).result_set
+                            if not rows:
+                                continue  # direct node gone — constrained no-op
+                            # Resurrection-delete with FRESH ID capture, rel-
+                            # constrained to (old:Point{id:src}) — never a
+                            # graph-wide pattern delete, never a descriptor-
+                            # carried rid (internal ids die at rebuild).
+                            self.g.query(
+                                f"MATCH (old:Point {{id:$old}})-[r:{etype}]->(t) "
+                                f"WHERE ID(t) = $tid DELETE r",
+                                params={"old": src, "tid": rows[0][0]})
+                        continue
+
+                    # ── #2489 normal STRUCTURAL descriptor ── route on
+                    # edge_type ∈ the derivable set BEFORE the direct-leg
+                    # consumer's validate_rel_type / Point→Point MERGE /
+                    # _final(tgt). The fixed-set discriminator is an ALLOWLIST,
+                    # not a validation substitute — validate_rel_type still
+                    # runs inside the branch (single validation point).
+                    if (isinstance(etype, str) and etype in DERIVABLE_STRUCTURAL_RELS
+                            and isinstance(src, str) and isinstance(tgt, str)):
+                        validate_rel_type(etype)
+                        # Resolve tgt via the SHARED label-scoped resolver —
+                        # never auto-detect _create_about_edges (Subject-first
+                        # auto-detect would attach an aboutObject descriptor to
+                        # a same-name Subject node; the delete-leg's rel-
+                        # constrained re-query would then miss the drifted
+                        # resurrection and old keeps a phantom). Create-if-
+                        # missing: Subject/Source stubs MERGE by key (live
+                        # wiring parity — one create path, edges.py); never
+                        # mint Point stubs by name (absent Point target ⇒ skip).
+                        resolved = resolve_structural_target(
+                            self.g, STRUCTURAL_REL_LABELS[etype], tgt, etype)
+                        if resolved is None:
+                            # Target absent at replay (non-stubbable entity from
+                            # an unjournaled producer): pass-2's resurrection
+                            # could not have attached a same-rel edge either
+                            # (name/url-based match), so nothing to clean or
+                            # re-create.
+                            continue
+                        # Delete-leg (old-side resurrection cleanup) runs BEFORE
+                        # the dedupe skip — a dropped duplicate still cleans its
+                        # old-side resurrection. Constrained re-query on the
+                        # resolved node identity; fresh internal ids only. P1:
+                        # only when src is TERMINAL at replay — a live re-created
+                        # src (id-reuse) owns its edges legitimately.
+                        if not _src_is_terminal(src):
+                            continue
+                        self.g.query(
+                            f"MATCH (old:Point {{id:$old}})-[r:{etype}]->(t) "
+                            f"WHERE ID(t) = $tid DELETE r",
+                            params={"old": src, "tid": resolved["internal"]})
+                        # #2489 step 6b (2nd-model P1): structural descriptors
+                        # must obey #2488's survivor-filtered succ map — once
+                        # #2488 lands (pre-recreation supersede folds dropped),
+                        # _final(src) below resolves through the survivor-only
+                        # map and a dropped fold's descriptor self-skips via the
+                        # src_f == src guard (its delete-leg already ran above).
+                        # Base (pre-#2488) has no survivor filter — parity with
+                        # the operator/direct legs' existing replay.
+                        key = (src, etype, resolved["internal"])
+                        if key in structural_seen:
+                            continue
+                        structural_seen.add(key)
+                        src_f = _final(src)
+                        if src_f == src:
+                            # No surviving supersede fold for src (dropped by a
+                            # future #2488 survivor filter / defensive) — never
+                            # re-create the edge at old after the delete-leg.
+                            continue
+                        if resolved.get("logical") and resolved["logical"] == src_f:
+                            # aboutPoint whose target IS the final successor
+                            # (chain collapse X→Y→Z with target Z): the create
+                            # would mint (succ)-[:aboutPoint]->(succ) — phantom
+                            # self-edge. Never recreate (E2E-11.6 no-self
+                            # contract); the delete-leg already cleaned the
+                            # resurrection at old.
+                            continue
+                        # Two-step MERGE on the resolved node identity — collapses
+                        # duplicate creates to one edge (about* / extractedFrom
+                        # are MERGE-created live). Structural 2b transfers are
+                        # bare: NO attr SET, no direction/confidence/weight.
+                        self.g.query(
+                            f"MATCH (s:Point {{id:$sid}}), (t) WHERE ID(t) = $tid "
+                            f"MERGE (s)-[:{etype}]->(t)",
+                            params={"sid": src_f, "tid": resolved["internal"]})
+                        continue
+
                     if (not isinstance(src, str) or not isinstance(tgt, str)
                             or not isinstance(etype, str)):
                         logger.warning(

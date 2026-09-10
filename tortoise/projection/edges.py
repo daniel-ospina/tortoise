@@ -8,6 +8,149 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()  # noqa: UP017
 
 
+# ── #2489 structural-edge transfer parity: shared rel→(label,key) resolver ──
+# ONE home for the key map supersede_point 2b EMISSION (sdk.py), the pass-2b
+# DirectEdgeRepoint structural REPLAY branch (projection/__init__.py), and the
+# resurrection-DELETE leg. Two divergent copies would drift: _create_about_edges'
+# auto-detect (Subject-first order) cannot mint a specific aboutObject/
+# aboutEvent/aboutDocument edge for an absent node (it would attach the
+# descriptor's rel to a wrong-label node), so replay resolution is LABEL-SCOPED
+# and never auto-detects.
+
+# Snapshot-derivable structural rel set — the rels supersede's 2b transfer
+# journals as DirectEdgeRepoint descriptors because rebuild pass-2 re-creates
+# them at the OLD point from its immutable snapshot (extractedFrom prop +
+# aboutEntities list -> _upsert_point_edges / entities.py). They are the edges
+# whose resurrection the replay delete-leg must clean. aboutAction
+# (Action dissolved in Ontology v3.0), aboutSource, and wasDerivedFrom are NOT
+# derivable — never snapshot-recreated, never resurrect at old — so they get no
+# descriptor (emitting one would half-own the A10 raw-edge family by accident).
+DERIVABLE_STRUCTURAL_RELS = frozenset({
+    'aboutSubject', 'aboutObject', 'aboutEvent', 'aboutPoint',
+    'aboutDocument', 'extractedFrom',
+})
+
+# rel -> entity label of the structural TARGET (label-scoped resolution). The
+# source side of a supersede transfer is always a Point. Public — sdk.py's 2b
+# emission and the projection replay both import it (no duplicate key map).
+STRUCTURAL_REL_LABELS = {
+    'aboutSubject': 'Subject',
+    'aboutObject': 'Object',
+    'aboutEvent': 'Event',
+    'aboutPoint': 'Point',
+    'aboutDocument': 'Document',
+    'extractedFrom': 'Source',
+}
+
+
+def stub_key(rel: str, target: dict):
+    """Extract the replayable (label, key) for a structural edge's target node.
+
+    ``target`` is the target node's property dict (the 2b SELECT returns
+    ``properties(target)``). Key map: aboutSubject/aboutObject/aboutEvent/
+    aboutPoint -> ``name``; aboutDocument -> ``coalesce(title, name)``;
+    extractedFrom -> ``url``. NEVER ``target.id`` — Subjects MERGE by name (id
+    may be a webhook stub ulid, #1918), Sources by url, Documents by
+    name-or-title (#211). Returns None for a rel outside the derivable set or an
+    unresolvable key (name-less Point from an id-targeted create_about_edge;
+    extractedFrom target lacking url) — such descriptors are un-replayable and
+    the caller must SKIP emission (those edges die at rebuild today anyway).
+    """
+    label = STRUCTURAL_REL_LABELS.get(rel)
+    if label is None:
+        return None
+    if rel == 'aboutDocument':
+        key = target.get('title') or target.get('name')
+    elif rel == 'extractedFrom':
+        key = target.get('url')
+    else:
+        key = target.get('name')
+    if not isinstance(key, str) or not key:
+        return None
+    return (label, key)
+
+
+def _mint_subject_stub(g, name: str) -> None:
+    """MERGE the Subject stub live wiring's auto-detect fallback creates
+    (edges.py _create_about_edges) — single create path for live + replay so a
+    replayed descriptor mints a byte-identical stub to live wiring."""
+    g.query(
+        "MERGE (s:Subject {name:$name}) "
+        "ON CREATE SET s.id=$name, s.subjectKind='other'",
+        params={"name": name},
+    )
+
+
+def _mint_source_stub(g, url: str, source_kind: str = "document") -> None:
+    """MERGE the Source stub _link_source creates — single create path for live
+    + replay (mirror _link_source's ON CREATE exactly: title=url, empty
+    contentHash, ingestedAt now; session: refs carry is_episodic=true so the
+    #1486 one-time episodic backfill does not re-match a replay-minted Source)."""
+    params = {"url": url, "sk": source_kind, "now": _now_iso()}
+    ep_clause = ""
+    if str(url).startswith("session:"):
+        params["ep"] = True
+        ep_clause = ", s.is_episodic=$ep"
+    g.query(
+        "MERGE (s:Source {url:$url}) "
+        "ON CREATE SET s.sourceKind=$sk, s.title=$url, "
+        f"    s.contentHash='', s.ingestedAt=$now{ep_clause}",
+        params=params,
+    )
+
+
+def resolve_structural_target(g, label: str, key: str, rel: str):
+    """Resolve the label-scoped structural target node by its replay key.
+
+    Create-if-missing semantics: Subject / Source stubs MERGE by key (the live
+    wiring precedent — _create_about_edges' fallback / _link_source). NEVER
+    auto-detect labels (Subject-first auto-detect would attach an aboutObject
+    descriptor to a same-name Subject node) and NEVER mint Point stubs by name
+    (an absent Point target => skip — absent Documents/Objects/Events return
+    None too; those entities are journaled by their own creation events, and an
+    absent one is an unjournaled-producer edge that dies at rebuild).
+
+    Returns {"internal": <FalkorDB internal node id>, "logical": <node.id>}
+    or None. ``g`` is the projection graph handle (``self.g`` on
+    FalkorProjection / the guarded proxy). """
+    if label not in STRUCTURAL_REL_LABELS.values():
+        # label is interpolated into the query STRUCTURE — fail loudly on
+        # anything outside the fixed constant set (parity with
+        # _resolve_entity's runtime defense).
+        raise RuntimeError(
+            f"resolve_structural_target: unsafe label {label!r} "
+            "(contract: STRUCTURAL_REL_LABELS values only)")
+    if label == "Subject":
+        _mint_subject_stub(g, key)
+        rows = g.query(
+            "MATCH (s:Subject {name:$name}) RETURN ID(s), s.id LIMIT 1",
+            params={"name": key}).result_set
+        if not rows:
+            return None
+        return {"internal": rows[0][0], "logical": rows[0][1]}
+    if label == "Source":
+        _mint_source_stub(g, key)
+        rows = g.query(
+            "MATCH (s:Source {url:$url}) RETURN ID(s), s.id LIMIT 1",
+            params={"url": key}).result_set
+        if not rows:
+            return None
+        return {"internal": rows[0][0], "logical": rows[0][1]}
+    # Non-stubbable labels — resolve-only (never mint). Document matches
+    # name OR title (#211 — Documents store their display name in title);
+    # Event nodes match by name (set by create_event).
+    if label == "Document":
+        q = ("MATCH (d:Document) WHERE d.title = $key OR d.name = $key "
+             "RETURN ID(d), d.id LIMIT 1")
+    else:
+        q = (f"MATCH (x:{label} {{name:$key}}) "
+             f"RETURN ID(x), x.id LIMIT 1")
+    rows = g.query(q, params={"key": key}).result_set
+    if not rows:
+        return None
+    return {"internal": rows[0][0], "logical": rows[0][1]}
+
+
 # Canonical structural-edge predicate vocabulary (ONTOLOGY §3.2/§3.3 + #391).
 # Hoisted from create_edge so SDK surfaces (e.g. TortoiseSDK.ingest, epic #888
 # W4) can validate relation names WITHOUT string-duplicating the set.
@@ -134,12 +277,11 @@ class _EdgeHandlers:
         # Try Point (for Event→Point reverse direction)
         if self._try_about_edge(source_id, entity_name, 'Point', 'aboutPoint', 'pointKind', 'statement'):
             return
-        # Neither exists — default to Subject stub (label-agnostic source)
-        self.g.query(
-            "MERGE (s:Subject {name:$name}) "
-            "ON CREATE SET s.id=$name, s.subjectKind='other'",
-            params={"name": entity_name},
-        )
+        # Neither exists — default to Subject stub (label-agnostic source).
+        # #2489: stub mint routed through the SHARED resolver helper
+        # (_mint_subject_stub) so live wiring and rebuild replay mint
+        # byte-identical stubs (one create path).
+        _mint_subject_stub(self.g, entity_name)
         srcs = self._resolve_entity(source_id, by_id=True)
         for n in srcs:
             self.g.query(
@@ -235,17 +377,11 @@ class _EdgeHandlers:
         (issue #1486). Non-session Sources (documents, connectors) are
         untouched.
         """
-        params = {"url": source_ref, "sk": source_kind, "now": _now_iso()}
-        ep_clause = ""
-        if str(source_ref).startswith("session:"):
-            params["ep"] = True
-            ep_clause = ", s.is_episodic=$ep"
-        self.g.query(
-            "MERGE (s:Source {url:$url}) "
-            "ON CREATE SET s.sourceKind=$sk, s.title=$url, "
-            f"    s.contentHash='', s.ingestedAt=$now{ep_clause}",
-            params=params,
-        )
+        # #2489: Source stub creation routed through the SHARED resolver helper
+        # (_mint_source_stub — mirror query text, incl. the session: is_episodic
+        # clause) so live wiring and rebuild replay mint byte-identical stubs
+        # (one create path).
+        _mint_source_stub(self.g, source_ref, source_kind)
         self.g.query(
             f"MATCH (n:{label} {{id:$pid}}), (s:Source {{url:$url}}) "
             "MERGE (n)-[:extractedFrom]->(s)",
