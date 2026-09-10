@@ -857,3 +857,33 @@ def test_corpus_filter(sealed_corpus) -> None:
     assert corpus.filter(split="train") == corpus.filter(split="train")  # deterministic
     ids = [s["id"] for s in corpus.filter(split="train")]
     assert ids == sorted(ids)
+
+
+def test_planted_contradiction_without_authored_turn_is_refused() -> None:
+    """#2759: a planted contradiction with no authored injection turn must
+    REFUSE at load — the old inline `k or 5` fabricated the scenario's truth
+    value, and R1's surfaced-within-1-turn rule + the injection_turn
+    emission both read it as authored data."""
+    from pathlib import Path
+
+    import pytest
+
+    from battery.config.corpus import _coerce_scenario
+    from battery.exceptions import ConfigError
+
+    sc = _valid_contradiction()
+    sc["planted_contradictions"] = [
+        {"claim": "plan A is the right choice",
+         "counter_claim": "plan A is not the right choice"}]  # no k anywhere
+    with pytest.raises(ConfigError, match="no authored injection turn"):
+        _coerce_scenario(sc, Path("."))
+
+    # an authored turn still loads (the shipped corpus authors all 21)
+    sc["planted_contradictions"][0]["k"] = 4
+    loaded = _coerce_scenario(sc, Path("."))
+    assert loaded.contradiction_pairs[0].injection_turn == 4
+
+    # a non-integer / non-positive turn is refused too
+    sc["planted_contradictions"][0]["k"] = 0
+    with pytest.raises(ConfigError, match="must be >= 1"):
+        _coerce_scenario(sc, Path("."))
