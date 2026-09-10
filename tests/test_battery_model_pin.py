@@ -107,7 +107,9 @@ def test_real_preflight_refuses_unpinned_or_fixed_sentinel(tmp_path,
     assert resolved.model_id == "deepseek/deepseek-v4-flash", (
         "the arms.yaml pin must win over the class-level 'fixed' sentinel")
     assert resolved.temperature == 0.0
-    assert resolve_pinned_model(resolved.model_id) is not None  # concrete pin
+    pinned = resolve_pinned_model(resolved.model_id)  # concrete pin resolves
+    assert getattr(pinned, "id", "") == "deepseek/deepseek-v4-flash", (
+        "the resolved factory must be the pinned model, not a default")
     # …and the placeholder is still refused at the same seam (branch i's
     # check asserted at the unit boundary).
     with pytest.raises(ConfigError):
