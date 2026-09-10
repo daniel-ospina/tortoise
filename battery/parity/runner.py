@@ -118,6 +118,12 @@ class ParityRun:
     samples: int
     protocol_hash: str | None = None
     protocol_unknown: bool = False
+    #: The dataset identity the runner ACTUALLY loaded (#2800) — set only
+    #: when a benchmark executed; a not-measured cell has no revision.
+    revision: str | None = None
+    #: The lane that produced the number ("real" | "mock" | None when no
+    #: benchmark ran) — a mock number must never read as comparable.
+    lane: str | None = None
 
     def __post_init__(self) -> None:
         # The invariant is enforced at CONSTRUCTION, not only in run_parity
@@ -174,7 +180,9 @@ def run_parity(benchmark: str, version: str, arm: str,
                *,
                accuracy: float | None = None,
                samples: int = 0,
-               protocol: str | None = None) -> ParityRun:
+               protocol: str | None = None,
+               revision: str | None = None,
+               lane: str | None = None) -> ParityRun:
     """Execute one parity cell. Raises on version/baseline mismatch.
 
     Compares all THREE methodology hashes when the baseline record carries
@@ -209,7 +217,8 @@ def run_parity(benchmark: str, version: str, arm: str,
     return ParityRun(benchmark=benchmark, arm=arm, version=version,
                      accuracy=accuracy, methodology_matched=matched,
                      samples=samples, protocol_hash=protocol,
-                     protocol_unknown=not can_verify_protocol)
+                     protocol_unknown=not can_verify_protocol,
+                     revision=revision, lane=lane)
 
 
 # ── Bespoke supersession-vs-stale probe ────────────────────────────────
