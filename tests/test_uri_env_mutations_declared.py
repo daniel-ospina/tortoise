@@ -72,6 +72,25 @@ file with a fixture-scope raw mutation must show an in-body restore of a
 captured URI var; a top-level raw mutation must show a file-level
 save-restore. This is not dataflow analysis — it catches the pop-without-
 restore CLASS, not every leak.
+
+## Empty-means-unset read guard (#2815) — the non-empty-default class
+
+CI's tier-2 (PR) legs export ``TORTOISE_DB_URI=""`` and the epic #1647 lane
+contract reads that as UNSET. ``os.environ.get("TORTOISE_DB_URI", <default>)``
+breaks that contract — a set-but-empty variable returns "" and the default is
+never reached — so a docker probe built a scheme-less URI, reported "not
+available", the module skipped, and the #1436 skip-guard redded every tier-2
+PR (docs-only included) while the job's provisioned falkordb service was up.
+This file's third guard censuses ``tests/**/*.py`` for those reads:
+get/getenv/setdefault, positional or keyword, literal or non-literal default.
+``None`` and ``""`` are the only defaults that pass;
+``tests/_live_utils.live_uri()`` is the sanctioned read (``or``-based,
+empty-as-unset) and its ``default=`` argument carries a different lane
+default. Not to be confused with ``tests/test_ingest.py::_live_uri``, which
+builds a per-test ``test_*`` graph path from the env host. The census is
+exercised by a synthetic positive control
+(``test_nonempty_default_uri_reads_flags_the_class``) so it cannot go
+silently vacuous.
 """
 from __future__ import annotations
 
@@ -112,6 +131,7 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     "test_ep_mitigation.py": [r'os\.environ\[\s*["\']TORTOISE_DB_URI["\']\]\s*=',
                                r'os\.environ\.pop\(\s*["\']TORTOISE_DB_URI["\']',
                                r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"'],  # #2315: docker-lane EP mitigation tests force the URI (the setenv IS the point — live-EP delta + schema-reject assertions against the real server)
+    "test_eval_ingest_cache.py": [r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI",\s*""'],  # #2815: the set-but-empty tier-2 lane shape the explicit-db_uri handoff must honor (empty == unset)
     "test_extractor_reliability.py": [r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
     "test_hard_reject.py": [r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
     "test_hosted_api.py": [r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"',  # #1686: register/provision journal tests force the embedded lane (the delenv IS the point)
@@ -1100,53 +1120,104 @@ def test_restoration_exemption_boundary():
 
 
 # ── Empty-means-unset read contract (#2815) ─────────────────────────────────
-def _nonempty_default_uri_reads() -> list[str]:
-    """AST census: URI reads carrying a NON-EMPTY literal default.
+_URI_ENV = "TORTOISE_DB_URI"
 
-    Catches `os.environ.get("TORTOISE_DB_URI", "<non-empty>")` and the
-    equivalent `os.getenv("TORTOISE_DB_URI", "<non-empty>")` /
-    `..., default="<non-empty>")` spellings — every shape whose default is
-    reached only when the variable is ABSENT, never when it is
-    set-but-empty.
 
-    `dict.get`'s default is NEVER reached when the variable is set-but-empty —
-    and CI's tier-2 fast leg exports ``TORTOISE_DB_URI=""`` as the URI-less
-    lane signal (epic #1647). A non-empty default read therefore returns ""
-    on that lane: the docker probe builds a scheme-less URI, fails, and the
-    module skips with an availability-family reason the #1436 skip-guard
-    must (and does) red — the #2815 class (blocked every PR, docs-only
-    included). ``tests/_live_utils.live_uri()`` is the honoring read (``or``).
+def _statically_empty_default(node) -> bool:
+    """True only for a default that is provably empty/unset-safe.
+
+    ``None`` (an omitted default, or ``default=None``) and the empty-string
+    literal are the only defaults whose value is meaningless when the variable
+    is set-but-empty. Everything else — a docker-URI literal, a module constant
+    such as ``DOCKER_TEST_URI``, an f-string, a name — is a default the ABSENT
+    case reaches and the SET-BUT-EMPTY case defeats: the #2815 class, so those
+    fail closed.
     """
     import ast
 
+    if node is None:
+        return True
+    return isinstance(node, ast.Constant) and node.value in ("", None)
+
+
+def _nonempty_default_uri_reads(
+        files: list[tuple[str, str]] | None = None) -> list[str]:
+    """AST census: TORTOISE_DB_URI reads carrying a NON-EMPTY default.
+
+    Catches every spelling whose default is reached only when the variable is
+    ABSENT — never when it is set-but-empty (CI's tier-2 legs export
+    ``TORTOISE_DB_URI=""``; the epic #1647 lane contract is empty == unset,
+    the redirect seam being truthy-gated):
+
+      * ``os.environ.get("TORTOISE_DB_URI", <non-empty>)`` and
+        ``os.getenv(...)`` — positional, or ``key=``/``default=`` keyword;
+      * ``os.environ.setdefault("TORTOISE_DB_URI", <non-empty>)`` — identical
+        semantics, identical trap;
+      * any NON-statically-empty default expression, not just a string
+        literal: ``DOCKER_TEST_URI`` (the constant the sibling module
+        exports), an f-string, a concatenation, a name. These are the natural
+        spellings of the same bug, so they red too.
+
+    ``dict.get``'s default is NEVER reached when the variable is set-but-empty:
+    the probe builds a scheme-less URI, fails, and the module skips with an
+    availability-family reason the #1436 skip-guard must (and does) red — the
+    #2815 class (blocked every PR, docs-only included). The honoring read is
+    ``tests/_live_utils.live_uri()``.
+
+    ``files`` is an injectable ``[(relpath, source)]`` list (the positive
+    control uses it); the default scans every ``*.py`` under ``tests/`` —
+    broader than the ``test_*.py`` censuses above, because helper modules
+    carry the same probe.
+    """
+    import ast
+
+    if files is None:
+        files = [
+            (path.relative_to(_TESTS_ROOT.parent).as_posix(),
+             path.read_text(encoding="utf-8", errors="replace"))
+            for path in sorted(_TESTS_ROOT.rglob("*.py"))
+        ]
+
     out: list[str] = []
-    for path in sorted(_TESTS_ROOT.rglob("*.py")):
+    for rel, src in files:
+        # Cheap prefilter: ast.parse over the whole tests/ tree costs ~40s on
+        # every core-lane PR, and only a few percent of files mention the
+        # variable at all.
+        if _URI_ENV not in src:
+            continue
         try:
-            tree = ast.parse(path.read_text(encoding="utf-8", errors="replace"))
+            tree = ast.parse(src)
         except SyntaxError:
             continue
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
                 continue
             func = node.func
-            # os.environ.get / dict.get (Attribute) and os.getenv / a bare
-            # getenv imported from os (Name).
+            # os.environ.get / any dict-like .get (Attribute), os.getenv /
+            # setdefault (Attribute), or a bare imported getenv (Name).
             attr = getattr(func, "attr", None) or getattr(func, "id", None)
-            if attr not in ("get", "getenv"):
+            if attr not in ("get", "getenv", "setdefault"):
                 continue
             key = node.args[0] if node.args else None
+            if key is None:
+                for kw in node.keywords:
+                    if kw.arg == "key":
+                        key = kw.value
+                        break
             if not (isinstance(key, ast.Constant)
-                    and key.value == "TORTOISE_DB_URI"):
+                    and key.value == _URI_ENV):
                 continue
             default = node.args[1] if len(node.args) > 1 else None
             if default is None:
                 for kw in node.keywords:
                     if kw.arg == "default":
                         default = kw.value
-            if (isinstance(default, ast.Constant)
-                    and isinstance(default.value, str) and default.value):
-                rel = path.relative_to(_TESTS_ROOT.parent).as_posix()
-                out.append(f"{rel}:{node.lineno}")
+                        break
+            if default is None and attr == "setdefault":
+                continue  # key-only setdefault carries no default
+            if _statically_empty_default(default):
+                continue
+            out.append(f"{rel}:{node.lineno}")
     return out
 
 
@@ -1158,21 +1229,60 @@ def test_no_nonempty_default_tortoise_db_uri_reads():
     is truthy-gated), so a docker probe reports "not available" while the
     job's provisioned falkordb service is up — the guard then reds every
     tier-2 PR, and the tests' coverage silently vanishes from the PR lane.
-    Covers the get/getenv and positional/keyword-default spellings. Use
-    tests._live_utils.live_uri().
+    Covers get/getenv/setdefault, positional/keyword spellings, and any
+    non-literal default expression. Use tests._live_utils.live_uri() — its
+    ``default=`` argument is the escape hatch for a different lane default.
     """
+    # A wrong/empty scan set would make the assertion below vacuous.
+    assert len(list(_TESTS_ROOT.rglob("*.py"))) > 100, (
+        "census scan set is empty — the census would pass vacuously")
     offenders = _nonempty_default_uri_reads()
     assert not offenders, (
-        'these test files read os.environ.get("TORTOISE_DB_URI", '
-        '<non-empty default>) — empty-means-unset is the lane contract '
-        '(#1647/#2815); use tests._live_utils.live_uri() instead:\n  '
+        'these test files read TORTOISE_DB_URI with a non-empty default '
+        '(possibly a non-literal one) — empty-means-unset is the lane '
+        'contract (#1647/#2815); use tests._live_utils.live_uri() (its '
+        'default= argument carries a different lane default):\n  '
         + "\n  ".join(offenders))
+
+
+def test_nonempty_default_uri_reads_flags_the_class():
+    """Positive control for the #2815 census — the detector is not vacuous.
+
+    A regression that narrows the matcher (dropped getenv/setdefault, only
+    positional defaults, literal-only defaults) would keep the repo census
+    green while the #2815 class walked back in — the same failure mode
+    ``test_declaration_regex_census_surface`` pins for the sibling guard.
+    """
+    src = "\n".join([
+        "import os",
+        "import tests._live_utils as lu",
+        'a = os.environ.get("TORTOISE_DB_URI", "docker://x")',
+        'b = os.getenv("TORTOISE_DB_URI", "docker://x")',
+        'c = os.environ.get("TORTOISE_DB_URI", default="docker://x")',
+        'd = os.environ.get(key="TORTOISE_DB_URI", default="docker://x")',
+        'e = os.environ.get("TORTOISE_DB_URI", lu.DOCKER_TEST_URI)',
+        'f = os.environ.get("TORTOISE_DB_URI", f"docker://{host}/g")',
+        'g = os.environ.setdefault("TORTOISE_DB_URI", "docker://x")',
+        '# the sanctioned shapes stay green:',
+        'h = os.environ.get("TORTOISE_DB_URI")',
+        'i = os.environ.get("TORTOISE_DB_URI", "")',
+        'j = os.environ.get("TORTOISE_DB_URI", None)',
+        'k = lu.live_uri()',
+        'l = os.environ.get("OTHER_VAR", "docker://x")',
+    ])
+    flagged = _nonempty_default_uri_reads([("tests/planted.py", src)])
+    assert [hit.rsplit(":", 1)[-1] for hit in flagged] == [
+        "3", "4", "5", "6", "7", "8", "9"], (
+        "the #2815 census must flag every non-empty-default spelling "
+        "(get/getenv/setdefault, positional/keyword, literal and "
+        f"non-literal) and nothing else — got {flagged}")
 
 
 def test_live_uri_treats_empty_as_unset(monkeypatch):
     """#2815: live_uri() resolves the docker-lane default on BOTH the unset
-    and the set-but-empty (tier-2 CI) shapes, honors a real value, and strips
-    the trailing slash callers append ``_<suffix>`` to."""
+    and the set-but-empty (tier-2 CI) shapes, a REAL value WINS over both the
+    default and an explicit ``default=`` argument, and the trailing slash
+    callers append ``_<suffix>`` to is stripped."""
     from tests._live_utils import DOCKER_TEST_URI, live_uri
 
     monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
@@ -1180,10 +1290,18 @@ def test_live_uri_treats_empty_as_unset(monkeypatch):
     monkeypatch.setenv("TORTOISE_DB_URI", "")
     assert live_uri() == DOCKER_TEST_URI, (
         'the tier-2 lane exports TORTOISE_DB_URI="" — it must read as unset')
+    # A value DISTINCT from the default must win: every other assertion here
+    # also passes for a helper that ignored the environment entirely.
+    monkeypatch.setenv("TORTOISE_DB_URI",
+                       "docker://:pw@otherhost:1234/other_graph/")
+    assert live_uri() == "docker://:pw@otherhost:1234/other_graph"
+    assert live_uri("docker://:pw@host:1/g") == (
+        "docker://:pw@otherhost:1234/other_graph"), (
+        "a real env value must beat an explicit default")
+    # The explicit default is used when the variable is unset — and stripped.
+    monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+    assert live_uri("docker://:pw@host:1/g/") == "docker://:pw@host:1/g"
+    # A value that strips to "" is unusable: fall through, never hand callers
+    # the scheme-less "_<suffix>" shape (#2815).
+    monkeypatch.setenv("TORTOISE_DB_URI", "/")
     assert live_uri("docker://:pw@host:1/g") == "docker://:pw@host:1/g"
-    monkeypatch.setenv(
-        "TORTOISE_DB_URI",
-        "docker://:falkordb@localhost:6379/tortoise_test_matrix/")
-    assert live_uri() == DOCKER_TEST_URI
-    # the per-test graph suffix contract: f"{live_uri()}_{suffix}"
-    assert not live_uri().endswith("/")

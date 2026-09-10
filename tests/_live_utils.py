@@ -34,9 +34,17 @@ def live_uri(default: str = DOCKER_TEST_URI) -> str:
     while the job's falkordb service was up. ``or`` is the empty-as-unset read.
 
     Returns the value with any trailing ``"/"`` stripped: callers append
-    ``"_<suffix>"`` to build a per-test graph URI.
+    ``"_<suffix>"`` to build a per-test graph URI. A value that strips to the
+    empty string (e.g. ``"/"``) is not a usable URI — it falls through to
+    ``default`` rather than handing callers the scheme-less ``"_<suffix>"``
+    shape this helper exists to prevent.
+
+    Not to be confused with ``tests/test_ingest.py::_live_uri``, a per-test
+    ``test_*`` graph-path builder: always append a per-test suffix before
+    using this value as a graph name.
     """
-    return (os.environ.get("TORTOISE_DB_URI") or default).rstrip("/")
+    raw = (os.environ.get("TORTOISE_DB_URI") or default).rstrip("/")
+    return raw or default.rstrip("/")
 
 
 def _skip_unless_live_uri():

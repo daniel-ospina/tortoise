@@ -218,13 +218,19 @@ def _make_question_sdk(*, db_uri: str | None, namespace: str | None,
     construction). Returns (sdk, cleanup).
 
     The ``--db`` cleanup restores ``TORTOISE_DB_URI`` to its pre-call value:
-    the setdefault below is how the URI reaches the SDK, but mutating the
+    the assignment below is how the URI reaches the SDK, but mutating the
     process env permanently leaks the URI into every later SDK/validation in
     the same process (issue #1349 test isolation).
     """
     if db_uri:
         prev = os.environ.get("TORTOISE_DB_URI")
-        os.environ.setdefault("TORTOISE_DB_URI", db_uri)
+        # #2815: empty means UNSET (epic #1647 lane contract). setdefault is a
+        # no-op for the set-but-empty shape CI exports on the tier-2 leg
+        # (TORTOISE_DB_URI=""), so the caller's explicit db_uri was silently
+        # discarded and TortoiseSDK fell back to the shared canonical embedded
+        # store instead of the server the caller asked for.
+        if not os.environ.get("TORTOISE_DB_URI"):
+            os.environ["TORTOISE_DB_URI"] = db_uri
 
         def _cleanup():
             if prev is None:

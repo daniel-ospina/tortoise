@@ -541,7 +541,10 @@ def run_eval(args) -> dict:
         db_arg = str(Path(__file__).resolve().parent / "reports" / "eval.db")
     is_uri = "://" in db_arg
     if is_uri:
-        os.environ.setdefault("TORTOISE_DB_URI", db_arg)
+        # #2815: empty means UNSET — setdefault is a no-op for the
+        # set-but-empty lane env, silently discarding --db.
+        if not os.environ.get("TORTOISE_DB_URI"):
+            os.environ["TORTOISE_DB_URI"] = db_arg
         sdk = TortoiseSDK()
     else:
         sdk = TortoiseSDK(db_arg)
