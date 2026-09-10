@@ -879,3 +879,21 @@ def _packs_env_isolation(monkeypatch):
     domain_loader._registry = None
     domain_loader._env_fallback_key = None
     domain_loader._PACKS_DIR = None
+
+
+@pytest.fixture
+def force_sparse_tfidf(monkeypatch):
+    """#2573/#2772: pin the sparse TF-IDF fallback (no embedder) for the test.
+
+    CI may run with the bge embedder cache present or absent (python-ci.yml
+    treats a failed HF download as a WARN and lets the suite run
+    TF-IDF-degraded), so any test pinning exact retrieval pool sizes must
+    pin the embedder state or it is environment-dependent. Request this
+    fixture in such a test; assertions are unchanged (this is the
+    ``tests/eval/retrieval/test_oracle.py`` ``_force_sparse_tfidf`` pattern
+    promoted to a shared named home — older inline copies predate it).
+    """
+    from tortoise.embeddings import EmbeddingModel
+    monkeypatch.setattr(EmbeddingModel, "get", classmethod(
+        lambda cls, load_timeout=None: None))
+    return None

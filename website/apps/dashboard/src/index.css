@@ -451,7 +451,10 @@ button:focus-visible, select:focus-visible, a:focus-visible, input:focus-visible
 .graph-delete-modal .new-key-actions button { flex: 1; }
 .graph-delete-modal button.danger { background: var(--red, #dc2626); border-color: var(--red, #dc2626); color: #fff; }
 .graph-delete-modal button.danger:disabled { opacity: 0.5; cursor: not-allowed; }
-.delete-confirm-input {
+/* #2778: scoped to .modal so this rule (0,2,0) out-specifies the shared
+   `.modal input` rule (0,1,1) added below — the destructive red border must
+   survive the dialog-field default. */
+.modal .delete-confirm-input {
   width: 100%; box-sizing: border-box; padding: 6px 10px; font-size: 14px;
   background: var(--surface, #0d1a2d); color: var(--text, #e2e8f0);
   border: 1px solid var(--red, #f87171); border-radius: 6px;
@@ -737,6 +740,29 @@ input::placeholder, textarea::placeholder {
 }
 .modal h2 { margin: 0 0 0.4rem; font-size: 16px; }
 .modal .claim-actions { justify-content: flex-start; }
+/* #2778 (a11y): dialog text fields were the one unstyled input surface — the
+   global `input, textarea, select` rule above sets no background, so the
+   create-organization dialog's bare <input> fell back to the UA white while
+   inheriting the dark theme's light text (measured 1.48:1; WCAG AA needs
+   4.5:1). Theme every dialog field by default so the next modal cannot
+   repeat it. The border is deliberately stronger than `--border`
+   (rgba(255,255,255,0.12) is only 1.41:1 over the identical --surface panel):
+   with the field background the same as the panel, the border is the only cue
+   that identifies the control, so it must clear the WCAG 1.4.11 non-text 3:1
+   floor — 0.36 measures ≈3.3:1. This rule has the same specificity (0,1,1) as
+   `.inline-form input` but comes later, so dialog inline-form fields (key
+   create / reauth) deliberately inherit the compliant border while keeping
+   their own `font-family: var(--mono)` (not declared here).
+   `.modal .delete-confirm-input` (0,2,0) out-specifies this one and keeps its
+   destructive red border. */
+.modal input, .modal textarea, .modal select {
+  background: var(--surface, #0d1a2d);
+  border: 1px solid rgba(255, 255, 255, 0.36);
+  color: var(--text, #cbd5e1);
+  border-radius: 8px;
+  padding: 8px 12px;
+  font-size: 14px;
+}
 
 /* #1003: new-key modal — wider than the standard modal because it holds the key-value <code> block */
 .modal.key-create-modal { max-width: 540px; }

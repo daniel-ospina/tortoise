@@ -22,8 +22,12 @@ carries zero per-question-type guidance. These tests lock:
      is not marker-scorable, so fakes emit marker-compatible 'does not
      mention' / 'does not contain' formulations).
 
-Fully offline: embedded FalkorDBLite, mock judge, fake recording models, no
-API keys, no dataset download.
+Offline except the live-embedder pipeline (ingest embeds points, retrieval
+encodes the query): embedded FalkorDBLite, mock judge, fake
+recording models, no API keys, no dataset download. The retrieval tests load
+the bge embedder whenever its HF cache is present and the embeddings extra is
+installed; the mini-pipeline pool-size pin requests force_sparse_tfidf
+(tests/conftest.py) to opt out.
 """
 from __future__ import annotations
 
@@ -390,7 +394,7 @@ def test_preference_question_answered_from_option_end_to_end(tmp_path):
 
 # ── 4. Pipeline guard: mini fixture stays green with the plumbing ─────────
 
-def test_mini_pipeline_still_green_with_question_type(tmp_path):
+def test_mini_pipeline_still_green_with_question_type(tmp_path, force_sparse_tfidf):
     """The 5-question committed mini fixture still passes end-to-end with
     the question_type plumbing in place (no regression on other types).
 
@@ -405,7 +409,17 @@ def test_mini_pipeline_still_green_with_question_type(tmp_path):
     haystack date (the context says "last week") — no literal containment.
     An exact pin makes any drift (retrieval change surfacing the missing
     MSR turn, fixture edits) loud instead of silently passing under the
-    old >= 0.4 bar; the real-model eval covers the reasoning categories."""
+    old >= 0.4 bar; the real-model eval covers the reasoning categories.
+
+    #2772: the 0.4 pin is calibrated to the sparse TF-IDF baseline (the
+    2026-08 CI window in which the test was authored). With the bge
+    embedder cache restored (#2573) the vector leg surfaces the missing MSR
+    turn and the overall climbs to 0.6 — an embedder-state delta, not a
+    regression. Request ``force_sparse_tfidf`` (tests/conftest.py, the
+    ``test_oracle.py`` ``_force_sparse_tfidf`` pattern) so this pin is
+    deterministic across embedder states. NOTE: the pin covers THIS test
+    only — the rest of the module still loads the live embedder whenever
+    the cache is present."""
     instances = json.loads(MINI.read_text(encoding="utf-8"))
     outcomes, report = run_evaluation(
         instances, reader=MockReader(), judge=MockJudge(),
