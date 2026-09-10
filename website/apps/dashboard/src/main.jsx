@@ -1046,15 +1046,21 @@ function claimIntentInFlight() {
   }, [])
 
   // Auto-open key modal when reaching connect step without a key
-  // Note: isOwnerAdmin and capNotice are declared later in this component —
-  // the effect body reads them at render time (closure), but they are
-  // intentionally excluded from the deps array to avoid TDZ (#2426 pattern).
+  //
+  // ⛔ TDZ HAZARD (#2426 → #2621 → #2709): the effect body below reads
+  // `isOwnerAdmin`, `capNotice` AND `harnessKey`, all of which are `const`s
+  // declared LATER in this component. A deps array is evaluated eagerly
+  // during render, so listing any of them here throws
+  // `ReferenceError: Cannot access 'X' before initialization` on EVERY
+  // render — a whole-app white screen (#2709). The closure reads them fine
+  // at render time, so all three must stay OUT of the deps array.
+  // If you add a dep here, prove its declaration line is ABOVE this effect.
   React.useEffect(() => {
     if (wizardStep === 2 && isOwnerAdmin && !harnessKey && !capNotice) {
       setKeyModalOpen(true)
       setKeyModalStage('form')
     }
-  }, [wizardStep, wizardHarness, harnessKey])
+  }, [wizardStep, wizardHarness])
   const [wizardCopied, setWizardCopied] = React.useState('')
   // #1701 R2: a failed clipboard write must not strand the ChatGPT flow — the
   // error prescribes a manual ⌘/Ctrl-C copy, so the manual-Continue affordance
