@@ -38,6 +38,7 @@ from datetime import UTC, datetime
 
 import pytest
 
+from tests._live_utils import live_uri
 from tests.longmem_eval.test_vector_arm import _mini
 from tools.longmem_eval import run as runner
 from tools.longmem_eval.judge import MockJudge
@@ -48,6 +49,9 @@ from tortoise.sdk import TortoiseSDK
 # ── docker-lane only: reads TORTOISE_DB_URI at import and constructs bare
 # TortoiseSDK() (env-driven) in its helpers, so on a URI-less tier-2 leg it
 # would exercise the embedded backend and mis-assert the cache lifecycle.
+# The gate reads the RAW env, not `live_uri()`: `live_uri()` falls back to the
+# docker default when the variable is unset OR empty (the #2815 lane contract),
+# so it can never answer "is a live lane configured?".
 if not _is_db_uri(os.environ.get("TORTOISE_DB_URI")):
     pytest.skip(
         "requires TORTOISE_DB_URI (docker-lane eval-ingest-cache; "
@@ -55,12 +59,11 @@ if not _is_db_uri(os.environ.get("TORTOISE_DB_URI")):
         allow_module_level=True,
     )
 
-DB_URI = os.environ.get(
-    "TORTOISE_DB_URI",
-    # CI's falkordb service requires the password (python-ci.yml
-    # `--requirepass falkordb`); local passwordless instances can override.
-    "docker://:falkordb@localhost:6379/tortoise_test_matrix",
-)
+# live_uri() applies the lane contract to the resolved value: CI's tier-2 leg
+# exports TORTOISE_DB_URI="" (empty means unset — #2815), and the docker-lane
+# default carries the password python-ci.yml's falkordb service requires
+# (`--requirepass falkordb`); local passwordless instances can override.
+DB_URI = live_uri()
 
 
 def _falkordb_up() -> bool:
