@@ -168,9 +168,76 @@ def longmemeval_executor(*, mock: bool = False, limit: int | None = None,
                 "lane": lane, "output": str(out_path)})
 
 
+class _MockReader:
+    """Deterministic stand-in for the reader model (hermetic lanes only).
+
+    It answers nothing useful ON PURPOSE: its job is to exercise the path
+    (pool → prompt → answer → official metric → cell) in CI with no keys and
+    no spend. A mock score is labelled ``lane="mock"`` and can never read as a
+    comparable measurement — that is the whole reason the lane is recorded.
+    """
+
+    last_prompt_tokens = 0
+    last_completion_tokens = 0
+
+    def call(self, *, prompt: str) -> str:
+        return "Answer: unknown"
+
+
+def memoryagentbench_executor(*, mock: bool = False, limit: int | None = None,
+                              out_dir: Path | None = None,
+                              config: str = "factconsolidation_sh_6k"
+                              ) -> ExecutedCell:
+    """Run the MemoryAgentBench Conflict Resolution family (#2800).
+
+    The lane is the benchmark's published **long-context** setup: the knowledge
+    pool is injected once, each question is asked with the benchmark's own
+    conflict-rule template, and the answers are scored by the benchmark's own
+    ``substring_exact_match`` metric (no LLM judge).
+
+    ``mock=True`` uses a deterministic stand-in reader; the real lane uses the
+    pinned model caller (``battery.runner.model_calls``), which fails closed
+    without ``OPENROUTER_API_KEY`` and meters every call's tokens. Every
+    refusal below becomes ``ExecutorUnavailable`` — the parity leg then records
+    an explicitly not-measured cell rather than a number.
+    """
+    from battery.parity.mabench import (
+        MabenchError,
+        load_cr,
+    )
+    from battery.parity.mabench_run import run_cr_lane
+
+    try:
+        cfg = load_cr(config)
+    except MabenchError as e:
+        raise ExecutorUnavailable(
+            f"memoryagentbench: {type(e).__name__}: {e}") from e
+    if mock:
+        caller, lane = _MockReader(), "mock"
+    else:
+        try:
+            from battery.runner.model_calls import RealModelCaller
+            caller = RealModelCaller()
+        except Exception as e:
+            raise ExecutorUnavailable(
+                f"memoryagentbench: real reader unavailable ({e})") from e
+        lane = "real"
+    try:
+        cell, _run = run_cr_lane(cfg.items, caller, lane=lane, config=config,
+                                 context=cfg.context, limit=limit)
+    except Exception as e:
+        # A reader that fails mid-run must not abort the whole parity leg
+        # (other benchmarks still have a cell to record) — it becomes an
+        # explicit not-measured cell carrying the reason.
+        raise ExecutorUnavailable(
+            f"memoryagentbench: run failed ({type(e).__name__}: {e})") from e
+    return cell
+
+
 #: Registered execution seams, keyed by the pinned benchmark id. A benchmark
 #: absent here is a NOT-MEASURED cell (no runner wired) — the parity leg says
 #: so explicitly instead of implying a comparison.
 EXECUTORS: dict[str, Executor] = {
     "longmemeval": longmemeval_executor,
+    "memoryagentbench": memoryagentbench_executor,
 }

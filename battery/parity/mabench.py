@@ -164,6 +164,15 @@ def _config_of(qa_pair_id: str) -> str:
     return re.sub(r"_no\d+$", "", qa_pair_id)
 
 
+@dataclass(frozen=True)
+class CrConfig:
+    """One CR configuration: the knowledge pool plus its QA pairs."""
+
+    config: str
+    context: str
+    items: tuple[CrItem, ...]
+
+
 def load_cr_items(config: str, *, path: Path | None = None
                   ) -> tuple[CrItem, ...]:
     """Load one pinned CR configuration (e.g. ``factconsolidation_sh_6k``).
@@ -217,6 +226,33 @@ def load_cr_items(config: str, *, path: Path | None = None
             f"CR config {config!r} matched no rows in {src} — the pinned file "
             f"changed shape; refusing to report an empty measurement")
     return tuple(items)
+
+
+def load_cr(config: str, *, path: Path | None = None) -> CrConfig:
+    """Load a CR configuration WITH its knowledge pool (the run loop needs
+    both; scoring needs only the items)."""
+    items = load_cr_items(config, path=path)
+    src = path or fetch_cr_parquet()
+    verify_digest(src)
+    try:
+        import pyarrow.parquet as pq
+    except Exception as e:  # pragma: no cover - import guard, not a metric
+        raise PyarrowUnavailable(
+            f"MemoryAgentBench CR needs the parquet reader: install the "
+            f"parity extra (uv sync --extra parity). ({e})") from e
+    table = pq.read_table(src)
+    context = ""
+    for i in range(table.num_rows):
+        meta = table.column("metadata")[i].as_py() or {}
+        qa_ids = list(meta.get("qa_pair_ids") or [])
+        if qa_ids and _config_of(str(qa_ids[0])) == config:
+            context = str(table.column("context")[i].as_py() or "")
+            break
+    if not context:
+        raise MabenchError(
+            f"CR config {config!r}: the knowledge pool (context) is empty — "
+            f"refusing to run a reader with nothing to read")
+    return CrConfig(config=config, context=context, items=items)
 
 
 # ── the benchmark's OWN metric, ported verbatim ───────────────────────────
