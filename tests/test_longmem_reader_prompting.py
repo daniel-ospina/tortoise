@@ -22,10 +22,12 @@ carries zero per-question-type guidance. These tests lock:
      is not marker-scorable, so fakes emit marker-compatible 'does not
      mention' / 'does not contain' formulations).
 
-Offline except the retrieval path: embedded FalkorDBLite, mock judge, fake
+Offline except the live-embedder pipeline (ingest embeds points, retrieval
+encodes the query): embedded FalkorDBLite, mock judge, fake
 recording models, no API keys, no dataset download. The retrieval tests load
-the bge embedder whenever its HF cache is present; the mini-pipeline
-pool-size pin requests force_sparse_tfidf (tests/conftest.py) to opt out.
+the bge embedder whenever its HF cache is present and the embeddings extra is
+installed; the mini-pipeline pool-size pin requests force_sparse_tfidf
+(tests/conftest.py) to opt out.
 """
 from __future__ import annotations
 
