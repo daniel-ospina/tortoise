@@ -11,7 +11,7 @@ aboutSubjects: tortoise-write-path-integrity, tortoise-declared-vs-stored
 
 # WS-A — One write contract for the five doors
 
-**Parent:** #2820 (WS-A write-path integrity) · **Status:** design v4, awaiting owner approval
+**Parent:** #2820 (WS-A write-path integrity) · **Status:** design v5, awaiting owner approval
 **Design-side of:** #2795, #2813, #2814 · **Related:** #2788, #2742, #2825, #2873
 
 > #2820 gate: *"Workstreams A/B/C all require owner approval of a written design before implementation."*
@@ -38,6 +38,61 @@ aboutSubjects: tortoise-write-path-integrity, tortoise-declared-vs-stored
 > (`search_keys` is stored as a flat space-joined string; `tags` becomes `:Tag` + `TAGGED` edges) and
 > is corrected to "scalar + declared `flatten=list` only". EP-owned set completed (`baseline_source`,
 > `inherited_at`, `outdated`), and the second `DETACH DELETE n` site (`:1157`) noted.
+>
+> **v5** incorporated a SOTA research pass + fresh-context verifier on the `content_hash` decision
+> (verdict: CONFIRMED-WITH-CAVEATS). Corrections: the design now **cites the repo's own §11 v3.2 cache
+> doctrine** (`ONTOLOGY.md:850-854`) instead of inventing a stricter "derived ⇒ never persist" rule;
+> **`pure` becomes a NECESSARY-but-not-sufficient signal** (`content_hash` pure, `embedding` not — see
+> **OD9**); the OPERATIVE rule is the per-prop **`replay_source`** (`journal`|`derived`|`none`) in D1; the
+> **hash-function immutability precondition** is stated (ids are derived from the hash, so a hash change
+> makes `rebuild_all` a migration, not a repair); **v1–v4's "a missing hash is cheap" rationale is
+> withdrawn as false** (`_content_exists` has no null-hash fallback → silent duplicates, filed
+> separately); **recompute-and-compare drift canary** added as **OD10**; and D2 is explicitly framed as
+> the **class-level** fix (give `Point` the **open-set + recompute deny-list** pattern — the deny-list
+> itself is **introduced by this design**, D4's `NON_PERSISTABLE_PROPS`; no other layer has one today).
+>
+> **v5 (revision b)** incorporated a SECOND fresh-context cycle (cycle 6, 2 new P1s + 4 new P2s + 5 P3s,
+> all self-inflicted by the v5 edit pass). Corrections: the **duplicated EP-owned block was removed**
+> (cycle 5's fix had been inserted *above* the old block, leaving duplicate dict keys whose last-wins
+> semantics silently restored the uncorrected `replayable=True`); **`replay_source` is now set on EVERY
+> prop** — the six payload props were unset, which would have put the four fields WS-A exists to protect
+> *outside* D7's durability union; `none` added to the declared enum and `tags` given an explicit entry;
+> the v5 changelog no longer claims `pure` is "the decision rule"; OD9's justification no longer cites a
+> deleted rule; D7 gained the golden-vector, `CONTENT_HASH_VERSION`, `replay_source`-completeness and
+> non-NULL-derived-hash rows that D1c #2 had referred to but never placed; two dangling sentence
+> fragments removed; `Document` added to the `_persist_extra_props` layer list; and two line citations
+> corrected (`updatedAt` `:196`→`:194`, `embedding` `:178-184`→`:176-179`).
+>
+> **Lesson recorded:** cycles 1–4 reviewed *design decisions*; cycles 5–6 reviewed *text*. The v5 pass
+> introduced more defects than it fixed, because an edit that adds a field to a declaration must also
+> update every consumer of that declaration. Treat D1's block as code, not prose.
+>
+> **v5 (revision c)** incorporated a THIRD cycle (cycle 7, 2 new P2s + 6 new P3s). Corrections:
+> **D2's prescribed `tags` declaration gained `replay_source="none"`** — it contradicted D1 and would
+> have red-lined D7's own completeness gate; **the `none` bucket's justification was corrected** (it
+> claimed "no journal event exists", which is true for `lastDreamedAt` but **false for `tags`** — the
+> `PointAdded` snapshot carries `tags`, the replay writer just ignores it); that discovery is a
+> **previously-unknown silent data loss**, filed as **#2897** (every `rebuild_all` drops all `tags` + all
+> `TAGGED` edges); D1's block **now parses as valid Python** (a bare `...` was inside the dict literal
+> while the same document says "treat D1's block as code") and now **actually DECLARES all twelve
+> OD6(b) EP-owned props** (cycle 7 listed them in prose only, leaving OD6(b)'s `payload_writable=False`
+> invariant with nothing to bind to); `derive="_now_iso"` (a string among callables) corrected to `ids.now_iso`; `speaker`
+> un-mislabeled as payload-sourced; the id-minting enumeration completed (`:19405`, `:19414`, `:19424`);
+> the version history's claim that other layers already have the deny-list was corrected at its source;
+> a dangling `D1c #5`
+> reference removed; and D7 gained a row asserting the `none` bucket is **reported, not silent**.
+>
+> **v5 (revision d)** — a FOURTH cycle (cycle 8, 2 new P2s + 2 new P3s). Corrections: **the twelve
+> OD6(b) EP-owned props are now declared in `POINT_PROPS`, not merely listed in a comment** — without
+> this, D2's open-set passthrough would persist a payload-supplied `c_cal`/`posterior_alpha` and
+> **overwrite EP state**, the exact failure OD6(b) exists to prevent; and that in turn widens #2884's
+> scope from "`posterior_*` + `lastDreamedAt`" to **every** `replay_source="none"` prop. Also: D7's
+> declaration-parity row no longer asserts `§4.1 ≡ contract.py` (the surfaces genuinely differ — §4.1
+> has 18 Point fields and lacks `tags`/`content_hash`) and is restated as a **diff**, not an equality;
+> the key count corrected 12→**22**; the id-minting enumeration gains `sdk.py:1156-1175`
+> (`_session_capture_event_id`, which uses `hashlib.sha256` **directly** and so falls OUTSIDE the
+> `ids.content_hash` golden-vector guard — noted as a coverage gap in that guard); and the revision-c
+> paragraph's two inaccurate claims were corrected.
 
 ---
 
@@ -55,7 +110,7 @@ reaches the graph, with no error raised.
 ### 2.1 The five doors
 
 | # | Door | Entry point | Acceptance rule | `quote`/`when`/`search_keys`/`source_turn_id`? |
-|---|------|-------------|-----------------|---|---|
+|---|------|-------------|-----------------|---|
 | 1 | Commit endpoint | `hosted_api._execute_commit_writes` (`:7936`) | Layer-1 validate; unknown field → **422** | **yes** — enumerated at `:8100-8135` |
 | 2 | v2 product capture | `sdk._extract_session_v2` (`:3809-3813`) | none | **no** — silent drop |
 | 3 | M2 / EventAPI | `extractor.py` / `mining.py` → `projection._upsert_point_props` | fixed SET list | **no** — silent drop, even live |
@@ -128,6 +183,18 @@ This is the **write-path half of the inversion already done for retrieval**
 - **Zep / Graphiti** resolves contradictions by invalidating the **edge** (`valid_at`/`invalid_at`), and
   frames it as *"temporal edge invalidation rather than LLM-driven judgment"* — deliberately not a stored
   verdict. Reinforces D4.
+- **PostgreSQL generated columns** — the primary reference for D1c. Postgres **cannot index a *virtual*
+  (computed-on-read) generated column**; the error directs you to a **STORED** generated column or an
+  expression index. The feature was designed so that a derived value *which needs an index* is
+  **materialized** — i.e. persisted, and recomputed on every INSERT/UPDATE. **The analogy supports one
+  narrow claim and no more:** a cached derived value may be *materialized when it is needed for an index*.
+  Postgres materializes only values **declared** STORED, recomputes them on *row write* only (there is no
+  restore/replay notion), and still **reads** the stored value rather than recomputing on read — so this is
+  **not** "exactly D1c's shape" and does **not** establish a general recompute-on-replay doctrine. The
+  "cannot write a generated column directly" ↔ D2 deny-list parallel is an **analogy**, not an equivalence.
+  What the analogy *does* carry over is the requirement that actually matters: **determinism of the
+  derivation**, not non-storage (Kleppmann, *DDIA* ch. 10-11: derived data systems materialize their
+  output, and the guarantee is that the derivation is reproducible).
 
 ---
 
@@ -140,29 +207,81 @@ Event, Source), one declaration carrying an explicit `source`:
 
 ```python
 POINT_PROPS: dict[str, Prop] = {
-    # sourced from the payload
-    "content":        Prop(str, required=True, source="payload", replayable=True),
-    "quote":          Prop(str, max_len=200,   source="payload", replayable=True),
-    "when":           Prop(str, max_len=40,    source="payload", replayable=True),
-    "search_keys":    Prop(str, flatten=list,  source="payload", replayable=True),
-    "speaker":        Prop(str,                source="capture", replayable=True),
-    "source_turn_id": Prop(str | int,          source="payload", replayable=True),  # type pending OD1
-    # derived — MUST be recomputed by the replay writer, never copied from the payload.
-    # derive= MUST point at CYCLE-FREE helpers: tortoise.sdk imports tortoise.projection at
-    # module top (sdk.py:34), so referencing the sdk-private _content_hash from contract.py
-    # is an ImportError. Use tortoise/ids.py::content_hash (stdlib-only) and
+    # `replay_source` is the OPERATIVE rule (D1c #1). Enum: journal | derived | none.
+    #   journal — `replayable` because the journaled node snapshot restores it
+    #   derived — `replayable` because the replay writer RECOMPUTES it (never copied)
+    #   none    — NOT restored by replay → replayable=False. TWO distinct reasons live here,
+    #             and they are NOT the same thing (v5 review cycle 7):
+    #               lastDreamedAt — UNJOURNALED: no event carries it (#2884)
+    #               tags          — JOURNALED but IGNORED: the PointAdded snapshot DOES carry it
+    #                               (only embedding + content_hash are stripped, sdk.py:2319-2325)
+    #                               but the replay writer never writes it → #2897. Do not
+    #                               describe this bucket as "unjournaled"; tags disproves it.
+    # EVERY entry MUST set it: D7's durability test is defined as the union of journal +
+    # derived, so an unset field silently falls OUTSIDE the very test it needs to pass.
+    #
+    # All journal-restored (the PointAdded snapshot carries them), except `tags` below:
+    # sourced from the payload / capture
+    "content":        Prop(str, required=True, source="payload", replay_source="journal", replayable=True),
+    "quote":          Prop(str, max_len=200,   source="payload", replay_source="journal", replayable=True),
+    "when":           Prop(str, max_len=40,    source="payload", replay_source="journal", replayable=True),
+    "search_keys":    Prop(str, flatten=list,  source="payload", replay_source="journal", replayable=True),
+    "speaker":        Prop(str,                source="capture", replay_source="journal", replayable=True),
+    "source_turn_id": Prop(str | int,          source="payload", replay_source="journal", replayable=True),  # type pending OD1
+    # The one explicit EXEMPTION — declared so the omission is visible, not accidental (D2):
+    "tags":           Prop(list, source="capture", replay_source="none", replayable=False,
+                           owned_by="_sync_tags"),  # raw list + :Tag/TAGGED edges; edge replay out of scope
+    # derived — the replay writer RECOMPUTES these; it never copies them from the payload.
+    # Per ONTOLOGY.md §11 v3.2 (#398) these are CACHES of a derivation, not payload:
+    #   "the derivation is the truth, the cache is a performance artifact."
+    # (D1c states which §11 clauses transfer and which do not — §11's own TITLE is
+    #  "Reputation (derived, not stored)", so the citation is scoped deliberately.)
+    # Excluding them from the preserve-unknown rule is NOT the fix — the fix is the
+    # ADDITIVE recompute below. Exclusion alone leaves every rebuilt node content_hash=NULL.
+    # `replay_source` DISAMBIGUATES the overloaded `replayable` (v5 review P1): `replayable`
+    # means only "survives rebuild_all"; `_emit_event` STRIPS content_hash from the journal
+    # (sdk.py:2319-2325) and the #548 snapshot strips it (:1219-1221), so it is NOT
+    # journal-restored — while OD6(a) defines `replayable` as journal-restored. Under that
+    # reading `content_hash: replayable=True` is false. Keep BOTH fields; do not collapse.
+    # `pure` is NECESSARY, NOT SUFFICIENT (D1c #1) — it records why recomputing is
+    # reproducible, it does not decide. `derive=` MUST point at CYCLE-FREE helpers:
+    # tortoise.sdk imports tortoise.projection at module top (sdk.py:34), so referencing the
+    # sdk-private _content_hash from contract.py is an ImportError. Use
+    # tortoise/ids.py::content_hash (stdlib-only) and
     # tortoise/embeddings.py::compute_embedding (no tortoise.* imports).
-    "content_hash":   Prop(str, source="derived", derive=ids.content_hash, replayable=True),
-    "embedding":      Prop(vector, source="derived", derive=embeddings.compute_embedding,
+    "content_hash":   Prop(str,    source="derived", replay_source="derived", pure=True,
+                           derive=ids.content_hash, replayable=True,
+                           guards="skip operators — operators store no content (#548), so a "
+                                  "hash over synthesized content matches nothing and would "
+                                  "emit canary noise on every operator"),
+    "embedding":      Prop(vector, source="derived", replay_source="derived", pure=False,
+                           derive=embeddings.compute_embedding,
                            guards="skip operators; require truthy content; wrap in vecf32",
-                           replayable=True),
-    # EP-owned. `replayable` MUST be honest (see OD6):
-    #   confidence     — journaled (node snapshot at PointAdded/Promoted) → restored by replay
-    #   lastDreamedAt  — UNJOURNALED → NOT restored (pre-existing gap, #2884)
-    # All are payload_writable=False: the payload/instrumentation lane must never overwrite EP state.
-    "confidence":     Prop(float, source="ep-owned", replayable=True,  payload_writable=False),
-    "lastDreamedAt":  Prop(str,   source="ep-owned", replayable=False, payload_writable=False),
-    ...
+                           replayable=True),  # pure=False — see OD9
+    "updatedAt":      Prop(str,    source="derived", replay_source="derived", pure=False,
+                           derive=ids.now_iso, replayable=True),  # deliberate recompute — D1c #1
+    # OD6(b) EP-owned set — ALL TWELVE are DECLARED here with payload_writable=False, not merely
+    # listed in prose (v5 cycle 8 N1): OD6(b)'s invariant has nothing to bind to otherwise, and
+    # D2's open-set passthrough would happily persist a payload-supplied `c_cal`/`posterior_alpha`
+    # and OVERWRITE EP state — the exact failure OD6(b) exists to prevent.
+    # `replay_source="journal"` ONLY for `confidence` (restored from the PointAdded/Promoted node
+    # snapshot, entities.py:190). Every other writer (ep.py:266-272, dream.py:258/446/456) emits NO
+    # event at all → `"none"`, and #2884's scope is therefore WIDER than "posterior_* +
+    # lastDreamedAt": it covers every `"none"` prop below.
+    "confidence":      Prop(float, source="ep-owned", replay_source="journal", replayable=True,  payload_writable=False),
+    "c_cal":           Prop(float, source="ep-owned", replay_source="none",    replayable=False, payload_writable=False),
+    "posterior_alpha": Prop(float, source="ep-owned", replay_source="none",    replayable=False, payload_writable=False),
+    "posterior_beta":  Prop(float, source="ep-owned", replay_source="none",    replayable=False, payload_writable=False),
+    "ep_alpha":        Prop(float, source="ep-owned", replay_source="none",    replayable=False, payload_writable=False),
+    "ep_beta":         Prop(float, source="ep-owned", replay_source="none",    replayable=False, payload_writable=False),
+    "baseline_set":    Prop(bool,  source="ep-owned", replay_source="none",    replayable=False, payload_writable=False),
+    "baseline_source": Prop(str,   source="ep-owned", replay_source="none",    replayable=False, payload_writable=False),
+    "inherited_at":    Prop(str,   source="ep-owned", replay_source="none",    replayable=False, payload_writable=False),
+    "lastDreamedAt":   Prop(str,   source="ep-owned", replay_source="none",    replayable=False, payload_writable=False),
+    "expiredAt":       Prop(str,   source="ep-owned", replay_source="none",    replayable=False, payload_writable=False),
+    "outdated":        Prop(bool,  source="ep-owned", replay_source="none",    replayable=False, payload_writable=False),
+    # Not in POINT_PROPS: `reason` (D4 — NON_PERSISTABLE_PROPS, deny-listed). The ONLY intentional
+    # exclusion; every other declared Point prop is above.
 }
 ```
 
@@ -171,9 +290,94 @@ and rebuild's replay. `ONTOLOGY.md` §4.1 gains `search_keys` + `source_turn_id`
 two tables.
 
 **`content_hash` is the reason `source` matters.** #2795 names it explicitly, and it **cannot** be
-restored by passthrough: `_emit_event` strips it from the journaled point (`sdk.py:2319-2325`), the #548
-snapshot strips it (`projection/__init__.py:1219-1221`), and nothing recomputes it. It must be
-**derived** from `content` in the replay writer.
+restored by passthrough: `_emit_event` strips it from the journaled point (`sdk.py:2319-2325`, comment
+verbatim: *"content_hash is also stripped — it is derived from content"*), the #548 snapshot strips it
+(`projection/__init__.py:1219-1221`), and nothing recomputes it. It must be **derived** from `content` in
+the replay writer.
+
+**A correction to v1–v4's rationale.** Earlier drafts justified the split with *"a missing hash is the
+cheap failure — dedup degrades to a scan."* **That is false for at least one surface and is withdrawn.**
+`_content_exists` (`sdk.py:10658`) is a bare `MATCH (n:Point {content_hash:$ch})` with **no null-hash
+fallback** — unlike `create_point` (`sdk.py:2490-2500`), which does have one. (`_extract_session_v2` at
+`:3798-3806` mirrors it — and v5 cited the mirror instead of the original; corrected.) On a rebuilt graph every
+hash is NULL, so `_content_exists` returns `None` for content that *is* present, and `checkpoint()`
+files a **silent duplicate**. The honest statement is **both failures are real**: a stale hash returns a
+*wrong* node, a missing hash creates a *duplicate* — and duplicates accumulate with ingest volume and
+are not self-correcting. The fix is to recompute at every write (including replay) and **not** to treat
+the `create_point` fallback as the safety story. The missing `_content_exists` fallback is a
+pre-existing bug, filed separately as **#2892** (`_content_exists` has no null-hash fallback → post-rebuild
+`checkpoint()` re-files everything as new).
+
+### D1c — Derived values follow the §11 cache doctrine (`pure` is necessary, not sufficient)
+
+v1–v4 invented a rule stricter than the repo's own. `ONTOLOGY.md` §11 (v3.2, #398) already decides this:
+
+> **Derived values may be CACHED, never authoritative:** Source `reliability` is a write-through
+> projection of the query-time derivation (recomputed on write events, consistency-checked on read,
+> stamped with `reliability_derived_at`) — **the derivation is the truth, the cache is a performance
+> artifact.**
+
+**Which clauses transfer — and which do not.** v5 cited §11 as univocal; it is not. §11's *title* is
+"Reputation (derived, **not stored**)" and its first bullet is literally *"Not stored (would go stale)"* —
+which supports v1–v4's **stricter** rule. The v3.2 clause is the operative one, and it is scoped here
+deliberately rather than quoted selectively:
+
+| §11 clause | Transfers? | Why |
+|---|---|---|
+| "may be **CACHED**" | **yes** | an unpersisted index key is useless — Postgres cannot index a *virtual* generated column and directs you to a **STORED** one |
+| "**recomputed on write events**" | **yes** | this is D1's `derive=` |
+| "consistency-checked on read" | **no** | dedup *is* the check — a stale hash surfaces as a missed hit |
+| "stamped with `reliability_derived_at`" | **no** | the key *is* the hash; a freshness column would be written and never read |
+| "**never authoritative**" | **partly — do not overclaim** | `reliability` is a display score; `content_hash` mints **ids** (`pt_<sha>`) and is authoritative *there* |
+
+So the design does **not** say "derived ⇒ never persist". It says: persist the cache, **recompute on
+every write**, and do not treat it as authoritative *except* where it mints ids (D1c #2).
+
+1. **`pure` is NECESSARY, not the operative rule.** v5 asserted an *iff* ("safe iff side-effect-free over
+   same-node data **and frozen**"). The review falsified it **four ways**, **inside this document**:
+   - `updatedAt` is recomputed on replay with wall-clock `$now` (`entities.py:194`) — not a function of
+     same-node data, not frozen, and **deliberately** recomputed anyway (now declared `pure=False`).
+   - `embedding` is recomputed on replay today (`entities.py:176-179`) while declared `pure=False` (OD9).
+   - A version-pinned embedding *would* be `pure=True` — yet is still better **preserved** than
+     recomputed (an O(N) model forward-pass at rebuild). Purity does not capture recompute *cost*.
+   - "and frozen" was **circular**: that is D1c #2's precondition, not a property of the function.
+
+   **The operative rule is D1's explicit per-prop `replay_source`** (`journal` | `derived` | `none`),
+   assigned deliberately rather than inferred, with **no default** — an unset field would fall outside
+   D7's durability union. `pure` records *why* a `derived` assignment is defensible; it does not decide.
+
+2. **Hash-function immutability is a precondition — with a CORRECTED mechanism.** v5 claimed `rebuild_all`
+   "re-derives ids with the new code". **That is false and is withdrawn.** Replay preserves ids verbatim
+   from the journal snapshot (`entities.py:197`, `p["id"]`), and there is **no `content_hash(` call
+   anywhere under `tortoise/projection/`** — replay never re-derives an id.
+
+   The real break is **write-time**. `create_point` defaults to `pid = ulid()` (`sdk.py:2533`); content
+   addressing is opt-in on specific paths only — the commit door, `_stream_to_payload` (`pt_{sha}`,
+   `sdk.py:1519`), event ids (`ev_{sha}`, `:1534`, `:3948`, `:19405`, `:19414`) and content-derived `batch_id`s
+   (plus a second `pt_{sha}` site at `:19424`, and `_session_capture_event_id` at `:1156-1175` — which
+   mints `ev_<sha>` from `hashlib.sha256` **directly**, not via `ids.content_hash`, so it falls OUTSIDE
+   the golden-vector guard below and needs its own pinning). Change the
+   hash function and **new** writes mint `pt_<new_sha>` ids that do not match the ids the rebuilt graph
+   preserved from the journal, while `_stream_to_payload` still remaps operator `src`/`dst` to the old
+   ones → **dedup misses, duplicate Points, orphaned operator endpoints.** The conclusion stands (a hash
+   change is a **migration**, not a repair); the mechanism is id *minting*, not id *re-derivation*.
+
+   **Nothing currently enforces this** — `derive=ids.content_hash` references mutable code, so a one-line
+   edit to `tortoise/ids.py` silently changes every derivation. D7 therefore adds (a) a **golden-vector
+   test** (`content_hash("<fixture>") == "<pinned digest>"`) and (b) a `CONTENT_HASH_VERSION` constant in
+   `contract.py` with a documented migration checklist for any bump.
+
+3. **Recompute-and-compare drift canary (optional, OD10) — with a CORRECTED source.** v5 had the canary
+   read the node's stored hash. **That is tautological:** `_upsert_point_props` writes `content_hash` in
+   the same pass, so the only "stored" value at assert time is the one just computed — and the #548
+   snapshot strips `content_hash` (`:1220`), so graph-only Points have none at all.
+
+   The canary must read a **pre-wipe `{id: content_hash}` map** captured in the snapshot phase that
+   already runs before the wipe (`projection/__init__.py:1188-1255`). Cost is an O(N) map retained across
+   the wipe — **not** "near-zero". Observable: a WARN log line **plus a `drift_warnings` counter in
+   `rebuild_all`'s return dict** (a warning nobody surfaces is invisible). **Warn, do not fail**: a hard
+   failure turns the disaster-recovery path into an outage, and `PointRevised` legitimately changes content
+   after the `PointAdded` snapshot (`sdk.py:4241-4245` journals `new_content`) — a *correct* divergence.
 
 ### D1b — The capture response stays a separate output projection
 
@@ -186,6 +390,23 @@ Consequently D7's parity check is **one-directional**: *every prop in the respon
 
 ### D2 — Replay preserves what it does not recognise — with an explicit skip-set and precedence
 
+> **Class-level, not instance-level.** The review surfaced the deeper framing: the (a) payload fields
+> are dropped because **`Point` has no *open-set* preserve mechanism**, not because of a skip-set
+> membership decision. `_persist_extra_props` — the deny-list preserve mechanism used by
+> `Subject`/`Object`/`Document`/`Event` ×2/`Source` — is **never wired for `Point`**. Live `create_point` is an *open*
+> writer (`SET n += $props`); replay `_upsert_point_props` is a *closed* writer (fixed SET list). D2's job
+> is to close that gap permanently: give `Point` the same open-set semantics every other layer already
+> has, plus an explicit **recompute deny-list** (`embedding`, `content_hash`, `updatedAt`, `_nid`,
+> `_graph_id`). Note the deny-list is **introduced by this design** (D4's `NON_PERSISTABLE_PROPS`) —
+> no other layer has one today (v5 cycle 7 corrected an earlier claim here that they did).
+>
+> **⚠️ The precedent is incomplete and must NOT be mirrored literally.** `_persist_extra_props` filters
+> only `v is not None` (`entities.py:143-144`) — it has **no type filter**, which is exactly the crash D2
+> item 1 warns about for `Point`. So the primitive-type filter is a **new addition to the shared helper**,
+> not something `Point` inherits — and the same latent crash therefore exists **today** for
+> `Subject`/`Object`/`Document`/`Event`/`Source` if an unknown dict-valued prop ever arrives. Filed as
+> pre-existing bug **#2894** — do not fix here; D2's shared-helper change repairs all six layers at once.
+
 `_upsert_point_props` is the **shared live+replay writer** (its own docstring: *"Single source of truth
 for Point property parity between apply() and rebuild_all()"*). So D2 changes **door 3's live behaviour
 too** — intentional, since that symmetry is the point (door 3 drops props today).
@@ -193,7 +414,8 @@ too** — intentional, since that symmetry is the point (door 3 drops props toda
 A naive `SET n += $extra` is **wrong** and would crash. Required mechanics:
 
 1. **Value-type filter: scalar only, plus exactly the declared `flatten=list` props.** FalkorDB
-   rejects non-primitive property values. `operator` and `provenance` are dict-valued and deliberately
+   rejects **map/dict-valued** properties (nested structures — lists are fine; `tags` is stored as a raw
+   list today, `sdk.py:2578-2581`). `operator` and `provenance` are dict-valued and deliberately
    never persisted (`entities.py:132-149` filters only `None`; `tortoise/api.py:64-75` and
    `sdk.py:5750-5753` put dicts into `event_point`) — exclude them.
    - `search_keys` **is** flattened by declaration: stored as a flat space-joined STRING
@@ -202,11 +424,15 @@ A naive `SET n += $extra` is **wrong** and would crash. Required mechanics:
      migrates pre-R2 arrays back to strings). D1 declares it `Prop(str, flatten=list)`.
    - `tags` **is a genuine raw list node property** (`sdk.py:2578-2581` writes every prop key incl.
      `tags`; `sdk.py:4226-4237` keeps the `TAGGED` edges consistent with `n.tags`;
-     `tests/test_sdk.py:726` asserts `["tags"] == ["alpha"]`). It is the **one known undeclared
-     list prop**. D2's rule: `tags` is owned by its own `_sync_tags` path, is **not** passed through
-     the generic filter, and **TAGGED-edge replay is out of scope** (today's behaviour — no
-     regression). It must be declared explicitly in `contract.py` as
-     `Prop(list, source="capture", replayable=False, owned_by="_sync_tags")` so the omission is
+     `tests/test_sdk.py:726` asserts `["tags"] == ["alpha"]`). D1 now declares it explicitly, so it is
+     no longer "undeclared" — the earlier label described the state that D1 fixes. D2's rule:
+     `tags` is owned by its own `_sync_tags` path, is **not** passed through
+     the generic filter, and **TAGGED-edge replay is out of scope of WS-A**. That last point is a
+     **silent data-loss deferral, not a no-op** — replay currently handles `tags` nowhere
+     (`rg tags tortoise/projection/` → zero hits), so every rebuild drops the `n.tags` property *and*
+     every `TAGGED` edge. Unlike #2884 this is **journaled-but-ignored**, not unjournaled. Filed as
+     **#2897** with #2795; D7 must assert it is **reported**, not silently dropped.
+     `Prop(list, source="capture", replay_source="none", replayable=False, owned_by="_sync_tags")` so the omission is
      **intentional and visible** rather than an accident of the filter.
    - Otherwise **an undeclared list is denied** — never written raw.
 2. **Explicit `_POINT_HANDLED` skip-set** — every fixed SET-clause key, the MERGE key `id`
@@ -316,10 +542,15 @@ A test must pin that the wipe statement **remains** the unconditional `MATCH (n)
 
 | Test | Asserts |
 |---|---|
-| prop durability | every **journaled** `replayable` prop of every layer survives `rebuild_all` — including an operator point and an M2 point (the D2 skip-set cases) and a **derived** prop (`content_hash`). Unjournaled EP state (`posterior_alpha/beta`, `lastDreamedAt`) is **excluded** and tracked separately |
+| prop durability | every prop the replay writer is **responsible for** survives `rebuild_all` — i.e. every `replay_source="journal"` prop **plus** every `replay_source="derived"` one — including an operator point and an M2 point (the D2 skip-set cases) and `content_hash` (derived). `replay_source="none"` EP state (`lastDreamedAt`, `posterior_alpha/beta`) is **excluded** and tracked separately (#2884) |
+| **`replay_source` completeness** | **every** entry in `POINT_PROPS` declares `replay_source` (no default) — an unset field would silently fall outside the durability row above. Fails loudly on an omission. The D1 block parses as valid Python with **22 distinct keys and no duplicates** (v5 cycle 8) |
+| **`replay_source="none"` is REPORTED, not silent** | every prop in the `none` bucket is either (a) named in a filed issue, or (b) reported by `rebuild_all` (a `dropped_props` counter / WARN naming the key). Today: `lastDreamedAt` + EP state → **#2884**; `tags` → **#2897**. #2795's 4th indicator requires this — a prop that genuinely cannot be replayed must be *reported*, not dropped silently |
+| **hash-function golden vector** | `ids.content_hash("<fixture>") == "<pinned digest>"` — pins the derivation (D1c #2). Guards the write-time id-minting invariant: a change here changes `pt_<sha>`/`ev_<sha>` ids and makes `rebuild_all` a migration, not a repair |
+| **`CONTENT_HASH_VERSION`** | the constant exists in `contract.py`, is asserted non-empty, and any bump to it must be accompanied by a migration note — the version is the marker that tells an operator a rebuild is unsafe |
+| **derived-props are recomputed, not copied** | after `rebuild_all`, `content_hash` is **non-NULL** on every non-operator point — this is the specific assertion v1–v4 lacked (they excluded `content_hash` from passthrough without adding the additive recompute) |
 | writer parity | product writer ≡ eval writer for a shared payload (minus instrumentation) |
 | response ⊆ node | every prop in the capture response exists on the node (one-directional, per D1b) |
-| declaration parity | `ONTOLOGY.md` §4.1 ≡ `contract.py`; extractor `OUTPUT_CONTRACT` diffed |
+| declaration parity | **`ONTOLOGY.md` §4.1 vs `contract.py` — a DIFF, not an equality** (v5 cycle 8 N2). The surfaces genuinely differ: §4.1 has 18 Point fields and lacks `tags` + `content_hash`; `POINT_PROPS` has 22 and omits the structural keys (`id`, `pointKind`, `is_operator`, `op_type`, `status`, `authoredBy`, `validFrom`, `validTo`, `createdAt`, `is_episodic`) that belong to `_POINT_HANDLED`, not the declaration. The test asserts the **known, enumerated** difference and fails on any *unexpected* divergence — an `≡` assertion could never pass. Extractor `OUTPUT_CONTRACT` diffed the same way |
 | deny-list | `reason` never reaches a node from any door, with a warning |
 | wipe guard | `_is_bulk_wipe(<new wipe>) is True` |
 | benchmark coverage | `tests/eval/write_path` grades the declared props, not just prose |
@@ -330,7 +561,7 @@ A test must pin that the wipe statement **remains** the unconditional `MATCH (n)
 
 | Issue | How | Status |
 |---|---|---|
-| #2795 rebuild drops live-only props | D1 (`content_hash` **derived**) + D2 (passthrough for the rest, primitive-filtered) | **fully closed** — v1 missed `content_hash` |
+| #2795 rebuild drops live-only props | D1 (`content_hash` **derived**) + D2 (passthrough for the rest, primitive-filtered) | **closed for the declared props** — v1 missed `content_hash`. **Two known exceptions, both reported rather than repaired, per #2795's 4th indicator:** unjournaled EP state (**#2884**) and `tags` (**#2897** — journaled but ignored). Indicator 4 is satisfied only once `rebuild_all` reports the `none` bucket |
 | #2813 capture drops E3 fields; eval lane diverges | D1 + D3 + D6 — one writer, one declaration, instrumentation as input; D7 guards it | **closed in principle** |
 | #2814 rebuild wipes config | D5 — snapshot+restore, `config_reset` marker, guard preserved | **closed in principle** |
 | #2788 (event state nothing reads) | out of scope — same class, separate fix | — |
@@ -365,6 +596,8 @@ Steps 1–3 are independently shippable. Step 6 is independent of 1–5. Step 5 
 | **OD6** | **NEW** — Which props may the *payload/instrumentation lane* write, vs which are EP-owned? | **Two separate rules, not one.** (a) **Replay restores only what is journaled.** `confidence` IS restored — pass-1a's `n.confidence=coalesce($cf, n.confidence)` (`entities.py:190`), `$cf` from the journaled node snapshot (`sdk.py:2629`; `get_point` returns raw `properties(n)`, `sdk.py:6062-6076`), and `ConfidenceChanged` is an explicit rebuild no-op (`projection/__init__.py:1513`) with no post-rebuild re-derivation hook. **`posterior_alpha` / `posterior_beta` / `lastDreamedAt` are NOT restored** — their writers (`ep.py:268`, `dream.py:258/446/456`) emit **no journal event at all** (grep `_emit_event` over ep/dream/analyze → empty; `ConfidenceChanged` is emitted nowhere), and the #548 snapshot skips log-covered points (`:1216`). This is a **pre-existing gap this design does not close** → **filed as #2884**. (b) The **payload/instrumentation lane must NOT overwrite** EP state — `payload_writable=False`. EP-owned/derived set = `confidence`, `c_cal`, `posterior_alpha`, `posterior_beta`, `ep_alpha`, `ep_beta`, `baseline_set`, `baseline_source`, `inherited_at`, `lastDreamedAt`, `expiredAt`, `outdated`. | v2's `replayable=False` would silently drop `confidence` on rebuild. v3's blanket "replay restores EP state" would make D7's durability test unsatisfiable for the unjournaled props. |
 | **OD7** | **NEW** — Is the extraction-time `reason` opinion wanted for audit at all? | **Discard** (D4). If wanted, journal it deliberately as a non-persisted extraction record. | Choosing "journal it" is a small additional scope in step 5. |
 | **OD8** | **NEW** — Where does the `config_reset` marker live: graph property on a singleton node, or operator node? | **Singleton `:GraphMeta` node property.** | An operator node would be rebuild-wiped with the derived class. |
+| **OD9** | **NEW** — `embedding` is recomputed on replay (`entities.py:176-179`) but is **not pure**: it depends on the embedding model/version; D1c #1 gives `pure` as a necessary signal for a `derived` assignment. Options: (a) keep recomputing and accept that a rebuild under a new model changes vectors, (b) journal the model id + vector and restore, (c) recompute + record the model id so drift is detectable. | **Choose (c); implement in a follow-up issue. No WS-A code change.** `pure=False` is already declared in the contract so the gap is visible. | Out of WS-A scope (the four fields + durability contract). Changing embedding behaviour would move every retrieval baseline — that is a separate, measurable change, not a silent side effect of a durability fix. |
+| **OD10** | **NEW** — Should replay assert `recompute(content_hash) == stored_hash` (drift canary), or recompute blind? **Corrected in v5: the source must be a pre-wipe `{id: content_hash}` map from the snapshot phase (`projection/__init__.py:1188-1255`)** — the node's own value at replay time is the value just written (tautology), and the #548 snapshot strips it (`:1220`). | **Warn, do not fail.** Observable = WARN log + a `drift_warnings` counter in `rebuild_all`'s return dict. Cost = an O(N) map held across the wipe. | Blind recompute silently repairs a partial write or hash-function drift — exactly the class of bug that has been invisible here. But `PointRevised` legitimately changes content after the `PointAdded` snapshot (`sdk.py:4241-4245` journals `new_content`), so a pre-overwrite comparison flags a **correct** divergence and a hard failure would be wrong. Warn gives the signal without the false positive. |
 
 ---
 
