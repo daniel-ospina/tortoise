@@ -91,6 +91,15 @@ def _parser() -> argparse.ArgumentParser:
     parity.add_argument("--arms", default=None)
     parity.add_argument("--seed", type=int, default=0)
     parity.add_argument("--mock", action="store_true")
+    parity.add_argument("--execute", action="store_true",
+                        help="run the released benchmark runners (#2800) — "
+                             "without this a cell is explicitly not-measured")
+    parity.add_argument("--limit", type=int, default=None,
+                        help="cap benchmark questions per cell (--execute)")
+    parity.add_argument("--allow-spend", action="store_true",
+                        help="required for a REAL (non---mock) benchmark run — "
+                             "the released runners call paid reader/judge "
+                             "models")
     parity.add_argument("--out", default=_DEFAULT_OUT,
                         help="parity record output dir (parity_record.json)")
 
@@ -284,22 +293,56 @@ def _cmd_parity(args: argparse.Namespace) -> ExitCode:
     reader_prompt = _load_reader_prompt(args)
     judge_rubric = args.rubric or "longmemeval-official"
     baseline = _load_baseline(args)
+    if args.limit is not None and not args.execute:
+        print("parity: --limit has no effect without --execute — no benchmark "
+              "will run, so every cell stays not-measured")
+    # A REAL lane calls paid reader/judge models: it needs an explicit
+    # opt-in, so a bare `--execute` cannot spend money by accident. Without
+    # it the cells stay not-measured (fail-closed, no silent cost).
+    real_lane_blocked = bool(args.execute and not args.mock
+                             and not args.allow_spend)
+    if real_lane_blocked:
+        print("parity: --execute without --mock requires --allow-spend (the "
+              "released runners call paid reader/judge models) — no benchmark "
+              "will run; every cell stays not-measured")
     cells: list[ParityRun] = []
     for benchmark, version in PINNED_VERSIONS.items():
         try:
-            # #2797: NO accuracy is supplied — this leg does not execute a
-            # benchmark (the released runner wiring is #2800). A cell is
-            # therefore explicitly NOT MEASURED and carries no number; the
-            # pre-#2797 code passed a literal accuracy=0.5 here, which read
-            # as a measurement to any future consumer.
+            # #2797: an accuracy is supplied ONLY from a released runner's
+            # own output (#2800). Without --execute (or without a registered
+            # executor for a benchmark) the cell is explicitly NOT MEASURED
+            # and carries no number — the pre-#2797 code passed a literal
+            # accuracy=0.5 here, which read as a measurement.
+            executed = None
+            if args.execute and not real_lane_blocked:
+                from battery.parity.executors import (
+                    EXECUTORS,
+                    ExecutorUnavailable,
+                )
+                executor = EXECUTORS.get(benchmark)
+                if executor is None:
+                    print(f"{benchmark}: no released runner wired — "
+                          f"not measured (#2800)")
+                else:
+                    try:
+                        executed = executor(
+                            mock=bool(args.mock), limit=args.limit,
+                            out_dir=_Path(args.out or _DEFAULT_OUT))
+                    except ExecutorUnavailable as e:
+                        print(f"{benchmark}: executor unavailable — {e}")
             res = run_parity(benchmark, version, arm_id,
                              reader_prompt, judge_rubric, baseline,
-                             accuracy=None, samples=0, protocol=protocol)
+                             accuracy=(executed.accuracy if executed else None),
+                             samples=(executed.samples if executed else 0),
+                             protocol=protocol,
+                             revision=(executed.revision if executed else None),
+                             lane=(executed.lane if executed else None))
             cells.append(res)
             unknown = bool(res.protocol_unknown or placeholder_pinned)
             state = f"protocol_unknown={unknown}" if unknown \
                 else "protocol verified"
-            measured = (f"accuracy={res.accuracy} n={res.samples}"
+            measured = (f"[{res.lane}] accuracy={res.accuracy} n={res.samples} "
+                        f"revision={res.revision}"
                         if res.measured else
                         "accuracy NOT MEASURED — no runner wired (#2800)")
             print(f"{benchmark}: v{version} methodology_matched="
@@ -350,6 +393,8 @@ def _cmd_parity(args: argparse.Namespace) -> ExitCode:
                         "measured": c.measured,
                         "accuracy": c.accuracy,
                         "samples": c.samples,
+                        "revision": c.revision,
+                        "lane": c.lane,
                         # Round-4 P2 (consistency): a protocol-UNKNOWN
                         # record must NEVER carry methodology_matched=True —
                         # the two persisted fields would contradict (an
