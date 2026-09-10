@@ -7090,9 +7090,9 @@ function claimIntentInFlight() {
                 320-375px viewports. */}
             <div className="keys-table-wrap">
             <table>
-              <thead><tr><th scope="col">Name</th><th scope="col">Prefix</th><th scope="col">Created</th><th scope="col">Expires</th><th scope="col">Status</th><th scope="col"><span className="sr-only">Actions</span></th></tr></thead>
+              <thead><tr><th scope="col">Name</th><th scope="col">Prefix</th><th scope="col">Created</th><th scope="col">Last used</th><th scope="col">Expires</th><th scope="col">Status</th><th scope="col"><span className="sr-only">Actions</span></th></tr></thead>
               <tbody>
-                {managedKeys.length === 0 && <tr><td colSpan="6" className="dim">No keys yet.</td></tr>}
+                {managedKeys.length === 0 && <tr><td colSpan="7" className="dim">No keys yet.</td></tr>}
                 {managedKeys.map((k) => (
                   <tr key={k.id}>
                     <td>
@@ -7130,6 +7130,25 @@ function claimIntentInFlight() {
                     </td>
                     <td><code>{k.key_prefix || k.id?.slice(0, 12)}</code></td>
                     <td>{fmtTime(k.created_at || k.createdAt)}</td>
+                    {/* #2476: Last used cell — relative time + an absolute-date
+                        title tooltip when the row has a last_used_at (#685 writes
+                        it through on use; list_api_keys serializes null for
+                        never-used keys). 'Never' is PLAIN text — no span.dim (#2426
+                        lesson: the status cell's dim identifies 'disabled'; a
+                        Never-in-dim cell double-matched the e2e strict mode).
+                        Clock: Date.now() per render — NOT App's skeleton-gated
+                        `now` (that one ticks only while the Overview tab has a live
+                        loading floor; on the keys tab it would freeze and the label
+                        could read 'just now' forever after a reload surfaced a newer
+                        stamp). Per-render freshness is the same semantics as the
+                        sibling Expires cell (fmtExpiry's Date.now() default) and
+                        formatRelativeTime's callers in the memory-sources panel. */}
+                    <td>{(() => {
+                      const lu = k.last_used_at
+                      const rel = formatRelativeTime(lu, Date.now())
+                      if (!rel) return 'Never'
+                      return <span title={`Last used ${fmtTime(lu)}`}>{rel}</span>
+                    })()}</td>
                     {/* #2426: Expires cell — absolute date · 'Never' when
                         null · amber 'in N days' at ≤14d · terminal 'expired'
                         (row-dim styling family) when past. Expired rows stay
