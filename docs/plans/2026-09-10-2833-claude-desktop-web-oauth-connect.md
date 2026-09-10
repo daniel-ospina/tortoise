@@ -1,4 +1,13 @@
-<!-- research-path: issue-scoping artifact posted on #2833 (no epic brief — Level: task) -->
+---
+title: "Claude Desktop/Web OAuth Connect — Implementation Plan (#2833)"
+type: engineering
+domain: platform
+doc_status: draft
+created: 2026-09-10
+subjects.team: organisation-design-team
+---
+
+<!-- research-path: issue-scoping artifact posted on #2833 (no epic brief — re-tiered task → project) -->
 
 # Claude Desktop/Web OAuth Connect — Implementation Plan (#2833)
 
