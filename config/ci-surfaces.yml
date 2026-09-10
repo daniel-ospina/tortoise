@@ -268,6 +268,7 @@ surfaces:
   - test_backup_multigraph_e2e.py
   - test_backup_sweep.py
   - test_backup_watcher.py
+  - test_battery_parity_mabench_run.py
   - test_bfs_audit.py
   - test_boot_regressions.py
   - test_build_window_transcript.py
