@@ -1,3 +1,16 @@
+---
+title: "Wizard connect step — #2698 redesign, #2710 fixes and #2827 follow-up"
+type: engineering
+domain: platform
+doc_status: superseded
+subjects.team: organisation-design-team
+ownedBy: organisation-design-team
+aboutSubjects: onboarding-wizard, dashboard-connect-step
+aboutObjects: tortoise-dashboard, tortoise-mcp-server
+created: 2026-09-09
+updated: 2026-09-11
+---
+
 > **SUPERSEDED (2026-09-10, #2710):** two acceptance criteria below are no
 > longer the shipped behaviour and must NOT be reinstated:
 > 1. **Task 2** — "Clicking a pill opens the key modal ONLY if no key exists
@@ -12,8 +25,10 @@
 > 30-day expiry default) on the dashboard after exit. #2710 deleted the
 > auto-open effect and the pill→modal path, and replaced them with an inline,
 > in-flow `wizardNoKeyAffordance` (mint + paste escape) rendered by every
-> harness branch's no-key state — the mint is Never-expiring, matching the
-> step's own "keys embedded in agents should never expire" hint. Pinned by
+> harness branch's no-key state — the mint is Never-expiring (the step's own
+> "keys embedded in agents should never expire" hint it once matched was
+> deleted in #2827, so the Never-only embed policy now lives in the
+> paste-rejection reason, not a banner). Pinned by
 > `website/apps/dashboard/src/wizardConnectTripwire.test.js` and
 > `tests/e2e/test_dashboard_onboarding.py`.
 
@@ -568,3 +583,32 @@ Open the built dashboard, run through: sign in → wizard → fork=self → conn
 | User pastes an unknown key (wrong org, typo) | Rejected with "does not match any key in this organization" (never embed on unknown). |
 | Persisted `wizardHarness === 'chatgpt'` from legacy | Guard resets to `'pi'` on mount (Task 2 Step 3). |
 | User clicks "Done — Continue to dashboard" before step 2 | Auto-complete is the real gate. Checkpoint is a UX gesture. |
+
+## #2827 follow-up
+
+Round-2 review of the connect step (issue #2827) shipped these corrections on
+top of the round-1 rewrite:
+
+- **Deleted the unapproved embed hint.** The "Keys embedded in agents should
+  never expire…" banner was not in the approved copy; removed. The Never-only
+  embedding policy survives as the expiring-paste rejection reason
+  (`It expires, and a key embedded in an agent must never expire`).
+- **De-duplicated captions.** Each prompt body no longer repeats the caption
+  sentence the JSX already renders; verb unified to "connect Tortoise"; the
+  single-step tabs (Claude Code / Codex CLI) drop the leading `1.`.
+- **Claude Desktop + Claude Web → Connectors.** Both filesystem-less tabs now
+  document the Connectors UI (`Server URL` + `Authorization: Bearer <key>`)
+  instead of the `claude_desktop_config.json` / `mcpServers` shape, which only
+  supports local stdio servers and does nothing for the remote HTTP server.
+  The `UNIVERSAL_COMMAND['claude-desktop']` copy and the served onboarding
+  skill were brought in line.
+- **Copyable workflows card with the verify/file footer.** Claude Desktop/Web
+  step 2 renders `WORKFLOWS_PROMPT` + the `tortoise_health` →
+  `tortoise_create_point` footer through `WizardPromptCard` (it was a bare,
+  non-copyable `<pre>`).
+- **Shared step-label style.** One `wizardStepLabelStyle` for every tab
+  (numbered labels only where a tab genuinely has two steps); Pi/Cursor step 2
+  is gated as one unit so the no-key state has no orphaned "2.".
+- **Re-anchored `keyExpiryTripwire`.** Item 5 of
+  `keyExpiryTripwire.test.js` now pins the expiring-paste rejection + truthful
+  reason (the deleted hint assertion is gone).

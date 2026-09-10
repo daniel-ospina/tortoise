@@ -869,6 +869,10 @@ function WizardPromptCard({ text, label }) {
     <div className="wizard-prompt-card"
       style={{ position: 'relative', whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', wordBreak: 'break-word', maxWidth: '100%', background: 'var(--surface,#0d1a2d)', border: '1px solid var(--border,#1e293b)', borderRadius: 8, padding: '12px 14px', fontFamily: 'var(--mono,ui-monospace,SFMono-Regular,Menlo,monospace)', fontSize: 14, lineHeight: 1.6, color: 'var(--text,#e2e8f0)' }}>
       {text}
+      {/* #2827 (round-2 P2): the button's own label flips to 'Copied ✓' for
+          1.6s — a sighted-only signal. This live region announces the copy
+          outcome to screen readers. */}
+      <span className="sr-only" role="status" aria-live="polite">{copied ? 'Copied to clipboard' : ''}</span>
       <div style={{ marginTop: '0.6rem', display: 'flex', justifyContent: 'center' }}>
         <button type="button" className={copied ? 'ghost small' : 'btn-primary small'}
           onClick={doCopy}>
@@ -886,24 +890,41 @@ function wizardPromptText(harness, step, key, mode) {
   const twoStepNote = 'Tell me when to restart'
   const step2Text = `Call tortoise_health to verify the connection, then tortoise_create_point to file my first point.\n${docs}`
 
+  // #2827: every body starts at its first actionable instruction. The step
+  // heading the user reads ("Give this prompt…", "Restart X…") is the JSX
+  // caption above the card — the SINGLE place that sentence may appear.
   if (harness === 'pi') {
-    if (step === 1) return `Give this prompt to your agent to install the MCP server\n\nAdd Tortoise MCP at ${url}.\n${keyLine}\nSave it to my shell profile (~/.zshrc).\n${twoStepNote} Pi.\nThen install the Tortoise skills (how-to-use-tortoise, tortoise-decide, tortoise-file-finding + tortoise-onboarding) from ${SKILLS_INSTALL_URL}.\n${docs}`
-    if (step === 2) return `Restart Pi, then give it this prompt to complete setup\n\n${step2Text}`
+    if (step === 1) return `Add Tortoise MCP at ${url}.\n${keyLine}\nSave it to my shell profile (~/.zshrc).\n${twoStepNote} Pi.\nThen install the Tortoise skills (how-to-use-tortoise, tortoise-decide, tortoise-file-finding + tortoise-onboarding) from ${SKILLS_INSTALL_URL}.\n${docs}`
+    if (step === 2) return step2Text
   }
   if (harness === 'cursor') {
-    if (step === 1) return `Give this prompt to your agent to install the MCP server\n\nAdd Tortoise MCP at ${url}.\n${keyLine}\nSave it to my shell profile (export TORTOISE_API_KEY=…) so Cursor can read it from its env.\n${twoStepNote} Cursor.\nThen install the Tortoise skills (how-to-use-tortoise, tortoise-decide, tortoise-file-finding + tortoise-onboarding) from ${SKILLS_INSTALL_URL}.\n${docs}`
-    if (step === 2) return `Restart Cursor, then give it this prompt to complete setup\n\n${step2Text}`
+    if (step === 1) return `Add Tortoise MCP at ${url}.\n${keyLine}\nSave it to my shell profile (export TORTOISE_API_KEY=…) so Cursor can read it from its env.\n${twoStepNote} Cursor.\nThen install the Tortoise skills (how-to-use-tortoise, tortoise-decide, tortoise-file-finding + tortoise-onboarding) from ${SKILLS_INSTALL_URL}.\n${docs}`
+    if (step === 2) return step2Text
   }
   if (harness === 'claude') {
-    return `Give this prompt to your agent to set up Tortoise\n\nAdd Tortoise MCP at ${url}.\n${keyLine}\nThen install the Tortoise skills (how-to-use-tortoise, tortoise-decide, tortoise-file-finding + tortoise-onboarding) from ${SKILLS_INSTALL_URL}.\nThen call tortoise_health and tortoise_create_point to file my first point.\n${docs}`
+    return `Add Tortoise MCP at ${url}.\n${keyLine}\nThen install the Tortoise skills (how-to-use-tortoise, tortoise-decide, tortoise-file-finding + tortoise-onboarding) from ${SKILLS_INSTALL_URL}.\nThen call tortoise_health and tortoise_create_point to file my first point.\n${docs}`
   }
   if (harness === 'codex') {
-    return `Give this prompt to your agent to set up Tortoise\n\nAdd Tortoise MCP at ${url}.\n${keyLine}\nSave it to my shell profile (export TORTOISE_API_KEY=…).\nThen install the Tortoise skills (how-to-use-tortoise, tortoise-decide, tortoise-file-finding + tortoise-onboarding) from ${SKILLS_INSTALL_URL}.\nThen call tortoise_health and tortoise_create_point to file my first point.\n${docs}`
+    return `Add Tortoise MCP at ${url}.\n${keyLine}\nSave it to my shell profile (export TORTOISE_API_KEY=…).\nThen install the Tortoise skills (how-to-use-tortoise, tortoise-decide, tortoise-file-finding + tortoise-onboarding) from ${SKILLS_INSTALL_URL}.\nThen call tortoise_health and tortoise_create_point to file my first point.\n${docs}`
   }
-  if (harness === 'claude-desktop') {
+  // #2827: both filesystem-less harnesses (Claude Desktop/Web) need only the
+  // verify/file step in the conversation; the workflows body rides
+  // wizardWorkflowsText below.
+  if (harness === 'claude-desktop' || harness === 'claude-web') {
     if (step === 2) return step2Text
   }
   return ''
+}
+
+// #2827: the skills-as-prompt body a filesystem-less harness needs (Claude
+// Desktop and Claude Web keep no local skills, so the Tortoise workflows have
+// to arrive in the conversation). It ends with the same verify/file step every
+// other tab gets — without it a Claude Desktop/Web user never calls
+// tortoise_health/tortoise_create_point, so onboarding never auto-completes.
+// Rendered via WizardPromptCard so it is COPYABLE (it used to be a bare <pre>
+// with no copy affordance).
+function wizardWorkflowsText(key, mode) {
+  return `${WORKFLOWS_PROMPT}\n\n${wizardPromptText('claude-web', 2, key, mode)}`
 }
 
 function App() {
@@ -5730,6 +5751,18 @@ function claimIntentInFlight() {
   // token and the Copy button is pushed off-screen at 390px.
   const wizardKeyCodeStyle = { flex: 1, minWidth: 0, overflowWrap: 'anywhere', wordBreak: 'break-all', padding: '0.4rem 0.6rem', background: 'var(--surface,#0d1a2d)', border: '1px solid var(--border,#1e293b)', borderRadius: 6, fontSize: 13 }
 
+  // #2827 (round-2 P2): the connector request-header literal is ONE breakable
+  // token on the Claude Desktop/Web tabs. It used to be split across two
+  // <code> elements joined by `=` — wrong punctuation (`:` is what the
+  // connector field expects) and impossible to copy in one gesture.
+  const wizardHeaderCodeStyle = { minWidth: 0, overflowWrap: 'anywhere', wordBreak: 'break-all' }
+
+  // #2827: ONE step-label style for every connect tab. The tabs used to
+  // hand-roll inline <p className="dim small"> captions that drifted in size,
+  // weight and alignment (some centred, some left). The wizard tabs are
+  // ordered procedures, so the numbering is part of the label.
+  const wizardStepLabelStyle = { margin: '0 0 0.5rem', fontWeight: 600, fontSize: 13, lineHeight: 1.6, color: 'var(--text,#e2e8f0)' }
+
   // #2710: the connect step's no-key affordance. The copy already promised
   // "Create an API key to see the setup prompt." but shipped no button, so an
   // owner/admin with no in-memory key hit a dead end (the prompt cards are
@@ -6045,9 +6078,6 @@ function claimIntentInFlight() {
                           </button>
                         ))}
                       </div>
-                      <p className="dim small" style={{ margin: '0.5rem 0 0', lineHeight: 1.5 }}>
-                        Keys embedded in agents should never expire — when you create or rotate one in the API Keys tab, choose <strong>No expiration</strong>.
-                      </p>
                       {['pi', 'cursor', 'claude', 'codex'].includes(wizardHarness) && wizardConnectHarness !== 'codexDesktop' && (
                         /* #2710: pills are pure display-mode toggles. They used to
                            also `setKeyModalOpen(true)` when no key existed — a no-op
@@ -6057,13 +6087,13 @@ function claimIntentInFlight() {
                            the mint affordance is always visible and the modal is never
                            queued. */
                         <div className="key-pills">
-                          <button className={wizardKeyMode === 'included' ? 'active' : ''}
+                          <button type="button" className={wizardKeyMode === 'included' ? 'active' : ''}
                             aria-pressed={wizardKeyMode === 'included'}
                             onClick={() => setWizardKeyMode('included')}>
                             <strong>Key included in prompt</strong>
                             <span>Simple — easiest</span>
                           </button>
-                          <button className={wizardKeyMode === 'separate' ? 'active' : ''}
+                          <button type="button" className={wizardKeyMode === 'separate' ? 'active' : ''}
                             aria-pressed={wizardKeyMode === 'separate'}
                             onClick={() => setWizardKeyMode('separate')}>
                             <strong>Key separate from prompt</strong>
@@ -6090,24 +6120,33 @@ function claimIntentInFlight() {
 
                         if (agentDriven2Step.includes(wizardHarness)) return (
                           <div>
-                            <p className="dim small" style={{ marginBottom: '0.5rem' }}>Give this prompt to your agent to install the MCP server</p>
+                            <p style={wizardStepLabelStyle}>1. Give this prompt to your agent to connect Tortoise</p>
                             {harnessKey ? (
-                              <WizardPromptCard text={wizardPromptText(wizardHarness, 1, harnessKey, wizardKeyMode)} />
+                              <WizardPromptCard text={wizardPromptText(wizardHarness, 1, harnessKey, wizardKeyMode)} label="Copy step 1 prompt" />
                             ) : (
                               wizardNoKeyAffordance
                             )}
                             {keyDisplayRow}
-                            <p className="dim small" style={{ textAlign: 'center', margin: '0.75rem 0' }}>
-                              Restart {HARNESS_NAMES[wizardHarness]}, then give it this prompt to complete setup
-                            </p>
+                            {/* #2827 (round-2 P1): step 2 is ONE unit. The label
+                                used to render in the no-key state above an empty
+                                slot, leaving an orphaned "2." with nothing under
+                                it — both label and card are now gated together. */}
                             {harnessKey && (
-                              <WizardPromptCard text={wizardPromptText(wizardHarness, 2, harnessKey, wizardKeyMode)} />
+                              <>
+                                <p style={{ ...wizardStepLabelStyle, margin: '0.9rem 0 0.5rem' }}>2. Restart {HARNESS_NAMES[wizardHarness]}, then give it this prompt to verify and file your first point</p>
+                                <WizardPromptCard text={wizardPromptText(wizardHarness, 2, harnessKey, wizardKeyMode)} label="Copy step 2 prompt" />
+                              </>
                             )}
                           </div>
                         )
                         if (agentDriven1Step.includes(wizardHarness)) return (
                           <div>
-                            <p className="dim small" style={{ marginBottom: '0.5rem' }}>Give this prompt to your agent to set up Tortoise</p>
+                            {/* #2827 (round-2 P1): the Codex Desktop surface
+                                shows a ~/.codex/config.toml block the HUMAN
+                                pastes, so the agent-prompt caption lied there.
+                                Single-step tabs also drop the leading "1." —
+                                they are not truncated procedures. */}
+                            <p style={wizardStepLabelStyle}>{wizardConnectHarness === 'codexDesktop' ? 'Add this block to your Codex config file' : 'Give this prompt to your agent to connect Tortoise'}</p>
                             {/* #2756: Codex has two surfaces — CLI (shell) and Desktop
                                 (GUI app with no terminal; it does not inherit shell
                                 exports). The #2328 toggle was dropped by the #2698
@@ -6133,7 +6172,7 @@ function claimIntentInFlight() {
                                   <WizardPromptCard text={UNIVERSAL_COMMAND.codexDesktop(harnessKey)} label={HARNESS_COPY_LABEL.codexDesktop} />
                                 </>
                               ) : (
-                                <WizardPromptCard text={wizardPromptText(wizardConnectHarness, 1, harnessKey, wizardKeyMode)} />
+                                <WizardPromptCard text={wizardPromptText(wizardConnectHarness, 1, harnessKey, wizardKeyMode)} label="Copy prompt" />
                               )
                             ) : (
                               wizardNoKeyAffordance
@@ -6154,20 +6193,23 @@ function claimIntentInFlight() {
                                 coherent ask). */}
                             {harnessKey ? (
                               <>
-                                <p className="dim" style={{ margin: 0, lineHeight: 1.6 }}>
-                                  Open Claude Desktop → Settings → Developer → Edit Config. Merge this into mcpServers (don't replace the whole file):
-                                </p>
-                                <pre className="snippet" style={{ margin: '0.75rem 0' }}>
-{JSON.stringify({ mcpServers: { tortoise: { type: 'http', url: 'https://api.premiselabs.co/mcp/', headers: { Authorization: 'Bearer ' + harnessKey } } } }, null, 2)}
-                                </pre>
-                                <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', flexWrap: 'wrap', marginTop: '0.5rem' }}>
-                                  <p className="dim small">Your API key (shown once):</p>
+                                <p style={wizardStepLabelStyle}>1. Connect Tortoise: Open Claude Desktop → Settings → Connectors → <em>Add custom connector</em>, then enter:</p>
+                                <ul className="dim small" style={{ lineHeight: 1.8, paddingLeft: '1.2rem', margin: '0 0 0.75rem' }}>
+                                  <li>Name: <strong>Tortoise</strong></li>
+                                  <li>Server URL: <code>https://api.premiselabs.co/mcp/</code></li>
+                                  <li>Request headers: <code style={wizardHeaderCodeStyle}>{'Authorization: Bearer ' + harnessKey}</code></li>
+                                </ul>
+                                <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', flexWrap: 'wrap', marginBottom: '0.75rem' }}>
+                                  <p className="dim small" style={{ margin: 0 }}>Your API key (shown once):</p>
                                   <code style={wizardKeyCodeStyle}>{harnessKey}</code>
                                   <button type="button" className="btn-primary small" onClick={() => navigator.clipboard?.writeText(harnessKey)}>Copy</button>
+                                  <button type="button" className="btn-primary small" onClick={() => navigator.clipboard?.writeText(`Authorization: Bearer ${harnessKey}`)}>Copy header value</button>
                                 </div>
-                                <p className="dim small" style={{ marginTop: '0.5rem' }}>Save and restart Claude Desktop.</p>
-                                <p className="dim small" style={{ textAlign: 'center', margin: '0.75rem 0' }}>After restart, start a new chat and give it this prompt to complete setup</p>
-                                <WizardPromptCard text={wizardPromptText('claude-desktop', 2, harnessKey, wizardKeyMode)} />
+                                <p className="dim small" style={{ margin: '0 0 0.9rem', lineHeight: 1.6 }}>
+                                  Note: <strong>Request headers</strong> is still rolling out in Anthropic&apos;s beta and may not appear for every account. If Request headers isn&apos;t available on your account yet, use the Claude Code or Cursor tab instead — those paths work on every account.
+                                </p>
+                                <p style={wizardStepLabelStyle}>2. Start a new chat and paste this prompt — it tells Claude how to use Tortoise in this chat:</p>
+                                <WizardPromptCard text={wizardWorkflowsText(harnessKey, wizardKeyMode)} label="Copy prompt" />
                               </>
                             ) : (
                               wizardNoKeyAffordance
@@ -6181,29 +6223,30 @@ function claimIntentInFlight() {
                                 `YOUR_API_KEY` placeholder and the Copy button wrote
                                 an empty string. The affordance is the no-key branch;
                                 the lead-in sentence is gated with the block it
-                                introduces (round-2 review P2). The trailing workflow
-                                prompt is key-free, so it stays visible. */}
+                                introduces (round-2 review P2). */}
                             {harnessKey ? (
                               <>
-                                <p className="dim" style={{ margin: 0, lineHeight: 1.6 }}>
-                                  Go to claude.ai → Settings → Connectors → Add custom connector:
-                                </p>
-                                <ul className="dim small" style={{ lineHeight: 1.7, paddingLeft: '1.2rem' }}>
-                                  <li>Name: Tortoise</li>
-                                  <li>Server URL: https://api.premiselabs.co/mcp/</li>
-                                  <li>Headers: Authorization: Bearer {harnessKey}</li>
+                                <p style={wizardStepLabelStyle}>1. Connect Tortoise: Open claude.ai → Settings → Connectors → <em>Add custom connector</em>, then enter:</p>
+                                <ul className="dim small" style={{ lineHeight: 1.8, paddingLeft: '1.2rem', margin: '0 0 0.75rem' }}>
+                                  <li>Name: <strong>Tortoise</strong></li>
+                                  <li>Server URL: <code>https://api.premiselabs.co/mcp/</code></li>
+                                  <li>Request headers (advanced): <code style={wizardHeaderCodeStyle}>{'Authorization: Bearer ' + harnessKey}</code></li>
                                 </ul>
-                                <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', flexWrap: 'wrap', marginTop: '0.5rem' }}>
-                                  <p className="dim small">Your API key (shown once):</p>
+                                <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', flexWrap: 'wrap', marginBottom: '0.75rem' }}>
+                                  <p className="dim small" style={{ margin: 0 }}>Your API key (shown once):</p>
                                   <code style={wizardKeyCodeStyle}>{harnessKey}</code>
                                   <button type="button" className="btn-primary small" onClick={() => navigator.clipboard?.writeText(harnessKey)}>Copy</button>
+                                  <button type="button" className="btn-primary small" onClick={() => navigator.clipboard?.writeText(`Authorization: Bearer ${harnessKey}`)}>Copy header value</button>
                                 </div>
+                                <p className="dim small" style={{ margin: '0 0 0.9rem', lineHeight: 1.6 }}>
+                                  Note: <strong>Request headers</strong> is still rolling out in Anthropic&apos;s beta and may not appear for every account. If Request headers isn&apos;t available on your account yet, use the Claude Code or Cursor tab instead — those paths work on every account. Claude connects from Anthropic&apos;s cloud, so your key is stored by Anthropic — keep the chat and the key private.
+                                </p>
+                                <p style={wizardStepLabelStyle}>2. Start a new chat and paste this prompt — it teaches Claude the Tortoise workflows:</p>
+                                <WizardPromptCard text={wizardWorkflowsText(harnessKey, wizardKeyMode)} label="Copy prompt" />
                               </>
                             ) : (
                               wizardNoKeyAffordance
                             )}
-                            <p className="dim small" style={{ textAlign: 'center', margin: '0.75rem 0' }}>After setting up the connector, start a new chat and paste this prompt (it tells your agent how to work with Tortoise):</p>
-                            <pre className="snippet" style={{ marginTop: '0.5rem' }}>{WORKFLOWS_PROMPT}</pre>
                           </div>
                         )
                         return null

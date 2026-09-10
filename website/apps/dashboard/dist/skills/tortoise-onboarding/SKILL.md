@@ -225,18 +225,19 @@ Pi's mcp-client expands plain `${TORTOISE_API_KEY}` (no `env:` prefix).
 
 ### Claude Desktop (teach-human)
 
-You cannot edit local files. Walk the human through:
+You cannot edit local files. Walk the human through the Connectors flow:
 
-1. Open `~/Library/Application Support/Claude/claude_desktop_config.json`
-   (macOS) — or Claude > Settings > Developer in the app.
-2. MERGE the `mcpServers` block below into the existing config (never replace
-   the whole file — the key stays literal here; keep the file private):
+1. Open Claude Desktop → **Settings → Connectors → Add custom connector**.
+2. Name: `Tortoise`
+3. Server URL: `https://api.premiselabs.co/mcp/`
+4. Request headers: `Authorization: Bearer <TORTOISE_API_KEY>`
 
-```json
-{ "mcpServers": { "tortoise": { "type": "http", "url": "https://api.premiselabs.co/mcp/", "headers": { "Authorization": "Bearer <TORTOISE_API_KEY>" } } } }
-```
-
-3. Restart Claude Desktop. The `tortoise` MCP tools appear in this session.
+Restart is not required — the connector's `tortoise_*` MCP tools appear in a
+new chat. The config file at
+`~/Library/Application Support/Claude/claude_desktop_config.json` only accepts
+**local stdio** servers and silently does nothing for this remote HTTP server;
+it can still be edited via **Settings → Developer → Edit Config** for
+advanced/local stdio setups only.
 
 ### Claude Web (teach-human)
 
@@ -244,8 +245,8 @@ Guide the human through:
 
 1. claude.ai > Settings > Connectors > Add custom connector, name it
    "Tortoise".
-2. Server URL: `https://api.premiselabs.co/mcp/`; Request headers
-   (advanced): `Authorization: Bearer <TORTOISE_API_KEY>` (stored by
+2. Server URL: `https://api.premiselabs.co/mcp/`; Request headers:
+   `Authorization: Bearer <TORTOISE_API_KEY>` (stored by
    Anthropic — your key, their cloud).
 3. The connector exposes the `tortoise_*` MCP tools to claude.ai workflows.
 
@@ -254,8 +255,8 @@ Guide the human through:
 1. Call `tortoise_health` (MCP tool, all 6 harnesses once connected). It
    must report the graph reachable + your organization context.
 2. On failure: retry once; then give an honest diagnostic — config write
-   invalid (harness broken)? Offer the teach-human fallback (the config is a
-   manual file for Desktop, or the connector steps for Web) or re-run the
+   invalid (harness broken)? Offer the teach-human fallback (the connector
+   steps for Desktop/Web) or re-run the
    universal command. Never claim connected on a failed `tortoise_health`.
 3. On success — **write the harness-connected checkpoint** (idempotent
    first-write-wins keyed-MERGE; replay is a no-op, so the dashboard's
@@ -265,7 +266,7 @@ Guide the human through:
      "Authorization: Bearer $TORTOISE_API_KEY" -H "Content-Type:
      application/json" -d '{"step":"harness-connected"}'`
    - Claude Desktop / Claude Web: you have no REST/curl surface — the human
-     clicks **"I've set it up — Continue"** in the dashboard connect step;
+     clicks **"Done — Continue to dashboard"** in the dashboard connect step;
      that click writes the same checkpoint (session-authed). Tell them to do
      that once `tortoise_health` succeeds here.
 4. Report to the user: "✅ Tortoise is connected and verified." The Setup

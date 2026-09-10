@@ -678,8 +678,8 @@ def test_owner_connect_mint_failure_is_visible(page: Page) -> None:
 
 
 @pytest.mark.parametrize("tab,sync_text", [
-    ("Claude Desktop", "Open Claude Desktop → Settings → Developer → Edit Config"),
-    ("Claude Web", "Go to claude.ai → Settings → Connectors → Add custom connector"),
+    ("Claude Desktop", "Open Claude Desktop → Settings → Connectors"),
+    ("Claude Web", "Open claude.ai → Settings → Connectors"),
 ])
 def test_owner_no_key_affordance_on_manual_harness_tabs(page: Page, tab: str, sync_text: str) -> None:
     """#2710 (code-review P1): the two MANUAL harness tabs must not dead-end.

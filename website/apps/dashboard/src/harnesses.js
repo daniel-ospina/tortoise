@@ -9,9 +9,10 @@ const MCP_URL = 'https://api.premiselabs.co/mcp/'
 // slash for the 6 keyed harnesses (byte-identical copy).
 const CHATGPT_MCP_URL = 'https://api.premiselabs.co/mcp'
 
-// #1701: the skills-as-prompt body shared by Claude Web and ChatGPT (both
-// have no local skills). ONE constant so the two user-facing prompts can
-// never drift.
+// #1701: the skills-as-prompt body shared by every filesystem-less harness
+// that therefore has no local skills to install — Claude Web, Claude Desktop
+// (#2827) and ChatGPT. ONE constant so the user-facing prompts can never
+// drift. Composed by wizardWorkflowsText in the dashboard.
 export const WORKFLOWS_PROMPT =
   `You have Tortoise connected (the 'tortoise' MCP tools). Follow these workflows:\n\n1) Writing to the graph — Tortoise stores knowledge as points with edges: IMPL means 'supports', NAND means 'contradicts'. Mitigations reduce confidence (range 0.10–0.50). To change a point, supersede it and clean up its active edges rather than editing in place. Prefer structural claims over labels and always cite provenance.\n\n2) Decisions — to make a decision, first refine it, then research the options, the criteria that matter, and the findings/evidence, then wire IMPL/NAND edges from findings and criteria to options (mitigate an edge, range 0.10–0.50, when it's true but matters less), and rank the options by EP confidence.\n\n3) Research findings — when I share a research finding, ingest it as a point, check for existing related claims first, and surface connections to what we already know.`
 
@@ -96,7 +97,7 @@ export const HARNESS_STEPS = (harness, key) => ({
 // paste into the agent). NOT part of the copied content.
 export const HARNESS_INTRO = {
   claude: 'Run these commands in your terminal:',
-  'claude-desktop': 'Edit ~/Library/Application Support/Claude/claude_desktop_config.json (macOS) — or Claude > Settings > Developer in the app — and add the tortoise block below. Merge into an existing mcpServers section — don\'t replace the whole file. The key stays literal here — keep the file private. Restart Claude after saving.',
+  'claude-desktop': 'Open Claude Desktop → Settings → Connectors → Add custom connector, then enter the Server URL and the Authorization: Bearer <key> request header. (For local stdio servers only, advanced users can still edit ~/Library/Application Support/Claude/claude_desktop_config.json on macOS, or %APPDATA%\\Claude\\claude_desktop_config.json on Windows, from Settings → Developer in the app.)',
   // #2361 review-r1 (UX-3): Claude Web had no intro — the copy button said
   // 'Copy prompt' but nothing explained where the prompt goes.
   'claude-web': 'Start a new chat at claude.ai (or the Claude web app) and paste the prompt below into it — that conversation becomes your connected agent. The prompt keeps the key literal: do not share the chat or the key.',
@@ -144,8 +145,15 @@ cp <path-to-tortoise>/tortoise/claude-hooks/session-end.sh .claude/hooks/session
 chmod +x .claude/hooks/session-start.sh .claude/hooks/session-end.sh
 # then merge into .claude/settings.json:
 # { "hooks": { "SessionStart": [{ "matcher": "", "hooks": [{ "type": "command", "command": ".claude/hooks/session-start.sh" }] }], "SessionEnd": [{ "matcher": "", "hooks": [{ "type": "command", "command": ".claude/hooks/session-end.sh" }] }] } }`,
+  // #2827: these constants are NOT wired to any live surface — they are only
+  // reachable from the archived LEGACY_WIZARD_ARCHIVED render in main.jsx and
+  // from harnesses.test.js. A remote HTTP MCP server must NOT be documented as
+  // an mcpServers JSON block regardless: claude_desktop_config.json accepts
+  // local stdio servers only, so a "type"/"headers" shape silently does
+  // nothing (no server, no error). These connector field values are what the
+  // user actually pastes into the Connectors UI.
   'claude-desktop': (key) =>
-    `${JSON.stringify({ mcpServers: { tortoise: { url: MCP_URL, headers: { Authorization: `Bearer ${key}` } } } }, null, 2)}`,
+    `Connector name: Tortoise\nServer URL:   ${MCP_URL}\nRequest headers:\n  Authorization: Bearer ${key}`,
   'claude-web': () => {
     const base = WORKFLOWS_PROMPT
     // The session-filing paragraph is gated on HARNESS_CAPTURE_SUPPORT — the
@@ -369,7 +377,20 @@ ${JSON.stringify(PI_MCP_CONFIG_ENV, null, 2)}
    Then call tortoise_health — when it passes, tell me "Tortoise is
    connected".`,
   'claude-desktop': (key) =>
-    `# Tortoise — universal setup command (Claude Desktop — manual setup)\n# Claude Desktop has no local shell, so YOU complete the steps below, then the\n# agent verifies after:\n# 1. Open ~/Library/Application Support/Claude/claude_desktop_config.json\n#    (macOS) — or Claude > Settings > Developer in the app.\n# 2. MERGE the mcpServers block below into the existing config (never replace\n#    the whole file; the key stays literal here — keep the file private):\n${JSON.stringify({ mcpServers: { tortoise: { url: MCP_URL, headers: { Authorization: `Bearer ${key}` } } } }, null, 2)}\n# 3. Restart Claude Desktop, then say "Set up Tortoise" in a chat — the agent\n#    verifies with tortoise_health. Click "I've set it up — Continue" in the\n#    dashboard connect step when it passes (that writes the checkpoint).`,
+    `# Tortoise — universal setup command (Claude Desktop — manual setup)
+# Claude Desktop is filesystem-less for remote MCP: use the Connectors UI, NOT
+# claude_desktop_config.json (that file only accepts local stdio servers, so an
+# mcpServers block with a type/headers remote shape silently does nothing).
+# YOU complete these steps, then the agent verifies:
+1. Open Claude Desktop → Settings → Connectors → Add custom connector.
+2. Connector name: Tortoise
+3. Server URL:   ${MCP_URL}
+4. Request headers:
+     Authorization: Bearer ${key}
+5. Start a new chat, paste the Tortoise workflows prompt, then say "Set up
+   Tortoise" — the agent calls tortoise_health to verify. Click "I've set it up
+   — Continue" in the dashboard connect step when it passes (that writes the
+   harness-connected checkpoint).`,
   'claude-web': (key) =>
     `Tortoise — universal setup command (Claude Web — manual setup)\nClaude Web runs in Anthropic's cloud — no local files. Complete the connector\nsteps below, then the agent (with the connector's tortoise_* tools) verifies:\n1. Go to claude.ai > Settings > Connectors > Add custom connector, name it "Tortoise".\n2. Server URL: ${MCP_URL}\n3. Request headers (advanced): Authorization: Bearer ${key}  (stored by Anthropic)\n4. In a Claude Web chat, say "Set up Tortoise" — the agent calls tortoise_health\n   to verify, then click "I've pasted it — Continue" in the dashboard connect\n   step (that writes the harness-connected checkpoint).`,
   chatgpt: () =>

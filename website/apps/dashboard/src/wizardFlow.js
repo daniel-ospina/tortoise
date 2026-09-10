@@ -34,7 +34,7 @@ export const WIZARD_STEPS = Object.freeze([
   {
     id: 'connect',
     label: 'Connect your agent',
-    sub: "One command for your agent — copy it, run or paste it, and it can reach your Organization.",
+    sub: 'Connect Tortoise to your Organization.',
   },
   {
     id: 'done',
