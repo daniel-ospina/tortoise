@@ -873,7 +873,9 @@ def test_supabase_set_graph_name_custom_and_default():
     coexists with the recording override."""
     from tests.fake_control_plane import FakeControlPlane
     from tortoise.supabase_control import (
-        graph_metadata, set_graph_name, set_graph_recording,
+        graph_metadata,
+        set_graph_name,
+        set_graph_recording,
     )
     cp = FakeControlPlane()
     cp.seed("teams", [{"id": "t1", "graph_name": "team_t1"}])
@@ -957,10 +959,11 @@ def _sb_seed(fake):
 
 def _sb_env(monkeypatch, fake_cls=None):
     import tempfile as _tempfile
+
+    import tortoise.hosted_api as ha_mod
     from tests._http_fixtures import patched_tortoise_sdk
     from tests.fake_control_plane import FakeControlPlane
     from tests.test_export_delete import _enable_supabase
-    import tortoise.hosted_api as ha_mod
     fake = (fake_cls or FakeControlPlane)(
         {"teams": [], "api_keys": [], "team_memberships": [],
          "invitations": [], "graphs": []})
