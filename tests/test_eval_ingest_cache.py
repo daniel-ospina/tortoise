@@ -22,9 +22,11 @@ marker refuses the cleanup AND the cache marker — a peer's mid-write graph
 is never wiped, reused or cached). Mock reader/judge + a mocked
 ``extract_session_v2`` counting extractor calls — zero API spend.
 
-Env-lane note: this module never mutates TORTOISE_DB_URI (the docker tests
-pass ``db_uri=`` explicitly, mirroring test_integrity_gate_docker), so it
-needs no DELIBERATE_URI_MUTATIONS entry.
+Env-lane note: the docker-lane tests take the ``docker_lane`` fixture, which
+pins the RESOLVED lane URI into TORTOISE_DB_URI for the test duration (a
+declared DELIBERATE_URI mutation — see the fixture for why the run side and
+the assertion side must read the same store). The hermetic tests need no URI
+and take no fixture.
 """
 from __future__ import annotations
 
@@ -63,6 +65,27 @@ if not _is_db_uri(os.environ.get("TORTOISE_DB_URI")):
 # default carries the password python-ci.yml's falkordb service requires
 # (`--requirepass falkordb`); local passwordless instances can override.
 DB_URI = live_uri()
+
+
+@pytest.fixture
+def docker_lane(monkeypatch) -> str:
+    """Put the whole test on ONE store: the resolved lane URI (#2815).
+
+    The docker-lane tests hand ``db_uri=`` to run_evaluation, but every
+    assertion-side ``TortoiseSDK(namespace=...)`` (and its ``_get_proj()``)
+    resolves TORTOISE_DB_URI from the ENV. With the env set-but-empty — CI's
+    tier-2 leg exports ``TORTOISE_DB_URI=""`` — the run went to the resolved
+    server while the assertions read the embedded store, so ``_marker_rows``
+    returned 0 rows and the cache tests failed with ``len([]) == 0``
+    (CI run 34529580649). The outcome is lane-dependent in exactly the way
+    the epic #1647 contract forbids: "empty means unset" must resolve to ONE
+    store, never two. Pinning the resolved URI into the env for the test
+    duration keeps both sides on it; ``monkeypatch`` auto-restores at
+    teardown (#2084 pop-without-restore class).
+    """
+    uri = _db_uri()
+    monkeypatch.setenv("TORTOISE_DB_URI", uri)
+    return uri
 
 
 def _falkordb_up() -> bool:
@@ -327,6 +350,7 @@ def _marker_rows(namespace: str) -> list:
         sdk.close()
 
 
+@pytest.mark.usefixtures("docker_lane")
 def test_cache_miss_ingests_writes_marker_and_persists(monkeypatch, tmp_path):
     """(c) cache-miss path: an absent graph ingests (extractor called), the
     fingerprint marker is written, and the graph PERSISTS after the run
@@ -362,6 +386,7 @@ def test_cache_miss_ingests_writes_marker_and_persists(monkeypatch, tmp_path):
         _clean_question(ns, qid)
 
 
+@pytest.mark.usefixtures("docker_lane")
 def test_cache_hit_skips_extraction(monkeypatch, tmp_path):
     """(b) cache-hit path: a pre-ingested + marked graph causes the ingest
     (extractor calls) to be SKIPPED on the matching second run and the
@@ -389,6 +414,7 @@ def test_cache_hit_skips_extraction(monkeypatch, tmp_path):
         _clean_question(ns, qid)
 
 
+@pytest.mark.usefixtures("docker_lane")
 def test_cache_stale_fingerprint_reen_ingests(monkeypatch, tmp_path):
     """(d) stale path: a graph carrying a DIFFERENT fingerprint re-ingests
     (the wipe removes the stale content + marker, the ingest refreshes the
@@ -424,6 +450,7 @@ def test_cache_stale_fingerprint_reen_ingests(monkeypatch, tmp_path):
         _clean_question(ns, qid)
 
 
+@pytest.mark.usefixtures("docker_lane")
 def test_cache_off_default_always_ingests_and_cleans(monkeypatch, tmp_path):
     """(e) --no-cache-ingest default: byte-identical behavior to today —
     every run ingests (extractor called each time, no marker ever), a
@@ -450,6 +477,7 @@ def test_cache_off_default_always_ingests_and_cleans(monkeypatch, tmp_path):
         _clean_question(ns, qid)
 
 
+@pytest.mark.usefixtures("docker_lane")
 def test_sweep_cache_wipes_graph_after_use(monkeypatch, tmp_path):
     """(--sweep-cache hygiene escape hatch) the question's graph — content
     AND cache marker — is removed right after the question finishes."""
@@ -497,6 +525,7 @@ def test_marker_peer_guard_hermetic_refusal(tmp_path):
     assert data["pid"] == _os.getpid() + 1  # peer marker untouched
 
 
+@pytest.mark.usefixtures("docker_lane")
 def test_marker_peer_guard_never_caches_a_live_peer_graph(
         monkeypatch, tmp_path):
     """(f) cache-mode MISS under a LIVE foreign run marker (a peer is

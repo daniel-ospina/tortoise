@@ -13,6 +13,14 @@ Isolation (plan cycle2-P2-25): every test uses a UNIQUE graph namespace
 (unique model name) and removes its debris before exit so one test's
 deliberately injected leftover state cannot contaminate another test's
 fresh-namespace ratio=1.000 assumption.
+
+Env-lane note: every test here is docker-lane (the module ``pytestmark``
+gate above), so the autouse ``_reset_proxy`` fixture additionally pins the
+RESOLVED lane URI into TORTOISE_DB_URI — the run helpers hand ``db_uri=``
+to run_evaluation while the assertion-side ``TortoiseSDK(namespace=...)``
+reads the env, and with the env set-but-empty (CI tier-2 exports
+``TORTOISE_DB_URI=""``) those two sides hit DIFFERENT stores (a declared
+DELIBERATE_URI mutation; see test_eval_ingest_cache.py::docker_lane).
 """
 from __future__ import annotations
 
@@ -59,8 +67,11 @@ pytestmark = pytest.mark.skipif(
 
 
 @pytest.fixture(autouse=True)
-def _reset_proxy():
+def _reset_proxy(monkeypatch):
     reset_gate_fault_proxy()
+    # #2815: one store for the whole test — the run side (db_uri=) and the
+    # assertion side (env-resolved TortoiseSDK constructions) must agree.
+    monkeypatch.setenv("TORTOISE_DB_URI", _db_uri())
     yield
     reset_gate_fault_proxy()
 
