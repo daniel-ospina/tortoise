@@ -32,16 +32,12 @@ class _BadEnvelopeCaller:
 
     def call(self, *, prompt: str) -> str:
         self.calls += 1
-        # every episode's second call emits the malformed envelope — the
-        # live crash shape (confidence None); the run must NOT crash.
-        if self.calls == 2:
-            env = {"position": "x", "stated_confidence": None,
-                   "undecided": False, "defeat_conditions": [],
-                   "intents": [], "citations": []}
-        else:
-            env = {"position": "Proceed", "stated_confidence": 0.8,
-                   "undecided": False, "defeat_conditions": ["data-loss"],
-                   "intents": [], "citations": []}
+        # EVERY call emits the malformed envelope (confidence None) — the
+        # live crash shape. The bounded repair re-ask cannot rescue it, so
+        # the run must still complete with honest exclusions, never crash.
+        env = {"position": "x", "stated_confidence": None,
+               "undecided": False, "defeat_conditions": [],
+               "intents": [], "citations": []}
         return f"deliberation text.\n{json.dumps(env)}"
 
 
@@ -88,3 +84,39 @@ def test_bad_envelope_excludes_not_crashes(tmp_path):
     summary = json.loads((attempt / "summary.json").read_text())
     assert summary["arms"][0]["excluded"]["count"] == 2, (
         "both bad-envelope episodes must exclude, never crash the run")
+
+
+def test_bad_envelope_repair_rescues_when_model_recovers(tmp_path):
+    """#1416: a schema violation gets ONE corrective re-ask of the SAME
+    question; when the model's second answer conforms, the episode is
+    VALID (not excluded) — the repair is a real re-answer, not a
+    fabrication."""
+    class _OnceBadCaller(_BadEnvelopeCaller):
+        def call(self, *, prompt: str) -> str:
+            self.calls += 1
+            if self.calls == 2:
+                env = {"position": "x", "stated_confidence": None,
+                       "undecided": False, "defeat_conditions": [],
+                       "intents": [], "citations": []}
+            else:
+                env = {"position": "Proceed", "stated_confidence": 0.8,
+                       "undecided": False,
+                       "defeat_conditions": ["data-loss"],
+                       "intents": [], "citations": []}
+            return f"deliberation text.\n{json.dumps(env)}"
+
+    out = tmp_path / "out"
+    code = run_battery(RunConfig(config_dir=_cfg(tmp_path), out_dir=out,
+                                 executor="real", arms=["a0"],
+                                 caller_factory=_OnceBadCaller),
+                       stdout=lambda _: None)
+    assert code is ExitCode.OK, "repaired episodes must count as valid"
+    attempt = sorted(out.iterdir())[0]
+    summary = json.loads((attempt / "summary.json").read_text())
+    assert summary["arms"][0]["excluded"]["count"] == 0
+    art = summary["arms"][0]["artifacts"][0]
+    tr = json.loads((attempt / art).read_text())
+    repaired = [t for t in tr["episode_trace"]["turns"] if t.get("repaired")]
+    assert repaired, "the repaired turn must be recorded in the artifact"
+    assert "[[repair]]" in repaired[0]["content"], (
+        "the trace must carry the model's repaired answer")

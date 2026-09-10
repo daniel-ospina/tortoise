@@ -338,8 +338,13 @@ def _execute_real_episode(*, config: RunConfig, arm, scenario: Scenario,
         _row_off += n
         tokens = int(sum(getattr(r, "completion_tokens", 0) or 0
                          for r in seg))
-        tracker.add_turn(role="agent", content=turn["content"],
-                         tokens=tokens, outcome=ModelCallOutcome.OK)
+        tracker.add_turn(
+            role="agent",
+            content=(turn["content"] if not turn.get("repaired")
+                     else f'{turn["content"]}\n\n[[repair]] '
+                          f'{turn.get("repair_content", "")}'),
+            tokens=tokens, outcome=ModelCallOutcome.OK,
+            phase=turn.get("phase", ""), repaired=bool(turn.get("repaired")))
 
     # decide writes: surfacing intents against a closed-set claim; a
     # tool_event is emitted ONLY when the product returned a real ref
