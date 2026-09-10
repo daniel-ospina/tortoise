@@ -11,7 +11,8 @@
 //      effective declarations: dark --surface background, a PAINTED border
 //      (width > 0, style not none/hidden) whose COMPOSITED contrast clears the
 //      WCAG 1.4.11 non-text 3:1 floor (last-wins border/border-* resolution),
-//      and no custom-property declaration inside the rule;
+//      the --text/--surface pair clearing the WCAG 1.4.3 4.5:1 text floor, and
+//      no custom-property declaration inside the rule;
 //   2. the create-org name input itself carries no class, no inline style and
 //      no own background — i.e. it is exactly the element that MUST be themed
 //      by the shared rule (a re-added inline/white background fails here);
@@ -132,6 +133,17 @@ test('#2778: a single shared .modal input/textarea/select rule themes dialog fie
   const surfaceHex = indexCss.match(/--surface:\s*(#[0-9a-fA-F]{6})/)
   assert.ok(surfaceHex, 'the --surface token must be defined')
   const surface = hexToRgb(surfaceHex[1])
+
+  // WCAG 1.4.3: the text/background pair is the actual reported defect
+  // (1.48:1 → 11.76:1), so compute it rather than only checking token names.
+  const textHex = indexCss.match(/--text:\s*(#[0-9a-fA-F]{6})/)
+  assert.ok(textHex, 'the --text token must be defined')
+  const textRatio = contrastRatio(hexToRgb(textHex[1]), surface)
+  assert.ok(
+    textRatio >= 4.5,
+    `the dialog-field text must clear the WCAG 1.4.3 4.5:1 floor against --surface; measured ${textRatio.toFixed(2)}:1 (--text on --surface)`,
+  )
+
   const whiteAlpha = paintedColor && paintedColor.match(/^rgba\(255,\s*255,\s*255,\s*([0-9.]+)\)$/)
   assert.ok(
     whiteAlpha,
