@@ -54,9 +54,21 @@ class ExecutedCell:
     accuracy: float | None
     samples: int
     revision: str
+    #: Which lane produced the number: "real" (the released dataset with real
+    #: reader/judge models) or "mock" (a fixture with mocked reader/judge, no
+    #: spend). Persisted so a mock number can never read as a comparable
+    #: measurement (review P1 on #2819): the official runner hardcodes its
+    #: dataset id, so without this a mock cell carried the REAL dataset's
+    #: revision and was indistinguishable from a real one.
+    lane: str = "real"
     detail: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
+        if self.lane not in ("real", "mock"):
+            raise ValueError(
+                f"parity executor {self.benchmark}: lane={self.lane!r} must be "
+                f"'real' or 'mock' — a cell that does not say which lane it "
+                f"came from cannot be compared")
         if self.accuracy is not None and self.samples <= 0:
             raise ValueError(
                 f"parity executor {self.benchmark}: accuracy={self.accuracy!r} "
@@ -131,13 +143,22 @@ def longmemeval_executor(*, mock: bool = False, limit: int | None = None,
     accuracy = (acc.get("overall")
                 if isinstance(acc, dict) and "overall" in acc else None)
     samples = int(report.get("n_questions") or 0)
-    revision = f"{report.get('dataset', 'unknown')}@{report.get('split', '')}"
+    # The revision names what was ACTUALLY loaded. In mock mode the runner
+    # still reports its hardcoded dataset id, so trusting it would label a
+    # fixture run with a real dataset's identity (review P1, #2819) — the
+    # fixture is named instead.
+    if mock:
+        lane = "mock"
+        revision = f"fixture:{fx.name}"
+    else:
+        lane = "real"
+        revision = f"{report.get('dataset', 'unknown')}@{report.get('split', '')}"
     return ExecutedCell(
         benchmark="longmemeval", accuracy=accuracy, samples=samples,
-        revision=revision,
+        revision=revision, lane=lane,
         detail={"task_averaged": (acc or {}).get("task_averaged")
                 if isinstance(acc, dict) else None,
-                "output": str(out_path)})
+                "lane": lane, "output": str(out_path)})
 
 
 #: Registered execution seams, keyed by the pinned benchmark id. A benchmark

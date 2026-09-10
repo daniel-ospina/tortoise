@@ -62,7 +62,10 @@ class TestLongMemEvalExecutor:
         c = longmemeval_executor(mock=True, limit=5, out_dir=tmp_path,
                                  fixture=_touch(tmp_path / "mini.json"))
         assert c.accuracy == 0.775 and c.samples == 40
-        assert c.revision == "xiaowu0162/longmemeval-cleaned@s"
+        # a MOCK run must not wear the real dataset's identity (review P1):
+        # the fixture is named and the lane is recorded
+        assert c.lane == "mock"
+        assert c.revision == "fixture:mini.json"
         assert c.detail["task_averaged"] == 0.79
 
     def test_retrieval_only_report_is_not_measured(self, monkeypatch, tmp_path):
@@ -75,6 +78,14 @@ class TestLongMemEvalExecutor:
         c = longmemeval_executor(mock=True, limit=5, out_dir=tmp_path,
                                  fixture=_touch(tmp_path / "mini.json"))
         assert c.accuracy is None and c.samples == 40
+
+    def test_lane_is_required_and_validated(self):
+        """A cell that does not say which lane produced it is refused."""
+        with pytest.raises(ValueError, match="must be"):
+            ExecutedCell(benchmark="longmemeval", accuracy=0.5, samples=5,
+                         revision="d@s", lane="production")
+        assert ExecutedCell(benchmark="longmemeval", accuracy=0.5, samples=5,
+                            revision="d@s", lane="real").lane == "real"
 
     def test_missing_fixture_fails_closed(self, tmp_path):
         with pytest.raises(ExecutorUnavailable, match="mini fixture"):
@@ -127,21 +138,46 @@ class TestCliExecutionSeam:
 
         def _fake_executor(*, mock=False, limit=None, out_dir=None):
             return ExecutedCell(benchmark="longmemeval", accuracy=0.775,
-                                samples=40,
+                                samples=40, lane="real",
                                 revision="xiaowu0162/longmemeval-cleaned@s")
 
         monkeypatch.setitem(ex.EXECUTORS, "longmemeval", _fake_executor)
         rc = cli.main(["parity", "--config", str(self._cfg(tmp_path)),
-                       "--out", str(tmp_path), "--execute", "--limit", "5"])
+                       "--out", str(tmp_path), "--execute", "--allow-spend",
+                       "--limit", "5"])
         assert rc == 0
         record = json.loads((tmp_path / "parity_record.json").read_text())
         cell = record["benchmarks"]["longmemeval"]
         assert cell["measured"] is True
         assert cell["accuracy"] == 0.775 and cell["samples"] == 40
         assert cell["revision"] == "xiaowu0162/longmemeval-cleaned@s"
+        assert cell["lane"] == "real"
         # a benchmark with no registered executor stays honestly not-measured
         other = record["benchmarks"]["locomo"]
         assert other["measured"] is False and other["accuracy"] is None
+
+    def test_real_lane_needs_explicit_spend_opt_in(self, tmp_path, monkeypatch,
+                                                   capsys):
+        import battery.cli as cli
+
+        def _must_not_run(*, mock=False, limit=None, out_dir=None):
+            raise AssertionError("a real lane ran without --allow-spend")
+
+        monkeypatch.setitem(EXECUTORS, "longmemeval", _must_not_run)
+        rc = cli.main(["parity", "--config", str(self._cfg(tmp_path)),
+                       "--out", str(tmp_path), "--execute"])
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "--allow-spend" in out
+        record = json.loads((tmp_path / "parity_record.json").read_text())
+        assert record["benchmarks"]["longmemeval"]["measured"] is False
+
+    def test_limit_without_execute_warns(self, tmp_path, capsys):
+        import battery.cli as cli
+        rc = cli.main(["parity", "--config", str(self._cfg(tmp_path)),
+                       "--out", str(tmp_path), "--limit", "5"])
+        assert rc == 0
+        assert "no effect without --execute" in capsys.readouterr().out
 
     def test_executor_unavailable_records_not_measured(self, tmp_path,
                                                        monkeypatch, capsys):
@@ -153,7 +189,7 @@ class TestCliExecutionSeam:
 
         monkeypatch.setitem(ex.EXECUTORS, "longmemeval", _unavailable)
         rc = cli.main(["parity", "--config", str(self._cfg(tmp_path)),
-                       "--out", str(tmp_path), "--execute"])
+                       "--out", str(tmp_path), "--execute", "--allow-spend"])
         assert rc == 0, "an unavailable executor must not crash the leg"
         out = capsys.readouterr().out
         assert "executor unavailable" in out
@@ -186,5 +222,6 @@ def test_longmemeval_real_mock_lane_end_to_end(tmp_path):
     assert cell.benchmark == "longmemeval"
     assert cell.samples == 1, "one question in, one sample out"
     assert cell.accuracy is not None, "the mock lane publishes an accuracy"
-    assert cell.revision.startswith("xiaowu0162/longmemeval")
+    assert cell.lane == "mock"
+    assert cell.revision == "fixture:longmemeval_mini.json"
     assert (tmp_path / "longmemeval_official.json").is_file()
