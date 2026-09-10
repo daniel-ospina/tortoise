@@ -17,7 +17,9 @@ surfaces:
   - test_battery_lane_matrix.py
   - test_battery_loader_fidelity.py
   - test_battery_model_pin.py
+  - test_battery_parity_executors.py
   - test_battery_parity_hash.py
+  - test_battery_parity_mabench.py
   - test_battery_parity_migration.py
   - test_battery_probe_measured.py
   - test_battery_provenance.py
