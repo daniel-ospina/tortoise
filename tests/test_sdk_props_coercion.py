@@ -109,7 +109,7 @@ class TestUpdateAndEntityProps:
         # ("Property values can only be of primitive types").
         obj = sdk.create_object(
             "Test Product", "product",
-            props={"tier": "free", "owner": "pm"},
+            props={"tier": "free", "custodian": "pm"},
         )
         assert obj.get("name") == "Test Product"
         assert obj.get("objectKind") == "product"
@@ -123,22 +123,27 @@ class TestEntityPropsPersisted:
     def test_create_object_persists_arbitrary_props(self, sdk):
         obj = sdk.create_object(
             "Arbitrary Widget", "widget",
-            tier="premium", owner="alice", region="us-east-1",
+            tier="premium", custodian="alice", region="us-east-1",
         )
         assert obj.get("name") == "Arbitrary Widget"
         assert obj.get("objectKind") == "widget"
         assert obj.get("tier") == "premium"
-        assert obj.get("owner") == "alice"
+        assert obj.get("custodian") == "alice"
         assert obj.get("region") == "us-east-1"
+        # #2600 (SD-2): 'owner' is a RESERVED actor key — a caller-supplied
+        # value is stripped with a warning and never stored. Pin the negative
+        # here so the two contracts (#228 arbitrary props vs #2600 reserved
+        # actor claims) cannot silently re-collide.
+        assert obj.get("owner") is None
 
     def test_create_object_nested_props_dict_persists(self, sdk):
         """MCP-style nested props= dict also persists arbitrary props (#228)."""
         obj = sdk.create_object(
             "Nested Props Widget", "gadget",
-            props={"tier": "free", "owner": "pm", "env": "staging"},
+            props={"tier": "free", "custodian": "pm", "env": "staging"},
         )
         assert obj.get("tier") == "free"
-        assert obj.get("owner") == "pm"
+        assert obj.get("custodian") == "pm"
         assert obj.get("env") == "staging"
 
     def test_create_subject_persists_arbitrary_props(self, sdk):

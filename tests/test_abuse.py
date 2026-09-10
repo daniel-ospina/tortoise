@@ -232,7 +232,10 @@ class TestEpisodeLifecycle:
         eng.record_point_create("t1", 501, now=T0 + timedelta(minutes=30))
         assert eng.record_point_create(
             "t1", 501, now=T0 + timedelta(minutes=90)) == "suspend"
-        store.unsuspend_team("t1")
+        # Pass the simulated clock: the default now=wall-clock would stamp
+        # the flag_clear rows AFTER the (simulated) future burst, so
+        # latest_flag_at would see the new burst as already cleared.
+        store.unsuspend_team("t1", now=T0 + timedelta(minutes=90))
         assert store.latest_flag_at("t1", "point_create") is None
         # fresh burst long after recovery: stage 1 again, never stage 2
         burst = T0 + timedelta(days=30)
