@@ -51,14 +51,27 @@ def _fresh_sdk(tmp_path):
 
 
 @pytest.fixture(autouse=True)
-def _reset_rerank_state():
+def _reset_rerank_state(monkeypatch):
     """Clear the scorer caches before/after EVERY test — a TTL test or a
     failed real-model import must not leak a cached failure into the next
-    test (the module globals are the real get_scorer state)."""
+    test (the module globals are the real get_scorer state).
+
+    #2772: pin the sparse TF-IDF baseline (``EmbeddingModel.get`` -> None,
+    the ``tests/eval/retrieval/test_oracle.py`` ``_force_sparse_tfidf``
+    pattern #2573 established). The pool-size pins in this module (q0 = 4
+    hits, q2 = 2 hits) were calibrated on 2026-08-22 while the CI bge cache
+    was evicted and the suite ran TF-IDF-degraded; once the embedder cache
+    was restored (#2573) the vector leg surfaced the rest of each corpus'
+    points (q0 = 10, q2 = 7) and every pool-size pin red'd. The R6
+    rerank/MMR contract under test is embedder-independent — the module
+    docstring's "runs fully offline" claim holds only with this pin (no
+    ~45s bge load per reset)."""
+    from tortoise.embeddings import EmbeddingModel
     rerank._scorer_cache.clear()
     rerank._fail_cache.clear()
-    from tortoise.embeddings import EmbeddingModel
     EmbeddingModel._reset()
+    monkeypatch.setattr(EmbeddingModel, "get", classmethod(
+        lambda cls, load_timeout=None: None))
     yield
     rerank._scorer_cache.clear()
     rerank._fail_cache.clear()

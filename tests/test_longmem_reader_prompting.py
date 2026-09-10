@@ -390,7 +390,7 @@ def test_preference_question_answered_from_option_end_to_end(tmp_path):
 
 # ── 4. Pipeline guard: mini fixture stays green with the plumbing ─────────
 
-def test_mini_pipeline_still_green_with_question_type(tmp_path):
+def test_mini_pipeline_still_green_with_question_type(tmp_path, monkeypatch):
     """The 5-question committed mini fixture still passes end-to-end with
     the question_type plumbing in place (no regression on other types).
 
@@ -405,7 +405,19 @@ def test_mini_pipeline_still_green_with_question_type(tmp_path):
     haystack date (the context says "last week") — no literal containment.
     An exact pin makes any drift (retrieval change surfacing the missing
     MSR turn, fixture edits) loud instead of silently passing under the
-    old >= 0.4 bar; the real-model eval covers the reasoning categories."""
+    old >= 0.4 bar; the real-model eval covers the reasoning categories.
+
+    #2772: the 0.4 pin is calibrated to the sparse TF-IDF baseline (the
+    2026-08 CI window in which the test was authored). With the bge
+    embedder cache restored (#2573) the vector leg surfaces the missing MSR
+    turn and the overall climbs to 0.6 — an embedder-state delta, not a
+    regression. Pin ``EmbeddingModel.get -> None`` (the
+    ``test_oracle.py`` ``_force_sparse_tfidf`` pattern) so the pin is
+    deterministic across embedder states and the module stays fully
+    offline."""
+    from tortoise.embeddings import EmbeddingModel
+    monkeypatch.setattr(EmbeddingModel, "get", classmethod(
+        lambda cls, load_timeout=None: None))
     instances = json.loads(MINI.read_text(encoding="utf-8"))
     outcomes, report = run_evaluation(
         instances, reader=MockReader(), judge=MockJudge(),
