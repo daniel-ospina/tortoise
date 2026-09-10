@@ -6,31 +6,30 @@
 // fell back to the UA white background under the dark theme's light text —
 // measured 1.48:1 (WCAG AA needs 4.5:1).
 //
-// The checks pin the fix's CSS invariant + the bug's shape:
-//   1. exactly one shared `.modal input/textarea/select` rule, and it themes
-//      every dialog field: dark --surface background, a PAINTED border (width
-//      > 0, style not none/hidden) whose COMPOSITED contrast clears the
-//      WCAG 1.4.11 non-text 3:1 floor, with last-wins resolution so a trailing
-//      `border-width`/`border-style`/`border-color` override cannot restore
-//      the 1.41:1 boundary; no custom-property redefinition inside the rule;
-//      and no other rule that could match a bare dialog input re-setting
-//      background/border behind it;
+// The checks pin the fix's SHAPE (not whole-sheet override resistance):
+//   1. exactly one shared `.modal input/textarea/select` rule, with correct
+//      effective declarations: dark --surface background, a PAINTED border
+//      (width > 0, style not none/hidden) whose COMPOSITED contrast clears the
+//      WCAG 1.4.11 non-text 3:1 floor (last-wins border/border-* resolution),
+//      and no custom-property declaration inside the rule;
 //   2. the create-org name input itself carries no class, no inline style and
 //      no own background — i.e. it is exactly the element that MUST be themed
 //      by the shared rule (a re-added inline/white background fails here);
 //   3. `.delete-confirm-input` stays `.modal`-scoped (0,2,0) so it keeps
 //      out-specifying the shared default and keeps its destructive red border.
 //
-// Deliberately out of scope: proving the <input> is *nested* inside the
-// `.modal` JSX element. That is a structural question a static regex scanner
-// cannot answer — main.jsx is a large JSX file whose text contains backticks
-// and `/*` sequences (embedded prompt strings), so a hand-rolled comment/
-// string mask desynchronizes and can swallow the dialog region — and the
-// zero-dep convention for this suite rules out importing the installed-but-
-// transitive JSX parsers. The guard's contract is the CSS invariant: any field
-// rendered inside `.modal` is themed, which is the class of bug #2778 was. A
-// DOM-level containment assertion belongs in the dashboard-e2e Playwright lane
-// and is tracked in #2793.
+// Deliberately out of scope — verified instead by computed styles in the
+// dashboard-e2e DOM lane (#2793):
+//   - proving the <input> is *nested* inside the `.modal` JSX element (a
+//     structural question; a hand-rolled mask is unreliable on this file —
+//     prose apostrophes/quotes desync quote-balancing heuristics — and the
+//     zero-dep convention rules out importing the transitive JSX parsers);
+//   - proving NO other rule anywhere in the sheet overrides the field's
+//     background/border. At-rule nesting, `:is()`/attribute selectors,
+//     higher-specificity/`!important` rules and a `--surface` redefinition
+//     elsewhere all evade a regex scan, because a regex scan is not a cascade
+//     resolver — four review rounds each defeated an attempt at it. The DOM
+//     lane asserts `getComputedStyle` directly and is the right home for it.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
@@ -76,23 +75,7 @@ function effectiveValue(decls, props) {
   return value
 }
 
-const ELEMENT_FIELD = /(^|[^\w-])(input|textarea|select)(?![\w-])/
-
-// True when a selector's target could be a BARE input/textarea/select inside
-// `.modal` — i.e. after stripping `:where()/:is()/:not()` wrappers it carries
-// no class other than `.modal` and no other element qualifier the create-org
-// field lacks. Used to catch overrides written with `:is()`/`:not()` spellings
-// that a plain `.modal input` prefix test would miss.
-function couldMatchBareModalField(selector) {
-  return selector.split(',').some((part) => {
-    const cleaned = part.replace(/:where\([^)]*\)|:is\([^)]*\)|:not\([^)]*\)/g, ' ')
-    const classes = cleaned.match(/\.[A-Za-z_-][\w-]*/g) || []
-    return !classes.some((c) => c !== '.modal')
-  })
-}
-
 test('#2778: a single shared .modal input/textarea/select rule themes dialog fields', () => {
-  const sharedSelector = '.modal input, .modal textarea, .modal select'
   const rule = cssFlat.match(/\.modal input, \.modal textarea, \.modal select \{([^}]*)\}/)
   assert.ok(
     rule,
@@ -100,23 +83,6 @@ test('#2778: a single shared .modal input/textarea/select rule themes dialog fie
   )
   const sharedCount = (cssFlat.match(/\.modal input, \.modal textarea, \.modal select \{/g) || []).length
   assert.equal(sharedCount, 1, 'exactly one shared dialog-field rule may exist — a duplicate override could quietly reset it')
-
-  // No OTHER rule that could match a bare dialog field may re-set
-  // background/border: that is how a "themed" field silently loses its surface
-  // again. Selector-shape independent (covers `:is()`/`:not()`/bare `input`).
-  const conflicting = []
-  const anyRule = /([^{}]*)\{([^}]*)\}/g
-  let m
-  while ((m = anyRule.exec(cssFlat))) {
-    const selector = m[1].trim()
-    if (selector === sharedSelector) continue
-    if (!ELEMENT_FIELD.test(selector)) continue
-    if (!couldMatchBareModalField(selector)) continue
-    if (/(^|;)\s*(background|background-color|border|border-color|border-width|border-style)\s*:/.test(m[2])) {
-      conflicting.push(selector)
-    }
-  }
-  assert.deepEqual(conflicting, [], `no other rule that could match a bare dialog field may re-set background/border (found: ${conflicting.join(' | ')})`)
 
   const decls = declarationsOf(rule[1])
   // A custom-property declaration inside the rule could retarget a token the
