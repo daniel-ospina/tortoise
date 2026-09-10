@@ -115,8 +115,14 @@ test('#2426: CSS states for expiring (amber) and expired (terminal red) exist', 
 // 3. Show-once card + rotate carry-over.
 test('#2426: the show-once key card states the expiry (server echo / never)', () => {
   assert.match(mainJsx, /setNewKeyExpiresAt\(\(mk && mk\.expires_at\) \|\| null\)/,
-    'create/rotate capture the server expiry echo')
-  assert.match(mainJsx, /expires \{fmtExpiryDate\(newKeyExpiresAt\)\}/, 'card shows the expiry date')
+    'create captures the server expiry echo into the modal card')
+  // #2735: rotate's reveal moved to its OWN `rotatedKey` state (so the create
+  // modal's dismiss cannot destroy an unread replacement) — the expiry echo
+  // must ride it, or a rotated key silently reads 'never expires'.
+  assert.match(mainJsx, /setRotatedKey\(\{ plaintext: \(mk && \(mk\.key \|\| mk\.api_key\)\) \|\| '', expiresAt: \(mk && mk\.expires_at\) \|\| null \}\)/,
+    'rotate captures the server expiry echo into rotatedKey')
+  assert.match(mainJsx, /expires \{fmtExpiryDate\(newKeyExpiresAt\)\}/, 'modal card shows the create expiry date')
+  assert.match(mainJsx, /expires \{fmtExpiryDate\(rotatedKey\.expiresAt\)\}/, 'rotate reveal shows the replacement expiry date')
   assert.match(mainJsx, /never expires/, 'card states Never explicitly')
 })
 
