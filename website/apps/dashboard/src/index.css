@@ -749,9 +749,12 @@ input::placeholder, textarea::placeholder {
    (rgba(255,255,255,0.12) is only 1.41:1 over the identical --surface panel):
    with the field background the same as the panel, the border is the only cue
    that identifies the control, so it must clear the WCAG 1.4.11 non-text 3:1
-   floor — 0.36 measures 3.29:1. Explicitly-classed fields keep their own
-   rules: `.inline-form input` resolves to the same tokens, and
-   `.modal .delete-confirm-input` (0,2,0) out-specifies this one. */
+   floor — 0.36 measures ≈3.3:1. This rule has the same specificity (0,1,1) as
+   `.inline-form input` but comes later, so dialog inline-form fields (key
+   create / reauth) deliberately inherit the compliant border while keeping
+   their own `font-family: var(--mono)` (not declared here).
+   `.modal .delete-confirm-input` (0,2,0) out-specifies this one and keeps its
+   destructive red border. */
 .modal input, .modal textarea, .modal select {
   background: var(--surface, #0d1a2d);
   border: 1px solid rgba(255, 255, 255, 0.36);
