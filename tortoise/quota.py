@@ -349,15 +349,21 @@ def _count_resource(team_id: str, resource: str, sdk=None) -> int:
             # the count reads Supabase via the seam — post-flip the registry
             # is DELETED, so a registry count would fail-open (0 nodes) or
             # 500. Mirrors the registry predicates exactly:
-            #   api_keys: revoked_at IS NULL AND not expired (#2426 — an
-            #             expired-but-unrevoked key must never wedge a team
-            #             at its cap; the auth layer already refuses it, so
-            #             counting it would hold a slot for a dead
-            #             credential. Pre-#2426 durable keys never carried
-            #             expiry. The expiry filter (expires_at IS NULL OR
-            #             > now) mirrors the bootstrap cap queries' own
-            #             predicate; live rows of every created_via count
-            #             exactly as before.),
+            #   api_keys: revoked_at IS NULL AND not expired (#2426/#2481 —
+            #             a REVOKED row is an audit tombstone (retained for
+            #             audit + swept later, #685) that must NEVER consume
+            #             the plan's max_api_keys budget; an expired-but-
+            #             unrevoked key must never wedge a team at its cap;
+            #             the auth layer already refuses both, so counting
+            #             them would hold a slot for a dead credential.
+            #             Pre-#2426 durable keys never carried expiry. The
+            #             expiry filter (expires_at IS NULL OR > now) mirrors
+            #             the bootstrap cap queries' own predicate; live rows
+            #             of every created_via count exactly as before. #2481
+            #             audit: this predicate is the ONE count shared by
+            #             every max_api_keys mint gate (hosted_api._mint_key
+            #             for POST /v1/team/keys + per-graph key mints,
+            #             REST _check_team_limit, MCP enforce_team_limit).),
             #   users:    status IS NULL OR status = 'active'
             #   graphs:   the default graph derived from teams.graph_name
             #             PLUS custom graph rows from the ``graphs`` table

@@ -328,6 +328,62 @@ class TestCreateApiKeyExpiry2426:
         assert r.status_code == 200, r.text
 
 
+class TestRevokedKeysDoNotConsumeCap2481:
+    """#2481 (SUPABASE lane) — revoked api_keys rows are audit tombstones,
+    never max_api_keys budget consumers. Every cap seam counts via
+    quota._count_resource with `revoked_at is null` (+ expiry exclusion) —
+    revoked rows never count. PIN: revoke-then-mint succeeds at cap and a
+    pre-existing revoked-tombstone stack alone can never 402/409 a mint;
+    only a true ACTIVE overage still 402s/409s (active-key semantics
+    unchanged — the fake control plane's api_keys table is the SOR)."""
+
+    def test_revoke_then_mint_succeeds_at_cap(self, team_client):
+        """Team at max (2 active rows) revokes one key → the revoked row
+        must not hold the slot; a replacement mint immediately succeeds."""
+        tc, fake, _ = team_client
+        a = tc.post("/v1/team/keys")
+        b = tc.post("/v1/team/keys")
+        assert a.status_code == 200 and b.status_code == 200
+        # control: at the cap with 2 ACTIVE rows → 402
+        assert tc.post("/v1/team/keys").status_code == 402
+        # revoke one row → its tombstone must NOT consume the cap slot
+        r = tc.delete(f"/v1/team/keys/{a.json()['id']}")
+        assert r.status_code == 200 and r.json()["revoked"] is True
+        m = tc.post("/v1/team/keys", json={"name": "replacement"})
+        assert m.status_code == 200, m.text
+        rows = fake.tables["api_keys"]
+        assert len([x for x in rows if x["revoked_at"] is None]) == 2
+        assert len([x for x in rows if x["revoked_at"] is not None]) == 1
+
+    def test_preseeded_revoked_tombstones_never_402_or_409(self, team_client):
+        """A stack of pre-existing revoked tombstones alone (5 rows, zero
+        active) can never 402/409 a mint — the gates only fire when ACTIVE
+        rows reach the cap."""
+        tc, fake, _ = team_client
+        for i in range(5):
+            fake.seed("api_keys", [_key_row(
+                id=f"tomb-{i}", created_via="provisioned",
+                revoked_at="2026-08-01T00:00:00Z")])
+        # two mints land (active 0 → 2); the third 402s ONLY on 2 ACTIVE
+        assert tc.post("/v1/team/keys").status_code == 200
+        assert tc.post("/v1/team/keys").status_code == 200
+        assert tc.post("/v1/team/keys").status_code == 402
+        # scoped mint reads the SAME count → 409 only on the ACTIVE overage
+        assert tc.post("/v1/team/keys",
+                       json={"scopes": ["graphs:read"]}).status_code == 409
+        # revoke one active → both surfaces free up (tombstones still there)
+        active = [x for x in fake.tables["api_keys"] if x["revoked_at"] is None]
+        assert len(active) == 2
+        r = tc.delete(f"/v1/team/keys/{active[0]['id']}")
+        assert r.status_code == 200, r.text
+        # scoped-mint 409 surface frees first (tombstones still present)
+        s = tc.post("/v1/team/keys", json={"scopes": ["graphs:read"]})
+        assert s.status_code == 200, s.text
+        # then the legacy-mint 402 surface
+        assert tc.delete(f"/v1/team/keys/{s.json()['id']}").status_code == 200
+        assert tc.post("/v1/team/keys").status_code == 200
+
+
 # ── GET /v1/team/keys (list_api_keys) ───────────────────────────────────────
 
 class TestListApiKeys:
