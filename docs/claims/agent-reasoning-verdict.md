@@ -55,8 +55,8 @@ These fields are the **Task-9 executor/derive leg**, which is not implemented. T
 The E2E-1.1 real leg exists to prove the battery runs the **real** product path end-to-end, honestly, on real model calls. It does:
 
 - 78 real episodes executed (write + read + envelope + EP read-out), 73 valid, `exit_code 0`, spend metered and inside cap (`budget_stopped: false`).
-- **Exclusion rate 6.4 %** against the E2E-1.1 <5 % target — improved from **43.6 %** (44/78) on the pre-fix harness by three fixes: robust envelope extraction (#2697), the context-bearing per-turn corrective repair (#2717), and the measured 480 s episode deadline (#2721). 34 turns were recovered by corrective repair.
-- Residual exclusions, both understood: `cal-010`, `cal-012` — the model answered with an empty `position` on **both** the first answer and the full-context re-ask (the envelope contract has no representation for "no position"; tracked on #2702); `lp-001`, `lp-006`, `lp-011` — long-prompt episodes exceeding 480 s while valid `lp` episodes measured 80–302 s, i.e. a genuinely slow tail rather than a hang.
+- **Exclusion rate 6.4 %** (5/78) against the E2E-1.1 <5 % target — improved from **43.6 %** (34 excluded / 44 valid of 78) on the pre-fix harness by three fixes: robust envelope extraction (#2697), the context-bearing per-turn corrective repair (#2717), and the measured 480 s episode deadline (#2721). 34 turns were recovered by corrective repair.
+- Residual exclusions, both understood: `cal-010`, `cal-012` — the episode did not yield a conforming envelope (`envelope.position is required and non-empty`) and excluded on the schema gate; the excluded path records a single synthetic FAILED turn, so the artifact does **not** evidence how many model attempts were made or what the model wrote — the envelope contract simply has no representation for "no position" (tracked on #2702); `lp-001`, `lp-006`, `lp-011` — long-prompt episodes exceeding 480 s while valid `lp` episodes measured 80–302 s, i.e. a genuinely slow tail rather than a hang (the deadline class, whose measured basis is #2721).
 
 ## 5. Falsification branches (pre-committed, spec §6)
 
@@ -72,7 +72,7 @@ The E2E-1.1 real leg exists to prove the battery runs the **real** product path 
 1. **#2740** — implement the derive/gold truth-emission leg so R1/R3/R5 measure on the real lane.
 2. Re-run the tier-1 leg **`--arms a4,a0`** at that harness (the profile then carries real numbers for both arms). The a4 leg was deliberately **not** run here: at this harness it would be equally no-data, so it would buy no measurement.
 3. `battery report` → verdict → re-file this document per the branch that the measured profile supports.
-4. **#2702** — `cal` empty-position contract; long-prompt deadline class.
+4. **#2702** — the `cal`/`bct` empty-position envelope contract (the long-prompt deadline class belongs to the #2721 lane).
 5. **#2525** — matched-recall pre-pass so the INCONCLUSIVE branch has a producer.
 
 ## 7. Reproduction
