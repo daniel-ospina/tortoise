@@ -8,17 +8,27 @@
 # app-independent.
 #   1. aws preflight (R2_DOWN on failure) + DIRECT R2 freshness (per-team)
 #   2. GET /status (classify: connect-fail → APP_DOWN; app-503/429 → up)
-#   3. kill-switch check (enabled:false → exit 0, no filings)
+#   3. kill-switch check — a DISABLED sweep is NOT automatically intentional:
+#      config_error → SWEEP_CONFIG_ERROR; stale R2 pool → SWEEP_OFF_STALE;
+#      storage_error → R2_DOWN; only a genuinely deliberate pause (no config
+#      error, fresh pool) stays silent (#2796)
 #   4. POST /backups/sweep (202 = lock held)
+#   4b. enabled-but-nothing — a sweep that backed up 0 teams while the R2 pool
+#      holds team prefixes → SWEEP_NO_COVERAGE, job red (#2796/#2823)
 #   5. POST /backups/purge + /reconcile ride-along (skipped on 202; #2304 purge
 #      erases expired trash on the hourly cadence — wired by #2317)
 #   6. POST /driver/heartbeat
-#   7. self-heal: close open APP_DOWN/WATCHER_DOWN on success
+#   7. self-heal: close open APP_DOWN/WATCHER_DOWN/R2_DOWN + resolved SWEEP_*
+#      incidents on a genuinely healthy run
 set -euo pipefail
 
 API="${INTERNAL_API_URL:-}"
 KEY="${FASTAPI_INTERNAL_KEY:-}"
 STALE_MIN="${BACKUP_STALE_THRESHOLD_MIN:-90}"
+# #2796: the "driver down" window (4 missed hourly runs) is the tripwire for a
+# disabled-but-not-deliberate sweep. Same knob the daemon uses
+# (tortoise/backup_config.py); already exported by registry-backup-cron.yml.
+DRIVER_DOWN_MIN="${BACKUP_DRIVER_DOWN_THRESHOLD_MIN:-240}"
 REPO="${GH_REPO:-daniel-ospina/tortoise}"
 GH_TOKEN="${GITHUB_TOKEN:-}"
 SIMULATE_APP_DOWN="${SIMULATE_APP_DOWN:-false}"
@@ -46,6 +56,9 @@ r2_put_once() { # key body_file
 r2_get() { # key -> body (empty on failure)
   aws s3api get-object --endpoint-url "$R2_ENDPOINT" --bucket "$R2_BUCKET" --key "$1" /dev/stdout 2>/dev/null || true
 }
+r2_delete() { # key — delete-to-resolve (the alert_store lifecycle contract)
+  aws s3api delete-object --endpoint-url "$R2_ENDPOINT" --bucket "$R2_BUCKET" --key "$1" >/dev/null 2>&1 || true
+}
 gh_find_open() { # kind id(subject) -> first open issue number whose TITLE subject matches exactly (or empty)
   # #2375: subject-scoped — a bare kind search lets a per-graph issue
   # ("[DR] STALE — team_a:g_x") be adopted by a team-level file ("… team_a")
@@ -67,13 +80,25 @@ gh_find_open() { # kind id(subject) -> first open issue number whose TITLE subje
     | jq -r --arg suf " — $id" \
       '[.items[] | select(.title | endswith($suf))][0].number // empty' 2>/dev/null || true
 }
-gh_close() { # number comment
+gh_close() { # number comment kind id
   [ -n "$GH_TOKEN" ] || return 0
+  local kind="${3:-}" id="${4:-}"
   curl -sS -X POST -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
     "https://api.github.com/repos/${REPO}/issues/$1/comments" \
     -d "{\"body\":\"$2\"}" >/dev/null 2>&1 || true
   curl -sS -X PATCH -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
     "https://api.github.com/repos/${REPO}/issues/$1" -d '{"state":"closed"}' >/dev/null 2>&1 || true
+  # delete-to-resolve: drop the R2 dedup object so a RECURRENCE is a new
+  # incident. Without this, file_alert's 412 branch would adopt the stale
+  # object and silently swallow the recurrence (the #2796 class).
+  if [ -n "$kind" ]; then
+    r2_delete "ops/alerts/${kind}/${id:-_}.json"
+  fi
+}
+resolve_global() { # kind comment — close an open global incident (no-op if none)
+  local kind="$1" comment="$2" num=""
+  num="$(gh_find_open "$kind" "global")"
+  if [ -n "$num" ]; then gh_close "$num" "$comment" "$kind" "global"; fi
 }
 telegram() { # text
   [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ] \
@@ -94,25 +119,27 @@ file_alert() { # kind title body dedup_id
     fi
     [ -n "$num" ] && telegram "🚨 DR alert: ${kind} — issue #${num}"
   else
-    # 412 — the object exists (a prior creator won). Adopt: if the winner
-    # never backfilled an issue number (create-then-die), become the filer
-    # (review P2-3 — the window must never be silent).
-    local existing
-    existing="$(r2_get "ops/alerts/${kind}/${id}.json")"
-    if [ -n "$existing" ] && [ "$(printf '%s' "$existing" | jq -r '.issue_number // "null"')" = "null" ]; then
-      num="$(gh_find_open "$kind" "$id")"
-      if [ -z "$num" ]; then
-        num="$(curl -sS -X POST -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
-          "https://api.github.com/repos/${REPO}/issues" \
-          -d "$(jq -nc --arg t "$title" --arg b "$body" '{title:$t, body:$b, labels:["dr:backup"]}')" \
-          | jq -r '.number // empty' 2>/dev/null || true)"
-      fi
-      if [ -n "$num" ]; then
-        printf '{"kind":"%s","issue_number":%s,"filed_at":"%s"}' "$kind" "$num" "$(date -u +%FT%TZ)" > "$tmp"
-        aws s3api put-object --endpoint-url "$R2_ENDPOINT" --bucket "$R2_BUCKET" \
-          --key "ops/alerts/${kind}/${id}.json" --body "$tmp" >/dev/null 2>&1 || true
-        telegram "🚨 DR alert: ${kind} — issue #${num}"
-      fi
+    # 412 — the object exists (a prior creator won). Two shapes reach here:
+    #   (a) the winner created the object but died before backfilling an issue
+    #       number (create-then-die — review P2-3);
+    #   (b) a RESOLVED incident is recurring — the dedup object outlived the
+    #       closed issue, and its stale issue_number would otherwise swallow
+    #       the recurrence silently (the #2796 class: a condition that pages
+    #       once must page again after it recurs).
+    # The correct action is the same for both: adopt an OPEN issue for this
+    # (kind, subject) if one exists, else become the filer.
+    num="$(gh_find_open "$kind" "$id")"
+    if [ -z "$num" ]; then
+      num="$(curl -sS -X POST -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
+        "https://api.github.com/repos/${REPO}/issues" \
+        -d "$(jq -nc --arg t "$title" --arg b "$body" '{title:$t, body:$b, labels:["dr:backup"]}')" \
+        | jq -r '.number // empty' 2>/dev/null || true)"
+    fi
+    if [ -n "$num" ]; then
+      printf '{"kind":"%s","issue_number":%s,"filed_at":"%s"}' "$kind" "$num" "$(date -u +%FT%TZ)" > "$tmp"
+      aws s3api put-object --endpoint-url "$R2_ENDPOINT" --bucket "$R2_BUCKET" \
+        --key "ops/alerts/${kind}/${id}.json" --body "$tmp" >/dev/null 2>&1 || true
+      telegram "🚨 DR alert: ${kind} — issue #${num}"
     fi
   fi
   rm -f "$tmp"
@@ -122,6 +149,11 @@ file_alert() { # kind title body dedup_id
 # A failed listing is NEVER confirmed-empty (no STALE/NEVER from a failed
 # read); a broken R2 auth preflight files R2_DOWN loudly (review P3).
 R2_OK=1
+# #2796: pool-level signals retained from the app-independent leg and consumed
+# by the kill-switch classifier (off-while-stale) and the no-coverage check
+# (enabled but 0 teams backed up) below.
+POOL_STALE=0        # any graph's newest archive older than DRIVER_DOWN_MIN
+R2_TEAM_COUNT=0     # team prefixes present under backups/
 # Bucket-scoped probe (head-bucket) — R2's S3 API does not reliably support
 # the account-level ListBuckets call from an object-scoped access key.
 if ! aws s3api head-bucket --endpoint-url "$R2_ENDPOINT" --bucket "$R2_BUCKET" >/dev/null 2>&1; then
@@ -138,6 +170,7 @@ if [ "$R2_OK" = "1" ]; then
   if [ -n "$TEAMS" ]; then
     for prefix in $TEAMS; do
       team="$(basename "$prefix")"
+      R2_TEAM_COUNT=$((R2_TEAM_COUNT + 1))
       # #2375: DEFAULT-graph freshness ONLY — nested default segment
       # (backups/{team}/default/) + legacy flat (pre-#2313 default dumps;
       # flat keys start with the dump year "2xxx" so the 2-prefix never
@@ -181,6 +214,9 @@ if [ "$R2_OK" = "1" ]; then
             log "team ${team}: newest archive ${age_min}m old — filing STALE (direct leg)"
             file_alert STALE "[DR] STALE — ${team}" "Direct R2 freshness check: newest archive ${age_min}m old (> ${STALE_MIN}m)." "$team"
           fi
+          if [ "$age_min" -gt "$DRIVER_DOWN_MIN" ]; then
+            POOL_STALE=1
+          fi
         fi
       fi
     done
@@ -209,14 +245,36 @@ fi
 
 ENABLED="$(printf '%s' "$STATUS" | jq -r '.enabled // false' 2>/dev/null || echo false)"
 STORAGE_ERR="$(printf '%s' "$STATUS" | jq -r '.storage_error // empty' 2>/dev/null || true)"
-log "status: enabled=$ENABLED storage_error=${STORAGE_ERR:-none}"
+CONFIG_ERR="$(printf '%s' "$STATUS" | jq -r '.config_error // empty' 2>/dev/null || true)"
+log "status: enabled=$ENABLED storage_error=${STORAGE_ERR:-none} config_error=${CONFIG_ERR:-none}"
 log "raw status: $(printf '%s' "$STATUS" | head -c 600)"
 if [ "$ENABLED" != "true" ]; then
+  # #2796: enabled:false conflates four states. Only a genuine deliberate
+  # pause (no config error, no storage error, fresh pool) may exit silently.
+  if [ -n "$CONFIG_ERR" ]; then
+    log "kill-switch is NOT an operator decision — config_error is set; filing SWEEP_CONFIG_ERROR (job red)"
+    file_alert SWEEP_CONFIG_ERROR "[DR] SWEEP_CONFIG_ERROR — backups off, config broken" \
+      "enabled=false with config_error: ${CONFIG_ERR}. The sweep flag says 'run' but load_config() raised, so nothing can be written. Fix the Fly secret/config (runbook: docs/ops/registry-backup-dr.md §REGISTRY_STREAM_KEY), then re-run." "global"
+    fail "sweep disabled by a configuration error: ${CONFIG_ERR}"
+    exit 1
+  fi
+  # Config is readable again (config_error is null here) — clear the incident.
+  resolve_global SWEEP_CONFIG_ERROR "Resolved — load_config() no longer raises."
   if [ -n "$STORAGE_ERR" ]; then
     log "status reports a storage error — filing R2_DOWN (not a kill-switch)"
     file_alert R2_DOWN "[DR] R2_DOWN — app storage unavailable" "status.storage_error: $STORAGE_ERR" "global"
+    fail "backups disabled by a storage error: ${STORAGE_ERR}"
+    exit 1
   fi
-  log "kill-switch: backups disabled — skipping (no filings)"
+  if [ "$POOL_STALE" = "1" ]; then
+    log "kill-switch while the R2 pool is stale (oldest > ${DRIVER_DOWN_MIN}m) — filing SWEEP_OFF_STALE (job red)"
+    file_alert SWEEP_OFF_STALE "[DR] SWEEP_OFF_STALE — backups off and the pool is stale" \
+      "enabled=false with no config_error, but the direct-R2 leg found an archive older than ${DRIVER_DOWN_MIN}m (${R2_TEAM_COUNT} team prefix(es)). An intentional pause must not let the pool decay unnoticed: re-enable backups or declare a bounded pause." "global"
+    fail "backups disabled while the R2 pool is stale (> ${DRIVER_DOWN_MIN}m)"
+    exit 1
+  fi
+  resolve_global SWEEP_OFF_STALE "Resolved — the R2 pool is fresh again."
+  log "kill-switch: backups deliberately disabled (no config error, pool fresh) — skipping"
   exit 0
 fi
 
@@ -235,6 +293,34 @@ RUN="$(curl -sS -m 600 -X POST -H "Authorization: Bearer $KEY" \
   "${API}/v1/internal/backups/sweep" 2>/dev/null || true)"
 RUN_STATUS="$(printf '%s' "$RUN" | jq -r '.status // "error"' 2>/dev/null || echo error)"
 log "sweep status: $RUN_STATUS"
+
+# ── 4b. enabled-but-backing-up-nothing (#2823 shape, #2796) ─────────────────
+# A sweep that backed up ZERO teams while the R2 pool already holds team
+# prefixes is NOT a healthy run — it is the #2823 empty-enumeration class
+# (and covers no_work/enum_failed/error, which mean the sweep tried and
+# failed). The chronic 0-team pre-beta state (R2 pool empty too) stays
+# silent: the false-positive envelope requires BOTH surfaces to be empty.
+NO_COVERAGE=0
+case "$RUN_STATUS" in
+  backed_up|degraded|already_running)
+    ;;
+  no_teams|no_eligible_teams)
+    if [ "${R2_TEAM_COUNT:-0}" -gt 0 ]; then
+      log "sweep backed up 0 teams but the R2 pool holds ${R2_TEAM_COUNT} team prefix(es) — filing SWEEP_NO_COVERAGE (job red)"
+      file_alert SWEEP_NO_COVERAGE "[DR] SWEEP_NO_COVERAGE — enabled but 0 teams backed up" \
+        "sweep status=${RUN_STATUS} but the R2 pool holds ${R2_TEAM_COUNT} team prefix(es); last_sweep=$(printf '%s' "$STATUS" | jq -c '.last_sweep' 2>/dev/null || echo null). The sweep is enabled yet enumerates 0 teams (#2823) — backups are NOT running." "global"
+      NO_COVERAGE=1
+    else
+      log "sweep found 0 teams and the R2 pool is empty — chronic pre-beta state, no incident"
+    fi
+    ;;
+  *)
+    log "sweep did not back up (status=$RUN_STATUS) — filing SWEEP_NO_COVERAGE (job red)"
+    file_alert SWEEP_NO_COVERAGE "[DR] SWEEP_NO_COVERAGE — enabled but the sweep backed up nothing" \
+      "sweep status=${RUN_STATUS} (raw: $(printf '%s' "$RUN" | head -c 300)). The sweep is enabled but backed up no team — backups are NOT running." "global"
+    NO_COVERAGE=1
+    ;;
+esac
 
 # ── 4. trash purge ride-along (#2304, wired #2317) + reconcile ride-along (#654) ──
 # Both are skipped when the sweep returned 202 (the lock-holder is running;
@@ -279,15 +365,30 @@ curl -sS -m 20 -X POST -H "Authorization: Bearer $KEY" -H "Content-Type: applica
   -d "{\"run_id\":\"$(date +%s)\",\"status\":\"$RUN_STATUS\",\"r2_ok\":$([ "$R2_OK" = "1" ] && echo true || echo false)}" \
   "${API}/v1/internal/driver/heartbeat" >/dev/null 2>&1 || true
 
-# ── 6. self-heal: close open APP_DOWN / WATCHER_DOWN / R2_DOWN on health ─────
-# #2411: "degraded" (per-graph errors with ≥1 default backed up) still PROVES
-# the app/watcher/R2 are up — it must self-heal like backed_up. Pre-#2372 the
-# same condition returned backed_up and closed these; a persistent custom-graph
-# error must not leave stale app-down incidents open indefinitely.
-if [ "$RUN_STATUS" = "backed_up" ] || [ "$RUN_STATUS" = "no_teams" ] || [ "$RUN_STATUS" = "degraded" ]; then
-  for kind in APP_DOWN WATCHER_DOWN R2_DOWN; do
-    num="$(gh_find_open "$kind" "global")"
-    [ -n "$num" ] && gh_close "$num" "Resolved — sweep succeeded ($RUN_STATUS)."
+# ── 6. self-heal ────────────────────────────────────────────────────────────
+# Two tiers, because a no-coverage sweep does NOT prove the same things as a
+# real backup:
+#   * APP_DOWN / R2_DOWN (and the resolved SWEEP_* config/off-stale
+#     incidents) are cleared by ANY completed /status + sweep round trip —
+#     the app and its storage answered.
+#   * WATCHER_DOWN requires a run that actually BACKED UP. #2796: the pre-fix
+#     code treated `no_teams` as healthy and closed a WATCHER_DOWN it had just
+#     filed — an empty sweep says nothing about the in-process staleness
+#     daemon.
+# #2411: "degraded" (per-graph errors with ≥1 graph backed up) still PROVES
+# the watcher/R2 are up — it self-heals like backed_up.
+case "$RUN_STATUS" in
+  backed_up|degraded|no_teams|no_eligible_teams|no_work) SWEEP_COMPLETED=1 ;;
+  *) SWEEP_COMPLETED=0 ;;
+esac
+if [ "$SWEEP_COMPLETED" = "1" ]; then
+  for kind in APP_DOWN R2_DOWN SWEEP_CONFIG_ERROR SWEEP_OFF_STALE; do
+    resolve_global "$kind" "Resolved — the app/storage answered (/status + sweep completed, status=$RUN_STATUS)."
+  done
+fi
+if [ "$RUN_STATUS" = "backed_up" ] || [ "$RUN_STATUS" = "degraded" ]; then
+  for kind in WATCHER_DOWN SWEEP_NO_COVERAGE; do
+    resolve_global "$kind" "Resolved — sweep succeeded ($RUN_STATUS)."
   done
   log "self-heal: closed open incidents for a healthy run"
 fi
@@ -299,6 +400,11 @@ fi
 
 if [ "$RECONCILE_FAILED" = "1" ]; then
   fail "reconcile ride-along failed — investigate"
+  exit 1
+fi
+
+if [ "$NO_COVERAGE" = "1" ]; then
+  fail "sweep backed up nothing (status=$RUN_STATUS) — see the SWEEP_NO_COVERAGE incident"
   exit 1
 fi
 log "done"

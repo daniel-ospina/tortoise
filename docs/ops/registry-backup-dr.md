@@ -271,6 +271,39 @@ jurisdiction-restricted buckets require the `cf-r2-jurisdiction` header.)
 - `ops/watcher-heartbeat.json`, `ops/driver-heartbeat.json` — mutual supervision.
 - `ops/alerts/`, `ops/pending-push/`, `ops/simulate/`, `ops/suppression.json`.
 
+## Driver state taxonomy — disabled ≠ healthy (#2796)
+
+The driver (`.github/scripts/registry-cron.sh`) classifies `/status` plus its
+app-independent direct-R2 leg into **four** states. Only a *deliberately* off
+sweep is silent; the other three file a deduped `dr:backup` incident **and**
+make the hourly job RED, so a broken pipeline cannot stay green for weeks (the
+31-day #2790 outage hid behind 40 consecutive `success` runs).
+
+| State | Detection | Driver behavior |
+|---|---|---|
+| deliberate-off | `enabled:false`, no `config_error`/`storage_error`, pool fresh | silent `exit 0` — a real operator pause must not page |
+| off-because-broken | `enabled:false` + non-null `config_error` | files **SWEEP_CONFIG_ERROR**, job RED |
+| off-while-pool-stale | `enabled:false`, no config error, oldest `backups/{team}/default/` archive > `BACKUP_DRIVER_DOWN_THRESHOLD_MIN` (240) | files **SWEEP_OFF_STALE**, job RED (the per-team STALE incident still files) |
+| enabled-but-backing-up-nothing | `enabled:true` and the sweep backed up 0 teams (`no_teams` / `no_eligible_teams` / `no_work` / `enum_failed` / `error`) while the R2 pool holds ≥1 team prefix | files **SWEEP_NO_COVERAGE**, job RED |
+
+**0-team false-positive envelope:** when the sweep finds 0 teams **and the R2
+pool is also empty**, the chronic pre-beta state is assumed and nothing is
+filed. Both surfaces must be empty before silence is allowed; a mismatch is
+loud.
+
+**Self-heal is two-tier (#2411 + #2796):** `APP_DOWN`/`R2_DOWN` plus the
+resolved `SWEEP_CONFIG_ERROR`/`SWEEP_OFF_STALE` clear whenever `/status` + the
+sweep complete (the app and its storage answered). `WATCHER_DOWN` and
+`SWEEP_NO_COVERAGE` clear **only** on a run that actually backed up
+(`backed_up`/`degraded`) — an empty sweep says nothing about the in-process
+staleness daemon, and the pre-#2796 code wrongly closed a just-filed
+`WATCHER_DOWN` on a `no_teams` run.
+
+**Regression harness:** `bash .github/scripts/registry-cron.test.sh` (CI: the
+`backup-driver-scripts` job in `.github/workflows/ci.yml`). It stubs
+`aws`/`curl`/`date` and asserts all four states, the 0-team envelope, self-heal,
+and dedup recurrence/refresh.
+
 ## Alert taxonomy + triage
 | Kind | Meaning | Triage |
 |---|---|---|
@@ -283,7 +316,10 @@ jurisdiction-restricted buckets require the `cf-r2-jurisdiction` header.)
 | ALERTER_DOWN | daemon's GitHub PAT dead (`gh_ok: false`) | Rotate `DR_ISSUES_PAT` |
 | APP_DOWN | app unreachable from the driver | Fly health; cold-start OOM (#545) |
 | WATCHER_DOWN | watcher heartbeat stale (daemon dead) | Check app logs; restart |
-| LIVENESS_NO_WORK | driver ran but did nothing (sweep skipped + reconcile empty) | Verify teams exist; otherwise expected pre-beta |
+| SWEEP_CONFIG_ERROR | `enabled:false` **with** a non-null `config_error` — the sweep flag says "run" but `load_config()` raised (e.g. missing `REGISTRY_STREAM_KEY`). The pre-#2796 driver exited 0 here | Fix the Fly secret/config (`§REGISTRY_STREAM_KEY`); the next healthy run self-heals |
+| SWEEP_OFF_STALE | `enabled:false`, no config error, but the newest archive is older than `BACKUP_DRIVER_DOWN_THRESHOLD_MIN` (240m) — a disabled/paused sweep while the pool decays | Re-enable backups or declare a bounded pause; investigate why the flag is off |
+| SWEEP_NO_COVERAGE | `enabled:true` but the sweep backed up 0 teams while the R2 pool holds team prefixes — the #2823 empty-enumeration class (`no_teams`/`no_work`/`enum_failed`) | Inspect `last_sweep` on `/status`; the sweep enumerates 0 teams → #2823 / #2340 control-plane resolution |
+| LIVENESS_NO_WORK | driver ran but did nothing (sweep skipped + reconcile empty) — reserved kind, **not yet emitted by the driver**; the enabled-but-0-teams case is now SWEEP_NO_COVERAGE (#2796) | Verify teams exist; otherwise expected pre-beta |
 | SIZE_GUARD_ABORT | team graph > 100k nodes — dump aborted | Investigate graph growth; raise limit deliberately |
 | DATA_LOSS_CANDIDATE | a team's node count dropped >50% (or >0→0) | **Manual close only** — verify + re-baseline or restore |
 | P0_GUARD_FAIL | a dump named the wrong graph or was empty — objects deleted | Investigate the sweep; alert auto-consolidates |

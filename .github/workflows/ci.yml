@@ -408,6 +408,17 @@ jobs:
       - name: Check test isolation (repo-local lint)
         run: bash .ci-checks/check-test-isolation.sh
 
+  backup-driver-scripts:
+    # #2796: the hourly backup driver's state-classification harness. Ungated
+    # (like test-isolation) so any change to registry-cron.sh exercises it in
+    # PRs — the driver is otherwise only run by a schedule and its failures
+    # used to be silent. Self-contained: stubs aws/curl/date, no network.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Backup driver state taxonomy (#2796)
+        run: bash .github/scripts/registry-cron.test.sh
+
   entrypoint-guards:
     needs: changes
     if: needs.changes.outputs.entrypoints == 'true'  # #2149: entrypoint.sh / its .ci-checks script only
