@@ -544,6 +544,59 @@ class TestResolveApiKeyFailSoft:
         finally:
             monkeypatch.undo()
 
+    def test_session_lane_dkl_carries_stored_flag_and_drift_default(self,
+                                                                    fake):
+        """#2475: _session_user_team (the session-lane /v1/team resolver) must
+        carry the REAL dashboard_key_login column — the dashboard switch
+        renders from this lane, and a hardcoded True made a persisted
+        toggle-off snap back ON on reload. Null/missing (additive drift)
+        still degrades to the safe default True, mirroring the key lane's
+        `True if _dkl is None else _dkl` (#1096)."""
+        import asyncio
+
+        from starlette.datastructures import Headers
+        from starlette.requests import Request
+
+        import tortoise.supabase_control as sc
+        from tortoise.hosted_api import _session_user_team
+        monkeypatch = pytest.MonkeyPatch()
+        monkeypatch.setenv("SUPABASE_URL", "https://test.supabase.co")
+        monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "svc_role_key_test")
+        monkeypatch.setenv("TORTOISE_CONTROL_PLANE", "supabase")
+        # the post-auth abuse hook is best-effort but needs an engine — keep
+        # this auth-resolution unit test offline/deterministic.
+        monkeypatch.setenv("TORTOISE_ABUSE_DISABLED", "1")
+        monkeypatch.setattr(sc, "get_control_plane", lambda: fake)
+        try:
+            fake.seed("team_memberships", [{
+                "user_id": "9f2c1a40-0000-4a00-8000-000000000001",
+                "team_id": "team-free-001", "role": "owner",
+                "status": "active", "team_name": "free-team",
+            }])
+            request = Request({
+                "type": "http", "method": "GET", "path": "/v1/team",
+                "query_string": b"",
+                "headers": Headers({"cf-ipcountry": "MX"}).raw,
+            })
+            user = {"user_id": "9f2c1a40-0000-4a00-8000-000000000001"}
+            # stored False → the session team dict carries False (#2475 fix;
+            # pre-fix this was the hardcoded True that broke the reload).
+            fake.tables["teams"][0]["dashboard_key_login"] = False
+            team = asyncio.run(_session_user_team(request, user))
+            assert team["dashboard_key_login"] is False
+            # stored True rides as True (the common case)
+            fake.tables["teams"][0]["dashboard_key_login"] = True
+            team = asyncio.run(_session_user_team(request, user))
+            assert team["dashboard_key_login"] is True
+            # drift: additive DKL column missing → safe default True (the
+            # #1148 gate must not 403 key-auth management during drift; the
+            # UI switch renders "on" for teams that never disabled it).
+            fake.missing_columns = {"teams": {"dashboard_key_login"}}
+            team = asyncio.run(_session_user_team(request, user))
+            assert team["dashboard_key_login"] is True
+        finally:
+            monkeypatch.undo()
+
     def test_marker_column_drift_quota_keeps_max_points(self, fake):
         """#2040 (code-review round 5): resolve_team_limits runs the SAME
         full additive ladder — marker-column-only drift must degrade just

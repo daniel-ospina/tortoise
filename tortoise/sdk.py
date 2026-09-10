@@ -892,6 +892,19 @@ def _sanitize_props(props: dict, *, reject_id: bool = False) -> dict:
             "'is_episodic' is a server-managed field (quota discriminator) "
             "and cannot be set via props."
         )
+    # #2491: outdated is the terminalizing flag written ONLY by the lifecycle
+    # writers via raw cypher (invalidate_point/supersede_point SET
+    # n.outdated=true) after they journal + drop EP messages. Accepting it via
+    # props (update_point/create_point/_update_entity label-loop) silently
+    # flag-flips a live claim to EP-dead with NO journal event and NO
+    # invalidate_factor_messages drop — resurrecting the #2422 ghost class
+    # (the degenerate factor never re-runs to zero the stale sibling seed).
+    # Route through invalidate_point()/supersede_point() instead.
+    if "outdated" in props:
+        raise ValueError(
+            "'outdated' is a server-managed lifecycle flag — use "
+            "invalidate_point() or supersede_point() to terminalize a claim."
+        )
     if reject_id and "id" in props:
         raise ValueError("'id' is server-managed and cannot be set via props.")
     return props
