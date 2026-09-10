@@ -222,8 +222,15 @@ def memoryagentbench_executor(*, mock: bool = False, limit: int | None = None,
             raise ExecutorUnavailable(
                 f"memoryagentbench: real reader unavailable ({e})") from e
         lane = "real"
-    cell, _run = run_cr_lane(cfg.items, caller, lane=lane, config=config,
-                             context=cfg.context, limit=limit)
+    try:
+        cell, _run = run_cr_lane(cfg.items, caller, lane=lane, config=config,
+                                 context=cfg.context, limit=limit)
+    except Exception as e:
+        # A reader that fails mid-run must not abort the whole parity leg
+        # (other benchmarks still have a cell to record) — it becomes an
+        # explicit not-measured cell carrying the reason.
+        raise ExecutorUnavailable(
+            f"memoryagentbench: run failed ({type(e).__name__}: {e})") from e
     return cell
 
 

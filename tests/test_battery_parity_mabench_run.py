@@ -180,3 +180,35 @@ class TestRegisteredExecutor:
         assert cell.samples == 2, "two questions asked, two scored"
         assert cell.accuracy == 0.0, "the mock reader answers nothing useful"
         assert cell.revision.startswith("memoryagentbench-cr@")
+
+
+class TestReviewP2s:
+    """Fixes from the #2861 review."""
+
+    def test_limit_zero_asks_nothing(self):
+        """`--limit 0` must mean zero questions — never 'unlimited' (on the
+        real lane that is an unbounded spend)."""
+        caller = ScriptedCaller([])
+        outputs, calls, _ = answer_items(ITEMS, caller, context=CTX, limit=0)
+        assert calls == 0 and outputs == {}
+
+    def test_duplicate_ids_refuse_rather_than_collapse(self):
+        dup = (ITEMS[0], ITEMS[0])
+        with pytest.raises(ValueError, match="duplicate qa_pair_id"):
+            answer_items(dup, ScriptedCaller(["a"]), context=CTX)
+
+    def test_midrun_reader_failure_becomes_not_measured(self, monkeypatch,
+                                                        tmp_path):
+        """A failed run must not abort the whole parity leg: the cell is
+        recorded as not-measured with the reason."""
+        import battery.parity.executors as ex
+        import battery.parity.mabench as mabench_mod
+        from battery.parity.executors import ExecutorUnavailable
+
+        monkeypatch.setattr(mabench_mod, "load_cr", lambda config, path=None:
+                            mabench_mod.CrConfig(config=config, context=CTX,
+                                                 items=ITEMS))
+        monkeypatch.setattr(ex, "_MockReader", lambda: ScriptedCaller(
+            [], fail_on=1))
+        with pytest.raises(ExecutorUnavailable, match="run failed"):
+            ex.memoryagentbench_executor(mock=True, limit=2, out_dir=tmp_path)

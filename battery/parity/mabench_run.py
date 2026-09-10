@@ -116,7 +116,14 @@ def answer_items(items: tuple[CrItem, ...], caller: ReaderCaller, *,
     lane that quietly skips the questions it could not answer would report an
     accuracy over a self-selected subset.
     """
-    chosen = items[:limit] if limit else items
+    # `limit is not None` (not truthiness): --limit 0 must ask NOTHING, never
+    # silently run the whole corpus on a real (paid) lane.
+    chosen = items[:limit] if limit is not None else items
+    ids = [i.qa_pair_id for i in chosen]
+    if len(set(ids)) != len(ids):
+        raise ValueError(
+            "duplicate qa_pair_id in the CR items — two questions would share "
+            "one answer slot and the score would be silently wrong")
     outputs: dict[str, str] = {}
     cost = 0.0
     calls = 0
@@ -162,7 +169,7 @@ def run_cr_lane(items: tuple[CrItem, ...], caller: ReaderCaller, *,
     """
     outputs, calls, spend = answer_items(items, caller, context=context,
                                          limit=limit)
-    scored_items = items[:limit] if limit else items
+    scored_items = items[:limit] if limit is not None else items
     accuracy, samples = score_cr(outputs, scored_items)
     cell = ExecutedCell(
         benchmark="memoryagentbench",
