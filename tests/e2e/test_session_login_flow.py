@@ -24,6 +24,7 @@ Flows (the user's #1511 acceptance):
 """
 from __future__ import annotations
 
+import ipaddress
 import json
 import os
 import re
@@ -79,13 +80,16 @@ def _proxy_body(route, local_url: str, page: Page) -> None:
 
 
 # ── #2731: drive the LOCAL committed-dist preview, never the prod origin ──
-# The dashboard specs used to navigate the DOCUMENT to the prod origins and
-# rely on the ``page.route`` proxy to serve local content under them. When the
-# proxy path failed, the request fell through to production and every
-# assertion misreported as an app-behavior failure. The document now loads from
-# the local preview directly; the route handlers stay for intercepted prod
-# hosts (API_HOST stubs, the AUTH_HOST -> :8788 rewrite, and a defensive
-# APP_HOST -> :8790 rewrite that no current request in these modules uses).
+# The two CI dashboard specs used to navigate the DOCUMENT to the prod origins
+# and rely on the ``page.route`` proxy to serve local content under them. When
+# the proxy path failed, the request fell through to production and every
+# assertion misreported as an app-behavior failure. In those two specs the
+# document now loads from the local preview directly; the route handlers stay
+# for intercepted prod hosts (API_HOST stubs and the AUTH_HOST -> :8788
+# rewrite). The APP_HOST -> :8790 rewrite is a defensive fallback — those specs
+# emit no prod-app-origin request. This module's own flow tests and the sibling
+# dashboard specs still simulate the prod domains; migrating them (and the
+# auth-page goto in ``_open_auth``) is tracked in #2744.
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -97,13 +101,20 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 
 
 def _is_local_preview_host(host: str) -> bool:
-    """Loopback / RFC1918 only — mirrors the dashboard's ``isLocal()``
-    (main.jsx) so the preflight refuses to bless a non-local origin (#2731)."""
-    if host in ("localhost", "127.0.0.1", "::1", "[::1]"):
+    """True only for ``localhost`` or a loopback/private IP LITERAL.
+
+    Stricter than the dashboard's prefix-based ``isLocal()`` (main.jsx) on
+    purpose: a guard whose job is to *reject* non-local origins must not accept
+    a DNS name like ``10.evil.com`` / ``192.168.attacker.io`` just because it
+    starts with a private-range prefix (#2731 review P2).
+    """
+    if host == "localhost":
         return True
-    if host.startswith("10.") or host.startswith("192.168."):
-        return True
-    return bool(re.match(r"^172\.(1[6-9]|2\d|3[01])\.", host))
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return ip.is_loopback or (ip.is_private and not ip.is_unspecified)
 
 
 def _preflight_local_servers() -> None:
@@ -145,11 +156,6 @@ def _preflight_local_servers() -> None:
         )
 
 
-def _local_dashboard_host() -> str:
-    """The hostname of the local app preview (loopback by default)."""
-    return urllib.parse.urlparse(DASHBOARD_URL).hostname or "127.0.0.1"
-
-
 def _seed_local_session_cookie(page: Page, user_id: str) -> None:
     """Seed ``sb-tortoise-auth-token`` for the LOCAL preview origin (#2731).
 
@@ -157,14 +163,15 @@ def _seed_local_session_cookie(page: Page, user_id: str) -> None:
     ``127.0.0.1``, so the host-only loopback cookie is what the local app's
     mount gate actually reads (host-conditional ``domainAttr()``/``secureAttr()``
     in main.jsx make the loopback cookie domain-less and Secure-less by design).
-    The prod parent-domain cookie is seeded as well so any intercepted
-    prod-origin subresource/redirect stays session-coherent — the DOCUMENT is
-    always loaded from the local preview, never prod.
+    Seeding by ``url`` (not ``domain``) keeps IPv6 loopback (``[::1]``) usable —
+    Playwright needs the bracketed form, which ``urlparse().hostname`` strips
+    (#2731 review P2). The prod parent-domain cookie is seeded as well so any
+    intercepted prod-origin subresource/redirect stays session-coherent — the
+    DOCUMENT is always loaded from the local preview, never prod.
     """
     value = urllib.parse.quote(json.dumps(_session_json(user_id)))
     page.context.add_cookies([
-        {"name": "sb-tortoise-auth-token", "value": value,
-         "domain": _local_dashboard_host(), "path": "/"},
+        {"name": "sb-tortoise-auth-token", "value": value, "url": DASHBOARD_URL},
         {"name": "sb-tortoise-auth-token", "value": value,
          "domain": ".premiselabs.co", "path": "/"},
     ])
