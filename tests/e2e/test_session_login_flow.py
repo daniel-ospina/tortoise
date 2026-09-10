@@ -82,9 +82,28 @@ def _proxy_body(route, local_url: str, page: Page) -> None:
 # The dashboard specs used to navigate the DOCUMENT to the prod origins and
 # rely on the ``page.route`` proxy to serve local content under them. When the
 # proxy path failed, the request fell through to production and every
-# assertion misreported as an app-behavior failure. The document (and the auth
-# page) now load from the local previews directly; the route handlers remain
-# only for subresources/redirects that reference the prod hosts.
+# assertion misreported as an app-behavior failure. The document now loads from
+# the local preview directly; the route handlers stay for intercepted prod
+# hosts (API_HOST stubs, the AUTH_HOST -> :8788 rewrite, and a defensive
+# APP_HOST -> :8790 rewrite that no current request in these modules uses).
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """#2731 (review P2): never follow a redirect in the preflight — a local
+    preview that 3xx-bounces off-box must not pass a redirect-following check."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def _is_local_preview_host(host: str) -> bool:
+    """Loopback / RFC1918 only — mirrors the dashboard's ``isLocal()``
+    (main.jsx) so the preflight refuses to bless a non-local origin (#2731)."""
+    if host in ("localhost", "127.0.0.1", "::1", "[::1]"):
+        return True
+    if host.startswith("10.") or host.startswith("192.168."):
+        return True
+    return bool(re.match(r"^172\.(1[6-9]|2\d|3[01])\.", host))
 
 
 def _preflight_local_servers() -> None:
@@ -92,17 +111,29 @@ def _preflight_local_servers() -> None:
     serving (#2731). Without this, a missing :8788/:8790 preview makes the
     route handlers fall through to production and every test misdiagnoses as
     an app-behavior failure. Called from a module-scoped autouse fixture in
-    the two CI dashboard specs."""
+    the two CI dashboard specs.
+
+    ``pytest.exit`` (not ``pytest.fail``) is deliberate: a module-scoped autouse
+    fixture that fails is re-raised once per collected test, so ``fail`` would
+    print the same error 16 times. ``exit`` aborts the session with a single
+    message (#2731 review P2)."""
     failures: list[str] = []
+    opener = urllib.request.build_opener(_NoRedirect)
     for label, url in (("auth", AUTH_ORIGIN + "/"), ("dashboard", DASHBOARD_URL)):
+        host = urllib.parse.urlparse(url).hostname or ""
+        if not _is_local_preview_host(host):
+            failures.append(
+                f"{label} {url} -> non-local host {host!r} — refusing to drive "
+                "a non-local origin")
+            continue
         try:
-            with urllib.request.urlopen(url, timeout=10) as resp:  # localhost only
-                if resp.status >= 400:
+            with opener.open(url, timeout=10) as resp:
+                if resp.status != 200:
                     failures.append(f"{label} {url} -> HTTP {resp.status}")
         except Exception as exc:  # any error means the preview is not serving
             failures.append(f"{label} {url} -> {type(exc).__name__}: {exc}")
     if failures:
-        pytest.fail(
+        pytest.exit(
             "dashboard e2e: local preview server(s) unreachable — this suite "
             "drives the LOCAL wrangler previews, never production (#2731). "
             "Start BOTH before running:\n"
@@ -110,7 +141,7 @@ def _preflight_local_servers() -> None:
             "  cd website && npx wrangler@4 pages dev . --port 8788\n"
             "Unreachable:\n"
             + "\n".join(f"  - {f}" for f in failures),
-            pytrace=False,
+            returncode=1,
         )
 
 

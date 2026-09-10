@@ -50,8 +50,10 @@ empty-keys tests untouched"):
   `wrangler@4 pages dev . --port 8788` from website/ (auth) +
   `wrangler@4 pages dev dist --port 8790` from website/apps/dashboard/.
 - #2731: the app DOCUMENT is loaded from the LOCAL preview (DASHBOARD_URL,
-  :8790), never the prod origin — the route handler only rewrites prod-hosted
-  subresources/redirects (API_HOST interception + AUTH_HOST -> :8788).
+  :8790), never the prod origin — the route handler is no longer load-bearing
+  for the document. API_HOST is intercepted and AUTH_HOST is rewritten to
+  :8788; the APP_HOST -> :8790 rewrite stays as a defensive fallback (no
+  request in this module originates from the prod app origin).
 - Host-only loopback session cookie (sb-tortoise-auth-token for 127.0.0.1) +
   the prod parent-domain cookie so intercepted prod-origin paths stay coherent.
   #2246: the mount NEVER probes and NEVER mints; POST /v1/session/key is a

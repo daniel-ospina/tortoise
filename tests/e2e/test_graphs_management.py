@@ -11,9 +11,10 @@ test_keys_table_mixed.py):
   `wrangler@4 pages dev dist --port 8790` from website/apps/dashboard/.
 
   #2731: the app DOCUMENT is loaded from the LOCAL preview (DASHBOARD_URL,
-  :8790) — never the prod origin. The route handler only rewrites
-  prod-hosted subresources/redirects (API_HOST interception + the
-  AUTH_HOST -> :8788 rewrite); it is no longer load-bearing for the document.
+  :8790) — never the prod origin; the route handler is no longer load-bearing
+  for the document. API_HOST is intercepted and AUTH_HOST is rewritten to
+  :8788; the APP_HOST -> :8790 rewrite stays as a defensive fallback (no
+  request in this module originates from the prod app origin).
 
 Covered contracts (issue indicators 1-6):
   1. Meter line — "N graphs · ∞ cap" (pro/team, max_graphs null) vs
