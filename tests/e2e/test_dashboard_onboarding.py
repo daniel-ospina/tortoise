@@ -111,7 +111,8 @@ def _seed_cookie(page: Page, user_id: str) -> None:
 
 def _wire(page: Page, *, seed_objects: list = None,  # noqa: RUF013
           role: str | None = None, key_rows: list | None = None,
-          minted_key: str = MINTED_KEY, mint_status: int = 200) -> dict:
+          minted_key: str = MINTED_KEY, mint_status: int = 200,
+          mint_error_detail: str = "API key cap reached") -> dict:
     """Route harness: the API mocks for the wizard journey. Returns the
     capture dict ({objects, points, state_patches, org_create, checkpoint,
     mint}).
@@ -151,7 +152,7 @@ def _wire(page: Page, *, seed_objects: list = None,  # noqa: RUF013
                 cap["mint"].append(json.loads(route.request.post_data or "{}"))
                 if mint_status != 200:
                     route.fulfill(status=mint_status, content_type="application/json",
-                                  body=json.dumps({"detail": "API key cap reached"}))
+                                  body=json.dumps({"detail": mint_error_detail}))
                     return
                 route.fulfill(status=200, content_type="application/json",
                               body=json.dumps({"id": "k-mint", "key": minted_key,
@@ -651,6 +652,98 @@ def test_connect_prompt_card_has_no_nested_interactive_and_dragselect_is_safe(pa
         ("#2755: the copy control must copy the FULL prompt (the card's text "
          f"starts with it) — got {len(copied)} chars: {copied[:80]!r}")
     assert len(copied) > 200, "#2755: the copied prompt looks truncated"
+
+
+def test_owner_connect_mint_failure_is_visible(page: Page) -> None:
+    """#2710 (code-review P1): a NON-402 mint failure must be visible. The error
+    is rendered inside the paste disclosure, but only the 402 cap opens it — so a
+    suspension 403 / transport failure / the #2326 team-switch guard would have
+    silently reverted the button with no feedback and no way forward."""
+    _seed_cookie(page, "u-mint-500")
+    # api() surfaces `detail` as the Error message, so this sentinel proves the
+    # visible alert IS the mint's failure and not some unrelated banner.
+    cap = _wire(page, role="owner", mint_status=500,
+                mint_error_detail="MINT-FAILURE-SENTINEL")
+    _walk_to_connect(page)
+    page.get_by_role("button", name="Create an API key").click()
+    alert_el = page.locator("[role=alert]")
+    expect(alert_el).to_contain_text("MINT-FAILURE-SENTINEL", timeout=10_000)
+    assert len(cap["mint"]) == 1, f"exactly one attempted mint: {cap['mint']}"
+    # the disclosure stays CLOSED (the 402 path is the only one that opens it) …
+    assert page.locator("#wizard-paste-row").count() == 0
+    # … so the alert must be visible OUTSIDE it, and the user can retry or paste.
+    expect(page.get_by_role("button", name="Create an API key")).to_be_enabled()
+    expect(page.get_by_role("button", name="I already have a key — paste it instead")).to_be_visible()
+    assert page.locator(".wizard-prompt-card").count() == 0
+
+
+@pytest.mark.parametrize("tab,sync_text", [
+    ("Claude Desktop", "Open Claude Desktop → Settings → Developer → Edit Config"),
+    ("Claude Web", "Go to claude.ai → Settings → Connectors → Add custom connector"),
+])
+def test_owner_no_key_affordance_on_manual_harness_tabs(page: Page, tab: str, sync_text: str) -> None:
+    """#2710 (code-review P1): the two MANUAL harness tabs must not dead-end.
+
+    Pre-fix they kept a `YOUR_API_KEY` placeholder in the config block plus a
+    Copy button whose handler wrote `harnessKey` — an empty string with no key —
+    so an owner/admin on those tabs had no mint CTA, no paste escape, and a Copy
+    control that silently clobbered the clipboard.
+
+    The tab click is synchronised on a MANUAL-TAB-UNIQUE instruction string
+    first: the default tab (claude) already renders an identical affordance, so
+    an unsynchronised read would pass against the previous tab's DOM."""
+    _seed_cookie(page, "u-manual-" + tab.split()[-1].lower())
+    _wire(page, role="owner", key_rows=[DURABLE_ROW])
+    _walk_to_connect(page)
+    page.get_by_role("button", name=tab, exact=True).click()
+    expect(page.locator("body")).to_contain_text(sync_text, timeout=10_000)
+    # The no-key state offers the SAME in-flow path as the agent-driven tabs.
+    expect(page.get_by_role("button", name="Create an API key")).to_be_visible(timeout=5_000)
+    harness = page.locator("body")
+    assert "YOUR_API_KEY" not in harness.inner_text(), \
+        f"{tab}: the placeholder key must not render"
+    assert page.locator("code", has_text="…").count() == 0, \
+        f"{tab}: no fake '…' key row"
+    assert page.locator(".wizard-prompt-card").count() == 0, \
+        f"{tab}: the config block must not render before a key exists"
+    # The paste escape lands a real key, and the config block then renders it.
+    page.get_by_role("button", name="I already have a key — paste it instead").click()
+    page.get_by_label("Paste an API key").fill(PASTED_KEY)
+    page.get_by_role("button", name="Use this key").click()
+    expect(page.locator("code", has_text=PASTED_KEY)).to_be_visible(timeout=5_000)
+    assert "YOUR_API_KEY" not in page.locator("body").inner_text(), \
+        f"{tab}: the placeholder must be replaced by the real key"
+
+
+def test_codex_desktop_hides_the_key_mode_pills(page: Page) -> None:
+    """#2756 (code-review P1): the Codex Desktop surface embeds the key in the
+    config block by construction, so the "Key separate from prompt" promise
+    cannot be honored there — the pills AND the separate key row must be gone on
+    that surface, and both must come back on the CLI surface."""
+    _seed_cookie(page, "u-codex-mode")
+    _wire(page, role="owner")
+    _walk_to_connect(page)
+    _mint_from_connect(page)
+    pills = page.get_by_role("button", name=re.compile("Key (included in|separate from) prompt"))
+    group = page.get_by_role("group", name="Codex setup surface")
+    page.get_by_role("button", name="Codex", exact=True).click()
+    expect(group).to_be_visible(timeout=10_000)  # sync: the Codex surface rendered
+    expect(pills).to_have_count(2, timeout=5_000)
+    # "separate" on the CLI surface shows the separate key row and keeps the key
+    # OUT of the prompt card.
+    page.get_by_role("button", name="Key separate from prompt").click()
+    expect(page.locator("code", has_text=MINTED_KEY)).to_be_visible(timeout=5_000)
+    # Desktop: the pills and the separate row go away; the key lives in the
+    # config block instead.
+    page.get_by_role("button", name="Desktop (no terminal)").click()
+    expect(group.get_by_role("button", name="Desktop (no terminal)")).to_have_attribute("aria-pressed", "true")
+    expect(pills).to_have_count(0, timeout=5_000)
+    assert page.locator("code", has_text=MINTED_KEY).count() == 0, \
+        "the separate key row must not sit beside a key-embedding Desktop block"
+    expect(page.locator(".wizard-prompt-card").first).to_contain_text(MINTED_KEY, timeout=5_000)
+    # … and back to CLI.
+    page.get_by_role("button", name="CLI (terminal)").click()
+    expect(pills).to_have_count(2, timeout=5_000)
 
 
 def test_codex_desktop_toggle_reaches_config_toml_instructions(page: Page) -> None:

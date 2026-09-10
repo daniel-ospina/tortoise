@@ -197,14 +197,33 @@ test('#2710: the connect-step auto-open effect is GONE (no queued-modal leak)', 
   // exit. #2710 deletes the effect; the connect step owns an inline
   // mint/paste affordance instead. This pins the removal so a future edit
   // cannot quietly reinstate the TDZ-bearing queue-while-invisible effect.
+  //
+  // Comment-stripped (code-review P2, PR #2571's finding on this file): a raw
+  // regex over the 8k-line file can be satisfied or defeated by a comment, and
+  // it only matches one exact single-line formatting. Both negatives run on
+  // the stripped source so only LIVE code can fail them.
+  const live = mainJsx
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .split('\n')
+    .filter((line) => !line.trim().startsWith('//'))
+    .join('\n')
   assert.doesNotMatch(
-    mainJsx,
-    /if \(wizardStep === 2 && isOwnerAdmin && !harnessKey && !capNotice\) \{/,
+    live,
+    /wizardStep === 2 && isOwnerAdmin && !harnessKey && !capNotice/,
     'the connect-step auto-open modal effect must not return (#2710 stray-modal leak)',
   )
   assert.doesNotMatch(
-    mainJsx,
+    live,
     /\[wizardStep, wizardHarness, harnessKey\]/,
     'the #2709 deps array must not return',
   )
+  // Structural companion: the whole wizard tree must contain no queue call at
+  // all (the only live one is the keys tab's "+ New key", outside this slice).
+  const connect = live.slice(
+    live.indexOf('const wizardPasteRow = ('),
+    live.indexOf('{wizardStep === 3 && ('),
+  )
+  assert.ok(connect.length > 1000, 'the connect-step slice must resolve (markers moved?)')
+  assert.doesNotMatch(connect, /setKeyModalOpen\(true\)/,
+    'no wizard path may queue the shared key-create modal')
 })

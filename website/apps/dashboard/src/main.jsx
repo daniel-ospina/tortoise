@@ -2883,7 +2883,14 @@ function claimIntentInFlight() {
     setWizardDurableError('')
     setWizardShowPaste(false)    // #2361 review-r2: welcomeKey is the first-timer provisioned plaintext
     // #2710: the wizard never owns the shared key-create modal — clear any
-    // queued flag on EVERY exit path so it can never surface on the dashboard.
+    // queued flag on the way out so it cannot surface on the dashboard. The two
+    // paths that clear it are this one (wizardComplete) and the welcome header's
+    // "Open my dashboard →" escape. The wizard's other `setWelcomeMode(false)`
+    // sites (the build fork's "Manage API keys →" and the archived legacy
+    // tree's escapes) do not — harmless today because the wizard has no
+    // `setKeyModalOpen(true)` call site left at all (pinned by
+    // wizardConnectTripwire.test.js), so nothing can queue it in the first
+    // place. Belt-and-braces, deliberately not extended (code-review P2).
     setKeyModalOpen(false)
     setKeyModalStage('form')
     // (owner-only by construction — members never mint) — drop it here too so
@@ -5738,11 +5745,21 @@ function claimIntentInFlight() {
           {wizardDurableBusy ? 'Creating…' : 'Create an API key'}
         </button>
         <button type="button" className="ghost small" aria-expanded={wizardShowPaste}
+          aria-controls={wizardShowPaste ? 'wizard-paste-row' : undefined}
           onClick={() => setWizardShowPaste((v) => !v)}>
           I already have a key — paste it instead
         </button>
       </div>
       {wizardShowPaste && wizardPasteRow}
+      {/* #2710 (code-review P1): wizardDurableError is rendered inside
+          wizardPasteRow, but only the 402 cap opens the disclosure — a
+          suspension 403, a transport failure, or the #2326 team-switch guard
+          would otherwise be INVISIBLE next to the new mint CTA (the button just
+          flips back from "Creating…"). Render it here while the row is hidden
+          so there is exactly one alert. */}
+      {!wizardShowPaste && wizardDurableError && (
+        <p className="error" role="alert" style={{ margin: '0.6rem 0 0', fontSize: 13 }}>{wizardDurableError}</p>
+      )}
     </>
   )
 
@@ -6031,7 +6048,7 @@ function claimIntentInFlight() {
                       <p className="dim small" style={{ margin: '0.5rem 0 0', lineHeight: 1.5 }}>
                         Keys embedded in agents should never expire — when you create or rotate one in the API Keys tab, choose <strong>No expiration</strong>.
                       </p>
-                      {['pi', 'cursor', 'claude', 'codex'].includes(wizardHarness) && (
+                      {['pi', 'cursor', 'claude', 'codex'].includes(wizardHarness) && wizardConnectHarness !== 'codexDesktop' && (
                         /* #2710: pills are pure display-mode toggles. They used to
                            also `setKeyModalOpen(true)` when no key existed — a no-op
                            during the wizard (the modal renders only in the dashboard
@@ -6041,11 +6058,13 @@ function claimIntentInFlight() {
                            queued. */
                         <div className="key-pills">
                           <button className={wizardKeyMode === 'included' ? 'active' : ''}
+                            aria-pressed={wizardKeyMode === 'included'}
                             onClick={() => setWizardKeyMode('included')}>
                             <strong>Key included in prompt</strong>
                             <span>Simple — easiest</span>
                           </button>
                           <button className={wizardKeyMode === 'separate' ? 'active' : ''}
+                            aria-pressed={wizardKeyMode === 'separate'}
                             onClick={() => setWizardKeyMode('separate')}>
                             <strong>Key separate from prompt</strong>
                             <span>Manual — more secure</span>
@@ -6055,7 +6074,13 @@ function claimIntentInFlight() {
                       {(() => {
                         const agentDriven2Step = ['pi', 'cursor']
                         const agentDriven1Step = ['claude', 'codex']
-                        const keyDisplayRow = harnessKey && wizardKeyMode === 'separate' ? (
+                        /* #2756 (code-review P1): the key-mode pills are hidden on the
+                           Codex DESKTOP surface — UNIVERSAL_COMMAND.codexDesktop embeds
+                           the key in the config block by construction, so honoring
+                           "separate" there is impossible and showing the separate key
+                           row beside an embedded-key block would contradict the mode.
+                           The pills render again on the CLI surface. */
+                        const keyDisplayRow = harnessKey && wizardKeyMode === 'separate' && wizardConnectHarness !== 'codexDesktop' ? (
                           <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', flexWrap: 'wrap', marginTop: '0.5rem' }}>
                             <p className="dim small">Your API key (shown once):</p>
                             <code style={wizardKeyCodeStyle}>{harnessKey}</code>
@@ -6121,15 +6146,27 @@ function claimIntentInFlight() {
                             <p className="dim" style={{ margin: 0, lineHeight: 1.6 }}>
                               Open Claude Desktop → Settings → Developer → Edit Config. Merge this into mcpServers (don't replace the whole file):
                             </p>
-                            <pre className="snippet" style={{ margin: '0.75rem 0' }}>
-{JSON.stringify({ mcpServers: { tortoise: { type: 'http', url: 'https://api.premiselabs.co/mcp/', headers: { Authorization: 'Bearer ' + (harnessKey || 'YOUR_API_KEY') } } } }, null, 2)}
-                            </pre>
-                            <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', flexWrap: 'wrap', marginTop: '0.5rem' }}>
-                              <p className="dim small">Your API key (shown once):</p>
-                              <code style={wizardKeyCodeStyle}>{harnessKey || '…'}</code>
-                              <button type="button" className="btn-primary small" onClick={() => navigator.clipboard?.writeText(harnessKey)}>Copy</button>
-                            </div>
-                            <p className="dim small" style={{ marginTop: '0.5rem' }}>Save and restart Claude Desktop.</p>
+                            {/* #2710 (code-review P1): this branch used to render the
+                                snippet with a `YOUR_API_KEY` placeholder plus a Copy
+                                button that wrote an EMPTY string to the clipboard — the
+                                same no-key dead-end as the agent-driven blocks, for one
+                                of six tabs. The affordance is the no-key branch here
+                                too; the key row only exists once a key does. */}
+                            {harnessKey ? (
+                              <>
+                                <pre className="snippet" style={{ margin: '0.75rem 0' }}>
+{JSON.stringify({ mcpServers: { tortoise: { type: 'http', url: 'https://api.premiselabs.co/mcp/', headers: { Authorization: 'Bearer ' + harnessKey } } } }, null, 2)}
+                                </pre>
+                                <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', flexWrap: 'wrap', marginTop: '0.5rem' }}>
+                                  <p className="dim small">Your API key (shown once):</p>
+                                  <code style={wizardKeyCodeStyle}>{harnessKey}</code>
+                                  <button type="button" className="btn-primary small" onClick={() => navigator.clipboard?.writeText(harnessKey)}>Copy</button>
+                                </div>
+                                <p className="dim small" style={{ marginTop: '0.5rem' }}>Save and restart Claude Desktop.</p>
+                              </>
+                            ) : (
+                              <div style={{ marginTop: '0.75rem' }}>{wizardNoKeyAffordance}</div>
+                            )}
                             <p className="dim small" style={{ textAlign: 'center', margin: '0.75rem 0' }}>After restart, start a new chat and give it this prompt to complete setup</p>
                             {harnessKey && <WizardPromptCard text={wizardPromptText('claude-desktop', 2, harnessKey, wizardKeyMode)} />}
                           </div>
@@ -6139,16 +6176,26 @@ function claimIntentInFlight() {
                             <p className="dim" style={{ margin: 0, lineHeight: 1.6 }}>
                               Go to claude.ai → Settings → Connectors → Add custom connector:
                             </p>
-                            <ul className="dim small" style={{ lineHeight: 1.7, paddingLeft: '1.2rem' }}>
-                              <li>Name: Tortoise</li>
-                              <li>Server URL: https://api.premiselabs.co/mcp/</li>
-                              <li>Headers: Authorization: Bearer {harnessKey || 'YOUR_API_KEY'}</li>
-                            </ul>
-                            <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', flexWrap: 'wrap', marginTop: '0.5rem' }}>
-                              <p className="dim small">Your API key (shown once):</p>
-                              <code style={wizardKeyCodeStyle}>{harnessKey || '…'}</code>
-                              <button type="button" className="btn-primary small" onClick={() => navigator.clipboard?.writeText(harnessKey)}>Copy</button>
-                            </div>
+                            {/* #2710 (code-review P1): same no-key dead-end as
+                                claude-desktop — the header line used a
+                                `YOUR_API_KEY` placeholder and the Copy button wrote
+                                an empty string. The affordance is the no-key branch. */}
+                            {harnessKey ? (
+                              <>
+                                <ul className="dim small" style={{ lineHeight: 1.7, paddingLeft: '1.2rem' }}>
+                                  <li>Name: Tortoise</li>
+                                  <li>Server URL: https://api.premiselabs.co/mcp/</li>
+                                  <li>Headers: Authorization: Bearer {harnessKey}</li>
+                                </ul>
+                                <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', flexWrap: 'wrap', marginTop: '0.5rem' }}>
+                                  <p className="dim small">Your API key (shown once):</p>
+                                  <code style={wizardKeyCodeStyle}>{harnessKey}</code>
+                                  <button type="button" className="btn-primary small" onClick={() => navigator.clipboard?.writeText(harnessKey)}>Copy</button>
+                                </div>
+                              </>
+                            ) : (
+                              <div style={{ marginTop: '0.75rem' }}>{wizardNoKeyAffordance}</div>
+                            )}
                             <p className="dim small" style={{ textAlign: 'center', margin: '0.75rem 0' }}>After setting up the connector, start a new chat and paste this prompt (it tells your agent how to work with Tortoise):</p>
                             <pre className="snippet" style={{ marginTop: '0.5rem' }}>{WORKFLOWS_PROMPT}</pre>
                           </div>

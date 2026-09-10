@@ -81,19 +81,65 @@ test('#2710: wizardMintDurableKey mints with NO expiry (Never-only embed contrac
     'the wizard mint must never send an expiry')
 })
 
-test('#2710: the no-key affordance is the branch of BOTH agent-driven content blocks', () => {
-  // Slice each content block and assert the affordance is ITS no-key branch —
+test('#2710: the no-key affordance is the branch of ALL FOUR harness blocks', () => {
+  // Slice each render block and assert the affordance is ITS no-key branch —
   // a global count of one JSX spelling would fail on a behaviour-preserving
   // refactor (`) : wizardNoKeyAffordance`) and pass on a wrong render.
-  const two = slice('if (agentDriven2Step.includes(wizardHarness)) return (',
-                    'if (agentDriven1Step.includes(wizardHarness)) return (',
-                    'agentDriven2Step render block')
-  const one = slice('if (agentDriven1Step.includes(wizardHarness)) return (', '})()}',
-                    'agentDriven1Step render block')
-  for (const [label, block] of [['2-step (pi/cursor)', two], ['1-step (claude/codex)', one]]) {
-    assert.match(block, /\)\s*:\s*\(\s*wizardNoKeyAffordance/,
-      `the ${label} block must render the no-key affordance when no key exists`)
+  // code-review P1: the two MANUAL blocks (claude-desktop / claude-web) used to
+  // keep a `YOUR_API_KEY` placeholder + a Copy button that wrote an empty
+  // string, so the #2710 dead-end survived on 2 of the 6 shipped tabs.
+  const blocks = [
+    ['2-step (pi/cursor)',
+     slice('if (agentDriven2Step.includes(wizardHarness)) return (',
+           'if (agentDriven1Step.includes(wizardHarness)) return (', 'agentDriven2Step')],
+    ['1-step (claude/codex)',
+     slice('if (agentDriven1Step.includes(wizardHarness)) return (',
+           "if (wizardHarness === 'claude-desktop') return (", 'agentDriven1Step')],
+    ['claude-desktop',
+     slice("if (wizardHarness === 'claude-desktop') return (", "if (wizardHarness === 'claude-web') return (",
+           'claude-desktop block')],
+    ['claude-web',
+     slice("if (wizardHarness === 'claude-web') return (", 'return null', 'claude-web block')],
+  ]
+  for (const [label, block] of blocks) {
+    // Branch-anchored: the affordance must sit in the ELSE branch of a ternary
+    // (`) : ( …wizardNoKeyAffordance`), i.e. it must NOT render once a key
+    // exists. A bare presence check would pass on a mutation that renders it
+    // unconditionally (found by the VGATE mutation check on this very test).
+    assert.match(block, /\)\s*:\s*\([\s\S]{0,120}?wizardNoKeyAffordance/,
+      `the ${label} block must render the no-key affordance as its NO-KEY branch`)
+    assert.doesNotMatch(block, /YOUR_API_KEY/, `the ${label} block must not keep a placeholder key`)
+    assert.doesNotMatch(block, /<code style=\{wizardKeyCodeStyle\}>\{harnessKey \|\| '…'\}/,
+      `the ${label} block must gate its key row on a real key`)
   }
+})
+
+test('#2710: a non-402 mint failure is VISIBLE next to the mint CTA', () => {
+  // code-review P1: wizardDurableError renders inside wizardPasteRow, which is
+  // gated on wizardShowPaste — and only the 402 branch opens it. A 403 /
+  // transport / #2326 team-switch failure would have been silent.
+  const affordance = slice('const wizardNoKeyAffordance = (', 'if (welcomeMode && authed) {',
+                           'wizardNoKeyAffordance')
+  assert.match(affordance, /!wizardShowPaste && wizardDurableError &&/,
+    'the affordance must render the mint error outside the paste-row gate')
+  assert.match(affordance, /role="alert"/, 'the error must be an assertive alert')
+  assert.match(affordance, /aria-controls=\{wizardShowPaste \? 'wizard-paste-row' : undefined\}/,
+    'the paste disclosure must expose aria-controls')
+})
+
+test('#2756: the Codex Desktop surface never embeds a key the user asked to keep separate', () => {
+  // code-review P1: UNIVERSAL_COMMAND.codexDesktop embeds the key by
+  // construction, so the "separate" pill cannot be honored there. The pills
+  // (and the separate key row) must therefore not render on that surface.
+  const connect = connectStep()
+  assert.match(connect,
+    /\['pi', 'cursor', 'claude', 'codex'\]\.includes\(wizardHarness\) && wizardConnectHarness !== 'codexDesktop' && \(/,
+    'the key-mode pills must be hidden on the Codex Desktop surface')
+  assert.match(connect,
+    /const keyDisplayRow = harnessKey && wizardKeyMode === 'separate' && wizardConnectHarness !== 'codexDesktop' \? \(/,
+    'the separate key row must not render beside a key-embedding Desktop block')
+  assert.match(connect, /aria-pressed=\{wizardKeyMode === 'included'\}/, 'pills expose their state')
+  assert.match(connect, /aria-pressed=\{wizardKeyMode === 'separate'\}/, 'pills expose their state')
 })
 
 test('#2710: nothing in the wizard connect step queues the shared create modal', () => {
