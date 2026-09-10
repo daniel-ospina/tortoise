@@ -959,7 +959,13 @@ def test_enumerate_teams_registry_lane_accepts_registry_source(monkeypatch):
 
 def test_sweep_reports_resolved_source_in_ops_state(shared_proj):
     """#2823: the run result + the ops/state roll-up both record WHICH control
-    plane the run enumerated, and a no-op run merge-preserves it (#2412)."""
+    plane the run enumerated, and a no-op run records ITS OWN dialect.
+
+    The no-op leg deliberately flips the lane (registry → supabase) so the
+    assertion is discriminating: merge-preserving `source` from the previous
+    run (the pre-fix behaviour) would leave `registry` in the roll-up while the
+    run result says `supabase` — the same two-surfaces-disagree shape that let
+    #2823 hide."""
     if shared_proj is None:
         # A silent `return` would make this test pass having asserted NOTHING —
         # a green result read as coverage for the #2823 regression tripwire.
@@ -973,14 +979,20 @@ def test_sweep_reports_resolved_source_in_ops_state(shared_proj):
     assert res["status"] == "backed_up"
     assert res["source"] == "registry"
     assert json.loads(store.download(OPS_STATE_KEY))["source"] == "registry"
-    # A subsequent 0-team run must not erase the last real run's dialect.
-    reg.query("MATCH (t:Team) DETACH DELETE t")
+    first = json.loads(store.download(OPS_STATE_KEY))
+    # The lane flips; the next run enumerates 0 teams FROM THE SUPABASE LANE.
+    monkeypatch_empty = FakeControlPlane().seed("teams", [])
+    assert source_dialect(monkeypatch_empty) == "supabase"
     res2 = run_backup_sweep(
-        db=proj.db, registry=reg, storage=store, config=_config(),
+        db=proj.db, registry=monkeypatch_empty, storage=store, config=_config(),
     )
     assert res2["status"] == "no_teams"
-    assert res2["source"] == "registry"
-    assert json.loads(store.download(OPS_STATE_KEY))["source"] == "registry"
+    assert res2["source"] == "supabase"
+    rolled = json.loads(store.download(OPS_STATE_KEY))
+    assert rolled["source"] == "supabase", rolled
+    # ...and the no-op still preserves the last REAL run's outcome fields.
+    assert rolled["last_sweep_at"] == first["last_sweep_at"], rolled
+    assert rolled["graph_totals"]["backed_up"] == 1
 
 
 def test_sweep_wrong_dialect_is_loud_not_no_teams(shared_proj, monkeypatch):

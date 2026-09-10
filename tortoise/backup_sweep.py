@@ -1054,30 +1054,49 @@ def resolve_active_graph(source, team_id: str, graph_id: str) -> dict[str, Any]:
 _OPS_STATE_LOCK = threading.Lock()
 
 
-def _noop_ops_state_write(storage, now: datetime) -> None:
+def _noop_ops_state_write(storage, now: datetime,
+                          *, source: str | None = None) -> None:
     """#2560: write the merge-preserving no-op roll-up AFTER re-reading the
     state under _OPS_STATE_LOCK — a no-op run whose start-of-run read
     predates a concurrent purge's ghost-drop would otherwise resurrect the
-    dropped keys. Serialized against the purge drop + real-run write."""
+    dropped keys. Serialized against the purge drop + real-run write.
+
+    ``source`` is THIS run's resolved dialect (not a preserved field, see
+    _noop_ops_state): a no-op run must still answer which control plane it
+    enumerated (#2823)."""
     with _OPS_STATE_LOCK:
         ops_state = read_ops_state(storage)
-        _write_json(storage, OPS_STATE_KEY, _noop_ops_state(ops_state, now))
+        _write_json(storage, OPS_STATE_KEY,
+                    _noop_ops_state(ops_state, now, source=source))
 
 
-def _noop_ops_state(ops_state: Any, now: datetime) -> dict[str, Any]:
+def _noop_ops_state(ops_state: Any, now: datetime,
+                    *, source: str | None = None) -> dict[str, Any]:
     """#2412: a no-op run (0 eligible / 0 teams) must NOT erase the last real
     run's roll-up — merge-preserve the #2372 sweep fields (last_sweep_at,
     graph_totals, graph_failures, graph_error_streaks) so /status last_sweep
     keeps showing the last REAL sweep and the cross-run error-streak
     bookkeeping survives no-op runs (the pre-#2412 code replaced the whole
     object, rendering last_sweep: None "sweep never ran" right after a
-    healthy run)."""
+    healthy run).
+
+    ``source`` is deliberately NOT in that preserve set: it is per-run
+    provenance ("which control plane did THIS run enumerate?"), not a sweep
+    OUTCOME. Preserving it would make the sweep response and
+    /status last_sweep disagree on the first no-op run (or after a lane
+    change) — exactly the ambiguity #2823 existed in. Pass ``source`` to
+    record this run's dialect; omitted, the previous value is kept for
+    callers that have no dialect to report."""
     prev = ops_state if isinstance(ops_state, dict) else {}
     out = {"last_team_count": 0, "updated_at": now.isoformat()}
     for key in ("last_sweep_at", "graph_totals", "graph_failures",
-                "graph_error_streaks", "source"):
+                "graph_error_streaks"):
         if key in prev:
             out[key] = prev[key]
+    if source is not None:
+        out["source"] = source
+    elif "source" in prev:
+        out["source"] = prev["source"]
     return out
 
 
@@ -1190,7 +1209,7 @@ def run_backup_sweep(
                     "detail": {"message": "team sweep enabled but 0 eligible (Pro) teams found"},
                 }
             )
-            _noop_ops_state_write(storage, now)
+            _noop_ops_state_write(storage, now, source=resolved_source)
             return {
                 "status": "no_eligible_teams",
                 "teams_backed_up": 0,
@@ -1213,7 +1232,7 @@ def run_backup_sweep(
                     "detail": {"previous": prev_team_count, "now": 0},
                 }
             )
-        _noop_ops_state_write(storage, now)
+        _noop_ops_state_write(storage, now, source=resolved_source)
         return {
             "status": "no_teams",
             "teams_backed_up": 0,

@@ -585,12 +585,12 @@ async def _lifespan(app):
                 if not is_supabase_enabled():
                     try:
                         # Registry lane only: the boot GC sweeps stale `_drill_*`
-                        # scratch graphs. The DATA-plane handle is resolved here
-                        # rather than held above — `team_source` now comes from
+                        # scratch graphs. The DATA-plane handle (#1366) is resolved
+                        # here rather than held above — `team_source` now comes from
                         # the shared seam, and _make_sdk's process-lifetime
                         # keepalive anchor keeps the embedded server alive
                         # (#1475/#1607).
-                        _boot_gc_drill_graphs(_registry_sdk()._get_proj().db)
+                        _boot_gc_drill_graphs(_make_sdk(namespace=None)._get_proj().db)
                     except Exception as exc:
                         # #2922 review: a separate operation, so a separate
                         # message. Reporting a drill-graph GC failure as "the
@@ -19768,9 +19768,15 @@ def _control_plane_source():
     their ``finally`` (#1475/#1607), so folding them needs that lifetime
     preserved — tracked separately rather than risked here.
 
-    A Supabase-mode caller also never opens the registry namespace, which the
-    #669 post-flip verification flagged as an auto-recreate artifact
-    (``_get_registry()`` runs ``CREATE INDEX`` against the deleted graph).
+    A Supabase-mode caller also never opens the registry namespace: the
+    pre-#2823 handlers passed ``_registry_sdk()._get_proj().db`` as the
+    data-plane handle, and opening that projection re-materializes the
+    control-plane namespace the #669 post-flip verification flagged as an
+    auto-recreate artifact (``_get_registry()`` additionally runs
+    ``CREATE INDEX`` against the deleted graph). The data-plane handle
+    (``_make_sdk(namespace=None)._get_proj().db`` — backup_sweep's ``db``, the
+    GRAPH.DELETE / ``select_graph`` target) is the one #669 mandates and the
+    one that exists in BOTH lanes.
     """
     from tortoise.supabase_control import get_control_plane, is_supabase_enabled
 
@@ -20252,11 +20258,11 @@ async def backups_sweep(request: Request):
     # #2823 (P0): the control plane resolves through the SHARED dialect-aware
     # seam. `_registry_sdk()._get_registry()` is the pre-#669 resolution — the
     # post-flip graph is DELETED, so the sweep enumerated 0 teams, reported a
-    # benign `no_teams`, and backed nothing up from the flip until now. The
-    # data-plane `db` handle is lane-independent (knowledge graphs stay in
-    # FalkorDB) and is reused exactly as before.
+    # benign `no_teams`, and backed nothing up from the flip until now.
     registry = _control_plane_source()
-    db = _registry_sdk()._get_proj().db
+    # #2823/#669: the DATA-plane handle (#1366) — the data-plane SDK, never
+    # the registry namespace (see _control_plane_source's docstring).
+    db = _make_sdk(namespace=None)._get_proj().db
     storage = _backup_storage()
     try:
         mirror = _backup_mirror_storage(cfg)
@@ -20323,7 +20329,9 @@ async def backups_purge(request: Request, body: dict | None = None):
     # teams through the same seam — off the raw registry handle it purged 0
     # teams in Supabase mode (expired trash never erased).
     registry = _control_plane_source()
-    db = _registry_sdk()._get_proj().db
+    # #2823/#669: the DATA-plane handle (#1366) — the data-plane SDK, never
+    # the registry namespace (see _control_plane_source's docstring).
+    db = _make_sdk(namespace=None)._get_proj().db
     storage = _backup_storage()
     grace_days = int((body or {}).get("grace_days")
                      or _TRASH_GRACE_DAYS)
@@ -20598,7 +20606,9 @@ async def backups_rebaseline(request: Request, body: dict):
     # enumerates the team's graphs through this source; the raw registry handle
     # 400s/409s ACTIVE Supabase-lane graphs.
     registry = _control_plane_source()
-    db = _registry_sdk()._get_proj().db
+    # #2823/#669: the DATA-plane handle (#1366) — the data-plane SDK, never
+    # the registry namespace (see _control_plane_source's docstring).
+    db = _make_sdk(namespace=None)._get_proj().db
     storage = _backup_storage()
     try:
         row = resolve_active_graph(registry, team_id, graph_id)
@@ -20841,7 +20851,9 @@ async def backups_drill(request: Request, body: dict):
 
     # #2823/#2340: dialect-aware control plane (see re-baseline).
     registry = _control_plane_source()
-    db = _registry_sdk()._get_proj().db
+    # #2823/#669: the DATA-plane handle (#1366) — the data-plane SDK, never
+    # the registry namespace (see _control_plane_source's docstring).
+    db = _make_sdk(namespace=None)._get_proj().db
     storage = _backup_storage()
     try:
         return await asyncio.to_thread(
@@ -20883,7 +20895,9 @@ async def backups_drill_scheduled(request: Request):
     # #2823/#2340: dialect-aware control plane — the scheduled drill resolves
     # its candidate's active graph through this source.
     registry = _control_plane_source()
-    db = _registry_sdk()._get_proj().db
+    # #2823/#669: the DATA-plane handle (#1366) — the data-plane SDK, never
+    # the registry namespace (see _control_plane_source's docstring).
+    db = _make_sdk(namespace=None)._get_proj().db
     storage = _backup_storage()
     alerts = _alert_store_from(cfg)
     try:

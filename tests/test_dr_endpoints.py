@@ -456,6 +456,11 @@ class TestSupabaseLaneSeam:
     cannot use the hard-fail tripwire and are guarded by their outcome instead:
     `backups_list` (fail-soft by design — `_legacy_graph_overrides`) and the
     watcher lifespan (covered by `tests/test_backup_watcher.py` + the seam).
+    The same handlers also obtained their DATA-plane handle (#1366: the
+    `GRAPH.DELETE` / `select_graph` target) from `_registry_sdk()._get_proj()`,
+    i.e. by opening the registry namespace — the auto-recreate artifact the
+    #669 post-flip verification flagged; they now use
+    `_make_sdk(namespace=None)._get_proj().db`.
 
     Only `backups_sweep` had a Supabase-lane integration test, so reverting any
     of the others — or a future refactor re-introducing the raw registry
@@ -463,10 +468,11 @@ class TestSupabaseLaneSeam:
     moved/deleted registry graph reads as an empty deployment: a benign
     `no_teams`, a `{"teams": 0}` ACL no-op, a purge that erases nothing).
 
-    These tests make `_get_registry()` on the registry SDK a HARD FAILURE under
-    the Supabase lane, then drive each endpoint and assert an OPERATOR-VISIBLE
-    outcome (plus a control-plane consultation) — never merely "did not 500",
-    which a 404/400/422 route-or-validation miss would also satisfy.
+    These tests make the registry SDK a HARD FAILURE (`_registry_sdk` raises on
+    ANY call) under the Supabase lane, then drive each endpoint and assert an
+    OPERATOR-VISIBLE outcome (plus a control-plane consultation) — never merely
+    "did not 500", which a 404/400/422 route-or-validation miss would also
+    satisfy.
     """
 
     TEAM: ClassVar[dict] = {"id": "team_s1", "graph_name": "team_team_s1",
@@ -474,9 +480,15 @@ class TestSupabaseLaneSeam:
 
     @staticmethod
     def _fortify_supabase_lane(monkeypatch):
-        """Supabase lane + a registry SDK whose `_get_registry()` is forbidden
-        (the data-plane `_get_proj().db` handle must keep working). Returns the
-        fake control plane so callers can seed/assert on it."""
+        """Supabase lane + a registry SDK that is FORBIDDEN outright.
+
+        #2823/#669: under the Supabase lane no handler may construct or open
+        the registry namespace AT ALL — `_registry_sdk()` eagerly builds the
+        registry projection, which re-materializes the control-plane namespace
+        the #669 flip deleted (and `_get_registry()` then runs `CREATE INDEX`
+        against it). The data-plane handle (``_make_sdk(namespace=None)``) is a
+        different SDK and stays available. Returns the fake control plane so
+        callers can seed/assert on it."""
         import tortoise.hosted_api as ha
         from tests.fake_control_plane import FakeControlPlane
 
@@ -486,21 +498,13 @@ class TestSupabaseLaneSeam:
         monkeypatch.setattr("tortoise.supabase_control.get_control_plane",
                             lambda: cp)
 
-        real = ha._registry_sdk()
+        def _forbidden_registry_sdk():
+            raise AssertionError(
+                "the registry-namespaced SDK was opened under the Supabase "
+                "lane — resolve the control plane via _control_plane_source() "
+                "and the data plane via _make_sdk(namespace=None) (#2823/#669)")
 
-        class _NoRawRegistry:
-            def _get_registry(self):
-                raise AssertionError(
-                    "raw registry control plane used under the Supabase lane — "
-                    "resolve via _control_plane_source() (#2823/#2340)")
-
-            def _get_proj(self):
-                return real._get_proj()
-
-            def __getattr__(self, name):
-                return getattr(real, name)
-
-        monkeypatch.setattr(ha, "_registry_sdk", lambda: _NoRawRegistry())
+        monkeypatch.setattr(ha, "_registry_sdk", _forbidden_registry_sdk)
         return cp
 
     @staticmethod

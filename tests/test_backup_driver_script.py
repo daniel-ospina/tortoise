@@ -3,13 +3,14 @@
 The hourly DR driver is the only unattended consumer of the sweep result, and
 three of its behaviours are load-bearing for #2823:
 
-1. **`no_teams` self-heal must not close `WATCHER_DOWN`.** A 0-team sweep proves
-   the app answered and R2 round-tripped (the no-op roll-up writes
-   `ops/state.json`) — it proves nothing about the watcher daemon. On
-   2026-09-10 the driver filed `WATCHER_DOWN` and closed it 8 seconds later as
-   "a healthy run" while the watcher's heartbeat had been stale for 30 days
-   (since the #669 flip). `backed_up`/`degraded` still prove the app is up and
-   keep healing all three kinds.
+1. **`WATCHER_DOWN` closes only on watcher evidence.** A sweep that backed up
+   proves the app answered and R2 round-tripped; it proves nothing about the
+   staleness daemon (a separate thread the sweep never touches). On 2026-09-10
+   the driver filed `WATCHER_DOWN` and closed it 8 seconds later as "a healthy
+   run" while the watcher's heartbeat had been stale for 30 days (since the
+   #669 flip). The close is now keyed on the fresh heartbeat measured in step 2
+   (`WATCHER_HEARTBEAT_OK`), whatever the sweep status; `APP_DOWN`/`R2_DOWN`
+   still close on a completed round trip (`backed_up`/`degraded`/no-op).
 
 2. **The resolved control-plane dialect is logged.** The sweep result carries
    `source` (`supabase`|`registry`); the driver must render it, because a
@@ -20,8 +21,13 @@ three of its behaviours are load-bearing for #2823:
    benign `no_teams`) for a control-plane dialect mismatch; a sweep CALL that
    produced no credible status (`error` — empty body / 5xx / malformed, e.g.
    the control plane could not be resolved and the handler 500'd) is the same
-   class of "no backups ran". Both must fail the run red, because the
-   GitHub/Telegram alert layer is a separate, currently-deaf path (#2828).
+   class of "no backups ran"; and a 0-backup result whose own numbers or
+   dialect contradict it (`graph_totals.errors > 0` — the shape a
+   never-backing-up sweep takes when every graph errors, since there is no
+   `backed_up` to degrade — or no recognizable `source`, the #2823 shape during
+   a version-skew window) is the same class again. All must fail the run red,
+   because the GitHub/Telegram alert layer is a separate, currently-deaf path
+   (#2828).
 
 Every behaviour above is asserted by **executing the real script text** in bash
 with stubbed I/O — never by grepping the source. A prior revision of this file
@@ -46,9 +52,10 @@ _SCRIPT = (Path(__file__).resolve().parent.parent
 
 # Code anchors (statements, not section comments) — a pure comment/renumber edit
 # must not break these tests, while a contract move must.
+_WATCHER_STEP_START = 'WATCHER_RUNNING="$(printf'
 _SWEEP_STEP_START = "SWEEP_FAILED=0"
 _SWEEP_STEP_END = "PURGE_FAILED=0"
-_SELFHEAL_START = 'if [ "$RUN_STATUS" = "backed_up" ]'
+_SELFHEAL_START = 'if [ -n "$SWEEP_UNTRUSTED" ]; then'
 _GATE_START = 'if [ "$SWEEP_FAILED" = "1" ]; then'
 
 # The script bodies the driver must interpret (real sweep result shapes).
@@ -66,6 +73,17 @@ _ENUM_FAILED_BODY = ('{"status": "enum_failed", "teams_backed_up": 0, '
                      '"source": "registry", '
                      '"error": "team enumeration failed: control-plane dialect '
                      'mismatch"}')
+# #2823 corroboration shapes: a 0-backup result the numbers/dialect contradict.
+_NO_WORK_WITH_ERRORS_BODY = ('{"status": "no_work", "teams_backed_up": 0, '
+                             '"source": "supabase", '
+                             '"graph_totals": {"attempted": 1, "backed_up": 0, '
+                             '"errors": 1}}')
+_NO_TEAMS_NO_SOURCE_BODY = '{"status": "no_teams", "teams_backed_up": 0}'
+_NO_WORK_NO_SOURCE_BODY = '{"status": "no_work", "teams_backed_up": 0}'
+_NO_TEAMS_EMPTY_BODY = ('{"status": "no_teams", "teams_backed_up": 0, '
+                        '"source": "supabase", '
+                        '"graph_totals": {"attempted": 0, "backed_up": 0, '
+                        '"errors": 0}}')
 _MALFORMED_BODY = "502 Bad Gateway"
 _HTTP_500_BODY = '{"detail": "Internal Server Error"}'
 
@@ -74,14 +92,20 @@ def _text() -> str:
     return _SCRIPT.read_text(encoding="utf-8")
 
 
-def _slice(start_marker: str, end_marker: str | None) -> str:
+def _slice(start_marker: str, end_marker: str | None, *,
+           last: bool = False) -> str:
     """Slice a live region of the driver between real CODE anchors.
 
     ValueError (anchor absent) fails the test loudly — a silently-empty slice
     would make every assertion over it vacuous.
+
+    ``last=True`` anchors on the LAST occurrence: the step-6 self-heal guard
+    (`if [ -n "$SWEEP_UNTRUSTED" ]; then`) is byte-identical to the one closing
+    the step-3 latch, and slicing from the first would execute two regions that
+    are not adjacent in the real script.
     """
     text = _text()
-    start = text.index(start_marker)
+    start = text.rindex(start_marker) if last else text.index(start_marker)
     end = len(text) if end_marker is None else text.index(end_marker, start)
     return text[start:end]
 
@@ -110,12 +134,20 @@ def _preamble() -> list[str]:
     ]
 
 
-def _run_selfheal(run_status: str) -> str:
-    """Execute the real self-heal block with stubbed alert I/O."""
+def _run_selfheal(run_status: str, watcher_ok: str = "1",
+                  untrusted: str = "") -> str:
+    """Execute the real self-heal block with stubbed alert I/O.
+
+    ``watcher_ok`` is step 2's `WATCHER_HEARTBEAT_OK` — the ONLY watcher
+    evidence the driver collects; the WATCHER_DOWN close must follow it, not the
+    sweep status. ``untrusted`` is step 3's latch verdict (`SWEEP_UNTRUSTED`);
+    a non-empty value means the run heals nothing at all (#2823)."""
     proc = _run_bash([
         *_preamble(),
         f'RUN_STATUS="{run_status}"',
-        _slice(_SELFHEAL_START, _GATE_START),
+        f'WATCHER_HEARTBEAT_OK="{watcher_ok}"',
+        f'SWEEP_UNTRUSTED="{untrusted}"',
+        _slice(_SELFHEAL_START, _GATE_START, last=True),
     ])
     assert proc.returncode == 0, proc.stderr
     return proc.stdout
@@ -145,21 +177,62 @@ def _run_sweep_step(body: str, curl_log: Path | None = None) -> tuple[str, str]:
     return proc.stdout, failed
 
 
-def _run_chain(body: str) -> subprocess.CompletedProcess:
-    """Execute the driver's real DECISION CHAIN in one shell: sweep step
-    (parse status/source, latch credibility) → self-heal (consumes RUN_STATUS)
-    → failure gates (consumes SWEEP_FAILED). This is the sequencing the journey
-    depends on — the sweep response actually driving the heal set and the exit
-    code — rather than three literals pinned independently."""
-    return _run_bash([
-        *_preamble(),
+def _run_chain(body: str, *, watcher_json: str | None = None) -> subprocess.CompletedProcess:
+    """Execute the driver's real DECISION CHAIN in one shell: watcher
+    supervision (step 2, when ``watcher_json`` is given) → sweep step (parse
+    status/source, latch credibility) → self-heal (consumes RUN_STATUS and the
+    step-2 heartbeat verdict) → failure gates (consume SWEEP_FAILED). This is
+    the sequencing the journey depends on — the `/status` watcher reading, the
+    sweep response, the heal set and the exit code all driving each other in
+    one real execution — rather than four literals pinned independently."""
+    lines = [*_preamble(), 'file_alert() { echo "FILE $1"; }']
+    if watcher_json is not None:
+        lines.append(f"STATUS={_shell_quote(watcher_json)}")
+        lines.append(_slice(_WATCHER_STEP_START, _SWEEP_STEP_START))
+    else:
+        lines.append("WATCHER_HEARTBEAT_OK=1")
+    lines += [
         f"curl() {{ printf '%s' {_shell_quote(body)}; }}",
         "PURGE_FAILED=0",
         "RECONCILE_FAILED=0",
         _slice(_SWEEP_STEP_START, _SWEEP_STEP_END),   # sets RUN_*, SWEEP_FAILED
-        _slice(_SELFHEAL_START, _GATE_START),          # consumes RUN_STATUS
+        _slice(_SELFHEAL_START, _GATE_START,          # consumes RUN_STATUS
+               last=True),
         _slice(_GATE_START, None),                     # consumes SWEEP_FAILED
-    ])
+    ]
+    return _run_bash(lines)
+
+
+def test_chain_files_and_keeps_watcher_down_when_the_heartbeat_is_stale():
+    """The whole #2823 watcher story in one execution: a stale heartbeat at
+    step 2 files WATCHER_DOWN, and the productive sweep that follows does NOT
+    close it — pre-fix, this exact run filed and closed it 8 seconds apart."""
+    stale = '{"watcher": {"running": true, "age_minutes": 99}}'
+    proc = _run_chain(_BACKED_UP_BODY, watcher_json=stale)
+    assert proc.returncode == 0, (proc.returncode, proc.stdout, proc.stderr)
+    assert "FILE WATCHER_DOWN" in proc.stdout, proc.stdout
+    assert "CLOSE OPEN_APP_DOWN" in proc.stdout, proc.stdout
+    assert "CLOSE OPEN_WATCHER_DOWN" not in proc.stdout, proc.stdout
+
+
+def test_chain_closes_watcher_down_on_a_fresh_heartbeat_noop_run():
+    """The complement: a fresh heartbeat lets a 0-team no-op close the stale
+    WATCHER_DOWN that a previous run filed."""
+    fresh = '{"watcher": {"running": true, "age_minutes": 1}}'
+    proc = _run_chain(_NO_TEAMS_BODY, watcher_json=fresh)
+    assert proc.returncode == 0, (proc.returncode, proc.stdout, proc.stderr)
+    assert "FILE WATCHER_DOWN" not in proc.stdout, proc.stdout
+    for kind in ("APP_DOWN", "WATCHER_DOWN", "R2_DOWN"):
+        assert f"CLOSE OPEN_{kind}" in proc.stdout, (kind, proc.stdout)
+
+
+def test_chain_reports_a_dead_watcher_daemon_as_stale():
+    """`watcher.running: false` (the daemon thread is not alive) is stale even
+    with a low age, and must never be closed by the sweep that follows."""
+    dead = '{"watcher": {"running": false, "age_minutes": 1}}'
+    proc = _run_chain(_BACKED_UP_BODY, watcher_json=dead)
+    assert "FILE WATCHER_DOWN" in proc.stdout, proc.stdout
+    assert "CLOSE OPEN_WATCHER_DOWN" not in proc.stdout, proc.stdout
 
 
 def _run_gate(sweep_failed: str) -> subprocess.CompletedProcess:
@@ -175,34 +248,60 @@ def _run_gate(sweep_failed: str) -> subprocess.CompletedProcess:
 
 
 @pytest.mark.parametrize("run_status", ["backed_up", "degraded"])
-def test_selfheal_closes_watcher_down_on_a_real_run(run_status):
-    """A run that actually backed something up (or degraded with >=1 default
-    backed up, #2411) IS evidence the whole stack — watcher included — is up."""
-    out = _run_selfheal(run_status)
+def test_selfheal_closes_every_kind_on_a_fresh_heartbeat(run_status):
+    """A run that backed something up (or degraded with >=1 default backed up,
+    #2411) with a FRESH watcher heartbeat is evidence the whole stack is up."""
+    out = _run_selfheal(run_status, watcher_ok="1")
     for kind in ("APP_DOWN", "WATCHER_DOWN", "R2_DOWN"):
         assert f"CLOSE OPEN_{kind}" in out, (run_status, kind, out)
 
 
-def test_no_teams_selfheal_never_closes_watcher_down():
-    """#2823: the load-bearing regression — `no_teams` heals APP_DOWN/R2_DOWN
-    (both proven by the run) but MUST leave WATCHER_DOWN open (filed 8 seconds
-    earlier off a stale heartbeat the 0-team sweep says nothing about).
+@pytest.mark.parametrize("run_status", ["backed_up", "degraded", "no_teams",
+                                        "no_eligible_teams", "no_work"])
+def test_stale_heartbeat_never_closes_watcher_down(run_status):
+    """#2823: the load-bearing regression. A STALE heartbeat leaves WATCHER_DOWN
+    open for EVERY status — including a productive `backed_up` run (the watcher
+    is a separate thread the sweep never touches, so a successful backup says
+    nothing about it). The pre-fix driver closed it for `backed_up`/`degraded`
+    in the same invocation that filed it, which is how a 30-day-stale watcher
+    read healthy.
 
     Asserted on the STUB invocations (`CLOSE OPEN_<kind>`), not on the raw text:
     the driver's own diagnostic line prints the heal KINDS, so a behaviour-
     preserving reword of that log must not turn this test red."""
-    out = _run_selfheal("no_teams")
+    out = _run_selfheal(run_status, watcher_ok="0")
     assert "CLOSE OPEN_APP_DOWN" in out
     assert "CLOSE OPEN_R2_DOWN" in out
-    assert "CLOSE OPEN_WATCHER_DOWN" not in out
+    assert "CLOSE OPEN_WATCHER_DOWN" not in out, (run_status, out)
+
+
+@pytest.mark.parametrize("run_status", ["no_teams", "no_eligible_teams", "no_work"])
+def test_noop_run_closes_watcher_down_only_on_a_fresh_heartbeat(run_status):
+    """A 0-backup no-op proves the app answered and R2 round-tripped (its
+    roll-up was written) — so it heals those two — and it heals WATCHER_DOWN
+    when, and only when, step 2 measured a fresh heartbeat."""
+    fresh = _run_selfheal(run_status, watcher_ok="1")
+    assert "CLOSE OPEN_WATCHER_DOWN" in fresh, (run_status, fresh)
+    stale = _run_selfheal(run_status, watcher_ok="0")
+    assert "CLOSE OPEN_WATCHER_DOWN" not in stale, (run_status, stale)
 
 
 def test_unhealthy_run_does_not_selfheal():
-    """The self-heal block stays gated on the healthy statuses."""
-    for status in ("enum_failed", "error", "already_running", "no_eligible_teams",
-                   "no_work"):
+    """The self-heal block stays gated on the completed-round-trip statuses."""
+    for status in ("enum_failed", "error", "already_running"):
         out = _run_selfheal(status)
         assert "CLOSE" not in out, status
+
+
+@pytest.mark.parametrize("run_status", ["no_work", "no_teams", "backed_up"])
+def test_untrusted_run_heals_nothing(run_status):
+    """A result step 3 latched as untrusted must not close incidents on its way
+    to going red — otherwise a sweep that backed nothing up (and whose numbers
+    contradicted it) would still look like health to the incident ledger."""
+    out = _run_selfheal(run_status, watcher_ok="1",
+                        untrusted="no_work with graph_totals.errors=1")
+    assert "CLOSE" not in out, (run_status, out)
+    assert "self-heal skipped" in out, out
 
 
 @pytest.mark.parametrize("body,expected", [
@@ -232,11 +331,21 @@ def test_sweep_step_logs_the_resolved_source(body, expected):
     # turns ordinary production runs (e.g. a 0-eligible-team team sweep) red
     # every hour with no test signal.
     (_NO_ELIGIBLE_TEAMS_BODY, "0"),
+    # A corroborated empty deployment: 0 backups, 0 errors, known dialect.
+    (_NO_TEAMS_EMPTY_BODY, "0"),
     # Untrusted — the run goes red.
     (_ENUM_FAILED_BODY, "1"),
     (_HTTP_500_BODY, "1"),
     (_MALFORMED_BODY, "1"),
     ("", "1"),
+    # A 0-backup result the numbers contradict: teams were enumerated and every
+    # graph errored (`no_work` cannot read `degraded` without a `backed_up`), so
+    # the run backed nothing up and must not read green.
+    (_NO_WORK_WITH_ERRORS_BODY, "1"),
+    # ...or the dialect contradicts it: no recognizable `source` is the #2823
+    # shape itself (older app build / a caller bypassing the shared seam).
+    (_NO_TEAMS_NO_SOURCE_BODY, "1"),
+    (_NO_WORK_NO_SOURCE_BODY, "1"),
 ])
 def test_sweep_step_latches_only_untrusted_results_as_failed(body, expected_failed):
     """#2823: every status the driver does not recognise as benign is untrusted
@@ -269,13 +378,17 @@ def test_gate_is_not_taken_on_a_clean_run():
     (_ENUM_FAILED_BODY, 1, (), ("APP_DOWN", "WATCHER_DOWN", "R2_DOWN")),
     # A sweep call that returned no credible status is the same class.
     (_MALFORMED_BODY, 1, (), ("APP_DOWN", "WATCHER_DOWN", "R2_DOWN")),
-    # J2: a 0-team run closes what it proves and leaves WATCHER_DOWN open.
-    (_NO_TEAMS_BODY, 0, ("APP_DOWN", "R2_DOWN"), ("WATCHER_DOWN",)),
+    # J2: a 0-team run closes what a completed round trip proves (fresh
+    # heartbeat in this harness) and leaves nothing else open.
+    (_NO_TEAMS_BODY, 0, ("APP_DOWN", "WATCHER_DOWN", "R2_DOWN"), ()),
     # A real run heals all three.
     (_BACKED_UP_BODY, 0, ("APP_DOWN", "WATCHER_DOWN", "R2_DOWN"), ()),
     # Benign no-op shapes never heal anything and never go red.
-    (_NO_ELIGIBLE_TEAMS_BODY, 0, (), ("APP_DOWN", "WATCHER_DOWN", "R2_DOWN")),
-    (_NO_WORK_BODY, 0, (), ("APP_DOWN", "WATCHER_DOWN", "R2_DOWN")),
+    (_NO_ELIGIBLE_TEAMS_BODY, 0, ("APP_DOWN", "WATCHER_DOWN", "R2_DOWN"), ()),
+    (_NO_WORK_BODY, 0, ("APP_DOWN", "WATCHER_DOWN", "R2_DOWN"), ()),
+    # A corroboration failure is red and heals nothing.
+    (_NO_WORK_WITH_ERRORS_BODY, 1, (), ("APP_DOWN", "WATCHER_DOWN", "R2_DOWN")),
+    (_NO_TEAMS_NO_SOURCE_BODY, 1, (), ("APP_DOWN", "WATCHER_DOWN", "R2_DOWN")),
 ])
 def test_driver_chain_end_to_end(body, exit_code, closed, not_closed):
     """#2823 sequencing: the sweep RESPONSE drives the heal set AND the run's
