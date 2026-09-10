@@ -13,7 +13,8 @@
 //      the replacement expiry; the show-once card echoing the mint expiry;
 //   4. isManagedKey staying bootstrap-exclusion-only (an expiring durable
 //      row must NEVER vanish from the table — the #2426 critical fix);
-//   5. the wizard's Never-keys-only embed hint + expiring-paste rejection.
+//   5. the wizard's expiring-paste rejection — an expiring key is classified
+//      'expiring' (never embedded) and refused with a truthful reason.
 // A future edit that drops any of these regresses #2426 the same way the
 // pre-fix dashboard hid every expiring key.
 import { test } from 'node:test'
@@ -150,10 +151,8 @@ test('#2426: isManagedKey excludes bootstrap only — no expires_at exclusion ma
     'paste classifier reports source expiring (distinct from bootstrap)')
 })
 
-// 5. Wizard embed surface — Never-keys-only policy + the hint.
-test('#2426: the connect wizard keeps Never-only embeds and hints to pick No expiration', () => {
-  assert.match(mainJsx, /Keys embedded in agents should never expire — when you create or rotate one in the API Keys tab, choose <strong>No expiration<\/strong>\./,
-    'owner/admin embed hint names the No expiration choice')
+// 5. Wizard embed surface — Never-keys-only policy.
+test('#2426/#2827: the connect wizard never embeds an expiring key', () => {
   assert.match(mainJsx, /check\.source === 'expiring'/, 'paste validation rejects expiring rows')
   assert.match(mainJsx, /It expires, and a key embedded in an agent must never expire/, 'truthful expiring reason')
 })

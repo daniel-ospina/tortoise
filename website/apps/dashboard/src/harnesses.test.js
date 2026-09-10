@@ -102,9 +102,9 @@ test('DE2E-5: 4 self-install harnesses carry a config-write command + skill inst
 
 test('DE2E-5: teach-human harnesses carry exact manual steps + verify handoff (Claude Desktop/Web)', () => {
   const desktop = UNIVERSAL_COMMAND['claude-desktop'](KEY)
-  assert.match(desktop, /claude_desktop_config\.json/, 'desktop: config file named')
-  assert.match(desktop, /mcpServers/, 'desktop: mcpServers block')
-  assert.match(desktop, /Restart Claude Desktop/, 'desktop: restart step')
+  assert.match(desktop, /Connectors/, 'desktop: Connectors UI named')
+  assert.match(desktop, /Server URL/, 'desktop: server URL field')
+  assert.match(desktop, /Authorization/, 'desktop: request-header field')
   assert.match(desktop, /tortoise_health/, 'desktop: agent verifies')
   const web = UNIVERSAL_COMMAND['claude-web'](KEY)
   assert.match(web, /Connectors/, 'web: connector steps')
