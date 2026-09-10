@@ -177,12 +177,14 @@ def render_manifest() -> dict:
 
 def render_gold() -> dict:
     """The sealed gold: per-planted-point expectations, DERIVED from the
-    family structure table (conflicted/clean + expected pointer kinds)."""
+    family structure table (conflicted/clean + expected pointer kinds +
+    the #2490 resolved contract for the superseded family)."""
     manifest = render_manifest()
     topics = manifest["topics"]
     entries: list[dict] = []
     for family in ("p9", "decision", "superseded", "plain", "clean"):
         conflicted = schema.FAMILY_CONFLICTED[family]
+        resolved = family in schema.FAMILY_RESOLVED  # #2490: superseded = resolved
         for topic in topics[family]:
             entries.append(
                 {
@@ -190,9 +192,17 @@ def render_gold() -> dict:
                     "family": family,
                     "clean": not conflicted,
                     "expected": {
-                        "conflict_surfacing": conflicted,
+                        # #2490: conflict_surfacing comes from the EXPECTED-
+                        # contested table (superseded is planted-conflicted but
+                        # RESOLVED — never expected to read as a live dispute).
+                        "conflict_surfacing": schema.FAMILY_EXPECTED_CONTESTED[family],
                         "dig_deeper_targets": [dict(t) for t in _EXPECTED_KINDS[family]],
-                        "support_chain_sufficient": True,
+                        "resolved": resolved,
+                        # A resolved claim is not a measured live belief
+                        # (has_ep=false via the terminal gate) — its why-block
+                        # serves the supersession view instead; only live/clean
+                        # claims carry the support-sufficiency expectation.
+                        "support_chain_sufficient": not resolved,
                         "tradeoff_sufficient": family == "decision",
                     },
                 }

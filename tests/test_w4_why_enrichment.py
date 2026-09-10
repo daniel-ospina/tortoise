@@ -757,10 +757,14 @@ def test_e2e1_conflict_surfacing_rate(w4_flag):
     PRE-TEST: all 10 P9-planted points' persisted variance EXCEEDS
     CONTESTED_VARIANCE_THRESHOLD (calibrated, not aspirational).
 
-    THEN: conflict-surfacing rate ≥ 0.95 of the 30 conflicted points (≥29/30
-    surface conflicts.contested:true + ≥1 NAND + a dig-deeper nand pointer);
-    0 clean points carry conflict noise; each of the 5 decision points
-    surfaces ≥2 alternatives with ep_weight + mitigation."""
+    THEN: conflict-surfacing rate ≥ 0.95 of the 25 NON-TERMINAL conflicted
+    points (≥24/25 surface conflicts.contested:true + ≥1 NAND + a dig-deeper
+    nand pointer); the 5 superseded predecessors surface through the
+    terminal-inclusive lens as NOT contested (#2490 — terminal claims decay
+    to vacuity and every contested computation excludes them) while their
+    conflict structure + supersession view stay served; 0 clean points carry
+    conflict noise; each of the 5 decision points surfaces ≥2 alternatives
+    with ep_weight + mitigation."""
     sdk = _fresh_sdk()
     try:
         corpus = _seed_e2e1_corpus(sdk)
@@ -773,12 +777,17 @@ def test_e2e1_conflict_surfacing_rate(w4_flag):
         # When: recall each conflicted point through the search surface.
         surfaced = 0
         all_hits = _recall_all_points(sdk)
-        for pid in corpus["conflicted"]:
+        # #2490: the 5 superseded corpus predecessors are terminal-status —
+        # they decay to vacuity at the terminalizing write and every contested
+        # computation excludes them, so the contested-surfacing denominator is
+        # the 25 NON-terminal conflicted points (E2E-1's conflicted structure
+        # for the superseded subset is retained and asserted separately below).
+        live_conflicted = [pid for pid in corpus["conflicted"]
+                           if pid not in corpus["superseded"]]
+        for pid in live_conflicted:
             # The corpus is recalled through the search surface (full-scan
             # retrieval lens — deterministic; ranking is exercised by the
-            # flag-drift tests). include_terminal=True: the 5 superseded
-            # corpus points are terminal-status predecessors — recalled
-            # through the terminal-inclusive lens (never as current belief).
+            # flag-drift tests).
             claim_hit = _hit_by_id(all_hits, pid)
             assert claim_hit is not None, f"corpus point {pid} not retrieved"
             conflicts = claim_hit.get("conflicts")
@@ -788,9 +797,21 @@ def test_e2e1_conflict_surfacing_rate(w4_flag):
                     and any(p["kind"] == "nand" for p in dd)):
                 surfaced += 1
 
-        rate = surfaced / len(corpus["conflicted"])
-        assert surfaced >= 29, \
-            f"conflict-surfacing rate {rate:.2f} — need ≥ 29/30 (E2E-1 ≥ 0.95)"
+        rate = surfaced / len(live_conflicted)
+        assert surfaced >= 24, \
+            f"conflict-surfacing rate {rate:.2f} — need ≥ 24/25 (E2E-1 ≥ 0.95)"
+
+        # #2490 pin: the superseded predecessors (terminal) are retrieved on
+        # the terminal-inclusive lens with their conflict structure served but
+        # NEVER as contested (a decayed terminal must not read as contested on
+        # any include-terminal surface).
+        for pid in corpus["superseded"]:
+            claim_hit = _hit_by_id(all_hits, pid)
+            assert claim_hit is not None, f"superseded point {pid} not retrieved"
+            conflicts = claim_hit.get("conflicts") or {}
+            assert conflicts.get("contested") is not True, (
+                f"superseded point {pid} must not surface contested (#2490): "
+                f"{claim_hit}")
 
         # 0 clean points carry conflict noise.
         for pid in corpus["clean"]:

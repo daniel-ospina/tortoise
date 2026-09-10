@@ -795,6 +795,28 @@ supersede_point / invalidate_point          (§3.1: mark old outdated:true,
                                             ep.contested in search, #580)
 ```
 
+**Terminal posterior vacuity decay (#2490):** every terminalizing write
+(retract/supersede/invalidate/assess_source + the rebuild folds) decays the
+terminal claim to VACUITY — `confidence=0.5`, posterior `(1,1)` — atomically
+with the status/flag write, so an include-terminal surface never shows a
+frozen pre-terminal posterior. Decay is UNIFORM across #2421 Case-1
+restatement and Case-2 correction (the old claim is terminal either way; the
+successor recomputes independently). `ep_alpha`/`ep_beta` are deliberately
+retained as prior history — there is NO unsupersede path that recovers the
+old claim's posterior, so the retained prior is the SOLE recovery vector.
+Every contested computation (annotate_ep_batch, rankers, `get_contested_claims`,
+`_review_prune`, why, analyze) excludes terminal claims via the shared
+live.py predicate (status ∈ {retracted, superseded, outdated, archived,
+deprecated} OR `outdated=true`).
+
+**#2488 merge-blocker caveat:** on this branch the rebuild-side fold decay
+applies to the *supersede* fold only — the `PointInvalidated` rebuild fold
+(`_fold_point_invalidated`) does not exist until #2488 lands, so an
+invalidate→rebuild cycle on THIS branch resurrects the frozen posterior (no
+fold re-applies decay). #2490's merge is gated on #2488; the rebase appends
+`decay_clause('n')` to `_fold_point_invalidated`'s SET (plan Task 2 step 4)
+and the invalidate→rebuild→vacuity parity test ships with it.
+
 **Design decisions (recorded for the patent filing):**
 
 | Question | Decision |
@@ -802,6 +824,7 @@ supersede_point / invalidate_point          (§3.1: mark old outdated:true,
 | Ontology concept vs implementation detail? | **Derived behavior**, documented here; no new stored entity |
 | Dedicated edge type (DEPENDS_ON)? | **No** — reverse traversal of IMPL/NAND operators is sufficient; a stored DEPENDS_ON edge would duplicate structure and drift |
 | Representation of "potentially invalidated"? | **Elevated posterior variance** (v > 0.04 → contested), not a stored `pointStatus` — statuses are `{live, draft, outdated, archived}`; `outdated` is set only by explicit supersession, never auto-inferred |
+| Terminal claims' posterior after terminalization? | **Decay to vacuity** (0.5, posterior (1,1)) at the terminalizing write + rebuild fold (#2490) — never a frozen pre-terminal posterior; `ep_alpha`/`ep_beta` retained as the sole recovery vector |
 | Interaction with CORRECTS? | CORRECTS is the *structural* replacement; cascading invalidation is the *belief-level* consequence — both fire from the same write (`supersede_point` → `_mark_dirty`) |
 
 Direction-aware EP (§3.1, #86) is the prerequisite that makes reverse

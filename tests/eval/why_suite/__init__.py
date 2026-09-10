@@ -16,9 +16,15 @@ manifest (a ``gold`` key in the manifest = validation error), ``fixtures_hash``
 over manifest + gold, jointly-pinned corpus manifest (the deterministic
 seed → planted composition shared with W4-a's E2E-1 seeding), BPRE-style
 posture-scoped baselines (``baselines/main.json`` + ``baselines/m2.json``),
-receipts with validated per-run rows, and the PINNED ``judge_why_suite_v1``
+receipts with validated per-run rows, and the PINNED ``judge_why_suite_v2``
 (prompt hash recorded in the baseline ``judge_pin``; asserted in the grading
 pre-step — a judge/gold change is a protocol change, never a silent compare).
+
+#2490 (terminal-posterior freeze): the superseded family is RESOLVED — its
+conflict SURFACE structure is planted and still graded by dig-deeper
+navigation, but the gold expects ``conflict_surfacing: false`` (a resolved
+claim is never a live open dispute) and grades the resolved-presentation
+arm (``supersession.status == "superseded"`` served, contested false).
 
 Hermetic: pure validation/hashing modules import no DB/network/LLM.  The
 runner opens its own throwaway hermetic graph per run (seeding + assembly +

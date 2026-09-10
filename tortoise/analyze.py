@@ -9,7 +9,7 @@ from __future__ import annotations  # noqa: I001
 import json, os, re  # noqa: E401
 from typing import Any
 
-from .live import _live_only
+from .live import _live_only, _terminal_excluded
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -80,9 +80,14 @@ TEMPLATES: dict[str, dict] = {
         "triggers": ["uncertain", "weakest", "least sure", "unknown", "unsure", "low confidence"],
         "description": "Find claims with lowest EP confidence or highest variance",
         "subgraph_vars": ["c"],
-        "cypher": """
+        # #2490: decayed terminals carry var 1/12 > the 0.04 contested bar and
+        # would dominate "most uncertain" on include-terminal surfaces — the
+        # shared live.py terminal predicate excludes them ("uncertain" is for
+        # LIVE claims).
+        "cypher": f"""
             MATCH (c:Point)
             WHERE c.is_operator = false
+              AND {_terminal_excluded('c.status')}
               AND (c.posterior_alpha IS NOT NULL OR c.ep_alpha IS NOT NULL)
             WITH c, coalesce(c.posterior_alpha, c.ep_alpha, 1.0) AS a,
                  coalesce(c.posterior_beta, c.ep_beta, 1.0) AS b
@@ -111,9 +116,12 @@ TEMPLATES: dict[str, dict] = {
         "triggers": ["changed", "trend", "evolved", "over time", "history", "how has"],
         "description": "Show confidence changes by comparing node properties over time",
         "subgraph_vars": ["c"],
-        "cypher": """
+        # #2490: exclude decayed terminals from the confidence timeline (see
+        # most_uncertain — the shared live.py terminal predicate).
+        "cypher": f"""
             MATCH (c:Point)
             WHERE c.content CONTAINS $entity
+              AND {_terminal_excluded('c.status')}
               AND (c.posterior_alpha IS NOT NULL OR c.ep_alpha IS NOT NULL)
             RETURN c.id, c.content, coalesce(c.confidence,0.5) as conf,
                    coalesce(c.posterior_alpha, c.ep_alpha, 1.0) as a,

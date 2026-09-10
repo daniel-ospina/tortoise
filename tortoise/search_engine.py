@@ -20,22 +20,44 @@ from typing import Any, Literal
 # same family — none must be served as current. Audit/history queries opt in
 # via include_terminal (tortoise_fts_query), sdk.query/paginated_query
 # (include_retracted=True) or an explicit status= filter.
-TERMINAL_EXCLUDED_STATUSES = (
-    "retracted", "superseded", "outdated", "archived", "deprecated")
+#
+# #2490: the terminal VOCABULARY + WHERE composition live in tortoise/live.py
+# (single source of truth — live.py:44 TERMINAL_EXCLUDED_STATUSES +
+# live.py `_terminal_excluded`). This module REBINDS the exported name so
+# downstream consumers (fallback_snapshot) keep importing from here while
+# the vocabulary itself never has a second literal definition (grep: no
+# second literal terminal vocabulary in this file).
+from .live import (
+    TERMINAL_EXCLUDED_STATUSES,
+    _terminal_excluded,
+    _terminal_expression,
+    _alive_flag,
+    is_terminal_status,
+)
 
 
 def _exclude_status_clause(alias: str,
-                           excluded: tuple[str, ...] = TERMINAL_EXCLUDED_STATUSES) -> str:
+                           excluded=TERMINAL_EXCLUDED_STATUSES) -> str:
     """Cypher WHERE fragment excluding the terminal statuses on ``alias``
-    (<>-chain form — FalkorDB rejects inline string lists in ``IN``), plus
-    the ``outdated=true`` legacy flag (invalidate_point writes the flag
+    plus the ``outdated=true`` legacy flag (invalidate_point writes the flag
     without touching status). ``excluded=()`` produces the empty string
-    (no exclusion — the audit/full-scan opt-in)."""
-    if not excluded:
-        return ""
-    chain = " AND ".join(f"{alias}.status <> '{s}'" for s in excluded)
-    return (f"(({alias}.status IS NULL OR ({chain})) "
-            f"AND coalesce({alias}.outdated, false) = false)")
+    (no exclusion — the audit/full-scan opt-in).
+
+    #2490: DELEGATES to live.py's ``_terminal_excluded`` composition (single
+    source of truth for the terminal predicate). A non-default ``excluded``
+    (audit surfaces pass ``()``; the historical signature allowed a custom
+    vocab) falls back to the legacy inline ``<>``-chain composition over the
+    caller-provided values — the DEFAULT path never duplicates live.py.
+    """
+    if excluded is not TERMINAL_EXCLUDED_STATUSES:
+        # Custom/empty vocab (audit opt-in or legacy callers) — inline
+        # composition over the caller's values, not the live.py vocabulary.
+        if not excluded:
+            return ""
+        chain = " AND ".join(f"{alias}.status <> '{s}'" for s in excluded)
+        return (f"(({alias}.status IS NULL OR ({chain})) "
+                f"AND coalesce({alias}.outdated, false) = false)")
+    return _terminal_excluded(f"{alias}.status")
 
 
 # ── Circuit breaker (#249) ──────────────────────────────────────────────────
@@ -197,6 +219,12 @@ class EpBreakdown:
     # True = EP has run on the claim (posterior) or a prior was persisted
     # (baseline/evidence); False = unmeasured — confidence_mean is the neutral
     # Beta(1,1) mean 0.5, which is NOT a signal of contestation.
+    # #2490 has_ep overload: TERMINAL claims (terminal vocab status OR the
+    # legacy outdated=true flag) are also gated to False — their posterior
+    # decays to vacuity at the terminalizing write, so a terminal claim's
+    # has_ep does NOT mean "EP ran" but "not serving a dead posterior to
+    # include-terminal surfaces". Consumers (topic disputed-pair gate,
+    # volunteer, mcp) must not read terminal=unmeasured.
     has_ep: bool = False
 
     def __post_init__(self):
@@ -1234,6 +1262,14 @@ def annotate_ep_batch(graph, point_ids: list[str]) -> dict[str, EpBreakdown]:
     contention=0.0. variance/contested are computed from the PERSISTED
     posterior (posterior_alpha/beta, falling back to ep_alpha/beta priors)
     (posterior stability), not from edge ratios.
+
+    #2490 has_ep overload: TERMINAL claims (status in the terminal vocab or
+    the legacy outdated=true flag) are gated to has_ep=False + contested=False
+    even when EP actually measured them (their posterior decays to vacuity at
+    the terminalizing write). has_ep therefore no longer strictly means "EP
+    ran" — for a terminal claim it means "not serving its frozen/dead
+    posterior to include-terminal surfaces". Consumers (topic disputed-pair
+    gate, volunteer, mcp) must not read terminal=unmeasured.
     """
     if not point_ids:
         return {}
@@ -1252,13 +1288,20 @@ def annotate_ep_batch(graph, point_ids: list[str]) -> dict[str, EpBreakdown]:
             "    ELSE 0.0 "
             "  END AS contention, "
             "  coalesce(n.posterior_alpha, n.ep_alpha, 1.0) AS alpha, coalesce(n.posterior_beta, n.ep_beta, 1.0) AS beta, "
-            "  (n.posterior_alpha IS NOT NULL OR n.ep_alpha IS NOT NULL) AS has_ep "
+            "  (n.posterior_alpha IS NOT NULL OR n.ep_alpha IS NOT NULL) AS has_ep, "
+            "  n.status, coalesce(n.outdated, false) "
         )
         rows = graph.query(cypher, params={"ids": point_ids}).result_set
 
         breakdowns: dict[str, EpBreakdown] = {}
         for row in rows:
             pid, impl, nand, contention, alpha, beta, has_ep = row[0], int(row[1]), int(row[2]), float(row[3]), float(row[4]), float(row[5]), row[6]
+            # #2490: terminal claims never surface a frozen/decayed posterior
+            # as measured EP — has_ep=False + contested=False (the columns
+            # are fetched so the terminal state is read, not guessed; the len
+            # guard tolerates doubles mirroring the pre-#2490 7-col shape).
+            if len(row) > 8 and is_terminal_status(row[7], bool(row[8])):
+                has_ep = False
             total = impl + nand
             variance = _beta_variance(alpha, beta)
             breakdowns[pid] = EpBreakdown(
@@ -1268,7 +1311,9 @@ def annotate_ep_batch(graph, point_ids: list[str]) -> dict[str, EpBreakdown]:
                 variance=round(variance, 6),
                 # Contested only when EP actually ran: an uncalibrated point
                 # (no persisted α/β → defaults to 1/1 → v=1/12) is NOT
-                # contested, it's unmeasured.
+                # contested, it's unmeasured. (#2490: terminal claims are
+                # gated above, so their decayed (1,1) posterior never reads
+                # contested either.)
                 contested=bool(has_ep) and variance > CONTESTED_VARIANCE_THRESHOLD,
                 has_ep=bool(has_ep),
             )
@@ -1483,7 +1528,7 @@ def get_relationships_bounded(
                 "WHERE (other.is_operator = false OR other.is_operator IS NULL) "
                 "  AND NOT (op)-[:mitigated_by]->(other) "
                 "  AND (type(r2) = 'NAND' "
-                "       OR other.status IN ['superseded','retracted','deprecated'] "
+                f"       OR {_terminal_expression('other.status')} "
                 "       OR ((other.posterior_alpha IS NOT NULL OR other.ep_alpha IS NOT NULL) "
                 "           AND (coalesce(other.posterior_alpha, other.ep_alpha, 1.0) * coalesce(other.posterior_beta, other.ep_beta, 1.0)) "
                 "               / ((coalesce(other.posterior_alpha, other.ep_alpha, 1.0) + coalesce(other.posterior_beta, other.ep_beta, 1.0)) ^ 2 "
@@ -1492,8 +1537,12 @@ def get_relationships_bounded(
                 "  other.pointKind, other.status, "
                 "  coalesce(other.posterior_alpha, other.ep_alpha, 1.0), "
                 "  coalesce(other.posterior_beta, other.ep_beta, 1.0), "
-                "  (other.posterior_alpha IS NOT NULL OR other.ep_alpha IS NOT NULL), "
-                "  other.createdAt "
+                # #2490: the aligned has_ep boolean — measured AND NOT terminal
+                # (a decayed terminal's (1,1) posterior is column-
+                # indistinguishable from a measured (1,1), so the status/flag
+                # gate lives INSIDE the projection).
+                f"  ((other.posterior_alpha IS NOT NULL OR other.ep_alpha IS NOT NULL) AND {_alive_flag('other.status')}), "
+                "  other.createdAt, coalesce(other.outdated, false) "
                 "LIMIT $raw_cap",
                 params={"op_ids": list(op_ids), "raw_cap": raw_cap,
                         "contested_threshold": CONTESTED_VARIANCE_THRESHOLD},
@@ -1503,6 +1552,7 @@ def get_relationships_bounded(
                 op_crit.setdefault(row[0], {})[row[3]] = (
                     row[1], row[2], row[4] or "", row[5] or "",
                     float(row[6]), float(row[7]), bool(row[8]), row[9],
+                    bool(row[10]),
                 )
 
         # The operators of the TOP-K result points are the ones that get
@@ -1530,8 +1580,11 @@ def get_relationships_bounded(
                 "  other.pointKind, other.status, "
                 "  coalesce(other.posterior_alpha, other.ep_alpha, 1.0), "
                 "  coalesce(other.posterior_beta, other.ep_beta, 1.0), "
-                "  (other.posterior_alpha IS NOT NULL OR other.ep_alpha IS NOT NULL), "
-                "  other.createdAt",
+                # #2490: aligned has_ep gate (see op_crit) — support peers are
+                # also terminal-gated so a terminal peer's decayed posterior
+                # never reads as measured EP in the assembly.
+                f"  ((other.posterior_alpha IS NOT NULL OR other.ep_alpha IS NOT NULL) AND {_alive_flag('other.status')}), "
+                "  other.createdAt, coalesce(other.outdated, false)",
                 params={"op_ids": list(expand_ops), "per_op": per_op_cap},
                 timeout=_DECORATION_TIMEOUT_MS,
             ).result_set
@@ -1539,6 +1592,7 @@ def get_relationships_bounded(
                 op_support.setdefault(row[0], {})[row[3]] = (
                     row[1], row[2], row[4] or "", row[5] or "",
                     float(row[6]), float(row[7]), bool(row[8]), row[9],
+                    bool(row[10]),
                 )
 
         # Unified endpoint store: critical classes first, then support filler
@@ -1581,9 +1635,15 @@ def get_relationships_bounded(
                 for other_id, ep in op_endpoints.get(op_id, {}).items():
                     if other_id == pid:
                         continue  # self-peer exclusion
-                    et2, other_idx, kind, status, alpha, beta, has_ep, created = ep  # noqa: RUF059
+                    et2, other_idx, kind, status, alpha, beta, has_ep, created, outdated = ep  # noqa: RUF059
                     variance = _beta_variance(alpha, beta)
                     contested = has_ep and variance > CONTESTED_VARIANCE_THRESHOLD
+                    # #2490: terminal peers (full live.py vocab OR the legacy
+                    # outdated=true flag — a flag-outdated live-status peer is
+                    # in no status-set member, only the fetched column
+                    # expresses it) stay a critical class and never read as
+                    # measured/contested EP.
+                    terminal = is_terminal_status(status, outdated)
                     role = "source" if (n_idx is not None and n_idx == 0) else "target"
                     direction = "outgoing" if role == "source" else "incoming"
                     entry = {
@@ -1610,7 +1670,7 @@ def get_relationships_bounded(
                         "family_size": op_family.get((op_id, et2), 0),
                         "op_created_at": op_created,
                     }
-                    if et2 == "NAND" or contested or status in ("superseded", "retracted", "deprecated"):
+                    if et2 == "NAND" or contested or terminal:
                         criticals.append(entry)
                     else:
                         support.append(entry)
