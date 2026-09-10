@@ -10,13 +10,13 @@ Harness (pinned in the #1511 plan Task 5):
   prod-origin /auth landing; intercepted `https://tortoise.premiselabs.co/auth`
   requests are re-fetched from the :8788 server (route handler proxies via
   page.request).
-- #2744: every spec loads its DOCUMENT from the LOCAL preview (:8790
-  dashboard, :8788 auth) — never the prod origins. The prod hosts stay
-  intercepted only to rewrite app-emitted prod-origin redirects back to the
-  preview (the AUTH_HOST rewrite is load-bearing for the asserted prod /auth
-  targets; APP_HOST is a defensive fallback — no migrated spec originates a
-  prod-app-origin request). The migrated welcome-mode/session tests rely on the
-  local document and use the app's absolute prod /auth bounce implicitly.
+- #2744: dashboard DOCUMENTS load from the LOCAL preview (:8790); the
+  ASSERTED /auth landings keep their prod-origin URL, but their content is
+  served from :8788 by the route handler (`_wire_*` proxies via
+  page.request). The prod hosts stay intercepted for those asserted targets
+  and for app-emitted prod-origin redirects (the AUTH_HOST rewrite is
+  load-bearing; APP_HOST is a defensive fallback — no migrated spec
+  originates a prod-app-origin request).
 - Opt-in: RUN_DASHBOARD_E2E=1 (mirrors RUN_LEGAL_E2E).
 
 Flows:
@@ -531,9 +531,9 @@ def test_welcome_mode_fork_503_stays_and_recovers(page: Page) -> None:
     page.route("**/*", handle)
     _goto_local_dashboard(page)
     expect(page.locator("body")).to_contain_text("Welcome to Tortoise", timeout=20_000)
-    # #2744/#2751: the pre-#2534 orientation step is gone — the first-timer
-    # welcome card renders the org-create form DIRECTLY (no `Continue →`; the
-    # stale click timed out and stranded these specs).
+    # #2744/#2534: the orientation step was removed — the first-timer welcome
+    # card renders the org-create form DIRECTLY (no `Continue →`; the stale
+    # click timed out and stranded these specs).
     expect(page.locator("body")).to_contain_text("Create your Organization", timeout=10_000)
     page.get_by_label("Organization name").fill("acme")
     page.get_by_role("button", name="Create Organization").click()
@@ -591,7 +591,7 @@ def test_welcome_mode_provision_failure_shows_error_card(page: Page) -> None:
     # provisions) — the 500 surfaces the inline step-1 error; the busy flags
     # reset so the submit button recovers and a retry is possible.
     expect(page.locator("body")).to_contain_text("Welcome to Tortoise", timeout=20_000)
-    # #2744/#2751: no pre-#2534 orientation step — org-create renders directly.
+    # #2744/#2534: no orientation step — org-create renders directly.
     expect(page.locator("body")).to_contain_text("Create your Organization", timeout=10_000)
     page.get_by_label("Organization name").fill("acme")
     page.get_by_role("button", name="Create Organization").click()
@@ -647,7 +647,7 @@ def test_welcome_mode_provision_401_clears_session_and_redirects(page: Page) -> 
     # #2323: the stale-session 401 now surfaces on the org-create SUBMIT
     # (mount no longer provisions). Drive to it, then expect the /auth bounce.
     expect(page.locator("body")).to_contain_text("Welcome to Tortoise", timeout=20_000)
-    # #2744/#2751: no pre-#2534 orientation step — org-create renders directly.
+    # #2744/#2534: no orientation step — org-create renders directly.
     expect(page.locator("body")).to_contain_text("Create your Organization", timeout=10_000)
     page.get_by_label("Organization name").fill("acme")
     page.get_by_role("button", name="Create Organization").click()
