@@ -32,42 +32,42 @@ arms:
   - arm_id: a0
     adapter: battery.arms.a0_plain
     config: {}
-    price_per_1k_usd: 0.0011  # #2602 measured meter basis (2026-09-08): pinned deepseek/deepseek-v4-flash real rates (0.27 in / 1.10 out per 1M); conservative all-tokens-as-output per-1k bound = 1.10/1000. Pre-#2602 0.5 ($500/1M) was a stale legacy guess that inflated estimates ~365-1850x and refused real runs at the pre-run guard. Mid-run dollar cap (#2603) is the hard stop.
+    price_per_1k_usd: 0.000168  # #2874: derived from battery/config/prices.py — pinned deepseek/deepseek-v4-flash at the OpenRouter route the lane calls (0.084 in / 0.168 out per 1M, checked 2026-09-10); conservative all-tokens-as-output per-1k bound = 0.168/1000. The pre-#2874 basis (0.27/1.10) matched no live provider price and inflated every recorded real_spend_usd ~3-6x (and the a0 leg's published $1.0717 figure). Keep this equal to prices.price_per_1k_usd() — a test fails if it drifts. Mid-run dollar cap (#2603) is the hard stop.
     expected_tokens_per_episode: 26409  # MEASURED + EXPOSURE-FINALIZED (2026-09-08: #2292 probe p95 8803 x 3x headroom AND #2284 Task-8 exposure part-1 smoke n=8 (d-001/ct-001/cal-001/ret-001 x a0/a4) deliberation p95 7518 / mean 3821 — 26409 = 3x headroom over the LARGER measured p95 (7518 x 3 = 22554 <= 26409); deliberation-content only, arm retrieval context NOT included (Task-9 executor measures the full episode); SAME token_table_hash machinery)
     model_pin: deepseek/deepseek-v4-flash  # measured pin (decision a: UNCAPPED, temp 0)
     temperature: 0.0
   - arm_id: a1
     adapter: battery.arms.a1_longctx
     config: {}
-    price_per_1k_usd: 0.5
+    price_per_1k_usd: 0.000168  # #2874: aligned to battery/config/prices.py (the pinned deepseek/deepseek-v4-flash basis, 0.084 in / 0.168 out per 1M, checked 2026-09-10). Pre-#2874 these four arms still carried 0.5/1.0 per-1k = $500-$1000 per 1M — the stale legacy guess #2602 removed from a0/a4 only — which inflated their pre-run cost estimates ~3000-6000x and made comparator runs look unaffordable. Vendor-specific backend costs (mem0/zep) are NOT included here; add the vendor's published rate when a2/a2b become runnable (no keys today). Mid-run dollar cap (#2603) is the hard stop.
     expected_tokens_per_episode: 600  # TBD(EXPOSURE): finalize from #2284 Task 8 exposure measurements over the same token_table_hash machinery — never a stale guess presented as measured
     model_pin: deepseek/deepseek-v4-flash  # measured pin (decision a: UNCAPPED, temp 0)
     temperature: 0.0
   - arm_id: a2
     adapter: battery.arms.a2_mem0
     config: {}
-    price_per_1k_usd: 1.0
+    price_per_1k_usd: 0.000168  # #2874: aligned to battery/config/prices.py (the pinned deepseek/deepseek-v4-flash basis, 0.084 in / 0.168 out per 1M, checked 2026-09-10). Pre-#2874 these four arms still carried 0.5/1.0 per-1k = $500-$1000 per 1M — the stale legacy guess #2602 removed from a0/a4 only — which inflated their pre-run cost estimates ~3000-6000x and made comparator runs look unaffordable. Vendor-specific backend costs (mem0/zep) are NOT included here; add the vendor's published rate when a2/a2b become runnable (no keys today). Mid-run dollar cap (#2603) is the hard stop.
     expected_tokens_per_episode: 700  # TBD(EXPOSURE): finalize from #2284 Task 8 exposure measurements over the same token_table_hash machinery — never a stale guess presented as measured
     model_pin: deepseek/deepseek-v4-flash  # measured pin (decision a: UNCAPPED, temp 0)
     temperature: 0.0
   - arm_id: a2b
     adapter: battery.arms.a2b_zep
     config: {}
-    price_per_1k_usd: 1.0
+    price_per_1k_usd: 0.000168  # #2874: aligned to battery/config/prices.py (the pinned deepseek/deepseek-v4-flash basis, 0.084 in / 0.168 out per 1M, checked 2026-09-10). Pre-#2874 these four arms still carried 0.5/1.0 per-1k = $500-$1000 per 1M — the stale legacy guess #2602 removed from a0/a4 only — which inflated their pre-run cost estimates ~3000-6000x and made comparator runs look unaffordable. Vendor-specific backend costs (mem0/zep) are NOT included here; add the vendor's published rate when a2/a2b become runnable (no keys today). Mid-run dollar cap (#2603) is the hard stop.
     expected_tokens_per_episode: 700  # TBD(EXPOSURE): finalize from #2284 Task 8 exposure measurements over the same token_table_hash machinery — never a stale guess presented as measured
     model_pin: deepseek/deepseek-v4-flash  # measured pin (decision a: UNCAPPED, temp 0)
     temperature: 0.0
   - arm_id: a3
     adapter: battery.arms.a3_rag
     config: {}
-    price_per_1k_usd: 0.5
+    price_per_1k_usd: 0.000168  # #2874: aligned to battery/config/prices.py (the pinned deepseek/deepseek-v4-flash basis, 0.084 in / 0.168 out per 1M, checked 2026-09-10). Pre-#2874 these four arms still carried 0.5/1.0 per-1k = $500-$1000 per 1M — the stale legacy guess #2602 removed from a0/a4 only — which inflated their pre-run cost estimates ~3000-6000x and made comparator runs look unaffordable. Vendor-specific backend costs (mem0/zep) are NOT included here; add the vendor's published rate when a2/a2b become runnable (no keys today). Mid-run dollar cap (#2603) is the hard stop.
     expected_tokens_per_episode: 400  # TBD(EXPOSURE): finalize from #2284 Task 8 exposure measurements over the same token_table_hash machinery — never a stale guess presented as measured
     model_pin: deepseek/deepseek-v4-flash  # measured pin (decision a: UNCAPPED, temp 0)
     temperature: 0.0
   - arm_id: a4
     adapter: battery.arms.a4_tortoise
     config: {}
-    price_per_1k_usd: 0.0011  # #2602 measured meter basis (2026-09-08): pinned deepseek/deepseek-v4-flash real rates (0.27 in / 1.10 out per 1M); conservative all-tokens-as-output per-1k bound = 1.10/1000. Pre-#2602 0.5 ($500/1M) was a stale legacy guess that inflated estimates ~365-1850x and refused real runs at the pre-run guard. Mid-run dollar cap (#2603) is the hard stop.
+    price_per_1k_usd: 0.000168  # #2874: derived from battery/config/prices.py — pinned deepseek/deepseek-v4-flash at the OpenRouter route the lane calls (0.084 in / 0.168 out per 1M, checked 2026-09-10); conservative all-tokens-as-output per-1k bound = 0.168/1000. The pre-#2874 basis (0.27/1.10) matched no live provider price and inflated every recorded real_spend_usd ~3-6x (and the a0 leg's published $1.0717 figure). Keep this equal to prices.price_per_1k_usd() — a test fails if it drifts. Mid-run dollar cap (#2603) is the hard stop.
     expected_tokens_per_episode: 26409  # MEASURED + EXPOSURE-FINALIZED (2026-09-08: #2292 probe p95 8803 x 3x headroom AND #2284 Task-8 exposure part-1 smoke n=8 (d-001/ct-001/cal-001/ret-001 x a0/a4) deliberation p95 7518 / mean 3821 — 26409 = 3x headroom over the LARGER measured p95 (7518 x 3 = 22554 <= 26409); deliberation-content only, arm retrieval context NOT included (Task-9 executor measures the full episode); SAME token_table_hash machinery)
     model_pin: deepseek/deepseek-v4-flash  # measured pin (decision a: UNCAPPED, temp 0)
     temperature: 0.0
