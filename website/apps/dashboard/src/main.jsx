@@ -6143,17 +6143,20 @@ function claimIntentInFlight() {
                         )
                         if (wizardHarness === 'claude-desktop') return (
                           <div>
-                            <p className="dim" style={{ margin: 0, lineHeight: 1.6 }}>
-                              Open Claude Desktop → Settings → Developer → Edit Config. Merge this into mcpServers (don't replace the whole file):
-                            </p>
                             {/* #2710 (code-review P1): this branch used to render the
                                 snippet with a `YOUR_API_KEY` placeholder plus a Copy
                                 button that wrote an EMPTY string to the clipboard — the
                                 same no-key dead-end as the agent-driven blocks, for one
                                 of six tabs. The affordance is the no-key branch here
-                                too; the key row only exists once a key does. */}
+                                too (round-1 review P2: the lead-in sentence and the
+                                trailing "this prompt" line are gated with the block they
+                                introduce, so the no-key state reads as one coherent
+                                ask). */}
                             {harnessKey ? (
                               <>
+                                <p className="dim" style={{ margin: 0, lineHeight: 1.6 }}>
+                                  Open Claude Desktop → Settings → Developer → Edit Config. Merge this into mcpServers (don't replace the whole file):
+                                </p>
                                 <pre className="snippet" style={{ margin: '0.75rem 0' }}>
 {JSON.stringify({ mcpServers: { tortoise: { type: 'http', url: 'https://api.premiselabs.co/mcp/', headers: { Authorization: 'Bearer ' + harnessKey } } } }, null, 2)}
                                 </pre>
@@ -6163,25 +6166,28 @@ function claimIntentInFlight() {
                                   <button type="button" className="btn-primary small" onClick={() => navigator.clipboard?.writeText(harnessKey)}>Copy</button>
                                 </div>
                                 <p className="dim small" style={{ marginTop: '0.5rem' }}>Save and restart Claude Desktop.</p>
+                                <p className="dim small" style={{ textAlign: 'center', margin: '0.75rem 0' }}>After restart, start a new chat and give it this prompt to complete setup</p>
+                                <WizardPromptCard text={wizardPromptText('claude-desktop', 2, harnessKey, wizardKeyMode)} />
                               </>
                             ) : (
-                              <div style={{ marginTop: '0.75rem' }}>{wizardNoKeyAffordance}</div>
+                              wizardNoKeyAffordance
                             )}
-                            <p className="dim small" style={{ textAlign: 'center', margin: '0.75rem 0' }}>After restart, start a new chat and give it this prompt to complete setup</p>
-                            {harnessKey && <WizardPromptCard text={wizardPromptText('claude-desktop', 2, harnessKey, wizardKeyMode)} />}
                           </div>
                         )
                         if (wizardHarness === 'claude-web') return (
                           <div>
-                            <p className="dim" style={{ margin: 0, lineHeight: 1.6 }}>
-                              Go to claude.ai → Settings → Connectors → Add custom connector:
-                            </p>
                             {/* #2710 (code-review P1): same no-key dead-end as
                                 claude-desktop — the header line used a
                                 `YOUR_API_KEY` placeholder and the Copy button wrote
-                                an empty string. The affordance is the no-key branch. */}
+                                an empty string. The affordance is the no-key branch;
+                                the lead-in sentence is gated with the block it
+                                introduces (round-1 review P2). The trailing workflow
+                                prompt is key-free, so it stays visible. */}
                             {harnessKey ? (
                               <>
+                                <p className="dim" style={{ margin: 0, lineHeight: 1.6 }}>
+                                  Go to claude.ai → Settings → Connectors → Add custom connector:
+                                </p>
                                 <ul className="dim small" style={{ lineHeight: 1.7, paddingLeft: '1.2rem' }}>
                                   <li>Name: Tortoise</li>
                                   <li>Server URL: https://api.premiselabs.co/mcp/</li>
@@ -6194,7 +6200,7 @@ function claimIntentInFlight() {
                                 </div>
                               </>
                             ) : (
-                              <div style={{ marginTop: '0.75rem' }}>{wizardNoKeyAffordance}</div>
+                              wizardNoKeyAffordance
                             )}
                             <p className="dim small" style={{ textAlign: 'center', margin: '0.75rem 0' }}>After setting up the connector, start a new chat and paste this prompt (it tells your agent how to work with Tortoise):</p>
                             <pre className="snippet" style={{ marginTop: '0.5rem' }}>{WORKFLOWS_PROMPT}</pre>

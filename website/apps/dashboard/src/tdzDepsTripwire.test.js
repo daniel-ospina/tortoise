@@ -198,10 +198,10 @@ test('#2710: the connect-step auto-open effect is GONE (no queued-modal leak)', 
   // mint/paste affordance instead. This pins the removal so a future edit
   // cannot quietly reinstate the TDZ-bearing queue-while-invisible effect.
   //
-  // Comment-stripped (code-review P2, PR #2571's finding on this file): a raw
-  // regex over the 8k-line file can be satisfied or defeated by a comment, and
-  // it only matches one exact single-line formatting. Both negatives run on
-  // the stripped source so only LIVE code can fail them.
+  // Comment-stripped (code-review P2, PR #2771 round 1): a raw regex over the
+  // 8k-line file can be satisfied or defeated by a comment, and it only matches
+  // one exact single-line formatting. Both negatives run on the stripped source
+  // so only LIVE code can fail them.
   const live = mainJsx
     .replace(/\/\*[\s\S]*?\*\//g, '')
     .split('\n')

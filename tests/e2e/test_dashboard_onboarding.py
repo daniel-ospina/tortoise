@@ -689,27 +689,32 @@ def test_owner_no_key_affordance_on_manual_harness_tabs(page: Page, tab: str, sy
     so an owner/admin on those tabs had no mint CTA, no paste escape, and a Copy
     control that silently clobbered the clipboard.
 
-    The tab click is synchronised on a MANUAL-TAB-UNIQUE instruction string
-    first: the default tab (claude) already renders an identical affordance, so
-    an unsynchronised read would pass against the previous tab's DOM."""
+    The no-key state shows ONLY the affordance (the tab's own lead-in sentence is
+    gated with the block it introduces), so the tab switch is synchronised on the
+    tab button's `active` class — a tab-unique signal — and the tab-unique
+    lead-in is asserted AFTER the key lands, which proves the manual block really
+    rendered in key mode."""
     _seed_cookie(page, "u-manual-" + tab.split()[-1].lower())
     _wire(page, role="owner", key_rows=[DURABLE_ROW])
     _walk_to_connect(page)
-    page.get_by_role("button", name=tab, exact=True).click()
-    expect(page.locator("body")).to_contain_text(sync_text, timeout=10_000)
-    # The no-key state offers the SAME in-flow path as the agent-driven tabs.
+    tab_btn = page.get_by_role("button", name=tab, exact=True)
+    tab_btn.click()
+    expect(tab_btn).to_have_class(re.compile(r"\bactive\b"), timeout=10_000)
+    # The no-key state offers the SAME in-flow path as the agent-driven tabs …
     expect(page.get_by_role("button", name="Create an API key")).to_be_visible(timeout=5_000)
-    harness = page.locator("body")
-    assert "YOUR_API_KEY" not in harness.inner_text(), \
+    assert "YOUR_API_KEY" not in page.locator("body").inner_text(), \
         f"{tab}: the placeholder key must not render"
     assert page.locator("code", has_text="…").count() == 0, \
         f"{tab}: no fake '…' key row"
     assert page.locator(".wizard-prompt-card").count() == 0, \
         f"{tab}: the config block must not render before a key exists"
-    # The paste escape lands a real key, and the config block then renders it.
+    assert sync_text not in page.locator("body").inner_text(), \
+        f"{tab}: the config lead-in must not dangle above the affordance"
+    # … and the paste escape lands a real key, after which the manual block renders.
     page.get_by_role("button", name="I already have a key — paste it instead").click()
     page.get_by_label("Paste an API key").fill(PASTED_KEY)
     page.get_by_role("button", name="Use this key").click()
+    expect(page.locator("body")).to_contain_text(sync_text, timeout=5_000)
     expect(page.locator("code", has_text=PASTED_KEY)).to_be_visible(timeout=5_000)
     assert "YOUR_API_KEY" not in page.locator("body").inner_text(), \
         f"{tab}: the placeholder must be replaced by the real key"
