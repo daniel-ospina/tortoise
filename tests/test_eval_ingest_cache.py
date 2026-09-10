@@ -64,7 +64,9 @@ if not _is_db_uri(os.environ.get("TORTOISE_DB_URI")):
 # exports TORTOISE_DB_URI="" (empty means unset — #2815), and the docker-lane
 # default carries the password python-ci.yml's falkordb service requires
 # (`--requirepass falkordb`); local passwordless instances can override.
-DB_URI = live_uri()
+# Read at CALL time, never captured at import (#221/#2628 test isolation).
+def _db_uri() -> str:
+    return live_uri()
 
 
 @pytest.fixture
@@ -334,7 +336,7 @@ def _run_one_question(monkeypatch, tmp_path, model: str, qid: str,
     return runner.run_evaluation(
         [q], reader=MockReader(), judge=MockJudge(), ks=(5,), top_k=5,
         split="s", work_dir=str(work_dir or tmp_path),
-        ingest_mode="v2", db_uri=DB_URI, model=model,
+        ingest_mode="v2", db_uri=_db_uri(), model=model,
         dataset_fingerprint="icache-test",
         cache_ingest=cache_ingest, sweep_cache=sweep_cache,
         extractor_model=_StableModel(tag))
