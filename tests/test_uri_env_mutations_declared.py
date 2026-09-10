@@ -1123,7 +1123,11 @@ _URI_ENV = "TORTOISE_DB_URI"
 
 
 def _module_string_constants(tree) -> dict[str, str]:
-    """``NAME = "<literal>"`` string constants — for constant-held URI keys."""
+    """``NAME = "<literal>"`` string constants assigned in the file.
+
+    Function-local assignments are harvested too (``ast.walk``), which can only
+    over-flag — never miss a real non-empty-default read.
+    """
     import ast
 
     consts: dict[str, str] = {}
