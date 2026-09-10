@@ -189,18 +189,18 @@ test('#2709: main.jsx has no effect-deps referencing a later-declared const', ()
   )
 })
 
-test('#2709: the connect-step auto-open effect keeps harnessKey out of deps', () => {
-  // The specific regression, pinned: the effect body may READ harnessKey (it
-  // is a closure at render time) but the deps array must not list it.
-  assert.match(
+test('#2710: the connect-step auto-open effect is GONE (no queued-modal leak)', () => {
+  // #2709's effect was the #2710 root cause: it set `keyModalOpen(true)` on
+  // arrival at the connect step, but the shared modal's JSX renders only in
+  // the post-welcome dashboard tree — so the flag sat queued during the
+  // wizard and popped a stray "Create new API key" modal (30-day default) on
+  // exit. #2710 deletes the effect; the connect step owns an inline
+  // mint/paste affordance instead. This pins the removal so a future edit
+  // cannot quietly reinstate the TDZ-bearing queue-while-invisible effect.
+  assert.doesNotMatch(
     mainJsx,
     /if \(wizardStep === 2 && isOwnerAdmin && !harnessKey && !capNotice\) \{/,
-    'connect-step auto-open effect still reads harnessKey in the body',
-  )
-  assert.match(
-    mainJsx,
-    /\}, \[wizardStep, wizardHarness\]\)/,
-    'harnessKey must not appear in the deps array (TDZ #2709)',
+    'the connect-step auto-open modal effect must not return (#2710 stray-modal leak)',
   )
   assert.doesNotMatch(
     mainJsx,

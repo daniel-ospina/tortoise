@@ -840,7 +840,25 @@ function apiErrorText(status, b) {
 const SKEL_VALUE = { width: '60%', height: '1.2em' }
 const SKEL_LABEL = { width: '45%', height: '1.2em' }
 
-function WizardPromptCard({ text }) {
+// #2755: the prompt card is a PLAIN REGION with exactly ONE explicit copy
+// control. The #2698 build wrapped the whole card in a `role="button"`
+// container holding two real `<button>`s — an interactive element nested in an
+// interactive element (WCAG 4.1.2 / 1.3.1: an AT announces a button containing
+// buttons, and the container's aria-label competed with the children's names),
+// and because the container was the click target, a drag-select inside the card
+// fired a copy on mouse-up and silently overwrote the user's clipboard.
+//
+// Chosen resolution (issue's option b): demote the container, keep one
+// control. Rationale: (a) it satisfies BOTH required conditions outright —
+// nothing interactive is nested (the single button is the only control) and
+// there is no container click handler left to fire on a drag-select, so no
+// selection guard is needed; (b) it removes a duplicate tab stop and the
+// competing accessible names the three-way design created; (c) the surviving
+// control is the primary bottom button (largest target, matches the Copy
+// button convention used by the build fork and the key rows). The three-way
+// intent is deliberately NOT preserved: keeping "click anywhere copies" would
+// require the container to stay a control, which is the violation itself.
+function WizardPromptCard({ text, label }) {
   const [copied, setCopied] = React.useState(false)
   const doCopy = React.useCallback(() => {
     navigator.clipboard.writeText(text)
@@ -848,19 +866,13 @@ function WizardPromptCard({ text }) {
     setTimeout(() => setCopied(false), 1600)
   }, [text])
   return (
-    <div onClick={doCopy}
-      style={{ position: 'relative', cursor: 'pointer', whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', wordBreak: 'break-word', maxWidth: '100%', background: 'var(--surface,#0d1a2d)', border: '1px solid var(--border,#1e293b)', borderRadius: 8, padding: '12px 14px', fontFamily: 'var(--mono,ui-monospace,SFMono-Regular,Menlo,monospace)', fontSize: 14, lineHeight: 1.6, color: 'var(--text,#e2e8f0)' }}
-      role="button" tabIndex={0} aria-label="Click to copy prompt"
-      onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); doCopy() } }}>
+    <div className="wizard-prompt-card"
+      style={{ position: 'relative', whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', wordBreak: 'break-word', maxWidth: '100%', background: 'var(--surface,#0d1a2d)', border: '1px solid var(--border,#1e293b)', borderRadius: 8, padding: '12px 14px', fontFamily: 'var(--mono,ui-monospace,SFMono-Regular,Menlo,monospace)', fontSize: 14, lineHeight: 1.6, color: 'var(--text,#e2e8f0)' }}>
       {text}
-      <button onClick={(e) => { e.stopPropagation(); doCopy() }}
-        style={{ position: 'absolute', top: 8, right: 8, background: 'var(--surface,#0d1a2d)', border: '1px solid var(--border,#1e293b)', borderRadius: 6, padding: '4px 8px', fontSize: 12, cursor: 'pointer', color: copied ? 'var(--accent,#06b6d4)' : 'var(--dim,#7d8ea3)' }}>
-        {copied ? 'Copied ✓' : 'Copy'}
-      </button>
       <div style={{ marginTop: '0.6rem', display: 'flex', justifyContent: 'center' }}>
         <button type="button" className={copied ? 'ghost small' : 'btn-primary small'}
-          onClick={(e) => { e.stopPropagation(); doCopy() }}>
-          {copied ? 'Copied ✓' : 'Copy'}
+          onClick={doCopy}>
+          {copied ? 'Copied ✓' : (label || 'Copy')}
         </button>
       </div>
     </div>
@@ -1068,22 +1080,19 @@ function claimIntentInFlight() {
     }
   }, [])
 
-  // Auto-open key modal when reaching connect step without a key
-  //
-  // ⛔ TDZ HAZARD (#2426 → #2621 → #2709): the effect body below reads
-  // `isOwnerAdmin`, `capNotice` AND `harnessKey`, all of which are `const`s
-  // declared LATER in this component. A deps array is evaluated eagerly
-  // during render, so listing any of them here throws
-  // `ReferenceError: Cannot access 'X' before initialization` on EVERY
-  // render — a whole-app white screen (#2709). The closure reads them fine
-  // at render time, so all three must stay OUT of the deps array.
-  // If you add a dep here, prove its declaration line is ABOVE this effect.
-  React.useEffect(() => {
-    if (wizardStep === 2 && isOwnerAdmin && !harnessKey && !capNotice) {
-      setKeyModalOpen(true)
-      setKeyModalStage('form')
-    }
-  }, [wizardStep, wizardHarness])
+  // ⛔ #2710 — the connect step's auto-open effect was DELETED here. It ran
+  // `setKeyModalOpen(true)` on arrival at the connect step when the user had
+  // no in-memory key. During the wizard that was an invisible no-op: the
+  // shared key-create modal's JSX lives only in the post-welcome dashboard
+  // return tree, so the flag sat queued and then popped a stray
+  // "Create new API key" modal — with the API Keys tab's 30-day expiry
+  // default — the instant the user exited the wizard. The connect step now
+  // owns its key affordance inline (see wizardNoKeyAffordance below: mint
+  // CTA + paste row, mint always No-expiration) and never touches the shared
+  // modal, so `keyModalOpen` cannot leak past the wizard. Deleting the effect
+  // also retires the #2426/#2621/#2709 TDZ hazard it carried (its deps array
+  // could not safely list the later-declared harnessKey). The
+  // tdzDepsTripwire analyzer still guards the whole file against that class.
   const [wizardCopied, setWizardCopied] = React.useState('')
   // #1701 R2: a failed clipboard write must not strand the ChatGPT flow — the
   // error prescribes a manual ⌘/Ctrl-C copy, so the manual-Continue affordance
@@ -2873,6 +2882,10 @@ function claimIntentInFlight() {
     setWizardDurablePaste('')
     setWizardDurableError('')
     setWizardShowPaste(false)    // #2361 review-r2: welcomeKey is the first-timer provisioned plaintext
+    // #2710: the wizard never owns the shared key-create modal — clear any
+    // queued flag on EVERY exit path so it can never surface on the dashboard.
+    setKeyModalOpen(false)
+    setKeyModalStage('form')
     // (owner-only by construction — members never mint) — drop it here too so
     // a later resume re-gates to the rows-aware copy instead of re-showing a
     // 'shown once' key under a fresh 'shown once' disclosure.
@@ -5655,6 +5668,84 @@ function claimIntentInFlight() {
   const wizardFork = wizardForkChosen || (onboarding && onboarding.fork) || ''
   const isBuildFork = wizardFork === 'build'
 
+  // #2710: the wizard's paste escape (shared verbatim with the member/capped
+  // branch below — same markup, same validation, no copy or IA change). The
+  // connect step exposes it behind "I already have a key — paste it instead"
+  // for owner/admins who hold a durable key whose plaintext they still have;
+  // wizardMintDurableKey's 402 cap remedy also opens it.
+  const wizardPasteRow = (
+    <>
+      <div id="wizard-paste-row" style={{ marginTop: '0.75rem', display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+        <input type="password" aria-label="Paste an API key" placeholder="Paste an API key (tt_…)"
+          value={wizardDurablePaste}
+          onChange={(e) => { setWizardDurablePaste(e.target.value); setWizardDurableError('') }}
+          onKeyDown={(e) => { if (e.key === 'Enter' && wizardDurablePaste.trim()) { e.preventDefault(); document.querySelector('[data-paste-use]')?.click() } }}
+          style={{ flex: 1, minWidth: 0, padding: '0.5rem 0.65rem', background: 'var(--surface,#0d1a2d)', border: '1px solid var(--border,#1e293b)', borderRadius: 8, fontSize: 13, color: 'inherit' }} />
+        <button data-paste-use type="button" className="ghost" disabled={!wizardDurablePaste.trim()}
+          onClick={() => {
+            const pasted = wizardDurablePaste.trim()
+            if (!pasted) return
+            if (!/^tt_/.test(pasted)) {
+              setWizardDurableError('That does not look like a Tortoise API key (tt_…). Paste the full key from the API Keys tab.')
+              return
+            }
+            const check = durableConnectKey('', pasted, keys)
+            if (check.source === 'unknown') {
+              setWizardDurableError('That key does not match any key in this organization. Paste a key from this organization\'s API Keys tab, or ask an owner/admin to create one.')
+              return
+            }
+            if (check.source === 'bootstrap') {
+              setWizardDurableError(`That key can\'t be used — it was created for a login session and stops working after 24 hours. ${isOwnerAdmin ? 'Create a new key in the API Keys tab.' : 'Ask an owner or admin to create a new key for you.'}`)
+              return
+            }
+            if (check.source === 'expiring') {
+              setWizardDurableError(`It expires, and a key embedded in an agent must never expire. ${isOwnerAdmin ? 'Rotate it in the API Keys tab and paste the replacement, or create a new key with No expiration.' : 'Ask an owner or admin to create or rotate a key for you.'}`)
+              return
+            }
+            if (check.source === 'revoked' || check.source === 'disabled') {
+              setWizardDurableError(`That key can't be used — it is revoked or disabled. ${isOwnerAdmin ? 'Create or rotate a key in the API Keys tab and paste the new one.' : 'Ask an owner or admin to create or rotate a key for you.'}`)
+              return
+            }
+            setWizardDurableKey(pasted)
+            setWizardDurablePaste('')
+          }}>Use this key</button>
+      </div>
+      {wizardDurableError && (
+        <p className="error" role="alert" style={{ margin: '0.6rem 0 0', fontSize: 13 }}>{wizardDurableError}</p>
+      )}
+    </>
+  )
+
+  // #2711: a shown-once key token is an unbreakable `tt_…` string. This one
+  // style is shared by all three key rows (the agent-driven "separate" row +
+  // claude-desktop + claude-web) so the row can shrink and the token can break
+  // — without `minWidth: 0` the flex item's min-content width is the whole
+  // token and the Copy button is pushed off-screen at 390px.
+  const wizardKeyCodeStyle = { flex: 1, minWidth: 0, overflowWrap: 'anywhere', wordBreak: 'break-all', padding: '0.4rem 0.6rem', background: 'var(--surface,#0d1a2d)', border: '1px solid var(--border,#1e293b)', borderRadius: 6, fontSize: 13 }
+
+  // #2710: the connect step's no-key affordance. The copy already promised
+  // "Create an API key to see the setup prompt." but shipped no button, so an
+  // owner/admin with no in-memory key hit a dead end (the prompt cards are
+  // key-gated). The mint rides wizardMintDurableKey — the same silent,
+  // Never-expiring mint the build fork uses (mintKey with NO expires_in → the
+  // key never expires, matching the step's own hint and the Never-only embed
+  // contract #2426 decision 2). The paste row covers "I already have one".
+  const wizardNoKeyAffordance = (
+    <>
+      <p className="dim small">Create an API key to see the setup prompt.</p>
+      <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', flexWrap: 'wrap', marginTop: '0.5rem' }}>
+        <button type="button" className="btn-primary small" onClick={wizardMintDurableKey} disabled={wizardDurableBusy}>
+          {wizardDurableBusy ? 'Creating…' : 'Create an API key'}
+        </button>
+        <button type="button" className="ghost small" aria-expanded={wizardShowPaste}
+          onClick={() => setWizardShowPaste((v) => !v)}>
+          I already have a key — paste it instead
+        </button>
+      </div>
+      {wizardShowPaste && wizardPasteRow}
+    </>
+  )
+
   if (welcomeMode && authed) {
     // #2323 (Option B): name-first first-run — the welcome card renders the
     // W1 wizard, never the key. There is NO mount provisioning (#1566's
@@ -5678,7 +5769,7 @@ function claimIntentInFlight() {
           <button
             className="ghost small"
             disabled={welcomeProvisioning || welcomeProvisionError || !welcomeHasOrg}
-            onClick={() => { window.history.replaceState({}, '', '#/' + tab); setWelcomeMode(false); setWizardDurableKey(''); setWizardDurablePaste(''); setWizardDurableError(''); setWizardShowPaste(false); setWizardPaused(false); connectedOnceRef.current = false; if (wizardStep >= 2) setWelcomeKey(''); finishWelcomeLoads() }}
+            onClick={() => { window.history.replaceState({}, '', '#/' + tab); setWelcomeMode(false); setWizardDurableKey(''); setWizardDurablePaste(''); setWizardDurableError(''); setWizardShowPaste(false); setWizardPaused(false); setKeyModalOpen(false); setKeyModalStage('form'); connectedOnceRef.current = false; if (wizardStep >= 2) setWelcomeKey(''); finishWelcomeLoads() }}
           >
             Open my dashboard →
           </button>
@@ -5941,14 +6032,21 @@ function claimIntentInFlight() {
                         Keys embedded in agents should never expire — when you create or rotate one in the API Keys tab, choose <strong>No expiration</strong>.
                       </p>
                       {['pi', 'cursor', 'claude', 'codex'].includes(wizardHarness) && (
+                        /* #2710: pills are pure display-mode toggles. They used to
+                           also `setKeyModalOpen(true)` when no key existed — a no-op
+                           during the wizard (the modal renders only in the dashboard
+                           tree) that queued the stray post-exit pop-up. The no-key
+                           state now renders wizardNoKeyAffordance directly below, so
+                           the mint affordance is always visible and the modal is never
+                           queued. */
                         <div className="key-pills">
                           <button className={wizardKeyMode === 'included' ? 'active' : ''}
-                            onClick={() => { setWizardKeyMode('included'); if (!harnessKey) setKeyModalOpen(true) }}>
+                            onClick={() => setWizardKeyMode('included')}>
                             <strong>Key included in prompt</strong>
                             <span>Simple — easiest</span>
                           </button>
                           <button className={wizardKeyMode === 'separate' ? 'active' : ''}
-                            onClick={() => { setWizardKeyMode('separate'); if (!harnessKey) setKeyModalOpen(true) }}>
+                            onClick={() => setWizardKeyMode('separate')}>
                             <strong>Key separate from prompt</strong>
                             <span>Manual — more secure</span>
                           </button>
@@ -5958,9 +6056,9 @@ function claimIntentInFlight() {
                         const agentDriven2Step = ['pi', 'cursor']
                         const agentDriven1Step = ['claude', 'codex']
                         const keyDisplayRow = harnessKey && wizardKeyMode === 'separate' ? (
-                          <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', marginTop: '0.5rem' }}>
+                          <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', flexWrap: 'wrap', marginTop: '0.5rem' }}>
                             <p className="dim small">Your API key (shown once):</p>
-                            <code style={{ flex: 1, padding: '0.4rem 0.6rem', background: 'var(--surface,#0d1a2d)', border: '1px solid var(--border,#1e293b)', borderRadius: 6, fontSize: 13 }}>{harnessKey}</code>
+                            <code style={wizardKeyCodeStyle}>{harnessKey}</code>
                             <button type="button" className="btn-primary small" onClick={() => navigator.clipboard?.writeText(harnessKey)}>Copy</button>
                           </div>
                         ) : null
@@ -5971,7 +6069,7 @@ function claimIntentInFlight() {
                             {harnessKey ? (
                               <WizardPromptCard text={wizardPromptText(wizardHarness, 1, harnessKey, wizardKeyMode)} />
                             ) : (
-                              <p className="dim small">Create an API key to see the setup prompt.</p>
+                              wizardNoKeyAffordance
                             )}
                             {keyDisplayRow}
                             <p className="dim small" style={{ textAlign: 'center', margin: '0.75rem 0' }}>
@@ -5985,10 +6083,35 @@ function claimIntentInFlight() {
                         if (agentDriven1Step.includes(wizardHarness)) return (
                           <div>
                             <p className="dim small" style={{ marginBottom: '0.5rem' }}>Give this prompt to your agent to set up Tortoise</p>
+                            {/* #2756: Codex has two surfaces — CLI (shell) and Desktop
+                                (GUI app with no terminal; it does not inherit shell
+                                exports). The #2328 toggle was dropped by the #2698
+                                rewrite while its state and the wizardConnectHarness
+                                derivation were kept (the plan's tab handler still resets
+                                it), so a Codex Desktop user was handed the CLI
+                                command. Restored and wired through below. */}
+                            {wizardHarness === 'codex' && (
+                              <div role="group" aria-label="Codex setup surface"
+                                style={{ marginBottom: '0.75rem', display: 'inline-flex', border: '1px solid var(--border,#1e293b)', borderRadius: 8, overflow: 'hidden' }}>
+                                <button type="button" className="ghost small" aria-pressed={!wizardCodexDesktop}
+                                  style={wizardCodexDesktop ? {} : { background: 'rgba(6,182,212,0.12)', color: 'var(--accent,#06b6d4)' }}
+                                  onClick={() => { setWizardCodexDesktop(false); setWizardCopied('') }}>CLI (terminal)</button>
+                                <button type="button" className="ghost small" aria-pressed={wizardCodexDesktop}
+                                  style={wizardCodexDesktop ? { background: 'rgba(6,182,212,0.12)', color: 'var(--accent,#06b6d4)' } : {}}
+                                  onClick={() => { setWizardCodexDesktop(true); setWizardCopied('') }}>Desktop (no terminal)</button>
+                              </div>
+                            )}
                             {harnessKey ? (
-                              <WizardPromptCard text={wizardPromptText(wizardHarness, 1, harnessKey, wizardKeyMode)} />
+                              wizardConnectHarness === 'codexDesktop' ? (
+                                <>
+                                  <p className="dim small" style={{ margin: '0 0 0.5rem', lineHeight: 1.6 }}>{HARNESS_INTRO.codexDesktop}</p>
+                                  <WizardPromptCard text={UNIVERSAL_COMMAND.codexDesktop(harnessKey)} label={HARNESS_COPY_LABEL.codexDesktop} />
+                                </>
+                              ) : (
+                                <WizardPromptCard text={wizardPromptText(wizardConnectHarness, 1, harnessKey, wizardKeyMode)} />
+                              )
                             ) : (
-                              <p className="dim small">Create an API key to see the setup prompt.</p>
+                              wizardNoKeyAffordance
                             )}
                             {keyDisplayRow}
                           </div>
@@ -6001,9 +6124,9 @@ function claimIntentInFlight() {
                             <pre className="snippet" style={{ margin: '0.75rem 0' }}>
 {JSON.stringify({ mcpServers: { tortoise: { type: 'http', url: 'https://api.premiselabs.co/mcp/', headers: { Authorization: 'Bearer ' + (harnessKey || 'YOUR_API_KEY') } } } }, null, 2)}
                             </pre>
-                            <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', marginTop: '0.5rem' }}>
+                            <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', flexWrap: 'wrap', marginTop: '0.5rem' }}>
                               <p className="dim small">Your API key (shown once):</p>
-                              <code style={{ flex: 1, padding: '0.4rem 0.6rem', background: 'var(--surface,#0d1a2d)', border: '1px solid var(--border,#1e293b)', borderRadius: 6, fontSize: 13 }}>{harnessKey || '…'}</code>
+                              <code style={wizardKeyCodeStyle}>{harnessKey || '…'}</code>
                               <button type="button" className="btn-primary small" onClick={() => navigator.clipboard?.writeText(harnessKey)}>Copy</button>
                             </div>
                             <p className="dim small" style={{ marginTop: '0.5rem' }}>Save and restart Claude Desktop.</p>
@@ -6021,9 +6144,9 @@ function claimIntentInFlight() {
                               <li>Server URL: https://api.premiselabs.co/mcp/</li>
                               <li>Headers: Authorization: Bearer {harnessKey || 'YOUR_API_KEY'}</li>
                             </ul>
-                            <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', marginTop: '0.5rem' }}>
+                            <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', flexWrap: 'wrap', marginTop: '0.5rem' }}>
                               <p className="dim small">Your API key (shown once):</p>
-                              <code style={{ flex: 1, padding: '0.4rem 0.6rem', background: 'var(--surface,#0d1a2d)', border: '1px solid var(--border,#1e293b)', borderRadius: 6, fontSize: 13 }}>{harnessKey || '…'}</code>
+                              <code style={wizardKeyCodeStyle}>{harnessKey || '…'}</code>
                               <button type="button" className="btn-primary small" onClick={() => navigator.clipboard?.writeText(harnessKey)}>Copy</button>
                             </div>
                             <p className="dim small" style={{ textAlign: 'center', margin: '0.75rem 0' }}>After setting up the connector, start a new chat and paste this prompt (it tells your agent how to work with Tortoise):</p>
@@ -6050,44 +6173,7 @@ function claimIntentInFlight() {
                           ? 'Only owners and admins can create API keys in this dashboard. Paste an API key below from your agent or an owner/admin.'
                           : capNotice}
                       </p>
-                      <div id="wizard-paste-row" style={{ marginTop: '0.75rem', display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
-                        <input type="password" aria-label="Paste an API key" placeholder="Paste an API key (tt_…)"
-                          value={wizardDurablePaste}
-                          onChange={(e) => { setWizardDurablePaste(e.target.value); setWizardDurableError('') }}
-                          onKeyDown={(e) => { if (e.key === 'Enter' && wizardDurablePaste.trim()) { e.preventDefault(); document.querySelector('[data-paste-use]')?.click() } }}
-                          style={{ flex: 1, minWidth: 0, padding: '0.5rem 0.65rem', background: 'var(--surface,#0d1a2d)', border: '1px solid var(--border,#1e293b)', borderRadius: 8, fontSize: 13, color: 'inherit' }} />
-                        <button data-paste-use type="button" className="ghost" disabled={!wizardDurablePaste.trim()}
-                          onClick={() => {
-                            const pasted = wizardDurablePaste.trim()
-                            if (!pasted) return
-                            if (!/^tt_/.test(pasted)) {
-                              setWizardDurableError('That does not look like a Tortoise API key (tt_…). Paste the full key from the API Keys tab.')
-                              return
-                            }
-                            const check = durableConnectKey('', pasted, keys)
-                            if (check.source === 'unknown') {
-                              setWizardDurableError('That key does not match any key in this organization. Paste a key from this organization\'s API Keys tab, or ask an owner/admin to create one.')
-                              return
-                            }
-                            if (check.source === 'bootstrap') {
-                              setWizardDurableError(`That key can\'t be used — it was created for a login session and stops working after 24 hours. ${isOwnerAdmin ? 'Create a new key in the API Keys tab.' : 'Ask an owner or admin to create a new key for you.'}`)
-                              return
-                            }
-                            if (check.source === 'expiring') {
-                              setWizardDurableError(`It expires, and a key embedded in an agent must never expire. ${isOwnerAdmin ? 'Rotate it in the API Keys tab and paste the replacement, or create a new key with No expiration.' : 'Ask an owner or admin to create or rotate a key for you.'}`)
-                              return
-                            }
-                            if (check.source === 'revoked' || check.source === 'disabled') {
-                              setWizardDurableError(`That key can't be used — it is revoked or disabled. ${isOwnerAdmin ? 'Create or rotate a key in the API Keys tab and paste the new one.' : 'Ask an owner or admin to create or rotate a key for you.'}`)
-                              return
-                            }
-                            setWizardDurableKey(pasted)
-                            setWizardDurablePaste('')
-                          }}>Use this key</button>
-                      </div>
-                      {wizardDurableError && (
-                        <p className="error" role="alert" style={{ margin: '0.6rem 0 0', fontSize: 13 }}>{wizardDurableError}</p>
-                      )}
+                      {wizardPasteRow}
                       <div className="wizard-nav" style={{ marginTop: '0.75rem' }}>
                         <button type="button" className="ghost" onClick={() => setWizardStep(1)}>← Back</button>
                         <div className="wizard-nav-actions">
