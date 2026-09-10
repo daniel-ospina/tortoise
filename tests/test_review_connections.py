@@ -158,12 +158,31 @@ def test_add_surfaces_iml_only_for_similar_unconnected(sdk_factory, tmp_path):
         assert sug["suggested_relation"] == "IMPL"
 
 
-def test_add_scope_topic_narrows_pool(sdk_factory, tmp_path):
-    """scope=<topic text> restricts the candidate pool via retrieval."""
+def test_add_scope_topic_narrows_pool(sdk_factory, tmp_path, monkeypatch):
+    """scope=<topic text> restricts the candidate pool via retrieval.
+
+    The prompt is tested at its seam: ``_review_pool`` builds the scoped pool
+    from ``sdk.tortoise_fts_query`` (sdk.py), so stubbing THAT makes the
+    assertion independent of the embedder state (sparse vs dense) instead of
+    opting out of one of them — and still fails if ``scope=`` is ignored
+    (whole-graph pool -> the croissant pair becomes a suggestion).
+
+    Note scope= is a POOL-NARROWING mechanism (it bounds the O(n²) pairwise
+    pass), not a relevance gate; relevance is ``similarity_threshold`` (0.72)
+    per pair — see the review_connections docstring. The stubbed similarity
+    below is 0.9 for every pair, so only the pool can exclude the croissant.
+    """
     sdk = sdk_factory(tmp_path)
     k1 = sdk.create_point("statement", "kubernetes rollout plan")
     k2 = sdk.create_point("statement", "kubernetes deployment pipeline")
     off = sdk.create_point("statement", "croissant bakery menu")
+    # Retrieval seam: only the two in-scope points, in the PRODUCTION result
+    # shape (tortoise_fts_query returns scores.rrf via SearchScores). A
+    # positive score is required — _review_pool drops results whose score <= 0.
+    monkeypatch.setattr(
+        sdk, "tortoise_fts_query",
+        lambda *a, **k: [{"id": k1["id"], "scores": {"rrf": 1.0}},
+                         {"id": k2["id"], "scores": {"rrf": 1.0}}])
     # Unscoped, similarity says EVERYTHING is related — but scoped to the
     # kubernetes topic, the croissant point is outside the pool and must not
     # appear in any suggestion.
@@ -399,14 +418,21 @@ def test_prune_stale_prefers_successor_endpoint(sdk_factory, tmp_path):
     assert hit[0]["detail"]["successor"] == repl["id"]
 
 
-def test_prune_scope_empty_pool_returns_empty(sdk_factory, tmp_path):
+def test_prune_scope_empty_pool_returns_empty(sdk_factory, tmp_path, monkeypatch):
     """A scoped prune whose scope matches nothing returns [] — never the
-    whole-graph flag list (fail quiet, consistent with mode=add)."""
+    whole-graph flag list (fail quiet, consistent with mode=add).
+
+    Stubbed at the retrieval seam (``sdk.tortoise_fts_query``) rather than
+    pinned to the sparse embedder state, so the guard is covered regardless of
+    which retrieval legs are active — and still fails if the scope filter is
+    removed (the whole-graph flag list would return the stale entry).
+    """
     sdk = sdk_factory(tmp_path)
     src = sdk.create_point("statement", "live source claim")
     victim = sdk.create_point("statement", "doomed claim")
     sdk.create_operator("IMPL", src["id"], [victim["id"]])
     sdk.retract_point(victim["id"])
+    monkeypatch.setattr(sdk, "tortoise_fts_query", lambda *a, **k: [])
 
     result = sdk.review_connections(mode="prune", scope="zzz-no-such-topic-xyz")
     assert result["prune"] == []
