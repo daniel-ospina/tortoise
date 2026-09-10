@@ -29,17 +29,17 @@ class TestExecutedCellInvariants:
     def test_accuracy_without_samples_is_refused(self):
         with pytest.raises(ValueError, match="not a measurement"):
             ExecutedCell(benchmark="longmemeval", accuracy=0.7, samples=0,
-                         revision="ds@s")
+                         revision="ds@s", lane="real")
 
     def test_a_measured_cell_must_name_its_revision(self):
         """A number without its dataset identity is not comparable."""
         with pytest.raises(ValueError, match="must name the dataset revision"):
             ExecutedCell(benchmark="longmemeval", accuracy=0.7, samples=10,
-                         revision="")
+                         revision="", lane="real")
 
     def test_healthy_cell_constructs(self):
         c = ExecutedCell(benchmark="longmemeval", accuracy=0.7, samples=10,
-                         revision="ds@s")
+                         revision="ds@s", lane="real")
         assert c.accuracy == 0.7 and c.samples == 10
 
 
@@ -58,6 +58,7 @@ class TestLongMemEvalExecutor:
         monkeypatch.setattr(lme, "run_main", _fake_run_main({
             "dataset": "xiaowu0162/longmemeval-cleaned", "split": "s",
             "n_questions": 40,
+            "methodology": {"dataset_fingerprint": "a" * 64},
             "accuracy": {"overall": 0.775, "task_averaged": 0.79}}))
         c = longmemeval_executor(mock=True, limit=5, out_dir=tmp_path,
                                  fixture=_touch(tmp_path / "mini.json"))
@@ -80,10 +81,16 @@ class TestLongMemEvalExecutor:
         assert c.accuracy is None and c.samples == 40
 
     def test_lane_is_required_and_validated(self):
-        """A cell that does not say which lane produced it is refused."""
+        """A cell that does not say which lane produced it is refused — a
+        default would fail OPEN by asserting the real lane."""
         with pytest.raises(ValueError, match="must be"):
             ExecutedCell(benchmark="longmemeval", accuracy=0.5, samples=5,
                          revision="d@s", lane="production")
+        import dataclasses
+        with pytest.raises(TypeError):
+            ExecutedCell(benchmark="longmemeval", accuracy=0.5, samples=5,
+                         revision="d@s")  # lane is keyword-required
+        assert [f.name for f in dataclasses.fields(ExecutedCell)]
         assert ExecutedCell(benchmark="longmemeval", accuracy=0.5, samples=5,
                             revision="d@s", lane="real").lane == "real"
 
@@ -139,7 +146,7 @@ class TestCliExecutionSeam:
         def _fake_executor(*, mock=False, limit=None, out_dir=None):
             return ExecutedCell(benchmark="longmemeval", accuracy=0.775,
                                 samples=40, lane="real",
-                                revision="xiaowu0162/longmemeval-cleaned@s")
+                                revision="xiaowu0162/longmemeval-cleaned@s#abc")
 
         monkeypatch.setitem(ex.EXECUTORS, "longmemeval", _fake_executor)
         rc = cli.main(["parity", "--config", str(self._cfg(tmp_path)),
@@ -150,7 +157,7 @@ class TestCliExecutionSeam:
         cell = record["benchmarks"]["longmemeval"]
         assert cell["measured"] is True
         assert cell["accuracy"] == 0.775 and cell["samples"] == 40
-        assert cell["revision"] == "xiaowu0162/longmemeval-cleaned@s"
+        assert cell["revision"] == "xiaowu0162/longmemeval-cleaned@s#abc"
         assert cell["lane"] == "real"
         # a benchmark with no registered executor stays honestly not-measured
         other = record["benchmarks"]["locomo"]

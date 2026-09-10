@@ -56,11 +56,10 @@ class ExecutedCell:
     revision: str
     #: Which lane produced the number: "real" (the released dataset with real
     #: reader/judge models) or "mock" (a fixture with mocked reader/judge, no
-    #: spend). Persisted so a mock number can never read as a comparable
-    #: measurement (review P1 on #2819): the official runner hardcodes its
-    #: dataset id, so without this a mock cell carried the REAL dataset's
-    #: revision and was indistinguishable from a real one.
-    lane: str = "real"
+    #: spend). REQUIRED — no default (review P2 on #2819): a default would
+    #: silently assert "real" for a cell that never said so, which is the
+    #: fail-open version of the provenance bug this field exists to prevent.
+    lane: str
     detail: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -152,7 +151,15 @@ def longmemeval_executor(*, mock: bool = False, limit: int | None = None,
         revision = f"fixture:{fx.name}"
     else:
         lane = "real"
-        revision = f"{report.get('dataset', 'unknown')}@{report.get('split', '')}"
+        # The runner's `dataset` field is its own hardcoded `dataset_id`
+        # default, not proof of what was loaded — the VERIFIED identity is
+        # `methodology.dataset_fingerprint` (sha256 of the loaded file,
+        # report.py). Carry it, so a real revision is checkable against the
+        # artifact rather than self-asserted (review P2, #2819).
+        meta = report.get("methodology") or {}
+        fingerprint = str(meta.get("dataset_fingerprint") or "unknown")
+        revision = (f"{report.get('dataset', 'unknown')}"
+                    f"@{report.get('split', '')}#{fingerprint[:16]}")
     return ExecutedCell(
         benchmark="longmemeval", accuracy=accuracy, samples=samples,
         revision=revision, lane=lane,
