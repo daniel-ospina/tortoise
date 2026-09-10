@@ -1,3 +1,22 @@
+> **SUPERSEDED (2026-09-10, #2710):** two acceptance criteria below are no
+> longer the shipped behaviour and must NOT be reinstated:
+> 1. **Task 2** — "Clicking a pill opens the key modal ONLY if no key exists
+>    yet". The pills are now pure display-mode toggles; clicking one never
+>    opens/touches the shared key-create modal.
+> 2. **Task 4** — "Auto-open modal on first load" / "Auto-open useEffect fires
+>    when reaching step 2 without a key".
+>
+> Why: the shared key-create modal renders ONLY in the post-welcome dashboard
+> tree, so queueing `keyModalOpen` from inside the wizard was invisible during
+> the step and then popped a stray "Create new API key" modal (pre-set to the
+> 30-day expiry default) on the dashboard after exit. #2710 deleted the
+> auto-open effect and the pill→modal path, and replaced them with an inline,
+> in-flow `wizardNoKeyAffordance` (mint + paste escape) rendered by every
+> harness branch's no-key state — the mint is Never-expiring, matching the
+> step's own "keys embedded in agents should never expire" hint. Pinned by
+> `website/apps/dashboard/src/wizardConnectTripwire.test.js` and
+> `tests/e2e/test_dashboard_onboarding.py`.
+
 <!-- research-path: skipped — zero third-party deps, no integration boundaries -->
 
 # Wizard Connect Step — Per-Harness Agent-Driven Prompts
