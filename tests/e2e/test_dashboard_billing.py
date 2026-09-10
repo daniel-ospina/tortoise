@@ -245,6 +245,8 @@ def test_welcome_reveal_shows_welcome_card_then_dashboard_exit(page: Page) -> No
     # exists) → dashboard shell at /. Scoped to the header — the done-step
     # wizard carries a same-named button.
     page.locator("header").get_by_role("button", name="Open my dashboard →").click()
-    # #2744: the exit lands on the local dashboard shell (hash route allowed).
-    expect(page).to_have_url(re.compile("^" + re.escape(DASHBOARD_URL)), timeout=15_000)
+    # #2744: the exit lands on the local dashboard SHELL root (a hash route is
+    # allowed; any other path/query is not — the pre-migration pin was exact).
+    expect(page).to_have_url(
+        re.compile("^" + re.escape(DASHBOARD_URL) + r"(#.*)?$"), timeout=15_000)
     expect(page.locator("body")).to_contain_text("API Keys", timeout=15_000)

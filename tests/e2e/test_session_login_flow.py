@@ -12,9 +12,9 @@ Harness (pinned in the #1511 plan Task 7):
   `https://app.premiselabs.co/**` → the :8790 server. On the loopback origin
   the local /auth page writes a host-only session cookie that the loopback
   dashboard reads (`domainAttr()`/`secureAttr()` are host-conditional);
-  ``_seed_local_session_cookie`` additionally PRE-SEEDS the prod
-  parent-domain `.premiselabs.co` cookie only so intercepted prod-origin
-  redirects/subresources stay session-coherent.
+  ``_seed_local_session_cookie`` PRE-SEEDS the prod parent-domain
+  `.premiselabs.co` cookie (unless ``parent_domain=False``) only so intercepted
+  prod-origin redirects/subresources stay session-coherent.
 - The exchange (`POST https://api.premiselabs.co/v1/session/login`) is mocked;
   `https://api.premiselabs.co/**` catches the dashboard's other API calls with
   a benign 401 so the app shell renders deterministically.
@@ -98,10 +98,11 @@ def _proxy_body(route, local_url: str, page: Page) -> None:
 # proxy path failed, the request fell through to production and every
 # assertion misreported as an app-behavior failure. As of #2744 every
 # dashboard/auth DOCUMENT loads from the local preview directly; the route
-# handlers stay for intercepted prod hosts (API_HOST stubs and the
-# AUTH_HOST/APP_HOST -> local rewrites, needed for app-emitted prod-origin
-# redirects such as the dashboard's hardcoded
-# ``https://tortoise.premiselabs.co/auth`` logout bounce).
+# handlers stay for intercepted prod hosts (API_HOST stubs; the AUTH_HOST ->
+# :8788 rewrite is required for the app-emitted prod-origin /auth bounce, e.g.
+# the dashboard's hardcoded ``https://tortoise.premiselabs.co/auth`` logout
+# target; the APP_HOST -> :8790 rewrite is a DEFENSIVE fallback — no migrated
+# spec originates a prod-app-origin request).
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -197,11 +198,13 @@ def _seed_local_session_cookie(page: Page, user_id: str,
 
     #2744: ``session`` lets a caller seed a CUSTOM session shape (the sibling
     specs carried bespoke dicts — user_metadata/display_name/tier variants).
-    Defaults to the standard ``_session_json(user_id)``. ``parent_domain``
-    (default True) seeds the ``.premiselabs.co`` cookie as well; pass False for
-    the logout-bounce spec, where a still-valid parent-domain session would
-    make the intercepted ``/auth`` page's valid-session gate bounce straight
-    back to the dashboard (the session must read as cleared after logout).
+    When ``session`` is given, ``user_id`` is IGNORED (the dict's own
+    ``user.id`` is what the cookie carries); otherwise the standard
+    ``_session_json(user_id)`` is used. ``parent_domain`` (default True) seeds
+    the ``.premiselabs.co`` cookie as well; pass False when the spec asserts a
+    landing on the /auth page immediately after a session clear (a still-valid
+    parent-domain session would make the intercepted ``/auth`` page's
+    valid-session gate bounce straight back to the dashboard).
     """
     value = urllib.parse.quote(json.dumps(session if session is not None else _session_json(user_id)))
     cookies = [{"name": "sb-tortoise-auth-token", "value": value, "url": DASHBOARD_URL}]
@@ -230,12 +233,14 @@ def _goto_local_auth(page: Page) -> None:
     redirect target the page computes stays local (prod-origin redirects that
     a test explicitly ASSERTS keep their own ``__AUTH_BASE_URL``).
     """
-    page.add_init_script(f"window.__AUTH_BASE_URL = '{AUTH_ORIGIN}';")
+    page.add_init_script(f"window.__AUTH_BASE_URL = {json.dumps(AUTH_ORIGIN)};")
     # #2744: keep the post-login redirect on loopback — the local auth page's
     # session write is host-only for 127.0.0.1, so a redirect to the prod app
     # origin would lose it. The seam defaults to the prod origin when unset
-    # (no prod behavior change).
-    page.add_init_script(f"window.__DASHBOARD_BASE_URL = '{DASHBOARD_URL.rstrip('/')}';")
+    # (no prod behavior change). json.dumps — never manual quoting: the URL is
+    # env-derived and a quote would break the injected JS.
+    page.add_init_script(
+        f"window.__DASHBOARD_BASE_URL = {json.dumps(DASHBOARD_URL.rstrip('/'))};")
     page.goto(AUTH_ORIGIN + "/auth", wait_until="domcontentloaded", timeout=30_000)
     print(f"[#2744 local-preview] auth document ← {AUTH_ORIGIN}/auth")
 

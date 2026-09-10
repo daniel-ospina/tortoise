@@ -6,9 +6,17 @@ Harness (pinned in the #1511 plan Task 5):
 - Serve the dashboard dist with `wrangler@4 pages dev dist --port 8790`
   from website/apps/dashboard/.
 - `__AUTH_BASE_URL = 'https://tortoise.premiselabs.co'` via addInitScript so
-  the dashboard gate emits the ABSOLUTE target; intercepted
-  `https://tortoise.premiselabs.co/auth` requests are re-fetched from the
-  :8788 server (route handler proxies via page.request).
+  the dashboard gate emits the ABSOLUTE target for the tests that ASSERT a
+  prod-origin /auth landing; intercepted `https://tortoise.premiselabs.co/auth`
+  requests are re-fetched from the :8788 server (route handler proxies via
+  page.request).
+- #2744: every spec loads its DOCUMENT from the LOCAL preview (:8790
+  dashboard, :8788 auth) — never the prod origins. The prod hosts stay
+  intercepted only to rewrite app-emitted prod-origin redirects back to the
+  preview (the AUTH_HOST rewrite is load-bearing for the asserted prod /auth
+  targets; APP_HOST is a defensive fallback — no migrated spec originates a
+  prod-app-origin request). The migrated welcome-mode/session tests rely on the
+  local document and use the app's absolute prod /auth bounce implicitly.
 - Opt-in: RUN_DASHBOARD_E2E=1 (mirrors RUN_LEGAL_E2E).
 
 Flows:
@@ -523,7 +531,9 @@ def test_welcome_mode_fork_503_stays_and_recovers(page: Page) -> None:
     page.route("**/*", handle)
     _goto_local_dashboard(page)
     expect(page.locator("body")).to_contain_text("Welcome to Tortoise", timeout=20_000)
-    page.get_by_role("button", name="Continue →").click()
+    # #2744/#2751: the pre-#2534 orientation step is gone — the first-timer
+    # welcome card renders the org-create form DIRECTLY (no `Continue →`; the
+    # stale click timed out and stranded these specs).
     expect(page.locator("body")).to_contain_text("Create your Organization", timeout=10_000)
     page.get_by_label("Organization name").fill("acme")
     page.get_by_role("button", name="Create Organization").click()
@@ -581,7 +591,7 @@ def test_welcome_mode_provision_failure_shows_error_card(page: Page) -> None:
     # provisions) — the 500 surfaces the inline step-1 error; the busy flags
     # reset so the submit button recovers and a retry is possible.
     expect(page.locator("body")).to_contain_text("Welcome to Tortoise", timeout=20_000)
-    page.get_by_role("button", name="Continue →").click()
+    # #2744/#2751: no pre-#2534 orientation step — org-create renders directly.
     expect(page.locator("body")).to_contain_text("Create your Organization", timeout=10_000)
     page.get_by_label("Organization name").fill("acme")
     page.get_by_role("button", name="Create Organization").click()
@@ -637,11 +647,18 @@ def test_welcome_mode_provision_401_clears_session_and_redirects(page: Page) -> 
     # #2323: the stale-session 401 now surfaces on the org-create SUBMIT
     # (mount no longer provisions). Drive to it, then expect the /auth bounce.
     expect(page.locator("body")).to_contain_text("Welcome to Tortoise", timeout=20_000)
-    page.get_by_role("button", name="Continue →").click()
+    # #2744/#2751: no pre-#2534 orientation step — org-create renders directly.
     expect(page.locator("body")).to_contain_text("Create your Organization", timeout=10_000)
     page.get_by_label("Organization name").fill("acme")
     page.get_by_role("button", name="Create Organization").click()
     expect(page).to_have_url(re.compile(rf"^{re.escape(AUTH_HOST)}/auth"), timeout=20_000)
+    # #2744: the /auth landing alone no longer proves the stale session was
+    # cleared — the seeded credential is host-only loopback, invisible to the
+    # intercepted prod-origin /auth document. Pin the clear directly
+    # (context.cookies() reads every origin).
+    assert not [c for c in page.context.cookies()
+                if c["name"] == "sb-tortoise-auth-token"], (
+        "401 must clear the session cookie before the /auth bounce")
 
 
 def test_oauth_callback_fragment_lands_in_dashboard(page: Page) -> None:
@@ -1077,7 +1094,7 @@ def test_logout_redirects_to_auth(page: Page) -> None:
     session cookie → dashboard renders → Log out → /auth."""
     durable = "tt_loop_durable_abcdef0123456789"
     _wire_prod_domains(page)
-    _seed_local_session_cookie(page, "u-loop", _session_json(), parent_domain=False)
+    _seed_local_session_cookie(page, "u-loop", _session_json("u-loop"), parent_domain=False)
     page.add_init_script(f"window.__AUTH_BASE_URL = '{AUTH_HOST}';")
     # #2246: legacy residue seeded — the session mount purges it once
     # (never probed/adopted; the mount probe is deleted).
@@ -1096,21 +1113,40 @@ def test_logout_redirects_to_auth(page: Page) -> None:
     # Re-seed it NOW so the logout click below is the ONLY remaining wipe —
     # the final assert then pins logout's own removeItem, not the mount purge.
     page.evaluate(f"localStorage.setItem('tortoise_api_key', '{durable}')")
+
+    def _loopback_key_residue() -> list:
+        """#2744: the loopback origin's ``tortoise_api_key`` values from the
+        context storage state (per-origin, so it survives the /auth bounce).
+        ``DASHBOARD_URL`` is a loopback URL with no path, so the prefix match
+        is exact; an env override carrying a path would match nothing, hence
+        the positive-control assert below."""
+        prefix = DASHBOARD_URL.rstrip("/")
+        return [
+            item["value"]
+            for origin in page.context.storage_state().get("origins", [])
+            if origin.get("origin", "").startswith(prefix)
+            for item in origin.get("localStorage", [])
+            if item.get("name") == "tortoise_api_key"
+        ]
+
+    # Positive control: the re-seeded residue MUST be observable, or the
+    # post-logout absence assert would pass vacuously (the #2246 round-2
+    # class the rewrite was meant to preserve).
+    assert _loopback_key_residue() == [durable], (
+        "pre-logout residue read is not positive — cannot assert the wipe")
     page.locator(".account-blob-btn").click()
     expect(page.locator(".account-menu-logout")).to_be_visible()
     page.locator(".account-menu-logout").click()
     expect(page).to_have_url(re.compile(rf"^{re.escape(AUTH_HOST)}/auth"), timeout=20_000)
-    # rule 8: the app-origin wipe fired before the bounce. Read the LOOPBACK
-    # origin's localStorage from the context storage state (per-origin, so it
-    # survives the navigation to /auth) — a surviving re-seeded residue means
-    # logout's removeItem did not fire.
-    loop_prefix = DASHBOARD_URL.rstrip("/")
-    residue = [
-        item["value"]
-        for origin in page.context.storage_state().get("origins", [])
-        if origin.get("origin", "").startswith(loop_prefix)
-        for item in origin.get("localStorage", [])
-        if item.get("name") == "tortoise_api_key"
-    ]
-    assert not residue, (
-        f"logout must wipe KEY_STORAGE on the app origin (residue: {residue})")
+    # rule 8 (session clear): context.cookies() reads every origin, so a
+    # surviving loopback credential fails here (the pre-migration transitive
+    # check via the .premiselabs.co cookie is not expressible on the loopback
+    # harness — the loopback clear can be pinned directly).
+    assert not [c for c in page.context.cookies()
+                if c["name"] == "sb-tortoise-auth-token"], (
+        "logout must clear the session cookie")
+    # rule 8 (KEY_STORAGE wipe): the re-seeded residue is gone — a survivor
+    # means logout's own removeItem did not fire.
+    assert not _loopback_key_residue(), (
+        f"logout must wipe KEY_STORAGE on the app origin "
+        f"(residue: {_loopback_key_residue()})")
