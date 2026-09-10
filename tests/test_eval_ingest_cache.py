@@ -31,7 +31,6 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import json
-import os
 import socket
 import uuid
 from datetime import UTC, datetime
@@ -223,36 +222,6 @@ def test_cache_ingest_env_resolution(monkeypatch):
     assert runner.cache_ingest_enabled(None) is False
     monkeypatch.setenv("TORTOISE_LME_CACHE_INGEST", "garbage")
     assert runner.cache_ingest_enabled(None) is False
-
-
-def test_question_sdk_honors_db_uri_when_lane_env_is_set_but_empty(monkeypatch):
-    """#2815: an explicit ``db_uri`` must WIN over the set-but-empty lane env.
-
-    CI's tier-2 legs export ``TORTOISE_DB_URI=""``; ``os.environ.setdefault``
-    is a no-op for a set-but-empty variable, so the URI a caller passed to
-    ``_make_question_sdk`` was silently discarded and ``TortoiseSDK`` fell back
-    to the shared canonical embedded store while the probe reported docker —
-    false docker coverage plus writes to a persistent DB. Empty means UNSET
-    (epic #1647).
-    """
-    seen: dict[str, str] = {}
-
-    class _Recorder:
-        def __init__(self, *args, **kwargs):
-            seen["uri"] = os.environ.get("TORTOISE_DB_URI") or "<unset>"
-
-    monkeypatch.setenv("TORTOISE_DB_URI", "")
-    monkeypatch.setattr(runner, "TortoiseSDK", _Recorder)
-    _sdk, cleanup = runner._make_question_sdk(
-        db_uri=_db_uri(), namespace="ns-pin")
-    try:
-        assert seen["uri"] == _db_uri(), (
-            "the explicit db_uri must reach the SDK when the lane env is "
-            'set-but-empty ("" means unset, #2815)')
-    finally:
-        cleanup()
-    assert os.environ.get("TORTOISE_DB_URI") == "", (
-        "cleanup must restore the pre-call (empty) lane value")
 
 
 def test_cache_cli_parser_tristate():

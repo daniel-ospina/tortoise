@@ -131,7 +131,6 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     "test_ep_mitigation.py": [r'os\.environ\[\s*["\']TORTOISE_DB_URI["\']\]\s*=',
                                r'os\.environ\.pop\(\s*["\']TORTOISE_DB_URI["\']',
                                r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"'],  # #2315: docker-lane EP mitigation tests force the URI (the setenv IS the point — live-EP delta + schema-reject assertions against the real server)
-    "test_eval_ingest_cache.py": [r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI",\s*""'],  # #2815: the set-but-empty tier-2 lane shape the explicit-db_uri handoff must honor (empty == unset)
     "test_extractor_reliability.py": [r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
     "test_hard_reject.py": [r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
     "test_hosted_api.py": [r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"',  # #1686: register/provision journal tests force the embedded lane (the delenv IS the point)
@@ -1123,6 +1122,39 @@ def test_restoration_exemption_boundary():
 _URI_ENV = "TORTOISE_DB_URI"
 
 
+def _module_string_constants(tree) -> dict[str, str]:
+    """``NAME = "<literal>"`` string constants — for constant-held URI keys."""
+    import ast
+
+    consts: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign):
+            continue
+        if not (isinstance(node.value, ast.Constant)
+                and isinstance(node.value.value, str)):
+            continue
+        for tgt in node.targets:
+            if isinstance(tgt, ast.Name):
+                consts[tgt.id] = node.value.value
+    return consts
+
+
+def _is_uri_key(node, consts: dict[str, str]) -> bool:
+    """True when ``node`` names the URI variable — literal or constant-held.
+
+    Covers ``os.environ.get("TORTOISE_DB_URI", …)`` and the spelling a future
+    author is most likely to copy (``KEY = "TORTOISE_DB_URI";
+    os.environ.get(KEY, …)``), including this module's own ``_URI_ENV``.
+    """
+    import ast
+
+    if isinstance(node, ast.Constant):
+        return node.value == _URI_ENV
+    if isinstance(node, ast.Name):
+        return consts.get(node.id) == _URI_ENV
+    return False
+
+
 def _statically_empty_default(node) -> bool:
     """True only for a default that is provably empty/unset-safe.
 
@@ -1144,10 +1176,10 @@ def _nonempty_default_uri_reads(
         files: list[tuple[str, str]] | None = None) -> list[str]:
     """AST census: TORTOISE_DB_URI reads carrying a NON-EMPTY default.
 
-    Catches every spelling whose default is reached only when the variable is
-    ABSENT — never when it is set-but-empty (CI's tier-2 legs export
-    ``TORTOISE_DB_URI=""``; the epic #1647 lane contract is empty == unset,
-    the redirect seam being truthy-gated):
+    Catches the get/getenv/setdefault spellings whose default is reached only
+    when the variable is ABSENT — never when it is set-but-empty (CI's tier-2
+    legs export ``TORTOISE_DB_URI=""``; the epic #1647 lane contract is
+    empty == unset, the redirect seam being truthy-gated):
 
       * ``os.environ.get("TORTOISE_DB_URI", <non-empty>)`` and
         ``os.getenv(...)`` — positional, or ``key=``/``default=`` keyword;
@@ -1168,6 +1200,15 @@ def _nonempty_default_uri_reads(
     control uses it); the default scans every ``*.py`` under ``tests/`` —
     broader than the ``test_*.py`` censuses above, because helper modules
     carry the same probe.
+
+    Boundary (deliberate, pinned by the positive control): the key must be a
+    literal or a module-level string constant, and the callee must be named
+    get/getenv/setdefault. An ALIASED reader (``from os import getenv as g``)
+    and the default-free shapes (``os.environ.get(NAME)``, ``os.environ[NAME]
+    if NAME in os.environ else …``) are out of scope — they carry no default to
+    be defeated (the presence-based form yields "" for a set-but-empty
+    variable, not the fallback), so a caller-side fallback is a different
+    check.
     """
     import ast
 
@@ -1182,13 +1223,16 @@ def _nonempty_default_uri_reads(
     for rel, src in files:
         # Cheap prefilter: ast.parse over the whole tests/ tree costs ~40s on
         # every core-lane PR, and only a few percent of files mention the
-        # variable at all.
-        if _URI_ENV not in src:
+        # variable at all. "TORTOISE_DB" (not the full name) so an implicit
+        # string concatenation — os.environ.get("TORTOISE_DB_" "URI", …) —
+        # still reaches the parser.
+        if "TORTOISE_DB" not in src:
             continue
         try:
             tree = ast.parse(src)
         except SyntaxError:
             continue
+        consts = _module_string_constants(tree)
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
                 continue
@@ -1204,8 +1248,7 @@ def _nonempty_default_uri_reads(
                     if kw.arg == "key":
                         key = kw.value
                         break
-            if not (isinstance(key, ast.Constant)
-                    and key.value == _URI_ENV):
+            if not _is_uri_key(key, consts):
                 continue
             default = node.args[1] if len(node.args) > 1 else None
             if default is None:
@@ -1269,13 +1312,19 @@ def test_nonempty_default_uri_reads_flags_the_class():
         'j = os.environ.get("TORTOISE_DB_URI", None)',
         'k = lu.live_uri()',
         'l = os.environ.get("OTHER_VAR", "docker://x")',
+        'KEY = "TORTOISE_DB_URI"',
+        'm = os.environ.get(KEY, "docker://x")',
+        'n = os.environ.get("TORTOISE_DB_" "URI", "docker://x")',
+        '# documented boundary: no default to be defeated, so out of scope',
+        'o = _getenv("TORTOISE_DB_URI", "docker://x")',
+        'p = os.environ["TORTOISE_DB_URI"] if "TORTOISE_DB_URI" in os.environ else "docker://x"',
     ])
     flagged = _nonempty_default_uri_reads([("tests/planted.py", src)])
     assert [hit.rsplit(":", 1)[-1] for hit in flagged] == [
-        "3", "4", "5", "6", "7", "8", "9"], (
+        "3", "4", "5", "6", "7", "8", "9", "17", "18"], (
         "the #2815 census must flag every non-empty-default spelling "
-        "(get/getenv/setdefault, positional/keyword, literal and "
-        f"non-literal) and nothing else — got {flagged}")
+        "(get/getenv/setdefault, positional/keyword, literal, constant-held "
+        f"and concatenated) and nothing else — got {flagged}")
 
 
 def test_live_uri_treats_empty_as_unset(monkeypatch):
@@ -1305,3 +1354,66 @@ def test_live_uri_treats_empty_as_unset(monkeypatch):
     # the scheme-less "_<suffix>" shape (#2815).
     monkeypatch.setenv("TORTOISE_DB_URI", "/")
     assert live_uri("docker://:pw@host:1/g") == "docker://:pw@host:1/g"
+
+
+def test_question_sdk_honors_db_uri_when_lane_env_is_set_but_empty(
+        monkeypatch):
+    """#2815: an explicit ``db_uri`` must WIN over the set-but-empty lane env.
+
+    CI's tier-2 legs export ``TORTOISE_DB_URI=""``; ``os.environ.setdefault``
+    is a no-op for a set-but-empty variable, so the URI a caller passed to
+    ``_make_question_sdk`` was silently discarded and ``TortoiseSDK`` fell back
+    to the shared canonical embedded store while the probe reported docker —
+    false docker coverage plus writes to a persistent DB. Empty means UNSET
+    (epic #1647). Hermetic: ``TortoiseSDK`` is stubbed, no server is touched.
+    """
+    import os
+
+    from tests._live_utils import DOCKER_TEST_URI
+    from tools.longmem_eval import run as runner
+
+    seen: dict[str, str] = {}
+
+    class _Recorder:
+        def __init__(self, *args, **kwargs):
+            seen["uri"] = os.environ.get("TORTOISE_DB_URI") or "<unset>"
+
+    monkeypatch.setenv("TORTOISE_DB_URI", "")
+    monkeypatch.setattr(runner, "TortoiseSDK", _Recorder)
+    _sdk, cleanup = runner._make_question_sdk(
+        db_uri=DOCKER_TEST_URI, namespace="ns-pin")
+    try:
+        assert seen["uri"] == DOCKER_TEST_URI, (
+            "the explicit db_uri must reach the SDK when the lane env is "
+            'set-but-empty ("" means unset, #2815)')
+    finally:
+        cleanup()
+    assert os.environ.get("TORTOISE_DB_URI") == "", (
+        "cleanup must restore the pre-call (empty) lane value")
+
+
+def test_question_sdk_restores_env_when_construction_fails(monkeypatch):
+    """The #2815 env assignment must not leak when the SDK constructor raises.
+
+    ``_cleanup`` only reaches the caller with a successful return, so a raising
+    constructor would otherwise leave the mutated ``TORTOISE_DB_URI`` in the
+    process env — flipping later tests in the same pytest process onto the
+    docker lane (the #1349/#2084 lane-poisoning class).
+    """
+    import os
+
+    import pytest
+
+    from tests._live_utils import DOCKER_TEST_URI
+    from tools.longmem_eval import run as runner
+
+    class _Boom:
+        def __init__(self, *args, **kwargs):
+            raise RuntimeError("construction failed")
+
+    monkeypatch.setenv("TORTOISE_DB_URI", "")
+    monkeypatch.setattr(runner, "TortoiseSDK", _Boom)
+    with pytest.raises(RuntimeError):
+        runner._make_question_sdk(db_uri=DOCKER_TEST_URI, namespace="ns-pin")
+    assert os.environ.get("TORTOISE_DB_URI") == "", (
+        "a failed construction must still restore the pre-call value")
