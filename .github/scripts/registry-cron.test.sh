@@ -44,6 +44,15 @@
 #  34. missing GITHUB_TOKEN → fail closed (no silent-deaf alerting)
 #  35. a per-team listing failure is unmeasured, not a false stale
 #  36. positive self-heals: SWEEP_CONFIG_ERROR / SWEEP_OFF_STALE resolve
+#  37. multi-team pool: `--output text` is ONE tab-separated line (review P1)
+#  38. held lock + UNMEASURED pool → SWEEP_NO_COVERAGE (review P1)
+#  39. redaction of DSN/URI/Basic/lowercase/numbered secrets (security review)
+#  40. the purge failure body is redacted (security review)
+#  41. storage_error while ENABLED is loud, and blocks R2_DOWN self-heal
+#  42. no_work with graph_totals.backed_up>0 is not a coverage gap
+#  43. APP_DOWN is RED (any filing is RED)
+#  44. an index read failure is unmeasured, not "no index"
+#  45. a measured-fresh off pool resolves a stale R2_DOWN
 #  11. R2 listing fails  → pool UNKNOWN, never read as empty/fresh
 #  12. R2 listing fails while OFF → does NOT resolve SWEEP_OFF_STALE
 #  13. R2 preflight down + 0 teams → R2_DOWN stays OPEN (no self-close loop)
@@ -127,7 +136,14 @@ case "$op" in
     esac
     ;;
   put-object)   [ "${STUB_412:-0}" = "1" ] && exit 1 || exit 0 ;;
-  get-object)   printf '%s' "${STUB_GET_BODY:-}" ;;
+  get-object)
+    # STUB_INDEX_FAIL emulates a NON-404 failure reading the legacy-flat index
+    # (a transient S3 error) so the driver must treat the pool as unmeasured.
+    if [ "${STUB_INDEX_FAIL:-0}" = "1" ] && case "$(argval --key)" in *legacy-flat-index*) true ;; *) false ;; esac; then
+      echo "An error occurred (InternalError) when calling the GetObject operation" >&2
+      exit 1
+    fi
+    printf '%s' "${STUB_GET_BODY:-}" ;;
   delete-object) exit 0 ;;
   *) exit 0 ;;
 esac
@@ -246,7 +262,8 @@ reset_case() {
   : > "$LOG"
   unset STUB_STATUS_BODY STUB_SWEEP_BODY STUB_PURGE_BODY STUB_PURGE_CODE \
         STUB_RECONCILE_CODE STUB_412 STUB_APP_DOWN STUB_R2_DOWN STUB_GET_BODY \
-        STUB_LIST_FAIL STUB_LIST_FAIL_TEAM GH_ISSUE_STATE STUB_ISSUE_CODE \
+        SIMULATE_APP_DOWN \
+        STUB_LIST_FAIL STUB_LIST_FAIL_TEAM STUB_INDEX_FAIL GH_ISSUE_STATE STUB_ISSUE_CODE \
         GH_SEARCH_JSON GH_NEW_ISSUE R2_TEAMS R2_DEFAULT_LIST R2_FLAT_LIST \
         GH_ISSUE_SWEEP_CONFIG_ERROR GH_ISSUE_SWEEP_OFF_STALE GH_ISSUE_SWEEP_NO_COVERAGE \
         GH_ISSUE_WATCHER_DOWN GH_ISSUE_APP_DOWN GH_ISSUE_R2_DOWN GH_ISSUE_STALE || true
@@ -454,8 +471,9 @@ export R2_DEFAULT_LIST="$TS_RECENT"
 export STUB_STATUS_BODY="$(status_body true null null false 1)"
 export STUB_SWEEP_BODY='{"status":"backed_up","teams_backed_up":1}'
 run_driver
-assert_eq "$RC" 0 "18. backed_up exits 0 even with a dead watcher"
+assert_eq "$RC" 1 "18. backed_up is RED while the staleness watcher is dead (loud)"
 assert_match "$(cat "$LOG")" 'GH POST .*/issues .*WATCHER_DOWN' "18. running=false is honored and files WATCHER_DOWN"
+assert_contains "$OUT" "exiting RED" "18. the run is RED because it filed an incident"
 
 # ── 19. prefix without DEFAULT archive while OFF → SWEEP_OFF_STALE ───────────
 reset_case
@@ -675,6 +693,108 @@ run_driver
 assert_eq "$RC" 0 "36. recovered config + measured-fresh pool exits 0"
 assert_match "$(cat "$LOG")" "GH PATCH .*/issues/44" "36. SWEEP_CONFIG_ERROR self-heals when the config is readable"
 assert_match "$(cat "$LOG")" "GH PATCH .*/issues/45" "36. SWEEP_OFF_STALE self-heals on a measured-fresh pool"
+
+# ── 37. multi-team pool: `--output text` is ONE tab-separated line (P1) ────
+# Review P1 (bug-deep, conf 98): aws renders a list as a single tab-separated
+# line, so a bare `while read` measured only the LAST team. teamA must still be
+# seen — its stale default drives POOL_STALE / SWEEP_OFF_STALE.
+reset_case
+export R2_TEAMS=$'backups/teamZ/\tbackups/teamA/'
+export R2_DEFAULT_LIST=""
+export STUB_STATUS_BODY="$(status_body false null null)"
+run_driver
+assert_eq "$RC" 1 "37. a 2-team tab-separated pool while OFF exits RED (1)"
+assert_match "$OUT" "team teamA: team prefix present but no default archive" "37. the NON-LAST team is measured too"
+assert_filed "$(cat "$LOG")" SWEEP_OFF_STALE "37. the non-last stale team drives SWEEP_OFF_STALE"
+
+# ── 38. held lock + UNMEASURED pool → SWEEP_NO_COVERAGE (review P1) ────────
+reset_case
+export STUB_LIST_FAIL=1
+export STUB_STATUS_BODY='{"enabled":true,"config_error":null,"storage_error":null,"per_team":{},"last_sweep":null,"watcher":{"running":true,"age_minutes":1}}'
+export STUB_SWEEP_BODY='{"status":"already_running"}'
+run_driver
+assert_eq "$RC" 1 "38. stuck lock + unmeasurable pool exits RED (1)"
+assert_filed "$(cat "$LOG")" SWEEP_NO_COVERAGE "38. unknown pool is never read as empty for a held lock"
+assert_not_contains "$(cat "$LOG")" "leaving silent" "38. the unmeasurable lock is never silently dropped"
+
+# ── 39. redaction shapes (security review F1) ─────────────────────────────
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_STATUS_BODY="$(status_body false '"dsn falkor://usr:SuperSecret123@cloud.example:6380 and Authorization: Bearer abcDEFghiJKL012345678 also key SECRETVALUE1234567890"' null)"
+run_driver
+assert_eq "$RC" 1 "39. secret-bearing config error exits RED (1)"
+for leaked in SuperSecret123 abcDEFghiJKL012345678 SECRETVALUE1234567890; do
+  assert_not_contains "$(cat "$LOG")" "$leaked" "39. the DSN/header/value '$leaked' is NOT published"
+  assert_not_contains "$OUT" "$leaked" "39. the DSN/header/value '$leaked' is NOT logged"
+done
+assert_match "$OUT" "<redacted>" "39. the redaction marker is present"
+
+# ── 40. the purge failure body is redacted ────────────────────────────────
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_STATUS_BODY="$(status_body true null null)"
+export STUB_SWEEP_BODY='{"status":"backed_up","teams_backed_up":1}'
+export STUB_PURGE_CODE=500
+export STUB_PURGE_BODY='{"status":"error","detail":"mirror misconfig with key TESTONLYTOKENAbCdEfGhIjKlMnOpQrSt"}'
+run_driver
+assert_eq "$RC" 1 "40. a purge failure is RED (1)"
+assert_not_contains "$(cat "$LOG")" "TESTONLYTOKENAbCdEfGhIjKlMnOpQrSt" "40. the purge body secret is NOT published"
+
+# ── 41. storage_error while ENABLED is loud and blocks R2_DOWN self-heal ───
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_STATUS_BODY="$(status_body true null '"heartbeat read: boom"')"
+export STUB_SWEEP_BODY='{"status":"backed_up","teams_backed_up":1}'
+export GH_ISSUE_R2_DOWN=88
+run_driver
+assert_eq "$RC" 1 "41. storage_error while enabled exits RED (1)"
+assert_match "$(cat "$LOG")" "AWS put-object key=ops/alerts/R2_DOWN/global.json" "41. storage_error while enabled records R2_DOWN"
+assert_not_match "$(cat "$LOG")" "GH PATCH .*/issues/88" "41. R2_DOWN is NOT closed while storage_error is set"
+
+# ── 42. no_work with graph_totals.backed_up>0 is not a coverage gap ───────
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_STATUS_BODY="$(status_body true null null)"
+export STUB_SWEEP_BODY='{"status":"no_work","teams_backed_up":0,"graph_totals":{"attempted":2,"backed_up":1,"failed":1}}'
+run_driver
+assert_eq "$RC" 0 "42. a custom-graph backup is not a 0-coverage outage"
+assert_not_match "$(cat "$LOG")" "GH POST .*/issues .*SWEEP_NO_COVERAGE" "42. no false SWEEP_NO_COVERAGE"
+
+# ── 43. APP_DOWN is RED (any filing is RED) ──────────────────────────────
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export SIMULATE_APP_DOWN=true
+run_driver
+assert_eq "$RC" 1 "43. APP_DOWN exits RED (1)"
+assert_filed "$(cat "$LOG")" APP_DOWN "43. APP_DOWN is filed"
+
+# ── 44. an index read failure is unmeasured, not "no index" ──────────────
+# STUB_INDEX_FAIL makes the classification-index get-object fail with a
+# non-404 error while the legacy-flat listing succeeds.
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_FLAT_LIST='[["backups/teamA/2024/dump.enc","2024-01-01T00:00:00Z"]]'
+export STUB_INDEX_FAIL=1
+export STUB_STATUS_BODY="$(status_body false null null)"
+run_driver
+assert_eq "$RC" 1 "44. an unreadable flat index while OFF exits RED (1)"
+assert_contains "$OUT" "legacy-flat index read FAILED" "44. the failed index read is surfaced"
+assert_filed "$(cat "$LOG")" SWEEP_OFF_STALE "44. unreadable index is unmeasured → no confirmed pause"
+
+# ── 45. a measured-fresh off pool resolves a stale R2_DOWN ────────────────
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_STATUS_BODY="$(status_body false null null)"
+export GH_ISSUE_R2_DOWN=88
+run_driver
+assert_eq "$RC" 0 "45. recovered storage exits 0"
+assert_match "$(cat "$LOG")" "GH PATCH .*/issues/88" "45. R2_DOWN self-heals once storage answers while OFF"
 
 echo ""
 echo "registry-cron.test.sh: $PASS passed, $FAIL failed"

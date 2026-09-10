@@ -19,8 +19,9 @@
 #   4b. enabled-but-nothing — a sweep that backed up 0 teams while the R2 pool
 #      holds team prefixes, or while the pool cannot be measured →
 #      SWEEP_NO_COVERAGE, job red (#2796/#2823)
-#   5. POST /backups/purge + /reconcile ride-along (skipped on 202; #2304 purge
-#      erases expired trash on the hourly cadence — wired by #2317)
+#   5. POST /backups/purge + /reconcile ride-along (skipped when the sweep
+#      reported already_running; #2304 purge erases expired trash on the hourly
+#      cadence — wired by #2317)
 #   6. POST /driver/heartbeat
 #   7. self-heal: close an incident only on the evidence that proves it gone —
 #      APP_DOWN / resolved SWEEP_CONFIG_ERROR / SWEEP_OFF_STALE on a completed
@@ -48,24 +49,47 @@ export AWS_DEFAULT_REGION="${AWS_DEFAULT_REGION:-auto}"
 
 log() { echo "[backup-driver] $*"; }
 fail() { echo "[backup-driver] ERROR: $*" >&2; }
+# #2796 (review guidance P2-3): the job must be RED whenever the pipeline is
+# broken — i.e. whenever an incident was filed this run, not only on the four
+# kill-switch/no-coverage states. `file_alert` sets LOUD and every terminal
+# exit goes through finish(). Silent ⟺ nothing was filed this run.
+LOUD=0
+finish() {
+  if [ "${LOUD:-0}" = "1" ]; then
+    log "loud run: an incident was filed — exiting RED"
+    exit 1
+  fi
+  exit 0
+}
 
 # ── #2796 (review R2/R4): publication redaction ─────────────────────────────
-# The driver PUBLISHES config_error/storage_error into a public GitHub issue +
-# Telegram, and app error strings can embed secret material (historically
-# `... must be base64 (got '<key prefix>'...)`; the source now emits a
-# fingerprint, see tortoise/backup_config.py). Scrub quoted tokens, long
-# base64-ish runs and filesystem paths before publishing — defence in depth for
-# any other module's error text.
+# The driver PUBLISHES config_error/storage_error/last_sweep into a public
+# GitHub issue + Telegram, and app error strings can embed secret material
+# (historically `... must be base64 (got '<key prefix>'...)`; the source now
+# emits a fingerprint, see tortoise/backup_config.py). Scrub credential SHAPES.
+#
+# Review round 3: the previous blanket `"[^"]{4,}"` rule redacted every quoted
+# JSON KEY (destroying the diagnostic payload and mangling the JSON) while
+# still missing DSN/URI passwords, Basic/Bearer headers and short tokens. The
+# rules now target credential shapes and preserve lowercase JSON keys/values:
+#   1. URI userinfo password     scheme://user:PASSWORD@host
+#   2. Authorization header      Basic|Bearer TOKEN
+#   3. sensitive-key assignment  *_KEY=value, "api_key":"value", token: value
+#   4. quoted token-ish value    contains A-Z/0-9/+-/=., so `last_sweep_at`
+#                                (lowercase) survives but 'AbCdEfGh' does not
+#   5. long quoted lowercase run ≥20 (an all-lowercase secret)
+#   6. bare token-like run ≥20 (ghp_…, base64, hex) — 20 rather than 24 after
+#                                 the security review showed a 22-char token
+#                                 escaping; lowercase JSON keys are all <20
+#   7. filesystem path
 redact() { # text -> text safe for a public issue body / public Actions log
-  # Review R4/Security: the previous rules were bypassable (a GitHub PAT
-  # `ghp_…` contains `_`, so the 40-char run never matched; the double-quote
-  # rule needed 16 chars while the single-quote rule needed 4; sed is
-  # line-oriented and `jq -r` unescapes \n). Normalise to one line first, use
-  # ONE quote threshold, and widen the bare-run class to include `_`/`-`.
   printf '%s' "$1" | tr '\n\r\t' '   ' | sed -E \
-    -e "s/'[^']{4,}'/'<redacted>'/g" \
-    -e 's/"[^"]{4,}"/"<redacted>"/g' \
-    -e 's/[A-Za-z0-9+\/_.=-]{24,}/<redacted>/g' \
+    -e 's#([A-Za-z][A-Za-z0-9+.-]*://[^/@[:space:]:]+:)[^/@[:space:]]+#\1<redacted>#g' \
+    -e 's/(Basic|Bearer)[[:space:]]+[A-Za-z0-9+/=_.-]+/\1 <redacted>/Ig' \
+    -e 's/([A-Za-z0-9_]*(KEY|TOKEN|SECRET|PASSWORD|PASSWD|PAT|AUTH|CREDENTIAL)[A-Za-z0-9_]*[[:space:]]*[=:][[:space:]]*)["'\''"]?[^[:space:]"'\''"]+/\1<redacted>/Ig' \
+    -e 's/["'\''"]([A-Za-z0-9+/=_.-]*[A-Z0-9+/=.-][A-Za-z0-9+/=_.-]*)["'\''"]/"<redacted>"/g' \
+    -e 's/["'\''"]([a-z0-9+/=_.-]{20,})["'\''"]/"<redacted>"/g' \
+    -e 's/[A-Za-z0-9+/_.=-]{20,}/<redacted>/g' \
     -e 's#(/[A-Za-z0-9._-]+){3,}#<path>#g' || true
 }
 redact_truncate() { # text max_chars — redact BEFORE truncating (a secret must
@@ -175,6 +199,7 @@ telegram() { # text
 }
 file_alert() { # kind title body dedup_id
   local kind="$1" title="$2" body="$3" id="$4" num="" tmp="" issue_num=""
+  LOUD=1
   tmp="$(mktemp)"
   printf '{"kind":"%s","issue_number":null,"filed_at":"%s"}' "$kind" "$(date -u +%FT%TZ)" > "$tmp"
   if r2_put_once "ops/alerts/${kind}/${id}.json" "$tmp"; then
@@ -232,6 +257,9 @@ R2_OK=1
 # (enabled but 0 teams backed up) below.
 POOL_STALE=0        # a team's newest default archive is older than DRIVER_DOWN_MIN
 R2_TEAM_COUNT=0     # team prefixes present under backups/
+# #2796 (review P1): `aws --output text` renders a LIST as ONE tab-separated
+# line, so a bare `while read` measured only the LAST team. Split on tabs first
+# (process substitution keeps the current shell, so the counters propagate).
 # #2796 (review R5): a FAILED listing is UNKNOWN, not empty. Without this flag
 # an R2 read that lacks ListObjects (or a transient failure) would look like
 # "pool empty" — suppressing SWEEP_NO_COVERAGE and reporting a stale pool as
@@ -306,7 +334,18 @@ if [ "$R2_OK" = "1" ]; then
         continue
       fi
       if [ -n "$flat_list" ] && [ "$flat_list" != "[]" ]; then
-        idx="$(r2_get "ops/legacy-flat-index/${team}.json")"
+        # Review P2 (bug-deep): a FAILED read of the classification index is
+        # NOT "no index" — a custom flat could then be misread as a default
+        # dump and mask a stale default. Only a definitive absence
+        # (NoSuchKey/404) means the pre-#2370 parity.
+        idx=""; idx_rc=0
+        idx="$(aws s3api get-object --endpoint-url "$R2_ENDPOINT" --bucket "$R2_BUCKET" \
+          --key "ops/legacy-flat-index/${team}.json" /dev/stdout 2>/tmp/dr-idx-err)" || idx_rc=$?
+        if [ "$idx_rc" != "0" ] && ! grep -qiE 'NoSuchKey|404|Not Found' /tmp/dr-idx-err 2>/dev/null; then
+          log "team ${team}: legacy-flat index read FAILED — freshness UNKNOWN"
+          R2_LIST_OK=0
+          continue
+        fi
         if [ -n "$idx" ] && [ "$(printf '%s' "$idx" | jq -r 'type' 2>/dev/null)" = "object" ]; then
           flat_newest="$(printf '%s' "$flat_list" | jq -r --argjson idx "$idx" \
             '[.[] | select((($idx[(.[0] | split("/")[1] + "/" + split("/")[2])].graph_id) // "") == "" or ($idx[(.[0] | split("/")[1] + "/" + split("/")[2])].graph_id) == "default") | .[1]] | max // empty' 2>/dev/null || true)"
@@ -346,7 +385,7 @@ if [ "$R2_OK" = "1" ]; then
         log "team ${team}: team prefix present but no default archive — treating pool as stale"
         POOL_STALE=1
       fi
-    done <<< "$TEAMS"
+    done < <(printf '%s\n' "$TEAMS" | tr '\t' '\n')
   fi
 fi
 
@@ -361,13 +400,15 @@ else
 fi
 
 if [ -z "$STATUS" ]; then
-  # connect/DNS/timeout/5xx-without-app-body → APP_DOWN (exit 0: the issue is
-  # the contract; avoids noisy Actions-failure emails). The direct-R2 STALE
+  # connect/DNS/timeout/5xx-without-app-body → APP_DOWN. The direct-R2 STALE
   # filings above already ran, so the app-down case still surfaces staleness.
+  # #2796 (review P2-3): an app-down run is a BROKEN pipeline — file the
+  # incident and go RED (finish reads the LOUD flag). The old exit 0 is what
+  # let a 31-day outage hide behind 40 green runs.
   log "app unreachable — filing APP_DOWN"
   file_alert APP_DOWN "[DR] APP_DOWN — app unreachable" \
     "The hosted API did not answer /status. Runbook: docs/ops/registry-backup-dr.md" "global"
-  exit 0
+  finish
 fi
 
 # #2796 (review R5): require a real boolean. A missing/mistyped .enabled
@@ -435,8 +476,23 @@ if [ "$ENABLED" != "true" ]; then
     exit 1
   fi
   resolve_global SWEEP_OFF_STALE "Resolved — the R2 pool is measured fresh."
+  # Review P2 (guidance): the app-storage R2_DOWN can only be filed from a
+  # disabled path, so without this it would stay open (and its 412 dedup object
+  # would swallow the next real recurrence) even after storage recovered.
+  if [ "$R2_OK" = "1" ] && [ -z "$STORAGE_ERR" ]; then
+    resolve_global R2_DOWN "Resolved — storage answered (R2 preflight OK, storage_error clear)."
+  fi
   log "kill-switch: backups deliberately disabled (measured-fresh pool) — skipping"
-  exit 0
+  finish
+fi
+
+# ── 1b. storage error while ENABLED (review P3) ────────────────────────────
+# `storage_error` was only filed from the disabled path; an enabled run that
+# still reports one is the same broken storage (the sweep is about to fail), so
+# surface it here too. §6 must not self-heal it while it is set.
+if [ -n "$STORAGE_ERR" ]; then
+  log "status reports a storage error while enabled — filing R2_DOWN (job red)"
+  file_alert R2_DOWN "[DR] R2_DOWN — app storage unavailable" "status.storage_error: $STORAGE_ERR_SAFE" "global"
 fi
 
 # ── 2. watcher supervision (WATCHER_DOWN when the daemon is dead) ────────────
@@ -469,7 +525,14 @@ RUN="$(curl -sS -m 600 -X POST -H "Authorization: Bearer $KEY" \
   -H "Content-Type: application/json" -d '{}' \
   "${API}/v1/internal/backups/sweep" 2>/dev/null || true)"
 RUN_STATUS="$(printf '%s' "$RUN" | jq -r '.status // "error"' 2>/dev/null || echo error)"
-log "sweep status: $RUN_STATUS"
+# Security review: RUN_STATUS is app-controlled — never publish it verbatim.
+RUN_STATUS_SAFE="$(redact "$RUN_STATUS")"
+# Review P2 (bug-deep): `teams_backed_up` counts only DEFAULT-graph backups, so
+# a team whose default is legitimately empty while a CUSTOM graph archived
+# reads as 0. `graph_totals.backed_up` is the real coverage signal.
+GRAPHS_BACKED_UP="$(printf '%s' "$RUN" | jq -r '.graph_totals.backed_up // 0' 2>/dev/null || echo 0)"
+[ -n "$GRAPHS_BACKED_UP" ] || GRAPHS_BACKED_UP=0
+log "sweep status: $RUN_STATUS_SAFE"
 
 # ── 4b. enabled-but-backing-up-nothing (#2823 shape, #2796) ─────────────────
 # A sweep that backed up ZERO teams while the R2 pool already holds team
@@ -503,17 +566,24 @@ case "$RUN_STATUS" in
       else
         log "sweep lock held; last real sweep ${last_age_min}m ago — healthy"
       fi
-    elif [ "$R2_LIST_OK" = "1" ] && [ "${R2_TEAM_COUNT:-0}" -gt 0 ]; then
-      log "sweep lock held but /status carries no usable last_sweep_at while the pool holds ${R2_TEAM_COUNT} team prefix(es) — filing SWEEP_NO_COVERAGE (job red)"
+    elif [ "$R2_LIST_OK" != "1" ] || [ "${R2_TEAM_COUNT:-0}" -gt 0 ]; then
+      # An UNMEASURED pool is never "empty" (review P1, three reviewers):
+      # requiring a MEASURED pool here let a stuck lock + failed listing exit 0
+      # silently — the exact #2790 class this PR exists to close.
+      log "sweep lock held, no usable last_sweep_at, and the pool is not measured-empty (R2_LIST_OK=${R2_LIST_OK}, ${R2_TEAM_COUNT} prefix(es)) — filing SWEEP_NO_COVERAGE (job red)"
       file_alert SWEEP_NO_COVERAGE "[DR] SWEEP_NO_COVERAGE — sweep lock unverifiable" \
-        "the app reported already_running (lock held) but /status carries no usable last_sweep.last_sweep_at (the sweep never completed, or ops/state.json is missing) while the R2 pool holds ${R2_TEAM_COUNT} team prefix(es). The lock state cannot be verified — backups may not be running." "global"
+        "the app reported already_running (lock held) but /status carries no usable last_sweep.last_sweep_at (the sweep never completed, or ops/state.json is missing), and the R2 pool is NOT measured-empty (R2_LIST_OK=${R2_LIST_OK}, ${R2_TEAM_COUNT} team prefix(es)). The lock state cannot be verified — backups may not be running. Check the app's sweep lock and the R2 access key's ListObjects permission." "global"
       NO_COVERAGE=1
     else
-      log "sweep lock held; no usable last_sweep_at and the pool is empty/unmeasured — cannot classify, leaving silent"
+      log "sweep lock held; no usable last_sweep_at and the pool is measured empty — leaving silent"
     fi
     ;;
   no_teams|no_eligible_teams|no_work)
-    if [ "$R2_LIST_OK" != "1" ]; then
+    # Review P2 (bug-deep): a team whose DEFAULT graph is legitimately empty
+    # while a CUSTOM graph archived reads as 0 teams but real coverage exists.
+    if [ "${GRAPHS_BACKED_UP:-0}" -gt 0 ]; then
+      log "sweep status=$RUN_STATUS_SAFE but ${GRAPHS_BACKED_UP} graph(s) were backed up — coverage is not zero"
+    elif [ "$R2_LIST_OK" != "1" ]; then
       # Unknown ≠ empty (review R5): the pool could hold teams we cannot see.
       log "sweep backed up 0 teams (status=$RUN_STATUS) and the R2 pool could NOT be measured — filing SWEEP_NO_COVERAGE (job red)"
       file_alert SWEEP_NO_COVERAGE "[DR] SWEEP_NO_COVERAGE — enabled, 0 teams, pool unmeasurable" \
@@ -532,9 +602,9 @@ case "$RUN_STATUS" in
     # Any other body status (error / enum_failed / unrecognized) means the
     # sweep tried and failed — loud REGARDLESS of pool state (the 0-team
     # envelope applies only to the enumerated-empty statuses above).
-    log "sweep did not back up (status=$RUN_STATUS) — filing SWEEP_NO_COVERAGE (job red)"
+    log "sweep did not back up (status=$RUN_STATUS_SAFE) — filing SWEEP_NO_COVERAGE (job red)"
     file_alert SWEEP_NO_COVERAGE "[DR] SWEEP_NO_COVERAGE — enabled but the sweep backed up nothing" \
-      "sweep status=$(redact "$RUN_STATUS") (raw: $(redact_truncate "$RUN" 300)). The sweep is enabled but backed up no team — backups are NOT running." "global"
+      "sweep status=${RUN_STATUS_SAFE} (raw: $(redact_truncate "$RUN" 300)). The sweep is enabled but backed up no team — backups are NOT running." "global"
     NO_COVERAGE=1
     ;;
 esac
@@ -558,10 +628,13 @@ if [ "$RUN_STATUS" != "already_running" ]; then
     "${API}/v1/internal/backups/purge" 2>/dev/null || echo '000')"
   PURGE_BODY="$(cat /tmp/purge-resp.json 2>/dev/null || true)"
   PURGE_ST="$(printf '%s' "$PURGE_BODY" | jq -r '.status // "error"' 2>/dev/null || echo error)"
+  PURGE_ST_SAFE="$(redact "$PURGE_ST")"
   if [ "$PURGE_CODE" = "200" ] && { [ "$PURGE_ST" = "ok" ] || [ "$PURGE_ST" = "already_running" ]; }; then
-    log "purge ride-along OK (status=$PURGE_ST teams_purged=$(printf '%s' "$PURGE_BODY" | jq -r '.teams_purged // 0'))"
+    log "purge ride-along OK (status=$PURGE_ST_SAFE teams_purged=$(printf '%s' "$PURGE_BODY" | jq -r '.teams_purged // 0'))"
   else
-    log "purge ride-along FAILED (HTTP $PURGE_CODE status=$PURGE_ST): $(printf '%s' "$PURGE_BODY" | head -c 300)"
+    # Security review: the purge body is app-controlled and can carry a raw
+    # exception string — redact it like the sweep body (it goes to a public log).
+    log "purge ride-along FAILED (HTTP $PURGE_CODE status=$PURGE_ST_SAFE): $(redact_truncate "$PURGE_BODY" 300)"
     PURGE_FAILED=1
   fi
   RECONCILE_CODE="$(curl -sS -o /dev/null -w '%{http_code}' -m 120 -X POST \
@@ -582,7 +655,7 @@ fi
 # response must not be interpolated into raw JSON.
 r2_ok=$([ "$R2_OK" = "1" ] && echo true || echo false)
 curl -sS -m 20 -X POST -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
-  -d "$(jq -nc --arg rid "$(date +%s)" --arg s "$RUN_STATUS" --argjson ok "$r2_ok" '{run_id:$rid,status:$s,r2_ok:$ok}')" \
+  -d "$(jq -nc --arg rid "$(date +%s)" --arg s "$RUN_STATUS_SAFE" --argjson ok "$r2_ok" '{run_id:$rid,status:$s,r2_ok:$ok}')" \
   "${API}/v1/internal/driver/heartbeat" >/dev/null 2>&1 || true
 
 # ── 6. self-heal ────────────────────────────────────────────────────────────
@@ -605,16 +678,17 @@ case "$RUN_STATUS" in
 esac
 if [ "$SWEEP_COMPLETED" = "1" ]; then
   for kind in APP_DOWN SWEEP_CONFIG_ERROR SWEEP_OFF_STALE; do
-    resolve_global "$kind" "Resolved — the app answered (/status + sweep completed, status=$RUN_STATUS)."
+    resolve_global "$kind" "Resolved — the app answered (/status + sweep completed, status=$RUN_STATUS_SAFE)."
   done
   # R2_DOWN is cleared only when the driver's OWN storage probe succeeded this
   # run (review R1/R3): a sweep that "completes" with R2_OK=0 (head-bucket
   # failed) must not close the R2_DOWN it just filed — that would re-file and
-  # re-close on every run forever.
-  if [ "$R2_OK" = "1" ]; then
-    resolve_global R2_DOWN "Resolved — the storage answered (R2 preflight + sweep completed, status=$RUN_STATUS)."
+  # re-close on every run forever. Review R3: a non-null storage_error also
+  # proves the app-side storage is still broken — never close on that run.
+  if [ "$R2_OK" = "1" ] && [ -z "$STORAGE_ERR" ]; then
+    resolve_global R2_DOWN "Resolved — the storage answered (R2 preflight + sweep completed, status=$RUN_STATUS_SAFE)."
   else
-    log "self-heal: R2 preflight failed this run — leaving R2_DOWN open"
+    log "self-heal: R2/storage evidence is not clean this run — leaving R2_DOWN open"
   fi
 fi
 # WATCHER_DOWN self-heals only on WATCHER EVIDENCE (a real boolean .watcher
@@ -641,8 +715,8 @@ if [ "$RECONCILE_FAILED" = "1" ]; then
 fi
 
 if [ "$NO_COVERAGE" = "1" ]; then
-  fail "sweep backed up nothing (status=$RUN_STATUS) — see the SWEEP_NO_COVERAGE incident"
+  fail "sweep backed up nothing (status=$RUN_STATUS_SAFE) — see the SWEEP_NO_COVERAGE incident"
   exit 1
 fi
 log "done"
-exit 0
+finish
