@@ -107,17 +107,40 @@ def verify_digest(path: Path, *, expected: str = CR_SHA256) -> None:
             f"and re-download, or pin the new digest deliberately")
 
 
-def fetch_cr_parquet(*, dest_dir: Path | None = None,
-                     timeout: int = 120) -> Path:
-    """Fetch the pinned CR parquet, verifying its digest before returning it."""
+def _fetch_bytes(url: str, timeout: int) -> bytes:
+    """Fetch the published file (single seam, so tests can substitute it)."""
+    req = urllib.request.Request(
+        url, headers={"User-Agent": "tortoise-mabench-parity"})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return resp.read()
+
+
+def fetch_cr_parquet(*, dest_dir: Path | None = None, timeout: int = 120,
+                     expected: str = CR_SHA256) -> Path:
+    """Fetch the pinned CR parquet, verifying its digest before publishing it.
+
+    The file is written to a ``.part`` sibling and only moved into the cache
+    after the digest check passes, so an interrupted download can never leave
+    a half-file that looks like a cached dataset. A cached file that fails
+    verification is deleted and re-fetched ONCE (a truncated cache is
+    recoverable); a fresh download that also fails raises — a wrong pin is a
+    deliberate act, never something to paper over.
+    """
     target = (dest_dir or cache_dir()) / Path(CR_FILE).name
-    if not target.is_file():
-        req = urllib.request.Request(
-            remote_url(), headers={"User-Agent": "tortoise-mabench-parity"})
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            data = resp.read()
-        target.write_bytes(data)
-    verify_digest(target)
+    if target.is_file():
+        try:
+            verify_digest(target, expected=expected)
+            return target
+        except DatasetDigestError:
+            target.unlink()  # corrupt cache: re-fetch once below
+    part = target.with_name(target.name + ".part")
+    try:
+        part.write_bytes(_fetch_bytes(remote_url(), timeout))
+        verify_digest(part, expected=expected)
+        os.replace(part, target)
+    finally:
+        if part.exists():
+            part.unlink()
     return target
 
 
@@ -153,6 +176,13 @@ def load_cr_items(config: str, *, path: Path | None = None
         raise MabenchError(
             f"unknown CR config {config!r}; pinned configs: "
             f"{', '.join(CR_CONFIGS)}")
+    # Content identity FIRST, reader second: the file must be the pinned one
+    # whether it came from the cache or from the caller (a caller-supplied
+    # file is not exempt from the pin — an unverified corpus must never be
+    # scored, however it arrived).
+    src = path or fetch_cr_parquet()
+    verify_digest(src)
+
     try:
         import pyarrow.parquet as pq
     except Exception as e:  # pragma: no cover - import guard, not a metric
@@ -160,9 +190,6 @@ def load_cr_items(config: str, *, path: Path | None = None
             f"MemoryAgentBench CR needs the parquet reader: install the "
             f"parity extra (uv sync --extra parity). ({e})") from e
 
-    src = path or fetch_cr_parquet()
-    if path is None:
-        verify_digest(src)
     table = pq.read_table(src)
     items: list[CrItem] = []
     for i in range(table.num_rows):
@@ -246,14 +273,33 @@ def parse_output(output_text: str, answer_prefix: str = "Answer:") -> str | None
     return None
 
 
+def score_item(output: str, accepted: tuple[str, ...]) -> bool:
+    """Score ONE model output the way the benchmark does.
+
+    Verbatim port of ``default_post_process`` (``utils/eval_other_utils.py``):
+    the metric is computed on the RAW output, then — when the parse yields
+    something — on the parsed answer as well, and the best of the two wins.
+    Scoring only the parsed text is NOT equivalent: an answer stated on a
+    later line without the ``Answer:`` prefix fails the parse but matches the
+    raw output, and the official harness counts it CORRECT.
+    """
+    golds = list(accepted)
+    best = score_max_over_ground_truths(output, golds)
+    parsed = parse_output(output)
+    if parsed is not None and parsed != output:
+        best = best or score_max_over_ground_truths(parsed, golds)
+    return best
+
+
 def score_cr(predictions: dict[str, str], items: tuple[CrItem, ...]
              ) -> tuple[float, int]:
-    """Accuracy over the items, using the benchmark's binary substring metric.
+    """Accuracy over the items, using the benchmark's own binary metric.
 
-    Returns ``(accuracy, n)``. An item with no prediction — or one whose
-    output yields no answer at all — is scored WRONG (the benchmark counts it
-    against the system), never skipped, so ``n`` stays the full item count and
-    the accuracy cannot be inflated by dropping the hard cases.
+    Returns ``(accuracy, n)`` with ``n`` ALWAYS the full item count: an item
+    the arm produced no output for is scored wrong rather than skipped, so
+    the accuracy cannot be inflated by silently dropping unanswered hard
+    cases. (The official harness always has an output to score; a missing one
+    is our integration's failure and is charged as one.)
     """
     if not items:
         raise MabenchError("no items to score — refusing an empty measurement")
@@ -262,9 +308,6 @@ def score_cr(predictions: dict[str, str], items: tuple[CrItem, ...]
         raw = predictions.get(item.qa_pair_id)
         if raw is None:
             continue
-        parsed = parse_output(raw)
-        if parsed is None:
-            continue
-        if score_max_over_ground_truths(parsed, list(item.accepted)):
+        if score_item(raw, item.accepted):
             correct += 1
     return correct / len(items), len(items)

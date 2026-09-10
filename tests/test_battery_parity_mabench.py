@@ -33,6 +33,7 @@ from battery.parity.mabench import (
     normalize_answer,
     parse_output,
     score_cr,
+    score_item,
     score_max_over_ground_truths,
     substring_exact_match_score,
     verify_digest,
@@ -75,8 +76,21 @@ class TestMissingReaderFailsClosed:
             return real_import(name, *a, **kw)
 
         monkeypatch.setattr(builtins, "__import__", _no_pyarrow)
+        # the digest check runs first by design (content identity before
+        # reader); isolate the reader-missing path here
+        import battery.parity.mabench as mabench
+        monkeypatch.setattr(mabench, "verify_digest", lambda *a, **k: None)
         with pytest.raises(PyarrowUnavailable, match="parity extra"):
             load_cr_items("factconsolidation_sh_6k", path=tmp_path / "x.parquet")
+
+    def test_explicit_path_is_still_verified(self, tmp_path):
+        """A caller-supplied file is not exempt from the pin: reviewing P2
+        (#2842) — an unverified corpus must never be scored, however it
+        arrived."""
+        bogus = tmp_path / "bogus.parquet"
+        bogus.write_bytes(b"not the pinned dataset")
+        with pytest.raises(DatasetDigestError, match="digest mismatch"):
+            load_cr_items("factconsolidation_sh_6k", path=bogus)
 
     def test_unknown_config_refuses(self):
         with pytest.raises(MabenchError, match="unknown CR config"):
@@ -141,9 +155,22 @@ class TestScoreCr:
         acc, n = score_cr({"q1": "Answer: Belgium"}, self._items())
         assert (acc, n) == (0.5, 2)
 
-    def test_unparseable_output_counts_as_wrong(self):
-        acc, n = score_cr({"q1": "", "q2": "Answer: Rodez"}, self._items())
+    def test_output_without_the_final_answer_counts_as_wrong(self):
+        acc, n = score_cr({"q1": "I have no idea", "q2": "Answer: Rodez"},
+                          self._items())
         assert (acc, n) == (0.5, 2)
+
+    def test_raw_output_is_scored_like_the_benchmark_does(self):
+        """Review P1 (#2842): the official ``default_post_process`` scores the
+        RAW output too and takes the best of raw/parsed. Scoring only the
+        parsed text under-rates an answer stated without the ``Answer:``
+        prefix — a systematic, non-comparable difference."""
+        assert score_item("Reasoning first.\nThe final answer is Belgium.",
+                          ("Belgium",)) is True
+        assert score_cr({"q1": "Reasoning.\nThe final answer is Belgium."},
+                        self._items()[:1]) == (1.0, 1)
+        # and the parsed path still works when the raw does not contain gold
+        assert score_item("Answer: Belgium", ("Belgium",)) is True
 
     def test_no_items_refuses(self):
         with pytest.raises(MabenchError, match="no items to score"):
@@ -170,3 +197,42 @@ def test_published_dataset_downloads_and_verifies(tmp_path):
     assert len(items) == 100, "the pinned file carries 100 QA pairs per config"
     assert all(i.accepted for i in items)
     assert all(i.config == "factconsolidation_sh_6k" for i in items)
+
+
+class TestAtomicFetch:
+    """Review P2 (#2842): a partial download must never become the cache, and
+    a corrupt cache must be recoverable without manual deletion."""
+
+    def test_corrupt_cache_is_refetched_once(self, tmp_path, monkeypatch):
+        import battery.parity.mabench as mabench
+
+        good = b"the pinned bytes"
+        digest = hashlib.sha256(good).hexdigest()
+        (tmp_path / "Conflict_Resolution-00000-of-00001.parquet").write_bytes(
+            b"truncated junk")
+        monkeypatch.setattr(mabench, "_fetch_bytes",
+                            lambda url, timeout: good)
+        src = mabench.fetch_cr_parquet(dest_dir=tmp_path, expected=digest)
+        assert src.read_bytes() == good
+
+    def test_bad_download_never_lands_in_cache(self, tmp_path, monkeypatch):
+        import battery.parity.mabench as mabench
+
+        monkeypatch.setattr(mabench, "_fetch_bytes",
+                            lambda url, timeout: b"wrong bytes")
+        with pytest.raises(DatasetDigestError):
+            mabench.fetch_cr_parquet(dest_dir=tmp_path)
+        assert not (tmp_path / "Conflict_Resolution-00000-of-00001.parquet").exists()
+        assert not list(tmp_path.glob("*.part")), "no partial file left behind"
+
+    def test_verified_cache_is_reused(self, tmp_path, monkeypatch):
+        import battery.parity.mabench as mabench
+
+        good = b"the pinned bytes"
+        digest = hashlib.sha256(good).hexdigest()
+        (tmp_path / "Conflict_Resolution-00000-of-00001.parquet").write_bytes(good)
+        called = []
+        monkeypatch.setattr(mabench, "_fetch_bytes",
+                            lambda url, timeout: called.append(1) or b"nope")
+        src = mabench.fetch_cr_parquet(dest_dir=tmp_path, expected=digest)
+        assert src.read_bytes() == good and not called, "cache must not be re-fetched"
