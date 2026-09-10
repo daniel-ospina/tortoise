@@ -8,8 +8,8 @@ issue: 596
 ownedBy: epistemic-team
 subjects:
   team: epistemic-team
-aboutObjects:
-- tortoise-hosted-platform
+aboutSubjects: epistemic-team
+aboutObjects: tortoise-hosted-platform
 ---
 
 # Registry/Knowledge-Graph Backup DR — Runbook (#596)
@@ -274,35 +274,63 @@ jurisdiction-restricted buckets require the `cf-r2-jurisdiction` header.)
 ## Driver state taxonomy — disabled ≠ healthy (#2796)
 
 The driver (`.github/scripts/registry-cron.sh`) classifies `/status` plus its
-app-independent direct-R2 leg into **four** states. Only a *deliberately* off
-sweep is silent; the other three file a deduped `dr:backup` incident **and**
+app-independent direct-R2 leg into **five** states. Only a *deliberately* off
+sweep is silent; the other four file a deduped `dr:backup` incident **and**
 make the hourly job RED, so a broken pipeline cannot stay green for weeks (the
 31-day #2790 outage hid behind 40 consecutive `success` runs).
 
 | State | Detection | Driver behavior |
 |---|---|---|
-| deliberate-off | `enabled:false`, no `config_error`/`storage_error`, pool fresh | silent `exit 0` — a real operator pause must not page |
+| deliberate-off | `enabled:false`, no `config_error`/`storage_error`, pool **measured** fresh | silent `exit 0` — a real operator pause must not page |
 | off-because-broken | `enabled:false` + non-null `config_error` | files **SWEEP_CONFIG_ERROR**, job RED |
-| off-while-pool-stale | `enabled:false`, no config error, oldest `backups/{team}/default/` archive > `BACKUP_DRIVER_DOWN_THRESHOLD_MIN` (240) | files **SWEEP_OFF_STALE**, job RED (the per-team STALE incident still files) |
-| enabled-but-backing-up-nothing | `enabled:true` and the sweep backed up 0 teams (`no_teams` / `no_eligible_teams` / `no_work` / `enum_failed` / `error`) while the R2 pool holds ≥1 team prefix | files **SWEEP_NO_COVERAGE**, job RED |
+| off-because-storage-down | `enabled:false` + non-null `storage_error` | files **R2_DOWN**, job RED |
+| off-while-pool-stale | `enabled:false`, no config/storage error, a `backups/{team}/default/` archive older than `BACKUP_DRIVER_DOWN_THRESHOLD_MIN` (240) — or a team prefix with **no default archive at all** | files **SWEEP_OFF_STALE**, job RED (the per-team STALE incident still files) |
+| enabled-but-backing-up-nothing | `enabled:true` and the sweep backed up 0 teams (`no_teams` / `no_eligible_teams` / `no_work` / `enum_failed` / `error`) while the R2 pool holds ≥1 team prefix, **or while the pool cannot be measured** | files **SWEEP_NO_COVERAGE**, job RED |
+
+**Unknown ≠ empty (the dominant rule).** A failed `list-objects-v2` (or a
+bucket key without `ListObjects`) leaves the pool *unmeasured* — the driver
+then never reads it as fresh and never lets it silence the 0-team envelope. An
+unclassifiable `/status` (no boolean `.enabled`, or a non-JSON 200) fails
+**closed** as SWEEP_NO_COVERAGE rather than being read as a pause, and a
+`202` sweep lock held longer than the driver-down window is SWEEP_NO_COVERAGE
+too (a stuck lock is not a running sweep).
 
 **0-team false-positive envelope:** when the sweep finds 0 teams **and the R2
-pool is also empty**, the chronic pre-beta state is assumed and nothing is
-filed. Both surfaces must be empty before silence is allowed; a mismatch is
-loud.
+pool is measured empty**, the chronic pre-beta state is assumed and nothing is
+filed. Both surfaces must be empty before silence is allowed; a mismatch (or an
+unmeasured pool) is loud.
 
-**Self-heal is two-tier (#2411 + #2796):** `APP_DOWN`/`R2_DOWN` plus the
-resolved `SWEEP_CONFIG_ERROR`/`SWEEP_OFF_STALE` clear whenever `/status` + the
-sweep complete (the app and its storage answered). `WATCHER_DOWN` and
-`SWEEP_NO_COVERAGE` clear **only** on a run that actually backed up
-(`backed_up`/`degraded`) — an empty sweep says nothing about the in-process
-staleness daemon, and the pre-#2796 code wrongly closed a just-filed
-`WATCHER_DOWN` on a `no_teams` run.
+**Self-heal is evidence-tiered (#2411 + #2796):** `APP_DOWN` and the resolved
+`SWEEP_CONFIG_ERROR`/`SWEEP_OFF_STALE` clear when `/status` + the sweep complete
+(the app answered). `R2_DOWN` clears **only** when the driver's own
+`head-bucket` preflight succeeded this run — a sweep that "completes" with R2
+down must not close the `R2_DOWN` it just filed (that would re-file and
+re-close forever). `WATCHER_DOWN` clears on **watcher evidence** (a fresh
+`.watcher` heartbeat read this run), not on the sweep — a 0-team sweep says
+nothing about the in-process daemon. `SWEEP_NO_COVERAGE` clears **only** on a
+run that actually backed up (`backed_up`/`degraded`).
+
+**Dedup lifecycle:** incidents are create-once in R2
+(`ops/alerts/{kind}/{subject}.json`) with a GitHub-search fallback. A global
+incident exists under **both** `global.json` (driver) and `_.json` (the
+server-side `AlertStore`); resolve deletes **both**, so a recurrence is a new
+incident on either writer (#2844). Resolution is delete-to-resolve — the object
+is dropped so a recurring condition pages again instead of being swallowed. The
+412 create-race branch trusts the recorded R2 object (and its issue state) over
+a GitHub search, which can lag.
+
+**Publication redaction:** `config_error`/`storage_error` are published into a
+**public** GitHub issue + Telegram, and the app's error text can embed key
+material (e.g. `must be base64 (got '<key prefix>'...)`). The driver strips
+quoted tokens, long base64-ish runs and paths before filing.
 
 **Regression harness:** `bash .github/scripts/registry-cron.test.sh` (CI: the
 `backup-driver-scripts` job in `.github/workflows/ci.yml`). It stubs
-`aws`/`curl`/`date` and asserts all four states, the 0-team envelope, self-heal,
-and dedup recurrence/refresh.
+`aws`/`curl`/`date` and asserts all five states, the unmeasurable-pool rule,
+the 0-team envelope, the stuck-lock and unclassifiable-status failsafes,
+redaction, self-heal tiers, and dedup recurrence/refresh. (The driver carries
+the exec bit so the harness invokes it directly — a `$(bash script)` command
+substitution trips the agent worktree guard, #1484.)
 
 ## Alert taxonomy + triage
 | Kind | Meaning | Triage |
@@ -316,9 +344,9 @@ and dedup recurrence/refresh.
 | ALERTER_DOWN | daemon's GitHub PAT dead (`gh_ok: false`) | Rotate `DR_ISSUES_PAT` |
 | APP_DOWN | app unreachable from the driver | Fly health; cold-start OOM (#545) |
 | WATCHER_DOWN | watcher heartbeat stale (daemon dead) | Check app logs; restart |
-| SWEEP_CONFIG_ERROR | `enabled:false` **with** a non-null `config_error` — the sweep flag says "run" but `load_config()` raised (e.g. missing `REGISTRY_STREAM_KEY`). The pre-#2796 driver exited 0 here | Fix the Fly secret/config (`§REGISTRY_STREAM_KEY`); the next healthy run self-heals |
-| SWEEP_OFF_STALE | `enabled:false`, no config error, but the newest archive is older than `BACKUP_DRIVER_DOWN_THRESHOLD_MIN` (240m) — a disabled/paused sweep while the pool decays | Re-enable backups or declare a bounded pause; investigate why the flag is off |
-| SWEEP_NO_COVERAGE | `enabled:true` but the sweep backed up 0 teams while the R2 pool holds team prefixes — the #2823 empty-enumeration class (`no_teams`/`no_work`/`enum_failed`) | Inspect `last_sweep` on `/status`; the sweep enumerates 0 teams → #2823 / #2340 control-plane resolution |
+| SWEEP_CONFIG_ERROR | `enabled:false` **with** a non-null `config_error` — the sweep flag says "run" but `load_config()` raised (e.g. missing `REGISTRY_STREAM_KEY`). The pre-#2796 driver exited 0 here. Error text is redacted before filing | Fix the Fly secret/config (`§REGISTRY_STREAM_KEY`); the next healthy run self-heals |
+| SWEEP_OFF_STALE | `enabled:false`, no config/storage error, but a `backups/{team}/default/` archive is older than `BACKUP_DRIVER_DOWN_THRESHOLD_MIN` (240m) — or a team prefix has no default archive at all. A disabled/paused sweep while the pool decays | Re-enable backups or declare a bounded pause; investigate why the flag is off |
+| SWEEP_NO_COVERAGE | `enabled:true` but the sweep backed up 0 teams (the #2823 empty-enumeration class: `no_teams`/`no_work`/`enum_failed`/`error`), **or** the R2 pool could not be measured, **or** `/status` was unclassifiable, **or** a `202` sweep lock outlived `BACKUP_DRIVER_DOWN_THRESHOLD_MIN` | Inspect `last_sweep` on `/status`; the sweep enumerates 0 teams → #2823 / #2340 control-plane resolution |
 | LIVENESS_NO_WORK | driver ran but did nothing (sweep skipped + reconcile empty) — reserved kind, **not yet emitted by the driver**; the enabled-but-0-teams case is now SWEEP_NO_COVERAGE (#2796) | Verify teams exist; otherwise expected pre-beta |
 | SIZE_GUARD_ABORT | team graph > 100k nodes — dump aborted | Investigate graph growth; raise limit deliberately |
 | DATA_LOSS_CANDIDATE | a team's node count dropped >50% (or >0→0) | **Manual close only** — verify + re-baseline or restore |

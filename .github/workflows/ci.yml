@@ -33,6 +33,7 @@ jobs:
       flip: ${{ steps.gate.outputs.flip }}
       python: ${{ steps.gate.outputs.python }}
       drift: ${{ steps.gate.outputs.drift }}
+      driver_scripts: ${{ steps.gate.outputs.driver_scripts }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -175,6 +176,14 @@ jobs:
                   startswith(".github/workflows/"),
                   startswith(".husky/"),
                   startswith("scripts/"),
+              ),
+              # backup-driver-scripts (#2796): the hourly backup driver's
+              # state-classification harness. Gated on the driver surface so a
+              # PR touching registry-cron.* (or the cron that runs it) re-runs
+              # it — #2149 pattern, not an always-on job.
+              "driver_scripts": any_file(
+                  startswith(".github/scripts/registry-cron"),
+                  isfile(".github/workflows/registry-backup-cron.yml"),
               ),
               # dashboard-e2e (#2166/#2178): the two-server keys-table suite
               # (mixed fixture — durable-only render regression). Triggers on
@@ -409,10 +418,13 @@ jobs:
         run: bash .ci-checks/check-test-isolation.sh
 
   backup-driver-scripts:
-    # #2796: the hourly backup driver's state-classification harness. Ungated
-    # (like test-isolation) so any change to registry-cron.sh exercises it in
-    # PRs — the driver is otherwise only run by a schedule and its failures
-    # used to be silent. Self-contained: stubs aws/curl/date, no network.
+    needs: changes
+    if: needs.changes.outputs.driver_scripts == 'true'  # #2149: driver surface only
+    # #2796: the hourly backup driver's state-classification harness. Gated on
+    # the driver surface (`.github/scripts/registry-cron*` + the cron workflow)
+    # so a change to the driver exercises it in PRs — the driver is otherwise
+    # only run by a schedule and its failures used to be silent. Self-contained:
+    # stubs aws/curl/date, no network.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

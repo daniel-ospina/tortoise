@@ -63,8 +63,11 @@ def test_encode_decode_roundtrip():
 
 
 def test_decode_rejects_non_base64():
-    with pytest.raises(ss.KeyStoreError, match="base64"):
+    with pytest.raises(ss.KeyStoreError, match="base64") as exc:
         ss.decode_key("not-base64!!", env_name="TORTOISE_BACKUP_KEY_PREVIOUS")
+    # #2796 review (R2/R4): the malformed value must NOT be echoed.
+    assert "not-base64!!" not in str(exc.value)
+    assert "must be base64-encoded (got <" in str(exc.value)
 
 
 def test_decode_rejects_wrong_length():

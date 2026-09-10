@@ -57,8 +57,12 @@ def test_enabled_requires_valid_backup_key(monkeypatch):
     env = _good_env()
     env["TORTOISE_BACKUP_KEY"] = "not-base64!!"
     monkeypatch.setattr(os, "environ", env)
-    with pytest.raises(ConfigError, match="base64"):
+    with pytest.raises(ConfigError, match="base64") as exc:
         load_config()
+    # #2796 review (R2/R4): the malformed value must NOT be echoed — it is
+    # secret material and this text can reach logs and public incident bodies.
+    assert "not-base64!!" not in str(exc.value)
+    assert "must be base64 (got <" in str(exc.value)
 
 
 def test_enabled_requires_32_byte_key(monkeypatch):
