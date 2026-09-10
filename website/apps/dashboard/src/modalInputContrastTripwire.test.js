@@ -8,11 +8,13 @@
 //
 // The checks pin the fix's CSS invariant + the bug's shape:
 //   1. exactly one shared `.modal input/textarea/select` rule, and it themes
-//      every dialog field: dark --surface background, visible border whose
-//      COMPOSITED contrast clears the WCAG 1.4.11 non-text 3:1 floor
-//      (effective/last-wins declarations, so a trailing `border-color` /
-//      `border-width` override cannot re-introduce the 1.41:1 boundary), and
-//      no other modal-field rule re-setting background/border behind it;
+//      every dialog field: dark --surface background, a PAINTED border (width
+//      > 0, style not none/hidden) whose COMPOSITED contrast clears the
+//      WCAG 1.4.11 non-text 3:1 floor, with last-wins resolution so a trailing
+//      `border-width`/`border-style`/`border-color` override cannot restore
+//      the 1.41:1 boundary; no custom-property redefinition inside the rule;
+//      and no other rule that could match a bare dialog input re-setting
+//      background/border behind it;
 //   2. the create-org name input itself carries no class, no inline style and
 //      no own background — i.e. it is exactly the element that MUST be themed
 //      by the shared rule (a re-added inline/white background fails here);
@@ -20,12 +22,15 @@
 //      out-specifying the shared default and keeps its destructive red border.
 //
 // Deliberately out of scope: proving the <input> is *nested* inside the
-// `.modal` JSX element. That is a structural question, and a regex/string
-// scanner cannot answer it robustly on a 455KB JSX file (unbalanced backticks
-// in embedded prompt strings defeat any comment/string mask). The suite is
-// zero-dep by convention, so no JSX parser is available here. The guard's
-// contract is the CSS invariant: any field rendered inside `.modal` is
-// themed — the class of bug #2778 was.
+// `.modal` JSX element. That is a structural question a static regex scanner
+// cannot answer — main.jsx is a large JSX file whose text contains backticks
+// and `/*` sequences (embedded prompt strings), so a hand-rolled comment/
+// string mask desynchronizes and can swallow the dialog region — and the
+// zero-dep convention for this suite rules out importing the installed-but-
+// transitive JSX parsers. The guard's contract is the CSS invariant: any field
+// rendered inside `.modal` is themed, which is the class of bug #2778 was. A
+// DOM-level containment assertion belongs in the dashboard-e2e Playwright lane
+// and is tracked in #2793.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
@@ -52,6 +57,17 @@ const contrastRatio = (a, b) => {
   return (hi + 0.05) / (lo + 0.05)
 }
 
+function declarationsOf(body) {
+  return body
+    .split(';')
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .map((s) => {
+      const i = s.indexOf(':')
+      return i === -1 ? { prop: s, value: '' } : { prop: s.slice(0, i).trim(), value: s.slice(i + 1).trim() }
+    })
+}
+
 // Effective (last-wins) value of a property, as the browser would resolve it
 // within a single rule.
 function effectiveValue(decls, props) {
@@ -60,7 +76,23 @@ function effectiveValue(decls, props) {
   return value
 }
 
+const ELEMENT_FIELD = /(^|[^\w-])(input|textarea|select)(?![\w-])/
+
+// True when a selector's target could be a BARE input/textarea/select inside
+// `.modal` — i.e. after stripping `:where()/:is()/:not()` wrappers it carries
+// no class other than `.modal` and no other element qualifier the create-org
+// field lacks. Used to catch overrides written with `:is()`/`:not()` spellings
+// that a plain `.modal input` prefix test would miss.
+function couldMatchBareModalField(selector) {
+  return selector.split(',').some((part) => {
+    const cleaned = part.replace(/:where\([^)]*\)|:is\([^)]*\)|:not\([^)]*\)/g, ' ')
+    const classes = cleaned.match(/\.[A-Za-z_-][\w-]*/g) || []
+    return !classes.some((c) => c !== '.modal')
+  })
+}
+
 test('#2778: a single shared .modal input/textarea/select rule themes dialog fields', () => {
+  const sharedSelector = '.modal input, .modal textarea, .modal select'
   const rule = cssFlat.match(/\.modal input, \.modal textarea, \.modal select \{([^}]*)\}/)
   assert.ok(
     rule,
@@ -68,27 +100,29 @@ test('#2778: a single shared .modal input/textarea/select rule themes dialog fie
   )
   const sharedCount = (cssFlat.match(/\.modal input, \.modal textarea, \.modal select \{/g) || []).length
   assert.equal(sharedCount, 1, 'exactly one shared dialog-field rule may exist — a duplicate override could quietly reset it')
-  // No OTHER `.modal`-scoped element rule may re-set background/border: that is
-  // how a "themed" dialog field could silently lose its surface again.
-  const fieldRule = /([^{}]*)\{([^}]*)\}/g
-  const conflicting = []
-  let m
-  while ((m = fieldRule.exec(cssFlat))) {
-    const selector = m[1].trim()
-    if (selector === '.modal input, .modal textarea, .modal select') continue
-    if (!/\.modal[^{}]*(\s|>)(input|textarea|select)(?![\w-])/.test(selector)) continue
-    if (/(^|;)\s*(background|border|border-color|border-width)\s*:/.test(m[2])) conflicting.push(selector)
-  }
-  assert.deepEqual(conflicting, [], `no other modal-field rule may re-set background/border (found: ${conflicting.join(' | ')})`)
 
-  const decls = rule[1]
-    .split(';')
-    .map((s) => s.trim())
-    .filter(Boolean)
-    .map((s) => {
-      const i = s.indexOf(':')
-      return i === -1 ? { prop: s, value: '' } : { prop: s.slice(0, i).trim(), value: s.slice(i + 1).trim() }
-    })
+  // No OTHER rule that could match a bare dialog field may re-set
+  // background/border: that is how a "themed" field silently loses its surface
+  // again. Selector-shape independent (covers `:is()`/`:not()`/bare `input`).
+  const conflicting = []
+  const anyRule = /([^{}]*)\{([^}]*)\}/g
+  let m
+  while ((m = anyRule.exec(cssFlat))) {
+    const selector = m[1].trim()
+    if (selector === sharedSelector) continue
+    if (!ELEMENT_FIELD.test(selector)) continue
+    if (!couldMatchBareModalField(selector)) continue
+    if (/(^|;)\s*(background|background-color|border|border-color|border-width|border-style)\s*:/.test(m[2])) {
+      conflicting.push(selector)
+    }
+  }
+  assert.deepEqual(conflicting, [], `no other rule that could match a bare dialog field may re-set background/border (found: ${conflicting.join(' | ')})`)
+
+  const decls = declarationsOf(rule[1])
+  // A custom-property declaration inside the rule could retarget a token the
+  // contrast/background checks trust (e.g. `--surface: #ffffff`).
+  const customProps = decls.filter((d) => d.prop.startsWith('--')).map((d) => d.prop)
+  assert.deepEqual(customProps, [], `the shared dialog-field rule must not redefine custom properties (found: ${customProps.join(', ')})`)
 
   // The exact bug: no background was set, so the UA white showed through.
   const background = effectiveValue(decls, ['background', 'background-color'])
@@ -99,25 +133,43 @@ test('#2778: a single shared .modal input/textarea/select rule themes dialog fie
   assert.doesNotMatch(background, /(#fff|#ffffff|white)\b/i, 'the dialog-field default must never resolve to a white background')
   assert.match(effectiveValue(decls, ['color']) || '', /var\(--text/, 'the dialog-field default must set `color`')
 
+  // Resolve the PAINTED border (last-wins across border / border-* longhands).
+  let paintedWidth = null
+  let paintedStyle = null
+  let paintedColor = null
+  for (const d of decls) {
+    if (d.prop === 'border') {
+      const w = d.value.match(/(^|\s)(\d+(?:\.\d+)?)(px)?(\s|$)/)
+      if (w) paintedWidth = Number(w[2])
+      else if (/(^|\s)0(\s|$)/.test(d.value)) paintedWidth = 0
+      const st = d.value.match(/\b(solid|dashed|dotted|double|none|hidden)\b/)
+      if (st) paintedStyle = st[1]
+      const c = d.value.match(/(rgba?\([^)]*\)|var\([^)]*\))/)
+      if (c) paintedColor = c[1]
+    } else if (d.prop === 'border-width') {
+      const w = d.value.match(/^(\d+(?:\.\d+)?)(px)?$/)
+      paintedWidth = w ? Number(w[1]) : d.value.trim() === '0' ? 0 : paintedWidth
+    } else if (d.prop === 'border-style') {
+      paintedStyle = d.value.trim()
+    } else if (d.prop === 'border-color') {
+      paintedColor = d.value.trim()
+    }
+  }
+  assert.ok(paintedStyle !== 'none' && paintedStyle !== 'hidden', `the dialog-field border must be painted (effective style: ${paintedStyle})`)
+  assert.ok(paintedWidth !== null && paintedWidth > 0, `the dialog-field border must have a non-zero width (effective: ${paintedWidth})`)
+
   // WCAG 1.4.11: the field fill is the same --surface as the .modal panel, so
   // the border is the only cue identifying the control and must clear 3:1.
-  const border = effectiveValue(decls, ['border'])
-  const borderWidth = (border && border.match(/(\d+(?:\.\d+)?)px/)) || null
-  const borderColorOverride = effectiveValue(decls, ['border-color'])
-  const borderWidthOverride = effectiveValue(decls, ['border-width'])
-  assert.ok(borderWidth && Number(borderWidth[1]) > 0, `the dialog-field default must set a visible border; got: ${border}`)
-  assert.notEqual(borderWidthOverride, '0', 'the dialog-field border must not be zeroed by a trailing border-width declaration')
-  const borderColor = borderColorOverride || (border && (border.match(/(rgba?\([^)]*\)|var\([^)]*\))/) || [])[0])
   const panelRule = cssFlat.match(/\.modal \{([^}]*)\}/)
   assert.ok(panelRule, 'the base `.modal` panel rule must exist')
   assert.doesNotMatch(panelRule[1], /--surface\s*:/, '--surface must not be redefined on .modal (the contrast check would use the wrong panel colour)')
   const surfaceHex = indexCss.match(/--surface:\s*(#[0-9a-fA-F]{6})/)
   assert.ok(surfaceHex, 'the --surface token must be defined')
   const surface = hexToRgb(surfaceHex[1])
-  const whiteAlpha = borderColor && borderColor.match(/^rgba\(255,\s*255,\s*255,\s*([0-9.]+)\)$/)
+  const whiteAlpha = paintedColor && paintedColor.match(/^rgba\(255,\s*255,\s*255,\s*([0-9.]+)\)$/)
   assert.ok(
     whiteAlpha,
-    `the effective dialog-field border must be a white-alpha border (a var(--border) token measures only 1.41:1 against the identical --surface panel); got: ${borderColor}`,
+    `the effective dialog-field border must be a white-alpha border (a var(--border) token measures only 1.41:1 against the identical --surface panel); got: ${paintedColor}`,
   )
   const alpha = Number(whiteAlpha[1])
   const composited = surface.map((c) => alpha * 255 + (1 - alpha) * c)
