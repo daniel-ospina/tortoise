@@ -1123,23 +1123,31 @@ _URI_ENV = "TORTOISE_DB_URI"
 
 
 def _module_string_constants(tree) -> dict[str, str]:
-    """``NAME = "<literal>"`` string constants assigned in the file.
+    """``NAME = "<literal>"`` / ``NAME: T = "<literal>"`` string constants.
 
-    Function-local assignments are harvested too (``ast.walk``), which can only
-    over-flag — never miss a real non-empty-default read.
+    Harvested across the whole file (``ast.walk``) — function-local and
+    annotated assignments count too, so the direction is fail-closed: an
+    over-flag, never a missed read. A value that is not a plain string literal
+    (a tuple, an f-string, another name) is not resolved and stays a residual
+    boundary.
     """
     import ast
 
     consts: dict[str, str] = {}
     for node in ast.walk(tree):
-        if not isinstance(node, ast.Assign):
+        value = getattr(node, "value", None)
+        if not (isinstance(value, ast.Constant)
+                and isinstance(value.value, str)):
             continue
-        if not (isinstance(node.value, ast.Constant)
-                and isinstance(node.value.value, str)):
+        if isinstance(node, ast.Assign):
+            targets = list(node.targets)
+        elif isinstance(node, ast.AnnAssign):
+            targets = [node.target]
+        else:
             continue
-        for tgt in node.targets:
+        for tgt in targets:
             if isinstance(tgt, ast.Name):
-                consts[tgt.id] = node.value.value
+                consts[tgt.id] = value.value
     return consts
 
 
@@ -1319,16 +1327,35 @@ def test_nonempty_default_uri_reads_flags_the_class():
         'KEY = "TORTOISE_DB_URI"',
         'm = os.environ.get(KEY, "docker://x")',
         'n = os.environ.get("TORTOISE_DB_" "URI", "docker://x")',
-        '# documented boundary: no default to be defeated, so out of scope',
+        'KEY2: Final = "TORTOISE_DB_URI"',
+        'q = os.environ.get(KEY2, "docker://x")',
+        'from os import getenv',
+        's = getenv("TORTOISE_DB_URI", "docker://x")',
+        '# boundary: callee must be named get/getenv/setdefault (an aliased or',
+        '# differently-named reader is out of scope — it IS the trap)',
         'o = _getenv("TORTOISE_DB_URI", "docker://x")',
+        'from os import getenv as g',
+        'r = g("TORTOISE_DB_URI", "docker://x")',
+        '# boundary: presence-based, so a set-but-empty variable yields "" and',
+        '# the fallback is never reached — no default to be defeated',
         'p = os.environ["TORTOISE_DB_URI"] if "TORTOISE_DB_URI" in os.environ else "docker://x"',
     ])
     flagged = _nonempty_default_uri_reads([("tests/planted.py", src)])
     assert [hit.rsplit(":", 1)[-1] for hit in flagged] == [
-        "3", "4", "5", "6", "7", "8", "9", "17", "18"], (
-        "the #2815 census must flag every non-empty-default spelling "
-        "(get/getenv/setdefault, positional/keyword, literal, constant-held "
-        f"and concatenated) and nothing else — got {flagged}")
+        "3", "4", "5", "6", "7", "8", "9", "17", "18", "20", "22"], (
+        "the #2815 census must flag every in-scope non-empty-default spelling "
+        "(get/getenv/setdefault, positional/keyword, literal, constant-held,"
+        f" annotated and bare-import getenv) and nothing else — got {flagged}")
+    # The per-file prefilter must not swallow an implicit concatenation: this
+    # source mentions the full name NOWHERE else, so a prefilter keyed on the
+    # complete literal would skip the file before ast.parse ever folds
+    # "TORTOISE_DB_" "URI" into one constant.
+    concat = 'n = os.environ.get("TORTOISE_DB_" "URI", "docker://x")'
+    flagged_concat = _nonempty_default_uri_reads(
+        [("tests/planted_concat.py", concat)])
+    assert flagged_concat == ["tests/planted_concat.py:1"], (
+        "the prefilter must key on 'TORTOISE_DB' so a concatenated key still "
+        f"reaches the parser — got {flagged_concat}")
 
 
 def test_live_uri_treats_empty_as_unset(monkeypatch):
