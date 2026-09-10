@@ -52,7 +52,7 @@ def test_methodology_unchanged_matches():
 def test_methodology_drift_detected():
     """Reader prompt or rubric changed → hashes differ → NOT matched."""
     r = run_parity("longmemeval", "longmemeval-2025.3", "a4",
-                   "rp-CHANGED", "jr", _baseline(), accuracy=0.6)
+                   "rp-CHANGED", "jr", _baseline(), accuracy=0.6, samples=5)
     assert not r.methodology_matched
 
 
@@ -77,3 +77,90 @@ def test_staleness_stale_answer_fails():
 def test_staleness_ambiguous_fails_closed():
     probe = staleness_probes()[0]
     assert not score_staleness(probe, "unrelated answer")
+
+
+# ── #2797: a parity cell may only carry a number that was MEASURED ────────
+class TestNoFabricatedAccuracy:
+    """The parity CLI must never supply an accuracy it did not measure.
+
+    Pre-#2797 `battery parity` passed a literal ``accuracy=0.5, samples=0``
+    for every pinned benchmark without executing any of them. The value was
+    inert (nothing read ``ParityRun.accuracy``), but it is the shape of a
+    fabricated metric: any future consumer of the cell — or of the parity
+    record — would have read a constant as a score.
+    """
+
+    def test_accuracy_with_zero_samples_is_refused(self):
+        with pytest.raises(ValueError, match="not a measurement"):
+            run_parity("longmemeval", "longmemeval-2025.3", "a4",
+                       "rp", "jr", _baseline(), accuracy=0.5, samples=0)
+
+    def test_not_measured_cell_has_no_accuracy(self):
+        r = run_parity("longmemeval", "longmemeval-2025.3", "a4",
+                       "rp", "jr", _baseline(), accuracy=None, samples=0)
+        assert r.accuracy is None
+        assert r.measured is False
+        # the methodology compare still works — the cell is not useless,
+        # it simply makes no claim about a score
+        assert r.methodology_matched
+
+    def test_measured_cell_requires_samples(self):
+        r = run_parity("longmemeval", "longmemeval-2025.3", "a4",
+                       "rp", "jr", _baseline(), accuracy=0.66, samples=10)
+        assert r.measured is True
+
+    def test_cli_supplies_no_fabricated_accuracy(self, tmp_path, monkeypatch):
+        """The CLI's parity cell must be not-measured until #2800 wires a
+        real runner — asserted on the CALL, which is where the constant was."""
+        import battery.cli as cli
+        import battery.parity.runner as parity_runner
+
+        seen: list[tuple] = []
+        real = parity_runner.run_parity
+
+        def _spy(benchmark, version, arm, rp, jr, baseline, **kw):
+            seen.append((benchmark, kw.get("accuracy"), kw.get("samples")))
+            return real(benchmark, version, arm, rp, jr, baseline, **kw)
+
+        monkeypatch.setattr(parity_runner, "run_parity", _spy)
+        cfg = Path(__file__).resolve().parent.parent / "battery" / "config"
+        # A baseline record is what makes the CLI persist parity_record.json
+        # (no baseline = fail-closed, nothing to record).
+        import json
+        import shutil
+        tmp_cfg = tmp_path / "cfg"
+        tmp_cfg.mkdir()
+        shutil.copy(cfg / "arms.yaml", tmp_cfg / "arms.yaml")
+        rp, jr, _ = methodology_hashes("default-reader", "longmemeval-official")
+        (tmp_cfg / "parity_baseline.json").write_text(json.dumps(
+            {"reader_prompt_hash": rp, "judge_rubric_id_hash": jr}))
+        rc = cli.main(["parity", "--config", str(tmp_cfg),
+                       "--out", str(tmp_path), "--mock"])
+        assert rc == 0, f"parity CLI failed: {rc}"
+        assert seen, "parity CLI ran no cells"
+        for benchmark, accuracy, samples in seen:
+            assert accuracy is None, (
+                f"{benchmark}: CLI supplied accuracy={accuracy!r} — a value "
+                f"no runner produced (#2797)")
+            assert samples == 0
+        record = json.loads((tmp_path / "parity_record.json").read_text())
+        assert set(record["benchmarks"]) == {
+            "longmemeval", "locomo", "memoryarena", "memoryagentbench"}
+        for benchmark, cell in record["benchmarks"].items():
+            assert cell["measured"] is False, benchmark
+            assert cell["accuracy"] is None, benchmark
+            assert cell["samples"] == 0, benchmark
+
+    def test_construction_refuses_inconsistent_pair(self):
+        """The invariant holds on the dataclass itself, not only in
+        run_parity — ParityRun is exported and directly constructible."""
+        from battery.parity.runner import ParityRun
+        with pytest.raises(ValueError, match="not a measurement"):
+            ParityRun(benchmark="longmemeval", arm="a4",
+                      version="longmemeval-2025.3", accuracy=0.9,
+                      methodology_matched=True, samples=0)
+        # a measured cell still constructs
+        r = ParityRun(benchmark="longmemeval", arm="a4",
+                      version="longmemeval-2025.3", accuracy=0.9,
+                      methodology_matched=True, samples=5)
+        assert r.measured is True

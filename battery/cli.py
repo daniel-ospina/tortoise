@@ -287,15 +287,23 @@ def _cmd_parity(args: argparse.Namespace) -> ExitCode:
     cells: list[ParityRun] = []
     for benchmark, version in PINNED_VERSIONS.items():
         try:
+            # #2797: NO accuracy is supplied — this leg does not execute a
+            # benchmark (the released runner wiring is #2800). A cell is
+            # therefore explicitly NOT MEASURED and carries no number; the
+            # pre-#2797 code passed a literal accuracy=0.5 here, which read
+            # as a measurement to any future consumer.
             res = run_parity(benchmark, version, arm_id,
                              reader_prompt, judge_rubric, baseline,
-                             accuracy=0.5, samples=0, protocol=protocol)
+                             accuracy=None, samples=0, protocol=protocol)
             cells.append(res)
             unknown = bool(res.protocol_unknown or placeholder_pinned)
             state = f"protocol_unknown={unknown}" if unknown \
                 else "protocol verified"
+            measured = (f"accuracy={res.accuracy} n={res.samples}"
+                        if res.measured else
+                        "accuracy NOT MEASURED — no runner wired (#2800)")
             print(f"{benchmark}: v{version} methodology_matched="
-                  f"{res.methodology_matched} ({state})")
+                  f"{res.methodology_matched} ({state}); {measured}")
             if unknown:
                 if placeholder_pinned:
                     print(f"{benchmark}: WARNING arm {arm_id!r} pins "
@@ -333,6 +341,15 @@ def _cmd_parity(args: argparse.Namespace) -> ExitCode:
                 "benchmarks": {
                     c.benchmark: {
                         "version": c.version,
+                        # #2797: the not-measured state is PERSISTED (and the
+                        # accuracy is written as an explicit null, not
+                        # omitted) so no reader can mistake a placeholder
+                        # cell for a score. `measured` is derived from the
+                        # accuracy/samples pair by ParityRun and can only be
+                        # True when a runner actually produced a number.
+                        "measured": c.measured,
+                        "accuracy": c.accuracy,
+                        "samples": c.samples,
                         # Round-4 P2 (consistency): a protocol-UNKNOWN
                         # record must NEVER carry methodology_matched=True —
                         # the two persisted fields would contradict (an

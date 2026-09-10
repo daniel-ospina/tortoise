@@ -174,7 +174,7 @@ class TestRunParityProtocol:
         bl = _baseline()  # 2-tuple only
         assert "protocol_hash" not in bl
         r = run_parity("longmemeval", "longmemeval-2025.3", "a4",
-                       "rp", "jr", bl, accuracy=0.5, samples=0,
+                       "rp", "jr", bl, accuracy=None, samples=0,
                        protocol=protocol)
         assert r.methodology_matched  # old record still matches (2-tuple)
         assert r.protocol_unknown is True  # protocol leg unverified → warn
@@ -183,7 +183,7 @@ class TestRunParityProtocol:
     def test_old_record_without_current_protocol_matches(self):
         """Old callers (no protocol computed) keep compare-2 semantics."""
         r = run_parity("longmemeval", "longmemeval-2025.3", "a4",
-                       "rp", "jr", _baseline(), accuracy=0.5)
+                       "rp", "jr", _baseline(), accuracy=0.5, samples=5)
         assert r.methodology_matched
         assert r.protocol_unknown is True and r.protocol_hash is None
 
