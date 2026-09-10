@@ -204,7 +204,18 @@ _DEFAULT_PLAN = ({"turn": 1, "tokens": 50, "tool_calls": 0,
                   "re_derivations": 0},)
 
 
-def _run_with_deadline(fn, seconds: float = 240.0):
+#: Per-episode wall-clock cap on the REAL lane (hang protection, not a
+#: performance gate). MEASURED basis at 240.0 (attempt
+#: /tmp/run1416-g/20260909-201340-991151, 77 inter-artifact deltas):
+#: median 135 s, p90 193 s — i.e. the old cap sat AT the ~p90 and killed
+#: legitimately-running long-prompt episodes (5/78, 6.4% of the E2E-1.1
+#: exclusion budget, purely by timing). 480 s clears the measured p90 with
+#: ~2.5x headroom while still bounding a genuinely hung episode (the
+#: 0%-CPU hang this cap exists for) to 8 minutes of one run's wall clock.
+_REAL_EPISODE_DEADLINE_S = 480.0
+
+
+def _run_with_deadline(fn, seconds: float = _REAL_EPISODE_DEADLINE_S):
     """Run ``fn`` under a wall-clock deadline in a worker thread. A hung
     call (0% CPU, no timeout firing — the #1416 real run hit this) must
     become an honest TimeoutError -> FAILED + exclusion, never a silent
@@ -240,9 +251,6 @@ def _run_with_deadline(fn, seconds: float = 240.0):
 
 
 #: #1416: per-episode wall-clock deadline (seconds) for the real executor.
-_REAL_EPISODE_DEADLINE_S = 240.0
-
-
 def _execute_real_episode(*, config: RunConfig, arm, scenario: Scenario,
                           episode_seed: int, tracker: EpisodeTracker,
                           ) -> tuple[list[ModelCallOutcome], int, list[dict],
