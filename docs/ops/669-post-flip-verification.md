@@ -402,6 +402,19 @@ security = `scheme: lookup_hash_sha256` (Supabase).
 
 ## 10. #596 monitor confirmation — no_teams state, watcher quiet
 
+> ⚠️ **Superseded in part by #2823 (2026-09-11).** This step is a one-time
+> #669 cutover checklist, and its expectation below was written BEFORE the
+> sweep learned to report which control plane it enumerated. `no_teams` on its
+> own is NOT a healthy signal — it is exactly what the post-flip sweep printed
+> for 31 days while backing nothing up (the raw registry handle read the graph
+> the flip deleted). Verify the dialect and the watcher heartbeat, not the
+> status word: expected now is `"source": "supabase"` (or
+> `last_run_source`), `graph_totals.errors == 0`, `enum_failed` ABSENT, and a
+> `watcher.age_minutes` that is a measured number. `source: registry` /
+> `enum_failed` / an unmeasurable watcher age is the failure signature, and the
+> hourly driver fails the run red for a 0-backup result it cannot corroborate.
+> See `docs/ops/registry-backup-dr.md` §Architecture.
+
 ```bash
 curl -s https://api.premiselabs.co/v1/internal/backups/status \
   -H "Authorization: Bearer $FASTAPI_INTERNAL_KEY"
@@ -409,8 +422,12 @@ curl -s https://api.premiselabs.co/v1/internal/backups/status \
 
 ✅ **Expect:**
 
-- `"no_teams": true` (chronic zero-team state — the watcher's honest signal),
-- `"watcher": {"running": true, …}` with a fresh `last_poll_at`, and
+- `"no_teams": true` (chronic zero-team state) **and** `"source": "supabase"`
+  (a `registry` source here means the sweep read the WRONG control plane —
+  #2823 — not that the deployment is empty),
+- `"watcher": {"running": true, "age_minutes": <a measured number>}` with a
+  fresh `last_poll_at` (`null`/absent age = no heartbeat read = NOT verified),
+  and
 - **no new GitHub issue / Telegram alert** from the #596 watcher during the
   flip window (the enumeration-delta guard is suppressed by
   `TORTOISE_SUPPRESS_ENUM_DELTA=1`, so a spurious "wiped enumeration source"

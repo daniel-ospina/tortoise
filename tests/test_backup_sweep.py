@@ -959,13 +959,16 @@ def test_enumerate_teams_registry_lane_accepts_registry_source(monkeypatch):
 
 def test_sweep_reports_resolved_source_in_ops_state(shared_proj):
     """#2823: the run result + the ops/state roll-up both record WHICH control
-    plane the run enumerated, and a no-op run records ITS OWN dialect.
+    plane the run enumerated, and a no-op run records its OWN dialect without
+    mislabelling the last real sweep's outcomes.
 
     The no-op leg deliberately flips the lane (registry → supabase) so the
-    assertion is discriminating: merge-preserving `source` from the previous
-    run (the pre-fix behaviour) would leave `registry` in the roll-up while the
-    run result says `supabase` — the same two-surfaces-disagree shape that let
-    #2823 hide."""
+    assertions are discriminating: the preserved ``source`` names the lane that
+    produced the preserved totals (``registry``), while ``last_run_source``
+    names this run's dialect (``supabase``). Collapsing the two — either by
+    overwriting ``source`` or by never recording this run's dialect — makes the
+    block claim the wrong lane for the numbers it shows (the pre-fix
+    ambiguity), so both halves are pinned here."""
     if shared_proj is None:
         # A silent `return` would make this test pass having asserted NOTHING —
         # a green result read as coverage for the #2823 regression tripwire.
@@ -978,21 +981,26 @@ def test_sweep_reports_resolved_source_in_ops_state(shared_proj):
     )
     assert res["status"] == "backed_up"
     assert res["source"] == "registry"
-    assert json.loads(store.download(OPS_STATE_KEY))["source"] == "registry"
     first = json.loads(store.download(OPS_STATE_KEY))
+    assert first["source"] == "registry"
+    # A REAL run's two provenance fields agree by definition.
+    assert first["last_run_source"] == "registry"
     # The lane flips; the next run enumerates 0 teams FROM THE SUPABASE LANE.
-    monkeypatch_empty = FakeControlPlane().seed("teams", [])
-    assert source_dialect(monkeypatch_empty) == "supabase"
+    empty_cp = FakeControlPlane().seed("teams", [])
+    assert source_dialect(empty_cp) == "supabase"
     res2 = run_backup_sweep(
-        db=proj.db, registry=monkeypatch_empty, storage=store, config=_config(),
+        db=proj.db, registry=empty_cp, storage=store, config=_config(),
     )
     assert res2["status"] == "no_teams"
     assert res2["source"] == "supabase"
     rolled = json.loads(store.download(OPS_STATE_KEY))
-    assert rolled["source"] == "supabase", rolled
-    # ...and the no-op still preserves the last REAL run's outcome fields.
+    # The no-op still preserves the last REAL run's outcome fields + dialect...
     assert rolled["last_sweep_at"] == first["last_sweep_at"], rolled
     assert rolled["graph_totals"]["backed_up"] == 1
+    assert rolled["source"] == "registry", rolled
+    # ...and records THIS run's dialect separately, so /status can answer both
+    # "which lane produced these totals?" and "which lane did the last run read?".
+    assert rolled["last_run_source"] == "supabase", rolled
 
 
 def test_sweep_wrong_dialect_is_loud_not_no_teams(shared_proj, monkeypatch):

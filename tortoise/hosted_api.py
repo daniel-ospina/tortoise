@@ -19770,13 +19770,14 @@ def _control_plane_source():
 
     A Supabase-mode caller also never opens the registry namespace: the
     pre-#2823 handlers passed ``_registry_sdk()._get_proj().db`` as the
-    data-plane handle, and opening that projection re-materializes the
-    control-plane namespace the #669 post-flip verification flagged as an
-    auto-recreate artifact (``_get_registry()`` additionally runs
-    ``CREATE INDEX`` against the deleted graph). The data-plane handle
-    (``_make_sdk(namespace=None)._get_proj().db`` — backup_sweep's ``db``, the
-    GRAPH.DELETE / ``select_graph`` target) is the one #669 mandates and the
-    one that exists in BOTH lanes.
+    data-plane handle. That projection is the registry namespace's own shell
+    (``registry_tortoise``), which it re-materializes; and ``_get_registry()``
+    — the pre-#2823 team source — runs ``CREATE INDEX`` against
+    ``registry_control_plane``, the graph the #669 flip DELETED. Both are
+    auto-recreate artifacts (#669 post-flip verification). The data-plane
+    handle (``_make_sdk(namespace=None)._get_proj().db`` — backup_sweep's
+    ``db``, the GRAPH.DELETE / ``select_graph`` target) is the one #669
+    mandates and the one that exists in BOTH lanes.
     """
     from tortoise.supabase_control import get_control_plane, is_supabase_enabled
 
@@ -20466,7 +20467,11 @@ async def backups_status(request: Request):
     last_sweep = {
         key: sweep_state.get(key)
         for key in ("last_sweep_at", "last_team_count", "graph_totals",
-                    "graph_failures", "graph_error_streaks", "source")
+                    "graph_failures", "graph_error_streaks", "source",
+                    # #2823: the most recent run's dialect, which differs from
+                    # ``source`` only on a no-op run (whose roll-up preserves
+                    # the last REAL sweep's outcome fields + dialect).
+                    "last_run_source")
     }
     if not last_sweep.get("last_sweep_at"):
         last_sweep = None  # sweep never ran — omit the block

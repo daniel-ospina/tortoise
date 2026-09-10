@@ -424,6 +424,10 @@ class TestDrSweep:
         r = client.get("/v1/internal/backups/status", headers=INTERNAL_HEADERS)
         assert r.status_code == 200
         assert r.json()["last_sweep"]["source"] == "registry"
+        # #2823: the per-run provenance field rides /status too. After a REAL
+        # sweep the two agree by definition (a no-op run is where they differ —
+        # pinned in test_backup_sweep).
+        assert r.json()["last_sweep"]["last_run_source"] == "registry"
 
     def test_sweep_empty_supabase_lane_is_a_quiet_confirmed_empty(
             self, client, dr_env, mem_storage, monkeypatch):

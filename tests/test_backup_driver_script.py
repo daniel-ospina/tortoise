@@ -22,10 +22,11 @@ three of its behaviours are load-bearing for #2823:
    produced no credible status (`error` — empty body / 5xx / malformed, e.g.
    the control plane could not be resolved and the handler 500'd) is the same
    class of "no backups ran"; and a 0-backup result whose own numbers or
-   dialect contradict it (`graph_totals.errors > 0` — the shape a
-   never-backing-up sweep takes when every graph errors, since there is no
-   `backed_up` to degrade — or no recognizable `source`, the #2823 shape during
-   a version-skew window) is the same class again. All must fail the run red,
+   dialect contradict it (`graph_totals.errors > 0` per-GRAPH, or a
+   `results[].status == "error"` TEAM-level failure — resolution, lock-busy,
+   exception — since a 0-backup sweep cannot read `degraded` whatever failed;
+   or no recognizable `source`, the #2823 shape during a version-skew window)
+   is the same class again. All must fail the run red,
    because the GitHub/Telegram alert layer is a separate, currently-deaf path
    (#2828).
 
@@ -84,6 +85,13 @@ _NO_TEAMS_EMPTY_BODY = ('{"status": "no_teams", "teams_backed_up": 0, '
                         '"source": "supabase", '
                         '"graph_totals": {"attempted": 0, "backed_up": 0, '
                         '"errors": 0}}')
+# A team-level failure (lock busy / resolution failure / exception) carries NO
+# graphs map, so `graph_totals.errors` stays 0 while nothing was backed up.
+_NO_WORK_TEAM_ERROR_BODY = (
+    '{"status": "no_work", "teams_backed_up": 0, "source": "supabase", '
+    '"graph_totals": {"attempted": 0, "backed_up": 0, "errors": 0}, '
+    '"results": {"team_a": {"status": "error", "team_id": "team_a", '
+    '"error": "team lock busy past the timeout"}}}')
 _MALFORMED_BODY = "502 Bad Gateway"
 _HTTP_500_BODY = '{"detail": "Internal Server Error"}'
 
@@ -127,6 +135,9 @@ def _preamble() -> list[str]:
         "set -euo pipefail",
         "API=http://driver.test",
         "KEY=k",
+        # The workflow passes secrets.GITHUB_TOKEN; the driver now ends RED
+        # without it (#2828), so every harness that reaches the tail needs it.
+        "GH_TOKEN=driver-token",
         "log() { echo \"[backup-driver] $*\"; }",
         "fail() { echo \"[backup-driver] ERROR: $*\" >&2; }",
         "gh_find_open() { echo \"OPEN_$1\"; }",
@@ -224,6 +235,30 @@ def test_chain_closes_watcher_down_on_a_fresh_heartbeat_noop_run():
     assert "FILE WATCHER_DOWN" not in proc.stdout, proc.stdout
     for kind in ("APP_DOWN", "WATCHER_DOWN", "R2_DOWN"):
         assert f"CLOSE OPEN_{kind}" in proc.stdout, (kind, proc.stdout)
+
+
+@pytest.mark.parametrize("watcher_json", [
+    # No heartbeat object yet (or the app's R2 read failed): age_minutes null.
+    '{"watcher": {"running": true, "age_minutes": null}}',
+    # The key itself is absent.
+    '{"watcher": {"running": true}}',
+    # No watcher block at all (a malformed/older /status payload).
+    "{}",
+    '{"watcher": {}}',
+    # A non-numeric age is not a measurement either.
+    '{"watcher": {"running": true, "age_minutes": "unknown"}}',
+])
+def test_chain_treats_an_unmeasurable_heartbeat_as_not_fresh(watcher_json):
+    """#2823: only an explicit `true` PLUS a MEASURED age is watcher evidence.
+    `age_minutes: null` / absent means no heartbeat was ever read (a watcher
+    that has not completed a poll reports `running: true`), and the pre-fix
+    `// 0` default read exactly that as fresh — so WATCHER_DOWN stayed closable
+    with zero watcher evidence, just via the null path instead of the sweep
+    status."""
+    proc = _run_chain(_BACKED_UP_BODY, watcher_json=watcher_json)
+    assert proc.returncode == 0, (proc.returncode, proc.stdout, proc.stderr)
+    assert "FILE WATCHER_DOWN" in proc.stdout, (watcher_json, proc.stdout)
+    assert "CLOSE OPEN_WATCHER_DOWN" not in proc.stdout, (watcher_json, proc.stdout)
 
 
 def test_chain_reports_a_dead_watcher_daemon_as_stale():
@@ -346,6 +381,9 @@ def test_sweep_step_logs_the_resolved_source(body, expected):
     # shape itself (older app build / a caller bypassing the shared seam).
     (_NO_TEAMS_NO_SOURCE_BODY, "1"),
     (_NO_WORK_NO_SOURCE_BODY, "1"),
+    # ...or a TEAM-level failure: `graph_totals.errors` is 0 (the team produced
+    # no graphs map) while every team errored, so the run backed nothing up.
+    (_NO_WORK_TEAM_ERROR_BODY, "1"),
 ])
 def test_sweep_step_latches_only_untrusted_results_as_failed(body, expected_failed):
     """#2823: every status the driver does not recognise as benign is untrusted
@@ -354,6 +392,26 @@ def test_sweep_step_latches_only_untrusted_results_as_failed(body, expected_fail
     status (5xx / empty body) both mean no backup ran."""
     out, failed = _run_sweep_step(body)
     assert failed == expected_failed, out
+
+
+def test_gate_fails_red_when_the_alert_channel_is_deaf():
+    """#2828: without GITHUB_TOKEN every `file_alert`/`gh_close` call is a
+    silent no-op — the driver logs "filing WATCHER_DOWN" and files nothing.
+    The sweep still runs (alerting is not backing up), but the run must end RED
+    so a deaf alert channel can never look like a healthy hour."""
+    proc = _run_bash([
+        "set -euo pipefail",
+        "GH_TOKEN=",
+        "RUN_STATUS=backed_up",
+        "log() { echo \"[backup-driver] $*\"; }",
+        "fail() { echo \"[backup-driver] ERROR: $*\" >&2; }",
+        "SWEEP_FAILED=0",
+        "PURGE_FAILED=0",
+        "RECONCILE_FAILED=0",
+        _slice(_GATE_START, None),
+    ])
+    assert proc.returncode == 1, (proc.returncode, proc.stdout, proc.stderr)
+    assert "GITHUB_TOKEN not set" in proc.stderr, proc.stderr
 
 
 def test_gate_fails_red_when_enumeration_is_refused():
@@ -389,6 +447,7 @@ def test_gate_is_not_taken_on_a_clean_run():
     # A corroboration failure is red and heals nothing.
     (_NO_WORK_WITH_ERRORS_BODY, 1, (), ("APP_DOWN", "WATCHER_DOWN", "R2_DOWN")),
     (_NO_TEAMS_NO_SOURCE_BODY, 1, (), ("APP_DOWN", "WATCHER_DOWN", "R2_DOWN")),
+    (_NO_WORK_TEAM_ERROR_BODY, 1, (), ("APP_DOWN", "WATCHER_DOWN", "R2_DOWN")),
 ])
 def test_driver_chain_end_to_end(body, exit_code, closed, not_closed):
     """#2823 sequencing: the sweep RESPONSE drives the heal set AND the run's
@@ -400,6 +459,20 @@ def test_driver_chain_end_to_end(body, exit_code, closed, not_closed):
         assert f"CLOSE OPEN_{kind}" in proc.stdout, (kind, proc.stdout)
     for kind in not_closed:
         assert f"CLOSE OPEN_{kind}" not in proc.stdout, (kind, proc.stdout)
+
+
+def test_sweep_step_survives_an_oversized_status():
+    """#2823: the sanitizer truncates with bash parameter expansion. A
+    `printf '%s' "$X" | head -c N` pipeline SIGPIPEs once the server string
+    exceeds the pipe buffer, and under `set -o pipefail` that aborts the driver
+    mid-run (no heartbeat, no self-heal, exit 141) — a hostile/oversized
+    response must not be able to switch the DR driver off."""
+    body = '{"status": "' + "x" * 200000 + '", "source": "supabase"}'
+    out, failed = _run_sweep_step(body)
+    assert failed == "1", out[:200]
+    line = next(ln for ln in out.splitlines() if "sweep status:" in ln)
+    assert line.endswith("x" * 64), line
+    assert "x" * 65 not in line, line
 
 
 def test_sweep_step_posts_the_sweep_endpoint(tmp_path):

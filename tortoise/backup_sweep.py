@@ -1061,9 +1061,8 @@ def _noop_ops_state_write(storage, now: datetime,
     predates a concurrent purge's ghost-drop would otherwise resurrect the
     dropped keys. Serialized against the purge drop + real-run write.
 
-    ``source`` is THIS run's resolved dialect (not a preserved field, see
-    _noop_ops_state): a no-op run must still answer which control plane it
-    enumerated (#2823)."""
+    ``source`` is THIS no-op run's resolved dialect (see _noop_ops_state): it
+    lands in ``last_run_source``, never in the preserved ``source``."""
     with _OPS_STATE_LOCK:
         ops_state = read_ops_state(storage)
         _write_json(storage, OPS_STATE_KEY,
@@ -1080,23 +1079,24 @@ def _noop_ops_state(ops_state: Any, now: datetime,
     object, rendering last_sweep: None "sweep never ran" right after a
     healthy run).
 
-    ``source`` is deliberately NOT in that preserve set: it is per-run
-    provenance ("which control plane did THIS run enumerate?"), not a sweep
-    OUTCOME. Preserving it would make the sweep response and
-    /status last_sweep disagree on the first no-op run (or after a lane
-    change) — exactly the ambiguity #2823 existed in. Pass ``source`` to
-    record this run's dialect; omitted, the previous value is kept for
-    callers that have no dialect to report."""
+    #2823 lineage: ``source`` is preserved with those OUTCOME fields because it
+    describes the run they came from — the block is surfaced verbatim as
+    /status last_sweep, so overwriting the dialect while keeping the previous
+    run's timestamps/totals would claim the wrong lane produced them. This
+    run's own dialect lands in the separate ``last_run_source`` field, so both
+    questions are answerable from one object: "which lane produced the totals
+    shown?" (``source``) and "which lane did the most recent run read?"
+    (``last_run_source`` — equal to ``source`` after a real sweep)."""
     prev = ops_state if isinstance(ops_state, dict) else {}
     out = {"last_team_count": 0, "updated_at": now.isoformat()}
     for key in ("last_sweep_at", "graph_totals", "graph_failures",
-                "graph_error_streaks"):
+                "graph_error_streaks", "source"):
         if key in prev:
             out[key] = prev[key]
     if source is not None:
-        out["source"] = source
-    elif "source" in prev:
-        out["source"] = prev["source"]
+        out["last_run_source"] = source
+    elif "last_run_source" in prev:
+        out["last_run_source"] = prev["last_run_source"]
     return out
 
 
@@ -1344,6 +1344,7 @@ def run_backup_sweep(
                 "last_sweep_at": now.isoformat(),
                 "updated_at": now.isoformat(),
                 "source": resolved_source,  # #2823: which control plane
+                "last_run_source": resolved_source,  # the same run, by definition
                 "graph_totals": graph_totals,
                 "graph_failures": graph_failures[:20],
                 "graph_error_streaks": streaks,
