@@ -51,7 +51,7 @@ def _fresh_sdk(tmp_path):
 
 
 @pytest.fixture(autouse=True)
-def _reset_rerank_state(monkeypatch):
+def _reset_rerank_state(force_sparse_tfidf):
     """Clear the scorer caches before/after EVERY test — a TTL test or a
     failed real-model import must not leak a cached failure into the next
     test (the module globals are the real get_scorer state).
@@ -70,8 +70,7 @@ def _reset_rerank_state(monkeypatch):
     rerank._scorer_cache.clear()
     rerank._fail_cache.clear()
     EmbeddingModel._reset()
-    monkeypatch.setattr(EmbeddingModel, "get", classmethod(
-        lambda cls, load_timeout=None: None))
+    # force_sparse_tfidf (tests/conftest.py) pins EmbeddingModel.get -> None.
     yield
     rerank._scorer_cache.clear()
     rerank._fail_cache.clear()

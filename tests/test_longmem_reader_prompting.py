@@ -390,7 +390,7 @@ def test_preference_question_answered_from_option_end_to_end(tmp_path):
 
 # ── 4. Pipeline guard: mini fixture stays green with the plumbing ─────────
 
-def test_mini_pipeline_still_green_with_question_type(tmp_path, monkeypatch):
+def test_mini_pipeline_still_green_with_question_type(tmp_path, force_sparse_tfidf):
     """The 5-question committed mini fixture still passes end-to-end with
     the question_type plumbing in place (no regression on other types).
 
@@ -411,13 +411,11 @@ def test_mini_pipeline_still_green_with_question_type(tmp_path, monkeypatch):
     2026-08 CI window in which the test was authored). With the bge
     embedder cache restored (#2573) the vector leg surfaces the missing MSR
     turn and the overall climbs to 0.6 — an embedder-state delta, not a
-    regression. Pin ``EmbeddingModel.get -> None`` (the
-    ``test_oracle.py`` ``_force_sparse_tfidf`` pattern) so the pin is
-    deterministic across embedder states and the module stays fully
-    offline."""
-    from tortoise.embeddings import EmbeddingModel
-    monkeypatch.setattr(EmbeddingModel, "get", classmethod(
-        lambda cls, load_timeout=None: None))
+    regression. Request ``force_sparse_tfidf`` (tests/conftest.py, the
+    ``test_oracle.py`` ``_force_sparse_tfidf`` pattern) so this pin is
+    deterministic across embedder states. NOTE: the pin covers THIS test
+    only — the rest of the module still loads the live embedder whenever
+    the cache is present."""
     instances = json.loads(MINI.read_text(encoding="utf-8"))
     outcomes, report = run_evaluation(
         instances, reader=MockReader(), judge=MockJudge(),
