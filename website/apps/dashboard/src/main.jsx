@@ -6148,10 +6148,10 @@ function claimIntentInFlight() {
                                 button that wrote an EMPTY string to the clipboard — the
                                 same no-key dead-end as the agent-driven blocks, for one
                                 of six tabs. The affordance is the no-key branch here
-                                too (round-1 review P2: the lead-in sentence and the
-                                trailing "this prompt" line are gated with the block they
-                                introduce, so the no-key state reads as one coherent
-                                ask). */}
+                                too (round-2 review P2: the lead-in sentence and the
+                                trailing "this prompt" line are gated with the block
+                                they introduce, so the no-key state reads as one
+                                coherent ask). */}
                             {harnessKey ? (
                               <>
                                 <p className="dim" style={{ margin: 0, lineHeight: 1.6 }}>
@@ -6181,7 +6181,7 @@ function claimIntentInFlight() {
                                 `YOUR_API_KEY` placeholder and the Copy button wrote
                                 an empty string. The affordance is the no-key branch;
                                 the lead-in sentence is gated with the block it
-                                introduces (round-1 review P2). The trailing workflow
+                                introduces (round-2 review P2). The trailing workflow
                                 prompt is key-free, so it stays visible. */}
                             {harnessKey ? (
                               <>
