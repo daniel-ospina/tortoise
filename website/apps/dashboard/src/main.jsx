@@ -918,7 +918,7 @@ function wizardPromptText(harness, step, key, mode) {
   const docs = 'Docs: https://tortoise.premiselabs.co/docs'
   const keyLine = mode === 'included' ? `Key: ${key}` : 'I\'ll give you the API key when you need it.'
   const twoStepNote = 'Tell me when to restart'
-  const step2Text = `Call tortoise_health to verify the connection, then tortoise_create_point to file my first point.\n${docs}`
+  const step2Text = `Call tortoise_health to verify the connection, then tortoise_create_point to file my first memory.\n${docs}`
 
   // #2827: every body starts at its first actionable instruction. The step
   // heading the user reads ("Give this prompt…", "Restart X…") is the JSX
@@ -932,10 +932,10 @@ function wizardPromptText(harness, step, key, mode) {
     if (step === 2) return step2Text
   }
   if (harness === 'claude') {
-    return `Add Tortoise MCP at ${url}.\n${keyLine}\nThen install the Tortoise skills (how-to-use-tortoise, tortoise-decide, tortoise-file-finding + tortoise-onboarding) from ${SKILLS_INSTALL_URL}.\nThen call tortoise_health and tortoise_create_point to file my first point.\n${docs}`
+    return `Add Tortoise MCP at ${url}.\n${keyLine}\nThen install the Tortoise skills (how-to-use-tortoise, tortoise-decide, tortoise-file-finding + tortoise-onboarding) from ${SKILLS_INSTALL_URL}.\nThen call tortoise_health and tortoise_create_point to file my first memory.\n${docs}`
   }
   if (harness === 'codex') {
-    return `Add Tortoise MCP at ${url}.\n${keyLine}\nSave it to my shell profile (export TORTOISE_API_KEY=…).\nThen install the Tortoise skills (how-to-use-tortoise, tortoise-decide, tortoise-file-finding + tortoise-onboarding) from ${SKILLS_INSTALL_URL}.\nThen call tortoise_health and tortoise_create_point to file my first point.\n${docs}`
+    return `Add Tortoise MCP at ${url}.\n${keyLine}\nSave it to my shell profile (export TORTOISE_API_KEY=…).\nThen install the Tortoise skills (how-to-use-tortoise, tortoise-decide, tortoise-file-finding + tortoise-onboarding) from ${SKILLS_INSTALL_URL}.\nThen call tortoise_health and tortoise_create_point to file my first memory.\n${docs}`
   }
   // #2827: both filesystem-less harnesses (Claude Desktop/Web) need only the
   // verify/file step in the conversation; the workflows body rides
@@ -2500,7 +2500,7 @@ function claimIntentInFlight() {
   const [wizardOrgBusy, setWizardOrgBusy] = React.useState(false)
   const [wizardForkBusy, setWizardForkBusy] = React.useState(false)
   const [wizardForkError, setWizardForkError] = React.useState('')
-  const [wizardForkChosen, setWizardForkChosen] = React.useState('')  // 'self' | 'build' | '' (set once per org)
+  const [wizardForkChosen, setWizardForkChosen] = React.useState('')  // 'self' | 'build' | '' — set once per org (#2407: 'unsure' never sets it; fork stays None so the card keeps asking)
   // #1998 (W2): connect-consent state — the harness-connected checkpoint
   // write on "I've set it up — Continue" (busy + error mirror handleWizardFork).
   const [wizardConnectBusy, setWizardConnectBusy] = React.useState(false)
@@ -3046,7 +3046,8 @@ function claimIntentInFlight() {
     // new team. Fire-and-forget like completeLogin's card loads; each
     // loader carries its own staleness guard.
     loadAll('').catch(() => {})
-    // #1906: refetch the team so the Overview 'Data points' card reflects
+    // #1906: refetch the team so the memory-count cards (Overview digest +
+    // Billing 'Memories') reflect
     // the seeded graph — team.point_count was captured at provisioning
     // (pre-seed, 0). Also covers the header-exit-without-seed case (0
     // stays 0 — honest).
@@ -4301,10 +4302,25 @@ function claimIntentInFlight() {
     setWizardForkBusy(true)
     setWizardForkError('')
     try {
+      // #2407: 'unsure' ("Not sure yet — decide later") is a fork-card ANSWER,
+      // never a fork VALUE — the checkpoint op {fork_unsure_at: true} records
+      // a server-stamped deferral WITHOUT consuming the set-once fork (fork
+      // stays None → the card keeps asking + the completion gate refuses to
+      // auto-close the org as 'self'). Repeat unsure picks re-stamp (200,
+      // never a 409); a later explicit self/build pick is a fresh fork write.
+      const body = forkId === 'unsure' ? { fork_unsure_at: true } : { fork: forkId }
       await api(`/v1/onboarding/state/checkpoint${onboardingTeamQ()}`, {
         method: 'POST', useSession: true,
-        body: JSON.stringify({ fork: forkId }),
+        body: JSON.stringify(body),
       })
+      if (forkId === 'unsure') {
+        // no fork consumed — refresh so the projection carries fork_unsure_at
+        // (the card's deferred hint + the Setup-guide fork row need it), then
+        // advance like a self pick (there is no catalog to show).
+        refreshOnboarding().catch(() => {})
+        setWizardStep(3)
+        return
+      }
       setWizardForkChosen(forkId)
       // review P1 (#1997): the catalog-presented mark fires HERE, not in a
       // step-2 effect — React batches setWizardForkChosen + setWizardStep(3)
@@ -6294,6 +6310,11 @@ function claimIntentInFlight() {
                           This Organization is set to <strong>{onboarding.fork === 'build' ? 'build an application on top' : 'use Tortoise for your own agents'}</strong>.
                         </p>
                       )}
+                      {onboarding && !onboarding.fork && onboarding.fork_unsure_at && (
+                        <p className="dim" style={{ marginBottom: '0.9rem' }}>
+                          You told us you're <strong>not sure yet</strong> — nothing is locked in. Pick an option now, or answer any time from Settings → Setup guide.
+                        </p>
+                      )}
                       <div className="fork-options" style={{ display: 'flex', flexDirection: 'column', gap: '0.6rem', marginBottom: '1rem' }}>
                         {WIZARD_FORK_OPTIONS.map((opt) => (
                           <button
@@ -6384,7 +6405,7 @@ function claimIntentInFlight() {
                       {harnessKey && (
                         <WizardBlock step={2} title="Call the SDK">
                           <p className="dim" style={{ margin: 0, lineHeight: 1.6 }}>
-                            Run this to verify your API key and file your first point — it creates your graph and connects your project.
+                            Run this to verify your API key and file your first memory — it creates your graph and connects your project.
                           </p>
                           <pre className="snippet" style={{ margin: 0 }}>
 {`curl https://api.premiselabs.co/v1/points \\
@@ -6453,7 +6474,7 @@ function claimIntentInFlight() {
                           <>
                             <p className="wizard-caption">Give this prompt to your agent to connect Tortoise:</p>
                             <WizardPromptCard text={wizardPromptText(wizardHarness, 1, harnessKey, wizardKeyMode)} label="Copy step 1 prompt" />
-                            <p className="wizard-caption">Then restart {HARNESS_NAMES[wizardHarness]} and give it this prompt to verify and file your first point:</p>
+                            <p className="wizard-caption">Then restart {HARNESS_NAMES[wizardHarness]} and give it this prompt to verify and file your first memory:</p>
                             <WizardPromptCard text={wizardPromptText(wizardHarness, 2, harnessKey, wizardKeyMode)} label="Copy step 2 prompt" />
                           </>
                         )
@@ -7466,7 +7487,7 @@ function claimIntentInFlight() {
               <>
                 <p className="dim">
                   Your Organization and API key are live — the graph is created the moment
-                  you add data. Connect your agent, or add a point yourself:
+                  you add data. Connect your agent, or add a memory yourself:
                 </p>
                 <div className="snippet-wrap">
                   <pre className="snippet">{firstDataSnippet}</pre>
@@ -7509,7 +7530,7 @@ function claimIntentInFlight() {
         {tab === 'overview' && team && !showReentryCard && team.graph_ready !== false && (team.point_count ?? 0) === 0 && (
           <section className="overview empty-state">
             <h2>Welcome to your Tortoise graph</h2>
-            <p className="dim">Connect your agent so it remembers why, not just what.</p>
+            <p className="dim">Connect your agent so it remembers why, not just what — the decisions and findings it saves land here as memories.</p>
             <div className="empty-actions">
               <a className="btn-primary" href="https://tortoise.premiselabs.co/welcome" target="_blank" rel="noreferrer">
                 Connect your agent →
@@ -8416,7 +8437,7 @@ function claimIntentInFlight() {
               </div>
               <div className="cards" style={{ marginTop: 12, marginBottom: 0 }}>
                 <div className="card"><div className="card-val">{(team.write_ops_used ?? 0).toLocaleString()}</div><div className="card-label">Write ops used{(team.write_ops_limit ? ` / ${team.write_ops_limit.toLocaleString()}` : '')}{team.write_ops_period ? ` · ${team.write_ops_period}` : ''}</div></div>
-                <div className="card"><div className="card-val">{team.point_count ?? 0}</div><div className="card-label">Data points</div></div>
+                <div className="card"><div className="card-val">{team.point_count ?? 0}</div><div className="card-label">Memories</div></div>
                 <div className="card"><div className="card-val">{team.max_graphs == null ? '∞' : team.max_graphs}</div><div className="card-label">Graphs</div></div>
                 <div className="card"><div className="card-val">{team.max_users == null ? '∞' : team.max_users}</div><div className="card-label">Users</div></div>
               </div>

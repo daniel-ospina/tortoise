@@ -2,6 +2,9 @@
 // derivations are pure, no jsdom/React needed) (#2000 W4).
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
+import { dirname, join } from 'node:path'
 import {
   OVERVIEW_ELEMENTS,
   overviewConnection,
@@ -9,6 +12,8 @@ import {
   overviewNextAction,
 } from './overview.js'
 import { setupGuide } from './setupGuide.js'
+
+const __dirname = dirname(fileURLToPath(import.meta.url))
 
 test('DE2E-2: the Overview renders EXACTLY 3 elements in order', () => {
   assert.deepEqual([...OVERVIEW_ELEMENTS], [
@@ -55,25 +60,31 @@ test('connection: null state → loading (never fabricated)', () => {
   assert.equal(overviewConnection(null).kind, 'loading')
 })
 
-test('digest: populated count is honest (N points)', () => {
+test('digest: populated count is honest (N memories)', () => {
   const d = overviewDigest(42)
   assert.equal(d.kind, 'populated')
   assert.equal(d.value, 42)
   assert.ok(d.detail.includes('Organization'))
 })
 
-test('digest: singular count renders the singular copy (first point milestone)', () => {
+test('digest: singular count renders the singular copy (first memory milestone)', () => {
   const d = overviewDigest(1)
   assert.equal(d.kind, 'populated')
   assert.equal(d.value, 1)
-  assert.ok(/point filed/.test(d.detail), 'singular copy')
-  assert.ok(!/points filed/.test(d.detail), 'never the plural copy for 1')
+  // #2361: the anchor is 'memories' — the singular/plural pair must use it
+  // (never 'point(s) filed', the pre-sweep drift term).
+  assert.ok(/memory filed/.test(d.detail), 'singular copy')
+  assert.ok(!/memories filed/.test(d.detail), 'never the plural copy for 1')
 })
 
-test('digest: zero → empty pre-first-point copy, no fabrication', () => {
+test('digest: zero → empty pre-first-memory copy, no fabrication', () => {
   const d = overviewDigest(0)
   assert.equal(d.kind, 'empty')
   assert.ok(/No memories yet/.test(d.detail))
+  // #2361: the empty gloss is plain language — the anchor is explained on
+  // first contact, and the jargon terms ('point'/'subject') never appear.
+  assert.ok(/decisions and findings/.test(d.detail))
+  assert.ok(!/point/i.test(d.detail), 'no bare graph jargon in user copy')
 })
 
 test('digest: unknown/missing → unavailable, never a fake count', () => {
@@ -142,4 +153,59 @@ test('DE2E-2 copy sweep: Overview derivations never say team/workspace', () => {
   assert.ok(!/\bteam\b/i.test(all), 'no "team" in Overview copy')
   assert.ok(!/workspace/i.test(all), 'no "workspace" in Overview copy')
   assert.ok(/Organization/i.test(all), 'Organization copy present')
+})
+
+test('#2361 vocab anchor: count-of-record surfaces share ONE term (memories)', () => {
+  // The graph's contents have ONE user-facing name: 'memories'. The pre-sweep
+  // drift called the same object 'memories' on the Overview empty state and
+  // 'point(s)' on the populated digest + the Setup-guide step label — two
+  // unexplained terms for one object (issue #2361, indicators 1 and 4).
+  // This guard is the ratchet: a future copy edit that reintroduces 'point'
+  // on a count-of-record surface fails here instead of silently re-drifting.
+  const digest = [overviewDigest(0), overviewDigest(1), overviewDigest(7)]
+    .map((d) => String(d.detail)).join(' ')
+  assert.ok(/memor(y|ies)/.test(digest), 'digest uses the anchor term')
+  assert.ok(!/\bpoints?\b/.test(digest), 'digest never says "point(s)"')
+
+  const g = setupGuide({ status: 'active', fork: 'self', completed_steps: [] })
+  const seedRow = g.rows.find((r) => r.id === 'first-points-filed')
+  assert.ok(seedRow, 'the first-memory step renders')
+  assert.ok(/memor(y|ies)/.test(seedRow.label), 'setup-guide step uses the anchor term')
+  assert.ok(!/\bpoints?\b/.test(seedRow.label), 'setup-guide step never says "point(s)"')
+})
+
+test('#2361 vocab anchor: LIVE surfaces (main.jsx) do not drift back to "point"', () => {
+  // Code-review round 1 (P1): the first pass only guarded the pure modules,
+  // so three LIVE main.jsx strings drifted invisibly past a green suite —
+  // the Billing count-of-record card ("Data points", the SAME
+  // team.point_count the digest renders), the live connect step ("file your
+  // first point"), and the live Overview empty CTA ("add a point
+  // yourself"). Source scan (wizardArchived.test.js pattern) so the ratchet
+  // covers the surface users actually read, not just the modules.
+  const src = readFileSync(join(__dirname, 'main.jsx'), 'utf8')
+
+  assert.ok(!/Data points/.test(src),
+    'Billing count-of-record card uses the anchor (was "Data points")')
+  // whitespace-tolerant: a Prettier reflow of correct copy must not fail
+  assert.ok(/card-label">\s*Memories</.test(src),
+    'the point_count card is labelled "Memories"')
+  // Class-level, not literal-phrase: the live connect step renders BOTH the
+  // JSX caption AND the copyable prompt bodies (wizardPromptText), and round
+  // 2 caught the caption anchored while the prompt body four lines below
+  // still said "point". Match any subject pronoun, not just the one string
+  // that happens to exist today.
+  assert.ok(!/file (my|your) first point/i.test(src),
+    'live connect step (caption + prompt bodies) never says "first point"')
+  assert.ok(!/first point/i.test(src),
+    'no natural-language "first point" prose remains on live surfaces')
+  assert.ok(/file your first memory/i.test(src),
+    'live connect caption carries the anchor')
+  assert.ok(/file my first memory/i.test(src),
+    'live prompt bodies carry the anchor (not just the caption)')
+  assert.ok(!/add a point yourself/i.test(src),
+    'live Overview empty CTA uses the anchor (was "add a point yourself")')
+  // the FIRST-CONTACT surface is the welcome empty state (the digest card
+  // mounts only above zero), so the gloss must live there too
+  assert.ok(/decisions and findings it saves land here as memories/.test(src),
+    'the live first-contact empty state glosses the anchor')
 })

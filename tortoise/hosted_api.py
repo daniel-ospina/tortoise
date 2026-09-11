@@ -403,7 +403,6 @@ async def _lifespan(app):
 
     async with mcp_http_app.lifespan(mcp_http_app):
         try:
-            import threading
 
             def _probe_loaded_model_id(model) -> str | None:
                 """Best-effort extraction of the loaded HF model id from a
@@ -469,7 +468,45 @@ async def _lifespan(app):
         global _WATCHER
         try:
             cfg = _backup_config_safe()
-            if cfg and os.environ.get("BACKUP_WATCHER_DISABLED") != "1":  # noqa: F823
+            # #2922: EVERY reason the watcher does not start must be stated on
+            # boot. The UnboundLocalError was one silent path; these two
+            # conditions were others — an absent/invalid backup config (the
+            # fail-closed default) or the test-only kill switch both left
+            # `_WATCHER` unset with no log line at all, i.e. the same "invisible
+            # dead monitor" state that hid this incident for ~31 days.
+            _watcher_disabled = os.environ.get("BACKUP_WATCHER_DISABLED") == "1"
+            # "The monitor is absent" is a warning only where a monitor is
+            # expected. Gating on the hosted marker (FLY_APP_NAME — the same
+            # truthiness test the durability guard uses) keeps production loud
+            # without making every TestClient/embedded boot warn about a subsystem
+            # those deployments legitimately leave off: a warning that fires on
+            # every healthy non-production boot is training-to-ignore material for
+            # the very signal #2922 needed.
+            _watcher_expected = bool(os.environ.get("FLY_APP_NAME"))
+            _not_started_reason = None
+            if cfg is None:
+                _not_started_reason = (
+                    "backup config unavailable (BACKUP_SWEEP_ENABLED off, or config invalid)"
+                )
+            elif _watcher_disabled:
+                _not_started_reason = (
+                    "BACKUP_WATCHER_DISABLED=1 (test-only kill switch; "
+                    "must never be set in production)"
+                )
+            if _not_started_reason is not None:
+                if _watcher_expected:
+                    _logger.warning(
+                        "backup watcher not started: %s — no backup staleness "
+                        "monitoring this boot",
+                        _not_started_reason,
+                    )
+                else:
+                    _logger.debug(
+                        "backup watcher not started: %s — no backup staleness "
+                        "monitoring this boot",
+                        _not_started_reason,
+                    )
+            if cfg and not _watcher_disabled:
                 from tortoise.backup_sweep import read_team_state
                 from tortoise.backup_watcher import BackupWatcher, WatcherThread
 
@@ -548,17 +585,35 @@ async def _lifespan(app):
                 _WATCHER = WatcherThread(watcher, interval_seconds=cfg.watcher_poll_seconds)
                 _WATCHER.start()
                 if not is_supabase_enabled():
-                    _boot_gc_drill_graphs(reg_sdk._get_proj().db)
+                    try:
+                        _boot_gc_drill_graphs(reg_sdk._get_proj().db)
+                    except Exception as exc:
+                        # #2922 review: a separate operation, so a separate
+                        # message. Reporting a drill-graph GC failure as "the
+                        # backup watcher could not start" would have told the
+                        # operator the opposite of the truth (the watcher IS
+                        # running by this point).
+                        _logger.error(
+                            "gc of drill graphs at boot failed: %s", exc, exc_info=True
+                        )
         except Exception as exc:
-            _logger.warning("backup watcher could not start: %s", exc)
+            # #2922: this used to be a swallowed `warning`. The watcher silently
+            # never started in hosted production (~31 days: watcher.running=false
+            # with last_poll 2026-08-11), which removed the one signal that would
+            # have surfaced #2790 (no sweep for 33 days, no drill ever recorded).
+            # Loud, with a traceback, so a dead watcher can never be invisible again.
+            _logger.error("backup watcher could not start: %s", exc, exc_info=True)
         # #432 Task 7: event retention — boot purge + interval task. Best-effort
         # and non-fatal (like the pre-warm): a purge failure never blocks bind.
         # Per-team graphs get purged by the SDK lazy hook too (embedded/stdio);
         # here we sweep once at boot and then on an asyncio interval.
+        #
+        # #2922: do NOT import asyncio/os locally here. Both are imported at module
+        # scope (lines 17/23), and a function-local `import os` makes `os` a local
+        # name for the WHOLE of _lifespan — so the earlier `os.environ.get(...)`
+        # read above raised UnboundLocalError and aborted the entire watcher-start
+        # block. Regression guard: tests/test_boot_regressions.py.
         try:
-            import asyncio
-            import os
-
             def _sweep_events() -> None:
                 try:
                     from tortoise.event_store import purge_expired, purge_overflow
@@ -613,7 +668,11 @@ async def _lifespan(app):
             _retention_task = asyncio.get_event_loop().create_task(_event_retention_loop())
             app.state._event_retention_task = _retention_task
         except Exception as exc:
-            _logger.warning("event retention loop not started: %s", exc)
+            # Best-effort by design (a purge failure must never block bind), but
+            # there is no retry: retention is off for this process's lifetime, so
+            # this is the same "silently never runs" shape as #2922 and gets the
+            # same treatment — ERROR plus a traceback.
+            _logger.error("event retention loop not started: %s", exc, exc_info=True)
         yield
 
 
@@ -3941,15 +4000,21 @@ async def team_info(team: dict = Depends(get_current_team_session_ungated)):  # 
     teams (the #1148 gate stays scoped to the management set)."""
     _reject_graph_bound_team_surface(team, "team overview")
     sdk = _make_sdk(namespace=team["team_id"])
-    # Count Points in default graph. #1591: FAIL SOFT — a missing/broken team
-    # graph (half-failed provisioning, restores) must not dead-end the
-    # dashboard with a hard 500; the client renders the empty state and a
-    # write recreates the graph.
+    # Count REAL Points in default graph. #2360: demo/sample Points
+    # (_seed_demo_graph: the 12 sample Points + _demo_sentinel) are EXCLUDED
+    # — the Overview memory digest (this count) presents the user's own
+    # filings, never opt-in/legacy sample content masquerading as user data.
+    # The exclusion set is the same constant the demo seeder writes from, so
+    # it can never drift. #1591: FAIL SOFT — a missing/broken team graph
+    # (half-failed provisioning, restores) must not dead-end the dashboard
+    # with a hard 500; the client renders the empty state and a write
+    # recreates the graph.
     point_count = 0
     graph_ready = True
     try:
         point_count = sdk._get_proj().g.query(
-            "MATCH (n:Point) RETURN count(n)"
+            "MATCH (n:Point) WHERE NOT n.id IN $demo_ids RETURN count(n)",
+            params={"demo_ids": list(_DEMO_POINT_IDS)},
         ).result_set[0][0]
     except Exception:
         import logging
@@ -5008,34 +5073,104 @@ async def email_signup(request: Request):
     )
 
 
+# ── #2360 (re-spec): the demo/sample seed is NOT part of fresh-org
+# provisioning any more — the tenant-provision Edge Function calls the REAL
+# starter seed (/internal/starter-seed) instead, which files the signing-up
+# user + their Organization as connected anchor Subjects (never sample
+# Points). The demo seed below survives ONLY as an explicit opt-in sample
+# (/v1/demo + MCP tortoise_onboarding_demo_create) for callers who ask for
+# it — and every demo Point it writes is EXCLUDED from the count-of-record
+# surfaces (team.point_count — the Overview memory digest) so sample content
+# is never presented as the user's own filings. The id set is the single
+# source of truth for the exclusion: point_count and the seeder share it, so
+# a demo id can never drift into the digest.
+_DEMO_SENTINEL_ID = "_demo_sentinel"
+
+# (pid, pointKind, content, tags)
+_DEMO_SEMANTIC_POINTS = [
+    ("sem_welcome", "observation",
+     "Your Tortoise graph is ready. This is where agents file decisions, "
+     "observations, and findings so your team remembers across sessions.",
+     ["system", "welcome"]),
+    ("sem_fact_tortoise", "statement",
+     "Tortoise is a semantic epistemic graph engine that powers agent memory "
+     "through four ontology layers: Semantic, Episodic, Epistemic, and Procedural.",
+     ["tortoise", "overview"]),
+    ("sem_fact_layers", "statement",
+     "Semantic = facts and statements. Episodic = session history and events. "
+     "Epistemic = claims with evidence and confidence. Procedural = workflows and skills.",
+     ["tortoise", "ontology"]),
+]
+
+# (pid, content) — episodic turns (pointKind 'event', no tags)
+_DEMO_EPISODIC_TURNS = [
+    ("epi_turn1", "[user] Let's set up our agent memory system with Tortoise."),
+    ("epi_turn2", "[assistant] I'll initialize the graph and configure the ontology layers. "
+     "Once set up, all decisions will be tracked automatically."),
+    ("epi_turn3", "[user] Great — make sure we capture decisions about architecture and product strategy."),
+]
+
+# (pid, pointKind, content, confidence, tags)
+_DEMO_EPISTEMIC_POINTS = [
+    ("epis_claim1", "hypothesis",
+     "Agent memory systems should be graph-native rather than vector-only "
+     "because semantic relationships carry more signal than embedding proximity.",
+     0.7, ["hypothesis", "architecture"]),
+    ("epis_claim2", "evidence",
+     "Teams using structured agent memory report 40% fewer repeated mistakes "
+     "and 3x faster onboarding for new team members.",
+     0.5, ["evidence", "adoption"]),
+    ("epis_claim3", "decision",
+     "We will use FalkorDB as the graph backend because it supports Cypher "
+     "queries and runs as a lightweight extension to Redis.",
+     0.9, ["decision", "infrastructure"]),
+]
+
+# (pid, pointKind, content, tags)
+_DEMO_PROCEDURAL_POINTS = [
+    ("proc_wf1", "workflow",
+     "CONTEXT-INJECTION: Before any coding task, call tortoise_suggest_entry_points() "
+     "to find related context from past sessions and decisions.",
+     ["workflow", "context"]),
+    ("proc_wf2", "workflow",
+     "DECISION-CAPTURE: After making a design decision, call tortoise_create_point() "
+     "with kind='decision' so future agents can trace the reasoning chain.",
+     ["workflow", "decision"]),
+    ("proc_wf3", "workflow",
+     "REVIEW-GATE: Before merging any PR, verify that key decisions are filed in Tortoise. "
+     "If not, file them before merging.",
+     ["workflow", "review"]),
+]
+
+# Every demo/sample Point the seeder can write, incl. the sentinel. The
+# Overview digest (team.point_count) excludes exactly this set — sample
+# content never counts as the user's own filings (#2360).
+_DEMO_POINT_IDS: frozenset[str] = frozenset(
+    pid for pid, *_ in (
+        _DEMO_SEMANTIC_POINTS + _DEMO_EPISODIC_TURNS
+        + _DEMO_EPISTEMIC_POINTS + _DEMO_PROCEDURAL_POINTS)
+) | {_DEMO_SENTINEL_ID}
+
+
 def _seed_demo_graph(team_id: str) -> dict:
-    """Seed the 4-layer demo graph for a team. Idempotent (sentinel)."""
+    """Seed the 4-layer OPT-IN demo/sample graph for a team. Idempotent
+    (sentinel). #2360: NEVER called on the fresh-org provisioning path —
+    fresh orgs get the REAL starter seed (/internal/starter-seed) instead.
+    Every Point written here is excluded from team.point_count, so opt-in
+    sample content is never counted as the user's own filings."""
     sdk = _make_sdk(namespace=team_id)
     proj = sdk._get_proj()
     now = datetime.now(UTC).isoformat()
 
     # Idempotency: sentinel written last — skip if already fully seeded
     existing = proj.g.query(
-        "MATCH (p:Point {id: '_demo_sentinel'}) RETURN p.id"
+        f"MATCH (p:Point {{id: '{_DEMO_SENTINEL_ID}'}}) RETURN p.id"
     ).result_set
     if existing:
         return {"status": "already_seeded", "team_id": team_id}
 
     # ── Semantic Layer — facts and statements ────────────────────
-    semantic_points = [
-        ("sem_welcome", "observation",
-         "Your Tortoise graph is ready. This is where agents file decisions, "
-         "observations, and findings so your team remembers across sessions.",
-         ["system", "welcome"]),
-        ("sem_fact_tortoise", "statement",
-         "Tortoise is a semantic epistemic graph engine that powers agent memory "
-         "through four ontology layers: Semantic, Episodic, Epistemic, and Procedural.",
-         ["tortoise", "overview"]),
-        ("sem_fact_layers", "statement",
-         "Semantic = facts and statements. Episodic = session history and events. "
-         "Epistemic = claims with evidence and confidence. Procedural = workflows and skills.",
-         ["tortoise", "ontology"]),
-    ]
+    semantic_points = _DEMO_SEMANTIC_POINTS
     for pid, kind, content, tags in semantic_points:
         proj.g.query(
             "MERGE (p:Point {id:$id}) "
@@ -5058,12 +5193,7 @@ def _seed_demo_graph(team_id: str) -> dict:
         "SET s.created_at=$now, s.turn_count=3",
         params={"sid": session_id, "now": now},
     )
-    episodic_turns = [
-        ("epi_turn1", "[user] Let's set up our agent memory system with Tortoise."),
-        ("epi_turn2", "[assistant] I'll initialize the graph and configure the ontology layers. "
-         "Once set up, all decisions will be tracked automatically."),
-        ("epi_turn3", "[user] Great — make sure we capture decisions about architecture and product strategy."),
-    ]
+    episodic_turns = _DEMO_EPISODIC_TURNS
     for pid, content in episodic_turns:
         proj.g.query(
             "MERGE (t:Point {id:$id}) "
@@ -5078,20 +5208,7 @@ def _seed_demo_graph(team_id: str) -> dict:
         )
 
     # ── Epistemic Layer — claims with evidence ───────────────────
-    epistemic_points = [
-        ("epis_claim1", "hypothesis",
-         "Agent memory systems should be graph-native rather than vector-only "
-         "because semantic relationships carry more signal than embedding proximity.",
-         0.7, ["hypothesis", "architecture"]),
-        ("epis_claim2", "evidence",
-         "Teams using structured agent memory report 40% fewer repeated mistakes "
-         "and 3x faster onboarding for new team members.",
-         0.5, ["evidence", "adoption"]),
-        ("epis_claim3", "decision",
-         "We will use FalkorDB as the graph backend because it supports Cypher "
-         "queries and runs as a lightweight extension to Redis.",
-         0.9, ["decision", "infrastructure"]),
-    ]
+    epistemic_points = _DEMO_EPISTEMIC_POINTS
     for pid, kind, content, confidence, tags in epistemic_points:
         proj.g.query(
             "MERGE (p:Point {id:$id}) "
@@ -5108,20 +5225,7 @@ def _seed_demo_graph(team_id: str) -> dict:
             )
 
     # ── Procedural Layer — workflows ─────────────────────────────
-    procedural_points = [
-        ("proc_wf1", "workflow",
-         "CONTEXT-INJECTION: Before any coding task, call tortoise_suggest_entry_points() "
-         "to find related context from past sessions and decisions.",
-         ["workflow", "context"]),
-        ("proc_wf2", "workflow",
-         "DECISION-CAPTURE: After making a design decision, call tortoise_create_point() "
-         "with kind='decision' so future agents can trace the reasoning chain.",
-         ["workflow", "decision"]),
-        ("proc_wf3", "workflow",
-         "REVIEW-GATE: Before merging any PR, verify that key decisions are filed in Tortoise. "
-         "If not, file them before merging.",
-         ["workflow", "review"]),
-    ]
+    procedural_points = _DEMO_PROCEDURAL_POINTS
     for pid, kind, content, tags in procedural_points:
         proj.g.query(
             "MERGE (p:Point {id:$id}) "
@@ -5151,7 +5255,7 @@ def _seed_demo_graph(team_id: str) -> dict:
 
     # ── Sentinel — written last so partial failure allows retry ──
     proj.g.query(
-        "CREATE (p:Point {id:'_demo_sentinel', content:'demo-sentinel', "
+        f"CREATE (p:Point {{id:'{_DEMO_SENTINEL_ID}', content:'demo-sentinel', "
         "pointKind:'system', is_operator:false, status:'live', "
         "createdAt:$now, updatedAt:$now})",
         params={"now": now},
@@ -5179,10 +5283,15 @@ def _seed_demo_graph(team_id: str) -> dict:
 
 @app.post("/internal/demo")
 async def create_demo_graph(request: Request):
-    """Create a demo graph with sample Points across all 4 ontology layers.
+    """Create an OPT-IN demo graph with sample Points across all 4 ontology
+    layers.
 
-    Called by the tenant-provision Edge Function after provisioning to seed
-    demo data so new users see a populated graph immediately.
+    #2360 (re-spec): this is NO LONGER auto-called by the tenant-provision
+    Edge Function on fresh orgs — fresh orgs receive the REAL starter seed
+    (/internal/starter-seed: the signing-up user + their Organization as
+    connected Subjects). This endpoint stays only as the explicit opt-in
+    sample path (quota-gated, metered), and every Point it writes is
+    excluded from the Overview memory digest (team.point_count).
     """
     _check_internal(request)
 
@@ -16519,7 +16628,8 @@ def _maybe_apply_completion(team_id: str) -> bool:
             return False
         steps = _os.completed_steps(proj, team_id)
         if _os.completion_gate_satisfied(
-                steps, node.get("fork"), bool(node.get("compact"))):
+                steps, node.get("fork"), bool(node.get("compact")),
+                fork_unsure_at=bool(node.get("fork_unsure_at"))):
             _os.write_status(proj, team_id, _os.STATUS_COMPLETE)
             try:  # created-signal invalidates the 60s MCP TTL cache (pin 18)
                 from tortoise import mcp_server as _mcp
@@ -16714,6 +16824,7 @@ def _get_onboarding_projection(team_id: str) -> dict:
             node.get("member_progress")),
         "last_decide_attempt": node.get("last_decide_attempt"),
         "compact": node.get("compact", False),
+        "fork_unsure_at": node.get("fork_unsure_at"),
     })
     state["onboarding_complete"] = _os.resolve_wire_completion(
         node.get("status"), bool(raw.get("onboarding_complete")), steps)
@@ -16806,6 +16917,9 @@ class OnboardingStatePatchRequest(BaseModel):
     completed_steps: list[str] | None = None
     member_progress: dict | None = None
     last_decide_attempt: str | None = None
+    # #2407: fork_unsure_at is a server-stamped FLOW key — declared here so
+    # a stray PATCH is REJECTED loudly (403 server-owned) like the siblings.
+    fork_unsure_at: str | None = None
 
 
 # #2001 (W5): PATCH-surface ownership table — which FLOW keys are rejected
@@ -16813,6 +16927,7 @@ class OnboardingStatePatchRequest(BaseModel):
 _PATCH_SERVER_OWNED_KEYS = {
     "fork", "compact", "status", "version",
     "completed_steps", "member_progress", "last_decide_attempt",
+    "fork_unsure_at",
 }
 _PATCH_REJECTED_STEP_FIELDS = {
     "harness_connected", "first_points_filed", "decide_completed",
@@ -17000,6 +17115,10 @@ class OnboardingCheckpointRequest(BaseModel):
     last_decide_attempt: str | None = None
     member_progress: dict | None = None
     status: str | None = None
+    # #2407: "not sure yet — decide later" fork-card answer — a MARKER
+    # (true) that records fork_unsure_at server-side WITHOUT consuming the
+    # set-once fork value. Never a timestamp from the client (server-stamped).
+    fork_unsure_at: bool | None = None
     model_config = {"extra": "forbid"}
 
 
@@ -17018,6 +17137,11 @@ async def onboarding_checkpoint(body: OnboardingCheckpointRequest,
       (replay → noop), unknown step → 422.
     - fork/compact → set-once (first write wins; same-value replay 200;
       changed → 409).
+    - fork_unsure_at (true) → #2407 "not sure yet — decide later": records
+      the fork-card deferral (server-stamped ISO timestamp) WITHOUT
+      consuming the set-once fork — fork stays NULL so the card stays
+      answerable; repeat → 200 (re-stamp); fork already set or compact org
+      → 409 (never asked / already answered).
     - last_decide_attempt → LWW; 'failed' is SKIPPED once decide-completed
       exists (dismissal alone never completes).
     - member_progress → {user_id: [steps]} user-scoped map-merge;
@@ -17041,6 +17165,7 @@ async def onboarding_checkpoint(body: OnboardingCheckpointRequest,
             ("compact", body.compact),
             ("last_decide_attempt", body.last_decide_attempt),
             ("member_progress", body.member_progress),
+            ("fork_unsure_at", body.fork_unsure_at),
         ) if val is not None
     ]
     if len(present) > 1:
@@ -17077,6 +17202,22 @@ async def onboarding_checkpoint(body: OnboardingCheckpointRequest,
                                     detail="fork must be 'self' or 'build'")
             outcome = _os.write_fork(proj, team_id, body.fork,
                                      status_from_mirror=legacy_mirror)
+            if outcome == "conflict":
+                raise HTTPException(
+                    status_code=409,
+                    detail={"message": "fork_already_set"})
+            # #2407 invariant: the unsure marker is meaningful only while
+            # fork IS NULL — a consumed fork clears it (the org answered).
+            _os.clear_fork_unsure_at(proj, team_id)
+        elif body.fork_unsure_at is not None:
+            if body.fork_unsure_at is not True:
+                raise HTTPException(
+                    status_code=422,
+                    detail={"message": "invalid_fork_unsure_at",
+                            "expects": True})
+            at = datetime.now(UTC).isoformat()
+            outcome = _os.write_fork_unsure_at(
+                proj, team_id, at, status_from_mirror=legacy_mirror)
             if outcome == "conflict":
                 raise HTTPException(
                     status_code=409,
@@ -17127,7 +17268,8 @@ async def onboarding_checkpoint(body: OnboardingCheckpointRequest,
                     proj, team_id, uid, steps,
                     status_from_mirror=legacy_mirror))
         # post-write fork-aware gate eval (monotonic) — step/fork/compact
-        # writes only (never member_progress)
+        # writes only (never member_progress; fork_unsure_at records no
+        # progress and its gate is unsatisfiable-by-design until answered)
         if body.step is not None or body.fork is not None or body.compact is not None:
             _maybe_apply_completion(team_id)
     except HTTPException:
@@ -17376,6 +17518,159 @@ async def onboarding_seed(body: OnboardingSeedRequest,
             "onboarding seed failed (team=%s)", team_id)
         raise HTTPException(status_code=500,
                             detail="Onboarding seed failed — retry-safe") from None
+
+
+# ── #2360: provisioning-time REAL starter seed (supersedes the demo auto-seed) ──
+# The tenant-provision Edge Function used to auto-seed 12 fake demo Points +
+# a _demo_sentinel into EVERY fresh org (/internal/demo) so new users "see a
+# populated graph immediately" — sample content the Overview digest then
+# counted as the user's own filings ('13 points filed' on a brand-new org).
+# The #2360 re-spec replaces that sample data with REAL data that kickstarts
+# the process: the signing-up user as a naturalPerson Subject and their
+# Organization as an organization Subject, the two CONNECTED (memberOf) — the
+# canonical two-anchor structure from tortoise/onboarding/seed.py (same
+# module the interactive W3 seed uses; replay is idempotent and never
+# merges a distinct identity). No demo Point is ever written on this path.
+#
+# Never-invented-identity (DM-3): the person anchor is filed ONLY when the
+# provisioning context carries the user's own display name (auth metadata —
+# user-provided at signup/OAuth). When only an email-prefix derivation would
+# be available, the starter seed files the org-anchor Subject only (the org
+# name IS user-confirmed at org-create) and leaves the first-points-filed
+# step pending — the connect-time interactive W3 seed then files the person
+# Subject + memberOf with a user-confirmed name. Both legs are REAL data;
+# nothing is ever invented or silently derived on the provisioning path.
+
+def _run_starter_seed(team_id: str, *, org_name: str | None = None,
+                      person_name: str | None = None,
+                      person_user_id: str | None = None,
+                      person_email: str | None = None) -> dict:
+    """The provisioning-time real starter seed (internal, #2360).
+
+    W3-parity runner over the canonical seed core: files the org-anchor
+    Subject (organization, org_id=team_id) ALWAYS (the org display name is
+    user-confirmed at org-create), and the person-anchor Subject
+    (naturalPerson, user_id/email) + the memberOf link WHEN a user-provided
+    display name is present. On success links the onboarding node (onboards
+    edge / org_subject_id) and — when the person anchor was filed too (the
+    full starter structure) — marks the first-points-filed seed step (W3
+    semantics: the org-anchor seed). A pending step otherwise stays with the
+    connect-time interactive seed (never-invented-identity). Idempotent:
+    replay reuses the canonical anchors (created=False). Graph-down → 503
+    fail-loud (retry-safe), mirroring the W3 runner."""
+    from tortoise.onboarding import seed as _seed
+    if not _graph_available(team_id):
+        raise HTTPException(status_code=503,
+                            detail="Onboarding graph unavailable — retry later")
+    org_display = (org_name or "").strip()
+    if not org_display:
+        org_display = _team_name(team_id) or ""
+    person = (person_name or "").strip() or None
+    # never-invented-identity guard: no org display name on the control
+    # plane → zero writes (the caller must name the org first).
+    if not org_display:
+        return {"status": "org_name_required", "team_id": team_id}
+    # the person user_id ref is a real user UUID only — 'api'/email-shaped
+    # values never ride the identity ref (W3 parity).
+    if person_user_id in (None, "api") or "@" in str(person_user_id):
+        person_user_id = None
+    include_person = person is not None
+    sdk = _make_sdk(namespace=team_id)
+    try:
+        proj = sdk._get_proj()
+        surface = _TeamSeedSurface(sdk)
+        try:
+            report = _seed.seed_onboarding_anchors(
+                surface, org_name=org_display, org_id=team_id,
+                person_name=person, user_id=person_user_id,
+                person_email=person_email, include_person=include_person)
+        except _seed.SubjectCollision as exc:
+            # A same-name Subject that is NOT this org/user (rare on a fresh
+            # org) → surfaced, zero writes for that anchor, retry-safe. The
+            # provisioning caller logs + keeps the team usable (mirrors the
+            # W3 runner's all-or-nothing contract).
+            return {
+                "status": "collision",
+                "collisions": [{
+                    "kind": exc.kind, "name": exc.name,
+                    "existing_id": exc.existing_id, "reason": exc.reason,
+                    "existing_refs": exc.refs,
+                }],
+                "org_name": org_display,
+                "person_name_source": "provided" if include_person else None,
+            }
+        legacy_mirror = bool(_get_onboarding_state(team_id).get(
+            "onboarding_complete"))
+        org_subject = report["org_subject"]
+        onboards = _os.write_onboards_edge(proj, team_id, org_subject["id"])
+        step = None
+        if include_person:
+            step = _os.write_completed_step(
+                proj, team_id, "first-points-filed",
+                status_from_mirror=legacy_mirror)
+        _maybe_apply_completion(team_id)
+    finally:
+        sdk.close()
+    resp = {
+        "status": "seeded",
+        "team_id": team_id,
+        "org_name": org_display,
+        "org_subject": report["org_subject"],
+        "org_created": report["org_created"],
+        "org_kind_normalized": report["org_kind_normalized"],
+        "onboards": onboards,
+        "onboarding": _get_onboarding_projection(team_id),
+    }
+    if include_person:
+        resp.update({
+            "user_subject": report["user_subject"],
+            "person_created": report["person_created"],
+            "person_kind_normalized": report["person_kind_normalized"],
+            "member_of": report["member_of"],
+            "steps": {"first-points-filed": step},
+        })
+    return resp
+
+
+@app.post("/internal/starter-seed")
+async def starter_seed(request: Request):
+    """Provisioning-time REAL starter seed (#2360) — internal key only.
+
+    Called by the tenant-provision Edge Function right after provisioning a
+    fresh org (replacing the old demo auto-seed). Files the signing-up user
+    as a naturalPerson Subject and their Organization as an organization
+    Subject, connected memberOf (canonical two-anchor seed,
+    tortoise/onboarding/seed.py). Idempotent; never writes demo Points;
+    never silently derives the person name (person_name is the user's own
+    display name from the auth context; absent → org-anchor seed only).
+    """
+    _check_internal(request)
+    raw = await _read_capped_body(request, _BODY_MAX_BYTES, _BODY_413_DETAIL)
+    try:
+        body = _json.loads(raw)
+    except Exception:
+        raise HTTPException(status_code=400,
+                            detail="Invalid JSON body") from None
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+    team_id = body.get("team_id")
+    if not team_id:
+        raise HTTPException(status_code=400, detail="Missing team_id")
+    try:
+        return _run_starter_seed(
+            team_id,
+            org_name=(body.get("org_name") or None),
+            person_name=(body.get("person_name") or None),
+            person_user_id=(body.get("person_user_id") or None),
+            person_email=(body.get("person_email") or None))
+    except HTTPException:
+        raise
+    except Exception:
+        import logging
+        logging.getLogger("tortoise.api").exception(
+            "starter seed failed (team=%s)", team_id)
+        raise HTTPException(status_code=500,
+                            detail="Starter seed failed — retry-safe") from None
 
 
 @app.post("/v1/onboarding/session-recording", response_model=OnboardingStateResponse)
@@ -19668,7 +19963,7 @@ async def backups_restore(body: BackupRestoreRequest, request: Request, team: di
 # endpoint 503s when the sweep is disabled (config missing or BACKUP_SWEEP_ENABLED
 # not true).
 
-_WATCHER: BackupWatcher | None = None  # spawned in _lifespan (driver-disabled leg)  # noqa: F821
+_WATCHER: WatcherThread | None = None  # WatcherThread imported in _lifespan  # noqa: F821
 _DRIVER_HEARTBEAT_KEY = "ops/driver-heartbeat.json"
 _LAST_DRILL_AT: float = 0.0  # in-memory drill cooldown (single-instance, resets on restart)
 _DRILL_COOLDOWN_S = 3600

@@ -11,6 +11,13 @@ surfaces:
   - test_battery_parity_mabench_run.py
   - test_battery_parity_mabench_tortoise.py
   - test_battery_parity_migration.py
+  # #2922/#2923: DB-free static guards for boot-path regressions (credential
+  # redaction in entrypoint.sh, function-scope import shadowing in _lifespan).
+  # Registered under `api` as well as `core` deliberately: the file it guards most
+  # (tortoise/hosted_api.py) selects the `api` surface, and `core` is only added
+  # when nothing else matched — so a PR that reintroduced the bug in that file
+  # alone would otherwise never run the guard.
+  - test_boot_regressions.py
   - test_delivery_tenancy.py  # C6 #2115: delivery-shape tenancy + session_recording per-graph override
   - test_onboarding_email_http.py
   - test_sentry.py
@@ -260,6 +267,7 @@ surfaces:
   - test_backup_sweep.py
   - test_backup_watcher.py
   - test_bfs_audit.py
+  - test_boot_regressions.py
   - test_build_window_transcript.py
   - test_canary_classify.py
   - test_canonical.py
@@ -628,6 +636,8 @@ surfaces:
   - eval/retrieval/test_run.py
   - longmem_eval/test_vector_arm.py
   - longmem_eval/test_assembly_arm.py  # #2165 Task 7: v2-lane eval arm A/A-widened/B admission + R9 geometry (docker-lane)
+  - longmem_eval/test_measure_temporal.py  # #2578 Task 2: measurement scaffold — census 133->55 pin, prereg writer, refusal classifier (embedded-safe)
+  - longmem_eval/test_probe_v2.py  # #2578 Task 5: v2-lane structural probe — wave guard, saturation stop rule, substrate measurement (embedded-safe)
   - eval/write_path/test_write_path_corpus.py
   - eval/write_path/test_write_path_grading.py
   - eval/write_path/test_write_path_runner.py

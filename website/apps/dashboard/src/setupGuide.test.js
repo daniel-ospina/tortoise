@@ -125,6 +125,61 @@ test('fork None defaults to self (read-time J6 default)', () => {
   assert.deepEqual(g.rows.map((r) => r.id)[2], 'decide-completed')
 })
 
+test('#2407 unsure org (fork_unsure_at, fork still None) keeps the FORK QUESTION as the open counted row', () => {
+  const g = setupGuide({
+    status: 'active', fork: null, fork_unsure_at: '2026-01-01T00:00:00+00:00', compact: false,
+    completed_steps: ['team-named', 'harness-connected', 'first-points-filed'],
+  })
+  assert.deepEqual(g.rows.map((r) => r.id), [
+    'harness-connected', 'first-points-filed', 'fork', 'capture-disclosed',
+  ])
+  // NOT the self checklist: decide-completed must not render as the open row
+  assert.ok(!g.rows.some((r) => r.id === 'decide-completed'))
+  const forkRow = g.rows.find((r) => r.id === 'fork')
+  assert.equal(forkRow.counted, true)
+  assert.equal(forkRow.done, false)
+  assert.equal(forkRow.label, "Choose how you'll use Tortoise")
+  assert.equal(g.total, 3)  // harness + seed + fork (capture uncounted)
+  assert.equal(g.done, 2)
+  assert.equal(g.currentStep, 'fork')  // the deferral keeps the guide open
+  assert.equal(g.collapsed, false)
+})
+
+test('#2407 unsure org with zero progress shows the fork row as a counted row (never collapsed)', () => {
+  const g = setupGuide({
+    status: 'active', fork: null, fork_unsure_at: '2026-01-01T00:00:00+00:00', compact: false,
+    completed_steps: ['team-named'],
+  })
+  assert.deepEqual(g.rows.map((r) => r.id), [
+    'harness-connected', 'first-points-filed', 'fork', 'capture-disclosed',
+  ])
+  assert.equal(g.currentStep, 'harness-connected')
+  assert.equal(g.collapsed, false)
+})
+
+test('#2407 a persisted fork wins over a stale marker — fork set renders the normal fork-aware checklist', () => {
+  // invariant: fork_unsure_at is meaningful only while fork IS NULL (the
+  // checkpoint clears it on fork-set, but reads must never trust it)
+  const g = setupGuide({
+    status: 'active', fork: 'build', fork_unsure_at: '2026-01-01T00:00:00+00:00', compact: false,
+    completed_steps: ['team-named', 'harness-connected', 'first-points-filed'],
+  })
+  assert.deepEqual(g.rows.map((r) => r.id), [
+    'harness-connected', 'first-points-filed', 'catalog-presented', 'capture-disclosed',
+  ])
+  assert.ok(!g.rows.some((r) => r.id === 'fork'))
+  assert.equal(g.total, 3)
+})
+
+test('#2407 complete-status unsure org stays collapsed (never re-renders an active fork row)', () => {
+  const g = setupGuide({
+    status: 'complete', fork: null, fork_unsure_at: '2026-01-01T00:00:00+00:00', compact: false,
+    completed_steps: [],
+  })
+  assert.equal(g.collapsed, true)
+  assert.equal(g.status, 'complete')
+})
+
 test('unknown fork falls back to the self checklist (mirrors Python gate)', () => {
   const g = setupGuide({
     status: 'active', fork: 'bogus', compact: false,
