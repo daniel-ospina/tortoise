@@ -332,6 +332,7 @@ def restore(uri: str, rdb_file: str, container: str | None,
         return {"ok": False,
                 "error": f"docker stop {cname} failed: {r.stderr.strip()}"}
 
+    restarted = False
     try:
         # 2. Place RDB into the container's data dir (read pre-stop; defaults
         #    match the FalkorDB image layout when the probe came up empty).
@@ -339,17 +340,29 @@ def restore(uri: str, rdb_file: str, container: str | None,
                   else "/var/lib/falkordb/dump.rdb")
         r = _docker(["cp", rdb_file, f"{cname}:{target}"], timeout=60)
         if r.returncode != 0:
+            # NOTE: this early `return` is inside the `try` — it does NOT run
+            # the `except` below. Recovery lives in the `finally` (#2993).
             return {"ok": False,
                     "error": f"docker cp RDB into container failed: {r.stderr.strip()}"}
 
         # 3. Start container
         r = _docker(["start", cname], timeout=60)
-        if r.returncode != 0:
+        restarted = r.returncode == 0
+        if not restarted:
             return {"ok": False,
                     "error": f"docker start {cname} failed: {r.stderr.strip()}"}
     except Exception as exc:  # noqa: BLE001, RUF100
-        _docker(["start", cname], timeout=60)  # best-effort recovery
         return {"ok": False, "error": f"restore failed mid-sequence: {exc}"}
+    finally:
+        # The container is STOPPED for the whole span above. Every exit path —
+        # the early `return`s, an exception, or success — must leave it
+        # running. Putting this in `except` (as it was before #2993) missed the
+        # early-`return` paths entirely: a `return` inside `try` never reaches
+        # `except`, so a failed `docker cp` left the database down. That is
+        # exactly what happened on 2026-09-04 — falkordb-16379 stayed stopped
+        # for 6 days (agent-infra#730).
+        if not restarted:
+            _docker(["start", cname], timeout=60)
 
     # 4. Wait for connectivity
     after = None
