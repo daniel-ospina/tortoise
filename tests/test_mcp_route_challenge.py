@@ -175,10 +175,34 @@ class TestAuthChallenge:
 
 # ── 3. Challenge absence where there is no authorization server ─────────────
 
-class TestChallengeAbsentOnSelfHost:
-    """``StaticKeyMiddleware`` (self-host, ``TORTOISE_AUTH_MODE=static``) has NO
-    authorization server behind it. Emitting a challenge there sends the client
-    to a 404 — worse than the honest bare 401."""
+class TestChallengeAbsentWhereNoAuthorizationServer:
+    """``TeamResolutionMiddleware`` is the auth middleware for TWO surfaces with
+    no authorization server, and neither must ever see a challenge:
+
+    * **tenant-mode self-host** — ``create_http_app``'s DEFAULT ``auth_mode``, i.e.
+      ``tortoise serve --http``. It runs this same middleware against a registry
+      that registers no ``/.well-known/*`` routes, so a challenge would 404. This
+      was a real regression: emitting unconditionally put a
+      ``resource_metadata`` pointer to a 404 on the default self-host surface.
+    * ``StaticKeyMiddleware`` — single-key self-host (``--auth static``).
+
+    Only ``hosted_api`` opts in via ``emit_oauth_challenge=True``.
+    """
+
+    def test_real_tenant_mode_app_emits_no_challenge(self):
+        from tortoise.mcp_server import create_http_app
+
+        app = create_http_app(allowed_origins=[], auth_mode="tenant")
+        with TestClient(app, follow_redirects=False) as tc:
+            r = tc.post("/", json={})
+        assert r.status_code == 401
+        assert "www-authenticate" not in {k.lower() for k in r.headers}, (
+            "tenant-mode self-host has no AS — a challenge would point at a 404"
+        )
+
+    def test_the_hosted_app_still_does_emit_it(self, hosted_client):
+        """The flip side — guard against 'fix it by disabling everywhere'."""
+        assert _challenge_url(hosted_client.post("/mcp", json={})).endswith(PRM_PATH)
 
     @staticmethod
     def _static_app(api_key: str):
@@ -214,6 +238,64 @@ class TestChallengeAbsentOnSelfHost:
         assert "www-authenticate" not in {k.lower() for k in r.headers}
 
 
+class TestChallengeHostInjection:
+    """The challenge value is reflected into a response the client uses to steer
+    OAuth discovery, and the app's own Host guard does NOT cover it: FastMCP's
+    ``_normalize_host`` splits on the LAST colon, so
+    ``Host: api.premiselabs.co:443@evil.com`` passes the allowlist while RFC 3986
+    resolves the authority to ``evil.com``. Reflecting it would hand the attacker
+    the client's authorization-code exchange. Verified exploitable before the
+    validation was added.
+
+    Status and header presence are asserted per case so the parameters cannot
+    silently go vacuous. Both defenses FAIL CLOSED — they suppress the challenge
+    rather than emit a sanitized one, which is the stronger outcome:
+
+    * ``_SAFE_HOST_RE`` rejects the shape → the request is an ordinary 401 with
+      **no** ``WWW-Authenticate`` at all.
+    * FastMCP's HostOriginGuard rejects a non-allowlisted host → **421**, before
+      this middleware runs.
+
+    The positive control (a legitimate host still yields a well-formed
+    challenge) is what stops this from being satisfiable by "never emit".
+    """
+
+    @pytest.mark.parametrize("bad_host,expected", [
+        # `_SAFE_HOST_RE` rejects these (userinfo / newline) → fail-closed 401.
+        ("api.premiselabs.co:443@evil.com", 401),
+        ("api.premiselabs.co\n", 401),
+        # The quote makes FastMCP's normalizer reject the host outright → 421.
+        ('api.premiselabs.co",error="x@evil.com', 421),
+        # Not allowlisted at all → 421 from the framework guard.
+        ("evil.com", 421),
+    ])
+    def test_attacker_host_never_reaches_the_header(self, hosted_client, bad_host, expected):
+        r = hosted_client.post("/mcp", json={}, headers={"Host": bad_host})
+        assert r.status_code == expected, f"{bad_host!r} → {r.status_code}"
+        header = r.headers.get("www-authenticate")
+        assert header is None, (
+            f"{bad_host!r} produced a challenge — it must fail closed: {header!r}"
+        )
+        assert not any("evil.com" in v for v in r.headers.values()), (
+            f"{bad_host!r} was reflected into a response header"
+        )
+
+    def test_legitimate_host_still_yields_a_well_formed_challenge(self, hosted_client):
+        """Positive control: the guards above must not be satisfiable by simply
+        never emitting a challenge."""
+        r = hosted_client.post("/mcp", json={}, headers={"Host": "api.premiselabs.co"})
+        assert r.status_code == 401
+        header = r.headers.get("www-authenticate")
+        assert header is not None
+        assert header.count('"') == 2, header
+        assert header.endswith(f'{PRM_PATH}"'), header
+
+    def test_quoted_host_cannot_break_out_of_the_value(self, hosted_client):
+        r = hosted_client.post("/mcp", json={}, headers={"Host": 'a"b.example'})
+        header = r.headers.get("www-authenticate")
+        assert header is None or header.count('"') == 2, header
+
+
 # ── 4. Origin derivation unit ───────────────────────────────────────────────
 
 class TestResourceMetadataUrl:
@@ -222,7 +304,7 @@ class TestResourceMetadataUrl:
     scheme/host regression that only shows up behind the proxy."""
 
     @staticmethod
-    def _url_for(scope_extra: dict, headers: dict | None = None) -> str:
+    def _url_for(scope_extra: dict, headers: dict | None = None) -> str | None:
         from starlette.requests import Request
 
         from tortoise.mcp_auth import _resource_metadata_url
@@ -251,23 +333,46 @@ class TestResourceMetadataUrl:
         assert self._url_for({"scheme": "https"}, {"host": "api.premiselabs.co"}) == (
             f"https://api.premiselabs.co{PRM_PATH}")
 
-    def test_falls_back_to_scope_server_when_host_absent(self):
-        """No Host header (non-HTTP/1.1 or a synthetic scope): fall back to the
-        ASGI server address, omitting the port when it is the scheme default."""
-        url = self._url_for({}, {})
-        assert url == f"http://testserver{PRM_PATH}", url
-
-    def test_non_default_port_is_kept(self):
-        url = self._url_for({"server": ("localhost", 8000)}, {})
+    def test_port_from_the_host_header_is_preserved(self):
+        url = self._url_for({}, {"host": "localhost:8000"})
         assert url == f"http://localhost:8000{PRM_PATH}", url
 
-    def test_https_default_port_is_omitted(self):
-        url = self._url_for({"scheme": "https", "server": ("h.example", 443)}, {})
-        assert url == f"https://h.example{PRM_PATH}", url
+    def test_ipv6_literal_host_is_accepted(self):
+        url = self._url_for({}, {"host": "[::1]:8000"})
+        assert url == f"http://[::1]:8000{PRM_PATH}", url
 
     def test_defaults_to_https_when_scheme_unset(self):
-        scope = {"scheme": ""}
-        assert self._url_for(scope, {"host": "h.example"}).startswith("https://")
+        assert self._url_for({"scheme": ""}, {"host": "h.example"}).startswith("https://")
+
+    @pytest.mark.parametrize("host", [
+        None,                                 # absent
+        "",                                   # empty
+        "api.premiselabs.co:443@evil.com",     # userinfo — FastMCP's guard normalizes to the
+                                               # allowlisted host, RFC 3986 resolves evil.com
+        'a"b.example',                        # breaks out of the quoted header value
+        "a,b.example",
+        "a b.example",
+        "a%2fb.example",
+        "a/b.example",
+        'a\\b.example',
+        "-bad.example",
+        "api.premiselabs.co\n",     # `$` would accept this; `\Z` does not
+        "api.premiselabs.co\r\n",
+        "x" * 256,
+    ])
+    def test_unsafe_or_absent_host_yields_no_url(self, host):
+        """Fail-closed on SYNTACTICALLY unsafe input: an unparseable or
+        header-breaking Host produces NO challenge rather than reflecting the
+        value. This was verified exploitable before the check existed.
+
+        Note this is NOT the allowlist check. A syntactically valid but
+        non-allowlisted host (``evil.com``) still yields a URL here — enforcement
+        of the allowlist is FastMCP's HostOriginGuard (421), verified end-to-end
+        in ``TestChallengeHostInjection``. Keeping the two concerns separate is
+        deliberate: this function must not silently depend on the guard having
+        run first."""
+        headers = {} if host is None else {"host": host}
+        assert self._url_for({}, headers) is None, host
 
 
 class TestCanonicalizerRootPath:
@@ -319,6 +424,31 @@ class TestCanonicalizerRootPath:
         import asyncio
         seen = asyncio.run(self._run("/x/mcp", ""))
         assert seen["path"] == "/x/mcp", "rewrite fired on a non-/mcp route"
+
+    @pytest.mark.parametrize("path", [
+        "/mcp/../other", "/mcp/..;/other", "//mcp", "/mcp//",
+        "/mcp%2f", "/mcp%2F", "/Mcp", "/mcpfoo", "/mcp/x",
+        "/mcp/teams/t1", "/MCP",
+    ])
+    def test_bypass_family_is_not_rewritten(self, path):
+        """Traversal / shadowing family, driven through a RAW ASGI scope.
+
+        ``httpx`` normalizes dot-segments BEFORE the ASGI call, so a
+        ``TestClient`` probe for ``/mcp/../`` never reaches this middleware with
+        that path — it tests a different request. Only a raw scope exercises the
+        real thing. The rewrite is exact-match and can only ever narrow ``/mcp``
+        onto the same mount, never open a sibling route."""
+        import asyncio
+        seen = asyncio.run(self._run(path, ""))
+        assert seen["path"] == path, f"{path} was rewritten to {seen['path']}"
+
+    @pytest.mark.parametrize("path", [
+        "/mcp/../other", "//mcp", "/mcp%2f", "/Mcp", "/mcpfoo", "/mcp//",
+    ])
+    def test_bypass_family_is_not_rewritten_under_a_prefix(self, path):
+        import asyncio
+        seen = asyncio.run(self._run(path, "/x"))
+        assert seen["path"] == path, f"{path} was rewritten to {seen['path']}"
 
 
 def url_is_clean(url: str) -> bool:

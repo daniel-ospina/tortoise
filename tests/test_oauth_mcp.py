@@ -1266,6 +1266,74 @@ class TestMcpBoundary:
                 "jsonrpc": "2.0", "method": "tools/list", "id": 1})
             assert rr.status_code == 401
 
+    def test_revoked_oauth_token_401_on_a_warm_cache_within_ttl(self, api_client, session_user):
+        """#2864 — the 60s warm-token cache is REAL and this pins it.
+
+        ``TeamResolutionMiddleware`` keys its cache by raw token and serves a
+        warm hit for 60s WITHOUT re-introspecting (``mcp_auth.py:279-297``), so
+        ``resolve_oauth_access_token``'s ``revoked_at`` check is bypassed until
+        the entry ages out. ``test_revoked_oauth_token_401`` above cannot see
+        this: it builds a FRESH app per call, i.e. a cold cache.
+
+        This deliberately drives ONE client (one app -> one middleware -> one
+        cache) so the grace window is observable. The grace is a documented
+        design trade-off for the multi-machine deployment (a revocation on one
+        Fly machine cannot invalidate another's cache), not an accident —
+        pinning the exact bound is what stops it drifting silently.
+        """
+        tc, cp = api_client
+        session_user(_U1)
+        flow = _auth_code_flow(tc, cp)
+        access = _exchange(tc, client_id=flow["client_id"], code=flow["code"],
+                           verifier=flow["verifier"]).json()["access_token"]
+        call = {"jsonrpc": "2.0", "method": "tools/list", "id": 1}
+
+        mcp_tc = self._mcp(cp)
+        mcp_tc.headers.update(_mcp_headers(access))
+        with mcp_tc:
+            # 1. a good request warms the cache for this token
+            assert mcp_tc.post("/mcp", json=call).status_code == 200
+            # 2. revoke out of band
+            tc.post("/oauth/revoke", data={"token": access,
+                                           "token_type_hint": "access_token"})
+            # 3. warm hit still authenticates — the bounded grace
+            assert mcp_tc.post("/mcp", json=call).status_code == 200
+
+    def test_revoked_oauth_token_rejected_once_the_cache_entry_expires(
+            self, api_client, session_user, monkeypatch):
+        """#2864 — the other half of the bound: past 60s the entry is stale, the
+        token is re-introspected, and the revocation takes effect. Without this
+        half the grace above would be indistinguishable from a token that is
+        never revoked at all."""
+        from types import SimpleNamespace
+
+        import tortoise.mcp_auth as mcp_auth
+
+        tc, cp = api_client
+        session_user(_U1)
+        flow = _auth_code_flow(tc, cp)
+        access = _exchange(tc, client_id=flow["client_id"], code=flow["code"],
+                           verifier=flow["verifier"]).json()["access_token"]
+        call = {"jsonrpc": "2.0", "method": "tools/list", "id": 1}
+
+        mcp_tc = self._mcp(cp)
+        mcp_tc.headers.update(_mcp_headers(access))
+        with mcp_tc:
+            assert mcp_tc.post("/mcp", json=call).status_code == 200
+            tc.post("/oauth/revoke", data={"token": access,
+                                           "token_type_hint": "access_token"})
+
+            # Scope the clock shift to mcp_auth only — patching the stdlib
+            # `time` module itself would freeze time for every other consumer
+            # in the process for the duration of the test.
+            real_time = mcp_auth.time.time
+            monkeypatch.setattr(
+                mcp_auth, "time", SimpleNamespace(time=lambda: real_time() + 61))
+            rr = mcp_tc.post("/mcp", json=call)
+        assert rr.status_code == 401, (
+            "a cache entry older than the 60s TTL must re-introspect and reject"
+        )
+
     def test_bogus_oauth_token_401(self, api_client):
         tc, cp = api_client  # noqa: RUF059
         mcp_tc = self._mcp(cp)

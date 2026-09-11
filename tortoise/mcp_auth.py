@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import hmac
 import os
+import re
 import time
 from collections import OrderedDict, defaultdict
 from contextvars import ContextVar
@@ -125,8 +126,8 @@ def _jsonrpc_error(code: int, message: str, data: dict | None = None,
     return JSONResponse(body, status_code=status, headers=headers)
 
 
-def _resource_metadata_url(request: Request) -> str:
-    """Absolute PRM URL for the RFC 9728 challenge (#2864).
+def _resource_metadata_url(request: Request) -> str | None:
+    """Absolute PRM URL for the RFC 9728 challenge (#2864), or None.
 
     Built from ``scheme`` + the ``Host`` header rather than
     ``request.base_url``: this middleware runs INSIDE the sub-app mounted at
@@ -135,21 +136,41 @@ def _resource_metadata_url(request: Request) -> str:
     ``…/mcp/.well-known/oauth-protected-resource/mcp`` — a 404. ``Host`` is the
     client-visible host in both production and tests, and ``scheme`` has already
     been corrected by ``ForwardedProtoMiddleware`` (#985).
+
+    Returns ``None`` — meaning "emit no challenge" — when the host is absent or
+    is not a syntactically valid URI host. That is the security boundary, not
+    defensive noise: the value is reflected into a response header that steers
+    the client's OAuth discovery, and the app's own host guard does NOT cover
+    this path. FastMCP's ``_normalize_host`` splits on the LAST ``:``, so
+    ``Host: api.premiselabs.co:443@evil.com`` passes the allowlist while its raw
+    form resolves to ``evil.com`` per RFC 3986 — reflecting it would hand the
+    attacker the client's authorization-code exchange. Verified exploitable
+    before this check existed.
     """
     scheme = request.scope.get("scheme") or "https"
     host = request.headers.get("host")
-    if not host:
-        server = request.scope.get("server") or ("localhost", 80)
-        port = server[1]
-        is_default_port = (scheme == "http" and port == 80) or (
-            scheme == "https" and port == 443)
-        host = server[0] if is_default_port else f"{server[0]}:{port}"
+    if not host or len(host) > 255 or not _SAFE_HOST_RE.match(host):
+        return None
     return f"{scheme}://{host}/.well-known/oauth-protected-resource/mcp"
 
 
-def _unauthorized_challenge(request: Request) -> dict[str, str]:
+# RFC 3986 host: a reg-name (letters/digits/hyphen/dot) or a bracketed IPv6
+# literal, plus an optional numeric port. Deliberately narrow — anything outside
+# this grammar (userinfo `@`, `/`, `"`, `,`, `%`, whitespace, controls) makes
+# _resource_metadata_url return None rather than reflect attacker-controlled text.
+# `\Z`, NOT `$`: Python's `$` also matches immediately BEFORE a trailing newline,
+# so `$` would accept `"api.premiselabs.co\n"` and reflect it (h11 rejects CR/LF
+# on both the request and the response side, so that is not reachable through a
+# real server — but the grammar should say what it means).
+_SAFE_HOST_RE = re.compile(
+    r"^(?:[A-Za-z0-9][A-Za-z0-9.\-]*|\[[0-9A-Fa-f:.]+\])(?::[0-9]{1,5})?\Z"
+)
+
+
+def _unauthorized_challenge(request: Request,
+                            enabled: bool) -> dict[str, str] | None:
     """``WWW-Authenticate`` headers for a 401 on the OAuth-protected MCP
-    resource (#2864).
+    resource (#2864), or ``None`` when no challenge must be emitted.
 
     MCP 2025-11-25 requires the challenge to carry one of ``resource_metadata``
     or the authorization-server URL; RFC 9728 section 5.1 defines the
@@ -158,12 +179,22 @@ def _unauthorized_challenge(request: Request) -> dict[str, str]:
     defect that blocks the Claude Desktop/Web connector on accounts lacking the
     beta ``Request headers`` field.
 
-    NOT used by ``StaticKeyMiddleware`` (self-host): there is no authorization
-    server on that surface, so a challenge would point at a 404.
+    Two independent conditions suppress the challenge, and both matter:
+
+    * ``enabled`` is False — the surface has no authorization server, so the
+      header would point at a 404. That is ``StaticKeyMiddleware`` (self-host
+      single-key) AND tenant-mode self-host (``tortoise serve --http``, the
+      ``create_http_app`` default), which runs this same middleware against a
+      registry with no ``/.well-known/*`` routes. Only the hosted app passes
+      ``emit_challenge=True``.
+    * the origin cannot be safely determined (see ``_resource_metadata_url``).
     """
-    return {
-        "WWW-Authenticate": f'Bearer resource_metadata="{_resource_metadata_url(request)}"',
-    }
+    if not enabled:
+        return None
+    url = _resource_metadata_url(request)
+    if url is None:
+        return None
+    return {"WWW-Authenticate": f'Bearer resource_metadata="{url}"'}
 
 
 class TeamResolutionMiddleware(BaseHTTPMiddleware):
@@ -187,9 +218,15 @@ class TeamResolutionMiddleware(BaseHTTPMiddleware):
     """
 
     def __init__(self, app, *, max_cache: int = 10000,
-                 registry_sdk: TortoiseSDK | None = None):
+                 registry_sdk: TortoiseSDK | None = None,
+                 emit_challenge: bool = False):
         super().__init__(app)
         self._registry_sdk = registry_sdk  # test injection
+        # #2864: only the hosted surface has an authorization server to point
+        # at. Default False so every other caller (tenant-mode self-host via
+        # create_http_app's default) stays challenge-free rather than emitting
+        # a header that 404s.
+        self._emit_challenge = emit_challenge
         self._init_lock = asyncio.Lock()
         self._cache: OrderedDict[str, tuple[float, dict, dict]] = OrderedDict()  # (ts, team, limits)
         self._max_cache = max_cache
@@ -217,7 +254,7 @@ class TeamResolutionMiddleware(BaseHTTPMiddleware):
                 "Expected format: Authorization: Bearer tt_<key>/tk_<key> "
                 "(or an OAuth access token for #524 OAuth clients)",
                 status=401,
-                headers=_unauthorized_challenge(request),
+                headers=_unauthorized_challenge(request, self._emit_challenge),
             )
         token = auth[7:]
         # C2 (#2111): accept tk_ scoped keys too. Lazy import preserves the
@@ -232,14 +269,14 @@ class TeamResolutionMiddleware(BaseHTTPMiddleware):
                     "Expected format: Authorization: Bearer tt_<key>/tk_<key> "
                     "(or an OAuth access token for #524 OAuth clients)",
                     status=401,
-                    headers=_unauthorized_challenge(request),
+                    headers=_unauthorized_challenge(request, self._emit_challenge),
                 )
             return _jsonrpc_error(
                 ERR_UNAUTHORIZED,
                 "Unauthorized: invalid Bearer token format. "
                 "Expected tt_<tenant key> or an OAuth access token.",
                 status=401,
-                headers=_unauthorized_challenge(request),
+                headers=_unauthorized_challenge(request, self._emit_challenge),
             )
         is_oauth = token.startswith("oat_")
         now = time.time()
@@ -301,7 +338,7 @@ class TeamResolutionMiddleware(BaseHTTPMiddleware):
                     "Unauthorized: invalid API key. "
                     "Expected format: Authorization: Bearer tt_<key>/tk_<key>",
                     status=401,
-                    headers=_unauthorized_challenge(request),
+                    headers=_unauthorized_challenge(request, self._emit_challenge),
                 )
             # C2 (#2111) → C5 (#2114) one-level-deep guard (code-review P1,
             # #2b): a MINTED (deleg=0) key drives MCP tools ONLY when it
