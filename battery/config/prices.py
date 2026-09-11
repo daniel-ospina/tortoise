@@ -1,4 +1,4 @@
-"""Spend-meter price basis — ONE source of truth (#2874).
+"""Spend-meter price basis — the declared FALLBACK (#2874, #2906).
 
 Why this module exists: the battery's cost figures were computed from a rate
 constant that had been copied into five places (`model_calls`, `probe_runner`,
@@ -12,6 +12,14 @@ wrong units.
 The rule now: exactly one place declares the basis, and it records WHERE the
 number came from and WHEN it was checked, so a stale basis is visible rather
 than silent. Consumers import it; a test fails if they stop agreeing.
+
+#2906: this module is a FALLBACK, not the source of truth. When a real call's
+response carries ``usage.cost``, the meter uses that provider-reported charge
+(``provider_reported``); the rates below only price calls whose provider does
+not report one (mocks/offline/hermetic lanes, and routes without the field).
+OpenRouter serves the pinned id from ~11 upstreams priced ~0.068–0.14 per 1M
+input, and nothing pins which one serves a given call, so no constant can be
+correct: the measured meter was 2.5x high on one lane and 1.5x low on another.
 
 Basis: the price of the model id the arms actually PIN, on the route the real
 lane actually calls (OpenRouter, via ``OPENROUTER_API_KEY``) — not the direct
@@ -28,6 +36,11 @@ PRICE_SOURCE = "https://openrouter.ai/api/v1/models"
 PRICE_CHECKED_ON = "2026-09-10"
 
 #: (input, output) USD per 1M tokens. OpenRouter, 2026-09-10.
+#: #2906: FALLBACK ONLY — not the source of truth. The real source of truth
+#: is the provider's own ``usage.cost`` on the response; this constant prices
+#: only the calls that do not carry one. OpenRouter serves the pinned id from
+#: ~11 upstreams spread over ~0.068–0.14 per 1M input (measured 2026-09-10),
+#: so any single pair here is wrong in both directions for a given call.
 RATES_PER_1M_USD: tuple[float, float] = (0.084, 0.168)
 #: Cache-read rate (USD per 1M tokens), for meters that model prompt caching.
 #: Also from `PRICE_SOURCE` above (its `pricing.input_cache_read` field).

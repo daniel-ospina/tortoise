@@ -729,7 +729,9 @@ TOOL_REGISTRY: list[ToolDefinition] = [
                     "detail} with issue in (contradictory, stale, contested) and action in "
                     "(review, prune, re-point); mode=both runs both and returns "
                     "{add: [...], prune: [...]}. Optional scope (topic text or Point id) "
-                    "narrows the candidate pool.",
+                    "narrows the candidate pool to the retrieval-NEAREST points — a focus "
+                    "filter, not an exact-match or relevance gate (mode=add also applies "
+                    "similarity_threshold; mode=prune has no similarity bar).",
         annotations=_ro(),
         http_policy=True,
         sdk_method="review_connections",
