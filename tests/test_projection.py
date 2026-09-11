@@ -2331,6 +2331,129 @@ def test_rebuild_all_preserves_tags_and_tagged_edges():
         shutil.rmtree(d, ignore_errors=True)
 
 
+def test_apply_recomputes_content_hash_on_revised_point():
+    """#2942: the incremental apply() lane must recompute content_hash on
+    PointRevised. Pre-fix, the live Point already held sha256(old content)
+    from the SDK writer, but replaying PointRevised stored the new content
+    and left that STALE hash — the indexed dedup missed and a re-ingest
+    created a DUPLICATE (verified 1 -> 2 points).
+    """
+    if _skip_if_no_falkor():
+        pytest.skip("redislite falkordb unavailable")
+    import hashlib
+
+    from tortoise.sdk import TortoiseSDK
+
+    d = tempfile.mkdtemp(prefix="tortoise_apply_chash_")
+    try:
+        db_path = os.path.join(d, "tortoise.db")
+        events_path = os.path.join(d, "events.jsonl")
+        sdk = TortoiseSDK(db_path=db_path, event_log_path=events_path)
+        try:
+            p = sdk.create_point("statement", "original content")
+            proj = sdk._get_proj()
+            live_hash = hashlib.sha256(b"original content").hexdigest()
+            rows = proj.g.query(
+                "MATCH (n:Point {id:$id}) RETURN n.content_hash",
+                params={"id": p["id"]},
+            ).result_set
+            assert rows, "point missing after creation"
+            assert rows[0][0] == live_hash, (
+                "live writer did not store sha256(content); test cannot pass "
+                "vacuously on NULL")
+
+            proj.apply({"type": "PointRevised", "id": p["id"],
+                        "new_content": "REVISED content"})
+            rows = proj.g.query(
+                "MATCH (n:Point {id:$id}) RETURN n.content, n.content_hash",
+                params={"id": p["id"]},
+            ).result_set
+            assert rows, "point missing after revise"
+            content, chash = rows[0]
+            assert content == "REVISED content", content
+            expected = hashlib.sha256(b"REVISED content").hexdigest()
+            assert chash == expected, (
+                f"apply() left stale hash {chash!r} != {expected!r} "
+                "— duplicates on re-ingest (#2942)")
+
+            # Dedup consequence: re-ingesting the new content must dedup
+            # onto the same point (count unchanged).
+            before = proj.g.query(
+                "MATCH (n:Point) RETURN count(n)").result_set[0][0]
+            again = sdk.create_point("statement", "REVISED content",
+                                     dedup=True)
+            after = proj.g.query(
+                "MATCH (n:Point) RETURN count(n)").result_set[0][0]
+            assert again["id"] == p["id"], (
+                "re-ingest after apply created a duplicate instead of "
+                "deduping (#2942)")
+            assert after == before, f"duplicate: {before} -> {after}"
+        finally:
+            sdk.close()
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_sync_tag_edges_clears_stale_tags_and_gc():
+    """#2897: _sync_tag_edges must be idempotent on re-apply and must
+    remove stale :TAGGED edges + orphan :Tag nodes when tags=[] is applied
+    through the incremental apply() lane.
+    """
+    if _skip_if_no_falkor():
+        pytest.skip("redislite falkordb unavailable")
+    from tortoise.sdk import TortoiseSDK
+
+    d = tempfile.mkdtemp(prefix="tortoise_tags_gc_")
+    try:
+        db_path = os.path.join(d, "tortoise.db")
+        events_path = os.path.join(d, "events.jsonl")
+        sdk = TortoiseSDK(db_path=db_path, event_log_path=events_path)
+        try:
+            p = sdk.create_point("statement", "tag point",
+                                 tags=["alpha", "beta"])
+            proj = sdk._get_proj()
+
+            # Idempotency: re-applying the same tagged PointAdded must
+            # produce exactly one edge per tag (no duplicates).
+            proj.apply({"type": "PointAdded", "point": {
+                "id": p["id"], "content": "tag point",
+                "tags": ["alpha", "beta"],
+            }})
+            tagged = proj.g.query(
+                "MATCH (:Point {id:$id})-[:TAGGED]->(:Tag) RETURN count(*)",
+                params={"id": p["id"]},
+            ).result_set[0][0]
+            assert tagged == 2, (
+                f"idempotent re-apply created {tagged} edges instead of 2")
+
+            # Clear: apply PointAdded with empty tags. Must clear the
+            # node property, remove all TAGGED edges, and GC orphan :Tag.
+            proj.apply({"type": "PointAdded", "point": {
+                "id": p["id"], "content": "tag point", "tags": [],
+            }})
+            rows = proj.g.query(
+                "MATCH (n:Point {id:$id}) RETURN n.tags",
+                params={"id": p["id"]},
+            ).result_set
+            assert rows, "point missing after clear"
+            assert rows[0][0] == [], (
+                f"n.tags not cleared: {rows[0][0]!r}")
+            tagged_after = proj.g.query(
+                "MATCH (:Point {id:$id})-[:TAGGED]->(:Tag) RETURN count(*)",
+                params={"id": p["id"]},
+            ).result_set[0][0]
+            assert tagged_after == 0, (
+                f"stale TAGGED edges remain: {tagged_after}")
+            tag_count = proj.g.query(
+                "MATCH (t:Tag) RETURN count(t)").result_set[0][0]
+            assert tag_count == 0, (
+                f"orphan :Tag nodes not GCed: {tag_count}")
+        finally:
+            sdk.close()
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def test_falkor_rebuild_all_snapshot_preserves_sdk_points():
     """#548 transitional: SDK points created WITHOUT event_log_path are
     preserved via rebuild_all's graph snapshot.

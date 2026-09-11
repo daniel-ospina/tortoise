@@ -239,6 +239,11 @@ class _EntityHandlers:
         # the live write (a present-but-None value stores no property; an
         # explicit [] is a real clear and must be written). The :Tag nodes +
         # TAGGED edges ride _upsert_point_edges, where the other edges live.
+        #
+        # ⚠️ Cross-PR: sibling PR #2958 (fix/2795-replay-open-set) defines
+        # _POINT_LIST_PROPS = frozenset() which refuses the raw `tags` list
+        # and asserts n.tags is None post-rebuild. This query is the SOLE
+        # writer of n.tags; the two PRs must be reconciled at merge time.
         tags_val = p.get("tags")
         if tags_val is not None:
             self.g.query(
