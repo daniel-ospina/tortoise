@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import re
 import time
 from pathlib import Path
 
@@ -28,18 +29,31 @@ from fastapi import HTTPException
 
 REPO = Path(__file__).resolve().parent.parent
 HOSTED_API = REPO / "tortoise" / "hosted_api.py"
+SELFHOST = REPO / "tortoise" / "selfhost.py"
 
 
-def _handler(name: str) -> ast.AsyncFunctionDef:
-    tree = ast.parse(HOSTED_API.read_text())
+def _handler(name: str, source: Path = HOSTED_API) -> ast.AsyncFunctionDef:
+    tree = ast.parse(source.read_text())
     for node in ast.walk(tree):
         if isinstance(node, ast.AsyncFunctionDef) and node.name == name:
             return node
-    raise AssertionError(f"{name} not found in hosted_api.py")
+    raise AssertionError(f"{name} not found in {source.name}")
 
 
 def _parents(node: ast.AST) -> dict[ast.AST, ast.AST]:
     return {child: parent for parent in ast.walk(node) for child in ast.iter_child_nodes(parent)}
+
+
+def _walk_own_body(node: ast.AST):
+    """Walk the coroutine's OWN statements, not the bodies of functions it
+    dispatches. A probe nested in the handler is exactly where the synchronous
+    call is supposed to live — flagging it would make the pin unsatisfiable and
+    would push the real call back onto the loop.
+    """
+    for stmt in getattr(node, "body", []):
+        if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        yield from ast.walk(stmt)
 
 
 # ── structural pins ────────────────────────────────────────────────────────
@@ -53,7 +67,7 @@ def test_handler_makes_no_direct_query_call():
     node = _handler("health_ready")
     offenders = [
         n.lineno
-        for n in ast.walk(node)
+        for n in _walk_own_body(node)
         if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr == "query"
     ]
     assert not offenders, (
@@ -143,14 +157,81 @@ def test_wait_for_uses_the_module_bound():
     )
 
 
-def test_probe_bound_is_smaller_than_the_platform_health_check():
-    """Fly's http_check allows 15s (fly.toml). The bound must stay well under
-    it, or a slow plane reads as an unhealthy MACHINE rather than a 503."""
-    import re
+def test_probe_bound_is_strictly_above_the_client_timeout():
+    """The bound is a SAFETY NET, not the mechanism.
 
-    src = HOSTED_API.read_text()
-    bound = float(re.search(r"_READY_PROBE_TIMEOUT_S = ([\d.]+)", src).group(1))
-    assert 0 < bound < 15, bound
+    ``asyncio.wait_for`` cancels the await, not the worker thread. If the outer
+    bound can win the race against the probe client's own timeout, every
+    timed-out request leaves a thread in its socket read (measured: 16
+    concurrent timeouts starve the shared executor). Keeping the outer bound
+    strictly above the inner one makes the client timeout fire first, so the
+    thread returns by itself.
+
+    The earlier version of this test asserted the bound was below Fly's 15s
+    /health timeout — a constraint that does not exist, because Fly checks
+    /health, never /health/ready. It guarded nothing.
+    """
+    import inspect
+
+    import tortoise.hosted_api as mod
+    from tortoise.monitoring import PROBE_TIMEOUT
+    from tortoise.supabase_control import SupabaseControlPlane
+
+    bound = float(re.search(r"_READY_PROBE_TIMEOUT_S = ([\d.]+)", HOSTED_API.read_text()).group(1))
+    assert bound == mod._READY_PROBE_TIMEOUT_S
+
+    client_timeout = inspect.signature(SupabaseControlPlane.__init__).parameters["timeout"].default
+    assert bound > client_timeout, (
+        f"_READY_PROBE_TIMEOUT_S ({bound}) must be strictly above the control-plane "
+        f"client timeout ({client_timeout}) or the outer bound wins the race and "
+        "leaks an executor worker per timed-out request (#2988)"
+    )
+    assert bound > PROBE_TIMEOUT, (
+        f"_READY_PROBE_TIMEOUT_S ({bound}) must be above probe_db's own bound "
+        f"({PROBE_TIMEOUT}) for the same reason"
+    )
+
+
+# ── the selfhost twin of the same defect ───────────────────────────────────
+
+
+def test_selfhost_ready_does_not_probe_on_the_loop():
+    """``tortoise/selfhost.py::health_ready`` had the identical bug: it built the
+    SDK and touched the DB inline. ``publish-selfhost.yml`` curls this endpoint
+    on every publish, so it is the same outage vector in the other image."""
+    node = _handler("health_ready", SELFHOST)
+    offenders = [
+        n.lineno
+        for n in _walk_own_body(node)
+        if isinstance(n, ast.Call)
+        and isinstance(n.func, ast.Attribute)
+        and n.func.attr in {"_get_proj", "query"}
+    ]
+    assert not offenders, (
+        f"selfhost health_ready calls DB-touching code directly at line(s) {offenders} — "
+        "synchronous DB work on the event loop (#2988)"
+    )
+    off_loop = {
+        arg.id
+        for call in ast.walk(node)
+        if isinstance(call, ast.Call)
+        and isinstance(call.func, ast.Attribute)
+        and call.func.attr == "to_thread"
+        for arg in call.args
+        if isinstance(arg, ast.Name)
+    }
+    assert off_loop, "selfhost health_ready dispatches nothing with asyncio.to_thread"
+
+
+def test_selfhost_probe_is_bounded():
+    node = _handler("health_ready", SELFHOST)
+    assert any(
+        isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr == "wait_for"
+        for n in ast.walk(node)
+    ), "selfhost health_ready's probe is unbounded — a black-holed DB would hang it"
+    assert re.search(r"_READY_PROBE_TIMEOUT_S = ([\d.]+)", SELFHOST.read_text()), (
+        "selfhost.py must own its bound as a module constant"
+    )
 
 
 # ── behavioural proof ──────────────────────────────────────────────────────
@@ -162,12 +243,29 @@ def _run(coro):
 
 def test_loop_stays_responsive_while_probes_are_slow(monkeypatch):
     """The decisive test: with a probe that BUSY-WAITS, a blocking
-    implementation starves the ticker to ~0. The off-loop one keeps ticking
-    (measured: tens of ticks)."""
+    implementation starves the ticker. Deterministic by construction — the
+    probe signals when it is actually running and the assertion is about ticks
+    that happened WHILE it was pending, so scheduler jitter cannot flip it.
+
+    (The first version of this test asserted a fixed tick count against a
+    sleeping probe and false-failed ~1 run in 5 under the docker lane: the loop
+    was merely descheduled, not blocked. A flaky guard in a registered CI
+    surface is worse than no guard.)
+    """
+    import threading
+
     import tortoise.hosted_api as mod
     import tortoise.supabase_control as sc
 
-    monkeypatch.setattr(mod, "_probe_db", lambda: (time.sleep(0.3), {"ok": True})[1])
+    entered = threading.Event()
+    release = threading.Event()
+
+    def slow_probe():
+        entered.set()
+        release.wait(30)
+        return {"ok": True, "latency_ms": 1.0, "error": None}
+
+    monkeypatch.setattr(mod, "_probe_db", slow_probe)
     monkeypatch.setattr(sc, "is_supabase_enabled", lambda: False)
 
     async def scenario():
@@ -179,18 +277,30 @@ def test_loop_stays_responsive_while_probes_are_slow(monkeypatch):
                 await asyncio.sleep(0.01)
                 ticks += 1
 
-        task = asyncio.create_task(ticker())
+        ticker_task = asyncio.create_task(ticker())
         try:
-            result = await mod.health_ready()
+            ready_task = asyncio.create_task(mod.health_ready())
+            # The probe is dispatched before the first await completes; wait for
+            # it to be inside its thread, then count ticks while it is pending.
+            while not entered.is_set():
+                await asyncio.sleep(0.01)
+            before = ticks
+            deadline = time.time() + 5.0
+            while ticks - before < 3 and time.time() < deadline:
+                await asyncio.sleep(0.01)
+            pending_ticks = ticks - before
+            release.set()
+            result = await ready_task
         finally:
-            task.cancel()
-        return result, ticks
+            release.set()
+            ticker_task.cancel()
+        return result, pending_ticks
 
-    result, ticks = _run(scenario())
+    result, pending_ticks = _run(scenario())
     assert result["status"] == "ok"
-    assert ticks >= 10, (
-        f"the event loop only ticked {ticks} times while the probe slept — "
-        "the probe is running ON the loop (#2988)"
+    assert pending_ticks >= 3, (
+        f"the event loop ticked {pending_ticks} times while the probe was pending — "
+        "a blocking implementation freezes it at 0 (#2988)"
     )
 
 

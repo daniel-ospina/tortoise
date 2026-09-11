@@ -1539,10 +1539,19 @@ def _probe_control_plane() -> None:
     get_control_plane().query("teams", select=["id"], limit=1)
 
 
-# #2988: wall bound for the readiness probes. Fly's health check allows 15s and
-# deploy gates curl /health/ready right after a cold boot, so the bound must be
-# small enough that a stalled plane is REPORTED (503) rather than waited out.
-_READY_PROBE_TIMEOUT_S = 5.0
+# #2988: wall bound for the readiness probes.
+#
+# ORDERING INVARIANT — the bound must be STRICTLY ABOVE the probe client's own
+# timeout ("SupabaseControlPlane" defaults to 5.0s; "probe_db" self-bounds at
+# ~1.6s). ``asyncio.wait_for`` cancels the AWAIT, not the worker thread: when
+# the outer bound wins the race it returns while the thread is still in its
+# socket read, so each timed-out request leaks an executor worker until that
+# read finishes. Keeping the outer bound above the inner one means the client
+# timeout normally fires first, the thread returns on its own, and this bound
+# stays what it is meant to be — a safety net for a probe that never
+# self-bounds. It is NOT an executor-occupancy bound; the shared default
+# executor is tracked separately on #2988.
+_READY_PROBE_TIMEOUT_S = 6.0
 
 
 @app.get("/health")
