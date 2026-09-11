@@ -63,8 +63,9 @@ from tortoise.sdk import TortoiseSDK
 def _falkordb_available() -> bool:
     """Probe a live FalkorDB; reads TORTOISE_DB_URI at CALL time so the
     module never captures it at import (#221 test-isolation lint)."""
-    uri = (os.environ.get("TORTOISE_DB_URI")
-           or "docker://:falkordb@localhost:6379/tortoise_test_matrix").rstrip("/")
+    uri = os.environ.get(
+        "TORTOISE_DB_URI",
+        "docker://:falkordb@localhost:6379/tortoise_test_matrix").rstrip("/")
     old = os.environ.get("TORTOISE_DB_URI")
     try:
         os.environ["TORTOISE_DB_URI"] = f"{uri}_probe"
@@ -87,11 +88,12 @@ FALKORDB_AVAILABLE = _falkordb_available()
 
 def _uri() -> str:
     """Current TORTOISE_DB_URI (or the default), read at CALL time."""
-    return (os.environ.get("TORTOISE_DB_URI")
-            or "docker://:falkordb@localhost:6379/tortoise_test_matrix").rstrip("/")
+    return os.environ.get(
+        "TORTOISE_DB_URI",
+        "docker://:falkordb@localhost:6379/tortoise_test_matrix").rstrip("/")
 
 pytestmark = pytest.mark.skipif(
-    not FALKORDB_AVAILABLE, reason="Live FalkorDB (Docker) not available")
+    not FALKORDB_AVAILABLE, reason="requires TORTOISE_DB_URI (live FalkorDB FTS lane — tier-2 embedded legs skip)")
 
 #: The question tokens (after the shared stopword drop): the sparse OR leg
 #: matches these against content ∪ search_keys.

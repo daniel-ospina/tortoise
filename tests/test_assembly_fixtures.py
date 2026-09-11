@@ -35,10 +35,9 @@ import tests._assembly_graph as ag
 from tortoise.sdk import TortoiseSDK
 
 # ── Live-FalkorDB + FTS availability ───────────────────────────────────────
-_URI = (
-    os.environ.get("TORTOISE_DB_URI")
-    or "docker://:falkordb@localhost:6379/tortoise_test_matrix"
-).rstrip("/")
+_URI = os.environ.get(
+    "TORTOISE_DB_URI",
+    "docker://:falkordb@localhost:6379/tortoise_test_matrix").rstrip("/")
 FALKORDB_AVAILABLE = False
 _OLD_URI = os.environ.get("TORTOISE_DB_URI")
 _PROBE_GRAPH = f"{_URI}_probe"
@@ -72,7 +71,7 @@ finally:
 
 pytestmark = pytest.mark.skipif(
     not FALKORDB_AVAILABLE,
-    reason="Live FalkorDB with fulltext (Docker) not available")
+    reason="requires TORTOISE_DB_URI (live FalkorDB FTS lane — tier-2 embedded legs skip)")
 
 
 def _fresh_uri() -> str:
