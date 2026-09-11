@@ -272,6 +272,7 @@ surfaces:
   - test_build_window_transcript.py
   - test_canary_classify.py
   - test_canonical.py
+  - test_capture_loop_responsiveness.py
   - test_capture_session.py
   - test_capture_session_supersession_e2e.py
   - test_restore_container_recovery.py

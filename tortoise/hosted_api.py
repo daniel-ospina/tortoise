@@ -15,6 +15,8 @@ extractor/indexer, update the catalog reference.
 from __future__ import annotations
 
 import asyncio
+import contextvars
+import functools
 import hmac
 import inspect
 import json as _json
@@ -26,6 +28,7 @@ import threading
 import time
 from collections import defaultdict
 from collections.abc import Hashable
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager, suppress
 from datetime import UTC, datetime, timedelta
 
@@ -122,6 +125,173 @@ _FALLBACK_KEEPALIVE: dict[str, TortoiseSDK] = {}
 # _make_sdk/_registry_anchor; the lock is never held across a per-request
 # fresh-SDK construction.
 _KEEPALIVE_LOCK = threading.Lock()
+
+# ── #3060: dedicated executors for long / stallable work ───────────────────
+# `asyncio.to_thread` (the house style — see `list_packs`) submits to the
+# loop's SHARED default executor, which is also where /health's DB probe and
+# the auth middleware's abuse hooks run. That is fine for short work. It is
+# NOT fine for the capture extraction: on a stalled provider it blocks for the
+# token-scaled deadline (~800s at a 16K budget, per attempt, retried), so
+# enough concurrent stalls would occupy every default worker
+# (min(32, cpu+4) — 6 on prod's 2 vCPU) and the /health probe would then
+# QUEUE behind them, miss Fly's 15s check timeout, and the machine would be
+# dropped exactly as in #3060 — with nothing blocking the event loop at all.
+# Long or stallable work therefore gets its OWN pool: it can only ever starve
+# itself, never the liveness path or auth.
+_CAPTURE_EXECUTOR = ThreadPoolExecutor(
+    # max(1, _int_env(...)): the executor is built at IMPORT time, so a
+    # malformed or zero/negative knob must degrade to the default — not raise
+    # `ValueError` and make `import tortoise.hosted_api` fail (a boot loop no
+    # deploy gate can fix).
+    max_workers=max(1, min(_int_env("TORTOISE_CAPTURE_WORKERS", 4), 8)),
+    thread_name_prefix="capture-extract")
+
+# #3060 review: a bounded pool with an UNBOUNDED queue is a new failure mode —
+# four stalled extractions park every worker (each up to the token-scaled
+# deadline, retried) and every later capture then waits forever while holding
+# its stored-window transcript (~MBs) on a 4GB VM, up to fly.toml's
+# hard_limit. Reject instead of enqueueing: at capacity the request fails fast
+# with 429 + Retry-After (the ask lane's quota 429 precedent,
+# `CODE_QUOTA_EXCEEDED` — its in-flight-limit 429 carries no Retry-After).
+# Counting is a plain locked int, NOT an asyncio.Semaphore — the latter binds
+# to the first event loop it waits on (mixins._LoopBoundMixin), which breaks
+# across the per-test loops.
+_CAPTURE_MAX_IN_FLIGHT = max(1, min(_int_env("TORTOISE_CAPTURE_IN_FLIGHT", 8), 16))
+_CAPTURE_IN_FLIGHT = 0
+_CAPTURE_IN_FLIGHT_LOCK = threading.Lock()
+
+# /health is the FLY liveness signal (fly.toml: path=/health, 15s timeout): the
+# one request that must answer even when everything else is wedged. Its probe
+# is hard-bounded (~1.5s, #1384) but could still QUEUE behind arbitrary
+# default-pool work — a dedicated pool plus a bounded wait keeps the liveness
+# answer independent of every other request.
+_HEALTH_PROBE_EXECUTOR = ThreadPoolExecutor(
+    max_workers=2, thread_name_prefix="health-probe")
+_HEALTH_PROBE_BUDGET_S = 5.0
+
+
+def _submit_off_loop(executor: ThreadPoolExecutor, fn, /, *args, **kwargs):
+    """Submit blocking work to a DEDICATED executor, preserving contextvars.
+
+    Why not `asyncio.to_thread`: it ALWAYS uses the loop's shared default
+    executor, which is the starvation path #3060's review uncovered (see the
+    pool notes above). Why not a bare `run_in_executor`: it does NOT propagate
+    contextvars (cpython#78195 — the repo rule recorded at `list_packs`), and
+    the capture path depends on them: `_call_once` snapshots the caller's
+    context for the actor/usage ContextVars (extractor_v2.py:5066). Copying the
+    context in the CALLING thread and running under it in the worker is exactly
+    what `asyncio.to_thread` does internally (module: asyncio.to_thread).
+
+    Returns the CONCURRENT future. Callers needing a completion hook (the
+    in-flight accounting below) attach it there: a loop-side callback would
+    fire on cancellation while the worker is still parked.
+    """
+    ctx = contextvars.copy_context()
+    return executor.submit(ctx.run, functools.partial(fn, *args, **kwargs))
+
+
+async def _run_off_loop(executor: ThreadPoolExecutor, fn, /, *args, **kwargs):
+    """Await `_submit_off_loop` (see it for the contextvars rationale)."""
+    return await asyncio.wrap_future(_submit_off_loop(executor, fn, *args, **kwargs))
+
+
+def _capture_slot_decrement() -> None:
+    """Return one reserved capture slot (lock-guarded, clamped at zero).
+
+    The clamp is a safety net, NOT a licence: a decrement with nothing in
+    flight means the accounting leaked somewhere, which silently under-counts
+    and would admit more than `_CAPTURE_MAX_IN_FLIGHT` — so it is logged.
+    """
+    global _CAPTURE_IN_FLIGHT
+    with _CAPTURE_IN_FLIGHT_LOCK:
+        if _CAPTURE_IN_FLIGHT > 0:
+            _CAPTURE_IN_FLIGHT -= 1
+        else:
+            _logger.warning(
+                "capture slot decrement with nothing in flight — accounting "
+                "leak (#3060); the admission cap may under-count")
+
+
+class _CaptureSlot:
+    """One reserved capture slot (#3060).
+
+    Reserved at ADMISSION (before any state is written), so a concurrent burst
+    cannot all slip past a bare check and then queue without bound. Released
+    exactly once, by whichever comes last:
+
+    * the extraction's CONCURRENT future completing (`worker_done`) — for a
+      request that extracts. The request's own ``release()`` is a no-op once
+      the slot is handed off, so a cancelled request cannot free capacity
+      while its worker still occupies a pool thread (the shape of
+      `quota.run_ask_bounded`, quota.py:791-816); or
+    * the request's own teardown (`release()`) — for a replay / opt-out /
+      quota / provider-503 path that never extracts. Without that release the
+      reservation would leak and permanently burn capacity.
+    """
+
+    __slots__ = ("_done", "_handed_off")
+
+    def __init__(self) -> None:
+        self._done = False
+        self._handed_off = False
+
+    def hand_off(self) -> None:
+        """Transfer ownership to the extraction future (before any await)."""
+        self._handed_off = True
+
+    def release(self) -> None:
+        if self._done or self._handed_off:
+            return
+        self._done = True
+        _capture_slot_decrement()
+
+    def worker_done(self, _fut=None) -> None:
+        if self._done:
+            return
+        self._done = True
+        _capture_slot_decrement()
+
+
+def _reserve_capture_slot() -> _CaptureSlot:
+    """Reserve a capture slot, or fail fast with 429 at capacity (#3060).
+
+    Called at ADMISSION — before the impl writes anything. A 429 raised later
+    (after the Session MERGE) would leave ``capture_ok`` NULL, and the
+    advertised retry would then be served as a no-op REPLAY (200, 0 extracted)
+    — silent permanent data loss. Reserving (not just checking) is what bounds
+    the queue: a burst of simultaneous requests cannot all pass the gate and
+    then wait on the pool forever while holding their transcripts.
+    """
+    global _CAPTURE_IN_FLIGHT
+    with _CAPTURE_IN_FLIGHT_LOCK:
+        if _CAPTURE_IN_FLIGHT >= _CAPTURE_MAX_IN_FLIGHT:
+            raise HTTPException(
+                status_code=429,
+                detail=("capture capacity saturated — too many captures in "
+                        "flight; retry shortly"),
+                headers={"Retry-After": "30"})
+        _CAPTURE_IN_FLIGHT += 1
+    return _CaptureSlot()
+
+
+async def _run_capture_bounded(slot, fn, /, *args, **kwargs):
+    """Run one capture extraction on the capture pool, owning ``slot``.
+
+    The work runs off the event loop on the capture pool, with the caller's
+    contextvars copied in explicitly (`_submit_off_loop`'s rationale). The
+    slot is handed to the CONCURRENT future, not to the loop-side future the
+    caller awaits: cancelling the awaiting task (client disconnect, request
+    timeout) marks the loop-side future done immediately, so a callback
+    attached there would release the slot while the worker is still parked and
+    the cap would silently exceed itself. A synchronous submit failure leaves
+    ownership with the caller (no future, no callback), and the request's own
+    teardown releases it.
+    """
+    cfut = _submit_off_loop(_CAPTURE_EXECUTOR, fn, *args, **kwargs)
+    if slot is not None:
+        slot.hand_off()  # before any await: only the worker frees it now
+        cfut.add_done_callback(slot.worker_done)
+    return await asyncio.wrap_future(cfut)
 
 
 def _anchor_usable(anchor: TortoiseSDK, db_path: str) -> bool:
@@ -1602,9 +1772,15 @@ async def health():
     """
     import asyncio
     try:
-        # to_thread: a hung probe (firewall black-hole) must not stall the
-        # event loop — probe_db is itself bounded, but stay off the loop.
-        db = await asyncio.to_thread(_probe_db)
+        # #3060: off the loop AND off the shared default pool, with a bounded
+        # wait — /health must answer even when every default worker is tied up
+        # by long work (a starved probe → no answer → Fly drops the machine).
+        db = await asyncio.wait_for(
+            _run_off_loop(_HEALTH_PROBE_EXECUTOR, _probe_db),
+            timeout=_HEALTH_PROBE_BUDGET_S)
+    except TimeoutError:
+        db = {"ok": False, "latency_ms": 0.0,
+              "error": f"probe exceeded {_HEALTH_PROBE_BUDGET_S:.0f}s"}
     except Exception as exc:
         db = {"ok": False, "latency_ms": 0.0, "error": str(exc)[:200]}
     return {"status": "ok" if db["ok"] else "degraded", "db": db}
@@ -6741,19 +6917,32 @@ async def capture_session(body: SessionRequest, request: Request, team: dict = D
     #1927: the session_recording OPT-OUT check is FIRST in the gate stack (before
     the provider 503 / quota 402) so disabled teams do no quota work at all; any
     non-2xx failure records ``session_capture_last_error_{harness}`` (the
-    dashboard failure sub-line reads this, NOT client state) and 2xx records
+    dashboard failure sub-line reads this, NOT client state) — except the #3060
+    capacity 429, a server condition — and 2xx records
     ``session_capture_receipt_{harness}`` (bare ``session_capture_receipt``
     for legacy no-harness hooks).
     """
     _require_scope(team, "graphs:write", "capture_session")
     try:
-        return await _capture_session_impl(body, request, team)
+        # #3060: reserve ADMISSION before ANY state is written. Reserving (not
+        # merely checking) bounds the queue under a concurrent burst, and a
+        # 429 here cannot leave a half-created Session behind.
+        slot = _reserve_capture_slot()
+        try:
+            return await _capture_session_impl(body, request, team, slot=slot)
+        finally:
+            slot.release()
     except HTTPException as e:
-        if e.status_code >= 400:
-            # Review PR #1827: a last-error state-write failure must never
-            # mask the intended 403/402/503 with a 500.
+        # #3060: a capacity 429 is a SERVER condition, not a team capture
+        # failure — recording it in the team-visible last-error slot (and
+        # clearing it on the retry, which then replays) would misreport
+        # capacity as a capture fault and mask a genuine prior error.
+        # Review PR #1827: a last-error state-write failure must never mask the
+        # intended 403/402/503 with a 500.
+        if e.status_code >= 400 and e.status_code != 429:
             try:
-                _record_capture_last_error(team["team_id"], body.harness, e.detail)
+                _record_capture_last_error(
+                    team["team_id"], body.harness, e.detail)
             except Exception:
                 logging.getLogger("tortoise.api").exception(
                     "capture last-error state write failed (non-fatal)")
@@ -6792,7 +6981,7 @@ _SWEEP_EVENT_DELETE_CYPHER = (
 
 
 async def _capture_session_impl(body: SessionRequest, request: Request | None,
-                                team: dict) -> dict:
+                                team: dict, slot: _CaptureSlot | None = None) -> dict:
     """The capture pipeline (gates + writes). Shared by the REST endpoint and
     the ``tortoise_session_capture`` MCP tool (mcp_server.py) so the two
     surfaces can never drift on gate order.
@@ -7160,7 +7349,11 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         # contract as v2 — no fabricated empty meta; extraction-stage failures
         # are structured, never raised (turn points have already landed).
         try:
-            extracted, meta = sdk._extract_session_llm(
+            # #3060: same invariant as the v2 branch below — this extractor is
+            # synchronous (model calls included), so it must never run on the
+            # event loop, and never on the shared default pool either.
+            extracted, meta = await _run_capture_bounded(
+                slot, sdk._extract_session_llm,
                 windowed, session_id, now)
         except ValueError as e:
             # no-key fail-closed (outer 503 gate normally catches this first;
@@ -7202,7 +7395,24 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
                             "not applied")
                 except Exception:  # noqa: BLE001, RUF100
                     pass
-            extracted, meta = sdk._extract_session_v2(
+            # #3060 (P0) — INVARIANT: no provider/model call may run on the
+            # event loop. The extraction below is SYNCHRONOUS, and on a stalled
+            # model call it blocks in `_call_once`'s `t.join(timeout=deadline_s)`
+            # (extractor_v2.py:5101) for up to the token-scaled deadline —
+            # `_scaled_deadline(600, max_tokens)` is ~819s at a 16K budget
+            # (extractor_v2.py:5162), per retry. Run straight from this
+            # `async def` handler it froze the SINGLE event loop: /health stopped
+            # answering, Fly marked the machine unhealthy, and the proxy dropped
+            # ALL traffic ("no known healthy instances for route tcp/443") — one
+            # slow model call took down the whole product, not just the capture.
+            # `to_thread`-style context propagation, but on the CAPTURE pool:
+            # a stalled extraction must not be able to starve /health's probe or
+            # auth out of the shared default executor (#3060). `_run_off_loop`
+            # copies the caller's contextvars into the worker, which is what
+            # `_call_once`'s own `copy_context()` snapshot depends on (#2185).
+            # See tests/test_capture_loop_responsiveness.py.
+            extracted, meta = await _run_capture_bounded(
+                slot, sdk._extract_session_v2,
                 windowed, session_id, now, master=tenant_master)
         except ValueError as e:
             raise HTTPException(status_code=503, detail=str(e)) from e
@@ -7869,7 +8079,8 @@ def _capture_last_error_key(harness: str | None) -> str | None:
 def _record_capture_last_error(team_id: str, harness: str | None,
                                detail: str | None) -> None:
     """Set (detail) or clear (None) the per-harness last-attempt failure key.
-    Called on every non-2xx (set) and every 2xx (cleared) capture attempt."""
+    Called on every non-2xx (set) EXCEPT the #3060 capacity 429 — a server
+    condition, not a team capture failure — and every 2xx (cleared)."""
     key = _capture_last_error_key(harness)
     if key is None:
         return
