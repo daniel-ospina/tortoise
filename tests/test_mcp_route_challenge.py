@@ -228,6 +228,7 @@ class TestChallengeAbsentWhereNoAuthorizationServer:
     def test_the_hosted_app_still_does_emit_it(self, hosted_client):
         """The flip side — guard against 'fix it by disabling everywhere'."""
         assert _challenge_url(hosted_client.post("/mcp", json={})).endswith(PRM_PATH)
+
     @staticmethod
     def _static_app(api_key: str):
         from starlette.applications import Starlette
