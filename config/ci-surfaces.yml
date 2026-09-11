@@ -200,6 +200,13 @@ surfaces:
   - test_battery_parity_mabench.py
   - test_battery_parity_mabench_run.py
   - test_battery_probes.py
+  # #2906: provider-reported cost (#2906) + the declared fallback basis
+  # (#2874) pin battery/config/prices.py, battery/runner/model_calls.py,
+  # battery/parity/mabench_run.py, and tortoise/model_adapters.py. The
+  # price-basis file landed in #2890 unregistered (drift-gate red on main)
+  # and is registered here alongside the provider-cost file it guards.
+  - test_battery_price_basis.py
+  - test_battery_provider_cost.py
   - test_battery_differential.py
   - test_battery_streams.py
   - test_battery_recall.py
@@ -356,6 +363,10 @@ surfaces:
   - test_mining.py
   - test_model_adapters_routing.py
   - test_model_adapters_taxonomy.py
+  # #2906: tortoise/model_adapters.py maps to core (no SOURCE_PATTERN), and
+  # this file pins the provider-cost surfacing on that adapter path — so a
+  # model_adapters.py-only PR must run it (dual-registered with battery).
+  - test_battery_provider_cost.py
   - test_monitoring.py
   - test_navigation.py
   - test_no_tests_imports_in_production.py

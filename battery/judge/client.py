@@ -130,8 +130,14 @@ class JudgeClient:
                 "usage)")
         pt = int(usage.get("prompt_tokens", 0) or 0)
         ct = int(usage.get("completion_tokens", 0) or 0)
-        cost = float(usage.get("cost", 0.0)
-                     or _openrouter_cost(data.get("model", ""), pt, ct))
+        # #2906: `usage["cost"]` is the provider's authoritative charge and a
+        # genuine 0.0 (a free/zero-priced call) is a VALUE, not an absence —
+        # `or` would silently re-price it from the fallback table. Check for
+        # None explicitly; the fallback is only for a provider that reports no
+        # cost at all.
+        reported = usage.get("cost")
+        cost = (float(reported) if reported is not None
+                else _openrouter_cost(data.get("model", ""), pt, ct))
         try:
             parsed = json.loads(content)
             parsed.setdefault("prompt_tokens", pt)
