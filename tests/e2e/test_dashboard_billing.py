@@ -232,15 +232,16 @@ def test_welcome_reveal_shows_welcome_card_then_dashboard_exit(page: Page) -> No
     _goto_local_dashboard(page)
     # Teamless first-timer: welcome card (no orientation — removed per epic
     # #2534). Org-create is step 0.
-    expect(page.locator("body")).to_contain_text("Welcome to Tortoise", timeout=25_000)
+    expect(page.locator("body")).to_contain_text("Create your Organization", timeout=25_000)
     # Org-create step: type the org name → the SUBMIT provisions
     # (tenant-provision with the typed name; 201 carries the plaintext).
     expect(page.locator("body")).to_contain_text("Create your Organization", timeout=10_000)
     page.get_by_label("Organization name").fill("acme")
     page.get_by_role("button", name="Create Organization").click()
-    # Provisioned: the welcome heading flips to the org — the header exit is
-    # enabled once an org exists.
-    expect(page.locator("body")).to_contain_text("Welcome Team is set up", timeout=20_000)
+    # Provisioned: the org name becomes the welcome-card eyebrow (#2912 — the
+    # h1 is now the STAGE, so the provisioned org is the eyebrow above it), and
+    # the header exit is enabled once an org exists.
+    expect(page.locator(".welcome-eyebrow")).to_have_text("Welcome Team", timeout=20_000)
     # Escape hatch: the header 'Open my dashboard →' (enabled once the org
     # exists) → dashboard shell at /. Scoped to the header — the done-step
     # wizard carries a same-named button.
