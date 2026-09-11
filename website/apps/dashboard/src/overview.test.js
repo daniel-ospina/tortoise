@@ -55,7 +55,7 @@ test('connection: null state → loading (never fabricated)', () => {
   assert.equal(overviewConnection(null).kind, 'loading')
 })
 
-test('digest: populated count is honest (N points)', () => {
+test('digest: populated count is honest (N memories)', () => {
   const d = overviewDigest(42)
   assert.equal(d.kind, 'populated')
   assert.equal(d.value, 42)
