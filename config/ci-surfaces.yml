@@ -530,6 +530,7 @@ surfaces:
   - test_ranking.py
   - test_ranking_w4b.py
   - test_retrieval_determinism_2952.py  # #2952: ranking determinism (hermetic; also registered under core)
+  - test_2952_write_path_determinism.py  # #2952 defect 1: fresh-create write path must not skew fulltext/recall_state scores (docker-lane; DB)
   - test_recall_gaps_subgraph.py
   - test_recall_state.py
   - test_source_credibility.py
