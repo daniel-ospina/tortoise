@@ -53,6 +53,19 @@ reranking changes nothing (the isolation result the arms were built to
 test). Rerank additionally pushes refusal DOWN (0.982 → 0.782) while the
 reader context grows 94.9 → 624.0 mean tokens.
 
+**Whole-class baseline (2026-09-10, Task 4 Step 4):** the
+census-enumerated 133-question class was run at default knobs (real reader,
+facts gate ON, 133/133 measured, zero unresolved failures) —
+[`docs/runbook/2578-baseline-133.md`](2578-baseline-133.md), evidence rows
+[`docs/runbook/2578-measured-outcomes-133.jsonl`](2578-measured-outcomes-133.jsonl).
+Result: **8/133 correct (0.060, 95% CI 0.031–0.114)**, with **125/133
+failures attributed to ADMISSION** (the gold fact never reached the
+reader's context) — the same shape as the 55-Q subset, now on the honest
+whole-class denominator rather than the fireability-selected subset.
+Conversion was not the binding constraint anywhere in this baseline
+(0 conv-refusal / 0 conv-wrong): the reader is almost never given the
+chance to fail.
+
 **Correction (2026-09-10, post-commit):** two questions
 (`gpt4_76048e76`, `gpt4_c27434e8_abs`) were re-measured on all 8 arms. The
 55-Q run file had been built by dropping a content-identical duplicated
