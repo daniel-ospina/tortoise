@@ -2583,6 +2583,26 @@ class TortoiseSDK:
         # write on the new node; folding it here makes the whole fresh-create
         # path ONE graph write. The epoch is advanced NOW so the stamp and
         # the persist agree on one value (see _advance_ep_version).
+        #
+        # #2422 (born-terminal exception): a point whose BORN status is
+        # terminal must NOT carry that stamp. `status` is a write-path
+        # argument, so the only place the terminal exclusion is read is
+        # `_mark_dirty`'s persist query's WHERE — and that query is skipped
+        # entirely when every dirty id arrives `pre_stamped` (`persisted |=
+        # _stamped & set(dirty_ids)` below), which is precisely what an
+        # inline stamp would do. The result is the #2422 ghost class: a
+        # terminal point can never enter an EP affected set, so
+        # `_sweep_dirty_roots` can never clear its flag — a NEVER-clearable
+        # dirty root that pins `_auto_dream_mode` to 'local' forever (the
+        # comment in `_mark_dirty` forbids exactly this). So a born-terminal
+        # point gets no `ep_dirty`/`ep_dirty_at` in the CREATE map, and is
+        # NOT reported as pre-stamped: it flows through the persist WHERE
+        # (matches nothing → no write) into the terminal classification
+        # (`terminal_ids`), which clears any stale flag and keeps the id out
+        # of the in-memory mirror. `_sanitize_props` already rejects the
+        # legacy `outdated` flag prop (#2491), so `status` is the complete
+        # born-terminal surface.
+        _born_terminal = status in TERMINAL_EXCLUDED_STATUSES
         _epv = self._advance_ep_version(proj)
         _create_params: dict = {"id": pid, "c": content, "k": kind, "st": status,
                                 "now": now, "embedding": embedding,
@@ -2591,6 +2611,15 @@ class TortoiseSDK:
         # slipped in so the CREATE map keeps exactly one key of each name.
         props.pop("ep_dirty", None)
         props.pop("ep_dirty_at", None)
+        # #2952: a point born from a Source is inherit-eligible by definition
+        # (#398) — the inheritance gate must start invalid. The generic helper
+        # expresses that as `REMOVE n.inherited_at` AFTER the prop write, but
+        # a fresh point has no stamp of its own and the caller's (if any) is
+        # invalidated anyway, so the prop is dropped HERE: the CREATE map
+        # never writes it and no post-CREATE REMOVE is needed (final node
+        # state identical, ONE write instead of two).
+        if props.get("extractedFrom"):
+            props.pop("inherited_at", None)
         # CREATE-map (key -> expression), in the order the CREATE has always
         # written the fields. Built as a MAPPING because a caller prop whose
         # key collides with a field here must REPLACE it, not duplicate it:
@@ -2601,8 +2630,10 @@ class TortoiseSDK:
             "id": "$id", "content": "$c", "pointKind": "$k",
             "is_operator": "false", "status": "$st",
             "createdAt": "$now", "updatedAt": "$now",
-            "ep_dirty": "true", "ep_dirty_at": "$_epv",
         }
+        if not _born_terminal:
+            _create_map["ep_dirty"] = "true"
+            _create_map["ep_dirty_at"] = "$_epv"
         if _create_baseline is not None:
             _create_params.update(_baseline_create_params(_create_baseline))
             _create_map.update(_baseline_create_fields())
@@ -2613,8 +2644,17 @@ class TortoiseSDK:
         # A caller-supplied `embedding` prop is the embedding itself (the old
         # ordering applied the prop loop after the embedding SET, so props
         # won) — popped here so the map carries exactly one `embedding` key.
+        # TYPE CHANGE GUARD (P2, PR #3018 review): the pre-#2952 props loop
+        # stored a caller-supplied `embedding` RAW (it merely won the
+        # assignment race against `SET n.embedding = vecf32($embedding)`), so
+        # it must NOT be coerced here either — a silent float64-list →
+        # vecf32/float32 rewrite of an explicitly caller-owned value would
+        # change what a vector read returns. The server-computed embedding
+        # keeps the original `vecf32()` coercion (unchanged).
+        _embedding_expr = "vecf32($embedding)"
         if "embedding" in props:
             embedding = props.pop("embedding")
+            _embedding_expr = "$embedding"  # caller value stored verbatim
         _create_params["embedding"] = embedding
         for _i, (_key, _val) in enumerate(props.items()):
             _pname = f"_cp{_i}"
@@ -2622,7 +2662,7 @@ class TortoiseSDK:
             _create_map[_key] = f"${_pname}"
         # The embedding is written LAST (and `embedding` was popped from props
         # above), so the map carries exactly one `embedding` key.
-        _create_map["embedding"] = "vecf32($embedding)"
+        _create_map["embedding"] = _embedding_expr
         _create_fields = "".join(
             f", `{str(_k).replace('`', '``')}`: {_v}"
             for _k, _v in _create_map.items())
@@ -2639,17 +2679,16 @@ class TortoiseSDK:
             proj._link_source(pid, props["extractedFrom"])
             # Inheritance gate dirty-mark: a freshly-sourced point is always
             # inherit-eligible on the next EP run (no interval wait, #398).
-            # #2952: a born point carries no `inherited_at` stamp, so the gate
-            # is ALREADY invalid and the REMOVE the generic helper issues
-            # would be a pure no-op — but a no-op write on the node still
-            # costs a fulltext re-add, so it is skipped unless the caller
-            # supplied `inherited_at` (the one case where a REMOVE is real).
-            # The EP dirty-marking half is issued once below.
-            if "inherited_at" in props:
-                proj.g.query(
-                    "MATCH (n:Point {id:$id}) REMOVE n.inherited_at",
-                    params={"id": pid},
-                )
+            # #2952: a born point carries no `inherited_at` stamp, so the
+            # `REMOVE n.inherited_at` the generic helper
+            # (`_invalidate_inheritance_gate`) issues is a no-op on the final
+            # state — and a no-op write on the node still costs a fulltext
+            # re-add. The `extractedFrom` invalidation therefore happens in
+            # the PROPS (see the up-front pop of `inherited_at` above): a
+            # caller-supplied stamp is dropped BEFORE the CREATE map is built
+            # instead of being written and then taken back out, so this path
+            # is ONE graph write too. The EP dirty-marking half is issued once
+            # below.
 
         # Apply the starting belief (only on new creation, not dedup).
         #
@@ -2689,7 +2728,13 @@ class TortoiseSDK:
         # mark it dirty so the next dream/lazy-read stabilizes it.
         # #2952: the graph stamp was written by the CREATE above — this call
         # only fills the in-memory mirror (no second write on the node).
-        self._mark_dirty([pid], ep_version=_epv, pre_stamped={pid})
+        # #2422: a born-terminal point was NOT stamped by its CREATE — it is
+        # not pre-stamped, so `_mark_dirty` runs the persist query (whose
+        # terminal WHERE matches nothing: no write) and then classifies the
+        # id as terminal, keeping it out of `_dirty_roots` (the exact
+        # observable the P1 regression test pins).
+        self._mark_dirty([pid], ep_version=_epv,
+                         pre_stamped=set() if _born_terminal else {pid})
         # #432+#548 unified: domain payload + full point snapshot for both
         # the :GraphEvent store (subscriptions/poll) and JSONL (rebuild_all).
         self._emit_event("PointAdded", {"id": pid, "kind": kind, "content_hash": ch},

@@ -55,7 +55,8 @@ import uuid
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from tortoise.sdk import TortoiseSDK
+from tortoise.live import TERMINAL_EXCLUDED_STATUSES
+from tortoise.sdk import POINT_STATUS_VALUES, TortoiseSDK
 from tortoise.sparse import build_or_query
 
 # ── Hermetic corpus ────────────────────────────────────────────────────────
@@ -161,7 +162,11 @@ def test_create_point_is_one_graph_write_per_point(tmp_path, monkeypatch,
     """A fresh point must be created by ONE graph write. Every extra write on
     the node costs the fulltext index an extra entry, which is what skewed the
     engine's statistics (and, pre-fix, made the ranking drift for ~tens of
-    seconds after ingest)."""
+    seconds after ingest). This is the PLAIN variant; the sourced
+    (``extractedFrom``) variant is asserted by
+    ``test_create_point_sourced_with_inherited_at_is_one_graph_write`` below
+    (the invariant is universal — it is asserted for every fresh-create
+    path, not just this one)."""
     from tortoise.projection import _GuardedGraph
 
     namespace = _new_namespace()
@@ -194,6 +199,148 @@ def test_create_point_is_one_graph_write_per_point(tmp_path, monkeypatch,
         f"{writes}"
     )
     assert writes[0].startswith("CREATE (n:Point")
+
+
+# ── 1b. the ONE-write invariant is universal, not plain variant only ──────
+#
+# The invariant above is asserted for a plain point. The `extractedFrom`
+# path is the second fresh-create variant, and it is asserted explicitly
+# below (P2, PR #3018 review — a test that implies a universal invariant it
+# does not check would be worse than no test).
+
+
+def test_create_point_sourced_with_inherited_at_is_one_graph_write(
+        tmp_path, monkeypatch, force_sparse_tfidf):
+    """The sourced (``extractedFrom``) path is ONE write too, including when
+    the caller supplies ``inherited_at`` (P2, PR #3018 review).
+
+    That path used to follow the CREATE with a `REMOVE n.inherited_at`, and
+    when the caller passed an `inherited_at` prop the CREATE map wrote it
+    first — so the point took TWO property writes, the exact fulltext re-add
+    #2952 is about. The prop is now dropped before the CREATE map is built:
+    final node state identical (`inherited_at` absent, #398 gate invalid),
+    ONE write.
+    """
+    from tortoise.projection import _GuardedGraph
+
+    namespace = _new_namespace()
+    sdk = _open(tmp_path, namespace)
+
+    writes: list[str] = []
+    original = _GuardedGraph.query
+
+    def spy(self, cypher, *args, **kwargs):
+        text = " ".join(str(cypher).split())
+        if "Point" in text and any(
+                marker in text for marker in
+                ("CREATE (n:Point", "SET n.", "SET n ", "SET n +=",
+                 "REMOVE n.")):
+            writes.append(text[:120])
+        return original(self, cypher, *args, **kwargs)
+
+    monkeypatch.setattr(_GuardedGraph, "query", spy)
+    try:
+        point = sdk.create_point(
+            kind="evidence", content=FACTS[0], credibility="medium",
+            source_harness="battery-parity",
+            source_session="regression-2952",
+            extractedFrom="doc:2952-sourced",
+            inherited_at="2026-01-01T00:00:00+00:00",
+        )
+        pid = point["id"]
+        stored = sdk._get_proj().g.query(
+            "MATCH (n:Point {id:$id}) RETURN n.inherited_at, n.extractedFrom",
+            params={"id": pid}).result_set
+    finally:
+        sdk.close()
+
+    assert len(writes) == 1, (
+        "the extractedFrom + caller-supplied inherited_at path must write "
+        "the new Point node exactly once too — the inheritance-gate REMOVE "
+        f"is folded into the CREATE by dropping the prop. Saw {len(writes)}: "
+        f"{writes}"
+    )
+    assert writes[0].startswith("CREATE (n:Point")
+    assert stored == [[None, "doc:2952-sourced"]], (
+        "final node state must be unchanged from the write-then-REMOVE "
+        "version: inherited_at absent (a freshly-sourced point is always "
+        f"inherit-eligible, #398), extractedFrom stored. graph={stored}"
+    )
+
+
+# ── 1c. born-terminal points must not become dirty roots (#2422) ──────────
+
+#: Born-terminal statuses `create_point`'s closed vocabulary admits
+#: (``POINT_STATUS_VALUES``). ``deprecated`` is in
+#: ``TERMINAL_EXCLUDED_STATUSES`` but is not a create-time status — legacy /
+#: assessment paths write it — so it cannot be BORN through this path.
+_BORNABLE_TERMINAL = sorted(TERMINAL_EXCLUDED_STATUSES & POINT_STATUS_VALUES)
+
+
+def test_born_terminal_point_is_not_a_dirty_root(tmp_path, force_sparse_tfidf):
+    """A point created ALREADY terminal must not be stamped ``ep_dirty`` by
+    its own CREATE (P1, PR #3018 review — the #2422 ghost class).
+
+    The inline ``ep_dirty``/``ep_dirty_at`` write coexisted with the
+    ``pre_stamped`` handshake, so ``_mark_dirty`` counted the id as persisted
+    (``persisted |= _stamped & set(dirty_ids)``), the persist query's terminal
+    WHERE never ran, and the terminal classification never fired. A terminal
+    point can never enter an EP affected set, so ``_sweep_dirty_roots`` could
+    never clear the flag: a never-clearable dirty root pinning
+    ``_auto_dream_mode`` to ``'local'`` forever — exactly the state the
+    comment in ``_mark_dirty`` forbids.
+
+    The observables mirror the reviewer's evidence on the pre-fix tip: the
+    node carried ``(status='retracted', ep_dirty=true, ep_dirty_at=1)``, the
+    id was in ``_dirty_roots``, and replaying the pre-#2952 persist statement
+    on that node returned ``[]`` (the terminal WHERE already excluded it, so
+    only the inline stamp kept it flagged).
+    """
+    assert _BORNABLE_TERMINAL, "expected at least one born-terminal status"
+    for status in _BORNABLE_TERMINAL:
+        namespace = _new_namespace()
+        sdk = _open(tmp_path, namespace)
+        try:
+            point = sdk.create_point(
+                kind="statement",
+                content=f"born {status} — #2422 regression",
+                status=status)
+            pid = point["id"]
+            rows = sdk._get_proj().g.query(
+                "MATCH (n:Point {id:$id}) "
+                "RETURN n.status, n.ep_dirty, n.ep_dirty_at",
+                params={"id": pid}).result_set
+            roots = set(sdk._dirty_roots)
+            # The pre-#2952 persist statement, replayed verbatim: it is the
+            # statement the fix routes a born-terminal id through instead of
+            # pre-stamping it. `[]` proves the terminal classification owns
+            # this node (a non-empty row would mean it should be dirty).
+            replayed = sdk._get_proj().g.query(
+                "UNWIND $ids AS pid MATCH (n:Point {id: pid}) "
+                "WHERE NOT coalesce(n.status, 'live') IN $terminal "
+                "AND coalesce(n.outdated, false) = false "
+                "SET n.ep_dirty = true, n.ep_dirty_at = $ep RETURN pid",
+                params={"ids": [pid],
+                        "terminal": sorted(TERMINAL_EXCLUDED_STATUSES),
+                        "ep": 0}).result_set
+        finally:
+            sdk.close()
+
+        assert rows == [[status, None, None]], (
+            f"a point born {status!r} must not carry an EP-dirty stamp — the "
+            "terminal exclusion lives only in _mark_dirty's persist WHERE, "
+            f"which an inline stamp bypasses. graph={rows}"
+        )
+        assert pid not in roots, (
+            f"a point born {status!r} must not enter _dirty_roots — a "
+            "terminal point can never be swept, so the flag would strand and "
+            f"pin _auto_dream_mode to 'local' forever. roots={sorted(roots)}"
+        )
+        assert replayed == [], (
+            "the persist WHERE already classifies the born-terminal id as "
+            "terminal (nothing to mark), so the id must flow through the "
+            f"terminal classification, never pre-stamping. replayed={replayed}"
+        )
 
 
 # ── 2. the engine's own scores must not drift with elapsed wall-clock ──────
