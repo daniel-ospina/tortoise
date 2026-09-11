@@ -11,6 +11,45 @@ primary_region = "iad"
   protocol = "tcp"
   internal_port = 8000
 
+  # ── Machine lifecycle policy (#2850, P0) — explicit, not platform default ──
+  # All three keys were previously ABSENT, so production ran on Fly's
+  # undocumented-here defaults (auto_stop_machines="off",
+  # auto_start_machines=true, min_machines_running=0) — invisible in review.
+  # Full reasoning, cost math, and the 2-machine blocker: docs/infra-runbook.md §6.
+  #
+  # auto_stop_machines="off" — never stop. One machine + single-attach volume +
+  #   ~85s cold boot (#545: torch + sentence-transformers, marginal 4GB) means a
+  #   stopped machine = ZERO healthy instances = the #2850 outage signature
+  #   ("[PR01] no known healthy instances found for route tcp/443"). This key
+  #   matters precisely because a failing check only DE-REGISTERS a machine, it
+  #   does not stop it: once the sole machine is out of routing, public load is
+  #   zero by definition, and autostop is what would then decide to stop it.
+  #   Fly's default when the key is absent is "off" (never stop). We state it
+  #   explicitly so a de-registration can never cascade into a cold stop.
+  #   Matches the previous effective default: intent recorded, no behavior/cost
+  #   change (>=1 machine always warm, ~$21.40/mo; see COST below).
+  # auto_start_machines=true — safety net. If a machine is ever stopped
+  #   out-of-band (operator stop, host failure, crash-loop give-up), the next
+  #   request starts it. Never-stop + always-startable is the safe pairing;
+  #   Fly's warning targets the reverse (stop + never-start).
+  # min_machines_running=1 — availability floor: keep >=1 machine warm in iad.
+  #   Fly documents this as inert while auto_stop_machines="off" (declarative
+  #   today, load-bearing if autostop is enabled or a 2nd machine is added).
+  #   Do NOT set this to 2 expecting redundancy: the proxy never creates
+  #   machines (silent no-op), the volume is single-attach, and the app carries
+  #   per-process state — see runbook §6 before attempting it.
+  #
+  # COST (iad list price, Fly pricing page 2026-09-10): shared-cpu-2x:4096MB =
+  #   $21.40/mo running ($0.0297/hr; $17.50 of that is the 3.5GB above the
+  #   512MB preset at the documented $5/GB/30-days). Keeping >=1 machine warm
+  #   therefore costs ~$21.40/mo — already paid, since the app must serve
+  #   continuously. A genuinely redundant 2-machine topology is ~$42.80/mo
+  #   (+$21.40/mo, plus a 2nd volume at $0.15/GB/mo) and is blocked on the
+  #   app-state work in runbook §6. Operator decides that spend; not taken here.
+  auto_stop_machines = "off"
+  auto_start_machines = true
+  min_machines_running = 1
+
   [[services.ports]]
     port = 443
     handlers = ["tls", "http"]
@@ -23,12 +62,61 @@ primary_region = "iad"
     soft_limit = 100
     hard_limit = 200
 
-  [[services.http_checks]]
+  # ── Routing check: TCP, NOT HTTP (#2850, P0) ────────────────────────────────
+  # A [[services.tcp_checks]] connect is served by the KERNEL on the listening
+  # socket. The event loop and any thread pool cannot starve it, so a slow or
+  # blocked application CANNOT fail this check. That converts "a slow moment
+  # becomes a total outage" into "a slow moment is a slow response".
+  #
+  # The previous [[services.http_checks]] rode internal_port 8000 and hit
+  # path = "/health". A failing *service* check does NOT restart or stop the
+  # Machine (Fly: "a failing check won't cause the Machine to restart or stop")
+  # — it only makes the proxy STOP ROUTING to it. On 2026-09-10 (#2850) the sole
+  # machine's HTTP check flapped for 45 min and then failed; the machine was
+  # de-registered and the site was unreachable for ~35 min while the process was
+  # alive and answering on loopback. TCP removes that failure mode: no
+  # application-level latency can de-register the machine.
+  #
+  # NOTE: [[services.*_checks]] has NO `port` key — a service check always rides
+  # the service's internal_port (8000 here). It cannot be pointed at 9090. The
+  # 9090/healthz signal is the top-level [checks] section below, which never
+  # affects routing.
+  #
+  # timeout=5s against a 15s interval (was 15s/15s — a 1:1 ratio with zero
+  # headroom, so a hung probe consumed its whole period). A kernel accept is
+  # effectively instant (Fly's tcp_checks default timeout is 2s); 5s is
+  # generous headroom, not a latency budget. grace_period stays 180s: boot is
+  # ~85s (torch + model load, #545) and the listening socket must exist before
+  # the check starts. See docs/infra-runbook.md §6.4.
+  [[services.tcp_checks]]
     interval = "15s"
-    timeout = "15s"
+    timeout = "5s"
     grace_period = "180s"
+
+# ── Non-routing liveness check (#2850, P0) ───────────────────────────────────
+# THIS CHECK DOES NOT AFFECT REQUEST ROUTING. Top-level [checks] are an
+# independent alerting/paging signal only; the proxy ignores them when deciding
+# where to send traffic. It exists so a STALLED EVENT LOOP is VISIBLE to an
+# operator even though a stall can no longer take the app offline.
+#
+# It points at the app's dedicated health listener on port 9090, path /healthz
+# (interface contract: bound to 0.0.0.0; 200 when the loop is progressing, 503
+# when it has stalled). Top-level checks REQUIRE `port`, and Fly requires that
+# port be bound on 0.0.0.0 — a loopback-only (127.0.0.1) listener makes this
+# check fail permanently. Open questions (bind address, auth, whether it blocks
+# deploys) are tracked in docs/infra-runbook.md §6.9.
+#
+# grace_period matches the routing check: the 9090 listener shares the ~85s app
+# boot, so checking earlier would flap on every cold start.
+[checks]
+  [checks.loop_liveness]
+    type = "http"
     method = "get"
-    path = "/health"
+    path = "/healthz"
+    port = 9090
+    interval = "15s"
+    timeout = "5s"
+    grace_period = "180s"
 
 [[vm]]
   cpu_kind = "shared"
