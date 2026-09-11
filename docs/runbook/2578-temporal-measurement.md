@@ -38,12 +38,12 @@ run is not justified.**
 | class | n | substrate present | Objects | Point→aboutObject | Event→aboutObject | dated `startedAt` | gold sessions with events |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | ordering/compare | 9 | **9/9** | 2664 | 6351 | 1261 | 603 | 17 (of 18) |
-| interval | 4 | **4/4** | 977 | 2400 | 445 | 224 | 8 (of 8) |
+| interval | 4 | **4/4** | 991 | 2442 | 457 | 229 | 8 (of 8) |
 | current-state | 2 | **2/2** | 509 | 1322 | 282 | 134 | 4 (of 4) |
-| **all** | **15** | **15/15** (1.000) | 4150 | 10073 | 1988 | 961 | **29 of 30** |
+| **all** | **15** | **15/15** (1.000) | 4164 | 10115 | 2000 | 966 | **29 of 30** |
 
-Per-question (all 15 in `2578-probe-wave1-outcomes.jsonl`): 150–370 Objects,
-427–843 Point→aboutObject edges, 74–184 Event→aboutObject edges, and a
+Per-question (all 15 in `2578-probe-wave1-outcomes.jsonl`): 164–370 Objects,
+427–843 Point→aboutObject edges, 86–184 Event→aboutObject edges, and a
 dated gold event for **both** gold sessions on 14 of 15 questions (one
 ordering/compare question got 1 of 2). `errors = 0`.
 
@@ -57,21 +57,33 @@ ordering/compare question got 1 of 2). `errors = 0`.
   the 55-Q matrix above and #2165's own acceptance. Substrate existence is
   a prerequisite, never a result.
 
+**Extractor provenance.** The run resolved `('deepseek-direct', ['deepseek-direct', 'openrouter'])` and stayed on `deepseek-direct` (recorded at report level in `extractor`). Note the per-row `extractor_model` field is `null` — `RoutingModel` exposes `provider`, not an `id`, so the probe's per-row field could not be filled; the report-level record is authoritative here.
+
 **The name-match figure is a PROXY and must not be read as a resolution
 rate.** The probe derives candidate entity names by capitalisation from the
 gold subject and matches them against ingested Object names: **227 of 2823
 (8.0%)**. This is a crude string proxy with no eval-side entity resolver, so
 an 8% figure says the *proxy* is weak far more than it says the entities are
-missing (the same runs produced 4150 Objects with 10073 aboutObject edges).
+missing (the same runs produced 4164 Objects with 10115 aboutObject edges).
 Reported because hiding it would be worse; never quoted as "8% of entities
 resolve".
 
-**Reproducibility bonus.** The sequential runner and the parallelised
-workers overlapped on 6 questions, so those 6 were measured twice
-independently: the substrate verdict agreed **6/6** and the Object/edge
-counts agreed to within a small delta (one question 150 vs 164 Objects —
-extraction-boundary variance, not a verdict change). Recorded as
-`duplicate_remeasurements` in the report.
+**Idempotence check (NOT an independent re-measurement).** The
+parallelised per-question workers and the sequential runner overlapped on
+6 questions, so each was run against its graph twice. The second pass
+finished in **~4–9 s instead of ~15–20 min** because that question's graph
+namespace was **already populated** and the ingested point ids are
+deterministic (`lme:<qid>:s<n>:t<m>`) — so the re-run is an idempotent
+re-read, and its agreeing verdict is near-tautological. It shows the
+substrate is *persisted* and the measurement is *stable on a populated
+graph*; it says nothing about extraction variance.
+
+Counts were identical in **5 of 6**. The exception is `08f4fc43`: 150
+Objects on an 8.9 s pass and 164 on a 4530 s pass. The committed row is
+the second (164) — the longer, actually-ingesting pass. **The 14-Object
+difference is unexplained and is reported as unexplained**, not attributed
+to extraction variance. Per-pass rows for all 6:
+[`2578-probe-wave1-duplicates.jsonl`](2578-probe-wave1-duplicates.jsonl).
 
 **Infra incident (#2969).** Partway through the wave the ingest collapsed
 from ~25 min/question to >4 h/question, blocked indefinitely in a FalkorDB
@@ -90,6 +102,8 @@ namespaces) to bound the wall-clock. Filed with full evidence as #2969.
 | [`2578-reports-133/A-default-133q.json`](2578-reports-133) | the whole-class 133-Q baseline report (same shape; `integrity.valid=true`) |
 | [`2578-measured-outcomes.jsonl`](2578-measured-outcomes.jsonl) | 8 arms x 55 questions, one graded outcome per line |
 | [`2578-measured-outcomes-133.jsonl`](2578-measured-outcomes-133.jsonl) | the 133-Q baseline, one graded outcome per line |
+| [`2578-probe-wave1.json`](2578-probe-wave1.json) + [`-outcomes.jsonl`](2578-probe-wave1-outcomes.jsonl) | the Task 5 v2 structural probe: per-class aggregates, saturation, extractor provenance, the #2969 infra record; one row per question |
+| [`2578-probe-wave1-duplicates.jsonl`](2578-probe-wave1-duplicates.jsonl) | all 6 questions that were run twice (every pass, with duration + counts), so the idempotence claim is checkable |
 
 **Reproduce the published tables from the committed data** (no cache, no
 network, no docker):
