@@ -5923,6 +5923,14 @@ function claimIntentInFlight() {
                       // user to ask an owner — they are the owner. The build
                       // fork has no paste escape, so its honest action is
                       // freeing a slot in the API Keys tab.
+                      // PR-gate follow-up 3: a build-fork user who ALREADY holds a
+                      // key sees that key + the curl in the body, so any key-getting
+                      // copy contradicts the card. This is the first arm: the key
+                      // state is a fact, the role/fork branches are about who can
+                      // mint one.
+                      if (isBuildFork && harnessKey) {
+                        return <p className="welcome-lede">Copy your key and call the Tortoise SDK from your app.</p>
+                      }
                       if (!isOwnerAdmin) {
                         return <p className="welcome-lede">{isBuildFork
                           ? 'Ask an owner or admin for an API key, then call the Tortoise SDK.'
