@@ -20,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from tools.ci_selection import (  # noqa: I001
     load_manifest, select, integrity, slow_file_issues,  # noqa: F401
     unlisted_tests, register_tests, register, classify_test_file,  # noqa: F401
+    surface_audit, render_surface_audit,
 )
 
 
@@ -1264,3 +1265,194 @@ def test_drift_gate_cannot_skip_the_test_matrix():
                 "does not block the merge (#2656)")
         assert _verdict(*green[:-1], "skipped") == 0, (
             "a skipped need is not a failure (docs-only PRs skip the matrix)")
+
+
+# ── #2938: surface audit (report-only) ───────────────────────────────────
+# The audit must resolve what the rejected mechanical derivation could not:
+# package-level imports, `tortoise/api.py` (absent from SOURCE_PATTERNS),
+# helper/fixture indirection, string path refs — and it must stay a REPORT
+# (never mutate the manifest, never change select()/--integrity).
+
+_AUDIT_SOURCES = {
+    "tortoise/hosted_api.py": "",
+    "tortoise/api.py": "",
+    "tortoise/decide.py": "",
+    "tortoise/sdk.py": "",
+    "tortoise/ep.py": "",
+    "tortoise/exceptions.py": "",
+    "battery/cli.py": "",
+}
+
+
+def _audit_repo(tmp_path: Path, extra: dict[str, str]) -> Path:
+    """A synthetic repo: the shared source tree plus `extra` files."""
+    for rel, body in {**_AUDIT_SOURCES, **extra}.items():
+        p = tmp_path / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(body)
+    return tmp_path
+
+
+def _audit(manifest: dict, repo: Path) -> dict:
+    return surface_audit(manifest, repo=repo, tests_dir=repo / "tests")
+
+
+def _audit_manifest(**surfaces: list[str]) -> dict:
+    """A manifest carrying every surface the real one has (empty unless
+    overridden) so assertions can address any surface."""
+    base: dict[str, list[str]] = {
+        s: [] for s in ("api", "battery", "classify", "core", "ep",
+                        "eval", "onboarding", "sdk")}
+    base.update(surfaces)
+    return {"surfaces": base, "tier1": []}
+
+
+def test_surface_audit_reports_unregistered_surface_pin_as_addition(tmp_path):
+    # requirement: a file importing a surface's source but not registered
+    # under it is an addition candidate, with the import as evidence
+    repo = _audit_repo(tmp_path, {
+        "tests/test_imports_api.py": "from tortoise.hosted_api import app\n"})
+    report = _audit(_audit_manifest(battery=["test_imports_api.py"]), repo)
+    api = {e["file"]: e for e in report["surfaces"]["api"]["addition"]}
+    assert "test_imports_api.py" in api
+    assert api["test_imports_api.py"]["evidence"] == ["tortoise/hosted_api.py"]
+    # ... and the same file is a battery removal candidate (pins nothing battery)
+    assert [e["file"] for e in report["surfaces"]["battery"]["removal"]] \
+        == ["test_imports_api.py"]
+
+
+def test_surface_audit_reports_member_pinning_nothing_as_removal(tmp_path):
+    repo = _audit_repo(tmp_path, {
+        "tests/test_stray_api.py": "from battery.cli import main\n"})
+    report = _audit(_audit_manifest(api=["test_stray_api.py"]), repo)
+    removal = report["surfaces"]["api"]["removal"]
+    assert [e["file"] for e in removal] == ["test_stray_api.py"]
+    assert removal[0]["pins"] == {"battery": ["battery/cli.py"]}
+    # the reverse direction is reported too: not registered under battery
+    assert [e["file"] for e in report["surfaces"]["battery"]["addition"]] \
+        == ["test_stray_api.py"]
+
+
+def test_surface_audit_resolves_package_level_import(tmp_path):
+    # rule (a): `from tortoise import X` -> tortoise/X.py (or X/__init__.py);
+    # this is the gap that made 28 onboarding files read as "pins nothing"
+    repo = _audit_repo(tmp_path, {
+        "tortoise/onboarding/__init__.py": "",
+        "tests/test_pkg_import.py": "from tortoise import onboarding\n"})
+    report = _audit(_audit_manifest(api=["test_pkg_import.py"]), repo)
+    ep_add = {e["file"]: e for e in report["surfaces"]["ep"]["addition"]}
+    assert "test_pkg_import.py" not in ep_add  # sanity: not the wrong surface
+    additions = {e["file"]: e for e in report["surfaces"]["onboarding"]["addition"]}
+    assert "test_pkg_import.py" in additions
+    assert "tortoise/onboarding/__init__.py" in additions["test_pkg_import.py"]["evidence"]
+    # `tortoise` alone (the bare package root) is never a pin
+    assert report["surfaces"]["api"]["addition"] == []
+
+
+def test_surface_audit_excludes_shared_modules(tmp_path):
+    # rule: SHARED_MODULES force the full matrix, so importing one is NOT a
+    # pin and must not surface as an addition/uncovered mismatch
+    repo = _audit_repo(tmp_path, {
+        "tests/test_shared.py":
+            "from tortoise.sdk import TortoiseSDK\n"
+            "from tortoise.exceptions import TortoiseError\n"})
+    report = _audit(_audit_manifest(sdk=["test_shared.py"]), repo)
+    for surface in report["surfaces"].values():
+        assert surface["addition"] == []
+    assert all(r["path"] not in ("tortoise/sdk.py", "tortoise/exceptions.py")
+               for r in report["uncovered"])
+    assert all(r["path"] not in ("tortoise/sdk.py", "tortoise/exceptions.py")
+               for r in report["coverage_gaps"])
+    removal = report["surfaces"]["sdk"]["removal"]
+    assert [e["file"] for e in removal] == ["test_shared.py"]
+    assert set(removal[0]["shared"]) \
+        >= {"tortoise/sdk.py", "tortoise/exceptions.py"}
+
+
+def test_surface_audit_catches_string_path_reference(tmp_path):
+    # rule (c): a test may shell out to / read a path instead of importing it
+    repo = _audit_repo(tmp_path, {
+        "tests/test_string_ref.py":
+            "import subprocess\n"
+            "\n"
+            "def test_script():\n"
+            "    subprocess.run(['python', 'battery/cli.py'])\n"})
+    report = _audit(_audit_manifest(core=["test_string_ref.py"]), repo)
+    additions = {e["file"]: e for e in report["surfaces"]["battery"]["addition"]}
+    assert "test_string_ref.py" in additions
+    assert additions["test_string_ref.py"]["evidence"] == ['"battery/cli.py"']
+
+
+def test_surface_audit_follows_tests_helper(tmp_path):
+    # rule (d): a test reaching a surface only through a tests/ helper must
+    # still count, with the chain visible in the evidence
+    repo = _audit_repo(tmp_path, {
+        "tests/_helper.py": "from tortoise.hosted_api import app\n",
+        "tests/test_uses_helper.py": "from tests._helper import app\n"})
+    report = _audit(_audit_manifest(battery=["test_uses_helper.py"]), repo)
+    additions = {e["file"]: e for e in report["surfaces"]["api"]["addition"]}
+    assert "test_uses_helper.py" in additions
+    assert additions["test_uses_helper.py"]["evidence"] \
+        == ["tortoise/hosted_api.py (via tests/_helper.py)"]
+    # the helper module itself is not a test file, so it is never audited
+    assert all(e["file"] != "_helper.py"
+               for s in report["surfaces"].values() for e in s["addition"])
+
+
+def test_surface_audit_reports_uncovered_surface_named_source(tmp_path):
+    # rule (b): `tortoise/api.py` is real api-owned source but is absent from
+    # SOURCE_PATTERNS["api"] — the report must SAY so, not bin it as core
+    repo = _audit_repo(tmp_path, {
+        "tests/test_api_mod.py": "from tortoise.api import EventAPI\n"})
+    report = _audit(_audit_manifest(api=["test_api_mod.py"]), repo)
+    gaps = report["coverage_gaps"]
+    assert any(g["path"] == "tortoise/api.py" and g["surface"] == "api"
+               for g in gaps), gaps
+    assert "tortoise/api.py" not in [r["path"] for r in report["uncovered"]]
+    removal = report["surfaces"]["api"]["removal"][0]
+    assert removal["gap"] == ["tortoise/api.py"]
+
+
+def test_surface_audit_skips_removal_for_unmapped_surfaces(tmp_path):
+    # classify/core have no SOURCE_PATTERNS entry: "pins nothing from it" is
+    # undefined, so the audit must not propose emptying classify
+    repo = _audit_repo(tmp_path, {
+        "tests/test_classify_x.py": "import os\n",
+        "tests/test_api_nothing.py": "import os\n"})
+    report = _audit(_audit_manifest(classify=["test_classify_x.py"],
+                                    core=["test_classify_x.py"],
+                                    api=["test_api_nothing.py"]), repo)
+    for surface in ("classify", "core"):
+        assert report["surfaces"][surface]["source_mapped"] is False
+        assert report["surfaces"][surface]["removal"] == []
+        assert report["surfaces"][surface]["addition"] == []
+    # non-vacuity: a source-mapped surface in the SAME repo still reports
+    assert [e["file"] for e in report["surfaces"]["api"]["removal"]] \
+        == ["test_api_nothing.py"]
+
+
+def test_surface_audit_reports_no_surface_and_duplicates(tmp_path):
+    repo = _audit_repo(tmp_path, {
+        "tests/test_dup.py": "import os\n",
+        "tests/test_unregistered.py": "import os\n"})
+    report = _audit(_audit_manifest(core=["test_dup.py", "test_dup.py"]), repo)
+    assert report["no_surface"] == ["test_unregistered.py"]
+    assert report["duplicates"] == {"core": ["test_dup.py"]}
+
+
+def test_surface_audit_is_deterministic_and_non_mutating(tmp_path):
+    repo = _audit_repo(tmp_path, {
+        "tests/test_a.py": "from tortoise.hosted_api import app\n",
+        "tests/test_b.py": "from battery.cli import main\n"})
+    manifest = _audit_manifest(api=["test_b.py"], battery=["test_a.py"])
+    before = {s: list(f) for s, f in manifest["surfaces"].items()}
+    report = _audit(manifest, repo)
+    # non-vacuity: the audit actually found the two cross-surface additions
+    assert [e["file"] for e in report["surfaces"]["api"]["addition"]] \
+        == ["test_a.py"]
+    assert [e["file"] for e in report["surfaces"]["battery"]["addition"]] \
+        == ["test_b.py"]
+    first = render_surface_audit(report)
+    second = render_surface_audit(_audit(manifest, repo))
+    assert first == second
+    assert manifest["surfaces"] == before, "the audit must not mutate the manifest"
