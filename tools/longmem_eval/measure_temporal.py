@@ -69,14 +69,14 @@ ARM_TABLE: tuple[dict, ...] = (
      "knobs": ["--tr-top-k", "16"],
      "reach": "admits <= 16 pool ranks on TR questions, trimmed by the "
               "8000-token budget (~19 items at median chunk) — CAN reach "
-              "moderately deep gold; CANNOT reach the rank-48-68 gold band.",
+              "moderately deep gold; CANNOT reach the 41-120 band as a whole ",
      "isolation": "flood-control cap widening only (R5 #1544 knob family)",
      "indicators": ["2(d)"]},
     {"id": "tr_top_k20",
      "knobs": ["--tr-top-k", "20"],
      "reach": "admits <= 20 pool ranks, trimmed by the 8000-token budget — "
               "~19 items at median chunk, so 20 sits AT the budget ceiling; "
-              "CANNOT reach the rank-48-68 gold band.",
+              "CANNOT reach the 41-120 band as a whole.",
      "isolation": "flood-control cap widening only",
      "indicators": ["2(d)"]},
     {"id": "tr_top_k24",
@@ -307,6 +307,30 @@ def classify_refusal(hypothesis: str | None) -> bool:
     return bool(_looks_abstained(hypothesis))
 
 
+#: Observed absence phrasings the shared product classifier does NOT catch
+#: (found by the #2578 PR review: e.g. "I don't have any record of ... so I
+#: can't calculate ..."). They are NOT used to re-label an outcome — the
+#: 2×2 keeps using the shared classifier so the measurement and the product
+#: never disagree — but a conversion-wrong outcome carrying one of these is
+#: flagged, and the count is REPORTED, because a classifier false negative
+#: inflates the reader-wrong split (plan Failure Modes require this
+#: disagreement to be visible, never silently absorbed).
+_ABSENCE_HINTS = (
+    "i don't have any record", "i do not have any record",
+    "i don't have any information", "i do not have any information",
+    "it doesn't say", "it does not say",
+    "so i can't", "so i cannot", "i can't determine", "i cannot determine",
+    "i can't calculate", "i cannot calculate",
+)
+
+
+def refusal_classifier_hint(hypothesis: str | None) -> bool:
+    """Second-opinion scan for an explicit absence statement the shared
+    classifier misses. Diagnostic only — never re-labels an outcome."""
+    text = str(hypothesis or "").lower()
+    return any(h in text for h in _ABSENCE_HINTS)
+
+
 # ══════════════════════════════════════════════════════════════════════════
 # Task 3: arm driver + verdict classification + taxonomy aggregation +
 # rollback-guard readout + reader-constancy + runbook gate output
@@ -361,15 +385,32 @@ def classify_outcome(outcome: dict, *,
     """
     qid = outcome.get("question_id")
     label = outcome.get("label")
-    verdict: dict = {"qid": qid, "correct": None}
+    # An abstention-DESIGN question's gold answer is "the information is
+    # absent": refusing is the correct behaviour, so such a question is not
+    # evidence of answering capability either way. Keyed off the question's
+    # own marker (never off the reader's output) so the split cannot be
+    # polluted by a classifier false negative.
+    abstention_q = is_abs_control(qid) or str(qid or "").endswith("_abs")
+    verdict: dict = {"qid": qid, "correct": None,
+                     "abstention_question": bool(abstention_q)}
     if not isinstance(label, bool):
         verdict.update(attribution="unattributed",
                        reason="no-bool-label",
                        subclass=None, flags=[])
         return verdict
     if label is True:
-        verdict.update(correct=True, attribution="correct", subclass=None,
-                       flags=[])
+        # A correct outcome is NOT necessarily a substantive answer: on
+        # questions whose gold answer is an abstention, the only correct
+        # behaviour is to refuse. Reporting both in one "correct" column
+        # overstates capability (a run that refuses everything scores 100%
+        # on abstention questions and 0% on the rest). Record which it was.
+        mf = outcome.get("measure_facts") or {}
+        refusal = mf.get("reader_refusal")
+        if refusal is None:
+            refusal = classify_refusal(outcome.get("hypothesis"))
+        verdict.update(correct=True, attribution="correct",
+                       subclass="refusal" if bool(refusal) else "answer",
+                       correct_answer=not bool(refusal), flags=[])
         return verdict
     verdict["correct"] = False
     mf = outcome.get("measure_facts")
@@ -387,6 +428,11 @@ def classify_outcome(outcome: dict, *,
         refusal = mf.get("reader_refusal")
         if refusal is None:
             refusal = classify_refusal(outcome.get("hypothesis"))
+        if not bool(refusal) and refusal_classifier_hint(
+                outcome.get("hypothesis")):
+            # the 2×2 keeps the shared classifier's label; the flag makes
+            # the disagreement visible (and gates the reported count)
+            flags.append("refusal-classifier-miss")
         verdict.update(
             attribution="conversion",
             subclass="refusal" if bool(refusal) else "reader-wrong",
@@ -405,9 +451,10 @@ def classify_outcome(outcome: dict, *,
     subclasses = []
     # (i) marked gold beyond the arm's rerank pool horizon: no boost or
     # within-pool reorder can admit it. Default pool 40 -> the 41-120 band
-    # is beyond (the pinned tr_top_k reach statements name the rank-48-68
-    # gold band — it sits inside 41-120); applied-rerank pool 120 -> only
-    # 121+ is beyond.
+    # is beyond; applied-rerank pool 120 -> only 121+ is beyond. (The
+    # observed band comes from THIS run's pool_depth markup — the historical
+    # "rank-48-68" figure is an uncommitted /tmp-synthesis claim the plan
+    # explicitly refuses to chase, so it is never asserted here.)
     if beyond > 0:
         subclasses.append("admission-outside-rerank-depth")
     # (ii) marked gold at reader-horizon ranks (within the pool) yet absent
@@ -418,6 +465,7 @@ def classify_outcome(outcome: dict, *,
         attribution="admission",
         subclass=subclasses[0] if subclasses else None,
         flags=flags,
+        pool_bands=bands,
         derivable_subclasses=subclasses)
     return verdict
 
@@ -449,10 +497,28 @@ def aggregate_taxonomy(verdicts: list[dict], qid_to_cls: dict[str, str],
         conv_wrong = len(conv) - conv_refusal
         unattributed = sum(1 for v in vs
                            if v.get("attribution") == "unattributed")
+        # substantive correct = answered, not refused (see classify_outcome)
+        correct_answer = sum(1 for v in vs
+                             if v.get("correct_answer") is True)
+        correct_refusal = correct - correct_answer
+        # capability headline: correct on questions that HAVE an answer
+        answerable = [v for v in vs if not v.get("abstention_question")]
+        correct_answerable = sum(1 for v in answerable
+                                 if v.get("correct") is True)
+        answerable_n = len(answerable)
         tables[cls_] = {
             "n": n,
             "correct": correct,
+            "correct_answer": correct_answer,
+            "correct_refusal": correct_refusal,
+            "answerable_n": answerable_n,
+            "correct_answerable": correct_answerable,
+            "correct_answerable_ci": (
+                list(wilson_ci(correct_answerable, answerable_n))
+                if answerable_n else [0.0, 0.0]),
             "correct_ci": list(wilson_ci(correct, n)) if n else [0.0, 0.0],
+            "correct_answer_ci": (list(wilson_ci(correct_answer, n))
+                                  if n else [0.0, 0.0]),
             "admission": admission,
             "conversion_refusal": conv_refusal,
             "conversion_wrong": conv_wrong,
@@ -645,6 +711,13 @@ def _totals(verdicts: list[dict]) -> dict:
     return {
         "n": len(gradable),
         "correct": sum(1 for v in gradable if v["correct"] is True),
+        "correct_answer": sum(1 for v in gradable
+                              if v.get("correct_answer") is True),
+        "correct_answerable": sum(
+            1 for v in gradable if v.get("correct") is True
+            and not v.get("abstention_question")),
+        "answerable_n": sum(1 for v in gradable
+                            if not v.get("abstention_question")),
         "admission": sum(1 for v in gradable
                          if v.get("attribution") == "admission"),
         "conversion_refusal": sum(
@@ -712,6 +785,25 @@ def branch_decision(totals: dict) -> str:
     # routed to the #2013 strong-reader leg, never claimed as decided.
     return "conversion-indeterminate"
 
+def _observed_gold_bands(verdicts: list[dict]) -> str:
+    """The observed gold-depth bands the BASELINE actually saw, read from
+    the admission-failure pool_depth diagnostics — the 'observed gold depth'
+    half of the reach-vs-observed comparison the plan asks for. Returns an
+    aggregate band histogram, never a claim about a rank range the data does
+    not pin."""
+    hist: dict[str, int] = {}
+    for v in verdicts:
+        if v.get("attribution") != "admission":
+            continue
+        for band, n in (v.get("pool_bands") or {}).items():
+            if n and band != "unmarked":
+                hist[band] = hist.get(band, 0) + int(n)
+    if not hist:
+        return "(no pool_depth bands recorded)"
+    return ", ".join(f"{b}:{hist[b]}" for b in
+                     sorted(hist, key=lambda x: (len(x), x)))
+
+
 def gate_output(*, issue: str, prereg: dict, qid_to_cls: dict[str, str],
                 baseline_verdicts: list[dict],
                 arm_verdicts: dict[str, list[dict]],
@@ -744,6 +836,17 @@ def gate_output(*, issue: str, prereg: dict, qid_to_cls: dict[str, str],
     """
     if arms_meta:
         assert_reader_constancy(arms_meta)
+    # Loud guard: these must be classify_outcome VERDICTS, not raw outcomes.
+    # _totals() filters on the "correct" key, so raw outcomes would silently
+    # render an all-zero gate output — a measurement that looks like a result.
+    for _label, _vs in [("baseline_verdicts", baseline_verdicts),
+                        *[(f"arm_verdicts[{k}]", v)
+                          for k, v in arm_verdicts.items()]]:
+        if _vs and any("correct" not in v for v in _vs):
+            raise ValueError(
+                f"gate_output: {_label} must contain classify_outcome "
+                "verdicts (missing the 'correct' key) — raw outcome rows "
+                "would render as an all-zero gate output.")
     tables = aggregate_taxonomy(baseline_verdicts, qid_to_cls,
                                 pool_limit=pool_limit)
     comps = {arm_id: compare_arms_to_baseline(baseline_verdicts, vs)
@@ -755,10 +858,19 @@ def gate_output(*, issue: str, prereg: dict, qid_to_cls: dict[str, str],
     branch = branch_decision(totals)
     reach_lines = []
     prereg_arms = {a["id"]: a for a in prereg.get("arms", [])}
+    observed_bands = _observed_gold_bands(baseline_verdicts)
     for arm_id, s in arm_stats.items():
         reach = prereg_arms.get(arm_id, {}).get("reach", "(unregistered)")
         reach_lines.append(f"| {arm_id} | {s.get('mean_context_tokens', '—')} "
-                           f"| {reach} |")
+                           f"| {observed_bands} | {reach} |")
+    from tools.longmem_eval.report import wilson_ci as _wilson
+    base_t = totals["baseline"]
+    refusal_correct = (base_t.get("correct", 0)
+                       - base_t.get("correct_answerable", 0))
+    _an = base_t.get("answerable_n", 0)
+    base_t["correct_answerable_ci"] = (
+        list(_wilson(base_t.get("correct_answerable", 0), _an))
+        if _an else [0.0, 0.0])
     md = ["# 2578 Temporal Measurement — Gate Output",
           "",
           f"> Generated by tools.longmem_eval.measure_temporal.gate_output — "
@@ -768,16 +880,33 @@ def gate_output(*, issue: str, prereg: dict, qid_to_cls: dict[str, str],
           "",
           f"**{branch}**",
           "",
+          "### Substantive vs abstention-correct (baseline)",
+          "",
+          f"Baseline `correct` totals {base_t.get('correct', 0)} of "
+          f"{base_t.get('n', 0)} — but only **"
+          f"{base_t.get('correct_answerable', 0)} of "
+          f"{base_t.get('answerable_n', 0)} are on questions that HAVE an "
+          f"answer** (95% CI {base_t.get('correct_answerable_ci', [0, 0])[0]:.3f}"
+          f"–{base_t.get('correct_answerable_ci', [0, 0])[1]:.3f}); the other "
+          f"{refusal_correct} are abstention-DESIGN questions where the "
+          f"correct behaviour is to refuse. A refusal-scored question is "
+          f"not capability evidence: the answerable number is the "
+          f"headline, not `correct`.",
+          "",
           "## 2×2 per census class (baseline)",
           "",
-          "| class | n | correct (95% CI) | admission | conv-refusal | "
-          "conv-wrong | unattributed |",
-          "| --- | --- | --- | --- | --- | --- | --- |",
+          "| class | n | correct (95% CI) | correct on answerable "
+          "(n, 95% CI) | admission-attributed | conv-refusal | conv-wrong "
+          "| unattributed |",
+          "| --- | --- | --- | --- | --- | --- | --- | --- |",
           ]
     for cls_, t in sorted(tables.items()):
         lo, hi = t["correct_ci"]
+        alo, ahi = t["correct_answerable_ci"]
         md.append(f"| {cls_} | {t['n']} | {t['correct']} "
-                  f"({lo:.3f}–{hi:.3f}) | {t['admission']} | "
+                  f"({lo:.3f}–{hi:.3f}) | {t['correct_answerable']}"
+                  f"/{t['answerable_n']} ({alo:.3f}–{ahi:.3f}) | "
+                  f"{t['admission']} | "
                   f"{t['conversion_refusal']} | {t['conversion_wrong']} | "
                   f"{t['unattributed']} |")
     md += ["", "## Widening arms vs baseline (McNemar + min-discriminability)",
@@ -800,6 +929,13 @@ def gate_output(*, issue: str, prereg: dict, qid_to_cls: dict[str, str],
         md.append(f"| {r['arm']} | {r['refusal_rate']:.3f} | "
                   f"{r['mean_context_tokens']} | "
                   f"{'⚠️' if r['flagged_rollback_candidate'] else ''} |")
+    _base_ref = guard["baseline_refusal_rate"]
+    _n_above = sum(1 for r in guard["arms"]
+                   if r["arm"] != "A-default" and r["refusal_rate"] > _base_ref)
+    _n_equal = sum(1 for r in guard["arms"]
+                   if r["arm"] != "A-default" and r["refusal_rate"] == _base_ref)
+    _n_below = sum(1 for r in guard["arms"]
+                   if r["arm"] != "A-default" and r["refusal_rate"] < _base_ref)
     if guard["bound"] > 1.0:
         # Honesty note, emitted from the data: a refusal rate cannot exceed
         # 1, so a bound above 1 makes the pre-registered guard
@@ -812,19 +948,39 @@ def gate_output(*, issue: str, prereg: dict, qid_to_cls: dict[str, str],
                f"cannot exceed 1, so no arm could ever be flagged here. "
                f"The readout is reported for the record only; the "
                f"rollback decision must not lean on its silence. "
-               f"(Observed arm refusal rates all moved DOWN/equal — see "
-               f"table.)"]
+               f"(Observed: {_n_above} arm(s) ABOVE the baseline refusal "
+               f"rate, {_n_equal} equal, {_n_below} below — see table; "
+               f"the guard cannot flag any of them here.)"]
     md += ["", "## Per-arm reach vs observed gold depth", "",
-           "| arm | mean_context_tokens | pre-registered reach |",
-           "| --- | --- | --- |"]
+           "| arm | mean_context_tokens | observed gold bands "
+           "(pool_depth, baseline) | pre-registered reach |",
+           "| --- | --- | --- | --- |"]
     md += reach_lines
+    _misses = sum(1 for vs in [baseline_verdicts,
+                               *arm_verdicts.values()] for v in vs
+                  if "refusal-classifier-miss" in (v.get("flags") or []))
+    _conv_wrong = sum(_totals(vs)["conversion_wrong"]
+                      for vs in [baseline_verdicts, *arm_verdicts.values()])
+    if _misses:
+        md += ["",
+               f"> **Refusal-classifier disagreement ({_misses} of "
+               f"{_conv_wrong} conversion-wrong outcomes)**: these answers "
+               f"state the information is absent in wording the shared "
+               f"product classifier does not match (see "
+               f"`refusal_classifier_hint`). They are NOT re-labelled — the "
+               f"2×2 deliberately uses the same classifier the product uses "
+               f"— so the reader-wrong split above is an UPPER BOUND and the "
+               f"true refusal-driven share is higher. Fixing the production "
+               f"classifier vocabulary is a separate follow-up."]
     md += ["", "## Three pre-registered decision branches", "",
            "1. **Widening lifted accuracy** → attribute to ADMISSION "
            "(the branch fires only with arm_wins > baseline_wins).",
            "2. **Residual refusal/wrong on ADMITTED gold** → "
-           "conversion-bound — the honest caveat: wrong-on-admitted is "
-           "dominated by reader-MODEL derivation errors (arithmetic/"
-           "interval/count/recency), NOT ordering-of-admitted-evidence; "
+           "conversion-bound — the honest caveat (PRIOR from runbook 1987, "
+           "NOT measured by this gate): wrong-on-admitted is dominated "
+           "by reader-MODEL derivation errors (arithmetic/"
+           "interval/count/recency) rather than ordering-of-admitted-"
+           "evidence; "
            "the assembler is NEVER claimed from the 2×2 — a named "
            "qualitative pass (owner: epistemic-team; trigger: "
            "conversion-bound verdict) isolates ordering-of-admitted-"
@@ -842,3 +998,149 @@ def gate_output(*, issue: str, prereg: dict, qid_to_cls: dict[str, str],
                    f"aboutSubjects: epistemic-team\naboutObjects: tortoise\n"
                    f"issue: {issue}\n---\n\n")
     return frontmatter + body
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Committed-artifact producer: regenerate the gate output + evidence rows
+# from the committed raw reports alone. Without this the published tables
+# could not be reproduced from anything in the repo (the raw run reports
+# lived only in a local cache) — a measurement whose numbers cannot be
+# regenerated from committed inputs is not evidence.
+# ══════════════════════════════════════════════════════════════════════════
+
+#: Per-arm rerank-pool horizon (the arm's REAL admission depth, needed by
+#: classify_outcome's position-ceiling subclasses).
+ARM_POOL_LIMIT: dict[str, int] = {
+    "A-default": 40, "tr_top_k16": 40, "tr_top_k20": 40, "tr_top_k24": 40,
+    "c2-on": 40, "applied-rerank": 120, "pool-only-isolation": 120,
+    "cap3-only": 40,
+}
+
+#: The arm that supplies the baseline 2x2 (optionally overridden).
+BASELINE_ARM = "A-default"
+
+
+def gold_undated(instance: dict) -> bool:
+    """The derivable structural-absence signal (plan Task 3 sub-class iv):
+    the gold/answer session carries no date annotation."""
+    ids = list(instance.get("haystack_session_ids") or [])
+    dates = list(instance.get("haystack_dates") or [])
+    answer = set(instance.get("answer_session_ids") or [])
+    for i, sid in enumerate(ids):
+        if sid in answer and (i >= len(dates)
+                              or not str(dates[i] or "").strip()):
+            return True
+    return False
+
+
+def rebuild_from_reports(*, reports_dir, census_path=CENSUS_DEFAULT,
+                         out_md=None, out_jsonl=None,
+                         instances=None) -> dict:
+    """Rebuild the gate output + evidence rows from committed raw reports.
+
+    ``reports_dir`` holds one ``<arm>.json`` per arm, each
+    ``{"arm", "methodology", "outcomes": [...]}``. ``instances`` (optional
+    qid -> dataset row) supplies the undated-gold flag; without it that flag
+    is simply not derivable and stays False (never guessed).
+    """
+    reports_dir = Path(reports_dir)
+    by_class = {r["qid"]: r["cls"]
+                for r in load_census(census_path)["rows"]}
+    by_class = {q: c for q, c in by_class.items() if c in ANALYSIS_CLASSES}
+    inst = instances or {}
+    verdicts: dict[str, list[dict]] = {}
+    arm_meta: dict[str, dict] = {}
+    outcomes_raw: dict[str, list[dict]] = {}
+    # canonical ARM_TABLE order (never alphabetical) so a rebuild is
+    # byte-identical to the committed artifacts, not merely equivalent
+    order = {a["id"]: i for i, a in enumerate(ARM_TABLE)}
+    files = sorted(reports_dir.glob("*.json"),
+                   key=lambda f: order.get(f.stem, len(order)))
+    for f in files:
+        rep = json.loads(f.read_text(encoding="utf-8"))
+        arm = rep.get("arm") or f.stem
+        arm_meta[arm] = rep.get("methodology") or {}
+        outs = rep.get("outcomes") or []
+        outcomes_raw[arm] = outs
+        verdicts[arm] = [
+            classify_outcome(o, pool_limit=ARM_POOL_LIMIT.get(arm, 40),
+                             gold_undated=gold_undated(
+                                 inst.get(o.get("question_id"), {})))
+            for o in outs]
+    assert_reader_constancy(arm_meta)
+
+    arm_stats = {}
+    for arm, outs in outcomes_raw.items():
+        graded = [o for o in outs if isinstance(o.get("label"), bool)]
+        ref = sum(1 for o in graded
+                  if (o.get("measure_facts") or {}).get("reader_refusal")
+                  is True)
+        toks = [o.get("context_tokens") or 0 for o in outs]
+        arm_stats[arm] = {
+            "refusal_rate": (ref / len(graded)) if graded else 0.0,
+            "mean_context_tokens": (round(sum(toks) / len(toks), 1)
+                                    if toks else 0)}
+
+    prereg = write_preregistration(load_census(census_path)["rows"],
+                                   (Path(out_md).parent / "prereg-2578.json")
+                                   if out_md else "prereg-2578.json")
+    m0 = arm_meta.get(BASELINE_ARM, {})
+    text = gate_output(
+        issue="2578", prereg=prereg, qid_to_cls=by_class,
+        baseline_verdicts=verdicts[BASELINE_ARM],
+        arm_verdicts={a: v for a, v in verdicts.items()
+                      if a != BASELINE_ARM},
+        arm_stats=arm_stats, pool_limit=ARM_POOL_LIMIT[BASELINE_ARM],
+        reader_model=m0.get("reader_model_spec", "pinned (see methodology)"),
+        judge_model=m0.get("judge_model", "pinned"), arms_meta=arm_meta)
+    if out_md:
+        Path(out_md).write_text(text, encoding="utf-8")
+    if out_jsonl:
+        with Path(out_jsonl).open("w", encoding="utf-8") as fh:
+            for arm in (BASELINE_ARM, *[a for a in verdicts
+                                        if a != BASELINE_ARM]):
+                for o in outcomes_raw[arm]:
+                    mf = o.get("measure_facts") or {}
+                    fh.write(json.dumps({
+                        "arm": arm, "qid": o.get("question_id"),
+                        "cls": by_class.get(o.get("question_id")),
+                        "label": o.get("label"),
+                        "pool_limit": ARM_POOL_LIMIT.get(arm, 40),
+                        "context_tokens": o.get("context_tokens"),
+                        "gold_admitted": bool(mf.get("gold_admitted_ids")),
+                        "pool_depth": mf.get("pool_depth"),
+                        "reader_refusal": mf.get("reader_refusal"),
+                        "answer": (o.get("hypothesis") or "")[:200],
+                    }, ensure_ascii=False) + "\n")
+    return {"arms": sorted(verdicts), "gate_output": text}
+
+
+def main(argv: list[str] | None = None) -> int:
+    """CLI: rebuild the committed gate output + evidence rows from the
+    committed raw reports. Reproducibility entry point, not a run driver."""
+    import argparse
+    ap = argparse.ArgumentParser(prog="measure_temporal")
+    ap.add_argument("--reports", required=True,
+                    help="directory of committed <arm>.json raw reports")
+    ap.add_argument("--census", default=CENSUS_DEFAULT)
+    ap.add_argument("--out-md", default=None)
+    ap.add_argument("--out-jsonl", default=None)
+    ap.add_argument("--instances", default=None,
+                    help="optional JSON list of dataset rows (undated-gold)")
+    args = ap.parse_args(argv)
+    instances = None
+    if args.instances:
+        rows = json.loads(Path(args.instances).read_text(encoding="utf-8"))
+        instances = {r.get("question_id"): r for r in rows}
+    res = rebuild_from_reports(reports_dir=args.reports,
+                               census_path=args.census,
+                               out_md=args.out_md,
+                               out_jsonl=args.out_jsonl,
+                               instances=instances)
+    print(f"rebuilt {len(res['arms'])} arms"
+          + (f" -> {args.out_md}" if args.out_md else ""))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

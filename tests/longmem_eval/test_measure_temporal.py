@@ -666,3 +666,74 @@ def test_assert_reader_constancy_rejects_stub_via_spec_only():
                           "reader_prompt_hash": "abc",
                           "judge_model": "openai/gpt-4o-2024-08-06"},
         })
+
+
+# ── PR-review fixes: abstention-aware correct + classifier disagreement ──
+
+def test_correct_outcome_records_whether_it_was_a_refusal():
+    """A 'correct' outcome is not automatically a capability signal: on
+    abstention questions refusing IS the right answer. classify_outcome must
+    say which it was so the gate can report a substantive-only rate."""
+    answered = mt.classify_outcome(_mk_outcome("q1", True,
+                                               hypothesis="3 days ago"))
+    assert answered["correct"] is True and answered["correct_answer"] is True
+    refused = mt.classify_outcome(_mk_outcome(
+        "q2", True, hypothesis="I don't know."))
+    assert refused["correct"] is True and refused["correct_answer"] is False
+    t = mt.aggregate_taxonomy([answered, refused],
+                              {"q1": "interval", "q2": "interval"})
+    assert t["interval"]["correct"] == 2
+    assert t["interval"]["correct_answer"] == 1
+    assert t["interval"]["correct_refusal"] == 1
+
+
+def test_refusal_classifier_hint_catches_observed_misses():
+    """The PR review found real committed answers that are refusals the
+    shared product classifier does not match. They are NOT re-labelled (the
+    2x2 stays on the shared classifier) but they must be detectable so the
+    disagreement can be reported instead of inflating reader-wrong."""
+    for text in ("I don't have any record of that, so I can't calculate it.",
+                 "It doesn't say when you got the Samsung, so I can't "
+                 "determine that."):
+        assert mt.classify_refusal(text) is False      # shared classifier
+        assert mt.refusal_classifier_hint(text) is True  # second opinion
+    assert mt.refusal_classifier_hint("3 days ago") is False
+
+
+def test_gate_output_reports_substantive_vs_abstention_correct(tmp_path):
+    """The raw `correct` count mixes abstention-design questions (where
+    refusing is right) with real answers. The gate must lead with the
+    answerable-only number."""
+    prereg = mt.write_preregistration(
+        mt.load_census(CENSUS)["rows"], tmp_path / "prereg.json")
+    baseline = [
+        # abstention-design question, answered by refusing -> "correct" but
+        # NOT capability evidence
+        mt.classify_outcome(_mk_outcome("gpt4_93159ced_abs", True,
+                                        hypothesis="I don't know.")),
+        # answerable question, actually answered
+        mt.classify_outcome(_mk_outcome("q2", True, hypothesis="3 days ago")),
+        # answerable question, gold never admitted
+        mt.classify_outcome(_mk_outcome("q3", False, admitted=[])),
+    ]
+    text = mt.gate_output(issue="2578", prereg=prereg,
+                          qid_to_cls={"gpt4_93159ced_abs": "interval",
+                                      "q2": "interval", "q3": "interval"},
+                          baseline_verdicts=baseline,
+                          arm_verdicts={}, arm_stats={})
+    assert "Substantive vs abstention-correct" in text
+    # of 2 scored correct, exactly 1 is a real answer on an answerable Q
+    assert "1 of 2 are on questions that HAVE an answer" in text
+    assert "other 1 are abstention-DESIGN" in text
+    assert "correct on answerable" in text
+
+
+def test_gate_output_refuses_raw_outcomes(tmp_path):
+    """Raw outcome rows (no 'correct' key) would render an all-zero gate
+    output — a silent measurement that looks like a result. Refuse loudly."""
+    prereg = mt.write_preregistration(
+        mt.load_census(CENSUS)["rows"], tmp_path / "prereg.json")
+    with pytest.raises(ValueError, match="classify_outcome"):
+        mt.gate_output(issue="2578", prereg=prereg, qid_to_cls={"q1": "interval"},
+                       baseline_verdicts=[_mk_outcome("q1", True)],
+                       arm_verdicts={}, arm_stats={})

@@ -20,9 +20,7 @@ aboutObjects: tortoise
 > The historical "temporal 0/13" claim is NOT reproducible from committed
 > artifacts (no committed artifact pins the 13) — per the 2026-09-09 scope
 > decision it is annotated as unreproducible and superseded by this
-> measured record. **PENDING:** gate output is written here by
-> `tools.longmem_eval.measure_temporal.gate_output` after the operator-run
-> baseline + widening arms complete (Task 4).
+> measured record (see the generated gate output linked below).
 
 ## Pre-registration
 
@@ -44,57 +42,50 @@ branches. The per-question evidence rows are committed at
 (8 arms × 55 questions, one graded outcome per line).
 
 **Measured verdict (2026-09-10):** decision branch =
-**admission-attributed**. `applied-rerank` (`--rerank --rerank-pool 120
---rerank-cap 3`) is the only arm that moves the needle: baseline 3/55
-correct → 9/55 (McNemar p=0.0312, 6 discordant pairs, 6–0 arm wins), with
-admission-attributed failures 52 → 30. `tr_top_k` 12→16/20/24, `c2-on`,
-and `pool-only-isolation` are all null — widening the pool WITHOUT
-reranking changes nothing (the isolation result the arms were built to
-test). Rerank additionally pushes refusal DOWN (0.982 → 0.782) while the
-reader context grows 94.9 → 624.0 mean tokens.
-
-**Whole-class baseline (2026-09-10, Task 4 Step 4):** the
-census-enumerated 133-question class was run at default knobs (real reader,
-facts gate ON, 133/133 measured, zero unresolved failures) —
-[`docs/runbook/2578-baseline-133.md`](2578-baseline-133.md), evidence rows
-[`docs/runbook/2578-measured-outcomes-133.jsonl`](2578-measured-outcomes-133.jsonl).
-Result: **8/133 correct (0.060, 95% CI 0.031–0.114)**, with **125/133
-failures attributed to ADMISSION** (the gold fact never reached the
-reader's context) — the same shape as the 55-Q subset, now on the honest
-whole-class denominator rather than the fireability-selected subset.
-Conversion was not the binding constraint anywhere in this baseline
-(0 conv-refusal / 0 conv-wrong): the reader is almost never given the
-chance to fail.
-
-**Correction (2026-09-10, post-commit):** two questions
-(`gpt4_76048e76`, `gpt4_c27434e8_abs`) were re-measured on all 8 arms. The
-55-Q run file had been built by dropping a content-identical duplicated
-session id while leaving its entry in the parallel `haystack_dates` array —
-retrieval pairs sessions to dates by index, so every session after the drop
-point inherited its predecessor's date annotation (a temporal-measurement
-validity defect, not a cosmetic one). The committed helper
-`dedup_instance_sessions` was also schema-wrong: it expected dict-shaped
-sessions and CRASHED on the real parallel-array shape, so its promised
-dedup never ran at all. Both are fixed (the helper now drops the same index
-from all three arrays and REFUSES misaligned input), with regression tests.
-Re-run effect: totals unchanged except `applied-rerank` conv-refusal 13→12 /
-conv-wrong 3→4 — the decision branch (`admission-attributed`) and every
-other arm are unaffected. Evidence rows and the gate output are regenerated
-from the corrected data.
+**admission-attributed**. The honest headline is NOT the raw `correct`
+count: on the 55-Q subset the baseline answers **0 of the 52 questions
+that have an answer** (all 3 of its "correct" outcomes are
+abstention-design questions where refusing is the right behaviour); the
+whole-class 133-Q baseline is **2 of 127 answerable** (0.016, 95% CI
+0.004–0.056). Reranking is the one lever that produces real answers:
+`applied-rerank` (`--rerank --rerank-pool 120 --rerank-cap 3`) takes
+answerable-correct from **0 → 6 of 52** (McNemar p=0.0312, 6 discordant
+pairs, 6–0), with admission-attributed failures 52 → 30, refusal rate
+0.982 → 0.764, and mean reader context 94.9 → 624.0 tokens. `cap3-only`
+also lifts (answerable 0 → 5 of 52; p=0.0625, 5–0) — it is the same
+rerank family with the pool left at 40. `tr_top_k` 16/20/24, `c2-on`, and
+`pool-only-isolation` are all null: widening the pool WITHOUT reranking
+changes nothing (the isolation result the arms exist to test — 0
+answerable-correct, byte-identical to baseline).
 
 **Known limitations (recorded, not hidden):**
 1. The R5 rollback guard is non-discriminating on this data — the
    pre-registered bound (baseline refusal 0.982 + margin 0.10 = 1.082)
    exceeds the ceiling of a refusal rate (1.0), so no arm could ever be
-   flagged. The guard's silence carries no evidential weight here; the
-   observed arm refusal rates all moved down or equal.
+   flagged. The guard's silence carries no evidential weight here. The
+   observed arm rates are NOT all down: `c2-on` and `pool-only-isolation`
+   sit AT 1.000, above the 0.982 baseline — the gate output reports the
+   above/equal/below tally from the data rather than asserting a
+   direction.
 2. The 55-question subset is the temporal-analysis classes
    (`ordering/compare` 34, `interval` 19, `current-state` 2) — the
    `recency/current-state` family (8 questions) is a different knob family
    and is out of scope by pre-registration.
-3. Correctness levels are low in absolute terms (baseline 3/55) —
-   conversion on admitted gold remains the dominant residual error, with
-   `conv-refusal` 13–17 and `conv-wrong` 1–3 on the reranked arms.
+3. Correctness levels are low in absolute terms (0 of 52 answerable at
+   baseline). On the reranked arms conversion becomes the visible residual:
+   `conv-refusal` 12–17 and `conv-wrong` 1–4. **The reader-wrong figure is
+   an UPPER BOUND**: a second-opinion scan (`refusal_classifier_hint`) finds
+   3 of the 5 conversion-wrong answers are absence statements the shared
+   product classifier does not match — they are NOT re-labelled (the 2×2
+   deliberately uses the same classifier the product uses), and the gate
+   output reports the disagreement count alongside the split.
+4. The 55-Q gate baseline comes from its own `A-default` run rather than
+   from the 133-Q run's subset (the plan asked for no duplicate default
+   run). The two agree exactly on the 52 shared qids (labels, classes and
+   context tokens), so no number changes — recorded here as a divergence.
+5. Conversion is NOT observable in the 133-Q baseline: gold was admitted
+   on 0 of 133 questions, so the channel is empty by construction (0
+   conv-refusal / 0 conv-wrong is "not measurable", not "not binding").
 
 ## 0/13 annotation
 

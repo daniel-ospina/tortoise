@@ -18,13 +18,17 @@ issue: 2578
 
 **admission-attributed**
 
+### Substantive vs abstention-correct (baseline)
+
+Baseline `correct` totals 3 of 55 — but only **0 of 52 are on questions that HAVE an answer** (95% CI 0.000–0.069); the other 3 are abstention-DESIGN questions where the correct behaviour is to refuse. A refusal-scored question is not capability evidence: the answerable number is the headline, not `correct`.
+
 ## 2×2 per census class (baseline)
 
-| class | n | correct (95% CI) | admission | conv-refusal | conv-wrong | unattributed |
-| --- | --- | --- | --- | --- | --- | --- |
-| current-state | 2 | 1 (0.095–0.905) | 1 | 0 | 0 | 0 |
-| interval | 19 | 0 (0.000–0.168) | 19 | 0 | 0 | 0 |
-| ordering/compare | 34 | 2 (0.016–0.191) | 32 | 0 | 0 | 0 |
+| class | n | correct (95% CI) | correct on answerable (n, 95% CI) | admission-attributed | conv-refusal | conv-wrong | unattributed |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| current-state | 2 | 1 (0.095–0.905) | 0/1 (0.000–0.793) | 1 | 0 | 0 | 0 |
+| interval | 19 | 0 (0.000–0.168) | 0/19 (0.000–0.168) | 19 | 0 | 0 | 0 |
+| ordering/compare | 34 | 2 (0.016–0.191) | 0/32 (0.000–0.107) | 32 | 0 | 0 | 0 |
 
 ## Widening arms vs baseline (McNemar + min-discriminability)
 
@@ -53,25 +57,27 @@ Pre-registered bound = baseline refusal rate + 0.1 (module constant, never chose
 | pool-only-isolation | 1.000 | 94.9 |  |
 | cap3-only | 0.818 | 625.9 |  |
 
-> **Guard non-discriminating on this data**: the bound (1.082) exceeds 1.0 because the baseline refusal rate (0.982) sits within 0.1 of the ceiling. A refusal rate cannot exceed 1, so no arm could ever be flagged here. The readout is reported for the record only; the rollback decision must not lean on its silence. (Observed arm refusal rates all moved DOWN/equal — see table.)
+> **Guard non-discriminating on this data**: the bound (1.082) exceeds 1.0 because the baseline refusal rate (0.982) sits within 0.1 of the ceiling. A refusal rate cannot exceed 1, so no arm could ever be flagged here. The readout is reported for the record only; the rollback decision must not lean on its silence. (Observed: 2 arm(s) ABOVE the baseline refusal rate, 1 equal, 4 below — see table; the guard cannot flag any of them here.)
 
 ## Per-arm reach vs observed gold depth
 
-| arm | mean_context_tokens | pre-registered reach |
-| --- | --- | --- |
-| A-default | 94.9 | baseline 55-Q default knobs (tr_top_k=12, evidence-boost OFF, rerank OFF, rerank pool 40, per-session rerank cap 2) — the Indicator-1 denominator; no widening attempted. |
-| tr_top_k16 | 125.9 | admits <= 16 pool ranks on TR questions, trimmed by the 8000-token budget (~19 items at median chunk) — CAN reach moderately deep gold; CANNOT reach the rank-48-68 gold band. |
-| tr_top_k20 | 156.9 | admits <= 20 pool ranks, trimmed by the 8000-token budget — ~19 items at median chunk, so 20 sits AT the budget ceiling; CANNOT reach the rank-48-68 gold band. |
-| tr_top_k24 | 288.8 | admits <= 24 pool ranks but the 8000-token budget trims to ~19 items at median chunk — 20 vs 24 are near-duplicates, reported as a plateau. |
-| c2-on | 94.9 | position-ceiling promotion over the deduped pool; deep reach limited to answer-string-marked rows (~never on derived answers). |
-| applied-rerank | 624.0 | rerank pool 40->120 + per-session cap 2->3 + cross-encoder scorer + MMR; CONFOUNDED pool x ordering x scorer — reported with the pool-only isolation leg. |
-| pool-only-isolation | 94.9 | DEPTH-CEILING CONTROL — rerank OFF + deep pool still truncates pool[:top_k] then tr_top_k (retrieve.py:1432-1433), CANNOT admit rank-25-120 gold; separates DEPTH from reranker REORDER. |
-| cap3-only | 625.9 | per-session rerank cap 2->3 at pool 40 — the issue's own arm (b), stand-alone; isolates the cap from pool depth. |
+| arm | mean_context_tokens | observed gold bands (pool_depth, baseline) | pre-registered reach |
+| --- | --- | --- | --- |
+| A-default | 94.9 | 41-120:111 | baseline 55-Q default knobs (tr_top_k=12, evidence-boost OFF, rerank OFF, rerank pool 40, per-session rerank cap 2) — the Indicator-1 denominator; no widening attempted. |
+| tr_top_k16 | 125.9 | 41-120:111 | admits <= 16 pool ranks on TR questions, trimmed by the 8000-token budget (~19 items at median chunk) — CAN reach moderately deep gold; CANNOT reach the 41-120 band as a whole  |
+| tr_top_k20 | 156.9 | 41-120:111 | admits <= 20 pool ranks, trimmed by the 8000-token budget — ~19 items at median chunk, so 20 sits AT the budget ceiling; CANNOT reach the 41-120 band as a whole. |
+| tr_top_k24 | 288.8 | 41-120:111 | admits <= 24 pool ranks but the 8000-token budget trims to ~19 items at median chunk — 20 vs 24 are near-duplicates, reported as a plateau. |
+| c2-on | 94.9 | 41-120:111 | position-ceiling promotion over the deduped pool; deep reach limited to answer-string-marked rows (~never on derived answers). |
+| applied-rerank | 624.0 | 41-120:111 | rerank pool 40->120 + per-session cap 2->3 + cross-encoder scorer + MMR; CONFOUNDED pool x ordering x scorer — reported with the pool-only isolation leg. |
+| pool-only-isolation | 94.9 | 41-120:111 | DEPTH-CEILING CONTROL — rerank OFF + deep pool still truncates pool[:top_k] then tr_top_k (retrieve.py:1432-1433), CANNOT admit rank-25-120 gold; separates DEPTH from reranker REORDER. |
+| cap3-only | 625.9 | 41-120:111 | per-session rerank cap 2->3 at pool 40 — the issue's own arm (b), stand-alone; isolates the cap from pool depth. |
+
+> **Refusal-classifier disagreement (3 of 5 conversion-wrong outcomes)**: these answers state the information is absent in wording the shared product classifier does not match (see `refusal_classifier_hint`). They are NOT re-labelled — the 2×2 deliberately uses the same classifier the product uses — so the reader-wrong split above is an UPPER BOUND and the true refusal-driven share is higher. Fixing the production classifier vocabulary is a separate follow-up.
 
 ## Three pre-registered decision branches
 
 1. **Widening lifted accuracy** → attribute to ADMISSION (the branch fires only with arm_wins > baseline_wins).
-2. **Residual refusal/wrong on ADMITTED gold** → conversion-bound — the honest caveat: wrong-on-admitted is dominated by reader-MODEL derivation errors (arithmetic/interval/count/recency), NOT ordering-of-admitted-evidence; the assembler is NEVER claimed from the 2×2 — a named qualitative pass (owner: epistemic-team; trigger: conversion-bound verdict) isolates ordering-of-admitted-evidence.
+2. **Residual refusal/wrong on ADMITTED gold** → conversion-bound — the honest caveat (PRIOR from runbook 1987, NOT measured by this gate): wrong-on-admitted is dominated by reader-MODEL derivation errors (arithmetic/interval/count/recency) rather than ordering-of-admitted-evidence; the assembler is NEVER claimed from the 2×2 — a named qualitative pass (owner: epistemic-team; trigger: conversion-bound verdict) isolates ordering-of-admitted-evidence.
 3. **Gold unreachable under every widening** → structural-path evidence for the assembler lane.
 
 conversion-indeterminate fires when widening moved admission but conversion-wrong ≈ baseline across all arms — routed to the #2013 strong-reader leg, never claimed as decided.
