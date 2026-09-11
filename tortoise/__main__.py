@@ -4387,8 +4387,11 @@ def _cmd_index_github(args):
         try:
             with open(_ready_file, "w") as _fh:
                 _fh.write("ready\n")
-        except Exception:
-            pass
+        except OSError:
+            # Narrow on purpose: a failure here surfaces as the test's
+            # readiness timeout, which names the path and the child's rc —
+            # more useful than a silently swallowed error in a process that is
+            # about to be signalled anyway. A non-OSError bug should not hide.
 
     log_path = Path(tempfile.gettempdir()) / f"tortoise-index-{repo_name}.jsonl"
     log = EventLog(str(log_path))

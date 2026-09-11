@@ -326,14 +326,16 @@ def _wait_server_dead(pid, timeout=10):
 
 #: Budget for "the embedded server is gone after its parent exited" (#2947).
 #: This is LIVENESS on a cleanup path, not a performance assertion: the
-#: mechanism (signal → close → server exit) is deterministic, but observing it
-#: races a starved runner — the carve-out job runs ~700 tests over ~39min, and
-#: a 20s window flaked there (2026-09-11, PR #2934:
-#: "indexer's redis-server survived its killed parent"; green on re-run with no
-#: code change). 60s is the same order as the 45s the parent itself is given to
-#: exit, so a genuine hang still fails, and the message carries the evidence
+#: mechanism (signal → close → server exit) is deterministic and sub-second,
+#: and on a loaded runner the observation itself is what needs headroom.
+#: It was briefly 60s while #2947 was misdiagnosed as a starved runner; the
+#: real cause was that the CLI test signalled mid-construction, where
+#: redislite's last-client guard declines to shut the server down at all
+#: (no timeout would have helped — see the CLI test above). 30s keeps the
+#: loaded-runner margin while halving what a systematic cleanup regression
+#: costs across the 7 call sites, and the message carries the evidence
 #: (pid, elapsed, parent rc) instead of leaving the next occurrence a mystery.
-_SERVER_DEATH_TIMEOUT_S = 60
+_SERVER_DEATH_TIMEOUT_S = 30
 
 
 def _assert_server_dies_with_parent(redis_pid: int, proc, what: str) -> None:
