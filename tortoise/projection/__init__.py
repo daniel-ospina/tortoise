@@ -99,32 +99,44 @@ def _is_bulk_wipe(cypher: str) -> bool:
 # and L1 alone left hand-written Cypher unguarded, so each layer exists
 # because the other does not cover it:
 #
-#   L1 — STRUCTURAL, per-call opt-in (#2944). The only in-tree path that
-#        issues an unconditional whole-graph wipe (``MATCH (n) DETACH
-#        DELETE n`` with no label/WHERE/LIMIT) is
-#        ``FalkorProjection._wipe_all_nodes()``, and it refuses unless the
-#        CALLER passed ``confirm_destructive=True`` through ``rebuild_all()``
-#        / ``rebuild()``. There is no default-allow, no module-level flag, no
-#        env var, and no instance attribute that can authorize a wipe: a new
-#        caller cannot wipe a graph by *forgetting* something, it must
-#        deliberately opt in at its own call site. This layer applies to
-#        embedded DBs too — "embedded" means *isolated*, not *unsupervised*:
-#        an embedded wipe may be unrecoverable (missing or empty replay log,
-#        or a log that only parses after the wipe), so it too needs a
-#        deliberate per-call opt-in.
+#   L1 — STRUCTURAL, per-call opt-in (#2944), on the rebuild lane.
+#        ``FalkorProjection._wipe_all_nodes()`` is the only AUTHORIZED path in
+#        this package that issues the literal whole-graph statement, and it
+#        refuses unless the CALLER passed ``confirm_destructive=True`` through
+#        ``rebuild_all()`` / ``rebuild()``. There is no default-allow, no
+#        module-level flag, no env var, and no instance attribute that can
+#        authorize a wipe: a new caller on this lane cannot wipe a graph by
+#        *forgetting* something, it must deliberately opt in at its own call
+#        site. L1 applies to embedded DBs too — "embedded" means *isolated*,
+#        not *unsupervised*: an embedded wipe may be unrecoverable (missing or
+#        empty replay log, or a log that only parses after the wipe), so it too
+#        needs a deliberate per-call opt-in.
 #
-#   L2 — DEFENCE IN DEPTH, disposable-graph check (#99). ``_GuardedGraph``
-#        wraps the raw handle the SDK uses everywhere, so EVERY bulk DETACH
-#        DELETE (including hand-written Cypher that never went through L1)
-#        is still refused on a server graph whose name is not a disposable
-#        test graph. Names are no longer SUFFICIENT — L1's token is always
-#        required first — but on a server graph the name is still NECESSARY:
-#        L2 is the layer that refuses a real-looking graph
+#   L2 — DEFENCE IN DEPTH, disposable-graph check (#99), on every GUARDED
+#        query. ``_GuardedGraph`` wraps ``proj.g``, so a bulk DETACH DELETE
+#        issued through ``proj.g.query`` / ``FalkorProjection.query``
+#        (hand-written Cypher included) is refused on a server graph whose name
+#        is not a disposable test graph. On the L1 lane a name is no longer
+#        SUFFICIENT (the token is required first); on the raw-query lane L2 is
+#        the ONLY layer and it deliberately lets the embedded and
+#        test-named-server cases through without a token. On a server graph the
+#        name remains NECESSARY — L2 refuses a real-looking graph
 #        (`prod_tortoise`, `team_<id>`) even when an L1 opt-in was given.
 #        That is deliberate (#2944 evaluated replacing L2 with an explicit
 #        disposable registry and chose the per-call token as the structural
 #        gate); L2 was kept because removing it would refuse strictly less
 #        than before.
+#
+# KNOWN GAPS (pre-existing, NOT fixed by #2944):
+#   * ``proj.db`` is the RAW FalkorDB client — ``proj.db.select_graph(...)
+#     .query("MATCH (n) DETACH DELETE n")`` bypasses L1 AND L2. In-tree users:
+#     battery/testing/seeds.py and graph-scripts/{smoke_test,
+#     profile_395_local_ep}.py. They reach a server graph the guard never sees.
+#   * ``_is_bulk_wipe`` over-classifies label/LIMIT-scoped deletes, so
+#     ``event_store.purge_overflow`` is refused on a non-test server graph and
+#     its caller swallows the error at DEBUG — the per-team event cap silently
+#     no-ops (tracked: #3007).
+#
 #
 # History: the pre-#2944 bypass was ``_skip_guard``, a plain boolean
 # attribute (``self._skip_guard = False``) read by both query paths. It has
@@ -144,9 +156,12 @@ class _GuardedGraph:
     (MATCH (n:Label {id:$id}) ...) pass through unchanged.
 
     This is L2 of the two-layer guard (see the module comment above): it is
-    unconditional — there is deliberately NO bypass attribute. The only
-    authorized way to wipe is ``FalkorProjection._wipe_all_nodes()`` (L1),
-    which asserts the caller's explicit opt-in before reaching here.
+    unconditional — there is deliberately NO bypass attribute. It is also the
+    ONLY layer on the raw-query lane (``proj.g.query`` / ``query``), where a
+    bulk DETACH DELETE on an embedded or test-named graph is allowed through
+    without a token. The rebuild lane additionally requires L1 —
+    ``FalkorProjection._wipe_all_nodes()`` asserts the caller's explicit
+    per-call opt-in BEFORE reaching here.
     """
 
     __slots__ = ("_g", "_proj")
@@ -2188,11 +2203,14 @@ class FalkorProjection(
 
     def _wipe_all_nodes(self, *, confirm_destructive: bool,
                         operation: str) -> None:
-        """The ONLY in-tree path that issues an unconditional graph wipe.
+        """The only AUTHORIZED path in this package that wipes a whole graph.
 
-        "Unconditional" = `MATCH (n) DETACH DELETE n` with no label, WHERE, or
-        LIMIT — a whole-graph wipe. Scoped deletes (targeted, label-scoped, or
-        LIMIT-bounded) are a different operation and do not route here.
+        "Unconditional" here means the literal `MATCH (n) DETACH DELETE n`
+        (no label, WHERE, or LIMIT) — the rebuild lane only ever passes that
+        statement. THIS METHOD never receives a scoped delete; whether a
+        scoped delete is *allowed* elsewhere is `_is_bulk_wipe`'s (L2's)
+        business, and that classifier is broader — see the KNOWN GAPS note in
+        the module comment (#3007).
 
         L1 (#2944) enforces the caller's explicit per-call opt-in; the wipe
         itself then still passes L2 (`_assert_test_graph` via the guarded
