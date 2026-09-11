@@ -1547,3 +1547,130 @@ def test_surface_audit_is_deterministic_and_non_mutating(tmp_path):
     second = render_surface_audit(_audit(manifest, repo))
     assert first == second
     assert manifest["surfaces"] == before, "the audit must not mutate the manifest"
+
+
+def test_surface_audit_coverage_gap_names_only_gap_surface_members(tmp_path):
+    # P1-1: only files REGISTERED under the gap surface fail to run when the
+    # unmapped source changes. A core-registered pinner still runs (via core),
+    # so naming it under "never run" overstated the blast radius.
+    repo = _audit_repo(tmp_path, {
+        "tests/test_api_registered.py": "from tortoise.api import EventAPI\n",
+        "tests/test_core_registered.py": "from tortoise.api import EventAPI\n"})
+    manifest = _audit_manifest(api=["test_api_registered.py"],
+                               core=["test_core_registered.py"])
+    report = _audit(manifest, repo)
+    # behavior first: the rendered "never run" line must name ONLY the
+    # api-registered pinner
+    out = render_surface_audit(report)
+    victim_line = out.split("never run:")[1].split("\n")[0]
+    assert "test_api_registered.py" in victim_line
+    assert "test_core_registered.py" not in victim_line, (
+        "a core-registered pinner runs via core and must not be in the "
+        "\"never run\" list")
+    assert ("(pinned by 2 file(s) in total, of which 1 are registered under "
+            "`api`; the rest run via core;") in out
+    # ... and the structure carries per-file registration
+    gap = next(g for g in report["coverage_gaps"]
+               if g["path"] == "tortoise/api.py")
+    # both files are STRONG pinners (they import it); registration differs
+    assert set(gap["files"]) == {"test_api_registered.py",
+                                 "test_core_registered.py"}
+    assert gap["files"]["test_api_registered.py"] == ["api"]
+    assert gap["files"]["test_core_registered.py"] == ["core"]
+    assert gap["registered"] == ["api", "core"]
+
+
+def test_surface_audit_string_only_pin_is_weak_and_labelled(tmp_path):
+    # P1-2: a path STRING is fixture data, not an import. It stays visible
+    # (labelled) but must not make the file a strong pinnner, or the "never
+    # run" claim inflates (test_ci_selection.py's own corpus).
+    repo = _audit_repo(tmp_path, {
+        "tests/test_fixture_data.py":
+            "PATHS = ['tortoise/api.py']\n"
+            "def test_x(): assert PATHS\n",
+        "tests/test_fixture_elsewhere.py":
+            "PATHS = ['battery/cli.py']\n"
+            "def test_y(): assert PATHS\n"})
+    report = _audit(_audit_manifest(api=["test_fixture_data.py"],
+                                    core=["test_fixture_elsewhere.py"]), repo)
+    gap = next(g for g in report["coverage_gaps"]
+               if g["path"] == "tortoise/api.py")
+    assert gap["files"] == {}, "a string-only reference is not a strong pinnner"
+    assert list(gap["weak_files"]) == ["test_fixture_data.py"]
+    out = render_surface_audit(report)
+    assert '"tortoise/api.py" (string, not an import)' in out, \
+        "the human must still see the string pin, labelled"
+    assert "1 string-only pinnner(s), weak" in out
+    # an UNREGISTERED string-only reference is a weak addition, not candidate
+    weak = {e["file"]: e for e in
+            report["surfaces"]["battery"]["addition"] if not e["strong"]}
+    assert weak["test_fixture_elsewhere.py"]["evidence"] == ['"battery/cli.py"']
+    assert report["surfaces"]["battery"]["addition"] and all(
+        not e["strong"] for e in report["surfaces"]["battery"]["addition"])
+    assert ("string-only references — weak evidence, not counted as pins"
+            in out)
+    # ... and a strong (import) pin in the SAME repo still claims the gap
+    repo2 = _audit_repo(tmp_path / "strong", {
+        "tests/test_imports_api.py": "from tortoise.api import EventAPI\n"})
+    report2 = _audit(_audit_manifest(api=["test_imports_api.py"]), repo2)
+    gap2 = next(g for g in report2["coverage_gaps"]
+                if g["path"] == "tortoise/api.py")
+    assert list(gap2["files"]) == ["test_imports_api.py"]
+
+
+def test_surface_audit_credits_pin_reached_through_repo_root_helper(tmp_path):
+    # P2: the BFS used to follow only tests/ helpers, so a test reaching a
+    # surface through tools/ read as "pins nothing" -> false removal candidate
+    # (the real report called test_temporal_constraint.py an sdk removal while
+    # tools/longmem_eval/retrieve.py imports tortoise.retrieval).
+    repo = _audit_repo(tmp_path, {
+        "tortoise/retrieval.py": "",
+        "tools/reach.py": "from tortoise.retrieval import search\n",
+        "tests/test_via_tool.py": "from tools.reach import search\n",
+        "tests/test_control.py": "import os\n"})
+    # attribution: registered elsewhere, the sdk pin is an addition candidate
+    # and the evidence names the helper chain
+    additions = {e["file"]: e for e in
+                 _audit(_audit_manifest(battery=["test_via_tool.py"]), repo)
+                 ["surfaces"]["sdk"]["addition"]}
+    assert additions["test_via_tool.py"]["evidence"] == [
+        "tortoise/retrieval.py (via tools/reach.py)"]
+    # ... and the false removal is gone: only the genuinely pin-less file stays
+    report = _audit(_audit_manifest(sdk=["test_via_tool.py",
+                                         "test_control.py"]), repo)
+    assert [e["file"] for e in report["surfaces"]["sdk"]["removal"]] \
+        == ["test_control.py"], "the helper-reached sdk pin must suppress it"
+
+
+def test_surface_audit_removal_candidate_without_surface_pin_warns(tmp_path):
+    # P3: every removal candidate has NO pin for its own surface by definition,
+    # so the "don't act" cue belongs on all of them — shared-only members
+    # (`shared: tortoise/sdk.py`) used to render as bare removals.
+    repo = _audit_repo(tmp_path, {
+        "tests/test_shared_only.py": "from tortoise.sdk import TortoiseSDK\n",
+        "tests/test_no_refs.py": "import os\n"})
+    report = _audit(_audit_manifest(sdk=["test_shared_only.py",
+                                         "test_no_refs.py"]), repo)
+    assert [e["file"] for e in report["surfaces"]["sdk"]["removal"]] \
+        == ["test_no_refs.py", "test_shared_only.py"]
+    out = render_surface_audit(report)
+    assert ("test_shared_only.py <- (shared: tortoise/sdk.py)  "
+            "⚠ no `sdk` pin resolved") in out
+    assert ("test_no_refs.py <- (no source references at all)  "
+            "⚠ no `sdk` pin resolved") in out
+
+
+def test_surface_audit_tolerates_null_surface_value(tmp_path):
+    # P3: a curated manifest can carry `null` for a surface; the audit must
+    # traceback-proof it the way integrity() does with `files or ()`.
+    repo = _audit_repo(tmp_path, {
+        "tests/test_null_surface.py": "import os\n"})
+    manifest = _audit_manifest(api=None, core=["test_null_surface.py"])
+    report = _audit(manifest, repo)  # must not raise TypeError
+    assert report["surfaces"]["api"]["members"] == []
+    assert report["surfaces"]["api"]["removal"] == []
+    assert report["surfaces"]["api"]["addition"] == []
+    assert report["no_surface"] == []
+    assert report["duplicates"] == {}
+    # the renderer must survive it too
+    assert "api" in render_surface_audit(report)
