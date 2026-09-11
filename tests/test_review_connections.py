@@ -419,8 +419,13 @@ def test_prune_stale_prefers_successor_endpoint(sdk_factory, tmp_path):
 
 
 def test_prune_scope_empty_pool_returns_empty(sdk_factory, tmp_path, monkeypatch):
-    """A scoped prune whose scope matches nothing returns [] — never the
+    """A scoped prune whose retrieval returns NOTHING returns [] — never the
     whole-graph flag list (fail quiet, consistent with mode=add).
+
+    Note the precision (#2854): scope is a focus filter over nearest-match
+    retrieval, so a scope merely ABSENT from the graph would normally still
+    return its nearest neighbours. The empty pool here comes from retrieval
+    itself returning nothing, which is what this test pins.
 
     Stubbed at the retrieval seam (``sdk.tortoise_fts_query``) rather than
     pinned to the sparse embedder state, so the guard is covered regardless of
