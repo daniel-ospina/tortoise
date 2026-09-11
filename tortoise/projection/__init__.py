@@ -177,6 +177,12 @@ def _validate_point_entry(entry) -> str | None:
                     isinstance(inputs, (list, tuple))
                     and all(isinstance(v, str) for v in inputs)):
                 return f"operator inputs {inputs!r} is not a list of strings"
+            # Every OTHER operator value is written to the node as well
+            # (`n.op_type=$opt`), so it must be storable too.
+            for okey, ovalue in value.items():
+                if okey != "inputs" and not _is_snapshot_primitive(ovalue):
+                    return (f"operator.{okey} value {ovalue!r} is not a "
+                            f"primitive or an array of primitives")
             continue
         if not _is_snapshot_primitive(value):
             return (f"property {key!r} value {value!r} is not a primitive "

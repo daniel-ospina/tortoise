@@ -3232,6 +3232,13 @@ def test_prewipe_snapshot_helpers_validate_union_and_write_atomically():
              {"synthetic_events": [{"type": "OperatorAdded",
                                     "point": {"id": "op1",
                                               "operator": "IMPL"}}]}),
+            # every operator value is written to the node, not just inputs
+            ("operator op_type is not primitive",
+             {"synthetic_events": [{"type": "OperatorAdded",
+                                    "point": {"id": "op1",
+                                              "operator": {
+                                                  "op_type": {"n": 1},
+                                                  "inputs": ["p1"]}}}]}),
             ("batch entry not a dict", {"batch_snapshot": ["x"]}),
             ("batch entry without a str id", {"batch_snapshot": [{"id": 7}]}),
             ("non-primitive batch property",
@@ -3805,6 +3812,52 @@ def test_prewipe_snapshot_restores_replay_gap_properties():
             assert content_hash == "deadbeef", (
                 "the restored Point is hash-less — every hash-keyed dedup "
                 "and terminal guard misses it (#2971)")
+        finally:
+            proj.close()
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_recover_from_log_ignores_a_retirement_artifact():
+    """#2943: an entry-less retirement artifact must not divert auto-recovery.
+
+    `_clear_prewipe_snapshot` leaves an entry-less sidecar on disk when its
+    unlink fails (or the process dies between the two steps). That artifact
+    holds nothing, so the pending-sidecar probe must report "absent" — the
+    loader already does — and recovery must take the faithful apply() path
+    rather than a destructive wipe+replay (or, with no log at all, claim a
+    recovery that restored nothing).
+    """
+    if _skip_if_no_falkor():
+        pytest.skip("redislite falkordb unavailable")
+    from tortoise.consistency import recover_from_log
+    from tortoise.projection import _write_prewipe_snapshot
+
+    d = tempfile.mkdtemp(prefix="tortoise_2943_retired_")
+    try:
+        EventLog(os.path.join(d, "events.jsonl")).append({
+            "type": "PointAdded",
+            "point": {"id": "evt-001", "content": "journaled",
+                      "pointKind": "statement", "status": "live",
+                      "createdAt": "2026-08-01T00:00:00Z"},
+            "projection_version": 2, "initiated_by": "extractor"})
+        proj = FalkorProjection(os.path.join(d, "tortoise.db"),
+                                graph_name="test")
+        try:
+            proj.g.query("MATCH (n) DETACH DELETE n")  # post-crash state
+            _write_prewipe_snapshot(
+                os.path.join(d, ".tortoise-prewipe-snapshot.json"), {
+                    "version": 1, "completed": True,
+                    "synthetic_events": [], "batch_snapshot": [],
+                    "batch_point_links": []})
+            result = recover_from_log(d, proj)
+            # The journal is replayed by the faithful apply() path, and the
+            # result must not claim a sidecar-driven rebuild.
+            assert "pre-wipe snapshot" not in result["reason"], result
+            assert result["reason"] != "", result
+            rows = proj.g.query(
+                "MATCH (n:Point {id:'evt-001'}) RETURN count(n)").result_set
+            assert rows[0][0] == 1, result
         finally:
             proj.close()
     finally:

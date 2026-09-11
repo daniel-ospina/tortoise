@@ -5,7 +5,7 @@ This module verifies the counts haven't diverged (quick check, not full diff).
 """
 from __future__ import annotations
 
-from .projection import fold, prewipe_snapshot_path
+from .projection import _load_prewipe_snapshot, fold, prewipe_snapshot_path
 
 
 def check_consistency(log_path: str, projection) -> dict:
@@ -66,7 +66,8 @@ def recover_from_log(events_dir: str, projection) -> dict:
         in flight for this very directory, so completing it with rebuild_all
         reproduces exactly the replay the operator asked for. (A sidecar can
         also outlive a COMPLETED rebuild if its retirement could not be
-        written; it is then entry-less and this route does not fire — see
+        written; it is then entry-less, `_load_prewipe_snapshot` reports it
+        as absent, and this route does not fire — see
         `_clear_prewipe_snapshot`.) Either way the #428 single-log
         discriminator still governs the route (it is a destructive
         wipe+replay, so an ambiguous log set is still refused), and the
@@ -120,7 +121,21 @@ def recover_from_log(events_dir: str, projection) -> dict:
     # the sidecar is then the only record of anything, and rebuild_all
     # replays it without a journal (the documented #428 ">0 events" clause is
     # knowingly waived here, and only while a sidecar is pending).
-    if os.path.lexists(prewipe_snapshot_path(events_dir)):
+    #
+    # Presence is decided by the LOADER, not by `os.path.lexists`: a sidecar
+    # that exists but is entry-less (a retirement artifact whose unlink
+    # failed) must NOT divert this transparent path into a destructive
+    # wipe+replay, and one that is unreadable/untrustworthy must be refused
+    # here rather than fall through to the apply()-only replay, which would
+    # report success while the graph-only nodes it alone held stay lost.
+    snapshot_path = prewipe_snapshot_path(events_dir)
+    try:
+        pending = _load_prewipe_snapshot(snapshot_path) is not None
+    except Exception as e:
+        return {"recovered": False, "log_points": 0, "db_points": 0,
+                "reason": (f"a pre-wipe snapshot at {snapshot_path} cannot "
+                           f"be trusted: {e}")}
+    if pending:
         if len(files) > 1:
             return {"recovered": False, "log_points": 0, "db_points": 0,
                     "reason": (f"pending pre-wipe snapshot but {len(files)} "

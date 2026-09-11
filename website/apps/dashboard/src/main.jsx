@@ -892,7 +892,7 @@ function wizardPromptText(harness, step, key, mode) {
   const docs = 'Docs: https://tortoise.premiselabs.co/docs'
   const keyLine = mode === 'included' ? `Key: ${key}` : 'I\'ll give you the API key when you need it.'
   const twoStepNote = 'Tell me when to restart'
-  const step2Text = `Call tortoise_health to verify the connection, then tortoise_create_point to file my first point.\n${docs}`
+  const step2Text = `Call tortoise_health to verify the connection, then tortoise_create_point to file my first memory.\n${docs}`
 
   // #2827: every body starts at its first actionable instruction. The step
   // heading the user reads ("Give this prompt…", "Restart X…") is the JSX
@@ -906,10 +906,10 @@ function wizardPromptText(harness, step, key, mode) {
     if (step === 2) return step2Text
   }
   if (harness === 'claude') {
-    return `Add Tortoise MCP at ${url}.\n${keyLine}\nThen install the Tortoise skills (how-to-use-tortoise, tortoise-decide, tortoise-file-finding + tortoise-onboarding) from ${SKILLS_INSTALL_URL}.\nThen call tortoise_health and tortoise_create_point to file my first point.\n${docs}`
+    return `Add Tortoise MCP at ${url}.\n${keyLine}\nThen install the Tortoise skills (how-to-use-tortoise, tortoise-decide, tortoise-file-finding + tortoise-onboarding) from ${SKILLS_INSTALL_URL}.\nThen call tortoise_health and tortoise_create_point to file my first memory.\n${docs}`
   }
   if (harness === 'codex') {
-    return `Add Tortoise MCP at ${url}.\n${keyLine}\nSave it to my shell profile (export TORTOISE_API_KEY=…).\nThen install the Tortoise skills (how-to-use-tortoise, tortoise-decide, tortoise-file-finding + tortoise-onboarding) from ${SKILLS_INSTALL_URL}.\nThen call tortoise_health and tortoise_create_point to file my first point.\n${docs}`
+    return `Add Tortoise MCP at ${url}.\n${keyLine}\nSave it to my shell profile (export TORTOISE_API_KEY=…).\nThen install the Tortoise skills (how-to-use-tortoise, tortoise-decide, tortoise-file-finding + tortoise-onboarding) from ${SKILLS_INSTALL_URL}.\nThen call tortoise_health and tortoise_create_point to file my first memory.\n${docs}`
   }
   // #2827: both filesystem-less harnesses (Claude Desktop/Web) need only the
   // verify/file step in the conversation; the workflows body rides
@@ -3013,7 +3013,8 @@ function claimIntentInFlight() {
     // new team. Fire-and-forget like completeLogin's card loads; each
     // loader carries its own staleness guard.
     loadAll('').catch(() => {})
-    // #1906: refetch the team so the Overview 'Data points' card reflects
+    // #1906: refetch the team so the memory-count cards (Overview digest +
+    // Billing 'Memories') reflect
     // the seeded graph — team.point_count was captured at provisioning
     // (pre-seed, 0). Also covers the header-exit-without-seed case (0
     // stays 0 — honest).
@@ -6303,7 +6304,7 @@ function claimIntentInFlight() {
                             </button>
                           </div>
                           <p className="dim" style={{ marginBottom: '0.75rem', lineHeight: 1.6 }}>
-                            Run this to verify your API key and file your first point — it creates your graph and connects your project.
+                            Run this to verify your API key and file your first memory — it creates your graph and connects your project.
                           </p>
                           <pre className="snippet" style={{ marginBottom: '0.75rem' }}>
 {`curl https://api.premiselabs.co/v1/points \\
@@ -6398,7 +6399,7 @@ function claimIntentInFlight() {
                                 it — both label and card are now gated together. */}
                             {harnessKey && (
                               <>
-                                <p style={{ ...wizardStepLabelStyle, margin: '0.9rem 0 0.5rem' }}>2. Restart {HARNESS_NAMES[wizardHarness]}, then give it this prompt to verify and file your first point</p>
+                                <p style={{ ...wizardStepLabelStyle, margin: '0.9rem 0 0.5rem' }}>2. Restart {HARNESS_NAMES[wizardHarness]}, then give it this prompt to verify and file your first memory</p>
                                 <WizardPromptCard text={wizardPromptText(wizardHarness, 2, harnessKey, wizardKeyMode)} label="Copy step 2 prompt" />
                               </>
                             )}
@@ -7384,7 +7385,7 @@ function claimIntentInFlight() {
               <>
                 <p className="dim">
                   Your Organization and API key are live — the graph is created the moment
-                  you add data. Connect your agent, or add a point yourself:
+                  you add data. Connect your agent, or add a memory yourself:
                 </p>
                 <div className="snippet-wrap">
                   <pre className="snippet">{firstDataSnippet}</pre>
@@ -7427,7 +7428,7 @@ function claimIntentInFlight() {
         {tab === 'overview' && team && !showReentryCard && team.graph_ready !== false && (team.point_count ?? 0) === 0 && (
           <section className="overview empty-state">
             <h2>Welcome to your Tortoise graph</h2>
-            <p className="dim">Connect your agent so it remembers why, not just what.</p>
+            <p className="dim">Connect your agent so it remembers why, not just what — the decisions and findings it saves land here as memories.</p>
             <div className="empty-actions">
               <a className="btn-primary" href="https://tortoise.premiselabs.co/welcome" target="_blank" rel="noreferrer">
                 Connect your agent →
@@ -8334,7 +8335,7 @@ function claimIntentInFlight() {
               </div>
               <div className="cards" style={{ marginTop: 12, marginBottom: 0 }}>
                 <div className="card"><div className="card-val">{(team.write_ops_used ?? 0).toLocaleString()}</div><div className="card-label">Write ops used{(team.write_ops_limit ? ` / ${team.write_ops_limit.toLocaleString()}` : '')}{team.write_ops_period ? ` · ${team.write_ops_period}` : ''}</div></div>
-                <div className="card"><div className="card-val">{team.point_count ?? 0}</div><div className="card-label">Data points</div></div>
+                <div className="card"><div className="card-val">{team.point_count ?? 0}</div><div className="card-label">Memories</div></div>
                 <div className="card"><div className="card-val">{team.max_graphs == null ? '∞' : team.max_graphs}</div><div className="card-label">Graphs</div></div>
                 <div className="card"><div className="card-val">{team.max_users == null ? '∞' : team.max_users}</div><div className="card-label">Users</div></div>
               </div>
