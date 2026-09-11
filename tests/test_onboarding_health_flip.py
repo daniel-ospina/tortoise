@@ -315,13 +315,36 @@ class TestHealthReady:
             self, monkeypatch, supabase_client):
         """AND gate, first leg: FalkorDB down + control plane up → 503
         "Database unreachable" (never 200, even though the control plane is
-        fine)."""
+        fine).
+
+        #2850: the fault is injected at ``_probe_db`` — the probe owns ONE
+        REUSED connection (a cached SDK handle), so making ``_make_sdk`` raise
+        no longer models a dead DB: the established connection would simply be
+        reused and the query would be what fails. ``_probe_db`` is the seam
+        that reports the data plane's actual verdict.
+        """
         import tortoise.hosted_api as ha
 
-        def _boom_sdk(**kwargs):
+        monkeypatch.setattr(
+            ha, "_probe_db",
+            lambda: {"ok": False, "latency_ms": 1.0,
+                     "error": "ConnectionError: connection refused"})
+        tc, _ = supabase_client
+        r = tc.get("/health/ready")
+        assert r.status_code == 503
+        assert r.json()["detail"] == "Database unreachable"
+
+    def test_supabase_mode_not_ready_when_probe_handle_cannot_be_built(
+            self, monkeypatch, supabase_client):
+        """The other data-plane fault: the probe cannot obtain a connection
+        handle at all (bad URI/credentials). It must report not-ready rather
+        than reuse a stale handle."""
+        import tortoise.hosted_api as ha
+
+        def _boom_probe_sdk():
             raise RuntimeError("FalkorDB unreachable (simulated)")
 
-        monkeypatch.setattr(ha, "_make_sdk", _boom_sdk)
+        monkeypatch.setattr(ha, "_probe_sdk", _boom_probe_sdk)
         tc, _ = supabase_client
         r = tc.get("/health/ready")
         assert r.status_code == 503

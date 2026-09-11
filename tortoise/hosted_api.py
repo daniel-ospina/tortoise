@@ -56,6 +56,15 @@ from tortoise.hosted_backup import (
     restore_backup,
 )
 from tortoise.mcp_server import create_http_app
+from tortoise.monitoring import (  # #2850/2953 liveness-readiness decouple
+    HealthProbe,
+    heartbeat_record,
+    loop_heartbeat_info,
+    loop_heartbeat_task,
+    run_on_daemon_worker,
+    start_health_listener,
+    start_stall_watchdog,
+)
 from tortoise.onboarding import state as _os  # #2001 (W5) canonical FLOW-state module
 from tortoise.projection import (
     _journal_append_product,  # #1686: team_* mint journaling (session sweep drops them)
@@ -374,6 +383,199 @@ def _iter_registered_teams() -> list[dict]:
         return []
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# #2850 (P0) liveness/readiness decouple + #2953 (bind the port BEFORE the
+# boot sweeps). The two hazards these helpers remove:
+#
+#   #2953 — uvicorn awaits ``lifespan.startup()`` BEFORE ``loop.create_server()``
+#   (uvicorn/server.py: ~107 vs ~145/152/173), so anything awaited in the
+#   startup half of ``_lifespan`` runs with NO LISTENING SOCKET AT ALL. The
+#   pre-fix code awaited two full graph sweeps there (``_sweep_events``,
+#   ``_purge_deleted_teams``) — every deploy/restart served nothing while they
+#   ran. They now start as background tasks after the startup half returns.
+#
+#   #2850 — the health path must never share fate with the work. /health now
+#   reads ONE in-memory value (no I/O, no thread hand-off, no await), and the
+#   dedicated /healthz listener (port 9090, own thread) answers a question
+#   about the event loop from outside the event loop.
+# ═══════════════════════════════════════════════════════════════════════════
+
+#: How often the background refresher re-probes the DB. Keeps ``/health``'s
+#: ``db`` field fresh WITHOUT the request path doing any I/O. Must stay below
+#: monitoring.PROBE_STALE_AFTER (30s) or a healthy DB would read as degraded.
+HEALTH_PROBE_REFRESH_S = 10.0
+
+
+def _health_probe_interval() -> float:
+    """Probe refresh period (``TORTOISE_HEALTH_PROBE_INTERVAL``, seconds)."""
+    try:
+        v = float(os.environ.get("TORTOISE_HEALTH_PROBE_INTERVAL") or HEALTH_PROBE_REFRESH_S)
+    except (TypeError, ValueError):
+        return HEALTH_PROBE_REFRESH_S
+    return v if v > 0 else HEALTH_PROBE_REFRESH_S
+
+
+async def _health_probe_loop() -> None:
+    """Keep ``_HEALTH_PROBE`` warm, entirely off the request path (#2850).
+
+    ``/health`` must be answerable from memory alone, so freshness has to be
+    somebody else's job — this task. It is single-flight and hard-bounded
+    (``HealthProbe.run`` returns within PROBE_HARD_TIMEOUT even against a
+    black-holed DB), never touches the app's shared default executor, and can
+    never die: a raise here would freeze the reported DB verdict forever.
+    """
+    while True:
+        try:
+            await _HEALTH_PROBE.run()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # a refresher must not die
+            _logger.warning("health probe refresh failed: %s", exc)
+        await asyncio.sleep(_health_probe_interval())
+
+
+def _sweep_events() -> None:
+    """#432: purge expired/overflowed events from every registered team graph.
+
+    #2953: hoisted out of ``_lifespan`` (it was a closure) so the boot phase
+    can be a background task and so it is patchable in tests.
+
+    Probe-before-purge is registry-mode only (#2251 review P2): a purge query
+    against an ABSENT team_{tid} graph (orphan registry row from a partial
+    provision) would materialize an empty one. Skip the probe in Supabase mode
+    — the registry namespace must NEVER be constructed there (#669; the
+    flip-gate pins the webhook path zero-touch), and that sweep predates #2251
+    so it keeps its pre-existing unconditional per-team purge. Registry mode:
+    enumerate the server-wide existing graphs ONCE; None → probe failed → skip
+    this cycle (best-effort — the per-team purges below hit the same graph
+    store, so they would fail anyway; the per-team SDK lazy hook still covers
+    purges).
+    """
+    try:
+        from tortoise.event_store import purge_expired, purge_overflow
+        days = int(os.environ.get("TORTOISE_EVENT_RETENTION_DAYS", "30"))
+        cap = int(os.environ.get("TORTOISE_EVENT_MAX_PER_TEAM", "500000"))
+        from tortoise.supabase_control import is_supabase_enabled
+        existing = None  # None = no gate (Supabase mode)
+        if not is_supabase_enabled():
+            existing = _registry_existing_graphs()
+            if existing is None:
+                _logger.warning("event retention sweep skipped: registry graph probe failed")
+                return
+        # Sweep every registered team's graph (registry Team nodes).
+        for team in _iter_registered_teams():
+            if existing is not None and f"team_{team['team_id']}" not in existing:
+                continue
+            try:
+                sdk = _make_sdk(namespace=team["team_id"])
+                proj = sdk._get_proj()
+                purge_expired(proj, retention_days=days)
+                purge_overflow(proj, max_events=cap)
+            except Exception:
+                _logger.debug("event retention sweep skipped for %s", team.get("team_id"))
+    except Exception as exc:
+        _logger.warning("event retention sweep failed: %s", exc)
+
+
+async def _run_boot_sweeps() -> None:
+    """#2953: the one-time boot sweeps, run as a BACKGROUND task.
+
+    This must never be awaited from the startup half of ``_lifespan``: uvicorn
+    only calls ``loop.create_server()`` after ``lifespan.startup()`` returns,
+    so awaiting here means the machine accepts no traffic at all for the
+    duration of the sweeps (guaranteed on every deploy/restart). Scheduled as
+    a task instead, the loop is free to bind immediately.
+
+    The ``await asyncio.sleep(0)`` at the top yields once before the first
+    blocking submission, so the loop reaches uvicorn's ``create_server`` before
+    any sweep work is handed to a thread. The hard guarantee is the removed
+    ``await``; this just makes the ordering explicit.
+
+    Best-effort by construction (mirroring the pre-#2953 ``try/except``): a
+    sweep failure logs and never kills startup.
+
+    The sweeps run on a dedicated DAEMON worker (``run_on_daemon_worker``), not
+    on the shared default executor: ``asyncio.run``'s
+    ``shutdown_default_executor()`` joins every DEFAULT-executor worker, so a
+    sweep blocked on a dead DB would hang uvicorn's whole process shutdown
+    until the socket timeout (and forever against a black hole with no
+    timeout). A daemon worker can always be abandoned.
+    """
+    await asyncio.sleep(0)
+    for label, fn in (("event retention", _sweep_events),
+                      ("deleted-team purge", _purge_deleted_teams)):
+        try:
+            await run_on_daemon_worker(fn, name="tortoise-boot-sweep")
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # never fatal
+            _logger.warning("boot %s sweep failed: %s", label, exc)
+
+
+def _start_liveness(app) -> None:
+    """Arm the heartbeat, the dedicated /healthz listener and the watchdog.
+
+    Called from the STARTUP half of ``_lifespan`` — cheap, synchronous, no
+    I/O, no await, so it cannot delay the bind.
+
+    Order is load-bearing: ``heartbeat_record()`` runs ON the loop right now
+    (proving it is scheduling before the watchdog exists to judge it), then
+    the heartbeat task, then the listener, then the watchdog. Starting the
+    watchdog before the heartbeat would let it fire on a loop that simply had
+    not ticked yet.
+    """
+    loop = asyncio.get_running_loop()
+    # A previous lifespan of the SAME app instance (in-process restart,
+    # TestClient reuse) may have failed before its shutdown half ran, leaving an
+    # armed watchdog and live tasks behind. Disarm them first: an orphaned
+    # watchdog would survive into the next shutdown, where a legitimately stale
+    # heartbeat (the cancelled heartbeat task) looks exactly like a wedge, and
+    # it would kill the process mid-drain.
+    prev_stop = getattr(app.state, "_loop_watchdog_stop", None)
+    if prev_stop is not None:
+        prev_stop.set()
+    for attr in ("_loop_heartbeat_task", "_health_probe_task"):
+        prev = getattr(app.state, attr, None)
+        if prev is not None:
+            prev.cancel()
+    heartbeat_record()
+    app.state._loop_heartbeat_task = loop.create_task(loop_heartbeat_task())
+    app.state._healthz_server = start_health_listener()
+    app.state._loop_watchdog_stop = threading.Event()
+    app.state._loop_watchdog = start_stall_watchdog(
+        stop_event=app.state._loop_watchdog_stop)
+
+
+async def _stop_liveness(app) -> None:
+    """Shutdown half: cancel the loop tasks, stop the watchdog.
+
+    The watchdog MUST be stopped FIRST: shutdown cancels the heartbeat task,
+    which makes the heartbeat legitimately stale, which is indistinguishable
+    from a wedge. Leaving it armed would kill the process mid-drain.
+
+    The /healthz listener is deliberately NOT torn down — it is process-
+    lifetime, it answers 200 for as long as the loop is alive (so a rolling
+    drain is not mistaken for a dead machine), and rebinding it per lifespan
+    would race TIME_WAIT across in-process TestClient restarts.
+
+    Cancelled tasks are awaited: a bare ``cancel()`` leaves them pending and
+    the loop prints "Task was destroyed but it is pending!" at teardown. The
+    wait is prompt — cancellation is thrown into the awaiting coroutine at its
+    ``await`` point, so it does not wait for an in-flight ``to_thread`` worker.
+    """
+    stop = getattr(app.state, "_loop_watchdog_stop", None)
+    if stop is not None:
+        stop.set()
+    pending = [t for t in (getattr(app.state, attr, None) for attr in (
+        "_loop_heartbeat_task", "_health_probe_task",
+        "_boot_sweep_task", "_event_retention_task")) if t is not None]
+    for task in pending:
+        task.cancel()
+    if pending:
+        with suppress(Exception):
+            await asyncio.gather(*pending, return_exceptions=True)
+
+
 @asynccontextmanager
 async def _lifespan(app):
     """Compose the FastMCP sub-app's lifespan (session manager init) into
@@ -390,6 +592,20 @@ async def _lifespan(app):
     OPTIONAL — if the pre-warm misses its window, EmbeddingModel.get()
     retries on the next call and search falls back to FTS+structural RRF.
     """
+    # ── #2850: every app instance starts from a clean health-probe state.
+    # A probe worker wedged during a previous app instance (TestClient reuse
+    # in-process, or an in-process reload) must not survive into this one.
+    _HEALTH_PROBE.reset()
+    _READY_PROBE.reset()
+    _CONTROL_PLANE_PROBE.reset()
+    _probe_sdk_reset()
+
+    # ── #2850: arm liveness BEFORE anything that can block. The heartbeat
+    # task, the dedicated /healthz listener and the stall watchdog are all
+    # synchronous/cheap — they cannot delay uvicorn's bind, and they mean the
+    # machine reports its true liveness from the first millisecond.
+    _start_liveness(app)
+
     # ── #2444: optional Sentry activation for the hosted API (no-op without
     # SENTRY_DSN). Initialize before the app starts serving so captures are
     # armed from the first request. Hosted-only concern: local SDK/self-host
@@ -559,62 +775,43 @@ async def _lifespan(app):
             import asyncio
             import os
 
-            def _sweep_events() -> None:
-                try:
-                    from tortoise.event_store import purge_expired, purge_overflow
-                    days = int(os.environ.get("TORTOISE_EVENT_RETENTION_DAYS", "30"))
-                    cap = int(os.environ.get("TORTOISE_EVENT_MAX_PER_TEAM", "500000"))
-                    # Probe-before-purge is registry-mode only (#2251 review
-                    # P2): a purge query against an ABSENT team_{tid} graph
-                    # (orphan registry row from a partial provision) would
-                    # materialize an empty one. Skip the probe in Supabase
-                    # mode — the registry namespace must NEVER be
-                    # constructed there (#669; the flip-gate pins the
-                    # webhook path zero-touch), and that sweep predates
-                    # #2251 so it keeps its pre-existing unconditional
-                    # per-team purge. Registry mode: enumerate the
-                    # server-wide existing graphs ONCE; None → probe failed
-                    # → skip this cycle (best-effort — the per-team purges
-                    # below hit the same graph store, so they would fail
-                    # anyway; the per-team SDK lazy hook still covers
-                    # purges).
-                    from tortoise.supabase_control import is_supabase_enabled
-                    existing = None  # None = no gate (Supabase mode)
-                    if not is_supabase_enabled():
-                        existing = _registry_existing_graphs()
-                        if existing is None:
-                            _logger.warning("event retention sweep skipped: registry graph probe failed")
-                            return
-                    # Sweep every registered team's graph (registry Team nodes).
-                    for team in _iter_registered_teams():
-                        if existing is not None and f"team_{team['team_id']}" not in existing:
-                            continue
-                        try:
-                            sdk = _make_sdk(namespace=team["team_id"])
-                            proj = sdk._get_proj()
-                            purge_expired(proj, retention_days=days)
-                            purge_overflow(proj, max_events=cap)
-                        except Exception:
-                            _logger.debug("event retention sweep skipped for %s", team.get("team_id"))
-                except Exception as exc:
-                    _logger.warning("event retention sweep failed: %s", exc)
-
-            await asyncio.to_thread(_sweep_events)  # boot sweep (#310, off the loop — same shape as the #302 purge below)
-            await asyncio.to_thread(_purge_deleted_teams)  # boot purge (#302)
             interval = int(os.environ.get("TORTOISE_EVENT_RETENTION_INTERVAL", "3600"))
 
             async def _event_retention_loop() -> None:
                 while True:
                     await asyncio.sleep(interval)
-                    await asyncio.to_thread(_sweep_events)
+                    # #2850: daemon worker, not the shared default executor —
+                    # see _run_boot_sweeps.
+                    await run_on_daemon_worker(_sweep_events,
+                                               name="tortoise-boot-sweep")
                     # #302: hard-delete past grace (sync DB work off the loop)
-                    await asyncio.to_thread(_purge_deleted_teams)
+                    await run_on_daemon_worker(_purge_deleted_teams,
+                                               name="tortoise-boot-sweep")
 
             _retention_task = asyncio.get_event_loop().create_task(_event_retention_loop())
             app.state._event_retention_task = _retention_task
+            # #2953: the BOOT sweeps are NOT awaited here. uvicorn calls
+            # loop.create_server() only after lifespan.startup() returns, so
+            # awaiting them meant the machine had NO listening socket for the
+            # whole sweep — every deploy and restart. Background task instead.
+            app.state._boot_sweep_task = asyncio.get_event_loop().create_task(
+                _run_boot_sweeps())
         except Exception as exc:
             _logger.warning("event retention loop not started: %s", exc)
+
+        # ── #2850: the DB probe refresher — keeps /health's ``db`` field
+        # honest without the request path doing any I/O at all.
+        try:
+            app.state._health_probe_task = asyncio.get_event_loop().create_task(
+                _health_probe_loop())
+        except Exception as exc:
+            _logger.warning("health probe refresher not started: %s", exc)
         yield
+
+        # ── shutdown: disarm the watchdog before the heartbeat task is
+        # cancelled (see _stop_liveness), then cancel the loop tasks.
+        with suppress(Exception):
+            await _stop_liveness(app)
 
 
 app = FastAPI(title="Tortoise Hosted API", version=tortoise.__version__, lifespan=_lifespan)
@@ -1446,14 +1643,86 @@ def _validate_mint_expiry(body: dict) -> str | None:
     return None
 
 
+# ── #2850: reusable, bounded probe connection ────────────────────────────
+#
+# Pre-#2850 ``_probe_db`` called ``_make_sdk(namespace=None)`` on EVERY
+# invocation (a fresh TortoiseSDK + FalkorProjection + FalkorDB connection
+# pool each time) and never closed it. On a black-holed FalkorDB that leaked
+# one connection per health check, and the abandoned probe threads kept the
+# sockets (and the whole SDK) alive. The probe now owns ONE connection,
+# rebuilt only when the DB target itself changes.
+_PROBE_SDK_CACHE: dict = {"key": None, "sdk": None}
+_PROBE_SDK_LOCK = threading.Lock()
+
+
+def _probe_sdk_key() -> tuple:
+    """Identity of the DB target the cached probe SDK is bound to.
+
+    A changed TORTOISE_DB_URI / TORTOISE_DB_PATH / embedded path must rebuild
+    rather than probe a stale DB (test fixtures swap temp paths; entrypoint.sh
+    rewrites the URI). Production is a stable key, so the connection is built
+    once. TORTOISE_DB_PATH is included even when a URI is set: the hosted test
+    fixture force-binds a temp embedded path through a patched SDK __init__, so
+    the path — not the shared URI — is what actually changes per test.
+    """
+    uri = os.environ.get("TORTOISE_DB_URI") or ""
+    path = os.environ.get("TORTOISE_DB_PATH") or ""
+    return (uri, path, "" if uri else _resolve_embedded_db_path())
+
+
+def _probe_sdk_reset() -> None:
+    """Close + drop the cached probe SDK (app startup / tests / ops)."""
+    with _PROBE_SDK_LOCK:
+        sdk = _PROBE_SDK_CACHE.get("sdk")
+        _PROBE_SDK_CACHE["sdk"] = None
+        _PROBE_SDK_CACHE["key"] = None
+    if sdk is not None:
+        try:  # noqa: SIM105 — a stale temp DB may already be gone
+            sdk.close()
+        except Exception:
+            pass
+
+
+def _probe_sdk() -> TortoiseSDK:
+    """Return the cached probe SDK, rebuilding only when the target changes.
+
+    The per-request ``_make_sdk`` contract (a FRESH SDK per call, mutable
+    in-memory state) does not apply here: the health probes are single-flight
+    coordinators (``_HEALTH_PROBE`` / ``_READY_PROBE`` each run at most one
+    probe at a time) and the actual ``_get_proj().g.query`` always executes on
+    the ONE shared probe worker (``monitoring._PROBE_WORKER``), so this handle
+    is never touched concurrently. One shared handle is exactly what stops the
+    per-check connection leak.
+
+    Both cache mutation and construction are serialized on
+    ``_PROBE_SDK_LOCK``, so concurrent coordinators can race for the handle but
+    cannot corrupt the cache or build two of them.
+    """
+    key = _probe_sdk_key()
+    with _PROBE_SDK_LOCK:
+        cached = _PROBE_SDK_CACHE.get("sdk")
+        if cached is not None and _PROBE_SDK_CACHE.get("key") == key:
+            return cached
+        old = cached
+        sdk = _make_sdk(namespace=None)
+        _PROBE_SDK_CACHE["sdk"] = sdk
+        _PROBE_SDK_CACHE["key"] = key
+    if old is not None:
+        try:  # noqa: SIM105
+            old.close()
+        except Exception:
+            pass
+    return sdk
+
+
 def _probe_db() -> dict:
-    """Deep-check the graph DB through the shared/default connection (#1384).
+    """Deep-check the graph DB through the reused probe connection (#1384).
 
     Reports ``{"ok": bool, "latency_ms": float, "error": str|None}`` via
-    monitoring.probe_db — never raises, hard-bounded (~1.5s). The probe
-    target is ``_make_sdk(namespace=None)``: the default-graph connection
-    shares the DB server with every team/registry endpoint, so a stopped
-    FalkorDB (NXDOMAIN, #1381) fails it too.
+    monitoring.probe_db — never raises, caller-bounded by ``PROBE_TIMEOUT``
+    per attempt. The probe target is ``_make_sdk(namespace=None)``: the
+    default-graph connection shares the DB server with every team/registry
+    endpoint, so a stopped FalkorDB (NXDOMAIN, #1381) fails it too.
 
     #669: NEVER probe the registry namespace — FalkorDB auto-creates the
     graph on select, so a registry-namespaced probe RECREATES a deleted
@@ -1461,10 +1730,64 @@ def _probe_db() -> dict:
     """
     from tortoise.monitoring import probe_db
     try:
-        sdk = _make_sdk(namespace=None)
+        sdk = _probe_sdk()
     except Exception as exc:
+        _probe_sdk_reset()
         return {"ok": False, "latency_ms": 0.0, "error": str(exc)[:200]}
     return probe_db(sdk)
+
+
+# #2850: the single-flight, hard-bounded coordinator BOTH health endpoints
+# read. The lambda resolves ``_probe_db`` at CALL time, so the existing
+# monkeypatch seams (tests patch ha_mod._probe_db) keep working.
+_HEALTH_PROBE = HealthProbe(lambda: _probe_db())
+
+
+def _probe_control_plane() -> dict:
+    """Bounded Supabase control-plane probe (#2850 item 6). Never raises.
+
+    ``/health/ready`` used to run ``get_control_plane().query("teams", ...)``
+    DIRECTLY on the event loop with no timeout — the same hazard as the
+    FalkorDB half: a black-holed PostgREST endpoint blocked EVERY request in
+    the process, not just the readiness check. It now runs on the probe's own
+    daemon worker through ``_CONTROL_PLANE_PROBE``.
+
+    ``get_control_plane()`` is a process-wide lazy singleton, so the probe
+    does not build a client per check (and a construction failure — missing
+    creds in Supabase mode — is reported as not-ready, fail-closed).
+    """
+    start = time.monotonic()
+    try:
+        from tortoise.supabase_control import get_control_plane
+        # Minimal control-plane probe — a 1-row teams read exercises the
+        # PostgREST path without depending on any tenant data.
+        get_control_plane().query("teams", select=["id"], limit=1)
+    except Exception as exc:  # never raise, always report
+        return {"ok": False,
+                "latency_ms": round((time.monotonic() - start) * 1000, 1),
+                "error": f"{type(exc).__name__}: {exc}"[:200]}
+    return {"ok": True,
+            "latency_ms": round((time.monotonic() - start) * 1000, 1),
+            "error": None}
+
+
+# Separate coordinator instance from the FalkorDB one: the two planes fail
+# independently, and single-flighting them together would let a wedged DB
+# starve the control-plane check (and vice versa).
+_CONTROL_PLANE_PROBE = HealthProbe(lambda: _probe_control_plane())
+
+
+# #2850 item 6: READINESS gets its own coordinator, distinct from the one the
+# background refresher feeds. ``/health/ready`` is a fail-closed gate (the
+# deploy workflow asserts it LAST), so its verdict must reflect the DB at
+# request time — sharing the refresher's coordinator meant a readiness call
+# could JOIN a probe that started before the failure and report the stale
+# "ok" (#1384's whole point inverted). Its own coordinator is still
+# single-flight and hard-bounded, so concurrent readiness checks cannot pile
+# work up. Safe to run concurrently with ``_HEALTH_PROBE``: the actual
+# ``_get_proj().g.query`` executes on the single shared probe worker
+# (monitoring._PROBE_WORKER), never concurrently.
+_READY_PROBE = HealthProbe(lambda: _probe_db())
 
 
 @app.get("/health")
@@ -1476,21 +1799,42 @@ async def health():
     60s, and a cold FalkorDB Cloud connection exceeds it. Liveness returns
     immediately; DB readiness is `/health/ready`.
 
-    Deep check (#1384): a lightweight graph-DB probe (RETURN 1, ≤1.5s bound)
-    rides along in `db`. A stopped FalkorDB (incident #1381 — NXDOMAIN with
-    /health staying ok) flips status to "degraded" + db.ok=false, visible
-    immediately without any graph-touching request. The handler never raises
-    and never 5xxes: a dead DB must not kill the process — deploy/backup
-    drivers gate on /health/ready, which still fails closed.
+    Deep check (#1384): a lightweight graph-DB probe (RETURN 1) rides along in
+    `db`. A stopped FalkorDB (incident #1381 — NXDOMAIN with /health staying
+    ok) flips status to "degraded" + db.ok=false, visible immediately without
+    any graph-touching request.
+
+    #2850 (P0): this handler now collects NO I/O and takes NO thread
+    # hand-off. It reads one in-memory value from ``_HEALTH_PROBE``
+    # (``snapshot()``) and one in-memory heartbeat timestamp, and returns.
+    # Nothing on the request path submits work to the event loop's DEFAULT
+    # ThreadPoolExecutor — the executor /health used to ride via
+    # ``asyncio.to_thread(_probe_db)``, shared with ~89 other ``to_thread``
+    # call sites whose queue wait has no timeout. That shared queue is what
+    # let a stalled FalkorDB push the check past Fly's 15s budget while the
+    # process was idle (2026-09-10 incident). A saturated executor, a
+    # black-holed DB, or 20 concurrent checks can no longer delay this
+    # response by a microsecond. Freshness comes from the background
+    # ``_health_probe_loop`` refresher, not from the check.
+    #
+    # The response shape is unchanged for deploy/dashboard consumers:
+    # ``{"status", "db"}`` — ``probe`` and ``loop_stale_ms`` are additive.
+    # It never 5xxes: a dead DB is "degraded", never a killed process.
     """
-    import asyncio
     try:
-        # to_thread: a hung probe (firewall black-hole) must not stall the
-        # event loop — probe_db is itself bounded, but stay off the loop.
-        db = await asyncio.to_thread(_probe_db)
-    except Exception as exc:
+        db = _HEALTH_PROBE.snapshot()
+    except Exception as exc:  # liveness must answer, always
         db = {"ok": False, "latency_ms": 0.0, "error": str(exc)[:200]}
-    return {"status": "ok" if db["ok"] else "degraded", "db": db}
+    try:
+        probe_meta = _HEALTH_PROBE.info()
+    except Exception:
+        probe_meta = {}
+    try:
+        loop_age_ms = loop_heartbeat_info().get("loop_age_ms")
+    except Exception:
+        loop_age_ms = None
+    return {"status": "ok" if db.get("ok") else "degraded", "db": db,
+            "probe": probe_meta, "loop_stale_ms": loop_age_ms}
 
 
 @app.get("/health/ready")
@@ -1502,6 +1846,14 @@ async def health_ready():
     ready=false (503) unless both answer. Registry mode: FalkorDB only
     (today's behavior — selfhost has no second plane). Fail-closed: not-ready
     is a 503, never a 200.
+
+    #2850: the FalkorDB half reads its OWN bounded, single-flight coordinator
+    (``_READY_PROBE`` — deliberately NOT the liveness refresher's, or a
+    readiness call could join a probe that began before the outage and report a
+    stale "ok"). The pre-fix code ran ``_make_sdk(...)._get_proj().g.query(...)``
+    directly on the event loop with no timeout, so a hung DB blocked EVERY
+    request, not just this one. A stalled probe now reads as not-ready (503),
+    fail-closed, without ever blocking the loop.
     """
     db_ok = False
     try:
@@ -1511,21 +1863,23 @@ async def health_ready():
         # registry_control_plane on every health check (post-flip
         # verification finding, #669). Probe the data plane via the default
         # graph (never the registry namespace).
-        sdk = _make_sdk(namespace=None)
-        sdk._get_proj().g.query("RETURN 1")
-        db_ok = True
+        db = await _READY_PROBE.run()
+        db_ok = db.get("ok") is True
     except Exception:
-        pass
+        db_ok = False
     if not db_ok:
         raise HTTPException(status_code=503, detail="Database unreachable")
-    from tortoise.supabase_control import get_control_plane, is_supabase_enabled
+    from tortoise.supabase_control import is_supabase_enabled
     if is_supabase_enabled():
+        # #2850 item 6: bounded + off-loop, exactly like the FalkorDB half.
+        # A wedged/unreachable control plane is a 503 (fail-closed), never a
+        # blocked event loop.
         try:
-            # Minimal control-plane probe — a 1-row teams read exercises the
-            # PostgREST path without depending on any tenant data.
-            get_control_plane().query("teams", select=["id"], limit=1)
-        except Exception:
-            raise HTTPException(status_code=503, detail="Control plane unreachable")  # noqa: B904
+            control = await _CONTROL_PLANE_PROBE.run()
+        except Exception:  # fail closed
+            control = {"ok": False}
+        if control.get("ok") is not True:
+            raise HTTPException(status_code=503, detail="Control plane unreachable")
         return {"status": "ok", "db": "connected", "control_plane": "connected"}
     return {"status": "ok", "db": "connected"}
 
