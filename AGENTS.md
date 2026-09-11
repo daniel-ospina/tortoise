@@ -87,29 +87,38 @@ When choosing between two approaches, prefer the one that produces the better ou
 
 Every operation has mandatory quality gates in its skill file — pre-flight checks, review cycles, safety verification. Skipping the skill means skipping those gates. Pi's progressive disclosure puts skill descriptions (not content) in the system prompt. The `read` tool loads the full workflow. **Never assume you know a workflow from the description alone.**
 
-Skill length is not an excuse — reading a 700-line skill is cheaper than bypassing a pre-flight check. Skills with review loops have mandatory quality gates. **Review cycles are not optional.** When a skill describes a review-fix loop, you run it to convergence. Fixing issues and self-declaring "done" without re-dispatching a fresh reviewer is a bypass — not a review. Only "NO ISSUES FOUND" from a fresh-context reviewer ends the cycle.
+Skill length is not an excuse — reading a 700-line skill is cheaper than bypassing a pre-flight check. Skills with review loops have mandatory quality gates. **Review cycles are not optional.** When a skill describes a review-fix loop, you run it to convergence. Fixing issues and self-declaring "done" without re-dispatching a fresh reviewer is a bypass — not a review. Only "NO ISSUES FOUND" from a fresh-context reviewer — or the skill's own defined clean verdict — is a **clean completion**; convergence and cap exits **that leave issues unresolved** are escalation exits, never completions (see Hard Cap).
 
 ### Review Loop Protocol — MANDATORY
 
-Skills that describe review cycles contain **mandatory quality gates**, not suggestions. Do not skip review cycles. Do not emit a plan or content as "done" until all review cycles pass clean.
+Skills that describe review cycles contain **mandatory quality gates**, not suggestions. Do not skip review cycles. Do not emit a plan or content as "done" until all review cycles pass clean, or the skill's own escalation path (cap, convergence, stall, or abort) is followed with the remaining issues documented — a capped exit is never reported as clean.
 
 #### Fresh-Context Task Dispatch
 
-Every review cycle MUST dispatch a FRESH `task` sub-agent. The reviewer has no memory of prior cycles, no investment in defending prior fixes. This prevents confirmation bias.
+Every review cycle MUST re-review in a FRESH context — via `task` where the skill dispatches one, or the skill's mandated mechanism (its MCP wrapper, or its verifier subagent). The reviewer has no memory of prior cycles, no investment in defending prior fixes. This prevents confirmation bias.
 
 - Same-model self-review in the same conversation degrades without an external signal
 - The model defends prior decisions rather than critically re-evaluating
 - `task` spawns `pi -p` in a new process with no session memory — the closest available proxy for an independent reviewer
 
-#### Exit Conditions — ALL Must Be True
+#### Exit Conditions — ALL Must Be True (Clean Completion)
 
-- [ ] Last `task` reviewer response was "NO ISSUES FOUND" (verbatim, not paraphrased)
+- [ ] Last reviewer response was the skill's clean verdict — `NO ISSUES FOUND`, or the skill's defined equivalent (e.g. the verifier's `PASS`, the loop's `CLEAN`) — verbatim, not paraphrased
 - [ ] If cycle 1 found any issues → at least 1 re-review cycle completed
 - [ ] Cycle log posted: each cycle's issues and fixes documented
 
+These conditions define a **clean completion** only. A convergence, stall, abort, or cap exit **that leaves issues unresolved** cannot satisfy them: it is an **escalation** exit — document the remaining issues and escalate (see Hard Cap). Such an exit may still be handed on where the skill's own path says so, but it is never reported as clean.
+
 #### Hard Cap
 
-4 cycles maximum per reviewer (unless skill specifies otherwise). On cap → document remaining issues, post with `⚠️ capped at N cycles — M issues remain`, proceed.
+**The skill's own bound always governs — this file only supplies a fallback.** The `proportional-gates` skill holds the **canonical** proportional table (Low → skip; Low-Medium → **3**; Medium-High → **5**; High → **10**), and most convergence-gated skills use a **10-cycle safety cap** (`code-review`, `test-review`, `epic-plan`, `verification-before-completion` are examples — **not an exhaustive list**). Other skills carry their own bounds, all of them governing over the fallback (`prototype-review` 5, 3 in React-diff mode; the `research` Step-5.5 verifier 2; the second-model gates in `code-review`, `plan-review` and `issue-scoping` 2; `codebase-audit` 3). The `subagent-driven-development` final reviewer is also a second-model gate but states no cycle bound of its own, so the fallback **10** governs it. A skill that says "no hard cap" but states a safety cap is **still governed by that cap** — "no hard cap" means no quality-gate ceiling, not no runaway guard. Only when a skill states no bound of any kind does the fallback **10** apply, and a skill that **explicitly declares itself uncapped** (`carousel-designer` — "No Cycle Cap … No arbitrary cap") is never capped by this file, and its own stop rules govern.
+
+This is a **runaway guard, not a quality gate** — review cycles are how quality gets produced, so do not treat the cap as a target, and do not stop early because the count "feels high". Stop on (a) a clean exit (the skill's clean verdict — `NO ISSUES FOUND`, or its defined equivalent), (b) **convergence as the running skill defines it** (issues are a strict subset of the previous cycle's — no new dimensions or files; some skills define this only at their safety cap, e.g. `epic-plan`), (c) a stall signal the skill defines (`fingerprint-stall`, `honest-stuck`, `zero-progress`, stall-guard), (d) an abort the skill defines (`tool-unavailable`, `git-error`, `pr-closed`, fixer push failure), or (e) the bound. Never apply a bound tighter than the skill's own.
+
+**(b)–(e) are escalation exits, not completions.** They do not satisfy the Exit Conditions above, and the loop must never be reported or handed off as clean or complete **while issues remain** (if the skill's own recovery path resolves them all and a fresh reviewer returns the clean verdict, that is a clean completion under (a)). (Where a skill labels its *zero-issue* exit "convergence" — e.g. `prototype-review` — that is a clean exit under (a), not this rule.) On a non-clean exit → **escalate** — to the orchestrator agent, or to a human wherever a skill requires one (the Auto-Continue pause conditions apply in addition). Document the remaining issues, then follow the skill's own path for that exit **first** — including any mandatory orchestrator recovery (`code-review` Step 6.5, `plan-review`'s deep-fix attempt) — and post **the exact marker the skill's own exit table defines at the point that path specifies**, where it defines one (`code-review` cap → `⚠️ Auto-fix reached the 10-cycle safety cap — unresolved issues remain; escalate to a human`; `test-review` cap → `⚠️ Test review capped at 10 cycles — N issues remain:`). Where the skill defines no marker for that exit, post `⚠️ <the skill's own name for the exit> after N cycles — M issues remain` and record the exit under the skill's own name. Use the skill's own label verbatim — do not invent a cap label for a convergence or stall exit, and do not relabel an exit the skill itself names otherwise:
+
+- **Paths that require a human** (non-exhaustive: `plan-review` → Requires Human Input; `carousel-b2b-copy` → BLOCKED; `code-review` → its convergence exit needs human acknowledgement and its cap/stall exit surfaces to a human via its Step 6.5 recovery; `test-writing` → halts while a P0 remains): **do not proceed past that skill's own halt point.**
+- **Paths that log-and-proceed** (`epic-plan`, `test-review`, `meta-framework-research`'s 3-cycle stall rule, `test-writing` when only P1/P2 remain — **non-exhaustive**): continue **only** with the skill's own marker posted where it defines one, and the remaining issues — including any P0 — recorded in the artifact, exactly as the skill directs. A capped exit is never described as clean or complete.
 
 #### FORBIDDEN — These Bypass the Quality Gate Entirely
 
@@ -117,11 +126,11 @@ Every review cycle MUST dispatch a FRESH `task` sub-agent. The reviewer has no m
   This IS skipping the review. Fixing without re-reviewing = no review.
 
 - ❌ Self-declare "I addressed the feedback" as completion
-  Only "NO ISSUES FOUND" from a fresh reviewer is a valid exit signal.
+  Only "NO ISSUES FOUND" (or the skill's own clean verdict) from a fresh reviewer is a valid **clean-completion** signal. Convergence, stall, abort, and cap exits **that leave issues unresolved** close the loop only with the remaining issues documented and the skill's own path for that exit followed (see Hard Cap); a skill labelling its *zero-issue* exit "convergence" (e.g. `prototype-review`) is a clean exit.
 
 - ❌ Re-review in the same conversation context
   Confirmation bias makes same-context re-review unreliable.
-  Always use `task` for a fresh session.
+  Use the skill's mandated fresh-context dispatch (`task`, its MCP wrapper, or its verifier subagent).
 
 ---
 
@@ -222,6 +231,16 @@ When you encounter a **pre-existing bug** (not introduced by your current work),
 - **Never use sed for multi-line code changes.**
 - **Never use `git add -A`** — always stage specific files.
 - **Prefer the `edit` tool over `write`** for targeted changes to existing files.
+- **Commit messages: always `git commit -F <file>` — never `-m`, never a heredoc.** Write the
+  message with the `write` tool to `/tmp/commit-msg-<branch>.md`, then
+  `git commit -F /tmp/commit-msg-<branch>.md`. Both `-m "…"` and heredocs pass the message
+  through the shell first — backticked spans run as command substitution, `$VAR`/`$(…)` expand,
+  `${…}`/`{{ }}` break — and the failure is **silent**: the substitution yields an empty string,
+  git accepts the mangled result, and only a human reading the log sees the hole. The
+  `commit-msg` hook warns on the signature (unbalanced backticks, or a doubled space where inline
+  code should be) when husky hooks are installed — do not rely on it running (#672). On a hit:
+  amend **before** pushing; if it is already pushed, post a correction note instead of silently
+  force-pushing. Worked example: `skills/commit-workflow/workflow/02-commit-pr.md`.
 
 ## Tool Quality & Retirement
 
