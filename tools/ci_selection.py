@@ -352,6 +352,31 @@ def integrity(manifest: dict) -> list[str]:
     return missing
 
 
+def duplicate_entries(manifest: dict) -> list[str]:
+    """#2913: names listed more than once WITHIN one surface.
+
+    `select()` unions surfaces, so a same-surface duplicate is invisible to
+    selection and to :func:`integrity` (which only asks "is it classified?").
+    Surfaced as a non-fatal `--integrity` note rather than a gate failure — the
+    duplicate is a manifest edit to clean up, and the gate must stay green while
+    it is. Cross-surface (dual) registration is deliberate; only same-surface
+    repeats are reported.
+
+    Each offending name is reported ONCE however many times it repeats, so the
+    note's count is a count of distinct problems.
+    """
+    dupes: list[str] = []
+    for surface, files in manifest.get("surfaces", {}).items():
+        seen: set[str] = set()
+        reported: set[str] = set()
+        for f in files or ():
+            if f in seen and f not in reported:
+                dupes.append(f"{surface}: {f}")
+                reported.add(f)
+            seen.add(f)
+    return dupes
+
+
 def unlisted_tests(tests_dir: Path, manifest: dict) -> list[str]:
     """Top-level tests/test_*.py absent from every surface in the manifest.
 
@@ -375,6 +400,12 @@ def register_tests(manifest_path: Path, tests_dir: Path, surface: str,
     default surface is `core` — the selection logic's own fallback; the shared
     / unknown-path / push-to-main rules still expand to the full matrix, so a
     misclassified new test keeps running on every broad change.
+
+    Insertion lands *between real entry lines* (#2913): `pos` indexes the entry
+    list (comment lines excluded), so it is converted to a physical line via the
+    entry immediately before it — never used as a raw line offset, which would
+    drop the new entry inside a comment run and detach the run from the entries
+    it documents.
     """
     missing = unlisted_tests(tests_dir, manifest)
     if not missing:
@@ -395,28 +426,47 @@ def register_tests(manifest_path: Path, tests_dir: Path, surface: str,
         anchor = next((i for i, ln in enumerate(lines) if ln.startswith("tier1:")), len(lines))
         new_block = [f"  {surface}:{NL}"] + [f"  - {n}{NL}" for n in missing]
         lines[anchor:anchor] = new_block
-    else:
-        # collect existing entries in this block (until next "  x:" or non-list line)
-        end = block_start + 1
-        entries = []
-        while end < len(lines) and (lines[end].startswith("  - ") or lines[end].lstrip().startswith("#")):
-            if lines[end].startswith("  - "):
-                entries.append(lines[end])
-            end += 1
-        names = [e.strip()[2:].split("#", 1)[0].rstrip() for e in entries]  # "  - name.py" -> "name.py" (strip trailing comments)
-        # INSERT-ONLY: place each new name at its alphabetical position among
-        # the existing entries; never re-order pre-existing lines (keeps the
-        # diff surgical — normalizing the whole block would churn the manifest).
-        to_add = [n for n in missing if n not in set(names)]
-        for n in sorted(to_add):
-            pos = 0
-            while pos < len(names) and names[pos] < n:
-                pos += 1
-            lines[block_start + 1 + pos:block_start + 1 + pos] = [f"  - {n}{NL}"]
-            names.insert(pos, n)
-            end += 1
-    manifest_path.write_text("".join(lines))
-    return missing
+        manifest_path.write_text("".join(lines))
+        return missing
+
+    # Scan the block (until the next "  x:" / non-list line), tracking each
+    # real entry's PHYSICAL line index. Comments are prose about the group that
+    # follows and must never be split by an insertion (#2913).
+    end = block_start + 1
+    entry_lines: list[int] = []
+    while end < len(lines) and (lines[end].startswith("  - ") or lines[end].lstrip().startswith("#")):
+        if lines[end].startswith("  - "):
+            entry_lines.append(end)
+        end += 1
+    names = [lines[i].strip()[2:].split("#", 1)[0].rstrip() for i in entry_lines]
+    # A file already present in THIS surface is a no-op, reported: writing it
+    # again would duplicate the entry, and select() unions surfaces so a
+    # same-surface duplicate is invisible downstream (#2913).
+    already = [n for n in missing if n in set(names)]
+    to_add = [n for n in missing if n not in set(names)]
+    if already:
+        print(f"ℹ️  already registered under {surface}: {already}")
+    # INSERT-ONLY: place each new name at its alphabetical position among
+    # the existing entries; never re-order pre-existing lines (keeps the
+    # diff surgical — normalizing the whole block would churn the manifest).
+    for n in sorted(to_add):
+        pos = 0
+        while pos < len(names) and names[pos] < n:
+            pos += 1
+        # `pos` indexes the entry list; convert to a PHYSICAL line by inserting
+        # right after the preceding entry (or at the top of the block when the
+        # name sorts first). This keeps comment runs contiguous and attached to
+        # the entries they describe — the bug was `block_start + 1 + pos`, which
+        # counted comment lines and landed inside a run.
+        insert_at = block_start + 1 if pos == 0 else entry_lines[pos - 1] + 1
+        lines[insert_at:insert_at] = [f"  - {n}{NL}"]
+        names.insert(pos, n)
+        entry_lines.insert(pos, insert_at)
+        for j in range(pos + 1, len(entry_lines)):
+            entry_lines[j] += 1
+    if to_add:
+        manifest_path.write_text("".join(lines))
+    return to_add
 
 
 def register(manifest_path: Path, tests_dir: Path, surface: str) -> list[str]:
@@ -736,6 +786,10 @@ def main() -> int:
             sample = ", ".join(absent[:8])
             print(f"⚠️  {len(absent)} manifest fast files are in NO half "
                   f"(full-matrix coverage hole, #1266): {sample} …")
+        dupes = duplicate_entries(manifest)
+        if dupes:
+            print(f"⚠️  {len(dupes)} duplicate manifest entr(y/ies) — invisible "
+                  f"to select(), #2913: {', '.join(dupes)}")
         print("✅ integrity: all test files classified; slow_files consistent; halves consistent")
         return 0
 
