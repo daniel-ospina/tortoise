@@ -5,6 +5,8 @@ domain: operations
 doc_status: live
 created: 2026-08-08
 ownedBy: epistemic-team
+aboutSubjects: epistemic-team
+aboutObjects: tortoise
 ---
 
 # Documentation Index
@@ -14,6 +16,9 @@ ownedBy: epistemic-team
 | Ask answer surface (`POST /v1/ask` / SDK `ask()` / MCP `tortoise_ask`, #1987) | `docs/product/answer-surface.md` |
 | Ask pre-ship gate runbook + #2069 routing/cost record (#1987/#2069) | `docs/runbook/1987-ask-abstention-check.md` |
 | Temporal measurement runbook + gate output (2×2 attribution + widening ablation, #2578) | `docs/runbook/2578-temporal-measurement.md` |
+| Temporal retrieval diagnosis + oracle ceiling (42/52 = 81%, #2976/#2978) — evidence | `docs/runbook/2578-oracle-ceiling.jsonl` · `docs/research/2026-09-11-subgraph-retrieval-research.md` |
+| **A/B/C context-assembly pre-registration** — verbatim vs epistemic subgraph vs union (#2976/#2978/#2683) | `docs/experiments/2026-09-11-abc-context-assembly-experiment.md` |
+| Competitor analysis — 14 profiles incl. the four-epistemic-primitives matrix (Kumiho/Cognee/Mem0/HippoRAG/GraphRAG/Emergence/Letta) | `product/competition/_analysis.md` · `product/competition/_index.md` |
 | Auth architecture — standard patterns vs Tortoise (#1498/#1506); key-permission model + #2082 boundary (§6, epic #2083) | `docs/auth-architecture.md` |
 | Backup/DR runbook | `docs/ops/registry-backup-dr.md` |
 | Hosted platform infra runbook — incl. the out-of-band availability watchdog, self-healing + alert dedupe (#2850) | `docs/infra-runbook.md` (§6) |

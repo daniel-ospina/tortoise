@@ -6,6 +6,7 @@ import {
   WIZARD_STEPS, WIZARD_FORK_OPTIONS, BUILD_CATALOG_PLACEHOLDER,
   resolveBuildCatalog, orgNameError, LEGACY_LABELS, forkStepState,
   durableKeyName,
+  wizardStageLabel,
 } from './wizardFlow.js'
 
 test('EXACTLY 4 human steps in the plan order (org-create → fork → connect → done)', () => {
@@ -142,4 +143,40 @@ test('#2325 (review P2): labels never exceed the server\'s 64-char clamp, and th
   const m2 = durableKeyName('a'.repeat(38), date, [m1])
   assert.notEqual(m1, m2, 'long-org same-minute mints must stay distinct')
   assert.ok(m2.length <= 64)
+})
+
+// #2912 (PR-gate UX P1): the wizard header and the sr-only step announcement
+// share ONE stage-name derivation. Before this the header hard-coded the plain
+// step label, so the paused reconnect rendered <h1>You're all set</h1> directly
+// above the lede "your agent isn't connected yet" — the headline said the
+// opposite of the state. The overrides are pure logic, so they are unit-tested
+// here instead of pinned by a source grep.
+test('#2912: wizardStageLabel names the stage, with the org-holding and paused overrides', () => {
+  // the plain case: the step's own label, for every step
+  for (const [i, s] of WIZARD_STEPS.entries()) {
+    assert.equal(wizardStageLabel(i), s.label, `step ${i} label`)
+  }
+  // step 0 on an org-holding account is a read-only summary
+  assert.equal(wizardStageLabel(0, { hasOrg: true }), 'Your Organization')
+  assert.equal(wizardStageLabel(0, { hasOrg: false }), WIZARD_STEPS[0].label)
+  // other steps are unaffected by hasOrg (the header used to leak the receipt
+  // "Your Organization" above every later step)
+  assert.equal(wizardStageLabel(2, { hasOrg: true }), WIZARD_STEPS[2].label)
+  // the paused reconnect: "You're all set" would contradict the step
+  assert.equal(wizardStageLabel(3, { paused: true }),
+    'Setup paused — your agent is not connected yet')
+  assert.equal(wizardStageLabel(3), "You're all set")
+  // paused only applies to the done step
+  assert.equal(wizardStageLabel(2, { paused: true }), WIZARD_STEPS[2].label)
+  // the three step-2 ledes are distinct — the header says what each fork does
+  assert.equal(WIZARD_STEPS[2].sub, 'Pick which harness to connect.')
+  assert.ok(!/Connect Tortoise to your Organization/.test(WIZARD_STEPS[2].sub))
+})
+
+test('#2912 (PR-gate UX): the done-step sub does not repeat the card body verbatim', () => {
+  // the step-3 body ends with "Open Settings → Setup guide to follow what
+  // happens next"; the header sub used to end with the same sentence, so one
+  // viewport stated it twice.
+  assert.ok(!/Open Settings/.test(WIZARD_STEPS[3].sub),
+    'the Settings pointer belongs to the card body only')
 })

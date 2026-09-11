@@ -3,7 +3,7 @@ import { createRoot } from 'react-dom/client'
 import './index.css'
 // #1623: plan display data (build-time import of product/pricing.json).
 import { planOptions, STATUS_LABELS, TIER_LABELS } from './pricing.js'
-import { HARNESS_CAPTURE_INSTALL, HARNESS_CAPTURE_REASON, HARNESS_CAPTURE_STATUS_LABEL, HARNESS_CAPTURE_SUPPORT, HARNESS_CONTINUE_LABEL, HARNESS_COPY_LABEL, HARNESS_INSTALL, HARNESS_INTRO, HARNESS_NAMES, HARNESS_OAUTH, HARNESS_ORDER, HARNESS_PERSIST, HARNESS_SELF_INSTALL, HARNESS_SKILLS, HARNESS_SKILLLESS, HARNESS_SKILLS_IN_PROMPT, HARNESS_SKILLS_IN_STEPS, HARNESS_STEPS, SKILLS_INSTALL_URL, UNIVERSAL_COMMAND, WORKFLOWS_PROMPT } from './harnesses.js'
+import { HARNESS_CAPTURE_INSTALL, HARNESS_CAPTURE_REASON, HARNESS_CAPTURE_STATUS_LABEL, HARNESS_CAPTURE_SUPPORT, HARNESS_CONTINUE_LABEL, HARNESS_COPY_LABEL, HARNESS_FAMILIES, HARNESS_INSTALL, HARNESS_INTRO, HARNESS_NAMES, HARNESS_OAUTH, HARNESS_ORDER, HARNESS_PERSIST, HARNESS_SELF_INSTALL, HARNESS_SKILLS, HARNESS_SKILLLESS, HARNESS_SKILLS_IN_PROMPT, HARNESS_SKILLS_IN_STEPS, HARNESS_STEPS, SKILLS_INSTALL_URL, UNIVERSAL_COMMAND, WORKFLOWS_PROMPT, harnessDisplayName, harnessFamilyOf, preferredSurface } from './harnesses.js'
 // #1728 Slice 3 (Tasks 16-17): the SHARED 4-state capture-status derivation
 // (off → install-pending → waiting → active, probe-driven) — pure, node --test
 // unit-tested (captureStatus.test.js). #1927: the re-ask gate predicate was
@@ -16,7 +16,7 @@ import { setupGuide } from './setupGuide.js'
 import { overviewConnection, overviewDigest, overviewNextAction } from './overview.js'
 // #1997 (W1): the 4 human onboarding steps — pure structure + copy + fork
 // options + org-name validation, node --test unit-tested (wizardFlow.test.js).
-import { WIZARD_STEPS, WIZARD_FORK_OPTIONS, resolveBuildCatalog, orgNameError, durableKeyName } from './wizardFlow.js'
+import { WIZARD_STEPS, WIZARD_FORK_OPTIONS, resolveBuildCatalog, orgNameError, durableKeyName, wizardStageLabel } from './wizardFlow.js'
 // #1894: indexed-state + job-progress derivations — pure, node --test
 // unit-tested (memorySourcesStatus.test.js).
 import { docsIndexedLabel, formatRelativeTime, jobStatusLine } from './memorySourcesStatus.js'
@@ -864,20 +864,30 @@ const SKEL_LABEL = { width: '45%', height: '1.2em' }
 // require the container to stay a control, which is the violation itself.
 function WizardPromptCard({ text, label }) {
   const [copied, setCopied] = React.useState(false)
+  // #2912 (PR-gate a11y): the scroll region must have a UNIQUE accessible name
+  // per card — the 2-card surfaces (Pi, Cursor) render two `role="region"`
+  // landmarks, and a shared "Setup prompt" name made them
+  // indistinguishable to a screen-reader user navigating by landmark
+  // (axe `landmark-unique`). Derive it from the button's own label, which is
+  // already per-card ("Copy step 1 prompt" → "step 1 prompt").
+  const regionLabel = label ? label.replace(/^Copy\s+/i, '') : 'Setup prompt'
   const doCopy = React.useCallback(() => {
     navigator.clipboard.writeText(text)
     setCopied(true)
     setTimeout(() => setCopied(false), 1600)
   }, [text])
   return (
-    <div className="wizard-prompt-card"
-      style={{ position: 'relative', whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', wordBreak: 'break-word', maxWidth: '100%', background: 'var(--surface,#0d1a2d)', border: '1px solid var(--border,#1e293b)', borderRadius: 8, padding: '12px 14px', fontFamily: 'var(--mono,ui-monospace,SFMono-Regular,Menlo,monospace)', fontSize: 14, lineHeight: 1.6, color: 'var(--text,#e2e8f0)' }}>
-      {text}
+    <div className="wizard-prompt-card">
+      {/* #2912 (review cycle 2): the long prompts scroll, so the <pre> is a
+          scroll REGION — it must be reachable by keyboard (WCAG 2.1.1 /
+          axe `scrollable-region-focusable`). The copy control stays OUTSIDE
+          the scroll container so it never scrolls away. */}
+      <pre className="wizard-prompt-text" tabIndex={0} role="region" aria-label={regionLabel}>{text}</pre>
       {/* #2827 (round-2 P2): the button's own label flips to 'Copied ✓' for
           1.6s — a sighted-only signal. This live region announces the copy
           outcome to screen readers. */}
       <span className="sr-only" role="status" aria-live="polite">{copied ? 'Copied to clipboard' : ''}</span>
-      <div style={{ marginTop: '0.6rem', display: 'flex', justifyContent: 'center' }}>
+      <div className="wizard-prompt-actions">
         <button type="button" className={copied ? 'ghost small' : 'btn-primary small'}
           onClick={doCopy}>
           {copied ? 'Copied ✓' : (label || 'Copy')}
@@ -887,12 +897,28 @@ function WizardPromptCard({ text, label }) {
   )
 }
 
+// #2912: one numbered block of the connect step ("1 Get your API key" →
+// "2 Set up Claude Code"). Before this the step was a flat run of captions,
+// cards and buttons with ad-hoc margins, so nothing communicated ORDER.
+// The block owns its own spacing + rule; the step body just stacks blocks.
+function WizardBlock({ step, title, children }) {
+  return (
+    <section className="wizard-block">
+      <h2 className="wizard-block-title">
+        {step != null && <span className="wizard-block-step" aria-hidden="true">{step}</span>}
+        {title}
+      </h2>
+      <div className="wizard-block-body">{children}</div>
+    </section>
+  )
+}
+
 function wizardPromptText(harness, step, key, mode) {
   const url = 'https://api.premiselabs.co/mcp/'
   const docs = 'Docs: https://tortoise.premiselabs.co/docs'
   const keyLine = mode === 'included' ? `Key: ${key}` : 'I\'ll give you the API key when you need it.'
   const twoStepNote = 'Tell me when to restart'
-  const step2Text = `Call tortoise_health to verify the connection, then tortoise_create_point to file my first point.\n${docs}`
+  const step2Text = `Call tortoise_health to verify the connection, then tortoise_create_point to file my first memory.\n${docs}`
 
   // #2827: every body starts at its first actionable instruction. The step
   // heading the user reads ("Give this prompt…", "Restart X…") is the JSX
@@ -906,10 +932,10 @@ function wizardPromptText(harness, step, key, mode) {
     if (step === 2) return step2Text
   }
   if (harness === 'claude') {
-    return `Add Tortoise MCP at ${url}.\n${keyLine}\nThen install the Tortoise skills (how-to-use-tortoise, tortoise-decide, tortoise-file-finding + tortoise-onboarding) from ${SKILLS_INSTALL_URL}.\nThen call tortoise_health and tortoise_create_point to file my first point.\n${docs}`
+    return `Add Tortoise MCP at ${url}.\n${keyLine}\nThen install the Tortoise skills (how-to-use-tortoise, tortoise-decide, tortoise-file-finding + tortoise-onboarding) from ${SKILLS_INSTALL_URL}.\nThen call tortoise_health and tortoise_create_point to file my first memory.\n${docs}`
   }
   if (harness === 'codex') {
-    return `Add Tortoise MCP at ${url}.\n${keyLine}\nSave it to my shell profile (export TORTOISE_API_KEY=…).\nThen install the Tortoise skills (how-to-use-tortoise, tortoise-decide, tortoise-file-finding + tortoise-onboarding) from ${SKILLS_INSTALL_URL}.\nThen call tortoise_health and tortoise_create_point to file my first point.\n${docs}`
+    return `Add Tortoise MCP at ${url}.\n${keyLine}\nSave it to my shell profile (export TORTOISE_API_KEY=…).\nThen install the Tortoise skills (how-to-use-tortoise, tortoise-decide, tortoise-file-finding + tortoise-onboarding) from ${SKILLS_INSTALL_URL}.\nThen call tortoise_health and tortoise_create_point to file my first memory.\n${docs}`
   }
   // #2827: both filesystem-less harnesses (Claude Desktop/Web) need only the
   // verify/file step in the conversation; the workflows body rides
@@ -1100,7 +1126,9 @@ function claimIntentInFlight() {
 
   // Wizard connect step: reset persisted 'chatgpt' value (legacy default) to a valid tab
   React.useEffect(() => {
-    if (!['pi', 'cursor', 'claude', 'codex', 'claude-desktop', 'claude-web'].includes(wizardHarness)) {
+    // #2912: 'codexDesktop' is a first-class leaf now (the Codex chooser's
+    // Desktop surface), so it is a valid persisted value too.
+    if (!['pi', 'cursor', 'claude', 'codex', 'codexDesktop', 'claude-desktop', 'claude-web'].includes(wizardHarness)) {
       setWizardHarness('pi')
     }
   }, [])
@@ -1123,10 +1151,11 @@ function claimIntentInFlight() {
   // error prescribes a manual ⌘/Ctrl-C copy, so the manual-Continue affordance
   // appears ONLY after a failure (the user explicitly asserts the copy).
   const [wizardCopyFailed, setWizardCopyFailed] = React.useState(false)
-  // #2328: Codex has two surfaces — CLI (shell) and Desktop (GUI app, NO
-  // terminal, does not inherit shell exports). The connect step toggles so a
-  // Desktop user never faces an export-command they cannot run.
-  const [wizardCodexDesktop, setWizardCodexDesktop] = React.useState(false)
+  // #2328/#2912: Codex has two surfaces — CLI (shell) and Desktop (GUI app,
+  // NO terminal, does not inherit shell exports). Since #2912 the SURFACE is
+  // the leaf `wizardHarness` value ('codex' vs 'codexDesktop') chosen by the
+  // two-level harness chooser, so the old parallel `wizardCodexDesktop`
+  // boolean (a second place a surface choice could get stuck) is gone.
   const [wizardGithub, setWizardGithub] = React.useState({ connected: false, repos: null, busy: false, org: null })
   const wizardGithubPollRef = React.useRef(null)  // #1643 review P1: the status poll handle (hoisted so Cancel/unmount can stop it)
   // #1728 Slice 3: the Memory-sources surface (wizard step-1 + Overview
@@ -1314,9 +1343,7 @@ function claimIntentInFlight() {
   React.useEffect(() => {
     if (!(welcomeMode && authed)) return
     if (LEGACY_WIZARD_ARCHIVED) return  // A0 rollback owns its own steps (#2361 r3 P3-7)
-    const label = (wizardStep === 3 && effectivelyPaused)
-      ? 'Setup paused — your agent is not connected yet'
-      : (wizardStep === 0 && welcomeHasOrg ? 'Your Organization' : WIZARD_STEPS[wizardStep].label)
+    const label = wizardStageLabel(wizardStep, { hasOrg: welcomeHasOrg, paused: effectivelyPaused })
     setWizardStepAnnounce(`Step ${wizardStep + 1} of 4: ${label}`)
     if (!wizardFocusInit.current) { wizardFocusInit.current = true; return }
     // #2361 review-r4 (P3): focus ONLY on step changes — toggling the paste
@@ -1331,7 +1358,13 @@ function claimIntentInFlight() {
     if (wizardStep === 0 && !welcomeHasOrg) return
     if (wizardCardRef.current) wizardCardRef.current.focus()
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [wizardStep, welcomeMode, authed, wizardPaused])
+    // #2912 (PR-gate follow-up): `effectivelyPaused` (declared above this
+    // effect, so no TDZ) must be a dep. It also depends on
+    // `serverHarnessConnected`, which the step-3 landing refresh flips —
+    // without it the announcement keeps saying "Setup paused…" while the <h1>
+    // and body have already flipped to "You're all set", re-creating the
+    // h1/announcement disagreement the shared helper exists to prevent.
+  }, [wizardStep, welcomeMode, authed, wizardPaused, effectivelyPaused])
   // ⛔ #2426 e2e catch (P0): welcomeHasOrg (~line 4890) and wizardShowPaste
   // (~1832) are declared LATER in this giant component — a hook dep array
   // evaluates eagerly DURING render, so listing either here threw "Cannot
@@ -3013,7 +3046,8 @@ function claimIntentInFlight() {
     // new team. Fire-and-forget like completeLogin's card loads; each
     // loader carries its own staleness guard.
     loadAll('').catch(() => {})
-    // #1906: refetch the team so the Overview 'Data points' card reflects
+    // #1906: refetch the team so the memory-count cards (Overview digest +
+    // Billing 'Memories') reflect
     // the seeded graph — team.point_count was captured at provisioning
     // (pre-seed, 0). Also covers the header-exit-without-seed case (0
     // stays 0 — honest).
@@ -5939,9 +5973,11 @@ function claimIntentInFlight() {
     (Array.isArray(teams)
       ? ((teams.find((t) => t.team_id === teamIdRef.current) || teams[0] || {}).team_name || '')
       : '') || ''
-  // #2328: the Codex connect step renders one of two surfaces — 'codex'
-  // (CLI) or 'codexDesktop' (GUI). Other harnesses pass through unchanged.
-  const wizardConnectHarness = (wizardHarness === 'codex' && wizardCodexDesktop) ? 'codexDesktop' : wizardHarness
+  // #2328/#2912: the connect step renders one of two Codex surfaces — 'codex'
+  // (CLI) or 'codexDesktop' (GUI). The surface IS the leaf harness value now,
+  // so this is an identity mapping kept as the single read-point for every
+  // per-harness lookup below (the old boolean derivation is gone).
+  const wizardConnectHarness = wizardHarness
   // #1998 fork-aware connect: the fork choice determines what the connect step
   // shows — 'build' users see API key + SDK code; 'self' users see harness
   // picker + setup command.
@@ -5996,9 +6032,10 @@ function claimIntentInFlight() {
     </>
   )
 
-  // #2711: a shown-once key token is an unbreakable `tt_…` string. This one
-  // style is shared by all three key rows (the agent-driven "separate" row +
-  // claude-desktop + claude-web) so the row can shrink and the token can break
+  // #2711: a shown-once key token is an unbreakable `tt_…` string. One shared
+  // `.key-row` style carries every raw-key row (the step-1 key block for each
+  // leaf except Codex Desktop, whose key lives in the config block) so the row
+  // can shrink and the token can break
   // — without `minWidth: 0` the flex item's min-content width is the whole
   // token and the Copy button is pushed off-screen at 390px.
   const wizardKeyCodeStyle = { flex: 1, minWidth: 0, overflowWrap: 'anywhere', wordBreak: 'break-all', padding: '0.4rem 0.6rem', background: 'var(--surface,#0d1a2d)', border: '1px solid var(--border,#1e293b)', borderRadius: 6, fontSize: 13 }
@@ -6008,12 +6045,6 @@ function claimIntentInFlight() {
   // <code> elements joined by `=` — wrong punctuation (`:` is what the
   // connector field expects) and impossible to copy in one gesture.
   const wizardHeaderCodeStyle = { minWidth: 0, overflowWrap: 'anywhere', wordBreak: 'break-all' }
-
-  // #2827: ONE step-label style for every connect tab. The tabs used to
-  // hand-roll inline <p className="dim small"> captions that drifted in size,
-  // weight and alignment (some centred, some left). The wizard tabs are
-  // ordered procedures, so the numbering is part of the label.
-  const wizardStepLabelStyle = { margin: '0 0 0.5rem', fontWeight: 600, fontSize: 13, lineHeight: 1.6, color: 'var(--text,#e2e8f0)' }
 
   // #2710: the connect step's no-key affordance. The copy already promised
   // "Create an API key to see the setup prompt." but shipped no button, so an
@@ -6104,11 +6135,71 @@ function claimIntentInFlight() {
               </>
             ) : (
               <>
-                <h1 style={{ fontFamily: 'var(--serif, Georgia, serif)', fontWeight: 400, marginBottom: '0.5rem' }}>
-                  {welcomeHasOrg
-                    ? (shownOrgName ? `${shownOrgName} is set up` : 'Your organization is set up')
-                    : 'Welcome to Tortoise'}
-                </h1>
+                {/* #2912: the header names the STAGE ("Connect your agent"),
+                    not the org's status ("<org> is set up") — the old heading was
+                    a receipt for step 0 sitting above every later step, so it
+                    said nothing about what the user was doing. The org stays
+                    visible as a small eyebrow, and the step's own sub moves up
+                    here so the card body starts at the controls. */}
+                <div className="welcome-head">
+                  {welcomeHasOrg && shownOrgName && (
+                    <p className="welcome-eyebrow">{shownOrgName}</p>
+                  )}
+                  <h1 className="welcome-title">
+                    {wizardStageLabel(wizardStep, { hasOrg: welcomeHasOrg, paused: effectivelyPaused })}
+                  </h1>
+                  {(() => {
+                    // Step 0 on an org-holding account is a read-only summary
+                    // whose body already says "You're set up in <org>…" — a
+                    // second line here would repeat it. Same for the paused
+                    // reconnect: its <h1> already names the state, and the step-3
+                    // body carries the recovery (PR-gate UX: the old paused lede
+                    // restated both).
+                    if (wizardStep === 0 && welcomeHasOrg) return null
+                    if (wizardStep === 3 && effectivelyPaused) return null
+                    // #2912 (review cycle 2): WIZARD_STEPS[2].sub is the harness
+                    // pick's copy, but step 2 has THREE bodies — only the
+                    // owner/self branch is a harness pick.
+                    if (wizardStep === 2) {
+                      // #2912 (review cycle 4 P1): the role/cap check runs FIRST.
+                      // A member of a build-fork org gets the SDK-lede body
+                      // ("Only owners and admins can create API keys"), so
+                      // promising them a key here reproduced the exact defect
+                      // class #2912 was filed for.
+                      // PR-gate follow-up: the member/capped copy is ALSO
+                      // fork-aware — the build-fork member body offers no paste
+                      // affordance at all (its only actions are "ask an owner or
+                      // admin" and "Manage API keys →"), so the self-fork line
+                      // would instruct an action that branch does not offer.
+                      // PR-gate follow-up 2: capNotice is set ONLY by an
+                      // owner/admin mint, so the capped arm must not tell the
+                      // user to ask an owner — they are the owner. The build
+                      // fork has no paste escape, so its honest action is
+                      // freeing a slot in the API Keys tab.
+                      // PR-gate follow-up 3: a build-fork user who ALREADY holds a
+                      // key sees that key + the curl in the body, so any key-getting
+                      // copy contradicts the card. This is the first arm: the key
+                      // state is a fact, the role/fork branches are about who can
+                      // mint one.
+                      if (isBuildFork && harnessKey) {
+                        return <p className="welcome-lede">Copy your key and call the Tortoise SDK from your app.</p>
+                      }
+                      if (!isOwnerAdmin) {
+                        return <p className="welcome-lede">{isBuildFork
+                          ? 'Ask an owner or admin for an API key, then call the Tortoise SDK.'
+                          : 'Paste an API key to connect your agent.'}</p>
+                      }
+                      if (capNotice) {
+                        return <p className="welcome-lede">{isBuildFork
+                          ? 'Free a key slot in the API Keys tab, then call the Tortoise SDK.'
+                          : 'Paste an API key to connect your agent.'}</p>
+                      }
+                      if (isBuildFork) return <p className="welcome-lede">Create an API key and call the Tortoise SDK from your app.</p>
+                    }
+                    const sub = WIZARD_STEPS[wizardStep].sub
+                    return <p className="welcome-lede">{sub}</p>
+                  })()}
+                </div>
                 <span className="sr-only" role="status" aria-live="polite">
                   {welcomeProvisioning ? 'Creating your organization' : (welcomeHasOrg && shownOrgName ? `${shownOrgName} is set up` : '')}
                 </span>
@@ -6125,22 +6216,15 @@ function claimIntentInFlight() {
                       <span key={s.id} className={'wizard-step' + (i === wizardStep ? ' active' : (i < wizardStep ? ' done' : ''))} />
                     ))}
                   </div>
-                  {/* #2364 round-1: org-holder resume/re-entry must never re-read
-                      the org-create TITLE — an account that already holds an org
-                      walks step 0 as a READ-ONLY summary (never a second mint,
-                      #2323). Branch the visible title to the same label the
-                      sr-only announce uses (#2361 r2) — title + announce never
-                      diverge. The body copy below already branches (#2323 Option
-                      B): 'You're set up in <org>' + Continue, never a create
-                      form. W9/#2005 owns the fork-aware step-MAPPED resume. */}
-                  <p className="wizard-title">{wizardStep === 0 && welcomeHasOrg ? 'Your Organization' : WIZARD_STEPS[wizardStep].label}</p>
-                  {wizardStep !== 0 && (
-                    <p className="wizard-sub" style={{ marginBottom: '1rem' }}>
-                      {(wizardStep === 3 && effectivelyPaused)
-                        ? "You're set up, but your agent isn't connected yet. Reconnect any time from Settings → Setup guide."
-                        : WIZARD_STEPS[wizardStep].sub}
-                    </p>
-                  )}
+                  {/* #2487/#2364 resolved into #2912's header: the visible title
+                      and sub moved into `.welcome-head` above (stage <h1> through
+                      the shared `wizardStageLabel`, which branches step 0 on
+                      `welcomeHasOrg` to 'Your Organization' AND drives the sr-only
+                      announce — the never-diverge invariant #2364 round-1 wanted),
+                      so no in-card `.wizard-title`/`.wizard-sub` may come back
+                      here: that duplication is exactly what #2912's defect 5
+                      removed. The setup-guide resume copy from #2487 is
+                      untouched. */}
 
                   {wizardStep === 0 && (
                     <div className="org-create">
@@ -6273,39 +6357,57 @@ function claimIntentInFlight() {
 
 {wizardStep === 2 && (isBuildFork ? (
                     <div className="connect-build">
-                      {!harnessKey ? (
-                        <>
-                          {isOwnerAdmin ? (
-                            <button type="button" className="btn-primary" onClick={wizardMintDurableKey} disabled={wizardDurableBusy}
-                              style={{ marginBottom: '0.75rem' }}>
-                              {wizardDurableBusy ? 'Creating…' : `Create an API key for ${shownOrgName || 'your organization'}`}
-                            </button>
-                          ) : (
-                            <p className="dim" style={{ marginBottom: '0.75rem' }}>
-                              Only owners and admins can create API keys. Ask an owner or admin to create one.
+                      {/* #2912 (PR-gate UX): the build fork used to keep the old
+                          ad-hoc layout (0.4rem captions, inline margins) while
+                          its sibling owner path got h1 → numbered h2 blocks, so
+                          the same step looked like two different products. Same
+                          block structure here: 1 = key, 2 = the SDK call. */}
+                      <WizardBlock step={1} title={harnessKey ? 'Your API key' : 'Get your API key'}>
+                        {harnessKey ? (
+                          <>
+                            <p className="dim small" style={{ marginBottom: '0.4rem' }}>
+                              Your API key is shown once — copy it now.
                             </p>
-                          )}
-                          <button type="button" className="ghost small" onClick={() => { window.history.replaceState({}, '', '#/keys'); setWelcomeMode(false); setTab('keys'); finishWelcomeLoads('keys') }}>
-                            Manage API keys →
-                          </button>
-                        </>
-                      ) : (
-                        <>
-                          <p className="dim small" style={{ marginBottom: '0.4rem' }}>
-                            Your API key is shown once — copy it now.
+                            <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+                              <code style={{ flex: 1, padding: '0.6rem 0.8rem', background: 'var(--surface,#0d1a2d)', border: '1px solid var(--border,#1e293b)', borderRadius: 8, fontSize: 13, wordBreak: 'break-all' }}>
+                                {harnessKey}
+                              </code>
+                              <button type="button" className="btn-primary" onClick={() => navigator.clipboard?.writeText(harnessKey)}>
+                                Copy
+                              </button>
+                            </div>
+                          </>
+                        ) : (
+                          <>
+                            {isOwnerAdmin ? (
+                              <>
+                                <p className="dim small" style={{ margin: '0 0 0.6rem' }}>
+                                  Create an API key to call the SDK from your application.
+                                </p>
+                                <button type="button" className="btn-primary" onClick={wizardMintDurableKey} disabled={wizardDurableBusy}>
+                                  {wizardDurableBusy ? 'Creating…' : `Create an API key for ${shownOrgName || 'your organization'}`}
+                                </button>
+                              </>
+                            ) : (
+                              <p className="dim" style={{ margin: 0 }}>
+                                Only owners and admins can create API keys. Ask an owner or admin to create one.
+                              </p>
+                            )}
+                            <div style={{ marginTop: '0.6rem' }}>
+                              <button type="button" className="ghost small" onClick={() => { window.history.replaceState({}, '', '#/keys'); setWelcomeMode(false); setTab('keys'); finishWelcomeLoads('keys') }}>
+                                Manage API keys →
+                              </button>
+                            </div>
+                          </>
+                        )}
+                      </WizardBlock>
+
+                      {harnessKey && (
+                        <WizardBlock step={2} title="Call the SDK">
+                          <p className="dim" style={{ margin: 0, lineHeight: 1.6 }}>
+                            Run this to verify your API key and file your first memory — it creates your graph and connects your project.
                           </p>
-                          <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', marginBottom: '1.25rem' }}>
-                            <code style={{ flex: 1, padding: '0.6rem 0.8rem', background: 'var(--surface,#0d1a2d)', border: '1px solid var(--border,#1e293b)', borderRadius: 8, fontSize: 13, wordBreak: 'break-all' }}>
-                              {harnessKey}
-                            </code>
-                            <button type="button" className="btn-primary" onClick={() => navigator.clipboard?.writeText(harnessKey)}>
-                              Copy
-                            </button>
-                          </div>
-                          <p className="dim" style={{ marginBottom: '0.75rem', lineHeight: 1.6 }}>
-                            Run this to verify your API key and file your first point — it creates your graph and connects your project.
-                          </p>
-                          <pre className="snippet" style={{ marginBottom: '0.75rem' }}>
+                          <pre className="snippet" style={{ margin: 0 }}>
 {`curl https://api.premiselabs.co/v1/points \\
   -H "Authorization: Bearer ${harnessKey}" \\
   -H "Content-Type: application/json" \\
@@ -6319,12 +6421,13 @@ function claimIntentInFlight() {
                               SDK documentation →
                             </a>
                           </div>
-                        </>
+                        </WizardBlock>
                       )}
+
                       {wizardDurableError && (
                         <p className="error" role="alert" style={{ margin: '0.6rem 0 0', fontSize: 13 }}>{wizardDurableError}</p>
                       )}
-                      <div className="wizard-nav" style={{ marginTop: '0.75rem' }}>
+                      <div className="wizard-nav">
                         <button type="button" className="ghost" onClick={() => setWizardStep(1)}>← Back</button>
                         <div className="wizard-nav-actions">
                           <button type="button" className="ghost" onClick={() => { setWizardPaused(true); setWizardStep(3) }}>Skip for now</button>
@@ -6332,201 +6435,201 @@ function claimIntentInFlight() {
                       </div>
                     </div>
                   ) : (isOwnerAdmin && !capNotice ? (
-                    <div className="harness">
-                      <div className="harness-tabs">
-                        {HARNESS_ORDER.filter(h => h !== 'chatgpt').map((h) => (
-                          <button key={h} type="button"
-                            className={'harness-tab' + (wizardHarness === h ? ' active' : '')}
-                            aria-pressed={wizardHarness === h}
-                            onClick={() => { setWizardHarness(h); setWizardCopied(''); setWizardConnectError(''); setWizardDurableError(''); if (h !== 'codex') setWizardCodexDesktop(false) }}>
-                            {HARNESS_NAMES[h]}
-                          </button>
-                        ))}
-                      </div>
-                      {['pi', 'cursor', 'claude', 'codex'].includes(wizardHarness) && wizardConnectHarness !== 'codexDesktop' && (
-                        /* #2710: pills are pure display-mode toggles. They used to
-                           also `setKeyModalOpen(true)` when no key existed — a no-op
-                           during the wizard (the modal renders only in the dashboard
-                           tree) that queued the stray post-exit pop-up. The no-key
-                           state now renders wizardNoKeyAffordance directly below, so
-                           the mint affordance is always visible and the modal is never
-                           queued. */
-                        <div className="key-pills">
-                          <button type="button" className={wizardKeyMode === 'included' ? 'active' : ''}
-                            aria-pressed={wizardKeyMode === 'included'}
-                            onClick={() => setWizardKeyMode('included')}>
-                            <strong>Key included in prompt</strong>
-                            <span>Simple — easiest</span>
-                          </button>
-                          <button type="button" className={wizardKeyMode === 'separate' ? 'active' : ''}
-                            aria-pressed={wizardKeyMode === 'separate'}
-                            onClick={() => setWizardKeyMode('separate')}>
-                            <strong>Key separate from prompt</strong>
-                            <span>Manual — more secure</span>
-                          </button>
+                    (() => {
+                      // #2912: two-level chooser — the FAMILY (Claude/Codex/
+                      // Cursor/Pi) then the SURFACE (Claude Code/Desktop/Web;
+                      // Codex CLI/Desktop). `wizardHarness` stays the leaf id
+                      // every payload lookup already keys on.
+                      const activeFamily = harnessFamilyOf(wizardHarness) || HARNESS_FAMILIES[0]
+                      const surfaces = activeFamily.surfaces
+                      const displayName = harnessDisplayName(wizardConnectHarness)
+                      const agentDriven2Step = ['pi', 'cursor']
+                      // 'codexDesktop' is the Codex GUI leaf — same payload shape
+                      // as the CLI (a config block instead of an agent prompt).
+                      const agentDriven1Step = ['claude', 'codex', 'codexDesktop']
+                      // #2710: pills are pure display-mode toggles — they must
+                      // never queue the shared create modal (it renders only in
+                      // the dashboard tree, so it would pop after exit).
+                      const keyModeToggleable = ['pi', 'cursor', 'claude', 'codex'].includes(wizardHarness)
+                      /* #2756 (code-review P1): the Codex DESKTOP surface embeds
+                         the key in the config block by construction, so there is
+                         no separate key row there. Manual harnesses (no mode
+                         choice) always show the key — it is what the user pastes
+                         into the connector. */
+                      const keyRowVisible = harnessKey && wizardConnectHarness !== 'codexDesktop'
+                        && (wizardKeyMode === 'separate' || !keyModeToggleable)
+                      const keyDisplayRow = keyRowVisible ? (
+                        <div className="key-row">
+                          <p className="dim small">Your API key (shown once):</p>
+                          <code style={wizardKeyCodeStyle}>{harnessKey}</code>
+                          <button type="button" className="btn-primary small" onClick={() => navigator.clipboard?.writeText(harnessKey)}>Copy</button>
                         </div>
-                      )}
-                      {(() => {
-                        const agentDriven2Step = ['pi', 'cursor']
-                        const agentDriven1Step = ['claude', 'codex']
-                        /* #2756 (code-review P1): the key-mode pills are hidden on the
-                           Codex DESKTOP surface — UNIVERSAL_COMMAND.codexDesktop embeds
-                           the key in the config block by construction, so honoring
-                           "separate" there is impossible and showing the separate key
-                           row beside an embedded-key block would contradict the mode.
-                           The pills render again on the CLI surface. */
-                        const keyDisplayRow = harnessKey && wizardKeyMode === 'separate' && wizardConnectHarness !== 'codexDesktop' ? (
-                          <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', flexWrap: 'wrap', marginTop: '0.5rem' }}>
-                            <p className="dim small">Your API key (shown once):</p>
-                            <code style={wizardKeyCodeStyle}>{harnessKey}</code>
-                            <button type="button" className="btn-primary small" onClick={() => navigator.clipboard?.writeText(harnessKey)}>Copy</button>
-                          </div>
-                        ) : null
+                      ) : null
 
-                        if (agentDriven2Step.includes(wizardHarness)) return (
-                          <div>
-                            <p style={wizardStepLabelStyle}>1. Give this prompt to your agent to connect Tortoise</p>
-                            {harnessKey ? (
-                              <WizardPromptCard text={wizardPromptText(wizardHarness, 1, harnessKey, wizardKeyMode)} label="Copy step 1 prompt" />
-                            ) : (
-                              wizardNoKeyAffordance
-                            )}
-                            {keyDisplayRow}
-                            {/* #2827 (round-2 P1): step 2 is ONE unit. The label
-                                used to render in the no-key state above an empty
-                                slot, leaving an orphaned "2." with nothing under
-                                it — both label and card are now gated together. */}
-                            {harnessKey && (
-                              <>
-                                <p style={{ ...wizardStepLabelStyle, margin: '0.9rem 0 0.5rem' }}>2. Restart {HARNESS_NAMES[wizardHarness]}, then give it this prompt to verify and file your first point</p>
-                                <WizardPromptCard text={wizardPromptText(wizardHarness, 2, harnessKey, wizardKeyMode)} label="Copy step 2 prompt" />
-                              </>
-                            )}
-                          </div>
+                      // ── step 2 body: the harness's own connect procedure ──
+                      let procedureTitle = `Set up ${displayName}`
+                      let procedure = null
+                      if (agentDriven2Step.includes(wizardHarness)) {
+                        procedure = (
+                          <>
+                            <p className="wizard-caption">Give this prompt to your agent to connect Tortoise:</p>
+                            <WizardPromptCard text={wizardPromptText(wizardHarness, 1, harnessKey, wizardKeyMode)} label="Copy step 1 prompt" />
+                            <p className="wizard-caption">Then restart {HARNESS_NAMES[wizardHarness]} and give it this prompt to verify and file your first memory:</p>
+                            <WizardPromptCard text={wizardPromptText(wizardHarness, 2, harnessKey, wizardKeyMode)} label="Copy step 2 prompt" />
+                          </>
                         )
-                        if (agentDriven1Step.includes(wizardHarness)) return (
-                          <div>
-                            {/* #2827 (round-2 P1): the Codex Desktop surface
-                                shows a ~/.codex/config.toml block the HUMAN
-                                pastes, so the agent-prompt caption lied there.
-                                Single-step tabs also drop the leading "1." —
-                                they are not truncated procedures. */}
-                            <p style={wizardStepLabelStyle}>{wizardConnectHarness === 'codexDesktop' ? 'Add this block to your Codex config file' : 'Give this prompt to your agent to connect Tortoise'}</p>
-                            {/* #2756: Codex has two surfaces — CLI (shell) and Desktop
-                                (GUI app with no terminal; it does not inherit shell
-                                exports). The #2328 toggle was dropped by the #2698
-                                rewrite while its state and the wizardConnectHarness
-                                derivation were kept (the plan's tab handler still resets
-                                it), so a Codex Desktop user was handed the CLI
-                                command. Restored and wired through below. */}
-                            {wizardHarness === 'codex' && (
-                              <div role="group" aria-label="Codex setup surface"
-                                style={{ marginBottom: '0.75rem', display: 'inline-flex', border: '1px solid var(--border,#1e293b)', borderRadius: 8, overflow: 'hidden' }}>
-                                <button type="button" className="ghost small" aria-pressed={!wizardCodexDesktop}
-                                  style={wizardCodexDesktop ? {} : { background: 'rgba(6,182,212,0.12)', color: 'var(--accent,#06b6d4)' }}
-                                  onClick={() => { setWizardCodexDesktop(false); setWizardCopied('') }}>CLI (terminal)</button>
-                                <button type="button" className="ghost small" aria-pressed={wizardCodexDesktop}
-                                  style={wizardCodexDesktop ? { background: 'rgba(6,182,212,0.12)', color: 'var(--accent,#06b6d4)' } : {}}
-                                  onClick={() => { setWizardCodexDesktop(true); setWizardCopied('') }}>Desktop (no terminal)</button>
+                      } else if (agentDriven1Step.includes(wizardHarness)) {
+                        // #2827: the Codex Desktop surface configures a TOML file
+                        // the HUMAN pastes, so the "give your agent this prompt"
+                        // caption would lie there.
+                        procedure = wizardConnectHarness === 'codexDesktop' ? (
+                          <>
+                            <p className="wizard-caption">{HARNESS_INTRO.codexDesktop}</p>
+                            <WizardPromptCard text={UNIVERSAL_COMMAND.codexDesktop(harnessKey)} label={HARNESS_COPY_LABEL.codexDesktop} />
+                          </>
+                        ) : (
+                          <>
+                            <p className="wizard-caption">Give this prompt to your agent to connect Tortoise:</p>
+                            <WizardPromptCard text={wizardPromptText(wizardConnectHarness, 1, harnessKey, wizardKeyMode)} label="Copy prompt" />
+                          </>
+                        )
+                      } else if (wizardHarness === 'claude-desktop' || wizardHarness === 'claude-web') {
+                        // #2710: the manual connector flows used to render a
+                        // `YOUR_API_KEY` placeholder with a Copy button that
+                        // wrote an empty string. The key now lives in step 1
+                        // (always, for these harnesses); step 2 pastes the
+                        // header value into the connector and the prompt into
+                        // the chat.
+                        const web = wizardHarness === 'claude-web'
+                        procedureTitle = `Add the ${displayName} connector`
+                        procedure = (
+                          <>
+                            <p className="wizard-caption">
+                              Open {web ? 'claude.ai' : 'Claude Desktop'} → Settings → Connectors → <em>Add custom connector</em>, then enter:
+                            </p>
+                            <ul className="wizard-fields">
+                              <li>Name: <strong>Tortoise</strong></li>
+                              <li>Server URL: <code>https://api.premiselabs.co/mcp/</code></li>
+                              <li>Request headers{web ? ' (advanced)' : ''}: <code style={wizardHeaderCodeStyle}>{'Authorization: Bearer ' + harnessKey}</code></li>
+                            </ul>
+                            <div>
+                              <button type="button" className="ghost small" onClick={() => navigator.clipboard?.writeText(`Authorization: Bearer ${harnessKey}`)}>Copy header value</button>
+                            </div>
+                            <p className="wizard-note">
+                              Note: <strong>Request headers</strong> is still rolling out in Anthropic&apos;s beta and may not appear for every account. If Request headers isn&apos;t available on your account yet, use the Claude Code surface instead — that path works on every account.{web ? ' Claude connects from Anthropic\u2019s cloud, so your key is stored by Anthropic — keep the chat and the key private.' : ''}
+                            </p>
+                            <p className="wizard-caption">Start a new chat and paste this prompt — it {web ? 'teaches Claude the Tortoise workflows' : 'tells Claude how to use Tortoise in this chat'}:</p>
+                            <WizardPromptCard text={wizardWorkflowsText(harnessKey, wizardKeyMode)} label="Copy prompt" />
+                          </>
+                        )
+                      }
+
+                      return (
+                        <div className="harness-connect">
+                          <div className="harness-chooser">
+                            <p className="wizard-field-label">Your harness</p>
+                            <div className="harness-families" role="group" aria-label="Harness">
+                              {HARNESS_FAMILIES.map((f) => (
+                                <button key={f.id} type="button"
+                                  className={'harness-family' + (activeFamily.id === f.id ? ' active' : '')}
+                                  aria-pressed={activeFamily.id === f.id}
+                                  onClick={() => { setWizardHarness((cur) => preferredSurface(f, cur)); setWizardCopied(''); setWizardConnectError(''); setWizardDurableError('') }}>
+                                  {f.name}
+                                </button>
+                              ))}
+                            </div>
+                            {surfaces.length > 0 && (
+                              <div className="harness-surfaces" role="group" aria-label={`${activeFamily.name} surface`}>
+                                {surfaces.map((s) => (
+                                  <button key={s.id} type="button"
+                                    className={'harness-surface' + (wizardHarness === s.id ? ' active' : '')}
+                                    aria-pressed={wizardHarness === s.id}
+                                    onClick={() => { setWizardHarness(s.id); setWizardCopied(''); setWizardConnectError(''); setWizardDurableError('') }}>
+                                    <span className="harness-surface-name">{s.name}</span>
+                                    {s.hint && <span className="harness-surface-hint">{s.hint}</span>}
+                                  </button>
+                                ))}
                               </div>
                             )}
-                            {harnessKey ? (
-                              wizardConnectHarness === 'codexDesktop' ? (
+                          </div>
+
+                          {/* #2912: KEY FIRST. The step used to caption "Give
+                              this prompt…" and then, with no key, replace the
+                              prompt with the mint CTA — telling the user to
+                              copy something that did not exist and putting the
+                              key instructions after the promise. The block
+                              order now matches the real dependency:
+                              key → procedure.
+                              PR-gate UX: the Codex Desktop surface is a SINGLE
+                              step (its key lives inside the config block), and
+                              an empty "1 Get your API key" would promise an
+                              action that does not exist there; with no key there
+                              is no procedure block to show either. */}
+                          {wizardConnectHarness === 'codexDesktop' ? (
+                            <WizardBlock step={1} title={harnessKey ? procedureTitle : 'Get your API key'}>
+                              {harnessKey ? (
                                 <>
-                                  <p className="dim small" style={{ margin: '0 0 0.5rem', lineHeight: 1.6 }}>{HARNESS_INTRO.codexDesktop}</p>
-                                  <WizardPromptCard text={UNIVERSAL_COMMAND.codexDesktop(harnessKey)} label={HARNESS_COPY_LABEL.codexDesktop} />
+                                  {/* PR-gate follow-up: the merged block dropped
+                                      the only "shown once" advisory this surface
+                                      had — nothing else on it says the key is
+                                      unrecoverable after you leave. */}
+                                  <p className="wizard-caption">Your API key is inside the block below — it&apos;s shown once, so keep it private.</p>
+                                  {procedure}
                                 </>
-                              ) : (
-                                <WizardPromptCard text={wizardPromptText(wizardConnectHarness, 1, harnessKey, wizardKeyMode)} label="Copy prompt" />
-                              )
-                            ) : (
-                              wizardNoKeyAffordance
-                            )}
-                            {keyDisplayRow}
+                              ) : wizardNoKeyAffordance}
+                            </WizardBlock>
+                          ) : (
+                            <>
+                              <WizardBlock step={1} title="Get your API key">
+                                {harnessKey ? (
+                                  <>
+                                    <p className="wizard-caption">
+                                      This key connects {displayName} to {shownOrgName || 'your Organization'}. It&apos;s shown once — keep it private.
+                                    </p>
+                                    {keyModeToggleable && (
+                                      <div className="key-pills">
+                                        <button type="button" className={wizardKeyMode === 'included' ? 'active' : ''}
+                                          aria-pressed={wizardKeyMode === 'included'}
+                                          onClick={() => setWizardKeyMode('included')}>
+                                          <strong>Key included in prompt</strong>
+                                          <span>Simple — easiest</span>
+                                        </button>
+                                        <button type="button" className={wizardKeyMode === 'separate' ? 'active' : ''}
+                                          aria-pressed={wizardKeyMode === 'separate'}
+                                          onClick={() => setWizardKeyMode('separate')}>
+                                          <strong>Key separate from prompt</strong>
+                                          <span>Manual — more secure</span>
+                                        </button>
+                                      </div>
+                                    )}
+                                    {keyDisplayRow}
+                                  </>
+                                ) : (
+                                  wizardNoKeyAffordance
+                                )}
+                              </WizardBlock>
+
+                              {harnessKey && (
+                                <WizardBlock step={2} title={procedureTitle}>
+                                  {procedure}
+                                </WizardBlock>
+                              )}
+                            </>
+                          )}
+
+                          <div className="wizard-nav">
+                            <button type="button" className="ghost" onClick={() => setWizardStep(1)}>← Back</button>
+                            <div className="wizard-nav-actions">
+                              {wizardConnectError && <p className="error" role="alert" style={{ margin: '0 0.5rem 0 0', fontSize: 13 }}>{wizardConnectError}</p>}
+                              <button type="button" className="btn-primary" onClick={wizardHarnessContinue} disabled={wizardConnectBusy}>
+                                {wizardConnectBusy ? 'Saving…' : (['pi','cursor','claude-desktop','claude-web'].includes(wizardHarness) ? 'Done — Continue to dashboard' : "I've set it up — Continue →")}
+                              </button>
+                              <button type="button" className="ghost" onClick={() => { setWizardPaused(true); setWizardStep(3) }}>Skip for now</button>
+                            </div>
                           </div>
-                        )
-                        if (wizardHarness === 'claude-desktop') return (
-                          <div>
-                            {/* #2710 (code-review P1): this branch used to render the
-                                snippet with a `YOUR_API_KEY` placeholder plus a Copy
-                                button that wrote an EMPTY string to the clipboard — the
-                                same no-key dead-end as the agent-driven blocks, for one
-                                of six tabs. The affordance is the no-key branch here
-                                too (round-2 review P2: the lead-in sentence and the
-                                trailing "this prompt" line are gated with the block
-                                they introduce, so the no-key state reads as one
-                                coherent ask). */}
-                            {harnessKey ? (
-                              <>
-                                <p style={wizardStepLabelStyle}>1. Connect Tortoise: Open Claude Desktop → Settings → Connectors → <em>Add custom connector</em>, then enter:</p>
-                                <ul className="dim small" style={{ lineHeight: 1.8, paddingLeft: '1.2rem', margin: '0 0 0.75rem' }}>
-                                  <li>Name: <strong>Tortoise</strong></li>
-                                  <li>Server URL: <code>https://api.premiselabs.co/mcp/</code></li>
-                                  <li>Request headers: <code style={wizardHeaderCodeStyle}>{'Authorization: Bearer ' + harnessKey}</code></li>
-                                </ul>
-                                <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', flexWrap: 'wrap', marginBottom: '0.75rem' }}>
-                                  <p className="dim small" style={{ margin: 0 }}>Your API key (shown once):</p>
-                                  <code style={wizardKeyCodeStyle}>{harnessKey}</code>
-                                  <button type="button" className="btn-primary small" onClick={() => navigator.clipboard?.writeText(harnessKey)}>Copy</button>
-                                  <button type="button" className="btn-primary small" onClick={() => navigator.clipboard?.writeText(`Authorization: Bearer ${harnessKey}`)}>Copy header value</button>
-                                </div>
-                                <p className="dim small" style={{ margin: '0 0 0.9rem', lineHeight: 1.6 }}>
-                                  Note: <strong>Request headers</strong> is still rolling out in Anthropic&apos;s beta and may not appear for every account. If Request headers isn&apos;t available on your account yet, use the Claude Code or Cursor tab instead — those paths work on every account.
-                                </p>
-                                <p style={wizardStepLabelStyle}>2. Start a new chat and paste this prompt — it tells Claude how to use Tortoise in this chat:</p>
-                                <WizardPromptCard text={wizardWorkflowsText(harnessKey, wizardKeyMode)} label="Copy prompt" />
-                              </>
-                            ) : (
-                              wizardNoKeyAffordance
-                            )}
-                          </div>
-                        )
-                        if (wizardHarness === 'claude-web') return (
-                          <div>
-                            {/* #2710 (code-review P1): same no-key dead-end as
-                                claude-desktop — the header line used a
-                                `YOUR_API_KEY` placeholder and the Copy button wrote
-                                an empty string. The affordance is the no-key branch;
-                                the lead-in sentence is gated with the block it
-                                introduces (round-2 review P2). */}
-                            {harnessKey ? (
-                              <>
-                                <p style={wizardStepLabelStyle}>1. Connect Tortoise: Open claude.ai → Settings → Connectors → <em>Add custom connector</em>, then enter:</p>
-                                <ul className="dim small" style={{ lineHeight: 1.8, paddingLeft: '1.2rem', margin: '0 0 0.75rem' }}>
-                                  <li>Name: <strong>Tortoise</strong></li>
-                                  <li>Server URL: <code>https://api.premiselabs.co/mcp/</code></li>
-                                  <li>Request headers (advanced): <code style={wizardHeaderCodeStyle}>{'Authorization: Bearer ' + harnessKey}</code></li>
-                                </ul>
-                                <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', flexWrap: 'wrap', marginBottom: '0.75rem' }}>
-                                  <p className="dim small" style={{ margin: 0 }}>Your API key (shown once):</p>
-                                  <code style={wizardKeyCodeStyle}>{harnessKey}</code>
-                                  <button type="button" className="btn-primary small" onClick={() => navigator.clipboard?.writeText(harnessKey)}>Copy</button>
-                                  <button type="button" className="btn-primary small" onClick={() => navigator.clipboard?.writeText(`Authorization: Bearer ${harnessKey}`)}>Copy header value</button>
-                                </div>
-                                <p className="dim small" style={{ margin: '0 0 0.9rem', lineHeight: 1.6 }}>
-                                  Note: <strong>Request headers</strong> is still rolling out in Anthropic&apos;s beta and may not appear for every account. If Request headers isn&apos;t available on your account yet, use the Claude Code or Cursor tab instead — those paths work on every account. Claude connects from Anthropic&apos;s cloud, so your key is stored by Anthropic — keep the chat and the key private.
-                                </p>
-                                <p style={wizardStepLabelStyle}>2. Start a new chat and paste this prompt — it teaches Claude the Tortoise workflows:</p>
-                                <WizardPromptCard text={wizardWorkflowsText(harnessKey, wizardKeyMode)} label="Copy prompt" />
-                              </>
-                            ) : (
-                              wizardNoKeyAffordance
-                            )}
-                          </div>
-                        )
-                        return null
-                      })()}
-                      <div className="wizard-nav" style={{ marginTop: '1rem' }}>
-                        <button type="button" className="ghost" onClick={() => setWizardStep(1)}>← Back</button>
-                        <div className="wizard-nav-actions">
-                          {wizardConnectError && <p className="error" role="alert" style={{ margin: '0 0.5rem 0 0', fontSize: 13 }}>{wizardConnectError}</p>}
-                          <button type="button" className="btn-primary" onClick={wizardHarnessContinue} disabled={wizardConnectBusy}>
-                            {wizardConnectBusy ? 'Saving…' : (['pi','cursor','claude-desktop','claude-web'].includes(wizardHarness) ? 'Done — Continue to dashboard' : "I've set it up — Continue →")}
-                          </button>
-                          <button type="button" className="ghost" onClick={() => { setWizardPaused(true); setWizardStep(3) }}>Skip for now</button>
                         </div>
-                      </div>
-                    </div>
+                      )
+                    })()
                   ) : (
                     <div className="harness">
                       <p className="dim" style={{ margin: '0.9rem 0 0', lineHeight: 1.6 }}>
@@ -7384,7 +7487,7 @@ function claimIntentInFlight() {
               <>
                 <p className="dim">
                   Your Organization and API key are live — the graph is created the moment
-                  you add data. Connect your agent, or add a point yourself:
+                  you add data. Connect your agent, or add a memory yourself:
                 </p>
                 <div className="snippet-wrap">
                   <pre className="snippet">{firstDataSnippet}</pre>
@@ -7427,7 +7530,7 @@ function claimIntentInFlight() {
         {tab === 'overview' && team && !showReentryCard && team.graph_ready !== false && (team.point_count ?? 0) === 0 && (
           <section className="overview empty-state">
             <h2>Welcome to your Tortoise graph</h2>
-            <p className="dim">Connect your agent so it remembers why, not just what.</p>
+            <p className="dim">Connect your agent so it remembers why, not just what — the decisions and findings it saves land here as memories.</p>
             <div className="empty-actions">
               <a className="btn-primary" href="https://tortoise.premiselabs.co/welcome" target="_blank" rel="noreferrer">
                 Connect your agent →
@@ -8334,7 +8437,7 @@ function claimIntentInFlight() {
               </div>
               <div className="cards" style={{ marginTop: 12, marginBottom: 0 }}>
                 <div className="card"><div className="card-val">{(team.write_ops_used ?? 0).toLocaleString()}</div><div className="card-label">Write ops used{(team.write_ops_limit ? ` / ${team.write_ops_limit.toLocaleString()}` : '')}{team.write_ops_period ? ` · ${team.write_ops_period}` : ''}</div></div>
-                <div className="card"><div className="card-val">{team.point_count ?? 0}</div><div className="card-label">Data points</div></div>
+                <div className="card"><div className="card-val">{team.point_count ?? 0}</div><div className="card-label">Memories</div></div>
                 <div className="card"><div className="card-val">{team.max_graphs == null ? '∞' : team.max_graphs}</div><div className="card-label">Graphs</div></div>
                 <div className="card"><div className="card-val">{team.max_users == null ? '∞' : team.max_users}</div><div className="card-label">Users</div></div>
               </div>
@@ -8704,8 +8807,18 @@ function MemorySources(props) {
             {HARNESS_ORDER.map((h) => {
               const st = status(h)
               const supported = !!HARNESS_CAPTURE_SUPPORT[h]
+              const isCurrent = wizardHarness && h === wizardHarness
+              // #2912 (review cycle 4 P2): a `wizardHarness === 'codexDesktop'`
+              // alias used to live here, aliasing the Codex Desktop surface onto
+              // the 'codex' row. It was unreachable: HARNESS_ORDER has no
+              // codexDesktop row, the Settings call site passes
+              // `wizardHarness: null` on purpose, and the only other call site is
+              // the LEGACY_WIZARD_ARCHIVED rollback block, which is fed solely by
+              // HARNESS_ORDER leaves. If a surface leaf ever reaches this row,
+              // wire the alias through a unit-tested helper instead of a
+              // source-grep tripwire.
               return (
-                <div key={h} className={`harness-status status-${st}${wizardHarness && h === wizardHarness ? ' current' : ''}`}>
+                <div key={h} className={`harness-status status-${st}${isCurrent ? ' current' : ''}`}>
                   <div className="harness-status-head">
                     <strong>{HARNESS_NAMES[h]}</strong>
                     {/* review P2-5: aria-live lives on the PILL (the state word
