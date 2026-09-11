@@ -404,11 +404,15 @@ function SettingsTab(props) {
 
       {/* ── Home 1: Setup guide (DE2E-6) — renders the SAME graph-held
           OnboardingState node as the Overview next-action element; the
-          card's Resume re-opens the wizard (idempotent re-entry). W9 owns
-          the fork-aware step-mapped resume. ── */}
+          card's Resume re-opens the wizard (idempotent re-entry). #2364
+          round-1: the copy below states the TRUE resume semantics — the
+          wizard reopens from the START (org-create), never mapped to the
+          guide's current row — and finished steps are saved so org-create
+          and a chosen fork never re-ask. W9 owns the fork-aware
+          step-mapped resume. ── */}
       <section className="settings-home" aria-labelledby="settings-setup-guide-heading">
         <h3 id="settings-setup-guide-heading">Setup guide</h3>
-        <p className="dim small">Where your Organization is in setup — reopen the wizard any time; what you've done is saved.</p>
+        <p className="dim small">Where your Organization is in setup — Resume reopens the setup wizard and walks you through what's left (your Organization and fork choice are already saved).</p>
         <SetupGuideCard state={state} loading={loading} onResume={onResumeSetup} />
       </section>
 
@@ -6106,7 +6110,15 @@ function claimIntentInFlight() {
                       <span key={s.id} className={'wizard-step' + (i === wizardStep ? ' active' : (i < wizardStep ? ' done' : ''))} />
                     ))}
                   </div>
-                  <p className="wizard-title">{WIZARD_STEPS[wizardStep].label}</p>
+                  {/* #2364 round-1: org-holder resume/re-entry must never re-read
+                      the org-create TITLE — an account that already holds an org
+                      walks step 0 as a READ-ONLY summary (never a second mint,
+                      #2323). Branch the visible title to the same label the
+                      sr-only announce uses (#2361 r2) — title + announce never
+                      diverge. The body copy below already branches (#2323 Option
+                      B): 'You're set up in <org>' + Continue, never a create
+                      form. W9/#2005 owns the fork-aware step-MAPPED resume. */}
+                  <p className="wizard-title">{wizardStep === 0 && welcomeHasOrg ? 'Your Organization' : WIZARD_STEPS[wizardStep].label}</p>
                   {wizardStep !== 0 && (
                     <p className="wizard-sub" style={{ marginBottom: '1rem' }}>
                       {(wizardStep === 3 && effectivelyPaused)
