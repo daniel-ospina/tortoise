@@ -138,3 +138,13 @@ class TestIdentifierError:
 
     def test_exactly_65_is_rejected(self):
         assert identifier_error("a" * 65) is not None
+
+    def test_id_pattern_rejects_malformed_identifiers(self):
+        r"""``\Z`` (not ``$``): a trailing newline must not slip an identifier into
+        a graph namespace. Shares the vector list with the JS mirror."""
+        for bad in _VECTORS["id_pattern_rejects"]:
+            assert ID_PATTERN.match(bad) is None, bad
+
+    def test_id_pattern_accepts_the_legal_bounds(self):
+        for good in ["a", "acme", "Acme-Corp_2", "a" * 64, "0abc"]:
+            assert ID_PATTERN.match(good) is not None, good

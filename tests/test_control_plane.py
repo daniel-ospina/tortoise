@@ -101,6 +101,26 @@ class TestTeamCRUD:
         assert result["graph_name"] == "team_name-with-spaces"
         assert result["api_key"].startswith("tt_")
 
+    def test_team_create_rejects_a_colliding_derived_namespace(self, sdk):
+        """#2779: slugify_id is many-to-one — two distinct display names that
+        derive the SAME graph namespace must not share a tenant graph (the
+        namespace is the registry lane's isolation boundary)."""
+        sdk.team_create("Acme Corp")
+        with pytest.raises(ControlPlaneError, match="already exists"):
+            sdk.team_create("Acme.Corp")
+
+    def test_idempotent_recall_returns_the_persisted_graph_name(self, sdk):
+        """#2779: the idempotency branch must return the STORED namespace, not
+        a freshly derived one — the derivation changed (slugify_id), so a
+        pre-existing team could otherwise be handed another tenant's graph."""
+        first = sdk.team_create("Legacy Name", idempotency_key="k-legacy")
+        sdk._get_registry().query(
+            "MATCH (t:Team {id:$id}) SET t.graph_name = 'team_legacy_old'",
+            params={"id": first["id"]})
+        again = sdk.team_create("Legacy Name", idempotency_key="k-legacy")
+        assert again["existing"] is True
+        assert again["graph_name"] == "team_legacy_old"
+
     def test_team_get_returns_none_for_missing(self, sdk):
         assert sdk.team_get("nonexistent-id") is None
 

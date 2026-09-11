@@ -33,7 +33,10 @@ DISPLAY_NAME_MAX = 64
 
 #: The identifier contract — unchanged since #1903. The graph namespace is
 #: ``team_{identifier}`` in both lanes, so this is a charset guarantee.
-ID_PATTERN = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$")
+#: ``\Z`` (not ``$``): Python's ``$`` also matches before a trailing newline,
+#: which would let ``"team-x\n"`` through into a graph name (the JS mirror's
+#: ``$`` has no such hole — this keeps the two verdicts identical).
+ID_PATTERN = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}\Z")
 
 #: Identifiers that would collide with control-plane resources.
 #: ``registry`` is the worst: ``_make_sdk(namespace="registry")`` is the
@@ -61,10 +64,23 @@ def _display_char(code_point: int) -> str:
     return f"U+{code_point:04X}"
 
 
+def _shown(ch: str) -> str:
+    """Printable ASCII is shown verbatim; everything else (controls, format
+    chars, non-ASCII) as ``U+XXXX`` so a message never embeds a raw control
+    char and stays identical across the Python/JS/Deno mirrors."""
+    return ch if ch.isascii() and ch.isprintable() else _display_char(ord(ch))
+
+
 def _is_control(ch: str) -> bool:
-    """C0/C1 control that is not collapsible whitespace (mirror of
-    ``isControlChar`` in orgNaming.js)."""
-    return unicodedata.category(ch) == "Cc" and ch not in _CONTROL_WHITESPACE
+    """Cc/Cf that is not collapsible whitespace (mirror of ``isControlChar``
+    in orgNaming.js / orgNaming.ts).
+
+    ``Cf`` (format chars) is rejected too: free text newly admits bidi
+    overrides/isolates and zero-width characters, which render an org name as
+    a different (or invisible) string — a display-spoofing vector that the
+    pre-#2779 charset could not express.
+    """
+    return unicodedata.category(ch) in ("Cc", "Cf") and ch not in _CONTROL_WHITESPACE
 
 
 def validate_display_name(raw: str | None) -> str:
@@ -132,10 +148,8 @@ def identifier_error(candidate: str | None) -> str | None:
         )
     for ch in text:
         if ch not in "_-" and not (ch.isascii() and ch.isalnum()):
-            shown = _display_char(ord(ch)) if _is_control(ch) else ch
-            return f'Identifier can\'t contain "{shown}". Try: {suggestion}'
+            return f'Identifier can\'t contain "{_shown(ch)}". Try: {suggestion}'
     first = text[0]
     if not (first.isascii() and first.isalnum()):
-        shown = _display_char(ord(first)) if _is_control(first) else first
-        return f'Identifier can\'t start with "{shown}". Try: {suggestion}'
+        return f'Identifier can\'t start with "{_shown(first)}". Try: {suggestion}'
     return None

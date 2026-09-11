@@ -50,6 +50,14 @@ src = src.replace(
   '"../_shared/lookup.ts"',
   '"' + join(STUBS, "_shared/lookup.ts") + '"'
 );
+// #2779: the edge function now also imports the shared org-naming predicate
+// (pure TS, no Deno APIs) — point it at the REAL module so the display-name
+// override path is actually exercised (an un-rewritten relative import would
+// resolve to tests/_shared/orgNaming.ts → ERR_MODULE_NOT_FOUND).
+src = src.replace(
+  '"../_shared/orgNaming.ts"',
+  '"' + join(REPO_ROOT, "supabase/functions/_shared/orgNaming.ts") + '"'
+);
 
 const dir = mkdtempSync(join(REPO_ROOT, "tests/.cors-tmp-"));
 const copy = join(dir, "index-under-test.ts");

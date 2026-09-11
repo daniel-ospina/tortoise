@@ -20,12 +20,19 @@ const WS_RE = /[ \t\n\r\f\v\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u30
 
 export function isControlChar(ch: string): boolean {
   if ('\t\n\r\f\v'.includes(ch)) return false // collapsible whitespace
-  const c = ch.codePointAt(0) as number
-  return c < 0x20 || (c >= 0x7f && c <= 0x9f)
+  // Cc (controls) AND Cf (format chars — bidi overrides, zero-width) are
+  // rejected: mirror of org_naming._is_control / orgNaming.js isControlChar.
+  return /[\p{Cc}\p{Cf}]/u.test(ch)
 }
 
 export function displayChar(ch: string): string {
   return `U+${(ch.codePointAt(0) as number).toString(16).toUpperCase().padStart(4, '0')}`
+}
+
+// Printable ASCII verbatim; everything else as U+XXXX (mirror of
+// org_naming._shown).
+function shownChar(ch: string): string {
+  return /^[\x20-\x7e]$/.test(ch) ? ch : displayChar(ch)
 }
 
 // Mirror of validate_display_name: returns the normalized display name, or
@@ -56,4 +63,29 @@ export function slugifyOrgId(displayName: unknown): string {
     text = `org-${text}`
   }
   return text.slice(0, DISPLAY_NAME_MAX)
+}
+
+// Mirror of identifier_error: null when legal, else a message naming the FIRST
+// offending character (or the reserved word) plus a suggestion.
+export function orgIdentifierError(candidate: unknown): string | null {
+  const text = candidate == null ? '' : String(candidate)
+  const suggestion = slugifyOrgId(text)
+  if (!text) return `Identifier is required. Try: ${suggestion}`
+  if (RESERVED_IDENTIFIERS.has(text)) {
+    return `Identifier "${text}" is reserved. Try: ${suggestion}`
+  }
+  const len = [...text].length
+  if (len > DISPLAY_NAME_MAX) {
+    return `Identifier must be ${DISPLAY_NAME_MAX} characters or fewer (got ${len}). Try: ${suggestion}`
+  }
+  for (const ch of text) {
+    if (ch !== '_' && ch !== '-' && !/^[A-Za-z0-9]$/.test(ch)) {
+      return `Identifier can't contain "${shownChar(ch)}". Try: ${suggestion}`
+    }
+  }
+  const first = text[0]
+  if (!/^[A-Za-z0-9]$/.test(first)) {
+    return `Identifier can't start with "${shownChar(first)}". Try: ${suggestion}`
+  }
+  return null
 }

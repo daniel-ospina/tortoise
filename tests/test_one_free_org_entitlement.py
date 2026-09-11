@@ -729,19 +729,23 @@ class TestNewOrgStripePayload:
 
 class TestCollisionNameRule:
     def test_legal_in_both_lanes_at_every_length(self):
-        """The name must satisfy the STRICTEST lane: sdk.team_create's
-        `^[a-zA-Z0-9][a-zA-Z0-9_ -]*$` and <= 64 chars (the registry SDK
-        rejects parentheses, which the first cut used — the retry could never
-        succeed and a paying customer was stranded on a 500 loop)."""
-        import re as _re
-
+        """The name must survive BOTH lanes' rules: it is a free-text DISPLAY
+        name (#2779) and its DERIVED identifier — `slugify_id` — must satisfy
+        the graph-namespace charset (`ID_PATTERN`), <= 64 chars. (The old
+        assertion pinned the deleted SDK charset regex; it passed only because
+        every sample happened to be charset-legal.)"""
         from tortoise.hosted_api import _new_org_collision_name
-        for name in ["A", "Second Org", "Acme Inc", "x" * 57, "y" * 64,
-                     "N" * 63 + " Z"]:
+        from tortoise.org_naming import (
+            ID_PATTERN,
+            slugify_id,
+            validate_display_name,
+        )
+        for name in ["A", "Second Org", "Acme Inc", "Acme, Inc. (US)",
+                     "x" * 57, "y" * 64, "N" * 63 + " Z"]:
             alt = _new_org_collision_name(name, "0123456789abcdef")
             assert len(alt) <= 64, (name, alt)
-            assert _re.match(r"^[a-zA-Z0-9][a-zA-Z0-9_ -]*$", alt), (name, alt)
-            assert "(" not in alt and ")" not in alt, alt
+            assert validate_display_name(alt) == alt, (name, alt)
+            assert ID_PATTERN.match(slugify_id(alt)), (name, alt)
         # deterministic — a Stripe redelivery must not compute a different name
         assert (_new_org_collision_name("Second Org", "abcdef1234")
                 == _new_org_collision_name("Second Org", "abcdef1234"))
@@ -869,8 +873,6 @@ class TestRegistryLaneWebhookProvisioning:
         The retry MUST use a name the SAME lane accepts (no parentheses, <=64) —
         otherwise it raises inside the except, 500s forever, and the paying
         customer never gets an org."""
-        import re as _re
-
         import tortoise.billing as billing
         monkeypatch.setattr(billing.StripeClient, "get_subscription",
                             lambda self, sid: FIXTURE_SUB)
@@ -887,5 +889,6 @@ class TestRegistryLaneWebhookProvisioning:
         assert names.count("Second Org") == 1, names  # the squatter's
         alt = [n for n in names if n.startswith("Second Org") and n != "Second Org"]
         assert len(alt) == 1, names
-        assert _re.match(r"^[a-zA-Z0-9][a-zA-Z0-9_ -]*$", alt[0]), alt
+        from tortoise.org_naming import ID_PATTERN, slugify_id
+        assert ID_PATTERN.match(slugify_id(alt[0])), alt
         assert len(alt[0]) <= 64, alt

@@ -44,6 +44,12 @@ test('#2779 shared vectors: orgIdentifierError names the offending character', (
   }
 })
 
+test('#2779 shared vectors: ID_PATTERN rejects malformed identifiers', () => {
+  for (const bad of VECTORS.id_pattern_rejects) {
+    assert.equal(ID_PATTERN.test(bad), false, `ID_PATTERN must reject ${JSON.stringify(bad)}`)
+  }
+})
+
 test('#2779: the reported bug — a display name with spaces is accepted', () => {
   assert.equal(displayNameError('test org for multi-organisation'), null)
   // the identifier rule stays honest for genuine identifier input

@@ -27,7 +27,13 @@
     {"input": "   ", "valid": false, "error_contains": ["required"]},
     {"input": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "valid": false, "error_contains": ["65"]},
     {"input": "Acme\u0000Corp", "valid": false, "error_contains": ["U+0000"]},
-    {"input": "Acme\u007fCorp", "valid": false, "error_contains": ["U+007F"]}
+    {"input": "Acme\u007fCorp", "valid": false, "error_contains": ["U+007F"]},
+    {"input": "Acme\u202eCorp", "valid": false, "error_contains": ["U+202E"]},
+    {"input": "Acme\u200bCorp", "valid": false, "error_contains": ["U+200B"]}
+  ],
+  "id_pattern_rejects": [
+    "acme\n", "acme ", " acme", "_acme", "-acme", "a b", "", "a/",
+    "é", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
   ],
   "identifier_errors": [
     {"input": "test org for multi-organisation", "message_contains": ["\" \"", "test-org-for-multi-organisation"]},
@@ -38,6 +44,7 @@
     {"input": "", "message_contains": ["required", "org-"]},
     {"input": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "message_contains": ["65", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]},
     {"input": "Acme\u0000Corp", "message_contains": ["U+0000", "Acme-Corp"]},
+    {"input": "acme\n", "message_contains": ["U+000A", "acme"]},
     {"input": "ok-name", "message_contains": []},
     {"input": "acme_prod-2", "message_contains": []}
   ]

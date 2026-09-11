@@ -1,10 +1,14 @@
 // org_naming_vectors_test.ts — Deno test pinning supabase/functions/_shared/
 // orgNaming.ts to the SHARED #2779 vectors (also read by the Python and
-// dashboard suites). Run: deno test supabase/tests/org_naming_vectors_test.ts
+// dashboard suites). Run explicitly:
+//   deno test --allow-read supabase/tests/org_naming_vectors_test.ts
+// (Not wired into CI — there is no deno step; run it when touching this
+// mirror, the fixture, or org_naming.py.)
 import {
   DISPLAY_NAME_MAX,
   RESERVED_IDENTIFIERS,
   normalizeDisplayName,
+  orgIdentifierError,
   slugifyOrgId,
 } from "../functions/_shared/orgNaming.ts";
 
@@ -34,6 +38,20 @@ Deno.test("#2779 shared vectors: normalizeDisplayName accepts free text", () => 
     } else {
       if (got !== null) {
         throw new Error(`expected rejection for ${JSON.stringify(v.input)}, got ${JSON.stringify(got)}`);
+      }
+    }
+  }
+});
+
+Deno.test("#2779 shared vectors: orgIdentifierError names the character", () => {
+  for (const v of VECTORS.identifier_errors) {
+    const err = orgIdentifierError(v.input);
+    if (v.message_contains.length === 0) {
+      eq(err, null, `orgIdentifierError(${JSON.stringify(v.input)})`);
+    } else {
+      if (err === null) throw new Error(`expected a rejection for ${JSON.stringify(v.input)}`);
+      for (const needle of v.message_contains) {
+        if (!err.includes(needle)) throw new Error(`${JSON.stringify(err)} should contain ${JSON.stringify(needle)}`);
       }
     }
   }

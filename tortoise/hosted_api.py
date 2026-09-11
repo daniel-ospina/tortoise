@@ -2878,11 +2878,14 @@ class NewOrgCheckoutRequest(BaseModel):
     """#2789: POST /v1/billing/checkout/new-org body — the intended org name
     plus the plan's server-side price id. The org does not exist yet; the name
     is validated as a free-text DISPLAY name (#2779)."""
-    name: str = Field(..., min_length=1, max_length=64)
+    name: str = Field(..., min_length=1, max_length=4096)
     price_id: str = Field(..., min_length=1, max_length=128)
-    # NOTE (#2779): `name` is a free-text DISPLAY name. The Pydantic bounds
-    # above are a coarse shape gate; the authoritative rule is the shared
-    # display-name validator applied in the route (tortoise/org_naming.py).
+    # NOTE (#2779): `name` is a free-text DISPLAY name. The bound above is a
+    # coarse DoS shape gate only — the AUTHORITATIVE rule is the shared
+    # display-name validator applied in the route (tortoise/org_naming.py),
+    # which collapses whitespace and caps at 64 AFTER normalisation. A raw
+    # 64-char Pydantic bound would diverge from the other three routes for
+    # inputs like "a  " * 30 (90 raw → 59 normalised).
 
 
 class NewOrgCheckoutResponse(BaseModel):

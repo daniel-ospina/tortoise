@@ -25,12 +25,20 @@ const WS_RE = /[ \t\n\r\f\v\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u30
 
 function isControlChar(ch) {
   if ('\t\n\r\f\v'.includes(ch)) return false // collapsible whitespace
-  const c = ch.codePointAt(0)
-  return c < 0x20 || (c >= 0x7f && c <= 0x9f)
+  // Cc (controls) AND Cf (format chars — bidi overrides, zero-width) are
+  // rejected: free text would otherwise admit invisible/visually-spoofing
+  // names. Mirror of org_naming._is_control.
+  return /[\p{Cc}\p{Cf}]/u.test(ch)
 }
 
 function displayChar(ch) {
   return `U+${ch.codePointAt(0).toString(16).toUpperCase().padStart(4, '0')}`
+}
+
+// Printable ASCII verbatim; everything else as U+XXXX (mirror of
+// org_naming._shown).
+function shownChar(ch) {
+  return /^[\x20-\x7e]$/.test(ch) ? ch : displayChar(ch)
 }
 
 function isAsciiAlnum(ch) {
@@ -103,14 +111,12 @@ export function orgIdentifierError(candidate) {
   }
   for (const ch of text) {
     if (ch !== '_' && ch !== '-' && !isAsciiAlnum(ch)) {
-      const shown = isControlChar(ch) ? displayChar(ch) : ch
-      return `Identifier can't contain "${shown}". Try: ${suggestion}`
+      return `Identifier can't contain "${shownChar(ch)}". Try: ${suggestion}`
     }
   }
   const first = text[0]
   if (!isAsciiAlnum(first)) {
-    const shown = isControlChar(first) ? displayChar(first) : first
-    return `Identifier can't start with "${shown}". Try: ${suggestion}`
+    return `Identifier can't start with "${shownChar(first)}". Try: ${suggestion}`
   }
   return null
 }

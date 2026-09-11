@@ -14381,7 +14381,7 @@ class TortoiseSDK:
         # Idempotency — check registry graph for existing team
         if idempotency_key:
             existing = reg.query(
-                "MATCH (t:Team {idempotency_key:$ik}) RETURN t.id, t.name",
+                "MATCH (t:Team {idempotency_key:$ik}) RETURN t.id, t.name, t.graph_name",
                 params={"ik": idempotency_key},
             ).result_set
             if existing:
@@ -14390,7 +14390,11 @@ class TortoiseSDK:
                 # the function is never hashed/persisted on this branch, so
                 # returning it handed callers a dead key that fails auth on
                 # first use. The plaintext belongs to the original creation.
-                return {"name": name, "graph_name": graph_name,
+                # #2779: return the PERSISTED graph_name, not a freshly
+                # derived one — the derivation changed (slugify_id), so a
+                # pre-existing team's namespace must never be recomputed into
+                # a different (possibly another tenant's) graph.
+                return {"name": name, "graph_name": row[2] or graph_name,
                         "id": row[0], "existing": True}
 
         # Mint the key only on the CREATE path (after the idempotency check)
@@ -14411,6 +14415,23 @@ class TortoiseSDK:
         ).result_set[0][0]
         if dup:
             raise ControlPlaneError(f"Team {name!r} already exists")
+
+        # #2779: the namespace identifier is derived from a free-text display
+        # name, so slugify_id is many-to-one ("Acme Corp" and "Acme.Corp"
+        # both derive team_Acme-Corp). The graph namespace IS the tenant
+        # isolation boundary in the registry lane — guard uniqueness on the
+        # DERIVED namespace, not just the exact display name. (Slice 2's
+        # uq_teams_graph_name index is the DB-level backstop; the Supabase
+        # lane uses the opaque team_{team_id} and cannot collide.)
+        dup_ns = reg.query(
+            "MATCH (t:Team {graph_name:$gn}) RETURN count(t) > 0",
+            params={"gn": graph_name},
+        ).result_set[0][0]
+        if dup_ns:
+            raise ControlPlaneError(
+                f"Team namespace {graph_name!r} already exists "
+                "(a different display name derives the same identifier)"
+            )
 
         tid = ulid()
         # Tier-driven limits from product/pricing.json (decision 1d) — no max_teams
