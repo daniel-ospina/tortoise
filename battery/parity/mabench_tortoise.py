@@ -15,8 +15,15 @@ The lane contract (what makes the two rows comparable):
    ``docs/epics/1402-eval-battery/lane-matrix.md``). A partial ingest is a
    refusal, never a number.
 2. **Retrieve per question.** ``memory.recall(question, k)`` reads through the
-   product state surface (``TortoiseSDK.recall_state``, the same read the A4
-   arm uses).
+   product state surface (``TortoiseSDK.recall_state``) — but NOT byte-for-byte
+   what the A4 arm does: A4 reads with the product default
+   ``object_centric=True`` (``a4_tortoise.py``), while this lane passes
+   ``object_centric=False`` explicitly (see ``_TortoiseMemory.recall``) because
+   the CR pool is a flat list of facts with no object structure to pivot on and
+   the object-centric read returned materially less. That is a deliberate,
+   documented deviation from "the product as A4 configures it" and it is a
+   retrieval-quality knob, NOT a benchmark-tuned one: it was chosen against the
+   benchmark's own pool shape and never tuned against its scores.
 3. **Ask with the benchmark's OWN templates.** The per-question prompt is
    ``mabench_run.build_lane_prompt(retrieved_context, question)`` — the
    benchmark's system message + memorize turn + conflict-rule query template,
