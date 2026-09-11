@@ -10667,11 +10667,17 @@ class TortoiseSDK:
         ``pointKind`` scopes the match (a duplicate observation must never
         suppress a decision, #784); ``exclude_id`` excludes a specific point
         (the dedup candidate itself — self-match guard, #784 review). Both
-        default to None (legacy any-kind behavior). The WHERE clause
-        ``(n.is_operator IS NULL OR n.is_operator = false)`` matches the
+        default to None (legacy any-kind behavior). The WHERE clause is the
+        canonical non-operator predicate — ``(n.is_operator IS NULL OR
+        n.is_operator = false) AND n.op_type IS NULL`` (parity with
+        ``summarize_structure`` / ``list_pointkinds`` / ``ep.py``
+        ``count_claims``, #943): the absence-or-false form matches the
         explicit-false modern shape AND the legacy property-absent shape
-        (plain Points written before ``is_operator:false`` was stamped) while
-        never matching an operator node.
+        (plain Points written before ``is_operator:false`` was stamped), and
+        the ``op_type IS NULL`` guard excludes LEGACY operators — which carry
+        ``op_type`` WITHOUT the ``is_operator`` property and would otherwise
+        be matched by the absence-or-false form, so the predicate never
+        resolves a dedup to an operator node.
 
         Order pin (inherited from create_point): the hash query runs first;
         the fallback runs on the miss and a fallback HIT is a normal dedup
@@ -10679,7 +10685,13 @@ class TortoiseSDK:
         snapshot (the hash-less point's content is intact).
         """
         proj = self._get_proj()
-        clauses = ["(n.is_operator IS NULL OR n.is_operator = false)"]
+        # Canonical non-operator predicate (#943 parity): absence-or-false
+        # AND op_type IS NULL. The op_type guard excludes LEGACY operators
+        # (op_type set, is_operator property absent) that the bare
+        # absence-or-false form matches — resolving a dedup to an operator
+        # node would skip creating a legitimate point.
+        clauses = ["(n.is_operator IS NULL OR n.is_operator = false)",
+                   "n.op_type IS NULL"]
         hash_params: dict = {"ch": _content_hash(content)}
         if pointKind:
             clauses.append("n.pointKind = $kind")
