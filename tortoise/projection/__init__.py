@@ -21,7 +21,7 @@ import threading
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Protocol, runtime_checkable
+from typing import NamedTuple, Protocol, runtime_checkable
 
 logger = logging.getLogger(__name__)
 
@@ -570,6 +570,45 @@ def _validate_uri_scheme(scheme: str) -> str:
     return scheme
 
 
+class DbEndpoint(NamedTuple):
+    """Resolved FalkorDB server endpoint (the canonical URI → client kwargs)."""
+
+    host: str
+    port: int
+    username: str | None
+    password: str | None
+    graph_name: str
+    ssl: bool
+
+
+def resolve_db_endpoint(uri: str, graph_name: str | None = None) -> DbEndpoint:
+    """Parse a connection URI into FalkorDB client endpoint parameters.
+
+    THE canonical URI → endpoint derivation (#2974): ``FalkorProjection.
+    from_uri`` (every product connection) and ``tortoise.backup._bgsave`` (the
+    backup snapshot) both call this, so a backup can never dial a different
+    instance than the product it is backing up. Before this existed the same
+    parse was inlined in ``from_uri`` and independently re-implemented by
+    callers — one of which hardcoded an embedded ``localhost:16379``.
+
+    ``graph_name`` overrides the URI-path-derived name (multi-tenant
+    isolation, #7886); when None the URI path is used (default "tortoise").
+    Unsupported schemes raise ValueError via ``_validate_uri_scheme``.
+    """
+    from urllib.parse import urlparse
+    parsed = urlparse(uri)
+    _validate_uri_scheme(parsed.scheme)
+    return DbEndpoint(
+        host=parsed.hostname or "localhost",
+        port=parsed.port or 16379,
+        username=parsed.username or None,
+        password=parsed.password or None,
+        graph_name=(graph_name if graph_name is not None
+                    else (parsed.path.lstrip('/') or "tortoise")),
+        ssl=(parsed.scheme == "rediss"),
+    )
+
+
 # ── FalkorProjection ──────────────────────────────────────────────────────
 
 
@@ -1004,13 +1043,8 @@ class FalkorProjection(
 
         Unsupported schemes raise ValueError with an actionable message.
         """
-        from urllib.parse import urlparse
-        parsed = urlparse(uri)
-        _validate_uri_scheme(parsed.scheme)
-        username = parsed.username or None
-        password = parsed.password or None
-        if graph_name is None:
-            graph_name = parsed.path.lstrip('/') or "tortoise"
+        endpoint = resolve_db_endpoint(uri, graph_name)
+        graph_name = endpoint.graph_name
         # Epic #1647 (cycle-4 P2-2 / cycle-6 P2-13 / cycle-7 P2-9 / #1686): in
         # a TEST SESSION with a calling test frame (TORTOISE_TEST_MODE=1 AND
         # _resolve_caller_stem() is not None — the SAME predicate as the
@@ -1029,12 +1063,12 @@ class FalkorProjection(
         if os.environ.get("TORTOISE_TEST_MODE") == "1" \
                 and _resolve_caller_stem() is not None:
             _journal_append_product(graph_name)
-        return cls(host=parsed.hostname or "localhost",
-                   port=parsed.port or 16379,
-                   username=username,
-                   password=password,
+        return cls(host=endpoint.host,
+                   port=endpoint.port,
+                   username=endpoint.username,
+                   password=endpoint.password,
                    graph_name=graph_name,
-                   ssl=(parsed.scheme == "rediss"))
+                   ssl=endpoint.ssl)
 
     def _norm(self, ev: dict) -> dict:
         """Normalize event shape — tolerates API (flat) and script (nested point)."""

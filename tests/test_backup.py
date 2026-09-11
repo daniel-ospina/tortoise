@@ -2,12 +2,13 @@
 from __future__ import annotations  # noqa: I001
 
 import json
+import logging
 import os
 import tempfile
 from pathlib import Path
 
 import pytest  # noqa: F401
-from tortoise.backup import backup, restore
+from tortoise.backup import _bgsave, backup, restore
 
 
 def test_backup_creates_timestamped_dir():
@@ -159,3 +160,191 @@ def test_restore_legacy_manifest_embedded_db_fallback(tmp_path):
     assert (dst / "tortoise.db").exists(), \
         "embedded.db fallback must be copied to the target db path"
     assert (dst / "tortoise.db").read_bytes() == b"stub-embedded-db"
+
+
+# ── #2974: BGSAVE must dial the CONFIGURED DB, and fail loudly ────────────
+#
+# Regression: ``_bgsave()`` dialed FALKORDB_HOST/FALKORDB_PORT with the
+# embedded defaults (localhost:16379), so in hosted production — which sets
+# only FALKORDB_CLOUD_URI → TORTOISE_DB_URI — the BGSAVE never reached the
+# real instance and the swallowed ``except Exception: pass`` hid it.
+# The endpoint now comes from the same canonical resolver the product uses
+# (tortoise.projection.resolve_db_endpoint, shared with from_uri).
+
+
+class _RecordingConnection:
+    """Stand-in for falkordb's ``.connection`` (a redis client)."""
+
+    def __init__(self, exc: Exception | None = None):
+        self.commands: list[tuple] = []
+        self._exc = exc
+
+    def execute_command(self, *args):
+        self.commands.append(args)
+        if self._exc is not None:
+            raise self._exc
+        return "Background saving started"
+
+
+def _install_fake_falkordb(monkeypatch, instances, exc=None):
+    """Replace ``falkordb.FalkorDB`` with a recorder so no socket is opened."""
+
+    class _FakeFalkorDB:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+            self.connection = _RecordingConnection(exc)
+            instances.append(self)
+
+    monkeypatch.setattr("falkordb.FalkorDB", _FakeFalkorDB)
+    return _FakeFalkorDB
+
+
+def test_bgsave_dials_the_configured_uri_not_localhost(monkeypatch):
+    """#2974: the endpoint is TORTOISE_DB_URI, never the embedded defaults."""
+    instances: list = []
+    _install_fake_falkordb(monkeypatch, instances)
+    # The embedded defaults the old code used — they must be IGNORED.
+    monkeypatch.setenv("FALKORDB_HOST", "localhost")
+    monkeypatch.setenv("FALKORDB_PORT", "16379")
+    monkeypatch.setenv(
+        "TORTOISE_DB_URI",
+        "rediss://:s3cret@falkordb-cloud.example.com:6380/tortoise")
+
+    status = _bgsave()
+
+    assert status == "ok"
+    assert len(instances) == 1, "exactly one client must be constructed"
+    assert instances[0].kwargs == {
+        "host": "falkordb-cloud.example.com",
+        "port": 6380,
+        "username": None,
+        "password": "s3cret",
+        "ssl": True,
+        "socket_connect_timeout": 5,
+        "socket_timeout": 10,
+    }
+    assert instances[0].connection.commands == [("BGSAVE",)]
+
+
+def test_bgsave_explicit_uri_argument_wins_over_env(monkeypatch):
+    """The CLI ``--db`` URI (when it is a URI) is the snapshot target."""
+    instances: list = []
+    _install_fake_falkordb(monkeypatch, instances)
+    monkeypatch.setenv("TORTOISE_DB_URI",
+                       "redis://:envpw@env-host.example.com:7000/tortoise")
+
+    status = _bgsave("docker://:pw@cli-host:6379/tortoise")
+
+    assert status == "ok"
+    assert instances[0].kwargs["host"] == "cli-host"
+    assert instances[0].kwargs["port"] == 6379
+    assert instances[0].kwargs["password"] == "pw"
+
+
+def test_bgsave_connection_failure_is_loud(monkeypatch, caplog):
+    """#2974: a failed snapshot is visible — ERROR log + 'failed' status —
+    never the old silent ``except Exception: pass``."""
+    instances: list = []
+    _install_fake_falkordb(monkeypatch, instances,
+                           exc=RuntimeError("connection refused"))
+    monkeypatch.setenv("TORTOISE_DB_URI",
+                       "redis://cloud.example.com:6379/tortoise")
+
+    with caplog.at_level(logging.ERROR, logger="tortoise.backup"):
+        status = _bgsave()
+
+    assert status.startswith("failed:")
+    assert "cloud.example.com:6379" in status
+    assert [r for r in caplog.records if r.levelno >= logging.ERROR], \
+        "a BGSAVE connection failure must be logged at ERROR"
+
+
+def test_bgsave_unsupported_scheme_is_loud(monkeypatch, caplog):
+    """A configured-but-unresolvable URI is a misconfiguration, not a skip."""
+    instances: list = []
+    _install_fake_falkordb(monkeypatch, instances)
+    monkeypatch.setenv("TORTOISE_DB_URI", "bolt://neo4j.example.com:7687")
+
+    with caplog.at_level(logging.ERROR, logger="tortoise.backup"):
+        status = _bgsave()
+
+    assert status.startswith("failed:")
+    assert "bolt" in status
+    assert instances == [], \
+        "must not attempt a connection to an unresolvable endpoint"
+    assert [r for r in caplog.records if r.levelno >= logging.ERROR]
+
+
+def test_bgsave_embedded_mode_skips_without_alarm(monkeypatch, caplog):
+    """No configured server URI = embedded mode: skip at INFO, no error."""
+    instances: list = []
+    _install_fake_falkordb(monkeypatch, instances)
+    monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+
+    with caplog.at_level(logging.INFO, logger="tortoise.backup"):
+        status = _bgsave()
+
+    assert status.startswith("skipped:")
+    assert instances == []
+    assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+
+
+def test_backup_manifest_records_bgsave_failure(monkeypatch, tmp_path):
+    """#2974: a broken snapshot is visible in the backup artifact itself."""
+    instances: list = []
+    _install_fake_falkordb(monkeypatch, instances,
+                           exc=RuntimeError("boom"))
+    monkeypatch.setenv("TORTOISE_DB_URI",
+                       "redis://cloud.example.com:6379/tortoise")
+
+    (tmp_path / "events.jsonl").write_text('{"type": "PointAdded"}\n')
+    (tmp_path / "tortoise.db").write_text("stub-db")
+
+    target = backup(db_path=str(tmp_path / "tortoise.db"),
+                    events_path=str(tmp_path / "events.jsonl"),
+                    target_dir=str(tmp_path / "backups"))
+
+    manifest = json.loads((target / "manifest.json").read_text())
+    assert manifest["bgsave"].startswith("failed:"), \
+        "the manifest must record that the snapshot was NOT taken"
+
+
+def test_backup_manifest_records_bgsave_ok(monkeypatch, tmp_path):
+    """The happy path is recorded too, so 'ok' is never merely assumed."""
+    instances: list = []
+    _install_fake_falkordb(monkeypatch, instances)
+    monkeypatch.setenv("TORTOISE_DB_URI",
+                       "redis://cloud.example.com:6379/tortoise")
+
+    (tmp_path / "events.jsonl").write_text('{"type": "PointAdded"}\n')
+    (tmp_path / "tortoise.db").write_text("stub-db")
+
+    target = backup(db_path=str(tmp_path / "tortoise.db"),
+                    events_path=str(tmp_path / "events.jsonl"),
+                    target_dir=str(tmp_path / "backups"))
+
+    manifest = json.loads((target / "manifest.json").read_text())
+    assert manifest["bgsave"] == "ok"
+    assert instances[0].connection.commands == [("BGSAVE",)]
+
+
+def test_resolve_db_endpoint_is_the_shared_canonical_resolver():
+    """#2974: the backup endpoint and from_uri's endpoint derive from ONE
+    resolver — they cannot drift."""
+    from tortoise.projection import DbEndpoint, resolve_db_endpoint
+
+    endpoint = resolve_db_endpoint(
+        "rediss://user:pw@cloud.example.com:6380/team_acme")
+    assert endpoint == DbEndpoint(
+        host="cloud.example.com",
+        port=6380,
+        username="user",
+        password="pw",
+        graph_name="team_acme",
+        ssl=True,
+    )
+    # graph_name override (multi-tenant isolation, #7886) wins over the path
+    override = resolve_db_endpoint(
+        "docker://:pw@localhost:6379/tortoise", graph_name="team_x")
+    assert override.graph_name == "team_x"
+    assert override.ssl is False
