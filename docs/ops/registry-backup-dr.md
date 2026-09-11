@@ -374,7 +374,12 @@ short or line-split PAT cannot survive), `*_KEY=`/`"token":"…"` assignments
 (suffix-anchored, so `patch:`/`compatible:`/`author:` are not false positives),
 quoted token values, ≥20-char token-like runs and filesystem paths — while
 **preserving lowercase JSON keys, timestamps and graph ids**, so the published
-`last_sweep` roll-up stays readable. `redact_truncate()` redacts *before*
+`last_sweep` roll-up stays readable. Over-redaction is the deliberate
+fail-safe direction for a **public** body: a value that merely *looks*
+token-like is redacted too — a 26-char hex `team_id` (matched by the generic
+≥20-char token rule) or a ≥6-char single-quoted identifier (the historical
+`(got 'AbCdEfGh')` rule) — so triage keys on the preserved `graph_id` rather
+than the redacted `team_id`. `redact_truncate()` redacts *before*
 truncating so a secret is never cut into a sub-threshold fragment. Known
 residual: a secret with no recognisable prefix that is split by raw whitespace
 into fragments each under 20 characters. The primary control is the source —

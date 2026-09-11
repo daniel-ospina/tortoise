@@ -98,11 +98,13 @@ finish() {
 # key-parsing sites emit a sha256 fingerprint, never the raw value.
 redact() { # text -> text safe for a public issue body / public Actions log
   printf '%s' "$1" | tr '\n\r\t' '   ' | sed -E \
+    -e 's/\\"/"/g' \
     -e 's#([A-Za-z][A-Za-z0-9+.-]*://)[^[:space:]]*@#\1<redacted>@#g' \
     -e 's#([A-Za-z0-9_.-]+:)[^[:space:]]*@#\1<redacted>@#g' \
     -e 's/(Basic|Bearer|token|ApiKey|OAuth)[[:space:]]+[A-Za-z0-9+/=_.-]+/\1 <redacted>/Ig' \
     -e 's/(^|[^A-Za-z0-9_])(ghp_|gho_|ghu_|ghs_|ghr_|github_pat_|glpat-|xox[baprs]-|AKIA|ASIA|sk-)[^[:space:]]*/\1\2<redacted>/g' \
     -e 's/([A-Za-z0-9_]*(KEY|TOKEN|SECRET|PASSWORD|PASSWD|PAT|AUTH|CREDENTIAL|APIKEY|DSN)[[:space:]]*[=:][[:space:]]*)["'\''"]?[^[:space:]"'\''"]+/\1<redacted>/Ig' \
+    -e 's/("[A-Za-z0-9_]*(KEY|TOKEN|SECRET|PASSWORD|PASSWD|PAT|AUTH|CREDENTIAL|APIKEY|DSN)"[[:space:]]*:[[:space:]]*)"[^"]*"/\1"<redacted>"/Ig' \
     -e "s/'([^']{6,})'/'<redacted>'/g" \
     -e 's/"([A-Za-z0-9+/=_.-]{20,})"/"<redacted>"/g' \
     -e 's/[A-Za-z0-9+/_.=-]{20,}/<redacted>/g' \
@@ -624,16 +626,23 @@ case "$RUN_STATUS" in
     # while a CUSTOM graph archived reads as 0 teams but real coverage exists.
     if [ "${GRAPHS_BACKED_UP:-0}" -gt 0 ]; then
       log "sweep status=$RUN_STATUS_SAFE but ${GRAPHS_BACKED_UP} graph(s) were backed up — coverage is not zero"
+      # Review R1 (P2): coverage EXISTS on this run, so an open
+      # SWEEP_NO_COVERAGE must close here — otherwise a recovered pipeline
+      # keeps a stale incident open forever and its dedup object absorbs the
+      # next genuine occurrence (alert rot). The enabled+stale/empty arms all
+      # set NO_COVERAGE=1 and file; this arm is the one covered path.
+      resolve_global SWEEP_NO_COVERAGE \
+        "Resolved — ${GRAPHS_BACKED_UP} graph(s) backed up (status=$RUN_STATUS_SAFE; default graphs empty, custom graphs covered)."
     elif [ "$R2_LIST_OK" != "1" ]; then
       # Unknown ≠ empty (review R5): the pool could hold teams we cannot see.
       log "sweep backed up 0 teams (status=$RUN_STATUS_SAFE) and the R2 pool could NOT be measured — filing SWEEP_NO_COVERAGE (job red)"
       file_alert SWEEP_NO_COVERAGE "[DR] SWEEP_NO_COVERAGE — enabled, 0 teams, pool unmeasurable" \
-        "sweep status=${RUN_STATUS} and the R2 pool listing failed (unknown is not empty), so coverage cannot be confirmed. The sweep is enabled but may be backing up nothing (#2823). Check the R2 access key's ListObjects permission and re-run." "global"
+        "sweep status=${RUN_STATUS_SAFE} and the R2 pool listing failed (unknown is not empty), so coverage cannot be confirmed. The sweep is enabled but may be backing up nothing (#2823). Check the R2 access key's ListObjects permission and re-run." "global"
       NO_COVERAGE=1
     elif [ "${R2_TEAM_COUNT:-0}" -gt 0 ]; then
       log "sweep backed up 0 teams but the R2 pool holds ${R2_TEAM_COUNT} team prefix(es) — filing SWEEP_NO_COVERAGE (job red)"
       file_alert SWEEP_NO_COVERAGE "[DR] SWEEP_NO_COVERAGE — enabled but 0 teams backed up" \
-        "sweep status=${RUN_STATUS} but the R2 pool holds ${R2_TEAM_COUNT} team prefix(es); last_sweep=${LAST_SWEEP_SAFE}. The sweep is enabled yet backed up 0 teams (#2823) — backups are NOT running." "global"
+        "sweep status=${RUN_STATUS_SAFE} but the R2 pool holds ${R2_TEAM_COUNT} team prefix(es); last_sweep=${LAST_SWEEP_SAFE}. The sweep is enabled yet backed up 0 teams (#2823) — backups are NOT running." "global"
       NO_COVERAGE=1
     else
       log "sweep found 0 teams and the R2 pool is empty — chronic pre-beta state, no incident"

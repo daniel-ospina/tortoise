@@ -132,7 +132,15 @@ case "$op" in
         printf '%s' "${R2_TEAMS:-}" ;;
       */default/)
         [ "${STUB_LIST_FAIL_TEAM:-0}" = "1" ] && exit 1
-        printf '%s' "${R2_DEFAULT_LIST:-}" ;;
+        # Per-team override so a multi-team case can distinguish WHICH team the
+        # driver measured (review R1 test-integrity): with one shared listing
+        # every prefix returns the same value and the tab-split regression is
+        # invisible (the buggy loop measures only the LAST team).
+        case "$p" in
+          "backups/teamZ/default/") printf '%s' "${R2_DEFAULT_LIST_Z:-${R2_DEFAULT_LIST:-}}" ;;
+          "backups/teamA/default/") printf '%s' "${R2_DEFAULT_LIST_A:-${R2_DEFAULT_LIST:-}}" ;;
+          *) printf '%s' "${R2_DEFAULT_LIST:-}" ;;
+        esac ;;
       backups/*/2)
         [ "${STUB_FLAT_FAIL:-0}" = "1" ] && exit 1
         printf '%s' "${R2_FLAT_LIST:-[]}" ;;
@@ -269,6 +277,7 @@ reset_case() {
         SIMULATE_APP_DOWN \
         STUB_LIST_FAIL STUB_LIST_FAIL_TEAM STUB_FLAT_FAIL STUB_INDEX_FAIL GH_ISSUE_STATE STUB_ISSUE_CODE \
         GH_SEARCH_JSON GH_NEW_ISSUE R2_TEAMS R2_DEFAULT_LIST R2_FLAT_LIST \
+        R2_DEFAULT_LIST_Z R2_DEFAULT_LIST_A \
         GH_ISSUE_SWEEP_CONFIG_ERROR GH_ISSUE_SWEEP_OFF_STALE GH_ISSUE_SWEEP_NO_COVERAGE \
         GH_ISSUE_WATCHER_DOWN GH_ISSUE_APP_DOWN GH_ISSUE_R2_DOWN GH_ISSUE_STALE || true
   export R2_FLAT_LIST="[]"
@@ -700,15 +709,20 @@ assert_match "$(cat "$LOG")" "GH PATCH .*/issues/45" "36. SWEEP_OFF_STALE self-h
 
 # ── 37. multi-team pool: `--output text` is ONE tab-separated line (P1) ────
 # Review P1 (bug-deep, conf 98): aws renders a list as a single tab-separated
-# line, so a bare `while read` measured only the LAST team. teamA must still be
+# line, so a bare `while read` measured only the LAST team. teamZ must still be
 # seen — its stale default drives POOL_STALE / SWEEP_OFF_STALE.
+# Review R1 (test-integrity, conf 95): the ORIGINAL case put the stale team
+# LAST, so the ablated driver measured exactly the team the assertion looked
+# for and the suite stayed green (ablation-proven). The stale team is now
+# FIRST and the last team is FRESH, so only the tab-split can see it.
 reset_case
 export R2_TEAMS=$'backups/teamZ/\tbackups/teamA/'
-export R2_DEFAULT_LIST=""
+export R2_DEFAULT_LIST_Z=""            # teamZ (first): prefix present, no default archive → stale
+export R2_DEFAULT_LIST_A="$TS_RECENT"  # teamA (last): fresh — a bare `read` sees only this
 export STUB_STATUS_BODY="$(status_body false null null)"
 run_driver
 assert_eq "$RC" 1 "37. a 2-team tab-separated pool while OFF exits RED (1)"
-assert_match "$OUT" "team teamA: team prefix present but no default archive" "37. the NON-LAST team is measured too"
+assert_match "$OUT" "team teamZ: team prefix present but no default archive" "37. the NON-LAST team is measured too"
 assert_filed "$(cat "$LOG")" SWEEP_OFF_STALE "37. the non-last stale team drives SWEEP_OFF_STALE"
 
 # ── 38. held lock + UNMEASURED pool → SWEEP_NO_COVERAGE (review P1) ────────
@@ -721,16 +735,23 @@ assert_eq "$RC" 1 "38. stuck lock + unmeasurable pool exits RED (1)"
 assert_filed "$(cat "$LOG")" SWEEP_NO_COVERAGE "38. unknown pool is never read as empty for a held lock"
 assert_not_contains "$OUT" "leaving silent" "38. the unmeasurable lock is never silently dropped"
 
-# ── 39. redaction shapes (security review F1) ─────────────────────────────
+# ── 39. redaction shapes (security review F1; strengthened review R1) ─────
+# Review R1 (test-integrity, conf 90): the original values were all ≥20 chars,
+# so the generic ≥20-char rule masked them and 7 of the 9 shape rules could be
+# deleted with the suite still green. Every value below is the shortest its own
+# shape rule can match (a sub-20 secret for rules 1–6, a 20/21-char value for
+# rules 7/8), so deleting the owning rule turns the case red.
 reset_case
 export R2_TEAMS=$'backups/teamA/'
 export R2_DEFAULT_LIST="$TS_RECENT"
-export STUB_STATUS_BODY="$(status_body false '"dsn falkor://usr:SuperSecret123@cloud.example:6380 and Authorization: Bearer abcDEFghiJKL012345678 also key SECRETVALUE1234567890"' null)"
+export STUB_STATUS_BODY="$(status_body false '"dsn docker://:pwd12345@host:6379 schemeless user:pwdXYZ789@host hdr Authorization: Bearer tokEN123 pat ghp_AB12cd34 assign MY_SECRET_KEY=shrt999 quoted (got '\''qZwXeDcR'\'') long \"AbCdEfGhIjKlMnOpQrSt\" bare BareTokenZz0123456789X qkey \"api_key\":\"shrtpw1\""' null)"
 run_driver
 assert_eq "$RC" 1 "39. secret-bearing config error exits RED (1)"
-for leaked in SuperSecret123 abcDEFghiJKL012345678 SECRETVALUE1234567890; do
-  assert_not_contains "$(cat "$LOG")" "$leaked" "39. the DSN/header/value '$leaked' is NOT published"
-  assert_not_contains "$OUT" "$leaked" "39. the DSN/header/value '$leaked' is NOT logged"
+# one short value per shape rule (1 URI, 2 schemeless, 3 header, 4 prefix,
+# 5 assignment, 6 single-quoted, 7 quoted ≥20, 8 bare ≥20, 5b quoted-key)
+for leaked in pwd12345 pwdXYZ789 tokEN123 AB12cd34 shrt999 qZwXeDcR AbCdEfGhIjKlMnOpQrSt BareTokenZz0123456789X shrtpw1; do
+  assert_not_contains "$(cat "$LOG")" "$leaked" "39. the '$leaked' shape is NOT published"
+  assert_not_contains "$OUT" "$leaked" "39. the '$leaked' shape is NOT logged"
 done
 assert_match "$OUT" "<redacted>" "39. the redaction marker is present"
 
@@ -768,6 +789,12 @@ export STUB_SWEEP_BODY='{"status":"no_work","teams_backed_up":0,"graph_totals":{
 run_driver
 assert_eq "$RC" 0 "42. a custom-graph backup is not a 0-coverage outage"
 assert_not_match "$(cat "$LOG")" "GH POST .*/issues .*SWEEP_NO_COVERAGE" "42. no false SWEEP_NO_COVERAGE"
+# Review R1 (P2): this run HAS coverage, so an open SWEEP_NO_COVERAGE must
+# close here — otherwise a recovered pipeline keeps a stale incident forever.
+export GH_ISSUE_SWEEP_NO_COVERAGE=123
+run_driver
+assert_eq "$RC" 0 "42. (open incident) a custom-graph backup still exits 0"
+assert_match "$(cat "$LOG")" "GH PATCH .*/issues/123" "42. SWEEP_NO_COVERAGE self-heals on a covered no_work run"
 
 # ── 43. APP_DOWN is RED (any filing is RED) ──────────────────────────────
 reset_case
