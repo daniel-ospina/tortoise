@@ -124,6 +124,21 @@ class _MockGroundingProjection:
         self.points = fold(log.read_all())
 
 
+def test_mock_projection_rebuild_accepts_the_token():
+    """#2944: the stub's ``rebuild`` must accept ``confirm_destructive``.
+
+    Protocol parity: a generic caller doing
+    ``proj.rebuild(log, confirm_destructive=True)`` must not hit a TypeError.
+    Executed here because the stub is otherwise only constructed and never
+    rebuilt."""
+    proj = _MockGroundingProjection()
+    log = EventLog(_tmp("replay.jsonl"))
+    log.append({"type": "PointAdded",
+                "point": {"id": "p1", "content": "c", "context": "t"}})
+    proj.rebuild(log, confirm_destructive=True)  # must not raise TypeError
+    assert "p1" in proj.points
+
+
 def test_resolution_event_triggers_grounding():
     """add_point with pointKind='resolution-event' calls compute_grounding.
 

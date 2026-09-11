@@ -17,10 +17,12 @@ Coverage map (per the issue's acceptance criteria):
       when the old ``_skip_guard`` bypass would have allowed it
   (b) the legitimate disposable paths still work
   (c) ``_skip_guard`` (or its replacement) cannot be flipped from ordinary
-      production code — pinned at three depths: the identifier is gone from
+      production code — pinned at four depths: the identifier is gone from
       both query paths (bytecode), the token is keyword-only with a refusing
-      default, and the L1 assertion BODY itself refuses without it (the
-      chokepoint test that reds if enforcement is neutered).
+      default, every production call site passes the literal ``True`` (AST),
+      and the L1 assertion BODY itself refuses without it plus the
+      ``_wipe_all_nodes`` chokepoint consults it before wiping (the two tests
+      that red if enforcement is neutered).
 
 The unit tests use a recording fake graph handle so they run in BOTH the
 embedded carve-out lane and the docker lane without a live server. The
@@ -154,6 +156,15 @@ def test_setting_skip_guard_attribute_does_not_authorize_wipe():
     guarded = _GuardedGraph(_RecordingGraph(), raw)
     with pytest.raises(RuntimeError, match="non-test graph"):
         guarded.query("MATCH (n) DETACH DELETE n")
+
+    # Both query PATHS are pinned behaviourally, not just at the bytecode
+    # level: `FalkorProjection.query` carries the same no-bypass contract.
+    # The handle here is deliberately BARE (not `_GuardedGraph`) so the
+    # assertion under test is this method's own, not the wrapper's.
+    proj_query = _bare_projection(graph_name="prod_tortoise", embedded=False)
+    proj_query._skip_guard = True
+    with pytest.raises(RuntimeError, match="non-test graph"):
+        proj_query.query("MATCH (n) DETACH DELETE n")
 
 
 def test_replacement_is_a_call_site_parameter_not_ambient_state():
@@ -413,6 +424,18 @@ def test_wipe_all_nodes_consults_the_token_before_issuing_the_wipe(monkeypatch):
         proj._wipe_all_nodes(confirm_destructive=True, operation="probe")
     assert proj.g.queries == [], "graph I/O ran before the token check"
     assert proj.g.wipes() == [], "the wipe ran before the token check"
+
+
+def test_wipe_all_nodes_refuses_without_the_token(tmp_path):
+    """(c) DISCRIMINATING: the chokepoint consults the CALLER'S token value.
+
+    The sentinel test below proves the call exists; this one proves the value
+    is forwarded. A hardcoded ``True`` at the call site would satisfy the
+    sentinel (it ignores its argument) but reds here."""
+    proj = _bare_projection(graph_name="test_probe", embedded=True)
+    with pytest.raises(RuntimeError, match="confirm_destructive"):
+        proj._wipe_all_nodes(confirm_destructive=False, operation="probe")
+    assert proj.g.queries == [], "graph I/O ran on a refused token"
 
 
 def test_rebuild_all_fast_fails_before_any_work(monkeypatch):

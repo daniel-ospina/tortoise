@@ -70,7 +70,10 @@ def _reset_falkordb_version_cache() -> None:
 # A query is a bulk wipe when it contains DETACH DELETE but has NO property map
 # ({...} — e.g. MATCH (n:Label {id:$id})) and NO real WHERE clause.
 # A WHERE clause is "real" only if it references a property (n.xxx) or a
-# parameter ($id) or CONTAINS/IN — tautologies (WHERE true, WHERE 1=1) don't count.
+# parameter ($id) or CONTAINS / ``IN (`` — tautologies (WHERE true, WHERE 1=1)
+# don't count. Note ``IN [list]`` is NOT recognized (only ``IN (``), so a
+# scoped delete whose only reference is `id(n) IN [..]` is misclassified as a
+# bulk wipe (#3007).
 _WHERE_REAL_RE = re.compile(
     r"\b[a-zA-Z_][a-zA-Z0-9_]*\.[a-zA-Z_][a-zA-Z0-9_]*|\$[a-zA-Z_]|CONTAINS|IN\s*\(",
     re.IGNORECASE,
@@ -134,17 +137,23 @@ def _is_bulk_wipe(cypher: str) -> bool:
 # KNOWN GAPS (pre-existing, NOT fixed by #2944):
 #   * ``proj.db`` is the RAW FalkorDB client. Two destructive forms reach a
 #     graph without passing either layer: ``select_graph(name).query("MATCH (n)
-#     DETACH DELETE n")`` (e.g. battery/testing/seeds.py:120,
-#     graph-scripts/smoke_test.py:130) and ``select_graph(name).delete()``
-#     (GRAPH.DELETE — used by ``sdk.team_delete``, ``hosted_api``,
-#     ``backup_sweep``). This surface cannot be closed inside the guard: a
-#     caller holding ``proj.db`` can equally build its own
-#     ``falkordb.FalkorDB(...)``. The guard's contract is "no wipe by
-#     *forgetting* an opt-in"; those callers carry their own
+#     DETACH DELETE n")`` (e.g. battery/testing/seeds.py:120;
+#     graph-scripts/smoke_test.py:130 server-or-embedded, :111 embedded
+#     branch) and ``select_graph(name).delete()`` (GRAPH.DELETE — used by
+#     ``sdk.team_delete``, ``hosted_api``, ``backup_sweep``). This surface
+#     cannot be closed inside the guard: a caller holding ``proj.db`` can
+#     equally build its own ``falkordb.FalkorDB(...)``. The guard's contract
+#     is "no wipe by *forgetting* an opt-in"; those callers carry their own
 #     confirmation/authorization (e.g. ``team_delete`` requires the team name
 #     to match).
-#   * ``_is_bulk_wipe`` over-classifies label/LIMIT-scoped deletes, so
-#     ``event_store.purge_overflow`` is refused on a non-test server graph and
+#   * ``_GuardedGraph`` forwards every method except ``query`` to the raw
+#     handle via ``__getattr__``, so ``proj.g.delete()`` (GRAPH.DELETE — e.g.
+#     tests/test_hosted_backup.py) is NOT guarded by L2 either. Only
+#     ``query`` is intercepted; the class name says "guarded query", not
+#     "guarded handle".
+#   * ``_is_bulk_wipe`` over-classifies label/LIMIT/WITH-scoped deletes and
+#     ``WHERE id(n) IN [..]``-scoped ones, so ``event_store.purge_overflow`` is
+#     refused on a non-test server graph and
 #     its callers swallow it (the hosted sweeper at DEBUG, the SDK lazy hook at
 #     WARNING) — the per-team event cap no-ops without a build failure
 #     (tracked: #3007).
@@ -1036,7 +1045,9 @@ class FalkorProjection(
         ``recover_from_log``, which only replays into a graph it has already
         proven to be EMPTY (0 nodes) — nothing to DETACH DELETE — so it needs
         no ``confirm_destructive`` token. If that ever changes, the wipe it
-        grows must route through ``_wipe_all_nodes`` like every other one.
+        grows must route through ``_wipe_all_nodes`` like every other
+        REBUILD-LANE wipe (the raw-query lane has no token — see the module
+        comment's KNOWN GAPS note).
 
         The event log is the source of truth; the projection a derived view.
         Two corruption modes are caught:
@@ -2244,8 +2255,12 @@ class FalkorProjection(
         """
         self._assert_destructive_confirmed(confirm_destructive, operation)
         # L2: name/embedded check. Redundant with _GuardedGraph.query below
-        # on purpose — this method is the readable contract; the handle is
-        # the last line of defence for every other bulk-wipe caller.
+        # on purpose — this method is the readable contract; the guarded
+        # handle is the last line of defence for every other caller that goes
+        # through it. Callers on the raw client (``proj.db``), or on Graph
+        # methods that ``_GuardedGraph.__getattr__`` forwards (e.g.
+        # ``proj.g.delete()`` → GRAPH.DELETE), bypass BOTH layers — see the
+        # KNOWN GAPS note in the module comment.
         self._assert_test_graph(
             f"REFUSING to run bulk DETACH DELETE on non-test graph "
             f"({operation})"
