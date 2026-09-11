@@ -18,6 +18,11 @@ surfaces:
   # when nothing else matched — so a PR that reintroduced the bug in that file
   # alone would otherwise never run the guard.
   - test_boot_regressions.py
+  # #2988: /health/ready must never block the event loop (a synchronous probe
+  # froze every route in production — /openapi.json included). Same dual
+  # registration as the boot guards above, for the same reason: the file it
+  # guards is tortoise/hosted_api.py, which selects the `api` surface.
+  - test_health_ready_nonblocking.py
   - test_delivery_tenancy.py  # C6 #2115: delivery-shape tenancy + session_recording per-graph override
   - test_onboarding_email_http.py
   - test_sentry.py
@@ -268,6 +273,7 @@ surfaces:
   - test_backup_watcher.py
   - test_bfs_audit.py
   - test_boot_regressions.py
+  - test_health_ready_nonblocking.py  # #2988: /health/ready off-loop + bounded probes
   - test_build_window_transcript.py
   - test_canary_classify.py
   - test_canonical.py
