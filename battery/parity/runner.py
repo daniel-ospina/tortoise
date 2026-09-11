@@ -121,8 +121,11 @@ class ParityRun:
     #: The dataset identity the runner ACTUALLY loaded (#2800) — set only
     #: when a benchmark executed; a not-measured cell has no revision.
     revision: str | None = None
-    #: The lane that produced the number ("real" | "mock" | None when no
-    #: benchmark ran) — a mock number must never read as comparable.
+    #: The lane that produced the number: one of ``executors.LANES``
+    #: ("real"/"mock" for the full-context released-runner lanes, or the
+    #: retrieved-context arm labels "real_tortoise"/"mock_tortoise", #2800),
+    #: or None when no benchmark ran — a mock/Tortoise number must never read
+    #: as a full-context baseline.
     lane: str | None = None
 
     def __post_init__(self) -> None:
