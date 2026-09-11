@@ -306,6 +306,11 @@ def _cmd_parity(args: argparse.Namespace) -> ExitCode:
               "released runners call paid reader/judge models) — no benchmark "
               "will run; every cell stays not-measured")
     cells: list[ParityRun] = []
+    # #2985: the retrieval capability gate per benchmark. Populated from a
+    # measured cell's detail (the REAL lane that proved the vector leg ran)
+    # OR from a gate REFUSAL (``ExecutorUnavailable.capability_gate``) — the
+    # refusal is persisted, never a silent absence.
+    capability_gates: dict[str, dict] = {}
     for benchmark, version in PINNED_VERSIONS.items():
         try:
             # #2797: an accuracy is supplied ONLY from a released runner's
@@ -328,8 +333,18 @@ def _cmd_parity(args: argparse.Namespace) -> ExitCode:
                         executed = executor(
                             mock=bool(args.mock), limit=args.limit,
                             out_dir=_Path(args.out or _DEFAULT_OUT))
+                        gate = getattr(executed, "detail", {}).get(
+                            "capability_gate")
+                        if gate is not None:
+                            capability_gates[benchmark] = gate
                     except ExecutorUnavailable as e:
                         print(f"{benchmark}: executor unavailable — {e}")
+                        # #2985: a capability-gate refusal carries its
+                        # machine-readable record — persist it (the printed
+                        # reason alone is not an artifact).
+                        gate = getattr(e, "capability_gate", None)
+                        if gate is not None:
+                            capability_gates[benchmark] = gate
             res = run_parity(benchmark, version, arm_id,
                              reader_prompt, judge_rubric, baseline,
                              accuracy=(executed.accuracy if executed else None),
@@ -395,6 +410,12 @@ def _cmd_parity(args: argparse.Namespace) -> ExitCode:
                         "samples": c.samples,
                         "revision": c.revision,
                         "lane": c.lane,
+                        # #2985: the retrieval capability gate — machine-
+                        # readable, never silent. A refused REAL lane records
+                        # {vector_leg: false, reason: ...}; a real lane that
+                        # ran records {vector_leg: true, ...}. Benchmarks with
+                        # no retrieval lane (or no run) record null.
+                        "capability_gate": capability_gates.get(c.benchmark),
                         # Round-4 P2 (consistency): a protocol-UNKNOWN
                         # record must NEVER carry methodology_matched=True —
                         # the two persisted fields would contradict (an

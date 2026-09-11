@@ -35,6 +35,13 @@ The lane contract (what makes the two rows comparable):
 5. **Say which lane it is.** The cell's ``lane`` is ``real_tortoise`` /
    ``mock_tortoise`` (never ``real``/``mock``), so a Tortoise number can never
    be mistaken for the full-context baseline it is compared against.
+6. **Prove the retrieval surface before scoring (#2985).** A ``real_tortoise``
+   score claims to measure the PRODUCT's retrieval — hybrid RRF over
+   FTS + vector. The lane emits the product's per-leg trace for one probe
+   query and REFUSES (``capability_gate: {vector_leg: false, reason: ...}``,
+   persisted in the artifact) when the vector leg was never submitted; a
+   keyword-only run must never wear the ``real_tortoise`` label. Mock lanes
+   are not gated.
 
 Fact-unit split (and why): the pinned CR ``context`` is a header line followed
 by numbered lines (``0. Thomas Kyd was born in the city of London.``). One
@@ -92,6 +99,84 @@ _POOL_HEADER_RE = re.compile(r"^here is a list of facts:?$", re.IGNORECASE)
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
 
 
+#: The product's retrieval surface is hybrid RRF over FTS + vector (+
+#: structural) — "Best-match mode: provide query → RRF fusion of FTS + vector
+#: + structural" (``tortoise_fts_query``). A lane labelled ``real_tortoise``
+#: claims to measure THAT surface. #2985: the VECTOR leg was silently absent
+#: in the environment the lanes ran in (the ``embeddings`` extra was missing
+#: at collection time), so scores that read as "the product's retrieval" were
+#: keyword-only (FTS). Measured impact: factconsolidation_sh_6k recall@20
+#: 0.80 (FTS-only) → 1.00 (hybrid); mh_6k 0.44 → 0.61. Nothing in the
+#: artifact said so — so the VECTOR leg is the leg the gate below REQUIRES.
+_GATED_LEG = "vector"
+
+
+def retrieval_capability_gate(leg_trace: list[dict] | None, *,
+                              lane: str) -> dict:
+    """PRE-FLIGHT capability record for a lane (#2985).
+
+    ``TortoiseSDK.recall_state`` → ``tortoise_fts_query`` is hybrid RRF over
+    FTS + vector (+ structural). A lane labelled ``real_tortoise`` claims to
+    measure THAT surface; if the vector leg was never submitted (the
+    ``embeddings`` extra absent at collection time), the score measures a
+    degraded, keyword-only surface. This evaluates the emitted leg trace and
+    returns a machine-readable record so a refusal is never silent.
+
+    Returns ``{gated, lane, vector_leg, legs_seen, reason, leg_trace}``:
+
+    * ``gated`` — True for the REAL product lane; False for mock lanes (a
+      fake memory may legitimately run without embeddings — mock behaviour
+      is deliberately unchanged).
+    * ``vector_leg`` — True when a vector entry reports ``ran``; False when
+      the leg was not submitted; None when the lane is not gated.
+    * ``legs_seen`` — every leg the trace reported (fts / vector /
+      structural), sorted.
+    * ``reason`` — the vector entry's own reason (``no_embedder`` /
+      ``encode_failed`` / ``breaker_open``) or ``vector_leg_absent``.
+    * ``leg_trace`` — the raw per-leg entries, so the artifact carries the
+      trace itself (per-leg ``ran``/``degraded``/``reason``/``count``), not
+      just a summary.
+    """
+    entries = [e for e in (leg_trace or []) if isinstance(e, dict)]
+    legs_seen = sorted({str(e.get("leg")) for e in entries if e.get("leg")})
+    if lane != LANE_REAL:
+        return {"gated": False, "lane": lane, "vector_leg": None,
+                "legs_seen": legs_seen, "reason": "not a real product lane",
+                "leg_trace": entries}
+    vector = [e for e in entries if e.get("leg") == _GATED_LEG]
+    if any(bool(e.get("ran")) for e in vector):
+        reasons = [str(e.get("reason")) for e in vector if e.get("reason")]
+        return {"gated": True, "lane": lane, "vector_leg": True,
+                "legs_seen": legs_seen,
+                "reason": reasons[-1] if reasons else "ok",
+                "leg_trace": entries}
+    # Not submitted: prefer the source-recorded reason (no_embedder /
+    # encode_failed) over the generic absence, so the artifact says WHAT was
+    # wrong, not just that the leg is missing.
+    why = next((str(e.get("reason")) for e in vector if e.get("reason")),
+               None)
+    return {"gated": True, "lane": lane, "vector_leg": False,
+            "legs_seen": legs_seen, "reason": why or "vector_leg_absent",
+            "leg_trace": entries}
+
+
+def _capability_refusal(gate: dict) -> ExecutorUnavailable:
+    """Build the LOUD refusal for a failed capability gate, carrying the
+    machine-readable record on the exception so the artifact writer persists
+    it (#2985)."""
+    err = ExecutorUnavailable(
+        f"memoryagentbench_tortoise: RETRIEVAL CAPABILITY GATE FAILED — the "
+        f"{LANE_REAL} lane did not submit the VECTOR leg "
+        f"(reason={gate.get('reason')!r}, "
+        f"legs_seen={gate.get('legs_seen')!r}). An FTS-only score is a "
+        f"degraded, keyword-only retrieval surface — NOT the product's "
+        f"hybrid retrieval — and must not be labelled {LANE_REAL} (#2985). "
+        f"Install the embeddings extra (`uv sync --extra embeddings`) and "
+        f"re-run; the lane refuses rather than record a number.")
+    err.capability_gate = gate
+    return err
+
+
 class CrMemory(Protocol):
     """The injected memory seam: a write path and a read path.
 
@@ -108,6 +193,15 @@ class CrMemory(Protocol):
     def recall(self, question: str, k: int) -> list[str]:
         """Return up to ``k`` retrieved fact texts for ``question``."""
         ...
+
+    # OPTIONAL PRE-FLIGHT extension (#2985) — REQUIRED on any implementation
+    # used with ``lane=LANE_REAL``: ``retrieval_legs(question, k) -> list[dict]``
+    # exercises the read surface ONCE and returns the product's per-leg trace
+    # (R3 #1542 D4 shape: ``{"leg", "ran", "degraded", "reason", "count"}``),
+    # so the lane can verify the hybrid legs are actually submitted BEFORE it
+    # scores. It is deliberately NOT part of this Protocol — the mock fake
+    # legitimately omits it — but a real-lane memory that cannot report its
+    # legs is refused (fail-closed, ``reason="leg_trace_unavailable"``).
 
 
 def split_fact_units(context: str) -> list[str]:
@@ -177,10 +271,17 @@ class TortoiseCrMemory:
             written += 1
         return written
 
+    def _recall_state(self, question: str, k: int, *,
+                      leg_trace: list[dict] | None = None):
+        """The ONE read call shape this lane uses (single source, so the
+        capability probe and ``recall`` can never drift apart)."""
+        return self._sdk.recall_state(
+            query=question, kind=None, limit=k, object_centric=False,
+            leg_trace=leg_trace)
+
     def recall(self, question: str, k: int) -> list[str]:
         """The product state read, filtered to point rows with text."""
-        rows = self._sdk.recall_state(
-            query=question, kind=None, limit=k, object_centric=False)
+        rows = self._recall_state(question, k)
         out: list[str] = []
         for row in rows or []:
             if not isinstance(row, dict):
@@ -192,6 +293,16 @@ class TortoiseCrMemory:
                 continue
             out.append(content)
         return out[:k]
+
+    def retrieval_legs(self, question: str, k: int) -> list[dict]:
+        """PRE-FLIGHT capability probe (#2985): run ONE read through the SAME
+        ``recall_state`` call ``recall`` uses and return the product's
+        per-leg trace (R3 #1542 D4 shape), so the lane can prove the vector
+        leg was actually submitted before it records a score. Observational
+        only — it does not write and does not change retrieval."""
+        trace: list[dict] = []
+        self._recall_state(question, k, leg_trace=trace)
+        return trace
 
     def close(self) -> None:
         self._sdk.close()
@@ -247,6 +358,13 @@ def run_cr_tortoise_lane(
     than scoring a run over a self-selected subset. ``limit is not None`` — a
     ``limit=0`` run asks NOTHING and refuses before it writes anything.
 
+    PRE-FLIGHT CAPABILITY GUARD (#2985): on the REAL lane the memory is
+    probed once (``retrieval_legs``) and the lane REFUSES
+    (``ExecutorUnavailable`` carrying ``capability_gate``) when the vector
+    leg was not submitted — an FTS-only score is a degraded, keyword-only
+    surface and must never be labelled ``real_tortoise``. Mock lanes are not
+    gated.
+
     Returns the labelled ``ExecutedCell`` plus the ``CrRun`` detail, exactly
     like ``run_cr_lane``.
     """
@@ -296,6 +414,32 @@ def run_cr_tortoise_lane(
             f"memoryagentbench_tortoise: ingest wrote {ingested!r} of "
             f"{len(units)} fact units — refusing a partial ingest (a lane that "
             f"scored with facts missing would understate retrieval)")
+
+    # 1b. PRE-FLIGHT CAPABILITY GUARD (#2985). The lane claims to measure the
+    # product's retrieval — hybrid RRF over FTS + vector. Probe that surface
+    # ONCE and refuse if the vector leg was never submitted, BEFORE any
+    # question is asked or scored: an FTS-only number must never wear the
+    # real_tortoise label. Gated on the REAL lane only — mock lanes may
+    # legitimately run without embeddings and are deliberately unchanged.
+    capability_gate: dict | None = None
+    if lane == LANE_REAL:
+        probe = getattr(memory, "retrieval_legs", None)
+        if not callable(probe):
+            # Fail closed: a real-lane memory that cannot report its legs
+            # cannot prove it exercised the product surface.
+            gate = {"gated": True, "lane": lane, "vector_leg": False,
+                    "legs_seen": [], "reason": "leg_trace_unavailable",
+                    "leg_trace": []}
+            raise _capability_refusal(gate)
+        try:
+            trace = probe(chosen[0].question, k)
+        except Exception as e:
+            raise ExecutorUnavailable(
+                f"memoryagentbench_tortoise: capability probe failed "
+                f"({type(e).__name__}: {e})") from e
+        capability_gate = retrieval_capability_gate(trace, lane=lane)
+        if not capability_gate["vector_leg"]:
+            raise _capability_refusal(capability_gate)
 
     # 2-3. Retrieve per question, then ask with the benchmark's OWN template.
     outputs: dict[str, str] = {}
@@ -365,6 +509,11 @@ def run_cr_tortoise_lane(
             "k": k,
             "retrieved_chars": retrieved_chars,
             "empty_retrievals": empty_retrievals,
+            # #2985: the capability record rides the measured cell for the
+            # REAL lane, so the artifact SHOWS the vector leg ran (a lane
+            # that could not prove it never reaches here — it refuses).
+            **({"capability_gate": capability_gate}
+               if capability_gate is not None else {}),
         },
     )
     run = CrRun(accuracy=accuracy, samples=samples, calls=calls,

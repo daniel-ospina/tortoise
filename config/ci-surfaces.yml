@@ -186,6 +186,7 @@ surfaces:
   - test_battery_parity_mabench_run.py
   - test_battery_parity_mabench_tortoise.py
   - test_battery_parity_migration.py
+  - test_battery_parity_vector_guard.py  # #2985 retrieval capability gate (fake SDK; hermetic)
   - test_battery_price_basis.py
   - test_battery_probes.py
   # #2906: provider-reported cost (#2906) + the declared fallback basis
@@ -387,6 +388,10 @@ surfaces:
   # this file pins the provider-cost surfacing on that adapter path — so a
   # model_adapters.py-only PR must run it (dual-registered with battery).
   - test_battery_provider_cost.py
+  # #2985: tortoise/sdk.py maps to core (no SOURCE_PATTERN) and this file pins
+  # the recall_state leg_trace threading the retrieval capability gate depends
+  # on — a sdk.py-only PR must run it (dual-registered with battery).
+  - test_battery_parity_vector_guard.py
   - test_monitoring.py
   - test_navigation.py
   - test_no_tests_imports_in_production.py
