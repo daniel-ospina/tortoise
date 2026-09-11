@@ -332,16 +332,21 @@ derivation, granularity and storage are part of the pre-registration:
 - **`|tokens(g)| = 0`.** The all-stopword / all-punctuation span is exactly the
   `|tokens(g)| < 3` case: flagged `"trivial": true`, never matched, and no division is performed
   (the ratio is defined as 0 rather than computed).
-- **Non-emptiness.** The artifact is built and validated **before** the pre-registration is
-  frozen, and every question must contribute **≥1 non-trivial claim**. A question that cannot is
+- **Non-emptiness (build prerequisite).** The artifact **does not exist yet** — it is a pre-run
+  deliverable, not part of this frozen document. It must be built and validated **before the
+  first render**; the pre-registration is already frozen without it, so it can no longer be
+  built "before the freeze" and carries its own commit and sha256 (§9.5). Every question must
+  contribute **≥1 non-trivial claim**. A question that cannot is
   a construction failure fixed before the run — never a reason to change the 52-question
   denominator of metric 5 or §9.4.
-- **Storage.** One committed JSON artifact —
+- **Storage.** One JSON artifact, **not yet created** —
   `docs/experiments/artifacts/2026-09-11-abc-context-assembly/gold-evidence-claims.json` (an
   object keyed by `qid`; each value a list of
   `{"claim": str, "source_turn_id": "lme:<qid>:s<si>:t<ti>" | "gold_answer", "tokens": int, "trivial": bool}`)
-  — committed in the same commit as the frozen pre-registration, with its **sha256 recorded in
-  the run manifest** alongside the frozen seed, stopword and prompt artifacts. It is materialised
+  — committed **before the first render**, as its own commit (the pre-registration is already
+  frozen, so it cannot be committed in the freeze commit), with its **sha256 recorded in
+  the run manifest** alongside the frozen seed, stopword and prompt artifacts. Until it exists
+  and is validated, the run may not start (§9.5). It is materialised
   **outside the eval graph**: no namespace, eval or scratch, ever holds it, so the seed,
   traversal, ranking and B/C render paths have no access to it, and the §3 static-reference
   assertion names it explicitly.
@@ -356,7 +361,7 @@ derivation, granularity and storage are part of the pre-registration:
    reported for completeness, excluded from per-class inference)** = 52.
 5. **Answer-bearing-claim presence (content-bearing; matching rule frozen).** Per question, a
    boolean: **1 iff at least one Point in the eval graph is *answer-bearing***, where Point `p` is
-   answer-bearing for question `q` iff at least one claim `g` in `q`'s pre-committed gold-evidence
+   answer-bearing for question `q` iff at least one claim `g` in `q`'s pre-registered gold-evidence
    claim list (**defined immediately above**) is **matched** by `p` under the frozen content rule:
    the frozen `tokens()` function defined under "The gold-evidence claim list" above (lowercase →
    delete ASCII punctuation → split on whitespace → drop the frozen stopword list, appended to the
@@ -366,8 +371,9 @@ derivation, granularity and storage are part of the pre-registration:
    list is never matched. The rate = the fraction of the 52 questions with
    ≥1 answer-bearing Point. **This is the metric F6/H5 use** — because it is content-bearing, it
    is 0 when the graph holds only unrelated points that merely share a gold session, which is
-   exactly the §8.4 confound. It is a measurement input only: the list lives in the committed
-   artifact defined above and is read **only** by this metric's scorer and the §10 reviewer — the
+   exactly the §8.4 confound. It is a measurement input only: the list lives in the artifact
+   defined above (committed before the first render, §4 Storage; §9.5) and is read **only** by
+   this metric's scorer and the §10 reviewer — the
    seed/traversal/ranking/render code paths never open it, and it is never written into any graph
    namespace (§3 leakage test). It separates "the answer-bearing claim
    was never extracted" from "it was extracted but not retrieved". Reported per question.
@@ -559,6 +565,12 @@ apply (F3 may still fire on its own terms).
    run may be reported only as an **extraction measurement**, labelled as such — there is no
    run-time choice to proceed anyway. This prevents measuring an under-extracted graph while
    reporting on "the assembly thesis".
+5. **The gold-evidence claim artifact (§4) must exist before the first render.** It is **not in
+   the repo yet** (`docs/experiments/artifacts/` does not exist): it must be built, validated
+   (§4 Non-emptiness), committed as its **own** commit — the pre-registration is already frozen,
+   so there is no freeze commit left to join — and its **sha256 recorded in the run manifest**
+   before any arm is rendered or scored. Metric 5 and the §10 reviewer are undefined until it
+   exists, so this is a hard gate, not a formality.
 
 ## 10. Validation gate — stage 6 (1-question hard gate + leak test + blind H5 check, before scaling)
 
@@ -601,10 +613,11 @@ before running — never run an arm that can rank on gold.
 **H5 renderer check (numeric and blind — replaces "reads as knowledge").** Hand-inspection of B's
 context alone is unblinded and subjective, so: (i) freeze the rule **before** the run — B fails
 the renderer check on a question iff its rendered context contains **zero** typed relation lines,
-**or** the question's pre-committed gold-evidence claim list (≥1 non-trivial claim per question
+**or** the question's pre-registered gold-evidence claim list (≥1 non-trivial claim per question
 by construction, §4) holds no claim that can be read out of the block; (ii) the reviewer receives,
-as a **fixed pre-committed input**, the gold-evidence claim list for each inspected question (the
-artifact defined and committed in §4, before any render; the §4 metric-5 content-match rule is
+as a **fixed pre-registered input**, the gold-evidence claim list for each inspected question (the
+artifact defined in §4, which must be committed as its own pre-render deliverable before any
+render — §4 Storage, §9.5; the §4 metric-5 content-match rule is
 what decides whether a graph Point carries each claim), so the second clause is judgeable while
 the reviewer still does **not** see the arm label or the outcome (contexts are stripped of arm
 identifiers and shuffled); (iii) **question selection is pre-registered** — the first **10**
@@ -703,7 +716,8 @@ a majority vote** (two reviewers cannot produce a majority). Only then scale to 
 | 2026-09-11 | Review remediation **round 1, before any run** (P0-1…P2-4): §2 H5 numeric; §3 arm D + frozen B/C construction; §4 arm-D floor, strict-primary judge, `current-state` class; §5 prompt-constancy + budget-match controls; §6 derived MDE + decision floor + multiplicity; §7 precedence, mutually exclusive F2/F4, detached F6; §8 confound fixes; §9.4 corpus-wide viability gate; §10 numeric blind H5; §11 analysis-plan completeness; §12 limitation update; token→word relabelling. | Three fresh-context reviews of the pre-registration, **before any data was collected**. No result has been seen, so this is repair of the pre-registration, not a post-hoc revision. |
 | 2026-09-11 | Review remediation **round 2, before any run** (P1-1…P2-6): §3 seed function pinned to `vector_search` with the BM25 fallback recorded in the manifest, min–max normalization of `seed_similarity`, dedupe key and the "no separate global cap" rule, whole-graph degree for hub damping, and the complete worked arm-B/arm-C block; §4 metric 5's matching rule frozen with an explicit threshold and §9.4's gate registered as a separately named criterion; §5 budget-match sub-analysis truncating all of A/B/C to a common cap; §7 F6 classified diagnostic everywhere, F1/F4's sub-floor parentheticals deleted, F2 reduced to INCONCLUSIVE and its false F1-exclusivity claim corrected; §10 blind H5 check pre-committed (gold-evidence list as reviewer input, first 10 questions by `qid`, flag-fail on disagreement); §3/§10 gold-field perturbation + static-reference leakage test added. | A fresh-context review of the round-1 remediation, **before any data was collected**. Repair of the pre-registration, not a post-hoc revision. |
 | 2026-09-11 | Review remediation **round 3, before any run** (P1-1…P2-8): §2 H5 metric renamed; §3 seed-truncation tie-break + concrete empty-context sentinel + `zero_seed` selection-failure flag, contradiction reservation ahead of the 12-cap, natural-log damping base, named rendered-session field + full scratch-namespace definition, admission tie-break, worked-example scope limited to render format; §4 metric 5 made content-bearing (answer-bearing-claim match) + new metric 9 (gold-provenance presence) split out, metric 8 re-pointed; §5 prompt scaffolding made single and adaptation forbidden; §7 F6 re-pointed to metric 5 + F2/F4/F5 exclusivity + F3 arm set (A/B/C) + evidence-collapse/D-does-not case; §8.4 mitigation re-pointed; §9.4 gate re-pointed and made deterministic; §10 leak-test + H5 references synced; §11.9 diagnostics list; §14 F2 row reduced to INCONCLUSIVE, F3/F6 rows re-labelled. | A fresh-context review of the round-2 remediation, **before any data was collected**. Repair of the pre-registration, not a post-hoc revision. |
-| 2026-09-11 | Review remediation **round 4 (final), before any run** (P1-1…P2-7): §7's prior-knowledge trigger aligned to §11.8's single definition (D ≥ 15/52), removing the superseded lower D-trigger; §3/§4/§10 leakage guard extended to the gold-evidence claim list (static-reference assertion + never-in-a-graph-namespace rule); §4 gold-evidence claim list derived from the `has_answer` turns of the gold sessions plus the gold `answer`, sentence-span granularity, committed JSON artifact + sha256, `MIN_GOLD_TOKENS = 3`, the zero-content-token claim defined as never-matched; §3 dedupe precedence fixed (score first, edge priority the tie-break) and operation order frozen (cap → dedupe); §3 seed fetch widened to `limit=64` so the boundary tie-break sees the full tied set, selected seed `id`s recorded in the manifest, min–max normalization scoped to the 8 selected seeds; §3 serializer turn ordinal (`source_turn_id`/`id`, 0-based `t<ti>` + 1), date (`createdAt`, else `validFrom`), confidence (`f"{c:.2f}"`) fields named; §3/worked-example render order corrected and the reserved-relation anchor disambiguated; §13 reader-call arithmetic aligned with the wall-clock total; §7/§14 F3 magnitude re-anchored to the primary arm-A count with the §6 15-pt floor; §10 zero-seed carve-out in the first STOP bullet. | A fresh-context review of the round-3 remediation, **before any data was collected**. Repair of the pre-registration, not a post-hoc revision. |
+| 2026-09-11 | Review remediation **round 4 (final), before any run** (P1-1…P2-7): §7's prior-knowledge trigger aligned to §11.8's single definition (D ≥ 15/52), removing the superseded lower D-trigger; §3/§4/§10 leakage guard extended to the gold-evidence claim list (static-reference assertion + never-in-a-graph-namespace rule); §4 gold-evidence claim list derived from the `has_answer` turns of the gold sessions plus the gold `answer`, sentence-span granularity, a JSON artifact built and committed as a **pre-render** deliverable + sha256, `MIN_GOLD_TOKENS = 3`, the zero-content-token claim defined as never-matched; §3 dedupe precedence fixed (score first, edge priority the tie-break) and operation order frozen (cap → dedupe); §3 seed fetch widened to `limit=64` so the boundary tie-break sees the full tied set, selected seed `id`s recorded in the manifest, min–max normalization scoped to the 8 selected seeds; §3 serializer turn ordinal (`source_turn_id`/`id`, 0-based `t<ti>` + 1), date (`createdAt`, else `validFrom`), confidence (`f"{c:.2f}"`) fields named; §3/worked-example render order corrected and the reserved-relation anchor disambiguated; §13 reader-call arithmetic aligned with the wall-clock total; §7/§14 F3 magnitude re-anchored to the primary arm-A count with the §6 15-pt floor; §10 zero-seed carve-out in the first STOP bullet. | A fresh-context review of the round-3 remediation, **before any data was collected**. Repair of the pre-registration, not a post-hoc revision. |
 | 2026-09-11 | Review remediation **round 5, before any run** (FIX 1, P1 + FIX 2–4, P2): §7 F3's magnitude re-defined against arm A's **pre-registered reference count** `A_ref` (42/52 official/variant-aware, 25/52 strict containment) instead of this run's arm-A count — `A_ref − 10` = **32 pts** or **15 pts**, both ≥ the §6 floor — making the F3 row, the §7 preamble, the §7 paragraph, §3's arm-A note and §14 agree exactly and removing the unsatisfiable ≤10/52-derived magnitude; §4's `tokens()` given a frozen split rule (**ASCII punctuation deleted, not replaced by a space**, then split on whitespace) shared by `MIN_GOLD_TOKENS` and the metric-5 ratio, with metric 5 deferring to that one definition; §4's 1–2-content-token rationale corrected (the ratio takes only 0 / 0.5 / 1.0, so the ≥0.80 threshold degenerates into an exact-subset test); Amendments table completed — the round-1 label added and the round-2 remediation logged, so every round cited in a reason has its own entry. | A fresh-context final review of the round-4 remediation, **before any data was collected**; supersedes the round-4 "(final)" label. Repair of the pre-registration, not a post-hoc revision. |
+| 2026-09-11 | Review remediation **round 6, before any run** (P1): the round-4 requirement that the gold-evidence claim artifact be *committed in the freeze commit* was not satisfiable — the pre-registration is already frozen and `docs/experiments/artifacts/` exists in neither the tree nor its history, so §4 Non-emptiness/Storage, §4 metric 5, §10 and the round-4 amendment row falsely asserted an already-committed artifact (the residual "pre-committed" wording at the three live list/input sites is re-worded "pre-registered"). The artifact is now stated as **not yet created**: a pre-run deliverable built, validated, committed on its own commit, and sha256-recorded in the manifest before the first render, with §9.5 added to gate the run on its existence. | A fresh-context review of the frozen pre-registration, **before any data was collected**: no artifact directory exists in the worktree, the base repo, or any commit history. Repair of the pre-registration, not a post-hoc revision. |
 
 *Pre-registration frozen: 2026-09-11. Amendments after the first run must be dated and appended, never edited in place.*
