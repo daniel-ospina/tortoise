@@ -19,6 +19,7 @@ aboutObjects: tortoise
 | Temporal retrieval diagnosis + oracle ceiling (42/52 = 81%, #2976/#2978) — evidence | `docs/runbook/2578-oracle-ceiling.jsonl` · `docs/research/2026-09-11-subgraph-retrieval-research.md` |
 | **A/B/C context-assembly pre-registration** — verbatim vs epistemic subgraph vs union (#2976/#2978/#2683) | `docs/experiments/2026-09-11-abc-context-assembly-experiment.md` |
 | Competitor analysis — 14 profiles incl. the four-epistemic-primitives matrix (Kumiho/Cognee/Mem0/HippoRAG/GraphRAG/Emergence/Letta) | `product/competition/_analysis.md` · `product/competition/_index.md` |
+| Decision evidence — #2952 (degraded retrieval) + #2976 (temporal retrieval) from competitors (Hindsight TEMPR temporal leg, Zep bi-temporal, supermemory "dreaming") | `docs/research/2026-09-11-decisions-2952-2976-competitor-evidence.md` |
 | Auth architecture — standard patterns vs Tortoise (#1498/#1506); key-permission model + #2082 boundary (§6, epic #2083) | `docs/auth-architecture.md` |
 | Backup/DR runbook | `docs/ops/registry-backup-dr.md` |
 | CI timing measurement artifact (#1477) | `docs/ci-timing.md` |
