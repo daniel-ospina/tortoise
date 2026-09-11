@@ -415,7 +415,7 @@ security = `scheme: lookup_hash_sha256` (Supabase).
 > registry`, a sweep result of `enum_failed`, or an unmeasurable watcher age is
 > the failure signature, and the hourly driver fails the run red for a 0-backup
 > result it cannot corroborate.
-> See `docs/ops/registry-backup-dr.md` §Architecture.
+> See `docs/ops/registry-backup-dr.md` §Control plane / dialect (#2823).
 
 ```bash
 curl -s https://api.premiselabs.co/v1/internal/backups/status \

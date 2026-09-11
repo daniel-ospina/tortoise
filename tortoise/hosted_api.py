@@ -20475,7 +20475,22 @@ async def backups_status(request: Request):
                     "last_run_source")
     }
     if not last_sweep.get("last_sweep_at"):
-        last_sweep = None  # sweep never ran — omit the block
+        # #2823 (code-review cycle 4): a deployment whose ONLY runs were no-ops
+        # has a dialect in ops/state.json but no `last_sweep_at` (see
+        # backup_sweep._noop_ops_state). Nulling the whole block there hid the
+        # lane on exactly the fresh / misconfigured deployment an operator is
+        # diagnosing — `_refuse_wrong_dialect` is deliberately one-directional,
+        # so a registry-dialect source on a Supabase deployment is NOT caught
+        # there. Keep the block when it can still name the lane; never
+        # fabricate the outcome fields (the driver reads
+        # `.last_sweep.last_sweep_at // empty`, so their absence stays
+        # meaningful).
+        dialect_only = {
+            key: last_sweep[key]
+            for key in ("source", "last_run_source")
+            if last_sweep.get(key)
+        }
+        last_sweep = dialect_only or None  # sweep never ran — omit the block
     driver_hb = {}
     try:
         parsed = _json.loads(storage.download(_DRIVER_HEARTBEAT_KEY))

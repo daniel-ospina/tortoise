@@ -202,6 +202,26 @@ class TestDrStatus:
         assert r.status_code == 200
         assert r.json()["last_sweep"] is None
 
+    def test_status_surfaces_the_dialect_when_only_noop_runs_have_happened(
+            self, client, dr_env, mem_storage):
+        """#2823 (code-review cycle 4): a deployment whose only runs were no-ops
+        has a dialect in ops/state.json but no `last_sweep_at`. The lane must
+        still be readable — that IS the deployment an operator is diagnosing
+        (a registry-dialect source on a Supabase deployment is exactly what
+        `_refuse_wrong_dialect` deliberately does not catch) — and the block
+        must NOT fabricate outcome fields the driver keys off."""
+        mem_storage.upload("ops/state.json", json.dumps({
+            "last_team_count": 0,
+            "updated_at": "2026-09-11T04:00:00+00:00",
+            "last_run_source": "registry",
+        }).encode())
+        r = client.get("/v1/internal/backups/status", headers=INTERNAL_HEADERS)
+        assert r.status_code == 200
+        ls = r.json()["last_sweep"]
+        assert ls == {"last_run_source": "registry"}
+        assert "last_sweep_at" not in ls
+        assert "graph_totals" not in ls
+
     def test_status_degrades_gracefully_without_a_source_key(
             self, client, dr_env, mem_storage):
         """An older app build's roll-up has no `source` — it must surface as
