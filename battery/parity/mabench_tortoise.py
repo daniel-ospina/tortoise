@@ -171,8 +171,10 @@ def _capability_refusal(gate: dict) -> ExecutorUnavailable:
         f"legs_seen={gate.get('legs_seen')!r}). An FTS-only score is a "
         f"degraded, keyword-only retrieval surface — NOT the product's "
         f"hybrid retrieval — and must not be labelled {LANE_REAL} (#2985). "
-        f"Install the embeddings extra (`uv sync --extra embeddings`) and "
-        f"re-run; the lane refuses rather than record a number.")
+        f"Install the embeddings extra (`uv sync --extra embeddings "
+        f"--extra parity` — an explicit --extra list is EXACT, so name every "
+        f"extra the lane needs) and re-run; the lane refuses rather than "
+        f"record a number.")
     err.capability_gate = gate
     return err
 
@@ -244,6 +246,14 @@ class TortoiseCrMemory:
                 Path(tempfile.mkdtemp(prefix="mabench_tortoise_")) / "cr.db")
         self._db_path = db_path
         self._session = source_session
+        #: #2985 — the retrieval legs the product ACTUALLY submitted across
+        #: every ``recall()`` in this run (union, from the per-call
+        #: ``leg_trace``), plus whether any leg degraded. Recorded in the cell
+        #: ``detail`` so a persisted number carries the retrieval conditions
+        #: that produced it. Named ``observed_*`` to stay distinct from the
+        #: ``retrieval_legs()`` capability-PROBE method above (#3005).
+        self.observed_retrieval_legs: list[str] = []
+        self.observed_retrieval_degraded = False
         ev_dir = Path(db_path).parent / "events"
         self._sdk = TortoiseSDK(
             db_path=db_path,
@@ -280,8 +290,17 @@ class TortoiseCrMemory:
             leg_trace=leg_trace)
 
     def recall(self, question: str, k: int) -> list[str]:
-        """The product state read, filtered to point rows with text."""
-        rows = self._recall_state(question, k)
+        """The product state read, filtered to point rows with text.
+
+        #2985: ``recall_state`` is called with the observation-only
+        ``leg_trace`` so the lane can attest WHICH legs ran (fts / vector /
+        structural / fallback) rather than only that they *could*; the trace
+        is folded into ``observed_retrieval_legs`` and surfaced in the cell
+        detail. The trace never changes the returned rows.
+        """
+        trace: list[dict] = []
+        rows = self._recall_state(question, k, leg_trace=trace)
+        self._record_retrieval_trace(trace)
         out: list[str] = []
         for row in rows or []:
             if not isinstance(row, dict):
@@ -303,6 +322,18 @@ class TortoiseCrMemory:
         trace: list[dict] = []
         self._recall_state(question, k, leg_trace=trace)
         return trace
+
+    def _record_retrieval_trace(self, trace: list[dict]) -> None:
+        """Fold one recall's observed leg trace into the run-level record.
+
+        Union of leg names (a leg that ran in ANY question ran in the lane)
+        and OR of the per-leg ``degraded`` flag — via the shared interpreter
+        of the product's trace shape (``retrieval_preflight.merge_leg_trace``),
+        so the parity lane and the a4 arm record identically.
+        """
+        from battery.runner.retrieval_preflight import merge_leg_trace
+        if merge_leg_trace(self.observed_retrieval_legs, trace):
+            self.observed_retrieval_degraded = True
 
     def close(self) -> None:
         self._sdk.close()
@@ -494,6 +525,21 @@ def run_cr_tortoise_lane(
     accuracy, samples = score_cr(outputs, chosen)
     cost_basis = aggregate_cost_basis(bases)
 
+    # #2985: record the retrieval conditions that produced the number — the
+    # OBSERVED leg union across this lane's own reads (the memory's folded
+    # ``leg_trace``), never an availability guess. A real lane that observed
+    # no legs cannot attest that it ran hybrid, so the label fails closed;
+    # the mock lane's fake has no retrieval engine by construction and is
+    # deliberately not degraded. (The capability PROBE's verdict — including
+    # its own observed ``legs_seen`` — rides the cell separately in
+    # ``capability_gate``.)
+    retrieval_legs = sorted({str(leg) for leg in (
+        getattr(memory, "observed_retrieval_legs", None) or [])})
+    retrieval_degraded = bool(
+        getattr(memory, "observed_retrieval_degraded", False))
+    if lane == LANE_REAL and not retrieval_legs:
+        retrieval_degraded = True
+
     cell = ExecutedCell(
         benchmark="memoryagentbench",
         accuracy=accuracy,
@@ -509,6 +555,10 @@ def run_cr_tortoise_lane(
             "k": k,
             "retrieved_chars": retrieved_chars,
             "empty_retrievals": empty_retrievals,
+            # #2985: the retrieval conditions behind the accuracy — the OBSERVED
+            # leg union for this lane, plus the fail-closed degraded label.
+            "retrieval_legs": retrieval_legs,
+            "retrieval_degraded": retrieval_degraded,
             # #2985: the capability record rides the measured cell for the
             # REAL lane, so the artifact SHOWS the vector leg ran (a lane
             # that could not prove it never reaches here — it refuses).

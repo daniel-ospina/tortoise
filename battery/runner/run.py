@@ -72,6 +72,10 @@ from battery.runner.model_calls import (
     UsageRecordingCaller,
     aggregate_cost_basis,
 )
+from battery.runner.retrieval_preflight import (
+    HybridRetrievalUnavailable,
+    require_hybrid_retrieval,
+)
 from battery.runner.scorers import (
     HARNESS_METRIC_IDS,
     HarnessScorer,
@@ -734,6 +738,13 @@ def run_battery(config: RunConfig, *, stdout: Callable[[str], None] = print,
     run_real_spend = 0.0
     budget_stop = False
     budget_skipped: list[str] = []
+    # #2985: the retrieval conditions of this run — the union of legs the
+    # retrieval-reading arms OBSERVED (their own ``leg_trace``) and whether
+    # any real retrieval arm was refused by the preflight or degraded
+    # mid-run. Persisted at run level in summary.json; an availability
+    # guess is never used when an observed trace exists.
+    run_retrieval_legs: list[str] = []
+    run_retrieval_degraded = False
 
     for arm_id in config.arms:
         arm_config = arm_map.get(arm_id)
@@ -761,8 +772,27 @@ def run_battery(config: RunConfig, *, stdout: Callable[[str], None] = print,
                      "model_id": arm.model_id,
                      "temperature": float(getattr(arm, "temperature", 0.0))}
         # ── arm-init (setup_scenarios) — failure → skip arm, summary-only ──
+        # #2985: an arm that reads through the product's HYBRID retrieval
+        # (a4's recall_state) declares ``requires_hybrid_retrieval``. In a
+        # real run, preflight the embedder BEFORE setup/ingest so a
+        # keyword-only environment (plain ``uv sync``) fails closed — the arm
+        # is skipped with a recorded ``init_failure`` naming the preflight,
+        # never an FTS-only number under the a4 label. Mock/hermetic lanes
+        # and arms without retrieval are untouched, and the arm itself stays
+        # callable for equivalence tests (the gate lives here, not in the arm).
+        retrieval_required = bool(
+            getattr(arm, "requires_hybrid_retrieval", False))
         try:
+            if retrieval_required and run_mode == "real":
+                require_hybrid_retrieval()
             arm.setup_scenarios(scenarios)
+        except HybridRetrievalUnavailable as e:
+            run_retrieval_degraded = True
+            arms_out.append(_arm_summary_block(
+                arm_id, arm_present=False, run_mode=run_mode,
+                reason=f"retrieval preflight: {e}"))
+            any_arm_failed = True
+            continue
         except ArmUnavailable:
             arms_out.append(_arm_summary_block(
                 arm_id, arm_present=False, run_mode=run_mode))
@@ -935,6 +965,13 @@ def run_battery(config: RunConfig, *, stdout: Callable[[str], None] = print,
             })
 
         agg = aggregate(arm_episodes, HARNESS_METRIC_IDS)
+        # #2985: fold this arm's OBSERVED retrieval legs into the run record
+        # (union across arms). An arm with no retrieval reports nothing.
+        for _leg in getattr(arm, "observed_retrieval_legs", ()) or ():
+            if _leg not in run_retrieval_legs:
+                run_retrieval_legs.append(_leg)
+        if getattr(arm, "observed_retrieval_degraded", False):
+            run_retrieval_degraded = True
         arms_out.append(_arm_summary_block(
             arm_id, arm_present=True, run_mode=run_mode,
             scenarios=len(scenarios), valid_episodes=agg.valid_episodes,
@@ -977,6 +1014,9 @@ def run_battery(config: RunConfig, *, stdout: Callable[[str], None] = print,
                                   for s in scenarios)),
         budget_stopped=bool(budget_skipped),
         budget_skipped=budget_skipped,
+        # #2985: the retrieval conditions behind every number in this run.
+        retrieval_legs=run_retrieval_legs,
+        retrieval_degraded=run_retrieval_degraded,
         timestamps={"written_utc": datetime.now(timezone.utc).isoformat()})  # noqa: UP017
     validate_summary_keys(summary)
     write_summary(attempt_dir, summary)

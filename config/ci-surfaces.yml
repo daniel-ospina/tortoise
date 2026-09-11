@@ -210,6 +210,7 @@ surfaces:
   - test_battery_runner.py
   - test_battery_setup.py
   - test_battery_real_run_gate.py  # #2633 real-run vendor-key pre-flight gate (hermetic)
+  - test_battery_retrieval_preflight.py  # #2985: shared hybrid-retrieval preflight + arm gate + leg provenance (pins battery/arms, battery/runner, battery/parity + tortoise/embeddings.py → also eval)
   # #2916: 26 files that pin battery/ (arms, cli, config, enums, exceptions,
   # exposure, judge, probes, report, runner, testing) and NOTHING api-owned — no
   # api-pinned import, no api-pinned path string — yet were registered api-only,
@@ -641,6 +642,7 @@ surfaces:
   - eval/write_path/test_write_path_benchmark.py
   - mini_beir/test_mini_beir.py
   - test_backfill_embeddings_force.py
+  - test_battery_retrieval_preflight.py  # #2985: pins tortoise/embeddings.py EmbeddingModel.get probe + recall_state leg_trace provenance (also battery)
   - test_calibrate_thresholds.py
   - test_embedder_probe.py
   - test_eval_extraction_health.py

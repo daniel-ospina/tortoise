@@ -72,11 +72,28 @@ class A4TortoiseArm:
     model_id = "fixed"
     temperature = 0.0
 
+    #: #2985 — this arm READS through the product's HYBRID retrieval
+    #: (``recall_state`` → ``tortoise_fts_query``, FTS+vector+structural RRF).
+    #: The real runner preflights the embedder BEFORE setup/ingest for arms
+    #: carrying this flag, so a degraded environment fails closed instead of
+    #: publishing an FTS-only number under the a4 label. The explicit
+    #: ``embeddings`` extra is what makes the vector leg runnable; a plain
+    #: ``uv sync`` yields a KEYWORD-ONLY product (#2985).
+    requires_hybrid_retrieval = True
+
     def __init__(self, db_path: str | None = None, **config):
         self._db_path = db_path or os.environ.get("TORTOISE_DB_PATH") or ""
         self._sdk_by_id: dict[str, object] = {}
         self.decide_cycles = 0
         self._active_scenario: str | None = None
+        #: #2985 — the retrieval legs this arm actually OBSERVED across its
+        #: reads (union, from the product's per-call ``leg_trace``) and the
+        #: observed degraded flag. Recorded in summary.json so a persisted a4
+        #: number carries the retrieval conditions that produced it. Named
+        #: ``observed_*`` to stay distinct from the parity lane's
+        #: ``retrieval_legs()`` capability-PROBE method (#3005).
+        self.observed_retrieval_legs: list[str] = []
+        self.observed_retrieval_degraded = False
         #: per-scenario memo of filed records this setup (true-no-op keys:
         #: evidence = (op_kind, target, content); mitigate = content).
         self._filed_content: dict[str, set[str]] = {}
@@ -169,13 +186,14 @@ class A4TortoiseArm:
         """
         self.decide_cycles = 0
         sdk = self._sdk(context.scenario)
+        trace: list[dict] = []
         try:
             query = (context.user_message or "").strip()
             if not query:
                 probe = _scenario_probe_query(context.scenario)
                 query = probe or ""
             results = sdk.recall_state(
-                query=query or None, kind=None, limit=20)
+                query=query or None, kind=None, limit=20, leg_trace=trace)
             out: list[Memory] = []
             seen_op_ids: set[str] = set()
             for row in results or []:
@@ -215,6 +233,13 @@ class A4TortoiseArm:
             return out
         except Exception as e:  # noqa: BLE001, RUF100
             raise ArmUnavailable(f"a4 graph read: {e}") from e
+        finally:
+            # #2985: record the legs the trace observed even on a failed read
+            # (a partial trace still says which leg was attempted) — the same
+            # interpreter the parity lane uses, so the two record identically.
+            from battery.runner.retrieval_preflight import merge_leg_trace
+            if merge_leg_trace(self.observed_retrieval_legs, trace):
+                self.observed_retrieval_degraded = True
 
     # ── ep_outcome terminal table (#2291 I-4) ───────────────────────────
     def ep_terminal_outcome(self, scenario: Scenario, *,
