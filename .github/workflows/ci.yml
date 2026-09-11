@@ -34,6 +34,7 @@ jobs:
       python: ${{ steps.gate.outputs.python }}
       drift: ${{ steps.gate.outputs.drift }}
       driver_scripts: ${{ steps.gate.outputs.driver_scripts }}
+      watchdog_scripts: ${{ steps.gate.outputs.watchdog_scripts }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -184,6 +185,19 @@ jobs:
               "driver_scripts": any_file(
                   startswith(".github/scripts/registry-cron"),
                   isfile(".github/workflows/registry-backup-cron.yml"),
+                  # a job-definition change re-runs its own suite (dashboard_e2e
+                  # precedent) — review R12/Config.
+                  isfile(".github/workflows/ci.yml"),
+              ),
+              # availability-watchdog (#2850): the out-of-band availability
+              # probe's state-machine harness (verdict classification, issue
+              # dedupe, restart cooldown/velocity cap, drill disarm, redaction).
+              # Gated on the probe surface so a PR touching the watchdog (or the
+              # cron that runs it) re-runs its suite — #2149 pattern, not an
+              # always-on job.
+              "watchdog_scripts": any_file(
+                  startswith(".github/scripts/availability-watchdog"),
+                  isfile(".github/workflows/availability-watchdog.yml"),
                   # a job-definition change re-runs its own suite (dashboard_e2e
                   # precedent) — review R12/Config.
                   isfile(".github/workflows/ci.yml"),
@@ -433,6 +447,19 @@ jobs:
       - uses: actions/checkout@v4
       - name: Backup driver state taxonomy (#2796)
         run: bash .github/scripts/registry-cron.test.sh
+
+  availability-watchdog:
+    needs: changes
+    if: needs.changes.outputs.watchdog_scripts == 'true'  # #2850: probe surface only
+    # #2850: the out-of-band availability probe's state machine — verdict
+    # classification, issue dedupe (#2706 class), restart cooldown/velocity cap,
+    # drill disarm, public-body redaction. Self-contained: stubs curl/gh/flyctl,
+    # no network. Mirrors backup-driver-scripts (#2796).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Availability watchdog state machine (#2850)
+        run: bash .github/scripts/availability-watchdog.test.sh
 
   entrypoint-guards:
     needs: changes

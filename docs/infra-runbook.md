@@ -7,13 +7,13 @@ subjects.team: epistemic-team
 aboutSubjects: tortoise-infra
 aboutObjects: fly-io, falkordb, cloudflare
 created: 2026-08-03
-updated: 2026-08-14
+updated: 2026-09-11
 ---
 
 # Tortoise Hosted Platform — Infrastructure Runbook
 
-**Epic:** #7711
-**Last updated:** 2026-08-14
+**Epic:** #7711 (legacy provisioning epic — provenance) · availability watchdog: #2850
+**Last updated:** 2026-09-11 (#2850 availability watchdog)
 
 ## 1. Initial Provisioning
 
@@ -271,6 +271,247 @@ cd apps/dashboard
 npm run build
 wrangler pages deploy dist --project-name=tortoise-dashboard
 ```
+
+## 6. Out-of-band availability watchdog (#2850)
+
+The 2026-09-10 outage (~19:10–19:55 UTC, ~45 min) took `https://api.premiselabs.co`
+fully down for its whole duration and **nobody was paged**. Sentry could not see it:
+Sentry runs *inside* the process, so a machine that is alive-but-not-serving
+raises no exception and reports nothing — the Fly proxy simply stops routing
+(`[PR01] no known healthy instances found for route tcp/443`) and every public
+request hangs until it times out. There is exactly ONE machine, so its
+de-registration from routing *is* a total outage. This watchdog is the missing
+observer: it runs on GitHub Actions — a different failure domain than Fly —
+every 5 minutes.
+
+- **Workflow:** `.github/workflows/availability-watchdog.yml` (schedule `*/5 * * * *` + `workflow_dispatch`)
+- **Logic + limits:** `.github/scripts/availability-watchdog.sh`
+- **Harness (runs in CI job `availability-watchdog`):** `bash .github/scripts/availability-watchdog.test.sh`
+
+### 6.1 What the probe checks
+
+`GET https://api.premiselabs.co/v1/teams` with **no auth** — the real user
+path (an authenticated API route served by the app), not just an open socket.
+Unauthenticated, that route must answer **`401`** (`Missing session token`) —
+verified in source: `tortoise/session_auth.py::verify_session_jwt` raises 401
+with zero network I/O when the `Authorization` header is absent.
+
+**What that does and does not prove:** liveness, and that this route still
+exists and is served. It does **not** exercise authenticated traffic — an
+auth-leg break that rejects every real token (JWKS/JWT misconfiguration, mass
+suspension) answers `401` and therefore reads UP.
+
+| Verdict | HTTP seen | Meaning |
+|---|---|---|
+| **UP** | `2xx`, `401`, `403`, `429` | The app answered. `401` is the expected no-auth answer; `429` means the app answered and is throttling us |
+| **DOWN** | `000` (timeout / connection error) or `5xx` | No answer — the outage class |
+| **UNEXPECTED** | anything else (`3xx`, `404`, …) | It answered, but not as expected — usually a bad deploy or a moved route, **not** a wedge |
+
+A generous per-request timeout (25 s) plus 3 attempts ~10 s apart must all fail
+before the run declares DOWN, so a single transient blip cannot fire an alarm.
+
+### 6.2 How to read a failure
+
+1. **The workflow run goes RED** — that is the alert (enable GitHub Actions
+   notifications for this repo, or the failure is only visible in the UI).
+2. **One GitHub issue** appears (or an existing one gets a comment):
+   `[monitor] PROD DOWN — api.premiselabs.co is not answering the availability
+   probe` (or `PROD DEGRADED` for the UNEXPECTED class), labelled `auto-filed`.
+3. The issue **body** is machine-managed and carries the verdict, the first
+   observation time, the failing-run count, the raw probe evidence, and the
+   self-healing state. Read it first; add human notes as **comments**.
+4. The **first** line of the body is a state block:
+   `<!-- watchdog-state kind=down first_failure_ts=… down_runs=… last_down_ts=… last_comment_ts=… cap_notified_ts=… restarts=… -->`.
+   It drives the cooldown/velocity limits — do not hand-edit it. `restarts=`
+   records restart **attempts** (a failed attempt still counts).
+
+**One incident = one issue.** Repeats comment with an incremented count; the
+issue is closed automatically with a `Recovered` comment when a probe answers
+again. (This is the fix for the #2706 duplicate-issue failure mode.)
+
+### 6.3 Manual restart (when you do not want to wait for the watchdog)
+
+```bash
+export FLY_API_TOKEN=...            # same token as GitHub secret FLY_API_TOKEN
+flyctl machine list -a tortoise-y4mjjq          # state + checks (0/1 = unhealthy)
+flyctl machine restart <machine-id> -a tortoise-y4mjjq
+flyctl logs -a tortoise-y4mjjq                  # what it was doing
+```
+
+A restart is a **symptom fix**: the app takes ~60–90 s to boot, and the wedge
+recurs while the root cause is live (#2850: a FalkorDB socket timeout blocks
+the event loop; #2953: uvicorn binds the socket only after lifespan startup).
+The watchdog does **not** know you restarted anything: it keys off its own
+ledger, so a manual restart during the 20-minute cooldown window can still be
+followed by an automated one if the next probe lands while the app is booting.
+
+### 6.4 Self-healing and its limits
+
+When DOWN is confirmed for a sustained period the watchdog restarts the Fly
+machine itself, strictly rate limited so a database outage cannot become an
+infinite restart loop (AWS automated-remediation guidance: cap the remediation
+velocity and involve a human when the cap is hit).
+
+| Limit | Default | Behaviour |
+|---|---|---|
+| `SUSTAINED_DOWN_MINUTES` | 10 | No restart until the service has been continuously down this long (≈3 failing runs / 2 probe intervals at the 5-min cadence) |
+| `SUSTAINED_MIN_RUNS` | `max(2, ceil(SUSTAINED_DOWN_MINUTES / 5))` (2 at the wired 10-minute value) | At least this many failing runs must have been OBSERVED. Guards a stale/reopened incident whose stored clock is old from authorising a restart. Raising `SUSTAINED_DOWN_MINUTES` raises this too |
+| `RESTART_COOLDOWN_MINUTES` | 20 | Minimum gap between automated restarts |
+| `MAX_RESTARTS_PER_HOUR` | 2 | Rolling-hour cap. On the next failure the watchdog **stops restarting** and comments/pages asking for a human (paged at most every `CAP_RENOTIFY_MINUTES`, default 60 — the same text can still reappear in routine comments every `COMMENT_THROTTLE_MINUTES`). Set it to **`0` to disable automated restarts entirely** (an operator kill switch: alerting continues, nothing restarts) |
+| `COMMENT_THROTTLE_MINUTES` | 15 | Routine “still down” comments are throttled; the body count still increments every run |
+| `STALE_RESET_MINUTES` | 45 | If no failing run has been seen for this long, the incident is not continuous: the sustained WINDOW restarts (the restart ledger is **preserved**) |
+| `CONTROL_URL` | `https://www.google.com/generate_204` | Runner-side egress control (see below) |
+
+Override them in the `env:` block of `availability-watchdog.yml`. The watchdog
+restarts **only**: (a) on a DOWN verdict — never on UNEXPECTED, where a restart
+cannot help; (b) when `PROBE_URL` is the production endpoint — a drill
+automatically disarms the restart leg. Three safeguards worth knowing:
+
+- **Write-then-act:** the attempt is recorded in the incident body *before*
+  `flyctl` runs. If that write fails the restart does **not** happen — the body
+  is the only cooldown/cap memory, so restarting without it could loop.
+- **Attempts, not successes, are capped:** a failed `flyctl` call still counts
+  against the hourly cap (the watchdog will not retry it every 5 minutes) and
+  escalates to a human instead.
+- **Runner-side egress control:** before ANY restart the watchdog probes
+  `CONTROL_URL` (a known-good endpoint outside this app's failure domain). If
+  that also fails, the verdict is **INCONCLUSIVE** — the incident is still
+  recorded and alerted, but nothing is restarted, because a DNS/egress/proxy
+  failure on the GitHub runner looks exactly like an app outage. No control
+  probe, no disruptive action.
+- **Write-then-act comments:** the body (including the comment-throttle stamp)
+  is written BEFORE the comment, and the restart/escalation stamps before the
+  restart/page. A failed state write therefore means **no restart, no page and
+  no comment** (the run fails loudly) — that is what keeps a broken GitHub
+  connection from turning into a notification loop.
+
+### 6.5 Secrets
+
+| Secret | Needed for | If missing |
+|---|---|---|
+| `FLY_API_TOKEN` | the automated restart | **Already exists** (used by `deploy-hosted.yml`). If absent, the restart leg is skipped, the log says so, and the incident **body** (plus any comment that is not throttled away) names the secret — **alerting still works** |
+| `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` | optional paging on transitions | Page skipped with a log line (reuses the DR driver's secrets) |
+
+`GITHUB_TOKEN` is supplied by Actions and needs `issues: write` (granted in the
+workflow). A missing `GH_TOKEN` fails the run before probing — a monitor that
+cannot file is a deaf monitor.
+
+### 6.6 When restarts do not help
+
+The watchdog stops after `MAX_RESTARTS_PER_HOUR` and asks for a human — treat
+that as “this is not a wedged process”:
+
+1. `flyctl logs -a tortoise-y4mjjq` — look for `Timeout reading from socket`,
+   `Failed to create index`, or a crash loop.
+2. Check **FalkorDB Cloud** reachability itself (a dead/slow DB is the #2850
+   root cause; the app cannot serve while the DB stalls).
+3. Check what was **deployed** — a bad release can 5xx without the process
+   being wedged; roll back with `fly deploy --image $(fly releases -a tortoise-y4mjjq --json | jq -r '.[1].ImageRef') -a tortoise-y4mjjq`.
+4. If restarts are actively harmful (e.g. they lengthen the outage), use a real
+   lever — a `probe_url` drill only disarms **that one run**, and the next
+   5-minute scheduled run probes production again:
+   - **Primary lever — stop restarts, keep alerting:** put
+     `MAX_RESTARTS_PER_HOUR: '0'` in the workflow's `env:` via a PR/merge (the
+     kill switch). It survives runs and leaves alerting intact.
+   - **Stop the whole monitor:** `gh workflow disable availability-watchdog`
+     (also stops alerting — you are now the monitor), then re-enable it.
+   - **Do NOT delete the `FLY_API_TOKEN` secret** as a lever: `deploy-hosted.yml`
+     requires it fail-closed (#1896), so the next deploy or rollback is blocked
+     until it is re-set. (Removing it *does* disable the restart leg, but at the
+     cost of the deploy pipeline.)
+5. **This watchdog does not fix availability.** It is an observer plus a
+   bounded restart. The durable fixes are #2850 (do not wedge on a DB stall)
+   and #2953 (bind the socket before the startup DB sweep). Note also that the
+   app runs on a **single machine** (see §6.8), so there is no failover to
+   absorb a restart.
+
+### 6.7 Drilling the watchdog
+
+```bash
+gh workflow run availability-watchdog -f probe_url=https://api.premiselabs.co/no-such-route
+```
+
+A non-production `probe_url` is a **drill**, and a drill gets its **own incident
+identity** — it files/comments `[monitor] DRILL DOWN — <host> [DRILL]` (or
+`DRILL DEGRADED`) with the `auto-filed` label, and it can never restart
+production, mutate a production incident's state, or close one. Close the drill
+issue afterwards.
+
+Expect: a RED run and a `DRILL DEGRADED` issue — *filed* if none is open,
+otherwise a **comment** (the first repeat comments immediately; further repeats
+inside `COMMENT_THROTTLE_MINUTES` only bump the body count). A subsequent drill
+run that reads **UP** comments `Recovered` on and closes the **drill** incident
+(never a production one) — so drills do not accumulate, but do close the one
+you opened.
+
+To check the *paging* path, set the repo secrets (`gh secret set
+TELEGRAM_BOT_TOKEN`) — a dispatched workflow uses the repository secrets, not
+your shell environment. `gh workflow run` cannot pass them inline.
+
+### 6.8 Known limits
+
+- **Single-route, unauthenticated blindness.** The probe checks ONE route
+  (`/v1/teams`) and only its no-auth branch. An outage that leaves that route
+  answering `401` while other routes fail reads as UP (green) — and so does an
+  auth-leg break that rejects every *real* token. The probe proves liveness and
+  route presence, not end-to-end authenticated traffic.
+- **A *total* runner-side network failure is INCONCLUSIVE, not DOWN** (the
+  `CONTROL_URL` check). Alerting still fires; no restart is issued. The
+  escalation page is throttled (at most once per `CAP_RENOTIFY_MINUTES`) and the
+  per-run record is the incident **body** plus the RED workflow run — so "no
+  page this run" does not mean "no alert". Note the control can only detect a
+  TOTAL egress failure: a failure affecting only the probe's own host (its DNS
+  zone, a Cloudflare/ASN block on the runner IP) leaves the control green and
+  still reads as DOWN.
+- **The dedupe search is a loose `in:title` term match**, not an exact phrase:
+  any open issue sharing the marker's terms (`monitor` + `PROD` + `DOWN`) would
+  be adopted as the incident. Keep unrelated issues' titles clear of those words.
+- **Truth is derived from the incident body**, which is human-editable. Values
+  are sanitised (scalars and the restart ledger) and a stale clock (no failing
+  run within `STALE_RESET_MINUTES`, default 45) restarts the sustained window
+  **without** clearing the restart ledger, but a hand-edited field can still
+  make the watchdog more conservative or less so within the configured caps.
+- **A failed state write is fatal** (the run fails) because the body is the
+  only cooldown/cap memory — expect a RED run whose log says the state write
+  failed, with no restart. The same applies to a failed body READ (never
+  treated as “no state”, which would erase the ledger) and to the cap's
+  escalation stamp (no page is sent until the stamp is durable).
+- **A DOWN↔DEGRADED flip can leave two open incidents** (one of each kind) for
+  a single outage; recovery closes both. Rare, but do not assume the second
+  issue is a new outage.
+- **Flapping** (UP→DOWN→UP within minutes) keeps an open incident open
+  (recovery needs a confirmation probe) but does churn comments. That
+  unconfirmed-recovery run exits **GREEN** — the open incident, not the run
+  colour, is the standing alert, so do not read a green run as all-clear while
+  an incident is open. The sustained
+  clock is **preserved** while the incident stays open (it is only reset when
+  the gap since the last failing run exceeds `STALE_RESET_MINUTES`), so a flap
+  does not delay self-healing; a flap that recovers long enough to close the
+  incident starts a fresh clock *and* a fresh restart budget (next bullet). If a
+  flap is seen with NO incident open, the watchdog files one for the observed
+  failure rather than reporting a green run.
+- **The restart ledger is per-incident.** Recovery closes the incident, so a
+  service that flaps (recovers ≥1 probe, then fails ≥10 min again) starts a
+  fresh `MAX_RESTARTS_PER_HOUR` budget each cycle. A flap can therefore exceed
+  2 restarts/hour *globally* while never exceeding it within one incident. The
+  sustained window + recovery confirmation + 20-min cooldown bound it to a few
+  restarts per hour; if that is ever observed, the fix is a cross-incident
+  ledger (inherit the stamps from the most recently closed incident).
+- **GitHub scheduled workflows can be delayed** under platform load, and GitHub
+  **disables** schedules after ~60 days of repo inactivity — a missing run looks
+  like silence. After any long quiet period, dispatch the workflow once to
+  confirm the schedule is still enabled — but note that a **blank or production
+  `probe_url` is a full PRODUCTION run with self-healing ARMED**: it re-probes
+  production and can restart it. Only a non-production value is a drill. To
+  check the schedule without touching production, first set `MAX_RESTARTS_PER_HOUR: '0'`
+  (or accept that a down service may be restarted).
+- If a human closes the incident issue mid-outage, the next run files a fresh
+  issue and the sustained/velocity clock restarts (documented, accepted).
+- The dedupe search API is eventually consistent; the 5-minute cadence makes
+  that immaterial.
+- Only one machine exists, so any restart is a (multi-minute) outage by itself
+  — there is no failover. A restart is therefore always the *last* automated
+  resort, gated on a trustworthy verdict (see the egress control).
 
 ## Secrets Matrix
 
