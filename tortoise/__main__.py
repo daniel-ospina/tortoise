@@ -4392,6 +4392,7 @@ def _cmd_index_github(args):
             # readiness timeout, which names the path and the child's rc —
             # more useful than a silently swallowed error in a process that is
             # about to be signalled anyway. A non-OSError bug should not hide.
+            pass
 
     log_path = Path(tempfile.gettempdir()) / f"tortoise-index-{repo_name}.jsonl"
     log = EventLog(str(log_path))
