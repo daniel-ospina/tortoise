@@ -27,6 +27,7 @@ Design rules (they are what make the published parity table defensible):
 """
 from __future__ import annotations
 
+import contextlib
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -45,6 +46,14 @@ class ExecutorUnavailable(RuntimeError):
     """
 
 
+#: Lane labels a measured cell may carry. "real"/"mock" are the released
+#: full-context runner lanes; the "_tortoise" labels are the RETRIEVED-context
+#: arm lanes (#2800). A Tortoise number carries its OWN label so it can never
+#: be mistaken for the full-context baseline it is compared against (the
+#: reason the lane field is keyword-required and validated, #2819).
+LANES: tuple[str, ...] = ("real", "mock", "real_tortoise", "mock_tortoise")
+
+
 @dataclass(frozen=True)
 class ExecutedCell:
     """One measured benchmark cell: the official metric + the samples + the
@@ -55,19 +64,21 @@ class ExecutedCell:
     samples: int
     revision: str
     #: Which lane produced the number: "real" (the released dataset with real
-    #: reader/judge models) or "mock" (a fixture with mocked reader/judge, no
-    #: spend). REQUIRED — no default (review P2 on #2819): a default would
+    #: reader/judge models), "mock" (a fixture with mocked reader/judge, no
+    #: spend), or the retrieved-context arm variants "real_tortoise" /
+    #: "mock_tortoise" (#2800 — MemoryAgentBench CR on the Tortoise arm).
+    #: REQUIRED — no default (review P2 on #2819): a default would
     #: silently assert "real" for a cell that never said so, which is the
     #: fail-open version of the provenance bug this field exists to prevent.
     lane: str
     detail: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        if self.lane not in ("real", "mock"):
+        if self.lane not in LANES:
             raise ValueError(
                 f"parity executor {self.benchmark}: lane={self.lane!r} must be "
-                f"'real' or 'mock' — a cell that does not say which lane it "
-                f"came from cannot be compared")
+                f"one of {LANES} — a cell that does not say which lane it came "
+                f"from cannot be compared")
         if self.accuracy is not None and self.samples <= 0:
             raise ValueError(
                 f"parity executor {self.benchmark}: accuracy={self.accuracy!r} "
@@ -234,10 +245,94 @@ def memoryagentbench_executor(*, mock: bool = False, limit: int | None = None,
     return cell
 
 
+def memoryagentbench_tortoise_executor(*, mock: bool = False,
+                                       limit: int | None = None,
+                                       out_dir: Path | None = None,
+                                       config: str = "factconsolidation_sh_6k",
+                                       k: int | None = None
+                                       ) -> ExecutedCell:
+    """Run the MemoryAgentBench Conflict Resolution family on the TORTOISE
+    (retrieved-context) lane (#2800) — the treatment row of the baseline cell
+    ``memoryagentbench_executor`` produces.
+
+    Same pinned dataset, same benchmark prompts and the same official metric:
+    the ONLY difference from the baseline is that the reader sees the arm's
+    RETRIEVED facts instead of the whole knowledge pool. The cell is labelled
+    ``lane="real_tortoise"`` / ``"mock_tortoise"`` so it can never be mistaken
+    for the full-context baseline.
+
+    ``mock=True`` is hermetic: an in-memory fake memory + the deterministic
+    ``_MockReader`` — no parquet reader beyond the pinned config, no keys, no
+    spend. The real lane builds the product-backed ``TortoiseCrMemory``
+    (embedded store) and the pinned caller; both fail closed into
+    ``ExecutorUnavailable`` — a missing key or an unavailable arm is never
+    silently downgraded to the mock lane.
+    """
+    from battery.parity.mabench import MabenchError, load_cr
+    from battery.parity.mabench_tortoise import (
+        DEFAULT_K,
+        LANE_MOCK,
+        LANE_REAL,
+        TortoiseCrMemory,
+        _FakeCrMemory,
+        run_cr_tortoise_lane,
+    )
+
+    try:
+        cfg = load_cr(config)
+    except MabenchError as e:
+        raise ExecutorUnavailable(
+            f"memoryagentbench_tortoise: {type(e).__name__}: {e}") from e
+
+    kk = DEFAULT_K if k is None else k
+    if mock:
+        memory, caller, lane = _FakeCrMemory(), _MockReader(), LANE_MOCK
+    else:
+        try:
+            from battery.runner.model_calls import RealModelCaller
+            caller = RealModelCaller()
+        except Exception as e:
+            raise ExecutorUnavailable(
+                f"memoryagentbench_tortoise: real reader unavailable "
+                f"({e})") from e
+        try:
+            memory = TortoiseCrMemory()
+        except Exception as e:
+            raise ExecutorUnavailable(
+                f"memoryagentbench_tortoise: tortoise arm unavailable "
+                f"({e})") from e
+        lane = LANE_REAL
+
+    try:
+        cell, _run = run_cr_tortoise_lane(
+            cfg.items, memory, caller, lane=lane, config=config,
+            context=cfg.context, limit=limit, k=kk)
+    except ExecutorUnavailable:
+        raise
+    except Exception as e:
+        # A reader/arm that fails mid-run must not abort the whole parity leg:
+        # it becomes an explicit not-measured cell carrying the reason.
+        raise ExecutorUnavailable(
+            f"memoryagentbench_tortoise: run failed "
+            f"({type(e).__name__}: {e})") from e
+    finally:
+        # Close the real embedded store (the fake has none). Non-masking: a
+        # teardown error must never replace the propagating result/refusal —
+        # the CLI catches only ``ExecutorUnavailable``, so an escaping close
+        # error would abort the whole parity leg instead of recording a
+        # not-measured cell.
+        close = getattr(memory, "close", None)
+        if lane == LANE_REAL and callable(close):
+            with contextlib.suppress(Exception):
+                close()
+    return cell
+
+
 #: Registered execution seams, keyed by the pinned benchmark id. A benchmark
 #: absent here is a NOT-MEASURED cell (no runner wired) — the parity leg says
 #: so explicitly instead of implying a comparison.
 EXECUTORS: dict[str, Executor] = {
     "longmemeval": longmemeval_executor,
     "memoryagentbench": memoryagentbench_executor,
+    "memoryagentbench_tortoise": memoryagentbench_tortoise_executor,
 }
