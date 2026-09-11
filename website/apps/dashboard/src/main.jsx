@@ -404,11 +404,15 @@ function SettingsTab(props) {
 
       {/* ── Home 1: Setup guide (DE2E-6) — renders the SAME graph-held
           OnboardingState node as the Overview next-action element; the
-          card's Resume re-opens the wizard (idempotent re-entry). W9 owns
-          the fork-aware step-mapped resume. ── */}
+          card's Resume re-opens the wizard (idempotent re-entry). #2364
+          round-1: the copy below states the TRUE resume semantics — the
+          wizard reopens from the START (org-create), never mapped to the
+          guide's current row — and finished steps are saved so org-create
+          and a chosen fork never re-ask. W9 owns the fork-aware
+          step-mapped resume. ── */}
       <section className="settings-home" aria-labelledby="settings-setup-guide-heading">
         <h3 id="settings-setup-guide-heading">Setup guide</h3>
-        <p className="dim small">Where your Organization is in setup — reopen the wizard any time; what you've done is saved.</p>
+        <p className="dim small">Where your Organization is in setup — Resume reopens the setup wizard and walks you through what's left (your Organization and fork choice are already saved).</p>
         <SetupGuideCard state={state} loading={loading} onResume={onResumeSetup} />
       </section>
 
@@ -1632,7 +1636,16 @@ function claimIntentInFlight() {
   const [createTeamName, setCreateTeamName] = React.useState('')
   const [createTeamBusy, setCreateTeamBusy] = React.useState(false)
   const [createTeamError, setCreateTeamError] = React.useState('')
-  const [createTeamUpgrade, setCreateTeamUpgrade] = React.useState(false)
+  // #2789: the dialog has three modes — 'name' (free create, when the user is
+  // under the cap), 'limit' (the one-free-org gate: Cancel · Upgrade current
+  // organization · Purchase subscription for a new organization) and
+  // 'purchase' (name + plan → checkout for an org that does not exist yet).
+  // `createTeamLimitTeamId` is the owned free org "Upgrade current
+  // organization" targets — from the client pre-check, or the server's
+  // structured 402 detail.
+  const [createTeamMode, setCreateTeamMode] = React.useState('name')
+  const [createTeamPlan, setCreateTeamPlan] = React.useState('')
+  const [createTeamLimitTeamId, setCreateTeamLimitTeamId] = React.useState('')
   // #2392 (a11y): focus-restore holder for the create-team dialog — the
   // blob trigger button is captured when '+ Create new organization' is
   // clicked (the menu item itself unmounts when the account menu closes
@@ -1746,7 +1759,9 @@ function claimIntentInFlight() {
   // restores focus to the opening trigger instead of dropping it on <body>.
   function closeCreateTeam() {
     setCreateTeamOpen(false)
-    setCreateTeamUpgrade(false)
+    setCreateTeamMode('name')
+    setCreateTeamPlan('')
+    setCreateTeamLimitTeamId('')
     restoreFocus(createTeamRestoreRef)
   }
   // NOTE: the logout/team-switch revealKey clears (below) deliberately do NOT
@@ -1759,10 +1774,42 @@ function claimIntentInFlight() {
   const teamIdRef = React.useRef(null)
   const teamRefreshSeqRef = React.useRef(0) // #1906 (code-review P2): monotonic seq for the welcome-path team refreshes — a post-seed refire must win over a concurrent exit refresh (a pre-seed point_count must never clobber the post-seed count)
   const authSubRef = React.useRef(null) // Round-6: supabase onAuthStateChange subscription
+  // #2789 review P2/P1: the set of orgs that existed BEFORE the new-org
+  // purchase. The poll's prefix arm is a heuristic, so it must never consider
+  // one of those. It cannot live in a ref: the checkout opens in a NEW TAB
+  // (`window.open`, below) and Stripe's success redirect lands THERE, so the
+  // returning document has its own empty ref. The snapshot is therefore
+  // written to localStorage BEFORE the popup opens and read back on return —
+  // same origin, shared across tabs (sessionStorage's copy-on-open semantics
+  // are not dependable). Cleared in stripReturnParams when the flow ends.
+  const NEW_ORG_KNOWN_IDS_KEY = 'tt_new_org_known_ids'
+
+  function snapshotKnownOrgIds() {
+    try {
+      window.localStorage.setItem(NEW_ORG_KNOWN_IDS_KEY, JSON.stringify(
+        (teams || []).map((t) => t && t.team_id).filter(Boolean)))
+    } catch { /* private mode — the poll falls back to its list snapshot */ }
+  }
+
+  function knownOrgIdsForPoll() {
+    try {
+      const raw = window.localStorage.getItem(NEW_ORG_KNOWN_IDS_KEY)
+      const ids = raw ? JSON.parse(raw) : null
+      if (Array.isArray(ids)) return new Set(ids)
+    } catch { /* unreadable — fall through */ }
+    return new Set((teams || []).map((t) => t && t.team_id).filter(Boolean))
+  }
+
   const checkoutResetTimerRef = React.useRef(null) // Round-16: popup-flow fallback reset
   const apiKeyRef = React.useRef(null) // Round-21: live apiKey for staleness checks (state is closure-stale)
   const [checkoutPending, setCheckoutPending] = React.useState(false)
   const [billingPending, setBillingPending] = React.useState(false) // Round-25: double-click guard
+  // #2789: a sticky, dismissible Billing-tab notice for the paid-new-org
+  // return path — the org is provisioned by the webhook (graph work included),
+  // so a slow delivery must be TOLD to the user rather than silently leaving
+  // them on their old org. Deliberately separate from `capNotice` (which gates
+  // the onboarding wizard and would be cleared by a team switch).
+  const [billingNotice, setBillingNotice] = React.useState('')
   // P5 (code-review): distinguish 'loading' / 'ok' / 'denied' / 'error' so
   // loading and network failures never masquerade as an RBAC denial.
   const [membersStatus, setMembersStatus] = React.useState('loading')
@@ -1824,10 +1871,23 @@ function claimIntentInFlight() {
       // ('Invalid API key', 'Unauthorized', …), never '401', so status-based
       // checks (switchTeam re-mint) must read e.status, not message content.
       // #308: suspended teams get a dict detail — surface the appeal link.
-      const sus = suspendedFromDetail(body.detail)
-      const err = new Error(sus ? (sus.message || 'Organization suspended') : (typeof body.detail === 'string' ? body.detail : `HTTP ${res.status}`))
+      // #2789: a STRUCTURED detail (object with `code`) is surfaced on the
+      // Error so callers branch on the machine-readable code and never on the
+      // message text — the one-free-org dialog is driven by
+      // `one_free_org_limit`, and `team_id` names the org its "Upgrade current
+      // organization" action must target.
+      const detail = body.detail
+      const sus = suspendedFromDetail(detail)
+      const coded = detail && typeof detail === 'object' ? detail : null
+      const message = sus ? (sus.message || 'Organization suspended')
+        : typeof detail === 'string' ? detail
+        : (coded && typeof coded.message === 'string') ? coded.message
+        : `HTTP ${res.status}`
+      const err = new Error(message)
       err.status = res.status
       if (sus) err.suspended = sus
+      if (coded && typeof coded.code === 'string') err.code = coded.code
+      if (coded && typeof coded.team_id === 'string') err.teamId = coded.team_id
       throw err
     }
     return res.json()
@@ -2154,6 +2214,33 @@ function claimIntentInFlight() {
 
   // ── Billing (#310 Task 9): upgrade CTA + manage billing ──
   const ACTIVE_STATUSES = ['active', 'past_due', 'trialing']
+  // #2789: the ownership-based "one free organization" entitlement — the
+  // client mirror of the server's `_owned_free_org_ids` (hosted_api.py).
+  // OWNERSHIP, not membership: a collaborator on someone else's free org keeps
+  // their own free slot (counting memberships was the trap that motivated the
+  // issue). A `pending_payment` org is not real yet and does not consume the
+  // allowance. The `tier` predicate mirrors the registry (selfhost) lane — the
+  // Supabase lane decides on `subscription_status` alone, so a paid-tier row
+  // without an active status is counted free there and this pre-check would
+  // open the NAME dialog: harmless, because the server stays authoritative and
+  // its structured 402 flips the same dialog to limit mode. /v1/teams carries
+  // role + tier + subscription_status on every row, so this needs no extra
+  // request — advisory UX only.
+  const ownedFreeOrgs = (teams || []).filter((t) => t && t.role === 'owner'
+    && (t.tier === 'free' || t.tier == null)
+    && !ACTIVE_STATUSES.includes(t.subscription_status)
+    && t.subscription_status !== 'pending_payment')
+  // #2789 (code-review P2): the paid plans THIS deployment can actually check
+  // out, in catalog order. The purchase dialog must default to the first one
+  // rather than assuming `pro` is configured (a deployment may sell solo/team
+  // only, and defaulting to a missing `pro` would refuse a checkout while
+  // showing two usable plans).
+  const newOrgPlanOptions = (t) => planOptions().filter((p) => p.tier !== 'free'
+    && t?.checkout_price_ids?.[p.tier])
+  const newOrgDefaultPrice = (t) => {
+    const first = newOrgPlanOptions(t)[0]
+    return first ? t.checkout_price_ids[first.tier] : ''
+  }
   const hasActiveSubscription = team && ACTIVE_STATUSES.includes(team.subscription_status)
   // #1623 (review P2): canceled/unpaid teams still have a Stripe customer —
   // the portal gives invoice history + cancel management. Upgrade stays for
@@ -2218,27 +2305,87 @@ function claimIntentInFlight() {
   // Success-return path: ?session_id=... triggers a refetch loop until the
   // webhook flips subscription_status to active; ?checkout=cancelled clears
   // the pending flag. Both params are stripped from the URL after handling.
+  // #2789: the paid-new-org flow returns to
+  // ?session_id=...&new_org=<id>&new_org_name=<name> — the org does not exist
+  // until the webhook provisions it, so the loop waits for it to appear in
+  // /v1/teams and then switches to it (instead of polling the CURRENT org's
+  // subscription_status, which is a different org). It matches the id OR the
+  // intended name because the pre-minted id is not always the real id: on the
+  // registry (selfhost) lane `team_create` mints its own.
   React.useEffect(() => {
     const params = new URLSearchParams(window.location.search)
     const sessionId = params.get('session_id')
+    const newOrgId = params.get('new_org')
+    const newOrgName = params.get('new_org_name')
     const cancelled = params.get('checkout') === 'cancelled'
-    if (sessionId) {
+    const stripReturnParams = () => {
+      params.delete('session_id')
+      params.delete('new_org')
+      params.delete('new_org_name')
+      params.delete('checkout')
+      // the new-org flow is over — drop the pre-purchase snapshot with it
+      try { window.localStorage.removeItem(NEW_ORG_KNOWN_IDS_KEY) } catch { /* ignore */ }
+      window.history.replaceState({}, '', `${window.location.pathname}${params.toString() ? `?${params}` : ''}${window.location.hash}`)
+    }
+    if (sessionId || newOrgId) {
       let tries = 0
+      let switches = 0
       // Round-13 (P2): a mid-poll team switch must not let a tick land the
       // OLD team's data under the NEW team's switcher — capture the team at
       // poll start and bail when it changes.
       const teamAtPollStart = teamIdRef.current
+      // #2789 review P2: the orgs that already existed when this purchase
+      // STARTED (a tree-shared snapshot — see NEW_ORG_KNOWN_IDS_KEY). The
+      // prefix arm below is a heuristic, so it must never match one of THESE
+      // — that is what stops buying "Beta" while owning "Beta Corp" from
+      // switching to the wrong org.
+      const knownOrgIds = knownOrgIdsForPoll()
       const poll = setInterval(async () => {
         tries += 1
         try {
-          const t = await refreshTeam(undefined, teamAtPollStart)
-          if (t && ACTIVE_STATUSES.includes(t.subscription_status)) { tries = 5 }
+          if (newOrgId) {
+            const list = await loadTeams()
+            // #2789 review P2: a long name is TRUNCATED server-side when it is
+            // disambiguated (`_new_org_collision_name` → `name[:55] + " " +
+            // id[:8]`), so the prefix arm must truncate the intended name the
+            // same way — otherwise a 56–64 char name never matches and a paid
+            // user is wrongly told provisioning is slow.
+            const newOrgNamePrefix = newOrgName
+              ? `${String(newOrgName).slice(0, 55).trimEnd()} ` : ''
+            const match = (list || []).find((t) => t && (t.team_id === newOrgId
+              || (newOrgName && t.team_name === newOrgName)
+              // #2789 review P2: the prefix arm is a HEURISTIC, so it must only
+              // consider orgs that did not exist when the poll started —
+              // otherwise buying "Beta" while owning "Beta Corp" (or re-buying
+              // "Acme" when "Acme <id>" already exists from a prior collision)
+              // would switch the user to that OLD org and suppress the notice.
+              || (newOrgNamePrefix && !knownOrgIds.has(t.team_id)
+                && String(t.team_name || '').startsWith(newOrgNamePrefix))))
+            if (match) {
+              switches += 1
+              if (switches === 1) switchTeam(match.team_id)
+              tries = 5
+            }
+          } else {
+            const t = await refreshTeam(undefined, teamAtPollStart)
+            if (t && ACTIVE_STATUSES.includes(t.subscription_status)) { tries = 5 }
+          }
         } catch { /* webhook may not have landed yet */ }
         if (tries >= 5) {
           clearInterval(poll)
           setCheckoutPending(false) // Round-15: popup flow never returns the param to this tab — don't stay stuck
-          params.delete('session_id')
-          window.history.replaceState({}, '', `${window.location.pathname}${params.toString() ? `?${params}` : ''}${window.location.hash}`)
+          if (newOrgId && !switches) {
+            // #2789 (code-review P2): the org is provisioned by the webhook,
+            // which also does graph work — a slow delivery is normal. Tell the
+            // user instead of silently leaving them on the old org with no
+            // message. The notice lives on the Billing tab, so land there too
+            // (the success return otherwise opens on the overview tab, where
+            // the notice would never be seen); the params are stripped, so the
+            // notice must be sticky.
+            setBillingNotice("Your new organization is being set up — it will appear in the organization switcher shortly (refresh in a few moments if you don't see it).")
+            setTab('billing')
+          }
+          stripReturnParams()
         }
       }, 2000)
       return () => clearInterval(poll)
@@ -2246,8 +2393,7 @@ function claimIntentInFlight() {
     if (cancelled) {
       window.clearTimeout(checkoutResetTimerRef.current)
       setCheckoutPending(false)
-      params.delete('checkout')
-      window.history.replaceState({}, '', `${window.location.pathname}${params.toString() ? `?${params}` : ''}${window.location.hash}`)
+      stripReturnParams()
     }
   }, [team?.subscription_status])
 
@@ -3887,9 +4033,12 @@ function claimIntentInFlight() {
   }
 
   // ── E6/E7: team + graph switcher (session JWT authed) ──
+  // #2789: returns the loaded list (or null when not loaded) so the
+  // paid-new-org success-return poll can wait for the webhook-provisioned org
+  // to appear without a second /v1/teams fetch.
   async function loadTeams() {
     const tok = sessionTokenRef.current
-    if (!tok) return
+    if (!tok) return null
     try {
       const res = await fetch(`${API_BASE}/v1/teams`, {
         headers: { Authorization: `Bearer ${tok}` },
@@ -3898,7 +4047,7 @@ function claimIntentInFlight() {
         const list = await res.json()
         // Round-12: a SIGNED_OUT (cross-tab broadcast) during this fetch must
         // not resurrect the previous user's team list after logout's setTeams([]).
-        if (sessionTokenRef.current !== tok) return
+        if (sessionTokenRef.current !== tok) return null
         setTeams(list)
         // Round-8: guard on teamIdRef (sync write, no render-closure race) —
         // the session-only landing's #1912 first-healthy pin (set before
@@ -3912,8 +4061,10 @@ function claimIntentInFlight() {
           setCurrentTeamId(firstSelectable.team_id)
           teamIdRef.current = firstSelectable.team_id
         }
+        return list
       }
     } catch { /* best-effort */ }
+    return null
   }
 
   // #1875: fetch the invitee's pending invites when the account menu opens.
@@ -3960,6 +4111,87 @@ function claimIntentInFlight() {
     setPendingInvitesBusy('')
   }
 
+  // #2789: open the create dialog in the RIGHT mode. The account-menu item
+  // pre-checks the entitlement from the teams list (role + subscription_status
+  // ride every /v1/teams row), so a user already at the cap sees the
+  // three-option dialog IMMEDIATELY — never after typing a name and being
+  // rejected (the pre-#2789 gate-on-submit flow). A user with no owned free org
+  // (including a pure collaborator) gets the ordinary name dialog.
+  function openCreateTeamDialog() {
+    // #2392 (a11y): capture the focus-restore anchor BEFORE the menu closes —
+    // this item unmounts with the account menu under the dialog, so close hands
+    // focus to the always-mounted blob trigger button instead.
+    rememberRestoreTarget(createTeamRestoreRef, accountBlobBtnRef.current)
+    const capped = ownedFreeOrgs[0] || null
+    setCreateTeamName('')
+    setCreateTeamError('')
+    setCreateTeamPlan(newOrgDefaultPrice(team))
+    setCreateTeamLimitTeamId(capped ? capped.team_id : '')
+    setCreateTeamMode(capped ? 'limit' : 'name')
+    setCreateTeamOpen(true)
+    setAccountMenuOpen(false)
+  }
+
+  // #2789: "Upgrade current organization" — land on the Billing tab of the
+  // owned free org the entitlement is about (the client pre-check's org, or the
+  // server's `team_id`). Switch first when the user is on a different org.
+  function upgradeCurrentOrg() {
+    const target = createTeamLimitTeamId
+    closeCreateTeam()
+    if (target && target !== teamIdRef.current) switchTeam(target)
+    setTab('billing')
+  }
+
+  // #2789: the dialog's third option — buy a subscription for an organization
+  // that does not exist yet. Session-scoped (no team exists); the response
+  // carries the PRE-MINTED team id, which rides the success URL as
+  // ?new_org=<id> so the returning tab can switch to the org once the webhook
+  // provisions it. An abandoned checkout leaves nothing behind and does not
+  // consume the free-org allowance (nothing is created until payment).
+  async function startNewOrgCheckout() {
+    const name = createTeamName.trim()
+    if (!name) { setCreateTeamError('Organization name required'); return }
+    if (name.length > 64 || !/^[a-zA-Z0-9][a-zA-Z0-9_ -]{0,63}$/.test(name)) {
+      setCreateTeamError('Invalid organization name — letters, numbers, space, dash, underscore only')
+      return
+    }
+    const priceId = createTeamPlan || newOrgDefaultPrice(team)
+    if (!priceId) {
+      setCreateTeamError('No paid plan is available right now — open the Billing tab or try again later.')
+      return
+    }
+    setCreateTeamBusy(true)
+    setCreateTeamError('')
+    // Snapshot the CURRENT orgs BEFORE the popup opens (the return runs in
+    // that popup's document, which cannot see this one's in-memory state).
+    snapshotKnownOrgIds()
+    try {
+      const res = await api('/v1/billing/checkout/new-org', {
+        method: 'POST', useSession: true,
+        body: JSON.stringify({ name, price_id: priceId }),
+      })
+      // Mirror upgradeToPrice's popup handling (async-fetch-then-open is
+      // popup-blocked in Firefox/Safari — surface it instead of no-opping).
+      const win = window.open(res.checkout_url, '_blank')
+      if (!win) {
+        setCreateTeamError('Popup blocked — allow popups for this site and try again.')
+        return
+      }
+      closeCreateTeam()
+    } catch (e) {
+      if (e?.code === 'one_free_org_limit') {
+        // Defensive: the paid path is never entitlement-gated server-side; if a
+        // future gate returns the structured code, show the gate rather than a
+        // dead-end error.
+        setCreateTeamLimitTeamId(e.teamId || '')
+        setCreateTeamMode('limit')
+      }
+      setCreateTeamError(e?.message || 'Could not start checkout')
+    } finally {
+      setCreateTeamBusy(false)
+    }
+  }
+
   async function handleCreateTeam() {
     // #1877: create-team dialog submit — validation mirrors POST /v1/teams
     // (≤64 chars, [a-zA-Z0-9_-], spaces rejected); 402 → gated-on-click
@@ -3973,7 +4205,6 @@ function claimIntentInFlight() {
     }
     setCreateTeamBusy(true)
     setCreateTeamError('')
-    setCreateTeamUpgrade(false)
     try {
       const res = await api('/v1/teams', {
         method: 'POST', useSession: true,
@@ -3984,9 +4215,15 @@ function claimIntentInFlight() {
       await loadTeams()
       if (res?.team_id) switchTeam(res.team_id)
     } catch (e) {
-      if (e?.status === 402) {
-        setCreateTeamError(e.message || 'Create another organization requires a paid plan')
-        setCreateTeamUpgrade(true)
+      if (e?.code === 'one_free_org_limit' || e?.status === 402) {
+        // #2789: the server gate is authoritative and returns a STRUCTURED
+        // detail ({"code":"one_free_org_limit", ...}). The dialog is driven by
+        // the code — never by string-matching the detail. The 402 fallback
+        // keeps older servers (bare string detail) working.
+        setCreateTeamMode('limit')
+        setCreateTeamLimitTeamId(e?.teamId || (ownedFreeOrgs[0]?.team_id ?? ''))
+        setCreateTeamError(e?.code === 'one_free_org_limit' ? '' : (e?.message || ''))
+        if (e?.code === 'one_free_org_limit') await loadTeams()
       } else {
         setCreateTeamError(e?.message || 'Could not create the organization')
       }
@@ -5963,6 +6200,15 @@ function claimIntentInFlight() {
                       <span key={s.id} className={'wizard-step' + (i === wizardStep ? ' active' : (i < wizardStep ? ' done' : ''))} />
                     ))}
                   </div>
+                  {/* #2487/#2364 resolved into #2912's header: the visible title
+                      and sub moved into `.welcome-head` above (stage <h1> through
+                      the shared `wizardStageLabel`, which branches step 0 on
+                      `welcomeHasOrg` to 'Your Organization' AND drives the sr-only
+                      announce — the never-diverge invariant #2364 round-1 wanted),
+                      so no in-card `.wizard-title`/`.wizard-sub` may come back
+                      here: that duplication is exactly what #2912's defect 5
+                      removed. The setup-guide resume copy from #2487 is
+                      untouched. */}
 
                   {wizardStep === 0 && (
                     <div className="org-create">
@@ -6962,14 +7208,7 @@ function claimIntentInFlight() {
                     ))}
                     </>
                 ))}
-                <button className="account-menu-create" onClick={() => {
-                  // #2392 (a11y): capture the focus-restore anchor BEFORE the
-                  // menu closes — this item unmounts with the account menu
-                  // under the dialog, so close hands focus to the always-
-                  // mounted blob trigger button instead.
-                  rememberRestoreTarget(createTeamRestoreRef, accountBlobBtnRef.current)
-                  setCreateTeamOpen(true); setCreateTeamName(''); setCreateTeamError(''); setCreateTeamUpgrade(false); setAccountMenuOpen(false)
-                }}>
+                <button className="account-menu-create" onClick={openCreateTeamDialog}>
                   + Create new organization
                 </button>
               </div>
@@ -6977,33 +7216,86 @@ function claimIntentInFlight() {
           )}
         </div>
         </div>
-        {/* #1877: create-team dialog — gated-on-click upgrade UX. The 402
-            state explains "upgrade a team, then create" (the new team
-            doesn't exist until the gate passes); the CTA lands on Billing
-            (#1876's team selector). */}
+        {/* #1877: create-team dialog. #2789: three modes — the ordinary name
+            dialog (under the cap), the one-free-org three-option gate, and the
+            paid-new-org purchase flow (name + plan → Checkout). The gate is
+            server-driven: the structured 402 code selects the mode, and the
+            account-menu pre-check opens it directly at the cap. */}
         {createTeamOpen && (
           <div className="modal-backdrop" onClick={() => { if (!createTeamBusy) closeCreateTeam() }}>
-            <div className="modal" role="dialog" aria-modal="true" aria-label="Create a new organization"
+            {/* #2789: the dialog's accessible name is the CURRENT mode's
+                heading, so limit mode announces the gate copy (not a generic
+                "Create a new organization"): `create-org-title-*` ids are the
+                mode headings (name mode has no desc), `create-org-desc-*` are
+                the explanation paragraphs. */}
+            <div className="modal" role="dialog" aria-modal="true"
+                 aria-labelledby={createTeamMode === 'limit' ? 'create-org-title-limit'
+                   : createTeamMode === 'purchase' ? 'create-org-title-purchase'
+                   : 'create-org-title-name'}
+                 aria-describedby={createTeamMode === 'limit' ? 'create-org-desc-limit'
+                   : createTeamMode === 'purchase' ? 'create-org-desc-purchase'
+                   : undefined}
                  onClick={(e) => e.stopPropagation()}
                  onKeyDown={(e) => { if (e.key === 'Escape' && !createTeamBusy) closeCreateTeam() }}>
-              {createTeamUpgrade ? (
+              {createTeamMode === 'limit' ? (
                 <>
-                  <h3>Create a new organization</h3>
-                  <p className="error" role="alert">{createTeamError}</p>
-                  <p className="dim">The free plan includes one organization. Upgrade an existing organization to create more.</p>
+                  {/* #2789 (code-review): each mode's heading is the dialog's
+                      accessible NAME (aria-labelledby) — a screen reader must
+                      hear the gate, not a generic "Create a new organization". */}
+                  <h3 id="create-org-title-limit">You can only have one free organization</h3>
+                  <p className="dim" id="create-org-desc-limit">Individual users can create one organization. To create another, purchase a subscription for it — or upgrade your current organization.</p>
+                  {createTeamError && <p className="error" role="alert">{createTeamError}</p>}
                   <div className="row" style={{ marginTop: 12 }}>
-                    {/* #2392 (a11y): autoFocus moves focus INTO the dialog in
-                        the upgrade branch too (the non-upgrade branch's name
-                        input already autofocuses). */}
-                    <button className="btn-primary" autoFocus onClick={() => { closeCreateTeam(); setTab('billing') }}>
-                      Upgrade
+                    {/* #2392 (a11y): autoFocus moves focus INTO the dialog on
+                        open in every mode (the name/purchase inputs autofocus
+                        in theirs). */}
+                    <button className="btn-primary" autoFocus onClick={() => { setCreateTeamError(''); setCreateTeamMode('purchase') }}>
+                      Purchase subscription for a new organization
+                    </button>
+                    <button className="ghost" onClick={upgradeCurrentOrg}>
+                      Upgrade current organization
                     </button>
                     <button className="ghost" onClick={closeCreateTeam}>Cancel</button>
                   </div>
                 </>
+              ) : createTeamMode === 'purchase' ? (
+                <>
+                  <h3 id="create-org-title-purchase">Purchase a subscription for a new organization</h3>
+                  <p className="dim" id="create-org-desc-purchase">The organization is created once your payment completes — an abandoned checkout leaves nothing behind.</p>
+                  <input
+                    aria-label="Organization name"
+                    placeholder="Organization name"
+                    autoFocus
+                    value={createTeamName}
+                    onChange={(e) => setCreateTeamName(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === 'Enter' && !createTeamBusy) startNewOrgCheckout() }}
+                  />
+                  <div className="row" style={{ marginTop: 8 }} role="group" aria-label="Plan">
+                    {newOrgPlanOptions(team).map((p) => (
+                        <button
+                          key={p.tier}
+                          type="button"
+                          className={createTeamPlan === team.checkout_price_ids[p.tier] ? 'btn-primary small' : 'ghost small'}
+                          aria-pressed={createTeamPlan === team.checkout_price_ids[p.tier]}
+                          onClick={() => setCreateTeamPlan(team.checkout_price_ids[p.tier])}
+                        >
+                          {p.label} · ${p.price}/mo
+                        </button>
+                      ))}
+                  </div>
+                  {createTeamError && <p className="error" role="alert">{createTeamError}</p>}
+                  <div className="row" style={{ marginTop: 12 }}>
+                    <button className="btn-primary" onClick={startNewOrgCheckout} disabled={createTeamBusy}>
+                      {createTeamBusy ? 'Opening checkout…' : 'Continue to checkout'}
+                    </button>
+                    <button className="ghost" onClick={() => { setCreateTeamError(''); setCreateTeamMode('limit') }} disabled={createTeamBusy}>
+                      Back
+                    </button>
+                  </div>
+                </>
               ) : (
                 <>
-                  <h3>Create a new organization</h3>
+                  <h3 id="create-org-title-name">Create a new organization</h3>
                   <input
                     aria-label="Organization name"
                     placeholder="Organization name"
@@ -8152,6 +8444,19 @@ function claimIntentInFlight() {
 
             {/* Plan options */}
             <h3 style={{ fontSize: 15, marginBottom: 10 }}>Plans</h3>
+            {/* #2789: the entitlement is per PERSON — surface it where plans
+                are explained, with the door to the paid-new-org flow. */}
+            <p className="dim small" style={{ marginBottom: 10 }}>
+              Every account includes <strong>one free organization</strong>. A second organization
+              needs its own paid subscription — start one from the account menu's
+              “+ Create new organization”.
+            </p>
+            {billingNotice && (
+              <p className="dim small" role="status" style={{ marginBottom: 10 }}>
+                {billingNotice}{' '}
+                <button type="button" className="ghost small" onClick={() => setBillingNotice('')}>Dismiss</button>
+              </p>
+            )}
             <div className="plans-grid">
               {planOptions().map((p) => {
                 const current = p.tier === team.tier

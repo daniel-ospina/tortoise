@@ -32,17 +32,22 @@ test('legacy wizard labels still exist in source (archived-not-deleted)', () => 
   }
 })
 
-test('live wizard renders WIZARD_STEPS (the 5 human steps), not legacy labels', () => {
+test('live wizard renders WIZARD_STEPS (the 4 human steps), not legacy labels', () => {
   assert.ok(src.includes('WIZARD_STEPS.map'), 'live wizard maps WIZARD_STEPS')
   // #2912: the stage label moved from an in-card `.wizard-title` to the page
   // <h1> (the header now names the STAGE, not the org's set-up status). The
   // label is now the exported pure helper `wizardStageLabel` (unit-tested in
   // wizardFlow.test.js — a source grep cannot prove the override ORDER), so all
-  // this tripwire has to pin is that the <h1> uses it.
+  // this tripwire has to pin is that the <h1> uses it. #2487's in-card
+  // `wizard-title` branch was merged AWAY by #2912 (it reintroduced the duplicate
+  // stage label defect 5 reported); its org-holder invariant lives on through the
+  // helper's `hasOrg` arm and the e2e's "never 'Create your Organization'" pin.
   const h1Open = src.indexOf('<h1 className="welcome-title">')
   const h1 = src.slice(h1Open, src.indexOf('</h1>', h1Open))
   assert.ok(h1.includes('wizardStageLabel(wizardStep, { hasOrg: welcomeHasOrg, paused: effectivelyPaused })'),
     'the live wizard <h1> names the stage through wizardStageLabel (the org-holding and paused overrides are pinned by the unit tests)')
+  assert.ok(!src.slice(src.indexOf('<div className="welcome-head">'), src.indexOf('LEGACY_WIZARD_ARCHIVED &&')).includes('className="wizard-title"'),
+    'no in-card stage label may return in the LIVE wizard (the archived rollback block keeps its own)')
   // the archived block's title still reads wizardSteps (kept for rollback)
   assert.ok(/wizard-title">\{wizardSteps\[wizardStep\]\}/.test(src),
     'archived legacy title retained (wizardSteps)')
@@ -53,7 +58,9 @@ test('DE2E-2 copy sweep: org-create dialog + wizard copy say Organization', () =
   assert.ok(src.includes('Organization name required'), 'validation error copy')
   // #2912: the welcome header no longer prints '<org> is set up' (the stage is
   // the h1) — the ready copy is the org-create summary line, which must still
-  // name the Organization.
+  // name the Organization. #2487/#2547's lowercase fallback ('Your organization
+  // is set up') lived in the <h1> this PR removed; the org name now renders in
+  // the eyebrow, and the no-name case is covered by the stage label itself.
   assert.ok(/You're set up in <strong>\{shownOrgName \|\| 'your organization'\}<\/strong>/.test(src),
     'welcome ready copy names the user\'s Organization')
   assert.ok(src.includes('Creating your Organization and API key'), 'provisioning copy')

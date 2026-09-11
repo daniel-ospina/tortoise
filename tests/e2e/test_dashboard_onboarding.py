@@ -274,7 +274,10 @@ def _walk_to_fork(page: Page) -> None:
     # STEP 0: create/join org — an account that already holds an org sees a
     # read-only summary (never a second mint, #2323) and advances. #2912: the
     # header h1 names the stage — 'Your Organization' for this read-only state.
+    # #2364 round-1 (kept through the merge): the org-holder step must never
+    # re-read the org-create title, wherever it renders.
     expect(page.locator(".welcome-title")).to_have_text("Your Organization", timeout=10_000)
+    expect(page.locator("body")).not_to_contain_text("Create your Organization", timeout=10_000)
     expect(page.locator("body")).to_contain_text("You're set up in", timeout=5_000)
     page.get_by_role("button", name="Continue →").click()
     # STEP 1: fork card (was step 2 before orientation removal).
@@ -851,7 +854,10 @@ def test_first_timer_wizard_build_fork_marks_catalog(page: Page) -> None:
     page.get_by_role("button", name="Continue setup").click()
     # STEP 0: create/join org (orientation removed per epic #2534). #2912: the
     # org-holding read-only summary shows the stage h1 'Your Organization'.
+    # #2364 round-1 (kept through the merge): never 'Create your Organization'
+    # on resume/re-entry (#2323 read-only).
     expect(page.locator(".welcome-title")).to_have_text("Your Organization", timeout=10_000)
+    expect(page.locator("body")).not_to_contain_text("Create your Organization", timeout=10_000)
     expect(page.locator("body")).to_contain_text("You're set up in", timeout=5_000)
     page.get_by_role("button", name="Continue →").click()
     expect(page.locator("body")).to_contain_text("Choose how you'll use Tortoise", timeout=10_000)

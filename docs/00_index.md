@@ -49,3 +49,5 @@ ownedBy: epistemic-team
 | Standard-harness reuse audit — do we need to invent the battery's key decisions (#1416, 2026-09-10) | `docs/research/2026-09-10-standard-harness-reuse-audit.md` |
 | Epic #2554 scoping (REVISED) — keyless agent connect via per-agent OAuth + human attribution on the graph | `docs/scoping/tortoise-agent-daemon.md` |
 | #2600 Attribution Phase 1 scoping — resolver human actor; sessions + write-events stamped (epic #2554 v1 gate) | `docs/scoping-2600-attribution-phase1.md` |
+| #2789 one free organization per person — scoping (double diamond, Design 2 = webhook-provisioned org) | `docs/scoping/2026-09-10-2789-one-free-org.md` |
+| #2789 one free organization per person — implementation plan | `docs/plans/2026-09-10-2789-one-free-org.md` |
