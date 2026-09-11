@@ -65,7 +65,7 @@ finally:
 
 pytestmark = pytest.mark.skipif(
     not FALKORDB_AVAILABLE,
-    reason="Live FalkorDB with fulltext (Docker) not available")
+    reason="requires TORTOISE_DB_URI (live FalkorDB FTS lane — tier-2 embedded legs skip)")
 
 
 def _fresh_uri() -> str:
