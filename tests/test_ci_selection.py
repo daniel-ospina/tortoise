@@ -8,6 +8,9 @@ carve-out so tools/longmem_eval/ etc. select the eval surface).
 """
 from __future__ import annotations
 
+import shlex
+import shutil
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -1089,3 +1092,175 @@ def test_track_b_docker_lane_sets_team_stray_opt_in():
     assert env.get("TORTOISE_DB_URI", "").endswith("tortoise_test_matrix")
     assert env.get("TORTOISE_TEST_SWEEP_TEAM_STRAYS") == "1", \
         "test-track-b (dedicated docker lane) must set the team_* stray opt-in"
+
+
+def test_drift_gate_cannot_skip_the_test_matrix():
+    """#2656: the manifest drift gate must never be a prerequisite of the test
+    matrix.
+
+    It used to be a step inside `changes`, and every other job has
+    `needs: changes` — so a one-line manifest drift made GitHub mark the whole
+    matrix "skipped" (not failed: never run). Twice in two days (#2868 parity
+    files, #2911 price-basis) that hid every test signal behind a bookkeeping
+    miss, and the second time it blocked verification of the #2904 fork fix.
+
+    The gate must still BLOCK a merge (python-ci-gate, the required aggregate,
+    lists it) — it just must not withhold the tests. This pins the split, and
+    pins it against the ways this workflow could silently undo it: its own
+    house idioms (`continue-on-error`, `|| true` / `; exit 0`, `if:`) all turn a
+    FAILED job into a GREEN required check, which would restore the bug's effect
+    without restoring the bug.
+    """
+    workflow = _load_python_ci()
+    jobs = workflow["jobs"]
+    _always = ("always()", "${{ always() }}")
+
+    def _needs(name: str) -> list[str]:
+        needed = jobs[name].get("needs") or []
+        return [needed] if isinstance(needed, str) else list(needed)
+
+    def _code(step: dict) -> str:
+        # Comments are not invocations: this change leaves a pointer comment
+        # naming the gate, and moving it inside a step must not false-red.
+        return "\n".join(line for line in (step.get("run") or "").splitlines()
+                         if not line.strip().startswith("#"))
+
+    def runs_integrity(job: str) -> bool:
+        # Tool name AND flag, on non-comment lines: an import-form re-nest
+        # (`python3 -c "...ci_selection...integrity(m)"`) counts, and a literal
+        # `--integrity` re-nest cannot slip past.
+        return any("integrity" in _code(s) and "ci_selection" in _code(s)
+                   for s in jobs[job].get("steps", []))
+
+    def _defaults_shell(spec: dict) -> str | None:
+        return ((spec.get("defaults") or {}).get("run") or {}).get("shell")
+
+    # --- 1. the gate is not inside `changes` ------------------------------
+    assert not runs_integrity("changes"), (
+        "the drift gate must not run inside `changes`: every other job needs "
+        "`changes`, so a drift there SKIPS the whole matrix instead of "
+        "failing it (#2656)")
+
+    # --- 2. it is its own unconditional, bounded, unsilenceable job -------
+    assert "manifest-integrity" in jobs, \
+        "the drift gate must live in its own job (#2656)"
+    drift = jobs["manifest-integrity"]
+    assert not _needs("manifest-integrity"), (
+        "the drift job must have no upstream needs, or an unrelated failure "
+        "would skip the check itself")
+    assert runs_integrity("manifest-integrity"), \
+        "the drift job must actually run the integrity check"
+    assert drift.get("if", "always()") in _always, (
+        "the drift job must be unconditional (push/PR/schedule) — an `if:` "
+        "would silently drop drift enforcement on the events it excludes")
+    assert not drift.get("continue-on-error"), (
+        "the drift job must not be continue-on-error: a failed check would "
+        "report success and the required aggregate would go green (#2656)")
+    assert not _defaults_shell(workflow) and not _defaults_shell(drift), (
+        "a `defaults.run.shell` can swallow the integrity exit code (#2656)")
+
+    integrity_steps = [s for s in drift.get("steps", [])
+                       if "integrity" in _code(s)]
+    assert integrity_steps, "the drift job must run the integrity check"
+    for step in integrity_steps:
+        run = step["run"].replace("\\\n", " ")
+        tokens = shlex.split(run)
+        assert tokens[:2] == ["python3", "tools/ci_selection.py"] \
+            and "--integrity" in tokens, (
+            "the integrity step must invoke tools/ci_selection.py --integrity "
+            f"directly (#2656); got {step.get('run')!r}")
+        assert not any(op in run for op in ("||", "&&", ";", "`", "$(")), (
+            "no shell operator may follow the integrity check — `|| true` / "
+            "`; exit 0` (this workflow's most-used silencing idiom) makes a "
+            f"real drift report green (#2656); got {step.get('run')!r}")
+        assert not step.get("continue-on-error") and not step.get("shell"), (
+            "the integrity STEP must neither be continue-on-error nor override "
+            "`shell`: either one lets the job report success while the check "
+            "failed (#2656)")
+        assert step.get("if", "always()") in _always, (
+            "the integrity step must be unconditional: `if: always()` is fine, "
+            "any other condition drops drift enforcement on the events it "
+            "excludes")
+    _timeout = drift.get("timeout-minutes")
+    assert isinstance(_timeout, int) and 0 < _timeout <= 15, (
+        f"the drift job needs a tight timeout (got {_timeout!r}) — it installs "
+        "pyyaml and feeds the required aggregate (#2656)")
+
+    # --- 3. nothing that runs tests may depend on it ----------------------
+    # Not just its DIRECT dependents: a helper job that a matrix job needs
+    # would re-create the skip transitively (drift fails -> helper skipped ->
+    # matrix job skipped).
+    assert "manifest-integrity" in (jobs["python-ci-gate"].get("needs") or []), (
+        "python-ci-gate is the required status check — it must include the "
+        "drift job, or a drift would stop blocking merges (#2656)")
+    # What makes a dependent harmful is that it lies on the path to a job that
+    # runs tests: skip it and the tests do not run. A job that merely reports
+    # the drift result (and that no test job needs) is fine. So intersect the
+    # drift job's transitive dependents with the transitive needs-closure of
+    # the matrix jobs — which also catches the indirect form (drift job ->
+    # helper -> a matrix job), where a direct-only check sees nothing.
+    matrix_jobs = set(jobs["python-ci-gate"].get("needs") or []) \
+        - {"manifest-integrity"}
+    on_the_path, frontier = set(matrix_jobs), list(matrix_jobs)
+    while frontier:
+        for parent in _needs(frontier.pop()):
+            if parent not in on_the_path:
+                on_the_path.add(parent)
+                frontier.append(parent)
+    skipped, frontier = {"manifest-integrity"}, ["manifest-integrity"]
+    while frontier:
+        current = frontier.pop()
+        for name in jobs:
+            if current in _needs(name) and name not in skipped:
+                skipped.add(name)
+                frontier.append(name)
+    polluted = sorted((skipped & on_the_path) - {"manifest-integrity"})
+    assert not polluted, (
+        "no job needed to reach the test matrix may depend on the drift gate, "
+        "directly or through a helper: a drift would SKIP it instead of "
+        f"failing it (#2656); got {polluted}")
+
+    # --- 4. the aggregate still FAILS, and never swallows it --------------
+    gate = jobs["python-ci-gate"]
+    assert gate.get("if") in _always, (
+        "python-ci-gate must run even when the drift job fails — `if: always()`"
+        " is what lets it report the failure (#2656)")
+    assert not gate.get("continue-on-error"), (
+        "the required aggregate must not be continue-on-error (#2656)")
+    gate_steps = gate.get("steps", [])
+    assert all(not s.get("continue-on-error") and not s.get("shell")
+               for s in gate_steps), (
+        "no gate step may be continue-on-error or override `shell` — the "
+        "required check would report green on a red drift (#2656)")
+    aggregate = next((s for s in gate_steps
+                      if "join(needs.*.result" in (s.get("run") or "")), None)
+    assert aggregate is not None, (
+        "python-ci-gate must aggregate EVERY need's result — narrowing it to "
+        "`needs.changes.result` (or `outcome`) silently drops drift "
+        "enforcement (#2656)")
+    script = aggregate["run"]
+    assert "${{ join(needs.*.result, ' ') }}" in script, (
+        "python-ci-gate must join `needs.*.result` — reading a subset means a "
+        "red drift never reaches the check (#2656)")
+
+    # Render the GitHub expression into literal results and actually RUN the
+    # aggregate's script: this is what turns "the words are present" into "a
+    # failed drift really exits non-zero". (Guarded: the assertion is about the
+    # shell logic, which is the thing that has to be right on the runner.)
+    if shutil.which("bash"):
+        def _verdict(*results: str) -> int:
+            rendered = script.replace("${{ join(needs.*.result, ' ') }}",
+                                      " ".join(results))
+            return subprocess.run(["bash", "-c", rendered],
+                                  capture_output=True).returncode
+
+        count = len(jobs["python-ci-gate"].get("needs") or [])
+        green = ["success"] * count
+        assert _verdict(*green) == 0, (
+            "an all-green matrix must pass the required check")
+        for red in ("failure", "cancelled"):
+            assert _verdict(*green[:-1], red) == 1, (
+                f"a `{red}` need must FAIL python-ci-gate — otherwise a drift "
+                "does not block the merge (#2656)")
+        assert _verdict(*green[:-1], "skipped") == 0, (
+            "a skipped need is not a failure (docs-only PRs skip the matrix)")
