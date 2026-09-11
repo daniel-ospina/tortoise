@@ -333,7 +333,7 @@ def _wait_server_dead(pid, timeout=10):
 #: redislite's last-client guard declines to shut the server down at all
 #: (no timeout would have helped — see the CLI test above). 30s keeps the
 #: loaded-runner margin while halving what a systematic cleanup regression
-#: costs across the 7 call sites, and the message carries the evidence
+#: costs across the 6 call sites, and the message carries the evidence
 #: (pid, elapsed, parent rc) instead of leaving the next occurrence a mystery.
 _SERVER_DEATH_TIMEOUT_S = 30
 
