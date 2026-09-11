@@ -624,10 +624,11 @@ def run_battery(config: RunConfig, *, stdout: Callable[[str], None] = print,
         # ── model-pin pre-flight (#2292 Task 5; coordination n10) ──────
         #    A real request must resolve a CONCRETE pinned model for every
         #    requested real arm: the flash-class placeholder sentinel, an
-        #    unresolvable pin, a class-level model_id='fixed' sentinel
-        #    (battery/arms/*.py — the Task-9 parameterization seam), or a
-        #    temperature mismatch across requested real arms each refuse
-        #    BEFORE the attempt dir (zero orphaned artifacts). Additive
+        #    unresolvable pin, or a temperature mismatch across requested
+        #    real arms each refuse BEFORE the attempt dir (zero orphaned
+        #    artifacts). The class-level 'fixed' sentinel is NO LONGER a
+        #    gate: Task 9 parameterizes the arm INSTANCE from arms.yaml
+        #    (see _resolve_arm), so the check was unreachable (#2746). Additive
         #    INSIDE the real-executor gate block — #2284 Task 9 merges
         #    later over the same block and consumes the pinned values
         #    ("sibling B pin").
@@ -669,12 +670,12 @@ def run_battery(config: RunConfig, *, stdout: Callable[[str], None] = print,
                     f"arm {arm_id!r}: pin factory caps max_tokens="
                     f"{resolved.max_tokens} — decision (a) real runs are "
                     f"UNCAPPED (max_tokens=None); real run refuses")
+            # The resolved INSTANCE is the effective arm here: _resolve_arm
+            # writes the arms.yaml pin onto it (class attrs keep the 'fixed'
+            # sentinel for the mock/hermetic lanes), and the placeholder +
+            # resolvability gates above already refuse every unusable pin —
+            # so a class-level 'fixed' check can never fire (#2746).
             cls = _resolve_arm(arm_id, ac, mock=False)
-            if getattr(cls, "model_id", "") == "fixed":
-                raise ConfigError(
-                    f"arm {arm_id!r} still hardcodes the class-level "
-                    f"model_id='fixed' sentinel (Task 9 parameterizes arms "
-                    f"off it) — real run refuses")
             # ── per-arm VENDOR-KEY pre-flight (#2633) ─────────────
             #    a2/a2b real requests without their vendor credential pass
             #    every pin/temp gate above and would run real-model spend
