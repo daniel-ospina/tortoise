@@ -11,6 +11,10 @@
 //   ("capture-disclosed before decide must NOT render '4 of 4'").
 // - decide-completed (self) and catalog-presented (build) are fork-exclusive
 //   display rows; compact orgs show the reduced checklist.
+// - #2407: an org that deferred the fork card (fork_unsure_at set, fork
+//   still None) shows the FORK QUESTION as its open counted row instead of
+//   the self checklist — the card never collapses on the self path while
+//   the fork is unanswered (the row clears once a self/build pick lands).
 // - status-collapsed for complete/grandfathered orgs.
 // - DEGRADED when the server reports FLOW 'unavailable' (graph down) —
 //   never a false checklist.
@@ -29,6 +33,11 @@ const ROW_META = Object.freeze({
   'decide-completed': { label: 'Make your first decision' },
   'catalog-presented': { label: 'Review the catalog' },
   'capture-disclosed': { label: 'Capture disclosure', counted: false },
+  // #2407: the fork-question row — only rendered (counted) while the org
+  // deferred the fork card (fork_unsure_at set, fork still None); it is
+  // NOT a canonical step (parity: SETUP_GUIDE_COUNTED ⊆ STEP_IDS) — it is
+  // the open blocker that keeps the card from collapsing on the self path.
+  fork: { label: "Choose how you'll use Tortoise" },
 })
 
 export function setupGuide(state) {
@@ -50,10 +59,19 @@ export function setupGuide(state) {
   const compact = !!state.compact
   const done = Array.isArray(state.completed_steps) ? state.completed_steps : []
 
+  // #2407: "Not sure yet — decide later" deferral (fork_unsure_at set, fork
+  // still None) → the FORK QUESTION is the open counted row — the org is NOT
+  // auto-treated as self, so the self checklist (decide) must not render and
+  // the card must not collapse on the self path. The fork row is never 'done'
+  // while unanswered; answering later flips rows to the normal fork-aware set.
+  const unsureDeferred = !state.fork && !!state.fork_unsure_at
+
   // Fork-aware display rows (compact-first — same rule as the server gate).
   const ids = []
   ids.push('harness-connected', 'first-points-filed')
-  if (!compact) {
+  if (!compact && unsureDeferred) {
+    ids.push('fork')
+  } else if (!compact) {
     ids.push(fork === 'build' ? 'catalog-presented' : 'decide-completed')
   }
   ids.push('capture-disclosed')  // renders, NEVER counted
@@ -62,7 +80,9 @@ export function setupGuide(state) {
   const rows = ids.map((id) => ({
     id,
     label: (ROW_META[id] || {}).label || id,
-    counted: (ROW_META[id] || {}).counted !== false && countedIds.has(id),
+    // the #2407 fork row counts while open (id === 'fork' is rendered ONLY
+    // in the unsureDeferred branch above, where it is the open blocker)
+    counted: id === 'fork' || ((ROW_META[id] || {}).counted !== false && countedIds.has(id)),
     done: done.includes(id),
   }))
   const counted = rows.filter((r) => r.counted)
