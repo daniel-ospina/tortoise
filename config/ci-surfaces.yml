@@ -188,17 +188,24 @@ surfaces:
   - test_battery_arms.py
   - test_battery_judge.py
   - test_battery_parity.py
-  # #2800 dual-registered (api + battery): these pin battery/parity/executors.py
-  # and battery/parity/mabench.py, and battery/ is the source-mapped surface for
-  # battery/ — without the battery entry, a source-only edit to either file
-  # selected the battery surface and ran neither test (the drift class #2797/#2800
-  # exists to prevent). Dual membership is the tested pattern
-  # (test_suspension_parity.py is in api + core); select() unions surfaces.
-  # #2861 adds a third under the identical argument —
-  # test_battery_parity_mabench_run.py pins battery/parity/mabench_run.py.
+  # Dual-registered (api + battery) where the test pins a battery/ module:
+  # battery/ is the source-mapped surface (SOURCE_PATTERNS), so without a battery
+  # entry a source-only edit selected the battery surface and ran none of them —
+  # the drift class #2797/#2800 exists to prevent. Dual membership is the tested
+  # pattern (test_suspension_parity.py is in api + core); select() unions
+  # surfaces. Members: #2800 parity/executors.py + parity/mabench.py; #2861
+  # parity/mabench_run.py; and — added alongside the price-basis drift fix —
+  # test_battery_parity_migration.py and test_battery_parity_hash.py, which
+  # module-import battery.parity.runner yet were api-only (the same latent gap,
+  # found in review; #2916 tracks the wider class of this shape).
+  # NOT dual — battery-only (it pins no api-owned surface):
+  # test_battery_price_basis.py (#2906 — config/prices.py, runner, probes, judge).
   - test_battery_parity_executors.py
+  - test_battery_parity_hash.py
   - test_battery_parity_mabench.py
   - test_battery_parity_mabench_run.py
+  - test_battery_parity_migration.py
+  - test_battery_price_basis.py
   - test_battery_probes.py
   - test_battery_differential.py
   - test_battery_streams.py
