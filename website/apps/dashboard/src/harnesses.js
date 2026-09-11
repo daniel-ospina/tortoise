@@ -175,7 +175,7 @@ ${JSON.stringify(PI_MCP_CONFIG_ENV, null, 2)}
 3. Run: curl -fsSL ${SKILLS_INSTALL_URL} | bash -s -- --harness pi
 4. Reload Pi (run "/reload" — tortoise connects eagerly at startup).
    Then call tortoise_health — when it passes, tell me "Tortoise is
-   connected". The first time you write a point or file a decision,
+   connected". The first time you write a memory or file a decision,
    onboarding auto-completes (no separate ceremony needed).`,
   // #1701: ChatGPT — key-less OAuth harness. Copy = WORKFLOWS_PROMPT only;
   // the connector steps live in HARNESS_STEPS / HARNESS_INTRO above the

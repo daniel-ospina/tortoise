@@ -69,12 +69,11 @@ export function overviewDigest(points) {
       kind: 'empty',
       value: 0,
       // #2361: ONE anchor term for what the graph stores — 'memories' —
-      // glossed in plain language. NOTE: this empty branch is NOT the
-      // Overview's first-run surface (main.jsx renders its own welcome
-      // empty state when point_count === 0, so OverviewDigestCard only
-      // mounts above 0). The gloss therefore ALSO lands on the populated
-      // branch below, which is the one a user actually reads.
-      detail: 'No memories yet — decisions and findings your agent files will show up here.',
+      // glossed in plain language. This branch is the module's documented
+      // pre-first-memory renderable; the USER-visible first-contact gloss
+      // lives on OverviewDigestCard's sibling welcome empty state in
+      // main.jsx (this one is only reached above zero, see below).
+      detail: 'No memories yet — decisions and findings your agent saves will show up here.',
     }
   }
   return {

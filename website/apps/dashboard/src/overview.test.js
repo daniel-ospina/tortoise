@@ -186,12 +186,26 @@ test('#2361 vocab anchor: LIVE surfaces (main.jsx) do not drift back to "point"'
 
   assert.ok(!/Data points/.test(src),
     'Billing count-of-record card uses the anchor (was "Data points")')
-  assert.ok(/card-label">Memories</.test(src),
+  // whitespace-tolerant: a Prettier reflow of correct copy must not fail
+  assert.ok(/card-label">\s*Memories</.test(src),
     'the point_count card is labelled "Memories"')
-  assert.ok(!/file your first point/i.test(src),
-    'live connect step uses the anchor (was "file your first point")')
+  // Class-level, not literal-phrase: the live connect step renders BOTH the
+  // JSX caption AND the copyable prompt bodies (wizardPromptText), and round
+  // 2 caught the caption anchored while the prompt body four lines below
+  // still said "point". Match any subject pronoun, not just the one string
+  // that happens to exist today.
+  assert.ok(!/file (my|your) first point/i.test(src),
+    'live connect step (caption + prompt bodies) never says "first point"')
+  assert.ok(!/first point/i.test(src),
+    'no natural-language "first point" prose remains on live surfaces')
   assert.ok(/file your first memory/i.test(src),
-    'live connect step carries the anchor')
+    'live connect caption carries the anchor')
+  assert.ok(/file my first memory/i.test(src),
+    'live prompt bodies carry the anchor (not just the caption)')
   assert.ok(!/add a point yourself/i.test(src),
     'live Overview empty CTA uses the anchor (was "add a point yourself")')
+  // the FIRST-CONTACT surface is the welcome empty state (the digest card
+  // mounts only above zero), so the gloss must live there too
+  assert.ok(/decisions and findings it saves land here as memories/.test(src),
+    'the live first-contact empty state glosses the anchor')
 })
