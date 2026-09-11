@@ -744,12 +744,13 @@ assert_not_contains "$OUT" "leaving silent" "38. the unmeasurable lock is never 
 reset_case
 export R2_TEAMS=$'backups/teamA/'
 export R2_DEFAULT_LIST="$TS_RECENT"
-export STUB_STATUS_BODY="$(status_body false '"dsn docker://:pwd12345@host:6379 schemeless user:pwdXYZ789@host hdr Authorization: Bearer tokEN123 pat ghp_AB12cd34 assign MY_SECRET_KEY=shrt999 quoted (got '\''qZwXeDcR'\'') long \"AbCdEfGhIjKlMnOpQrSt\" bare BareTokenZz0123456789X qkey \"api_key\":\"shrtpw1\""' null)"
+export STUB_STATUS_BODY="$(status_body false '"dsn docker://:pwd12345@host:6379 schemeless user:pwdXYZ789@host hdr Authorization: Bearer tokEN123 pat ghp_AB12cd34 assign MY_SECRET_KEY=shrt999 quoted (got '\''qZwXeDcR'\'') long \"AbCdEfGhIjKlMnOpQrSt\" bare BareTokenZz0123456789X qkey \"api_key\":\"shrtpw1\" hkey \"x-api-key\":\"hyphenpw1\" dkey \"client-secret\":\"dotpw1\""' null)"
 run_driver
 assert_eq "$RC" 1 "39. secret-bearing config error exits RED (1)"
 # one short value per shape rule (1 URI, 2 schemeless, 3 header, 4 prefix,
-# 5 assignment, 6 single-quoted, 7 quoted ≥20, 8 bare ≥20, 5b quoted-key)
-for leaked in pwd12345 pwdXYZ789 tokEN123 AB12cd34 shrt999 qZwXeDcR AbCdEfGhIjKlMnOpQrSt BareTokenZz0123456789X shrtpw1; do
+# 5 assignment, 6 single-quoted, 7 quoted ≥20, 8 bare ≥20, 5b quoted-key
+# underscore, 5b quoted-key hyphen, 5b quoted-key dot)
+for leaked in pwd12345 pwdXYZ789 tokEN123 AB12cd34 shrt999 qZwXeDcR AbCdEfGhIjKlMnOpQrSt BareTokenZz0123456789X shrtpw1 hyphenpw1 dotpw1; do
   assert_not_contains "$(cat "$LOG")" "$leaked" "39. the '$leaked' shape is NOT published"
   assert_not_contains "$OUT" "$leaked" "39. the '$leaked' shape is NOT logged"
 done

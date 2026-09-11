@@ -84,7 +84,9 @@ finish() {
 #                                so a short or line-split PAT cannot survive)
 #   5. sensitive-key assignment  *_KEY=value, "api_key":"value", token: value
 #                                (suffix-anchored, so `patch:`/`compatible:`/
-#                                 `author:` are not false positives)
+#                                 `author:` are not false positives; the key
+#                                 class spans `-`/`.` so `"x-api-key":"…"`
+#                                 and `client-secret:` are covered too)
 #   6. quoted single token       the historical `(got 'AbCdEfGh')` leak vector
 #   7. quoted long token         ≥20 b64/hex-ish, so `"TimeoutError"`,
 #                                `"g_deadbeef01"` and `"graph_error_streaks"`
@@ -103,8 +105,8 @@ redact() { # text -> text safe for a public issue body / public Actions log
     -e 's#([A-Za-z0-9_.-]+:)[^[:space:]]*@#\1<redacted>@#g' \
     -e 's/(Basic|Bearer|token|ApiKey|OAuth)[[:space:]]+[A-Za-z0-9+/=_.-]+/\1 <redacted>/Ig' \
     -e 's/(^|[^A-Za-z0-9_])(ghp_|gho_|ghu_|ghs_|ghr_|github_pat_|glpat-|xox[baprs]-|AKIA|ASIA|sk-)[^[:space:]]*/\1\2<redacted>/g' \
-    -e 's/([A-Za-z0-9_]*(KEY|TOKEN|SECRET|PASSWORD|PASSWD|PAT|AUTH|CREDENTIAL|APIKEY|DSN)[[:space:]]*[=:][[:space:]]*)["'\''"]?[^[:space:]"'\''"]+/\1<redacted>/Ig' \
-    -e 's/("[A-Za-z0-9_]*(KEY|TOKEN|SECRET|PASSWORD|PASSWD|PAT|AUTH|CREDENTIAL|APIKEY|DSN)"[[:space:]]*:[[:space:]]*)"[^"]*"/\1"<redacted>"/Ig' \
+    -e 's/([A-Za-z0-9_.-]*(KEY|TOKEN|SECRET|PASSWORD|PASSWD|PAT|AUTH|CREDENTIAL|APIKEY|DSN)[[:space:]]*[=:][[:space:]]*)["'\''"]?[^[:space:]"'\''"]+/\1<redacted>/Ig' \
+    -e 's/("[A-Za-z0-9_.-]*(KEY|TOKEN|SECRET|PASSWORD|PASSWD|PAT|AUTH|CREDENTIAL|APIKEY|DSN)"[[:space:]]*:[[:space:]]*)"[^"]*"/\1"<redacted>"/Ig' \
     -e "s/'([^']{6,})'/'<redacted>'/g" \
     -e 's/"([A-Za-z0-9+/=_.-]{20,})"/"<redacted>"/g' \
     -e 's/[A-Za-z0-9+/_.=-]{20,}/<redacted>/g' \
