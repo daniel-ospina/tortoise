@@ -10,8 +10,11 @@ That is not hypothetical: it left `falkordb-16379` down for 6 days
 (agent-infra#730). Its logs show a clean `docker stop` — "User requested
 shutdown" — and `docker inspect` reports `OOMKilled=false`, matching this path.
 
-The contract these tests pin: **once `restore()` has stopped the container, every
-exit path leaves it running.**
+The contract these tests pin: **once `restore()` has stopped the container, it
+makes a best-effort attempt to leave it running on every exit path** — and when
+that attempt itself fails, it SAYS so (`container_running`, and a `WARNING` in
+the error) rather than letting the caller mistake a stopped container for an
+empty graph.
 """
 
 from __future__ import annotations
@@ -84,8 +87,13 @@ def test_restore_starts_container_when_cp_fails(monkeypatch):
     )
 
 
-def test_restore_starts_container_when_start_fails(monkeypatch):
-    """If the explicit start fails, recovery must still attempt a start."""
+def test_restore_retries_start_when_start_fails(monkeypatch):
+    """A failing `docker start` gets a recovery retry.
+
+    (Named for what it asserts — the end state here is STOPPED, since every
+    start in this fake fails; the transient-recovery test below covers the
+    success case.)
+    """
     result, calls = _run_restore(monkeypatch, fail_verb="start")
 
     assert result["ok"] is False
@@ -211,4 +219,83 @@ def test_restore_recovers_from_transient_start_failure(monkeypatch):
     assert state["last_start_rc"] == 0, (
         "the recovery start must leave the container running; "
         f"last start rc was {state['last_start_rc']}"
+    )
+
+
+def test_restore_recovers_when_stop_returns_nonzero(monkeypatch):
+    """A non-zero `docker stop` must still reach the recovery start.
+
+    A non-zero stop can still mean the container was stopped, so returning
+    past the recovery would leave it down.
+    """
+    _stub_non_docker_helpers(monkeypatch)
+    fake, calls = _fake_docker_failing_on(fail_verb="stop")
+    monkeypatch.setattr(rdb_snapshot_restore, "_docker", fake)
+
+    with tempfile.NamedTemporaryFile(suffix=".rdb") as fh:
+        result = rdb_snapshot_restore.restore(URI, fh.name, CONTAINER, yes=True)
+
+    assert result["ok"] is False
+    assert "stop" in calls
+    assert "start" in calls, "returned past the recovery on a failed stop"
+    assert result["container_running"] is True
+
+
+def test_restore_recovers_when_start_raises(monkeypatch):
+    """A RAISING `docker start` leaves `restarted` False and must be retried."""
+    _stub_non_docker_helpers(monkeypatch)
+    calls: list[str] = []
+
+    def _docker(args, timeout=30):  # noqa: ANN001, ARG001
+        calls.append(args[0])
+        if args[0] == "start":
+            raise subprocess.TimeoutExpired(cmd=["docker", *args],
+                                            timeout=timeout)
+        return subprocess.CompletedProcess(args=["docker", *args],
+                                           returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(rdb_snapshot_restore, "_docker", _docker)
+    with tempfile.NamedTemporaryFile(suffix=".rdb") as fh:
+        result = rdb_snapshot_restore.restore(URI, fh.name, CONTAINER, yes=True)
+
+    assert result["ok"] is False
+    assert calls.count("start") == 2, (
+        "a raising start must still be retried, got "
+        f"{calls.count('start')} start calls"
+    )
+
+
+def test_restore_reports_original_error_when_recovery_also_fails(monkeypatch):
+    """Second-order failure: recovery fails too, so SAY the graph is down.
+
+    Without this the caller gets only the cp error and cannot distinguish
+    "container stopped" from "graph empty" — the precursor to re-creating
+    evidence onto the wrong graph (agent-infra#730).
+    """
+    _stub_non_docker_helpers(monkeypatch)
+    calls: list[str] = []
+
+    def _docker(args, timeout=30):  # noqa: ANN001, ARG001
+        calls.append(args[0])
+        if args[0] == "cp":
+            return subprocess.CompletedProcess(
+                args=["docker", *args], returncode=1, stdout="",
+                stderr="simulated cp failure")
+        if args[0] == "start":
+            raise subprocess.TimeoutExpired(cmd=["docker", *args],
+                                            timeout=timeout)
+        return subprocess.CompletedProcess(args=["docker", *args],
+                                           returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(rdb_snapshot_restore, "_docker", _docker)
+    with tempfile.NamedTemporaryFile(suffix=".rdb") as fh:
+        result = rdb_snapshot_restore.restore(URI, fh.name, CONTAINER, yes=True)
+
+    assert result["ok"] is False
+    assert "cp" in result["error"], (
+        f"the recovery masked the root cause: {result['error']!r}"
+    )
+    assert result["container_running"] is False
+    assert "STOPPED" in result["error"], (
+        "a failed recovery must be reported, not silently absorbed"
     )

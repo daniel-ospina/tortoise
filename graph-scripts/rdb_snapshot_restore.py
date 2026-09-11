@@ -114,7 +114,14 @@ def graph_stats_for(uri: str) -> dict:
 
 
 def _docker(args: list[str], timeout: int = 30) -> subprocess.CompletedProcess:
-    """Run a docker CLI command, returning the CompletedProcess (no raise)."""
+    """Run a docker CLI command.
+
+    Returns the CompletedProcess on completion, but NOTE: it does NOT convert a
+    timeout into a non-zero return — a bare `subprocess.run(..., timeout=...)`
+    RAISES `subprocess.TimeoutExpired` at the wall. Callers must treat a
+    raising call as a real outcome. (Assuming "no raise" here is the root of
+    the #2993 outage: a raising `docker stop` escaped before the recovery.)
+    """
     return subprocess.run(["docker", *args], capture_output=True,
                           text=True, timeout=timeout)
 
@@ -327,56 +334,70 @@ def restore(uri: str, rdb_file: str, container: str | None,
     info = _container_rdb_info(cname)
 
     restarted = False
+    recovery_ok: bool | None = None
+    err: dict | None = None
     try:
         # 1. Stop container. This is INSIDE the `try` deliberately: `_docker`
-        #    is a bare `subprocess.run(..., timeout=...)` which raises
-        #    `TimeoutExpired` at the wall, and a stop that times out may still
-        #    have stopped the container daemon-side. With the stop outside the
-        #    `try` (the first cut of #2993), that exception escaped before the
-        #    `finally` and left the database down — the very hole being fixed.
+        #    RAISES `TimeoutExpired` at the wall rather than returning
+        #    non-zero, and a stop that times out may still have stopped the
+        #    container daemon-side. With the stop outside the `try` (the first
+        #    cut of #2993), that exception escaped before the `finally` and
+        #    left the database down — the very hole being fixed.
         r = _docker(["stop", cname], timeout=60)
         if r.returncode != 0:
-            # Non-zero can still mean "stopped": fall through to the `finally`
-            # rather than returning past the recovery.
-            return {"ok": False,
-                    "error": f"docker stop {cname} failed: {r.stderr.strip()}"}
-
-        # 2. Place RDB into the container's data dir (read pre-stop; defaults
-        #    match the FalkorDB image layout when the probe came up empty).
-        target = (f"{info['dir']}/{info['dbfilename']}" if info["dir"]
-                  else "/var/lib/falkordb/dump.rdb")
-        r = _docker(["cp", rdb_file, f"{cname}:{target}"], timeout=60)
-        if r.returncode != 0:
-            # NOTE: this early `return` is inside the `try` — it does NOT run
-            # the `except` below. Recovery lives in the `finally` (#2993).
-            return {"ok": False,
-                    "error": f"docker cp RDB into container failed: {r.stderr.strip()}"}
-
-        # 3. Start container
-        r = _docker(["start", cname], timeout=60)
-        restarted = r.returncode == 0
-        if not restarted:
-            return {"ok": False,
-                    "error": f"docker start {cname} failed: {r.stderr.strip()}"}
+            # Non-zero can still mean "stopped": fall through to the recovery
+            # below rather than returning past it.
+            err = {"ok": False,
+                   "error": f"docker stop {cname} failed: {r.stderr.strip()}"}
+        else:
+            # 2. Place RDB into the container's data dir (read pre-stop;
+            #    defaults match the FalkorDB image layout when the probe came
+            #    up empty).
+            target = (f"{info['dir']}/{info['dbfilename']}" if info["dir"]
+                      else "/var/lib/falkordb/dump.rdb")
+            r = _docker(["cp", rdb_file, f"{cname}:{target}"], timeout=60)
+            if r.returncode != 0:
+                err = {"ok": False,
+                       "error": ("docker cp RDB into container failed: "
+                                 f"{r.stderr.strip()}")}
+            else:
+                # 3. Start container
+                r = _docker(["start", cname], timeout=60)
+                restarted = r.returncode == 0
+                if not restarted:
+                    err = {"ok": False,
+                           "error": (f"docker start {cname} failed: "
+                                     f"{r.stderr.strip()}")}
     except Exception as exc:  # noqa: BLE001, RUF100
-        return {"ok": False, "error": f"restore failed mid-sequence: {exc}"}
+        err = {"ok": False, "error": f"restore failed mid-sequence: {exc}"}
     finally:
-        # The container is STOPPED for the whole span above. Every exit path —
-        # the early `return`s, an exception, or success — must leave it
-        # running. Putting this in `except` (as it was before #2993) missed the
-        # early-`return` paths entirely: a `return` inside `try` never reaches
-        # `except`, so a failed `docker cp` left the database down. That is
-        # exactly what happened on 2026-09-04 — falkordb-16379 stayed stopped
-        # for 6 days (agent-infra#730).
+        # The container is STOPPED for the whole span above. `finally` (not
+        # `except`) is the only construct that covers the early assignments to
+        # `err` above — an `except` clause would miss them entirely, which is
+        # precisely what left falkordb-16379 down for 6 days (agent-infra#730).
+        # Recovery is BEST-EFFORT: on a second-order failure the container may
+        # still be stopped, so the outcome is captured and reported rather than
+        # silently assumed.
         if not restarted:
             try:
-                _docker(["start", cname], timeout=60)
+                recovery_ok = _docker(["start", cname], timeout=60).returncode == 0
             except Exception:  # noqa: BLE001, RUF100
-                # Best-effort: raising here would discard the in-flight
-                # `return` and replace the real root cause with this exception
-                # (the caller would print only "timed out"). The original
-                # error is the more useful signal.
-                pass
+                # Raising here would discard the in-flight `err` and replace
+                # the real root cause with this exception (the caller would see
+                # only "timed out"). The original error is the better signal.
+                recovery_ok = False
+
+    if err is not None:
+        # Surface the recovery outcome. Without this, a failed recovery returns
+        # only the original cp/stop error and nothing signals that the database
+        # is still down — the caller cannot tell an unavailable graph from an
+        # empty one.
+        err["container_running"] = bool(recovery_ok)
+        if not recovery_ok:
+            err["error"] += (
+                f"; WARNING: recovery start of {cname} FAILED — the container "
+                "may still be STOPPED")
+        return err
 
     # 4. Wait for connectivity
     after = None
