@@ -231,8 +231,9 @@ _ROUTED_FROM_URI_SITES: dict[str, list[str]] = {
     "test_projection.py": [r"from_uri\(\"postgresql://", r"from_uri\(\"localhost:6379"],
     # __init__-stubbed parse asserts (fake_init captures kwargs, never connects)
     "test_sdk_props_coercion.py": [r'from_uri\(\s*"rediss://', r'from_uri\(\s*"docker://'],
-    # #3039 percent-decode unit tests — from_uri is stubbed (fake __init__
-    # captures kwargs, never connects); the AST guard reads source only
+    # #3039 percent-decode unit tests — __init__-stubbed parse asserts
+    # (fake __init__ captures kwargs, never connects); from_uri itself runs
+    # (journal-append path included) and the AST guard reads source only
     "test_from_uri_userinfo.py": [r"from_uri\("],
     # raw-client migration test — per-test tortoise_test_r2_migrate_<uuid> path
     "test_search_engine.py": [

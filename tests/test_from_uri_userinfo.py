@@ -18,7 +18,9 @@ These tests pin:
    ``unquote_plus``); an *unencoded* clean password and a percent-escaped one
    parse to the same plaintext; absent/empty userinfo stays ``None``.
 3. **Source guard** — a future refactor cannot reintroduce a raw
-   ``urlparse(...).username``/``.password`` read in the runtime package.
+   ``urlparse(...).username``/``.password`` read anywhere under ``tortoise/``
+   or ``graph-scripts/`` (the display-only
+   ``graph-scripts/connectivity_gate.py`` is allowlisted).
 """
 
 from __future__ import annotations
@@ -33,8 +35,9 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 # Characters that must be percent-encoded in URI userinfo (RFC 3986
 # sub-delims + '#'/'?'/'%' which would otherwise terminate or corrupt the
-# authority). `+` is deliberately NOT here — it is legal unencoded in
-# userinfo and must stay a literal plus (see the negative controls).
+# authority). `+` is legal unencoded in userinfo, so it is not in the
+# must-encode class — it is still exercised below via its escaped form
+# (`%2B`), and raw `+` is pinned by test_plus_is_a_literal_plus_not_a_space.
 HOSTILE_PASSWORDS = [
     "p@ss",
     "pa:ss",
@@ -56,6 +59,22 @@ def _uri(password: str, user: str = "user", host: str = "db.example.com") -> str
         f"docker://{quote(user, safe='')}:{quote(password, safe='')}"
         f"@{host}:6379/tortoise"
     )
+
+
+def _assigned_names(targets) -> set[str]:
+    """Every ``Name`` bound by an assignment target.
+
+    Covers ``p = ...``, unpacking ``p, q = ...`` / ``[p] = ...`` and the
+    nested forms. Missing an unpacking target would let a raw userinfo read
+    slip past the source guard (see the guard meta-test).
+    """
+    names: set[str] = set()
+    for target in targets:
+        if isinstance(target, ast.Name):
+            names.add(target.id)
+        elif isinstance(target, (ast.Tuple, ast.List)):
+            names.update(_assigned_names(target.elts))
+    return names
 
 
 def _capture_init(monkeypatch) -> dict:
@@ -197,6 +216,25 @@ def test_empty_and_absent_userinfo_stay_none():
     assert parse_uri_userinfo("docker://:@h:6379/g") == (None, None)
 
 
+@pytest.mark.parametrize(
+    ("uri", "expected"),
+    [
+        # Whitespace-only credentials are still credentials — decode, do not
+        # normalise to None (only truly absent/empty userinfo is None).
+        ("docker://user:%20@h:6379/g", ("user", " ")),
+        ("docker://%20:pw@h:6379/g", (" ", "pw")),
+        ("docker://user: @h:6379/g", ("user", " ")),
+        # No scheme → no userinfo; consumers reject the URI before this point
+        # (from_uri validates the scheme, _admin_client the hostname).
+        ("localhost:6379/g", (None, None)),
+    ],
+)
+def test_boundary_userinfo_shapes(uri, expected):
+    from tortoise.config import parse_uri_userinfo
+
+    assert parse_uri_userinfo(uri) == expected
+
+
 def test_double_encoded_percent_decodes_exactly_once():
     """Single decode, matching ``redis.from_url`` (``%2540`` → ``%40``)."""
     from tortoise.config import parse_uri_userinfo
@@ -248,9 +286,7 @@ def _raw_userinfo_reads(path: Path, rel: str) -> list[str]:
     parsed_names: set[str] = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Assign) and _is_parse_call_value(node.value):
-            parsed_names.update(
-                t.id for t in node.targets if isinstance(t, ast.Name)
-            )
+            parsed_names.update(_assigned_names(node.targets))
         elif (
             isinstance(node, ast.AnnAssign)
             and _is_parse_call_value(node.value)
@@ -279,10 +315,19 @@ def _raw_userinfo_reads(path: Path, rel: str) -> list[str]:
 
 
 def _is_parse_call_value(value) -> bool:
-    return isinstance(value, ast.Call) and _is_parse_call(value)
+    """True when ``value`` is — or unpacking-contains — a parse call.
+
+    ``p, q = urlparse(uri), None`` binds a parse result through a tuple
+    value, so a bare ``isinstance(value, ast.Call)`` check would miss it.
+    """
+    if isinstance(value, ast.Call) and _is_parse_call(value):
+        return True
+    if isinstance(value, (ast.Tuple, ast.List)):
+        return any(_is_parse_call_value(elt) for elt in value.elts)
+    return False
 
 
-def test_no_raw_urlparse_userinfo_read_in_runtime_package():
+def test_no_raw_urlparse_userinfo_read_in_guarded_dirs():
     """Guard: only ``tortoise.config.parse_uri_userinfo`` may read userinfo.
 
     Scans every module under ``_GUARDED_DIRS`` that can feed a parsed
@@ -343,3 +388,25 @@ def test_guard_detects_the_pre_fix_pattern(tmp_path):
     )
     hits = _raw_userinfo_reads(urlsplit_sample, "urlsplit_sample.py")
     assert any("username" in h for h in hits)
+
+    # Walrus binding (`if (p := urlparse(uri)):`) has its own collection
+    # branch — pin it so the branch cannot be deleted without a red.
+    walrus_sample = tmp_path / "walrus_sample.py"
+    walrus_sample.write_text(
+        "from urllib.parse import urlparse\n"
+        "if (p := urlparse(uri)):\n"
+        "    password = p.password\n"
+    )
+    hits = _raw_userinfo_reads(walrus_sample, "walrus_sample.py")
+    assert any("password" in h for h in hits)
+
+    # Unpacking target (`p, q = urlparse(uri), None`) must contribute its
+    # Names too — a tuple target is a realistic refactor shape.
+    tuple_sample = tmp_path / "tuple_sample.py"
+    tuple_sample.write_text(
+        "from urllib.parse import urlparse\n"
+        "p, q = urlparse(uri), None\n"
+        "password = p.password\n"
+    )
+    hits = _raw_userinfo_reads(tuple_sample, "tuple_sample.py")
+    assert any("password" in h for h in hits)
