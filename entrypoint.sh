@@ -5,14 +5,46 @@
 #   2. FALKORDB_CLOUD_URI (FalkorDB Cloud managed instance — production)
 #   3. embedded redislite (local/dev)
 #
-# FalkorDB Cloud (managed) is the ONLY production database — it provides
-# AOF durability, automated backups, and multi-tenancy. The former
+# FalkorDB Cloud (managed) is the ONLY production database. Its platform backups
+# are 12-hourly with 7-day retention and restore-creates-a-NEW-instance; there is
+# NO point-in-time recovery, and AOF availability on our tier is undocumented
+# (the vendor's docs contradict each other — see #2881). Do not claim durability
+# this deployment does not have: the in-app sweep was inert for 33 days and the
+# watcher that should have alarmed never started (#2790, #2922). The former
 # self-hosted falkordb-tortoise sidecar (AOF off, no backups) caused the
 # 2026-08-05 data-loss incident and has been removed. If the cloud URI is
 # missing in production, fail loudly rather than silently degrading.
 # ──────────────────────────────────────────────────────────────────
 
 set -euo pipefail
+
+# #2923: never print a connection string — it carries the DB password. Scheme,
+# host and path stay visible so the target is still diagnosable; userinfo is
+# replaced by the canonical mask shape (`scheme://:***@host`, the same shape
+# tortoise/__main__.py::_mask_uri_userinfo emits).
+#
+# Boundary rule: the LAST '@' in the string — NOT the first. A password may
+# contain '@', '/', '?' or '#', and a rule that stops at the first delimiter of
+# any kind can log the credential's tail. Masking to the last '@' also survives
+# a value with stray leading whitespace (a real shape: a copy-pasted secret),
+# and errs toward masking more rather than less.
+#
+# Scope: a single bare URI, which is all this entrypoint ever prints. The
+# canonical Python helper (`tortoise/__main__.py::_mask_uri_userinfo`) additionally
+# masks every `scheme://` occurrence inside a longer message; the shell helper is
+# `^`-anchored and does not, by design. tests/test_boot_regressions.py pins the
+# two to identical output over the corpus it enumerates.
+_redact_uri() {
+    local uri="${1:-}" masked
+    if [ -z "$uri" ]; then
+        return 0
+    fi
+    masked=$(printf '%s' "$uri" | sed -E 's|^([[:space:]]*[a-zA-Z][a-zA-Z0-9+.-]*://).*@|\1:***@|') || masked=""
+    # A redaction failure must not silently blank the target: without this the
+    # line reads "→ " and the diagnosability the redaction exists to preserve
+    # is gone with no signal.
+    printf '%s' "${masked:-<unprintable-uri>}"
+}
 
 # #1349 T11: reject the benchmark-only probe seam in the hosted image.
 # TORTOISE_EMBEDDER_OVERRIDE is the marker of tools/embedder_probe.py's
@@ -87,10 +119,10 @@ else
 fi
 
 if [ -n "${TORTOISE_DB_URI:-}" ]; then
-    echo "tortoise: using explicit TORTOISE_DB_URI"
+    echo "tortoise: using explicit TORTOISE_DB_URI → $(_redact_uri "${TORTOISE_DB_URI}")"
 elif [ -n "${FALKORDB_CLOUD_URI:-}" ]; then
     export TORTOISE_DB_URI="${FALKORDB_CLOUD_URI}"
-    echo "tortoise: using FalkorDB Cloud (managed) → ${TORTOISE_DB_URI}"
+    echo "tortoise: using FalkorDB Cloud (managed) → $(_redact_uri "${TORTOISE_DB_URI}")"
 elif [ -n "${FLY_APP_NAME:-}" ]; then
     echo "tortoise: FATAL — FALKORDB_CLOUD_URI not set in production. Refusing to start with no durable DB." >&2
     exit 1

@@ -11,6 +11,13 @@ surfaces:
   - test_battery_parity_mabench_run.py
   - test_battery_parity_mabench_tortoise.py
   - test_battery_parity_migration.py
+  # #2922/#2923: DB-free static guards for boot-path regressions (credential
+  # redaction in entrypoint.sh, function-scope import shadowing in _lifespan).
+  # Registered under `api` as well as `core` deliberately: the file it guards most
+  # (tortoise/hosted_api.py) selects the `api` surface, and `core` is only added
+  # when nothing else matched — so a PR that reintroduced the bug in that file
+  # alone would otherwise never run the guard.
+  - test_boot_regressions.py
   - test_delivery_tenancy.py  # C6 #2115: delivery-shape tenancy + session_recording per-graph override
   - test_onboarding_email_http.py
   - test_sentry.py
@@ -260,6 +267,7 @@ surfaces:
   - test_backup_sweep.py
   - test_backup_watcher.py
   - test_bfs_audit.py
+  - test_boot_regressions.py
   - test_build_window_transcript.py
   - test_canary_classify.py
   - test_canonical.py
