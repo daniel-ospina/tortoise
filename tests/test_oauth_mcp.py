@@ -1293,13 +1293,19 @@ class TestMcpBoundary:
         with mcp_tc:
             # 1. a good request warms the cache for this token
             assert mcp_tc.post("/mcp", json=call).status_code == 200
-            # 2. revoke out of band. Assert the revoke LANDED — otherwise a
-            #    silently-broken revoke would make step 3 pass while proving
-            #    nothing about the cache.
+            # 2. revoke out of band. The revoke ENDPOINT returns 200 even for an
+            #    unknown or already-revoked token (RFC 7009 idempotence —
+            #    oauth.py::revoke_token), so a 200 proves NOTHING about whether
+            #    the row was actually marked. Assert the stored row instead, or
+            #    step 3 could pass while the revoke silently no-opped.
             rev = tc.post("/oauth/revoke",
                           data={"token": access,
                                 "token_type_hint": "access_token"})
             assert rev.status_code == 200, rev.text
+            rows = cp.tables["oauth_access_tokens"]
+            assert any(r.get("revoked_at") for r in rows), (
+                f"revoke did not land: no oauth_access_tokens row is marked "
+                f"revoked ({len(rows)} rows) — step 3 below would prove nothing")
             # 3. warm hit still authenticates — the bounded grace
             assert mcp_tc.post("/mcp", json=call).status_code == 200
 
@@ -1328,6 +1334,8 @@ class TestMcpBoundary:
                           data={"token": access,
                                 "token_type_hint": "access_token"})
             assert rev.status_code == 200, rev.text
+            assert any(r.get("revoked_at")
+                       for r in cp.tables["oauth_access_tokens"]), "revoke did not land"
 
             # Scope the clock shift to mcp_auth only — patching the stdlib
             # `time` module itself would freeze time for every other consumer

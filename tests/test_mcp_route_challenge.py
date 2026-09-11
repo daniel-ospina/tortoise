@@ -22,10 +22,10 @@ Invariants pinned here:
   * the rewrite is EXACT-match — it can never widen the surface
 
 LANE: docker lane. ``TestClient(hosted_app)`` runs ``hosted_api._lifespan``, which
-composes the FastMCP session manager and pre-warms the graph backend. The module runs
-in ~100 s, so it is registered in ``config/ci-surfaces.yml`` under ``slow_files:`` and
-runs in the ``test-slow`` legs; it is NOT in ``carve_out:`` (that set is
-embedded-by-design). Set ``TORTOISE_DB_URI`` for a local run.
+composes the FastMCP session manager and pre-warms the graph backend. That needs a live
+FalkorDB URI (hence ``slow_files:`` in ``config/ci-surfaces.yml`` and the ``test-slow``
+legs); it is NOT in ``carve_out:`` (that set is embedded-by-design). Set
+``TORTOISE_DB_URI`` for a local run. The module itself runs in a few seconds.
 """
 from __future__ import annotations
 
@@ -153,7 +153,12 @@ class TestAuthChallenge:
         assert prm.status_code == 200, prm.text
         body = prm.json()
         assert body["resource"].endswith("/mcp"), body["resource"]
-        assert not body["resource"].endswith("/mcp/"), (
+        # NOTE: `assert not body["resource"].endswith("/mcp/")` used to sit here.
+        # It was unreachable — a string ending in "/mcp/" does not end in "/mcp",
+        # so the line above already forbids it. The assertion that actually
+        # carries weight is the endswith("/mcp") one; the failure message below
+        # exists to explain WHY the no-slash form is required.
+        assert "/mcp/" not in body["resource"], (
             f"PRM resource is slashed ({body['resource']}) but the challenge "
             f"advertises the no-slash form — the client would send the wrong aud"
         )

@@ -139,10 +139,17 @@ def _resource_metadata_url(request: Request) -> str | None:
     been corrected by ``ForwardedProtoMiddleware`` (#985).
 
     Returns ``None`` — meaning "emit no challenge" — when the host is absent or
-    is not a syntactically valid URI host. That is the security boundary, not
-    defensive noise: the value is reflected into a response header that steers
-    the client's OAuth discovery, and the app's own host guard does NOT cover
-    this path. FastMCP's ``_normalize_host`` splits on the LAST ``:``, so
+    is not a syntactically valid URI host. This is a *syntax* filter, not the
+    authorization decision: whether the host is one we are willing to serve at
+    all is decided separately by FastMCP's ``HostOriginGuardMiddleware`` allowlist
+    (``host_origin_protection=True``), which rejects a non-allowlisted host with
+    421 before this middleware runs. Two different jobs — syntax here, allowlist
+    there — and both must pass.
+
+    It is nonetheless load-bearing on its own, because the app's guard does NOT
+    cover every path that reaches this function. The value is reflected into a
+    response header that steers the client's OAuth discovery, and FastMCP's
+    ``_normalize_host`` splits on the LAST ``:``, so
     ``Host: api.premiselabs.co:443@evil.com`` passes the allowlist while its raw
     form resolves to ``evil.com`` per RFC 3986 — reflecting it would hand the
     attacker the client's authorization-code exchange. Verified exploitable
