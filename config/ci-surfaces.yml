@@ -77,6 +77,11 @@ surfaces:
   - test_export_cli.py
   - test_export_pack_config.py
   - test_failure_contract.py
+  # #3039: percent-decoding of URI userinfo — api-surface consumers
+  # (tortoise/acl_graph_users.py::_admin_client, tortoise/__main__.py doctor
+  # probe) feed the same rule in tortoise/config.py; registered here so an
+  # acl/__main__-only change runs the pinned tests.
+  - test_from_uri_userinfo.py
   - test_fake_control_plane.py
   - test_free_team_entitlement.py   # main-side drift unblock (#1929): committed on main (entitlement gate work) but never added to selection — the --integrity gate fails every PR without it
   - test_one_free_org_entitlement.py  # main-side drift unblock (#2789/#2822): one-free-org entitlement test merged on main but never added to selection — the --integrity gate fails every PR without it
@@ -274,6 +279,7 @@ surfaces:
   - test_canonical.py
   - test_capture_session.py
   - test_capture_session_supersession_e2e.py
+  - test_restore_container_recovery.py
   - test_session_attribution.py
   - test_ci_selection.py
   - test_connector_loader.py
@@ -331,6 +337,10 @@ surfaces:
   - test_file_indexer.py
   - test_flip_gate.py
   - test_fly_machines_guard.py
+  # #3039: percent-decoding of URI userinfo (the single shared rule in
+  # tortoise/config.py, which is a core-surface path) — registered here so a
+  # config.py-only change still runs the guard.
+  - test_from_uri_userinfo.py
   - test_frontmatter_validator.py
   - test_gate_b_tooling.py
   - test_graph_diagnostics.py

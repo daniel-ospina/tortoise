@@ -119,7 +119,7 @@ class _GuardedGraph:
     def __getattr__(self, name):
         return getattr(self._g, name)
 
-from tortoise.config import RELATIVE_PATH_ERROR, SUPPORTED_URI_SCHEMES, LOOPBACK_HOSTS  # noqa: E402, I001
+from tortoise.config import RELATIVE_PATH_ERROR, SUPPORTED_URI_SCHEMES, LOOPBACK_HOSTS, parse_uri_userinfo  # noqa: E402, I001
 from tortoise.live import _live_only, _terminal_excluded  # noqa: E402
 from tortoise.embedded_lifecycle import (  # noqa: E402
     atexit_fast_close,  # #1371: registers the batch flush
@@ -695,8 +695,9 @@ class FalkorProjection(
                         f"TORTOISE_DB_URI must point at a local docker (D-4); "
                         f"set TORTOISE_TEST_ALLOW_REMOTE=1 to override")
                 port = _parsed.port or 16379
-                username = _parsed.username or None
-                password = _parsed.password or None
+                # #3039: urlparse does NOT percent-decode userinfo — the
+                # single decode rule lives in tortoise.config.
+                username, password = parse_uri_userinfo(_uri)
                 ssl = (_parsed.scheme == "rediss")
                 _sess = os.environ.get("TORTOISE_TEST_SESSION", "")
                 if path == ":memory:":
@@ -1007,8 +1008,11 @@ class FalkorProjection(
         from urllib.parse import urlparse
         parsed = urlparse(uri)
         _validate_uri_scheme(parsed.scheme)
-        username = parsed.username or None
-        password = parsed.password or None
+        # #3039: urlparse does NOT percent-decode userinfo while
+        # redis.from_url does — decode through the SINGLE shared rule or a
+        # password needing percent-encoding reaches FalkorDB as a literal
+        # %XX and auth fails with a misleading message.
+        username, password = parse_uri_userinfo(uri)
         if graph_name is None:
             graph_name = parsed.path.lstrip('/') or "tortoise"
         # Epic #1647 (cycle-4 P2-2 / cycle-6 P2-13 / cycle-7 P2-9 / #1686): in

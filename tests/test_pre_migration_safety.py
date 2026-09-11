@@ -62,11 +62,18 @@ def test_proj():
     uri = os.environ.get("TORTOISE_DB_URI", "")
     if uri.startswith("docker://"):
         from urllib.parse import urlparse
+
+        from tortoise.config import parse_uri_userinfo
         parsed = urlparse(uri)
+        # #3039: decode userinfo through the single shared rule — urlparse
+        # does NOT percent-decode, and this fixture previously also dropped
+        # the username entirely.
+        username, password = parse_uri_userinfo(uri)
         proj = FalkorProjection(
             host=parsed.hostname or "localhost",
             port=parsed.port or 6379,
-            password=parsed.password or None,
+            username=username,
+            password=password,
             graph_name=parsed.path.lstrip("/") or "tortoise",
         )
     else:
