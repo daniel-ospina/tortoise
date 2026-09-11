@@ -2909,3 +2909,72 @@ def test_rebuild_all_tolerates_malformed_events():
     finally:
         shutil.rmtree(d, ignore_errors=True)
 
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# #2850 — bounded, env-configurable FalkorDB client socket timeouts
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def test_socket_timeout_defaults_are_bounded():
+    """The connect timeout is the one a stalled DB makes us pay on every call.
+
+    Pre-#2850 it was a hardcoded 5s and the read timeout 10s, so a single
+    blocked connect outlasted Fly's 5s check budget and connect+read summed to
+    the whole 15s http_check. The read timeout is deliberately LEFT at 10s
+    (it also bounds legitimate long GRAPH.QUERY replies / backup dumps), but
+    both are now operator-visible via env.
+    """
+    from tortoise.projection import (
+        _DB_CONNECT_TIMEOUT_DEFAULT,
+        _DB_SOCKET_TIMEOUT_DEFAULT,
+        _socket_timeouts,
+    )
+
+    assert _socket_timeouts() == (_DB_CONNECT_TIMEOUT_DEFAULT, _DB_SOCKET_TIMEOUT_DEFAULT)
+    assert _DB_CONNECT_TIMEOUT_DEFAULT < 5.0, "connect timeout must beat a 5s check budget"
+    assert _DB_SOCKET_TIMEOUT_DEFAULT == 10.0, (
+        "read timeout is intentionally unchanged — lowering it silently breaks "
+        "long-but-legitimate queries and non-idempotent write retries")
+
+
+def test_socket_timeouts_are_env_overridable(monkeypatch):
+    from tortoise.projection import _socket_timeouts
+
+    monkeypatch.setenv("TORTOISE_FALKORDB_CONNECT_TIMEOUT_S", "0.75")
+    monkeypatch.setenv("TORTOISE_FALKORDB_SOCKET_TIMEOUT_S", "3")
+    assert _socket_timeouts() == (0.75, 3.0)
+
+
+def test_socket_timeouts_reject_fail_open_values(monkeypatch):
+    """A non-numeric or non-positive value must fall back to the DEFAULT, not
+    disable the bound — redis-py treats 0/None as \"block forever\", which is
+    precisely the #2850 failure mode."""
+    from tortoise.projection import (
+        _DB_CONNECT_TIMEOUT_DEFAULT,
+        _DB_SOCKET_TIMEOUT_DEFAULT,
+        _socket_timeouts,
+    )
+
+    monkeypatch.setenv("TORTOISE_FALKORDB_CONNECT_TIMEOUT_S", "0")
+    monkeypatch.setenv("TORTOISE_FALKORDB_SOCKET_TIMEOUT_S", "banana")
+    assert _socket_timeouts() == (_DB_CONNECT_TIMEOUT_DEFAULT, _DB_SOCKET_TIMEOUT_DEFAULT)
+
+
+def test_server_projection_receives_the_bounded_timeouts(monkeypatch):
+    """Pin the wiring: the resolved values must actually reach FalkorDB(...)."""
+    from unittest import mock
+
+    import tortoise.projection as proj_mod
+
+    monkeypatch.setenv("TORTOISE_FALKORDB_CONNECT_TIMEOUT_S", "1.5")
+    monkeypatch.setenv("TORTOISE_FALKORDB_SOCKET_TIMEOUT_S", "4")
+    fake = mock.MagicMock()
+    fake.return_value.select_graph.return_value = mock.MagicMock()
+    with mock.patch("falkordb.FalkorDB", fake):
+        p = FalkorProjection.__new__(FalkorProjection)
+        FalkorProjection.__init__(p, host="example.invalid", port=6379,
+                                  graph_name="test")
+    assert fake.call_args.kwargs["socket_connect_timeout"] == 1.5
+    assert fake.call_args.kwargs["socket_timeout"] == 4.0
+    assert proj_mod._socket_timeouts() == (1.5, 4.0)

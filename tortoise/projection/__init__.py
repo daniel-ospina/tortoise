@@ -35,6 +35,59 @@ logger = logging.getLogger(__name__)
 _FALKORDB_VERSION_CACHE: dict[tuple, tuple[int, int, int] | None] = {}
 
 
+# ── #2850 (P0 liveness/readiness decouple): bounded DB client timeouts ────
+#
+# WHY these are bounded with an env knob. Every blocking FalkorDB call runs
+# with these socket timeouts, and the socket read/connect timeouts are what
+# decide how long a stalled call can hold a thread (or, on the paths that
+# still call the client synchronously from the event loop, how long the LOOP
+# is stalled — which is what the /healthz heartbeat and the loop-stall
+# watchdog observe). The pre-#2850 literals were
+# ``socket_connect_timeout=5, socket_timeout=10``: a single blocked connect
+# could outlast Fly's 5s check budget by itself, and connect+read (15s) summed
+# to the whole 15s http_check timeout with nothing left for the response.
+#
+# connect: 5s → 2s. A TCP/TLS handshake to a reachable endpoint is
+# milliseconds; 5s of silence means a black hole / dead DNS / filtered port,
+# where waiting longer buys nothing. Lowering this is close to risk-free.
+#
+# read: UNCHANGED at 10s, deliberately. This timeout also bounds legitimate
+# long commands — a large ``GRAPH.QUERY`` reply, a backup dump, the chunked
+# ``vecf32`` restore batches (hosted_backup.py sizes its chunks around it).
+# Lowering it silently turns big-but-valid queries into failures, and a
+# timeout on an in-flight WRITE is not idempotent (the server may still apply
+# it while the client reports an error and retries). After #2850 no health
+# check waits on the DB at all, so the read timeout no longer sits in the
+# liveness budget; it is now configurable for operators who need a tighter
+# loop-stall ceiling (pair a lower value with a lower
+# TORTOISE_LOOP_STALL_EXIT_S, see monitoring.start_stall_watchdog).
+_DB_CONNECT_TIMEOUT_DEFAULT = 2.0
+_DB_SOCKET_TIMEOUT_DEFAULT = 10.0
+
+
+def _socket_timeouts() -> tuple[float, float]:
+    """``(socket_connect_timeout, socket_timeout)`` from env, with defaults.
+
+    ``TORTOISE_FALKORDB_CONNECT_TIMEOUT_S`` / ``TORTOISE_FALKORDB_SOCKET_TIMEOUT_S``.
+    A non-numeric or non-positive value falls back to the default rather than
+    disabling the bound (a 0/None redis timeout means "block forever" —
+    exactly the failure mode #2850 is about).
+    """
+    def _one(name: str, default: float) -> float:
+        raw = os.environ.get(name)
+        if raw is None or not str(raw).strip():
+            return default
+        try:
+            v = float(raw)
+        except (TypeError, ValueError):
+            logger.warning("%s=%r is not a number — using %ss", name, raw, default)
+            return default
+        return v if v > 0 else default
+
+    return (_one("TORTOISE_FALKORDB_CONNECT_TIMEOUT_S", _DB_CONNECT_TIMEOUT_DEFAULT),
+            _one("TORTOISE_FALKORDB_SOCKET_TIMEOUT_S", _DB_SOCKET_TIMEOUT_DEFAULT))
+
+
 
 
 def _promotion_point_with_operator(p: dict) -> dict:
@@ -816,8 +869,10 @@ class FalkorProjection(
         elif host is not None:
             # Docker FalkorDB
             from falkordb import FalkorDB  # ponytail: lazy import, only needed for Docker mode
+            connect_to, read_to = _socket_timeouts()
             self.db = FalkorDB(host=host, port=port, username=username, password=password,
-                               socket_connect_timeout=5, socket_timeout=10, ssl=ssl)
+                               socket_connect_timeout=connect_to, socket_timeout=read_to,
+                               ssl=ssl)
             # Epic #1647 (cycle-3 P0-1): record the host ON THE PROJECTION so
             # wipe_server/session sweep/tripwire read it instead of the raw
             # client (redis-py 8.1.0 has no .host on the client — the host
