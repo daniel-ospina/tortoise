@@ -40,7 +40,7 @@ def sup(tmp_path):
 
 
 def _rebuild(sdk, events_dir) -> None:
-    sdk._get_proj().rebuild_all(str(events_dir))
+    sdk._get_proj().rebuild_all(str(events_dir), confirm_destructive=True)
 
 
 def _sem_edges(proj, pid: str) -> set:

@@ -123,7 +123,7 @@ class TestRoundTrip:
                 assert "is_episodic" not in line, line
             else:
                 assert line["is_episodic"] == is_episodic, line
-            proj.rebuild_all(str(events))
+            proj.rebuild_all(str(events), confirm_destructive=True)
             rebuilt = _subject_row(proj, name)
             assert rebuilt, "Subject must survive rebuild"
             rebuilt_props = {k: v for k, v in rebuilt[0][0].items()
@@ -167,7 +167,7 @@ class TestOnlyOnCreate:
             assert sas[0]["subject_kind"] == "core:org", (
                 "journal must hold FIRST-registration subject_kind, not the "
                 "churned live value")
-            proj.rebuild_all(str(events))
+            proj.rebuild_all(str(events), confirm_destructive=True)
             rebuilt = _subject_row(proj, "strategy-owner", "subjectKind")
             assert rebuilt and rebuilt[0][0] == "core:org", (
                 "rebuild reverts to first-registration subjectKind "
@@ -223,7 +223,7 @@ class TestStubAdoption:
             # status PRESENT (delta-3 inversion — Subject status rides extras)
             live_props = _subject_row(proj, "connector-person")[0][0]
             assert live_props.get("status") == "live", live_props
-            proj.rebuild_all(str(events))
+            proj.rebuild_all(str(events), confirm_destructive=True)
             rows = _subject_row(proj, "connector-person", "id", "createdAt")
             assert rows and rows[0][0] == line["id"], (
                 "rebuild must restore the canonical id, not the stub ulid")
@@ -290,7 +290,7 @@ class TestDuplicateReplay:
                             subject_kind="core:other", createdAt=first_ts)
             sdk._emit_event("SubjectAdded", id=oid, name="race-person",
                             subject_kind="core:other", createdAt=second_ts)
-            proj.rebuild_all(str(events))
+            proj.rebuild_all(str(events), confirm_destructive=True)
             rows = _subject_row(proj, "race-person", "id", "createdAt")
             assert len(rows) == 1, "exactly one Subject node after dup replay"
             assert rows[0][0] == oid, rows[0]
@@ -329,7 +329,7 @@ class TestReservedProps:
             assert rows, "subject must exist live"
             node = rows[0][0]
             assert "point" not in node and "payload" not in node, node
-            proj.rebuild_all(str(events))
+            proj.rebuild_all(str(events), confirm_destructive=True)
             rows = _subject_row(proj, "reserved-person")
             node = rows[0][0]
             for k in ("event_id", "ts", "initiated_by", "projection_version"):
@@ -413,7 +413,7 @@ class TestFailureInjection:
                 "probe failure must fail OPEN to journaling (durable bias): "
                 f"{sas}")
             assert _subject_row(proj, "fail-open-person"), "create must succeed"
-            proj.rebuild_all(str(events))
+            proj.rebuild_all(str(events), confirm_destructive=True)
             assert _subject_row(proj, "fail-open-person"), (
                 "fail-open journal must let rebuild restore the node")
         finally:
@@ -447,7 +447,7 @@ class TestFailureInjection:
             assert any("failed to append" in r.getMessage()
                        for r in caplog.records), caplog.records
             monkeypatch.setattr(EventLog, "append", orig_append)
-            proj.rebuild_all(str(events))
+            proj.rebuild_all(str(events), confirm_destructive=True)
             assert not _subject_row(proj, "append-fail-person"), (
                 "accepted consequence: rebuild omits the Subject whose "
                 "registration line was lost")
@@ -483,7 +483,7 @@ class TestDeleteNonDurability:
             assert sdk._delete_entity(oid) is True, "node must be deleted"
             rows = _subject_row(proj, "delete-me-A")
             assert not rows, "live node must be gone after delete"
-            proj.rebuild_all(str(events))
+            proj.rebuild_all(str(events), confirm_destructive=True)
             rows = _subject_row(proj, "delete-me-A", "createdAt")
             assert rows, (
                 "deleted Subject resurrects on rebuild "
@@ -514,7 +514,7 @@ class TestDeleteNonDurability:
             live_rows = _subject_row(proj, "delete-me-B", "createdAt")
             assert live_rows and live_rows[0][0] == sas[1]["createdAt"], (
                 "live node carries the SECOND registration's createdAt")
-            proj.rebuild_all(str(events))
+            proj.rebuild_all(str(events), confirm_destructive=True)
             rows = _subject_row(proj, "delete-me-B", "createdAt")
             assert rows and rows[0][0] == sas[0]["createdAt"], (
                 "replay first-wins the FIRST registration's createdAt — "
@@ -554,7 +554,7 @@ class TestCreatedAtNoneGate:
                 f"registration, not journaled as null: {line!r}")
             rows = _subject_row(proj, "none-person", "createdAt")
             assert rows and rows[0][0] == line["createdAt"], rows
-            proj.rebuild_all(str(events))
+            proj.rebuild_all(str(events), confirm_destructive=True)
             rows = _subject_row(proj, "none-person", "createdAt")
             assert rows and rows[0][0] == line["createdAt"], (
                 "rebuilt createdAt must equal the synthesized journaled "
@@ -637,7 +637,7 @@ class TestEventAPICoexistence:
             assert live_rows[0][1] == sas[0]["createdAt"], (
                 "live createdAt must be A's (first registration)")
             # rebuild against the SDK log ONLY
-            proj.rebuild_all(str(sdk_events))
+            proj.rebuild_all(str(sdk_events), confirm_destructive=True)
             rows = _subject_row(proj, name, "id", "createdAt")
             assert rows and rows[0][0] == _entity_name_id(
                 "Subject", name), (
@@ -674,7 +674,7 @@ class TestEventAPICoexistence:
             api.add_subject(name)  # random ulid, its own createdAt
             live_rows = _subject_row(proj, name, "id", "createdAt")
             assert live_rows, "live node must exist"
-            proj.rebuild_all(str(shared))
+            proj.rebuild_all(str(shared), confirm_destructive=True)
             rows = _subject_row(proj, name, "id", "createdAt")
             assert rows, "cross-file rebuild must converge on one node"
             sdk_lines = _name_sas(

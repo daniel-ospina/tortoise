@@ -85,7 +85,7 @@ class TestCaptureFoldRoundTrip:
             journal = _journaled(sdk, events)
             fold_ts = [e for e in journal
                        if e.get("type") == "ObjectSuperseded"][-1]["ts"]
-            proj.rebuild_all(str(events))
+            proj.rebuild_all(str(events), confirm_destructive=True)
             rows = _object_row(
                 proj, "strategy-A", "id", "status", "supersededBy",
                 "supersededAt", "objectKind", "is_episodic")
@@ -137,7 +137,7 @@ class TestCaptureFoldRoundTrip:
             assert line["status"] == "live"
             assert line.get("createdAt"), line
             assert line["is_episodic"] == False  # noqa: E712
-            proj.rebuild_all(str(events))
+            proj.rebuild_all(str(events), confirm_destructive=True)
             rebuilt = _object_row(proj, name)
             assert rebuilt, "Object must survive rebuild"
             rebuilt_props = {k: v for k, v in rebuilt[0][0].items()
@@ -187,7 +187,7 @@ class TestOnlyOnCreate:
             assert ors[0]["object_kind"] == "dev:issue", (
                 "journal must hold FIRST-registration props, not the "
                 "churned live value")
-            proj.rebuild_all(str(events))
+            proj.rebuild_all(str(events), confirm_destructive=True)
             rebuilt = _object_row(proj, "strategy-A", "objectKind")
             assert rebuilt and rebuilt[0][0] == "dev:issue", (
                 "rebuild reverts to first-registration props (accepted "
@@ -223,7 +223,7 @@ class TestOnlyOnCreate:
             journal = _journaled(sdk, events)
             assert len(_name_ors(journal, "strategy-A")) == 1, (
                 "re-mention of a superseded Object must not journal")
-            proj.rebuild_all(str(events))
+            proj.rebuild_all(str(events), confirm_destructive=True)
             rows = _object_row(proj, "strategy-A", "status", "supersededBy")
             assert rows and rows[0][0] == "superseded", (
                 "no resurrect on rebuild")
@@ -280,7 +280,7 @@ class TestStubAdoption:
             # CREATE writes them from the journaled line.
             live_props = _object_row(proj, "connector-name")[0][0]
             assert "status" not in live_props, live_props
-            proj.rebuild_all(str(events))
+            proj.rebuild_all(str(events), confirm_destructive=True)
             rows = _object_row(proj, "connector-name", "id", "createdAt")
             assert rows and rows[0][0] == line["id"], (
                 "rebuild must restore the canonical id, not the stub ulid")
@@ -323,7 +323,7 @@ class TestDeleteNonDurability:
             assert not rows, "live node must be gone after delete"
             # delete mints no journal line — rebuild replays the OR line and
             # resurrects the deleted Object (accepted divergence, #2296 hook).
-            proj.rebuild_all(str(events))
+            proj.rebuild_all(str(events), confirm_destructive=True)
             rows = _object_row(proj, "delete-me-A", "status", "createdAt")
             assert rows and rows[0][0] == "live", (
                 "deleted Object resurrects live on rebuild "
@@ -354,7 +354,7 @@ class TestDeleteNonDurability:
             live_rows = _object_row(proj, "delete-me-B", "createdAt")
             assert live_rows and live_rows[0][0] == ors[1]["createdAt"], (
                 "live node carries the SECOND registration's createdAt")
-            proj.rebuild_all(str(events))
+            proj.rebuild_all(str(events), confirm_destructive=True)
             rows = _object_row(proj, "delete-me-B", "createdAt")
             assert rows and rows[0][0] == ors[0]["createdAt"], (
                 "replay first-wins the FIRST registration's createdAt — "
@@ -392,7 +392,7 @@ class TestReservedProps:
             assert rows, "object must exist live"
             node = rows[0][0]
             assert "point" not in node and "payload" not in node, node
-            proj.rebuild_all(str(events))
+            proj.rebuild_all(str(events), confirm_destructive=True)
             rows = _object_row(proj, "reserved-test")
             node = rows[0][0]
             for k in ("event_id", "ts", "initiated_by", "projection_version"):
@@ -454,7 +454,7 @@ class TestFoldMissWarning:
             import logging
             with caplog.at_level(logging.WARNING,
                                  logger="tortoise.projection"):
-                proj.rebuild_all(str(events))
+                proj.rebuild_all(str(events), confirm_destructive=True)
             assert any("fold" in r.message.lower() and
                        "match" in r.message.lower() for r in caplog.records), (
                 "fold-miss warning must fire for an unregistered target")
@@ -488,7 +488,7 @@ class TestDuplicateReplay:
                             object_kind="core:other", createdAt=second_ts)
             sdk._emit_event("ObjectSuperseded", id=oid, name="race-name",
                             supersedes_by="winner-name")
-            proj.rebuild_all(str(events))
+            proj.rebuild_all(str(events), confirm_destructive=True)
             rows = _object_row(proj, "race-name", "status", "createdAt",
                                "supersededBy")
             assert len(rows) == 1, "exactly one Object node after dup replay"
@@ -536,7 +536,7 @@ class TestFailureInjection:
                 "probe failure must fail OPEN to journaling (durable bias): "
                 f"{ors}")
             assert _object_row(proj, "fail-open-name"), "create must succeed"
-            proj.rebuild_all(str(events))
+            proj.rebuild_all(str(events), confirm_destructive=True)
             assert _object_row(proj, "fail-open-name"), (
                 "fail-open journal must let rebuild restore the node")
         finally:
@@ -571,7 +571,7 @@ class TestFailureInjection:
             assert any("failed to append" in r.getMessage()
                        for r in caplog.records), caplog.records
             monkeypatch.setattr(EventLog, "append", orig_append)
-            proj.rebuild_all(str(events))
+            proj.rebuild_all(str(events), confirm_destructive=True)
             assert not _object_row(proj, "append-fail-name"), (
                 "accepted consequence: rebuild omits the Object whose "
                 "registration line was lost")
@@ -620,7 +620,7 @@ class TestFailureInjection:
             journal = _journaled(sdk, events)
             assert not [e for e in journal
                         if e.get("type") == "ObjectSuperseded"], journal
-            proj.rebuild_all(str(events))
+            proj.rebuild_all(str(events), confirm_destructive=True)
             rows = _object_row(proj, "strategy-A", "status")
             assert rows and rows[0][0] == "live", (
                 "journal-consistent outcome: without the fold line, rebuild "
@@ -667,7 +667,7 @@ class TestLineOrder:
             # single-log chronological rebuild (no deferred sweep): with
             # [OR..., OS] order the fold applies — the Object stays superseded.
             from tortoise.log import EventLog
-            proj.rebuild(EventLog(str(events / "events.jsonl")))
+            proj.rebuild(EventLog(str(events / "events.jsonl")), confirm_destructive=True)
             rows = _object_row(proj, "strategy-A", "status", "supersededBy")
             assert rows and rows[0][0] == "superseded", rows
             assert rows[0][1] == "strategy-B", rows[0]
@@ -712,7 +712,7 @@ class TestCasReplayParity:
                             evidence="second fold")
             with caplog.at_level(logging.WARNING,
                                  logger="tortoise.projection"):
-                proj.rebuild_all(str(events))
+                proj.rebuild_all(str(events), confirm_destructive=True)
             rows = _object_row(proj, name, "status", "supersededBy")
             assert rows and rows[0] == ["superseded", "fr-succ-C"], (
                 "rebuild_all must resolve fold-Reg-fold LAST-wins "
@@ -720,7 +720,7 @@ class TestCasReplayParity:
             assert not any("matched no Object" in r.message
                            for r in caplog.records), caplog.records
             # dispatch arm — chronological rebuild (the backup-restore path)
-            proj.rebuild(EventLog(str(events / "events.jsonl")))
+            proj.rebuild(EventLog(str(events / "events.jsonl")), confirm_destructive=True)
             rows = _object_row(proj, name, "status", "supersededBy")
             assert rows and rows[0] == ["superseded", "fr-succ-C"], (
                 "rebuild() dispatch must resolve fold-Reg-fold LAST-wins — "
@@ -762,9 +762,11 @@ class TestCasReplayParity:
                 with caplog.at_level(logging.WARNING,
                                      logger="tortoise.projection"):
                     if surface == "rebuild_all":
-                        proj.rebuild_all(str(events))
+                        proj.rebuild_all(str(events), confirm_destructive=True)
                     else:
-                        proj.rebuild(EventLog(str(events / "events.jsonl")))
+                        proj.rebuild(
+                            EventLog(str(events / "events.jsonl")),
+                            confirm_destructive=True)
                 rows = _object_row(proj, name, "status", "supersededBy",
                                    "supersededAt")
                 assert rows and rows[0][:2] == ["superseded", "dup-succ"], (

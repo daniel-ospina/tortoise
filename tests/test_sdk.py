@@ -1215,7 +1215,7 @@ def test_update_content_replay_hash_parity(tmp_path):
 
     # wipe+rebuild_all: the edited content survives and the edited point is
     # still exactly-once reachable via dedup (hash-less fallback scan).
-    rebuilt = sdk._get_proj().rebuild_all(str(tmp_path))
+    rebuilt = sdk._get_proj().rebuild_all(str(tmp_path), confirm_destructive=True)
     assert rebuilt["events"] > 0
     row = sdk._get_proj().g.query(
         "MATCH (n:Point {id:$id}) RETURN n.content",
@@ -1243,7 +1243,7 @@ def test_promotion_survives_rebuild(sdk, tmp_path):
     sdk2.close()
 
     proj = sdk._get_proj()
-    rebuilt = proj.rebuild_all(str(tmp_path))
+    rebuilt = proj.rebuild_all(str(tmp_path), confirm_destructive=True)
     assert rebuilt["events"] > 0
     for pid in (a["id"], b["id"], op["id"]):
         rows = proj.g.query(

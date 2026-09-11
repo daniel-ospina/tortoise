@@ -233,10 +233,12 @@ still invoking the legacy `index sessions` becomes `nohup command-not-found →
    JSONL directory (the sole replay source for Sources/Events/Documents),
    (3) the db file.
 2. Restore onto a fresh graph — `rebuild_all` is line-tolerant (a torn
-   trailing line from a crash is skipped, never fatal):
+   trailing line from a crash is skipped, never fatal). The rebuild wipes the
+   target graph first, so it requires an explicit per-call opt-in (#2944) —
+   the CLI below IS that authorization:
 
 ```bash
-python -c 'from tortoise.sdk import TortoiseSDK; TortoiseSDK().rebuild_all("<events-dir>")'
+python -m tortoise rebuild --dir "<events-dir>" --db "<db-path>"
 ```
 
 3. Re-index the corpus:

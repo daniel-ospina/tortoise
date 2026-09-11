@@ -233,7 +233,7 @@ def test_audit_post_rebuild_completeness(tmp_path):
         bid = res["batch_id"]
         before = {p["id"] for p in sdk.list_batch(bid)["points"]}
         assert len(before) == 2
-        sdk._get_proj().rebuild_all(str(events_dir))
+        sdk._get_proj().rebuild_all(str(events_dir), confirm_destructive=True)
         after = {p["id"] for p in sdk.list_batch(bid)["points"]}
         assert after == before, \
             f"list_batch must survive rebuild_all: {before} vs {after}"

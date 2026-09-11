@@ -725,7 +725,7 @@ class TestW3PipelineWiring:
 
         # Rebuild from the REAL mining event log (points came from PointAdded
         # events that do NOT carry batch_id — only the snapshot restores it).
-        rebuilt = proj.rebuild_all(str(tmp_path))
+        rebuilt = proj.rebuild_all(str(tmp_path), confirm_destructive=True)
         assert rebuilt["events"] >= 1
         bs = mining.batch_status(proj, batch_id)
         assert bs is not None and bs["status"] == "quarantined", (
