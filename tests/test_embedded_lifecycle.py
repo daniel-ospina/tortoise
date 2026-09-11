@@ -324,6 +324,32 @@ def _wait_server_dead(pid, timeout=10):
     return not _pid_alive(pid)
 
 
+#: Budget for "the embedded server is gone after its parent exited" (#2947).
+#: This is LIVENESS on a cleanup path, not a performance assertion: the
+#: mechanism (signal → close → server exit) is deterministic, but observing it
+#: races a starved runner — the carve-out job runs ~700 tests over ~39min, and
+#: a 20s window flaked there (2026-09-11, PR #2934:
+#: "indexer's redis-server survived its killed parent"; green on re-run with no
+#: code change). 60s is the same order as the 45s the parent itself is given to
+#: exit, so a genuine hang still fails, and the message carries the evidence
+#: (pid, elapsed, parent rc) instead of leaving the next occurrence a mystery.
+_SERVER_DEATH_TIMEOUT_S = 60
+
+
+def _assert_server_dies_with_parent(redis_pid: int, proc, what: str) -> None:
+    """#2947: assert the embedded server died with its exited ``proc``.
+
+    ``what`` names the case (the parent was SIGINTed, the client disconnected,
+    …) so a failure says which lifecycle path failed to clean up.
+    """
+    started = time.time()
+    assert _wait_server_dead(redis_pid, timeout=_SERVER_DEATH_TIMEOUT_S), (
+        f"{what}: embedded redis-server (pid {redis_pid}) was still alive "
+        f"{time.time() - started:.1f}s after its parent exited "
+        f"(parent rc={proc.returncode}); budget {_SERVER_DEATH_TIMEOUT_S}s "
+        "(#2947)")
+
+
 def test_leaked_projection_closes_on_gc(tmp_path):
     """#1475: a leaked (never-closed) projection's embedded server shuts down
     deterministically on GC, not only at atexit. The finalizer works around
@@ -566,8 +592,8 @@ def test_terminating_signal_closes_embedded_server(tmp_path, signum):
                         "the #2203 guard did not terminate it")
         assert proc.returncode == -signum, (
             f"expected signal death ({-signum}), rc={proc.returncode}")
-        assert _wait_server_dead(redis_pid, timeout=20), (
-            f"child's redis-server survived its {_signal.Signals(signum).name}ed parent")
+        _assert_server_dies_with_parent(
+            redis_pid, proc, f"child's {_signal.Signals(signum).name}ed parent")
     finally:
         if proc.poll() is None:
             proc.kill()
@@ -620,8 +646,8 @@ def test_sigint_ignored_at_startup_still_terminates_and_closes(tmp_path):
             proc.kill()
             pytest.fail("SIGINT was ignored (pre-#2203 behavior) — guard did not fire")
         assert proc.returncode == -_signal.SIGINT, f"rc={proc.returncode}"
-        assert _wait_server_dead(redis_pid, timeout=20), (
-            "redis-server survived its SIGINTed parent")
+        _assert_server_dies_with_parent(
+            redis_pid, proc, "redis-server after its SIGINTed parent")
     finally:
         if proc.poll() is None:
             proc.kill()
@@ -689,8 +715,8 @@ def test_index_github_cli_signal_closes_embedded_server(tmp_path, signum):
                 f"`tortoise index github` ignored {_signal.Signals(signum).name} "
                 "(pre-#2203 behavior)")
         assert proc.returncode == -signum, f"rc={proc.returncode}"
-        assert _wait_server_dead(redis_pid, timeout=20), (
-            "indexer's redis-server survived its killed parent")
+        _assert_server_dies_with_parent(
+            redis_pid, proc, "indexer's redis-server after its killed parent")
     finally:
         if proc.poll() is None:
             proc.kill()
@@ -757,8 +783,8 @@ def test_serve_stdio_sigterm_closes_embedded_server(tmp_path):
             proc.kill()
             pytest.fail("stdio server survived SIGTERM — guard did not fire")
         assert proc.returncode == -_signal.SIGTERM, f"rc={proc.returncode}"
-        assert _wait_server_dead(redis_pid, timeout=20), (
-            "stdio server's redis-server survived its SIGTERMed parent")
+        _assert_server_dies_with_parent(
+            redis_pid, proc, "stdio server's redis-server after its SIGTERMed parent")
     finally:
         if proc.poll() is None:
             proc.kill()
@@ -779,8 +805,8 @@ def test_serve_stdio_client_disconnect_closes_embedded_server(tmp_path):
             proc.kill()
             pytest.fail("stdio server did not exit on client disconnect")
         assert proc.returncode == 0, f"rc={proc.returncode}"
-        assert _wait_server_dead(redis_pid, timeout=20), (
-            "stdio server's redis-server survived client disconnect")
+        _assert_server_dies_with_parent(
+            redis_pid, proc, "stdio server's redis-server after client disconnect")
     finally:
         if proc.poll() is None:
             proc.kill()
@@ -841,8 +867,8 @@ def test_selfhost_daemon_sigterm_closes_embedded_server(tmp_path):
         except _subprocess.TimeoutExpired:
             proc.kill()
             pytest.fail("daemon survived SIGTERM")
-        assert _wait_server_dead(redis_pid, timeout=25), (
-            "daemon's redis-server survived its SIGTERMed parent")
+        _assert_server_dies_with_parent(
+            redis_pid, proc, "daemon's redis-server after its SIGTERMed parent")
     finally:
         if proc.poll() is None:
             proc.kill()
