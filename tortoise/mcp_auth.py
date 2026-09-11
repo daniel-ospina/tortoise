@@ -209,8 +209,9 @@ def _unauthorized_challenge(request: Request,
     """``WWW-Authenticate`` headers for a 401 on the OAuth-protected MCP
     resource (#2864), or ``None`` when no challenge must be emitted.
 
-    MCP 2025-11-25 requires the challenge to carry one of ``resource_metadata``
-    or the authorization-server URL; RFC 9728 section 5.1 defines the
+    MCP 2025-11-25 requires a *discovery mechanism* - either the resource
+    metadata URL in the ``WWW-Authenticate`` header or a well-known URI. The
+    challenge form itself is RFC 9728 section 5.1's
     ``Bearer resource_metadata="…"`` form. Without this header an MCP client has
     no discoverable path from the 401 to the authorization server — this is the
     defect that blocks the Claude Desktop/Web connector on accounts lacking the

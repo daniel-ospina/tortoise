@@ -62,7 +62,7 @@ def hosted_client():
 
 class TestRouteCanonicalization:
     @pytest.mark.parametrize("path", ["/mcp", "/mcp/"])
-    @pytest.mark.parametrize("method", ["GET", "HEAD", "POST", "DELETE"])
+    @pytest.mark.parametrize("method", ["GET", "HEAD", "POST", "DELETE", "OPTIONS"])
     def test_no_3xx_on_any_method_or_form(self, hosted_client, method, path):
         """The defect: POST /mcp → 307 → /mcp/ (and GET/HEAD too). After the
         fix the canonical connector URL is served directly."""
@@ -130,6 +130,21 @@ class TestAuthChallenge:
         """`Bearer` with an empty token hits its own 401 site."""
         r = hosted_client.post("/mcp", json={}, headers={"Authorization": "Bearer "})
         assert r.status_code == 401
+        assert _challenge_url(r).endswith(PRM_PATH)
+
+    @pytest.mark.parametrize("token", ["tt_deadbeef", "oat_deadbeef"])
+    def test_unknown_credential_carries_challenge(self, hosted_client, token):
+        """The 4th 401 site: a well-formed but UNKNOWN credential.
+
+        Sites 1-3 are pinned by the tests above; this one is distinct because it
+        is reached only after a syntactically valid, recognized-prefix token
+        fails to resolve, and it was previously unpinned — deleting its
+        ``headers=`` argument left the whole suite green, even though the issue
+        enumerates all four sites as acceptance criteria.
+        """
+        r = hosted_client.post(
+            "/mcp", json={}, headers={"Authorization": f"Bearer {token}"})
+        assert r.status_code == 401, r.status_code
         assert _challenge_url(r).endswith(PRM_PATH)
 
     def test_challenge_url_is_root_path_free(self, hosted_client):
@@ -213,7 +228,6 @@ class TestChallengeAbsentWhereNoAuthorizationServer:
     def test_the_hosted_app_still_does_emit_it(self, hosted_client):
         """The flip side — guard against 'fix it by disabling everywhere'."""
         assert _challenge_url(hosted_client.post("/mcp", json={})).endswith(PRM_PATH)
-
     @staticmethod
     def _static_app(api_key: str):
         from starlette.applications import Starlette
