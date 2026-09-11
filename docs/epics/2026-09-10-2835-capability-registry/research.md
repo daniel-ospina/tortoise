@@ -105,7 +105,7 @@ Baseline ranks, Align's method at `a75bda4`: the single positive sits at **rank 
 3. **The graph-leg recall figures are void.** They were computed against the mislabelled fixture (`positive` n=3 / `negative` n=7); they cannot be re-scored, because that namespace has been dropped. **They are withdrawn rather than restated.**
 4. **The head-to-head comparison cannot be salvaged from this run** — the baseline half can be recomputed on correct labels, but the graph half cannot, and the two metrics were never the same function (see the metric note above).
 
-> ⚠️ **This is the fourth P0 in four cycles, and it is the same error class as cycle 1: the brief adopted a premiss that made the evidence look better than it was.** Cycle 1 invented a baseline; cycle 2 invented a verdict; cycle 3 invented a root cause; cycle 4's fixture invented a positive set. Each was caught, none by the author. The brief now records the epic's real measured position: **one duplicate, five separations, three unadjudicated candidates, and a kill-switch that could not have fired.**
+> ⚠️ **This is the fifth P0 across four cycles, and it is the same error class as cycle 1: the brief adopted a premiss that made the evidence look better than it was.** Cycle 1 produced **two** — an invented baseline, and a verdict that contradicted Align's conjunction rule; cycle 2 invented a lever verdict; cycle 3 invented a root cause; cycle 4's fixture invented a positive set. Each was caught, none by the author. The brief now records the epic's real measured position: **one duplicate, five separations, three unadjudicated candidates, and a kill-switch that could not have fired.**
 
 #### The declared sensitivity check — the baseline is pipeline-dependent, and the strip is load-bearing
 
