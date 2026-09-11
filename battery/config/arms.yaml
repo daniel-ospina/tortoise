@@ -8,8 +8,7 @@
 # (decision (a): deepseek/deepseek-v4-flash UNCAPPED, temp 0, same model
 # across arms — resolved via model_adapters.MODELS['deepseek-flash']); the
 # mock row is exempt (lane cap, never real-scored). A real run refuses an
-# unpinned/unresolvable pin or a class-level model_id='fixed' sentinel
-# (run.py pin pre-flight).
+# unpinned/unresolvable pin (run.py pin pre-flight).
 #
 # expected_tokens_per_episode (#2284 Task 7): per-arm token-budget
 # numbers, each annotated measured_after_exposure on its row (provisional —
