@@ -270,3 +270,17 @@ def test_main_without_dry_run_refuses_without_touching_the_graph(capsys):
     captured = capsys.readouterr()
     assert "live execution is NOT wired" in captured.err
     assert "wave         : 1 -> 15 Q" in captured.out
+
+def test_measure_question_structure_accepts_explicit_census_class(monkeypatch):
+    """A raw LongMemEval row carries `question_type`, NOT the census class —
+    passing the row alone must not silently collapse every result into one
+    report bucket. The explicit `cls=` wins."""
+    monkeypatch.setattr(pv, "_cypher", lambda sdk, q, params=None: [])
+    row = {"question_id": "q1", "question_type": "temporal-reasoning"}
+    res = pv.measure_question_structure(
+        None, row, gold_session_ids=[], namespace="ns",
+        cls="ordering/compare")
+    assert res["cls"] == "ordering/compare"
+    # and the dataset row alone yields an empty class rather than a guess
+    assert pv.measure_question_structure(
+        None, row, gold_session_ids=[], namespace="ns")["cls"] == ""

@@ -324,7 +324,8 @@ def _count_name_matches(candidates: list[str],
 
 def measure_question_structure(sdk: Any, question: dict, *,
                                gold_session_ids: list[str],
-                               namespace: str) -> dict:
+                               namespace: str,
+                               cls: str | None = None) -> dict:
     """Structural measurement for ONE question against an ALREADY-INGESTED
     v2 graph (no ingest, no LLM, read-only).
 
@@ -338,13 +339,19 @@ def measure_question_structure(sdk: Any, question: dict, *,
     (the three reads the assembler lane cannot do without: entity nodes, the
     point→entity link, and at least one dated gold-session event).
 
+    ``cls`` — the CENSUS class used for the per-class report. A raw LongMemEval
+    instance carries ``question_type``, NOT the census class, so passing the
+    dataset row alone silently yields an empty class and collapses every
+    result into one report bucket: pass the census class explicitly (the
+    caller has it from ``wave_questions``).
+
     ``entity_name_match`` is the documented proxy from
     :func:`derive_subject_candidates` — never a gold-subject resolution
     claim. ``namespace`` (the per-question ``team_<namespace>`` FalkorDB
     graph the numbers were read from) is echoed for provenance.
     """
     qid = str(question.get("question_id") or "")
-    cls = str(question.get("cls") or "")
+    cls = str(cls or question.get("cls") or "")
     golds = [str(g) for g in (gold_session_ids or []) if str(g).strip()]
 
     obj_rows = _cypher(
