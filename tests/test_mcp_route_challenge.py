@@ -6,10 +6,11 @@ Two defects on the hosted MCP surface:
    client had no discoverable path from the rejection to the authorization server.
    ``_jsonrpc_error`` had no ``headers`` parameter, so none of the
    ``TeamResolutionMiddleware`` 401 sites could emit a challenge.
-2. ``/mcp`` 307'd to ``/mcp/`` (Starlette ``redirect_slashes``). A 307 on a
-   JSON-RPC POST is a correctness hazard: POST-following HTTP stacks convert the
-   method to GET per RFC 9110, and the #985 chain (the Fly edge 301s http→https)
-   makes the round trip doubly lossy.
+2. ``/mcp`` 307'd to ``/mcp/`` (Starlette ``redirect_slashes``). The #985 chain
+   makes that lossy: the Fly edge 301s http→https, and 301 is NOT
+   method-preserving (RFC 9110 section 15.4.2), so a POST can arrive as a GET —
+   hence the 405 reported in #985. (307 itself is method-preserving, section
+   15.4.8; the lossy hop is the 301.)
 
 The challenge must NOT be emitted by ``StaticKeyMiddleware`` (self-host): that
 surface has no authorization server, so the header would point at a 404.
@@ -290,10 +291,20 @@ class TestChallengeHostInjection:
         assert header.count('"') == 2, header
         assert header.endswith(f'{PRM_PATH}"'), header
 
-    def test_quoted_host_cannot_break_out_of_the_value(self, hosted_client):
+    def test_quoted_host_is_rejected_by_the_framework_guard(self, hosted_client):
+        """A quote-bearing Host is not allowlisted, so FastMCP's Host/Origin guard
+        answers 421 BEFORE the middleware runs. The regex-level property (a `"`
+        cannot break out of the quoted header value) is pinned directly in
+        ``TestResourceMetadataUrl.test_unsafe_or_absent_host_yields_no_url``.
+
+        Asserting the status matters: the previous form
+        (``header is None or header.count('"') == 2``) could NEVER fail — `"` is
+        outside the regex, so the value is always None — and asserted nothing.
+        """
         r = hosted_client.post("/mcp", json={}, headers={"Host": 'a"b.example'})
-        header = r.headers.get("www-authenticate")
-        assert header is None or header.count('"') == 2, header
+        assert r.status_code == 421, r.status_code
+        assert r.headers.get("www-authenticate") is None
+        assert not any("evil" in v or '"b.example' in v for v in r.headers.values())
 
 
 # ── 4. Origin derivation unit ───────────────────────────────────────────────
@@ -341,6 +352,15 @@ class TestResourceMetadataUrl:
         url = self._url_for({}, {"host": "[::1]:8000"})
         assert url == f"http://[::1]:8000{PRM_PATH}", url
 
+    def test_full_and_mapped_ipv6_literals_are_accepted(self):
+        for host in ("[1:2:3:4:5:6:7:8]", "[::ffff:1.2.3.4]", "[2001:db8::1]"):
+            assert self._url_for({}, {"host": host}) == (
+                f"http://{host}{PRM_PATH}"), host
+
+    def test_port_at_the_usable_boundary_is_kept(self):
+        assert self._url_for({}, {"host": "h.example:65535"}) == (
+            f"http://h.example:65535{PRM_PATH}"), "65535 is the last usable port"
+
     def test_defaults_to_https_when_scheme_unset(self):
         assert self._url_for({"scheme": ""}, {"host": "h.example"}).startswith("https://")
 
@@ -358,6 +378,16 @@ class TestResourceMetadataUrl:
         "-bad.example",
         "api.premiselabs.co\n",     # `$` would accept this; `\Z` does not
         "api.premiselabs.co\r\n",
+        "[127.0.0.1]",               # bracketed IPv4 is not a legal RFC 3986 host
+        "[1.2.3.4]:80",
+        "[:]",                       # regex-shaped but not a valid IPv6 literal
+        "[:::]",
+        "[1:2:3]",
+        "[1::2::3]",
+        "[12345::1]",
+        "api.premiselabs.co:99999",  # parses here, but not a usable URL port
+        "api.premiselabs.co:65536",
+        "api.premiselabs.co:00000",
         "x" * 256,
     ])
     def test_unsafe_or_absent_host_yields_no_url(self, host):

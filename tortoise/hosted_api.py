@@ -1069,6 +1069,10 @@ class ForwardedProtoMiddleware(BaseHTTPMiddleware):
     remains the scheme fix for every OTHER trailing-slash redirect the app
     emits, so do not read the note above as covering ``/mcp`` any longer.
 
+    Citation note: the POST→GET conversion above is a property of 301/302
+    (RFC 9110 sections 15.4.2/15.4.3), NOT of the 307 Starlette emits — 307 is
+    method-preserving (section 15.4.8). The lossy step is the Fly edge's 301.
+
     This middleware rewrites ``scope["scheme"]`` from the FIRST value of
     the forwarded-proto header so redirect Locations carry the
     client-visible scheme (https). Two trust domains, each gated by its
@@ -1148,12 +1152,14 @@ class McpPathCanonicalizerMiddleware:
     """Exact-match ``/mcp`` to ``/mcp/``, so the JSON-RPC POST never 307s (#2864).
 
     Starlette's ``redirect_slashes`` answers a request for ``/mcp`` with a 307 to
-    ``/mcp/`` (the MCP app is mounted at ``/mcp``). A 307 on a JSON-RPC POST is a
-    correctness hazard: POST-following HTTP stacks convert the method to GET per
-    RFC 9110, and the #985 chain (the Fly edge 301s http to https) makes the
-    round trip doubly lossy. Rewriting the scope path internally means the
-    client-visible URL stays ``https://…/mcp`` — the canonical connector URL —
-    with no redirect at all.
+    ``/mcp/`` (the MCP app is mounted at ``/mcp``). 307 is method-preserving by
+    spec (RFC 9110 section 15.4.8: the method MUST NOT change), so the 307 itself
+    is not the hazard — the #985 chain is: the Fly edge 301s http→https, and 301
+    is NOT method-preserving (#15.4.2 lets a client rewrite POST to GET), so the
+    round trip is lossy for exactly the clients least able to tolerate it. Beyond
+    that, a redirect on a JSON-RPC POST is simply needless. Rewriting the scope
+    path internally means the client-visible URL stays ``https://…/mcp`` — the
+    canonical connector URL — with no redirect at all.
 
     EXACT match only (on the ROUTE path): ``/mcpfoo``, ``/Mcp`` and ``/mcp/x``
     are untouched, so the rewrite can never widen the surface or shadow a

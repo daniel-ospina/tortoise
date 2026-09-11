@@ -1293,9 +1293,13 @@ class TestMcpBoundary:
         with mcp_tc:
             # 1. a good request warms the cache for this token
             assert mcp_tc.post("/mcp", json=call).status_code == 200
-            # 2. revoke out of band
-            tc.post("/oauth/revoke", data={"token": access,
-                                           "token_type_hint": "access_token"})
+            # 2. revoke out of band. Assert the revoke LANDED — otherwise a
+            #    silently-broken revoke would make step 3 pass while proving
+            #    nothing about the cache.
+            rev = tc.post("/oauth/revoke",
+                          data={"token": access,
+                                "token_type_hint": "access_token"})
+            assert rev.status_code == 200, rev.text
             # 3. warm hit still authenticates — the bounded grace
             assert mcp_tc.post("/mcp", json=call).status_code == 200
 
@@ -1320,8 +1324,10 @@ class TestMcpBoundary:
         mcp_tc.headers.update(_mcp_headers(access))
         with mcp_tc:
             assert mcp_tc.post("/mcp", json=call).status_code == 200
-            tc.post("/oauth/revoke", data={"token": access,
-                                           "token_type_hint": "access_token"})
+            rev = tc.post("/oauth/revoke",
+                          data={"token": access,
+                                "token_type_hint": "access_token"})
+            assert rev.status_code == 200, rev.text
 
             # Scope the clock shift to mcp_auth only — patching the stdlib
             # `time` module itself would freeze time for every other consumer

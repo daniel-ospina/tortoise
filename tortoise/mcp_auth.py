@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import hmac
+import ipaddress
 import os
 import re
 import time
@@ -149,21 +150,49 @@ def _resource_metadata_url(request: Request) -> str | None:
     """
     scheme = request.scope.get("scheme") or "https"
     host = request.headers.get("host")
-    if not host or len(host) > 255 or not _SAFE_HOST_RE.match(host):
+    if not host or len(host) > 255:
         return None
+    match = _SAFE_HOST_RE.match(host)
+    if match is None:
+        return None
+    port = match.group("port")
+    if port is not None and not 0 < int(port) <= 65535:
+        # `:99999` / `:00000` are RFC 3986-parseable but not usable URL ports —
+        # WHATWG/Node reject the URL, so the client's discovery would fail.
+        return None
+    if host.startswith("["):
+        # The grammar in the regex accepts any hex-and-colon run inside brackets,
+        # which also admits malformed literals (`[:]`, `[:::]`, `[1::2::3]`,
+        # `[12345::1]`). Those are REJECTED by ``urlsplit``/WHATWG just like
+        # ``[127.0.0.1]``, so emitting one would be the same silent discovery
+        # failure. Validate the literal properly rather than trusting the shape.
+        try:
+            ipaddress.IPv6Address(host[1:host.index("]")])
+        except ValueError:
+            return None
     return f"{scheme}://{host}/.well-known/oauth-protected-resource/mcp"
 
 
-# RFC 3986 host: a reg-name (letters/digits/hyphen/dot) or a bracketed IPv6
-# literal, plus an optional numeric port. Deliberately narrow — anything outside
-# this grammar (userinfo `@`, `/`, `"`, `,`, `%`, whitespace, controls) makes
+# RFC 3986 host: a reg-name (letters/digits/hyphen/dot) or a bracketed IP-LITERAL,
+# plus an optional numeric port. Deliberately narrow — anything outside this
+# grammar (userinfo `@`, `/`, `"`, `,`, `%`, whitespace, controls) makes
 # _resource_metadata_url return None rather than reflect attacker-controlled text.
+#
 # `\Z`, NOT `$`: Python's `$` also matches immediately BEFORE a trailing newline,
 # so `$` would accept `"api.premiselabs.co\n"` and reflect it (h11 rejects CR/LF
 # on both the request and the response side, so that is not reachable through a
 # real server — but the grammar should say what it means).
+#
+# The bracketed branch REQUIRES a colon: RFC 3986's IP-literal is
+# `"[" ( IPv6address / IPvFuture ) "]"`, so `[127.0.0.1]` is not a legal host —
+# `urlsplit` rejects it outright and WHATWG/Node refuse the URL, which would turn
+# the challenge into a silent discovery failure. Shape alone is not enough, so the
+# literal is additionally validated with `ipaddress.IPv6Address` (see
+# _resource_metadata_url). The port is range-checked separately: `:99999` parses
+# here but is not a usable URL port.
 _SAFE_HOST_RE = re.compile(
-    r"^(?:[A-Za-z0-9][A-Za-z0-9.\-]*|\[[0-9A-Fa-f:.]+\])(?::[0-9]{1,5})?\Z"
+    r"^(?:[A-Za-z0-9][A-Za-z0-9.\-]*|\[[0-9A-Fa-f]*:[0-9A-Fa-f:.]*\])"
+    r"(?::(?P<port>[0-9]{1,5}))?\Z"
 )
 
 
