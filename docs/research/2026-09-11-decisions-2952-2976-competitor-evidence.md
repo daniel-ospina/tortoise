@@ -113,7 +113,7 @@ that its cost is the industry norm rather than an exotic add-on.
 ## Sources
 
 - In-repo: `product/competition/hindsight.md` (§6 TEMPR), `zep.md` (§6), `letta-cognee.md`,
-  `kimiho.md`, `_analysis.md` (§3a matrix, Findings 5–8); `docs/research/2026-09-09-competitor-memory-architecture.md`;
+  `kumiho.md`, `_analysis.md` (§3a matrix, Findings 5–8); `docs/research/2026-09-09-competitor-memory-architecture.md`;
   `docs/research/2026-09-11-subgraph-retrieval-research.md`; `battery/arms/a2_mem0.py`, `a2b_zep.py`.
 - External: Hindsight retrieval docs (`hindsight.vectorize.io/developer/retrieval`) + arXiv
   2512.12818v1 (TEMPR); Zep/Graphiti docs; supermemory docs (`supermemory.ai/docs/concepts/how-it-works`);
