@@ -1035,7 +1035,7 @@ def invitation_mint(cp, team_id: str, email: str, role: str,
     )
     if dup:
         raise InvitationError(
-            f"Pending invitation already exists for {email} in this team",
+            f"Pending invitation already exists for {email} in this organization",
             status=409,
         )
 
@@ -1067,7 +1067,7 @@ def invitation_mint(cp, team_id: str, email: str, role: str,
         # fast-path; the index is the authoritative dedup.
         if "HTTP 409" in str(e):
             raise InvitationError(
-                f"Pending invitation already exists for {email} in this team",
+                f"Pending invitation already exists for {email} in this organization",
                 status=409,
             ) from e
         raise
@@ -1218,7 +1218,7 @@ def invitation_accept(cp, token: str, user_id: str,
         )
         if len(member_count) >= int(max_users):
             raise InvitationError(
-                "Team member limit reached", status=402)
+                "Member limit reached", status=402)
 
     # Single-use: conditional PATCH (status='pending' filter) then verify.
     accept_body: dict = {"status": "accepted", "accepted_at": now.isoformat()}
@@ -3101,7 +3101,7 @@ def invitation_accept_by_id(cp, invitation_id: str, user_id: str,
         )
         if len(member_count) >= int(max_users):
             raise InvitationError(
-                "Team member limit reached", status=402)
+                "Member limit reached", status=402)
 
     # #1877 free-team entitlement (join side): the target team has no
     # active paid subscription AND the invitee already holds a free team →

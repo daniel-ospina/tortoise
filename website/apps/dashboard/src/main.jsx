@@ -404,11 +404,15 @@ function SettingsTab(props) {
 
       {/* ── Home 1: Setup guide (DE2E-6) — renders the SAME graph-held
           OnboardingState node as the Overview next-action element; the
-          card's Resume re-opens the wizard (idempotent re-entry). W9 owns
-          the fork-aware step-mapped resume. ── */}
+          card's Resume re-opens the wizard (idempotent re-entry). #2364
+          round-1: the copy below states the TRUE resume semantics — the
+          wizard reopens from the START (org-create), never mapped to the
+          guide's current row — and finished steps are saved so org-create
+          and a chosen fork never re-ask. W9 owns the fork-aware
+          step-mapped resume. ── */}
       <section className="settings-home" aria-labelledby="settings-setup-guide-heading">
         <h3 id="settings-setup-guide-heading">Setup guide</h3>
-        <p className="dim small">Where your Organization is in setup — reopen the wizard any time; what you've done is saved.</p>
+        <p className="dim small">Where your Organization is in setup — Resume reopens the setup wizard and walks you through what's left (your Organization and fork choice are already saved).</p>
         <SetupGuideCard state={state} loading={loading} onResume={onResumeSetup} />
       </section>
 
@@ -2463,7 +2467,7 @@ function claimIntentInFlight() {
   const [wizardOrgBusy, setWizardOrgBusy] = React.useState(false)
   const [wizardForkBusy, setWizardForkBusy] = React.useState(false)
   const [wizardForkError, setWizardForkError] = React.useState('')
-  const [wizardForkChosen, setWizardForkChosen] = React.useState('')  // 'self' | 'build' | '' (set once per org)
+  const [wizardForkChosen, setWizardForkChosen] = React.useState('')  // 'self' | 'build' | '' — set once per org (#2407: 'unsure' never sets it; fork stays None so the card keeps asking)
   // #1998 (W2): connect-consent state — the harness-connected checkpoint
   // write on "I've set it up — Continue" (busy + error mirror handleWizardFork).
   const [wizardConnectBusy, setWizardConnectBusy] = React.useState(false)
@@ -4264,10 +4268,25 @@ function claimIntentInFlight() {
     setWizardForkBusy(true)
     setWizardForkError('')
     try {
+      // #2407: 'unsure' ("Not sure yet — decide later") is a fork-card ANSWER,
+      // never a fork VALUE — the checkpoint op {fork_unsure_at: true} records
+      // a server-stamped deferral WITHOUT consuming the set-once fork (fork
+      // stays None → the card keeps asking + the completion gate refuses to
+      // auto-close the org as 'self'). Repeat unsure picks re-stamp (200,
+      // never a 409); a later explicit self/build pick is a fresh fork write.
+      const body = forkId === 'unsure' ? { fork_unsure_at: true } : { fork: forkId }
       await api(`/v1/onboarding/state/checkpoint${onboardingTeamQ()}`, {
         method: 'POST', useSession: true,
-        body: JSON.stringify({ fork: forkId }),
+        body: JSON.stringify(body),
       })
+      if (forkId === 'unsure') {
+        // no fork consumed — refresh so the projection carries fork_unsure_at
+        // (the card's deferred hint + the Setup-guide fork row need it), then
+        // advance like a self pick (there is no catalog to show).
+        refreshOnboarding().catch(() => {})
+        setWizardStep(3)
+        return
+      }
       setWizardForkChosen(forkId)
       // review P1 (#1997): the catalog-presented mark fires HERE, not in a
       // step-2 effect — React batches setWizardForkChosen + setWizardStep(3)
@@ -6106,7 +6125,15 @@ function claimIntentInFlight() {
                       <span key={s.id} className={'wizard-step' + (i === wizardStep ? ' active' : (i < wizardStep ? ' done' : ''))} />
                     ))}
                   </div>
-                  <p className="wizard-title">{WIZARD_STEPS[wizardStep].label}</p>
+                  {/* #2364 round-1: org-holder resume/re-entry must never re-read
+                      the org-create TITLE — an account that already holds an org
+                      walks step 0 as a READ-ONLY summary (never a second mint,
+                      #2323). Branch the visible title to the same label the
+                      sr-only announce uses (#2361 r2) — title + announce never
+                      diverge. The body copy below already branches (#2323 Option
+                      B): 'You're set up in <org>' + Continue, never a create
+                      form. W9/#2005 owns the fork-aware step-MAPPED resume. */}
+                  <p className="wizard-title">{wizardStep === 0 && welcomeHasOrg ? 'Your Organization' : WIZARD_STEPS[wizardStep].label}</p>
                   {wizardStep !== 0 && (
                     <p className="wizard-sub" style={{ marginBottom: '1rem' }}>
                       {(wizardStep === 3 && effectivelyPaused)
@@ -6197,6 +6224,11 @@ function claimIntentInFlight() {
                       {onboarding && onboarding.fork && (
                         <p className="dim" style={{ marginBottom: '0.9rem' }}>
                           This Organization is set to <strong>{onboarding.fork === 'build' ? 'build an application on top' : 'use Tortoise for your own agents'}</strong>.
+                        </p>
+                      )}
+                      {onboarding && !onboarding.fork && onboarding.fork_unsure_at && (
+                        <p className="dim" style={{ marginBottom: '0.9rem' }}>
+                          You told us you're <strong>not sure yet</strong> — nothing is locked in. Pick an option now, or answer any time from Settings → Setup guide.
                         </p>
                       )}
                       <div className="fork-options" style={{ display: 'flex', flexDirection: 'column', gap: '0.6rem', marginBottom: '1rem' }}>

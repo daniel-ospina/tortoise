@@ -267,8 +267,11 @@ def _walk_to_fork(page: Page) -> None:
     expect(page.locator("body")).to_contain_text("Continue setup", timeout=20_000)
     page.get_by_role("button", name="Continue setup").click()
     # STEP 0: create/join org — an account that already holds an org sees a
-    # read-only summary (never a second mint, #2323) and advances.
-    expect(page.locator("body")).to_contain_text("Create your Organization", timeout=10_000)
+    # read-only summary (never a second mint, #2323) and advances. #2364
+    # round-1: the org-holder step title branches to 'Your Organization' —
+    # the 'Create your Organization' title must never re-show on an
+    # org-holder resume/re-entry (step-mapping is W9/#2005).
+    expect(page.locator("body")).not_to_contain_text("Create your Organization", timeout=10_000)
     expect(page.locator("body")).to_contain_text("You're set up in", timeout=5_000)
     page.get_by_role("button", name="Continue →").click()
     # STEP 1: fork card (was step 2 before orientation removal).
@@ -810,8 +813,10 @@ def test_first_timer_wizard_build_fork_marks_catalog(page: Page) -> None:
     _goto_local_dashboard(page)
     expect(page.locator("body")).to_contain_text("Continue setup", timeout=20_000)
     page.get_by_role("button", name="Continue setup").click()
-    # STEP 0: create/join org (orientation removed per epic #2534).
-    expect(page.locator("body")).to_contain_text("Create your Organization", timeout=10_000)
+    # STEP 0: create/join org (orientation removed per epic #2534). #2364
+    # round-1: the org-holder step title branches to 'Your Organization' —
+    # never 'Create your Organization' on resume/re-entry (#2323 read-only).
+    expect(page.locator("body")).not_to_contain_text("Create your Organization", timeout=10_000)
     expect(page.locator("body")).to_contain_text("You're set up in", timeout=5_000)
     page.get_by_role("button", name="Continue →").click()
     expect(page.locator("body")).to_contain_text("Choose how you'll use Tortoise", timeout=10_000)

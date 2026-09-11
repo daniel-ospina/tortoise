@@ -32,11 +32,13 @@ test('legacy wizard labels still exist in source (archived-not-deleted)', () => 
   }
 })
 
-test('live wizard renders WIZARD_STEPS (the 5 human steps), not legacy labels', () => {
+test('live wizard renders WIZARD_STEPS (the 4 human steps), not legacy labels', () => {
   assert.ok(src.includes('WIZARD_STEPS.map'), 'live wizard maps WIZARD_STEPS')
-  // the legacy labels array is retained but the live title reads WIZARD_STEPS
-  assert.ok(/<p className="wizard-title">\{WIZARD_STEPS\[wizardStep\]\.label\}<\/p>/.test(src),
-    'live wizard title is WIZARD_STEPS[wizardStep].label')
+  // #2364 round-1: the org-holder step-0 title branches to 'Your Organization'
+  // (resume/re-entry must never re-read the org-create title) — the live title
+  // still reads WIZARD_STEPS[wizardStep].label for everyone else.
+  assert.ok(/<p className="wizard-title">\{wizardStep === 0 && welcomeHasOrg \? 'Your Organization' : WIZARD_STEPS\[wizardStep\]\.label\}<\/p>/.test(src),
+    'live wizard title is WIZARD_STEPS[wizardStep].label — org-holder branch (#2364)')
   // the archived block's title still reads wizardSteps (kept for rollback)
   assert.ok(/wizard-title">\{wizardSteps\[wizardStep\]\}/.test(src),
     'archived legacy title retained (wizardSteps)')
@@ -45,7 +47,7 @@ test('live wizard renders WIZARD_STEPS (the 5 human steps), not legacy labels', 
 test('DE2E-2 copy sweep: org-create dialog + wizard copy say Organization', () => {
   assert.ok(src.includes('Create a new organization'), 'create-team dialog header')
   assert.ok(src.includes('Organization name required'), 'validation error copy')
-  assert.ok(src.includes('Your organization is set up'), 'welcome ready copy')
+  assert.ok(src.includes('Your organization is set up'), 'welcome ready copy (lowercase — #2547 org-create copy pass)')
   assert.ok(src.includes('Creating your Organization and API key'), 'provisioning copy')
   assert.ok(src.includes('Your Organization and API key are live'), 're-entry + first-data cards')
 })

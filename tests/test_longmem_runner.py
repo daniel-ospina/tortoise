@@ -4947,6 +4947,97 @@ def test_checkpoint_fingerprint_matching_resumes(tmp_path):
     assert saved["fingerprint"]["dataset_fingerprint"] == "samehash0000000000"
 
 
+def test_checkpoint_fingerprint_tr_top_k_mismatch_refused(tmp_path):
+    """#2578 (Task 1, D1): tr_top_k rides the checkpoint fingerprint with
+    conditional presence (present iff != the 12 default) — a 12-resume of a
+    16-checkpoint is refused by the fingerprint gate (the silent cross-arm
+    denominator blend the plan pins) and a same-config resume is clean."""
+    cp = tmp_path / "lme-state.json"
+    base = dict(reader=MockReader(), judge=MockJudge(), ks=(5,), top_k=5,
+                split="s", work_dir=str(tmp_path), checkpoint=str(cp),
+                tr_top_k=16)
+    outcomes, _ = run_evaluation(_mini()[:2], **base)
+    assert len(outcomes) == 2
+    saved = json.loads(cp.read_text(encoding="utf-8"))
+    assert saved["fingerprint"]["tr_top_k"] == 16
+    # same-config resume clean
+    outcomes2, report2 = run_evaluation(_mini()[:2], **base)
+    assert len(outcomes2) == 2 and report2["n_failed"] == 0
+    # 12-resume (absent key == None) refuses naming the field
+    with pytest.raises(CheckpointStaleError, match="tr_top_k"):
+        run_evaluation(_mini()[:2], **dict(base, tr_top_k=12))
+
+
+def test_checkpoint_fingerprint_default_tr_top_k_absent(tmp_path):
+    """#2578 (Task 1, D1): a default-tr_top_k (12) run fingerprints WITHOUT
+    the tr_top_k key — the pre-feature checkpoint contract stays byte-
+    identical (a default resume is never refused by this feature)."""
+    cp = tmp_path / "lme-state.json"
+    run_evaluation(_mini()[:2], reader=MockReader(), judge=MockJudge(),
+                   ks=(5,), top_k=5, split="s", work_dir=str(tmp_path),
+                   checkpoint=str(cp))
+    saved = json.loads(cp.read_text(encoding="utf-8"))
+    assert "tr_top_k" not in saved["fingerprint"]
+
+
+def test_measure_facts_gate_off_outcomes_byte_identical(tmp_path, monkeypatch):
+    """#2578 (Task 1, D2): with the measurement gate OFF (default) no
+    outcome carries measure_facts and the Layer-1 projection adds no
+    measure_facts key — the published report stays byte-compatible with
+    pre-feature consumers."""
+    monkeypatch.delenv("TORTOISE_LME_MEASURE_FACTS", raising=False)
+    cp = tmp_path / "lme-state.json"
+    outcomes, _report = run_evaluation(
+        _mini()[:2], reader=MockReader(), judge=MockJudge(),
+        ks=(5,), top_k=5, split="s", work_dir=str(tmp_path),
+        checkpoint=str(cp))
+    for o in outcomes:
+        assert "measure_facts" not in o
+    proj = outcomes_to_report(outcomes, reader_model="mock",
+                              judge_model="mock", ks=(5,), top_k=5,
+                              split="s", dataset_semantics_audit=_trusted_audit())
+    for p in proj["outcomes"]:
+        assert "measure_facts" not in p
+
+
+def test_measure_facts_gate_on_records_three_facts(tmp_path):
+    """#2578 (Task 1, D3): with the gate ON (kwarg or env) every outcome
+    carries measure_facts {gold_admitted_ids, pool_depth, reader_refusal}
+    computed at the effective reader context, and the projection forwards
+    them (conditional rerank_pass pattern)."""
+    cp = tmp_path / "lme-state.json"
+    kwargs = dict(reader=MockReader(), judge=MockJudge(), ks=(5,), top_k=5,
+                  split="s", work_dir=str(tmp_path), checkpoint=str(cp),
+                  measure_facts=True)
+    outcomes, _ = run_evaluation(_mini()[:2], **kwargs)
+    assert outcomes
+    for o in outcomes:
+        mf = o.get("measure_facts")
+        assert isinstance(mf, dict)
+        assert isinstance(mf["gold_admitted_ids"], list)
+        assert isinstance(mf["reader_refusal"], bool)
+        pd_ = mf["pool_depth"]
+        assert isinstance(pd_, dict) and "marked_points_in_pool" in pd_
+    proj = outcomes_to_report(
+        outcomes, reader_model="mock", judge_model="mock",
+        ks=(5,), top_k=5, split="s",
+        dataset_semantics_audit=_trusted_audit())
+    for p in proj["outcomes"]:
+        assert "measure_facts" in p
+
+
+def test_measure_facts_env_opt_in(tmp_path, monkeypatch):
+    """#2578 (Task 1): the tri-state env opt-in enables the gate when the
+    kwarg is unset (fail-safe OFF — only 1/true/yes/on enables)."""
+    monkeypatch.setenv("TORTOISE_LME_MEASURE_FACTS", "1")
+    cp = tmp_path / "lme-state.json"
+    outcomes, _ = run_evaluation(
+        _mini()[:2], reader=MockReader(), judge=MockJudge(),
+        ks=(5,), top_k=5, split="s", work_dir=str(tmp_path),
+        checkpoint=str(cp))
+    assert all("measure_facts" in o for o in outcomes)
+
+
 def test_checkpoint_two_processes_no_lost_updates(tmp_path, monkeypatch):
     """D8 (M7 #1527, surface 20): two run PROCESSES sharing one checkpoint
     merge their results under the flock — no lost updates (each process runs

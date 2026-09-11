@@ -46,6 +46,11 @@ export const WIZARD_STEPS = Object.freeze([
 // The fork card (epic plan P4 / I-4): presentation fork, once per org,
 // nudge-not-force — NEVER a billing gate. Fork SEMANTICS are W2-owned;
 // W1 renders the shell + persists the set-once fork via the checkpoint.
+// #2407: THREE visible options. 'unsure' ("Not sure yet — decide later")
+// is NOT a fork VALUE — it records fork_unsure_at server-side (checkpoint
+// op {fork_unsure_at: true}) WITHOUT consuming the set-once fork: fork stays
+// None, so the card keeps rendering as answerable ('ask') and a later
+// explicit self/build pick is a fresh fork write (200, never a 409).
 export const WIZARD_FORK_OPTIONS = Object.freeze([
   {
     id: 'self',
@@ -56,6 +61,11 @@ export const WIZARD_FORK_OPTIONS = Object.freeze([
     id: 'build',
     label: 'Build an application on top',
     description: 'You get the capability catalog — the indexers and extractors you can build with.',
+  },
+  {
+    id: 'unsure',
+    label: 'Not sure yet — decide later',
+    description: 'Skip the choice — you pick once per organization, any time from the Setup guide.',
   },
 ])
 
@@ -140,12 +150,15 @@ export function orgNameError(name) {
 // #1998 (W2): fork-card display-mode semantics (surface 4 — W1 renders the
 // shell, W2 owns semantics). Pure helper so the fork-card behavior is
 // unit-testable without React:
-//   'ask'  — fork never chosen (first org, or a legacy org pre-opt-in): the
-//            fork card ASKS (once per org; set-once server-side).
+//   'ask'  — fork never chosen (first org, a legacy org pre-opt-in, OR a
+//            #2407-deferred org — "Not sure yet" records fork_unsure_at but
+//            NEVER consumes the fork, so fork stays None and the card keeps
+//            asking): the fork card ASKS (once per org; set-once server-side).
 //   'set'  — fork already persisted (chosen earlier, or INHERITED by org B at
 //            creation — compact orgs never re-ask): the card renders a
 //            read-only summary + Continue, options disabled.
-// fork values are 'self' | 'build' (state.py FORK_VALUES).
+// fork values are 'self' | 'build' (state.py FORK_VALUES) — 'unsure' is a
+// fork-card ANSWER, never a fork value (forkStepState('unsure') === 'ask').
 export function forkStepState(fork) {
   return (fork === 'self' || fork === 'build') ? 'set' : 'ask'
 }
