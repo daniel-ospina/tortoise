@@ -152,15 +152,19 @@ class TestAuthChallenge:
         prm = hosted_client.get(path)
         assert prm.status_code == 200, prm.text
         body = prm.json()
-        assert body["resource"].endswith("/mcp"), body["resource"]
+        assert body["resource"].endswith("/mcp"), (
+            f"PRM resource must be the no-slash form ({body['resource']}) — the "
+            f"challenge advertises /mcp, the client would send the wrong aud"
+        )
         # NOTE: `assert not body["resource"].endswith("/mcp/")` used to sit here.
         # It was unreachable — a string ending in "/mcp/" does not end in "/mcp",
-        # so the line above already forbids it. The assertion that actually
-        # carries weight is the endswith("/mcp") one; the failure message below
-        # exists to explain WHY the no-slash form is required.
+        # so the assertion above already forbids it. The check below is NOT
+        # redundant with it: `oauth.py` builds the resource as
+        # `base.rstrip("/") + "/mcp"`, so a root_path-prefixed base yields
+        # `.../mcp/mcp` — which satisfies endswith("/mcp") while still carrying a
+        # slash inside the path.
         assert "/mcp/" not in body["resource"], (
-            f"PRM resource is slashed ({body['resource']}) but the challenge "
-            f"advertises the no-slash form — the client would send the wrong aud"
+            f"PRM resource embeds a slash ({body['resource']})"
         )
         assert body["authorization_servers"], body
 

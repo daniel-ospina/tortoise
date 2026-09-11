@@ -35,6 +35,7 @@ from tortoise.hosted_api import app, verify_session_jwt  # noqa: E402, F401, I00
 from tortoise.mcp_server import create_http_app  # noqa: E402, RUF100
 from tortoise.oauth import (  # noqa: E402, RUF100
     ACCESS_TOKEN_PREFIX,
+    _sha256,
     mcp_resource_url,
     team_resource_url,
 )
@@ -1302,10 +1303,14 @@ class TestMcpBoundary:
                           data={"token": access,
                                 "token_type_hint": "access_token"})
             assert rev.status_code == 200, rev.text
+            h = _sha256(access)
             rows = cp.tables["oauth_access_tokens"]
-            assert any(r.get("revoked_at") for r in rows), (
-                f"revoke did not land: no oauth_access_tokens row is marked "
-                f"revoked ({len(rows)} rows) — step 3 below would prove nothing")
+            assert any(r.get("token_hash") == h and r.get("revoked_at")
+                       for r in rows), (
+                f"revoke did not land: no oauth_access_tokens row for THIS token "
+                f"is marked revoked ({len(rows)} rows) — step 3 below would prove "
+                f"nothing. (Matching on token_hash, not just any revoked_at, so a "
+                f"revoke of some other token cannot make this pass.)")
             # 3. warm hit still authenticates — the bounded grace
             assert mcp_tc.post("/mcp", json=call).status_code == 200
 
@@ -1334,8 +1339,10 @@ class TestMcpBoundary:
                           data={"token": access,
                                 "token_type_hint": "access_token"})
             assert rev.status_code == 200, rev.text
-            assert any(r.get("revoked_at")
-                       for r in cp.tables["oauth_access_tokens"]), "revoke did not land"
+            h = _sha256(access)
+            assert any(r.get("token_hash") == h and r.get("revoked_at")
+                       for r in cp.tables["oauth_access_tokens"]), (
+                "revoke did not land for this token")
 
             # Scope the clock shift to mcp_auth only — patching the stdlib
             # `time` module itself would freeze time for every other consumer

@@ -147,13 +147,14 @@ def _resource_metadata_url(request: Request) -> str | None:
     there — and both must pass.
 
     It is nonetheless load-bearing on its own, because the app's guard does NOT
-    cover every path that reaches this function. The value is reflected into a
+    cover every *host form* that reaches this function — it wraps every request,
+    but its normalizer mis-parses some values. The value here is reflected into a
     response header that steers the client's OAuth discovery, and FastMCP's
     ``_normalize_host`` splits on the LAST ``:``, so
-    ``Host: api.premiselabs.co:443@evil.com`` passes the allowlist while its raw
-    form resolves to ``evil.com`` per RFC 3986 — reflecting it would hand the
-    attacker the client's authorization-code exchange. Verified exploitable
-    before this check existed.
+    ``Host: api.premiselabs.co:443@evil.com`` normalizes to the allowlisted host
+    while its raw form resolves to ``evil.com`` per RFC 3986 — reflecting it would
+    hand the attacker the client's authorization-code exchange. Verified
+    exploitable before this check existed.
     """
     scheme = request.scope.get("scheme") or "https"
     host = request.headers.get("host")
