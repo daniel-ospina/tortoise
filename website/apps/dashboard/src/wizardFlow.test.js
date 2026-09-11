@@ -32,10 +32,11 @@ test('DE2E-2 copy sweep: no team/workspace in any step or fork copy', () => {
   assert.ok(/Organization/i.test(allCopy), 'Organization copy present')
 })
 
-test('fork options are exactly self + build with Organization-aware copy', () => {
-  assert.deepEqual(WIZARD_FORK_OPTIONS.map((o) => o.id), ['self', 'build'])
+test('fork options are self + build + unsure (#2407) with Organization-aware copy', () => {
+  assert.deepEqual(WIZARD_FORK_OPTIONS.map((o) => o.id), ['self', 'build', 'unsure'])
   const copy = WIZARD_FORK_OPTIONS.flatMap((o) => [o.label, o.description]).join(' ')
   assert.ok(!/\bteam\b/i.test(copy))
+  assert.ok(!/workspace/i.test(copy))
 })
 
 test('offline fallback mirrors the 3 canonical catalog module names (W8 #2004 endpoint contract)', () => {
@@ -91,6 +92,13 @@ test('#1998 forkStepState: fork card ASKS when unset, renders SET summary when p
   assert.equal(forkStepState(''), 'ask')
   assert.equal(forkStepState('self'), 'set')
   assert.equal(forkStepState('build'), 'set')
+})
+
+test('#2407 forkStepState: an unsure answer never consumes the fork — the card keeps ASKING', () => {
+  // "Not sure yet — decide later" records fork_unsure_at; fork stays None, so
+  // the card must keep rendering as an ask (and 'unsure' is never a stored
+  // fork value). A later explicit pick lands as a fresh set-once write.
+  assert.equal(forkStepState('unsure'), 'ask')
 })
 
 test('#1998 DE2E-12: an INHERITED fork (org B) is a SET summary — never re-asks', () => {
