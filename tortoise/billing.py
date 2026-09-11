@@ -307,6 +307,52 @@ class StripeClient:
             raise StripeAPIError("stripe checkout session returned no url")
         return url
 
+    def create_checkout_session_for_new_org(
+        self, *, new_org_id: str, price_id: str, email: str | None,
+        user_id: str, org_name: str, tier: str,
+        success_url: str, cancel_url: str,
+    ) -> tuple[str, str]:
+        """#2789: Checkout for an organization that does NOT exist yet.
+
+        Deliberately not ``create_checkout_session``: there is no team row to
+        bind and no reusable Stripe customer. Two differences matter:
+
+        - ``customer_email`` instead of ``customer`` — in subscription mode
+          Stripe CREATES the Customer at completion. An ABANDONED checkout
+          therefore leaves literally nothing behind: no team row, no
+          membership, no graph, not even an orphaned Stripe customer.
+        - the pre-minted org id rides BOTH ``client_reference_id`` (the
+          existing webhook binding — the event echoes it back) and metadata
+          (``user_id`` / ``org_name`` / ``tier`` / ``new_org=1``), so
+          ``checkout.session.completed`` can provision the org idempotently
+          before applying billing state. ``tier`` is the server-resolved
+          catalog tier for ``price_id`` so a failed subscription fetch cannot
+          leave a paying customer on free limits.
+
+        Returns ``(checkout_session_id, checkout_url)``.
+        """
+        params = {
+            "mode": "subscription",
+            "line_items[0][price]": price_id,
+            "line_items[0][quantity]": "1",
+            "client_reference_id": new_org_id,
+            "metadata[new_org]": "1",
+            "metadata[team_id]": new_org_id,
+            "metadata[user_id]": user_id,
+            "metadata[org_name]": org_name,
+            "metadata[tier]": tier,
+            "success_url": success_url,
+            "cancel_url": cancel_url,
+        }
+        if email:
+            # Not an empty string: Stripe rejects an empty customer_email.
+            params["customer_email"] = email
+        data = self._request("POST", "checkout/sessions", params=params)
+        url = data.get("url")
+        if not url:
+            raise StripeAPIError("stripe checkout session returned no url")
+        return str(data.get("id") or ""), url
+
     def create_portal_session(self, customer_id: str, return_url: str) -> str:
         """POST /v1/billing_portal/sessions → customer portal url."""
         data = self._request(
