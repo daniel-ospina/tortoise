@@ -507,6 +507,18 @@ def assemble_context(
     estimate_tokens(render_context(...))`` holds exactly (no per-block
     ``int()`` drift). Oversized hits are SKIPPED (continue), never starving
     the rest of the context.
+
+    Content-less hits (#2978) consume NO item slot and NO budget. A hit
+    whose ``content`` is empty/whitespace renders a prefix-only block (just
+    the ``[session N]`` / speaker / validity decorations — e.g. an
+    epistemic operator node: ``is_operator=true``, ``op_type`` IMPL/NAND,
+    which ``create_operator`` writes with no ``content`` property).
+    Admitting such a hit burned an item slot and left the reader window
+    mostly empty (measured 61.3% of slots); it is now SKIPPED like an
+    oversized hit (skip-not-starve), so later real hits are admitted up to
+    the cap. Skipped hits are absent from the returned list, so
+    ``render_context`` never renders them and the accounting invariant
+    above is unaffected.
     """
     if max_context_tokens < 1:
         raise ValueError("max_context_tokens must be >= 1, got "
@@ -532,6 +544,13 @@ def assemble_context(
     for h in pool:
         if len(selected) >= item_bound:
             break
+        # #2978: a content-less hit renders a prefix-only block (decorations
+        # with no claim text) — it carries nothing for the reader, so it must
+        # not consume an item slot or budget. Skipping it preserves the
+        # skip-not-starve semantics below: later real hits still get their
+        # chance, and the admitted REAL-item set/order is unchanged.
+        if not str(h.get("content") or "").strip():
+            continue
         block = _render_block(h)
         cost = len(block.split())
         if int((words + cost) * 1.1) > max_context_tokens:
