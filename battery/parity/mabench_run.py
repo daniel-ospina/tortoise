@@ -25,8 +25,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Protocol
 
+from battery.config.prices import cost_usd
 from battery.parity.executors import ExecutedCell
 from battery.parity.mabench import CR_SHA256, CrItem, score_cr
+from battery.runner.model_calls import aggregate_cost_basis
 
 #: Verbatim from MemoryAgentBench `utils/templates.py::SYSTEM_MESSAGE`.
 SYSTEM_MESSAGE = ("You are a helpful assistant that can read the context and "
@@ -72,6 +74,11 @@ class CrRun:
     calls: int
     spend_usd: float
     config: str
+    #: #2906: how ``spend_usd`` was derived — "provider_reported" (every
+    #: call's ``usage.cost``), "estimated" (the declared fallback basis), or
+    #: "mixed". Persisted with the figure so a spend number always says how
+    #: it was derived.
+    cost_basis: str = "estimated"
 
 
 def build_memorize_prompt(context: str, *, time_stamp: str = "") -> str:
@@ -104,13 +111,18 @@ def build_lane_prompt(context: str, question: str, *,
 
 def answer_items(items: tuple[CrItem, ...], caller: ReaderCaller, *,
                  context: str, limit: int | None = None,
-                 system_message: str = SYSTEM_MESSAGE
+                 system_message: str = SYSTEM_MESSAGE,
+                 basis_out: list[str] | None = None
                  ) -> tuple[dict[str, str], int, float]:
     """Ask the reader every item's question; return (raw outputs, calls, cost).
 
     ``limit`` caps the item count (a bounded, cheaper lane) and the return
     count reflects what was actually asked — the caller's sample count is the
     number of real answers, never the size of the corpus.
+
+    ``basis_out`` (#2906): when given, one per-call label ("provider_reported"
+    or "estimated") is appended to it. It is an out-parameter rather than a
+    fourth return value so the public 3-tuple contract stays intact.
 
     A failing call is NOT silently dropped: the exception propagates, because a
     lane that quietly skips the questions it could not answer would report an
@@ -134,27 +146,41 @@ def answer_items(items: tuple[CrItem, ...], caller: ReaderCaller, *,
         calls += 1
         pt = int(getattr(caller, "last_prompt_tokens", 0) or 0)
         ct = int(getattr(caller, "last_completion_tokens", 0) or 0)
-        cost += _call_cost(caller, pt, ct)
+        call_cost, basis = _call_cost_and_basis(caller, pt, ct)
+        cost += call_cost
+        if basis_out is not None:
+            basis_out.append(basis)
     return outputs, calls, cost
 
 
 def _call_cost(caller: ReaderCaller, prompt_tokens: int,
                completion_tokens: int) -> float:
-    """Per-call spend: derived from tokens when the caller reports them,
-    else whatever the caller itself metered (0.0 for a mock)."""
+    """Per-call spend, preferring the provider's own charge (#2906).
+
+    The provider-reported ``last_cost_usd`` is authoritative when the route
+    publishes it; only when it is absent (``is None`` — 0.0 is a real free
+    call) do we fall back to the declared token basis, or to whatever the
+    caller itself metered (0.0 for a mock). Number-only compat wrapper —
+    ``run_cr_lane`` uses ``_call_cost_and_basis`` to carry the label.
+    """
+    return _call_cost_and_basis(caller, prompt_tokens, completion_tokens)[0]
+
+
+def _call_cost_and_basis(caller: ReaderCaller, prompt_tokens: int,
+                         completion_tokens: int) -> tuple[float, str]:
+    """(cost, basis) for one call — the basis names how the cost was derived
+    (#2906: "provider_reported" vs "estimated")."""
+    provider_cost = getattr(caller, "last_cost_usd", None)
+    if provider_cost is not None:
+        return float(provider_cost), "provider_reported"
     if prompt_tokens or completion_tokens:
-        return _cost(prompt_tokens, completion_tokens)
-    return float(getattr(caller, "cost_usd", 0.0) or 0.0)
-
-
-#: Mirror of battery/runner/model_calls.py's pinned price basis (deepseek-v4-
-#: flash): ONE price basis across the battery's spend meters.
-_RATES_PER_1M_USD: tuple[float, float] = (0.27, 1.10)
+        return _cost(prompt_tokens, completion_tokens), "estimated"
+    return float(getattr(caller, "cost_usd", 0.0) or 0.0), "estimated"
 
 
 def _cost(prompt_tokens: int, completion_tokens: int) -> float:
-    p_in, p_out = _RATES_PER_1M_USD
-    return (prompt_tokens * p_in + completion_tokens * p_out) / 1_000_000.0
+    """The ONE declared basis (#2874) — imported, never re-declared."""
+    return cost_usd(prompt_tokens, completion_tokens)
 
 
 def run_cr_lane(items: tuple[CrItem, ...], caller: ReaderCaller, *,
@@ -167,17 +193,21 @@ def run_cr_lane(items: tuple[CrItem, ...], caller: ReaderCaller, *,
     the DATASET DIGEST, not the runner's self-reported name, so the cell's
     identity is checkable against the bytes that were scored.
     """
+    bases: list[str] = []
     outputs, calls, spend = answer_items(items, caller, context=context,
-                                         limit=limit)
+                                         limit=limit, basis_out=bases)
     scored_items = items[:limit] if limit is not None else items
     accuracy, samples = score_cr(outputs, scored_items)
+    cost_basis = aggregate_cost_basis(bases)
     cell = ExecutedCell(
         benchmark="memoryagentbench",
         accuracy=accuracy,
         samples=samples,
         revision=f"memoryagentbench-cr@{CR_SHA256[:16]}",
         lane=lane,
-        detail={"config": config, "calls": calls, "spend_usd": spend},
+        detail={"config": config, "calls": calls, "spend_usd": spend,
+                "cost_basis": cost_basis},
     )
     return cell, CrRun(accuracy=accuracy, samples=samples, calls=calls,
-                       spend_usd=spend, config=config)
+                       spend_usd=spend, config=config,
+                       cost_basis=cost_basis)

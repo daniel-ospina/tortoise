@@ -8586,7 +8586,8 @@ class TortoiseSDK:
             pool via hybrid retrieval; None = whole graph, capped at
             REVIEW_ADD_POOL_CAP most-recently-updated non-terminal,
             non-operator Points (pairwise scoring is O(n²) — bound the work;
-            pass a scope for larger graphs).
+            pass a scope for larger graphs). Retrieval is nearest-match, not
+            exact — see the scope note below.
         mode=prune: find ILLOGICAL/stale connections to fix or prune, using
             EP signals. Flags IMPL/NAND edges (operator-mediated OR direct
             per the reification rule) where:
@@ -8606,13 +8607,38 @@ class TortoiseSDK:
                                 suggested_action "review".
         mode=both: run both, return {add: [...], prune: [...]}.
 
+        Scope semantics (both modes) — ``scope`` is a FOCUS / work-bounding
+        filter, NOT an exact-match or relevance gate. Hybrid retrieval returns
+        the points NEAREST the scope, so near-but-not-exact is expected and
+        intended: a scope naming something absent from the graph normally
+        still yields its nearest retrievable neighbours — but in the degraded
+        single-leg state every retrieved id can score 0 and be dropped, so "no
+        exact match" does not by itself imply a non-empty pool (see below).
+
+        When the pool is EMPTY (and with it the review): retrieval returned
+        nothing (no hits, or it failed — fail quiet); or every retrieved id was
+        dropped — its RRF score was <= 0 (the single-leg TF-IDF fallback carries
+        no fusion signal), or it is an operator / terminal / outdated point / a
+        ``[MITIGATION]`` bookkeeping row. mode=add also returns no suggestions
+        when the pool holds fewer than 2 points, or when no pair clears
+        ``similarity_threshold``.
+
+        What IS guaranteed: a NON-EMPTY scope never silently falls back to the
+        whole-graph pool (an empty or omitted scope means the whole graph by
+        design). For a hard relevance bar, mode=add additionally filters pairs
+        at ``similarity_threshold``; mode=prune applies no similarity gate by
+        design — it reports the EP signals of the edges incident to the scoped
+        pool (#2854).
+
         Returns {add: [{from, to, suggested_relation, reason, similarity}],
                  prune: [{from, to, relation, issue, suggested_action,
                           detail}]} — only the key(s) for the requested mode.
 
         Args:
             mode: "add", "prune" or "both" (default "both").
-            scope: optional topic text or Point id — narrows the review.
+            scope: optional topic text or Point id — narrows the review to
+                the retrieval-nearest candidates. A focus filter, not an
+                exact-match or relevance gate (see Scope semantics above).
             similarity_threshold: minimum cosine similarity for mode=add
                 (default 0.72 — the bge-small DEFAULT_THRESHOLD "semantically
                 related" cross-vocabulary band, see tortoise/embeddings.py;
@@ -8890,8 +8916,15 @@ class TortoiseSDK:
 
         Whole graph when scope is None; otherwise the hybrid-retrieval pool
         for the scope (topic text, or the resolved Point's content when
-        scope is a node id). Retrieval failure degrades to an EMPTY pool
-        (fail quiet — never crash a read-only review).
+        scope is a node id). The pool is the NEAREST retrievable candidates,
+        not an exact-match set: fusion scores are rank-based, so when two or
+        more legs return hits every fused id scores > 0 — but a SINGLE-leg run
+        reuses the ``rrf`` field for the raw leg score (0.0 on a fulltext tie,
+        or a signature-B cosine clamped to 0.0 at search_engine.py:659), and
+        those ids are dropped by the score guard below. The pool is normally
+        non-empty even for a scope that matches nothing. Retrieval failure
+        degrades to an EMPTY pool (fail quiet — never crash a read-only
+        review).
         """
         proj = self._get_proj()
         rows = proj.g.query(
@@ -9221,9 +9254,14 @@ class TortoiseSDK:
                                    x["to"], x["relation"]))
 
         # Optional scope narrowing: keep entries touching the scoped pool.
-        # An EMPTY scoped pool means "nothing in scope" (retrieval failure or
-        # zero hits) — filter to [] then, never fall back to the whole-graph
-        # list (fail quiet, consistent with mode=add; #913 review round 1).
+        # The pool is nearest-match (see _review_pool), so "not in the pool"
+        # means "not among the retrieval-nearest", NOT "irrelevant": this is
+        # a focus filter, and unlike mode=add no similarity bar is applied
+        # here — near-but-not-exact is the intended contract (#2854). An EMPTY
+        # pool (no hits at all, every retrieved id dropped by the zero-score
+        # guard, or retrieval failure) filters to [] ; never fall back to the
+        # whole-graph list (fail quiet, consistent with mode=add; #913 review
+        # round 1).
         if scope:
             pool = self._review_pool(scope)
             unique = [e for e in unique

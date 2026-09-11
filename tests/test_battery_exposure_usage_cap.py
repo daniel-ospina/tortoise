@@ -52,10 +52,12 @@ def test_usage_recording_totals_exact(tmp_path):
     assert t["calls"] == 2
     assert t["prompt_tokens"] == 20
     assert t["completion_tokens"] == 40
-    # (10*0.27 + 20*1.10) per call / 1e6 at the real pinned rates — the
-    # unrounded meter (spent_usd) matches exactly; totals() carries the
+    # 10 prompt + 20 completion tokens per call at the DECLARED basis (#2874,
+    # imported so this expectation can never drift from the meter again) —
+    # the unrounded meter (spent_usd) matches exactly; totals() carries the
     # 6-decimal display rounding.
-    assert abs(rec.spent_usd - 2 * (10 * 0.27 + 20 * 1.10) / 1_000_000) < 1e-12
+    from battery.config.prices import cost_usd
+    assert abs(rec.spent_usd - 2 * cost_usd(10, 20)) < 1e-12
     assert abs(t["cost_usd"] - rec.spent_usd) < 1e-6
 
 
@@ -70,8 +72,12 @@ def test_midrun_cap_stop_never_silent(tmp_path):
     """Step 4: a caller whose accumulated spend crosses the dollar cap
     mid-run stops the run with a CapStopped error (never continues to a
     second over-budget episode)."""
-    budget = BudgetConfig(max_estimated_cost_usd=0.00002)  # ~1 scripted call
-    rec = UsageRecordingCaller(_ScriptedCaller())  # $0.0000247/call
+    # Derived from the DECLARED basis (#2874) rather than a literal: the old
+    # 0.00002 was calibrated to the stale rates and stopped tripping once the
+    # prices were corrected.
+    from battery.config.prices import cost_usd
+    budget = BudgetConfig(max_estimated_cost_usd=1.5 * cost_usd(10, 20))
+    rec = UsageRecordingCaller(_ScriptedCaller())  # cost_usd(10, 20) per call
     with pytest.raises(CapStopped):
         run_smoke(specs=_specs(4), caller=rec, budget=budget)
     assert rec.totals()["calls"] <= 2  # stopped the moment the cap crossed

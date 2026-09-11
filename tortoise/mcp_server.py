@@ -2085,7 +2085,16 @@ def tortoise_review_connections(mode: str = "both", scope: str | None = None) ->
         issue in (contradictory, stale, contested) and suggested_action in
         (review, prune, re-point).
     mode=both: run both, return {add: [...], prune: [...]}.
-    scope: optional topic text or Point id — narrows the candidate pool.
+    scope: optional topic text or Point id — narrows the candidate pool to the
+        retrieval-NEAREST points. A focus filter, not an exact-match or
+        relevance gate: near-but-not-exact is intended, and a scope matching
+        nothing normally still returns its nearest neighbours — though a
+        degraded single-leg run can score every hit 0 and return nothing. The
+        result is empty when retrieval returns nothing, when every retrieved id
+        is dropped (RRF score <= 0, e.g. the TF-IDF fallback, or an
+        operator/terminal/outdated / [MITIGATION] row), or — for mode=add —
+        when no candidate pair clears similarity_threshold. mode=prune applies
+        no similarity bar.
 
     Never mutates the graph.
     """
