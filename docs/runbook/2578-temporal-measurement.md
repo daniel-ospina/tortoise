@@ -22,6 +22,66 @@ aboutObjects: tortoise
 > decision it is annotated as unreproducible and superseded by this
 > measured record (see the generated gate output linked below).
 
+## Task 5 — v2-lane structural probe (wave 1, saturation reached)
+
+The assembler lane's blocking question was whether the v2 lane actually
+*produces* the structure an assembler would consume. The probe ingests the
+real haystack through `ingest_v2` (the committed v2 path, LLM extractor,
+one fresh graph namespace per question on the dedicated `falkordb-eval`
+container) and then measures the substrate directly — no reader, no
+judge, no answer scoring.
+
+**Result: substrate present on 15 / 15 questions, unanimous across all
+three census classes — the pre-registered stop rule fires and the full-55
+run is not justified.**
+
+| class | n | substrate present | Objects | Point→aboutObject | Event→aboutObject | dated `startedAt` | gold sessions with events |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| ordering/compare | 9 | **9/9** | 2664 | 6351 | 1261 | 603 | 17 (of 18) |
+| interval | 4 | **4/4** | 977 | 2400 | 445 | 224 | 8 (of 8) |
+| current-state | 2 | **2/2** | 509 | 1322 | 282 | 134 | 4 (of 4) |
+| **all** | **15** | **15/15** (1.000) | 4150 | 10073 | 1988 | 961 | **29 of 30** |
+
+Per-question (all 15 in `2578-probe-wave1-outcomes.jsonl`): 150–370 Objects,
+427–843 Point→aboutObject edges, 74–184 Event→aboutObject edges, and a
+dated gold event for **both** gold sessions on 14 of 15 questions (one
+ordering/compare question got 1 of 2). `errors = 0`.
+
+**What this settles, and what it does not.**
+
+- It settles the *existence* question: the v2 lane produces aboutObject
+  edges from Points AND Events, and dates them, for the gold sessions of
+  the deterministic-fireable questions in every class. The assembler lane
+  is not building on an empty substrate.
+- It does **not** settle assembler admission or answer quality — those are
+  the 55-Q matrix above and #2165's own acceptance. Substrate existence is
+  a prerequisite, never a result.
+
+**The name-match figure is a PROXY and must not be read as a resolution
+rate.** The probe derives candidate entity names by capitalisation from the
+gold subject and matches them against ingested Object names: **227 of 2823
+(8.0%)**. This is a crude string proxy with no eval-side entity resolver, so
+an 8% figure says the *proxy* is weak far more than it says the entities are
+missing (the same runs produced 4150 Objects with 10073 aboutObject edges).
+Reported because hiding it would be worse; never quoted as "8% of entities
+resolve".
+
+**Reproducibility bonus.** The sequential runner and the parallelised
+workers overlapped on 6 questions, so those 6 were measured twice
+independently: the substrate verdict agreed **6/6** and the Object/edge
+counts agreed to within a small delta (one question 150 vs 164 Objects —
+extraction-boundary variance, not a verdict change). Recorded as
+`duplicate_remeasurements` in the report.
+
+**Infra incident (#2969).** Partway through the wave the ingest collapsed
+from ~25 min/question to >4 h/question, blocked indefinitely in a FalkorDB
+socket read — no timeout, no heartbeat, the client at 0% CPU and no error —
+while the extractor endpoint (1.0–1.2 s at a realistic payload) and
+isolated graph queries (0.07–0.68 ms) were both fast. The eval container was
+in a continuous active-defrag loop; defrag was disabled as a mitigation and
+the wave-1 remainder was parallelised per question (independent graph
+namespaces) to bound the wall-clock. Filed with full evidence as #2969.
+
 ## Evidence artifacts
 
 | artifact | contents |

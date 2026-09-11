@@ -1,0 +1,78 @@
+{
+  "schema": "probe-v2-report/v1",
+  "wave": 1,
+  "n": 15,
+  "by_class": {
+    "ordering/compare": {
+      "n": 9,
+      "substrate_present": 9,
+      "objects_total": 2664,
+      "point_about_object_edges": 6351,
+      "event_about_object_edges": 1261,
+      "dated_started_at": 603,
+      "gold_sessions_with_events": 17,
+      "name_match_matched": 145,
+      "name_match_total": 1516,
+      "substrate_present_rate": 1.0,
+      "name_match_rate": 0.09564643799472296
+    },
+    "interval": {
+      "n": 4,
+      "substrate_present": 4,
+      "objects_total": 977,
+      "point_about_object_edges": 2400,
+      "event_about_object_edges": 445,
+      "dated_started_at": 224,
+      "gold_sessions_with_events": 8,
+      "name_match_matched": 53,
+      "name_match_total": 881,
+      "substrate_present_rate": 1.0,
+      "name_match_rate": 0.060158910329171394
+    },
+    "current-state": {
+      "n": 2,
+      "substrate_present": 2,
+      "objects_total": 509,
+      "point_about_object_edges": 1322,
+      "event_about_object_edges": 282,
+      "dated_started_at": 134,
+      "gold_sessions_with_events": 4,
+      "name_match_matched": 29,
+      "name_match_total": 426,
+      "substrate_present_rate": 1.0,
+      "name_match_rate": 0.06807511737089202
+    }
+  },
+  "substrate_present": 15,
+  "substrate_present_rate": 1.0,
+  "entity_name_match": {
+    "matched": 227,
+    "total": 2823,
+    "rate": 0.08041091037902941
+  },
+  "unanimous": true,
+  "saturated": true,
+  "saturation": {
+    "saturated": true
+  },
+  "measured": 15,
+  "wave_size": 15,
+  "substrate_present_n": 15,
+  "errors": 0,
+  "duplicate_remeasurements": {
+    "n_questions": 6,
+    "verdict_agreement": "6/6",
+    "note": "the sequential runner and the parallelized workers overlapped on these questions; each duplicate is an INDEPENDENT re-measurement and reproduced the substrate verdict"
+  },
+  "classes_covered": [
+    "current-state",
+    "interval",
+    "ordering/compare"
+  ],
+  "db": "dedicated falkordb-eval container (localhost:6380), one fresh graph namespace per question (probe2578w1_<qid>)",
+  "infra_incident": {
+    "issue": "#2969",
+    "what": "mid-wave throughput collapse: the client blocked indefinitely in a FalkorDB socket read (no timeout, no heartbeat, 0% CPU) while the extractor endpoint (1.0-1.2 s at a realistic payload) and isolated graph queries (0.07-0.68 ms) were both fast; the eval container was in a continuous active-defrag loop",
+    "mitigation": "activedefrag disabled on the eval container; the wave-1 remainder was parallelised per question (independent graph namespaces) to bound wall-clock"
+  }
+}
