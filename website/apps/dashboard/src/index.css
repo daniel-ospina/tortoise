@@ -678,10 +678,10 @@ button:focus-visible, select:focus-visible, a:focus-visible, input:focus-visible
 .harness-surface-hint { font-size: 11px; font-weight: 400; color: var(--text-dim); }
 .harness-surface.active .harness-surface-hint { color: var(--accent, #06b6d4); opacity: 0.85; }
 /* `margin: 0` is load-bearing: the global `main section { margin-bottom: 32px }`
-   (0,0,2) out-specifies the `*` reset and would stack with the parent
-   `.harness { gap: 1.6rem }`, rendering 58px between numbered blocks instead of
-   26px and pushing the nav 78px down (review cycle 3, measured in Chromium).
-   `.wizard-block` (0,1,0) beats the type-selector pair. */
+   (0,0,2) out-specifies the `*` reset and would stack with the parent block
+   gap (`.harness-connect` / `.connect-build`), rendering 58px between numbered
+   blocks instead of 26px and pushing the nav 78px down (review cycle 3,
+   measured in Chromium). `.wizard-block` (0,1,0) beats the type-selector pair. */
 .wizard-block { margin: 0; border-top: 1px solid var(--border, #1e293b); padding-top: 1.15rem; }
 .wizard-block-title {
   display: flex;

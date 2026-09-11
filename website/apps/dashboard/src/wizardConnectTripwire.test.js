@@ -327,13 +327,16 @@ test('#2912: the step-2 lede asks what each branch actually does', () => {
   const src = stripComments(mainJsx)
   const i = src.indexOf('if (wizardStep === 2) {')
   assert.ok(i > -1, 'the step-2 lede fork exists')
-  const lede = src.slice(i, i + 900)
-  const member = lede.indexOf('Paste an API key to connect your agent.')
-  const build = lede.indexOf('Create an API key and call the Tortoise SDK from your app.')
-  assert.ok(member > -1, 'the member/capped branch exists and says what the step asks')
-  assert.ok(build > -1, 'the owner + build-fork branch exists')
-  assert.ok(member < build,
-    'the role/cap check must precede the build-fork check — a build-fork member cannot mint a key')
+  const lede = src.slice(i, i + 1400)
+  const memberSelf = lede.indexOf('Paste an API key to connect your agent.')
+  const memberBuild = lede.indexOf('Ask an owner or admin for an API key, then call the Tortoise SDK.')
+  const ownerBuild = lede.indexOf('Create an API key and call the Tortoise SDK from your app.')
+  assert.ok(memberSelf > -1, 'the member/capped SELF branch says what the step asks')
+  assert.ok(memberBuild > -1, 'the member/capped BUILD branch does not promise a paste it cannot offer')
+  assert.ok(ownerBuild > -1, 'the owner + build-fork branch exists')
+  // the role/cap check must still come first: a build-fork member cannot mint
+  assert.ok(memberSelf < ownerBuild,
+    'the role/cap check must precede the owner build-fork line')
   assert.doesNotMatch(lede, /Connect Tortoise to your Organization\./,
     'the string #2912 reported as vague must not come back')
 })
@@ -350,4 +353,39 @@ test('#2912: the org eyebrow renders only when an org exists AND its name is kno
     'the eyebrow is gated on welcomeHasOrg && shownOrgName')
   assert.match(head, /<h1 className="welcome-title">/,
     'the stage label is the h1 (the eyebrow is not the headline)')
+})
+
+// #2912 (PR-gate delta review): three follow-ups that a code-shape assertion
+// can pin cheaply. Each one was a real regression/finding in this commit.
+test('#2912: the Codex Desktop block keeps the "shown once" advisory', () => {
+  const src = stripComments(mainJsx)
+  const i = src.indexOf("{wizardConnectHarness === 'codexDesktop' ? (")
+  assert.ok(i > -1, 'the single-block Desktop branch exists')
+  const desktop = src.slice(i, src.indexOf(') : (', i))
+  // the merged block dropped the only unrecoverable-key cue on this surface
+  // (HARNESS_INTRO.codexDesktop / UNIVERSAL_COMMAND.codexDesktop never say it)
+  assert.match(desktop, /Your API key is inside the block below — it&apos;s shown once, so keep it private\./,
+    'the Desktop surface must still say the key is shown once and private')
+})
+
+test('#2912: the step announcement re-renders when the paused state is resolved', () => {
+  // the step-3 landing refresh can flip effectivelyPaused (serverHarnessConnected)
+  // without changing wizardStep — without this dep the announcement kept saying
+  // "Setup paused…" while the <h1> already said "You're all set".
+  assert.match(stripComments(mainJsx),
+    /\}, \[wizardStep, welcomeMode, authed, wizardPaused, effectivelyPaused\]\)/,
+    'effectivelyPaused must be in the step-announcement deps')
+})
+
+test('#2912: the build-fork blocks own their rhythm (no inline margins stacking on the gap)', () => {
+  const src = stripComments(mainJsx)
+  const i = src.indexOf('<div className="connect-build">')
+  assert.ok(i > -1, 'the build-fork container exists')
+  const build = src.slice(i, src.indexOf(') : (isOwnerAdmin && !capNotice ? (', i))
+  assert.match(build, /<pre className="snippet" style=\{\{ margin: 0 \}\}>/,
+    'the snippet has no margin of its own')
+  assert.doesNotMatch(build, /marginTop: '0\.9rem'/,
+    'the SDK button row must not add a margin on top of the block gap')
+  assert.doesNotMatch(build, /marginBottom: '0\.75rem'/,
+    'the SDK caption must not add a margin on top of the block gap')
 })

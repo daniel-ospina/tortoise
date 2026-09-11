@@ -1354,7 +1354,13 @@ function claimIntentInFlight() {
     if (wizardStep === 0 && !welcomeHasOrg) return
     if (wizardCardRef.current) wizardCardRef.current.focus()
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [wizardStep, welcomeMode, authed, wizardPaused])
+    // #2912 (PR-gate follow-up): `effectivelyPaused` (declared above this
+    // effect, so no TDZ) must be a dep. It also depends on
+    // `serverHarnessConnected`, which the step-3 landing refresh flips —
+    // without it the announcement keeps saying "Setup paused…" while the <h1>
+    // and body have already flipped to "You're all set", re-creating the
+    // h1/announcement disagreement the shared helper exists to prevent.
+  }, [wizardStep, welcomeMode, authed, wizardPaused, effectivelyPaused])
   // ⛔ #2426 e2e catch (P0): welcomeHasOrg (~line 4890) and wizardShowPaste
   // (~1832) are declared LATER in this giant component — a hook dep array
   // evaluates eagerly DURING render, so listing either here threw "Cannot
@@ -5907,11 +5913,16 @@ function claimIntentInFlight() {
                       // ("Only owners and admins can create API keys"), so
                       // promising them a key here reproduced the exact defect
                       // class #2912 was filed for.
-                      // PR-gate UX (P1): this branch's own body says "Paste an
-                      // API key below" — so the lede says what the step ASKS.
-                      // (The rejected "Connect Tortoise to your Organization."
-                      // is the string that said nothing about the step.)
-                      if (!isOwnerAdmin || capNotice) return <p className="welcome-lede">Paste an API key to connect your agent.</p>
+                      // PR-gate follow-up: the member/capped copy is ALSO
+                      // fork-aware — the build-fork member body offers no paste
+                      // affordance at all (its only actions are "ask an owner or
+                      // admin" and "Manage API keys →"), so the self-fork line
+                      // would instruct an action that branch does not offer.
+                      if (!isOwnerAdmin || capNotice) {
+                        return <p className="welcome-lede">{isBuildFork
+                          ? 'Ask an owner or admin for an API key, then call the Tortoise SDK.'
+                          : 'Paste an API key to connect your agent.'}</p>
+                      }
                       if (isBuildFork) return <p className="welcome-lede">Create an API key and call the Tortoise SDK from your app.</p>
                     }
                     const sub = WIZARD_STEPS[wizardStep].sub
@@ -6108,7 +6119,7 @@ function claimIntentInFlight() {
 
                       {harnessKey && (
                         <WizardBlock step={2} title="Call the SDK">
-                          <p className="dim" style={{ marginBottom: '0.75rem', lineHeight: 1.6 }}>
+                          <p className="dim" style={{ margin: 0, lineHeight: 1.6 }}>
                             Run this to verify your API key and file your first point — it creates your graph and connects your project.
                           </p>
                           <pre className="snippet" style={{ margin: 0 }}>
@@ -6117,7 +6128,7 @@ function claimIntentInFlight() {
   -H "Content-Type: application/json" \\
   -d '{\"content\":\"my first application is set up\"}'`}
                           </pre>
-                          <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center', marginTop: '0.9rem' }}>
+                          <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center' }}>
                             <button type="button" className="btn-primary" onClick={wizardHarnessContinue} disabled={wizardConnectBusy}>
                               {wizardConnectBusy ? 'Saving…' : "I've set it up — Continue →"}
                             </button>
@@ -6271,7 +6282,16 @@ function claimIntentInFlight() {
                               is no procedure block to show either. */}
                           {wizardConnectHarness === 'codexDesktop' ? (
                             <WizardBlock step={1} title={harnessKey ? procedureTitle : 'Get your API key'}>
-                              {harnessKey ? procedure : wizardNoKeyAffordance}
+                              {harnessKey ? (
+                                <>
+                                  {/* PR-gate follow-up: the merged block dropped
+                                      the only "shown once" advisory this surface
+                                      had — nothing else on it says the key is
+                                      unrecoverable after you leave. */}
+                                  <p className="wizard-caption">Your API key is inside the block below — it&apos;s shown once, so keep it private.</p>
+                                  {procedure}
+                                </>
+                              ) : wizardNoKeyAffordance}
                             </WizardBlock>
                           ) : (
                             <>
