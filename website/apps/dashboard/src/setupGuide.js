@@ -29,7 +29,10 @@ export const SETUP_GUIDE_COUNTED = Object.freeze([
 
 const ROW_META = Object.freeze({
   'harness-connected': { label: 'Connect your agent' },
-  'first-points-filed': { label: 'Seed your first point' },
+  // #2361: the label shares the ONE anchor term ('memories') used by the
+  // Overview digest — 'point' was the drift term (same object, two
+  // unexplained names across count-of-record surfaces).
+  'first-points-filed': { label: 'Seed your first memory' },
   'decide-completed': { label: 'Make your first decision' },
   'catalog-presented': { label: 'Review the catalog' },
   'capture-disclosed': { label: 'Capture disclosure', counted: false },

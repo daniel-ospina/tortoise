@@ -322,6 +322,9 @@ mcp_http_app = create_http_app(
     allowed_origins=_ALLOWED_ORIGINS,
     allowed_hosts=_ALLOWED_HOSTS,
     rate_limit=100,
+    # #2864: this is the only surface with an authorization server, so it is the
+    # only one that advertises the RFC 9728 challenge on `/mcp` 401s.
+    emit_oauth_challenge=True,
 )
 
 
@@ -403,7 +406,6 @@ async def _lifespan(app):
 
     async with mcp_http_app.lifespan(mcp_http_app):
         try:
-            import threading
 
             def _probe_loaded_model_id(model) -> str | None:
                 """Best-effort extraction of the loaded HF model id from a
@@ -469,7 +471,45 @@ async def _lifespan(app):
         global _WATCHER
         try:
             cfg = _backup_config_safe()
-            if cfg and os.environ.get("BACKUP_WATCHER_DISABLED") != "1":  # noqa: F823
+            # #2922: EVERY reason the watcher does not start must be stated on
+            # boot. The UnboundLocalError was one silent path; these two
+            # conditions were others — an absent/invalid backup config (the
+            # fail-closed default) or the test-only kill switch both left
+            # `_WATCHER` unset with no log line at all, i.e. the same "invisible
+            # dead monitor" state that hid this incident for ~31 days.
+            _watcher_disabled = os.environ.get("BACKUP_WATCHER_DISABLED") == "1"
+            # "The monitor is absent" is a warning only where a monitor is
+            # expected. Gating on the hosted marker (FLY_APP_NAME — the same
+            # truthiness test the durability guard uses) keeps production loud
+            # without making every TestClient/embedded boot warn about a subsystem
+            # those deployments legitimately leave off: a warning that fires on
+            # every healthy non-production boot is training-to-ignore material for
+            # the very signal #2922 needed.
+            _watcher_expected = bool(os.environ.get("FLY_APP_NAME"))
+            _not_started_reason = None
+            if cfg is None:
+                _not_started_reason = (
+                    "backup config unavailable (BACKUP_SWEEP_ENABLED off, or config invalid)"
+                )
+            elif _watcher_disabled:
+                _not_started_reason = (
+                    "BACKUP_WATCHER_DISABLED=1 (test-only kill switch; "
+                    "must never be set in production)"
+                )
+            if _not_started_reason is not None:
+                if _watcher_expected:
+                    _logger.warning(
+                        "backup watcher not started: %s — no backup staleness "
+                        "monitoring this boot",
+                        _not_started_reason,
+                    )
+                else:
+                    _logger.debug(
+                        "backup watcher not started: %s — no backup staleness "
+                        "monitoring this boot",
+                        _not_started_reason,
+                    )
+            if cfg and not _watcher_disabled:
                 from tortoise.backup_sweep import read_team_state
                 from tortoise.backup_watcher import BackupWatcher, WatcherThread
 
@@ -548,17 +588,35 @@ async def _lifespan(app):
                 _WATCHER = WatcherThread(watcher, interval_seconds=cfg.watcher_poll_seconds)
                 _WATCHER.start()
                 if not is_supabase_enabled():
-                    _boot_gc_drill_graphs(reg_sdk._get_proj().db)
+                    try:
+                        _boot_gc_drill_graphs(reg_sdk._get_proj().db)
+                    except Exception as exc:
+                        # #2922 review: a separate operation, so a separate
+                        # message. Reporting a drill-graph GC failure as "the
+                        # backup watcher could not start" would have told the
+                        # operator the opposite of the truth (the watcher IS
+                        # running by this point).
+                        _logger.error(
+                            "gc of drill graphs at boot failed: %s", exc, exc_info=True
+                        )
         except Exception as exc:
-            _logger.warning("backup watcher could not start: %s", exc)
+            # #2922: this used to be a swallowed `warning`. The watcher silently
+            # never started in hosted production (~31 days: watcher.running=false
+            # with last_poll 2026-08-11), which removed the one signal that would
+            # have surfaced #2790 (no sweep for 33 days, no drill ever recorded).
+            # Loud, with a traceback, so a dead watcher can never be invisible again.
+            _logger.error("backup watcher could not start: %s", exc, exc_info=True)
         # #432 Task 7: event retention — boot purge + interval task. Best-effort
         # and non-fatal (like the pre-warm): a purge failure never blocks bind.
         # Per-team graphs get purged by the SDK lazy hook too (embedded/stdio);
         # here we sweep once at boot and then on an asyncio interval.
+        #
+        # #2922: do NOT import asyncio/os locally here. Both are imported at module
+        # scope (lines 17/23), and a function-local `import os` makes `os` a local
+        # name for the WHOLE of _lifespan — so the earlier `os.environ.get(...)`
+        # read above raised UnboundLocalError and aborted the entire watcher-start
+        # block. Regression guard: tests/test_boot_regressions.py.
         try:
-            import asyncio
-            import os
-
             def _sweep_events() -> None:
                 try:
                     from tortoise.event_store import purge_expired, purge_overflow
@@ -613,7 +671,11 @@ async def _lifespan(app):
             _retention_task = asyncio.get_event_loop().create_task(_event_retention_loop())
             app.state._event_retention_task = _retention_task
         except Exception as exc:
-            _logger.warning("event retention loop not started: %s", exc)
+            # Best-effort by design (a purge failure must never block bind), but
+            # there is no retry: retention is off for this process's lifetime, so
+            # this is the same "silently never runs" shape as #2922 and gets the
+            # same treatment — ERROR plus a traceback.
+            _logger.error("event retention loop not started: %s", exc, exc_info=True)
         yield
 
 
@@ -993,13 +1055,22 @@ app.add_middleware(ClientIPMiddleware)
 class ForwardedProtoMiddleware(BaseHTTPMiddleware):
     """Honor forwarded-proto headers when building redirect Locations (#985).
 
-    Starlette builds redirect URLs (e.g. the trailing-slash 307 for
-    ``POST /mcp`` → ``/mcp/``) from ``scope["scheme"]``, which is the
+    Starlette builds redirect URLs from ``scope["scheme"]``, which is the
     scheme the proxy used to reach the app — plain http behind the Fly
-    proxy (TLS terminates at the edge). The result is a downgraded
-    ``Location: http://api.premiselabs.co/mcp/``; the client follows it,
-    Fly 301s http→https, and POST-following HTTP stacks (MCP TS SDK)
-    convert the method to GET per RFC 9110 → ``GET /mcp/`` 405.
+    proxy (TLS terminates at the edge). For any trailing-slash redirect the
+    app emits, the result is a downgraded ``Location: http://…``; the client
+    follows it, Fly 301s http→https, and POST-following HTTP stacks (MCP TS
+    SDK) may convert the method to GET at that 301 (RFC 9110 §15.4.2) → 405.
+
+    NOTE (#2864): the ``/mcp`` → ``/mcp/`` redirect is itself gone —
+    ``McpPathCanonicalizerMiddleware`` rewrites the scope path so the
+    canonical connector URL is served without a redirect. This middleware
+    remains the scheme fix for every OTHER trailing-slash redirect the app
+    emits, so do not read the note above as covering ``/mcp`` any longer.
+
+    Citation note: the POST→GET conversion above is a property of 301/302
+    (RFC 9110 sections 15.4.2/15.4.3), NOT of the 307 Starlette emits — 307 is
+    method-preserving (section 15.4.8). The lossy step is the Fly edge's 301.
 
     This middleware rewrites ``scope["scheme"]`` from the FIRST value of
     the forwarded-proto header so redirect Locations carry the
@@ -1074,6 +1145,52 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
 app.add_middleware(SecurityHeadersMiddleware)
 
 app.add_middleware(AnalyticsMiddleware)
+
+
+class McpPathCanonicalizerMiddleware:
+    """Exact-match ``/mcp`` to ``/mcp/``, so the JSON-RPC POST never 307s (#2864).
+
+    Starlette's ``redirect_slashes`` answers a request for ``/mcp`` with a 307 to
+    ``/mcp/`` (the MCP app is mounted at ``/mcp``). 307 is method-preserving by
+    spec (RFC 9110 section 15.4.8: the method MUST NOT change), so the 307 itself
+    is not the hazard — the #985 chain is: the Fly edge 301s http→https, and 301
+    is NOT method-preserving (#15.4.2 lets a client rewrite POST to GET), so the
+    round trip is lossy for exactly the clients least able to tolerate it. Beyond
+    that, a redirect on a JSON-RPC POST is simply needless. Rewriting the scope
+    path internally means the client-visible URL stays ``https://…/mcp`` — the
+    canonical connector URL — with no redirect at all.
+
+    EXACT match only (on the ROUTE path): ``/mcpfoo``, ``/Mcp`` and ``/mcp/x``
+    are untouched, so the rewrite can never widen the surface or shadow a
+    sibling route. Deliberately
+    pure ASGI rather than ``BaseHTTPMiddleware``: it must mutate the scope
+    *before* routing, and this avoids the response-wrapping overhead on the
+    hottest endpoint in the app.
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http":
+            # Compare on the ROUTE path (Starlette strips root_path there), not
+            # the raw path: under an ASGI mount prefix (`uvicorn --root-path
+            # /x`) scope["path"] is "/x/mcp" while the route path is "/mcp",
+            # so a raw comparison would silently re-enable the 307 — and would
+            # ALSO miss the unprefixed "/mcp" form. One comparison covers both.
+            from starlette.routing import get_route_path
+
+            if get_route_path(scope) == "/mcp":
+                scope = dict(scope)
+                root = scope.get("root_path", "")
+                scope["path"] = f"{root}/mcp/"
+                scope["raw_path"] = scope["path"].encode()
+        await self.app(scope, receive, send)
+
+
+# Added LAST so it is the OUTERMOST middleware: the path is canonicalized before
+# any other middleware or router sees it, and before a redirect can be built.
+app.add_middleware(McpPathCanonicalizerMiddleware)
 # Internal auth key for Edge Function → API communication
 # Read lazily (not at import): tests and multi-app processes set
 # FASTAPI_INTERNAL_KEY after tortoise.hosted_api may already be imported,
@@ -19904,7 +20021,7 @@ async def backups_restore(body: BackupRestoreRequest, request: Request, team: di
 # endpoint 503s when the sweep is disabled (config missing or BACKUP_SWEEP_ENABLED
 # not true).
 
-_WATCHER: BackupWatcher | None = None  # spawned in _lifespan (driver-disabled leg)  # noqa: F821
+_WATCHER: WatcherThread | None = None  # WatcherThread imported in _lifespan  # noqa: F821
 _DRIVER_HEARTBEAT_KEY = "ops/driver-heartbeat.json"
 _LAST_DRILL_AT: float = 0.0  # in-memory drill cooldown (single-instance, resets on restart)
 _DRILL_COOLDOWN_S = 3600

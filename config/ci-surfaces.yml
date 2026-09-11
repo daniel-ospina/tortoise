@@ -11,6 +11,13 @@ surfaces:
   - test_battery_parity_mabench_run.py
   - test_battery_parity_mabench_tortoise.py
   - test_battery_parity_migration.py
+  # #2922/#2923: DB-free static guards for boot-path regressions (credential
+  # redaction in entrypoint.sh, function-scope import shadowing in _lifespan).
+  # Registered under `api` as well as `core` deliberately: the file it guards most
+  # (tortoise/hosted_api.py) selects the `api` surface, and `core` is only added
+  # when nothing else matched — so a PR that reintroduced the bug in that file
+  # alone would otherwise never run the guard.
+  - test_boot_regressions.py
   - test_delivery_tenancy.py  # C6 #2115: delivery-shape tenancy + session_recording per-graph override
   - test_onboarding_email_http.py
   - test_sentry.py
@@ -84,6 +91,7 @@ surfaces:
   - test_session_key_recovery_gate.py  # #2380: recovery-mint owner/admin gate matrix (both lanes) + created_by/outage/lane-marker pins
   - test_mcp_client.py
   - test_mcp_http.py
+  - test_mcp_route_challenge.py  # #2864: RFC 9728 challenge on /mcp 401s + /mcp route canonicalization (docker lane)
   - test_mcp_server.py
   - test_mcp_server_auth_modes.py
   - test_mcp_telemetry.py
@@ -260,6 +268,7 @@ surfaces:
   - test_backup_sweep.py
   - test_backup_watcher.py
   - test_bfs_audit.py
+  - test_boot_regressions.py
   - test_build_window_transcript.py
   - test_canary_classify.py
   - test_canonical.py
@@ -695,6 +704,7 @@ slow_files:
 - test_ingest_mode.py
 - test_ingest_validation.py
 - test_mcp_http.py
+- test_mcp_route_challenge.py
 - test_migrate_db.py
 - test_pack_shipping_wheel.py
 - test_projection.py
