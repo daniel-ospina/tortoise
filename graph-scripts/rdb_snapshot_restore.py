@@ -409,9 +409,23 @@ def restore(uri: str, rdb_file: str, container: str | None,
         except Exception:  # noqa: BLE001, RUF100
             time.sleep(_CONNECT_POLL_S)
     if after is None:
-        return {"ok": False,
-                "error": f"container did not become reachable within "
-                         f"{_CONNECT_MAX_WAIT_S}s after restore"}
+        # `docker start` returning 0 only means the container was LAUNCHED — a
+        # corrupt RDB can make the server exit immediately, leaving it stopped
+        # with no reachable graph. Probe the real state so the caller can tell
+        # a stopped container from an empty one (agent-infra#730).
+        running = False
+        try:
+            probe = _docker(["inspect", "-f", "{{.State.Running}}", cname],
+                            timeout=30)
+            running = probe.returncode == 0 and probe.stdout.strip() == "true"
+        except Exception:  # noqa: BLE001, RUF100
+            running = False
+        message = ("container did not become reachable within "
+                   f"{_CONNECT_MAX_WAIT_S}s after restore")
+        if not running:
+            message += (f"; WARNING: {cname} is NOT running — it may have "
+                        "exited on load")
+        return {"ok": False, "error": message, "container_running": running}
 
     # 5. Verified-restore reconciliation
     expected = meta.get("graph_stats") or before

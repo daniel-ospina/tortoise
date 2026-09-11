@@ -52,7 +52,7 @@ def _fake_docker_failing_on(fail_verb: str):
     """Return a `_docker` stand-in that fails only on `fail_verb`."""
     calls: list[str] = []
 
-    def _docker(args, timeout=30):  # noqa: ANN001, ARG001
+    def _docker(args, timeout=30):
         verb = args[0]
         calls.append(verb)
         failed = verb == fail_verb
@@ -85,6 +85,11 @@ def test_restore_starts_container_when_cp_fails(monkeypatch):
         "container left STOPPED after a failed `docker cp` — this is the "
         "outage class from #2993 / agent-infra#730"
     )
+    assert result["container_running"] is True, (
+        "the recovery start succeeded, so the end state must be reported "
+        "as running"
+    )
+    assert "STOPPED" not in result["error"]
 
 
 def test_restore_retries_start_when_start_fails(monkeypatch):
@@ -145,7 +150,7 @@ def test_restore_starts_container_when_stop_times_out(monkeypatch):
     _stub_non_docker_helpers(monkeypatch)
     calls: list[str] = []
 
-    def _docker(args, timeout=30):  # noqa: ANN001, ARG001
+    def _docker(args, timeout=30):
         calls.append(args[0])
         if args[0] == "stop":
             raise subprocess.TimeoutExpired(cmd=["docker", *args],
@@ -162,6 +167,11 @@ def test_restore_starts_container_when_stop_times_out(monkeypatch):
         "a raising `docker stop` skipped recovery — the container is left "
         "stopped (the hole this fix exists to close)"
     )
+    assert result["container_running"] is True, (
+        "the recovery start succeeded — the end state is running, not merely "
+        "'a start was attempted'"
+    )
+    assert "STOPPED" not in result["error"]
 
 
 def test_restore_starts_container_when_docker_raises(monkeypatch):
@@ -174,7 +184,7 @@ def test_restore_starts_container_when_docker_raises(monkeypatch):
     _stub_non_docker_helpers(monkeypatch)
     calls: list[str] = []
 
-    def _docker(args, timeout=30):  # noqa: ANN001, ARG001
+    def _docker(args, timeout=30):
         calls.append(args[0])
         if args[0] == "cp":
             raise subprocess.TimeoutExpired(cmd=["docker", *args],
@@ -188,6 +198,8 @@ def test_restore_starts_container_when_docker_raises(monkeypatch):
 
     assert result["ok"] is False
     assert "start" in calls, "a raising `docker cp` skipped recovery"
+    assert result["container_running"] is True
+    assert "STOPPED" not in result["error"]
 
 
 def test_restore_recovers_from_transient_start_failure(monkeypatch):
@@ -200,7 +212,7 @@ def test_restore_recovers_from_transient_start_failure(monkeypatch):
     calls: list[str] = []
     state = {"starts": 0, "last_start_rc": None}
 
-    def _docker(args, timeout=30):  # noqa: ANN001, ARG001
+    def _docker(args, timeout=30):
         calls.append(args[0])
         rc = 0
         if args[0] == "start":
@@ -241,12 +253,17 @@ def test_restore_recovers_when_stop_returns_nonzero(monkeypatch):
     assert result["container_running"] is True
 
 
-def test_restore_recovers_when_start_raises(monkeypatch):
-    """A RAISING `docker start` leaves `restarted` False and must be retried."""
+def test_restore_retries_start_when_start_raises(monkeypatch):
+    """A RAISING `docker start` must still be retried.
+
+    Honest about the end state: this fake raises on EVERY start, so the
+    recovery retry fails too and the container ends STOPPED — which the
+    assertions pin. The transient-recovery test above covers success.
+    """
     _stub_non_docker_helpers(monkeypatch)
     calls: list[str] = []
 
-    def _docker(args, timeout=30):  # noqa: ANN001, ARG001
+    def _docker(args, timeout=30):
         calls.append(args[0])
         if args[0] == "start":
             raise subprocess.TimeoutExpired(cmd=["docker", *args],
@@ -263,6 +280,8 @@ def test_restore_recovers_when_start_raises(monkeypatch):
         "a raising start must still be retried, got "
         f"{calls.count('start')} start calls"
     )
+    assert result["container_running"] is False
+    assert "STOPPED" in result["error"]
 
 
 def test_restore_reports_original_error_when_recovery_also_fails(monkeypatch):
@@ -275,7 +294,7 @@ def test_restore_reports_original_error_when_recovery_also_fails(monkeypatch):
     _stub_non_docker_helpers(monkeypatch)
     calls: list[str] = []
 
-    def _docker(args, timeout=30):  # noqa: ANN001, ARG001
+    def _docker(args, timeout=30):
         calls.append(args[0])
         if args[0] == "cp":
             return subprocess.CompletedProcess(
