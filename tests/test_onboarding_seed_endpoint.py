@@ -406,3 +406,200 @@ class TestSeedJourney:
             assert _subjects(team_id) == {}
         finally:
             tc.__exit__(None, None, None)
+
+
+# ── #2360 (re-spec): provisioning-time REAL starter seed ────────────────
+# POST /internal/starter-seed — what the tenant-provision Edge Function calls
+# right after provisioning a FRESH org (replacing the old /internal/demo
+# auto-seed of 12 fake demo Points + _demo_sentinel). Files the REAL starter
+# structure through the canonical seed core: the signing-up user as a
+# naturalPerson Subject + their Organization as an organization Subject,
+# linked memberOf (org_id/user_id/email refs). Never writes demo Points, so
+# the Overview digest (team.point_count — Points only) reads 0 on a fresh
+# org, never '13 points filed'.
+
+# Internal endpoints authenticate via FASTAPI_INTERNAL_KEY — read at CALL
+# time by hosted_api._check_internal, so setting it here is sufficient even
+# though hosted_api is already imported (session-wide docker lane).
+_INTERNAL_KEY = "test-internal-shared-secret-xyz"
+os.environ["FASTAPI_INTERNAL_KEY"] = _INTERNAL_KEY
+
+
+def _internal_headers():
+    return {"Authorization": f"Bearer {_INTERNAL_KEY}"}
+
+
+def _point_count(team_id):
+    rows = _proj(team_id).query(
+        "MATCH (p:Point) RETURN count(p)").result_set
+    return rows[0][0]
+
+
+class TestStarterSeed:
+    """#2360 (re-spec): the fresh-org provisioning path seeds REAL starter
+    data (user Subject ↔ org Subject, connected) — never demo Points."""
+
+    def test_starter_seed_files_real_anchors_connected_no_demo_points(self):
+        """Fresh org provision = the REAL two-anchor structure (organization
+        + naturalPerson Subjects, memberOf, user_id/email refs) and ZERO demo
+        Points — the digest counts 0, never the old 13."""
+        tc, team_id, email = _registered()
+        try:
+            r = tc.post("/internal/starter-seed",
+                        json={"team_id": team_id, "org_name": "Acme Labs",
+                              "person_name": "Alex Johnson",
+                              "person_user_id": "user-2360",
+                              "person_email": email},
+                        headers=_internal_headers())
+            assert r.status_code == 200, r.text
+            res = r.json()
+            assert res["status"] == "seeded", res
+            assert res["org_created"] is True
+            assert res["person_created"] is True
+            subs = _subjects(team_id)
+            assert set(subs) == {"Acme Labs", "Alex Johnson"}
+            assert subs["Acme Labs"]["subjectKind"] == "organization"
+            assert subs["Acme Labs"]["org_id"] == team_id
+            assert subs["Alex Johnson"]["subjectKind"] == "naturalPerson"
+            assert subs["Alex Johnson"]["user_id"] == "user-2360"
+            assert subs["Alex Johnson"]["email"] == email
+            # the two CONNECTED (memberOf person → org)
+            assert _member_of_edges(team_id) == \
+                {("Alex Johnson", "Acme Labs")}
+            # onboarding node ↔ org anchor + the W3 seed step
+            node = onboarding_state.read_onboarding_node(
+                _proj(team_id), team_id)
+            assert node["org_subject_id"] == subs["Acme Labs"]["id"]
+            assert "first-points-filed" in _completed(team_id)
+            # ZERO demo/sample Points on the fresh org
+            assert _point_count(team_id) == 0
+            # the Overview digest reads 0 (never '13 points filed')
+            r2 = tc.get("/v1/team")
+            assert r2.status_code == 200, r2.text
+            assert r2.json()["point_count"] == 0
+        finally:
+            tc.__exit__(None, None, None)
+
+    def test_starter_seed_org_only_when_no_person_name(self):
+        """Never-invented-identity: with no user-provided person name the
+        starter seed files the org-anchor Subject ONLY (org name IS
+        user-confirmed) and leaves first-points-filed pending — the
+        connect-time interactive seed files the person + memberOf with a
+        user-confirmed name (reusing the org anchor)."""
+        tc, team_id, _email = _registered()
+        try:
+            r = tc.post("/internal/starter-seed",
+                        json={"team_id": team_id, "org_name": "Acme Labs"},
+                        headers=_internal_headers())
+            assert r.status_code == 200, r.text
+            res = r.json()
+            assert res["status"] == "seeded", res
+            assert res.get("user_subject") is None
+            assert res.get("member_of") is None
+            subs = _subjects(team_id)
+            assert set(subs) == {"Acme Labs"}
+            assert subs["Acme Labs"]["subjectKind"] == "organization"
+            assert "first-points-filed" not in _completed(team_id)
+            assert _member_of_edges(team_id) == set()
+            assert _point_count(team_id) == 0
+            # handoff: the interactive W3 seed completes the pair on connect
+            res = tc.post("/v1/onboarding/seed",
+                          json={"org_name": "Acme Labs",
+                                "person_name": "Alex Johnson"}).json()
+            assert res["status"] == "seeded", res
+            assert res["org_subject"]["id"] == \
+                _subjects(team_id)["Acme Labs"]["id"]
+            assert res["user_subject"]["subjectKind"] == "naturalPerson"
+            assert _member_of_edges(team_id) == \
+                {("Alex Johnson", "Acme Labs")}
+            assert "first-points-filed" in _completed(team_id)
+        finally:
+            tc.__exit__(None, None, None)
+
+    def test_starter_seed_replay_idempotent(self):
+        """Replay (edge-fn retry / hook redelivery) reuses the canonical
+        anchors — same ids, no duplicate memberOf, no duplicate step."""
+        tc, team_id, email = _registered()
+        try:
+            r1 = tc.post("/internal/starter-seed",
+                         json={"team_id": team_id, "org_name": "Acme",
+                               "person_name": "Alex",
+                               "person_user_id": "user-2360",
+                               "person_email": email},
+                         headers=_internal_headers())
+            r2 = tc.post("/internal/starter-seed",
+                         json={"team_id": team_id, "org_name": "Acme",
+                               "person_name": "Alex",
+                               "person_user_id": "user-2360",
+                               "person_email": email},
+                         headers=_internal_headers())
+            assert r1.status_code == 200 and r2.status_code == 200
+            b1, b2 = r1.json(), r2.json()
+            assert b2["status"] == "seeded"
+            assert b2["org_subject"]["id"] == b1["org_subject"]["id"]
+            assert b2["user_subject"]["id"] == b1["user_subject"]["id"]
+            assert b2["org_created"] is False
+            assert b2["person_created"] is False
+            assert len(_subjects(team_id)) == 2
+            assert len(_member_of_edges(team_id)) == 1
+        finally:
+            tc.__exit__(None, None, None)
+
+    def test_starter_seed_requires_internal_key(self):
+        tc, team_id, _email = _registered()
+        try:
+            r = tc.post("/internal/starter-seed",
+                        json={"team_id": team_id, "org_name": "Acme"})
+            assert r.status_code == 401, r.text
+        finally:
+            tc.__exit__(None, None, None)
+
+
+class TestDigestExcludesDemo:
+    """#2360: count-of-record surfaces (team.point_count — the Overview
+    memory digest) never count demo/sample Points as the user's own
+    filings — even when an opt-in /internal/demo seed runs on the org."""
+
+    def test_point_count_excludes_demo_points(self):
+        tc, team_id, _email = _registered()
+        try:
+            # a fresh org starts at 0 real Points
+            assert tc.get("/v1/team").json()["point_count"] == 0
+            # opt-in / legacy demo seed writes the 12 sample Points + sentinel
+            r = tc.post("/internal/demo", json={"team_id": team_id},
+                        headers=_internal_headers())
+            assert r.status_code == 200, r.text
+            assert r.json()["status"] == "demo_created"
+            assert _point_count(team_id) == 13  # 12 + _demo_sentinel (graph)
+            # ...but the digest count EXCLUDES them — still 0
+            assert tc.get("/v1/team").json()["point_count"] == 0
+            # a real user filing counts normally
+            import uuid
+            _proj(team_id).query(
+                "CREATE (p:Point {id: $pid, content: 'real filing', "
+                "pointKind: 'statement', is_operator: false, "
+                "status: 'live'})",
+                pid=f"real-{uuid.uuid4().hex[:8]}")
+            assert tc.get("/v1/team").json()["point_count"] == 1
+        finally:
+            tc.__exit__(None, None, None)
+
+    def test_demo_seeder_ids_match_exclusion_constant(self):
+        """The exclusion set is the single source of truth: the demo seeder
+        writes exactly the ids team.point_count excludes (a drifted id would
+        silently count as user data)."""
+        tc, team_id, _email = _registered()
+        try:
+            r = tc.post("/internal/demo", json={"team_id": team_id},
+                        headers=_internal_headers())
+            assert r.status_code == 200, r.text
+            rows = _proj(team_id).query(
+                "MATCH (p:Point) RETURN p.id").result_set
+            written = {row[0] for row in rows}
+            from tortoise.hosted_api import _DEMO_POINT_IDS, _DEMO_SENTINEL_ID
+            assert _DEMO_SENTINEL_ID == "_demo_sentinel"
+            assert written <= _DEMO_POINT_IDS
+            assert len(written) == 13
+            assert len(_DEMO_POINT_IDS) == 13
+        finally:
+            tc.__exit__(None, None, None)
