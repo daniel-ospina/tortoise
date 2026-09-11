@@ -736,6 +736,47 @@ def test_falkor_live_point_write_preserves_unknown_prop():
         pass  # shared session projection — module helper owns close
 
 
+def test_falkor_rebuild_undeclared_list_prop_denied():
+    """#2795 (D2 mechanic 1): an UNDECLARED list prop is never written raw —
+    including `tags`, whose raw list would half-restore a node without its
+    TAGGED edges (#2897)."""
+    if _skip_if_no_falkor():
+        pytest.skip("redislite falkordb unavailable")
+    api, log = _api()
+    pid = api.add_point("list prop", provenance("d.txt", [0, 5], "q"),
+                        custom_list=["a", "b"], tags=["alpha"])
+    proj = _shared_proj()
+    try:
+        proj.rebuild_all(str(log.path.parent))
+        row = proj.query(
+            "MATCH (n:Point {id:$id}) RETURN n.custom_list, n.tags", id=pid
+        ).result_set
+        assert row and row[0][0] is None, row
+        assert row[0][1] is None, row
+    finally:
+        pass  # shared session projection — module helper owns close
+
+
+def test_falkor_point_deny_list_drop_is_reported(caplog):
+    """#2795 indicator 4 / D4: a deny-listed prop that arrives in the payload
+    is dropped AND reported, not silently discarded."""
+    if _skip_if_no_falkor():
+        pytest.skip("redislite falkordb unavailable")
+    import logging
+    api, log = _api()
+    api.add_point("denied prop", provenance("d.txt", [0, 5], "q"),
+                  reason="because")
+    proj = _shared_proj()
+    try:
+        with caplog.at_level(logging.WARNING,
+                             logger="tortoise.projection.entities"):
+            proj.rebuild_all(str(log.path.parent))
+        assert any("deny-listed" in r.getMessage() and "reason" in r.getMessage()
+                   for r in caplog.records), caplog.text
+    finally:
+        pass  # shared session projection — module helper owns close
+
+
 # ----------------------------------------------- FalkorProjection.edge_stats
 
 def test_falkor_edge_stats():

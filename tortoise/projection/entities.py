@@ -192,15 +192,22 @@ class _EntityHandlers:
     })
     # #2795 (D2): D1's declared payload/capture props (contract.py has not
     # landed yet) — known passthrough keys that must NOT trip the drift
-    # warning. `tags` is declared here even though D1 marks its TAGGED-edge
-    # replay out of scope (#2897): the raw list property is preserved by the
-    # open-set write, the edges are not.
+    # warning.
     _POINT_DECLARED_PROPS: frozenset = frozenset({
         "quote", "when", "search_keys", "speaker", "source_turn_id", "tags",
     })
+    # #2795 (D2 mechanic 1): list-valued props are persisted ONLY when their
+    # key is declared here. Arrays are not fulltext-indexed and the canonical
+    # form is the declared `flatten=list` STRING (`search_keys` -> space-joined
+    # by `_flatten_search_keys_prop`); `tags` is owned by its own `_sync_tags`
+    # path and its TAGGED-edge replay is out of scope (#2897), so a raw-list
+    # half-restore is refused. Empty pre-D1: no list prop passes through the
+    # generic Point filter today. Replaced by contract.py's declared set in D1.
+    _POINT_LIST_PROPS: frozenset = frozenset()
 
     def _persist_extra_props(self, match_clause: str, match_params: dict,
-                              ev: dict, handled_keys: frozenset) -> dict:
+                              ev: dict, handled_keys: frozenset,
+                              list_props: frozenset | None = None) -> dict:
         """Persist arbitrary caller-supplied props not explicitly handled.
 
         Computes the set difference between event dict keys and the union of
@@ -212,14 +219,23 @@ class _EntityHandlers:
         #2894: non-persistable values (maps/dicts and other nested
         structures) are filtered by `_is_persistable_prop_value` — the engine
         rejects them on a SET, so dropping is the only non-crashing option.
+        #2795 (D2 mechanic 1): when `list_props` is supplied, a flat LIST is
+        # persisted only when its key is declared there; an undeclared list is
+        # denied, never written raw. `None` keeps the pre-existing permissive
+        # behaviour for the non-Point layers.
 
         Returns the dict of props actually persisted (empty when none) so the
         caller can report unrecognised keys (#2795 drift warning).
         """
         skip = self._META_KEYS | handled_keys
-        extra = {k: v for k, v in ev.items()
-                 if k not in skip and v is not None
-                 and _is_persistable_prop_value(v)}
+        extra = {}
+        for k, v in ev.items():
+            if k in skip or v is None or not _is_persistable_prop_value(v):
+                continue
+            if isinstance(v, list) and list_props is not None \
+                    and k not in list_props:
+                continue
+            extra[k] = v
         if extra:
             self.g.query(
                 match_clause + " SET n += $extra",
@@ -338,6 +354,7 @@ class _EntityHandlers:
         extras = self._persist_extra_props(
             "MATCH (n:Point {id:$id})", {"id": p["id"]}, p,
             self._POINT_HANDLED | self._POINT_DENY,
+            list_props=self._POINT_LIST_PROPS,
         )
         for key in extras:
             if key not in self._POINT_DECLARED_PROPS:
@@ -345,6 +362,16 @@ class _EntityHandlers:
                     "Point prop %r is not declared — persisted via open-set "
                     "passthrough (#2795); declare it in POINT_PROPS for parity",
                     key)
+        # #2795 indicator 4 / D4: a prop that genuinely cannot be restored
+        # from the payload must be REPORTED, not dropped silently. The
+        # recompute keys (`embedding`/`updatedAt`/`_nid`/`_graph_id`) are
+        # fixed-clause/handled and excluded here to avoid noise; the genuinely
+        # payload-hostile set is `_POINT_DENY - _POINT_HANDLED`.
+        for key in self._POINT_DENY - self._POINT_HANDLED:
+            if p.get(key) is not None:
+                logger.warning(
+                    "Point prop %r dropped — deny-listed (recompute/EP-owned, "
+                    "#2795); not restorable from the payload", key)
 
     def _upsert_point_edges(self, p: dict) -> None:
         """Wire all Point edges (provenance + about + operator).
