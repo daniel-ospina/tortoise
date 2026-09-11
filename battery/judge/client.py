@@ -36,6 +36,11 @@ class JudgeCall:
     prompt_tokens: int = 0
     completion_tokens: int = 0
     cost_usd: float = 0.0
+    #: #2906 — how this call's cost was priced ("provider_reported" when the
+    #: response carried `usage.cost`, else "estimated" from the fallback
+    #: table). Persisted so a judge spend figure never implies provenance it
+    #: does not have (review #2915 P2).
+    cost_basis: str = "estimated"
 
 
 class JudgeClient:
@@ -90,7 +95,8 @@ class JudgeClient:
                          prompt_tokens=int(out.get("prompt_tokens", 0) or 0),
                          completion_tokens=int(
                              out.get("completion_tokens", 0) or 0),
-                         cost_usd=float(out.get("cost_usd", 0.0) or 0.0))
+                         cost_usd=float(out.get("cost_usd", 0.0) or 0.0),
+                         cost_basis=str(out.get("cost_basis", "estimated")))
 
     def _mock_judge(self, prompt: str) -> dict:
         """Deterministic mock: seeds from the prompt hash so validation
@@ -143,6 +149,11 @@ class JudgeClient:
             parsed.setdefault("prompt_tokens", pt)
             parsed.setdefault("completion_tokens", ct)
             parsed.setdefault("cost_usd", cost)
+            # #2906: the label travels with the number — provider-reported
+            # only when the response itself carried the charge.
+            parsed.setdefault(
+                "cost_basis",
+                "provider_reported" if reported is not None else "estimated")
             return parsed
         except json.JSONDecodeError:
             return {"verdict": content.strip(), "confidence": 0.5,

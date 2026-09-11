@@ -222,6 +222,21 @@ class _AdapterCaller:
         return text
 
 
+def _spend_cost_basis(provider_calls: int, estimated_calls: int) -> str:
+    """#2906 — how a persisted spend figure was priced, derived from the calls
+    that actually priced it, never asserted.
+
+    A run that priced NOTHING reads ``estimated``: it must not claim
+    provider-reported provenance it does not have (review #2915 P2). Same rule
+    as ``model_calls.aggregate_cost_basis`` and the judge meter.
+    """
+    if not (provider_calls or estimated_calls):
+        return "estimated"
+    if not estimated_calls:
+        return "provider_reported"
+    return "mixed" if provider_calls else "estimated"
+
+
 def run_probe(*, config: str | Path, arms: list[str],
               scenario_ids: list[str],
               caller=None,
@@ -397,11 +412,8 @@ def run_probe(*, config: str | Path, arms: list[str],
             "scenarios": scenario_ids, "arms": arms, "seed": seed,
             "model": model_block, "spend": {
                 "sub_cap_usd": budget.cap_usd,
-                # #2906: derived from what actually priced the calls, never
-                # asserted — a figure that mixes both sources says so.
-                "cost_basis": (
-                    "provider_reported" if not metered_estimated
-                    else "mixed" if metered_provider else "estimated"),
+                "cost_basis": _spend_cost_basis(metered_provider,
+                                                metered_estimated),
             },
             "usage": rows,
         }, indent=2), encoding="utf-8")

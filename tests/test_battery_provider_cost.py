@@ -381,3 +381,57 @@ class TestJudgeCostIsNotRepriced:
             fallback_cost=99.0)
         assert out["cost_usd"] == 0.123
         assert calls["fallback"] == 0
+
+
+class TestPersistedSpendAlwaysCarriesItsBasis:
+    """#2906 (review #2915 P2) — two spend figures that were persisted without
+    a provenance label. The invariant is: a persisted number never implies it
+    was provider-priced when it was not."""
+
+    def test_judge_meter_report_carries_basis(self):
+        from battery.judge.evidence import _SpendMeter, meter_report
+
+        def _call(cost, basis):
+            from battery.judge.client import JudgeCall
+            return JudgeCall(rubric_id="r", item_id="i", verdict="ok",
+                             confidence=1.0, cost_usd=cost, cost_basis=basis)
+
+        m = _SpendMeter()
+        # a genuinely free provider-priced call is still provider_reported
+        m.record(_call(0.0, "provider_reported"))
+        m.record(_call(0.5, "estimated"))
+        rep = meter_report(m)
+        assert rep["cost_basis"] == "mixed"
+
+        m2 = _SpendMeter()
+        m2.record(_call(0.1, "provider_reported"))
+        assert meter_report(m2)["cost_basis"] == "provider_reported"
+
+        # zero priced calls must NOT claim provenance
+        assert meter_report(_SpendMeter())["cost_basis"] == "estimated"
+
+    def test_judge_call_defaults_to_estimated_not_provider(self):
+        from battery.judge.client import JudgeCall
+        jc = JudgeCall(rubric_id="r", item_id="i", verdict="ok", confidence=1.0)
+        assert jc.cost_basis == "estimated", "provenance is never assumed"
+
+    def test_probe_spend_basis_rule(self):
+        """The manifest's label comes from this rule, so test the rule
+        directly rather than through a full probe run (deterministic)."""
+        from battery.probes.probe_runner import _spend_cost_basis
+
+        # nothing priced => never claims provenance
+        assert _spend_cost_basis(0, 0) == "estimated"
+        assert _spend_cost_basis(3, 0) == "provider_reported"
+        assert _spend_cost_basis(0, 3) == "estimated"
+        assert _spend_cost_basis(2, 1) == "mixed"
+
+    def test_probe_manifest_uses_the_rule(self):
+        """The manifest must consume the rule, not re-derive it inline."""
+        import inspect
+
+        from battery.probes import probe_runner
+
+        src = inspect.getsource(probe_runner.run_probe)
+        assert "_spend_cost_basis(" in src
+        assert '"cost_basis"' in src
