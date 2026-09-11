@@ -4268,7 +4268,7 @@ def _cmd_index_github(args):
     (keyed by content hash via idempotency.document_key).
     """
     import atexit
-    import os  # noqa: F401
+    import os
     import subprocess
     import sys
     import tempfile
@@ -4371,6 +4371,29 @@ def _cmd_index_github(args):
         print(f"tortoise index: Cannot connect to database: {e}", file=sys.stderr)
         print("Set --db to a Docker URI or ensure FalkorDB is running.", file=sys.stderr)
         return 1
+
+    # #2947: the embedded projection (and its redis-server child) is now fully
+    # built. Signalling DURING construction lands while an in-flight server
+    # command still holds a connection, so redislite's last-client cleanup
+    # guard (correctly) declines to shut the server down and the kill orphans
+    # it. Expose a readiness marker for a supervisor/test that must signal
+    # this process at a deterministic point; the index loop's next step is the
+    # first file read, which the test blocks on (a FIFO), so the projection is
+    # open and the process quiescent. Written as a file under
+    # TORTOISE_INDEX_READY_FILE purely to synchronize the regression test —
+    # normal runs see nothing (env unset).
+    _ready_file = os.environ.get("TORTOISE_INDEX_READY_FILE")
+    if _ready_file:
+        try:
+            with open(_ready_file, "w") as _fh:
+                _fh.write("ready\n")
+        except OSError:
+            # Narrow on purpose: a failure here surfaces as the test's
+            # readiness timeout, which names the marker path (and the child's
+            # rc, if the child has also exited) — more useful than a silently
+            # swallowed error in a process that is about to be signalled
+            # anyway. A non-OSError bug should not hide.
+            pass
 
     log_path = Path(tempfile.gettempdir()) / f"tortoise-index-{repo_name}.jsonl"
     log = EventLog(str(log_path))

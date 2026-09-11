@@ -417,6 +417,97 @@ def test_register_default_surface_is_core():
         assert "test_new_default.py" in manifest2["surfaces"]["core"]
 
 
+# ── #2913: comment-safe insertion + duplicate-safe registration ──────────
+
+
+def test_register_never_splits_a_comment_run():
+    """#2913: `pos` indexes entries (comment lines excluded) and must be
+    converted to a physical line; treating it as a raw line offset dropped the
+    new entry INSIDE a comment run and detached the run from the entries it
+    documents."""
+    with tempfile.TemporaryDirectory() as d:
+        td = Path(d)
+        (td / "test_cc.py").write_text("def test_x():\n    pass\n")
+        for name in ("test_a.py", "test_b.py", "test_c.py", "test_d.py"):
+            (td / name).write_text("def test_x():\n    pass\n")
+        (td / "test_existing_core.py").write_text("def test_x():\n    pass\n")
+        m = td / "ci-surfaces.yml"
+        m.write_text(
+            "version: 1" + "\n" +
+            "surfaces:" + "\n" +
+            "  api:" + "\n" +
+            "  - test_a.py" + "\n" +
+            "  - test_b.py" + "\n" +
+            "  # comment 1 about the group below" + "\n" +
+            "  # comment 2 about the group below" + "\n" +
+            "  - test_c.py" + "\n" +
+            "  - test_d.py" + "\n" +
+            "  core:" + "\n" +
+            "  - test_existing_core.py" + "\n" +
+            "tier1:" + "\n" +
+            "  - test_a.py" + "\n"
+        )
+        import yaml
+        manifest = yaml.safe_load(m.read_text())
+        assert register_tests(m, td, "api", manifest) == ["test_cc.py"]
+        lines = m.read_text().splitlines()
+        # the comment run stays contiguous — no entry wedged between its lines
+        i = lines.index("  # comment 1 about the group below")
+        assert lines[i + 1] == "  # comment 2 about the group below", lines
+        # the entry is among real entries and alphabetical order is preserved
+        api = yaml.safe_load(m.read_text())["surfaces"]["api"]
+        assert api == sorted(api)
+        assert api == ["test_a.py", "test_b.py", "test_c.py",
+                       "test_cc.py", "test_d.py"]
+
+
+def test_register_already_present_in_surface_is_reported_noop(capsys):
+    """#2913: a file already present in the target surface is a reported no-op.
+
+    The old code did not write a duplicate line either (`to_add` filtered on
+    `names`), but it RETURNED `missing`, so `--register` reported an
+    already-present file as newly added. This pins the return value and the
+    `already registered` report for a caller passing a stale manifest dict —
+    the only way to reach that state, since the CLI always loads the manifest
+    fresh from disk.
+    """
+    with tempfile.TemporaryDirectory() as d:
+        td = Path(d)
+        (td / "test_new_thing.py").write_text("def test_x():\n    pass\n")
+        (td / "test_existing_api.py").write_text("def test_x():\n    pass\n")
+        (td / "test_existing_core.py").write_text("def test_x():\n    pass\n")
+        m = _tmp_manifest(td)
+        import yaml
+        stale = yaml.safe_load(m.read_text())
+        assert register_tests(m, td, "api", stale) == ["test_new_thing.py"]
+        assert m.read_text().count("  - test_new_thing.py\n") == 1
+        # second call with the pre-registration manifest dict: the entry is
+        # already in the surface text, so it must be a reported no-op.
+        added = register_tests(m, td, "api", stale)
+        assert added == []
+        assert m.read_text().count("  - test_new_thing.py\n") == 1, \
+            "a second line was written for an already-present entry"
+        assert "already registered" in capsys.readouterr().out
+
+
+def test_duplicate_entries_reports_same_surface_repeats():
+    """#2913: a same-surface duplicate is invisible to select() (it unions
+    surfaces) and to integrity() (it only asks "classified?") — the new
+    duplicate_entries() check surfaces it for the --integrity note."""
+    from tools.ci_selection import duplicate_entries
+    m = {"surfaces": {"core": ["test_a.py", "test_a.py", "test_b.py"],
+                      "api": ["test_a.py"]}}
+    # cross-surface (dual) membership is deliberate — only the SAME-surface
+    # repeat is reported
+    assert duplicate_entries(m) == ["core: test_a.py"]
+    assert duplicate_entries({"surfaces": {"core": ["test_a.py", "test_b.py"]}}) == []
+    # a name repeated 3x is ONE distinct problem, not two
+    assert duplicate_entries(
+        {"surfaces": {"core": ["test_a.py", "test_a.py", "test_a.py"]}}
+    ) == ["core: test_a.py"]
+    # a value that is None (empty surface block) must not raise
+    assert duplicate_entries({"surfaces": {"core": None}}) == []
+
 
 # ── #1266: matrix halves ↔ manifest consistency ──────────────────────────
 # The test (a)/(b) halves in python-ci.yml are a second source of truth next

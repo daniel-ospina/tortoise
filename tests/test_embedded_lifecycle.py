@@ -324,6 +324,34 @@ def _wait_server_dead(pid, timeout=10):
     return not _pid_alive(pid)
 
 
+#: Budget for "the embedded server is gone after its parent exited" (#2947).
+#: This is LIVENESS on a cleanup path, not a performance assertion: the
+#: mechanism (signal → close → server exit) is deterministic and sub-second,
+#: and on a loaded runner the observation itself is what needs headroom.
+#: It was briefly 60s while #2947 was misdiagnosed as a starved runner; the
+#: real cause was that the CLI test signalled mid-construction, where
+#: redislite's last-client guard declines to shut the server down at all
+#: (no timeout would have helped — see the CLI test above). 30s keeps the
+#: loaded-runner margin while halving what a systematic cleanup regression
+#: costs across the 6 call sites, and the message carries the evidence
+#: (pid, elapsed, parent rc) instead of leaving the next occurrence a mystery.
+_SERVER_DEATH_TIMEOUT_S = 30
+
+
+def _assert_server_dies_with_parent(redis_pid: int, proc, what: str) -> None:
+    """#2947: assert the embedded server died with its exited ``proc``.
+
+    ``what`` names the case (the parent was SIGINTed, the client disconnected,
+    …) so a failure says which lifecycle path failed to clean up.
+    """
+    started = time.time()
+    assert _wait_server_dead(redis_pid, timeout=_SERVER_DEATH_TIMEOUT_S), (
+        f"{what}: embedded redis-server (pid {redis_pid}) was still alive "
+        f"{time.time() - started:.1f}s after its parent exited "
+        f"(parent rc={proc.returncode}); budget {_SERVER_DEATH_TIMEOUT_S}s "
+        "(#2947)")
+
+
 def test_leaked_projection_closes_on_gc(tmp_path):
     """#1475: a leaked (never-closed) projection's embedded server shuts down
     deterministically on GC, not only at atexit. The finalizer works around
@@ -566,8 +594,8 @@ def test_terminating_signal_closes_embedded_server(tmp_path, signum):
                         "the #2203 guard did not terminate it")
         assert proc.returncode == -signum, (
             f"expected signal death ({-signum}), rc={proc.returncode}")
-        assert _wait_server_dead(redis_pid, timeout=20), (
-            f"child's redis-server survived its {_signal.Signals(signum).name}ed parent")
+        _assert_server_dies_with_parent(
+            redis_pid, proc, f"child's {_signal.Signals(signum).name}ed parent")
     finally:
         if proc.poll() is None:
             proc.kill()
@@ -620,8 +648,8 @@ def test_sigint_ignored_at_startup_still_terminates_and_closes(tmp_path):
             proc.kill()
             pytest.fail("SIGINT was ignored (pre-#2203 behavior) — guard did not fire")
         assert proc.returncode == -_signal.SIGINT, f"rc={proc.returncode}"
-        assert _wait_server_dead(redis_pid, timeout=20), (
-            "redis-server survived its SIGINTed parent")
+        _assert_server_dies_with_parent(
+            redis_pid, proc, "redis-server after its SIGINTed parent")
     finally:
         if proc.poll() is None:
             proc.kill()
@@ -653,13 +681,46 @@ def _tortoise_cli_popen(argv, env, cwd, sigint_ignored: bool):
     )
 
 
+def _wait_ready_file(path, proc, timeout: float = 60) -> None:
+    """#2947: block until the CLI child writes its post-construction readiness
+    marker (``TORTOISE_INDEX_READY_FILE``), or the child exits.
+
+    A file (not stdout) is the channel: while the index loop is blocked on the
+    FIFO the child's stdout is unreliable to read from the parent, but the
+    marker file is written and closed before the block. `_wait_for_registry_redis`
+    returns as soon as redislite has published ``<db>.settings`` — which happens
+    INSIDE projection construction — so without this wait the signal can land
+    mid-construction, while an in-flight query still holds a connection; the
+    last-client cleanup guard then declines to shut the server down.
+    """
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if os.path.exists(path):
+            return
+        if proc.poll() is not None:
+            out = proc.stdout.read() if proc.stdout is not None else ""
+            raise AssertionError(
+                f"child exited (rc={proc.returncode}) before readiness marker:\n{out[-1200:]}")
+        time.sleep(0.05)
+    raise AssertionError(f"timed out waiting for readiness marker {path!r}")
+
+
 @pytest.mark.parametrize("signum", [_signal.SIGINT, _signal.SIGTERM])
 def test_index_github_cli_signal_closes_embedded_server(tmp_path, signum):
     """#2203 (indicator 3): `tortoise index github` honors SIGINT (even when
     the process started with it ignored — piped stdin) and SIGTERM, and its
     embedded redis-server dies with it. The corpus contains a FIFO that
-    sorts first, so the CLI blocks mid-index with its projection open —
-    deterministic kill window (no race with a fast-completing index)."""
+    sorts first, so the CLI blocks mid-index with its projection open.
+
+    #2947: the signal must land AFTER projection construction. The corpus's
+    `.settings` registry is published DURING construction (redislite's
+    server start), so waiting on it and signalling immediately could hit an
+    in-flight server command; redislite's last-client cleanup guard then sees
+    a second connection and declines to shut the server down, orphaning it.
+    The child writes TORTOISE_INDEX_READY_FILE once construction is complete
+    (just before the index loop), giving the deterministic open-projection
+    kill window this test intends.
+    """
     sigint_ignored = signum == _signal.SIGINT
     work = tmp_path / f"idx-{signum}"
     corpus = work / "repo"
@@ -672,6 +733,8 @@ def test_index_github_cli_signal_closes_embedded_server(tmp_path, signum):
         (corpus / f"1000{i}.md").write_text(
             f"# File {i}\n\nSpeaker noted decision {i} is sound and final.\n")
     env = _child_env()
+    ready_file = work / "ready.marker"
+    env["TORTOISE_INDEX_READY_FILE"] = str(ready_file)
     proc = _tortoise_cli_popen(
         ["index", "github", str(corpus), "--db", str(db)],
         env=env, cwd=_REPO_ROOT, sigint_ignored=sigint_ignored,
@@ -679,6 +742,18 @@ def test_index_github_cli_signal_closes_embedded_server(tmp_path, signum):
     redis_pid = None
     try:
         redis_pid = _wait_for_registry_redis(db, proc)
+        # #2947: wait for the CLI to finish building its projection before
+        # signalling. `_wait_for_registry_redis` returns as soon as redislite
+        # has published `<db>.settings` — which happens INSIDE
+        # `FalkorProjection.__init__` (and its `_ensure_indexes` queries), not
+        # after it. Signalling in that window lands while the process still
+        # has an in-flight server command, so redislite's last-client cleanup
+        # guard sees `_connection_count() > 1` and declines to shut the server
+        # down — the kill then orphans it. The readiness marker is written
+        # once construction is complete; the FIFO below then blocks the index
+        # loop, giving the deterministic open-projection kill window this test
+        # intends.
+        _wait_ready_file(ready_file, proc)
         assert _pid_alive(redis_pid), "indexer's embedded server should be up"
         os.kill(proc.pid, signum)
         try:
@@ -689,8 +764,8 @@ def test_index_github_cli_signal_closes_embedded_server(tmp_path, signum):
                 f"`tortoise index github` ignored {_signal.Signals(signum).name} "
                 "(pre-#2203 behavior)")
         assert proc.returncode == -signum, f"rc={proc.returncode}"
-        assert _wait_server_dead(redis_pid, timeout=20), (
-            "indexer's redis-server survived its killed parent")
+        _assert_server_dies_with_parent(
+            redis_pid, proc, "indexer's redis-server after its killed parent")
     finally:
         if proc.poll() is None:
             proc.kill()
@@ -757,8 +832,8 @@ def test_serve_stdio_sigterm_closes_embedded_server(tmp_path):
             proc.kill()
             pytest.fail("stdio server survived SIGTERM — guard did not fire")
         assert proc.returncode == -_signal.SIGTERM, f"rc={proc.returncode}"
-        assert _wait_server_dead(redis_pid, timeout=20), (
-            "stdio server's redis-server survived its SIGTERMed parent")
+        _assert_server_dies_with_parent(
+            redis_pid, proc, "stdio server's redis-server after its SIGTERMed parent")
     finally:
         if proc.poll() is None:
             proc.kill()
@@ -779,8 +854,8 @@ def test_serve_stdio_client_disconnect_closes_embedded_server(tmp_path):
             proc.kill()
             pytest.fail("stdio server did not exit on client disconnect")
         assert proc.returncode == 0, f"rc={proc.returncode}"
-        assert _wait_server_dead(redis_pid, timeout=20), (
-            "stdio server's redis-server survived client disconnect")
+        _assert_server_dies_with_parent(
+            redis_pid, proc, "stdio server's redis-server after client disconnect")
     finally:
         if proc.poll() is None:
             proc.kill()
@@ -841,8 +916,8 @@ def test_selfhost_daemon_sigterm_closes_embedded_server(tmp_path):
         except _subprocess.TimeoutExpired:
             proc.kill()
             pytest.fail("daemon survived SIGTERM")
-        assert _wait_server_dead(redis_pid, timeout=25), (
-            "daemon's redis-server survived its SIGTERMed parent")
+        _assert_server_dies_with_parent(
+            redis_pid, proc, "daemon's redis-server after its SIGTERMed parent")
     finally:
         if proc.poll() is None:
             proc.kill()
