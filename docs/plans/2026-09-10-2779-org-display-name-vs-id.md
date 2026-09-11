@@ -109,7 +109,7 @@ two client files — without changing the storage model.
    - `:9157` `create_team`: the inline `^[a-zA-Z0-9][a-zA-Z0-9_ -]{0,63}$`
      (`:9175`) is replaced by `validate_display_name`.
    - `:17449` `create_onboarding_team`: the length check + charset regex at
-     `:17470-17472` are replaced by `validate_display_name` (the lane itself is
+     `:17468-17472` are replaced by `validate_display_name` (the lane itself is
      `_create_onboarding_team_lane` at `:17516`).
    - `:20845` `billing_checkout_new_org`: the inline regex (`:20856`) is replaced by
      `validate_display_name`.
@@ -214,7 +214,7 @@ slug, and the two lanes finally agree on `team_{identifier}`.
      the control plane. Guarding only the derived path leaves that reachable. Then
      uniqueness on `id`; taken → **409 naming it**. Absent → `slugify_id(name)` +
      `resolve_id` against the taken set, inside the existing
-     `_team_create_lock(user_id)` (`:9170`, `:9185`).
+     `_team_create_lock(user_id)` (def `:9040`; taken at `:9188`, `:9191`).
    - `_create_team_supabase_lane` (`:9242`): the `uuid4().hex[:26]` mint at `:9284`
      is replaced by the resolved id; `provision_team(p_team_id=…,
      p_graph_name=f"team_{id}")` shape unchanged.
@@ -223,7 +223,7 @@ slug, and the two lanes finally agree on `team_{identifier}`.
    - `:17449` / `:20845`: same optional-`id` handling. `billing_checkout_new_org`
      adds `org_id` to the Stripe session `metadata` alongside the existing
      `org_name`, and `_provision_new_org_from_checkout` reads it.
-   - `:9002-9003` `GET /v1/teams`: no shape change (both fields already returned).
+   - `:8997-8998` `GET /v1/teams`: no shape change (both fields already returned).
 
 3. **`tortoise/sdk.py:14323` `team_create`** — add keyword
    `team_id: str | None = None`:

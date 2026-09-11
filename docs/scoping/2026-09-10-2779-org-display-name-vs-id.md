@@ -45,7 +45,7 @@ the real defect is **narrower and different** than the issue describes:
 
 | Issue premise | Actual state on main | Evidence |
 |---|---|---|
-| The space is rejected client-side | **Only one of three** client entry points rejects it | `main.jsx:4164-4170` rejects; `wizardFlow.js:139-148` allows; `main.jsx:4108-4113` allows |
+| The space is rejected client-side | **Only one of three** client entry points rejects it | `main.jsx:4164-4170` rejects; `wizardFlow.js:139-148` allows; `main.jsx:4118-4121` allows |
 | The space is rejected server-side | **No** — the server already accepts spaces on the org-create route | `hosted_api.py:9175` `^[a-zA-Z0-9][a-zA-Z0-9_ -]{0,63}$` (since #2547 / `efc2b2375`) |
 | The field "does double duty as name *and* id" | The id is already independent in the Supabase lane (`uuid4().hex[:26]`); the *namespace* is still name-derived in the registry lane | `hosted_api.py:9214`; `sdk.py:14373` `graph_name = f"team_{name}".replace(' ', '_')` |
 | Fix = make the error actionable | Necessary but **not sufficient** — the field is still labelled and behaves like an identifier at one entry point | `main.jsx:4168-4170` |
@@ -210,7 +210,7 @@ the display name is the cosmetic label, and the upgrade path is additive.
 ```
 
 `GET /v1/teams` (`hosted_api.py:8969`) already returns both fields per row
-(`team_id` at `:9002`, `team_name` at `:9003`) — no response-shape change is needed
+(`team_id` at `:8997`, `team_name` at `:8998`) — no response-shape change is needed
 for the switcher.
 
 ### 3.2 Every other org-creation entry point
@@ -453,11 +453,11 @@ Every one of these is a slice target. Line numbers are `a76f98fb6`.
 | Surface | Location | What it does today | Disposition |
 |---|---|---|---|
 | Org-create (account menu) | `hosted_api.py:9157` `create_team`, `:9242` supabase lane, `:9323` registry lane | name regex inline (`:9175`) | shared validator; optional `id` (§3.1) |
-| Onboarding second org | `:17449` `create_onboarding_team` (validation `:17470-17472`), `:17516` `_create_onboarding_team_lane` | length check + charset regex | shared validator; optional `id` |
+| Onboarding second org | `:17449` `create_onboarding_team` (validation `:17468-17472`), `:17516` `_create_onboarding_team_lane` | length check + charset regex | shared validator; optional `id` |
 | Paid new org | `:20845` `billing_checkout_new_org`, model `:2762` | its own regex at `:20856` | shared validator; `id` in Stripe metadata |
 | Internal provision (selfhost) | `:1188-1198` | `_id_pattern` + `_name_pattern` | `_name_pattern` → shared validator; `_id_pattern` referenced, not copied |
 | Edge Function first org | `supabase/functions/tenant-provision/index.ts:327-347` | `TEAM_NAME_RE` + slug fallback; deterministic `sha256(user_id)[:26]` id at `:355-370` | accept free-text name; namespace → `team_{team_id}`; deterministic-id exception documented §3.2 |
-| SDK `team_create` | `tortoise/sdk.py:14323` | `graph_name = f"team_{name}".replace(' ','_')` (`:14373`) and a name-keyed duplicate guard (`:14406`); its own name regex at `:14367` is `^[a-zA-Z0-9][a-zA-Z0-9_ -]*$` — spaces allowed, no `{0,63}` cap, so it is NOT `_id_pattern` | slice 1: namespace via `slugify_id(name)` (charset-safe while the id stays opaque); slice 2: `team_{team_id}`, guard re-keyed to `id`, shared validator (#2023) |
+| SDK `team_create` | `tortoise/sdk.py:14323` | `graph_name = f"team_{name}".replace(' ','_')` (`:14373`) and a name-keyed duplicate guard (`:14406`); its own name regex at `:14368` is `^[a-zA-Z0-9][a-zA-Z0-9_ -]*$` — spaces allowed, no `{0,63}` cap, so it is NOT `_id_pattern` | slice 1: namespace via `slugify_id(name)` (charset-safe while the id stays opaque); slice 2: `team_{team_id}`, guard re-keyed to `id`, shared validator (#2023) |
 | **CLI `key create`** | `tortoise/__main__.py:5660` `_cmd_key_create` — reuses an existing team by **name** (`:5697-5700` loops `MATCH (t:Team) RETURN t.id, t.name` and matches `tname == args.name`) then `sdk.team_create(args.name)` (`:5703`) | treats the display name as identity for idempotency | slice 1: route `args.name` through the shared validator; slice 2: **reuse by derived `id`, never by name** — under D4 two orgs may share a display name and the name-match would silently return another org's team |
 | Name-keyed mutation helper | `tortoise/sdk.py:14932-14941` — dedups `Team` nodes via `MATCH (t:Team {name:$name}) RETURN count(t) > 0` then skips | assumes name → identity | slice 2: key on `id` once display names may repeat (one-shot path, lower materiality than the CLI) |
 | Name-keyed duplicate guard (same file) | `tortoise/sdk.py:14406` — `MATCH (t:Team {name:$name}) RETURN count(t) > 0` inside `team_create` | the create-time name uniqueness guard | slice 2: covered by "the duplicate guard moves from `name` to `id`" |
@@ -536,7 +536,7 @@ a preference: **every slice must leave `main` consistent and green on its own.**
 **Slice 1 — display name is free text, and the namespace charset stays safe.**
 `tortoise/org_naming.py` (`validate_display_name`, `ID_PATTERN`,
 `identifier_error`, `slugify_id`, **and `RESERVED_IDENTIFIERS`**); route adoption at `hosted_api.py:9175`,
-`:1198`, `:17470-17472`, `:20856`, `tenant-provision`; **the registry-lane namespace fix**
+`:1198`, `:17468-17472`, `:20856`, `tenant-provision`; **the registry-lane namespace fix**
 — `tortoise/sdk.py:14373` replaces
 `graph_name = f"team_{name}".replace(' ','_')` with
 `graph_name = f"team_{slugify_id(name)}"`, because the display name is now free text
