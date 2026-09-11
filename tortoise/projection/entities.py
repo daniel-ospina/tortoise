@@ -261,7 +261,10 @@ class _EntityHandlers:
         for k, v in ev.items():
             if k in skip or v is None or not _is_persistable_prop_value(v):
                 continue
-            if isinstance(v, list) and list_props is not None \
+            # #2958 review: a TUPLE is persisted by the engine as an array
+            # exactly like a list, so the list policy must cover both —
+            # otherwise a tuple-valued key bypasses the undeclared-list denial.
+            if isinstance(v, (list, tuple)) and list_props is not None \
                     and k not in list_props:
                 continue
             extra[k] = v
@@ -405,16 +408,30 @@ class _EntityHandlers:
         # recompute keys (`embedding`/`updatedAt`/`_nid`/`_graph_id`) are
         # fixed-clause/handled and excluded here to avoid noise; the genuinely
         # payload-hostile set is `_POINT_DENY - _POINT_HANDLED`.
+        # #2958 review: warn ONCE per key per rebuild pass (the `_deny_drop_warned`
+        # set, reset by `rebuild_all`) — the #548 synthetic snapshot carries
+        # EP-owned state for every dreamed graph-only point, so a per-row
+        # warning emitted O(N) lines and buried genuine violations. On the live
+        # path the set persists for the process, which is the right cadence for
+        # a policy-level signal.
         for key in self._POINT_DENY - self._POINT_HANDLED:
-            if p.get(key) is not None:
-                logger.warning(
-                    "Point prop %r dropped — deny-listed (recompute/EP-owned, "
-                    "#2795); not restorable from the payload", key)
-        # (b) a policy-denied flat list is also reported: the live SDK writer
+            if p.get(key) is None:
+                continue
+            warned = getattr(self, "_deny_drop_warned", None)
+            if warned is None:
+                warned = self._deny_drop_warned = set()
+            if key in warned:
+                continue
+            warned.add(key)
+            logger.warning(
+                "Point prop %r dropped — deny-listed (recompute/EP-owned, "
+                "#2795); not restorable from the payload", key)
+        # (b) a policy-denied list is also reported: the live SDK writer
         # still stores raw lists (e.g. `tags`), but replay refuses them, so the
         # drop MUST be visible (#2795 indicator 4 / D7; `tags` -> #2897).
+        # #2958 review: tuples count as arrays here too (engine parity).
         for key, val in p.items():
-            if not (isinstance(val, list) and val):
+            if not (isinstance(val, (list, tuple)) and val):
                 continue
             if key in self._POINT_LIST_PROPS or key in self._POINT_HANDLED \
                     or key in self._POINT_DENY or key in self._META_KEYS:

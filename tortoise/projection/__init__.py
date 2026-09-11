@@ -1187,6 +1187,11 @@ class FalkorProjection(
         import os  # noqa: I001
         from tortoise.log import EventLog
 
+        # #2958 review: reset the once-per-key deny-drop warning set for this
+        # rebuild pass (see `_upsert_point_props`) so the report is emitted once
+        # per key per pass instead of once per graph-only point.
+        self._deny_drop_warned = set()
+
         # ── #548: snapshot existing graph BEFORE wiping ──────────────
         # SDK-created points written via Cypher may have no corresponding
         # event in the JSONL log. Snapshot them now so they survive the

@@ -869,6 +869,52 @@ def test_falkor_rebuild_malformed_revised_content_does_not_crash():
         pass  # shared session projection — module helper owns close
 
 
+def test_falkor_live_point_tuple_prop_denied_by_list_policy():
+    """#2958 review: the engine persists a TUPLE as an array exactly like a
+    list, so the Point list policy (empty `_POINT_LIST_PROPS` = deny
+    undeclared arrays) must cover tuples too — otherwise a tuple-valued key
+    bypasses the denial that refuses the equivalent list."""
+    if _skip_if_no_falkor():
+        pytest.skip("redislite falkordb unavailable")
+    proj = _shared_proj()
+    try:
+        proj.apply({"type": "PointAdded",
+                    "point": {"id": "p-live-tuple", "content": "x",
+                              "custom_tup": ("a", "b")}})
+        row = proj.query(
+            "MATCH (n:Point {id:'p-live-tuple'}) RETURN n.custom_tup"
+        ).result_set
+        assert row and row[0][0] is None, row
+    finally:
+        pass  # shared session projection — module helper owns close
+
+
+def test_falkor_rebuild_deny_warning_emitted_once_per_key(caplog):
+    """#2958 review: the deny-drop report is emitted once per key per rebuild
+    pass. The #548 synthetic snapshot carries EP-owned state for EVERY dreamed
+    graph-only point, so a per-row warning emitted O(N) lines on a supported
+    path and buried genuine violations."""
+    if _skip_if_no_falkor():
+        pytest.skip("redislite falkordb unavailable")
+    import logging
+    proj = FalkorProjection(_tmp("deny_once.db"), graph_name="test")
+    try:
+        for pid in ("dream-a", "dream-b", "dream-c"):
+            proj.g.query(
+                "CREATE (n:Point {id:$id, content:'x', pointKind:'statement', "
+                "is_operator:false, status:'live', posterior_alpha:2.0})",
+                params={"id": pid})
+        with caplog.at_level(logging.WARNING,
+                             logger="tortoise.projection.entities"):
+            proj.rebuild_all(tempfile.mkdtemp(prefix="tortoise_deny_once_"))
+        hits = [r.getMessage() for r in caplog.records
+                if "deny-listed" in r.getMessage()
+                and "posterior_alpha" in r.getMessage()]
+        assert len(hits) == 1, (len(hits), caplog.text)
+    finally:
+        proj.close()
+
+
 # ----------------------------------------------- FalkorProjection.edge_stats
 
 def test_falkor_edge_stats():
