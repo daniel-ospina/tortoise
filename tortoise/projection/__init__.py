@@ -2723,7 +2723,15 @@ class FalkorProjection(
         # real edit (hash of the empty string).
         if new_content is not None:
             set_clauses.append("n.content_hash = $ch")
-            params["ch"] = content_hash(new_content)
+            try:
+                params["ch"] = content_hash(new_content)
+            except Exception:
+                # Malformed/legacy event with a non-string new_content (a
+                # hand-edited or corrupt JSONL line — rebuild is the recovery
+                # path): NULL the hash instead of crashing the whole pass.
+                # NULL falls through to create_point's content-equality
+                # fallback; a stale present-but-wrong hash would not (#2942).
+                params["ch"] = None
         # Phase 2 #49: context removed — new_context no longer written
         if "embedding" in params:
             set_clauses.append("n.embedding = $embedding")
