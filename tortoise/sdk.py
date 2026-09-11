@@ -2467,7 +2467,6 @@ class TortoiseSDK:
                 f"{sorted(POINT_STATUS_VALUES)}"
             )
         if dedup:
-            ch = _content_hash(content)
             # P1 #49: dedup by content_hash + pointKind (NOT context, which is
             # no longer written). The A10 hash-less content+kind fallback now
             # rides the shared ``_find_point_by_content`` helper (#2892) so
