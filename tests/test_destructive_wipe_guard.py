@@ -17,7 +17,10 @@ Coverage map (per the issue's acceptance criteria):
       when the old ``_skip_guard`` bypass would have allowed it
   (b) the legitimate disposable paths still work
   (c) ``_skip_guard`` (or its replacement) cannot be flipped from ordinary
-      production code
+      production code — pinned at three depths: the identifier is gone from
+      both query paths (bytecode), the token is keyword-only with a refusing
+      default, and the L1 assertion BODY itself refuses without it (the
+      chokepoint test that reds if enforcement is neutered).
 
 The unit tests use a recording fake graph handle so they run in BOTH the
 embedded carve-out lane and the docker lane without a live server. The
@@ -25,6 +28,7 @@ end-to-end allow tests use a real embedded FalkorDB in ``tmp_path``.
 """
 from __future__ import annotations
 
+import ast
 import inspect
 import sys
 from pathlib import Path
@@ -170,23 +174,54 @@ def test_replacement_is_a_call_site_parameter_not_ambient_state():
         )
 
 
+def _rebuild_call_sites(path: Path) -> list:
+    """Every ``*.rebuild(...)`` / ``*.rebuild_all(...)`` call AST node in a file.
+
+    An AST walk, not a substring scan: the token must be present on the CALL,
+    so a comment or docstring mentioning ``confirm_destructive=True`` cannot
+    make this pin pass vacuously while the call itself omits it."""
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    sites = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        name = func.attr if isinstance(func, ast.Attribute) else (
+            func.id if isinstance(func, ast.Name) else None)
+        if name in ("rebuild", "rebuild_all"):
+            sites.append(node)
+    return sites
+
+
 def test_production_entry_points_thread_the_token():
     """(c) Every production call site must pass the token — no silent default.
 
     A caller reaching ``rebuild_all``/``rebuild`` without opting in gets the
-    refusal, so the shipped entry points must opt in explicitly in source.
-    This is a textual pin so a future refactor that drops the argument (and
-    thereby relies on the default) reds here."""
+    refusal, so the shipped entry points must opt in explicitly at the call.
+    Per-call-site AST check: dropping the argument (and thereby relying on the
+    default) reds here even if the token text survives elsewhere in the
+    file."""
     checks = {
         REPO_ROOT / "tortoise" / "__main__.py": "tortoise rebuild CLI",
         REPO_ROOT / "tortoise" / "migrate_db.py": "migrate_db",
         REPO_ROOT / "validation" / "validate_tortoise_ep.py": "validation script",
     }
     for path, label in checks.items():
-        src = path.read_text(encoding="utf-8")
-        assert "confirm_destructive=True" in src, (
-            f"{label}: {path.name} reaches the wipe without the explicit token"
-        )
+        sites = _rebuild_call_sites(path)
+        assert sites, f"{label}: no rebuild/rebuild_all call found in {path.name}"
+        for call in sites:
+            token = next(
+                (kw for kw in call.keywords if kw.arg == "confirm_destructive"),
+                None,
+            )
+            assert token is not None, (
+                f"{label}: {path.name}:{call.lineno} reaches the wipe without "
+                f"the explicit confirm_destructive token"
+            )
+            assert isinstance(token.value, ast.Constant) and token.value.value is True, (
+                f"{label}: {path.name}:{call.lineno}: confirm_destructive must be "
+                f"the literal True (a variable could be flipped at runtime)"
+            )
 
 
 # ── (a) non-disposable graphs are refused ─────────────────────────────────
@@ -332,3 +367,47 @@ def test_embedded_raw_wipe_on_test_graph_still_allowed():
     guarded = _GuardedGraph(_RecordingGraph(), proj)
     guarded.query("MATCH (n) DETACH DELETE n")
     assert len(guarded._g.queries) == 1
+
+
+def test_server_test_named_graph_raw_wipe_without_token_is_allowed():
+    """(b) The other half of L2's exemption, pinned: on the RAW-QUERY lane a
+    test-named SERVER graph wipes with no token (L1 is not on that lane). This
+    is the counterpart to the non-test server refusal above."""
+    proj = _bare_projection(graph_name="test_raw_server", embedded=False)
+    guarded = _GuardedGraph(_RecordingGraph(), proj)
+    guarded.query("MATCH (n) DETACH DELETE n")
+    assert len(guarded._g.queries) == 1
+
+
+# ── (c) DISCRIMINATING pins: the chokepoint body, not just caller shape ───
+
+
+def test_l1_chokepoint_itself_refuses_without_the_token():
+    """(c) The assertion BODY, not just the callers' shape.
+
+    Neutering ``_assert_destructive_confirmed`` is the exact failure mode the
+    identifier/signature pins above cannot observe, so this exercises the
+    chokepoint directly: it must raise for ``False`` and return for ``True``."""
+    proj = _bare_projection(graph_name="test_probe", embedded=True)
+    with pytest.raises(RuntimeError, match="confirm_destructive"):
+        proj._assert_destructive_confirmed(False, "rebuild_all")
+    proj._assert_destructive_confirmed(True, "rebuild_all")  # must not raise
+
+
+def test_wipe_all_nodes_consults_the_token_before_issuing_the_wipe(monkeypatch):
+    """(c) L1 must gate the wipe, in that order.
+
+    With the token check replaced by a sentinel raise, the wipe must never
+    reach the handle: if the call were dropped from ``_wipe_all_nodes`` the
+    rebuild would proceed to real I/O (a different exception) and/or record a
+    wipe here."""
+    proj = _bare_projection(graph_name="test_probe", embedded=True)
+
+    def _sentinel(confirm_destructive, operation):
+        raise RuntimeError("confirm_destructive: sentinel")
+
+    monkeypatch.setattr(proj, "_assert_destructive_confirmed", _sentinel)
+    with pytest.raises(RuntimeError, match="sentinel"):
+        proj.rebuild_all(NO_IO_DIR, confirm_destructive=True)
+    assert proj.g.wipes() == [], "the wipe ran before the token check"
+    assert proj.g.queries == [], "graph I/O ran before the token check"

@@ -99,9 +99,10 @@ def _is_bulk_wipe(cypher: str) -> bool:
 # and L1 alone left hand-written Cypher unguarded, so each layer exists
 # because the other does not cover it:
 #
-#   L1 — STRUCTURAL, per-call opt-in (#2944), on the rebuild lane.
-#        ``FalkorProjection._wipe_all_nodes()`` is the only AUTHORIZED path in
-#        this package that issues the literal whole-graph statement, and it
+#   L1 — STRUCTURAL, per-call opt-in (#2944), on the rebuild lane. The only
+#        AUTHORIZED rebuild-lane path in this package that issues the literal
+#        whole-graph statement (``MATCH (n) DETACH DELETE n`` with no
+#        label/WHERE/LIMIT) is ``FalkorProjection._wipe_all_nodes()``, and it
 #        refuses unless the CALLER passed ``confirm_destructive=True`` through
 #        ``rebuild_all()`` / ``rebuild()``. There is no default-allow, no
 #        module-level flag, no env var, and no instance attribute that can
@@ -110,10 +111,13 @@ def _is_bulk_wipe(cypher: str) -> bool:
 #        site. L1 applies to embedded DBs too — "embedded" means *isolated*,
 #        not *unsupervised*: an embedded wipe may be unrecoverable (missing or
 #        empty replay log, or a log that only parses after the wipe), so it too
-#        needs a deliberate per-call opt-in.
+#        needs a deliberate per-call opt-in. (The raw-query lane below can also
+#        issue that literal statement; there it is authorized by L2's
+#        embedded/test-name exemption, NOT by a token — see KNOWN GAPS.)
 #
 #   L2 — DEFENCE IN DEPTH, disposable-graph check (#99), on every GUARDED
-#        query. ``_GuardedGraph`` wraps ``proj.g``, so a bulk DETACH DELETE
+#        query. ``_GuardedGraph`` wraps the raw graph handle reached as
+#        ``proj.g``, so a bulk DETACH DELETE
 #        issued through ``proj.g.query`` / ``FalkorProjection.query``
 #        (hand-written Cypher included) is refused on a server graph whose name
 #        is not a disposable test graph. On the L1 lane a name is no longer
@@ -128,14 +132,22 @@ def _is_bulk_wipe(cypher: str) -> bool:
 #        than before.
 #
 # KNOWN GAPS (pre-existing, NOT fixed by #2944):
-#   * ``proj.db`` is the RAW FalkorDB client — ``proj.db.select_graph(...)
-#     .query("MATCH (n) DETACH DELETE n")`` bypasses L1 AND L2. In-tree users:
-#     battery/testing/seeds.py and graph-scripts/{smoke_test,
-#     profile_395_local_ep}.py. They reach a server graph the guard never sees.
+#   * ``proj.db`` is the RAW FalkorDB client. Two destructive forms reach a
+#     graph without passing either layer: ``select_graph(name).query("MATCH (n)
+#     DETACH DELETE n")`` (e.g. battery/testing/seeds.py:120,
+#     graph-scripts/smoke_test.py:130) and ``select_graph(name).delete()``
+#     (GRAPH.DELETE — used by ``sdk.team_delete``, ``hosted_api``,
+#     ``backup_sweep``). This surface cannot be closed inside the guard: a
+#     caller holding ``proj.db`` can equally build its own
+#     ``falkordb.FalkorDB(...)``. The guard's contract is "no wipe by
+#     *forgetting* an opt-in"; those callers carry their own
+#     confirmation/authorization (e.g. ``team_delete`` requires the team name
+#     to match).
 #   * ``_is_bulk_wipe`` over-classifies label/LIMIT-scoped deletes, so
 #     ``event_store.purge_overflow`` is refused on a non-test server graph and
-#     its caller swallows the error at DEBUG — the per-team event cap silently
-#     no-ops (tracked: #3007).
+#     its callers swallow it (the hosted sweeper at DEBUG, the SDK lazy hook at
+#     WARNING) — the per-team event cap no-ops without a build failure
+#     (tracked: #3007).
 #
 #
 # History: the pre-#2944 bypass was ``_skip_guard``, a plain boolean
@@ -916,10 +928,12 @@ class FalkorProjection(
         self.graph_name = graph_name
         self._graph_name = graph_name
         # NOTE (#2944): there is deliberately NO `_skip_guard` attribute here.
-        # The former bypass was removed; the only authorization for an
-        # unconditional wipe is the per-call `confirm_destructive=True`
-        # token threaded through rebuild()/rebuild_all() (L1) — see the
-        # two-layer guard comment above _GuardedGraph.
+        # The former bypass was removed. On the REBUILD LANE the only
+        # authorization for an unconditional wipe is the per-call
+        # `confirm_destructive=True` token threaded through
+        # rebuild()/rebuild_all() (L1); the raw-query lane has no token and is
+        # authorized instead by L2's embedded / test-name exemption — see the
+        # two-layer guard comment above _GuardedGraph and its KNOWN GAPS note.
         self._is_embedded = (path is not None)
         self._path = path
         # Ops safety residual (#428): auto health check on open + transparent
@@ -2172,7 +2186,9 @@ class FalkorProjection(
         # L2 guard (#99): refuse bulk graph-wipe on non-test graphs. There is
         # NO bypass attribute (#2944 removed `_skip_guard`): this path is
         # unconditional, exactly like _GuardedGraph.query. The authorized
-        # wipe path is FalkorProjection._wipe_all_nodes() (L1).
+        # REBUILD-LANE wipe path is FalkorProjection._wipe_all_nodes() (L1);
+        # on THIS raw-query lane L2 alone is the gate, so an embedded or
+        # test-named graph passes with no token — see KNOWN GAPS above.
         if _is_bulk_wipe(cypher):
             self._assert_test_graph(
                 f"REFUSING to run bulk DETACH DELETE on non-test graph "
@@ -2231,9 +2247,15 @@ class FalkorProjection(
         """L2 of the destructive-op guard: refuse bulk wipe on a non-test graph.
 
         Test graphs must start with 'test_' or 'tortoise_test'.
-        Embedded mode (path=) is inherently isolated (per-instance temp DB) —
-        the guard does NOT apply to it. Only server mode (docker) needs the
-        graph-name check, protecting the shared real graph (#99).
+        Embedded mode (path=) is exempt from the NAME check — the graph-name
+        rule does not apply to it. That is a name-check exemption, NOT a
+        supervision exemption: an embedded DB opened with ``path`` is a
+        persistent user database (``python -m tortoise rebuild --db <path>``),
+        and a raw-query wipe on it is supervised by NEITHER layer (L1 is only
+        consulted on the rebuild lane). Embedded REBUILDS are supervised —
+        ``_assert_destructive_confirmed`` / ``_wipe_all_nodes`` require the
+        per-call token in embedded mode too. See KNOWN GAPS in the module
+        comment.
 
         #2944 scope note: this is DEFENCE IN DEPTH, not the structural gate.
         The structural gate (L1, per-call ``confirm_destructive=True``) lives
@@ -2241,8 +2263,7 @@ class FalkorProjection(
         to embedded mode too. L2 stays because it refuses strictly more than
         L1 alone: a hand-written ``MATCH (n) DETACH DELETE n`` straight to the
         guarded handle is still refused on a non-test server graph, regardless
-        of whether any L1-authorized operation was in flight. "Embedded" here
-        means *isolated*, not *unsupervised* — that supervision is L1's job.
+        of whether any L1-authorized operation was in flight.
         """
         if getattr(self, "_is_embedded", False):
             return
