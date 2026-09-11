@@ -5918,9 +5918,19 @@ function claimIntentInFlight() {
                       // affordance at all (its only actions are "ask an owner or
                       // admin" and "Manage API keys →"), so the self-fork line
                       // would instruct an action that branch does not offer.
-                      if (!isOwnerAdmin || capNotice) {
+                      // PR-gate follow-up 2: capNotice is set ONLY by an
+                      // owner/admin mint, so the capped arm must not tell the
+                      // user to ask an owner — they are the owner. The build
+                      // fork has no paste escape, so its honest action is
+                      // freeing a slot in the API Keys tab.
+                      if (!isOwnerAdmin) {
                         return <p className="welcome-lede">{isBuildFork
                           ? 'Ask an owner or admin for an API key, then call the Tortoise SDK.'
+                          : 'Paste an API key to connect your agent.'}</p>
+                      }
+                      if (capNotice) {
+                        return <p className="welcome-lede">{isBuildFork
+                          ? 'Free a key slot in the API Keys tab, then call the Tortoise SDK.'
                           : 'Paste an API key to connect your agent.'}</p>
                       }
                       if (isBuildFork) return <p className="welcome-lede">Create an API key and call the Tortoise SDK from your app.</p>

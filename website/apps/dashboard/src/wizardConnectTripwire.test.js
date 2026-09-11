@@ -327,16 +327,21 @@ test('#2912: the step-2 lede asks what each branch actually does', () => {
   const src = stripComments(mainJsx)
   const i = src.indexOf('if (wizardStep === 2) {')
   assert.ok(i > -1, 'the step-2 lede fork exists')
-  const lede = src.slice(i, i + 1400)
+  const lede = src.slice(i, i + 1600)
   const memberSelf = lede.indexOf('Paste an API key to connect your agent.')
   const memberBuild = lede.indexOf('Ask an owner or admin for an API key, then call the Tortoise SDK.')
+  const cappedBuild = lede.indexOf('Free a key slot in the API Keys tab, then call the Tortoise SDK.')
   const ownerBuild = lede.indexOf('Create an API key and call the Tortoise SDK from your app.')
   assert.ok(memberSelf > -1, 'the member/capped SELF branch says what the step asks')
-  assert.ok(memberBuild > -1, 'the member/capped BUILD branch does not promise a paste it cannot offer')
+  assert.ok(memberBuild > -1, 'the member BUILD branch does not promise a paste it cannot offer')
+  assert.ok(cappedBuild > -1, 'the capped OWNER on the build fork is not told to ask an owner')
   assert.ok(ownerBuild > -1, 'the owner + build-fork branch exists')
-  // the role/cap check must still come first: a build-fork member cannot mint
+  // the role/cap checks must still come first: a build-fork member cannot mint,
+  // and capNotice is only ever set by an owner/admin mint.
   assert.ok(memberSelf < ownerBuild,
-    'the role/cap check must precede the owner build-fork line')
+    'the role check must precede the owner build-fork line')
+  assert.ok(cappedBuild < ownerBuild,
+    'the cap check must precede the owner build-fork line')
   assert.doesNotMatch(lede, /Connect Tortoise to your Organization\./,
     'the string #2912 reported as vague must not come back')
 })
