@@ -210,8 +210,17 @@ def test_double_encoded_percent_decodes_exactly_once():
 _PARSE_CALLS = {"urlparse", "urlsplit"}
 _USERINFO_ATTRS = {"username", "password"}
 
-# The one module allowed to read raw userinfo — it IS the decoding rule.
-_ALLOWED = {"tortoise/config.py"}
+# Directories whose modules feed parsed credentials to a DB/redis client.
+# ``tortoise/`` is the runtime package; ``graph-scripts/`` contains the repo
+# utility scripts this fix also converted (their ``_parse_uri`` helpers feed
+# ``FalkorDB(..., password=...)``).
+_GUARDED_DIRS = ("tortoise", "graph-scripts")
+
+# Modules allowed to read raw userinfo:
+#   * ``tortoise/config.py`` — it IS the single decoding rule (#3039).
+#   * ``graph-scripts/connectivity_gate.py`` — ``redact_uri`` masks a
+#     ``urlsplit`` result for display and never feeds a client.
+_ALLOWED = {"tortoise/config.py", "graph-scripts/connectivity_gate.py"}
 
 
 def _is_parse_call(call: ast.Call) -> bool:
@@ -225,7 +234,14 @@ def _is_parse_call(call: ast.Call) -> bool:
 
 def _raw_userinfo_reads(path: Path, rel: str) -> list[str]:
     """Line-level findings for raw userinfo reads on a urlparse/urlsplit result."""
-    tree = ast.parse(path.read_text(), filename=str(path))
+    import warnings
+
+    with warnings.catch_warnings():
+        # Some scanned scripts carry pre-existing invalid-escape literals
+        # (SyntaxWarning only) — the guard cares about attribute reads, not
+        # escape hygiene, and must not pollute the test output.
+        warnings.simplefilter("ignore", SyntaxWarning)
+        tree = ast.parse(path.read_text(), filename=str(path))
     # Names bound from a parse call anywhere in the module (Assign, AnnAssign,
     # walrus). Cross-function name reuse can only over-flag, never under-flag —
     # a found line is a prompt to look, not a proof.
@@ -235,6 +251,13 @@ def _raw_userinfo_reads(path: Path, rel: str) -> list[str]:
             parsed_names.update(
                 t.id for t in node.targets if isinstance(t, ast.Name)
             )
+        elif (
+            isinstance(node, ast.AnnAssign)
+            and _is_parse_call_value(node.value)
+            and isinstance(node.target, ast.Name)
+        ):
+            # `parsed: ParseResult = urlparse(uri)` — annotated local.
+            parsed_names.add(node.target.id)
         elif (
             isinstance(node, ast.NamedExpr)
             and _is_parse_call_value(node.value)
@@ -262,18 +285,22 @@ def _is_parse_call_value(value) -> bool:
 def test_no_raw_urlparse_userinfo_read_in_runtime_package():
     """Guard: only ``tortoise.config.parse_uri_userinfo`` may read userinfo.
 
-    Scans the runtime package (``tortoise/**``). Tests and ``graph-scripts/``
-    are excluded: tests legitimately probe raw ``urlparse`` semantics
-    (``test_sdk_props_coercion``) and ``connectivity_gate.redact_uri`` masks
-    a ``urlsplit`` result for display without feeding a client. The bug class
-    this guards is a runtime credential reaching a client undecoded.
+    Scans every module under ``_GUARDED_DIRS`` that can feed a parsed
+    credential to a DB/redis client: the ``tortoise/`` runtime package and the
+    ``graph-scripts/`` helpers converted by this fix. ``tests/`` is excluded —
+    tests legitimately probe raw ``urlparse`` semantics
+    (``test_sdk_props_coercion``). ``graph-scripts/connectivity_gate.py`` is
+    allowlisted because ``redact_uri`` masks a ``urlsplit`` result for display
+    and never feeds a client. The bug class guarded is a credential reaching a
+    client undecoded.
     """
     violations: list[str] = []
-    for path in sorted((REPO_ROOT / "tortoise").rglob("*.py")):
-        rel = path.relative_to(REPO_ROOT).as_posix()
-        if rel in _ALLOWED:
-            continue
-        violations.extend(_raw_userinfo_reads(path, rel))
+    for dirname in _GUARDED_DIRS:
+        for path in sorted((REPO_ROOT / dirname).rglob("*.py")):
+            rel = path.relative_to(REPO_ROOT).as_posix()
+            if rel in _ALLOWED:
+                continue
+            violations.extend(_raw_userinfo_reads(path, rel))
 
     assert not violations, (
         "raw urlparse userinfo read(s) found — route them through "
@@ -292,4 +319,27 @@ def test_guard_detects_the_pre_fix_pattern(tmp_path):
     )
     hits = _raw_userinfo_reads(sample, "sample.py")
     assert any("password" in h for h in hits)
+    assert any("username" in h for h in hits)
+
+    # Annotated local (`parsed: ParseResult = urlparse(uri)`) is the same bug
+    # shape and must not slip through the name-collection pass.
+    annotated = tmp_path / "annotated.py"
+    annotated.write_text(
+        "from urllib.parse import urlparse\n"
+        "parsed: object = urlparse(uri)\n"
+        "password = parsed.password\n"
+    )
+    hits = _raw_userinfo_reads(annotated, "annotated.py")
+    assert any("password" in h for h in hits)
+
+    # The allowlisted display-only shape (urlsplit → mask) is NOT a client feed,
+    # but the guard is name-based: prove it still flags a urlsplit read in a
+    # non-allowlisted module (fail-closed, not fail-open).
+    urlsplit_sample = tmp_path / "urlsplit_sample.py"
+    urlsplit_sample.write_text(
+        "from urllib.parse import urlsplit\n"
+        "parts = urlsplit(uri)\n"
+        "user = parts.username\n"
+    )
+    hits = _raw_userinfo_reads(urlsplit_sample, "urlsplit_sample.py")
     assert any("username" in h for h in hits)
