@@ -331,6 +331,9 @@ mcp_http_app = create_http_app(
     allowed_origins=_ALLOWED_ORIGINS,
     allowed_hosts=_ALLOWED_HOSTS,
     rate_limit=100,
+    # #2864: this is the only surface with an authorization server, so it is the
+    # only one that advertises the RFC 9728 challenge on `/mcp` 401s.
+    emit_oauth_challenge=True,
 )
 
 
@@ -619,7 +622,6 @@ async def _lifespan(app):
 
     async with mcp_http_app.lifespan(mcp_http_app):
         try:
-            import threading
 
             def _probe_loaded_model_id(model) -> str | None:
                 """Best-effort extraction of the loaded HF model id from a
@@ -685,7 +687,45 @@ async def _lifespan(app):
         global _WATCHER
         try:
             cfg = _backup_config_safe()
-            if cfg and os.environ.get("BACKUP_WATCHER_DISABLED") != "1":  # noqa: F823
+            # #2922: EVERY reason the watcher does not start must be stated on
+            # boot. The UnboundLocalError was one silent path; these two
+            # conditions were others — an absent/invalid backup config (the
+            # fail-closed default) or the test-only kill switch both left
+            # `_WATCHER` unset with no log line at all, i.e. the same "invisible
+            # dead monitor" state that hid this incident for ~31 days.
+            _watcher_disabled = os.environ.get("BACKUP_WATCHER_DISABLED") == "1"
+            # "The monitor is absent" is a warning only where a monitor is
+            # expected. Gating on the hosted marker (FLY_APP_NAME — the same
+            # truthiness test the durability guard uses) keeps production loud
+            # without making every TestClient/embedded boot warn about a subsystem
+            # those deployments legitimately leave off: a warning that fires on
+            # every healthy non-production boot is training-to-ignore material for
+            # the very signal #2922 needed.
+            _watcher_expected = bool(os.environ.get("FLY_APP_NAME"))
+            _not_started_reason = None
+            if cfg is None:
+                _not_started_reason = (
+                    "backup config unavailable (BACKUP_SWEEP_ENABLED off, or config invalid)"
+                )
+            elif _watcher_disabled:
+                _not_started_reason = (
+                    "BACKUP_WATCHER_DISABLED=1 (test-only kill switch; "
+                    "must never be set in production)"
+                )
+            if _not_started_reason is not None:
+                if _watcher_expected:
+                    _logger.warning(
+                        "backup watcher not started: %s — no backup staleness "
+                        "monitoring this boot",
+                        _not_started_reason,
+                    )
+                else:
+                    _logger.debug(
+                        "backup watcher not started: %s — no backup staleness "
+                        "monitoring this boot",
+                        _not_started_reason,
+                    )
+            if cfg and not _watcher_disabled:
                 from tortoise.backup_sweep import read_team_state
                 from tortoise.backup_watcher import BackupWatcher, WatcherThread
 
@@ -764,17 +804,44 @@ async def _lifespan(app):
                 _WATCHER = WatcherThread(watcher, interval_seconds=cfg.watcher_poll_seconds)
                 _WATCHER.start()
                 if not is_supabase_enabled():
-                    _boot_gc_drill_graphs(reg_sdk._get_proj().db)
+                    try:
+                        _boot_gc_drill_graphs(reg_sdk._get_proj().db)
+                    except Exception as exc:
+                        # #2922 review: a separate operation, so a separate
+                        # message. Reporting a drill-graph GC failure as "the
+                        # backup watcher could not start" would have told the
+                        # operator the opposite of the truth (the watcher IS
+                        # running by this point).
+                        _logger.error(
+                            "gc of drill graphs at boot failed: %s", exc, exc_info=True
+                        )
         except Exception as exc:
-            _logger.warning("backup watcher could not start: %s", exc)
+            # #2922: this used to be a swallowed `warning`. The watcher silently
+            # never started in hosted production (~31 days: watcher.running=false
+            # with last_poll 2026-08-11), which removed the one signal that would
+            # have surfaced #2790 (no sweep for 33 days, no drill ever recorded).
+            # Loud, with a traceback, so a dead watcher can never be invisible again.
+            _logger.error("backup watcher could not start: %s", exc, exc_info=True)
         # #432 Task 7: event retention — boot purge + interval task. Best-effort
         # and non-fatal (like the pre-warm): a purge failure never blocks bind.
         # Per-team graphs get purged by the SDK lazy hook too (embedded/stdio);
         # here we sweep once at boot and then on an asyncio interval.
+        #
+        # #2922: do NOT import asyncio/os locally here. Both are imported at module
+        # scope (lines 17/23), and a function-local `import os` makes `os` a local
+        # name for the WHOLE of _lifespan — so the earlier `os.environ.get(...)`
+        # read above raised UnboundLocalError and aborted the entire watcher-start
+        # block. Regression guard: tests/test_boot_regressions.py.
         try:
-            import asyncio
-            import os
-
+            # #2850/#2953: the inline `_sweep_events` closure and the two
+            # `await asyncio.to_thread(...)` boot calls that used to live here
+            # are GONE. `_sweep_events` is now hoisted to module scope (see its
+            # own definition above), and both boot sweeps run as a background
+            # task (`_run_boot_sweeps`) so the listening socket binds before any
+            # DB work. The previous `import asyncio` / `import os` lines are also
+            # gone — module-scope imports already cover them, and a function-local
+            # `import os` shadowed the module name for the WHOLE of `_lifespan`
+            # (#2851/#2922; regression guard tests/test_boot_regressions.py).
             interval = int(os.environ.get("TORTOISE_EVENT_RETENTION_INTERVAL", "3600"))
 
             async def _event_retention_loop() -> None:
@@ -797,7 +864,11 @@ async def _lifespan(app):
             app.state._boot_sweep_task = asyncio.get_event_loop().create_task(
                 _run_boot_sweeps())
         except Exception as exc:
-            _logger.warning("event retention loop not started: %s", exc)
+            # Best-effort by design (a purge failure must never block bind), but
+            # there is no retry: retention is off for this process's lifetime, so
+            # this is the same "silently never runs" shape as #2922 and gets the
+            # same treatment — ERROR plus a traceback.
+            _logger.error("event retention loop not started: %s", exc, exc_info=True)
 
         # ── #2850: the DB probe refresher — keeps /health's ``db`` field
         # honest without the request path doing any I/O at all.
@@ -1190,13 +1261,22 @@ app.add_middleware(ClientIPMiddleware)
 class ForwardedProtoMiddleware(BaseHTTPMiddleware):
     """Honor forwarded-proto headers when building redirect Locations (#985).
 
-    Starlette builds redirect URLs (e.g. the trailing-slash 307 for
-    ``POST /mcp`` → ``/mcp/``) from ``scope["scheme"]``, which is the
+    Starlette builds redirect URLs from ``scope["scheme"]``, which is the
     scheme the proxy used to reach the app — plain http behind the Fly
-    proxy (TLS terminates at the edge). The result is a downgraded
-    ``Location: http://api.premiselabs.co/mcp/``; the client follows it,
-    Fly 301s http→https, and POST-following HTTP stacks (MCP TS SDK)
-    convert the method to GET per RFC 9110 → ``GET /mcp/`` 405.
+    proxy (TLS terminates at the edge). For any trailing-slash redirect the
+    app emits, the result is a downgraded ``Location: http://…``; the client
+    follows it, Fly 301s http→https, and POST-following HTTP stacks (MCP TS
+    SDK) may convert the method to GET at that 301 (RFC 9110 §15.4.2) → 405.
+
+    NOTE (#2864): the ``/mcp`` → ``/mcp/`` redirect is itself gone —
+    ``McpPathCanonicalizerMiddleware`` rewrites the scope path so the
+    canonical connector URL is served without a redirect. This middleware
+    remains the scheme fix for every OTHER trailing-slash redirect the app
+    emits, so do not read the note above as covering ``/mcp`` any longer.
+
+    Citation note: the POST→GET conversion above is a property of 301/302
+    (RFC 9110 sections 15.4.2/15.4.3), NOT of the 307 Starlette emits — 307 is
+    method-preserving (section 15.4.8). The lossy step is the Fly edge's 301.
 
     This middleware rewrites ``scope["scheme"]`` from the FIRST value of
     the forwarded-proto header so redirect Locations carry the
@@ -1271,6 +1351,52 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
 app.add_middleware(SecurityHeadersMiddleware)
 
 app.add_middleware(AnalyticsMiddleware)
+
+
+class McpPathCanonicalizerMiddleware:
+    """Exact-match ``/mcp`` to ``/mcp/``, so the JSON-RPC POST never 307s (#2864).
+
+    Starlette's ``redirect_slashes`` answers a request for ``/mcp`` with a 307 to
+    ``/mcp/`` (the MCP app is mounted at ``/mcp``). 307 is method-preserving by
+    spec (RFC 9110 section 15.4.8: the method MUST NOT change), so the 307 itself
+    is not the hazard — the #985 chain is: the Fly edge 301s http→https, and 301
+    is NOT method-preserving (#15.4.2 lets a client rewrite POST to GET), so the
+    round trip is lossy for exactly the clients least able to tolerate it. Beyond
+    that, a redirect on a JSON-RPC POST is simply needless. Rewriting the scope
+    path internally means the client-visible URL stays ``https://…/mcp`` — the
+    canonical connector URL — with no redirect at all.
+
+    EXACT match only (on the ROUTE path): ``/mcpfoo``, ``/Mcp`` and ``/mcp/x``
+    are untouched, so the rewrite can never widen the surface or shadow a
+    sibling route. Deliberately
+    pure ASGI rather than ``BaseHTTPMiddleware``: it must mutate the scope
+    *before* routing, and this avoids the response-wrapping overhead on the
+    hottest endpoint in the app.
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http":
+            # Compare on the ROUTE path (Starlette strips root_path there), not
+            # the raw path: under an ASGI mount prefix (`uvicorn --root-path
+            # /x`) scope["path"] is "/x/mcp" while the route path is "/mcp",
+            # so a raw comparison would silently re-enable the 307 — and would
+            # ALSO miss the unprefixed "/mcp" form. One comparison covers both.
+            from starlette.routing import get_route_path
+
+            if get_route_path(scope) == "/mcp":
+                scope = dict(scope)
+                root = scope.get("root_path", "")
+                scope["path"] = f"{root}/mcp/"
+                scope["raw_path"] = scope["path"].encode()
+        await self.app(scope, receive, send)
+
+
+# Added LAST so it is the OUTERMOST middleware: the path is canonicalized before
+# any other middleware or router sees it, and before a redirect can be built.
+app.add_middleware(McpPathCanonicalizerMiddleware)
 # Internal auth key for Edge Function → API communication
 # Read lazily (not at import): tests and multi-app processes set
 # FASTAPI_INTERNAL_KEY after tortoise.hosted_api may already be imported,
@@ -3111,6 +3237,22 @@ class CheckoutResponse(BaseModel):
     checkout_url: str
 
 
+class NewOrgCheckoutRequest(BaseModel):
+    """#2789: POST /v1/billing/checkout/new-org body — the intended org name
+    plus the plan's server-side price id. The org does not exist yet; the name
+    is validated exactly like POST /v1/teams (the same 64-char/pattern rule)."""
+    name: str = Field(..., min_length=1, max_length=64)
+    price_id: str = Field(..., min_length=1, max_length=128)
+
+
+class NewOrgCheckoutResponse(BaseModel):
+    """#2789: the Checkout URL plus the PRE-MINTED org id, echoed so the
+    client can switch to the org once the webhook provisions it
+    (``?new_org=<team_id>`` on the success return)."""
+    checkout_url: str
+    team_id: str
+
+
 class PortalResponse(BaseModel):
     portal_url: str
 
@@ -4279,15 +4421,21 @@ async def team_info(team: dict = Depends(get_current_team_session_ungated)):  # 
     teams (the #1148 gate stays scoped to the management set)."""
     _reject_graph_bound_team_surface(team, "team overview")
     sdk = _make_sdk(namespace=team["team_id"])
-    # Count Points in default graph. #1591: FAIL SOFT — a missing/broken team
-    # graph (half-failed provisioning, restores) must not dead-end the
-    # dashboard with a hard 500; the client renders the empty state and a
-    # write recreates the graph.
+    # Count REAL Points in default graph. #2360: demo/sample Points
+    # (_seed_demo_graph: the 12 sample Points + _demo_sentinel) are EXCLUDED
+    # — the Overview memory digest (this count) presents the user's own
+    # filings, never opt-in/legacy sample content masquerading as user data.
+    # The exclusion set is the same constant the demo seeder writes from, so
+    # it can never drift. #1591: FAIL SOFT — a missing/broken team graph
+    # (half-failed provisioning, restores) must not dead-end the dashboard
+    # with a hard 500; the client renders the empty state and a write
+    # recreates the graph.
     point_count = 0
     graph_ready = True
     try:
         point_count = sdk._get_proj().g.query(
-            "MATCH (n:Point) RETURN count(n)"
+            "MATCH (n:Point) WHERE NOT n.id IN $demo_ids RETURN count(n)",
+            params={"demo_ids": list(_DEMO_POINT_IDS)},
         ).result_set[0][0]
     except Exception:
         import logging
@@ -5346,34 +5494,104 @@ async def email_signup(request: Request):
     )
 
 
+# ── #2360 (re-spec): the demo/sample seed is NOT part of fresh-org
+# provisioning any more — the tenant-provision Edge Function calls the REAL
+# starter seed (/internal/starter-seed) instead, which files the signing-up
+# user + their Organization as connected anchor Subjects (never sample
+# Points). The demo seed below survives ONLY as an explicit opt-in sample
+# (/v1/demo + MCP tortoise_onboarding_demo_create) for callers who ask for
+# it — and every demo Point it writes is EXCLUDED from the count-of-record
+# surfaces (team.point_count — the Overview memory digest) so sample content
+# is never presented as the user's own filings. The id set is the single
+# source of truth for the exclusion: point_count and the seeder share it, so
+# a demo id can never drift into the digest.
+_DEMO_SENTINEL_ID = "_demo_sentinel"
+
+# (pid, pointKind, content, tags)
+_DEMO_SEMANTIC_POINTS = [
+    ("sem_welcome", "observation",
+     "Your Tortoise graph is ready. This is where agents file decisions, "
+     "observations, and findings so your team remembers across sessions.",
+     ["system", "welcome"]),
+    ("sem_fact_tortoise", "statement",
+     "Tortoise is a semantic epistemic graph engine that powers agent memory "
+     "through four ontology layers: Semantic, Episodic, Epistemic, and Procedural.",
+     ["tortoise", "overview"]),
+    ("sem_fact_layers", "statement",
+     "Semantic = facts and statements. Episodic = session history and events. "
+     "Epistemic = claims with evidence and confidence. Procedural = workflows and skills.",
+     ["tortoise", "ontology"]),
+]
+
+# (pid, content) — episodic turns (pointKind 'event', no tags)
+_DEMO_EPISODIC_TURNS = [
+    ("epi_turn1", "[user] Let's set up our agent memory system with Tortoise."),
+    ("epi_turn2", "[assistant] I'll initialize the graph and configure the ontology layers. "
+     "Once set up, all decisions will be tracked automatically."),
+    ("epi_turn3", "[user] Great — make sure we capture decisions about architecture and product strategy."),
+]
+
+# (pid, pointKind, content, confidence, tags)
+_DEMO_EPISTEMIC_POINTS = [
+    ("epis_claim1", "hypothesis",
+     "Agent memory systems should be graph-native rather than vector-only "
+     "because semantic relationships carry more signal than embedding proximity.",
+     0.7, ["hypothesis", "architecture"]),
+    ("epis_claim2", "evidence",
+     "Teams using structured agent memory report 40% fewer repeated mistakes "
+     "and 3x faster onboarding for new team members.",
+     0.5, ["evidence", "adoption"]),
+    ("epis_claim3", "decision",
+     "We will use FalkorDB as the graph backend because it supports Cypher "
+     "queries and runs as a lightweight extension to Redis.",
+     0.9, ["decision", "infrastructure"]),
+]
+
+# (pid, pointKind, content, tags)
+_DEMO_PROCEDURAL_POINTS = [
+    ("proc_wf1", "workflow",
+     "CONTEXT-INJECTION: Before any coding task, call tortoise_suggest_entry_points() "
+     "to find related context from past sessions and decisions.",
+     ["workflow", "context"]),
+    ("proc_wf2", "workflow",
+     "DECISION-CAPTURE: After making a design decision, call tortoise_create_point() "
+     "with kind='decision' so future agents can trace the reasoning chain.",
+     ["workflow", "decision"]),
+    ("proc_wf3", "workflow",
+     "REVIEW-GATE: Before merging any PR, verify that key decisions are filed in Tortoise. "
+     "If not, file them before merging.",
+     ["workflow", "review"]),
+]
+
+# Every demo/sample Point the seeder can write, incl. the sentinel. The
+# Overview digest (team.point_count) excludes exactly this set — sample
+# content never counts as the user's own filings (#2360).
+_DEMO_POINT_IDS: frozenset[str] = frozenset(
+    pid for pid, *_ in (
+        _DEMO_SEMANTIC_POINTS + _DEMO_EPISODIC_TURNS
+        + _DEMO_EPISTEMIC_POINTS + _DEMO_PROCEDURAL_POINTS)
+) | {_DEMO_SENTINEL_ID}
+
+
 def _seed_demo_graph(team_id: str) -> dict:
-    """Seed the 4-layer demo graph for a team. Idempotent (sentinel)."""
+    """Seed the 4-layer OPT-IN demo/sample graph for a team. Idempotent
+    (sentinel). #2360: NEVER called on the fresh-org provisioning path —
+    fresh orgs get the REAL starter seed (/internal/starter-seed) instead.
+    Every Point written here is excluded from team.point_count, so opt-in
+    sample content is never counted as the user's own filings."""
     sdk = _make_sdk(namespace=team_id)
     proj = sdk._get_proj()
     now = datetime.now(UTC).isoformat()
 
     # Idempotency: sentinel written last — skip if already fully seeded
     existing = proj.g.query(
-        "MATCH (p:Point {id: '_demo_sentinel'}) RETURN p.id"
+        f"MATCH (p:Point {{id: '{_DEMO_SENTINEL_ID}'}}) RETURN p.id"
     ).result_set
     if existing:
         return {"status": "already_seeded", "team_id": team_id}
 
     # ── Semantic Layer — facts and statements ────────────────────
-    semantic_points = [
-        ("sem_welcome", "observation",
-         "Your Tortoise graph is ready. This is where agents file decisions, "
-         "observations, and findings so your team remembers across sessions.",
-         ["system", "welcome"]),
-        ("sem_fact_tortoise", "statement",
-         "Tortoise is a semantic epistemic graph engine that powers agent memory "
-         "through four ontology layers: Semantic, Episodic, Epistemic, and Procedural.",
-         ["tortoise", "overview"]),
-        ("sem_fact_layers", "statement",
-         "Semantic = facts and statements. Episodic = session history and events. "
-         "Epistemic = claims with evidence and confidence. Procedural = workflows and skills.",
-         ["tortoise", "ontology"]),
-    ]
+    semantic_points = _DEMO_SEMANTIC_POINTS
     for pid, kind, content, tags in semantic_points:
         proj.g.query(
             "MERGE (p:Point {id:$id}) "
@@ -5396,12 +5614,7 @@ def _seed_demo_graph(team_id: str) -> dict:
         "SET s.created_at=$now, s.turn_count=3",
         params={"sid": session_id, "now": now},
     )
-    episodic_turns = [
-        ("epi_turn1", "[user] Let's set up our agent memory system with Tortoise."),
-        ("epi_turn2", "[assistant] I'll initialize the graph and configure the ontology layers. "
-         "Once set up, all decisions will be tracked automatically."),
-        ("epi_turn3", "[user] Great — make sure we capture decisions about architecture and product strategy."),
-    ]
+    episodic_turns = _DEMO_EPISODIC_TURNS
     for pid, content in episodic_turns:
         proj.g.query(
             "MERGE (t:Point {id:$id}) "
@@ -5416,20 +5629,7 @@ def _seed_demo_graph(team_id: str) -> dict:
         )
 
     # ── Epistemic Layer — claims with evidence ───────────────────
-    epistemic_points = [
-        ("epis_claim1", "hypothesis",
-         "Agent memory systems should be graph-native rather than vector-only "
-         "because semantic relationships carry more signal than embedding proximity.",
-         0.7, ["hypothesis", "architecture"]),
-        ("epis_claim2", "evidence",
-         "Teams using structured agent memory report 40% fewer repeated mistakes "
-         "and 3x faster onboarding for new team members.",
-         0.5, ["evidence", "adoption"]),
-        ("epis_claim3", "decision",
-         "We will use FalkorDB as the graph backend because it supports Cypher "
-         "queries and runs as a lightweight extension to Redis.",
-         0.9, ["decision", "infrastructure"]),
-    ]
+    epistemic_points = _DEMO_EPISTEMIC_POINTS
     for pid, kind, content, confidence, tags in epistemic_points:
         proj.g.query(
             "MERGE (p:Point {id:$id}) "
@@ -5446,20 +5646,7 @@ def _seed_demo_graph(team_id: str) -> dict:
             )
 
     # ── Procedural Layer — workflows ─────────────────────────────
-    procedural_points = [
-        ("proc_wf1", "workflow",
-         "CONTEXT-INJECTION: Before any coding task, call tortoise_suggest_entry_points() "
-         "to find related context from past sessions and decisions.",
-         ["workflow", "context"]),
-        ("proc_wf2", "workflow",
-         "DECISION-CAPTURE: After making a design decision, call tortoise_create_point() "
-         "with kind='decision' so future agents can trace the reasoning chain.",
-         ["workflow", "decision"]),
-        ("proc_wf3", "workflow",
-         "REVIEW-GATE: Before merging any PR, verify that key decisions are filed in Tortoise. "
-         "If not, file them before merging.",
-         ["workflow", "review"]),
-    ]
+    procedural_points = _DEMO_PROCEDURAL_POINTS
     for pid, kind, content, tags in procedural_points:
         proj.g.query(
             "MERGE (p:Point {id:$id}) "
@@ -5489,7 +5676,7 @@ def _seed_demo_graph(team_id: str) -> dict:
 
     # ── Sentinel — written last so partial failure allows retry ──
     proj.g.query(
-        "CREATE (p:Point {id:'_demo_sentinel', content:'demo-sentinel', "
+        f"CREATE (p:Point {{id:'{_DEMO_SENTINEL_ID}', content:'demo-sentinel', "
         "pointKind:'system', is_operator:false, status:'live', "
         "createdAt:$now, updatedAt:$now})",
         params={"now": now},
@@ -5517,10 +5704,15 @@ def _seed_demo_graph(team_id: str) -> dict:
 
 @app.post("/internal/demo")
 async def create_demo_graph(request: Request):
-    """Create a demo graph with sample Points across all 4 ontology layers.
+    """Create an OPT-IN demo graph with sample Points across all 4 ontology
+    layers.
 
-    Called by the tenant-provision Edge Function after provisioning to seed
-    demo data so new users see a populated graph immediately.
+    #2360 (re-spec): this is NO LONGER auto-called by the tenant-provision
+    Edge Function on fresh orgs — fresh orgs receive the REAL starter seed
+    (/internal/starter-seed: the signing-up user + their Organization as
+    connected Subjects). This endpoint stays only as the explicit opt-in
+    sample path (quota-gated, metered), and every Point it writes is
+    excluded from the Overview memory digest (team.point_count).
     """
     _check_internal(request)
 
@@ -9336,6 +9528,10 @@ async def list_my_teams(user: dict = Depends(get_current_user)):  # noqa: B008
             "team_name": team.get("name", m["team_id"]),
             "tier": team.get("tier", "free"),
             "role": m["role"],
+            # #2789: the client pre-check for the one-free-org dialog needs the
+            # SAME subscription signal the server counts on (an owner of a
+            # free-tier row that is nonetheless paid must not look free).
+            "subscription_status": team.get("subscription_status"),
             "graph_count": len(graphs),
             "default_graph_id": next((g["graph_id"] for g in graphs if g["kind"] == "default"), None),
             "suspended_at": suspended_at,
@@ -9418,6 +9614,76 @@ async def _count_active_free_memberships(user_id: str) -> int:
     return rows[0][0] if rows else 0
 
 
+async def _owned_free_org_ids(user_id: str) -> list[str]:
+    """#2789: the OWNERSHIP-based entitlement twin of
+    `_count_active_free_memberships`.
+
+    #1877 asked "does this person already have a team without a paid plan?" and
+    answered it with MEMBERSHIP, which counts a user who merely accepted an
+    invite into someone else's free org — so a collaborator could not create
+    their own org (#2789's motivating trap). The product decision is "one FREE
+    ORGANIZATION per person": count active memberships where the user is the
+    **owner** of a team with no active paid subscription, excluding
+    `pending_payment` (a not-yet-real org does not consume the allowance).
+
+    Distinct from `_count_active_free_memberships` on purpose: the
+    invite-JOIN gates (hosted_api.py:11393/11808/12320) still read the
+    membership-scoped count, and #2789's out-of-scope list pins that
+    semantics. Create-org gates read THIS one. Mode-aware with the same shape
+    as the #1877 helper: supabase reads `subscription_status`; selfhost (no
+    subscription model) uses `tier='free'` as the no-sub proxy and
+    `tier IS NULL` fail-closes. Supabase twin shape-gates user_id and skips
+    dangling memberships — never a 500."""
+    from tortoise.supabase_control import (
+        get_control_plane,
+        is_supabase_enabled,
+    )
+    from tortoise.supabase_control import (
+        owned_free_org_ids as _sb_ids,
+    )
+    if is_supabase_enabled():
+        import asyncio as _asyncio
+        ids = _sb_ids(get_control_plane(), user_id)
+        await _asyncio.sleep(0)  # the TOCTOU read window (#1954)
+        return ids
+    reg = _make_sdk(namespace="registry")._get_registry()
+    # RedisGraph-safe predicates (no coalesce/IN-list params): the explicit
+    # IS NULL branch keeps a property-less legacy Team node counting as free
+    # (fail-closed, parity with the #1877 twin), while an active/paid or
+    # pending_payment subscription_status excludes it.
+    rows = reg.query(
+        "MATCH (m:Membership {user_id:$uid, status:'active', role:'owner'}) "
+        "WHERE m.team_id <> '' "
+        "MATCH (t:Team {id:m.team_id}) "
+        "WHERE (t.tier='free' OR t.tier IS NULL) "
+        "AND (t.subscription_status IS NULL "
+        "     OR (t.subscription_status <> 'active' "
+        "         AND t.subscription_status <> 'past_due' "
+        "         AND t.subscription_status <> 'trialing' "
+        "         AND t.subscription_status <> 'pending_payment')) "
+        "RETURN m.team_id ORDER BY m.created_at",
+        params={"uid": user_id},
+    ).result_set
+    import asyncio as _asyncio
+    await _asyncio.sleep(0)  # the TOCTOU read window (#1954)
+    return [r[0] for r in rows if r and r[0]]
+
+
+def _one_free_org_detail(team_id: str | None) -> dict:
+    """#2789: the machine-readable 402 payload for a blocked create-org.
+
+    The dashboard's three-option dialog is driven by `code` — never by
+    string-matching `detail` (the pre-#2789 contract was a bare string and the
+    fetch layer string-handled it). `team_id` names the owned free org the
+    dialog's "Upgrade current organization" action targets, so the client need
+    not guess when the user is not currently ON that org."""
+    return {
+        "code": "one_free_org_limit",
+        "message": "You can only have one free organization",
+        "team_id": team_id,
+    }
+
+
 @app.post("/v1/teams")
 async def create_team(body: dict, user: dict = Depends(get_current_user)):  # noqa: B008
     """E2 — create a team (zero-teams state). Tier defaults Free; team
@@ -9431,13 +9697,13 @@ async def create_team(body: dict, user: dict = Depends(get_current_user)):  # no
     + membership_create) stays for selfhost."""
     name = (body.get("name") or "").strip()
     if not name:
-        raise HTTPException(status_code=422, detail="Team name required")
+        raise HTTPException(status_code=422, detail="Organization name required")
     if len(name) > 64:
-        raise HTTPException(status_code=422, detail="Team name must be ≤ 64 characters")
+        raise HTTPException(status_code=422, detail="Organization name must be ≤ 64 characters")
     import re as _re
     # spaces are now allowed in team names (onboarding wizard needs them)
     if not _re.match(r"^[a-zA-Z0-9][a-zA-Z0-9_ -]{0,63}$", name):
-        raise HTTPException(status_code=422, detail="Invalid team name")
+        raise HTTPException(status_code=422, detail="Invalid organization name")
 
     # #1954: the 429/409/402 gates + provision are read-then-write — the
     # whole check+provision runs under the per-user lock so a concurrent
@@ -9456,65 +9722,33 @@ async def create_team(body: dict, user: dict = Depends(get_current_user)):  # no
         return await _create_team_registry_lane(sdk, name, user)
 
 
-async def _create_team_supabase_lane(cp, name: str, user: dict) -> dict:
-    """#1954: the Supabase create_team lane — 429 → 409 → 402 gates + the
-    atomic provision_team write. MUST be called holding the caller's
-    _team_create_lock (the gates are read-then-write; the lock is what makes
-    a concurrent burst mint exactly one team)."""
-    import uuid as _uuid
-    from datetime import datetime
-    from datetime import timedelta as _td
+def _eager_provision_org_graph(cp, team_id: str, name: str, user_id: str) -> str:
+    """Effect the eager default-graph TeamMeta + OnboardingState init for an
+    org that is about to be provisioned; return its graph name.
 
-    from tortoise.supabase_control import (
-        active_membership_team_ids,
-        membership_count_since,
-        provision_team,
-        team_by_name,
-    )
+    Eager TeamMeta FIRST (register_user's documented ordering — review P2, PR
+    #874): an orphaned graph namespace is harmless, an orphaned teams row is
+    not (provision-then-graph would 500 the client with rows persisted; retry
+    then 409s on the name). #2001 (W5): OnboardingState init rides the same
+    statement — compact = creator's prior memberships > 0; fork inherited from
+    the earliest prior org ('self' fallback — never re-asks the fork card).
 
-    # Per-user team-creation rate limit (abuse posture) — the Supabase
-    # twin of the registry owner-membership count (#743(b) semantics:
-    # role='owner' rows created within the last hour).
-    since = (datetime.now(UTC) - _td(hours=1)).isoformat()
-    recent = membership_count_since(
-        cp, cutoff=since, user_id=user["user_id"], role="owner")
-    if recent >= 3:
-        raise HTTPException(status_code=429,
-                            detail="Too many teams created — try again later")
-    # Duplicate-name 409 (registry team_create raises ControlPlaneError
-    # 'already exists'; the 0011 unique index is the atomic guard — the
-    # pre-check is the friendly fast-path, the RPC 409 is authoritative).
-    if team_by_name(cp, name):
-        raise HTTPException(status_code=409, detail="Team name already exists")
-    # #1877: per-person entitlement — one free team. Any active
-    # membership in a team without an active paid subscription blocks
-    # creating another (the new team would start Free → 2 free teams).
-    # Order pinned: 429 → 409 → 402 (a free-capped user creating a
-    # duplicate name gets 409, not 402). STRING detail (the dashboard
-    # fetch layer string-handles details).
-    if await _count_active_free_memberships(user["user_id"]) >= 1:
-        raise HTTPException(
-            status_code=402,
-            detail="Create another team requires a paid plan — upgrade an existing team first")
-
-    team_id = str(_uuid.uuid4().hex[:26])
-    graph_name = f"team_{team_id}"  # stored name == data-plane namespace (team_id) — export/backup/delete resolve the real graph; parity with register_user/agent_signup (#1903; sdk.team_create keeps team_{name} — registry lane tracked in #2023)
-    # #1921: keyless provisioning — NO tt_ mint. The old per-call mint was
-    # a dead key: plaintext never returned (hash-only at rest), counted
-    # against max_api_keys, unclaimable (#1082) — 2 free teams exhausted
-    # the cap with zero usable keys. Mirror create_onboarding_team's #1716
-    # fix: the team stays keyless until a session-key mint (POST
-    # /v1/session/key writes the api_keys row itself).
-    # Eager default-graph TeamMeta FIRST (register_user's documented
-    # ordering — review P2, PR #874): an orphaned graph namespace is
-    # harmless, an orphaned teams row is not (provision-then-graph would
-    # 500 the client with rows persisted; retry then 409s on the name).
-    # #2001 (W5): eager OnboardingState init in the same statement —
-    # compact = creator's prior memberships > 0; fork inherited from the
-    # earliest prior org ('self' fallback — never re-asks the fork card).
+    IDEMPOTENT (#2789): a graph that already carries a TeamMeta is left
+    untouched. The paid-new-org webhook re-enters this helper when a RETRY
+    finds the teams row still absent (the RPC failed after the graph init),
+    and a plain CREATE would leave a second, conflicting TeamMeta node. The
+    TeamMeta-exists probe is the cheapest form of that guard and costs one
+    read on the fresh path (which never has TeamMeta anyway).
+    """
     from tortoise.onboarding import state as _os
+    graph_name = f"team_{team_id}"
     proj = _make_sdk(namespace=team_id)._get_proj()
-    prior_team_ids = active_membership_team_ids(cp, user["user_id"])
+    graph = proj.db.select_graph(graph_name)
+    _seen = graph.query("MATCH (m:TeamMeta) RETURN count(m)").result_set
+    if _seen and _seen[0][0]:
+        return graph_name  # already initialised — a retry must not duplicate
+    from tortoise.supabase_control import active_membership_team_ids
+    prior_team_ids = active_membership_team_ids(cp, user_id)
     prior_fork = None
     if prior_team_ids:
         try:
@@ -9529,9 +9763,65 @@ async def _create_team_supabase_lane(cp, name: str, user: dict) -> dict:
         "CREATE (:TeamMeta {name: $name, created: $now})",
         {"name": name, "now": datetime.now(UTC).isoformat()},
         org_id=team_id, fork=init_fork, compact=init_compact)
-    proj.db.select_graph(graph_name).query(_init_q, params=_init_p)
+    graph.query(_init_q, params=_init_p)
     # #1686: journal the minted team_* graph (session sweep drops it).
     _journal_append_product(graph_name)
+    return graph_name
+
+
+async def _create_team_supabase_lane(cp, name: str, user: dict) -> dict:
+    """#1954: the Supabase create_team lane — 429 → 409 → 402 gates + the
+    atomic provision_team write. MUST be called holding the caller's
+    _team_create_lock (the gates are read-then-write; the lock is what makes
+    a concurrent burst mint exactly one team)."""
+    import uuid as _uuid
+    from datetime import datetime
+    from datetime import timedelta as _td
+
+    from tortoise.supabase_control import (
+        membership_count_since,
+        provision_team,
+        team_by_name,
+    )
+
+    # Per-user team-creation rate limit (abuse posture) — the Supabase
+    # twin of the registry owner-membership count (#743(b) semantics:
+    # role='owner' rows created within the last hour).
+    since = (datetime.now(UTC) - _td(hours=1)).isoformat()
+    recent = membership_count_since(
+        cp, cutoff=since, user_id=user["user_id"], role="owner")
+    if recent >= 3:
+        raise HTTPException(status_code=429,
+                            detail="Too many organizations created — try again later")
+    # Duplicate-name 409 (registry team_create raises ControlPlaneError
+    # 'already exists'; the 0011 unique index is the atomic guard — the
+    # pre-check is the friendly fast-path, the RPC 409 is authoritative).
+    if team_by_name(cp, name):
+        raise HTTPException(status_code=409, detail="Organization name already exists")
+    # #1877/#2789: per-person entitlement — one FREE ORGANIZATION, counted by
+    # OWNERSHIP (role='owner'), not membership. Any active owned org without an
+    # active paid subscription blocks creating another (the new team would
+    # start Free → 2 free orgs). A collaborator on someone else's free org
+    # still passes. Order pinned: 429 → 409 → 402 (a free-capped user creating
+    # a duplicate name gets 409, not 402). STRUCTURED detail (#2789): the
+    # dashboard renders the three-option dialog from `code`.
+    _free_org_ids = await _owned_free_org_ids(user["user_id"])
+    if _free_org_ids:
+        raise HTTPException(
+            status_code=402,
+            detail=_one_free_org_detail(_free_org_ids[0]))
+
+    team_id = str(_uuid.uuid4().hex[:26])
+    # stored name == data-plane namespace (team_id) — export/backup/delete resolve the real graph; parity with register_user/agent_signup (#1903; sdk.team_create keeps team_{name} — registry lane tracked in #2023)
+    # #1921: keyless provisioning — NO tt_ mint. The old per-call mint was
+    # a dead key: plaintext never returned (hash-only at rest), counted
+    # against max_api_keys, unclaimable (#1082) — 2 free teams exhausted
+    # the cap with zero usable keys. Mirror create_onboarding_team's #1716
+    # fix: the team stays keyless until a session-key mint (POST
+    # /v1/session/key writes the api_keys row itself).
+    # Eager default-graph TeamMeta FIRST (see _eager_provision_org_graph) — the
+    # helper returns the graph name (f"team_{team_id}", the convention above).
+    graph_name = _eager_provision_org_graph(cp, team_id, name, user["user_id"])
     try:
         # #1921: all-NULL key params → the RPC writes teams + membership but
         # NO api_keys row (all-or-none guard, migration 20260825214233) —
@@ -9554,7 +9844,7 @@ async def _create_team_supabase_lane(cp, name: str, user: dict) -> dict:
         # the registry path).
         if "HTTP 409" in str(e):
             raise HTTPException(status_code=409,  # noqa: B904
-                                detail="Team name already exists")
+                                detail="Organization name already exists")
         raise HTTPException(status_code=500, detail="Team creation failed")  # noqa: B904
     return {"team_id": team_id, "graph_name": graph_name,
             "tier": "free", "name": name}
@@ -9583,7 +9873,7 @@ async def _create_team_registry_lane(sdk, name: str, user: dict) -> dict:
     ).result_set[0][0]
     if recent >= 3:
         raise HTTPException(status_code=429,
-                            detail="Too many teams created — try again later")
+                            detail="Too many organizations created — try again later")
 
     # #1877 ordering parity: the registry 409 currently surfaces only from
     # team_create's exception handler — add a dup-name pre-check BEFORE the
@@ -9594,13 +9884,15 @@ async def _create_team_registry_lane(sdk, name: str, user: dict) -> dict:
         params={"name": name},
     ).result_set[0][0]
     if dup:
-        raise HTTPException(status_code=409, detail="Team name already exists")
-    # #1877: per-person entitlement — one free team (tier='free' proxy;
-    # selfhost has no subscription model). STRING detail.
-    if await _count_active_free_memberships(user["user_id"]) >= 1:
+        raise HTTPException(status_code=409, detail="Organization name already exists")
+    # #1877/#2789: per-person entitlement — one FREE ORGANIZATION, counted by
+    # OWNERSHIP (registry tier='free' proxy; selfhost has no subscription
+    # model). STRUCTURED detail (#2789) — parity with the supabase lane.
+    _free_org_ids = await _owned_free_org_ids(user["user_id"])
+    if _free_org_ids:
         raise HTTPException(
             status_code=402,
-            detail="Create another team requires a paid plan — upgrade an existing team first")
+            detail=_one_free_org_detail(_free_org_ids[0]))
 
     try:
         # #1921: mint_key=False — the registry twin of the Supabase lane's
@@ -9611,7 +9903,7 @@ async def _create_team_registry_lane(sdk, name: str, user: dict) -> dict:
                                  owner_user_id=user["user_id"])
     except Exception as e:
         if isinstance(e, ControlPlaneError) and "already exists" in str(e):
-            raise HTTPException(status_code=409, detail="Team name already exists")  # noqa: B904
+            raise HTTPException(status_code=409, detail="Organization name already exists")  # noqa: B904
         raise HTTPException(status_code=500, detail="Team creation failed")  # noqa: B904
 
     # #1877 second-model P1: the owner Membership is created INSIDE
@@ -11272,7 +11564,7 @@ async def invite_to_team(body: dict, user: dict = Depends(get_current_user)):  #
             tier = team.get("tier") or "free"
             if tier in ("free", "solo"):
                 raise HTTPException(status_code=402,
-                                    detail="Invites require the Pro or Team tier — upgrade to invite teammates")
+                                    detail="Invites require the Pro or Team tier — upgrade to invite members")
             # #1965: per-team lock around the capacity check + mint — two
             # concurrent invites must not both read active+pending < 2 and
             # both mint past max_users. Serialized per team_id; the count
@@ -11288,7 +11580,7 @@ async def invite_to_team(body: dict, user: dict = Depends(get_current_user)):  #
                                if not i.get("expires_at") or i["expires_at"] > now]
                     if len(active) + len(pending) >= 2:  # Pro max_users=2
                         raise HTTPException(status_code=402,
-                                            detail="Team member limit reached — upgrade to invite more")
+                                            detail="Member limit reached — upgrade to invite more")
                 inv = invitation_mint(get_control_plane(), team_id, email, role,
                                       invited_by=user["user_id"],
                                       inviter_email=(user.get("email") or None))
@@ -11344,7 +11636,7 @@ async def invite_to_team(body: dict, user: dict = Depends(get_current_user)):  #
         # active-only under-counted pending seats).
         if tier in ("free", "solo"):
             raise HTTPException(status_code=402,
-                                detail="Invites require the Pro or Team tier — upgrade to invite teammates")
+                                detail="Invites require the Pro or Team tier — upgrade to invite members")
         if tier == "pro":
             from datetime import datetime as _pdt
             active = reg.query(
@@ -11360,7 +11652,7 @@ async def invite_to_team(body: dict, user: dict = Depends(get_current_user)):  #
             ).result_set[0][0]
             if active + pending >= 2:  # Pro max_users=2
                 raise HTTPException(status_code=402,
-                                    detail="Team member limit reached — upgrade to invite more")
+                                    detail="Member limit reached — upgrade to invite more")
 
         # Invitation node via SDK (token returned once); roles admin/member allowed here
         import uuid as _uuid
@@ -11658,7 +11950,7 @@ async def accept_invite(body: dict, request: Request,
             if _cap_active >= int(_cap_max):
                 raise HTTPException(
                     status_code=402,
-                    detail="Team member limit reached — upgrade to invite more")
+                    detail="Member limit reached — upgrade to invite more")
 
         # Token single-use: CONDITIONAL claim — the SET's own matched-row
         # count is authoritative (P2-1 concurrency review, cross-lane half):
@@ -12062,7 +12354,7 @@ async def _registry_mismatch_accept_v2(sdk, invite: dict, user: dict,
             if _cap_active >= int(_cap_max):
                 raise HTTPException(
                     status_code=402,
-                    detail="Team member limit reached — upgrade to invite more")
+                    detail="Member limit reached — upgrade to invite more")
         # Token single-use + OTP single-use: CONDITIONAL write (still-pending
         # guard) + the write's OWN matched-row count IS the authoritative
         # single-use claim — a concurrent accept (email-match invitee racing
@@ -12580,7 +12872,7 @@ async def _registry_accept_by_id(sdk, invitation_id: str, user: dict) -> dict:
             if _cap_active >= int(_cap_max):
                 raise HTTPException(
                     status_code=402,
-                    detail="Team member limit reached — upgrade to invite more")
+                    detail="Member limit reached — upgrade to invite more")
         # Single-use: CONDITIONAL claim — the SET's own matched-row count is
         # authoritative (P2-1 cross-lane half, by-id twin): a concurrent v2
         # OTP-mismatch winner on the SAME invitation row (or a same-user
@@ -15079,7 +15371,7 @@ async def claim_team(request: Request):
         raise HTTPException(
             status_code=403,
             detail=("Your email is not confirmed — cannot claim an "
-                    "anonymous team. Confirm your email and try again."),
+                    "anonymous organization. Confirm your email and try again."),
         )
 
     # 3. pasted key — the key-possession anchor.
@@ -16757,7 +17049,8 @@ def _maybe_apply_completion(team_id: str) -> bool:
             return False
         steps = _os.completed_steps(proj, team_id)
         if _os.completion_gate_satisfied(
-                steps, node.get("fork"), bool(node.get("compact"))):
+                steps, node.get("fork"), bool(node.get("compact")),
+                fork_unsure_at=bool(node.get("fork_unsure_at"))):
             _os.write_status(proj, team_id, _os.STATUS_COMPLETE)
             try:  # created-signal invalidates the 60s MCP TTL cache (pin 18)
                 from tortoise import mcp_server as _mcp
@@ -16952,6 +17245,7 @@ def _get_onboarding_projection(team_id: str) -> dict:
             node.get("member_progress")),
         "last_decide_attempt": node.get("last_decide_attempt"),
         "compact": node.get("compact", False),
+        "fork_unsure_at": node.get("fork_unsure_at"),
     })
     state["onboarding_complete"] = _os.resolve_wire_completion(
         node.get("status"), bool(raw.get("onboarding_complete")), steps)
@@ -17044,6 +17338,9 @@ class OnboardingStatePatchRequest(BaseModel):
     completed_steps: list[str] | None = None
     member_progress: dict | None = None
     last_decide_attempt: str | None = None
+    # #2407: fork_unsure_at is a server-stamped FLOW key — declared here so
+    # a stray PATCH is REJECTED loudly (403 server-owned) like the siblings.
+    fork_unsure_at: str | None = None
 
 
 # #2001 (W5): PATCH-surface ownership table — which FLOW keys are rejected
@@ -17051,6 +17348,7 @@ class OnboardingStatePatchRequest(BaseModel):
 _PATCH_SERVER_OWNED_KEYS = {
     "fork", "compact", "status", "version",
     "completed_steps", "member_progress", "last_decide_attempt",
+    "fork_unsure_at",
 }
 _PATCH_REJECTED_STEP_FIELDS = {
     "harness_connected", "first_points_filed", "decide_completed",
@@ -17238,6 +17536,10 @@ class OnboardingCheckpointRequest(BaseModel):
     last_decide_attempt: str | None = None
     member_progress: dict | None = None
     status: str | None = None
+    # #2407: "not sure yet — decide later" fork-card answer — a MARKER
+    # (true) that records fork_unsure_at server-side WITHOUT consuming the
+    # set-once fork value. Never a timestamp from the client (server-stamped).
+    fork_unsure_at: bool | None = None
     model_config = {"extra": "forbid"}
 
 
@@ -17256,6 +17558,11 @@ async def onboarding_checkpoint(body: OnboardingCheckpointRequest,
       (replay → noop), unknown step → 422.
     - fork/compact → set-once (first write wins; same-value replay 200;
       changed → 409).
+    - fork_unsure_at (true) → #2407 "not sure yet — decide later": records
+      the fork-card deferral (server-stamped ISO timestamp) WITHOUT
+      consuming the set-once fork — fork stays NULL so the card stays
+      answerable; repeat → 200 (re-stamp); fork already set or compact org
+      → 409 (never asked / already answered).
     - last_decide_attempt → LWW; 'failed' is SKIPPED once decide-completed
       exists (dismissal alone never completes).
     - member_progress → {user_id: [steps]} user-scoped map-merge;
@@ -17279,6 +17586,7 @@ async def onboarding_checkpoint(body: OnboardingCheckpointRequest,
             ("compact", body.compact),
             ("last_decide_attempt", body.last_decide_attempt),
             ("member_progress", body.member_progress),
+            ("fork_unsure_at", body.fork_unsure_at),
         ) if val is not None
     ]
     if len(present) > 1:
@@ -17315,6 +17623,22 @@ async def onboarding_checkpoint(body: OnboardingCheckpointRequest,
                                     detail="fork must be 'self' or 'build'")
             outcome = _os.write_fork(proj, team_id, body.fork,
                                      status_from_mirror=legacy_mirror)
+            if outcome == "conflict":
+                raise HTTPException(
+                    status_code=409,
+                    detail={"message": "fork_already_set"})
+            # #2407 invariant: the unsure marker is meaningful only while
+            # fork IS NULL — a consumed fork clears it (the org answered).
+            _os.clear_fork_unsure_at(proj, team_id)
+        elif body.fork_unsure_at is not None:
+            if body.fork_unsure_at is not True:
+                raise HTTPException(
+                    status_code=422,
+                    detail={"message": "invalid_fork_unsure_at",
+                            "expects": True})
+            at = datetime.now(UTC).isoformat()
+            outcome = _os.write_fork_unsure_at(
+                proj, team_id, at, status_from_mirror=legacy_mirror)
             if outcome == "conflict":
                 raise HTTPException(
                     status_code=409,
@@ -17365,7 +17689,8 @@ async def onboarding_checkpoint(body: OnboardingCheckpointRequest,
                     proj, team_id, uid, steps,
                     status_from_mirror=legacy_mirror))
         # post-write fork-aware gate eval (monotonic) — step/fork/compact
-        # writes only (never member_progress)
+        # writes only (never member_progress; fork_unsure_at records no
+        # progress and its gate is unsatisfiable-by-design until answered)
         if body.step is not None or body.fork is not None or body.compact is not None:
             _maybe_apply_completion(team_id)
     except HTTPException:
@@ -17616,6 +17941,159 @@ async def onboarding_seed(body: OnboardingSeedRequest,
                             detail="Onboarding seed failed — retry-safe") from None
 
 
+# ── #2360: provisioning-time REAL starter seed (supersedes the demo auto-seed) ──
+# The tenant-provision Edge Function used to auto-seed 12 fake demo Points +
+# a _demo_sentinel into EVERY fresh org (/internal/demo) so new users "see a
+# populated graph immediately" — sample content the Overview digest then
+# counted as the user's own filings ('13 points filed' on a brand-new org).
+# The #2360 re-spec replaces that sample data with REAL data that kickstarts
+# the process: the signing-up user as a naturalPerson Subject and their
+# Organization as an organization Subject, the two CONNECTED (memberOf) — the
+# canonical two-anchor structure from tortoise/onboarding/seed.py (same
+# module the interactive W3 seed uses; replay is idempotent and never
+# merges a distinct identity). No demo Point is ever written on this path.
+#
+# Never-invented-identity (DM-3): the person anchor is filed ONLY when the
+# provisioning context carries the user's own display name (auth metadata —
+# user-provided at signup/OAuth). When only an email-prefix derivation would
+# be available, the starter seed files the org-anchor Subject only (the org
+# name IS user-confirmed at org-create) and leaves the first-points-filed
+# step pending — the connect-time interactive W3 seed then files the person
+# Subject + memberOf with a user-confirmed name. Both legs are REAL data;
+# nothing is ever invented or silently derived on the provisioning path.
+
+def _run_starter_seed(team_id: str, *, org_name: str | None = None,
+                      person_name: str | None = None,
+                      person_user_id: str | None = None,
+                      person_email: str | None = None) -> dict:
+    """The provisioning-time real starter seed (internal, #2360).
+
+    W3-parity runner over the canonical seed core: files the org-anchor
+    Subject (organization, org_id=team_id) ALWAYS (the org display name is
+    user-confirmed at org-create), and the person-anchor Subject
+    (naturalPerson, user_id/email) + the memberOf link WHEN a user-provided
+    display name is present. On success links the onboarding node (onboards
+    edge / org_subject_id) and — when the person anchor was filed too (the
+    full starter structure) — marks the first-points-filed seed step (W3
+    semantics: the org-anchor seed). A pending step otherwise stays with the
+    connect-time interactive seed (never-invented-identity). Idempotent:
+    replay reuses the canonical anchors (created=False). Graph-down → 503
+    fail-loud (retry-safe), mirroring the W3 runner."""
+    from tortoise.onboarding import seed as _seed
+    if not _graph_available(team_id):
+        raise HTTPException(status_code=503,
+                            detail="Onboarding graph unavailable — retry later")
+    org_display = (org_name or "").strip()
+    if not org_display:
+        org_display = _team_name(team_id) or ""
+    person = (person_name or "").strip() or None
+    # never-invented-identity guard: no org display name on the control
+    # plane → zero writes (the caller must name the org first).
+    if not org_display:
+        return {"status": "org_name_required", "team_id": team_id}
+    # the person user_id ref is a real user UUID only — 'api'/email-shaped
+    # values never ride the identity ref (W3 parity).
+    if person_user_id in (None, "api") or "@" in str(person_user_id):
+        person_user_id = None
+    include_person = person is not None
+    sdk = _make_sdk(namespace=team_id)
+    try:
+        proj = sdk._get_proj()
+        surface = _TeamSeedSurface(sdk)
+        try:
+            report = _seed.seed_onboarding_anchors(
+                surface, org_name=org_display, org_id=team_id,
+                person_name=person, user_id=person_user_id,
+                person_email=person_email, include_person=include_person)
+        except _seed.SubjectCollision as exc:
+            # A same-name Subject that is NOT this org/user (rare on a fresh
+            # org) → surfaced, zero writes for that anchor, retry-safe. The
+            # provisioning caller logs + keeps the team usable (mirrors the
+            # W3 runner's all-or-nothing contract).
+            return {
+                "status": "collision",
+                "collisions": [{
+                    "kind": exc.kind, "name": exc.name,
+                    "existing_id": exc.existing_id, "reason": exc.reason,
+                    "existing_refs": exc.refs,
+                }],
+                "org_name": org_display,
+                "person_name_source": "provided" if include_person else None,
+            }
+        legacy_mirror = bool(_get_onboarding_state(team_id).get(
+            "onboarding_complete"))
+        org_subject = report["org_subject"]
+        onboards = _os.write_onboards_edge(proj, team_id, org_subject["id"])
+        step = None
+        if include_person:
+            step = _os.write_completed_step(
+                proj, team_id, "first-points-filed",
+                status_from_mirror=legacy_mirror)
+        _maybe_apply_completion(team_id)
+    finally:
+        sdk.close()
+    resp = {
+        "status": "seeded",
+        "team_id": team_id,
+        "org_name": org_display,
+        "org_subject": report["org_subject"],
+        "org_created": report["org_created"],
+        "org_kind_normalized": report["org_kind_normalized"],
+        "onboards": onboards,
+        "onboarding": _get_onboarding_projection(team_id),
+    }
+    if include_person:
+        resp.update({
+            "user_subject": report["user_subject"],
+            "person_created": report["person_created"],
+            "person_kind_normalized": report["person_kind_normalized"],
+            "member_of": report["member_of"],
+            "steps": {"first-points-filed": step},
+        })
+    return resp
+
+
+@app.post("/internal/starter-seed")
+async def starter_seed(request: Request):
+    """Provisioning-time REAL starter seed (#2360) — internal key only.
+
+    Called by the tenant-provision Edge Function right after provisioning a
+    fresh org (replacing the old demo auto-seed). Files the signing-up user
+    as a naturalPerson Subject and their Organization as an organization
+    Subject, connected memberOf (canonical two-anchor seed,
+    tortoise/onboarding/seed.py). Idempotent; never writes demo Points;
+    never silently derives the person name (person_name is the user's own
+    display name from the auth context; absent → org-anchor seed only).
+    """
+    _check_internal(request)
+    raw = await _read_capped_body(request, _BODY_MAX_BYTES, _BODY_413_DETAIL)
+    try:
+        body = _json.loads(raw)
+    except Exception:
+        raise HTTPException(status_code=400,
+                            detail="Invalid JSON body") from None
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+    team_id = body.get("team_id")
+    if not team_id:
+        raise HTTPException(status_code=400, detail="Missing team_id")
+    try:
+        return _run_starter_seed(
+            team_id,
+            org_name=(body.get("org_name") or None),
+            person_name=(body.get("person_name") or None),
+            person_user_id=(body.get("person_user_id") or None),
+            person_email=(body.get("person_email") or None))
+    except HTTPException:
+        raise
+    except Exception:
+        import logging
+        logging.getLogger("tortoise.api").exception(
+            "starter seed failed (team=%s)", team_id)
+        raise HTTPException(status_code=500,
+                            detail="Starter seed failed — retry-safe") from None
+
+
 @app.post("/v1/onboarding/session-recording", response_model=OnboardingStateResponse)
 async def set_session_recording(body: dict, team: dict = Depends(get_current_team_session_ungated)):  # noqa: B008
     """Toggle automatic session recording (Q3 / Memory-sources sessions toggle).
@@ -17674,7 +18152,7 @@ async def create_onboarding_team(body: dict,
         raise HTTPException(status_code=400, detail="name is required (max 64 chars)")
     import re
     if not re.match(r"^[a-zA-Z0-9][a-zA-Z0-9_ -]{0,63}$", name):
-        raise HTTPException(status_code=400, detail="Invalid team name")
+        raise HTTPException(status_code=400, detail="Invalid organization name")
     # #1748: the session user owns the sub-team. Session JWT →
     # session_user_id (get_current_team_session); key-auth → created_by
     # (the key creator's user UUID — session-minted bootstrap/recovery
@@ -17703,13 +18181,17 @@ async def create_onboarding_team(body: dict,
         onboarding_state = _get_onboarding_state(team["team_id"])
         if onboarding_state.get("team_created"):
             raise HTTPException(status_code=409, detail="Sub-team already created")
-        # #2323: mode-aware helper (supabase subscription_status; registry
-        # tier='free' proxy) — same gate POST /v1/teams enforces lane-uniform
-        # (hosted_api.py:8199-8203 supabase / :8304-8306 registry).
-        if await _count_active_free_memberships(owner_user_id) >= 1:
+        # #2323/#2789: mode-aware OWNERSHIP helper (supabase
+        # subscription_status; registry tier='free' proxy) — the same gate
+        # POST /v1/teams enforces, lane-uniform and now ownership-based (a
+        # collaborator on someone else's free org can still create their own).
+        # STRUCTURED detail (#2789) so the wizard lane renders the same
+        # three-option dialog from `code`.
+        _free_org_ids = await _owned_free_org_ids(owner_user_id)
+        if _free_org_ids:
             raise HTTPException(
                 status_code=402,
-                detail="Create another organization requires a paid plan",
+                detail=_one_free_org_detail(_free_org_ids[0]),
             )
         return _create_onboarding_team_lane(team, name, owner_user_id)
 
@@ -17775,7 +18257,7 @@ def _create_onboarding_team_lane(team: dict, name: str,
             # P1, PR #874).
             if "HTTP 409" in str(e):
                 raise HTTPException(status_code=409,  # noqa: B904
-                                    detail="Team name already exists")
+                                    detail="Organization name already exists")
             raise HTTPException(status_code=400, detail=f"Team create failed: {e}")  # noqa: B904
         _update_onboarding_state(team["team_id"], team_created=True)
         _track_onboarding_event(team, "question_answered",
@@ -19902,7 +20384,7 @@ async def backups_restore(body: BackupRestoreRequest, request: Request, team: di
 # endpoint 503s when the sweep is disabled (config missing or BACKUP_SWEEP_ENABLED
 # not true).
 
-_WATCHER: BackupWatcher | None = None  # spawned in _lifespan (driver-disabled leg)  # noqa: F821
+_WATCHER: WatcherThread | None = None  # WatcherThread imported in _lifespan  # noqa: F821
 _DRIVER_HEARTBEAT_KEY = "ops/driver-heartbeat.json"
 _LAST_DRILL_AT: float = 0.0  # in-memory drill cooldown (single-instance, resets on restart)
 _DRILL_COOLDOWN_S = 3600
@@ -20923,6 +21405,142 @@ async def billing_checkout(body: CheckoutRequest, request: Request, team: dict =
     return await asyncio.to_thread(_billing_checkout_sync, team, body.price_id)
 
 
+# ── #2789: paid NEW organization (webhook-provisioned) ──────────────────────
+# The third option of the one-free-org dialog. Checkout is otherwise
+# team-scoped (billing_checkout above), which a not-yet-existing org cannot
+# satisfy — hence a separate SESSION-authed endpoint. Design decision
+# (documented in docs/scoping/2026-09-10-2789-one-free-org.md §3 S-B): no
+# pending_payment org row. NOTHING is written here; the pre-minted org id
+# rides Stripe and `checkout.session.completed` provisions the org. An
+# abandoned checkout therefore leaves nothing visible and does not consume
+# the user's one-free-org allowance.
+
+def _new_org_team_id() -> str:
+    """#2789: pre-mint the new org's id BEFORE the Stripe session exists.
+
+    It must be known at session-creation time (``client_reference_id`` is a
+    creation param), so it cannot be derived from the session id — the session
+    id is Stripe's. 26-hex, matching the ids the create-org lanes mint (teams.id
+    is unconstrained text, 0006). Echoed back by the webhook, where the
+    existence check + ``provision_team``'s ON CONFLICT upsert make a replay a
+    no-op — idempotency by construction rather than by care."""
+    import uuid as _uuid
+    return _uuid.uuid4().hex[:26]
+
+
+def _new_org_collision_name(org_name: str, team_id: str) -> str:
+    """#2789: the disambiguating name for a collision that happened AFTER
+    checkout — the pre-check cannot see the future (someone else took the name
+    between payment intent and webhook).
+
+    Must stay legal in BOTH lanes, so NO parentheses (the registry SDK's
+    validator is ``^[a-zA-Z0-9][a-zA-Z0-9_ -]*$`` and it rejects them — a
+    paren suffix would make the retry raise forever and strand a paying
+    customer), first char still alphanumeric, and <= 64 chars. 8 id chars (32
+    bits) of entropy keeps a *second* collision vanishingly unlikely; if one
+    did happen the raise surfaces as a 500 + ops log rather than silently
+    stranding money.
+    """
+    suffix = str(team_id or "")[:8]
+    return f"{org_name[: 63 - len(suffix)].rstrip()} {suffix}"
+
+
+def _new_org_success_url(new_org_id: str, org_name: str = "") -> str:
+    """#2789: the standard success URL + ``new_org=<id>`` (+ the intended name).
+
+    The dashboard's success-return effect polls until the org appears in
+    /v1/teams and then switches to it (the webhook lands seconds later). The
+    env template (``{CHECKOUT_SESSION_ID}``) is preserved verbatim — only a
+    separator is chosen.
+
+    ``new_org_name`` is carried because the pre-minted id is NOT always the
+    org's real id: on the registry (selfhost) lane ``team_create`` mints its
+    own, so the client matches the id OR the intended name (the name is the
+    one column the webhook only changes on a collision).
+    """
+    base = os.environ.get("BILLING_SUCCESS_URL", _billing_default_success_url())
+    sep = "&" if "?" in base else "?"
+    url = f"{base}{sep}new_org={new_org_id}"
+    if org_name:
+        from urllib.parse import quote
+        url += f"&new_org_name={quote(str(org_name))}"
+    return url
+
+
+def _billing_checkout_new_org_sync(user: dict, name: str, price_id: str) -> dict:
+    """#2789 sync body: validate, pre-check the unique name, start Checkout.
+
+    Order matters: the name is globally unique (0011) and the pre-check is the
+    ONLY place a collision can be caught before money moves — a collision at
+    webhook-provision time would leave a paying customer with no org. (The
+    webhook still has a deterministic disambiguating fallback for the
+    checkout→payment race the pre-check cannot see.)
+
+    The entitlement is deliberately NOT consulted: the rules table says a user
+    at the free cap may PURCHASE a second org ("requests a paid org → allowed"),
+    and a user with zero orgs may also buy one.
+    """
+    from tortoise.billing import (
+        BillingConfigError,
+        BillingError,
+        PriceCatalog,
+        StripeClient,
+    )
+    from tortoise.supabase_control import (
+        get_control_plane,
+        is_supabase_enabled,
+        team_by_name,
+    )
+    try:
+        tier = PriceCatalog().tier_for_price(price_id)
+    except BillingConfigError as e:
+        raise HTTPException(status_code=503, detail=str(e))  # noqa: B904
+    except BillingError as e:
+        raise HTTPException(status_code=400, detail=str(e))  # noqa: B904
+    if not tier or tier in ("free", "anon"):
+        raise HTTPException(
+            status_code=400,
+            detail="A paid plan is required to purchase a new organization")
+    if is_supabase_enabled():
+        if team_by_name(get_control_plane(), name):
+            raise HTTPException(status_code=409, detail="Organization name already exists")
+    else:
+        _dup = _make_sdk(namespace="registry")._get_registry().query(
+            "MATCH (t:Team {name:$name}) RETURN count(t)", params={"name": name},
+        ).result_set[0][0]
+        if _dup:
+            raise HTTPException(status_code=409, detail="Organization name already exists")
+
+    new_org_id = _new_org_team_id()
+    try:
+        _sid, url = StripeClient().create_checkout_session_for_new_org(
+            new_org_id=new_org_id, price_id=price_id,
+            email=user.get("email") or "", user_id=user["user_id"],
+            org_name=name, tier=tier,
+            success_url=_new_org_success_url(new_org_id, name),
+            cancel_url=os.environ.get("BILLING_CANCEL_URL", _billing_default_cancel_url()),
+        )
+    except Exception as e:
+        raise _billing_error_to_http(e) from e
+    return {"checkout_url": url, "team_id": new_org_id}
+
+
+@app.post("/v1/billing/checkout/new-org", response_model=NewOrgCheckoutResponse)
+async def billing_checkout_new_org(body: NewOrgCheckoutRequest, user: dict = Depends(get_current_user)):  # noqa: B008
+    """#2789: buy a subscription for an organization that does not exist yet.
+
+    SESSION auth (get_current_user), not team auth — the whole point of the
+    endpoint is that there is no team yet."""
+    name = body.name.strip()
+    if not name:
+        raise HTTPException(status_code=422, detail="Team name required")
+    import re as _re
+    # Name rule shared with POST /v1/teams (spaces allowed; the same charset).
+    if not _re.match(r"^[a-zA-Z0-9][a-zA-Z0-9_ -]{0,63}$", name):
+        raise HTTPException(status_code=422, detail="Invalid team name")
+    return await asyncio.to_thread(_billing_checkout_new_org_sync, user, name, body.price_id)
+
+
 def _billing_portal_sync(team: dict) -> dict:
     """Sync body of POST /v1/billing/portal — portal session for an existing
     Stripe customer; 404 when the team never checked out (no customer id)."""
@@ -21022,16 +21640,130 @@ def _team_id_for_stripe_customer(customer_id: str) -> str | None:
         return None
 
 
-def _webhook_apply_event(sdk, team_id: str, event: dict) -> str | None:
+# #2789: per-org serialization of the paid-new-org provision. Stripe can
+# deliver the same (or a racing) event twice concurrently, and the webhook's
+# apply runs in a worker thread (asyncio.to_thread) — so this is a threading
+# lock, not an asyncio one (contrast _TEAM_CREATE_LOCKS, which serializes the
+# async create-org lanes). Bounded by the number of paid orgs ever created
+# (~100 bytes per entry); uncontended acquisition binds nothing.
+_NEW_ORG_PROVISION_LOCKS: dict[str, threading.Lock] = {}
+_NEW_ORG_PROVISION_LOCKS_GUARD = threading.Lock()
+
+
+def _new_org_provision_lock(team_id: str) -> threading.Lock:
+    with _NEW_ORG_PROVISION_LOCKS_GUARD:
+        lock = _NEW_ORG_PROVISION_LOCKS.get(team_id)
+        if lock is None:
+            lock = _NEW_ORG_PROVISION_LOCKS.setdefault(team_id, threading.Lock())
+        return lock
+
+
+def _provision_new_org_from_checkout(sdk, team_id: str, meta: dict) -> str:
+    """#2789 (design 2): provision the org a completed Checkout paid for.
+
+    Idempotent ON REPLAY, per lane:
+
+    - Supabase: the id was pre-minted at checkout time and echoed back as
+      ``client_reference_id``; ``provision_team`` upserts on the primary key,
+      and the ``team_by_id`` probe short-circuits a replay entirely (the graph
+      init is idempotent too — see ``_eager_provision_org_graph``).
+    - Registry (selfhost): ``team_create`` mints its own id, so the pre-minted
+      id is passed as ``idempotency_key`` — a replay resolves the SAME team
+      (``#1710``) and returns it; no second Team, no second Membership.
+
+    Returns the EFFECTIVE team id, which the caller must use for every
+    subsequent billing write (the registry lane's id differs from the
+    pre-minted one on first creation).
+
+    Raises on failure so the webhook returns 500 and Stripe retries: a paying
+    customer must never be left without an org.
+    """
+    from tortoise.pricing import tier_limits
+    from tortoise.supabase_control import (
+        get_control_plane,
+        is_supabase_enabled,
+        provision_team,
+        team_by_id,
+    )
+    user_id = str(meta.get("user_id") or "")
+    org_name = str(meta.get("org_name") or "").strip()
+    tier = str(meta.get("tier") or "free")
+    if not user_id or not org_name:
+        raise RuntimeError(
+            "new-org checkout metadata missing user_id/org_name — cannot "
+            f"provision (team_id={team_id!r})")
+    lim = tier_limits(tier)
+    # #1716/#1921 keyless provisioning: no tt_ mint (its plaintext is never
+    # returned — a dead credential). The org mints a session key via the normal
+    # POST /v1/session/key path.
+    keyless = {"p_api_key": None, "p_key_hash": None,
+               "p_lookup_hash": None, "p_key_prefix": None}
+    with _new_org_provision_lock(team_id):
+        if is_supabase_enabled():
+            cp = get_control_plane()
+            if team_by_id(cp, team_id) is not None:
+                return team_id  # replay — the org already exists
+            graph_name = _eager_provision_org_graph(cp, team_id, org_name, user_id)
+            params = {
+                "p_user_id": user_id, "p_identity": None,
+                "p_team_id": team_id, "p_team_name": org_name,
+                "p_graph_name": graph_name, "p_tier": tier,
+                "p_max_users": lim["max_users_per_team"],
+                "p_max_graphs": lim["max_graphs_per_team"],
+                "p_ops_allowance": lim["included_write_ops_per_month"],
+                "p_graph_size_cap": lim["max_graph_nodes"],
+                **keyless,
+            }
+            try:
+                provision_team(cp, **params)
+            except Exception as e:
+                if "HTTP 409" not in str(e):
+                    raise
+                # A name taken between checkout and payment — the pre-check at
+                # checkout time cannot see the future. Deterministic suffix ⇒
+                # replay-safe; the org stays fully functional and ops gets a
+                # warning (the stale TeamMeta display name is accepted — the
+                # org row is the authority).
+                params["p_team_name"] = _new_org_collision_name(org_name, team_id)
+                _logger.warning(
+                    "webhook: org name %r was taken; provisioning as %r (team %s)",
+                    org_name, params["p_team_name"], team_id)
+                provision_team(cp, **params)
+            return team_id
+
+        # Registry (selfhost) lane — sdk is the registry SDK passed by the
+        # route (never None in registry mode).
+        try:
+            result = sdk.team_create(org_name, mint_key=False,
+                                     owner_user_id=user_id,
+                                     idempotency_key=team_id)
+        except Exception as e:
+            if "already exists" not in str(e):
+                raise
+            alt = _new_org_collision_name(org_name, team_id)
+            _logger.warning(
+                "webhook: org name %r was taken; provisioning as %r (team %s)",
+                org_name, alt, team_id)
+            result = sdk.team_create(alt, mint_key=False,
+                                     owner_user_id=user_id,
+                                     idempotency_key=team_id)
+        return result["id"]
+
+
+def _webhook_apply_event(sdk, team_id: str, event: dict) -> tuple[str | None, str]:
     """Apply one verified Stripe event to the control plane (idempotent).
 
     Supabase mode: PATCH the teams row via the seam (tier / subscription
     state — 0006 + 0012 columns). Registry mode: SET on the Team node.
-    Returns the ops kind when a notification-worthy transition happened:
+    Returns ``(ops kind, effective_team_id)`` — the kind when a
+    notification-worthy transition happened:
     billing_upgrade | billing_downgrade | billing_payment_failed |
-    billing_cancel. Unknown price ids keep the stored tier + status and
-    fire an ops notification (review fix 7); cancel-at-period-end keeps
-    tier until the end.
+    billing_cancel.
+
+    #2789: the second element is the team the caller must use for the
+    dedup marker / tier read / audit — for a paid-new-org event the org is
+    PROVISIONED here, and the registry lane mints its own id, so the
+    ``client_reference_id`` the route bound is not always the real one.
 
     #771 review P1: this is the LAST live registry writer — the webhook
     previously wrote the registry unconditionally (silent billing loss +
@@ -21084,6 +21816,19 @@ def _webhook_apply_event(sdk, team_id: str, event: dict) -> str | None:
             return None
 
     if etype == "checkout.session.completed":
+        # #2789: a paid-new-org session has no team yet — PROVISION it first
+        # (before any _set, which PATCHes by id and would silently match 0
+        # rows). The org id was pre-minted at checkout time and echoed back as
+        # client_reference_id; the registry lane returns its own id, so the
+        # effective id is adopted for every later write AND reported back to
+        # the caller for the dedup marker / tier read / audit.
+        meta = data.get("metadata") or {}
+        is_new_org = str(meta.get("new_org") or "") == "1"
+        if is_new_org:
+            # Sync call: _webhook_apply_event itself already runs in a worker
+            # thread (asyncio.to_thread in the route), so the provision —
+            # blocking control-plane + graph writes — stays on that thread.
+            team_id = _provision_new_org_from_checkout(sdk, team_id, meta)
         cust = data.get("customer")
         email = (data.get("customer_details") or {}).get("email")
         sub_id = data.get("subscription")
@@ -21093,6 +21838,7 @@ def _webhook_apply_event(sdk, team_id: str, event: dict) -> str | None:
         if sub_id:
             updates["subscription_id"] = sub_id
         _set(updates)
+        resolved_tier = None
         if sub_id:
             try:
                 sub = StripeClient().get_subscription(sub_id)
@@ -21101,9 +21847,35 @@ def _webhook_apply_event(sdk, team_id: str, event: dict) -> str | None:
                     apply_limits(sdk, team_id, tier)
                     _set({"tier": tier})
                     notify_kind = "billing_upgrade"
+                    resolved_tier = tier
             except Exception as e:
                 _logger.warning("webhook: subscription fetch failed: %s", redact_error(e))
-        return notify_kind
+        if is_new_org and resolved_tier is None:
+            # The metadata tier was server-resolved from the price at checkout
+            # time and provision_team already wrote the matching quotas, so a
+            # failed/slow subscription fetch must not leave a PAYING customer
+            # on free limits.
+            meta_tier = str(meta.get("tier") or "")
+            if meta_tier and meta_tier not in ("free", "anon"):
+                apply_limits(sdk, team_id, meta_tier)
+                _set({"tier": meta_tier})
+                notify_kind = "billing_upgrade"
+                _logger.warning(
+                    "webhook: new org %s fell back to metadata tier %s "
+                    "(subscription tier unresolved)", team_id, meta_tier)
+            else:
+                # #2789 (code-review): RAISE, do not ack. The money was taken
+                # and the org now exists on whatever tier `_provision_new_org_
+                # from_checkout` defaulted to (free) — a 200 here would tell
+                # Stripe "processed" and nothing would ever retry, so a paying
+                # customer would sit on free limits with no self-healing. A 500
+                # makes Stripe redeliver (and the ops log records the session)
+                # so the tier can be applied once the cause is fixed.
+                raise RuntimeError(
+                    f"new-org checkout for team {team_id} has no resolvable "
+                    f"paid tier (metadata tier={meta_tier!r}, subscription "
+                    "tier unresolved) — refusing to ack")
+        return notify_kind, team_id
 
     if etype == "invoice.payment_failed":
         from datetime import datetime, timedelta
@@ -21117,7 +21889,7 @@ def _webhook_apply_event(sdk, team_id: str, event: dict) -> str | None:
         grace = (datetime.fromtimestamp(period_end, tz=UTC) + timedelta(hours=72)
                  if period_end else now + timedelta(hours=72))
         _set({"subscription_status": "past_due", "grace_until": grace.isoformat()})
-        return "billing_payment_failed"
+        return "billing_payment_failed", team_id
 
     if etype == "customer.subscription.updated":
         status = data.get("status")
@@ -21133,25 +21905,25 @@ def _webhook_apply_event(sdk, team_id: str, event: dict) -> str | None:
         if status == "canceled":
             _set({**updates, "tier": "free"})
             apply_limits(sdk, team_id, "free")
-            return "billing_cancel"
+            return "billing_cancel", team_id
         # cancel_at_period_end → keep tier until period end (mirror status only).
         if data.get("cancel_at_period_end"):
             _set(updates)
-            return None
+            return None, team_id
         _set(updates)
         tier = _resolve_tier_from_price(_price_id_from(data))
         if tier:
             apply_limits(sdk, team_id, tier)
             _set({"tier": tier})
             notify_kind = "billing_upgrade"
-        return notify_kind
+        return notify_kind, team_id
 
     if etype == "customer.subscription.deleted":
         _set({"tier": "free", "subscription_status": "canceled"})
         apply_limits(sdk, team_id, "free")
-        return "billing_cancel"
+        return "billing_cancel", team_id
 
-    return None  # unhandled event type → 200-ack
+    return None, team_id  # unhandled event type → 200-ack
 
 
 @app.post("/webhooks/stripe")
@@ -21207,7 +21979,11 @@ async def webhooks_stripe(request: Request):
         # Idempotent apply (SETs converge on replay). The apply itself is
         # seam-aware (#771 re-review P1: _webhook_apply_event's _set branches
         # to the teams row in Supabase mode; the registry twin for selfhost).
-        notify_kind = await asyncio.to_thread(_webhook_apply_event, sdk, team_id, event)
+        # #2789: it also returns the EFFECTIVE team id — a paid-new-org event
+        # provisions the org during the apply, and the registry lane mints its
+        # own id, so the marker/tier/audit below must use the returned id.
+        notify_kind, team_id = await asyncio.to_thread(
+            _webhook_apply_event, sdk, team_id, event)
 
         # Marker: first-seen detection (SET-then-marker — the apply ran
         # regardless, so a retry cannot drop the upgrade; only side-effects

@@ -80,7 +80,7 @@ def appeal_url() -> str:
 
 def suspended_message() -> str:
     return (
-        "This team has been suspended due to unusual activity. "
+        "This organization has been suspended due to unusual activity. "
         f"Appeal: {appeal_url()}"
     )
 
@@ -454,7 +454,7 @@ def _alert_dict(row: dict) -> dict:
     details = row.get("details") or {}
     messages = {
         EVENT_FLAG: f"Suspicious activity flagged ({details.get('rule', 'rule')})",
-        EVENT_SUSPEND: "Team auto-suspended due to unusual activity",
+        EVENT_SUSPEND: "Organization auto-suspended due to unusual activity",
         EVENT_AUTH_IP: f"Access from new location: {row.get('country') or 'unknown'}",
         EVENT_READ_VELOCITY: "Unusual read velocity detected on an API key",
         EVENT_SIGNUP_VELOCITY: f"Signup velocity breach: {details.get('count', '?')} anon signups from {details.get('ip', '?')}",

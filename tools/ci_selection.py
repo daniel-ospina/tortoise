@@ -695,7 +695,8 @@ def main() -> int:
     ap.add_argument("--register", action="store_true",
                     help="auto-register unlisted test files in the manifest (#1429)")
     ap.add_argument("--surface", default="core",
-                    choices=["api", "core", "ep", "onboarding", "sdk"],
+                    choices=["api", "battery", "classify", "core", "ep",
+                             "eval", "onboarding", "sdk"],
                     help="surface for --register (default: core — the selection fallback)")
     ap.add_argument("--dry-run", action="store_true", help="preview --register without writing")
     ap.add_argument("--emit-push-matrix", action="store_true",
