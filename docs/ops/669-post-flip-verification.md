@@ -409,10 +409,12 @@ security = `scheme: lookup_hash_sha256` (Supabase).
 > for 31 days while backing nothing up (the raw registry handle read the graph
 > the flip deleted). Verify the dialect and the watcher heartbeat, not the
 > status word: expected now is `last_sweep.source == "supabase"` (or
-> `last_sweep.last_run_source`), `graph_totals.errors == 0`, `enum_failed` ABSENT, and a
-> `watcher.age_minutes` that is a measured number. `last_sweep.source: registry` /
-> `enum_failed` / an unmeasurable watcher age is the failure signature, and the
-> hourly driver fails the run red for a 0-backup result it cannot corroborate.
+> `last_sweep.last_run_source`) and a `watcher.age_minutes` that is a measured
+> number. `/status` carries no sweep-status field of its own, so the sweep's own
+> outcome is read from the sweep result / the driver's run: `last_sweep.source:
+> registry`, a sweep result of `enum_failed`, or an unmeasurable watcher age is
+> the failure signature, and the hourly driver fails the run red for a 0-backup
+> result it cannot corroborate.
 > See `docs/ops/registry-backup-dr.md` §Architecture.
 
 ```bash
