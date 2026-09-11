@@ -246,9 +246,7 @@ def test_redirect_seam_decodes_userinfo(monkeypatch):
 
     monkeypatch.setattr(falkordb, "FalkorDB", _FakeFalkorDB)
     monkeypatch.setenv("TORTOISE_TEST_MODE", "1")
-    monkeypatch.setenv(
-        "TORTOISE_DB_URI", f"docker://:p%40ss@localhost:6379/{TEST_GRAPH}"
-    )
+    monkeypatch.setenv("TORTOISE_DB_URI", f"docker://:p%40ss@localhost:6379/{TEST_GRAPH}")
 
     from tortoise.projection import FalkorProjection
 
@@ -582,6 +580,41 @@ def test_guard_detects_the_pre_fix_pattern(tmp_path):
     hits = _raw_userinfo_reads(starred, "starred.py")
     assert any("password" in h for h in hits)
 
+    # A starred target that absorbs the parse result from a LATER position —
+    # the zip pairing alone cannot see this one, so the Starred disjunct in
+    # `_bindings_from_assign` is the only thing that catches it.
+    absorbed = tmp_path / "absorbed.py"
+    absorbed.write_text(
+        "from urllib.parse import urlparse\n"
+        "first, *rest = 1, 2, urlparse(uri)\n"
+        "password = rest.password\n"
+    )
+    hits = _raw_userinfo_reads(absorbed, "absorbed.py")
+    assert any("password" in h for h in hits)
+
+    # Attribute-call form (`urllib.parse.urlparse(uri)`) is a separate
+    # `_is_parse_call` branch.
+    attr_call = tmp_path / "attr_call.py"
+    attr_call.write_text(
+        "import urllib.parse\n"
+        "parsed = urllib.parse.urlparse(uri)\n"
+        "password = parsed.password\n"
+    )
+    hits = _raw_userinfo_reads(attr_call, "attr_call.py")
+    assert any("password" in h for h in hits)
+
+    # Tuple VALUE with a single (chained) target — reaches the parse result
+    # through `_is_parse_call_value`'s Tuple/List recursion, not the
+    # positional-pairing branch.
+    tuple_value = tmp_path / "tuple_value.py"
+    tuple_value.write_text(
+        "from urllib.parse import urlparse\n"
+        "a = b = (urlparse(uri), None)\n"
+        "password = a.password\n"
+    )
+    hits = _raw_userinfo_reads(tuple_value, "tuple_value.py")
+    assert any("password" in h for h in hits)
+
     # Inline walrus base: `(p := urlparse(uri)).password`.
     walrus_base = tmp_path / "walrus_base.py"
     walrus_base.write_text(
@@ -618,6 +651,10 @@ def test_graph_script_helpers_decode_credentials(module_name):
     import sys
 
     scripts_dir = REPO_ROOT / "graph-scripts"
+    # The helpers each `sys.path.insert(0, REPO_ROOT)` at import time, so a
+    # single `remove()` would leave seven duplicate repo-root entries behind
+    # for the rest of the session.
+    saved_path = list(sys.path)
     sys.path.insert(0, str(scripts_dir))
     try:
         spec = importlib.util.spec_from_file_location(
@@ -626,7 +663,7 @@ def test_graph_script_helpers_decode_credentials(module_name):
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
     finally:
-        sys.path.remove(str(scripts_dir))
+        sys.path[:] = saved_path
 
     parse = getattr(module, "_parse_uri", None) or module.parse_uri
     cfg = parse(f"docker://:p%40ss@localhost:6379/{TEST_GRAPH}")
