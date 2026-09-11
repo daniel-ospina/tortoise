@@ -400,6 +400,8 @@ from tortoise.projection.entities import _EntityHandlers  # noqa: E402, I001
 from tortoise.projection.edges import _EdgeHandlers  # noqa: E402
 from tortoise.projection.grounding import _GroundingMixin  # noqa: E402
 from tortoise.projection.propagation import _PropagationMixin  # noqa: E402
+# #2795: cycle-free derived-hash helper for the PointRevised replay writer.
+from tortoise.ids import content_hash as _content_hash  # noqa: E402
 
 # #244: Event FTS index migration (subject-only → subject+name) is tracked by a
 # persisted DB marker (Meta node 'event_fts_v2'), not a process-local flag — a
@@ -2709,6 +2711,14 @@ class FalkorProjection(
                 params["embedding"] = None  # wipe stale embedding on failure (#19)
 
         set_clauses = ["n.content = coalesce($c, n.content)"]
+        if new_content is not None:
+            # #2795: content_hash is derived from content — mirror the live
+            # update_point #1904 recompute so a replayed PointRevised cannot
+            # leave a STALE indexed dedup key behind (the writer now sets a
+            # hash on PointAdded, so a missed recompute here would be worse
+            # than the prior NULL).
+            set_clauses.append("n.content_hash = $content_hash")
+            params["content_hash"] = _content_hash(new_content)
         # Phase 2 #49: context removed — new_context no longer written
         if "embedding" in params:
             set_clauses.append("n.embedding = $embedding")

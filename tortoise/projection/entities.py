@@ -9,9 +9,36 @@ ghost class #2490 eliminates).
 """
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 
+# #2795: cycle-free helper (tortoise/ids.py is stdlib-only). sdk.py imports
+# projection at module top, so the sdk-private `_content_hash` is NOT
+# importable here.
+from tortoise.ids import content_hash as _content_hash
 from tortoise.live import decay_clause  # #2490: rebuild folds decay terminal posteriors
+
+logger = logging.getLogger(__name__)
+
+# #2894: FalkorDB stores scalars and flat (scalar-element) lists; a
+# map/dict-valued property raises on `SET n += $extra`. Shared predicate used
+# by every `_persist_extra_props` layer (Subject/Object/Document/Event/Source)
+# and by the Point open-set writer (#2795).
+_PERSISTABLE_SCALAR_TYPES: tuple = (str, bool, int, float)
+
+
+def _is_persistable_prop_value(value) -> bool:
+    """True for values FalkorDB accepts as node properties (#2894).
+
+    Scalars and flat lists of scalars are stored; maps/dicts and nested
+    structures are rejected by the engine, so they are filtered before the
+    SET rather than crashing it.
+    """
+    if isinstance(value, _PERSISTABLE_SCALAR_TYPES):
+        return True
+    if isinstance(value, list):
+        return all(isinstance(x, _PERSISTABLE_SCALAR_TYPES) for x in value)
+    return False
 
 
 def _now_iso() -> str:
@@ -128,9 +155,52 @@ class _EntityHandlers:
         "source_path",
         "_searchText",
     })
+    # #2795 (D2): every key owned by the fixed SET clauses of
+    # `_upsert_point_props` (plus the MERGE key and the structural/edge-carried
+    # keys). The open-set passthrough skips these so the declared writers keep
+    # precedence — `updatedAt`/`embedding` must never be reloaded from a
+    # payload. `content_hash` is NOT here: it is recomputed (see _POINT_DENY).
+    _POINT_HANDLED: frozenset = frozenset({
+        "id",  # MERGE key (n:Point {id:$id}) — not a SET clause
+        "content", "is_operator", "op_type", "pointKind", "status",
+        "authoredBy", "confidence", "createdAt", "created_at",
+        "validFrom", "validTo", "updatedAt", "embedding",
+        # A10 operator-scoped replay extension
+        "direction", "label",
+        # structural / edge-carried — never node props via passthrough
+        "operator", "provenance", "about_entities", "aboutEntities",
+        "extractedFrom", "is_episodic", "_nid", "_graph_id",
+        # Phase 2 #49: context was removed and is never written as a node
+        # prop — the old closed writer enforced this by omission; the open
+        # passthrough must keep it dropped.
+        "context", "new_context",
+    })
+    # #2795 (D2): recompute / non-persistable deny-list — the passthrough must
+    # never copy these from a payload. `embedding`/`content_hash`/`updatedAt`
+    # are recomputed by `_upsert_point_props`; `_nid`/`_graph_id` are replay
+    # bookkeeping. EP-owned props are denied because they are written only by
+    # ep.py/dream.py — an open-set passthrough would let a caller-supplied
+    # `posterior_alpha` overwrite EP state (D1 `payload_writable=False`).
+    # `reason` is deny-listed per D4. All of these were dropped by the old
+    # closed writer, so denying them preserves existing behaviour.
+    _POINT_DENY: frozenset = frozenset({
+        "embedding", "content_hash", "updatedAt", "_nid", "_graph_id",
+        "reason",
+        "c_cal", "posterior_alpha", "posterior_beta",
+        "ep_alpha", "ep_beta", "baseline_set", "baseline_source",
+        "inherited_at", "lastDreamedAt", "expiredAt", "outdated",
+    })
+    # #2795 (D2): D1's declared payload/capture props (contract.py has not
+    # landed yet) — known passthrough keys that must NOT trip the drift
+    # warning. `tags` is declared here even though D1 marks its TAGGED-edge
+    # replay out of scope (#2897): the raw list property is preserved by the
+    # open-set write, the edges are not.
+    _POINT_DECLARED_PROPS: frozenset = frozenset({
+        "quote", "when", "search_keys", "speaker", "source_turn_id", "tags",
+    })
 
     def _persist_extra_props(self, match_clause: str, match_params: dict,
-                              ev: dict, handled_keys: frozenset) -> None:
+                              ev: dict, handled_keys: frozenset) -> dict:
         """Persist arbitrary caller-supplied props not explicitly handled.
 
         Computes the set difference between event dict keys and the union of
@@ -139,14 +209,23 @@ class _EntityHandlers:
 
         None values are excluded — Cypher null semantics in SET maps are
         unreliable (coalesce-based updates use explicit per-field clauses).
+        #2894: non-persistable values (maps/dicts and other nested
+        structures) are filtered by `_is_persistable_prop_value` — the engine
+        rejects them on a SET, so dropping is the only non-crashing option.
+
+        Returns the dict of props actually persisted (empty when none) so the
+        caller can report unrecognised keys (#2795 drift warning).
         """
         skip = self._META_KEYS | handled_keys
-        extra = {k: v for k, v in ev.items() if k not in skip and v is not None}
+        extra = {k: v for k, v in ev.items()
+                 if k not in skip and v is not None
+                 and _is_persistable_prop_value(v)}
         if extra:
             self.g.query(
                 match_clause + " SET n += $extra",
                 params={**match_params, "extra": extra},
             )
+        return extra
 
     def _upsert_point_props(self, p: dict) -> None:
         """Write all Point node properties (no edges).
@@ -178,6 +257,17 @@ class _EntityHandlers:
             except Exception:
                 pass
 
+        # #2795 (D2): content_hash is DERIVED, not payload — recompute it from
+        # the content being written (mirrors create_point's `_content_hash`,
+        # #80). The old closed writer never wrote it, so every replayed node
+        # had content_hash=NULL and the indexed dedup MATCH degraded. Operators
+        # store no content (#548) — the writer synthesizes a fallback for them,
+        # so a hash would match nothing (noise): skip, mirroring the embedding
+        # carve-out above.
+        point_content_hash = None
+        if not op and p.get("content"):
+            point_content_hash = _content_hash(p["content"])
+
         # Build SET clauses + params; context is optional (Phase 1 stop-writes, #49)
         set_clauses = [
             "n.content=$content",
@@ -187,6 +277,7 @@ class _EntityHandlers:
             "n.status=coalesce($st, n.status, 'live')",
             "n.authoredBy=coalesce($ab, n.authoredBy)",
             "n.embedding=CASE WHEN $embedding IS NOT NULL THEN vecf32($embedding) ELSE n.embedding END",
+            "n.content_hash=coalesce($ch, n.content_hash)",
             "n.confidence=coalesce($cf, n.confidence)",
             "n.createdAt=coalesce($ca, n.createdAt, $now)",
             "n.validFrom=coalesce($vf, n.validFrom)",
@@ -200,6 +291,7 @@ class _EntityHandlers:
             "st": p.get("status"),
             "ab": p.get("authoredBy"),
             "embedding": embedding,
+            "ch": point_content_hash,
             "cf": p.get("confidence"),
             "ca": p.get("createdAt") or p.get("created_at"),
             "vf": p.get("validFrom"), "vt": p.get("validTo"),
@@ -236,6 +328,23 @@ class _EntityHandlers:
                 "MATCH (n:Point {id:$id}) SET n.provenanceSource=$sid",
                 params={"id": p["id"], "sid": prov["source_id"]},
             )
+        # #2795 (D2): open-set passthrough — parity with create_point's
+        # `SET n += $props` and with every other layer's _persist_extra_props.
+        # This is the shared live+replay writer, so door 3's live drop and
+        # rebuild's replay drop are fixed together. Handled + deny-listed keys
+        # are excluded (precedence: the fixed clauses above already wrote
+        # updatedAt/embedding/content_hash), and only persistable values
+        # survive the shared type filter (#2894).
+        extras = self._persist_extra_props(
+            "MATCH (n:Point {id:$id})", {"id": p["id"]}, p,
+            self._POINT_HANDLED | self._POINT_DENY,
+        )
+        for key in extras:
+            if key not in self._POINT_DECLARED_PROPS:
+                logger.warning(
+                    "Point prop %r is not declared — persisted via open-set "
+                    "passthrough (#2795); declare it in POINT_PROPS for parity",
+                    key)
 
     def _upsert_point_edges(self, p: dict) -> None:
         """Wire all Point edges (provenance + about + operator).

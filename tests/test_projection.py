@@ -634,6 +634,108 @@ def test_falkor_rebuild_then_apply():
         pass  # shared session projection — module helper owns close
 
 
+# --------------------------- #2795 open-set Point writer (live + replay)
+
+def test_falkor_rebuild_preserves_unknown_point_prop():
+    """#2795: an unrecognised primitive Point prop is not dropped by
+    rebuild_all — the replay half of the shared writer's closed-set drop."""
+    if _skip_if_no_falkor():
+        pytest.skip("redislite falkordb unavailable")
+    api, log = _api()
+    pid = api.add_point("keeps extras", provenance("d.txt", [0, 5], "q"),
+                        custom_keep="yes")
+    proj = _shared_proj()
+    try:
+        proj.rebuild_all(str(log.path.parent))
+        row = proj.query(
+            "MATCH (n:Point {id:$id}) RETURN n.custom_keep", id=pid
+        ).result_set
+        assert row and row[0][0] == "yes", row
+    finally:
+        pass  # shared session projection — module helper owns close
+
+
+def test_falkor_rebuild_dict_prop_not_persisted_no_crash():
+    """#2894/#2795: a dict-valued unknown prop must not crash the writer and
+    must not be persisted as a node property (FalkorDB rejects maps)."""
+    if _skip_if_no_falkor():
+        pytest.skip("redislite falkordb unavailable")
+    api, log = _api()
+    pid = api.add_point("dict prop", provenance("d.txt", [0, 5], "q"),
+                        custom_map={"nested": 1})
+    proj = _shared_proj()
+    try:
+        proj.rebuild_all(str(log.path.parent))
+        row = proj.query(
+            "MATCH (n:Point {id:$id}) RETURN n.custom_map", id=pid
+        ).result_set
+        assert row and row[0][0] is None, row
+    finally:
+        pass  # shared session projection — module helper owns close
+
+
+def test_falkor_rebuild_recomputes_content_hash():
+    """#2795: content_hash is recomputed on rebuild (previously every replayed
+    node had content_hash=NULL, degrading the indexed dedup MATCH)."""
+    if _skip_if_no_falkor():
+        pytest.skip("redislite falkordb unavailable")
+    import hashlib
+    api, log = _api()
+    pid = api.add_point("hash me", provenance("d.txt", [0, 5], "q"))
+    proj = _shared_proj()
+    try:
+        proj.rebuild_all(str(log.path.parent))
+        row = proj.query(
+            "MATCH (n:Point {id:$id}) RETURN n.content_hash, n.is_operator",
+            id=pid,
+        ).result_set
+        assert row and row[0][1] is False, row
+        assert row[0][0] is not None, "content_hash must be non-NULL after rebuild"
+        assert row[0][0] == hashlib.sha256(b"hash me").hexdigest(), row
+    finally:
+        pass  # shared session projection — module helper owns close
+
+
+def test_falkor_rebuild_operator_has_no_content_hash():
+    """#2795: operators store no content (#548) — the synthesized fallback
+    content hash is skipped so it cannot match anything."""
+    if _skip_if_no_falkor():
+        pytest.skip("redislite falkordb unavailable")
+    api, log = _api()
+    a = api.add_point("a", provenance("d.txt", [0, 5], "q"))
+    b = api.add_point("b", provenance("d.txt", [5, 10], "q"))
+    op = api.add_operator("IMPL", [a, b], provenance("d.txt", [0, 10], "q"))
+    proj = _shared_proj()
+    try:
+        proj.rebuild_all(str(log.path.parent))
+        row = proj.query(
+            "MATCH (n:Point {id:$id}) RETURN n.content_hash, n.is_operator",
+            id=op,
+        ).result_set
+        assert row and row[0][1] is True, row
+        assert row[0][0] is None, row
+    finally:
+        pass  # shared session projection — module helper owns close
+
+
+def test_falkor_live_point_write_preserves_unknown_prop():
+    """#2795: a door-3 live write through _upsert_point_props preserves an
+    unrecognised primitive prop (the live-drop half of the same writer)."""
+    if _skip_if_no_falkor():
+        pytest.skip("redislite falkordb unavailable")
+    proj = _shared_proj()
+    try:
+        proj.apply({"type": "PointAdded",
+                    "point": {"id": "p-live-extra", "content": "x",
+                              "custom_live": "kept"}})
+        row = proj.query(
+            "MATCH (n:Point {id:'p-live-extra'}) RETURN n.custom_live"
+        ).result_set
+        assert row and row[0][0] == "kept", row
+    finally:
+        pass  # shared session projection — module helper owns close
+
+
 # ----------------------------------------------- FalkorProjection.edge_stats
 
 def test_falkor_edge_stats():
