@@ -377,13 +377,16 @@ quoted token values, ≥20-char token-like runs and filesystem paths — while
 `last_sweep` roll-up stays readable. Over-redaction is the deliberate
 fail-safe direction for a **public** body: a value that merely *looks*
 token-like is redacted too — a 26-char hex `team_id` (matched by the generic
-≥20-char token rule) or a ≥6-char single-quoted identifier (the historical
-`(got 'AbCdEfGh')` rule) — so triage keys on the preserved `graph_id` rather
+≥20-char token rule), a ≥6-char single-quoted identifier (the historical
+`(got 'AbCdEfGh')` rule), or a word that merely ends in a credential suffix
+(`hockey:`) — so triage keys on the preserved `graph_id` rather
 than the redacted `team_id`. `redact_truncate()` redacts *before*
 truncating so a secret is never cut into a sub-threshold fragment. Known
-residual: a secret with no recognisable prefix that is split by raw whitespace
-into fragments each under 20 characters. The primary control is the source —
-the three key-parsing sites emit a sha256 fingerprint, never the raw value.
+residuals (regex-inherent, both bounded): a secret with no recognisable prefix
+split by raw whitespace into fragments each under 20 characters, and a value
+containing an embedded quote inside a JSON payload (the escaped `\"` defeats
+quote pairing). The primary control for both is the source — the three
+key-parsing sites emit a sha256 fingerprint, never the raw value.
 
 **Credential requirement:** the driver **fails closed** if `GITHUB_TOKEN`
 is unset — Actions does not export it into step envs, so

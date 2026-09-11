@@ -872,7 +872,7 @@ assert_not_match "$(cat "$LOG")" "GH POST .*/issues .*SWEEP_NO_COVERAGE" "49. no
 reset_case
 export R2_TEAMS=$'backups/teamA/'
 export R2_DEFAULT_LIST="$TS_RECENT"
-export STUB_STATUS_BODY="$(status_body false '"boom ghp_ABCDEFGH\nIJKLMNOPQRSTUVWXYZ0123456789 dsn=user:SuperSecret123@db.internal:6379 redis://:EmptyUserPw123@db:6379 falkor://user:p/ssw0rd@db:6379 compatible: true patch: 3 author: bob password='\''x sekritTail1'\'' key=\"y sekritTail2\" hockey: 3 monkey: 5"' null)"
+export STUB_STATUS_BODY="$(status_body false '"boom ghp_ABCDEFGH\nIJKLMNOPQRSTUVWXYZ0123456789 dsn=user:SuperSecret123@db.internal:6379 redis://:EmptyUserPw123@db:6379 falkor://user:p/ssw0rd@db:6379 compatible: true patch: 3 author: bob password='\''x sekritTail1'\'' key=\"y sekritTail2\" PGPASSWORD=pgPw9 dbpassword=dbPw9 accessToken=accTok9 passwd=\"unterm sekritTail6 secret='\''unterm sekritTail7"' null)"
 run_driver
 assert_eq "$RC" 1 "50. a secret-bearing config error exits RED (1)"
 for leaked in SuperSecret123 ghp_ABCDEFGH EmptyUserPw123; do
@@ -887,10 +887,15 @@ assert_contains "$OUT" "author: bob" "50. 'author:' is not a false positive"
 # (the old rule-5 value class stopped at the first space and left the tail).
 assert_not_contains "$OUT" "sekritTail1" "50. a single-quoted value with spaces leaves no tail"
 assert_not_contains "$OUT" "sekritTail2" "50. a double-quoted value with spaces leaves no tail"
-# Review R4 (P3): a key suffix must start at a word segment, so a word that
-# merely ENDS in `key` is not a credential key.
-assert_contains "$OUT" "hockey: 3" "50. 'hockey:' is not a false positive"
-assert_contains "$OUT" "monkey: 5" "50. 'monkey:' is not a false positive"
+# Review R5 (P2 regression): an UNTERMINATED quoted value must still redact —
+# the balanced-quote value class alone failed the whole rule and leaked.
+assert_not_contains "$OUT" "sekritTail6" "50. an unterminated double-quoted value is redacted"
+assert_not_contains "$OUT" "sekritTail7" "50. an unterminated single-quoted value is redacted"
+# Review R5 (P3 regression): separator-less credential keys must still match
+# (the word-segment boundary dropped PGPASSWORD/dbpassword/accessToken).
+assert_not_contains "$OUT" "pgPw9" "50. a PGPASSWORD-style key is redacted"
+assert_not_contains "$OUT" "dbPw9" "50. a concatenated lowercase key is redacted"
+assert_not_contains "$OUT" "accTok9" "50. a camelCase key is redacted"
 
 # ── 51. the success branch backfills the R2 object with its issue_number ─
 reset_case
