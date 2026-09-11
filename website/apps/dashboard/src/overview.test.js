@@ -2,6 +2,9 @@
 // derivations are pure, no jsdom/React needed) (#2000 W4).
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
+import { dirname, join } from 'node:path'
 import {
   OVERVIEW_ELEMENTS,
   overviewConnection,
@@ -9,6 +12,8 @@ import {
   overviewNextAction,
 } from './overview.js'
 import { setupGuide } from './setupGuide.js'
+
+const __dirname = dirname(fileURLToPath(import.meta.url))
 
 test('DE2E-2: the Overview renders EXACTLY 3 elements in order', () => {
   assert.deepEqual([...OVERVIEW_ELEMENTS], [
@@ -167,4 +172,26 @@ test('#2361 vocab anchor: count-of-record surfaces share ONE term (memories)', (
   assert.ok(seedRow, 'the first-memory step renders')
   assert.ok(/memor(y|ies)/.test(seedRow.label), 'setup-guide step uses the anchor term')
   assert.ok(!/\bpoints?\b/.test(seedRow.label), 'setup-guide step never says "point(s)"')
+})
+
+test('#2361 vocab anchor: LIVE surfaces (main.jsx) do not drift back to "point"', () => {
+  // Code-review round 1 (P1): the first pass only guarded the pure modules,
+  // so three LIVE main.jsx strings drifted invisibly past a green suite —
+  // the Billing count-of-record card ("Data points", the SAME
+  // team.point_count the digest renders), the live connect step ("file your
+  // first point"), and the live Overview empty CTA ("add a point
+  // yourself"). Source scan (wizardArchived.test.js pattern) so the ratchet
+  // covers the surface users actually read, not just the modules.
+  const src = readFileSync(join(__dirname, 'main.jsx'), 'utf8')
+
+  assert.ok(!/Data points/.test(src),
+    'Billing count-of-record card uses the anchor (was "Data points")')
+  assert.ok(/card-label">Memories</.test(src),
+    'the point_count card is labelled "Memories"')
+  assert.ok(!/file your first point/i.test(src),
+    'live connect step uses the anchor (was "file your first point")')
+  assert.ok(/file your first memory/i.test(src),
+    'live connect step carries the anchor')
+  assert.ok(!/add a point yourself/i.test(src),
+    'live Overview empty CTA uses the anchor (was "add a point yourself")')
 })

@@ -69,9 +69,11 @@ export function overviewDigest(points) {
       kind: 'empty',
       value: 0,
       // #2361: ONE anchor term for what the graph stores — 'memories' —
-      // glossed in plain language on first contact. The old copy said
-      // 'memories' here and 'points' everywhere else (same object, two
-      // unexplained terms).
+      // glossed in plain language. NOTE: this empty branch is NOT the
+      // Overview's first-run surface (main.jsx renders its own welcome
+      // empty state when point_count === 0, so OverviewDigestCard only
+      // mounts above 0). The gloss therefore ALSO lands on the populated
+      // branch below, which is the one a user actually reads.
       detail: 'No memories yet — decisions and findings your agent files will show up here.',
     }
   }
@@ -80,7 +82,13 @@ export function overviewDigest(points) {
     value: n,
     // #2361: the count-of-record surface shares the anchor — 'memories',
     // never 'points' (indicator 1 + 4: one term per object, everywhere).
-    detail: n === 1 ? 'memory filed to your Organization graph' : 'memories filed to your Organization graph',
+    // The gloss rides here because this is the branch users see: the
+    // digest card mounts only when point_count > 0, and the Billing tab
+    // renders the SAME team.point_count under a now-matching 'Memories'
+    // label (was 'Data points' — same object, two unexplained names).
+    detail: n === 1
+      ? 'memory filed to your Organization graph — decisions and findings your agent saves'
+      : 'memories filed to your Organization graph — decisions and findings your agent saves',
   }
 }
 

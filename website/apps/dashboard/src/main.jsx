@@ -3013,7 +3013,8 @@ function claimIntentInFlight() {
     // new team. Fire-and-forget like completeLogin's card loads; each
     // loader carries its own staleness guard.
     loadAll('').catch(() => {})
-    // #1906: refetch the team so the Overview 'Data points' card reflects
+    // #1906: refetch the team so the memory-count cards (Overview digest +
+    // Billing 'Memories') reflect
     // the seeded graph — team.point_count was captured at provisioning
     // (pre-seed, 0). Also covers the header-exit-without-seed case (0
     // stays 0 — honest).
@@ -6303,7 +6304,7 @@ function claimIntentInFlight() {
                             </button>
                           </div>
                           <p className="dim" style={{ marginBottom: '0.75rem', lineHeight: 1.6 }}>
-                            Run this to verify your API key and file your first point — it creates your graph and connects your project.
+                            Run this to verify your API key and file your first memory — it creates your graph and connects your project.
                           </p>
                           <pre className="snippet" style={{ marginBottom: '0.75rem' }}>
 {`curl https://api.premiselabs.co/v1/points \\
@@ -6398,7 +6399,7 @@ function claimIntentInFlight() {
                                 it — both label and card are now gated together. */}
                             {harnessKey && (
                               <>
-                                <p style={{ ...wizardStepLabelStyle, margin: '0.9rem 0 0.5rem' }}>2. Restart {HARNESS_NAMES[wizardHarness]}, then give it this prompt to verify and file your first point</p>
+                                <p style={{ ...wizardStepLabelStyle, margin: '0.9rem 0 0.5rem' }}>2. Restart {HARNESS_NAMES[wizardHarness]}, then give it this prompt to verify and file your first memory</p>
                                 <WizardPromptCard text={wizardPromptText(wizardHarness, 2, harnessKey, wizardKeyMode)} label="Copy step 2 prompt" />
                               </>
                             )}
@@ -6739,12 +6740,12 @@ function claimIntentInFlight() {
                   {wizardStep === 3 && (
                     <div className="seed">
                       {wizardSeedDone ? (
-                        <p className="dim">Your graph is live — it starts with who you are, what you're working on, and how they connect.</p>
+                        <p className="dim">Your graph is live — it starts with you and your project, and the statement connecting them.</p>
                       ) : (
                         <>
                           <p className="dim" style={{ marginBottom: '0.9rem' }}>
-                            Your graph starts with two memories — who you are and what
-                            you're working on. We've prefilled them; adjust or keep them as they are.
+                            Your graph starts with two objects: you (the subject) and your
+                            project. We've prefilled them — adjust or keep as they are.
                           </p>
                           <div className="seed-fields" style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem', marginBottom: '1rem' }}>
                             <label className="small" style={{ display: 'flex', flexDirection: 'column', gap: '0.3rem' }}>
@@ -6753,7 +6754,7 @@ function claimIntentInFlight() {
                                 value={wizardSubject}
                                 onChange={(e) => setWizardSubject(e.target.value)}
                                 placeholder="e.g. daniel"
-                                aria-label="Your name"
+                                aria-label="Your name (subject)"
                                 style={{ padding: '0.5rem 0.7rem', background: 'var(--surface,#0d1a2d)', border: '1px solid var(--border,#1e293b)', borderRadius: 8, fontSize: 14 }}
                               />
                             </label>
@@ -6768,7 +6769,7 @@ function claimIntentInFlight() {
                               />
                             </label>
                           </div>
-                          <p className="dim small">Seeding files three memories: who you are, what you're working on, and how they connect.</p>
+                          <p className="dim small">Seeding adds: your subject, the project object (in progress), and a statement connecting them.</p>
                         </>
                       )}
                       {wizardSeedError && (
@@ -7384,7 +7385,7 @@ function claimIntentInFlight() {
               <>
                 <p className="dim">
                   Your Organization and API key are live — the graph is created the moment
-                  you add data. Connect your agent, or add a point yourself:
+                  you add data. Connect your agent, or add a memory yourself:
                 </p>
                 <div className="snippet-wrap">
                   <pre className="snippet">{firstDataSnippet}</pre>
@@ -8334,7 +8335,7 @@ function claimIntentInFlight() {
               </div>
               <div className="cards" style={{ marginTop: 12, marginBottom: 0 }}>
                 <div className="card"><div className="card-val">{(team.write_ops_used ?? 0).toLocaleString()}</div><div className="card-label">Write ops used{(team.write_ops_limit ? ` / ${team.write_ops_limit.toLocaleString()}` : '')}{team.write_ops_period ? ` · ${team.write_ops_period}` : ''}</div></div>
-                <div className="card"><div className="card-val">{team.point_count ?? 0}</div><div className="card-label">Data points</div></div>
+                <div className="card"><div className="card-val">{team.point_count ?? 0}</div><div className="card-label">Memories</div></div>
                 <div className="card"><div className="card-val">{team.max_graphs == null ? '∞' : team.max_graphs}</div><div className="card-label">Graphs</div></div>
                 <div className="card"><div className="card-val">{team.max_users == null ? '∞' : team.max_users}</div><div className="card-label">Users</div></div>
               </div>
