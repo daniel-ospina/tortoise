@@ -6739,12 +6739,12 @@ function claimIntentInFlight() {
                   {wizardStep === 3 && (
                     <div className="seed">
                       {wizardSeedDone ? (
-                        <p className="dim">Your graph is live — it starts with you and your project, and the statement connecting them.</p>
+                        <p className="dim">Your graph is live — it starts with who you are, what you're working on, and how they connect.</p>
                       ) : (
                         <>
                           <p className="dim" style={{ marginBottom: '0.9rem' }}>
-                            Your graph starts with two objects: you (the subject) and your
-                            project. We've prefilled them — adjust or keep as they are.
+                            Your graph starts with two memories — who you are and what
+                            you're working on. We've prefilled them; adjust or keep them as they are.
                           </p>
                           <div className="seed-fields" style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem', marginBottom: '1rem' }}>
                             <label className="small" style={{ display: 'flex', flexDirection: 'column', gap: '0.3rem' }}>
@@ -6753,7 +6753,7 @@ function claimIntentInFlight() {
                                 value={wizardSubject}
                                 onChange={(e) => setWizardSubject(e.target.value)}
                                 placeholder="e.g. daniel"
-                                aria-label="Your name (subject)"
+                                aria-label="Your name"
                                 style={{ padding: '0.5rem 0.7rem', background: 'var(--surface,#0d1a2d)', border: '1px solid var(--border,#1e293b)', borderRadius: 8, fontSize: 14 }}
                               />
                             </label>
@@ -6768,7 +6768,7 @@ function claimIntentInFlight() {
                               />
                             </label>
                           </div>
-                          <p className="dim small">Seeding adds: your subject, the project object (in progress), and a statement connecting them.</p>
+                          <p className="dim small">Seeding files three memories: who you are, what you're working on, and how they connect.</p>
                         </>
                       )}
                       {wizardSeedError && (

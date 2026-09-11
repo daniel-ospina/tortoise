@@ -62,18 +62,24 @@ test('digest: populated count is honest (N points)', () => {
   assert.ok(d.detail.includes('Organization'))
 })
 
-test('digest: singular count renders the singular copy (first point milestone)', () => {
+test('digest: singular count renders the singular copy (first memory milestone)', () => {
   const d = overviewDigest(1)
   assert.equal(d.kind, 'populated')
   assert.equal(d.value, 1)
-  assert.ok(/point filed/.test(d.detail), 'singular copy')
-  assert.ok(!/points filed/.test(d.detail), 'never the plural copy for 1')
+  // #2361: the anchor is 'memories' — the singular/plural pair must use it
+  // (never 'point(s) filed', the pre-sweep drift term).
+  assert.ok(/memory filed/.test(d.detail), 'singular copy')
+  assert.ok(!/memories filed/.test(d.detail), 'never the plural copy for 1')
 })
 
-test('digest: zero → empty pre-first-point copy, no fabrication', () => {
+test('digest: zero → empty pre-first-memory copy, no fabrication', () => {
   const d = overviewDigest(0)
   assert.equal(d.kind, 'empty')
   assert.ok(/No memories yet/.test(d.detail))
+  // #2361: the empty gloss is plain language — the anchor is explained on
+  // first contact, and the jargon terms ('point'/'subject') never appear.
+  assert.ok(/decisions and findings/.test(d.detail))
+  assert.ok(!/point/i.test(d.detail), 'no bare graph jargon in user copy')
 })
 
 test('digest: unknown/missing → unavailable, never a fake count', () => {
@@ -142,4 +148,23 @@ test('DE2E-2 copy sweep: Overview derivations never say team/workspace', () => {
   assert.ok(!/\bteam\b/i.test(all), 'no "team" in Overview copy')
   assert.ok(!/workspace/i.test(all), 'no "workspace" in Overview copy')
   assert.ok(/Organization/i.test(all), 'Organization copy present')
+})
+
+test('#2361 vocab anchor: count-of-record surfaces share ONE term (memories)', () => {
+  // The graph's contents have ONE user-facing name: 'memories'. The pre-sweep
+  // drift called the same object 'memories' on the Overview empty state and
+  // 'point(s)' on the populated digest + the Setup-guide step label — two
+  // unexplained terms for one object (issue #2361, indicators 1 and 4).
+  // This guard is the ratchet: a future copy edit that reintroduces 'point'
+  // on a count-of-record surface fails here instead of silently re-drifting.
+  const digest = [overviewDigest(0), overviewDigest(1), overviewDigest(7)]
+    .map((d) => String(d.detail)).join(' ')
+  assert.ok(/memor(y|ies)/.test(digest), 'digest uses the anchor term')
+  assert.ok(!/\bpoints?\b/.test(digest), 'digest never says "point(s)"')
+
+  const g = setupGuide({ status: 'active', fork: 'self', completed_steps: [] })
+  const seedRow = g.rows.find((r) => r.id === 'first-points-filed')
+  assert.ok(seedRow, 'the first-memory step renders')
+  assert.ok(/memor(y|ies)/.test(seedRow.label), 'setup-guide step uses the anchor term')
+  assert.ok(!/\bpoints?\b/.test(seedRow.label), 'setup-guide step never says "point(s)"')
 })

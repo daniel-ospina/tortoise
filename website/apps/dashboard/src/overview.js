@@ -68,13 +68,19 @@ export function overviewDigest(points) {
     return {
       kind: 'empty',
       value: 0,
-      detail: 'No memories yet — your agent will file your first points.',
+      // #2361: ONE anchor term for what the graph stores — 'memories' —
+      // glossed in plain language on first contact. The old copy said
+      // 'memories' here and 'points' everywhere else (same object, two
+      // unexplained terms).
+      detail: 'No memories yet — decisions and findings your agent files will show up here.',
     }
   }
   return {
     kind: 'populated',
     value: n,
-    detail: n === 1 ? 'point filed to your Organization graph' : 'points filed to your Organization graph',
+    // #2361: the count-of-record surface shares the anchor — 'memories',
+    // never 'points' (indicator 1 + 4: one term per object, everywhere).
+    detail: n === 1 ? 'memory filed to your Organization graph' : 'memories filed to your Organization graph',
   }
 }
 
