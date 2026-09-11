@@ -858,6 +858,23 @@ def gate_output(*, issue: str, prereg: dict, qid_to_cls: dict[str, str],
                 f"gate_output: {_label} has {len(_vs)} verdict(s) and "
                 f"{_graded} graded — an all-ungraded set cannot be "
                 "reported (no measurement to compare).")
+    # A gate with a pre-registered arm table and ZERO arms supplied is a
+    # degenerate comparison, not a result: it renders the `no-arms` branch.
+    # (A genuinely staged run must say so explicitly rather than ship an
+    # empty comparison as a finding.)
+    _prereg_arm_ids = [a.get("id") for a in (prereg.get("arms") or [])]
+    if _prereg_arm_ids and not arm_verdicts:
+        raise ValueError(
+            "gate_output: the pre-registration declares "
+            f"{len(_prereg_arm_ids)} arm(s) but no arm verdicts were "
+            "supplied — an empty comparison cannot produce a decision "
+            "branch.")
+    unknown = sorted(set(arm_verdicts) - set(_prereg_arm_ids))
+    if unknown:
+        raise ValueError(
+            f"gate_output: arm verdicts for {unknown} are not in the "
+            "pre-registered arm table — an unregistered arm cannot be "
+            "compared against the baseline.")
     tables = aggregate_taxonomy(baseline_verdicts, qid_to_cls,
                                 pool_limit=pool_limit)
     comps = {arm_id: compare_arms_to_baseline(baseline_verdicts, vs)

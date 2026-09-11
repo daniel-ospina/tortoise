@@ -22,6 +22,30 @@ aboutObjects: tortoise
 > decision it is annotated as unreproducible and superseded by this
 > measured record (see the generated gate output linked below).
 
+## Evidence artifacts
+
+| artifact | contents |
+| --- | --- |
+| [`2578-reports/`](2578-reports) | the raw per-arm run reports behind the 55-Q matrix: methodology (reader spec + prompt hash + judge + `applied_knobs`) and per-outcome `measure_facts`, plus each run's `integrity` block (`valid=true` for all 8 arms — #1747 census-class criterion, `n_hard_invalid=0`, `invalid_rate=0.0 <= threshold 0.0`) |
+| [`2578-reports-133/A-default-133q.json`](2578-reports-133) | the whole-class 133-Q baseline report (same shape; `integrity.valid=true`) |
+| [`2578-measured-outcomes.jsonl`](2578-measured-outcomes.jsonl) | 8 arms x 55 questions, one graded outcome per line |
+| [`2578-measured-outcomes-133.jsonl`](2578-measured-outcomes-133.jsonl) | the 133-Q baseline, one graded outcome per line |
+
+**Reproduce the published tables from the committed data** (no cache, no
+network, no docker):
+
+```
+python -m tools.longmem_eval.measure_temporal \
+  --reports docs/runbook/2578-reports \
+  --instances <the 55-Q dataset rows> \
+  --out-md /tmp/gate.md --out-jsonl /tmp/rows.jsonl
+```
+
+Both outputs are byte-identical to the committed `2578-gate-output.md`
+and `2578-measured-outcomes.jsonl`. The producer also runs the
+pre-registered session dedup (`dedup_instance_sessions`) on every supplied
+row, so the date-alignment guarantee applies to the committed path itself.
+
 ## Pre-registration
 
 Written before any arm runs by `measure_temporal.write_preregistration`

@@ -720,7 +720,8 @@ def test_gate_output_reports_substantive_vs_abstention_correct(tmp_path):
                           qid_to_cls={"gpt4_93159ced_abs": "interval",
                                       "q2": "interval", "q3": "interval"},
                           baseline_verdicts=baseline,
-                          arm_verdicts={}, arm_stats={})
+                          arm_verdicts={"tr_top_k16": baseline},
+                          arm_stats={})
     assert "Substantive vs abstention-correct" in text
     # of 2 scored correct, exactly 1 is a real answer on an answerable Q
     assert "1 of 2 are on questions that HAVE an answer" in text
@@ -736,7 +737,7 @@ def test_gate_output_refuses_raw_outcomes(tmp_path):
     with pytest.raises(ValueError, match="classify_outcome"):
         mt.gate_output(issue="2578", prereg=prereg, qid_to_cls={"q1": "interval"},
                        baseline_verdicts=[_mk_outcome("q1", True)],
-                       arm_verdicts={}, arm_stats={})
+                       arm_verdicts={"tr_top_k16": []}, arm_stats={})
 
 
 def test_gate_output_refuses_an_all_ungraded_baseline(tmp_path):
@@ -750,11 +751,14 @@ def test_gate_output_refuses_an_all_ungraded_baseline(tmp_path):
                                      "measure_facts": None})]
     with pytest.raises(ValueError, match="ungraded"):
         mt.gate_output(issue="2578", prereg=prereg, qid_to_cls={"q1": "interval"},
-                       baseline_verdicts=ungraded, arm_verdicts={},
+                       baseline_verdicts=ungraded,
+                       arm_verdicts={"tr_top_k16": [_mk_outcome("q1", True)]},
                        arm_stats={})
     with pytest.raises(ValueError, match="ungraded"):
         mt.gate_output(issue="2578", prereg=prereg, qid_to_cls={},
-                       baseline_verdicts=[], arm_verdicts={}, arm_stats={})
+                       baseline_verdicts=[],
+                       arm_verdicts={"tr_top_k16": [_mk_outcome("q1", True)]},
+                       arm_stats={})
 
 
 def test_gate_output_refuses_an_all_ungraded_arm(tmp_path):
@@ -771,4 +775,24 @@ def test_gate_output_refuses_an_all_ungraded_arm(tmp_path):
                        qid_to_cls={"q1": "interval"},
                        baseline_verdicts=graded,
                        arm_verdicts={"tr_top_k16": ungraded_arm},
+                       arm_stats={})
+
+
+def test_gate_output_refuses_an_empty_or_unregistered_arm_set(tmp_path):
+    """A pre-registered arm table with zero supplied arms renders a
+    `no-arms` branch; an arm outside the table cannot be compared. Both are
+    degenerate comparisons, not results."""
+    prereg = mt.write_preregistration(
+        mt.load_census(CENSUS)["rows"], tmp_path / "prereg.json")
+    baseline = [mt.classify_outcome(_mk_outcome("q1", True))]
+    with pytest.raises(ValueError, match="no arm verdicts"):
+        mt.gate_output(issue="2578", prereg=prereg,
+                       qid_to_cls={"q1": "interval"},
+                       baseline_verdicts=baseline, arm_verdicts={},
+                       arm_stats={})
+    with pytest.raises(ValueError, match="not in the pre-registered"):
+        mt.gate_output(issue="2578", prereg=prereg,
+                       qid_to_cls={"q1": "interval"},
+                       baseline_verdicts=baseline,
+                       arm_verdicts={"made-up-arm": baseline},
                        arm_stats={})

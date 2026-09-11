@@ -12,7 +12,15 @@
   "reader_model_spec": "openrouter:deepseek/deepseek-v4-flash",
   "reader_prompt_hash": "fda476721fe0ae86",
   "retrieval_arm": "hybrid RRF (FTS+vector+structural, TF-IDF fallback) over graph turn points + raw session transcripts",
-  "tr_top_k": 12
+  "tr_top_k": 12,
+  "applied_knobs": {
+   "knobs": [
+    "--rerank",
+    "--rerank-cap",
+    "3"
+   ],
+   "isolation": "cap-only control for the applied-rerank confound"
+  }
  },
  "n_outcomes": 55,
  "outcomes": [
@@ -3089,5 +3097,15 @@
     "selected_count": 20
    }
   }
- ]
+ ],
+ "integrity": {
+  "criterion": "#1747 census-class-aware: valid = (n_hard_invalid == 0) AND (n_excluded_hard == 0) AND (invalid_rate <= threshold) AND (outcome-derived attempted set non-empty whenever any entry was excluded or dropped — a fully excluded/dropped run never certifies; failures do not count as attempts for this guard); hard = fatal_*/ingest/unknown census classes + non-census error strings with an EMPTY census (mixed recoverable+structural grades recoverable — #1746 lane) + permanent eval failures + malformed inputs (present non-bool valid flag, non-iterable, non-str, or falsy-but-present NON-CONTAINER error_classes — 0/\"\"/False/PRESENT-null; empty dict/list are the legitimate no-census shapes and grade clean) fail closed to hard + excluded outcomes (shape-broken dicts / breaker_open drops) with a hard census still veto (n_excluded_hard); recoverable = parse_error/truncated/truncated_parse_error/partial_parse/transient_*/s1_chunk_summary census classes + reader/judge/ingest:retries_exhausted eval failures (rate-limited, not vetoed)",
+  "invalid_rate": 0.0,
+  "n_excluded": 0,
+  "n_excluded_hard": 0,
+  "n_failed": 0,
+  "n_hard_invalid": 0,
+  "threshold": 0.0,
+  "valid": true
+ }
 }
