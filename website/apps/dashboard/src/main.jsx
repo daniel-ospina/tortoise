@@ -4195,13 +4195,18 @@ function claimIntentInFlight() {
 
   async function handleCreateTeam() {
     // #1877: create-team dialog submit — validation mirrors POST /v1/teams
-    // (≤64 chars, [a-zA-Z0-9_-], spaces rejected); 402 → gated-on-click
-    // upgrade UX (the dialog explains "upgrade a team, then create" — the
-    // new team doesn't exist until the gate passes).
+    // (≤64 chars, free text — spaces and dashes are fine). The organization's
+    // ID is minted opaquely server-side and never derived from this name, so
+    // there is nothing to slug: the name is display-only and renameable.
+    // Keep this pattern identical to the sibling checkout path above and to
+    // the server (`hosted_api.py` `_name_pattern`), or the two surfaces drift
+    // and one of them rejects names the other accepts (#2779).
+    // 402 → gated-on-click upgrade UX (the dialog explains "upgrade a team,
+    // then create" — the new team doesn't exist until the gate passes).
     const name = createTeamName.trim()
     if (!name) { setCreateTeamError('Organization name required'); return }
-    if (name.length > 64 || !/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/.test(name)) {
-      setCreateTeamError('Invalid organization name — letters, numbers, dash, underscore only')
+    if (name.length > 64 || !/^[a-zA-Z0-9][a-zA-Z0-9_ -]{0,63}$/.test(name)) {
+      setCreateTeamError('Invalid organization name — letters, numbers, space, dash, underscore only')
       return
     }
     setCreateTeamBusy(true)
