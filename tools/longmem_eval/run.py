@@ -62,6 +62,10 @@ from tortoise.model_adapters import (
     is_fatal,
 )
 
+# #2969: the PRODUCT parser owns the socket-timeout vocabulary — the eval
+# reuses it so the run diagnostic reports the exact effective bound.
+from tortoise.projection import _resolve_socket_timeout
+
 # #2578 (Task 1): the product-verbatim abstained-phrases classifier — the
 # measurement gate's raw reader_refusal marker uses EXACTLY the vocabulary
 # the tortoise reader abstains with (never the _abs question-id marker).
@@ -128,6 +132,14 @@ from .retrieve import (
     resolve_answer_session_indices,
     retrieve_for_question,
     run_integrity_gate,
+)
+from .stall_guard import (
+    DEFAULT_EVAL_SOCKET_CONNECT_TIMEOUT_S,
+    DEFAULT_EVAL_SOCKET_TIMEOUT_S,
+    ENV_SOCKET_CONNECT_TIMEOUT,
+    ENV_SOCKET_TIMEOUT,
+    ENV_STALL_TIMEOUT,
+    resolve_stall_timeout_s,
 )
 
 DEFAULT_KS = (5, 10, 20)
@@ -557,6 +569,31 @@ def _finalize_embedder_preflight(status: dict, *, mock: bool) -> dict:
     # the PreflightError path's SystemExit(1); a string code made CLI exit
     # status 1 ambiguous and broke the exit-code contract.
     raise SystemExit(1)
+
+
+def _ingest_bound_banner(stall_timeout_s: float, *,
+                         db_uri: str | None) -> str:
+    """#2969 diagnostic: the effective ingest bounds for THIS run.
+
+    A stalled run is silent by nature; this line makes the socket bound and
+    the no-progress budget visible in the run log so "stalled" is
+    distinguishable from "slow" without stack sampling. The read bound is
+    resolved through the PRODUCT parser (``_resolve_socket_timeout``) so the
+    reported value is exactly what the graph client will use; the embedded
+    lane has no graph socket, so it reports n/a rather than a fiction.
+    """
+    stall_txt = (f"{stall_timeout_s:g}s" if stall_timeout_s else "disabled")
+    if db_uri is None:
+        read_txt = "n/a (embedded lane)"
+    else:
+        read_val = _resolve_socket_timeout(ENV_SOCKET_TIMEOUT,
+                                           DEFAULT_EVAL_SOCKET_TIMEOUT_S)
+        read_txt = (f"{read_val:g}s" if read_val
+                    else "UNBOUNDED (explicit opt-out)")
+    return (f"[longmem_eval] ingest stall budget: {stall_txt} "
+            f"({ENV_STALL_TIMEOUT}); graph socket read timeout: {read_txt} "
+            f"({ENV_SOCKET_TIMEOUT})")
+
 
 @contextlib.contextmanager
 def _temporary_env_var(name: str, value: str):
@@ -3330,6 +3367,10 @@ def run_evaluation(
     ingest_write_retries: int = INGEST_WRITE_RETRIES,
     ingest_question_retries: int = INGEST_QUESTION_RETRIES,
     resume_attempts_cap: int = RESUME_ATTEMPTS_CAP,
+    # #2969: per-question ingest no-progress budget (seconds; None → the
+    # env/default resolution inside ingest_v2). NOT fingerprinted — it
+    # bounds a stall, it does not change the measurement definition.
+    ingest_stall_timeout_s: float | None = None,
     # #1786 (R5): the eval's HYBRID-arm retrieval deadline (ms) — the eval
     # (run_main) always passes EVAL_RETRIEVAL_BUDGET_MS (1500); None keeps
     # the SDK-default 500 ms for programmatic callers.
@@ -3871,7 +3912,15 @@ def run_evaluation(
                                     # resume-internal whole-question retry
                                     # budget, P1-1).
                                     ingest_write_retries=ingest_write_retries,
-                                    write_marker_armed=not resume_reattempt)
+                                    write_marker_armed=not resume_reattempt,
+                                    # #2969: the per-question liveness
+                                    # signal + no-progress budget — a
+                                    # stalled ingest aborts the QUESTION
+                                    # with a retryable classification
+                                    # instead of hanging forever.
+                                    # (None → env/default resolution
+                                    # inside ingest_v2.)
+                                    stall_timeout_s=ingest_stall_timeout_s)
                             return ingest_haystack(
                                 _sdk, question, chunk_turns=chunk_turns)
 
@@ -5752,7 +5801,15 @@ def run_main(argv: list[str] | None = None) -> dict[str, Any]:
                 f"--db must be a FalkorDB URI (docker://|redis://|rediss://|"
                 f"bolt://), got {db_uri!r} — the per-question isolated graphs "
                 f"derive from the URI's server")
-        with _temporary_env_var("TORTOISE_DB_URI", db_uri):
+        with _temporary_env_var("TORTOISE_DB_URI", db_uri), \
+                _temporary_env_var(
+                    ENV_SOCKET_TIMEOUT,
+                    (os.environ.get(ENV_SOCKET_TIMEOUT)
+                     or str(DEFAULT_EVAL_SOCKET_TIMEOUT_S))), \
+                _temporary_env_var(
+                    ENV_SOCKET_CONNECT_TIMEOUT,
+                    (os.environ.get(ENV_SOCKET_CONNECT_TIMEOUT)
+                     or str(DEFAULT_EVAL_SOCKET_CONNECT_TIMEOUT_S))):
             return _run_main(parser, args, db_uri)
     return _run_main(parser, args, db_uri)
 
@@ -5787,6 +5844,20 @@ def _run_main(parser: argparse.ArgumentParser, args,
     max_chunks_per_session = _resolve_int_knob(
         "TORTOISE_LME_MAX_CHUNKS_PER_SESSION",
         DEFAULT_MAX_CHUNKS_PER_SESSION, args.max_chunks_per_session)
+    # #2969: the ingest no-progress budget (env-only knob — it changes
+    # resilience, not the measurement definition, so it stays out of the
+    # run fingerprint). Fail loud on a malformed value: a typo must never
+    # silently disable the guard. The graph read bound is validated here too
+    # (and reported below via the PRODUCT parser, so the socket-timeout
+    # vocabulary has one home) — a typo fails at RUN START, not mid-question.
+    try:
+        ingest_stall_timeout_s = resolve_stall_timeout_s()
+        _resolve_socket_timeout(ENV_SOCKET_TIMEOUT,
+                                DEFAULT_EVAL_SOCKET_TIMEOUT_S)
+    except ValueError as _e:
+        raise SystemExit(str(_e)) from None
+    print(_ingest_bound_banner(ingest_stall_timeout_s, db_uri=db_uri),
+          file=sys.stderr)
     # C1 (#1745): reader-context item cap (env first, CLI overrides;
     # >= 1 validated). TR questions ignore it — tr_top_k is the pinned TR
     # item cap.
@@ -6098,6 +6169,7 @@ def _run_main(parser: argparse.ArgumentParser, args,
                 ingest_write_retries=INGEST_WRITE_RETRIES,
                 ingest_question_retries=INGEST_QUESTION_RETRIES,
                 resume_attempts_cap=RESUME_ATTEMPTS_CAP,
+                ingest_stall_timeout_s=ingest_stall_timeout_s,
                 retrieval_budget_ms=EVAL_RETRIEVAL_BUDGET_MS,
                 # #1785 (Task 1 Step 4 / Task 3): revalidation mode + the
                 # loss-location replay flags (CLI > env > default).

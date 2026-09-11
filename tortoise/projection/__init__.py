@@ -16,6 +16,7 @@ import hashlib
 import re
 import os
 import shutil
+import math
 import logging
 import threading
 from collections import defaultdict
@@ -24,6 +25,63 @@ from pathlib import Path
 from typing import Protocol, runtime_checkable
 
 logger = logging.getLogger(__name__)
+
+# ── #2969: bounded graph socket reads (env-tunable) ─────────────────────────
+# The server/Docker FalkorDB client MUST carry a bounded socket READ timeout:
+# a server-side stall (FalkorDB active-defrag loop / MERGE lock — #2969,
+# #2838) otherwise blocks the caller in ``recv()`` forever, and the run looks
+# alive (process present, 0% CPU) with no error, no log output and no way to
+# tell "stalled" from "slow". redis-py's own default is a 5s read timeout,
+# but ``falkordb.FalkorDB.__init__`` defaults ``socket_timeout=None`` and
+# passes it explicitly — which DISABLES redis-py's default on this path.
+#
+# The defaults below preserve the pre-#2969 product behaviour exactly
+# (10s read / 5s connect). The longmem eval lane raises the read bound for
+# its legitimately long ingest writes (see
+# ``tools/longmem_eval/stall_guard.py``). An operator can tune either knob:
+#
+#   TORTOISE_DB_SOCKET_TIMEOUT          seconds (default 10)
+#   TORTOISE_DB_SOCKET_CONNECT_TIMEOUT  seconds (default 5)
+#
+# ``none`` / ``off`` / ``0`` disables the bound — an explicit, documented
+# opt-out for a workload whose reads legitimately exceed any fixed budget
+# (NOT recommended: it restores the unbounded-hang failure mode).
+_SOCKET_TIMEOUT_ENV = "TORTOISE_DB_SOCKET_TIMEOUT"
+_SOCKET_CONNECT_TIMEOUT_ENV = "TORTOISE_DB_SOCKET_CONNECT_TIMEOUT"
+_DEFAULT_SOCKET_TIMEOUT = 10.0
+_DEFAULT_SOCKET_CONNECT_TIMEOUT = 5.0
+_SOCKET_TIMEOUT_UNBOUNDED = frozenset({"none", "off", "no", "0", "0.0", "-1"})
+
+
+def _resolve_socket_timeout(name: str, default: float) -> float | None:
+    """Parse a seconds-valued socket-timeout knob (env > default).
+
+    Unset/blank → ``default``. ``none``/``off``/``0``/negative → ``None``
+    (unbounded — the explicit opt-out). A non-numeric OR non-finite value
+    raises ``ValueError``: a typo must fail loud at connection time, never
+    silently leave the client effectively unbounded (``inf`` would).
+    """
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    token = raw.strip().lower()
+    if token in _SOCKET_TIMEOUT_UNBOUNDED:
+        return None
+    try:
+        value = float(token)
+    except ValueError:
+        raise ValueError(
+            f"{name}={raw!r} is not a number of seconds (use e.g. '120', "
+            f"or 'none' to disable the bound)") from None
+    if not math.isfinite(value):
+        raise ValueError(
+            f"{name}={raw!r} is not a finite number of seconds (inf/nan "
+            f"would leave the client unbounded; use 'none' to opt out "
+            f"explicitly)")
+    if value <= 0:
+        return None
+    return value
+
 
 # Process-lifetime cache for FalkorProjection._get_falkordb_version (#1359
 # review P2): version detection costs two network RTTs (MODULE LIST + INFO
@@ -816,8 +874,16 @@ class FalkorProjection(
         elif host is not None:
             # Docker FalkorDB
             from falkordb import FalkorDB  # ponytail: lazy import, only needed for Docker mode
+            # #2969: bounded socket reads — see _resolve_socket_timeout. The
+            # values are resolved at CONNECTION time so an env knob covers
+            # every construction site (SDK sessions, ingest, hosted).
             self.db = FalkorDB(host=host, port=port, username=username, password=password,
-                               socket_connect_timeout=5, socket_timeout=10, ssl=ssl)
+                               socket_connect_timeout=_resolve_socket_timeout(
+                                   _SOCKET_CONNECT_TIMEOUT_ENV,
+                                   _DEFAULT_SOCKET_CONNECT_TIMEOUT),
+                               socket_timeout=_resolve_socket_timeout(
+                                   _SOCKET_TIMEOUT_ENV, _DEFAULT_SOCKET_TIMEOUT),
+                               ssl=ssl)
             # Epic #1647 (cycle-3 P0-1): record the host ON THE PROJECTION so
             # wipe_server/session sweep/tripwire read it instead of the raw
             # client (redis-py 8.1.0 has no .host on the client — the host
