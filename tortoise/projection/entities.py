@@ -201,8 +201,12 @@ class _EntityHandlers:
     # form is the declared `flatten=list` STRING (`search_keys` -> space-joined
     # by `_flatten_search_keys_prop`); `tags` is owned by its own `_sync_tags`
     # path and its TAGGED-edge replay is out of scope (#2897), so a raw-list
-    # half-restore is refused. Empty pre-D1: no list prop passes through the
-    # generic Point filter today. Replaced by contract.py's declared set in D1.
+    # half-restore is refused. NOTE the live/rebuild boundary this creates:
+    # `sdk.create_point` still writes raw lists directly (`SET n += $props`),
+    # so a live `n.tags` exists while replay drops it — the pre-existing #2897
+    # gap (the drop is now REPORTED, not silent). Empty pre-D1: no list prop
+    # passes through the generic Point filter today. Replaced by contract.py's
+    # declared set in D1.
     _POINT_LIST_PROPS: frozenset = frozenset()
 
     def _persist_extra_props(self, match_clause: str, match_params: dict,
@@ -372,6 +376,18 @@ class _EntityHandlers:
                 logger.warning(
                     "Point prop %r dropped — deny-listed (recompute/EP-owned, "
                     "#2795); not restorable from the payload", key)
+        # (b) a policy-denied flat list is also reported: the live SDK writer
+        # still stores raw lists (e.g. `tags`), but replay refuses them, so the
+        # drop MUST be visible (#2795 indicator 4 / D7; `tags` -> #2897).
+        for key, val in p.items():
+            if not (isinstance(val, list) and val):
+                continue
+            if key in self._POINT_LIST_PROPS or key in self._POINT_HANDLED \
+                    or key in self._POINT_DENY or key in self._META_KEYS:
+                continue
+            logger.warning(
+                "Point list prop %r dropped — undeclared list props are never "
+                "written raw (#2795); not restorable from the payload", key)
 
     def _upsert_point_edges(self, p: dict) -> None:
         """Wire all Point edges (provenance + about + operator).

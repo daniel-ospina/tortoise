@@ -736,23 +736,29 @@ def test_falkor_live_point_write_preserves_unknown_prop():
         pass  # shared session projection — module helper owns close
 
 
-def test_falkor_rebuild_undeclared_list_prop_denied():
+def test_falkor_rebuild_undeclared_list_prop_denied(caplog):
     """#2795 (D2 mechanic 1): an UNDECLARED list prop is never written raw —
     including `tags`, whose raw list would half-restore a node without its
-    TAGGED edges (#2897)."""
+    TAGGED edges (#2897) — and the drop is REPORTED (indicator 4)."""
     if _skip_if_no_falkor():
         pytest.skip("redislite falkordb unavailable")
+    import logging
     api, log = _api()
     pid = api.add_point("list prop", provenance("d.txt", [0, 5], "q"),
                         custom_list=["a", "b"], tags=["alpha"])
     proj = _shared_proj()
     try:
-        proj.rebuild_all(str(log.path.parent))
+        with caplog.at_level(logging.WARNING,
+                             logger="tortoise.projection.entities"):
+            proj.rebuild_all(str(log.path.parent))
         row = proj.query(
             "MATCH (n:Point {id:$id}) RETURN n.custom_list, n.tags", id=pid
         ).result_set
         assert row and row[0][0] is None, row
         assert row[0][1] is None, row
+        assert any("undeclared list props" in r.getMessage()
+                   and "tags" in r.getMessage()
+                   for r in caplog.records), caplog.text
     finally:
         pass  # shared session projection — module helper owns close
 
