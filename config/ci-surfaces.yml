@@ -437,6 +437,7 @@ surfaces:
   - test_aggregative_facet_coverage.py  # #2521: aggregative-intent + facet coverage check (C5, docker-lane)
   - test_aggregative_intent.py          # #2521: hermetic detector + coverage-math table (C5)
   - test_retrieval.py
+  - test_retrieval_determinism_2952.py  # #2952: ranking determinism w.r.t. elapsed wall-clock (hermetic, no DB)
   - test_review_connections.py
   - test_round_trip_parity.py
   - test_run_protocol.py
@@ -528,6 +529,7 @@ surfaces:
   - test_kappa.py
   - test_ranking.py
   - test_ranking_w4b.py
+  - test_retrieval_determinism_2952.py  # #2952: ranking determinism (hermetic; also registered under core)
   - test_recall_gaps_subgraph.py
   - test_recall_state.py
   - test_source_credibility.py
