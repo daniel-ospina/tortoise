@@ -123,3 +123,92 @@ def test_restore_refuses_without_yes(monkeypatch):
         result = rdb_snapshot_restore.restore(URI, fh.name, CONTAINER, yes=False)
     assert result["ok"] is False
     assert calls == [], "no docker call may happen without --yes"
+
+
+def test_restore_starts_container_when_stop_times_out(monkeypatch):
+    """A `docker stop` that RAISES must still trigger recovery.
+
+    `_docker` is a bare `subprocess.run(..., timeout=...)`, so it raises
+    `TimeoutExpired` at the wall rather than returning non-zero. If the stop
+    sits outside the `try`, that exception escapes before the `finally` and the
+    container is left down. A stop that times out may nonetheless have stopped
+    the container daemon-side, so this is a real outage path.
+    """
+    _stub_non_docker_helpers(monkeypatch)
+    calls: list[str] = []
+
+    def _docker(args, timeout=30):  # noqa: ANN001, ARG001
+        calls.append(args[0])
+        if args[0] == "stop":
+            raise subprocess.TimeoutExpired(cmd=["docker", *args],
+                                            timeout=timeout)
+        return subprocess.CompletedProcess(args=["docker", *args],
+                                           returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(rdb_snapshot_restore, "_docker", _docker)
+    with tempfile.NamedTemporaryFile(suffix=".rdb") as fh:
+        result = rdb_snapshot_restore.restore(URI, fh.name, CONTAINER, yes=True)
+
+    assert result["ok"] is False
+    assert "start" in calls, (
+        "a raising `docker stop` skipped recovery — the container is left "
+        "stopped (the hole this fix exists to close)"
+    )
+
+
+def test_restore_starts_container_when_docker_raises(monkeypatch):
+    """A raising `_docker` mid-sequence must not skip recovery.
+
+    The original code recovered in `except`; the exception path is precisely
+    why recovery was moved to `finally`. `_docker` raises (it does not return
+    non-zero) on timeout, so this path needs its own test.
+    """
+    _stub_non_docker_helpers(monkeypatch)
+    calls: list[str] = []
+
+    def _docker(args, timeout=30):  # noqa: ANN001, ARG001
+        calls.append(args[0])
+        if args[0] == "cp":
+            raise subprocess.TimeoutExpired(cmd=["docker", *args],
+                                            timeout=timeout)
+        return subprocess.CompletedProcess(args=["docker", *args],
+                                           returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(rdb_snapshot_restore, "_docker", _docker)
+    with tempfile.NamedTemporaryFile(suffix=".rdb") as fh:
+        result = rdb_snapshot_restore.restore(URI, fh.name, CONTAINER, yes=True)
+
+    assert result["ok"] is False
+    assert "start" in calls, "a raising `docker cp` skipped recovery"
+
+
+def test_restore_recovers_from_transient_start_failure(monkeypatch):
+    """First `start` fails, the recovery retry succeeds — container RUNNING.
+
+    Asserts the end state, not merely that a retry was attempted: a second
+    useless start would satisfy a call-count assertion but not this one.
+    """
+    _stub_non_docker_helpers(monkeypatch)
+    calls: list[str] = []
+    state = {"starts": 0, "last_start_rc": None}
+
+    def _docker(args, timeout=30):  # noqa: ANN001, ARG001
+        calls.append(args[0])
+        rc = 0
+        if args[0] == "start":
+            state["starts"] += 1
+            rc = 1 if state["starts"] == 1 else 0
+            state["last_start_rc"] = rc
+        return subprocess.CompletedProcess(args=["docker", *args],
+                                           returncode=rc, stdout="", stderr="")
+
+    monkeypatch.setattr(rdb_snapshot_restore, "_docker", _docker)
+    with tempfile.NamedTemporaryFile(suffix=".rdb") as fh:
+        result = rdb_snapshot_restore.restore(URI, fh.name, CONTAINER, yes=True)
+
+    assert result["ok"] is False
+    assert state["starts"] == 2, f"expected one retry, got {calls}"
+    assert state["last_start_rc"] == 0, (
+        "the recovery start must leave the container running; "
+        f"last start rc was {state['last_start_rc']}"
+    )

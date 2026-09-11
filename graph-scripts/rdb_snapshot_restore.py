@@ -326,14 +326,21 @@ def restore(uri: str, rdb_file: str, container: str | None,
     before = graph_stats_for(uri)
     info = _container_rdb_info(cname)
 
-    # 1. Stop container
-    r = _docker(["stop", cname], timeout=60)
-    if r.returncode != 0:
-        return {"ok": False,
-                "error": f"docker stop {cname} failed: {r.stderr.strip()}"}
-
     restarted = False
     try:
+        # 1. Stop container. This is INSIDE the `try` deliberately: `_docker`
+        #    is a bare `subprocess.run(..., timeout=...)` which raises
+        #    `TimeoutExpired` at the wall, and a stop that times out may still
+        #    have stopped the container daemon-side. With the stop outside the
+        #    `try` (the first cut of #2993), that exception escaped before the
+        #    `finally` and left the database down — the very hole being fixed.
+        r = _docker(["stop", cname], timeout=60)
+        if r.returncode != 0:
+            # Non-zero can still mean "stopped": fall through to the `finally`
+            # rather than returning past the recovery.
+            return {"ok": False,
+                    "error": f"docker stop {cname} failed: {r.stderr.strip()}"}
+
         # 2. Place RDB into the container's data dir (read pre-stop; defaults
         #    match the FalkorDB image layout when the probe came up empty).
         target = (f"{info['dir']}/{info['dbfilename']}" if info["dir"]
@@ -362,7 +369,14 @@ def restore(uri: str, rdb_file: str, container: str | None,
         # exactly what happened on 2026-09-04 — falkordb-16379 stayed stopped
         # for 6 days (agent-infra#730).
         if not restarted:
-            _docker(["start", cname], timeout=60)
+            try:
+                _docker(["start", cname], timeout=60)
+            except Exception:  # noqa: BLE001, RUF100
+                # Best-effort: raising here would discard the in-flight
+                # `return` and replace the real root cause with this exception
+                # (the caller would print only "timed out"). The original
+                # error is the more useful signal.
+                pass
 
     # 4. Wait for connectivity
     after = None
