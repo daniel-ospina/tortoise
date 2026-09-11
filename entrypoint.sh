@@ -29,6 +29,11 @@ set -euo pipefail
 # a value with stray leading whitespace (a real shape: a copy-pasted secret),
 # and errs toward masking more rather than less.
 #
+# Trade-off on exotic shapes: masking to the LAST '@' can over-reach when an '@'
+# appears after the authority (`rediss://host:1/db?u=a@b` → `rediss://:***@b`),
+# which loses the host name for that line. That is diagnosability loss, never a
+# leak, and real FalkorDB/Redis URIs put no '@' outside the userinfo.
+#
 # Scope: a single bare URI, which is all this entrypoint ever prints. The
 # canonical Python helper (`tortoise/__main__.py::_mask_uri_userinfo`) additionally
 # masks every `scheme://` occurrence inside a longer message; the shell helper is
@@ -40,8 +45,16 @@ _redact_uri() {
         return 0
     fi
     masked=$(printf '%s' "$uri" | sed -E 's|^([[:space:]]*[a-zA-Z][a-zA-Z0-9+.-]*://).*@|\1:***@|') || masked=""
-    # A redaction failure must not silently blank the target: without this the
-    # line reads "→ " and the diagnosability the redaction exists to preserve
+    # Fail closed on a shape this rule cannot recognise. A malformed value that
+    # still carries userinfo (a copy-paste that dropped the scheme, say) is
+    # matched by nothing above, so without this it would be printed verbatim —
+    # the app would reject it, but the password would already be in the log.
+    if [ "$masked" = "$uri" ] && [ "${uri#*@}" != "$uri" ]; then
+        printf '%s' "<uri-redacted-unrecognised-shape>"
+        return 0
+    fi
+    # A redaction failure must not silently blank the target either: without this
+    # the line reads "→ " and the diagnosability the redaction exists to preserve
     # is gone with no signal.
     printf '%s' "${masked:-<unprintable-uri>}"
 }

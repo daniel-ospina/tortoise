@@ -155,6 +155,11 @@ def _redact(uri: str) -> str:
             "  rediss://user:hunter2@host.cloud:1234",
             "  rediss://:***@host.cloud:1234",
         ),
+        # A value with NO scheme cannot be masked reliably, so it fails closed
+        # rather than being echoed: the app rejects a malformed URI, but the
+        # password would already be in the log by then.
+        ("user:S3n/tinel@host.cloud:1234", "<uri-redacted-unrecognised-shape>"),
+        (":pw@host:6379/graph", "<uri-redacted-unrecognised-shape>"),
         # no userinfo → unchanged, so a target without credentials stays readable
         ("rediss://r-example.host.cloud:50317", "rediss://r-example.host.cloud:50317"),
         # embedded/dev target
@@ -534,18 +539,27 @@ def test_watcher_non_start_reason_is_gated_on_being_hosted():
     ]
     assert gated, "the non-start reason is not gated on `_watcher_expected`"
 
-    def _levels(nodes) -> set[str]:
-        return {
-            n.func.attr
-            for n in nodes
-            if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
-        }
+    def _log_levels_in(statements) -> set[str]:
+        levels: set[str] = set()
+        for stmt in statements:
+            for node in ast.walk(stmt):
+                if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+                    levels.add(node.func.attr)
+        return levels
 
-    levels = set()
-    for branch in gated:
-        levels |= _levels(ast.walk(branch))
-    assert {"warning", "debug"} <= levels, (
-        f"expected a warning branch (monitor expected) and a debug branch (not), got {sorted(levels)}"
+    branch = gated[0]
+    # Polarity, not just branch presence: an inverted gate
+    # (`if not _watcher_expected:`) would take the debug path in production —
+    # exactly the blindness #2922 removed — while still containing both levels.
+    assert isinstance(branch.test, ast.Name) and branch.test.id == "_watcher_expected", (
+        "the gate must be the positive `if _watcher_expected:` — an inverted or "
+        "negated test would silence production"
+    )
+    assert "warning" in _log_levels_in(branch.body), (
+        "the branch taken when a monitor IS expected must warn"
+    )
+    assert "debug" in _log_levels_in(branch.orelse), (
+        "the branch taken when no monitor is expected must not warn"
     )
 
 
