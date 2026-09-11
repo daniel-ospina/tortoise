@@ -8,7 +8,7 @@
 |---|---|---|---|---|
 | Zep / Graphiti | [zep.md](zep.md) | AI agent memory platform (temporal knowledge graphs) | 1 | ✅ Complete |
 | Hindsight (Vectorize) | [hindsight.md](hindsight.md) | Agent memory system (LLM-at-write, TEMPR retrieval) | 1 | ✅ Complete |
-| Honcho (Plastic Labs) | [honcho.md](honcho.md) | Agent memory (reasoning-based, pure-usage pricing) | 1 | ✅ Complete |
+| Honcho (Plastic Labs) | [honcho.md](honcho.md) | Agent memory (reasoning-based, pure-usage pricing) | 1 | ⚠️ Partial — thin stub |
 | **Mem0** | [mem0.md](mem0.md) | Agent memory infrastructure (Apache-2.0 SDK + cloud; co-occurrence "graph") | 1 | ✅ Complete (rewritten 2026-09-11) |
 | **Cognee** | [letta-cognee.md](letta-cognee.md) | Open-source knowledge-graph memory engine (Python) — `contradicts` edge + bi-temporal validity | 1 | ✅ Complete |
 | **Kumiho** | [kumiho.md](kumiho.md) | Graph-native cognitive memory — formal AGM belief revision over a versioned property graph | 1 | ✅ Complete |

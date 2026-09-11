@@ -233,7 +233,7 @@
 | Employees | 107 (GetLatka) / 123 (Tracxn, 2026-07-31) / 51–200 band (LinkedIn) |
 | LinkedIn followers | 12,609 |
 | X/Twitter followers | 463 |
-| GitHub org followers | 112 |
+| GitHub org followers | 198 |
 | Discord members | 689 (59 online) — checked 2026-09-11 |
 | GitHub (Agent-E) | 1,250★, 191 forks, MIT |
 | GitHub (Emergence-World) | 597★, 74 forks, updated 2026-09-10 |
@@ -277,11 +277,11 @@
 |---|---|---|
 | LinkedIn | 12,609 | Primary audience; the company's dominant channel — consistent with enterprise sales-led motion |
 | X/Twitter (@emergence_ai) | 463 | Very small relative to LinkedIn (≈3.7% of LinkedIn); product-announcement oriented |
-| GitHub (org) | 112 org followers; Agent-E 1,250★ | Best-performing OSS artifact is Agent-E (web agent), not the memory work |
+| GitHub (org) | 198 org followers; Agent-E 1,250★ | Best-performing OSS artifact is Agent-E (web agent), not the memory work |
 | Discord | 689 members / 59 online | Exists, modest, low concurrency |
 | ⚠️ G2 / Capterra / ProductHunt | No public review presence found | |
 
-**Community mechanics:** There is no community-led motion. OSS releases are research artifacts (Agent-E, `emergence_simple_fast`, Emergence-World) rather than platforms with contributor programs. The headline benchmark method — `emergence_simple_fast` — sits at **13 stars**, i.e. essentially no community reproduction or extension. Contrast with Zep's Graphiti (20,000★, 35+ contributors incl. AWS/Microsoft/Neo4j).
+**Community mechanics:** There is no community-led motion. OSS releases are research artifacts (Agent-E, `emergence_simple_fast`, Emergence-World) rather than platforms with contributor programs. The headline benchmark method — `emergence_simple_fast` — sits at **13 stars**, i.e. essentially no community reproduction or extension. Contrast with Zep's Graphiti (crossed 20K★, now ~31K★; ~62 contributors incl. AWS/Microsoft/Neo4j).
 
 [Source](https://github.com/EmergenceAI), [Source](https://x.com/emergence_ai), [Source](https://www.linkedin.com/company/emergenceai) — retrieved 2026-09-11
 

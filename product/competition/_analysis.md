@@ -11,22 +11,22 @@
 | Competitor | Why Tier 1 | Specific relevance | What to watch for |
 |---|---|---|---|
 | **Zep** | Direct overlap in memory architecture space — temporal knowledge graphs, FalkorDB backend, agent memory infrastructure | Graphiti (open-source KG engine) uses FalkorDB — same graph DB chosen in our ADR-004. Zep's managed cloud + enterprise governance model is a possible reference architecture for our epistemic graph. Their benchmark results (LoCoMo 94.7%) set the bar for agent memory accuracy. | Zep launches a self-hosted enterprise tier that competes with our “build your own” approach; Graphiti adds native belief propagation or confidence scoring that overlaps with our epistemic layer design |
-| **Hindsight (Vectorize)** | Direct overlap in agent memory space — TEMPR 4-way hybrid retrieval, observation consolidation, 40+ framework integrations, LongMemEval SOTA (91.4-94.6%) | PostgreSQL + pgvector backend (same infra choice as us). LLM-at-write memory extraction — the key architectural trade-off vs our verbatim approach. MIT license, no feature walls. Benchmark leadership (91.4% LongMemEval vs Zep's 71.2%) sets the highest bar. **Pure-usage pricing: $10/M tokens Retain, $0.75/M Recall, $0.05/call Reflect (~$30–40/10k-writes equiv — 6–8× our $5/10k overage).** | Hindsight adds belief propagation or confidence scoring; closed-source cloud diverges from MIT OSS; LLM-at-write becomes cheaper (threatening our verbatim cost advantage) |
+| **Hindsight (Vectorize)** | Direct overlap in agent memory space — TEMPR 4-way hybrid retrieval, observation consolidation, 59 integrations (51 official), LongMemEval SOTA (91.4-94.6%) | PostgreSQL + pgvector backend (same infra choice as us). LLM-at-write memory extraction — the key architectural trade-off vs our verbatim approach. MIT license, no feature walls. Benchmark leadership (91.4% LongMemEval vs Zep's 71.2%) sets the highest bar. **Pure-usage pricing: $10/M tokens Retain, $0.75/M Recall, $0.05/call Reflect (~$30–40/10k-writes equiv — 6–8× our $5/10k overage).** | Hindsight adds belief propagation (it already scores confidence); closed-source cloud diverges from MIT OSS; LLM-at-write becomes cheaper (threatening our verbatim cost advantage) |
 | **Honcho (Plastic Labs)** | Direct agent-memory overlap — reasoning-based memory "beyond RAG," per-user belief modeling | No epistemic graph structure (no operators/NAND, no team graph) — different paradigm, same buyer (devs wiring memory into agents). **Pure-usage pricing: $2/M tokens ingested, retrieval free, $100 free credits (~$6–8/10k-writes equiv — just above our $5/10k overage).** | Honcho wins the tiny user via $100 credits + no base; reasoning-at-write gets cheaper (pressuring our no-LLM-at-write cost advantage); OSS community growth |
-| **Mem0** | Category **distribution leader** — 65.1K GitHub stars, 14M+ PyPI downloads, $24M raised, AWS "exclusive memory provider for the Agent SDK", ~25 framework integrations. Same buyer (developers wiring memory into agents), Apache-2.0 SDK + managed cloud. | Direct product overlap on agent memory. **But its weakest measured capability is exactly our differentiator:** BEAM `contradiction_resolution` 35.7 (1M) / 32.5 (10M); `temporal_reasoning` collapses 61.8 → 16.3 from 1M → 10M; docs concede knowledge update is "the hardest category for an additive, ADD-only architecture". Self-reported LongMemEval 94.4% vs an independent evaluation's **49.0%** — a ~45-point spread. Its "graph memory" is a **co-occurrence entity index with no typed edges** (docs: "it won't record a 'manages' edge") that only boosts ranking. | Mem0 adds typed relations or propagated confidence — either would close the exact gap we're betting on. Also watch the $19 → $249 pricing cliff (most-cited churn driver) as a migration wedge. |
-| **Cognee** | **Converging from below on our own primitive set** — open-source (Apache-2.0) knowledge-graph memory engine in Python, 30.6K stars, 304 contributors, 151.7K PyPI downloads/mo. | Ships a `contradicts` edge (with LLM-judged confidence) **and** bi-temporal supersession (`valid_to`, `COGXFact` `valid_at`/`invalid_at`, supersede-not-delete) — **2 of our 4 primitives already covered.** But: no typed IMPL/support operator, **no belief propagation**, "no axioms are evaluated… no reasoner runs", validity is node-level (edges unstamped, persists only on the default Kuzu/Ladybug adapter), and **claim-level provenance + conflict resolution are Enterprise-gated**. | Cognee adds IMPL + propagation → our moat narrows to execution. Also note it ships **first-party migration importers for Zep/Graphiti and Letta** — an active land-grab motion to watch. |
+| **Mem0** | Category **distribution leader** — 65.1K GitHub stars, 14M+ PyPI downloads, $24M raised, AWS "exclusive memory provider for the Agent SDK", ~25 framework integrations. Same buyer (developers wiring memory into agents), Apache-2.0 SDK + managed cloud. | Direct product overlap on agent memory. **But its weakest measured capability is exactly our differentiator:** BEAM `contradiction_resolution` 35.7 (1M) / 32.5 (10M); `temporal_reasoning` collapses 61.8 → 16.3 from 1M → 10M; docs concede knowledge update is "the hardest category for an additive, ADD-only architecture". Self-reported LongMemEval 94.4% vs a competitor-run **49.0%** (Vectorize, the vendor of Hindsight, on its own mem0-vs-zep comparison page) — a ~45-point, vendor-vs-vendor spread. Its "graph memory" is a **co-occurrence entity index with no typed edges** (docs: "it won't record a 'manages' edge") that only boosts ranking. | Mem0 adds typed relations or propagated confidence — either would close the exact gap we're betting on. Also watch the $19 → $249 pricing cliff (most-cited churn driver) as a migration wedge. |
+| **Cognee** | **Converging from below on our own primitive set** — open-source (Apache-2.0) knowledge-graph memory engine in Python, 30.6K stars, 304 contributors, 151.7K PyPI downloads/mo. | Ships a `contradicts` edge (with LLM-judged confidence) **and** bi-temporal supersession (`valid_to`, `COGXFact` `valid_at`/`invalid_at`, supersede-not-delete) — **2 of our 4 primitives already covered.** But: no typed IMPL/support operator, **no belief propagation**, "no axioms are evaluated… no reasoner runs", validity is node-level (edges unstamped, persists only on the default Kuzu/Ladybug adapter), and its **claim-level provenance is an opt-in OSS ledger** — only the *marketing* claims ("provenance on every answer", "conflict resolution") are Enterprise-gated, and the exact OSS/Enterprise boundary is unresolved. | Cognee adds IMPL + propagation → our moat narrows to execution. Also note it ships **first-party migration importers for Zep/Graphiti and Letta** — an active land-grab motion to watch. |
 | **Kumiho** | **The only system that has formally claimed "the graph IS the belief state"** — 56-page preprint (arXiv 2603.17244) proving AGM belief-revision postulates over a versioned property graph, plus a shipping product (kumiho.io, $40/$99/$170/mo). | Directly our thesis, formalized: immutable Revision nodes, 6 typed edges (`Depends_On`, `Derived_From`, `Supersedes`, …), `kref://` addressing, time-indexed belief states ("what was believed at time T"), retrieval surface derived from belief state. **But it is BOOLEAN, not probabilistic** — presence/absence via tag pointers, *no credence, no propagation*, conflicts "not automatically resolved". It has **no contradiction edge at all**. Critically, it **explicitly leaves AGM K\*7/K\*8 OPEN** because it declines to construct an entrenchment ordering. | ⚠️ **This is the closest competitor to our theory.** Watch for: Kumiho shipping a probabilistic layer (would collide head-on), or the independent reimplementation `RichSchefren/atlas` (80★, Apache-2.0 — already reproduces the 49/49 AGM suite) succeeding, since Atlas has **already bolted propagating confidence (0.88 → 0.75) onto Kumiho's spec**, explicitly criticizing Kumiho: *"They are not re-evaluated."* Two independent signals that **propagated uncertainty is the next move in this category** — our core, not a feature to bolt on. |
+| **Letta (formerly MemGPT)** | Owns the **agent-harness lane** and the "more to memory than RAG" argument. 288K npm downloads/mo, 11.9K Discord members, model-agnostic. | **No graph, no epistemics.** Memory is a git-backed Markdown filesystem (MemFS) the LLM edits itself; "MemFS does not include a semantic or vector index by default". No confidence, no typed relations, no temporal validity — the only provenance is git commit history. **Has pivoted away from memory infrastructure** toward an agent product (`letta-ai/letta-code`); its only published benchmark is Terminal-Bench (an *agent* benchmark), with no memory-benchmark score. | They return to memory infrastructure with a graph layer. |
 
 ### Tier 2 — Monitor
 
-> **Architectural references, not commercial threats.** These shape how the category builds query→subgraph retrieval; they have no memory product, no price, and no customer overlap. Track their *mechanisms* (and their published failure modes), not their traction.
+> **Architectural references, not commercial threats.** These shape how the category builds query→subgraph retrieval. None competes for the same builder buyer: HippoRAG is an academic reference system with no company or product; GraphRAG/LightRAG are OSS frameworks with no memory product and no pricing; Emergence AI sells to regulated enterprises through private offers and explicitly declined to build graph memory. Track their *mechanisms* (and their published failure modes), not their traction.
 
 | Competitor | Overlap | Limiting factor | Watch if… |
 |---|---|---|---|
 | **Emergence AI** | Enterprise "agentic infrastructure" (CRAFT) whose Memory Service stores **Context Packs**; published SOTA on LongMemEval (**86%** vs Zep 71.2%, even beating Oracle GPT-4o's 82.4%). | **They explicitly declined to build the graph.** Verbatim: sentence decomposition "allows us to build a semantic graph… **but we didn't need to go that far** to establish a new state of the art". Storage is a retrieval index of records with exactly two edge types (`supersedes`, `related_to`); `metadata.confidence` is a **static written field, not propagated**; no logic layer, no temporal validity intervals. **No public pricing at all** (every commerce path 404s; docs: "No public storefront is required") — private offers only. Their 86% model is **unpublished**; only the 79% variant shipped as code (13 stars, no license). | They reverse the graph decision — they already named it as future work. Also note their headline is **already stale**: Zep's current published figure is 90.2%. |
-| **Letta (formerly MemGPT)** | Owns the **agent-harness lane** and the "more to memory than RAG" argument. 288K npm downloads/mo, 11.9K Discord members, model-agnostic. | **No graph, no epistemics.** Memory is a git-backed Markdown filesystem (MemFS) the LLM edits itself; "MemFS does not include a semantic or vector index by default". No confidence, no typed relations, no temporal validity — the only provenance is git commit history. **Has pivoted away from memory infrastructure** toward an agent product (`letta-ai/letta-code`); its only published benchmark is Terminal-Bench (an *agent* benchmark), with no memory-benchmark score. | They return to memory infrastructure with a graph layer. |
-| **Microsoft GraphRAG + LightRAG** | The dominant prior art for **subgraph-into-context serialization** (75.5K combined stars; LightRAG has overtaken GraphRAG: 39.6K vs 35.9K stars, 232K vs 52K monthly downloads). GraphRAG is corporate R&D (Azure); LightRAG is academic (HKU, EMNLP 2025). | **No memory product** — no episodic store, no belief state, no tenant model. Confidence: none (rank = degree/extraction strength). Logic: none (edges are free-text descriptions). ⚠️ GraphRAG *does* ship a claim layer with `Claim Status: TRUE/FALSE/SUSPECTED` + ISO dates — but it is **`enabled = False` by default and nothing consumes the status**. A label, not an epistemic state. **Both measurably lose to vanilla RAG on fact retrieval:** −13.4% on Natural Questions, −16.6% on time-sensitive questions; GraphRAG-Bench's medical table shows MS-GraphRAG local at **38.06** recall vs basic RAG **86.24**. | Their serialization mechanics are the reusable part — GraphRAG's **70/30 proportion-budgeted fill** (`text_unit_prop=0.5`, `community_prop=0.15`), **in-network-first relationship admission**, and **enforced inline citations** `[Data: Sources (15, 16), Reports (1)…]`; LightRAG's **single-call dual-keyword recall** (high-level relation keys + low-level entity keys). Watch if either adds belief state — that would be our thesis in a Microsoft/HKU distribution channel. |
-| **HippoRAG / HippoRAG 2** | **The** academic reference for subgraph selection via graph centrality. MIT OSS (OSU NLP Group). Mandatory baseline in agent-memory papers (LongMemEval 60.6). Productized *around* by AWS (Bedrock + Neptune + PPR implementation guide). | Research system: no company, no product, no price. **The graph is never shown to the LLM** — returned payload is plain concatenated *passages*; nodes/triples are internal seeding devices only. No confidence (PPR yields a *rank*, not a credence), no typed logic (relation edges untyped, undirected, weight 1), no time (OpenIE drops temporal triples). | **Adopt their query→triple linking** — worth **+12.5 avg Recall@5** over NER-to-node linking (the single highest-leverage retrieval choice they measured), plus putting passage nodes *in* the graph (+6.1) and scaling passage reset probability down 20× so concept signal dominates. And **their failure analysis is our opening**: in **50% of HippoRAG 2 failures the correct nodes WERE linked and graph search still failed** — because PPR propagates *reachability*, and with no credence and no NAND, a contradicting path and a supporting path are indistinguishable. That is architectural, not a hyperparameter. |
+| **Microsoft GraphRAG + LightRAG** | The dominant prior art for **subgraph-into-context serialization** (75.5K combined stars; LightRAG has overtaken GraphRAG: 39.6K vs 35.9K stars, 232K vs 52K monthly downloads). GraphRAG is corporate R&D (Azure); LightRAG is academic (HKU, EMNLP 2025). | **No memory product** — no episodic store, no belief state, no tenant model. Confidence: none (rank = degree/extraction strength). Logic: none (edges are free-text descriptions). ⚠️ GraphRAG *does* ship a claim layer with `Claim Status: TRUE/FALSE/SUSPECTED` + ISO dates — but it is **`enabled = False` by default and nothing consumes the status**. A label, not an epistemic state. **Both measurably lose to vanilla RAG on fact retrieval:** −13.4% on Natural Questions, −16.6% on time-sensitive questions; GraphRAG-Bench's medical table shows MS-GraphRAG local at **38.06** recall vs basic RAG **86.24**. | Their serialization mechanics are the reusable part — GraphRAG's **50/15/35 proportion-budgeted fill** (`text_unit_prop=0.5` / `community_prop=0.15` / residual entities+relations+covariates `0.35`), **in-network-first relationship admission**, and **enforced inline citations** `[Data: Sources (15, 16), Reports (1)…]`; LightRAG's **single-call dual-keyword recall** (high-level relation keys + low-level entity keys). Watch if either adds belief state — that would be our thesis in a Microsoft/HKU distribution channel. |
+| **HippoRAG / HippoRAG 2** | **The** academic reference for subgraph selection via graph centrality. MIT OSS (OSU NLP Group). Mandatory baseline in agent-memory papers (LongMemEval 60.6). Productized *around* by AWS (Bedrock + Neptune + PPR implementation guide). | Research system: no company, no product, no price. **The graph is never shown to the LLM** — returned payload is plain concatenated *passages*; nodes/triples are internal seeding devices only. No confidence (PPR yields a *rank*, not a credence), no typed logic (relation edges untyped, undirected, weight 1), no time (OpenIE drops temporal triples). | **Adopt their query→triple linking** — worth **+12.5 avg Recall@5** over NER-to-node linking (the single highest-leverage retrieval choice they measured), plus putting passage nodes *in* the graph (+6.1) and scaling passage reset probability down 20× so concept signal dominates. And **their failure analysis is our opening**: in **50% of HippoRAG 2 failures at least half the linked phrase nodes were in the supporting passages, yet graph search still failed** — because PPR propagates *reachability*, and with no credence and no NAND, a contradicting path and a supporting path are indistinguishable. That is architectural, not a hyperparameter. |
 
 ### Tier 3 — Low / No Threat
 
@@ -43,23 +43,26 @@
 
 > Added by the #2976 subgraph-retrieval research wave. Sources: `emergence-ai.md`, `mem0.md`, `cognee` (in `letta-cognee.md`), `kumiho.md`, `hipporag.md`, `graphrag-systems.md`.
 
-**Finding 1 — The category has converged on graph retrieval and stopped short of propagated belief. Nobody propagates confidence.**
+**Finding 1 — The category has converged on graph retrieval and stopped short of propagated belief. No surveyed agent-memory *product* propagates credence.**
+
+Across the **§3a matrix — 11 rows (Tortoise plus 10 non-Tortoise entries: 9 surveyed systems and the non-product reimplementation `atlas`), 12 entities once GraphRAG and LightRAG are counted separately** — the pattern holds, with exactly one exception — the independent ~80★ Apache-2.0, alpha, single-maintainer reimplementation `atlas`, which is not a product:
 
 | System | Graph? | Typed logical relations? | Propagated confidence? | Provenance to source? |
 |---|---|---|---|---|
 | Zep / Graphiti | ✅ | Partial (`valid_at`/`invalid_at` only) | ❌ | ✅ episode-level |
-| Hindsight | ✅ | ❌ | ❌ (consolidation only) | ✅ |
+| Hindsight | ✅ | ❌ | ~ (scored, not propagated) | ✅ |
 | Mem0 | ~ co-occurrence only | ❌ (docs: no typed edges) | ❌ | Partial (audit log) |
-| **Cognee** | ✅ | ~ `contradicts` only, no IMPL | ❌ ("no reasoner runs") | ✅ but **Enterprise-gated** |
+| **Cognee** | ✅ | ~ `contradicts` only, no IMPL | ❌ ("no reasoner runs") | ✅ but **opt-in OSS ledger**; only marketing claims Enterprise-gated |
 | **Kumiho** | ✅ **is the belief state** | ✅ 6 typed edges — **but no contradiction edge** | ❌ **BOOLEAN only**; K\*7/K\*8 left **open** | ✅ `Derived_From` |
 | **HippoRAG 2** | ✅ | ❌ untyped, weight-1 | ❌ (PPR = rank, not credence) | Partial (passage-level) |
 | **GraphRAG / LightRAG** | ✅ | ❌ free-text edges | ❌ | ✅ record-level |
 | **Emergence AI** | ❌ (declined) | ❌ | ❌ (static field) | ✅ turn-level |
 | **Letta** | ❌ (Markdown files) | ❌ | ❌ | ~ git history |
+| ⚙️ **`atlas`** *(reimplementation — not a competitor product)* | ✅ | ~ Kumiho's 6 typed edges incl. `Depends_On` | ✅ **`RippleEngine.propagate()`: 0.88 → 0.75** | ~ `Derived_From` |
 
-→ **Data points:** Kumiho's own paper §2.1 positions Hindsight's confidence-scored beliefs as *"functionally similar to our revision mechanism, but without AGM grounding"*; Cognee docs state *"no axioms are evaluated… no reasoner runs"*; Mem0 docs state the graph *"won't record a 'manages' edge"*; GraphRAG's claim status is `enabled = False` with no consumer.
+→ **Data points:** Kumiho's own paper §2.1 positions Hindsight's confidence-scored beliefs as *"functionally similar to our revision mechanism, but without AGM grounding"*; Cognee docs state *"no axioms are evaluated… no reasoner runs"*; Mem0 docs state the graph *"won't record a 'manages' edge"*; GraphRAG's claim status is `enabled = False` with no consumer; [atlas README] `RippleEngine.propagate()` recomputes downstream credences across typed `Depends_On` edges, with an explicit critique of Kumiho.
 
-**Implication — the moat is real, and it is narrower than six months ago.** Typed **contradiction (NAND)** and **temporal validity** were our differentiators; **Cognee now covers both.** What remains uniquely ours is **typed implication (IMPL) combined with propagated confidence** — and no surveyed system has either the machinery or a stated plan for it. The defensible claim is no longer "we have a graph" (crowded, and Mem0 has devalued the phrase) but **"contested belief, with propagated credence, and the reasoning shown."**
+**Implication — the moat is real, and it is narrower than six months ago.** Typed **contradiction (NAND)** and **temporal validity** were our differentiators; **Cognee now covers both.** What remains uniquely ours is **typed implication (IMPL) combined with propagated confidence** — and no surveyed *product* ships both — the one exception, the alpha reimplementation `atlas`, propagates credence but has no contradiction edge and no product surface. The defensible claim is no longer "we have a graph" (crowded, and Mem0 has devalued the phrase) but **"contested belief, with propagated credence, and the reasoning shown."**
 
 **Finding 2 — Two independent signals say propagated uncertainty is the category's next move.** (a) Kumiho's formal AGM work **declines** to build an entrenchment ordering, explicitly leaving K\*7/K\*8 open — i.e. it stops exactly where we start. (b) The independent reimplementation `RichSchefren/atlas` (80★, Apache-2.0) reproduced Kumiho's 49/49 AGM suite and then **bolted propagating confidence onto it** (`0.88 → 0.75`), criticizing Kumiho: *"AnalyzeImpact returns the impacted set. They are not re-evaluated."*
 → **Data points:** [kumiho.md §7] K\*7/K\*8 open, Recovery rejected; [atlas README] propagating confidence + explicit critique. **Implication:** we are not proposing a speculative feature; we are proposing the step the field has independently started reaching for. That is a *timing* advantage, not a permanent one.
@@ -72,13 +75,13 @@
 → **Implication (architecture):** serve **both** — the epistemic subgraph as the reasoning layer *and* verbatim source as the evidence layer, in one package. This is not a fallback; it is the measured difference between winning and losing ~20 points. It is also why Slice A of the evidence-assembly wave (#2683 — *"collapse a distilled point with its own source chunks/turns into ONE package entry"*) is the correct existing home for this work rather than a new design.
 ⚠️ **Honest caveat:** that ablation tested extraction **without** typed logical relations, **without** propagation, and **without** contradiction surfacing. It refutes the *naive* version of "serve the derived artifact" and does **not** test ours. Treat it as the load-bearing falsification risk to design against, not as a settled verdict.
 
-**Finding 5 — Graph retrieval alone loses to plain RAG on facts, so routing and budgeting matter as much as structure.** GraphRAG is **−13.4%** on Natural Questions and **−16.6%** on time-sensitive questions (only ~+4.5% on multi-hop for ~2.3× latency). HippoRAG's own error analysis: **50% of HippoRAG 2 failures are graph-search failures even when the correct nodes were linked.**
+**Finding 5 — Graph retrieval alone loses to plain RAG on facts, so routing and budgeting matter as much as structure.** GraphRAG is **−13.4%** on Natural Questions and **−16.6%** on time-sensitive questions (only ~+4.5% on multi-hop for ~2.3× latency). HippoRAG's own error analysis: **in 50% of HippoRAG 2 failures at least half the linked phrase nodes were in the supporting passages, yet graph search still failed.**
 → **Implication:** the subgraph layer is for multi-hop / temporal / contradiction questions; simple lookups should stay on the flat path. Budget by **tokens, not item counts** — GraphRAG partitions one fixed 12,000-token window (50/15/35) while our TR lane uses **4.2% of an 8,000-token budget** (#2978).
 
 **Finding 6 — Contradiction is the named, unserved gap across the entire field.** HippoRAG issue #181 (filed by an outsider) asks for a hook exposing *"how retrieval signals support, conflict, weaken, or require downstream verification"*; Mem0's worst BEAM score is `contradiction_resolution` (35.7/32.5); Kumiho has no contradiction edge; GraphRAG's `TRUE/FALSE/SUSPECTED` status is inert and off by default. Kumiho's answer to a live conflict is to return both revisions and let the agent's LLM apply *"recency preference."*
 → **Implication:** a first-class, propagatable NAND is a capability we can **name, demonstrate, and test against a concrete competitor gap** — the strongest possible position for a differentiator.
 
-**Finding 7 — Do not stake positioning on a single benchmark score.** Emergence's 86% (Jun 2025) was beaten by Zep's 90.2% within ~12 months, and Emergence's own conclusion is that *the benchmark* is the bottleneck. Vendor and independent LongMemEval numbers for the same products disagree by up to **2×** (Mem0 94.4 self-reported vs 49.0 independent).
+**Finding 7 — Do not stake positioning on a single benchmark score.** Emergence's 86% (Jun 2025) was beaten by Zep's 90.2% within ~12 months, and Emergence's own conclusion is that *the benchmark* is the bottleneck. Vendor and competitor-run LongMemEval numbers for the same products disagree by up to **2×** (Mem0 94.4 self-reported vs 49.0 measured by Vectorize, the vendor of Hindsight — vendor-vs-vendor, not vendor-vs-independent).
 → **Implication:** stake positioning on capabilities the benchmarks cannot express — contradiction resolution, temporal supersession, provenance-to-turn — and always publish the method line with any number.
 
 **Finding 8 — Category language must sharpen: "knowledge graph" is now devalued.** Mem0 calls a schema-free co-occurrence entity index "Graph Memory" and gates a dashboard view at $249/mo; its docs simultaneously say the graph records no typed edges. Cognee markets "bi-temporal memory & conflict resolution" and "provenance on every answer" as **Enterprise-only** while its OSS docs describe both.
@@ -96,7 +99,7 @@ Zep's core insight — track *when* facts were true, not just *what* is true —
 **2. FalkorDB is production-validated for this workload.**
 Zep chose FalkorDB as a Graphiti backend — the same graph DB in our ADR-004. Their 100M-graph benchmark (168ms P95 retrieval) confirms FalkorDB handles the scale we need. Their contributor list (AWS, Microsoft, Neo4j) signals ecosystem buy-in.
 
-→ **Data points:** [Profile §6] Graphiti supports Neo4j, FalkorDB, AWS Neptune; [Profile §8] 35+ contributors including AWS, Microsoft, FalkorDB, Neo4j.
+→ **Data points:** [Profile §6] Graphiti supports Neo4j, FalkorDB, AWS Neptune; [Profile §8] ~62 contributors including AWS, Microsoft, FalkorDB, Neo4j (retrieved 2026-09-11).
 
 **3. The managed cloud model is a different path from ours.**
 Zep monetizes via credit-based SaaS with enterprise compliance (SOC 2, HIPAA, BYOC). Our epistemic graph is infrastructure we build and operate, not a product we sell. Zep's pricing (from $0 to $375+/mo) is a useful reference for what the market will pay for governed agent memory — but our cost structure is different (self-operated, not SaaS margin).
@@ -109,7 +112,7 @@ Zep's "millions of context graphs, managed as one system" maps to our vision of 
 → **Data points:** [Profile §6] Context Lake architecture; [Profile §6] ABAC access control with Allow/Deny policies.
 
 **5. Small team risk is real but not relevant to us.**
-Zep is 5 people. We're not competing with them — we're learning from their architecture. Their ability to ship SOC 2 + HIPAA + 20K-star OSS with 5 people suggests the infrastructure layer is simpler than it appears, or they're exceptionally efficient. Either way, it lowers the perceived barrier to building a production-grade memory system.
+Zep is 5 people. We're not competing with them — we're learning from their architecture. Their ability to ship SOC 2 + HIPAA + ~31K-star OSS with 5 people suggests the infrastructure layer is simpler than it appears, or they're exceptionally efficient. Either way, it lowers the perceived barrier to building a production-grade memory system.
 
 → **Data points:** [Profile §1] 5 employees; [Profile §6] SOC 2 Type II, HIPAA BAA, managed cloud with 100M-graph benchmarks.
 
@@ -125,14 +128,15 @@ Zep is 5 people. We're not competing with them — we're learning from their arc
 | Zep / Graphiti | ❌ | ❌ (only `invalid_at` supersession) | ❌ | ✅ episode |
 | Hindsight | ❌ | ❌ | ❌ | ✅ |
 | Mem0 | ❌ | ~ `Dream Supersede` (pairwise, write-time) | ❌ | Partial |
-| **Cognee** | ❌ | ✅ `contradicts` edge (+ LLM confidence) | ❌ ("no reasoner runs") | ✅ **Enterprise-gated** |
+| **Cognee** | ❌ | ✅ `contradicts` edge (+ LLM confidence) | ❌ ("no reasoner runs") | ✅ **opt-in OSS ledger** (marketing claims Enterprise-gated) |
 | **Kumiho** | ~ 6 typed edges incl. `Depends_On` | ❌ **none** | ❌ **boolean only** (K\*7/K\*8 open) | ✅ `Derived_From` |
 | **HippoRAG 2** | ❌ | ❌ | ❌ (PPR rank ≠ credence) | Partial |
 | GraphRAG / LightRAG | ❌ | ❌ (`SUSPECTED` inert, off by default) | ❌ | ✅ record-level |
 | Emergence AI | ❌ | ❌ | ❌ (static field) | ✅ turn-level |
 | Letta | ❌ | ❌ | ❌ | ~ git history |
+| ⚙️ **`atlas`** *(reimplementation — not a competitor product)* | ~ Kumiho's 6 typed edges incl. `Depends_On` | ❌ **none** | ✅ **`RippleEngine.propagate()` 0.88 → 0.75** | ~ `Derived_From` |
 
-**Read of the table:** the entire category has **graph**, most have **provenance**, two have partial **contradiction**, one has a formal **revision** theory — and **nobody propagates credence.** Tortoise's combination is unoccupied, but the unoccupied area is *narrower than it was*: Cognee took contradiction + temporal validity; Kumiho took formal revision over a graph.
+**Read of the table:** across the **§3a matrix — 11 rows (Tortoise plus 10 non-Tortoise entries: 9 surveyed systems and the non-product reimplementation `atlas`), 12 entities once GraphRAG and LightRAG are counted separately** — the category has converged on graph retrieval — **Emergence and Letta are the two hold-outs** — most have **provenance**, two have partial **contradiction**, one has a formal **revision** theory, and **no surveyed agent-memory *product* propagates credence.** The single exception is `atlas` (marked ⚙️) — the independent ~80★ Apache-2.0, alpha, single-maintainer reimplementation of Kumiho, not a competitor product. Tortoise's combination is unoccupied, but the unoccupied area is *narrower than it was*: Cognee took contradiction + temporal validity; Kumiho took formal revision over a graph; `atlas` showed propagated credence is bolt-on-able.
 
 ### 3b — Platform & commercial comparison
 
@@ -141,13 +145,13 @@ Zep is 5 people. We're not competing with them — we're learning from their arc
 | Temporal fact tracking | ✅ `valid_from`/`valid_to` | Partial | Partial (`reference_date`, no intervals) | ✅ node-level `valid_to` | ✅ time-indexed belief states | ✅ ADR-004 §3 |
 | Graph DB backend | FalkorDB, Neo4j, Neptune | PostgreSQL + pgvector | vector + native entity graph | Kuzu / Ladybug | Neo4j + Redis | FalkorDB (ADR-004) |
 | Belief propagation | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ **Core feature** |
-| Confidence scoring | ❌ | ❌ | ❌ | ~ per-contradiction LLM judge | ❌ | ✅ 0.0–1.0, propagated |
-| Multi-agent claims | ✅ via ABAC (per-graph) | ❌ | ❌ | ~ workspaces | ❌ | ✅ shared claims + aggregation |
+| Confidence scoring | ❌ | ~ confidence-scored beliefs (Opinion Network), updated with evidence; no propagation over logical structure | ❌ | ~ per-contradiction LLM judge | ❌ | ✅ 0.0–1.0, propagated |
+| Multi-agent claims | ~ multi-tenant access via ABAC; no shared/aggregated claims | ❌ | ❌ | ~ workspaces | ❌ | ✅ shared claims + aggregation |
 | Open source | ✅ Graphiti (Apache-2.0) | ✅ MIT | ✅ Apache-2.0 | ✅ Apache-2.0 | ~ Community Edition | N/A (internal system) |
 | Managed cloud | ✅ credit-based | ✅ usage-based | ✅ $0/$19/$249 | ✅ $1.00/1M tokens | ✅ $40/$99/$170/mo | ❌ self-operated |
-| Provenance | ✅ episode | ✅ | Partial | ✅ **Enterprise-only** | ✅ | ✅ Core feature |
-| Published memory benchmark | LoCoMo 94.7 | LongMemEval 91.4–94.6 | self 94.4 / **indep. 49.0** | BEAM 0.79 *(self)* | LoCoMo-Plus 93.3 *(self)* | #2578: **0/52** (A-default) → **81% oracle ceiling** |
-| MCP server | ✅ | — | — | — | ✅ | Planned |
+| Provenance | ✅ episode | ✅ | Partial | ~ OSS docs + opt-in ledger; "provenance on every answer" Enterprise-gated | ✅ | ✅ Core feature |
+| Published memory benchmark | LoCoMo 94.7 *(self-reported)* | LongMemEval 91.4–94.6 *(self-reported)* | self 94.4 / **competitor-run 49.0** *(Vectorize/Hindsight)* | BEAM 0.79 *(self)* | LoCoMo-Plus 93.3 *(self)* | #2578: **0/52** (A-default) → **81% oracle ceiling** |
+| MCP server | ✅ | ✅ (`/mcp`) | ~ MCP integration / OpenMemory | ✅ | ✅ | Planned |
 
 ---
 
@@ -159,7 +163,7 @@ Zep is 5 people. We're not competing with them — we're learning from their arc
 
 3. **Provenance is non-negotiable.** Zep's "every fact traces back to source episode" is table stakes for agent memory. Our epistemic graph must maintain the same standard — every claim must link to its evidence source.
 
-4. **The market ceiling is real.** Zep's S&P coverage ("de facto partner in enterprise agent stack") and 20K GitHub stars signal that agent memory infrastructure is a real category with enterprise demand. Our internal system doesn't need to capture that market — but the architectural patterns are the same.
+4. **The market ceiling is real.** Zep's S&P coverage ("de facto partner in enterprise agent stack") and ~31K GitHub stars (crossed 20K; retrieved 2026-09-11) signal that agent memory infrastructure is a real category with enterprise demand. Our internal system doesn't need to capture that market — but the architectural patterns are the same.
 
 5. **Observations (pattern detection) is the next frontier.** Zep's "Observations" feature — analyzing graph structure to surface patterns — is something we should consider for the epistemic graph. "Claims about organic ROI have been contradicted 3 times in 6 months" is a pattern worth surfacing.
 
@@ -244,7 +248,7 @@ Zep's website says "Context Graph Engine" and "Context Lake" — but these are p
 **What's hidden:**
 
 **1. Graphiti IS the architecture.**
-Zep markets "Context Graph Engine" as proprietary secret sauce. But Graphiti (`github.com/getzep/graphiti`, 20K+ stars) is the actual implementation:
+Zep markets "Context Graph Engine" as proprietary secret sauce. But Graphiti (`github.com/getzep/graphiti`, ~31K stars, crossed 20K) is the actual implementation:
 - Entity extraction from Episodes
 - Relationship inference with temporal validity
 - Fact invalidation when new data contradicts old facts
@@ -415,7 +419,7 @@ subject to:
 │                 4. REFLECTION (Reflect)                            │
 │  AI reasons over memories → builds beliefs, consolidates obs      │
 │  Auto-dedup, evidence tracking, freshness awareness               │
-│  $3.00/M tokens                                                   │
+│  $0.05/call                                                       │
 └──────────────────────────────────────────────────────────────────┘
 ```
 
@@ -424,7 +428,7 @@ subject to:
 | **Retain** | Structured memory extraction from raw input | $10.00/M (highest) | API call (sync) |
 | **Storage** | PostgreSQL + pgvector. 4 memory types. Query-time graph. | $0 | Continuous |
 | **TEMPR** | 4-way hybrid: semantic, keyword, graph, temporal | $0.75/M | API call (sync) |
-| **Reflect** | AI reasoning over memories → Mental Models | $3.00/M | On-demand/scheduled |
+| **Reflect** | AI reasoning over memories → Mental Models | $0.05/call | On-demand/scheduled |
 
 ### 6b — Design Choice Tables
 
@@ -436,7 +440,7 @@ subject to:
 | **TEMPR engine** | 4 parallel strategies + RRF + reranker | No single strategy works for all queries. Semantic for paraphrasing, BM25 for names, graph for relationships, temporal for time. | Recall quality |
 | **MIT license** | Fully open source, no feature walls, no telemetry | Same codebase for OSS and Cloud. Builds trust + community. Cloud = managed infra, not more features. | Developer trust + adoption velocity |
 | **Observation consolidation** | Auto-dedup + evidence tracking + continuous refinement + freshness awareness | Observations drift. Stale observations re-verified before use. Update, don't overwrite. | Temporal accuracy + evidence trust |
-| **Integration breadth** | 40+ agent frameworks | "Be the default memory for every agent." Not competing — integrating. | Ecosystem lock-in |
+| **Integration breadth** | 59 integrations (51 official) | "Be the default memory for every agent." Not competing — integrating. | Ecosystem lock-in |
 | **Cloud pricing** | Pay-as-you-go per M tokens. Retain ($10/M) = ~13× Recall ($0.75/M). | Revenue scales with usage. Expensive writes → users self-regulate quality. Cheap reads → frequent retrieval. | Revenue per active user + cost predictability |
 
 ### 6c — Hidden Architecture
@@ -472,7 +476,7 @@ Zep/Honcho have "Dreamer" processes that run on schedules. Hindsight's observati
 
 | Gap | Detail |
 |-----|--------|
-| **Pricing page** | HTTP 404. All token costs from web_search — unverified. |
+| **Pricing page** | Docs-domain `hindsight.vectorize.io/pricing` 404s; company-domain `vectorize.io/pricing` verified live 2026-07-06. |
 | **Main website** | `vectorize.io` fetch failed. Company data from Perplexity + docs. |
 | **Revenue** | No public data. Seed-stage, likely pre-revenue. |
 | **Customers** | Only Groq (unverified single-source). No enterprise logos. |
@@ -501,7 +505,7 @@ subject to:
 | PostgreSQL + pgvector | zero_new_infrastructure |
 | LLM-at-write ($10/M Retain) | structured_memory_quality |
 | TEMPR 4-way ($0.75/M Recall) | cheap_retrieval |
-| 40+ integrations | integration_breadth |
+| 59 integrations (51 official) | integration_breadth |
 | MIT, same codebase | MIT_open_source |
 | Docker one-command | self_serve_onboarding |
 | Observation consolidation at write | structured_memory_quality |
@@ -528,7 +532,7 @@ subject to:
 | **LLM-at-write extraction** | $10/M is expensive. Our verbatim approach has zero write cost. Different trade-off. |
 | **PostgreSQL-only (no graph DB)** | We chose FalkorDB (ADR-004) for belief propagation. Query-time graph is limited vs persistent edges. |
 | **No belief propagation** | Our core differentiator. Confidence changes must propagate through dependent claims. |
-| **No quantitative confidence** | "Proof count" ≠ confidence. Our 0.0-1.0 model with source-weighted aggregation is unique. |
+| **No *propagated* confidence** | Hindsight scores confidence (Opinion Network) but does not propagate it over logical structure. Our 0.0-1.0 model with source-weighted aggregation is unique. |
 | **Agent memory vs org epistemology** | Hindsight = individual agents. We need TEAMS of agents building shared knowledge. Different data model. |
 | **No multi-agent claim aggregation** | Hindsight's memory bank is per-agent. Our epistemic graph needs shared claims — fundamentally different. |
 

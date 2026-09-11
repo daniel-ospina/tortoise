@@ -34,9 +34,9 @@ ranking, hub damping, and a flat-path fallback for simple lookups.**
 
 | System | How it chooses the subgraph | Budget control |
 |---|---|---|
-| **Microsoft GraphRAG** (local search) | entity-anchored: top-N entities (2× oversample) → fan out to linked text units, relationships, community reports | **one fixed window** (`max_tokens=12000`: ~50% raw text, ~10% community reports); relationships admitted **in-network first, ordered by `combined_degree`** [MEDIUM] |
+| **Microsoft GraphRAG** (local search) | entity-anchored: top-N entities (2× oversample) → fan out to linked text units, relationships, community reports | **one fixed window** (`max_tokens=12000`: ~50% raw text, ~15% community reports (0.5/0.15/0.35)); relationships admitted **in-network first, ordered by `combined_degree`** [MEDIUM] |
 | **LightRAG** | low-level (entity keys) → matched entities + **1-hop relations**; high-level (relation keys) → relation vector search; hybrid = both, deduped | one cheap key-extraction LLM call [MEDIUM] |
-| **HippoRAG** | **Personalized PageRank** seeded at query-linked entities; returns top nodes/edges/passages together | matches iterative IRCoT at **10–30× lower cost**; multi-hop gains up to +20% [MEDIUM] |
+| **HippoRAG** | **Personalized PageRank** seeded at query-linked entities; returns top-ranked **passages** — nodes/triples are internal seeding only | matches iterative IRCoT at **10–30× lower cost**; multi-hop gains up to +20% [MEDIUM] |
 | **Zep / Graphiti** | three scopes (edges = dated facts with `valid_at`/`invalid_at`; nodes = entity summaries; communities); fuses cosine+BM25+BFS via RRF; BFS "land and expand" from other legs' hits | **`MAX_SEARCH_DEPTH=3`**, candidate cap `2*limit`, node-distance reranker; base retrieval zero-LLM [MEDIUM] |
 | **Mem0 (OSS)** | **no traversal** — entity matches only *boost* scores on a vector-gated pool | **hub penalty** damping high-degree entities [MEDIUM] |
 
@@ -67,18 +67,18 @@ proxy, not the exact experiment. [ABSENCE]
 | Failure | Evidence |
 |---|---|
 | **GraphRAG can lose to vanilla RAG** | **−13.4%** accuracy on Natural Questions, **−16.6%** on time-sensitive questions; only +4.5% on HotpotQA multi-hop for ~2.3× latency [MEDIUM] |
-| **Extraction noise propagates** | KAG cites OpenIE noise as GraphRAG's core weakness; DEG-RAG reports removing **40–50%** of extracted entities *improves* QA [LOW] |
+| **Extraction noise propagates** | KAG cites OpenIE noise as GraphRAG's core weakness; DEG-RAG reports removing **~40%** of entities and relations *improves* QA [LOW] |
 | **Hub bias** | GraphRAG admits high-`combined_degree` nodes first; Mem0 counters with a hub penalty; type-blind BFS drifts topic [MEDIUM] |
 | **Near-relevant distractors** | the top killer — answerless-but-retrieved content actively harms [LOW] |
 | **Wrong local/global mode** | over-summarizes or under-reaches [MEDIUM] |
 
 ## 5. Agent memory / LongMemEval numbers
 
-Zep/Graphiti **63.8%** vs Mem0 **49.0%** (independent eval). [MEDIUM]
+Zep/Graphiti **63.8%** vs Mem0 **49.0%** (competitor-run eval — Vectorize, the vendor of Hindsight). [MEDIUM]
 Zep self-reports +18.5%/gpt-4o over baselines. [LOW — self-reported]
-Mem0 self-reports **93.4%** vs Zep 71.2%. [LOW — self-reported]
+Mem0 self-reports **93.4%** vs Zep **71.2%** on LongMemEval — both from Mem0's own Zep-vs-Mem0 comparison page (GPT-4o, April 2026); Mem0's current research-hub self-report is **94.4%**, with no contemporaneous Zep figure. [LOW — self-reported]
 
-⚠️ Vendor and independent LongMemEval numbers disagree by **~2×**, so
+⚠️ Vendor and competitor-run LongMemEval numbers disagree by **~2×**, so
 *"graph beats flat by X%"* is **not settleable from published results.**
 
 ---

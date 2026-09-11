@@ -129,7 +129,7 @@ Paper's own reading (verbatim): "HippoRAG 2 not only outperforms these RAG metho
 | Synonym edges | embedding cosine ≥ τ=0.8, weight = similarity | same |
 | Context edges | none | `passage —contains→ phrase`, weight 1 |
 | Seed selection | query NER → top-similarity nodes | query → top-k **triples**, LLM-filtered → up to k phrase nodes + **all** passage nodes |
-| Ranking signal | PPR over phrase graph, aggregated to passages via the `|N|×|P|` occurrence matrix **P** | PPR over phrase+passage graph, passage nodes ranked directly |
+| Ranking signal | PPR over phrase graph, aggregated to passages via the `\|N\|×\|P\|` occurrence matrix **P** | PPR over phrase+passage graph, passage nodes ranked directly |
 | Returned to reader | **top-ranked passages** (text), not triples, not nodes | **top-ranked passages** |
 | Serialization | retrieved passages concatenated before the query for the LLM reader | same |
 
@@ -321,7 +321,7 @@ From SEEM (arXiv:2601.06411v2, Feb 2026), Table 1:
 - **Ecosystem friction** — PyPI 14 months behind `main`, one release ever, index-config binding forces full re-index on any model change, and the 2.0.0a5 manifest rule means "copying or fabricating only the manifest is not a safe migration."
 - **Memory cost** — 9.9 GB QA GPU memory, 5.8× dense RAG.
 
-**Overall sentiment: Positive academically, mixed in practice.** Strong scholarly reception (NeurIPS + ICML, ~390 citations on the first paper) and repeated citation as a reference design. But the practitioner signal surfaced in its own issue tracker is a consistent theme of *ranking quality degradation outside Wikipedia-style multi-hop QA* — three independent reports (#154 user report, #178 third-party ablation, and the authors' own 50%-PPR-failure finding in Appendix E) converge on the same weakness.
+**Overall sentiment: Positive academically, mixed in practice.** Strong scholarly reception (NeurIPS + ICML, ~390 citations on the first paper) and repeated citation as a reference design. But the practitioner signal surfaced in its own issue tracker is a consistent theme of *ranking quality degradation outside Wikipedia-style multi-hop QA* — three independent reports (#154 user report, #178 third-party ablation, and the authors' own error analysis — in 50% of failures at least half the linked phrase nodes were in the supporting passages, yet graph search still failed) converge on the same weakness.
 
 [GitHub Issues API](https://api.github.com/repos/OSU-NLP-Group/HippoRAG/issues?state=all), [arXiv:2502.14802v2 Appendix E](https://arxiv.org/html/2502.14802v2) — retrieved 2026-09-11
 
@@ -336,7 +336,7 @@ The prompt asked to confirm or correct four claims. Two confirmed, one corrected
 | Claim | Verdict | Evidence |
 |---|---|---|
 | Ranks a subgraph by graph centrality (PPR) | ✅ **CONFIRMED** | "we run the PPR algorithm over the hippocampal index… we aggregate the output PPR node probability over the previously indexed passages and use that to rank them for retrieval." The ranking signal is *structural centrality*, not truth, not relevance-to-truth. |
-| No confidence / credence weighting | ✅ **CONFIRMED** | PPR yields a probability distribution over nodes — a *ranking score*, not a calibrated belief. Node specificity (`s_i = |P_i|^-1`) is IDF-flavoured term weighting. The LLM "recognition memory" filter is a **binary** keep/drop, not a confidence. Nothing anywhere attaches a credence to a claim being *true*. |
+| No confidence / credence weighting | ✅ **CONFIRMED** | PPR yields a probability distribution over nodes — a *ranking score*, not a calibrated belief. Node specificity (`s_i = \|P_i\|^-1`) is IDF-flavoured term weighting. The LLM "recognition memory" filter is a **binary** keep/drop, not a confidence. Nothing anywhere attaches a credence to a claim being *true*. |
 | No logical relations (IMPL / NAND) | ✅ **CONFIRMED** | Relations are OpenIE strings with "no constraints or schema." Relation edges are **undirected, weight 1** — direction and semantics are discarded at graph-build time. There is no implication typing, no contradiction/negation edge, and no mechanism to represent "these two claims conflict." |
 | Edges are corpus co-occurrence | ❌ **CORRECTED** | Three edge types, none of them co-occurrence counts: (1) **relation edges** from OpenIE triples, weight 1, undirected; (2) **synonymy edges** when embedding cosine ≥ τ=0.8, weight = similarity; (3) **"contains" context edges** passage→phrase, weight 1 (HippoRAG 2). "Co-occurrence" undersells it — these are LLM-extracted semantic triples. The accurate critique is not *how* the edges are built but that **the relations are untyped and semantically inert**: `(A, r, B)` supports graph traversal identically regardless of whether `r` means "is the father of," "contradicts," or "was mentioned near." |
 

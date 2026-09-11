@@ -161,8 +161,8 @@ Auto-dedup, evidence tracking (exact quotes + proof count), continuous refinemen
 
 | Channel | Activity |
 |---------|----------|
-| **GitHub OSS** | Primary engine. 18K stars, 10K+ gained in ~7 months (~150/day peak), trending #4 (Mar 2026) |
-| **Benchmark leadership** | LongMemEval SOTA, independently validated by Virginia Tech + Washington Post |
+| **GitHub OSS** | Primary engine. 18K stars — first 10K in 4.5 months, ~7 months to reach 18K (~150/day peak), trending #4 (Mar 2026) |
+| **Benchmark leadership** | LongMemEval SOTA, results cited/covered by Virginia Tech + the Washington Post |
 | **Integration ecosystem** | 59 integrations (51 official + 6 community + 2 cookbook) — "be the default memory for every agent" (51 official: LangChain, CrewAI, AutoGen, Claude SDK, Cursor, Copilot, etc.; 6 community; 2 cookbook) |
 | **Content** | Blog, cookbook, changelog. High-quality Docusaurus docs. |
 | **Community** | GitHub Discussions, Slack, "Show and Tell" sessions |
@@ -179,7 +179,7 @@ Auto-dedup, evidence tracking (exact quotes + proof count), continuous refinemen
 
 | Signal | Value |
 |---|---|
-| GitHub stars | ~18,000 (peak velocity ~150/day)
+| GitHub stars | ~18,000 (peak velocity ~150/day) |
 | Cloud sign-ups | 1,000+ (Apr 2026) |
 | GitHub issues | 1,680+ (May 2026) |
 | GitHub contributors | 12 (core repo) / 134 (total) |
@@ -190,7 +190,7 @@ Auto-dedup, evidence tracking (exact quotes + proof count), continuous refinemen
 | G2 (RAG platform) | 7 reviews, 4.5/5.0 |
 | ⚠️ Revenue / ARR | No public data — likely pre-revenue at seed stage |
 | ⚠️ Named customers | Groq (unverified single-source) |
-| Press / notable mentions | Virginia Tech + Washington Post benchmark validation; trending #4 on GitHub |
+| Press / notable mentions | Virginia Tech + Washington Post coverage of benchmark results; trending #4 on GitHub |
 
 [Source](https://github.com/vectorize-io/hindsight), [Trendshift](https://trendshift.io), [ProductHunt](https://producthunt.com) — retrieved 2026-07-06
 
@@ -228,9 +228,9 @@ Auto-dedup, evidence tracking (exact quotes + proof count), continuous refinemen
 | ⚠️ Twitter/X | Founder accounts found | No company handle surfaced |
 | ⚠️ Discord | Not found | Docs mention Slack, not Discord |
 
-**Platform strategy:** Be the memory layer for every agent framework. Not competing with frameworks — integrating with all 40+ of them.
+**Platform strategy:** Be the memory layer for every agent framework. Not competing with frameworks — integrating with all 59 of them (51 official).
 
-**Community dynamics:** Fast-growing OSS community (10K stars in 4.5 months). High issue volume (1,680+) suggests active usage. Core contributors are small (12) but total contributor base is wide (134).
+**Community dynamics:** Fast-growing OSS community (first 10K stars in 4.5 months; ~7 months to reach 18K). High issue volume (1,680+) suggests active usage. Core contributors are small (12) but total contributor base is wide (134).
 
 [Source](https://github.com/vectorize-io/hindsight) — retrieved 2026-07-06
 
@@ -243,7 +243,7 @@ Auto-dedup, evidence tracking (exact quotes + proof count), continuous refinemen
 **Sources checked:** Product Hunt, G2, Reddit (r/AI_Agents), GitHub Discussions
 
 **What users/customers praise:**
-- Benchmark credibility — independently verified by Virginia Tech, Washington Post
+- Benchmark credibility — results cited/covered by Virginia Tech and the Washington Post (⚠️ methodology not independently verified — see §6)
 - Developer experience — "Polished, dependable" (Product Hunt), "effortless" (G2), 60-second quick start
 - Production-ready — SOC 2, PostgreSQL, Docker one-command, no feature walls between OSS and Cloud
 - Same codebase for OSS and Cloud — no crippleware
@@ -252,7 +252,7 @@ Auto-dedup, evidence tracking (exact quotes + proof count), continuous refinemen
 **What users/customers complain about:**
 - API stability concerns for multi-agent setups (Reddit)
 - UI bugs reported on G2 (likely RAG platform, not Hindsight)
-- Pricing opacity — pricing page returns 404
+- Pricing opacity — docs-domain pricing page (`hindsight.vectorize.io/pricing`) returns 404; pricing lives on the company domain (`vectorize.io/pricing`)
 - Maturity concerns — <1 year old product, <2 year old company, 2–10 employees
 - Bus factor — two founders are the core team
 
