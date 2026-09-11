@@ -146,10 +146,19 @@ class TestTeamNameSanitization:
         assert result["name"] == "my team"
         assert result["api_key"].startswith("tt_")
 
-    def test_team_name_with_special_chars_rejected(self, sdk):
-        """Special characters are rejected."""
-        with pytest.raises(ValueError, match="alphanumeric"):
-            sdk.team_create("team@name!")
+    def test_team_name_with_special_chars_accepted_as_display_name(self, sdk):
+        """#2779: the team name is a free-text DISPLAY name — `@`/`!` are
+        legal there (the identifier/charset rule governs the derived
+        identifier + graph namespace, covered by org_naming.identifier_error).
+        This replaces the pre-#2779 'special chars rejected' assertion."""
+        from tortoise.org_naming import identifier_error
+
+        result = sdk.team_create("team@name!")
+        assert result["name"] == "team@name!"
+        # the display name never reaches the graph namespace unslugged
+        assert result["graph_name"] == "team_team-name"
+        # the identifier rule still names the offending character for id input
+        assert '@' in identifier_error("team@name!")
 
     def test_team_name_empty_rejected(self, sdk):
         """Empty team name raises ValueError."""
@@ -172,10 +181,16 @@ class TestTeamNameSanitization:
         result = sdk.team_create(name)
         assert result["name"] == name
 
-    def test_team_name_starts_with_hyphen_rejected(self, sdk):
-        """Leading hyphen is not allowed."""
-        with pytest.raises(ValueError, match="alphanumeric"):
-            sdk.team_create("-myteam")
+    def test_team_name_starts_with_hyphen_accepted_as_display_name(self, sdk):
+        """#2779: a leading hyphen is legal in a free-text DISPLAY name; only
+        the derived identifier must start alphanumeric (the leading '-' is
+        stripped by slugify_id). Replaces the pre-#2779 rejection assertion."""
+        from tortoise.org_naming import identifier_error
+
+        result = sdk.team_create("-myteam")
+        assert result["name"] == "-myteam"
+        assert result["graph_name"] == "team_myteam"
+        assert '-' in identifier_error("-myteam")
 
 
 # ── Team Creation Tests ─────────────────────────────────────────────────────

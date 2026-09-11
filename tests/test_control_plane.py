@@ -88,13 +88,17 @@ class TestTeamCRUD:
             sdk.team_create("unique-name")
 
     def test_team_create_rejects_empty_name(self, sdk):
-        with pytest.raises(ControlPlaneError, match="must not be empty"):
+        # #2779: the message comes from the shared display-name validator
+        # (blank → 'Organization name is required').
+        with pytest.raises(ControlPlaneError, match="required"):
             sdk.team_create("")
 
     def test_team_create_accepts_spaces(self, sdk):
-        """Spaces in team names are now accepted."""
+        """#2779: spaces are legal in the free-text display name; the graph
+        namespace is derived through slugify_id (space → '-')."""
         result = sdk.team_create("name with spaces")
         assert result["name"] == "name with spaces"
+        assert result["graph_name"] == "team_name-with-spaces"
         assert result["api_key"].startswith("tt_")
 
     def test_team_get_returns_none_for_missing(self, sdk):

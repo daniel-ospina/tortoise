@@ -5671,7 +5671,18 @@ def _cmd_key_create(args) -> int:
 
     from tortoise.config import is_db_uri
     from tortoise.exceptions import ControlPlaneError
+    from tortoise.org_naming import validate_display_name
     from tortoise.sdk import TortoiseSDK
+
+    # #2779 slice 1: the CLI --name is a free-text DISPLAY name; normalize +
+    # validate it here so blank/control/over-long names surface as a clean CLI
+    # error (never a traceback). The identifier rule governs the derived id
+    # (slice 2) and the graph namespace, not this field.
+    try:
+        args.name = validate_display_name(args.name)
+    except ValueError as e:
+        print(f"  ❌ {e}", file=sys.stderr)
+        return 1
 
     db_uri = os.environ.get("TORTOISE_DB_URI", "")
     if is_db_uri(db_uri):

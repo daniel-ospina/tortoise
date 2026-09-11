@@ -243,10 +243,14 @@ class TestNewOrgCheckout:
         assert r.status_code == 400, r.text
 
     def test_invalid_name_422(self, user_client):
+        """#2779: the org name is a free-text DISPLAY name — `bad@name!` is
+        now legal there. A genuinely invalid display name (a control
+        character) still 422s with the shared validator's specific message."""
         tc, _fake = user_client
         r = tc.post("/v1/billing/checkout/new-org",
-                    json={"name": "bad@name!", "price_id": _PRO_PRICE})
+                    json={"name": "Acme\x00Corp", "price_id": _PRO_PRICE})
         assert r.status_code == 422, r.text
+        assert "U+0000" in json.dumps(r.json())
 
     def test_unconfigured_catalog_503(self, monkeypatch, user_client):
         tc, _fake = user_client

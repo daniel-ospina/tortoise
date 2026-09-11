@@ -1,0 +1,44 @@
+{
+  "_comment": "Shared org-naming vectors (#2779). Consumed by BOTH tests/test_org_naming.py (tortoise/org_naming.py) and website/apps/dashboard/src/orgNaming.test.js (the JS mirror, orgNaming.js). Change either runtime only together with this fixture.",
+  "slugify": [
+    {"input": "test org for multi-organisation", "expected": "test-org-for-multi-organisation"},
+    {"input": "Acme  Corp", "expected": "Acme-Corp"},
+    {"input": "Café Ltd", "expected": "Cafe-Ltd"},
+    {"input": "!!!", "expected": "org-"},
+    {"input": "", "expected": "org-"},
+    {"input": "registry", "expected": "org-registry"},
+    {"input": "default", "expected": "org-default"},
+    {"input": "acme_prod-2", "expected": "acme_prod-2"},
+    {"input": "  Acme  ", "expected": "Acme"},
+    {"input": "a.b/c", "expected": "a-b-c"},
+    {"input": "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789", "expected": "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"},
+    {"input": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", "expected": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"},
+    {"input": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa b", "expected": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-"},
+    {"input": "résumé 2024", "expected": "resume-2024"}
+  ],
+  "display_names": [
+    {"input": "test org for multi-organisation", "valid": true, "normalized": "test org for multi-organisation"},
+    {"input": "Café  Ltd", "valid": true, "normalized": "Café Ltd"},
+    {"input": "  Acme  ", "valid": true, "normalized": "Acme"},
+    {"input": "Acme\nCorp", "valid": true, "normalized": "Acme Corp"},
+    {"input": "acme", "valid": true, "normalized": "acme"},
+    {"input": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "valid": true, "normalized": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+    {"input": "", "valid": false, "error_contains": ["required"]},
+    {"input": "   ", "valid": false, "error_contains": ["required"]},
+    {"input": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "valid": false, "error_contains": ["65"]},
+    {"input": "Acme\u0000Corp", "valid": false, "error_contains": ["U+0000"]},
+    {"input": "Acme\u007fCorp", "valid": false, "error_contains": ["U+007F"]}
+  ],
+  "identifier_errors": [
+    {"input": "test org for multi-organisation", "message_contains": ["\" \"", "test-org-for-multi-organisation"]},
+    {"input": "-acme", "message_contains": ["\"-\"", "acme"]},
+    {"input": "bad@name", "message_contains": ["\"@\"", "bad-name"]},
+    {"input": "_acme", "message_contains": ["\"_\"", "acme"]},
+    {"input": "registry", "message_contains": ["registry", "org-registry"]},
+    {"input": "", "message_contains": ["required", "org-"]},
+    {"input": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "message_contains": ["65", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]},
+    {"input": "Acme\u0000Corp", "message_contains": ["U+0000", "Acme-Corp"]},
+    {"input": "ok-name", "message_contains": []},
+    {"input": "acme_prod-2", "message_contains": []}
+  ]
+}

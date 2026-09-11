@@ -528,13 +528,17 @@ def test_create_team_success(page: Page):
     # reads 'Create a new organization'), so this name still resolves in name
     # mode; limit/purchase mode announce their own headings.
     expect(page.get_by_role("dialog", name="Create a new organization")).to_be_visible()
-    # special characters (not spaces) are rejected — inline error, no POST
-    page.get_by_label("Organization name").fill("bad@name!")
+    # #2779: the org name is a free-text DISPLAY name. The old assertion here
+    # expected '@'/'!' to be rejected inline; that rule is superseded —
+    # punctuation and spaces are legal in a DISPLAY name (the identifier/
+    # charset rule governs the DERIVED id, asserted in the slice-3
+    # derived-id e2e). An inline rejection still fires for a control
+    # character (the shared validator) — no POST.
+    page.get_by_label("Organization name").fill("bad\u0000name")
     page.locator(".modal .btn-primary").click(force=True)
-    # NOTE: the client copy is "Invalid organization name — …" (the team→
-    # organization rename). The assertion said "Invalid team name" and had been
-    # stale/latent-red on main; corrected here while touching this file.
     expect(page.locator(".modal")).to_contain_text("Invalid organization name", timeout=10000)
+    # spaces — the reported #2779 bug — are accepted (the old copy was
+    # "Invalid organization name — letters, numbers, dash, underscore only").
     page.get_by_label("Organization name").fill("good name with spaces")
     page.locator(".modal .btn-primary").click(force=True)  # busy-state re-render detaches the name-changed button
     # the dashboard switches to the new team (the blob shows its name)

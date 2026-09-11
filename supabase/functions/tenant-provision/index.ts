@@ -38,6 +38,7 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { Webhook } from "https://esm.sh/standardwebhooks@1.0.0";
 import { lookupHash } from "../_shared/lookup.ts";
+import { normalizeDisplayName } from "../_shared/orgNaming.ts";
 
 // Supabase Auth hook payload: { metadata: {...}, user: { id, email, user_metadata, ... } }
 // Also tolerates a direct { user_id, email, display_name } payload for manual testing.
@@ -338,10 +339,17 @@ Deno.serve(async (req: Request) => {
     // "Acme" — code-review P3: the display-name fallback keeps lowercasing).
     const bodyTeamName =
       typeof body.team_name === "string" ? body.team_name.trim() : "";
-    const TEAM_NAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9_ -]{0,63}$/;
+    // #2779 slice 1: the org name is a free-text DISPLAY name. The override is
+    // validated with the shared display-name rule (mirror of
+    // tortoise/org_naming.py validate_display_name via _shared/orgNaming.ts);
+    // it accepts spaces/punctuation and rejects only blank / >64 / control
+    // chars. An invalid or absent override falls back (never 500s) so a stale
+    // caller cannot regress. An override that passes keeps its case ("Acme"
+    // stays "Acme" — code-review P3: the fallback keeps lowercasing).
+    const overrideName = normalizeDisplayName(bodyTeamName);
     let safeName = "";
-    if (bodyTeamName && TEAM_NAME_RE.test(bodyTeamName)) {
-      safeName = bodyTeamName;
+    if (overrideName) {
+      safeName = overrideName;
     } else {
       const rawName = display_name || email.split("@")[0];
       const teamName = rawName

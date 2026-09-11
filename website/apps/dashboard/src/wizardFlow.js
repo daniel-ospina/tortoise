@@ -14,11 +14,14 @@
 //   live render uses WIZARD_STEPS and the org-create dialog says
 //   Organization).
 // - org-create name REQUIRED with editable prefill (DE2E-3) — the client
-//   validation below mirrors POST /v1/onboarding/team (server regex).
+//   validation below mirrors POST /v1/onboarding/team via the shared
+//   org-naming module (#2779: the field is free-text DISPLAY name).
 // - the fork card is once-per-org (set-once server-side); build branch
 //   renders the registry-backed capability catalog (W8 — the offline
 //   fallback lives in BUILD_CATALOG_PLACEHOLDER) whose render marks the
 //   catalog-presented step edge (surface 4).
+
+import { displayNameError } from './orgNaming.js'
 
 export const WIZARD_STEPS = Object.freeze([
   {
@@ -134,17 +137,13 @@ export function durableKeyName(orgName, date = new Date(), existingNames = []) {
   return name
 }
 
-// Org-create name validation — mirrors the server (POST /v1/onboarding/team:
-// non-empty, ≤64 chars, /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/). REQUIRED with
-// editable prefill, never a silent username (DE2E-3). Returns an error
-// string or null.
+// Org-create name validation — delegates to the shared org-naming module
+// (#2779): the org name is a FREE-TEXT DISPLAY name (spaces, punctuation and
+// non-ASCII all survive; whitespace runs collapse). The identifier/charset
+// rule governs the DERIVED id + graph namespace, never this field. REQUIRED,
+// never a silent username (DE2E-3). Returns an error string or null.
 export function orgNameError(name) {
-  const trimmed = String(name || '').trim()
-  if (!trimmed) return 'Organization name is required'
-  if (trimmed.length > 64 || !/^[a-zA-Z0-9][a-zA-Z0-9_ -]{0,63}$/.test(trimmed)) {
-    return 'Invalid organization name — letters, numbers, spaces, dash, underscore only'
-  }
-  return null
+  return displayNameError(name)
 }
 
 // #1998 (W2): fork-card display-mode semantics (surface 4 — W1 renders the

@@ -1300,18 +1300,18 @@ async def provision_tenant(request: Request):
     if not all([team_id, team_name, api_key_hash, created_by]):
         raise HTTPException(status_code=400, detail="Missing required fields")
 
-    # Validate team_id and team_name against allowed pattern
-    import re
-    # team_id flows into graph names + SDK namespaces — strict (aligned with
-    # the SDK namespace regex + hosted_backup._validate_team_id: a space would
-    # pass provision but fail every downstream _make_sdk(namespace=...) call).
-    # team_name is display-only — spaces allowed.
-    _id_pattern = re.compile(r'^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$')
-    _name_pattern = re.compile(r'^[a-zA-Z0-9][a-zA-Z0-9 _-]{0,63}$')
-    if not _id_pattern.match(team_id):
+    # Validate team_id and team_name against allowed pattern.
+    # team_id flows into graph names + SDK namespaces — strict (the shared
+    # #2779 ID_PATTERN: a space would pass provision but fail every
+    # downstream _make_sdk(namespace=...) call). team_name is display-only —
+    # free text via the shared validator (spaces/punctuation allowed).
+    from tortoise.org_naming import ID_PATTERN, validate_display_name
+    if not ID_PATTERN.match(team_id):
         raise HTTPException(status_code=400, detail="Invalid team_id format")
-    if not _name_pattern.match(team_name):
-        raise HTTPException(status_code=400, detail="Invalid team_name format")
+    try:
+        team_name = validate_display_name(team_name)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
 
     sdk = _make_sdk(namespace="registry")
     now = datetime.now(UTC).isoformat()
@@ -2877,9 +2877,12 @@ class CheckoutResponse(BaseModel):
 class NewOrgCheckoutRequest(BaseModel):
     """#2789: POST /v1/billing/checkout/new-org body — the intended org name
     plus the plan's server-side price id. The org does not exist yet; the name
-    is validated exactly like POST /v1/teams (the same 64-char/pattern rule)."""
+    is validated as a free-text DISPLAY name (#2779)."""
     name: str = Field(..., min_length=1, max_length=64)
     price_id: str = Field(..., min_length=1, max_length=128)
+    # NOTE (#2779): `name` is a free-text DISPLAY name. The Pydantic bounds
+    # above are a coarse shape gate; the authoritative rule is the shared
+    # display-name validator applied in the route (tortoise/org_naming.py).
 
 
 class NewOrgCheckoutResponse(BaseModel):
@@ -9333,14 +9336,16 @@ async def create_team(body: dict, user: dict = Depends(get_current_user)):  # no
     like the registry membership_create). The registry path (sdk.team_create
     + membership_create) stays for selfhost."""
     name = (body.get("name") or "").strip()
-    if not name:
-        raise HTTPException(status_code=422, detail="Organization name required")
-    if len(name) > 64:
-        raise HTTPException(status_code=422, detail="Organization name must be ≤ 64 characters")
-    import re as _re
-    # spaces are now allowed in team names (onboarding wizard needs them)
-    if not _re.match(r"^[a-zA-Z0-9][a-zA-Z0-9_ -]{0,63}$", name):
-        raise HTTPException(status_code=422, detail="Invalid organization name")
+    # #2779: the org name is a free-text DISPLAY name. The shared validator
+    # collapses whitespace, rejects control chars + >64, and names the exact
+    # problem (the old inline charset regex rejected spaces with a generic
+    # message). The identifier/graph-namespace rule never applies here; it is
+    # enforced on the derived id in slice 2 / on team_id everywhere.
+    from tortoise.org_naming import validate_display_name
+    try:
+        name = validate_display_name(name)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
 
     # #1954: the 429/409/402 gates + provision are read-then-write — the
     # whole check+provision runs under the per-user lock so a concurrent
@@ -17785,11 +17790,14 @@ async def create_onboarding_team(body: dict,
     NULL-user identity row never matched — no key, no claim, no list, no
     delete. The registry path stays for selfhost."""
     name = (body.get("name") or "").strip()
-    if not name or len(name) > 64:
-        raise HTTPException(status_code=400, detail="name is required (max 64 chars)")
-    import re
-    if not re.match(r"^[a-zA-Z0-9][a-zA-Z0-9_ -]{0,63}$", name):
-        raise HTTPException(status_code=400, detail="Invalid organization name")
+    # #2779: free-text DISPLAY name via the shared validator (was an inline
+    # charset regex + a bare length check). name is normalized (whitespace
+    # runs collapsed) before it is stored.
+    from tortoise.org_naming import validate_display_name
+    try:
+        name = validate_display_name(name)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
     # #1748: the session user owns the sub-team. Session JWT →
     # session_user_id (get_current_team_session); key-auth → created_by
     # (the key creator's user UUID — session-minted bootstrap/recovery
@@ -21070,13 +21078,13 @@ def _new_org_collision_name(org_name: str, team_id: str) -> str:
     checkout — the pre-check cannot see the future (someone else took the name
     between payment intent and webhook).
 
-    Must stay legal in BOTH lanes, so NO parentheses (the registry SDK's
-    validator is ``^[a-zA-Z0-9][a-zA-Z0-9_ -]*$`` and it rejects them — a
-    paren suffix would make the retry raise forever and strand a paying
-    customer), first char still alphanumeric, and <= 64 chars. 8 id chars (32
-    bits) of entropy keeps a *second* collision vanishingly unlikely; if one
-    did happen the raise surfaces as a 500 + ops log rather than silently
-    stranding money.
+    Must stay legal in BOTH lanes: it is a display name (free text since
+    #2779) and its DERIVED identifier (``slugify_id``) must satisfy
+    ``^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$``, so the suffix stays space-separated
+    (slugifies to ``-``) with first char alphanumeric and <= 64 chars. 8 id
+    chars (32 bits) of entropy keeps a *second* collision vanishingly
+    unlikely; if one did happen the raise surfaces as a 500 + ops log rather
+    than silently stranding money.
     """
     suffix = str(team_id or "")[:8]
     return f"{org_name[: 63 - len(suffix)].rstrip()} {suffix}"
@@ -21169,12 +21177,13 @@ async def billing_checkout_new_org(body: NewOrgCheckoutRequest, user: dict = Dep
     SESSION auth (get_current_user), not team auth — the whole point of the
     endpoint is that there is no team yet."""
     name = body.name.strip()
-    if not name:
-        raise HTTPException(status_code=422, detail="Team name required")
-    import re as _re
-    # Name rule shared with POST /v1/teams (spaces allowed; the same charset).
-    if not _re.match(r"^[a-zA-Z0-9][a-zA-Z0-9_ -]{0,63}$", name):
-        raise HTTPException(status_code=422, detail="Invalid team name")
+    # #2779: free-text DISPLAY name via the shared validator. The identifier
+    # charset rule governs team_id / the graph namespace, never this field.
+    from tortoise.org_naming import validate_display_name
+    try:
+        name = validate_display_name(name)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
     return await asyncio.to_thread(_billing_checkout_new_org_sync, user, name, body.price_id)
 
 

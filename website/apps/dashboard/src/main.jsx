@@ -17,6 +17,7 @@ import { overviewConnection, overviewDigest, overviewNextAction } from './overvi
 // #1997 (W1): the 4 human onboarding steps — pure structure + copy + fork
 // options + org-name validation, node --test unit-tested (wizardFlow.test.js).
 import { WIZARD_STEPS, WIZARD_FORK_OPTIONS, resolveBuildCatalog, orgNameError, durableKeyName } from './wizardFlow.js'
+import { displayNameError } from './orgNaming.js'
 // #1894: indexed-state + job-progress derivations — pure, node --test
 // unit-tested (memorySourcesStatus.test.js).
 import { docsIndexedLabel, formatRelativeTime, jobStatusLine } from './memorySourcesStatus.js'
@@ -4118,11 +4119,11 @@ function claimIntentInFlight() {
   // consume the free-org allowance (nothing is created until payment).
   async function startNewOrgCheckout() {
     const name = createTeamName.trim()
-    if (!name) { setCreateTeamError('Organization name required'); return }
-    if (name.length > 64 || !/^[a-zA-Z0-9][a-zA-Z0-9_ -]{0,63}$/.test(name)) {
-      setCreateTeamError('Invalid organization name — letters, numbers, space, dash, underscore only')
-      return
-    }
+    // #2779: the org name is a free-text DISPLAY name — the shared helper
+    // accepts spaces/punctuation and only rejects blank/long/control chars.
+    // The identifier charset rule governs the derived id, never this field.
+    const nameErr = displayNameError(name)
+    if (nameErr) { setCreateTeamError(nameErr); return }
     const priceId = createTeamPlan || newOrgDefaultPrice(team)
     if (!priceId) {
       setCreateTeamError('No paid plan is available right now — open the Billing tab or try again later.')
@@ -4161,16 +4162,13 @@ function claimIntentInFlight() {
   }
 
   async function handleCreateTeam() {
-    // #1877: create-team dialog submit — validation mirrors POST /v1/teams
-    // (≤64 chars, [a-zA-Z0-9_-], spaces rejected); 402 → gated-on-click
-    // upgrade UX (the dialog explains "upgrade a team, then create" — the
-    // new team doesn't exist until the gate passes).
+    // #1877/#2779: create-team dialog submit. The name is a free-text DISPLAY
+    // name (spaces accepted — the reported #2779 bug was this check rejecting
+    // "test org for multi-organisation"); the shared validator mirrors the
+    // server's POST /v1/teams rule. 402 → gated-on-click upgrade UX.
     const name = createTeamName.trim()
-    if (!name) { setCreateTeamError('Organization name required'); return }
-    if (name.length > 64 || !/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/.test(name)) {
-      setCreateTeamError('Invalid organization name — letters, numbers, dash, underscore only')
-      return
-    }
+    const nameErr = displayNameError(name)
+    if (nameErr) { setCreateTeamError(nameErr); return }
     setCreateTeamBusy(true)
     setCreateTeamError('')
     try {
