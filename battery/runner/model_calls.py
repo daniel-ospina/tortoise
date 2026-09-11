@@ -13,8 +13,9 @@ epic's critical bug-pattern flag). Retry table (scope DD8):
 from __future__ import annotations
 
 import time
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field  # noqa: F401
-from typing import Callable, Protocol  # noqa: UP035
+from typing import Protocol
 
 from battery.config.prices import RATES_PER_1M_USD, cost_usd
 from battery.enums import ModelCallOutcome
@@ -30,6 +31,28 @@ _REAL_RATES_PER_1M_USD: tuple[float, float] = RATES_PER_1M_USD
 
 def _usage_cost_usd(pt: int, ct: int) -> float:
     return cost_usd(pt, ct)
+
+
+def aggregate_cost_basis(bases: Iterable[str]) -> str:
+    """The run-level label for a set of per-call cost bases (#2906).
+
+    "provider_reported" only when EVERY call was priced by the provider's own
+    ``usage.cost``; "estimated" when every call fell back to the declared
+    basis; "mixed" when both occurred. An empty set (or one whose labels are
+    missing/unknown) is "estimated" — no provider-priced call exists, so the
+    figure is a basis estimate, never a receipt. "mixed" in the input (an
+    already-aggregated episode label) also forces "mixed", so the same helper
+    folds both per-call rows and per-episode labels.
+    """
+    seen = {b for b in bases if b in ("provider_reported", "estimated",
+                                    "mixed")}
+    if not seen:
+        return "estimated"
+    if seen == {"provider_reported"}:
+        return "provider_reported"
+    if seen == {"estimated"}:
+        return "estimated"
+    return "mixed"
 
 
 class RealModelCaller:
@@ -83,6 +106,15 @@ class RealModelCaller:
     def last_completion_tokens(self) -> int:
         return int(getattr(self._real, "last_completion_tokens", 0) or 0)
 
+    @property
+    def last_cost_usd(self) -> float | None:
+        """#2906: the provider's own charge for the last call (USD), or None
+        when the route did not report one. Never coerced to 0.0 — a None here
+        means "unknown, fall back to the declared basis", while a 0.0 means
+        "authoritative free call" and must be metered as such."""
+        cost = getattr(self._real, "last_cost_usd", None)
+        return None if cost is None else float(cost)
+
     def call(self, *, prompt: str) -> str:
         return self._real.complete(system="", user=prompt)
 
@@ -92,6 +124,11 @@ class _UsageRow:
     prompt_tokens: int
     completion_tokens: int
     cost_usd: float
+    #: How ``cost_usd`` was derived (#2906): "provider_reported" (the
+    #: provider's own ``usage.cost``) or "estimated" (the declared fallback
+    #: basis). Defaults to "estimated" so a hand-built row is never mislabelled
+    #: as a receipt.
+    basis: str = "estimated"
 
 
 class UsageRecordingCaller:
@@ -120,7 +157,20 @@ class UsageRecordingCaller:
         text = self._caller.call(prompt=prompt)
         pt = int(getattr(self._caller, "last_prompt_tokens", 0) or 0)
         ct = int(getattr(self._caller, "last_completion_tokens", 0) or 0)
-        self.rows.append(_UsageRow(pt, ct, self._cost_fn(pt, ct)))
+        provider_cost = getattr(self._caller, "last_cost_usd", None)
+        if provider_cost is None:
+            # #2906 fallback: no provider-reported charge → the declared
+            # basis. This is the priced estimate for mocks/offline lanes and
+            # for routes that do not publish ``usage.cost``.
+            cost = self._cost_fn(pt, ct)
+            basis = "estimated"
+        else:
+            # #2906: the provider's own charge is authoritative. ``is None``
+            # above (never truthiness) so a genuine 0.0 free call stays
+            # provider_reported instead of being re-estimated.
+            cost = float(provider_cost)
+            basis = "provider_reported"
+        self.rows.append(_UsageRow(pt, ct, cost, basis))
         return text
 
     @property
@@ -133,6 +183,9 @@ class UsageRecordingCaller:
             "prompt_tokens": sum(r.prompt_tokens for r in self.rows),
             "completion_tokens": sum(r.completion_tokens for r in self.rows),
             "cost_usd": round(self.spent_usd, 6),
+            # #2906: how the spend figure was derived — persisted with it so a
+            # reader can tell a provider receipt from a basis estimate.
+            "cost_basis": aggregate_cost_basis(r.basis for r in self.rows),
         }
 
 

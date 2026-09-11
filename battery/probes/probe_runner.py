@@ -209,11 +209,32 @@ class _AdapterCaller:
 
     def call(self, *, prompt: str) -> str:
         text = self._real.complete(system="", user=prompt)
+        self.last_cost_usd: float | None = None
         self.last_prompt_tokens = getattr(
             self._real, "last_prompt_tokens", 0)
         self.last_completion_tokens = getattr(
             self._real, "last_completion_tokens", 0)
+        # #2906: forward the provider's authoritative charge too. Without
+        # this the probe's HARD STOP and its persisted ``spend`` fall back to
+        # the declared price basis, which is wrong in both directions (the
+        # upstream serving the call is not pinned).
+        self.last_cost_usd = getattr(self._real, "last_cost_usd", None)
         return text
+
+
+def _spend_cost_basis(provider_calls: int, estimated_calls: int) -> str:
+    """#2906 — how a persisted spend figure was priced, derived from the calls
+    that actually priced it, never asserted.
+
+    A run that priced NOTHING reads ``estimated``: it must not claim
+    provider-reported provenance it does not have (review #2915 P2). Same rule
+    as ``model_calls.aggregate_cost_basis`` and the judge meter.
+    """
+    if not (provider_calls or estimated_calls):
+        return "estimated"
+    if not estimated_calls:
+        return "provider_reported"
+    return "mixed" if provider_calls else "estimated"
 
 
 def run_probe(*, config: str | Path, arms: list[str],
@@ -273,6 +294,11 @@ def run_probe(*, config: str | Path, arms: list[str],
     }
     #: cumulative probe spend in USD (mid-run HARD STOP against cap)
     spent: float = 0.0
+    #: #2906 — how many metered calls were priced from the provider's own
+    #: reported charge vs the declared fallback basis. Persisted so a spend
+    #: figure never implies provider-reported accuracy it does not have.
+    metered_provider: int = 0
+    metered_estimated: int = 0
     transcripts: list[dict] = []
     evidence_by_rubric: dict[str, list[dict]] = {}
     #: per-EPISODE deliberation token totals (the measured re-lock unit for
@@ -305,7 +331,17 @@ def run_probe(*, config: str | Path, arms: list[str],
                 # capture at the pinned rates (overshoot <= one call).
                 ptok = getattr(caller, "last_prompt_tokens", 0)
                 ctok = getattr(caller, "last_completion_tokens", 0)
-                spent += _call_cost_usd(int(ptok), int(ctok))
+                # #2906: prefer the provider-reported charge (`is None`, never
+                # truthiness — a genuine 0.0 is a value); the declared basis is
+                # the fallback and the label is recorded so the persisted
+                # spend never masquerades as provider-reported.
+                reported_cost = getattr(caller, "last_cost_usd", None)
+                if reported_cost is None:
+                    spent += _call_cost_usd(int(ptok), int(ctok))
+                    metered_estimated += 1
+                else:
+                    spent += float(reported_cost)
+                    metered_provider += 1
                 if spent > budget.cap_usd:
                     raise ConfigError(
                         f"probe sub-cap ${budget.cap_usd:.2f} exceeded after "
@@ -374,7 +410,11 @@ def run_probe(*, config: str | Path, arms: list[str],
             json.dumps(tables, indent=2), encoding="utf-8")
         (out / "probe_manifest.json").write_text(json.dumps({
             "scenarios": scenario_ids, "arms": arms, "seed": seed,
-            "model": model_block, "spend": {"sub_cap_usd": budget.cap_usd},
+            "model": model_block, "spend": {
+                "sub_cap_usd": budget.cap_usd,
+                "cost_basis": _spend_cost_basis(metered_provider,
+                                                metered_estimated),
+            },
             "usage": rows,
         }, indent=2), encoding="utf-8")
         (out / "probe_validation_bundle.json").write_text(json.dumps({
