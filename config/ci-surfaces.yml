@@ -431,6 +431,7 @@ surfaces:
   - test_relationships_bounded.py
   - test_remove_context_migration.py
   - test_render.py
+  - test_restore_container_recovery.py  # #2993: restore() must leave the container running on every exit path (hermetic — docker/graph helpers stubbed)
   - test_coverage_loop.py  # #2567: evidence-completeness loop E2E (C3-1, docker-lane)
   - test_coverage_loop_rules.py  # #2567: evidence-completeness loop hermetic rules
   - test_entity_key_expansion.py  # #2518: entity/fact-augmented key expansion (C2, docker-lane)
