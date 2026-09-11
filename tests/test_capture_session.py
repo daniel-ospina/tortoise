@@ -107,6 +107,69 @@ def test_capture_session_shape(sdk):
     assert isinstance(res["warnings"], list)
 
 
+def test_capture_v2_persists_passthrough_props_on_node(sdk, monkeypatch):
+    """#2813: the four E3 fields the v2 extractor emits (quote / when /
+    search_keys / source_turn_id) must land as NODE properties — not merely
+    ride the capture response's ``props`` superset. The extractor is shared
+    with the eval lane (tools/longmem_eval/ingest_v2.py), whose writer DID
+    persist them; the SDK persistence writer was forked and silently dropped
+    them, so the reply looked correct while the node stored nothing."""
+    import tortoise.extractor_v2 as ev2
+
+    payload = {
+        "entities": [],
+        "events": [],
+        "points": [{
+            "id": "pt_2813_regression",
+            "content": "the auth dead-end is the top issue",
+            "pointKind": "statement",
+            "reason": "NEW",
+            "confidence": 0.5,
+            "c_cal": 0.5,
+            "about_entities": [],
+            "source_ref": "session.md",
+            "quote": "We decided to ship serve --http first.",
+            "status": "draft",
+            "search_keys": ["auth", "dead-end"],
+            "source_turn_id": "turn-2813",
+            "when": "2026-08-01",
+        }],
+        "operators": [],
+    }
+
+    def _fake_extract(model, conversation, **kw):
+        return {"payload": payload, "minted_kinds": [], "supersessions": [],
+                "chain_notes": [], "link_before_create": [],
+                "warnings": [], "story_arc": "", "search": {},
+                "stats": {}, "errors": []}
+
+    monkeypatch.setattr(ev2, "extract_session_v2", _fake_extract)
+
+    res = sdk.capture_session(CONV)
+    assert res["ok"] is True, res
+    assert len(res["points"]) == 1, res["points"]
+    pid = res["points"][0]["id"]
+    # Response shape is deliberately UNCHANGED: the passthrough whitelist
+    # still reports the raw payload values (search_keys stays a list there).
+    assert res["points"][0]["props"] == {
+        "quote": "We decided to ship serve --http first.",
+        "when": "2026-08-01",
+        "search_keys": ["auth", "dead-end"],
+        "source_turn_id": "turn-2813",
+    }
+    # The actual regression: the NODE carries them (search_keys flattened to
+    # the graph's space-joined string by _flatten_search_keys_prop).
+    row = sdk._get_proj().g.query(
+        "MATCH (n:Point {id:$id}) "
+        "RETURN n.quote, n.when, n.search_keys, n.source_turn_id",
+        params={"id": pid},
+    ).result_set[0]
+    assert row[0] == "We decided to ship serve --http first.", row
+    assert row[1] == "2026-08-01", row
+    assert row[2] == "auth dead-end", row
+    assert row[3] == "turn-2813", row
+
+
 def test_capture_w5_phase_c_ep_on_ingest_calibrates_wired_claims(sdk, monkeypatch):
     """W5 Phase C (#2104, indicator 3 / E2E-5 acceptance): EP-on-ingest is
     USER-VISIBLE — the pre-ingestion (uncalibrated, has_ep False) state
