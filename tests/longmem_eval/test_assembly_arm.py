@@ -38,9 +38,10 @@ import pytest
 import tests._assembly_graph as ag
 from tortoise.sdk import TortoiseSDK
 
-_URI = os.environ.get(
-    "TORTOISE_DB_URI",
-    "docker://:falkordb@localhost:6379/tortoise_test_matrix").rstrip("/")
+_URI = (
+    os.environ.get("TORTOISE_DB_URI")
+    or "docker://:falkordb@localhost:6379/tortoise_test_matrix"
+).rstrip("/")
 FALKORDB_AVAILABLE = False
 _OLD_URI = os.environ.get("TORTOISE_DB_URI")
 _PROBE_GRAPH = f"{_URI}_probe"

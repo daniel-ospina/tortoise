@@ -42,6 +42,7 @@ from tests.longmem_eval.test_vector_arm import _mini
 from tools.longmem_eval import run as runner
 from tools.longmem_eval.judge import MockJudge
 from tools.longmem_eval.reader import MockReader
+from tortoise.config import is_db_uri as _is_db_uri
 from tortoise.sdk import TortoiseSDK
 
 # ── docker-lane only: this module reads TORTOISE_DB_URI at import (DB_URI)
@@ -51,8 +52,6 @@ from tortoise.sdk import TortoiseSDK
 # (mirrors test_capabilities_endpoint.py). Reason deliberately avoids the
 # "FalkorDB" token so the #1436 skip-guard treats it as the intentional
 # docker-lane availability family, not a silent regression.
-from tortoise.config import is_db_uri as _is_db_uri
-
 if not _is_db_uri(os.environ.get("TORTOISE_DB_URI")):
     pytest.skip(
         "docker-lane eval-ingest-cache tests require TORTOISE_DB_URI "

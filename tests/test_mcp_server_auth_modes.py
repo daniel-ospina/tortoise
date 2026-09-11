@@ -388,9 +388,9 @@ class TestAskConnectedAssemblyExposure:
         import tortoise.embeddings as _emb
         import tortoise.sdk as sdk_mod
         from tortoise.sdk import TortoiseSDK
-        base = os.environ.get(
-            "TORTOISE_DB_URI",
-            "docker://:falkordb@localhost:6379/tortoise_test_matrix"
+        base = (
+            os.environ.get("TORTOISE_DB_URI")
+            or "docker://:falkordb@localhost:6379/tortoise_test_matrix"
         ).rstrip("/")
         uri = f"{base}_{uuid.uuid4().hex[:10]}"
         monkeypatch.setenv("TORTOISE_DB_URI", uri)
