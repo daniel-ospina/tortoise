@@ -70,13 +70,13 @@ resolve".
 
 **Idempotence check (NOT an independent re-measurement).** The
 parallelised per-question workers and the sequential runner overlapped on
-6 questions, so each was run against its graph twice. The second pass
-finished in **~4–9 s instead of ~15–20 min** because that question's graph
+6 questions, so each was run against its graph twice. On **5 of the 6**
+the short pass finished in **~4–9 s instead of ~15–20 min** because that question's graph
 namespace was **already populated** and the ingested point ids are
 deterministic (`lme:<qid>:s<n>:t<m>`) — so the re-run is an idempotent
 re-read, and its agreeing verdict is near-tautological. It shows the
-substrate is *persisted* and the measurement is *stable on a populated
-graph*; it says nothing about extraction variance.
+substrate is *persisted* and (for 5 of 6) the measurement is *stable on a
+populated graph*; it says nothing about extraction variance.
 
 Counts were identical in **5 of 6**. The exception is `08f4fc43`: 150
 Objects on an 8.9 s pass and 164 on a 4530 s pass. The committed row is
