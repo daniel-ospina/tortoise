@@ -20274,9 +20274,10 @@ async def backups_sweep(request: Request):
     # In-flight guard: a concurrent sweep returns 202 (no queueing — the next
     # hourly run retries). This is what the driver's 202 branch keys on.
     if _SWEEP_INFLIGHT.locked():
-        # #2823: the dialect rides the 202 too — the driver logs `sweep source:`
-        # for EVERY run, and a lock-held run is the one shape where it would
-        # otherwise report `unknown` (the source is already resolved above).
+        # #2823: the dialect rides the 202 too — a lock-held run is the one
+        # shape where an unresolved dialect would otherwise surface as `unknown`
+        # to every consumer of the sweep result (the source is already resolved
+        # above).
         from tortoise.hosted_backup import source_dialect
 
         return {"status": "already_running", "teams_backed_up": 0,

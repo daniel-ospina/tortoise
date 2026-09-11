@@ -641,8 +641,8 @@ def test_team_sweep_enum_failure_when_enabled(shared_proj):
         assert res["status"] == "enum_failed"
         assert "eligible-team enumeration failed" in res["error"]
         # #2823: the ELIGIBLE branch returns `source` too — a regression here
-        # would make the driver log `sweep source: unknown` for exactly the
-        # misconfigured team-sweep case the field exists to diagnose.
+        # would surface as `source: unknown` for exactly the misconfigured
+        # team-sweep case the field exists to diagnose.
         assert res["source"] == "registry"
         assert res["teams_backed_up"] == 0
 

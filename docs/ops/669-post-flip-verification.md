@@ -408,9 +408,9 @@ security = `scheme: lookup_hash_sha256` (Supabase).
 > own is NOT a healthy signal — it is exactly what the post-flip sweep printed
 > for 31 days while backing nothing up (the raw registry handle read the graph
 > the flip deleted). Verify the dialect and the watcher heartbeat, not the
-> status word: expected now is `"source": "supabase"` (or
-> `last_run_source`), `graph_totals.errors == 0`, `enum_failed` ABSENT, and a
-> `watcher.age_minutes` that is a measured number. `source: registry` /
+> status word: expected now is `last_sweep.source == "supabase"` (or
+> `last_sweep.last_run_source`), `graph_totals.errors == 0`, `enum_failed` ABSENT, and a
+> `watcher.age_minutes` that is a measured number. `last_sweep.source: registry` /
 > `enum_failed` / an unmeasurable watcher age is the failure signature, and the
 > hourly driver fails the run red for a 0-backup result it cannot corroborate.
 > See `docs/ops/registry-backup-dr.md` §Architecture.
@@ -422,9 +422,10 @@ curl -s https://api.premiselabs.co/v1/internal/backups/status \
 
 ✅ **Expect:**
 
-- `"no_teams": true` (chronic zero-team state) **and** `"source": "supabase"`
-  (a `registry` source here means the sweep read the WRONG control plane —
-  #2823 — not that the deployment is empty),
+- `"no_teams": true` (chronic zero-team state) **and** `"last_sweep": {"source": "supabase", …}`
+  — the dialect lives under `last_sweep`, never at the top level (`jq '.source'`
+  on `/status` is always `null`; a `registry` source here means the sweep read
+  the WRONG control plane — #2823 — not that the deployment is empty),
 - `"watcher": {"running": true, "age_minutes": <a measured number>}` with a
   fresh `last_poll_at` (`null`/absent age = no heartbeat read = NOT verified),
   and

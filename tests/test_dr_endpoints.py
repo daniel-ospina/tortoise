@@ -664,9 +664,10 @@ class TestSupabaseLaneSeam:
 
     def test_sweep_in_flight_202_reports_the_dialect(self, client, dr_env,
                                                      mem_storage, monkeypatch):
-        """#2823: the driver logs `sweep source:` for EVERY run — the lock-held
-        202 is the one shape where an unresolved dialect would print `unknown`.
-        Asserted on the real endpoint shape (no fabricated body)."""
+        """#2823: the dialect rides the 202 too — the lock-held shape is where an
+        unresolved dialect would surface as `unknown` to every consumer of the
+        sweep result. Asserted on the real endpoint shape (no fabricated
+        body)."""
         class _Locked:
             @staticmethod
             def locked() -> bool:
