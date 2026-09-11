@@ -847,16 +847,17 @@ def gate_output(*, issue: str, prereg: dict, qid_to_cls: dict[str, str],
                 f"gate_output: {_label} must contain classify_outcome "
                 "verdicts (missing the 'correct' key) — raw outcome rows "
                 "would render as an all-zero gate output.")
-    # A non-empty set with ZERO graded verdicts is a failed measurement, not
-    # a result: without this it renders "0 of 0" and still prints a decision
-    # branch (e.g. structural-path-evidence) — a fabricated finding.
-    _graded_n = sum(1 for v in baseline_verdicts
-                    if v.get("correct") is not None)
-    if not baseline_verdicts or _graded_n == 0:
-        raise ValueError(
-            f"gate_output: baseline has {len(baseline_verdicts)} verdict(s) "
-            f"and {_graded_n} graded — an all-ungraded baseline cannot "
-            "produce a decision branch (no measurement to report).")
+        # A non-empty set with ZERO graded verdicts is a FAILED measurement,
+        # not a result: it renders as "0 of 0" and is indistinguishable from
+        # a genuine null arm (an ungraded arm can even fabricate a branch).
+        # Applied to the baseline AND every arm — an arm that produced no
+        # gradable outcome must never be published as "no effect".
+        _graded = sum(1 for v in _vs if v.get("correct") is not None)
+        if not _vs or _graded == 0:
+            raise ValueError(
+                f"gate_output: {_label} has {len(_vs)} verdict(s) and "
+                f"{_graded} graded — an all-ungraded set cannot be "
+                "reported (no measurement to compare).")
     tables = aggregate_taxonomy(baseline_verdicts, qid_to_cls,
                                 pool_limit=pool_limit)
     comps = {arm_id: compare_arms_to_baseline(baseline_verdicts, vs)

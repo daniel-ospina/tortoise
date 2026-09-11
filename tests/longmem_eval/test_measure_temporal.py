@@ -755,3 +755,20 @@ def test_gate_output_refuses_an_all_ungraded_baseline(tmp_path):
     with pytest.raises(ValueError, match="ungraded"):
         mt.gate_output(issue="2578", prereg=prereg, qid_to_cls={},
                        baseline_verdicts=[], arm_verdicts={}, arm_stats={})
+
+
+def test_gate_output_refuses_an_all_ungraded_arm(tmp_path):
+    """The zero-graded guard must cover ARMS too, not just the baseline: an
+    entirely ungraded arm renders as a null row — indistinguishable from a
+    real 'no effect' result."""
+    prereg = mt.write_preregistration(
+        mt.load_census(CENSUS)["rows"], tmp_path / "prereg.json")
+    graded = [mt.classify_outcome(_mk_outcome("q1", True))]
+    ungraded_arm = [mt.classify_outcome({"question_id": "q1", "label": None,
+                                         "measure_facts": None})]
+    with pytest.raises(ValueError, match="ungraded"):
+        mt.gate_output(issue="2578", prereg=prereg,
+                       qid_to_cls={"q1": "interval"},
+                       baseline_verdicts=graded,
+                       arm_verdicts={"tr_top_k16": ungraded_arm},
+                       arm_stats={})
