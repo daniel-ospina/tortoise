@@ -81,7 +81,9 @@ breaks that contract — a set-but-empty variable returns "" and the default is
 never reached — so a docker probe built a scheme-less URI, reported "not
 available", the module skipped, and the #1436 skip-guard redded every tier-2
 PR (docs-only included) while the job's provisioned falkordb service was up.
-This file's third guard censuses ``tests/**/*.py`` for those reads:
+This file's third guard censuses ``tests/**/*.py`` and ``tools/**/*.py``
+for those reads (``tortoise/`` is a deliberate exclusion — production reads
+are a separate review lane; #2857 tracks the known CLI instance):
 get/getenv/setdefault, positional or keyword, literal or non-literal default.
 ``None`` and ``""`` are the only defaults that pass;
 ``tests/_live_utils.live_uri()`` is the sanctioned read (``or``-based,
@@ -1254,9 +1256,10 @@ def _nonempty_default_uri_reads(
 
     out: list[str] = []
     for rel, src in files:
-        # Cheap prefilter: ast.parse over the whole tests/ tree costs ~40s on
-        # every core-lane PR, and only a few percent of files mention the
-        # variable at all. "TORTOISE_DB" (not the full name) so an implicit
+        # Cheap prefilter: ast.parse over the whole tests/ + tools/ tree costs
+        # tens of seconds on every core-lane PR, and only a few percent of
+        # files mention the variable at all. "TORTOISE_DB" (not the full name)
+        # so an implicit
         # string concatenation — os.environ.get("TORTOISE_DB_" "URI", …) —
         # still reaches the parser.
         if "TORTOISE_DB" not in src:
@@ -1321,7 +1324,7 @@ def test_no_nonempty_default_tortoise_db_uri_reads():
         "fixed by #2840 would be unpinned (see _URI_CENSUS_ROOTS)")
     offenders = _nonempty_default_uri_reads()
     assert not offenders, (
-        'these test files read TORTOISE_DB_URI with a non-empty default '
+        'these files read TORTOISE_DB_URI with a non-empty default '
         '(possibly a non-literal one) — empty-means-unset is the lane '
         'contract (#1647/#2815); use tests._live_utils.live_uri() (its '
         'default= argument carries a different lane default):\n  '
