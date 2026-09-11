@@ -357,6 +357,13 @@ def test_first_timer_wizard_human_steps(page: Page) -> None:
     # setup instructions" gap) — only the paste escape.
     assert page.locator(".harness-family").count() == 0, \
         "members must not see harness choices (owner/admin-only surface)"
+    # #2912 (test-review P2): the member LEDE, measured rather than inferred.
+    # "Pick which harness to connect." would be a lie here (no chooser renders),
+    # and the string the issue reported as vague must not come back.
+    expect(page.locator(".welcome-lede")).to_have_text(
+        "Paste an API key to connect your agent.", timeout=10_000)
+    assert "Pick which harness to connect" not in page.locator(".welcome-lede").inner_text()
+    assert "Connect Tortoise to your Organization" not in page.locator(".welcome-head").inner_text()
     # The mint CTA is owner/admin render-gated (POST /v1/team/keys is
     # _require_owner_admin server-side) — a member must never see a 403 button.
     assert page.get_by_role("button", name="Create an API key").count() == 0, \
@@ -373,7 +380,12 @@ def test_first_timer_wizard_human_steps(page: Page) -> None:
     page.get_by_role("button", name="Skip for now").click()
     # STEP 3: done — agent takes over; NO onboarding_complete PATCH (the
     # node's gate owns completion; accept-and-drop).
-    expect(page.locator("body")).to_contain_text("You're all set", timeout=10_000)
+    # #2912 (PR-gate UX): skipping = the PAUSED state, so the <h1> names that
+    # state. It used to read "You're all set" — the opposite — directly above
+    # the "isn't connected yet" body.
+    expect(page.locator(".welcome-title")).to_have_text(
+        "Setup paused — your agent is not connected yet", timeout=10_000)
+    expect(page.locator("body")).to_contain_text("your agent isn't connected yet", timeout=10_000)
     # the done step's exit (wizardComplete) — scoped: the header carries a
     # same-named 'Open my dashboard →' escape.
     page.locator(".wizard-actions").get_by_role("button", name="Open my dashboard →").click()
@@ -413,10 +425,12 @@ def test_owner_connect_step_mints_never_expiring_key_in_flow(page: Page) -> None
         f"the Claude family must offer its three surfaces: {surface_names}"
 
     # #2912: KEY FIRST — the key block is step 1 and the procedure is step 2,
-    # so the setup prompt is never offered before a key exists.
-    expect(page.locator(".wizard-block-title")).to_have_count(2)
+    # so the setup prompt is never offered before a key exists. With no key the
+    # procedure block is NOT rendered at all (a "2 Copy the setup prompt"
+    # heading promised a prompt that did not exist — the reported defect 2).
+    expect(page.locator(".wizard-block-title")).to_have_count(1)
     assert page.locator(".wizard-block-title").all_inner_texts()[0].endswith("Get your API key")
-    assert page.locator(".wizard-block-title").all_inner_texts()[1].endswith("Copy the setup prompt")
+    assert "Copy the setup prompt" not in page.locator(".wizard-block-title").all_inner_texts()[0]
     assert page.locator(".wizard-prompt-card").count() == 0, \
         "no prompt card may render before a key exists"
 
@@ -478,7 +492,9 @@ def test_owner_wizard_complete_exit_after_mint_is_modal_free(page: Page) -> None
     _walk_to_connect(page)
     _mint_from_connect(page)
     page.get_by_role("button", name="Skip for now").click()
-    expect(page.locator("body")).to_contain_text("You're all set", timeout=10_000)
+    # #2912 (PR-gate UX): skipped → paused, and the heading says so.
+    expect(page.locator(".welcome-title")).to_have_text(
+        "Setup paused — your agent is not connected yet", timeout=10_000)
     page.locator(".wizard-actions").get_by_role("button", name="Open my dashboard →").click(timeout=15_000)
     _expect_left_wizard(page)
     assert page.locator("[role=dialog]").count() == 0, \

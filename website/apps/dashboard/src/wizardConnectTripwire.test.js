@@ -104,17 +104,35 @@ test('#2710/#2912: the no-key affordance is the KEY block branch — never a pla
     'step 1 is the key block (key-first order)')
   assert.match(owner, /\{keyDisplayRow\}/,
     'the derived key row must actually RENDER (a dropped render used to stay green)')
+  // #2710: the key-first ORDER, actually pinned. The old assertion only proved
+  // the step-1 title existed — swapping the two blocks (the headline #2912
+  // behaviour reverted) left the suite green (test-review mutation, 2026-09-10).
+  const keyBlock = owner.indexOf('<WizardBlock step={1} title="Get your API key">')
+  const procBlock = owner.indexOf('<WizardBlock step={2} title={procedureTitle}>')
+  assert.ok(keyBlock > -1 && procBlock > -1, 'both numbered blocks exist')
+  assert.ok(keyBlock < procBlock,
+    'the key block (step 1) must render BEFORE the procedure block (step 2)')
+  // PR-gate (test-review P1): the CONDITION, not just the branch text —
+  // `{true ? (` made the mint CTA unreachable and the suite stayed green.
+  assert.match(owner, /<WizardBlock step=\{1\} title="Get your API key">\s*\{harnessKey \? \(/,
+    'the key block condition is harnessKey (else the no-key branch is dead code)')
   assert.match(owner, /\)\s*:\s*\(\s*wizardNoKeyAffordance\s*\)/,
     'the key block renders the no-key affordance as its NO-KEY branch')
   assert.doesNotMatch(owner, /YOUR_API_KEY/, 'no placeholder key may remain')
   assert.doesNotMatch(owner, /wizardKeyCodeStyle\}>\{harnessKey \|\| '…'\}/,
     'no fake key row may render before a key exists')
-  // #2912: the procedure is gated on the key too, and the no-key state says so
-  // explicitly instead of printing a copy control for an absent payload.
-  assert.match(owner, /<WizardBlock step=\{2\} title=\{harnessKey \? procedureTitle : 'Copy the setup prompt'\}>/,
-    'step 2 is the procedure block (key-gated title)')
-  assert.match(owner, /Your setup prompt appears here once you have an API key\./,
-    'the no-key state explains the order instead of offering an empty copy')
+  // PR-gate UX (P2): with no key there is NO procedure block at all. A numbered
+  // "2 Copy the setup prompt" heading promised a prompt that does not exist —
+  // the residue of reported defect 2.
+  assert.match(owner, /\{harnessKey && \(\s*<WizardBlock step=\{2\} title=\{procedureTitle\}>/,
+    'the procedure block renders only once a key exists')
+  assert.doesNotMatch(owner, /'Copy the setup prompt'/,
+    'no heading may promise a setup prompt that has not been minted yet')
+  // and the step-2 BODY must be gated on the same key as its title (the old
+  // assertion pinned only the title ternary; swapping the body for
+  // `{procedure ? …}` handed a keyless user a prompt card with an empty key)
+  assert.match(owner, /<WizardBlock step=\{2\} title=\{procedureTitle\}>\s*\{procedure\}/,
+    'the step-2 body is the procedure, rendered only inside the harnessKey gate')
 })
 
 test('#2710: a non-402 mint failure is VISIBLE next to the mint CTA', () => {
@@ -239,8 +257,14 @@ test('#2755: WizardPromptCard is a plain region with exactly one copy button', (
     'the container must not carry the copy handler (drag-select used to fire it)')
   assert.doesNotMatch(card, /onKeyDown=/,
     'no container key handler — the explicit button owns keyboard copy')
-  assert.match(card, /<pre className="wizard-prompt-text" tabIndex=\{0\} role="region" aria-label="Setup prompt">/,
+  assert.match(card, /<pre className="wizard-prompt-text" tabIndex=\{0\} role="region" aria-label=\{regionLabel\}>/,
     'the scrollable prompt text is a keyboard-reachable region')
+  // PR-gate a11y: the region name must be UNIQUE per card — the 2-card
+  // surfaces (Pi, Cursor) rendered two landmarks both named "Setup prompt",
+  // which axe flags as `landmark-unique` and which makes the pair
+  // indistinguishable when navigating by landmark.
+  assert.match(card, /const regionLabel = label \? label\.replace\(\/\^Copy\\s\+\/i, ''\) : 'Setup prompt'/,
+    'the region name is derived per card (never a hard-coded shared name)')
   assert.equal((card.match(/<button/g) || []).length, 1,
     'exactly ONE explicit copy control (the primary bottom button)')
   assert.match(card, /className="wizard-prompt-card"/,
@@ -264,8 +288,21 @@ test('#2912: the connect step renders a family→surface chooser wired to the le
   assert.match(connect, /onClick=\{\(\) => \{ setWizardHarness\(s\.id\)/, 'a surface click sets the leaf')
   assert.match(connect, /const activeFamily = harnessFamilyOf\(wizardHarness\) \|\| HARNESS_FAMILIES\[0\]/,
     'the selected family is derived from the leaf')
-  assert.match(mainJsx, /<h2 className="wizard-block-title">/,
-    'block titles are h2 (h1 → h2 heading order, no skipped level)')
+  // test-review P2: the surface row's premise is the DERIVATION — asserting only
+  // `surfaces.length > 0` passed even when `surfaces` fell back to the Claude
+  // list for Cursor/Pi (highlighting Cursor while setting a Claude leaf).
+  assert.match(connect, /const surfaces = activeFamily\.surfaces\n/,
+    'surfaces come from the active family (no fallback list)')
+  // test-review P2: scope the heading assertion to the WizardBlock DEFINITION —
+  // matching the whole file was satisfied by the definition itself even if
+  // nothing rendered.
+  assert.match(mainJsx, /function WizardBlock\(\{ step, title, children \}\)[\s\S]{0,220}?<h2 className="wizard-block-title">/,
+    'WizardBlock renders its title as <h2> (h1 → h2 order, no skipped level)')
+  // PR-gate UX: the Codex Desktop leaf is a SINGLE numbered block — its key
+  // lives inside the config block, so an empty "1 Get your API key" promised an
+  // action that does not exist on that surface.
+  assert.match(connect, /\{wizardConnectHarness === 'codexDesktop' \? \(\s*<WizardBlock step=\{1\} title=\{harnessKey \? procedureTitle : 'Get your API key'\}>/,
+    'the key-embedding Desktop surface renders ONE block, not an empty step 1')
   assert.match(owner, /const agentDriven1Step = \['claude', 'codex', 'codexDesktop'\]/,
     "'codexDesktop' must reach the 1-step procedure branch (its own leaf id)")
   // the derivation is now an identity — the old parallel boolean is gone
@@ -286,15 +323,31 @@ test('#2912: the connect step renders a family→surface chooser wired to the le
 // step too (role-agnostic Setup button / re-entry card / Settings), and their
 // body reads "Only owners and admins can create API keys." The lede must never
 // promise them a key — so the role/cap check has to run BEFORE the build fork.
-test('#2912: the step-2 lede never offers a key to someone who cannot mint one', () => {
+test('#2912: the step-2 lede asks what each branch actually does', () => {
   const src = stripComments(mainJsx)
   const i = src.indexOf('if (wizardStep === 2) {')
   assert.ok(i > -1, 'the step-2 lede fork exists')
   const lede = src.slice(i, i + 900)
-  const neutral = lede.indexOf('Connect Tortoise to your Organization.')
+  const member = lede.indexOf('Paste an API key to connect your agent.')
   const build = lede.indexOf('Create an API key and call the Tortoise SDK from your app.')
-  assert.ok(neutral > -1, 'the member/capped branch exists')
+  assert.ok(member > -1, 'the member/capped branch exists and says what the step asks')
   assert.ok(build > -1, 'the owner + build-fork branch exists')
-  assert.ok(neutral < build,
+  assert.ok(member < build,
     'the role/cap check must precede the build-fork check — a build-fork member cannot mint a key')
+  assert.doesNotMatch(lede, /Connect Tortoise to your Organization\./,
+    'the string #2912 reported as vague must not come back')
+})
+
+// #2912 (test-review P2): the eyebrow is the ONLY place the org name appears in
+// the header now, so its gate must be pinned. Rendering it unconditionally
+// would print an org name for a teamless first-timer (and the "X is set up"
+// claim the redesign removed). The e2e that asserts the eyebrow runs on the
+// post-provision path, where the gate is true either way.
+test('#2912: the org eyebrow renders only when an org exists AND its name is known', () => {
+  const head = slice('<div className="welcome-head">', '<span className="sr-only" role="status"',
+                     'welcome head')
+  assert.match(head, /\{welcomeHasOrg && shownOrgName && \(\s*<p className="welcome-eyebrow">\{shownOrgName\}<\/p>/,
+    'the eyebrow is gated on welcomeHasOrg && shownOrgName')
+  assert.match(head, /<h1 className="welcome-title">/,
+    'the stage label is the h1 (the eyebrow is not the headline)')
 })

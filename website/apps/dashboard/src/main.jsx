@@ -16,7 +16,7 @@ import { setupGuide } from './setupGuide.js'
 import { overviewConnection, overviewDigest, overviewNextAction } from './overview.js'
 // #1997 (W1): the 4 human onboarding steps — pure structure + copy + fork
 // options + org-name validation, node --test unit-tested (wizardFlow.test.js).
-import { WIZARD_STEPS, WIZARD_FORK_OPTIONS, resolveBuildCatalog, orgNameError, durableKeyName } from './wizardFlow.js'
+import { WIZARD_STEPS, WIZARD_FORK_OPTIONS, resolveBuildCatalog, orgNameError, durableKeyName, wizardStageLabel } from './wizardFlow.js'
 // #1894: indexed-state + job-progress derivations — pure, node --test
 // unit-tested (memorySourcesStatus.test.js).
 import { docsIndexedLabel, formatRelativeTime, jobStatusLine } from './memorySourcesStatus.js'
@@ -860,6 +860,13 @@ const SKEL_LABEL = { width: '45%', height: '1.2em' }
 // require the container to stay a control, which is the violation itself.
 function WizardPromptCard({ text, label }) {
   const [copied, setCopied] = React.useState(false)
+  // #2912 (PR-gate a11y): the scroll region must have a UNIQUE accessible name
+  // per card — the 2-card surfaces (Pi, Cursor) render two `role="region"`
+  // landmarks, and a shared "Setup prompt" name made them
+  // indistinguishable to a screen-reader user navigating by landmark
+  // (axe `landmark-unique`). Derive it from the button's own label, which is
+  // already per-card ("Copy step 1 prompt" → "step 1 prompt").
+  const regionLabel = label ? label.replace(/^Copy\s+/i, '') : 'Setup prompt'
   const doCopy = React.useCallback(() => {
     navigator.clipboard.writeText(text)
     setCopied(true)
@@ -871,7 +878,7 @@ function WizardPromptCard({ text, label }) {
           scroll REGION — it must be reachable by keyboard (WCAG 2.1.1 /
           axe `scrollable-region-focusable`). The copy control stays OUTSIDE
           the scroll container so it never scrolls away. */}
-      <pre className="wizard-prompt-text" tabIndex={0} role="region" aria-label="Setup prompt">{text}</pre>
+      <pre className="wizard-prompt-text" tabIndex={0} role="region" aria-label={regionLabel}>{text}</pre>
       {/* #2827 (round-2 P2): the button's own label flips to 'Copied ✓' for
           1.6s — a sighted-only signal. This live region announces the copy
           outcome to screen readers. */}
@@ -1332,9 +1339,7 @@ function claimIntentInFlight() {
   React.useEffect(() => {
     if (!(welcomeMode && authed)) return
     if (LEGACY_WIZARD_ARCHIVED) return  // A0 rollback owns its own steps (#2361 r3 P3-7)
-    const label = (wizardStep === 3 && effectivelyPaused)
-      ? 'Setup paused — your agent is not connected yet'
-      : (wizardStep === 0 && welcomeHasOrg ? 'Your Organization' : WIZARD_STEPS[wizardStep].label)
+    const label = wizardStageLabel(wizardStep, { hasOrg: welcomeHasOrg, paused: effectivelyPaused })
     setWizardStepAnnounce(`Step ${wizardStep + 1} of 4: ${label}`)
     if (!wizardFocusInit.current) { wizardFocusInit.current = true; return }
     // #2361 review-r4 (P3): focus ONLY on step changes — toggling the paste
@@ -5882,30 +5887,34 @@ function claimIntentInFlight() {
                     <p className="welcome-eyebrow">{shownOrgName}</p>
                   )}
                   <h1 className="welcome-title">
-                    {wizardStep === 0 && welcomeHasOrg ? 'Your Organization' : WIZARD_STEPS[wizardStep].label}
+                    {wizardStageLabel(wizardStep, { hasOrg: welcomeHasOrg, paused: effectivelyPaused })}
                   </h1>
                   {(() => {
                     // Step 0 on an org-holding account is a read-only summary
                     // whose body already says "You're set up in <org>…" — a
-                    // second line here would repeat it.
+                    // second line here would repeat it. Same for the paused
+                    // reconnect: its <h1> already names the state, and the step-3
+                    // body carries the recovery (PR-gate UX: the old paused lede
+                    // restated both).
                     if (wizardStep === 0 && welcomeHasOrg) return null
+                    if (wizardStep === 3 && effectivelyPaused) return null
                     // #2912 (review cycle 2): WIZARD_STEPS[2].sub is the harness
                     // pick's copy, but step 2 has THREE bodies — only the
-                    // owner/self branch is a harness pick. The build fork shows
-                    // key + SDK and members/capped see only the paste escape, so
-                    // the neutral line stays for those.
+                    // owner/self branch is a harness pick.
                     if (wizardStep === 2) {
                       // #2912 (review cycle 4 P1): the role/cap check runs FIRST.
                       // A member of a build-fork org gets the SDK-lede body
                       // ("Only owners and admins can create API keys"), so
                       // promising them a key here reproduced the exact defect
                       // class #2912 was filed for.
-                      if (!isOwnerAdmin || capNotice) return <p className="welcome-lede">Connect Tortoise to your Organization.</p>
+                      // PR-gate UX (P1): this branch's own body says "Paste an
+                      // API key below" — so the lede says what the step ASKS.
+                      // (The rejected "Connect Tortoise to your Organization."
+                      // is the string that said nothing about the step.)
+                      if (!isOwnerAdmin || capNotice) return <p className="welcome-lede">Paste an API key to connect your agent.</p>
                       if (isBuildFork) return <p className="welcome-lede">Create an API key and call the Tortoise SDK from your app.</p>
                     }
-                    const sub = (wizardStep === 3 && effectivelyPaused)
-                      ? "You're set up, but your agent isn't connected yet. Reconnect any time from Settings → Setup guide."
-                      : WIZARD_STEPS[wizardStep].sub
+                    const sub = WIZARD_STEPS[wizardStep].sub
                     return <p className="welcome-lede">{sub}</p>
                   })()}
                 </div>
@@ -6052,45 +6061,63 @@ function claimIntentInFlight() {
 
 {wizardStep === 2 && (isBuildFork ? (
                     <div className="connect-build">
-                      {!harnessKey ? (
-                        <>
-                          {isOwnerAdmin ? (
-                            <button type="button" className="btn-primary" onClick={wizardMintDurableKey} disabled={wizardDurableBusy}
-                              style={{ marginBottom: '0.75rem' }}>
-                              {wizardDurableBusy ? 'Creating…' : `Create an API key for ${shownOrgName || 'your organization'}`}
-                            </button>
-                          ) : (
-                            <p className="dim" style={{ marginBottom: '0.75rem' }}>
-                              Only owners and admins can create API keys. Ask an owner or admin to create one.
+                      {/* #2912 (PR-gate UX): the build fork used to keep the old
+                          ad-hoc layout (0.4rem captions, inline margins) while
+                          its sibling owner path got h1 → numbered h2 blocks, so
+                          the same step looked like two different products. Same
+                          block structure here: 1 = key, 2 = the SDK call. */}
+                      <WizardBlock step={1} title={harnessKey ? 'Your API key' : 'Get your API key'}>
+                        {harnessKey ? (
+                          <>
+                            <p className="dim small" style={{ marginBottom: '0.4rem' }}>
+                              Your API key is shown once — copy it now.
                             </p>
-                          )}
-                          <button type="button" className="ghost small" onClick={() => { window.history.replaceState({}, '', '#/keys'); setWelcomeMode(false); setTab('keys'); finishWelcomeLoads('keys') }}>
-                            Manage API keys →
-                          </button>
-                        </>
-                      ) : (
-                        <>
-                          <p className="dim small" style={{ marginBottom: '0.4rem' }}>
-                            Your API key is shown once — copy it now.
-                          </p>
-                          <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', marginBottom: '1.25rem' }}>
-                            <code style={{ flex: 1, padding: '0.6rem 0.8rem', background: 'var(--surface,#0d1a2d)', border: '1px solid var(--border,#1e293b)', borderRadius: 8, fontSize: 13, wordBreak: 'break-all' }}>
-                              {harnessKey}
-                            </code>
-                            <button type="button" className="btn-primary" onClick={() => navigator.clipboard?.writeText(harnessKey)}>
-                              Copy
-                            </button>
-                          </div>
+                            <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+                              <code style={{ flex: 1, padding: '0.6rem 0.8rem', background: 'var(--surface,#0d1a2d)', border: '1px solid var(--border,#1e293b)', borderRadius: 8, fontSize: 13, wordBreak: 'break-all' }}>
+                                {harnessKey}
+                              </code>
+                              <button type="button" className="btn-primary" onClick={() => navigator.clipboard?.writeText(harnessKey)}>
+                                Copy
+                              </button>
+                            </div>
+                          </>
+                        ) : (
+                          <>
+                            {isOwnerAdmin ? (
+                              <>
+                                <p className="dim small" style={{ margin: '0 0 0.6rem' }}>
+                                  Create an API key to call the SDK from your application.
+                                </p>
+                                <button type="button" className="btn-primary" onClick={wizardMintDurableKey} disabled={wizardDurableBusy}>
+                                  {wizardDurableBusy ? 'Creating…' : `Create an API key for ${shownOrgName || 'your organization'}`}
+                                </button>
+                              </>
+                            ) : (
+                              <p className="dim" style={{ margin: 0 }}>
+                                Only owners and admins can create API keys. Ask an owner or admin to create one.
+                              </p>
+                            )}
+                            <div style={{ marginTop: '0.6rem' }}>
+                              <button type="button" className="ghost small" onClick={() => { window.history.replaceState({}, '', '#/keys'); setWelcomeMode(false); setTab('keys'); finishWelcomeLoads('keys') }}>
+                                Manage API keys →
+                              </button>
+                            </div>
+                          </>
+                        )}
+                      </WizardBlock>
+
+                      {harnessKey && (
+                        <WizardBlock step={2} title="Call the SDK">
                           <p className="dim" style={{ marginBottom: '0.75rem', lineHeight: 1.6 }}>
                             Run this to verify your API key and file your first point — it creates your graph and connects your project.
                           </p>
-                          <pre className="snippet" style={{ marginBottom: '0.75rem' }}>
+                          <pre className="snippet" style={{ margin: 0 }}>
 {`curl https://api.premiselabs.co/v1/points \\
   -H "Authorization: Bearer ${harnessKey}" \\
   -H "Content-Type: application/json" \\
   -d '{\"content\":\"my first application is set up\"}'`}
                           </pre>
-                          <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center' }}>
+                          <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center', marginTop: '0.9rem' }}>
                             <button type="button" className="btn-primary" onClick={wizardHarnessContinue} disabled={wizardConnectBusy}>
                               {wizardConnectBusy ? 'Saving…' : "I've set it up — Continue →"}
                             </button>
@@ -6098,12 +6125,13 @@ function claimIntentInFlight() {
                               SDK documentation →
                             </a>
                           </div>
-                        </>
+                        </WizardBlock>
                       )}
+
                       {wizardDurableError && (
                         <p className="error" role="alert" style={{ margin: '0.6rem 0 0', fontSize: 13 }}>{wizardDurableError}</p>
                       )}
-                      <div className="wizard-nav" style={{ marginTop: '0.75rem' }}>
+                      <div className="wizard-nav">
                         <button type="button" className="ghost" onClick={() => setWizardStep(1)}>← Back</button>
                         <div className="wizard-nav-actions">
                           <button type="button" className="ghost" onClick={() => { setWizardPaused(true); setWizardStep(3) }}>Skip for now</button>
@@ -6201,7 +6229,7 @@ function claimIntentInFlight() {
                       }
 
                       return (
-                        <div className="harness">
+                        <div className="harness-connect">
                           <div className="harness-chooser">
                             <p className="wizard-field-label">Your harness</p>
                             <div className="harness-families" role="group" aria-label="Harness">
@@ -6235,43 +6263,54 @@ function claimIntentInFlight() {
                               copy something that did not exist and putting the
                               key instructions after the promise. The block
                               order now matches the real dependency:
-                              key → procedure. */}
-                          <WizardBlock step={1} title="Get your API key">
-                            {harnessKey ? (
-                              <>
-                                <p className="wizard-caption">
-                                  {wizardConnectHarness === 'codexDesktop'
-                                    ? <>Your API key is inside the config block below — it&apos;s shown once, so keep it private.</>
-                                    : <>This key connects {displayName} to {shownOrgName || 'your Organization'}. It&apos;s shown once — keep it private.</>}
-                                </p>
-                                {keyModeToggleable && (
-                                  <div className="key-pills">
-                                    <button type="button" className={wizardKeyMode === 'included' ? 'active' : ''}
-                                      aria-pressed={wizardKeyMode === 'included'}
-                                      onClick={() => setWizardKeyMode('included')}>
-                                      <strong>Key included in prompt</strong>
-                                      <span>Simple — easiest</span>
-                                    </button>
-                                    <button type="button" className={wizardKeyMode === 'separate' ? 'active' : ''}
-                                      aria-pressed={wizardKeyMode === 'separate'}
-                                      onClick={() => setWizardKeyMode('separate')}>
-                                      <strong>Key separate from prompt</strong>
-                                      <span>Manual — more secure</span>
-                                    </button>
-                                  </div>
+                              key → procedure.
+                              PR-gate UX: the Codex Desktop surface is a SINGLE
+                              step (its key lives inside the config block), and
+                              an empty "1 Get your API key" would promise an
+                              action that does not exist there; with no key there
+                              is no procedure block to show either. */}
+                          {wizardConnectHarness === 'codexDesktop' ? (
+                            <WizardBlock step={1} title={harnessKey ? procedureTitle : 'Get your API key'}>
+                              {harnessKey ? procedure : wizardNoKeyAffordance}
+                            </WizardBlock>
+                          ) : (
+                            <>
+                              <WizardBlock step={1} title="Get your API key">
+                                {harnessKey ? (
+                                  <>
+                                    <p className="wizard-caption">
+                                      This key connects {displayName} to {shownOrgName || 'your Organization'}. It&apos;s shown once — keep it private.
+                                    </p>
+                                    {keyModeToggleable && (
+                                      <div className="key-pills">
+                                        <button type="button" className={wizardKeyMode === 'included' ? 'active' : ''}
+                                          aria-pressed={wizardKeyMode === 'included'}
+                                          onClick={() => setWizardKeyMode('included')}>
+                                          <strong>Key included in prompt</strong>
+                                          <span>Simple — easiest</span>
+                                        </button>
+                                        <button type="button" className={wizardKeyMode === 'separate' ? 'active' : ''}
+                                          aria-pressed={wizardKeyMode === 'separate'}
+                                          onClick={() => setWizardKeyMode('separate')}>
+                                          <strong>Key separate from prompt</strong>
+                                          <span>Manual — more secure</span>
+                                        </button>
+                                      </div>
+                                    )}
+                                    {keyDisplayRow}
+                                  </>
+                                ) : (
+                                  wizardNoKeyAffordance
                                 )}
-                                {keyDisplayRow}
-                              </>
-                            ) : (
-                              wizardNoKeyAffordance
-                            )}
-                          </WizardBlock>
+                              </WizardBlock>
 
-                          <WizardBlock step={2} title={harnessKey ? procedureTitle : 'Copy the setup prompt'}>
-                            {harnessKey ? procedure : (
-                              <p className="wizard-caption">Your setup prompt appears here once you have an API key.</p>
-                            )}
-                          </WizardBlock>
+                              {harnessKey && (
+                                <WizardBlock step={2} title={procedureTitle}>
+                                  {procedure}
+                                </WizardBlock>
+                              )}
+                            </>
+                          )}
 
                           <div className="wizard-nav">
                             <button type="button" className="ghost" onClick={() => setWizardStep(1)}>← Back</button>

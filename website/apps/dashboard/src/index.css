@@ -621,7 +621,16 @@ button:focus-visible, select:focus-visible, a:focus-visible, input:focus-visible
      → caption (wizard-caption) → payload (wizard-prompt-card).
    Before this the tab row, pills, captions, cards and nav all sat on ad-hoc
    inline margins, so nothing communicated order or hierarchy. */
-.harness { display: flex; flex-direction: column; gap: 1.6rem; }
+/* #2912: the live owner/self connect body stacks numbered blocks with a fixed
+   rhythm. This is a NEW class on purpose — `className="harness"` is shared with
+   the member/capped branch and with the ARCHIVED A0-rollback render, which must
+   still reproduce its pre-#2912 layout byte-for-byte (the rollback flips
+   LEGACY_WIZARD_ARCHIVED and rebuilds from this CSS). */
+.harness-connect { display: flex; flex-direction: column; gap: 1.6rem; }
+/* the gap owns the spacing above the nav — `.wizard-nav`'s own margin-top would
+   add to it (PR-gate UX: one step, three different rhythms between branches) */
+.harness-connect > .wizard-nav, .connect-build > .wizard-nav { margin-top: 0; }
+.connect-build { display: flex; flex-direction: column; gap: 1.6rem; }
 .harness-chooser { display: flex; flex-direction: column; gap: 0.55rem; }
 .wizard-field-label {
   margin: 0;

@@ -35,19 +35,14 @@ test('legacy wizard labels still exist in source (archived-not-deleted)', () => 
 test('live wizard renders WIZARD_STEPS (the 5 human steps), not legacy labels', () => {
   assert.ok(src.includes('WIZARD_STEPS.map'), 'live wizard maps WIZARD_STEPS')
   // #2912: the stage label moved from an in-card `.wizard-title` to the page
-  // <h1> (the header now names the STAGE, not the org's set-up status), so the
-  // live title assertion follows it there. Step 0 on an org-holding account is
-  // the one exception ('Your Organization' — its body is a read-only summary).
-  assert.ok(/<h1 className="welcome-title">[\s\S]{0,140}?WIZARD_STEPS\[wizardStep\]\.label[\s\S]{0,40}?<\/h1>/.test(src),
-    'live wizard h1 is WIZARD_STEPS[wizardStep].label')
-  // #2912 (review cycle 3): the exception must be pinned INSIDE the <h1>, not
-  // anywhere in the file — the same expression also appears in the sr-only step
-  // announcement (main.jsx), so an unanchored match stayed green even when the
-  // heading lost the exception.
+  // <h1> (the header now names the STAGE, not the org's set-up status). The
+  // label is now the exported pure helper `wizardStageLabel` (unit-tested in
+  // wizardFlow.test.js — a source grep cannot prove the override ORDER), so all
+  // this tripwire has to pin is that the <h1> uses it.
   const h1Open = src.indexOf('<h1 className="welcome-title">')
   const h1 = src.slice(h1Open, src.indexOf('</h1>', h1Open))
-  assert.ok(h1.includes("wizardStep === 0 && welcomeHasOrg ? 'Your Organization'"),
-    'the org-holding step-0 heading is the read-only summary label')
+  assert.ok(h1.includes('wizardStageLabel(wizardStep, { hasOrg: welcomeHasOrg, paused: effectivelyPaused })'),
+    'the live wizard <h1> names the stage through wizardStageLabel (the org-holding and paused overrides are pinned by the unit tests)')
   // the archived block's title still reads wizardSteps (kept for rollback)
   assert.ok(/wizard-title">\{wizardSteps\[wizardStep\]\}/.test(src),
     'archived legacy title retained (wizardSteps)')

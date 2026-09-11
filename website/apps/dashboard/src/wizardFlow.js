@@ -41,9 +41,28 @@ export const WIZARD_STEPS = Object.freeze([
   {
     id: 'done',
     label: "You're all set",
-    sub: 'Your agent takes over from here. Open Settings → Setup guide to follow what happens next.',
+    // #2912 (PR-gate UX): the step-3 body already ends with "Open Settings →
+    // Setup guide to follow what happens next" — the header sub used to repeat
+    // that sentence verbatim inside one viewport.
+    sub: 'Your agent takes over from here.',
   },
 ])
+
+// #2912 (PR-gate UX P1): the wizard header and the sr-only step announcement
+// must name the stage the SAME way. Two contexts override the step's own
+// label:
+//   - step 0 on an org-holding account is a read-only summary ("Your
+//     Organization"), not an invitation to create one;
+//   - the paused reconnect's whole point is that the agent is NOT connected,
+//     so rendering "You're all set" as the page <h1> directly above the lede
+//     "You're set up, but your agent isn't connected yet" contradicted itself.
+// Pure + exported so it is unit-tested (wizardFlow.test.js) instead of pinned
+// by a source-text grep.
+export function wizardStageLabel(step, { hasOrg = false, paused = false } = {}) {
+  if (step === 3 && paused) return 'Setup paused — your agent is not connected yet'
+  if (step === 0 && hasOrg) return 'Your Organization'
+  return WIZARD_STEPS[step]?.label ?? ''
+}
 
 // The fork card (epic plan P4 / I-4): presentation fork, once per org,
 // nudge-not-force — NEVER a billing gate. Fork SEMANTICS are W2-owned;
