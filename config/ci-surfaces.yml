@@ -606,6 +606,7 @@ surfaces:
   - test_sdk_dedup.py
   - test_search_engine_recency.py
   - test_temporal_constraint.py
+  - test_terminal_dedup_nullhash.py  # #2971: _find_terminal_dedup_hit A10 hash-less fallback (rebuild-durable terminal guard)
   - test_sdk_ep.py
   - test_sdk_group3.py
   - test_sdk_legacy_coverage.py

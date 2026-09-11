@@ -6806,15 +6806,43 @@ class TortoiseSDK:
     def _find_terminal_dedup_hit(self, content: str, kind: str) -> str | None:
         """Read-only NFC-keyed dedup MATCH (mirrors create_point's dedup key)
         restricted to TERMINAL hits — the Phase-1 mechanism behind the
-        bundle-local-refs-resolving-to-terminal-points guard (cycle-17/18)."""
+        bundle-local-refs-resolving-to-terminal-points guard (cycle-17/18).
+
+        #2971: the content-hash MATCH alone is not enough. After a
+        ``rebuild_all`` the journal replay leaves every Point with
+        ``content_hash = NULL`` (``_upsert_point_props``'s fixed SET list
+        omits it and ``_emit_event`` strips it), so the hash MATCH misses for
+        EVERY point and this guard silently stops matching — an ingest bundle
+        could then wire a direct edge to a superseded/retracted Point. On a
+        miss, fall back to the SAME hash-less ``content+kind`` scan
+        ``create_point`` / ``_content_exists`` use (the A10 fallback, #2892),
+        keeping the identical terminal-status + ``coalesce(outdated,false)``
+        scoping so the fallback resolves exactly the points the hash path
+        would have resolved were the hash present. Order pin: hash query
+        first, fallback only on the miss — the hash-present path is
+        unchanged."""
         proj = self._get_proj()
+        terminal = sorted(self._INGEST_TERMINAL_STATUSES)
         rows = proj.g.query(
             "MATCH (n:Point {content_hash:$ch}) WHERE n.is_operator = false "
             "AND n.pointKind = $kind AND n.status IN $terminal "
             "AND coalesce(n.outdated, false) = false RETURN n.id LIMIT 1",
             params={"ch": _content_hash(content), "kind": kind,
-                    "terminal": sorted(self._INGEST_TERMINAL_STATUSES)},
+                    "terminal": terminal},
         ).result_set
+        if not rows:
+            # #2971 A10 CONTENT+KIND FALLBACK SCAN: a JSONL rebuild (or a
+            # create_point crash between the node CREATE and the props SET)
+            # leaves the terminal point hash-less — without this scan the
+            # cycle-17/18 guard cannot see it.
+            rows = proj.g.query(
+                "MATCH (n:Point) WHERE n.is_operator = false "
+                "AND n.pointKind = $kind AND n.content_hash IS NULL "
+                "AND n.content = $content AND n.status IN $terminal "
+                "AND coalesce(n.outdated, false) = false RETURN n.id LIMIT 1",
+                params={"kind": kind, "content": content,
+                        "terminal": terminal},
+            ).result_set
         return rows[0][0] if rows else None
 
     def _check_endpoints(self, bundle: dict, violations: list[dict]) -> None:
