@@ -278,9 +278,12 @@ DECIDE_PART_KINDS = frozenset({"decision", "option", "criterion", "evidence"})
 DECIDE_DEFAULT_CREDIBILITY = "medium"  # → Beta(3,1) via source_credibility
 
 
-def _baseline_create_fields() -> str:
-    """Extra CREATE-map fields for the #2199 baseline (see create_point)."""
-    return ", ep_alpha:$ba, ep_beta:$bb, baseline_set:true, baseline_source:$bsrc"
+def _baseline_create_fields() -> list[tuple[str, str]]:
+    """Extra CREATE-map (key, expression) pairs for the #2199 baseline (#2952:
+    returned as pairs, not a pre-rendered fragment, so create_point can
+    merge them with the caller's props without producing duplicate keys)."""
+    return [("ep_alpha", "$ba"), ("ep_beta", "$bb"),
+            ("baseline_set", "true"), ("baseline_source", "$bsrc")]
 
 
 def _baseline_create_params(baseline: tuple[float, float, str]) -> dict:
@@ -2559,32 +2562,133 @@ class TortoiseSDK:
             _alpha, _beta = credibility_prior(DECIDE_DEFAULT_CREDIBILITY)
             _create_baseline = (_alpha, _beta, BASELINE_SOURCE_SYSTEM_DEFAULT)
 
+        # #2952: EVERY property of a new Point is written in the CREATE's
+        # property map — ONE graph write per point, no post-CREATE clause. A
+        # post-CREATE write (the `SET n.embedding = ...` clause and the
+        # per-prop `SET n += $props` loop that used to live here) makes the
+        # engine delete+re-add the document in its fulltext index; the re-add
+        # double-counts the index's collection statistics (document count /
+        # total field length — the idf and fieldNorm terms of the fulltext
+        # ``score``), and only an ASYNC engine pass reconciles them tens of
+        # seconds later. Net effect: the same unchanged graph returns
+        # different fulltext scores — hence a different RRF order and a
+        # different top-k — purely as a function of elapsed wall-clock time.
+        # Measured: a point created with zero post-CREATE writes scores
+        # identically at t+0 and after settle (8.0); adding ONE post-CREATE
+        # SET drops it to 6.0 and it drifts back ~30-60s later. This is the
+        # same embedded-fulltext delete/re-add hazard #2199 fixed for the
+        # baseline fields — extended here to the embedding and every prop.
+        # #2952: the EP dirty stamp rides the SAME write. `_mark_dirty`'s
+        # post-CREATE `SET n.ep_dirty = ...` was the last remaining second
+        # write on the new node; folding it here makes the whole fresh-create
+        # path ONE graph write. The epoch is advanced NOW so the stamp and
+        # the persist agree on one value (see _advance_ep_version).
+        #
+        # #2422 (born-terminal exception): a point whose BORN status is
+        # terminal must NOT carry that stamp. `status` is a write-path
+        # argument, so the only place the terminal exclusion is read is
+        # `_mark_dirty`'s persist query's WHERE — and that query is skipped
+        # entirely when every dirty id arrives `pre_stamped` (`persisted |=
+        # _stamped & set(dirty_ids)` below), which is precisely what an
+        # inline stamp would do. The result is the #2422 ghost class: a
+        # terminal point can never enter an EP affected set, so
+        # `_sweep_dirty_roots` can never clear its flag — a NEVER-clearable
+        # dirty root that pins `_auto_dream_mode` to 'local' forever (the
+        # comment in `_mark_dirty` forbids exactly this). So a born-terminal
+        # point gets no `ep_dirty`/`ep_dirty_at` in the CREATE map, and is
+        # NOT reported as pre-stamped: it flows through the persist WHERE
+        # (matches nothing → no write) into the terminal classification
+        # (`terminal_ids`), which clears any stale flag and keeps the id out
+        # of the in-memory mirror. `_sanitize_props` already rejects the
+        # legacy `outdated` flag prop (#2491), so `status` is the complete
+        # born-terminal surface.
+        _born_terminal = status in TERMINAL_EXCLUDED_STATUSES
+        _epv = self._advance_ep_version(proj)
         _create_params: dict = {"id": pid, "c": content, "k": kind, "st": status,
-                                "now": now, "embedding": embedding}
+                                "now": now, "embedding": embedding,
+                                "_epv": _epv}
+        # Server-owned EP-dirty flags are never caller props — drop any that
+        # slipped in so the CREATE map keeps exactly one key of each name.
+        props.pop("ep_dirty", None)
+        props.pop("ep_dirty_at", None)
+        # #2952: a point born from a Source is inherit-eligible by definition
+        # (#398) — the inheritance gate must start invalid. The generic helper
+        # expresses that as `REMOVE n.inherited_at` AFTER the prop write, but
+        # a fresh point has no stamp of its own and the caller's (if any) is
+        # invalidated anyway, so the prop is dropped HERE: the CREATE map
+        # never writes it and no post-CREATE REMOVE is needed (final node
+        # state identical, ONE write instead of two).
+        if props.get("extractedFrom"):
+            props.pop("inherited_at", None)
+        # CREATE-map (key -> expression), in the order the CREATE has always
+        # written the fields. Built as a MAPPING because a caller prop whose
+        # key collides with a field here must REPLACE it, not duplicate it:
+        # the pre-#2952 code applied props in a post-CREATE `SET n += $props`
+        # (so props won), and `createdAt` is a normal caller prop — api.py,
+        # ingest.py and the source-inheritance path all pass one.
+        _create_map: dict[str, str] = {
+            "id": "$id", "content": "$c", "pointKind": "$k",
+            "is_operator": "false", "status": "$st",
+            "createdAt": "$now", "updatedAt": "$now",
+        }
+        if not _born_terminal:
+            _create_map["ep_dirty"] = "true"
+            _create_map["ep_dirty_at"] = "$_epv"
         if _create_baseline is not None:
             _create_params.update(_baseline_create_params(_create_baseline))
+            _create_map.update(_baseline_create_fields())
+        # ``vecf32()`` is accepted inline in the property map on both engines
+        # (embedded FalkorDBLite and server 4.x), so the embedding is no
+        # longer a trailing SET clause. $embedding is None when the embedder
+        # is unavailable — identical to the old `SET ... = vecf32(null)`.
+        # A caller-supplied `embedding` prop is the embedding itself (the old
+        # ordering applied the prop loop after the embedding SET, so props
+        # won) — popped here so the map carries exactly one `embedding` key.
+        # TYPE CHANGE GUARD (P2, PR #3018 review): the pre-#2952 props loop
+        # stored a caller-supplied `embedding` RAW (it merely won the
+        # assignment race against `SET n.embedding = vecf32($embedding)`), so
+        # it must NOT be coerced here either — a silent float64-list →
+        # vecf32/float32 rewrite of an explicitly caller-owned value would
+        # change what a vector read returns. The server-computed embedding
+        # keeps the original `vecf32()` coercion (unchanged).
+        _embedding_expr = "vecf32($embedding)"
+        if "embedding" in props:
+            embedding = props.pop("embedding")
+            _embedding_expr = "$embedding"  # caller value stored verbatim
+        _create_params["embedding"] = embedding
+        for _i, (_key, _val) in enumerate(props.items()):
+            _pname = f"_cp{_i}"
+            _create_params[_pname] = _val
+            _create_map[_key] = f"${_pname}"
+        # The embedding is written LAST (and `embedding` was popped from props
+        # above), so the map carries exactly one `embedding` key.
+        _create_map["embedding"] = _embedding_expr
+        _create_fields = "".join(
+            f", `{str(_k).replace('`', '``')}`: {_v}"
+            for _k, _v in _create_map.items())
         proj.g.query(
-            "CREATE (n:Point {id:$id, content:$c, pointKind:$k, "
-            "is_operator:false, status:$st, createdAt:$now, updatedAt:$now"
-            + (_baseline_create_fields() if _create_baseline is not None else "") + "}) "
-            "SET n.embedding = vecf32($embedding)",
+            "CREATE (n:Point {" + _create_fields.lstrip(", ") + "})",
             params=_create_params,
         )
         # Tag handling: create :Tag nodes + TAGGED edges (#215, #485)
         tags = props.get("tags") or []
         if isinstance(tags, list):
             self._sync_tags(proj, pid, tags)
-        for key, val in props.items():
-            proj.g.query(
-                "MATCH (n:Point {id:$id}) SET n += $props",
-                params={"id": pid, "props": {key: val}},
-            )
         # P1-1: Ontology v2.1 — link Point → Source via extractedFrom
         if props.get("extractedFrom"):
             proj._link_source(pid, props["extractedFrom"])
             # Inheritance gate dirty-mark: a freshly-sourced point is always
             # inherit-eligible on the next EP run (no interval wait, #398).
-            self._invalidate_inheritance_gate([pid])
+            # #2952: a born point carries no `inherited_at` stamp, so the
+            # `REMOVE n.inherited_at` the generic helper
+            # (`_invalidate_inheritance_gate`) issues is a no-op on the final
+            # state — and a no-op write on the node still costs a fulltext
+            # re-add. The `extractedFrom` invalidation therefore happens in
+            # the PROPS (see the up-front pop of `inherited_at` above): a
+            # caller-supplied stamp is dropped BEFORE the CREATE map is built
+            # instead of being written and then taken back out, so this path
+            # is ONE graph write too. The EP dirty-marking half is issued once
+            # below.
 
         # Apply the starting belief (only on new creation, not dedup).
         #
@@ -2622,7 +2726,15 @@ class TortoiseSDK:
             self._get_ep().invalidate_messages()
         # Dreaming (#85): a new point can carry confidence-affecting props;
         # mark it dirty so the next dream/lazy-read stabilizes it.
-        self._mark_dirty([pid])
+        # #2952: the graph stamp was written by the CREATE above — this call
+        # only fills the in-memory mirror (no second write on the node).
+        # #2422: a born-terminal point was NOT stamped by its CREATE — it is
+        # not pre-stamped, so `_mark_dirty` runs the persist query (whose
+        # terminal WHERE matches nothing: no write) and then classifies the
+        # id as terminal, keeping it out of `_dirty_roots` (the exact
+        # observable the P1 regression test pins).
+        self._mark_dirty([pid], ep_version=_epv,
+                         pre_stamped=set() if _born_terminal else {pid})
         # #432+#548 unified: domain payload + full point snapshot for both
         # the :GraphEvent store (subscriptions/poll) and JSONL (rebuild_all).
         self._emit_event("PointAdded", {"id": pid, "kind": kind, "content_hash": ch},
@@ -9571,7 +9683,23 @@ class TortoiseSDK:
             claim_ids = [r[0] for r in rows]
         return op_ids, claim_ids
 
-    def _mark_dirty(self, point_ids: list[str]) -> None:
+    def _advance_ep_version(self, proj) -> int:
+        """Advance the graph-wide EP epoch and return the new value (#1163).
+
+        Split out of :meth:`_mark_dirty` (#2952) so a create path can stamp
+        ``ep_dirty_at`` with the SAME epoch inside the CREATE statement that
+        writes the point — instead of issuing a second, post-CREATE ``SET``
+        (see create_point for why that second write is not free).
+        """
+        rows = proj.g.query(
+            "MERGE (m:EpMeta) "
+            "SET m.ep_version = coalesce(m.ep_version, 0) + 1 "
+            "RETURN m.ep_version"
+        ).result_set
+        return int(rows[0][0]) if rows else 1
+
+    def _mark_dirty(self, point_ids: list[str], *, ep_version: int | None = None,
+                    pre_stamped: set[str] | None = None) -> None:
         """Mark claims whose confidence is now stale after a write.
 
         1-hop reverse BFS (#85 contract): from the mutated point, collect the
@@ -9585,6 +9713,18 @@ class TortoiseSDK:
         ``ep_version`` epoch advances (every write that dirties EP bumps it).
         The in-memory ``_dirty_roots`` set stays as the hot-path mirror; any
         process (fresh request-scoped SDK) hydrates from the graph.
+
+        ``ep_version`` (default None → advance the epoch here): the ordering
+        stamp to persist. Pass the value already stamped by a caller's own
+        CREATE so the two writes agree.
+
+        ``pre_stamped`` (default None): ids whose ``ep_dirty``/``ep_dirty_at``
+        were written by that same CREATE. They are excluded from this call's
+        persist SET (no second graph write) and counted as persisted, so the
+        terminal/zombie classification below still treats them correctly.
+        #2952: a create path that writes one property-twice entry into the
+        fulltext index skews the engine's collection statistics — see
+        create_point.
         """
         # #1375: every write that dirties EP also invalidates the degraded-
         # fallback corpus snapshot (covers create/update/supersede/retract/
@@ -9601,18 +9741,20 @@ class TortoiseSDK:
         proj = self._get_proj()
         # #1163: advance the graph-wide EP epoch FIRST — the new value is the
         # ordering stamp for this write's dirty markings (and the stale-run
-        # guard's discriminator).
-        rows = proj.g.query(
-            "MERGE (m:EpMeta) "
-            "SET m.ep_version = coalesce(m.ep_version, 0) + 1 "
-            "RETURN m.ep_version"
-        ).result_set
-        ep_version = int(rows[0][0]) if rows else 1
+        # guard's discriminator). A caller that already advanced it (a CREATE
+        # that stamped ep_dirty_at inline) passes the value in.
+        if ep_version is None:
+            ep_version = self._advance_ep_version(proj)
         # Operators targeting the mutated points, then the claims those
         # operators target (shared 1-hop reverse-BFS — delete_point's
         # pre-delete neighbor capture uses the same helper, #1916).
         _op_ids, claim_ids = self._reverse_bfs_neighbors(proj, point_ids)
         dirty_ids = list(point_ids) + claim_ids
+        # #2952: ids already stamped by their own CREATE skip the persist SET
+        # (a second write on the node costs an extra fulltext index entry) —
+        # and when that covers every dirty id the persist statement is not
+        # issued at all.
+        _stamped = set(pre_stamped or ())
         # #2422 (dirty-root retention): a TERMINAL point can never enter an
         # EP affected set (every admission point terminal-excludes), so
         # _sweep_dirty_roots can never clear its ep_dirty flag — it would sit
@@ -9623,18 +9765,25 @@ class TortoiseSDK:
         # at persist time) so a point terminalized by a concurrent writer
         # between the filter read and the persist cannot be re-flagged — the
         # exclusion is atomic with the marking.
-        persisted_rows = proj.g.query(
-            "UNWIND $ids AS pid "
-            "MATCH (n:Point {id: pid}) "
-            "WHERE NOT coalesce(n.status, 'live') IN $terminal "
-            "AND coalesce(n.outdated, false) = false "
-            "SET n.ep_dirty = true, n.ep_dirty_at = $ep "
-            "RETURN pid",
-            params={"ids": dirty_ids,
-                    "terminal": sorted(TERMINAL_EXCLUDED_STATUSES),
-                    "ep": ep_version},
-        ).result_set
-        persisted = {r[0] for r in persisted_rows} if persisted_rows else set()
+        persisted: set[str] = set()
+        if dirty_ids and not set(dirty_ids) <= _stamped:
+            persisted_rows = proj.g.query(
+                "UNWIND $ids AS pid "
+                "MATCH (n:Point {id: pid}) "
+                "WHERE NOT coalesce(n.status, 'live') IN $terminal "
+                "AND coalesce(n.outdated, false) = false "
+                "AND NOT pid IN $stamped "
+                "SET n.ep_dirty = true, n.ep_dirty_at = $ep "
+                "RETURN pid",
+                params={"ids": dirty_ids,
+                        "terminal": sorted(TERMINAL_EXCLUDED_STATUSES),
+                        "ep": ep_version,
+                        "stamped": sorted(_stamped)},
+            ).result_set
+            persisted = {r[0] for r in persisted_rows} if persisted_rows else set()
+        # #2952: a pre-stamped id is persisted by its own CREATE — it is not
+        # a terminal/live classification case, it simply needs no SET here.
+        persisted |= _stamped & set(dirty_ids)
         # Classify the non-persisted input ids: a point that NO LONGER EXISTS
         # is a delete zombie (delete_point marks the pre-deleted id dirty —
         # #1916; _prune_nonexistent_dirty_roots removes it post-dream) — it
