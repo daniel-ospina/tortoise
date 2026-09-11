@@ -159,6 +159,12 @@ surfaces:
   # First-match ownership (api before eval) is fine: the tier-2 union
   # includes it whenever api OR eval matches.
   - eval/write_path/test_write_path_benchmark.py
+  # #2552 (layer-2 WIRE): the deterministic planted-operator lane — the
+  # ontology-correct operator emission replayed through the REAL capture
+  # write path (no LLM). Senses operator-persistence regressions (a capture's
+  # operator topology losing its eventId / dropping back out of the
+  # retrievable memory layer) + the cross-session CORRECTS audit leg.
+  - eval/write_path/test_write_path_operator_lane.py
   # #2280 (CI drift repair): volunteer §3.2 + W3 reflex surfaces merged in
   # #2283 but never registered — the drift gate failed every PR (incl.
   # #2283's own python-ci-gate). Hosted/selfhost transports mirror
@@ -499,6 +505,7 @@ surfaces:
   # regressions, not strict-survival deltas; strict becomes a live dimension
   # once the fix-wave creates headroom.
   - eval/write_path/test_write_path_benchmark.py
+  - eval/write_path/test_write_path_operator_lane.py
   - test_calibration.py
   - test_calibration_tools.py
   - test_decide.py
@@ -644,6 +651,7 @@ surfaces:
   - eval/write_path/test_write_path_grading.py
   - eval/write_path/test_write_path_runner.py
   - eval/write_path/test_write_path_benchmark.py
+  - eval/write_path/test_write_path_operator_lane.py
   - mini_beir/test_mini_beir.py
   - test_backfill_embeddings_force.py
   - test_calibrate_thresholds.py

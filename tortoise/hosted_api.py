@@ -7308,14 +7308,39 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
                 # resolved to an existing node whose provenance belongs to
                 # its original ingest; re-stamping would clobber the first
                 # session's single-eventId provenance (mirror byte-parity).
+                minted_ids = _capture_minted_ids(extracted)
                 proj.g.query(
                     "MATCH (n:Point) WHERE n.id IN $ids "
                     "SET n.eventId=$eid, n.source_session=$sid, "
                     "    n.source_harness=$harness, n.ingested_at=$ing",
-                    params={"ids": _capture_minted_ids(extracted),
+                    params={"ids": minted_ids,
                             "eid": event_id, "sid": session_id,
                             "harness": source_harness, "ing": now},
                 )
+                # #2552 (layer-2 WIRE — the structural leg): mirror of the
+                # sdk capture stamp — the reified operator Points this
+                # capture wrote must enter the eventId-keyed retrievable
+                # memory layer too (pre-fix they carried no eventId and
+                # were invisible; ``operator_counts`` was silently {}).
+                # Scope: operators touching a MINTED point, still draft
+                # (#780 extraction default), no eventId (never clobber a
+                # prior capture's provenance). The OperatorPromoted event
+                # emitted later by _apply_capture_ingest_ep snapshots the
+                # stamped state (rebuild-durable).
+                if minted_ids:
+                    proj.g.query(
+                        "MATCH (o:Point {is_operator:true})-"
+                        "[:IMPL|NAND]->(c:Point) "
+                        "WHERE c.id IN $ids "
+                        "AND (o.status IS NULL OR o.status = 'draft') "
+                        "AND o.eventId IS NULL "
+                        "SET o.eventId=$eid, o.source_session=$sid, "
+                        "    o.source_harness=$harness, "
+                        "    o.ingested_at=$ing",
+                        params={"ids": minted_ids,
+                                "eid": event_id, "sid": session_id,
+                                "harness": source_harness, "ing": now},
+                    )
                 if retry_failed_capture:
                     # #2335 WI-2b / review (PR #2473): a RETRY heals the
                     # failed first attempt's provenance gap (mirror of the

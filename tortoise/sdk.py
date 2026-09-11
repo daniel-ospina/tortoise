@@ -3216,14 +3216,49 @@ class TortoiseSDK:
                     # its original ingest; re-stamping would clobber the first
                     # session's single-eventId provenance.
                     source_harness = harness or "unknown"
+                    minted_ids = _capture_minted_ids(extracted)
                     proj.g.query(
                         "MATCH (n:Point) WHERE n.id IN $ids "
                         "SET n.eventId=$eid, n.source_session=$sid, "
                         "    n.source_harness=$harness, n.ingested_at=$ing",
-                        params={"ids": _capture_minted_ids(extracted),
+                        params={"ids": minted_ids,
                                 "eid": event_id, "sid": session_id,
                                 "harness": source_harness, "ing": now},
                     )
+                    # #2552 (layer-2 WIRE — the structural leg): reified
+                    # operator Points created by THIS capture must enter the
+                    # retrievable memory layer too. The point path above
+                    # stamps eventId; operators were left unstamped, so the
+                    # eventId-keyed memory layer (MEMORY_ROW_QUERY /
+                    # `MATCH (p:Point) WHERE p.eventId IN $eids`) never
+                    # admitted them — `operator_counts` was silently {} on
+                    # every real run and a committed operator node was
+                    # invisible to the retrievable graph (measured 0/4).
+                    # Scope: operators that touch a MINTED point of this
+                    # capture (the extraction-created topology) and are still
+                    # draft (the #780 extraction default — a pre-existing
+                    # LIVE operator touching a folded point is never
+                    # re-provenanced) and carry no eventId (never clobber a
+                    # prior capture's provenance). The OperatorPromoted
+                    # event emitted later by _apply_capture_ingest_ep
+                    # snapshots the stamped state, so the provenance is
+                    # rebuild-durable (the m2 lane has no OperatorAdded
+                    # journal record; OperatorPromoted is its only durable
+                    # record).
+                    if minted_ids:
+                        proj.g.query(
+                            "MATCH (o:Point {is_operator:true})-"
+                            "[:IMPL|NAND]->(c:Point) "
+                            "WHERE c.id IN $ids "
+                            "AND (o.status IS NULL OR o.status = 'draft') "
+                            "AND o.eventId IS NULL "
+                            "SET o.eventId=$eid, o.source_session=$sid, "
+                            "    o.source_harness=$harness, "
+                            "    o.ingested_at=$ing",
+                            params={"ids": minted_ids,
+                                    "eid": event_id, "sid": session_id,
+                                    "harness": source_harness, "ing": now},
+                        )
                     if retry_failed_capture:
                         # #2335 WI-2b / review (PR #2473): a RETRY heals the
                         # failed first attempt's provenance gap. The retry's
