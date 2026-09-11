@@ -82,6 +82,13 @@ class _RecordingGraph:
         return [q for q in self.queries if "DETACH DELETE" in q.upper()]
 
 
+class _EmptyLog:
+    """A log with no events — lets guard tests reach the wipe without I/O."""
+
+    def read_all(self):
+        return []
+
+
 def _bare_projection(*, graph_name: str, embedded: bool) -> FalkorProjection:
     """A FalkorProjection with no DB — enough to exercise the guard paths.
 
@@ -208,12 +215,12 @@ def test_non_disposable_name_refused_even_with_token(name, tmp_path):
 
 
 def test_non_disposable_name_refused_on_rebuild_too():
-    """(a) ``rebuild(log)`` shares the L1 chokepoint — same refusal."""
+    """(a) ``rebuild(log)`` shares the L1/L2 chokepoints — same refusal."""
     proj = _bare_projection(graph_name="prod_tortoise", embedded=False)
     with pytest.raises(RuntimeError, match="confirm_destructive"):
         proj.rebuild(object(), confirm_destructive=False)
     with pytest.raises(RuntimeError, match="non-test graph"):
-        proj.rebuild(object(), confirm_destructive=True)
+        proj.rebuild(_EmptyLog(), confirm_destructive=True)
     assert proj.g.wipes() == []
 
 
@@ -297,6 +304,25 @@ def test_embedded_rebuild_single_log_with_token(tmp_path, monkeypatch):
     finally:
         proj.close()
     assert int(rows[0][0]) == 1
+
+
+def test_rebuild_parses_before_wipe(tmp_path):
+    """A log that cannot be read must raise BEFORE the wipe (no data loss).
+
+    `rebuild()` mirrors `rebuild_all()`'s WIPE-AFTER-PARSE ordering: a corrupt
+    MID-FILE line raises out of `read_all()` while the graph is still intact.
+    Parsing after the wipe would leave a wiped, empty graph behind."""
+    proj = _bare_projection(graph_name="tortoise", embedded=True)
+    log = EventLog(tmp_path / "corrupt.jsonl")
+    log.append({"type": "PointAdded",
+                "point": {"id": "first", "content": "y", "context": "t"}})
+    with open(log.path, "a", encoding="utf-8") as fh:
+        fh.write("{not valid json\n")          # mid-file corruption
+    log.append({"type": "PointAdded",
+                "point": {"id": "second", "content": "z", "context": "t"}})
+    with pytest.raises(ValueError, match="mid-file corruption"):
+        proj.rebuild(log, confirm_destructive=True)
+    assert proj.g.wipes() == [], "no wipe may run when the log cannot be read"
 
 
 def test_embedded_raw_wipe_on_test_graph_still_allowed():

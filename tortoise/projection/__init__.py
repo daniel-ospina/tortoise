@@ -100,23 +100,31 @@ def _is_bulk_wipe(cypher: str) -> bool:
 # because the other does not cover it:
 #
 #   L1 — STRUCTURAL, per-call opt-in (#2944). The only in-tree path that
-#        issues the wipe is ``FalkorProjection._wipe_all_nodes()``, and it
-#        refuses unless the CALLER passed ``confirm_destructive=True``
-#        through ``rebuild_all()`` / ``rebuild()``. There is no default-allow,
-#        no module-level flag, no env var, and no instance attribute that can
-#        authorize a wipe: a new caller cannot wipe a graph by *forgetting*
-#        something, it must deliberately opt in at its own call site. This
-#        layer applies to embedded DBs too — "embedded" means *isolated*, not
-#        *unsupervised* (an embedded wipe with an empty/missing log is
-#        unrecoverable).
+#        issues an unconditional whole-graph wipe (``MATCH (n) DETACH
+#        DELETE n`` with no label/WHERE/LIMIT) is
+#        ``FalkorProjection._wipe_all_nodes()``, and it refuses unless the
+#        CALLER passed ``confirm_destructive=True`` through ``rebuild_all()``
+#        / ``rebuild()``. There is no default-allow, no module-level flag, no
+#        env var, and no instance attribute that can authorize a wipe: a new
+#        caller cannot wipe a graph by *forgetting* something, it must
+#        deliberately opt in at its own call site. This layer applies to
+#        embedded DBs too — "embedded" means *isolated*, not *unsupervised*:
+#        an embedded wipe may be unrecoverable (missing or empty replay log,
+#        or a log that only parses after the wipe), so it too needs a
+#        deliberate per-call opt-in.
 #
 #   L2 — DEFENCE IN DEPTH, disposable-graph check (#99). ``_GuardedGraph``
 #        wraps the raw handle the SDK uses everywhere, so EVERY bulk DETACH
 #        DELETE (including hand-written Cypher that never went through L1)
 #        is still refused on a server graph whose name is not a disposable
-#        test graph. Names are no longer load-bearing for the rebuild lane,
-#        but this layer still refuses strictly more than L1 alone, so it
-#        stays (removing it would weaken the guard).
+#        test graph. Names are no longer SUFFICIENT — L1's token is always
+#        required first — but on a server graph the name is still NECESSARY:
+#        L2 is the layer that refuses a real-looking graph
+#        (`prod_tortoise`, `team_<id>`) even when an L1 opt-in was given.
+#        That is deliberate (#2944 evaluated replacing L2 with an explicit
+#        disposable registry and chose the per-call token as the structural
+#        gate); L2 was kept because removing it would refuse strictly less
+#        than before.
 #
 # History: the pre-#2944 bypass was ``_skip_guard``, a plain boolean
 # attribute (``self._skip_guard = False``) read by both query paths. It has
@@ -576,7 +584,17 @@ def split(points: dict[str, dict]) -> tuple[list[dict], list[dict]]:
 @runtime_checkable
 class Projection(Protocol):
     def apply(self, event: dict) -> None: ...
-    def rebuild(self, log) -> None: ...
+
+    def rebuild(self, log, *, confirm_destructive: bool = False) -> None:
+        """Rebuild from `log`. The keyword is part of the contract (#2944).
+
+        A backend that wipes a graph MUST refuse when `confirm_destructive`
+        is False (see `FalkorProjection.rebuild`); a backend with nothing to
+        wipe may accept and ignore it (`InMemoryProjection`). Keeping the
+        parameter on the Protocol lets a generic caller opt in explicitly
+        instead of discovering a backend-specific refusal at runtime.
+        """
+        ...
 
 
 class InMemoryProjection:
@@ -586,7 +604,16 @@ class InMemoryProjection:
     def apply(self, event: dict) -> None:
         _apply_one(self.points, event)
 
-    def rebuild(self, log) -> None:
+    def rebuild(self, log, *, confirm_destructive: bool = False) -> None:
+        """Fold the log into memory.
+
+        `confirm_destructive` exists for `Projection` parity and is IGNORED:
+        this backend wipes no graph (it replaces the in-memory dict), so
+        there is nothing to authorize. `FalkorProjection.rebuild` REFUSES
+        without the token (#2944) — that divergence is deliberate and
+        documented here so a Protocol-typed caller knows a graph-backed
+        implementation may refuse while this one does not.
+        """
         self.points = fold(log.read_all())
 
 
@@ -623,7 +650,10 @@ class FalkorProjection(
     Docker:    FalkorProjection(host='localhost', port=16379, password='...')
     URI:       FalkorProjection.from_uri('docker://:pass@host:6379/graph')
 
-    Same API regardless of backend — constructor swap is the only difference.
+    Same API regardless of backend — constructor swap is the only difference,
+    EXCEPT the destructive `rebuild()`/`rebuild_all()` wipe, which requires an
+    explicit per-call `confirm_destructive=True` (#2944) and is refused on a
+    non-disposable server graph.
     """
 
     def __init__(self, path: str | None = None, *,
@@ -1208,10 +1238,18 @@ class FalkorProjection(
         ``confirm_destructive=True``. The default refuses, so a new caller
         cannot wipe a graph by forgetting the opt-in. L2 (`_assert_test_graph`)
         then still refuses a non-disposable server graph even with the token.
+
+        WIPE-AFTER-PARSE (mirrors ``rebuild_all``, epic #900 T12): the log is
+        read in FULL before the wipe, so an unreadable/corrupt log raises with
+        the graph still intact instead of leaving a wiped, empty graph.
         """
+        # L1 fast-fail (mirrors rebuild_all): a caller that did not opt in must
+        # not even reach the parse. (The wipe re-asserts it via _wipe_all_nodes.)
+        self._assert_destructive_confirmed(confirm_destructive, "rebuild")
+        events = log.read_all()
         self._wipe_all_nodes(confirm_destructive=confirm_destructive,
                              operation="rebuild")
-        for ev in log.read_all():
+        for ev in events:
             self.apply(ev)
 
     def rebuild_all(self, log_dir: str, *,
@@ -2151,6 +2189,10 @@ class FalkorProjection(
     def _wipe_all_nodes(self, *, confirm_destructive: bool,
                         operation: str) -> None:
         """The ONLY in-tree path that issues an unconditional graph wipe.
+
+        "Unconditional" = `MATCH (n) DETACH DELETE n` with no label, WHERE, or
+        LIMIT — a whole-graph wipe. Scoped deletes (targeted, label-scoped, or
+        LIMIT-bounded) are a different operation and do not route here.
 
         L1 (#2944) enforces the caller's explicit per-call opt-in; the wipe
         itself then still passes L2 (`_assert_test_graph` via the guarded
