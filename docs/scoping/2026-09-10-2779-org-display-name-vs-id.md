@@ -94,7 +94,7 @@ personal org "Personal". The registry lane still has the coupling (tracked, open
 | The identifier rule (`^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$`) must not loosen | **[validated]** | `hosted_api.py:1192` (`_id_pattern`), `hosted_backup.py:757` `_validate_team_id` — a space in the namespace fails every downstream `_make_sdk(namespace=…)` call |
 | Display names may repeat across accounts | **[unverified → product call]** | Orgs are personal, not a global namespace, so global `uq_teams_name` is wrong; but this changes 409 semantics. §5.3 decides and §5.5 lists the test updates. |
 | The user wants to see/edit the derived id | **[validated]** | Product decision in the issue prompt ("must see the derived identifier and be able to edit it") |
-| No third-party dependency is introduced | **[validated]** | Pure in-repo Python + React; slugify is `unicodedata` from the stdlib (`tortoise/sdk.py:14365` already imports `re`/`uuid` locally) |
+| No third-party dependency is introduced | **[validated]** | Pure in-repo Python + React. The slugify helper needs `unicodedata` (stdlib); `tortoise/sdk.py` already imports `re`/`uuid` locally inside `team_create`. |
 
 ### 1.6 Boundary & stakeholders
 
@@ -219,7 +219,7 @@ for the switcher.
 |---|---|---|
 | Account-menu create | `POST /v1/teams` → `_create_team_supabase_lane` / `_create_team_registry_lane` | §3.1 |
 | Onboarding wizard first org | `tenant-provision` Edge Function `index.ts:327-370` (`TEAM_NAME_RE`, slug fallback, `sha256(user_id)[:26]` id) | accept the free-text display name; keep the deterministic id until slice 2; align the namespace to `team_{team_id}` (§5.2). **NB:** the deterministic `sha256(user_id)[:26]` id means the *first* org can never get a name-derived id without breaking retry idempotency — document the deliberate exception. |
-| Onboarding second org | `POST /v1/onboarding/team` → `create_onboarding_team` (`:17495`) / `_create_onboarding_team_lane` | same shared validator; optional `id` |
+| Onboarding second org | `POST /v1/onboarding/team` → `create_onboarding_team` (`:17449`) / `_create_onboarding_team_lane` (`:17516`) | same shared validator; optional `id` |
 | Paid new org | `POST /v1/billing/checkout/new-org` (`:20845`, body model `:2762`) | same shared validator; `id` rides Stripe `metadata` and is used at webhook provisioning |
 | Internal provision (selfhost only) | `/internal/provision` (`:1176-1198`) | `_name_pattern` (`:1193`) becomes the shared validator; `_id_pattern` (`:1192`) is reused as-is for `team_id` |
 
@@ -367,7 +367,7 @@ Identifier space = `teams.id` (PK, unique) / `Team.id` in the registry.
 - Otherwise append `-2`, `-3`, … (bounded at `-50`), then a 6-char random suffix
   (`-a1b2c3`), then 409.
 - **Atomicity:** the Supabase lane already runs the whole gate+provision chain under
-  `_team_create_lock(user_id)` (`hosted_api.py:9170`, `:9185`) and the `id` PK is the
+  `_team_create_lock(user_id)` (`hosted_api.py:9040` def; taken at `:9188`, `:9191`) and the `id` PK is the
   DB backstop — a losing racer sees the PK violation and retries the next suffix.
   The registry lane's in-process lock is documented as not multi-process-safe
   (`hosted_api.py:9326-9330`, #1954); the retry-on-`ControlPlaneError` loop over the
@@ -453,12 +453,12 @@ Every one of these is a slice target. Line numbers are `a76f98fb6`.
 | Surface | Location | What it does today | Disposition |
 |---|---|---|---|
 | Org-create (account menu) | `hosted_api.py:9157` `create_team`, `:9242` supabase lane, `:9323` registry lane | name regex inline (`:9175`) | shared validator; optional `id` (§3.1) |
-| Onboarding second org | `:17495` `create_onboarding_team`, `:17540` `_create_onboarding_team_lane` | length-only at `:17496` | shared validator; optional `id` |
+| Onboarding second org | `:17449` `create_onboarding_team` (validation `:17470-17472`), `:17516` `_create_onboarding_team_lane` | length check + charset regex | shared validator; optional `id` |
 | Paid new org | `:20845` `billing_checkout_new_org`, model `:2762` | its own regex at `:20856` | shared validator; `id` in Stripe metadata |
 | Internal provision (selfhost) | `:1188-1198` | `_id_pattern` + `_name_pattern` | `_name_pattern` → shared validator; `_id_pattern` referenced, not copied |
 | Edge Function first org | `supabase/functions/tenant-provision/index.ts:327-347` | `TEAM_NAME_RE` + slug fallback; deterministic `sha256(user_id)[:26]` id at `:355-370` | accept free-text name; namespace → `team_{team_id}`; deterministic-id exception documented §3.2 |
-| SDK `team_create` | `tortoise/sdk.py:14323` | `graph_name = f"team_{name}".replace(' ','_')` (`:14373`) and a name-keyed duplicate guard (`:14406`), dup-name error, same regex | slice 1: namespace via `slugify_id(name)` (charset-safe while the id stays opaque); slice 2: `team_{team_id}`, guard re-keyed to `id`, shared validator (#2023) |
-| **CLI `key create`** | `tortoise/__main__.py:5658` `_cmd_key_create` — reuses an existing team by **name** (`:5697-5700` loops `MATCH (t:Team) RETURN t.id, t.name` and matches `tname == args.name`) then `sdk.team_create(args.name)` (`:5703`) | treats the display name as identity for idempotency | slice 1: route `args.name` through the shared validator; slice 2: **reuse by derived `id`, never by name** — under D4 two orgs may share a display name and the name-match would silently return another org's team |
+| SDK `team_create` | `tortoise/sdk.py:14323` | `graph_name = f"team_{name}".replace(' ','_')` (`:14373`) and a name-keyed duplicate guard (`:14406`); its own name regex at `:14367` is `^[a-zA-Z0-9][a-zA-Z0-9_ -]*$` — spaces allowed, no `{0,63}` cap, so it is NOT `_id_pattern` | slice 1: namespace via `slugify_id(name)` (charset-safe while the id stays opaque); slice 2: `team_{team_id}`, guard re-keyed to `id`, shared validator (#2023) |
+| **CLI `key create`** | `tortoise/__main__.py:5660` `_cmd_key_create` — reuses an existing team by **name** (`:5697-5700` loops `MATCH (t:Team) RETURN t.id, t.name` and matches `tname == args.name`) then `sdk.team_create(args.name)` (`:5703`) | treats the display name as identity for idempotency | slice 1: route `args.name` through the shared validator; slice 2: **reuse by derived `id`, never by name** — under D4 two orgs may share a display name and the name-match would silently return another org's team |
 | Name-keyed mutation helper | `tortoise/sdk.py:14932-14941` — dedups `Team` nodes via `MATCH (t:Team {name:$name}) RETURN count(t) > 0` then skips | assumes name → identity | slice 2: key on `id` once display names may repeat (one-shot path, lower materiality than the CLI) |
 | Name-keyed duplicate guard (same file) | `tortoise/sdk.py:14406` — `MATCH (t:Team {name:$name}) RETURN count(t) > 0` inside `team_create` | the create-time name uniqueness guard | slice 2: covered by "the duplicate guard moves from `name` to `id`" |
 | Supabase control plane | `tortoise/supabase_control.py` `provision_team`, `team_by_name`, `team_list`, `_TEAM_BASE_SELECT:82`, reads `:871`, `:1284` | reads/writes `name` | unchanged — `name` is the display name |
@@ -468,7 +468,7 @@ Every one of these is a slice target. Line numbers are `a76f98fb6`.
 | Surface | Location | Disposition |
 |---|---|---|
 | Account-menu create submit | `:4158-4190` `handleCreateTeam`; validator `:4164-4170` | **the bug**: replace the inline regex with `orgIdentifierError`/`orgNameError`; send `{name, id?}` |
-| Paid-new-org submit | `:4112-4150` `startNewOrgCheckout`; validator `:4108-4113` | shared validator; `id` in the request |
+| Paid-new-org submit | `:4118-4121` `startNewOrgCheckout` | shared validator; `id` in the request |
 | Wizard org step | `:4206-4245` `handleWizardCreateOrg`; validator `wizardFlow.js:139-148` `orgNameError` (spaces already OK) | switch to the shared validator module; show + allow editing the derived id |
 | Create dialog markup | `:7180-7230` (org name + plan inputs) | add the identifier field + live preview |
 | Wizard org markup | `:6155-6180` | add the identifier preview |
@@ -476,7 +476,10 @@ Every one of these is a slice target. Line numbers are `a76f98fb6`.
 | Org switcher rows | `:7084-7086` | display name primary; identifier shown when two rows share a display name |
 | Pending invites | `:7105`, `:6204` | display name (identifier tooltip) |
 | Team `<select>` fallback | `:8311` | display name (+ identifier when ambiguous) |
-| Billing tab team context | `:4391-4395`, `:5938-5940` | display name |
+| Billing tab team context | `:8300` `<h2>Billing — {currentTeamName or 'this organization'}</h2>`, `:8306` `aria-label="Billing organization"` | display name |
+| Connect-step key naming | `:4389-4395` `orgForKey` (the durable key label) | display name |
+| Wizard welcome header | `:5933-5941` `shownOrgName` | display name |
+| Members tab | `:8233` `<h2>Members</h2>` | **verified: the Members surface renders a title only, no org name** — listed so the implementer does not hunt for one |
 | #2789 three-option dialog | `:4085-4150`, `ownedFreeOrgs[0].team_id` | **no conflict** — the dialog already targets `team_id`, which is the identifier; the upgrade action keys off the id, so a duplicate display name cannot misroute it |
 | Checkout-return name matching | `:2323-2330` (`t.team_name === newOrgName`, `startsWith(prefix)`) | **replace with id matching** — the registry lane's differently-minted id is why the name hack exists (#2789 §S-B); once the id is the identity, the hack goes |
 
@@ -484,9 +487,9 @@ Every one of these is a slice target. Line numbers are `a76f98fb6`.
 
 | Surface | Location | Disposition |
 |---|---|---|
-| MCP `tortoise_team_create` | `tortoise/mcp_server.py:2129-2143` — docstring says "duplicate team names raise an error", returns `{name, graph_name, api_key, id}` | optional `team_id` param; docstring describes display name vs identifier; `idempotentHint` re-checked |
+| MCP `tortoise_team_create` | `tortoise/mcp_server.py:2135-2144` — docstring at `:2139` says "duplicate team names raise an error"; returns `{name, graph_name, api_key, id}` | optional `team_id` param; docstring describes display name vs identifier; `idempotentHint` re-checked |
 | MCP Subject `organization` | `mcp_server.py:2218`, `:2839` | **unrelated** — the ontology `Subject/organization` node, not the tenant org. Do not touch. Called out so the implementer does not "fix" it. |
-| Admin/ops | `tortoise/hosted_api.py:14360`, `:14411` (list/admin payloads carrying `graph_name`) | include the display name + identifier pair so ops can tell them apart |
+| Admin/ops | `tortoise/hosted_api.py:14360`, `:14411` — the API-key reveal/recover response dicts (`team_name` + `graph_name`); there is no admin team-list route | include the display name + identifier pair so ops can tell them apart |
 | Email | onboarding offer email takes `display_name` = the **person**, not the org (`tenant-provision/index.ts:~410`) | unchanged; verify no org name is interpolated as an identifier |
 | Docs | `docs/plans/2026-08-30-team-graph-name-parity.md`, `docs/plans/2026-09-02-2003-W7-onboarding-plan.md`, `docs/plans/2026-08-03-supabase-auth-signup.md` | align naming language; slice 4 |
 
@@ -533,7 +536,7 @@ a preference: **every slice must leave `main` consistent and green on its own.**
 **Slice 1 — display name is free text, and the namespace charset stays safe.**
 `tortoise/org_naming.py` (`validate_display_name`, `ID_PATTERN`,
 `identifier_error`, `slugify_id`, **and `RESERVED_IDENTIFIERS`**); route adoption at `hosted_api.py:9175`,
-`:1198`, `:17496`, `:20856`, `tenant-provision`; **the registry-lane namespace fix**
+`:1198`, `:17470-17472`, `:20856`, `tenant-provision`; **the registry-lane namespace fix**
 — `tortoise/sdk.py:14373` replaces
 `graph_name = f"team_{name}".replace(' ','_')` with
 `graph_name = f"team_{slugify_id(name)}"`, because the display name is now free text
@@ -568,8 +571,9 @@ enforced on **both** the derived and the user-supplied path;
 `sdk.py:14406` + `:14932-14941` re-keyed off `name`;
 `tortoise/__main__.py:5697-5703` reuse re-keyed off `id`; `tenant-provision`
 namespace parity; migration M1 (drop `uq_teams_name`, add `uq_teams_graph_name`, with
-a pre-flight duplicate scan); `supabase/tests/pglite/validate.mjs:177-178` updated
-in the same commit. Display names may now repeat; identifier collisions get
+a    pre-flight duplicate scan); `supabase/tests/pglite/validate.mjs:177-178` and
+   `tests/fake_control_plane.py:474-484` updated in the same commit. Display names may
+   now repeat; identifier collisions get
 `-2`/`-3`/random; a user-supplied taken id gets 409.
 **Tests:** `tests/test_org_naming.py::test_slugify_vectors` (shared JSON fixture),
 `test_identifier_collision_resolution`, `test_teams_name_not_unique`,
@@ -628,6 +632,7 @@ it, and it is safe to ship later because the identifier is immutable.
 | CLI `key create` reuses a team by display **name** (`tortoise/__main__.py:5697-5703`) — under D4 that can return another org's team | **absorbed** — it is a name-as-identity reader broken by the same decision; slice 2 re-keys it on the identifier |
 | `sdk.py:14932-14941` migration dedup keys `Team` nodes by `name` | **absorbed** — same class, one-shot path; slice 2 |
 | `supabase/tests/pglite/validate.mjs` pins the existence of `uq_teams_name` | **absorbed** — a schema validator that must move to `uq_teams_graph_name` when M1 runs (slice 2) |
+| `tests/fake_control_plane.py:474-484` fakes the `uq_teams_name` unique-name parity | **absorbed** — the fake must mirror the index swap and the duplicate-display-name allowance, or the slice-2 tests assert against a fiction (slice 2) |
 | `tests/e2e/test_dashboard_identity.py::test_create_team_success` is latent-red for the spaces path (`:539-541`) | **absorbed** — slice 1 makes it green; #2809 owns the separate blob-switch defect in the same test |
 | MCP `tortoise_team_create` advertises "duplicate team names raise an error", which D4 falsifies | **absorbed** — slice 4 |
 | No rename surface for an org display name | **deferred** to slice 4 (optional) |
@@ -737,10 +742,14 @@ backed — that row has been replaced with the actual (non-clean) result above.
 
 All 4 checks OK; **NO ISSUES FOUND**.
 
-**Status: clean.** Cycle 4 returned NO ISSUES FOUND on the corrected artifacts. The
-P0 and all P1s from cycle 1, and the P1s raised in cycle 2, are fixed and were
-re-verified. Cycles 2 and 3 were **not** clean exits; they were fix cycles. The exit
-is a clean completion under the cycle-4 verdict, not a cap or convergence exit.
+**Status: cycled clean, with the second-model coherence gate outstanding.** Cycle 4
+returned NO ISSUES FOUND on the corrected artifacts. The P0 and all P1s from cycle 1,
+and the P1s raised in cycle 2, are fixed and were re-verified. Cycles 2 and 3 were
+**not** clean exits; they were fix cycles. Under AGENTS.md a full clean completion also
+requires the second-model gate, which was **not** dispatched inside this task's timebox
+(see below) — so this is a **clean cycle-verifier exit with an outstanding gate**, not a
+full clean completion. The implementer must run the second-model coherence check at
+`plan-review` time before treating the design as final.
 
 **Second-model coherence check:** not run. The `task` tool's two initial dispatches
 (the codebase explorer and the first pair of verifiers) each stalled for ~20 min
@@ -751,6 +760,8 @@ and the plan doc's Integration Surface Map stand as the coherence artifact, and 
 implementer should run the second-model gate at `writing-plans`/`plan-review` time.
 
 **Wiring check:** §5.6 (surfaces) + §7 (slices) + the plan's Integration Surface Map.
-The CLI writer, the migration pre-flight, the pglite schema validator and the
-name-keyed `team_create` guard are the four touch points the verification cycles
-added. No uncovered touch point remains.
+The CLI writer, the migration pre-flight, the pglite schema validator, the name-keyed
+`team_create` guard and `tests/fake_control_plane.py:474-484` (which fakes the
+`uq_teams_name` unique-name parity and must change with slice 2's index swap) are the
+touch points the verification cycles added. No uncovered touch point remains **after**
+those five are included; the wiring claim is scoped to them.

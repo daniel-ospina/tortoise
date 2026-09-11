@@ -108,8 +108,9 @@ two client files — without changing the storage model.
      `ID_PATTERN` re-exported from `org_naming` (no behaviour change).
    - `:9157` `create_team`: the inline `^[a-zA-Z0-9][a-zA-Z0-9_ -]{0,63}$`
      (`:9175`) is replaced by `validate_display_name`.
-   - `:17495` `create_onboarding_team`: the length-only check (`:17496`) is replaced
-     by `validate_display_name`.
+   - `:17449` `create_onboarding_team`: the length check + charset regex at
+     `:17470-17472` are replaced by `validate_display_name` (the lane itself is
+     `_create_onboarding_team_lane` at `:17516`).
    - `:20845` `billing_checkout_new_org`: the inline regex (`:20856`) is replaced by
      `validate_display_name`.
    - All four now raise **422** with the validator's specific message (the current
@@ -125,7 +126,7 @@ two client files — without changing the storage model.
 4. **`website/apps/dashboard/src/main.jsx:4164-4170`** — the account-menu
    `handleCreateTeam` validator drops the inline strict regex and calls
    `displayNameError(name)`; the error copy becomes the specific message. **This is
-   the reported bug.** `startNewOrgCheckout` (`:4108-4113`) also switches to the
+   the reported bug.** `startNewOrgCheckout` (`:4118-4121`) also switches to the
    shared helper.
 
 5. **`supabase/functions/tenant-provision/index.ts:327-347`** — `TEAM_NAME_RE` is
@@ -146,7 +147,7 @@ two client files — without changing the storage model.
    (#1903). **Do not defer this to slice 2**: slicing the namespace fix away from the
    free-text widening would ship an unsafe intermediate state.
 
-7. **`tortoise/__main__.py:5658` `_cmd_key_create`** — route `args.name` through
+7. **`tortoise/__main__.py:5660` `_cmd_key_create`** — route `args.name` through
    `validate_display_name`; keep the name-based reuse in slice 1 (it is still safe
    while display names are unique) so the slice stays a validation-only change.
 
@@ -219,7 +220,7 @@ slug, and the two lanes finally agree on `team_{identifier}`.
      p_graph_name=f"team_{id}")` shape unchanged.
    - `_create_team_registry_lane` (`:9323`): pass the identifier through to
      `sdk.team_create`.
-   - `:17495` / `:20845`: same optional-`id` handling. `billing_checkout_new_org`
+   - `:17449` / `:20845`: same optional-`id` handling. `billing_checkout_new_org`
      adds `org_id` to the Stripe session `metadata` alongside the existing
      `org_name`, and `_provision_new_org_from_checkout` reads it.
    - `:9002-9003` `GET /v1/teams`: no shape change (both fields already returned).
@@ -249,9 +250,11 @@ slug, and the two lanes finally agree on `team_{identifier}`.
    idempotency for hook redelivery is load-bearing, `index.ts:~355-370`) and this
    exception is documented in the file.
 
-6. **`supabase/tests/pglite/validate.mjs:177-178`** — the schema validator pins
-   `teams_name_unique` as a post-migration spot check. Update it in the same commit
-   as M1 (drop that assertion, assert `uq_teams_graph_name`), or CI breaks on merge.
+6. **`supabase/tests/pglite/validate.mjs:177-178` and `tests/fake_control_plane.py:474-484`** —
+   the schema validator pins `teams_name_unique`, and the fake control plane reproduces
+   the `uq_teams_name` unique-name parity. Both must change in the same commit as M1
+   (drop the name-uniqueness assertion / fake, assert `uq_teams_graph_name` instead),
+   or CI and the slice-2 tests assert against a fiction.
 
 7. **Migration `supabase/migrations/<ts>_teams_display_name.sql`** — the only
    migration in this design.
@@ -350,7 +353,8 @@ same-named orgs apart.
    rendered in the dim style when (a) two listed orgs share a display name, or
    (b) the row is hovered/focused. Locations: `main.jsx:1664-1665` (account blob),
    `:7084-7086` (switcher rows), `:7105` + `:6204` (pending invites), `:8311`
-   (team `<select>`), `:4391-4395` + `:5938-5940` (billing context).
+   (team `<select>`), `:8300` + `:8306` (Billing heading + its `aria-label`), and
+   `:4389-4395` (connect-step key naming) / `:5933-5941` (wizard welcome header).
 5. **Checkout-return matching** (`main.jsx:2323-2330`) — replace the
    `t.team_name === newOrgName` / `team_name.startsWith(newOrgNamePrefix)` heuristic
    with matching on the returned `team_id` (already carried as `?new_org=<id>`), and
@@ -403,7 +407,7 @@ tell them apart.
 
 ### Steps
 
-1. **`tortoise/mcp_server.py:2129-2143` `tortoise_team_create`** — add optional
+1. **`tortoise/mcp_server.py:2135-2144` `tortoise_team_create`** — add optional
    `team_id: str | None = None`; the docstring's "duplicate team names raise an
    error" becomes "the display name is free text; the identifier is derived or
    supplied and must be unique"; re-check `idempotentHint` (it stays `false` for
