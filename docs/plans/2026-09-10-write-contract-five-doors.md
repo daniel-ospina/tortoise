@@ -198,6 +198,51 @@ This is the **write-path half of the inversion already done for retrieval**
 
 ---
 
+### 2.5 Which graphs can actually be rebuilt — and why that reorders the fix list
+
+Added after a direct question about blast radius. **Every rebuild-target in this system is disposable**, which
+changes the severity ordering of the fixes below.
+
+| Graph | Mode | Used by | Bulk-wipe reachable? |
+|---|---|---|---|
+| `test_memory_<hex>`, `test_<file>_<hash>` | docker | per-test, per-session | **yes** — session-scoped, swept at session end |
+| `test_suite_<uuid>` | docker | explicit test suites | **yes** |
+| `tortoise_test_matrix` | docker | the write-path benchmark scratch graph | **yes** |
+| embedded temp file (per test) | embedded | pytest | **yes** — guard exempts embedded |
+| embedded `tortoise.db` | embedded | **local dev** (gitignored) | **yes** |
+| `tortoise` (docker-compose default) | server | local docker | **no** — guard refuses |
+| `team_<id>` | server | **hosted product** | **no** — guard refuses + prod hard-raises |
+
+**`rebuild_all` has exactly three non-test callers**, and none reaches a real graph:
+
+| Caller | Target | Guard |
+|---|---|---|
+| `tortoise rebuild` CLI (`__main__.py:47`) | embedded file | exempt (embedded) |
+| `migrate_db.py:186` | embedded file | exempt (embedded) |
+| `_auto_health_recover` (`:925`) | embedded only | **hard-refuses when `FLY_APP_NAME` is set** |
+
+**No benchmark or eval code calls `rebuild_all` or `recover_from_log` at all** (`rg` over `tools/`,
+`tests/eval/`, `benchmarks/`, `battery/`, `validation/` → zero hits). LongMemEval's intermediate state is
+**files, not graph state** — `.longmemeval_cache/runs/*.checkpoint.json`, gitignored. The checkpoints are the
+durable artifact; the graph is scratch.
+
+**Consequences for this design:**
+
+1. **Live write-path bugs outrank replay bugs.** #2813's product half and door 3's live drop hit a
+   `team_*` graph on a **normal write, today**. #2795 (rebuild half), #2814, #2942, #2892, #2897 and #2943
+   only bite once a rebuild runs — i.e. dev, tests and disaster recovery. **§4 is ordered accordingly.**
+2. **A structural rebuild change is NOT justified.** An earlier draft of this work recommended converting
+   `rebuild_all` to build-alongside-and-swap so verification could hard-fail safely. **That recommendation is
+   withdrawn** — with no customers, a guard refusing every real graph, and no benchmark touching rebuild, a
+   shadow graph buys nothing today. **Warn-not-fail stays (OD10).**
+3. **#2943 is downgraded** from "data loss" to "can lose a local dev DB" — still worth fixing, not a project.
+4. **The safety is a naming convention, not architecture.** A graph named `prod_tortoise` passes the
+   `startswith(("test_", "tortoise_test"))` guard, and `_skip_guard` is a documented bypass (never set
+   `True` outside tests — verified). Fine while there are no customers; the thing to fix *before* there are.
+   Filed as **#2944**.
+
+---
+
 ## 3. Design
 
 ### D1 — One persisted-property declaration per layer (authoritative for persistence)
@@ -558,6 +603,11 @@ A test must pin that the wipe statement **remains** the unconditional `MATCH (n)
 ---
 
 ## 4. What the design fixes
+
+> **Ordered by live impact (§2.5).** Step 3 leads because it is the only fix that changes behaviour on a
+> **real graph today** — every product capture currently drops the four fields. Steps 1–2 follow (the contract
+> and the shared writer). Steps 4–6 are the replay-lane fixes, which affect dev/test/DR only until a rebuild
+> is run against something that matters.
 
 | Issue | How | Status |
 |---|---|---|
