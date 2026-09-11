@@ -34,7 +34,9 @@ export const WIZARD_STEPS = Object.freeze([
   {
     id: 'connect',
     label: 'Connect your agent',
-    sub: 'Connect Tortoise to your Organization.',
+    // #2912: the old sub ("Connect Tortoise to your Organization.") restated the
+    // label instead of saying what the step ASKS. The step is a harness pick.
+    sub: 'Pick which harness to connect.',
   },
   {
     id: 'done',

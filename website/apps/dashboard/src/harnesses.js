@@ -118,6 +118,14 @@ export const HARNESS_NAMES = {
   chatgpt: 'ChatGPT',
 }
 
+// #2912: the connect step's title/label for a leaf id. 'codexDesktop' is a
+// UI-only leaf (the Codex Desktop surface — #2328) that intentionally has no
+// HARNESS_NAMES entry (it is not a separate install vocabulary), so the
+// chooser needs one display name for it.
+const HARNESS_EXTRA_NAMES = { codexDesktop: 'Codex Desktop' }
+
+export const harnessDisplayName = (id) => HARNESS_NAMES[id] || HARNESS_EXTRA_NAMES[id] || id
+
 // Harnesses with no local file system for the file-based skills or shell
 // profile (Claude Desktop/Web connect from the app/cloud — MCP only).
 export const HARNESS_SKILLLESS = ['claude-desktop', 'claude-web', 'chatgpt']
@@ -272,6 +280,69 @@ export const HARNESS_PERSIST = (key) =>
   `# Persist the key for future sessions — add this line to your shell profile (~/.zshrc, ~/.bashrc, or equivalent):\nexport TORTOISE_API_KEY=${key}`
 
 export const HARNESS_ORDER = ['claude', 'claude-desktop', 'claude-web', 'codex', 'cursor', 'pi', 'chatgpt']
+
+// ── #2912: the wizard's TWO-LEVEL harness chooser ─────────────────────────
+// The connect step used to render 6 flat tabs (Claude Code / Claude Desktop /
+// Claude Web / Codex / Cursor / Pi), so one product filled half the row while
+// Codex hid its CLI/Desktop split behind an in-body toggle (#2328). Codex had
+// the better shape; this lifts it to every multi-surface harness:
+//
+//   level 1 — the HARNESS (the product you use): Claude | Codex | Cursor | Pi
+//   level 2 — the SURFACE you connect (only when there is a real choice):
+//             Claude → Code, Desktop, Web;  Codex → CLI, Desktop
+//
+// `surface.id` is the existing HARNESS_ORDER/`wizardHarness` LEAF id, so every
+// per-harness payload (UNIVERSAL_COMMAND, wizardPromptText, HARNESS_NAMES,
+// capture support) stays keyed exactly as before — this is a UI grouping, not
+// a vocabulary change (DE2E-5's 7-harness contract is untouched).
+// ChatGPT stays out: it is key-less OAuth (#2698) and has its own path.
+export const HARNESS_FAMILIES = Object.freeze([
+  Object.freeze({
+    id: 'claude',
+    name: 'Claude',
+    surfaces: Object.freeze([
+      Object.freeze({ id: 'claude', name: 'Claude Code', hint: 'Terminal' }),
+      Object.freeze({ id: 'claude-desktop', name: 'Claude Desktop', hint: 'Desktop app' }),
+      Object.freeze({ id: 'claude-web', name: 'Claude Web', hint: 'claude.ai' }),
+    ]),
+  }),
+  Object.freeze({
+    id: 'codex',
+    name: 'Codex',
+    surfaces: Object.freeze([
+      Object.freeze({ id: 'codex', name: 'Codex CLI', hint: 'Terminal' }),
+      Object.freeze({ id: 'codexDesktop', name: 'Codex Desktop', hint: 'No terminal needed' }),
+    ]),
+  }),
+  Object.freeze({ id: 'cursor', name: 'Cursor', surfaces: Object.freeze([]) }),
+  Object.freeze({ id: 'pi', name: 'Pi', surfaces: Object.freeze([]) }),
+])
+
+// The leaf id a surface click selects: single-surface families ARE their
+// surface (Cursor stays 'cursor'), multi-surface families keep the surface's
+// own id. Keeps HARNESS_FAMILIES.surfaces[].id == a HARNESS_ORDER leaf.
+export const HARNESS_FAMILY_IDS = HARNESS_FAMILIES.map((f) => f.id)
+
+// Resolve which top-level family a leaf id belongs to (the chooser's selected
+// family when the user is on a Claude Desktop / Codex Desktop surface).
+export function harnessFamilyOf(leaf) {
+  for (const family of HARNESS_FAMILIES) {
+    if (family.id === leaf) return family
+    if (family.surfaces.some((s) => s.id === leaf)) return family
+  }
+  return null
+}
+
+// The surface a family switch should land on: stay on the surface the user
+// already picked when it belongs to the new family (re-clicking a family is
+// non-destructive), else the family's preferred default — the terminal/CLI
+// surface first (self-install, no manual connector steps).
+export function preferredSurface(family, current) {
+  if (!family) return current
+  if (family.surfaces.some((s) => s.id === current)) return current
+  if (family.surfaces.length > 0) return family.surfaces[0].id
+  return family.id
+}
 
 // ── #1998 (W2): universal setup command (epic #1976 I-3, surface 5) ────────
 // The connect step's ONE command per harness — all 7 covered, 4 self-install
