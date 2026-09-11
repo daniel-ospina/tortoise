@@ -1348,3 +1348,30 @@ class TestMcpBoundary:
         assert hits, "no PointAdded GraphEvent journaled"
         newest = hits[-1]
         assert newest.get("actor_user_id") == _U1, newest
+
+
+# ── #2975: the consent-page literal must parse without SyntaxWarning ─────────
+
+
+def test_consent_html_literal_parses_without_syntax_warning():
+    """#2975: ``_CONSENT_HTML`` embeds a JavaScript RFC-1918 regex
+    (``/^172\\.(1[6-9]|2\\d|3[01])\\./``) whose backslashes are invalid Python
+    escapes. Left in a non-raw literal they emit
+    ``SyntaxWarning: invalid escape sequence`` on *every* parse (and become a
+    ``SyntaxError`` on a future Python), polluting every test run. The literal
+    must therefore stay raw — and staying raw must not alter the emitted bytes.
+    """
+    import warnings
+    from pathlib import Path
+
+    oauth_path = Path(__file__).resolve().parent.parent / "tortoise" / "oauth.py"
+    source = oauth_path.read_text(encoding="utf-8")
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", SyntaxWarning)
+        compile(source, str(oauth_path), "exec")
+
+    # The raw prefix must not have re-interpreted any escape in the literal.
+    from tortoise.oauth import _CONSENT_HTML
+
+    assert r"/^172\.(1[6-9]|2\d|3[01])\./" in _CONSENT_HTML

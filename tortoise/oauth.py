@@ -860,7 +860,7 @@ def authorization_server_metadata(base: str) -> dict:
 
 # ── Branded consent page (D2 — one custom HTML page, signup/signin pattern) ─
 
-_CONSENT_HTML = """<!DOCTYPE html>
+_CONSENT_HTML = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
