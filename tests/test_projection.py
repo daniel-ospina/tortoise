@@ -2220,6 +2220,117 @@ def test_falkor_rebuild_all_with_sdk_points():
         shutil.rmtree(d, ignore_errors=True)
 
 
+def test_rebuild_all_recomputes_content_hash_on_revised_point():
+    """#2942: PointRevised replay must re-derive content_hash from the NEW
+    content, not leave the point carrying a hash of its old content.
+
+    A stale (present-but-wrong) hash is worse than a NULL one: the indexed
+    dedup lookup `MATCH (n:Point {content_hash:$ch})` misses, so a re-ingest
+    creates a duplicate instead of falling through to create_point's
+    content-equality fallback.
+    """
+    if _skip_if_no_falkor():
+        pytest.skip("redislite falkordb unavailable")
+    import hashlib
+
+    from tortoise.sdk import TortoiseSDK
+
+    d = tempfile.mkdtemp(prefix="tortoise_rebuild_chash_")
+    try:
+        db_path = os.path.join(d, "tortoise.db")
+        events_path = os.path.join(d, "events.jsonl")
+        sdk = TortoiseSDK(db_path=db_path, event_log_path=events_path)
+        try:
+            p = sdk.create_point("statement", "original content")
+            sdk.update_point(p["id"], content="REVISED content")
+        finally:
+            sdk.close()
+
+        # Same graph_name as the SDK default ("tortoise") so the reopened
+        # projection AND the re-ingest below hit the same graph on the
+        # docker test-redirect lane (derived names hash path+graph_name).
+        proj = FalkorProjection(db_path, graph_name="tortoise")
+        try:
+            proj.rebuild_all(d)
+            rows = proj.g.query(
+                "MATCH (n:Point {id:$id}) RETURN n.content, n.content_hash",
+                params={"id": p["id"]},
+            ).result_set
+            assert rows, "revised point missing after rebuild"
+            content, chash = rows[0]
+            assert content == "REVISED content", content
+            expected = hashlib.sha256(b"REVISED content").hexdigest()
+            assert chash == expected, (
+                f"rebuilt content_hash {chash!r} != sha256(new content) "
+                f"{expected!r} — PointRevised replay left a stale hash (#2942)"
+            )
+        finally:
+            proj.close()
+
+        # Re-ingesting the same content must dedup onto the rebuilt point
+        # (the indexed content_hash lookup is the primary dedup surface).
+        sdk2 = TortoiseSDK(db_path=db_path,
+                           event_log_path=os.path.join(d, "second.jsonl"))
+        try:
+            before = sdk2._get_proj().g.query(
+                "MATCH (n:Point) RETURN count(n)").result_set[0][0]
+            again = sdk2.create_point("statement", "REVISED content", dedup=True)
+            after = sdk2._get_proj().g.query(
+                "MATCH (n:Point) RETURN count(n)").result_set[0][0]
+            assert again["id"] == p["id"], (
+                "re-ingest after rebuild created a duplicate instead of "
+                "deduping onto the revised point (#2942)")
+            assert after == before, f"duplicate created: {before} -> {after}"
+        finally:
+            sdk2.close()
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_rebuild_all_preserves_tags_and_tagged_edges():
+    """#2897: the PointAdded journal carries `tags` (the JSONL clean dict
+    strips only embedding/content_hash) — replay must restore BOTH the
+    `n.tags` node property and the `:Tag` nodes / `TAGGED` edges.
+    """
+    if _skip_if_no_falkor():
+        pytest.skip("redislite falkordb unavailable")
+    from tortoise.sdk import TortoiseSDK
+
+    d = tempfile.mkdtemp(prefix="tortoise_rebuild_tags_")
+    try:
+        db_path = os.path.join(d, "tortoise.db")
+        events_path = os.path.join(d, "events.jsonl")
+        sdk = TortoiseSDK(db_path=db_path, event_log_path=events_path)
+        try:
+            p = sdk.create_point("statement", "tagged point",
+                                 tags=["alpha", "beta"])
+        finally:
+            sdk.close()
+
+        proj = FalkorProjection(
+            os.path.join(d, "rebuilt.db"), graph_name="test")
+        try:
+            proj.rebuild_all(d)
+            rows = proj.g.query(
+                "MATCH (n:Point {id:$id}) RETURN n.tags",
+                params={"id": p["id"]},
+            ).result_set
+            assert rows, "tagged point missing after rebuild"
+            assert rows[0][0] == ["alpha", "beta"], (
+                f"n.tags dropped on rebuild: {rows[0][0]!r} (#2897)")
+            tagged = proj.g.query(
+                "MATCH (:Point {id:$id})-[:TAGGED]->(t:Tag) "
+                "RETURN t.name ORDER BY t.name",
+                params={"id": p["id"]},
+            ).result_set
+            assert [r[0] for r in tagged] == ["alpha", "beta"], (
+                f"TAGGED edges dropped on rebuild: {tagged!r} (#2897)")
+        finally:
+            proj.close()
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def test_falkor_rebuild_all_snapshot_preserves_sdk_points():
     """#548 transitional: SDK points created WITHOUT event_log_path are
     preserved via rebuild_all's graph snapshot.

@@ -120,6 +120,7 @@ class _GuardedGraph:
         return getattr(self._g, name)
 
 from tortoise.config import RELATIVE_PATH_ERROR, SUPPORTED_URI_SCHEMES, LOOPBACK_HOSTS  # noqa: E402, I001
+from tortoise.ids import content_hash  # noqa: E402
 from tortoise.live import _live_only, _terminal_excluded  # noqa: E402
 from tortoise.embedded_lifecycle import (  # noqa: E402
     atexit_fast_close,  # #1371: registers the batch flush
@@ -2709,6 +2710,20 @@ class FalkorProjection(
                 params["embedding"] = None  # wipe stale embedding on failure (#19)
 
         set_clauses = ["n.content = coalesce($c, n.content)"]
+        # #2942: a content edit MUST recompute content_hash in the same write
+        # (mirror the live writer, sdk.update_point's #1904 fix). Every dedup
+        # surface matches on the STORED hash (create_point dedup, ingest,
+        # _content_exists), so replaying PointRevised without re-deriving it
+        # leaves a rebuilt graph with a hash computed from the point's OLD
+        # content: the indexed lookup `MATCH (n:Point {content_hash:$ch})`
+        # then misses and a re-ingest creates a duplicate. A present-but-wrong
+        # hash is worse than NULL — NULL still falls through to create_point's
+        # content-equality fallback. Gate matches the content write above:
+        # new_content None keeps the old content (hash untouched); "" is a
+        # real edit (hash of the empty string).
+        if new_content is not None:
+            set_clauses.append("n.content_hash = $ch")
+            params["ch"] = content_hash(new_content)
         # Phase 2 #49: context removed — new_context no longer written
         if "embedding" in params:
             set_clauses.append("n.embedding = $embedding")

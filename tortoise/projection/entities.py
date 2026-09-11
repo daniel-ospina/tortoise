@@ -230,12 +230,67 @@ class _EntityHandlers:
         source_ref = p.get("extractedFrom")
         if source_ref:
             self.g.query("MATCH (n:Point {id:$id}) SET n.extractedFrom = $ref", params={"id": p["id"], "ref": source_ref})
+        # #2897: `tags` is a raw LIST node property on the live graph (the
+        # generic prop SET in create_point / update_point writes it) but the
+        # fixed SET list above has no clause for it, so a rebuild silently
+        # dropped every tag. Deliberately its OWN query rather than another
+        # entry in `set_clauses`: additive + minimal, so it cannot collide
+        # with the parallel WS-A lane editing that list. `is not None` mirrors
+        # the live write (a present-but-None value stores no property; an
+        # explicit [] is a real clear and must be written). The :Tag nodes +
+        # TAGGED edges ride _upsert_point_edges, where the other edges live.
+        tags_val = p.get("tags")
+        if tags_val is not None:
+            self.g.query(
+                "MATCH (n:Point {id:$id}) SET n.tags = $tags",
+                params={"id": p["id"], "tags": tags_val},
+            )
         # P1-2: Temporal — also store provenance source_id
         if prov.get("source_id"):
             self.g.query(
                 "MATCH (n:Point {id:$id}) SET n.provenanceSource=$sid",
                 params={"id": p["id"], "sid": prov["source_id"]},
             )
+
+    def _sync_tag_edges(self, pid: str, tags) -> None:
+        """Reconstruct :Tag nodes + TAGGED edges for a replayed Point (#2897).
+
+        Mirrors the live writer ``sdk._sync_tags`` (same edge shape +
+        idempotent MERGE, so a replayed/duplicate event re-applies cleanly,
+        never doubles). Non-list values get no edges (parity with the live
+        list guard in ``_sync_tags``); a list may legitimately be empty —
+        then any pre-existing TAGGED edges are removed, mirroring the live
+        "clear tags" idiom (update_point normalizes a falsy value to []).
+        """
+        if not isinstance(tags, list):
+            return
+        for tag in tags:
+            self.g.query(
+                "MATCH (p:Point {id:$pid}) "
+                "MERGE (t:Tag {name:$tag}) "
+                "MERGE (p)-[:TAGGED]->(t)",
+                params={"pid": pid, "tag": tag},
+            )
+        # Drop edges to tags no longer in the list (the live clear-tags
+        # idiom). A no-op on a freshly-wiped rebuild graph; correct for the
+        # incremental apply()/rebuild(log) lane. Read-then-diff rather than
+        # an IN-clause — same FalkorDB list-parameter portability reason as
+        # the live writer (#485).
+        stale = self.g.query(
+            "MATCH (p:Point {id:$pid})-[:TAGGED]->(t:Tag) RETURN t.name",
+            params={"pid": pid},
+        ).result_set
+        removed = 0
+        for row in stale:
+            if row[0] not in tags:
+                self.g.query(
+                    "MATCH (p:Point {id:$pid})-[r:TAGGED]->(t:Tag {name:$tag}) "
+                    "DELETE r",
+                    params={"pid": pid, "tag": row[0]},
+                )
+                removed += 1
+        if removed:
+            self.g.query("MATCH (t:Tag) WHERE NOT (t)<-[:TAGGED]-() DELETE t")
 
     def _upsert_point_edges(self, p: dict) -> None:
         """Wire all Point edges (provenance + about + operator).
@@ -255,6 +310,12 @@ class _EntityHandlers:
                 self._create_about_edges(p["id"], str(entity_name))
         if p.get("operator"):
             self._create_edges(p)
+        # #2897: rebuild the :Tag nodes + TAGGED edges from the replayed
+        # snapshot (the PointAdded journal carries `tags`; replay used to
+        # discard it). Same pass as the other Point edges so apply() and
+        # rebuild_all() stay parity (#330).
+        if p.get("tags") is not None:
+            self._sync_tag_edges(p["id"], p.get("tags"))
 
     def _upsert(self, p: dict) -> None:
         """Upsert a Point: node properties via _upsert_point_props, then edges."""
