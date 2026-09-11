@@ -2716,9 +2716,17 @@ class FalkorProjection(
             # update_point #1904 recompute so a replayed PointRevised cannot
             # leave a STALE indexed dedup key behind (the writer now sets a
             # hash on PointAdded, so a missed recompute here would be worse
-            # than the prior NULL).
+            # than the prior NULL). #2958 review: `is not None` is not a type
+            # gate — a non-str new_content from a corrupt/hand-edited JSONL
+            # line would raise inside sha256(text.encode) and kill the rebuild
+            # pass (the recovery path). NULL degrades to create_point's
+            # content-equality fallback; a stale present-but-wrong hash does
+            # not — so NULL is the correct failure value.
             set_clauses.append("n.content_hash = $content_hash")
-            params["content_hash"] = _content_hash(new_content)
+            try:
+                params["content_hash"] = _content_hash(new_content)
+            except Exception:
+                params["content_hash"] = None
         # Phase 2 #49: context removed — new_context no longer written
         if "embedding" in params:
             set_clauses.append("n.embedding = $embedding")

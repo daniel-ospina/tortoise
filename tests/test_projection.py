@@ -783,6 +783,92 @@ def test_falkor_point_deny_list_drop_is_reported(caplog):
         pass  # shared session projection — module helper owns close
 
 
+def test_falkor_rebuild_preserves_nested_list_prop_on_object_layer():
+    """#2795 / #2894 (code-review): FalkorDB stores arbitrarily NESTED arrays
+    of scalars, so the shared `_persist_extra_props` value-type filter must
+    NOT drop them. The earlier flat-list-only rule silently lost a nested-list
+    prop on every one of the six non-Point layers (Subject/Object/Document/
+    Event/Source), which previously filtered only `v is not None`. Exercised on
+    the Object layer, where no list policy applies (`list_props` is None).
+    Verified against the docker lane: the engine stores `[[1, 2], [3, 4]]`."""
+    if _skip_if_no_falkor():
+        pytest.skip("redislite falkordb unavailable")
+    api, log = _api()
+    api.add_object("Nested Co", "organization",
+                   custom_nested=[[1, 2], [3, 4]])
+    proj = _shared_proj()
+    try:
+        proj.rebuild_all(str(log.path.parent))
+        row = proj.query(
+            "MATCH (o:Object {name:'Nested Co'}) RETURN o.custom_nested"
+        ).result_set
+        assert row and row[0][0] == [[1, 2], [3, 4]], row
+    finally:
+        pass  # shared session projection — module helper owns close
+
+
+def test_falkor_rebuild_nested_dict_in_list_not_persisted_no_crash():
+    """#2894 (code-review): the engine REJECTS an array containing a dict at
+    any depth — that is the crash this filter exists to prevent, and the
+    nested-array relaxation must not re-open it."""
+    if _skip_if_no_falkor():
+        pytest.skip("redislite falkordb unavailable")
+    api, log = _api()
+    api.add_object("Mixed Co", "organization", custom_mixed=[1, {"a": 1}])
+    proj = _shared_proj()
+    try:
+        proj.rebuild_all(str(log.path.parent))  # must not raise
+        row = proj.query(
+            "MATCH (o:Object {name:'Mixed Co'}) RETURN o.custom_mixed"
+        ).result_set
+        assert row and row[0][0] is None, row
+    finally:
+        pass  # shared session projection — module helper owns close
+
+
+def test_is_persistable_prop_value_matches_engine_type_model():
+    """#2894 / #2795 (code-review): pin the predicate to the ENGINE's actual
+    type model, verified empirically against the docker FalkorDB lane —
+    scalars and arbitrarily nested arrays of scalars (lists AND tuples, which
+    the driver encodes as an array) are stored; maps/dicts (including an array
+    that contains one at any depth), bytes and sets are rejected."""
+    from tortoise.projection.entities import _is_persistable_prop_value as ok
+    assert ok("x") and ok(1) and ok(1.5) and ok(True)
+    assert ok([]) and ok(["a", 1, True])
+    assert ok([[1, 2], [3, 4]])          # engine stores this
+    assert ok([[['deep']]])              # arbitrary nesting is stored
+    assert ok((1, 2))                    # tuple -> array on the wire
+    assert not ok({"k": 1})             # engine rejects maps
+    assert not ok([1, {"a": 1}])        # dict at any depth is rejected
+    assert not ok([{"a": 1}])
+    assert not ok([[{"a": 1}]])
+    assert not ok(b"x") and not ok({1, 2}) and not ok(None)
+
+
+def test_falkor_rebuild_malformed_revised_content_does_not_crash():
+    """#2958 review / #2795: a PointRevised carrying a non-string
+    `new_content` (a hand-edited or corrupt JSONL line — rebuild is the
+    RECOVERY path) must not crash the rebuild pass: the content_hash
+    recompute degrades to NULL instead of raising inside sha256()."""
+    if _skip_if_no_falkor():
+        pytest.skip("redislite falkordb unavailable")
+    api, log = _api()
+    pid = api.add_point("malformed revise", provenance("d.txt", [0, 5], "q"))
+    log.append({"type": "PointRevised", "id": pid, "new_content": 12345,
+                "projection_version": 2, "initiated_by": "test",
+                "agent_id": "test"})
+    proj = _shared_proj()
+    try:
+        proj.rebuild_all(str(log.path.parent))  # must not raise
+        row = proj.query(
+            "MATCH (n:Point {id:$id}) RETURN n.content_hash", id=pid
+        ).result_set
+        assert row, "malformed revise lost the point"
+        assert row[0][0] is None, row
+    finally:
+        pass  # shared session projection — module helper owns close
+
+
 # ----------------------------------------------- FalkorProjection.edge_stats
 
 def test_falkor_edge_stats():

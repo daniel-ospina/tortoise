@@ -20,24 +20,36 @@ from tortoise.live import decay_clause  # #2490: rebuild folds decay terminal po
 
 logger = logging.getLogger(__name__)
 
-# #2894: FalkorDB stores scalars and flat (scalar-element) lists; a
-# map/dict-valued property raises on `SET n += $extra`. Shared predicate used
-# by every `_persist_extra_props` layer (Subject/Object/Document/Event/Source)
-# and by the Point open-set writer (#2795).
+# #2894: FalkorDB stores scalars and arbitrarily NESTED arrays of scalars (a
+# tuple is encoded as an array); a map/dict-valued property — including an
+# array that contains one at any depth — raises on `SET n += $extra`.
+# Verified empirically against the docker lane (#2958 review): `[[1, 2], [3, 4]]`,
+# `[[[['deep']]]]` and `(1, 2)` are accepted and stored, while `{'k': 1}`,
+# `[1, {'a': 1}]`, bytes and sets are rejected. Shared predicate used by every
+# `_persist_extra_props` layer (Subject/Object/Document/Event/Source) and by
+# the Point open-set writer (#2795).
 _PERSISTABLE_SCALAR_TYPES: tuple = (str, bool, int, float)
+# Depth cap for the recursive array check — a self-referential structure must
+# not recurse without bound (a JSON payload cannot contain one, but the props
+# passthrough accepts a plain Python object).
+_PERSISTABLE_MAX_DEPTH: int = 32
 
 
-def _is_persistable_prop_value(value) -> bool:
-    """True for values FalkorDB accepts as node properties (#2894).
+def _is_persistable_prop_value(value, _depth: int = 0) -> bool:
+    """True for values FalkorDB accepts as node properties (#2894, #2795).
 
-    Scalars and flat lists of scalars are stored; maps/dicts and nested
-    structures are rejected by the engine, so they are filtered before the
-    SET rather than crashing it.
+    Scalars and arbitrarily nested arrays of scalars (lists AND tuples) are
+    stored. Maps/dicts — including any array that contains one, at any depth —
+    and bytes/sets are rejected by the engine, so they are filtered before
+    the SET rather than crashing it. `bool` is a subclass of `int`, so it is
+    covered by `_PERSISTABLE_SCALAR_TYPES`.
     """
     if isinstance(value, _PERSISTABLE_SCALAR_TYPES):
         return True
-    if isinstance(value, list):
-        return all(isinstance(x, _PERSISTABLE_SCALAR_TYPES) for x in value)
+    if _depth >= _PERSISTABLE_MAX_DEPTH:
+        return False
+    if isinstance(value, (list, tuple)):
+        return all(_is_persistable_prop_value(x, _depth + 1) for x in value)
     return False
 
 
@@ -170,6 +182,11 @@ class _EntityHandlers:
         # structural / edge-carried — never node props via passthrough
         "operator", "provenance", "about_entities", "aboutEntities",
         "extractedFrom", "is_episodic", "_nid", "_graph_id",
+        # #2958 review: written by its own explicit clause in
+        # `_upsert_point_props` (`SET n.provenanceSource=$sid`), gated on
+        # provenance.source_id — the open passthrough must not supply it when
+        # that gate is closed.
+        "provenanceSource",
         # Phase 2 #49: context was removed and is never written as a node
         # prop — the old closed writer enforced this by omission; the open
         # passthrough must keep it dropped.
@@ -192,7 +209,13 @@ class _EntityHandlers:
     })
     # #2795 (D2): D1's declared payload/capture props (contract.py has not
     # landed yet) — known passthrough keys that must NOT trip the drift
-    # warning.
+    # warning. NOTE (#2958 review): a LIST-valued entry here is INERT for that
+    # warning — the list policy in `_persist_extra_props` filters lists out
+    # BEFORE they can reach the extras dict the drift warning inspects, so such
+    # an entry is documentation-only until `_POINT_LIST_PROPS` is populated
+    # from D1's contract.py. `tags` is exactly that case: it is DENIED on
+    # replay (its raw-list half-restore is refused — #2897) and the drop is
+    # reported by the undeclared-list warning below, NOT suppressed here.
     _POINT_DECLARED_PROPS: frozenset = frozenset({
         "quote", "when", "search_keys", "speaker", "source_turn_id", "tags",
     })
@@ -220,9 +243,11 @@ class _EntityHandlers:
 
         None values are excluded — Cypher null semantics in SET maps are
         unreliable (coalesce-based updates use explicit per-field clauses).
-        #2894: non-persistable values (maps/dicts and other nested
-        structures) are filtered by `_is_persistable_prop_value` — the engine
-        rejects them on a SET, so dropping is the only non-crashing option.
+        #2894: non-persistable values (maps/dicts at ANY depth, bytes, sets)
+        are filtered by `_is_persistable_prop_value` — the engine rejects them
+        on a SET, so dropping is the only non-crashing option. Nested scalar
+        ARRAYS (lists/tuples) ARE accepted by the engine and pass the filter
+        (#2958 review — the earlier flat-list-only rule silently dropped them).
         #2795 (D2 mechanic 1): when `list_props` is supplied, a flat LIST is
         # persisted only when its key is declared there; an undeclared list is
         # denied, never written raw. `None` keeps the pre-existing permissive
@@ -286,7 +311,16 @@ class _EntityHandlers:
         # carve-out above.
         point_content_hash = None
         if not op and p.get("content"):
-            point_content_hash = _content_hash(p["content"])
+            try:
+                point_content_hash = _content_hash(p["content"])
+            except Exception:
+                # #2958 review: truthiness is not a type check — a truthy
+                # non-str content (int/list/dict) from a malformed or
+                # hand-edited JSONL line would raise inside
+                # sha256(text.encode). Rebuild is the RECOVERY path: leave the
+                # hash unset (the coalesce preserves any existing value)
+                # rather than crash the whole pass.
+                point_content_hash = None
 
         # Build SET clauses + params; context is optional (Phase 1 stop-writes, #49)
         set_clauses = [
