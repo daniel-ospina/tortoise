@@ -61,6 +61,11 @@ from tortoise.model_adapters import (
     RoutingModel,
     is_fatal,
 )
+
+# #2578 (Task 1): the product-verbatim abstained-phrases classifier — the
+# measurement gate's raw reader_refusal marker uses EXACTLY the vocabulary
+# the tortoise reader abstains with (never the _abs question-id marker).
+from tortoise.reader import _looks_abstained as _reader_abstained
 from tortoise.sdk import TortoiseSDK
 from tortoise.shared_state.concurrency import flock_exclusive
 
@@ -1219,6 +1224,11 @@ def _build_fingerprint(*, reader_model: str, judge_model: str,
                        evidence_boost: bool | None = None,
                        evidence_boost_verbatim: float | None = None,
                        evidence_boost_source: float | None = None,
+                       # #2578 (Task 1): the TR item-cap knob — conditional
+                       # presence like the other C2/R5 knobs (a 12↔16 cross-
+                       # arm resume must be refused — R5 flood-control
+                       # denominators blend silently without it).
+                       tr_top_k: int | None = None,
                        # C2 (#2518, #2513): the entity/fact-augmented key
                        # expansion arm — conditional presence like the other
                        # C2 knob (a boosted/expanded checkpoint resumed
@@ -1351,6 +1361,10 @@ def _build_fingerprint(*, reader_model: str, judge_model: str,
             # presence (the eval always passes 1500, so a pre-feature /
             # 500-ms-budget checkpoint refuses via CheckpointStaleError).
             ("retrieval_budget_ms", retrieval_budget_ms),
+            # #2578 (Task 1): the TR item-cap knob — conditional presence
+            # (absent at the 12 default → pre-feature checkpoints resume
+            # byte-identically; a 16-checkpoint resumed at 12 refuses).
+            ("tr_top_k", tr_top_k),
         ) if v is not None}),
     }
 
@@ -3253,6 +3267,11 @@ def run_evaluation(
     # C2 (#1745): evidence-mark boost — OFF by default in code (the plan's
     # default decision; ON for the re-validation run via env or flag).
     evidence_boost: bool | None = None,
+    # #2578 (Task 1): the measurement-lane gate — tri-state (explicit flag
+    # > ``TORTOISE_LME_MEASURE_FACTS`` env > OFF, fail-safe). When ON every
+    # outcome carries measure_facts {gold_admitted_ids, pool_depth,
+    # reader_refusal} for the per-question 2×2 admission attribution.
+    measure_facts: bool | None = None,
     evidence_boost_verbatim: float | None = None,
     evidence_boost_source: float | None = None,
     # C2 (#2518, #2513): entity/fact-augmented key expansion — tri-state
@@ -3428,6 +3447,13 @@ def run_evaluation(
     if aggregative_flag is None:
         af_env = (os.environ.get("TORTOISE_LME_AGGREGATIVE_FLAG") or "")
         aggregative_flag = af_env.strip().lower() in _TRUTHY
+    # #2578 (Task 1): resolve the measurement-lane gate tri-state ONCE,
+    # before the loop — same fail-safe contract as the C2 knobs (only
+    # 1/true/yes/on enables; a None with the env unset records OFF and the
+    # per-question outcomes stay byte-identical).
+    if measure_facts is None:
+        mf_env = (os.environ.get("TORTOISE_LME_MEASURE_FACTS") or "")
+        measure_facts = mf_env.strip().lower() in _TRUTHY
     # C1/C2 (#1745): resolve the remaining boost knobs ONCE, before the
     # loop — the methodology and the fingerprint must record EXACTLY what
     # the per-question retrieval serves (CLI > env > default, mirroring
@@ -3547,6 +3573,11 @@ def run_evaluation(
         ingest_question_retries=ingest_question_retries,
         resume_attempts_cap=resume_attempts_cap,
         retrieval_budget_ms=retrieval_budget_ms,
+        # #2578 (Task 1): conditional presence — the DEFAULT tr_top_k (12)
+        # fingerprints as absent so pre-feature checkpoints resume
+        # byte-identically; a non-default value fingerprints (mismatched
+        # resumes refused by the existing fingerprint gate).
+        tr_top_k=(tr_top_k if tr_top_k != DEFAULT_TR_TOP_K else None),
     )
     done, prior_failures = _load_checkpoint(checkpoint, fingerprint,
                                             run_key=run_key,
@@ -4225,6 +4256,30 @@ def run_evaluation(
                         **({"ingest_cached": bool(_cache_hit)}
                            if _cache_armed else {}),
                     }
+                    # #2578 (Task 1): the measurement-lane facts — present
+                    # ONLY when the gate is ON (a default OFF run keeps the
+                    # outcome byte-identical). gold_admitted_ids is computed
+                    # where the effective reader context is live (the
+                    # POST-_assemble_context ``context_points`` the reader
+                    # consumed — never the pre-cap ``hits``); pool_depth is
+                    # the already-computed retrieve-layer diagnostic
+                    # (forwarded, not recomputed); reader_refusal uses the
+                    # product-verbatim abstained-phrases classifier on the
+                    # reader's own hypothesis (never the _abs marker).
+                    if measure_facts:
+                        outcome["measure_facts"] = {
+                            "gold_admitted_ids": [
+                                h.get("id")
+                                for h in ret.get("context_points", [])
+                                if h.get("has_answer")],
+                            "pool_depth": ret.get("pool_depth"),
+                            # retrieval-only runs never invoked the reader —
+                            # refusal is recorded None ("not measured"),
+                            # never conflated with a reader abstention.
+                            "reader_refusal": (
+                                bool(_reader_abstained(hypothesis))
+                                if not retrieval_only else None),
+                        }
                     # #2185: drain the qid's CUMULATIVE usage envelope — the
                     # outcome carries ``llm_usage`` ONLY when an LLM was
                     # actually called this run (mock/retrieval-only outcomes
@@ -4839,6 +4894,13 @@ def outcomes_to_report(
                   **({"rerank_pass": o["rerank_pass"],
                       "rerank_latency_ms": o.get("rerank_latency_ms", 0.0)}
                      if o.get("rerank_pass") is not None else {}),
+                  # #2578 (Task 1): the measurement facts ride the
+                  # projection ONLY when the outcome carries them (gate-OFF
+                  # / pre-feature outcomes never gain a null measure_facts
+                  # key — the published report stays byte-compatible with
+                  # pre-feature consumers).
+                  **({"measure_facts": o["measure_facts"]}
+                     if o.get("measure_facts") is not None else {}),
                   # #2185 (Task 6): the per-question LLM usage envelope is
                   # projected ONLY when the outcome carries it (conditional
                   # rerank_pass pattern — mock/pre-seam outcomes NEVER gain
