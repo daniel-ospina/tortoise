@@ -80,8 +80,12 @@ def _get_backup_key() -> bytes:
     try:
         key = base64.b64decode(raw.strip(), validate=True)  # tolerate trailing newline
     except Exception as e:
+        # #2796 review (R2/R4, third site): never echo the raw value — a
+        # malformed key is still secret material, and this message can reach
+        # logs / /status.graph_failures. Fingerprint only (secret_store contract).
+        got = hashlib.sha256(raw.strip().encode()).hexdigest()[:8]
         raise RuntimeError(
-            f"TORTOISE_BACKUP_KEY must be base64-encoded (got {raw[:8]!r}...): {e}"
+            f"TORTOISE_BACKUP_KEY must be base64-encoded (got <{got}>...): {e}"
         ) from e
     if len(key) != _AES_KEY_SIZE:
         raise RuntimeError(

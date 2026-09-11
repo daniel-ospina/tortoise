@@ -165,6 +165,20 @@ def test_key_must_be_32_bytes(monkeypatch):
         encrypt_backup(b"x", key=None)
 
 
+def test_malformed_key_not_echoed(monkeypatch):
+    """#2796 review (security, third site): a malformed key is secret material.
+
+    The pre-fix message emitted ``raw[:8]``; the fix emits a non-reversible
+    fingerprint. Assert on the 8-char prefix (asserting the full value would
+    pass vacuously) and pin the fingerprint so a placeholder also fails.
+    """
+    monkeypatch.setenv("TORTOISE_BACKUP_KEY", "not-base64!!")
+    with pytest.raises(RuntimeError, match="base64") as exc:
+        encrypt_backup(b"x", key=None)
+    assert "not-base" not in str(exc.value)
+    assert hashlib.sha256(b"not-base64!!").hexdigest()[:8] in str(exc.value)
+
+
 # ── logical dump / restore ───────────────────────────────────────────────────
 
 

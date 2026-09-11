@@ -1,0 +1,964 @@
+#!/usr/bin/env bash
+# registry-cron.test.sh — self-check for .github/scripts/registry-cron.sh (#2796).
+#
+# Run: bash .github/scripts/registry-cron.test.sh
+# Exits 0 when ALL assertions pass, 1 on any failure. Self-contained: stubs
+# aws / curl / date on PATH and drives the driver with simulated /status,
+# sweep and direct-R2 fixtures. No network, no R2, no GitHub.
+#
+# Coverage (the #2796 taxonomy):
+#   1. deliberately off (measured-fresh pool)              → exit 0, silent
+#   2. off because config broken (config_error non-null)   → incident + RED
+#   3. off while the pool goes stale (age > driver-down)   → incident + RED
+#   4. off because storage is down (storage_error)         → R2_DOWN + RED
+#   5. enabled but 0 teams backed up while R2 has teams    → incident + RED
+#      (the #2823 shape) — and it must NOT self-heal WATCHER_DOWN
+#   6. enabled, 0 teams, R2 pool also empty (pre-beta)     → exit 0, silent
+#   7. enabled + backed_up                                 → exit 0, self-heals
+#   8. enabled + no_work (teams enumerated, none backed)   → incident + RED
+#   9. dedup recurrence: 412 + object with no issue → re-files
+#  10. dedup repeat:    412 + object with an OPEN issue → adopts (no duplicate)
+#  11. R2 listing fails  → pool UNKNOWN, never read as empty/fresh
+#  12. R2 listing fails while OFF → SWEEP_OFF_STALE + RED (unconfirmed pause)
+#  13. R2 preflight down + 0 teams → R2_DOWN stays OPEN (no self-close loop)
+#  14. lock held + stale last_sweep → SWEEP_NO_COVERAGE + RED
+#  15. lock held + fresh last_sweep → healthy, silent
+#  16. no_work + empty R2 pool → silent (pre-beta)
+#  17. missing/non-JSON .enabled → SWEEP_NO_COVERAGE (fail CLOSED) + RED
+#  18. watcher.running=false → WATCHER_DOWN filed (jq `//` false bug, #2843)
+#  19. prefix without DEFAULT archive while OFF → SWEEP_OFF_STALE + RED
+#  20. config_error secret redacted before PUBLICATION (#2796 review R2/R4)
+#  21. 412 + R2 object with OPEN issue_number + empty search → NO duplicate
+#  22. 412 + R2 object with CLOSED issue_number → re-files
+#  23. WATCHER_DOWN self-heals on watcher EVIDENCE even on no_work (R3)
+#  24. purge ride-along failure → RED
+#  25. reconcile ride-along failure → RED
+#  26. unquoted/bare secret runs are redacted too (security review)
+#  27. last_sweep (graph_failures[].error) is redacted before publication
+#  28. a 404 (deleted) tracked issue re-files; a 500 blip does not duplicate
+#  29. resolve deletes BOTH global.json and the server-owned _.json (#2844)
+#  30. a missing .watcher block neither files nor self-heals WATCHER_DOWN
+#  31. degraded is healthy; no_eligible_teams is the no-coverage family
+#  32. lock held with no usable last_sweep + pool data → SWEEP_NO_COVERAGE
+#  33. sweep error / non-JSON body → SWEEP_NO_COVERAGE + RED (catch-all)
+#  34. missing GITHUB_TOKEN → fail closed (no silent-deaf alerting)
+#  35. a per-team listing failure is unmeasured, not a false stale
+#  36. positive self-heals: SWEEP_CONFIG_ERROR / SWEEP_OFF_STALE resolve
+#  37. multi-team pool: `--output text` is ONE tab-separated line (review P1)
+#  38. held lock + UNMEASURED pool → SWEEP_NO_COVERAGE (review P1)
+#  39. redaction of DSN/URI/Basic/lowercase/numbered secrets (security review)
+#  40. the purge failure body is redacted (security review)
+#  41. storage_error while ENABLED is loud, and blocks R2_DOWN self-heal
+#  42. no_work with graph_totals.backed_up>0 is not a coverage gap
+#  43. APP_DOWN is RED (any filing is RED)
+#  44. an index read failure is unmeasured, not "no index"
+#  45. a measured-fresh off pool resolves a stale R2_DOWN
+#  46. SWEEP_NO_COVERAGE self-heals on a degraded/backed_up sweep
+#  47. a per-team STALE filed while ENABLED also makes the run RED
+#  48. `enum_failed` is the catch-all family → SWEEP_NO_COVERAGE + RED
+#  49. no_eligible_teams + measured-EMPTY pool → silent (pre-beta)
+#  50. redaction: prefixed/newline-split/schemeless-DSN shapes; no false
+#      positives on `compatible:`/`patch:`/`author:`/graph ids/`TimeoutError`
+#  51. the success branch backfills the R2 object with its issue_number (F7)
+#  52. a failed listing blocks the R2_DOWN self-heal (F2)
+#  53. a failed legacy-flat listing is unmeasured (R2_DOWN + RED)
+#  54. an unparseable archive timestamp is never read as fresh
+#  55. a stale watcher AGE alone (running=true, age>30) files WATCHER_DOWN
+#  56. the measurable-empty lock branch is the silent one
+#
+# Fixtures are simulated; the real driver defers nothing.
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DRIVER="$SCRIPT_DIR/registry-cron.sh"
+
+PASS=0
+FAIL=0
+ok()  { PASS=$((PASS + 1)); echo "  ✅ $1"; }
+bad() { FAIL=$((FAIL + 1)); echo "  ❌ $1"; }
+assert_eq() { # <actual> <expected> <label>
+  if [ "$1" = "$2" ]; then ok "$3"; else bad "$3 (got '$1', want '$2')"; fi
+}
+assert_contains() { # <haystack> <needle> <label>
+  if printf '%s' "$1" | grep -qF -- "$2"; then ok "$3"; else bad "$3 (missing: $2)"; fi
+}
+assert_not_contains() { # <haystack> <needle> <label>
+  if printf '%s' "$1" | grep -qF -- "$2"; then bad "$3 (unexpected: $2)"; else ok "$3"; fi
+}
+assert_match() { # <haystack> <regex> <label>
+  if printf '%s' "$1" | grep -qE -- "$2"; then ok "$3"; else bad "$3 (no match: $2)"; fi
+}
+assert_not_match() { # <haystack> <regex> <label>
+  if printf '%s' "$1" | grep -qE -- "$2"; then bad "$3 (unexpected match: $2)"; else ok "$3"; fi
+}
+assert_filed() { # <log> <KIND> <label> — a create POST whose body carries KIND
+  # NB: matching a bare KIND against the log is confounded by the GitHub SEARCH
+  # URL (which carries the kind). Assert on the create POST instead.
+  if printf '%s' "$1" | grep -qE "GH POST .*/issues .*${2}"; then ok "$3"; else bad "$3 (no incident POST for ${2})"; fi
+}
+
+FIX="$(mktemp -d)"
+trap 'rm -rf "$FIX"' EXIT
+BIN="$FIX/bin"
+mkdir -p "$BIN"
+LOG="$FIX/calls.log"
+: > "$LOG"
+
+# ── stub: aws ───────────────────────────────────────────────────────────────
+cat > "$BIN/aws" <<'AWS_EOF'
+#!/usr/bin/env bash
+op="${2:-}"
+args=("$@")
+argval() { # <flag> -> next arg
+  local i
+  for ((i=0; i<${#args[@]}; i++)); do
+    if [ "${args[$i]}" = "$1" ]; then printf '%s' "${args[$((i+1))]}"; return 0; fi
+  done
+}
+echo "AWS $op key=$(argval --key) prefix=$(argval --prefix)" >> "$STUB_LOG"
+# Record the put body so a test can PROVE the backfilled issue_number (as
+# opposed to the create-once attempt, which writes issue_number:null —
+# review: the bare key match was vacuous).
+b="$(argval --body)"
+[ -n "$b" ] && [ -f "$b" ] && echo "AWS $op body=$(cat "$b" 2>/dev/null)" >> "$STUB_LOG"
+case "$op" in
+  head-bucket)  [ "${STUB_R2_DOWN:-0}" = "1" ] && exit 1 || exit 0 ;;
+  list-objects-v2)
+    p="$(argval --prefix)"
+    case "$p" in
+      "backups/")
+        [ "${STUB_LIST_FAIL:-0}" = "1" ] && exit 1
+        printf '%s' "${R2_TEAMS:-}" ;;
+      */default/)
+        [ "${STUB_LIST_FAIL_TEAM:-0}" = "1" ] && exit 1
+        # Per-team override so a multi-team case can distinguish WHICH team the
+        # driver measured (review R1 test-integrity): with one shared listing
+        # every prefix returns the same value and the tab-split regression is
+        # invisible (the buggy loop measures only the LAST team).
+        case "$p" in
+          "backups/teamZ/default/") printf '%s' "${R2_DEFAULT_LIST_Z:-${R2_DEFAULT_LIST:-}}" ;;
+          "backups/teamA/default/") printf '%s' "${R2_DEFAULT_LIST_A:-${R2_DEFAULT_LIST:-}}" ;;
+          *) printf '%s' "${R2_DEFAULT_LIST:-}" ;;
+        esac ;;
+      backups/*/2)
+        [ "${STUB_FLAT_FAIL:-0}" = "1" ] && exit 1
+        printf '%s' "${R2_FLAT_LIST:-[]}" ;;
+      *)            printf '' ;;
+    esac
+    ;;
+  put-object)   [ "${STUB_412:-0}" = "1" ] && exit 1 || exit 0 ;;
+  get-object)
+    # STUB_INDEX_FAIL emulates a NON-404 failure reading the legacy-flat index
+    # (a transient S3 error) so the driver must treat the pool as unmeasured.
+    if [ "${STUB_INDEX_FAIL:-0}" = "1" ] && case "$(argval --key)" in *legacy-flat-index*) true ;; *) false ;; esac; then
+      echo "An error occurred (InternalError) when calling the GetObject operation" >&2
+      exit 1
+    fi
+    printf '%s' "${STUB_GET_BODY:-}" ;;
+  delete-object) exit 0 ;;
+  *) exit 0 ;;
+esac
+exit 0
+AWS_EOF
+
+# ── stub: date (GNU-compatible enough for the driver) ───────────────────────
+cat > "$BIN/date" <<'DATE_EOF'
+#!/usr/bin/env bash
+if [ "${1:-}" = "-d" ]; then
+  arg="${2:-}"
+  python3 -c "import sys,datetime;print(int(datetime.datetime.fromisoformat(sys.argv[1].replace('Z','+00:00')).timestamp()))" "$arg" 2>/dev/null \
+    || /bin/date -u -d "$arg" +%s 2>/dev/null \
+    || echo 0
+  exit 0
+fi
+exec /bin/date "$@"
+DATE_EOF
+
+# ── stub: curl ──────────────────────────────────────────────────────────────
+cat > "$BIN/curl" <<'CURL_EOF'
+#!/usr/bin/env bash
+out_file=""; write_fmt=""; url=""; data=""; method="GET"
+args=("$@"); i=0
+while [ $i -lt ${#args[@]} ]; do
+  a="${args[$i]}"
+  case "$a" in
+    -o) out_file="${args[$((i+1))]:-}"; i=$((i+2)) ;;
+    -w) write_fmt="${args[$((i+1))]:-}"; i=$((i+2)) ;;
+    -X) method="${args[$((i+1))]:-GET}"; i=$((i+2)) ;;
+    -d) data="${args[$((i+1))]:-}"; i=$((i+2)) ;;
+    -H|-m|--data-urlencode|--data|--header|--max-time|-u) i=$((i+2)) ;;
+    -s|-sS|-S|-L|-k|-f|--fail) i=$((i+1)) ;;
+    *) url="$a"; i=$((i+1)) ;;
+  esac
+done
+
+emit() { # body code
+  local body="$1" code="${2:-200}"
+  [ -n "$out_file" ] && printf '%s' "$body" > "$out_file"
+  if [ -n "$write_fmt" ]; then printf '%s' "$code"; else [ -z "$out_file" ] && printf '%s' "$body"; fi
+}
+# NB: defaults live in variables — a literal JSON object inside ${VAR:-{...}}
+# is mis-parsed (the first '}' closes the expansion, leaking the rest).
+DEFAULT_STATUS='{}'
+DEFAULT_SWEEP='{"status":"backed_up"}'
+DEFAULT_PURGE='{"status":"ok","teams_purged":0}'
+gh_log() { # line
+  if [ -n "$data" ]; then echo "GH $method $url $data" >> "$STUB_LOG"; else echo "GH $method $url" >> "$STUB_LOG"; fi
+}
+
+case "$url" in
+  *api.telegram.org*) exit 0 ;;
+  *api.github.com*)
+    gh_log
+    case "$url" in
+      */search/issues*)
+        items="[]"
+        for kind in SWEEP_CONFIG_ERROR SWEEP_OFF_STALE SWEEP_NO_COVERAGE WATCHER_DOWN APP_DOWN R2_DOWN STALE; do
+          var="GH_ISSUE_$kind"
+          val="${!var:-}"
+          if [ -n "$val" ] && printf '%s' "$url" | grep -q "$kind"; then
+            items="[{\"number\":$val,\"title\":\"[DR] $kind\"}]"
+            break
+          fi
+        done
+        printf '{"items":%s}' "$items" ;;
+      */issues/*/comments*) printf '{}' ;;
+      */issues/*)
+        if [ "$method" = "GET" ]; then
+          # emit honours -o/-w: gh_issue_open asks for the code first, then the body.
+          emit "{\"state\":\"${GH_ISSUE_STATE:-open}\"}" "${STUB_ISSUE_CODE:-200}"
+        else
+          printf '{}'
+        fi ;;
+      */issues) printf '{"number":%s}' "${GH_NEW_ISSUE:-900}" ;;
+      *) printf '{}' ;;
+    esac
+    ;;
+  *"/v1/internal/backups/status"*)
+    [ "${STUB_APP_DOWN:-0}" = "1" ] && exit 0
+    sbody="${STUB_STATUS_BODY:-$DEFAULT_STATUS}"; emit "$sbody" ;;
+  *"/v1/internal/backups/sweep"*)
+    sbody="${STUB_SWEEP_BODY:-$DEFAULT_SWEEP}"; emit "$sbody" ;;
+  *"/v1/internal/backups/purge"*)
+    sbody="${STUB_PURGE_BODY:-$DEFAULT_PURGE}"; emit "$sbody" "${STUB_PURGE_CODE:-200}" ;;
+  *"/v1/internal/reconcile"*)
+    emit '{}' "${STUB_RECONCILE_CODE:-200}" ;;
+  *"/v1/internal/driver/heartbeat"*) printf '{}' ;;
+  *) printf '{}' ;;
+esac
+exit 0
+CURL_EOF
+
+chmod +x "$BIN/aws" "$BIN/date" "$BIN/curl"
+export PATH="$BIN:$PATH"
+export STUB_LOG="$LOG"
+
+# ── fixture timestamps ──────────────────────────────────────────────────────
+TS_RECENT="$(python3 -c "import datetime;print((datetime.datetime.now(datetime.timezone.utc)-datetime.timedelta(minutes=5)).strftime('%Y-%m-%dT%H:%M:%SZ'))")"
+TS_STALE="$(python3 -c "import datetime;print((datetime.datetime.now(datetime.timezone.utc)-datetime.timedelta(minutes=500)).strftime('%Y-%m-%dT%H:%M:%SZ'))")"
+export TS_RECENT TS_STALE
+
+# ── driver env ──────────────────────────────────────────────────────────────
+export INTERNAL_API_URL="https://api.example.test"
+export FASTAPI_INTERNAL_KEY="test-key"
+export R2_ACCOUNT_ID="acct"
+export R2_BUCKET="tortoise-backups"
+export GH_REPO="daniel-ospina/tortoise"
+export GITHUB_TOKEN="test-token"
+export BACKUP_STALE_THRESHOLD_MIN="90"
+export BACKUP_DRIVER_DOWN_THRESHOLD_MIN="240"
+unset TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID || true
+
+reset_case() {
+  : > "$LOG"
+  unset STUB_STATUS_BODY STUB_SWEEP_BODY STUB_PURGE_BODY STUB_PURGE_CODE \
+        STUB_RECONCILE_CODE STUB_412 STUB_APP_DOWN STUB_R2_DOWN STUB_GET_BODY \
+        SIMULATE_APP_DOWN \
+        STUB_LIST_FAIL STUB_LIST_FAIL_TEAM STUB_FLAT_FAIL STUB_INDEX_FAIL GH_ISSUE_STATE STUB_ISSUE_CODE \
+        GH_SEARCH_JSON GH_NEW_ISSUE R2_TEAMS R2_DEFAULT_LIST R2_FLAT_LIST \
+        R2_DEFAULT_LIST_Z R2_DEFAULT_LIST_A \
+        GH_ISSUE_SWEEP_CONFIG_ERROR GH_ISSUE_SWEEP_OFF_STALE GH_ISSUE_SWEEP_NO_COVERAGE \
+        GH_ISSUE_WATCHER_DOWN GH_ISSUE_APP_DOWN GH_ISSUE_R2_DOWN GH_ISSUE_STALE || true
+  export R2_FLAT_LIST="[]"
+}
+
+run_driver() { # -> sets RC
+  # Invoke the driver directly (it carries a shebang + the exec bit) rather
+  # than `bash "$DRIVER"`: a $(bash <script>) command substitution is read by
+  # the agent-infra worktree guard as unverifiable "git content" and blocks the
+  # harness locally (#1484 false positive — filed separately).
+  set +e
+  OUT="$("$DRIVER" 2>&1)"
+  RC=$?
+  set -e
+}
+
+status_body() { # enabled config storage [watcher_running] [watcher_age] [last_sweep_at]
+  printf '{"enabled":%s,"config_error":%s,"storage_error":%s,"per_team":{},"last_sweep":{"last_sweep_at":"%s","last_team_count":0},"watcher":{"running":%s,"age_minutes":%s}}' \
+    "$1" "$2" "$3" "${6:-2026-08-09T23:30:00Z}" "${4:-true}" "${5:-1}"
+}
+
+echo "registry-cron.test.sh — #2796 taxonomy"
+
+# ── 1. deliberately off (no config error, fresh pool) → silent exit 0 ───────
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_STATUS_BODY="$(status_body false null null)"
+export STUB_SWEEP_BODY='{"status":"backed_up"}'
+run_driver
+assert_eq "$RC" 0 "1. deliberate-off exits 0"
+assert_not_contains "$(cat "$LOG")" "GH POST" "1. deliberate-off files nothing"
+assert_contains "$OUT" "deliberately disabled" "1. deliberate-off logs the kill-switch as deliberate"
+
+# ── 2. off because config broken → SWEEP_CONFIG_ERROR + RED ─────────────────
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_STATUS_BODY="$(status_body false '"REGISTRY_STREAM_KEY not set"' null)"
+run_driver
+assert_eq "$RC" 1 "2. config-broken off exits RED (1)"
+assert_filed "$(cat "$LOG")" SWEEP_CONFIG_ERROR "2. config-broken files SWEEP_CONFIG_ERROR"
+assert_contains "$OUT" "kill-switch is NOT an operator decision" "2. config-broken is not treated as a pause"
+
+# ── 3. off while the pool goes stale → SWEEP_OFF_STALE + RED ────────────────
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_STALE"
+export STUB_STATUS_BODY="$(status_body false null null)"
+run_driver
+assert_eq "$RC" 1 "3. off-while-stale exits RED (1)"
+assert_filed "$(cat "$LOG")" SWEEP_OFF_STALE "3. off-while-stale files SWEEP_OFF_STALE"
+assert_contains "$OUT" "newest archive" "3. direct leg still reports the measured age"
+
+# ── 4. off because storage is down → R2_DOWN + RED ──────────────────────────
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_STATUS_BODY="$(status_body false null '"bucket unreachable"')"
+run_driver
+assert_eq "$RC" 1 "4. storage-broken off exits RED (1)"
+assert_filed "$(cat "$LOG")" R2_DOWN "4. storage-broken files R2_DOWN"
+
+# ── 5. enabled but 0 teams backed up while R2 has teams → SWEEP_NO_COVERAGE ─
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_STATUS_BODY="$(status_body true null null false 999)"
+export STUB_SWEEP_BODY='{"status":"no_teams","teams_backed_up":0}'
+export GH_ISSUE_WATCHER_DOWN=55
+run_driver
+assert_eq "$RC" 1 "5. enabled-no-coverage exits RED (1)"
+assert_filed "$(cat "$LOG")" SWEEP_NO_COVERAGE "5. enabled-no-coverage files SWEEP_NO_COVERAGE"
+assert_match "$(cat "$LOG")" "AWS put-object key=ops/alerts/WATCHER_DOWN/global.json" "5. the stale watcher incident is recorded"
+assert_not_match "$(cat "$LOG")" "GH PATCH .*/issues/55" "5. enabled-no-coverage does NOT self-heal WATCHER_DOWN"
+
+# ── 6. enabled, 0 teams, R2 pool also empty (chronic pre-beta) → silent ─────
+reset_case
+export STUB_STATUS_BODY="$(status_body true null null)"
+export STUB_SWEEP_BODY='{"status":"no_teams","teams_backed_up":0}'
+run_driver
+assert_eq "$RC" 0 "6. pre-beta 0-teams exits 0"
+assert_not_contains "$(cat "$LOG")" "SWEEP_NO_COVERAGE" "6. pre-beta 0-teams files nothing"
+
+# ── 7. enabled + backed_up → self-heal closes WATCHER_DOWN ──────────────────
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_STATUS_BODY="$(status_body true null null)"
+export STUB_SWEEP_BODY='{"status":"backed_up","teams_backed_up":1}'
+export GH_ISSUE_WATCHER_DOWN=77
+run_driver
+assert_eq "$RC" 0 "7. healthy run exits 0"
+assert_match "$(cat "$LOG")" "GH PATCH .*/issues/77" "7. healthy run closes the incident"
+
+# ── 8. enabled + no_work (teams enumerated, none backed up) → RED ───────────
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_STATUS_BODY="$(status_body true null null)"
+export STUB_SWEEP_BODY='{"status":"no_work","teams_backed_up":0}'
+run_driver
+assert_eq "$RC" 1 "8. no_work exits RED (1)"
+assert_filed "$(cat "$LOG")" SWEEP_NO_COVERAGE "8. no_work files SWEEP_NO_COVERAGE"
+
+# ── 9. dedup recurrence: 412 + no open issue → re-files ─────────────────────
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_STATUS_BODY="$(status_body false '"REGISTRY_STREAM_KEY not set"' null)"
+export STUB_412=1
+run_driver
+assert_eq "$RC" 1 "9. recurrence exits RED (1)"
+assert_match "$(cat "$LOG")" "GH POST .*/issues \{" "9. recurrence with a closed issue RE-FILES (not swallowed)"
+
+# ── 10. dedup repeat: 412 + open issue → adopt, no duplicate ────────────────
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_STATUS_BODY="$(status_body false '"REGISTRY_STREAM_KEY not set"' null)"
+export STUB_412=1
+export GH_ISSUE_SWEEP_CONFIG_ERROR=42
+run_driver
+assert_eq "$RC" 1 "10. repeat is still RED (1)"
+assert_not_match "$(cat "$LOG")" "GH POST .*/issues \{" "10. repeat adopts the open issue (no duplicate)"
+
+# ── 11. R2 listing failure → pool UNKNOWN, not empty ────────────────────────
+reset_case
+export STUB_LIST_FAIL=1
+export STUB_STATUS_BODY="$(status_body true null null)"
+export STUB_SWEEP_BODY='{"status":"no_teams","teams_backed_up":0}'
+run_driver
+assert_eq "$RC" 1 "11. unmeasurable pool + no_teams exits RED (1)"
+assert_filed "$(cat "$LOG")" SWEEP_NO_COVERAGE "11. unmeasurable pool files SWEEP_NO_COVERAGE"
+assert_contains "$OUT" "pool state is UNKNOWN" "11. the failed listing is recorded as unknown"
+
+# ── 12. R2 listing failure while OFF → SWEEP_OFF_STALE + RED ────────────────
+# Review R5/Agent1: an unmeasurable pool is NOT a confirmed deliberate pause,
+# so the driver files and goes RED (unknown ≠ fresh).
+reset_case
+export STUB_LIST_FAIL=1
+export STUB_STATUS_BODY="$(status_body false null null)"
+run_driver
+assert_eq "$RC" 1 "12. off + unmeasurable pool exits RED (1)"
+assert_filed "$(cat "$LOG")" SWEEP_OFF_STALE "12. an unmeasured pool while off files SWEEP_OFF_STALE"
+assert_contains "$OUT" "cannot be confirmed" "12. the driver says the pause is unconfirmed"
+
+# ── 13. R2 preflight down + 0 teams → R2_DOWN stays OPEN ────────────────────
+reset_case
+export STUB_R2_DOWN=1
+export STUB_STATUS_BODY="$(status_body true null null)"
+export STUB_SWEEP_BODY='{"status":"no_teams","teams_backed_up":0}'
+export GH_ISSUE_R2_DOWN=88
+run_driver
+assert_eq "$RC" 1 "13. R2 down + 0 teams exits RED (1)"
+assert_match "$(cat "$LOG")" "AWS put-object key=ops/alerts/R2_DOWN/global.json" "13. R2_DOWN is recorded"
+assert_not_match "$(cat "$LOG")" "GH PATCH .*/issues/88" "13. a failed R2 probe does NOT self-close the R2_DOWN it filed"
+
+# ── 14. 202 lock held + stale last_sweep → SWEEP_NO_COVERAGE ────────────────
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_STATUS_BODY="$(status_body true null null true 1 "$TS_STALE")"
+export STUB_SWEEP_BODY='{"status":"already_running"}'
+run_driver
+assert_eq "$RC" 1 "14. stuck lock exits RED (1)"
+assert_filed "$(cat "$LOG")" SWEEP_NO_COVERAGE "14. stuck lock files SWEEP_NO_COVERAGE"
+
+# ── 15. 202 lock held + fresh last_sweep → healthy ──────────────────────────
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_STATUS_BODY="$(status_body true null null true 1 "$TS_RECENT")"
+export STUB_SWEEP_BODY='{"status":"already_running"}'
+run_driver
+assert_eq "$RC" 0 "15. healthy lock exits 0"
+assert_not_contains "$(cat "$LOG")" "SWEEP_NO_COVERAGE" "15. healthy lock files nothing"
+
+# ── 16. no_work + empty R2 pool → silent (pre-beta) ─────────────────────────
+reset_case
+export STUB_STATUS_BODY="$(status_body true null null)"
+export STUB_SWEEP_BODY='{"status":"no_work","teams_backed_up":0}'
+run_driver
+assert_eq "$RC" 0 "16. no_work + empty pool exits 0"
+assert_not_contains "$(cat "$LOG")" "SWEEP_NO_COVERAGE" "16. no_work + empty pool files nothing"
+
+# ── 17. missing / non-JSON .enabled → fail CLOSED ───────────────────────────
+reset_case
+export STUB_STATUS_BODY='{"config_error":null,"storage_error":null}'
+run_driver
+assert_eq "$RC" 1 "17a. missing .enabled exits RED (1)"
+assert_contains "$(cat "$LOG")" "unclassifiable" "17a. missing .enabled files the unclassifiable incident"
+reset_case
+export STUB_STATUS_BODY='Internal Server Error'
+run_driver
+assert_eq "$RC" 1 "17b. non-JSON 200 exits RED (1)"
+assert_contains "$(cat "$LOG")" "unclassifiable" "17b. non-JSON 200 files the unclassifiable incident"
+
+# ── 18. watcher.running=false → WATCHER_DOWN (jq `//` false bug, #2843) ─────
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_STATUS_BODY="$(status_body true null null false 1)"
+export STUB_SWEEP_BODY='{"status":"backed_up","teams_backed_up":1}'
+run_driver
+assert_eq "$RC" 1 "18. backed_up is RED while the staleness watcher is dead (loud)"
+assert_match "$(cat "$LOG")" 'GH POST .*/issues .*WATCHER_DOWN' "18. running=false is honored and files WATCHER_DOWN"
+assert_contains "$OUT" "exiting RED" "18. the run is RED because it filed an incident"
+
+# ── 19. prefix without DEFAULT archive while OFF → SWEEP_OFF_STALE ───────────
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST=""
+export STUB_STATUS_BODY="$(status_body false null null)"
+run_driver
+assert_eq "$RC" 1 "19. never-backed-up pool + OFF exits RED (1)"
+assert_filed "$(cat "$LOG")" SWEEP_OFF_STALE "19. never-backed-up pool files SWEEP_OFF_STALE"
+
+# ── 20. config_error secret is redacted before publication ──────────────────
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_STATUS_BODY='{"enabled":false,"config_error":"must be base64 (got '"'"'SECRETKEY9'"'"'...)","storage_error":null,"per_team":{},"last_sweep":{"last_sweep_at":"2026-08-09T23:30:00Z","last_team_count":0},"watcher":{"running":true,"age_minutes":1}}'
+run_driver
+assert_eq "$RC" 1 "20. config-broken off exits RED (1)"
+assert_contains "$(cat "$LOG")" "<redacted>" "20. the published body carries the redaction marker"
+assert_not_contains "$(cat "$LOG")" "SECRETKEY9" "20. the key prefix is NOT published"
+assert_not_contains "$OUT" "SECRETKEY9" "20. the key prefix is NOT logged either"
+
+# ── 21. 412 + R2 object with an OPEN issue_number → no duplicate ────────────
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_STATUS_BODY="$(status_body false '"REGISTRY_STREAM_KEY not set"' null)"
+export STUB_412=1
+export STUB_GET_BODY='{"kind":"SWEEP_CONFIG_ERROR","issue_number":42}'
+export GH_ISSUE_STATE=open
+run_driver
+assert_eq "$RC" 1 "21. object-tracked incident is still RED (1)"
+assert_contains "$OUT" "already tracked by open issue #42" "21. the object is trusted over the search"
+assert_not_match "$(cat "$LOG")" "GH POST .*/issues \{" "21. no duplicate issue is filed"
+
+# ── 22. 412 + R2 object with a CLOSED issue_number → re-files ───────────────
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_STATUS_BODY="$(status_body false '"REGISTRY_STREAM_KEY not set"' null)"
+export STUB_412=1
+export STUB_GET_BODY='{"kind":"SWEEP_CONFIG_ERROR","issue_number":42}'
+export GH_ISSUE_STATE=closed
+run_driver
+assert_eq "$RC" 1 "22. closed-issue recurrence exits RED (1)"
+assert_match "$(cat "$LOG")" "GH POST .*/issues \{" "22. a closed issue RE-FILES (not swallowed)"
+assert_match "$(cat "$LOG")" "AWS put-object body=\{\"kind\":\"SWEEP_CONFIG_ERROR\",\"issue_number\":[0-9]" "22. the re-filed issue number is backfilled (body proven)"
+
+# ── 23. WATCHER_DOWN self-heals on watcher EVIDENCE even on no_work (R3) ────
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_STATUS_BODY="$(status_body true null null true 1)"
+export STUB_SWEEP_BODY='{"status":"no_work","teams_backed_up":0}'
+export GH_ISSUE_WATCHER_DOWN=66
+run_driver
+assert_eq "$RC" 1 "23. no_work is still RED (1)"
+assert_filed "$(cat "$LOG")" SWEEP_NO_COVERAGE "23. no_work files SWEEP_NO_COVERAGE"
+assert_match "$(cat "$LOG")" "GH PATCH .*/issues/66" "23. a fresh heartbeat still clears WATCHER_DOWN"
+
+# ── 24. purge ride-along failure → RED ──────────────────────────────────────
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_STATUS_BODY="$(status_body true null null)"
+export STUB_SWEEP_BODY='{"status":"backed_up","teams_backed_up":1}'
+export STUB_PURGE_CODE=500
+run_driver
+assert_eq "$RC" 1 "24. purge failure exits RED (1)"
+assert_contains "$OUT" "purge ride-along failed" "24. the failure names the purge leg"
+
+# ── 25. reconcile ride-along failure → RED ──────────────────────────────────
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_STATUS_BODY="$(status_body true null null)"
+export STUB_SWEEP_BODY='{"status":"backed_up","teams_backed_up":1}'
+export STUB_RECONCILE_CODE=500
+run_driver
+assert_eq "$RC" 1 "25. reconcile failure exits RED (1)"
+assert_contains "$OUT" "reconcile ride-along failed" "25. the failure names the reconcile leg"
+
+# ── 26. bare/unquoted secret runs are redacted too (security review) ────────
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_STATUS_BODY="$(status_body false "load_config failed: ghp_16C7e42F292c6912E7710c838347Ae178B4a at /home/runner/app/x.py" null)"
+run_driver
+assert_eq "$RC" 1 "26. bare-run secret + broken config exits RED (1)"
+assert_not_contains "$(cat "$LOG")" "ghp_16C7e42F292c6912E7710c838347Ae178B4a" "26. an unquoted PAT is NOT published"
+assert_not_contains "$OUT" "ghp_16C7e42F292c6912E7710c838347Ae178B4a" "26. an unquoted PAT is NOT logged"
+
+# ── 27. last_sweep error text is redacted before publication ────────────────
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_STATUS_BODY="$(printf '{"enabled":true,"config_error":null,"storage_error":null,"per_team":{},"last_sweep":{"last_sweep_at":"%s","last_team_count":1,"graph_failures":[{"error":"boom ghp_16C7e42F292c6912E7710c838347Ae178B4a"}]},"watcher":{"running":true,"age_minutes":1}}' "$TS_RECENT")"
+export STUB_SWEEP_BODY='{"status":"no_work","teams_backed_up":0}'
+run_driver
+assert_eq "$RC" 1 "27. 0-team + pool data exits RED (1)"
+assert_filed "$(cat "$LOG")" SWEEP_NO_COVERAGE "27. no-coverage is filed"
+assert_not_contains "$(cat "$LOG")" "ghp_16C7e42F292c6912E7710c838347Ae178B4a" "27. last_sweep error text is NOT published"
+
+# ── 28. a 404 (deleted) tracked issue re-files; a 500 blip does not duplicate
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_STATUS_BODY="$(status_body false '"REGISTRY_STREAM_KEY not set"' null)"
+export STUB_412=1
+export STUB_GET_BODY='{"kind":"SWEEP_CONFIG_ERROR","issue_number":42}'
+export STUB_ISSUE_CODE=404
+run_driver
+assert_eq "$RC" 1 "28a. 404 tracked issue is still RED (1)"
+assert_match "$(cat "$LOG")" "GH POST .*/issues \{" "28a. a deleted issue re-files the recurrence"
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_STATUS_BODY="$(status_body false '"REGISTRY_STREAM_KEY not set"' null)"
+export STUB_412=1
+export STUB_GET_BODY='{"kind":"SWEEP_CONFIG_ERROR","issue_number":42}'
+export STUB_ISSUE_CODE=500
+run_driver
+assert_eq "$RC" 1 "28b. transient 500 exits RED (1)"
+assert_not_match "$(cat "$LOG")" "GH POST .*/issues \{" "28b. a transient 500 assumes open (no duplicate)"
+
+# ── 29. resolve deletes BOTH global.json and _.json (#2844) ─────────────────
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_STATUS_BODY="$(status_body true null null)"
+export STUB_SWEEP_BODY='{"status":"backed_up","teams_backed_up":1}'
+export GH_ISSUE_APP_DOWN=99
+run_driver
+assert_eq "$RC" 0 "29. healthy run exits 0"
+assert_match "$(cat "$LOG")" "AWS delete-object key=ops/alerts/APP_DOWN/global.json" "29. the driver dedup object is deleted on resolve"
+assert_match "$(cat "$LOG")" "AWS delete-object key=ops/alerts/APP_DOWN/_.json" "29. the server-side dedup object is deleted too"
+
+# ── 30. missing .watcher block neither files nor self-heals WATCHER_DOWN ────
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_STATUS_BODY="$(printf '{"enabled":true,"config_error":null,"storage_error":null,"per_team":{},"last_sweep":{"last_sweep_at":"%s","last_team_count":1},"watcher":{}}' "$TS_RECENT")"
+export STUB_SWEEP_BODY='{"status":"backed_up","teams_backed_up":1}'
+export GH_ISSUE_WATCHER_DOWN=66
+run_driver
+assert_eq "$RC" 0 "30. healthy sweep with an unclassifiable watcher exits 0"
+assert_not_match "$(cat "$LOG")" "GH POST .*/issues .*WATCHER_DOWN" "30. no WATCHER_DOWN is filed from a missing block"
+assert_not_match "$(cat "$LOG")" "GH PATCH .*/issues/66" "30. a missing block does NOT close WATCHER_DOWN"
+
+# ── 31. degraded is healthy; no_eligible_teams is the no-coverage family ────
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_STATUS_BODY="$(status_body true null null)"
+export STUB_SWEEP_BODY='{"status":"degraded","teams_backed_up":1}'
+run_driver
+assert_eq "$RC" 0 "31a. degraded exits 0"
+assert_not_match "$(cat "$LOG")" "GH POST .*/issues .*SWEEP_NO_COVERAGE" "31a. degraded files no no-coverage"
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_STATUS_BODY="$(status_body true null null)"
+export STUB_SWEEP_BODY='{"status":"no_eligible_teams","teams_backed_up":0}'
+run_driver
+assert_eq "$RC" 1 "31b. no_eligible_teams + pool data exits RED (1)"
+assert_filed "$(cat "$LOG")" SWEEP_NO_COVERAGE "31b. no_eligible_teams files SWEEP_NO_COVERAGE"
+
+# ── 32. lock held with no usable last_sweep + pool data → RED ───────────────
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_STATUS_BODY='{"enabled":true,"config_error":null,"storage_error":null,"per_team":{},"last_sweep":null,"watcher":{"running":true,"age_minutes":1}}'
+export STUB_SWEEP_BODY='{"status":"already_running"}'
+run_driver
+assert_eq "$RC" 1 "32. unverifiable lock + pool data exits RED (1)"
+assert_filed "$(cat "$LOG")" SWEEP_NO_COVERAGE "32. unverifiable lock files SWEEP_NO_COVERAGE"
+
+# ── 33. sweep error / non-JSON body → SWEEP_NO_COVERAGE + RED ───────────────
+reset_case
+export STUB_STATUS_BODY="$(status_body true null null)"
+export STUB_SWEEP_BODY='{"status":"error"}'
+run_driver
+assert_eq "$RC" 1 "33a. sweep error exits RED (1)"
+assert_filed "$(cat "$LOG")" SWEEP_NO_COVERAGE "33a. sweep error files SWEEP_NO_COVERAGE"
+reset_case
+export STUB_STATUS_BODY="$(status_body true null null)"
+export STUB_SWEEP_BODY='not json at all'
+run_driver
+assert_eq "$RC" 1 "33b. non-JSON sweep body exits RED (1)"
+assert_filed "$(cat "$LOG")" SWEEP_NO_COVERAGE "33b. non-JSON sweep body files SWEEP_NO_COVERAGE"
+
+# ── 34. missing GITHUB_TOKEN → fail closed ─────────────────────────────────
+reset_case
+export STUB_STATUS_BODY="$(status_body true null null)"
+unset GITHUB_TOKEN
+run_driver
+assert_eq "$RC" 1 "34. missing GITHUB_TOKEN exits RED (1)"
+assert_contains "$OUT" "GITHUB_TOKEN not set" "34. the driver refuses to run blind"
+export GITHUB_TOKEN="test-token"
+
+# ── 35. a per-team listing failure is unmeasured, not a false stale ────────
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export STUB_LIST_FAIL_TEAM=1
+export STUB_STATUS_BODY="$(status_body false null null)"
+run_driver
+assert_eq "$RC" 1 "35. per-team listing failure while OFF exits RED (1)"
+assert_filed "$(cat "$LOG")" SWEEP_OFF_STALE "35. an unmeasured team is loud (not a false stale)"
+assert_not_contains "$OUT" "no default archive" "35. a failed read is not reported as a missing archive"
+
+# ── 36. positive self-heals (recovered config + measured-fresh pool) ───────
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_STATUS_BODY="$(status_body false null null)"
+export GH_ISSUE_SWEEP_CONFIG_ERROR=44
+export GH_ISSUE_SWEEP_OFF_STALE=45
+run_driver
+assert_eq "$RC" 0 "36. recovered config + measured-fresh pool exits 0"
+assert_match "$(cat "$LOG")" "GH PATCH .*/issues/44" "36. SWEEP_CONFIG_ERROR self-heals when the config is readable"
+assert_match "$(cat "$LOG")" "GH PATCH .*/issues/45" "36. SWEEP_OFF_STALE self-heals on a measured-fresh pool"
+
+# ── 37. multi-team pool: `--output text` is ONE tab-separated line (P1) ────
+# Review P1 (bug-deep, conf 98): aws renders a list as a single tab-separated
+# line, so a bare `while read` measured only the LAST team. teamZ must still be
+# seen — its stale default drives POOL_STALE / SWEEP_OFF_STALE.
+# Review R1 (test-integrity, conf 95): the ORIGINAL case put the stale team
+# LAST, so the ablated driver measured exactly the team the assertion looked
+# for and the suite stayed green (ablation-proven). The stale team is now
+# FIRST and the last team is FRESH, so only the tab-split can see it.
+reset_case
+export R2_TEAMS=$'backups/teamZ/\tbackups/teamA/'
+export R2_DEFAULT_LIST_Z=""            # teamZ (first): prefix present, no default archive → stale
+export R2_DEFAULT_LIST_A="$TS_RECENT"  # teamA (last): fresh — a bare `read` sees only this
+export STUB_STATUS_BODY="$(status_body false null null)"
+run_driver
+assert_eq "$RC" 1 "37. a 2-team tab-separated pool while OFF exits RED (1)"
+assert_match "$OUT" "team teamZ: team prefix present but no default archive" "37. the NON-LAST team is measured too"
+assert_filed "$(cat "$LOG")" SWEEP_OFF_STALE "37. the non-last stale team drives SWEEP_OFF_STALE"
+
+# ── 38. held lock + UNMEASURED pool → SWEEP_NO_COVERAGE (review P1) ────────
+reset_case
+export STUB_LIST_FAIL=1
+export STUB_STATUS_BODY='{"enabled":true,"config_error":null,"storage_error":null,"per_team":{},"last_sweep":null,"watcher":{"running":true,"age_minutes":1}}'
+export STUB_SWEEP_BODY='{"status":"already_running"}'
+run_driver
+assert_eq "$RC" 1 "38. stuck lock + unmeasurable pool exits RED (1)"
+assert_filed "$(cat "$LOG")" SWEEP_NO_COVERAGE "38. unknown pool is never read as empty for a held lock"
+assert_not_contains "$OUT" "leaving silent" "38. the unmeasurable lock is never silently dropped"
+
+# ── 39. redaction shapes (security review F1; strengthened review R1) ─────
+# Review R1 (test-integrity, conf 90): the original values were all ≥20 chars,
+# so the generic ≥20-char rule masked them and 7 of the 9 shape rules could be
+# deleted with the suite still green. Every value below is the shortest its own
+# shape rule can match (a sub-20 secret for rules 1–6, a 20/21-char value for
+# rules 7/8), so deleting the owning rule turns the case red.
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_STATUS_BODY="$(status_body false '"dsn docker://:pwd12345@host:6379 schemeless user:pwdXYZ789@host hdr Authorization: Bearer tokEN123 pat ghp_AB12cd34 assign MY_SECRET_KEY=shrt999 quoted (got '\''qZwXeDcR'\'') long \"AbCdEfGhIjKlMnOpQrSt\" bare BareTokenZz0123456789X qkey \"api_key\":\"shrtpw1\" hkey \"x-api-key\":\"hyphenpw1\" dkey \"client-secret\":\"dotpw1\""' null)"
+run_driver
+assert_eq "$RC" 1 "39. secret-bearing config error exits RED (1)"
+# one short value per shape rule (1 URI, 2 schemeless, 3 header, 4 prefix,
+# 5 assignment, 6 single-quoted, 7 quoted ≥20, 8 bare ≥20, 5b quoted-key
+# underscore, 5b quoted-key hyphen, 5b quoted-key dot)
+for leaked in pwd12345 pwdXYZ789 tokEN123 AB12cd34 shrt999 qZwXeDcR AbCdEfGhIjKlMnOpQrSt BareTokenZz0123456789X shrtpw1 hyphenpw1 dotpw1; do
+  assert_not_contains "$(cat "$LOG")" "$leaked" "39. the '$leaked' shape is NOT published"
+  assert_not_contains "$OUT" "$leaked" "39. the '$leaked' shape is NOT logged"
+done
+assert_match "$OUT" "<redacted>" "39. the redaction marker is present"
+
+# ── 40. the purge failure body is redacted ────────────────────────────────
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_STATUS_BODY="$(status_body true null null)"
+export STUB_SWEEP_BODY='{"status":"backed_up","teams_backed_up":1}'
+export STUB_PURGE_CODE=500
+export STUB_PURGE_BODY='{"status":"error","detail":"mirror misconfig with key TESTONLYTOKENAbCdEfGhIjKlMnOpQrSt"}'
+run_driver
+assert_eq "$RC" 1 "40. a purge failure is RED (1)"
+assert_not_contains "$OUT" "TESTONLYTOKENAbCdEfGhIjKlMnOpQrSt" "40. the purge body secret is NOT published"
+assert_match "$OUT" "<redacted>" "40. the purge failure body is redacted in the log"
+
+# ── 41. storage_error while ENABLED is loud and blocks R2_DOWN self-heal ───
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_STATUS_BODY="$(status_body true null '"heartbeat read: boom"')"
+export STUB_SWEEP_BODY='{"status":"backed_up","teams_backed_up":1}'
+export GH_ISSUE_R2_DOWN=88
+run_driver
+assert_eq "$RC" 1 "41. storage_error while enabled exits RED (1)"
+assert_match "$(cat "$LOG")" "AWS put-object key=ops/alerts/R2_DOWN/global.json" "41. storage_error while enabled records R2_DOWN"
+assert_not_match "$(cat "$LOG")" "GH PATCH .*/issues/88" "41. R2_DOWN is NOT closed while storage_error is set"
+
+# ── 42. no_work with graph_totals.backed_up>0 is not a coverage gap ───────
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_STATUS_BODY="$(status_body true null null)"
+export STUB_SWEEP_BODY='{"status":"no_work","teams_backed_up":0,"graph_totals":{"attempted":2,"backed_up":1,"failed":1}}'
+run_driver
+assert_eq "$RC" 0 "42. a custom-graph backup is not a 0-coverage outage"
+assert_not_match "$(cat "$LOG")" "GH POST .*/issues .*SWEEP_NO_COVERAGE" "42. no false SWEEP_NO_COVERAGE"
+# Review R1 (P2): this run HAS coverage, so an open SWEEP_NO_COVERAGE must
+# close here — otherwise a recovered pipeline keeps a stale incident forever.
+export GH_ISSUE_SWEEP_NO_COVERAGE=123
+run_driver
+assert_eq "$RC" 0 "42. (open incident) a custom-graph backup still exits 0"
+assert_match "$(cat "$LOG")" "GH PATCH .*/issues/123" "42. SWEEP_NO_COVERAGE self-heals on a covered no_work run"
+
+# ── 43. APP_DOWN is RED (any filing is RED) ──────────────────────────────
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export SIMULATE_APP_DOWN=true
+run_driver
+assert_eq "$RC" 1 "43. APP_DOWN exits RED (1)"
+assert_filed "$(cat "$LOG")" APP_DOWN "43. APP_DOWN is filed"
+
+# ── 44. an index read failure is unmeasured, not "no index" ──────────────
+# STUB_INDEX_FAIL makes the classification-index get-object fail with a
+# non-404 error while the legacy-flat listing succeeds.
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_FLAT_LIST='[["backups/teamA/2024/dump.enc","2024-01-01T00:00:00Z"]]'
+export STUB_INDEX_FAIL=1
+export STUB_STATUS_BODY="$(status_body false null null)"
+run_driver
+assert_eq "$RC" 1 "44. an unreadable flat index while OFF exits RED (1)"
+assert_contains "$OUT" "legacy-flat index read FAILED" "44. the failed index read is surfaced"
+assert_filed "$(cat "$LOG")" SWEEP_OFF_STALE "44. unreadable index is unmeasured → no confirmed pause"
+
+# ── 45. a measured-fresh off pool resolves a stale R2_DOWN ────────────────
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_STATUS_BODY="$(status_body false null null)"
+export GH_ISSUE_R2_DOWN=88
+run_driver
+assert_eq "$RC" 0 "45. recovered storage exits 0"
+assert_match "$(cat "$LOG")" "GH PATCH .*/issues/88" "45. R2_DOWN self-heals once storage answers while OFF"
+
+# ── 46. SWEEP_NO_COVERAGE self-heals on a degraded/backed_up sweep ────────
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_STATUS_BODY="$(status_body true null null)"
+export STUB_SWEEP_BODY='{"status":"degraded","teams_backed_up":1,"graph_totals":{"backed_up":1}}'
+export GH_ISSUE_SWEEP_NO_COVERAGE=123
+run_driver
+assert_eq "$RC" 0 "46. a healthy degraded sweep exits 0"
+assert_match "$(cat "$LOG")" "GH PATCH .*/issues/123" "46. SWEEP_NO_COVERAGE self-heals on a degraded sweep"
+
+# ── 47. a per-team STALE while ENABLED also makes the run RED ─────────────
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$(python3 -c "import datetime;print((datetime.datetime.now(datetime.timezone.utc)-datetime.timedelta(minutes=500)).strftime('%Y-%m-%dT%H:%M:%SZ'))")"
+export STUB_STATUS_BODY="$(status_body true null null)"
+export STUB_SWEEP_BODY='{"status":"backed_up","teams_backed_up":1}'
+run_driver
+assert_eq "$RC" 1 "47. an enabled run with a stale team exits RED (1)"
+assert_filed "$(cat "$LOG")" STALE "47. the per-team STALE is filed"
+
+# ── 48. enum_failed is the catch-all family → SWEEP_NO_COVERAGE + RED ─────
+reset_case
+export STUB_STATUS_BODY="$(status_body true null null)"
+export STUB_SWEEP_BODY='{"status":"enum_failed","error":"boom","teams_backed_up":0}'
+run_driver
+assert_eq "$RC" 1 "48. enum_failed exits RED (1)"
+assert_filed "$(cat "$LOG")" SWEEP_NO_COVERAGE "48. enum_failed files SWEEP_NO_COVERAGE"
+
+# ── 49. no_eligible_teams + measured-EMPTY pool → silent ─────────────────
+reset_case
+export R2_TEAMS=""
+export R2_DEFAULT_LIST=""
+export STUB_STATUS_BODY="$(status_body true null null)"
+export STUB_SWEEP_BODY='{"status":"no_eligible_teams","teams_backed_up":0}'
+run_driver
+assert_eq "$RC" 0 "49. no_eligible_teams + empty pool exits 0 (pre-beta)"
+assert_not_match "$(cat "$LOG")" "GH POST .*/issues .*SWEEP_NO_COVERAGE" "49. no false SWEEP_NO_COVERAGE"
+
+# ── 50. redaction shapes + false-positive guards ─────────────────────────
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_STATUS_BODY="$(status_body false '"boom ghp_ABCDEFGH\nIJKLMNOPQRSTUVWXYZ0123456789 dsn=user:SuperSecret123@db.internal:6379 redis://:EmptyUserPw123@db:6379 falkor://user:p/ssw0rd@db:6379 compatible: true patch: 3 author: bob password='\''x sekritTail1'\'' key=\"y sekritTail2\" PGPASSWORD=pgPw9 dbpassword=dbPw9 accessToken=accTok9 passwd=\"unterm sekritTail6 secret='\''unterm sekritTail7"' null)"
+run_driver
+assert_eq "$RC" 1 "50. a secret-bearing config error exits RED (1)"
+for leaked in SuperSecret123 ghp_ABCDEFGH EmptyUserPw123; do
+  assert_not_contains "$OUT" "$leaked" "50. '$leaked' is NOT logged"
+done
+assert_not_contains "$OUT" "ssw0rd" "50. a password containing '/' does not leak its tail"
+assert_not_contains "$OUT" "IJKLMNOPQRSTUVWXYZ0123456789" "50. the newline-split token fragment is redacted"
+assert_contains "$OUT" "compatible: true" "50. 'compatible:' is not a false positive"
+assert_contains "$OUT" "patch: 3" "50. 'patch:' is not a false positive"
+assert_contains "$OUT" "author: bob" "50. 'author:' is not a false positive"
+# Review R4 (P3): a quoted value containing whitespace must be consumed whole
+# (the old rule-5 value class stopped at the first space and left the tail).
+assert_not_contains "$OUT" "sekritTail1" "50. a single-quoted value with spaces leaves no tail"
+assert_not_contains "$OUT" "sekritTail2" "50. a double-quoted value with spaces leaves no tail"
+# Review R5 (P2 regression): an UNTERMINATED quoted value must still redact —
+# the balanced-quote value class alone failed the whole rule and leaked.
+assert_not_contains "$OUT" "sekritTail6" "50. an unterminated double-quoted value is redacted"
+assert_not_contains "$OUT" "sekritTail7" "50. an unterminated single-quoted value is redacted"
+# Review R5 (P3 regression): separator-less credential keys must still match
+# (the word-segment boundary dropped PGPASSWORD/dbpassword/accessToken).
+assert_not_contains "$OUT" "pgPw9" "50. a PGPASSWORD-style key is redacted"
+assert_not_contains "$OUT" "dbPw9" "50. a concatenated lowercase key is redacted"
+assert_not_contains "$OUT" "accTok9" "50. a camelCase key is redacted"
+
+# ── 51. the success branch backfills the R2 object with its issue_number ─
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_STATUS_BODY="$(status_body false '"REGISTRY_STREAM_KEY not set"' null)"
+run_driver
+assert_eq "$RC" 1 "51. a fresh config incident exits RED (1)"
+assert_match "$(cat "$LOG")" "GH POST .*/issues \{" "51. the incident is created"
+assert_match "$(cat "$LOG")" "AWS put-object body=\{\"kind\":\"SWEEP_CONFIG_ERROR\",\"issue_number\":[0-9]" "51. the object is rewritten with a real issue number"
+
+# ── 52. a failed listing blocks the R2_DOWN self-heal (F2) ──────────────
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_LIST_FAIL=1
+export STUB_STATUS_BODY="$(status_body true null null)"
+export STUB_SWEEP_BODY='{"status":"backed_up","teams_backed_up":1}'
+export GH_ISSUE_R2_DOWN=88
+run_driver
+assert_eq "$RC" 1 "52. a backed_up sweep with a failed listing exits RED (1)"
+assert_not_match "$(cat "$LOG")" "GH PATCH .*/issues/88" "52. R2_DOWN is NOT closed while the pool is unmeasured"
+
+# ── 53. a failed legacy-flat listing is unmeasured ──────────────────────
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_FLAT_LIST='[["backups/teamA/2024/dump.enc","2024-01-01T00:00:00Z"]]'
+export STUB_FLAT_FAIL=1
+export STUB_STATUS_BODY="$(status_body false null null)"
+run_driver
+assert_eq "$RC" 1 "53. a failed flat listing while OFF exits RED (1)"
+assert_match "$OUT" "legacy-flat listing FAILED" "53. the failed flat listing is surfaced"
+
+# ── 54. an unparseable archive timestamp is unmeasurable → loud ─────────
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="not-a-timestamp"
+export STUB_STATUS_BODY="$(status_body false null null)"
+run_driver
+assert_eq "$RC" 1 "54. an unparseable archive timestamp while OFF exits RED (1)"
+assert_match "$OUT" "unparseable archive timestamp" "54. the unparseable timestamp is surfaced"
+assert_filed "$(cat "$LOG")" SWEEP_OFF_STALE "54. an unparseable timestamp is never read as fresh"
+
+# ── 55. a stale watcher AGE alone (running=true) is WATCHER_DOWN ────────
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_STATUS_BODY="$(status_body true null null true 999)"
+export STUB_SWEEP_BODY='{"status":"backed_up","teams_backed_up":1}'
+run_driver
+assert_eq "$RC" 1 "55. a stale watcher AGE alone exits RED (1)"
+assert_match "$(cat "$LOG")" 'GH POST .*/issues .*WATCHER_DOWN' "55. running=true but age>30 files WATCHER_DOWN"
+
+# ── 56. lock + no last_sweep + measured-EMPTY pool is the silent branch ─
+reset_case
+export R2_TEAMS=""
+export STUB_STATUS_BODY='{"enabled":true,"config_error":null,"storage_error":null,"per_team":{},"last_sweep":null,"watcher":{"running":true,"age_minutes":1}}'
+export STUB_SWEEP_BODY='{"status":"already_running"}'
+run_driver
+assert_eq "$RC" 0 "56. a lock with a measured-empty pool exits 0"
+assert_contains "$OUT" "leaving silent" "56. the measured-empty lock is the silent branch"
+assert_not_match "$(cat "$LOG")" "GH POST .*/issues .*SWEEP_NO_COVERAGE" "56. no incident for a measured-empty lock"
+
+echo ""
+echo "registry-cron.test.sh: $PASS passed, $FAIL failed"
+[ "$FAIL" -eq 0 ]
