@@ -66,6 +66,7 @@ ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
     "test_dr_endpoints.py": {"registry": "prod-coupled"},
     "test_export_delete.py": {"registry": "prod-coupled"},
     "test_free_team_entitlement.py": {"registry": "entitlement-gate"},   # added with ci-surfaces drift fix (#1929) — file now runs in selection
+    "test_one_free_org_entitlement.py": {"registry": "prod-coupled"},   # #2965: registered in ci-surfaces.yml (#2789 work) — same registry-lane resolve as test_free_team_entitlement
     "test_github_index_lifecycle.py": {"registry": "prod-coupled"},
     "test_hosted_auth.py": {"registry": "prod-coupled"},   # C2 #2111 TestTkPrefixAuth mirrors test_hosted_api's registry-resolve pattern
     "test_hosted_api.py": {"registry": "prod-coupled",
