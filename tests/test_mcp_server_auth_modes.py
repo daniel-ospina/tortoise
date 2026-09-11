@@ -421,7 +421,7 @@ class TestAskConnectedAssemblyExposure:
         except Exception:
             ok = False
         if not ok:
-            pytest.skip("Live FalkorDB with fulltext not available")
+            pytest.skip("requires TORTOISE_DB_URI (live FalkorDB FTS lane — tier-2 embedded legs skip)")
         # seed into the SELFHOST namespace graph (what the none-mode ask
         # tool reads)
         import tests._assembly_graph as ag
