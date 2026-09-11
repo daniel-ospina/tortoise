@@ -261,17 +261,17 @@ jobs:
           SPLIT=$(echo '${{ steps.select.outputs.test_files }}' | python3 tools/ci_selection.py --split)
           echo "a_files=$(echo "$SPLIT" | python3 -c 'import json,sys; print(" ".join(json.load(sys.stdin)["a"]))')" >> "$GITHUB_OUTPUT"
           echo "b_files=$(echo "$SPLIT" | python3 -c 'import json,sys; print(" ".join(json.load(sys.stdin)["b"]))')" >> "$GITHUB_OUTPUT"
-      - name: Manifest integrity (drift gate, #1262)
-        # Unconditional: every event runs the integrity check so new test
-        # files can never silently drift out of selection again (the #1260
-        # 12-file + #1270 6-file drift class — test_ci_selection.py only ran
-        # on selected surfaces, not push/main). <1s, fail-closed. rglob
-        # (recursive) since #1349 so subdir test files are drift-checked;
-        # tests/e2e/ is deliberately exempt (welcome-e2e-monitor + legal-e2e
-        # + ENV_BROKEN_FILES cover those 17 files).
-        run: |
-          python3 tools/ci_selection.py --integrity
-
+      # The manifest drift gate used to run HERE. It moved to its own peer job
+      # (`manifest-integrity`) — #2656. Living in `changes`, which every other
+      # job needs, meant one missing manifest line SKIPPED the entire test
+      # matrix and hid all test signal behind a bookkeeping miss: twice on
+      # 2026-09-10/11 (#2868 parity files, #2911 price-basis — the second also
+      # blocked verification of the #2904 fork fix).
+      #
+      # The check itself is unchanged and still blocks the merge — it just no
+      # longer withholds the tests. python-ci-gate lists `manifest-integrity`
+      # in its needs, so a drift still reds the required aggregate check, by
+      # name, while the suite runs and reports real signal.
       - name: Secrets scan (evidence artifacts, #1349)
         # Evidence commits (T8/T15/T16) must never carry live keys. The
         # provenance writer redacts (primary defense); this grep is the
@@ -286,6 +286,43 @@ jobs:
             exit 1
           fi
           echo "secrets scan clean"
+
+  manifest-integrity:
+    # #2656: the manifest drift gate, as a PEER of the test matrix instead of a
+    # prerequisite of it. It used to be a step inside `changes`, and every other
+    # job has `needs: changes` — so a drift made GitHub mark the whole matrix
+    # "skipped" (not failed: never run), which is why a one-line bookkeeping
+    # miss in one lane could stop another lane's fix from being verified.
+    #
+    # Splitting it out keeps BOTH properties:
+    #   * the tests still run, so a red run tells you about the code; and
+    #   * a drift still fails loudly and still blocks the merge, because
+    #     python-ci-gate (the required aggregate) lists this job in its needs.
+    # Cost: one extra job (~20s: checkout + setup-python + pyyaml), against a
+    # 25-minute suite that used to be silently withheld.
+    #
+    # Unconditional on every event (push/PR/schedule) — same as before. Needs
+    # pyyaml only: tools/ci_selection.py imports it locally.
+    #
+    # timeout-minutes: this job now owns a network install (`pip install
+    # pyyaml`) AND feeds the REQUIRED aggregate check — without a bound, a
+    # stalled PyPI would hold python-ci-gate red for hours on every PR.
+    timeout-minutes: 5
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install pyyaml
+        # Pinned: this job feeds the REQUIRED aggregate check, so an unpinned
+        # dependency would make an upstream release a repo-wide merge blocker.
+        run: pip install pyyaml==6.0.2
+      - name: "Manifest integrity (drift gate, #1262)"
+        # Fail-closed, ~2s. rglob (recursive) since #1349 so subdir test files
+        # are drift-checked; tests/e2e/ is deliberately exempt
+        # (welcome-e2e-monitor + legal-e2e + ENV_BROKEN_FILES cover those 17).
+        run: python3 tools/ci_selection.py --integrity
 
   test:
     # #880: split into two parallel halves (matrix). The fast suite's pytest
@@ -336,7 +373,20 @@ jobs:
       falkordb:
         image: falkordb/falkordb-server:latest
         env:
-          REDIS_ARGS: "--requirepass falkordb"
+          # #2216: no periodic RDB snapshot in this lane. Redis refuses a second
+          # fork while any child is active ("Can't fork for module: File exists"
+          # - errno EEXIST, Redis' single-fork-slot rule), and FalkorDB's
+          # GRAPH.COPY forks via RedisModule_Fork with 10 x 5ms retries - a
+          # shorter window than a BGSAVE, so a restore/drill test landing inside
+          # one fails with "GRAPH.COPY failed, could not fork" (main run
+          # 34527934725, test (a): the only failure of 4905). Reproduced locally
+          # 3/3 with the default config and 0/3 with this flag. Automatic
+          # snapshots are worthless in a throwaway test container, and explicit
+          # BGSAVE still works, so the RDB/snapshot tests are unaffected.
+          # (docker-compose.yml spells the same flag --save \"\" for its
+          # persistent dev container; both spellings are verified equivalent
+          # under run.sh's unquoted ${REDIS_ARGS} expansion.)
+          REDIS_ARGS: "--requirepass falkordb --save ''"
         ports:
           - 6379:6379
         options: >-
@@ -346,6 +396,13 @@ jobs:
           --health-retries 10
       falkordb-legacy:
         image: falkordb/falkordb-server:latest
+        env:
+          # #2216: same no-periodic-snapshot rule as the passworded falkordb
+          # service above (see there for the mechanism + the reproduced
+          # evidence). Deliberately NO --requirepass: this is the passwordless
+          # probe lane (tests use docker://:@localhost:16379/) and its
+          # health-cmd is plain `redis-cli ping`.
+          REDIS_ARGS: "--save ''"
         ports:
           - 16379:6379
         options: >-
@@ -834,7 +891,8 @@ jobs:
               test_backfill_sources test_cli_context
               test_enumeration_surfaces test_event_provenance
               test_index_directory test_ingest test_ingest_validation
-              test_mcp_http test_pack_shipping_wheel test_sdk test_search_engine_gaps
+              test_mcp_http test_mcp_route_challenge test_pack_shipping_wheel
+              test_sdk test_search_engine_gaps
     name: test-slow (${{ matrix.half }})
     timeout-minutes: 90
     # Epic #1647 Task 9 Step 5: the slow legs run against the provisioned
@@ -844,7 +902,20 @@ jobs:
       falkordb:
         image: falkordb/falkordb-server:latest
         env:
-          REDIS_ARGS: "--requirepass falkordb"
+          # #2216: no periodic RDB snapshot in this lane. Redis refuses a second
+          # fork while any child is active ("Can't fork for module: File exists"
+          # - errno EEXIST, Redis' single-fork-slot rule), and FalkorDB's
+          # GRAPH.COPY forks via RedisModule_Fork with 10 x 5ms retries - a
+          # shorter window than a BGSAVE, so a restore/drill test landing inside
+          # one fails with "GRAPH.COPY failed, could not fork" (main run
+          # 34527934725, test (a): the only failure of 4905). Reproduced locally
+          # 3/3 with the default config and 0/3 with this flag. Automatic
+          # snapshots are worthless in a throwaway test container, and explicit
+          # BGSAVE still works, so the RDB/snapshot tests are unaffected.
+          # (docker-compose.yml spells the same flag --save \"\" for its
+          # persistent dev container; both spellings are verified equivalent
+          # under run.sh's unquoted ${REDIS_ARGS} expansion.)
+          REDIS_ARGS: "--requirepass falkordb --save ''"
         ports:
           - 6379:6379
         options: >-
@@ -854,6 +925,13 @@ jobs:
           --health-retries 10
       falkordb-legacy:
         image: falkordb/falkordb-server:latest
+        env:
+          # #2216: same no-periodic-snapshot rule as the passworded falkordb
+          # service above (see there for the mechanism + the reproduced
+          # evidence). Deliberately NO --requirepass: this is the passwordless
+          # probe lane (tests use docker://:@localhost:16379/) and its
+          # health-cmd is plain `redis-cli ping`.
+          REDIS_ARGS: "--save ''"
         ports:
           - 16379:6379
         options: >-
@@ -1174,7 +1252,20 @@ jobs:
       falkordb:
         image: falkordb/falkordb-server:latest
         env:
-          REDIS_ARGS: "--requirepass falkordb"
+          # #2216: no periodic RDB snapshot in this lane. Redis refuses a second
+          # fork while any child is active ("Can't fork for module: File exists"
+          # - errno EEXIST, Redis' single-fork-slot rule), and FalkorDB's
+          # GRAPH.COPY forks via RedisModule_Fork with 10 x 5ms retries - a
+          # shorter window than a BGSAVE, so a restore/drill test landing inside
+          # one fails with "GRAPH.COPY failed, could not fork" (main run
+          # 34527934725, test (a): the only failure of 4905). Reproduced locally
+          # 3/3 with the default config and 0/3 with this flag. Automatic
+          # snapshots are worthless in a throwaway test container, and explicit
+          # BGSAVE still works, so the RDB/snapshot tests are unaffected.
+          # (docker-compose.yml spells the same flag --save \"\" for its
+          # persistent dev container; both spellings are verified equivalent
+          # under run.sh's unquoted ${REDIS_ARGS} expansion.)
+          REDIS_ARGS: "--requirepass falkordb --save ''"
         ports:
           - 6379:6379
         options: >-
@@ -1363,7 +1454,20 @@ jobs:
       falkordb:
         image: falkordb/falkordb-server:latest
         env:
-          REDIS_ARGS: "--requirepass falkordb"
+          # #2216: no periodic RDB snapshot in this lane. Redis refuses a second
+          # fork while any child is active ("Can't fork for module: File exists"
+          # - errno EEXIST, Redis' single-fork-slot rule), and FalkorDB's
+          # GRAPH.COPY forks via RedisModule_Fork with 10 x 5ms retries - a
+          # shorter window than a BGSAVE, so a restore/drill test landing inside
+          # one fails with "GRAPH.COPY failed, could not fork" (main run
+          # 34527934725, test (a): the only failure of 4905). Reproduced locally
+          # 3/3 with the default config and 0/3 with this flag. Automatic
+          # snapshots are worthless in a throwaway test container, and explicit
+          # BGSAVE still works, so the RDB/snapshot tests are unaffected.
+          # (docker-compose.yml spells the same flag --save \"\" for its
+          # persistent dev container; both spellings are verified equivalent
+          # under run.sh's unquoted ${REDIS_ARGS} expansion.)
+          REDIS_ARGS: "--requirepass falkordb --save ''"
         ports:
           - 6379:6379
         options: >-
@@ -1747,7 +1851,7 @@ jobs:
 
   python-ci-gate:
     if: always()
-    needs: [changes, test, test-slow, test-concurrency-falkor, packs-compile, test-track-b, test-carve-out, test-d14-hosted-api, canary-streak]
+    needs: [changes, manifest-integrity, test, test-slow, test-concurrency-falkor, packs-compile, test-track-b, test-carve-out, test-d14-hosted-api, canary-streak]
     runs-on: ubuntu-latest
     steps:
       - name: Aggregate matrix result

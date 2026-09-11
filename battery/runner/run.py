@@ -67,7 +67,11 @@ from battery.runner.executor import (
     state_events,
     surfacing_event,
 )
-from battery.runner.model_calls import RealModelCaller, UsageRecordingCaller
+from battery.runner.model_calls import (
+    RealModelCaller,
+    UsageRecordingCaller,
+    aggregate_cost_basis,
+)
 from battery.runner.scorers import (
     HARNESS_METRIC_IDS,
     HarnessScorer,
@@ -620,10 +624,11 @@ def run_battery(config: RunConfig, *, stdout: Callable[[str], None] = print,
         # ── model-pin pre-flight (#2292 Task 5; coordination n10) ──────
         #    A real request must resolve a CONCRETE pinned model for every
         #    requested real arm: the flash-class placeholder sentinel, an
-        #    unresolvable pin, a class-level model_id='fixed' sentinel
-        #    (battery/arms/*.py — the Task-9 parameterization seam), or a
-        #    temperature mismatch across requested real arms each refuse
-        #    BEFORE the attempt dir (zero orphaned artifacts). Additive
+        #    unresolvable pin, or a temperature mismatch across requested
+        #    real arms each refuse BEFORE the attempt dir (zero orphaned
+        #    artifacts). The class-level 'fixed' sentinel is NO LONGER a
+        #    gate: Task 9 parameterizes the arm INSTANCE from arms.yaml
+        #    (see _resolve_arm), so the check was unreachable (#2746). Additive
         #    INSIDE the real-executor gate block — #2284 Task 9 merges
         #    later over the same block and consumes the pinned values
         #    ("sibling B pin").
@@ -665,12 +670,12 @@ def run_battery(config: RunConfig, *, stdout: Callable[[str], None] = print,
                     f"arm {arm_id!r}: pin factory caps max_tokens="
                     f"{resolved.max_tokens} — decision (a) real runs are "
                     f"UNCAPPED (max_tokens=None); real run refuses")
+            # The resolved INSTANCE is the effective arm here: _resolve_arm
+            # writes the arms.yaml pin onto it (class attrs keep the 'fixed'
+            # sentinel for the mock/hermetic lanes), and the placeholder +
+            # resolvability gates above already refuse every unusable pin —
+            # so a class-level 'fixed' check can never fire (#2746).
             cls = _resolve_arm(arm_id, ac, mock=False)
-            if getattr(cls, "model_id", "") == "fixed":
-                raise ConfigError(
-                    f"arm {arm_id!r} still hardcodes the class-level "
-                    f"model_id='fixed' sentinel (Task 9 parameterizes arms "
-                    f"off it) — real run refuses")
             # ── per-arm VENDOR-KEY pre-flight (#2633) ─────────────
             #    a2/a2b real requests without their vendor credential pass
             #    every pin/temp gate above and would run real-model spend
@@ -822,6 +827,9 @@ def run_battery(config: RunConfig, *, stdout: Callable[[str], None] = print,
                         config=config, arm=arm, scenario=scenario,
                         episode_seed=episode_seed, tracker=tracker)
                 run_real_spend += ep_surface.get("spend_usd", 0.0)
+                # #2603 cap logic UNCHANGED; #2906: the number it enforces is
+                # now the provider-reported charge when the route returns one
+                # (else the declared basis) — same spend_usd the meter records.
                 if run_real_spend > budget.max_estimated_cost_usd:
                     budget_stop = True
                 evlog = ep_events
@@ -933,7 +941,8 @@ def run_battery(config: RunConfig, *, stdout: Callable[[str], None] = print,
             excluded=agg.excluded_count, excluded_ids=list(agg.excluded_episode_ids),
             excluded_reason=agg.excluded_reason, artifacts=arm_artifacts,
             spend_usd=sum((e.ep_surface or {}).get("spend_usd", 0.0)
-                          for e in arm_episodes)))
+                          for e in arm_episodes),
+            cost_basis=_arm_cost_basis(arm_episodes)))
         if agg.valid_episodes == 0:
             any_arm_failed = True  # all-failed → exit 4 (after artifacts)
 
@@ -1160,6 +1169,22 @@ class _CompositeScorer:
         return ScorerResult(metrics=merged, ep_outcome=override)
 
 
+def _arm_cost_basis(arm_episodes: list[EpisodeResult]) -> str:
+    """The arm's aggregate cost basis (#2906) from its episodes' meters.
+
+    Each episode's ``usage.cost_basis`` is itself an aggregate; folding them
+    with ``aggregate_cost_basis`` yields "provider_reported" only when every
+    episode was provider-priced. A caller that does not report a basis (a
+    scripted/injected caller) contributes "estimated" — never silently
+    "provider_reported".
+    """
+    bases = []
+    for e in arm_episodes:
+        usage = (e.ep_surface or {}).get("usage") or {}
+        bases.append(usage.get("cost_basis") or "estimated")
+    return aggregate_cost_basis(bases)
+
+
 def _arm_summary_block(arm_id: str, *, arm_present: bool, scenarios: int = 0,
                        valid_episodes: int = 0, excluded: int = 0,
                        excluded_ids: list[str] | None = None,
@@ -1167,7 +1192,8 @@ def _arm_summary_block(arm_id: str, *, arm_present: bool, scenarios: int = 0,
                        artifacts: list[str] | None = None,
                        run_mode: str = "mock",
                        reason: str | None = None,
-                       spend_usd: float = 0.0) -> dict[str, Any]:
+                       spend_usd: float = 0.0,
+                       cost_basis: str | None = None) -> dict[str, Any]:
     return {
         "arm_id": arm_id,
         "arm_present": arm_present,
@@ -1177,6 +1203,11 @@ def _arm_summary_block(arm_id: str, *, arm_present: bool, scenarios: int = 0,
         "excluded": {"count": excluded, "episode_ids": excluded_ids or [],
                      "reason": excluded_reason},
         "real_spend_usd": round(spend_usd, 6) if run_mode == "real" else None,
+        # #2906: how real_spend_usd was derived — never left to inference.
+        # An arm that never executed (init failure) still declares a real
+        # figure (0.0); label it "estimated" rather than null, so no real
+        # spend figure is ever unlabelled.
+        "cost_basis": (cost_basis or "estimated") if run_mode == "real" else None,
         "artifacts": artifacts or [],
         "init_failure": reason or ("" if arm_present else "arm unavailable"),
     }

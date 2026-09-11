@@ -471,6 +471,17 @@ class FakeControlPlane:
         # teams upsert on id (exactly one row)
         team_rows = self.tables.setdefault("teams", [])
         team = next((t for t in team_rows if t.get("id") == team_id), None)
+        # #2789: unique-name parity (migration 0011 `uq_teams_name`). The real
+        # RPC upserts ON CONFLICT (id) ONLY, so a name held by a DIFFERENT team
+        # raises a unique violation → PostgREST 409. Without this the fake made
+        # a real production failure (stranding a paying customer) invisible to
+        # tests; both create lanes key on the "HTTP 409" marker.
+        if team is None and any(
+                t.get("name") == team_name and t.get("id") != team_id
+                for t in team_rows):
+            raise RuntimeError(
+                'HTTP 409: duplicate key value violates unique constraint '
+                '"uq_teams_name"')
         if team is None:
             team = {"id": team_id, "name": team_name, "tier": p.get("p_tier", "free"),
                     "graph_name": p.get("p_graph_name", f"team_{team_id}"),

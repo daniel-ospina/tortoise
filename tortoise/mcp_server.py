@@ -2085,7 +2085,16 @@ def tortoise_review_connections(mode: str = "both", scope: str | None = None) ->
         issue in (contradictory, stale, contested) and suggested_action in
         (review, prune, re-point).
     mode=both: run both, return {add: [...], prune: [...]}.
-    scope: optional topic text or Point id — narrows the candidate pool.
+    scope: optional topic text or Point id — narrows the candidate pool to the
+        retrieval-NEAREST points. A focus filter, not an exact-match or
+        relevance gate: near-but-not-exact is intended, and a scope matching
+        nothing normally still returns its nearest neighbours — though a
+        degraded single-leg run can score every hit 0 and return nothing. The
+        result is empty when retrieval returns nothing, when every retrieved id
+        is dropped (RRF score <= 0, e.g. the TF-IDF fallback, or an
+        operator/terminal/outdated / [MITIGATION] row), or — for mode=add —
+        when no candidate pair clears similarity_threshold. mode=prune applies
+        no similarity bar.
 
     Never mutates the graph.
     """
@@ -3251,8 +3260,16 @@ def create_http_app(*, allowed_origins: list[str] | None = None,
                     _registry_sdk=None,
                     auth_mode: Literal["tenant", "static", "none"] = "tenant",
                     api_key: str | None = None,
-                    tool_group: str | None = None) -> Any:
+                    tool_group: str | None = None,
+                    emit_oauth_challenge: bool = False) -> Any:
     """Configured Streamable HTTP app for the hosted platform (#236).
+
+    IMPORTANT: ``emit_oauth_challenge`` defaults to **False** on purpose. Leave
+    it alone unless this app is served alongside a real authorization server
+    (i.e. ``hosted_api``). A challenge emitted where no
+    ``/.well-known/oauth-protected-resource`` route exists points the client at a
+    404 — strictly worse than the bare 401. Only ``tortoise/hosted_api.py``
+    passes True.
 
     Mounted at /mcp on the existing FastAPI app. Auth + rate limiting +
     security headers + body-size caps live INSIDE this app's middleware
@@ -3292,7 +3309,12 @@ def create_http_app(*, allowed_origins: list[str] | None = None,
         group_mw = Middleware(ToolGroupMiddleware, tool_group=tool_group)
     if auth_mode == "tenant":
         from tortoise.mcp_auth import TeamResolutionMiddleware
-        auth_mw = Middleware(TeamResolutionMiddleware, registry_sdk=_registry_sdk)
+        # #2864: only the HOSTED app passes emit_oauth_challenge=True. Tenant-mode
+        # self-host (`tortoise serve --http`, this function's default) has no
+        # authorization server and registers no /.well-known/* routes, so a
+        # challenge there would point the client at a 404.
+        auth_mw = Middleware(TeamResolutionMiddleware, registry_sdk=_registry_sdk,
+                             emit_challenge=emit_oauth_challenge)
     elif auth_mode == "static":
         from tortoise.mcp_auth import StaticKeyMiddleware
         auth_mw = Middleware(StaticKeyMiddleware, api_key=api_key)

@@ -2,7 +2,7 @@
 
 **Run date:** 2026-09-10 · **Harness:** `main` `493143070` · **Attempt:** `/tmp/run1416-a0q/20260910-<ts>/`
 **Command:** `battery run --tier 1 --arms a0 --executor real --seed 7 --scorer battery.probes.r1_contradiction --scorer battery.probes.r3_calibration --scorer battery.probes.r4_defeat --scorer battery.probes.r5_update`
-**Run mode:** real (`deepseek/deepseek-v4-flash`, temp 0) · **Spend:** 1.071727 USD · **Exclusions:** 5/78 (6.4 %) · **Exit code:** 0
+**Run mode:** real (`deepseek/deepseek-v4-flash`, temp 0) · **Spend:** 1.071727 USD *as recorded by the meter of the day* — see the spend-basis note below · **Exclusions:** 5/78 (6.4 %) · **Exit code:** 0
 
 ---
 
@@ -55,8 +55,28 @@ These fields are the **Task-9 executor/derive leg**, which is not implemented. T
 The E2E-1.1 real leg exists to prove the battery runs the **real** product path end-to-end, honestly, on real model calls. It does:
 
 - 78 real episodes executed (write + read + envelope + EP read-out), 73 valid, `exit_code 0`, spend metered and inside cap (`budget_stopped: false`).
-- **Exclusion rate 6.4 %** (5/78) against the E2E-1.1 <5 % target — improved from **43.6 %** (34 excluded / 44 valid of 78) on the pre-fix harness by three fixes: robust envelope extraction (#2697), the context-bearing per-turn corrective repair (#2717), and the measured 480 s episode deadline (#2721). 34 turns were recovered by corrective repair.
-- Residual exclusions, both understood: `cal-010`, `cal-012` — the episode did not yield a conforming envelope (`envelope.position is required and non-empty`) and excluded on the schema gate; the excluded path records a single synthetic FAILED turn, so the artifact does **not** evidence how many model attempts were made or what the model wrote — the envelope contract simply has no representation for "no position" (tracked on #2702); `lp-001`, `lp-006`, `lp-011` — long-prompt episodes exceeding 480 s while valid `lp` episodes measured 80–302 s, i.e. a genuinely slow tail rather than a hang (the deadline class, whose measured basis is #2721).
+
+> **Spend-basis note (#2874 / #2906, added 2026-09-10).** The `1.071727 USD`
+> figure came from a price basis of 0.27 in / 1.10 out per 1M tokens that
+> **matches no provider price**. The run's token counts are recoverable from
+> `profile.json` (`ep_markers.usage`: 234,690 prompt + 916,689 completion
+> tokens), and re-pricing them at the corrected declared basis
+> (`battery/config/prices.py`, 0.084/0.168) gives **0.173718 USD** — the same
+> counts at the old basis reproduce the published figure to within 3e-6 USD
+> (1.071724, the residue being 6-decimal rounding of the per-episode
+> accumulated cost), which is what identifies this as a re-pricing of this run
+> and not a different one.
+> **The true figure is a range, not a point:** OpenRouter serves this model id
+> from ~11 upstream providers priced 0.068-0.14 per 1M input, nothing in the
+> config pins one, and a spot-check call was billed at the 0.130/0.280 tier.
+> Re-pricing this run's token counts across that published spread gives
+> **0.167-0.290 USD** (cheapest tier StreamLake 0.167; dearest Baidu 0.290),
+> so no single exact value is supportable from the receipt and the declared
+> basis lands at the cheap end (0.173718). The published figure overstates the
+> leg by **3.7-6.4x**. Nothing else in this report depends on it — it is a cost
+> statement, not a measurement — and the exclusion rate, the verdict, and the
+> family statuses are unaffected. See #2906 for making spend provider-reported
+> rather than inferred.
 
 ## 5. Falsification branches (pre-committed, spec §6)
 

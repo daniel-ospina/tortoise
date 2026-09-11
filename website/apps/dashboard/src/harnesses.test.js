@@ -11,6 +11,8 @@ import {
   HARNESS_CAPTURE_INSTALL, HARNESS_CAPTURE_REASON,
   HARNESS_CAPTURE_STATUS_LABEL, HARNESS_CAPTURE_SUPPORT,
   HARNESS_OAUTH,
+  HARNESS_FAMILIES, HARNESS_FAMILY_IDS, harnessFamilyOf, preferredSurface,
+  harnessDisplayName,
 } from './harnesses.js'
 
 const KEY = 'tt_w2_test_key'
@@ -40,6 +42,52 @@ test('UNIVERSAL_COMMAND covers all 7 harnesses (one command per harness)', () =>
     const cmd = UNIVERSAL_COMMAND[h](KEY)
     assert.ok(cmd && cmd.length > 0, `${h} command non-empty`)
   }
+})
+
+// #2912: the wizard's two-level chooser is a UI grouping over the SAME leaf
+// vocabulary — this pins that invariant (a family/surface id that is not a real
+// leaf would render a chooser entry with no payload behind it).
+test('#2912: HARNESS_FAMILIES groups the leaf vocabulary (Claude 3 + Codex 2 + Cursor/Pi)', () => {
+  assert.deepEqual(HARNESS_FAMILY_IDS, ['claude', 'codex', 'cursor', 'pi'])
+  const surfaceIds = HARNESS_FAMILIES.flatMap((f) => f.surfaces.map((s) => s.id))
+  const claude = HARNESS_FAMILIES.find((f) => f.id === 'claude')
+  const codex = HARNESS_FAMILIES.find((f) => f.id === 'codex')
+  assert.deepEqual(claude.surfaces.map((s) => s.id), ['claude', 'claude-desktop', 'claude-web'])
+  assert.deepEqual(codex.surfaces.map((s) => s.id), ['codex', 'codexDesktop'])
+  // Cursor/Pi are single-choice: family id == leaf id, no surface row.
+  for (const id of ['cursor', 'pi']) {
+    assert.deepEqual(HARNESS_FAMILIES.find((f) => f.id === id).surfaces, [])
+  }
+  // Every chooser id resolves to a real leaf — 'codexDesktop' is the ONE
+  // UI-only leaf (#2328) and is the only id outside HARNESS_ORDER.
+  for (const id of [...HARNESS_FAMILY_IDS, ...surfaceIds]) {
+    assert.ok(HARNESS_ORDER.includes(id) || id === 'codexDesktop',
+      `${id} must be a real leaf (HARNESS_ORDER member or the Codex Desktop surface)`)
+  }
+  // The families cover the wizard's whole leaf surface (chatgpt is OAuth-only).
+  const covered = new Set([
+    ...HARNESS_FAMILIES.flatMap((f) => (f.surfaces.length ? f.surfaces.map((s) => s.id) : [f.id])),
+  ])
+  for (const h of HARNESS_ORDER.filter((h) => h !== 'chatgpt')) {
+    assert.ok(covered.has(h), `${h} must be reachable from the chooser`)
+  }
+})
+
+test('#2912: family resolution + preferred surface + display names', () => {
+  assert.equal(harnessFamilyOf('claude-desktop').id, 'claude')
+  assert.equal(harnessFamilyOf('claude-web').id, 'claude')
+  assert.equal(harnessFamilyOf('codexDesktop').id, 'codex')
+  assert.equal(harnessFamilyOf('cursor').id, 'cursor')
+  assert.equal(harnessFamilyOf('chatgpt'), null)
+  const claude = HARNESS_FAMILIES.find((f) => f.id === 'claude')
+  const cursor = HARNESS_FAMILIES.find((f) => f.id === 'cursor')
+  // re-clicking the active family keeps the user's surface (non-destructive)
+  assert.equal(preferredSurface(claude, 'claude-web'), 'claude-web')
+  // switching families lands on the terminal/self-install surface first
+  assert.equal(preferredSurface(claude, 'pi'), 'claude')
+  assert.equal(preferredSurface(cursor, 'pi'), 'cursor')
+  assert.equal(harnessDisplayName('codexDesktop'), 'Codex Desktop')
+  assert.equal(harnessDisplayName('claude-desktop'), 'Claude Desktop')
 })
 
 test('#2328/#2329: Codex Desktop variant — terminal-less config path, .agents/skills, no .codex/skills', () => {

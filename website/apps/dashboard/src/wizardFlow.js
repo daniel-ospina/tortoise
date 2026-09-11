@@ -34,18 +34,44 @@ export const WIZARD_STEPS = Object.freeze([
   {
     id: 'connect',
     label: 'Connect your agent',
-    sub: 'Connect Tortoise to your Organization.',
+    // #2912: the old sub ("Connect Tortoise to your Organization.") restated the
+    // label instead of saying what the step ASKS. The step is a harness pick.
+    sub: 'Pick which harness to connect.',
   },
   {
     id: 'done',
     label: "You're all set",
-    sub: 'Your agent takes over from here. Open Settings → Setup guide to follow what happens next.',
+    // #2912 (PR-gate UX): the step-3 body already ends with "Open Settings →
+    // Setup guide to follow what happens next" — the header sub used to repeat
+    // that sentence verbatim inside one viewport.
+    sub: 'Your agent takes over from here.',
   },
 ])
+
+// #2912 (PR-gate UX P1): the wizard header and the sr-only step announcement
+// must name the stage the SAME way. Two contexts override the step's own
+// label:
+//   - step 0 on an org-holding account is a read-only summary ("Your
+//     Organization"), not an invitation to create one;
+//   - the paused reconnect's whole point is that the agent is NOT connected,
+//     so rendering "You're all set" as the page <h1> directly above the lede
+//     "You're set up, but your agent isn't connected yet" contradicted itself.
+// Pure + exported so it is unit-tested (wizardFlow.test.js) instead of pinned
+// by a source-text grep.
+export function wizardStageLabel(step, { hasOrg = false, paused = false } = {}) {
+  if (step === 3 && paused) return 'Setup paused — your agent is not connected yet'
+  if (step === 0 && hasOrg) return 'Your Organization'
+  return WIZARD_STEPS[step]?.label ?? ''
+}
 
 // The fork card (epic plan P4 / I-4): presentation fork, once per org,
 // nudge-not-force — NEVER a billing gate. Fork SEMANTICS are W2-owned;
 // W1 renders the shell + persists the set-once fork via the checkpoint.
+// #2407: THREE visible options. 'unsure' ("Not sure yet — decide later")
+// is NOT a fork VALUE — it records fork_unsure_at server-side (checkpoint
+// op {fork_unsure_at: true}) WITHOUT consuming the set-once fork: fork stays
+// None, so the card keeps rendering as answerable ('ask') and a later
+// explicit self/build pick is a fresh fork write (200, never a 409).
 export const WIZARD_FORK_OPTIONS = Object.freeze([
   {
     id: 'self',
@@ -56,6 +82,11 @@ export const WIZARD_FORK_OPTIONS = Object.freeze([
     id: 'build',
     label: 'Build an application on top',
     description: 'You get the capability catalog — the indexers and extractors you can build with.',
+  },
+  {
+    id: 'unsure',
+    label: 'Not sure yet — decide later',
+    description: 'Skip the choice — you pick once per organization, any time from the Setup guide.',
   },
 ])
 
@@ -140,12 +171,15 @@ export function orgNameError(name) {
 // #1998 (W2): fork-card display-mode semantics (surface 4 — W1 renders the
 // shell, W2 owns semantics). Pure helper so the fork-card behavior is
 // unit-testable without React:
-//   'ask'  — fork never chosen (first org, or a legacy org pre-opt-in): the
-//            fork card ASKS (once per org; set-once server-side).
+//   'ask'  — fork never chosen (first org, a legacy org pre-opt-in, OR a
+//            #2407-deferred org — "Not sure yet" records fork_unsure_at but
+//            NEVER consumes the fork, so fork stays None and the card keeps
+//            asking): the fork card ASKS (once per org; set-once server-side).
 //   'set'  — fork already persisted (chosen earlier, or INHERITED by org B at
 //            creation — compact orgs never re-ask): the card renders a
 //            read-only summary + Continue, options disabled.
-// fork values are 'self' | 'build' (state.py FORK_VALUES).
+// fork values are 'self' | 'build' (state.py FORK_VALUES) — 'unsure' is a
+// fork-card ANSWER, never a fork value (forkStepState('unsure') === 'ask').
 export function forkStepState(fork) {
   return (fork === 'self' || fork === 'build') ? 'set' : 'ask'
 }

@@ -42,7 +42,18 @@ from tests.longmem_eval.test_vector_arm import _mini
 from tools.longmem_eval import run as runner
 from tools.longmem_eval.judge import MockJudge
 from tools.longmem_eval.reader import MockReader
+from tortoise.config import is_db_uri as _is_db_uri
 from tortoise.sdk import TortoiseSDK
+
+# ── docker-lane only: reads TORTOISE_DB_URI at import and constructs bare
+# TortoiseSDK() (env-driven) in its helpers, so on a URI-less tier-2 leg it
+# would exercise the embedded backend and mis-assert the cache lifecycle.
+if not _is_db_uri(os.environ.get("TORTOISE_DB_URI")):
+    pytest.skip(
+        "requires TORTOISE_DB_URI (docker-lane eval-ingest-cache; "
+        "tier-2 embedded legs skip)",
+        allow_module_level=True,
+    )
 
 DB_URI = os.environ.get(
     "TORTOISE_DB_URI",

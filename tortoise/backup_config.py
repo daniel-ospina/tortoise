@@ -136,7 +136,12 @@ def _parse_backup_key(raw: str, name: str = "TORTOISE_BACKUP_KEY") -> bytes:
     try:
         key = base64.b64decode(raw.strip(), validate=True)
     except Exception as e:
-        raise ConfigError(f"{name} must be base64 (got {raw[:8]!r}...): {e}") from e
+        # #2796 review (R2/R4): a malformed key is still secret material — the
+        # raw prefix must never reach a log or a published incident body. Report
+        # a non-reversible 8-hex identity instead (secret_store.key_fingerprint
+        # contract: fingerprints are the only key identity that may be logged).
+        got = hashlib.sha256(raw.strip().encode()).hexdigest()[:8]
+        raise ConfigError(f"{name} must be base64 (got <{got}>...): {e}") from e
     if len(key) != _AES_KEY_SIZE:
         raise ConfigError(f"{name} must decode to {_AES_KEY_SIZE} bytes (got {len(key)})")
     return key
