@@ -240,7 +240,7 @@ def test_rebuild_cli_bypasses_health_gate():
         log.append(_point_event(i))
     proj = FalkorProjection(db_path, skip_health_check=True)
     try:
-        counts = proj.rebuild_all(log_dir)
+        counts = proj.rebuild_all(log_dir, confirm_destructive=True)
         assert counts["nodes"] == 2
     finally:
         proj.close()

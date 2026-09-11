@@ -313,7 +313,7 @@ def test_inmemory_rebuild():
     api = EventAPI(log, initiated_by="extractor", agent_id="test")
     a, b, op = _build(api)
     proj = InMemoryProjection()
-    proj.rebuild(log)
+    proj.rebuild(log)  # in-memory: no graph to wipe, no destructive-op token
     assert a in proj.points
     assert b in proj.points
     assert op in proj.points
@@ -609,7 +609,7 @@ def test_falkor_rebuild_from_log():
     _build(api)
     proj = _shared_proj()
     try:
-        proj.rebuild(log)
+        proj.rebuild(log, confirm_destructive=True)
         n = proj.query("MATCH (n:Point) RETURN count(n)").result_set[0][0]
         assert n == 3  # 2 statements + 1 operator
     finally:
@@ -624,7 +624,7 @@ def test_falkor_rebuild_then_apply():
     a, b, op = _build(api)  # noqa: RUF059
     proj = _shared_proj()
     try:
-        proj.rebuild(log)
+        proj.rebuild(log, confirm_destructive=True)
         # Apply a new event incrementally
         c = api.add_point("third statement", provenance("doc.txt", [20, 30], "extra"))  # noqa: F841
         proj.apply(log.read_all()[-1])  # the newly appended event
@@ -929,7 +929,7 @@ def test_falkor_rebuild_all():
 
         proj = FalkorProjection(_tmp("g_rebuild_all.db"), graph_name="test")
         try:
-            result = proj.rebuild_all(d)
+            result = proj.rebuild_all(d, confirm_destructive=True)
             # 2 builds × 6 events each (IngestStarted + 2 PointAdded + OperatorAdded)
             # Actually _build does 4 things: add_point a, add_point b,
             # add_operator. Plus begin_ingest = IngestStarted.
@@ -951,7 +951,7 @@ def test_falkor_rebuild_all_empty_dir():
     try:
         proj = FalkorProjection(_tmp("g_rebuild_empty.db"), graph_name="test")
         try:
-            result = proj.rebuild_all(d)
+            result = proj.rebuild_all(d, confirm_destructive=True)
             assert result["events"] == 0
             assert result["nodes"] == 0
             assert result["edges"] == 0
@@ -978,7 +978,7 @@ def test_falkor_rebuild_all_ignores_non_dict_point():
                                           "context": "ctx"}}) + "\n")
         proj = FalkorProjection(_tmp("g_badpoint.db"), graph_name="test")
         try:
-            result = proj.rebuild_all(d)
+            result = proj.rebuild_all(d, confirm_destructive=True)
             assert result["nodes"] == 1, f"expected 1 valid node, got {result['nodes']}"
             rows = proj.g.query(
                 "MATCH (n:Point {id:'ok-1'}) RETURN count(n)"
@@ -1006,7 +1006,7 @@ def test_falkor_rebuild_all_with_retractions():
 
         proj = FalkorProjection(_tmp("g_retract.db"), graph_name="test")
         try:
-            result = proj.rebuild_all(d)  # noqa: F841
+            result = proj.rebuild_all(d, confirm_destructive=True)  # noqa: F841
             # b was retracted — leaves a tombstone (#689)
             node_count = proj.query("MATCH (n:Point) RETURN count(n)").result_set[0][0]
             assert node_count == 3  # a + op + b tombstone
@@ -1441,7 +1441,7 @@ def test_check_consistency_matches():
     _build(api)
     proj = FalkorProjection(_tmp("g_consistency_ok.db"), graph_name="test")
     try:
-        proj.rebuild(log)
+        proj.rebuild(log, confirm_destructive=True)
         from tortoise.consistency import check_consistency
         result = check_consistency(log.path, proj)
         assert result["ok"], f"expected ok, got {result}"
@@ -1458,7 +1458,7 @@ def test_check_consistency_mismatch():
     _build(api)
     proj = FalkorProjection(_tmp("g_consistency_bad.db"), graph_name="test")
     try:
-        proj.rebuild(log)
+        proj.rebuild(log, confirm_destructive=True)
         # Inject a stray node directly into DB (bypassing the log)
         proj._upsert({"id": "ghost", "content": "not in log", "context": "ctx"})
         from tortoise.consistency import check_consistency
@@ -1974,7 +1974,7 @@ def test_falkor_rebuild_all_parity_with_apply():
         try:
             for ev in log.read_all():
                 projA.apply(ev)
-            projB.rebuild_all(d)
+            projB.rebuild_all(d, confirm_destructive=True)
 
             def node_map(proj):
                 rows = proj.g.query("MATCH (n:Point) RETURN n.id, properties(n)").result_set
@@ -2086,7 +2086,7 @@ def test_falkor_rebuild_all_revision_before_add():
 
         proj = FalkorProjection(_tmp("g_rebuild_21.db"), graph_name="test")
         try:
-            proj.rebuild_all(d)
+            proj.rebuild_all(d, confirm_destructive=True)
             r = proj.g.query(
                 "MATCH (n:Point {id:$id}) RETURN n.content",
                 params={"id": pid},
@@ -2181,7 +2181,7 @@ def test_falkor_rebuild_all_with_sdk_points():
         proj = FalkorProjection(
             os.path.join(d, "rebuilt.db"), graph_name="test")
         try:
-            result = proj.rebuild_all(d)
+            result = proj.rebuild_all(d, confirm_destructive=True)
             assert result["nodes"] >= 4, (
                 f"Expected at least 4 nodes (3 points + 1 operator), "
                 f"got {result['nodes']}")
@@ -2267,7 +2267,7 @@ def test_falkor_rebuild_all_snapshot_preserves_sdk_points():
         # Must use the same graph_name as the SDK ("tortoise" is default).
         proj = FalkorProjection(db_path, graph_name="tortoise")
         try:
-            result = proj.rebuild_all(d)
+            result = proj.rebuild_all(d, confirm_destructive=True)
 
             # Should have 4+ nodes: p1, p2, op, evt-001
             assert result["nodes"] >= 4, (
@@ -2352,7 +2352,7 @@ def test_falkor_rebuild_all_eventapi_regression():
         try:
             for ev in log.read_all():
                 projA.apply(ev)
-            result = projB.rebuild_all(d)
+            result = projB.rebuild_all(d, confirm_destructive=True)
 
             # p-reg-1 survives, p-reg-2 was retracted (tombstone per #689)
             assert result["nodes"] >= 1, (
@@ -2896,7 +2896,7 @@ def test_rebuild_all_tolerates_malformed_events():
                                 "point": {"id": ["x"], "content": "bad id"}}) + "\n")
         proj = FalkorProjection(_tmp("g_rebuild_331.db"), graph_name="test")
         try:
-            result = proj.rebuild_all(d)
+            result = proj.rebuild_all(d, confirm_destructive=True)
             assert result["nodes"] >= 1
             rows = proj.g.query(
                 "MATCH (n:Point {id:'p1'}) RETURN n.status").result_set

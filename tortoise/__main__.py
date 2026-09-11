@@ -48,7 +48,11 @@ def _cmd_rebuild(args):
         # skip_health_check: `rebuild` IS the recovery tool — a broken DB must
         # not block its own rebuild (ops safety #428).
         proj = FalkorProjection(args.db, skip_health_check=True)
-        counts = proj.rebuild_all(args.dir)
+        # #2944 L1: `tortoise rebuild` IS the operator-invoked wipe+replay
+        # recovery tool — the human running this command is the authorization.
+        # The token is passed HERE, at the entry point, so a new caller of
+        # rebuild_all() elsewhere cannot wipe a graph by forgetting it.
+        counts = proj.rebuild_all(args.dir, confirm_destructive=True)
         print(f"Done: {counts['nodes']} nodes, {counts['edges']} edges from {counts['events']} events")
     except ImportError as e:
         print(f"FalkorDB unavailable ({e}). Use InMemory rebuild:", file=sys.stderr)

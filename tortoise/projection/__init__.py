@@ -91,6 +91,39 @@ def _is_bulk_wipe(cypher: str) -> bool:
     return True
 
 
+# ── Destructive-op guard: TWO independent layers (#99 P0, hardened #2944) ──
+#
+# The unconditional graph wipe (``MATCH (n) DETACH DELETE n``) is the most
+# destructive statement in the system. It is protected by two layers that
+# cover different attack surfaces — L2 alone left embedded mode unsupervised
+# and L1 alone left hand-written Cypher unguarded, so each layer exists
+# because the other does not cover it:
+#
+#   L1 — STRUCTURAL, per-call opt-in (#2944). The only in-tree path that
+#        issues the wipe is ``FalkorProjection._wipe_all_nodes()``, and it
+#        refuses unless the CALLER passed ``confirm_destructive=True``
+#        through ``rebuild_all()`` / ``rebuild()``. There is no default-allow,
+#        no module-level flag, no env var, and no instance attribute that can
+#        authorize a wipe: a new caller cannot wipe a graph by *forgetting*
+#        something, it must deliberately opt in at its own call site. This
+#        layer applies to embedded DBs too — "embedded" means *isolated*, not
+#        *unsupervised* (an embedded wipe with an empty/missing log is
+#        unrecoverable).
+#
+#   L2 — DEFENCE IN DEPTH, disposable-graph check (#99). ``_GuardedGraph``
+#        wraps the raw handle the SDK uses everywhere, so EVERY bulk DETACH
+#        DELETE (including hand-written Cypher that never went through L1)
+#        is still refused on a server graph whose name is not a disposable
+#        test graph. Names are no longer load-bearing for the rebuild lane,
+#        but this layer still refuses strictly more than L1 alone, so it
+#        stays (removing it would weaken the guard).
+#
+# History: the pre-#2944 bypass was ``_skip_guard``, a plain boolean
+# attribute (``self._skip_guard = False``) read by both query paths. It has
+# been REMOVED — a mutable attribute is exactly the "flippable by accident"
+# shape this hardening eliminates.
+
+
 class _GuardedGraph:
     """Wrapper around the FalkorDB Graph handle that guards bulk graph-wipe queries.
 
@@ -101,6 +134,11 @@ class _GuardedGraph:
     Intercepts bulk DETACH DELETE (no property map, no real WHERE) and asserts
     the graph is a test graph before allowing execution. Targeted deletes
     (MATCH (n:Label {id:$id}) ...) pass through unchanged.
+
+    This is L2 of the two-layer guard (see the module comment above): it is
+    unconditional — there is deliberately NO bypass attribute. The only
+    authorized way to wipe is ``FalkorProjection._wipe_all_nodes()`` (L1),
+    which asserts the caller's explicit opt-in before reaching here.
     """
 
     __slots__ = ("_g", "_proj")
@@ -110,7 +148,7 @@ class _GuardedGraph:
         self._proj = projection
 
     def query(self, cypher: str, params=None, timeout=None):
-        if _is_bulk_wipe(cypher) and not getattr(self._proj, "_skip_guard", False):
+        if _is_bulk_wipe(cypher):
             self._proj._assert_test_graph(
                 "REFUSING to run bulk DETACH DELETE on non-test graph"
             )
@@ -832,7 +870,11 @@ class FalkorProjection(
         self.g = _GuardedGraph(self.db.select_graph(graph_name), self)
         self.graph_name = graph_name
         self._graph_name = graph_name
-        self._skip_guard = False
+        # NOTE (#2944): there is deliberately NO `_skip_guard` attribute here.
+        # The former bypass was removed; the only authorization for an
+        # unconditional wipe is the per-call `confirm_destructive=True`
+        # token threaded through rebuild()/rebuild_all() (L1) — see the
+        # two-layer guard comment above _GuardedGraph.
         self._is_embedded = (path is not None)
         self._path = path
         # Ops safety residual (#428): auto health check on open + transparent
@@ -924,6 +966,12 @@ class FalkorProjection(
 
     def _auto_health_recover(self) -> None:
         """Health check on open + transparent JSONL recovery (embedded only).
+
+        #2944: this path never bulk-wipes. Recovery goes through
+        ``recover_from_log``, which only replays into a graph it has already
+        proven to be EMPTY (0 nodes) — nothing to DETACH DELETE — so it needs
+        no ``confirm_destructive`` token. If that ever changes, the wipe it
+        grows must route through ``_wipe_all_nodes`` like every other one.
 
         The event log is the source of truth; the projection a derived view.
         Two corruption modes are caught:
@@ -1153,13 +1201,27 @@ class FalkorProjection(
             return self._upsert_source(
                 ev, merge_run_id=ev.pop("_merge_run_id", None))
 
-    def rebuild(self, log) -> None:
-        self.g.query("MATCH (n) DETACH DELETE n")
+    def rebuild(self, log, *, confirm_destructive: bool = False) -> None:
+        """Wipe the graph and replay one EventLog. DESTRUCTIVE.
+
+        #2944: the wipe is gated by L1 — the caller MUST pass
+        ``confirm_destructive=True``. The default refuses, so a new caller
+        cannot wipe a graph by forgetting the opt-in. L2 (`_assert_test_graph`)
+        then still refuses a non-disposable server graph even with the token.
+        """
+        self._wipe_all_nodes(confirm_destructive=confirm_destructive,
+                             operation="rebuild")
         for ev in log.read_all():
             self.apply(ev)
 
-    def rebuild_all(self, log_dir: str) -> dict:
+    def rebuild_all(self, log_dir: str, *,
+                    confirm_destructive: bool = False) -> dict:
         """Rebuild from all .jsonl files in a directory. Returns counts.
+
+        DESTRUCTIVE: this wipes the whole graph before replaying. #2944 gates
+        the wipe on an explicit per-call opt-in — the caller MUST pass
+        ``confirm_destructive=True`` (default refuses). L2 still refuses a
+        non-disposable server graph even with the token.
 
         Two-pass: creates all Point nodes first (pass 1), then operator edges
         and all other event types second (pass 2), so cross-file operator→Point
@@ -1184,6 +1246,11 @@ class FalkorProjection(
         """
         import os  # noqa: I001
         from tortoise.log import EventLog
+
+        # L1 (#2944): fail the structural precondition FIRST — a caller that
+        # did not opt in must not reach the #548 snapshot, the log parse, or
+        # the wipe. (The wipe re-asserts it via _wipe_all_nodes.)
+        self._assert_destructive_confirmed(confirm_destructive, "rebuild_all")
 
         # ── #548: snapshot existing graph BEFORE wiping ──────────────
         # SDK-created points written via Cypher may have no corresponding
@@ -1298,7 +1365,8 @@ class FalkorProjection(
             if fname.endswith('.jsonl'):
                 events.extend(EventLog(os.path.join(log_dir, fname)).read_all())
 
-        self.g.query("MATCH (n) DETACH DELETE n")
+        self._wipe_all_nodes(confirm_destructive=confirm_destructive,
+                             operation="rebuild_all")
 
         # Pass 1: create all Point/Operator nodes (skip edges) + non-edge events
         # Pass 1a: create all Point/Operator nodes first
@@ -2048,23 +2116,73 @@ class FalkorProjection(
         return {"events": len(events), "nodes": node_count, "edges": edge_count}
 
     def query(self, cypher: str, **params):
-        # P0 guard (#99): refuse bulk graph-wipe on non-test graphs.
-        # Respect _skip_guard (consistent with _GuardedGraph.query) so a
-        # legitimate maintenance bypass works through either call path.
-        if _is_bulk_wipe(cypher) and not self._skip_guard:
+        # L2 guard (#99): refuse bulk graph-wipe on non-test graphs. There is
+        # NO bypass attribute (#2944 removed `_skip_guard`): this path is
+        # unconditional, exactly like _GuardedGraph.query. The authorized
+        # wipe path is FalkorProjection._wipe_all_nodes() (L1).
+        if _is_bulk_wipe(cypher):
             self._assert_test_graph(
                 f"REFUSING to run bulk DETACH DELETE on non-test graph "
                 f"'{self._graph_name}'"
             )
         return self.g.query(cypher, params=params or None)
 
+    def _assert_destructive_confirmed(self, confirm_destructive: bool,
+                                      operation: str) -> None:
+        """L1 of the destructive-op guard (#2944): require an explicit opt-in.
+
+        Raises unless the CALLER of a destructive projection operation passed
+        ``confirm_destructive=True``. Default = refuse, so a new caller cannot
+        wipe a graph by forgetting something — it has to opt in deliberately,
+        per call, at its own call site. Deliberately NOT settable as an
+        instance/module attribute, an env var, or a constructor flag: there is
+        nothing to flip from ordinary production code.
+        """
+        if confirm_destructive is not True:
+            raise RuntimeError(
+                f"Graph guard: {operation} performs an unconditional bulk "
+                f"wipe (MATCH (n) DETACH DELETE n) on graph "
+                f"'{self._graph_name}'. Refusing: pass "
+                f"confirm_destructive=True to authorize this wipe at the call "
+                f"site. This is a deliberate per-call opt-in — no flag, env "
+                f"var, or instance attribute can authorize a wipe by accident."
+            )
+
+    def _wipe_all_nodes(self, *, confirm_destructive: bool,
+                        operation: str) -> None:
+        """The ONLY in-tree path that issues an unconditional graph wipe.
+
+        L1 (#2944) enforces the caller's explicit per-call opt-in; the wipe
+        itself then still passes L2 (`_assert_test_graph` via the guarded
+        handle), so a non-disposable graph is refused even when L1 was
+        satisfied.
+        """
+        self._assert_destructive_confirmed(confirm_destructive, operation)
+        # L2: name/embedded check. Redundant with _GuardedGraph.query below
+        # on purpose — this method is the readable contract; the handle is
+        # the last line of defence for every other bulk-wipe caller.
+        self._assert_test_graph(
+            f"REFUSING to run bulk DETACH DELETE on non-test graph "
+            f"({operation})"
+        )
+        self.g.query("MATCH (n) DETACH DELETE n")
+
     def _assert_test_graph(self, reason: str = "") -> None:
-        """Raise RuntimeError if the active graph is not a test graph.
+        """L2 of the destructive-op guard: refuse bulk wipe on a non-test graph.
 
         Test graphs must start with 'test_' or 'tortoise_test'.
         Embedded mode (path=) is inherently isolated (per-instance temp DB) —
         the guard does NOT apply to it. Only server mode (docker) needs the
         graph-name check, protecting the shared real graph (#99).
+
+        #2944 scope note: this is DEFENCE IN DEPTH, not the structural gate.
+        The structural gate (L1, per-call ``confirm_destructive=True``) lives
+        in ``_assert_destructive_confirmed`` / ``_wipe_all_nodes`` and applies
+        to embedded mode too. L2 stays because it refuses strictly more than
+        L1 alone: a hand-written ``MATCH (n) DETACH DELETE n`` straight to the
+        guarded handle is still refused on a non-test server graph, regardless
+        of whether any L1-authorized operation was in flight. "Embedded" here
+        means *isolated*, not *unsupervised* — that supervision is L1's job.
         """
         if getattr(self, "_is_embedded", False):
             return

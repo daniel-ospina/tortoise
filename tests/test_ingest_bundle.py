@@ -1336,7 +1336,7 @@ class TestA3OperatorDedupRicherReturn:
         events_dir.mkdir()
         log_path = str(events_dir / "events.jsonl")
         sdk._event_log_path = log_path
-        sdk._get_proj().rebuild_all(str(events_dir))
+        sdk._get_proj().rebuild_all(str(events_dir), confirm_destructive=True)
         # post-rebuild: the operator survives at the full input set
         assert _count(sdk, "MATCH (n:Point {id:$p}) RETURN count(n)",
                       {"p": partial["id"]}) == 1
