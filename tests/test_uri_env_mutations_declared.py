@@ -98,6 +98,14 @@ import re
 from pathlib import Path
 
 _TESTS_ROOT = Path(__file__).resolve().parent
+_REPO_ROOT = _TESTS_ROOT.parent
+# #2815 census scan roots. `tests/` is the primary surface; `tools/` is included
+# because the same probe/read anti-pattern was copy-pasted into the eval runner
+# (tools/longmem_eval/run.py), which this PR also had to fix by hand — a census
+# that could not see its own fix site would let the class return there unseen.
+# `tortoise/` is deliberately EXCLUDED: production reads are a separate review
+# lane (see the docstring boundary note and #2857 for the known CLI instance).
+_URI_CENSUS_ROOTS = (_TESTS_ROOT, _REPO_ROOT / "tools")
 
 # ── DELIBERATE_URI_MUTATIONS (cycle-8 P1-3) ─────────────────────────────────
 # dict[file, list[regex]] — every mutation line in `file` must match at least
@@ -1217,9 +1225,13 @@ def _nonempty_default_uri_reads(
     ``tests/_live_utils.live_uri()``.
 
     ``files`` is an injectable ``[(relpath, source)]`` list (the positive
-    control uses it); the default scans every ``*.py`` under ``tests/`` —
-    broader than the ``test_*.py`` censuses above, because helper modules
-    carry the same probe.
+    control uses it); the default scans every ``*.py`` under ``tests/`` and
+    ``tools/`` — broader than the ``test_*.py`` censuses above, because helper
+    modules carry the same probe, and ``tools/`` is included because the eval
+    runner (``tools/longmem_eval/run.py``) carried the identical ``setdefault``
+    trap this PR fixed by hand. ``tortoise/`` is a deliberate exclusion:
+    production intent is a different review lane, and the one known instance
+    there is tracked separately (#2857).
 
     Boundary (deliberate, pinned by the positive control): the key must be a
     literal or a module-level string constant, and the callee must be named
@@ -1234,9 +1246,10 @@ def _nonempty_default_uri_reads(
 
     if files is None:
         files = [
-            (path.relative_to(_TESTS_ROOT.parent).as_posix(),
+            (path.relative_to(_REPO_ROOT).as_posix(),
              path.read_text(encoding="utf-8", errors="replace"))
-            for path in sorted(_TESTS_ROOT.rglob("*.py"))
+            for root in _URI_CENSUS_ROOTS
+            for path in sorted(root.rglob("*.py"))
         ]
 
     out: list[str] = []
@@ -1296,9 +1309,16 @@ def test_no_nonempty_default_tortoise_db_uri_reads():
     non-literal default expression. Use tests._live_utils.live_uri() — its
     ``default=`` argument is the escape hatch for a different lane default.
     """
-    # A wrong/empty scan set would make the assertion below vacuous.
-    assert len(list(_TESTS_ROOT.rglob("*.py"))) > 100, (
+    # A wrong/empty scan set would make the assertion below vacuous. Pin both
+    # roots: shrinking the census back to tests/-only must red here, not pass
+    # silently (the tools/ root exists precisely because this PR fixed an
+    # instance there — a census that cannot see its own fix site is a gap).
+    scanned = [p for root in _URI_CENSUS_ROOTS for p in root.rglob("*.py")]
+    assert len(scanned) > 100, (
         "census scan set is empty — the census would pass vacuously")
+    assert any(p.is_relative_to(_REPO_ROOT / "tools") for p in scanned), (
+        "census scan set no longer covers tools/ — the eval-runner instance "
+        "fixed by #2840 would be unpinned (see _URI_CENSUS_ROOTS)")
     offenders = _nonempty_default_uri_reads()
     assert not offenders, (
         'these test files read TORTOISE_DB_URI with a non-empty default '
