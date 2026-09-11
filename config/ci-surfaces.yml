@@ -5,37 +5,11 @@ surfaces:
   - test_abuse.py
   - test_abuse_integration.py
   - test_acl_graph_users.py   # C4 #2113: per-graph FalkorDB ACL layer (docker-lane; skipif no URI)
-  - test_battery_corpus_v11.py
-  - test_battery_envelope_type.py
-  - test_battery_ep_outcome.py
-  - test_battery_executor_v1.py
-  - test_battery_executor_v2.py
-  - test_battery_exposure_liveness.py
-  - test_battery_exposure_oracle.py
-  - test_battery_exposure_usage_cap.py
-  - test_battery_judge_declarative.py
-  - test_battery_lane_matrix.py
-  - test_battery_loader_fidelity.py
-  - test_battery_model_pin.py
   - test_battery_parity_executors.py
   - test_battery_parity_hash.py
   - test_battery_parity_mabench.py
   - test_battery_parity_mabench_run.py
   - test_battery_parity_migration.py
-  - test_battery_probe_measured.py
-  - test_battery_provenance.py
-  - test_battery_r1_seed.py
-  - test_battery_real_deadline.py
-  - test_battery_realism.py
-  - test_battery_realism_run.py
-  - test_battery_report_writers.py
-  - test_battery_rubric_authoring.py
-  - test_battery_schema_v11.py
-  - test_battery_seed_ingest.py
-  - test_battery_thresholds_relock.py
-  - test_battery_token_relock.py
-  - test_battery_validation_real.py
-  - test_battery_write_channel.py
   - test_delivery_tenancy.py  # C6 #2115: delivery-shape tenancy + session_recording per-graph override
   - test_onboarding_email_http.py
   - test_sentry.py
@@ -197,7 +171,11 @@ surfaces:
   # parity/mabench_run.py; and — added alongside the price-basis drift fix —
   # test_battery_parity_migration.py and test_battery_parity_hash.py, which
   # module-import battery.parity.runner yet were api-only (the same latent gap,
-  # found in review; #2916 tracks the wider class of this shape).
+  # found in review).
+  # The other DUAL members here are inherited, not deliberate: arms, cli, config,
+  # determinism, enums, run, runner and setup pin no api-owned source either, so
+  # their api half is waste of the same kind #2916 moved out. Left in place here
+  # (out of that issue's scope) and tracked by #2938 with the wider class.
   # NOT dual — battery-only (it pins no api-owned surface):
   # test_battery_price_basis.py (#2906 — config/prices.py, runner, probes, judge).
   - test_battery_parity_executors.py
@@ -211,8 +189,8 @@ surfaces:
   # (#2874) pin battery/config/prices.py, battery/runner/model_calls.py,
   # battery/parity/mabench_run.py, and tortoise/model_adapters.py. The
   # price-basis file landed in #2890 unregistered (drift-gate red on main)
-  # and is registered here alongside the provider-cost file it guards.
-  - test_battery_price_basis.py
+  # and is registered in this surface alongside the provider-cost file it guards
+  # (it sits with the other battery-only entries above).
   - test_battery_provider_cost.py
   - test_battery_differential.py
   - test_battery_streams.py
@@ -228,6 +206,38 @@ surfaces:
   - test_battery_runner.py
   - test_battery_setup.py
   - test_battery_real_run_gate.py  # #2633 real-run vendor-key pre-flight gate (hermetic)
+  # #2916: 26 files that pin battery/ (arms, cli, config, enums, exceptions,
+  # exposure, judge, probes, report, runner, testing) and NOTHING api-owned — no
+  # api-pinned import, no api-pinned path string — yet were registered api-only,
+  # so a battery/ edit ran none of them and an api edit ran all of them for
+  # nothing. Moved here (not dual-registered): verified per file that no
+  # api-owned source is imported or referenced.
+  - test_battery_corpus_v11.py
+  - test_battery_envelope_type.py
+  - test_battery_ep_outcome.py
+  - test_battery_executor_v1.py
+  - test_battery_executor_v2.py
+  - test_battery_exposure_liveness.py
+  - test_battery_exposure_oracle.py
+  - test_battery_exposure_usage_cap.py
+  - test_battery_judge_declarative.py
+  - test_battery_lane_matrix.py
+  - test_battery_loader_fidelity.py
+  - test_battery_model_pin.py
+  - test_battery_probe_measured.py
+  - test_battery_provenance.py
+  - test_battery_r1_seed.py
+  - test_battery_real_deadline.py
+  - test_battery_realism.py
+  - test_battery_realism_run.py
+  - test_battery_report_writers.py
+  - test_battery_rubric_authoring.py
+  - test_battery_schema_v11.py
+  - test_battery_seed_ingest.py
+  - test_battery_thresholds_relock.py
+  - test_battery_token_relock.py
+  - test_battery_validation_real.py
+  - test_battery_write_channel.py
   core:
   - test_about_edges.py
   - test_about_event_untangle.py
