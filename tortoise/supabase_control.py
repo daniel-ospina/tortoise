@@ -2277,6 +2277,65 @@ def count_active_free_memberships(cp, user_id: str) -> int:
     return count
 
 
+# #2789: a not-yet-real org. An org in `pending_payment` has been minted but
+# is not provisioned (no graph, no keys) and is hidden from every surface, so
+# it must NOT consume the free-org allowance — excluded from the ownership
+# count exactly like an active/paid subscription. (The #2789 design,
+# webhook-provisioned org, never writes this state; the exclusion is the
+# rules-table invariant plus a guard for any future writer.)
+_PENDING_PAYMENT_STATUS = "pending_payment"
+
+
+def owned_free_org_ids(cp, user_id: str) -> list[str]:
+    """#2789: ids of orgs where *user_id* is an ACTIVE **owner** of a team
+    with no active paid subscription — oldest first.
+
+    The #1877 twin (`count_active_free_memberships`) counts MEMBERSHIPS; this
+    counts OWNERSHIP. They are deliberately separate functions: the
+    invite-join gates (`hosted_api.py:11393/11808/12320` and the two accept
+    paths in this module) read the membership-scoped count, and #2789's
+    out-of-scope list pins that semantics. Create-org gates read this one — a
+    collaborator on someone else's free org owns nothing, so it must not block
+    their own org (the trap that motivated #2789).
+
+    Counting = active membership + ``role='owner'`` + team without an active
+    paid subscription, excluding ``pending_payment`` (a not-yet-real org must
+    not consume the allowance). Shape-gates user_id (#1719: a non-UUID literal
+    would 22P02 → PostgREST 500) and skips dangling memberships
+    (``team_by_id`` None → not counted — the #302 soft-delete sweep can leave
+    memberships for purged teams).
+    """
+    if not _is_uuid(user_id):
+        return []
+    ids: list[str] = []
+    for row in cp.query(
+        "team_memberships",
+        select=["team_id", "role"],
+        filters=[("user_id", "eq", user_id), ("status", "eq", "active"),
+                 ("team_id", "neq", "")],
+        order="created_at.asc",
+    ):
+        if (row.get("role") or "") != "owner":
+            continue  # collaborator/invited-member — ownership is what counts
+        team = team_by_id(cp, row["team_id"])
+        if team is None:
+            continue  # dangling membership — not counted, never a 500
+        status = team.get("subscription_status")
+        if status in _BILLING_ACTIVE_STATUSES:
+            continue  # paid (or in the paying window) — not a free org
+        if status == _PENDING_PAYMENT_STATUS:
+            continue  # not real yet — does not consume the allowance
+        ids.append(row["team_id"])
+    return ids
+
+
+def count_owned_free_orgs(cp, user_id: str) -> int:
+    """#2789: ``len(owned_free_org_ids(...))`` — read-parity with the #1877
+    twin (``count_active_free_memberships``) for callers that only need the
+    count."""
+    return len(owned_free_org_ids(cp, user_id))
+
+
 def membership_count_since(cp, *, cutoff: str, user_id: str | None = None,
                            identity: str | None = None,
                            role: str | None = None) -> int:

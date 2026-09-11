@@ -529,7 +529,10 @@ def test_create_team_success(page: Page):
     # special characters (not spaces) are rejected — inline error, no POST
     page.get_by_label("Organization name").fill("bad@name!")
     page.locator(".modal .btn-primary").click(force=True)
-    expect(page.locator(".modal")).to_contain_text("Invalid team name", timeout=10000)
+    # NOTE: the client copy is "Invalid organization name — …" (the team→
+    # organization rename). The assertion said "Invalid team name" and had been
+    # stale/latent-red on main; corrected here while touching this file.
+    expect(page.locator(".modal")).to_contain_text("Invalid organization name", timeout=10000)
     page.get_by_label("Organization name").fill("good name with spaces")
     page.locator(".modal .btn-primary").click(force=True)  # busy-state re-render detaches the name-changed button
     # the dashboard switches to the new team (the blob shows its name)
@@ -537,8 +540,13 @@ def test_create_team_success(page: Page):
 
 
 def test_create_team_free_capped_gate(page: Page):
-    """#1877: a 402 from POST /v1/teams surfaces the gated-on-click upgrade
-    UX in the dialog (message + Upgrade CTA landing on Billing)."""
+    """#1877/#2789: a 402 from POST /v1/teams surfaces the gated dialog. The
+    server drives it with a STRUCTURED detail (`one_free_org_limit`) — the
+    three-option gate (#2789) — never by string-matching the message.
+
+    The fixture's team row carries no `role`, so the client pre-check does not
+    short-circuit here: this exercises the server-driven path.
+    """
     _seed(page)
     _wire(page, inv=_inventory(login_methods=1))
 
@@ -549,8 +557,10 @@ def test_create_team_free_capped_gate(page: Page):
         if path.endswith("/v1/teams"):
             if route.request.method == "POST":
                 route.fulfill(status=402, content_type="application/json",
-                              body=json.dumps({"detail": "Create another team requires a "
-                                                         "paid plan — upgrade an existing team first"}))
+                              body=json.dumps({"detail": {
+                                  "code": "one_free_org_limit",
+                                  "message": "You can only have one free organization",
+                                  "team_id": "team_e2e"}}))
             else:
                 # default single-team fixture shape (this test uses _wire's default)
                 route.fulfill(status=200, content_type="application/json",
@@ -566,13 +576,72 @@ def test_create_team_free_capped_gate(page: Page):
     page.get_by_label("Organization name").fill("blocked")
     page.locator(".modal .btn-primary").click(force=True)  # busy-state re-render
     dialog = page.get_by_role("dialog", name="Create a new organization")
-    # W1 (#1997): the 402 upgrade branch renders the fixed free-cap copy
-    # (main.jsx) — asserted case-exact as rendered (to_contain_text strings
-    # are case-sensitive).
-    expect(dialog).to_contain_text("The free plan includes one organization. Upgrade an existing organization to create more", timeout=15000)
-    expect(dialog.get_by_role("button", name="Upgrade")).to_be_visible()
-    dialog.get_by_role("button", name="Upgrade").click()
-    expect(page.get_by_role("heading", name="Billing")).to_be_visible()
+    # #2789: the server's structured code selects the three-option gate.
+    expect(dialog).to_contain_text("You can only have one free organization", timeout=15000)
+    expect(dialog).to_contain_text(
+        "Individual users can create one organization. To create another, purchase a subscription for it — or upgrade your current organization")
+    expect(dialog.get_by_role("button", name="Purchase subscription for a new organization")).to_be_visible()
+    expect(dialog.get_by_role("button", name="Upgrade current organization")).to_be_visible()
+    expect(dialog.get_by_role("button", name="Cancel")).to_be_visible()
+    # "Upgrade current organization" lands on the Billing tab (the org the
+    # server's detail named).
+    dialog.get_by_role("button", name="Upgrade current organization").click()
+    expect(page.get_by_role("heading", name=re.compile(r"Billing"))).to_be_visible()
+
+
+def test_create_team_pre_checked_at_cap(page: Page):
+    """#2789: the account-menu item PRE-CHECKS the entitlement from the teams
+    list (role + subscription_status) and opens the three-option dialog
+    immediately — the user never types a name and gets rejected.
+
+    No POST /v1/teams is stubbed/allowed here: reaching the dialog without one
+    IS the assertion.
+    """
+    _seed(page)
+    _wire(page, inv=_inventory(login_methods=1), teams=[
+        {"team_id": "team_e2e", "team_name": "E2E", "tier": "free",
+         "role": "owner", "subscription_status": None,
+         # #2789: the plan chooser reads the server-resolved catalog from the
+         # current team's /v1/team payload (ids never hardcoded client-side).
+         "checkout_price_ids": {"solo": "price_100soloM", "pro": "price_200proMM"}},
+    ])
+    posted: list = []
+
+    def handle_create(route):
+        path = route.request.url.split("?", 1)[0]
+        if path.endswith("/v1/teams"):
+            if route.request.method == "POST":
+                posted.append(route.request.url)
+                route.fulfill(status=500, content_type="application/json",
+                              body=json.dumps({"detail": "must not be called"}))
+            else:
+                route.fulfill(status=200, content_type="application/json",
+                              body=json.dumps([{"team_id": "team_e2e", "team_name": "E2E",
+                                                "tier": "free", "role": "owner",
+                                                "subscription_status": None,
+                                                "checkout_price_ids": {"solo": "price_100soloM",
+                                                                        "pro": "price_200proMM"}}]))
+            return
+        route.continue_()
+    page.route("**/v1/teams", handle_create)
+
+    page.goto(DASHBOARD_URL)
+    _open_account_menu(page)
+    page.locator(".account-menu").get_by_role("button", name="+ Create new organization").click(force=True)
+    dialog = page.get_by_role("dialog", name="Create a new organization")
+    expect(dialog).to_contain_text("You can only have one free organization", timeout=15000)
+    # The name input is NOT shown — no rejection-after-typing flow.
+    expect(dialog.get_by_label("Organization name")).to_have_count(0)
+    expect(dialog.get_by_role("button", name="Purchase subscription for a new organization")).to_be_visible()
+    assert posted == [], "the pre-check must not POST /v1/teams"
+    # The third option opens the paid-new-org flow (name + plan), not a checkout.
+    dialog.get_by_role("button", name="Purchase subscription for a new organization").click()
+    dialog = page.get_by_role("dialog", name="Create a new organization")
+    expect(dialog.get_by_label("Organization name")).to_be_visible()
+    expect(dialog.get_by_role("button", name="Continue to checkout")).to_be_visible()
+    # paid plan chooser is server-resolved (no hardcoded Stripe ids)
+    expect(dialog.get_by_role("button", name="Pro · $25/mo")).to_be_visible()
+    expect(dialog.get_by_role("button", name="Solo · $9/mo")).to_be_visible()
 
 
 def test_account_menu_two_sections(page: Page):
