@@ -1719,7 +1719,7 @@ def _suspended_info(body: str) -> tuple[str, str | None] | None:
         return None
     if not isinstance(detail, dict) or detail.get("code") != "SUSPENDED":
         return None
-    msg = detail.get("message") or "This team has been suspended due to unusual activity."
+    msg = detail.get("message") or "This organization has been suspended due to unusual activity."
     url = detail.get("appeal_url")
     return (f"{msg} Appeal: {url}" if url else msg, url)
 
