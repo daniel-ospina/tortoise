@@ -872,7 +872,7 @@ assert_not_match "$(cat "$LOG")" "GH POST .*/issues .*SWEEP_NO_COVERAGE" "49. no
 reset_case
 export R2_TEAMS=$'backups/teamA/'
 export R2_DEFAULT_LIST="$TS_RECENT"
-export STUB_STATUS_BODY="$(status_body false '"boom ghp_ABCDEFGH\nIJKLMNOPQRSTUVWXYZ0123456789 dsn=user:SuperSecret123@db.internal:6379 redis://:EmptyUserPw123@db:6379 falkor://user:p/ssw0rd@db:6379 compatible: true patch: 3 author: bob"' null)"
+export STUB_STATUS_BODY="$(status_body false '"boom ghp_ABCDEFGH\nIJKLMNOPQRSTUVWXYZ0123456789 dsn=user:SuperSecret123@db.internal:6379 redis://:EmptyUserPw123@db:6379 falkor://user:p/ssw0rd@db:6379 compatible: true patch: 3 author: bob password='\''x sekritTail1'\'' key=\"y sekritTail2\" hockey: 3 monkey: 5"' null)"
 run_driver
 assert_eq "$RC" 1 "50. a secret-bearing config error exits RED (1)"
 for leaked in SuperSecret123 ghp_ABCDEFGH EmptyUserPw123; do
@@ -883,6 +883,14 @@ assert_not_contains "$OUT" "IJKLMNOPQRSTUVWXYZ0123456789" "50. the newline-split
 assert_contains "$OUT" "compatible: true" "50. 'compatible:' is not a false positive"
 assert_contains "$OUT" "patch: 3" "50. 'patch:' is not a false positive"
 assert_contains "$OUT" "author: bob" "50. 'author:' is not a false positive"
+# Review R4 (P3): a quoted value containing whitespace must be consumed whole
+# (the old rule-5 value class stopped at the first space and left the tail).
+assert_not_contains "$OUT" "sekritTail1" "50. a single-quoted value with spaces leaves no tail"
+assert_not_contains "$OUT" "sekritTail2" "50. a double-quoted value with spaces leaves no tail"
+# Review R4 (P3): a key suffix must start at a word segment, so a word that
+# merely ENDS in `key` is not a credential key.
+assert_contains "$OUT" "hockey: 3" "50. 'hockey:' is not a false positive"
+assert_contains "$OUT" "monkey: 5" "50. 'monkey:' is not a false positive"
 
 # ── 51. the success branch backfills the R2 object with its issue_number ─
 reset_case
