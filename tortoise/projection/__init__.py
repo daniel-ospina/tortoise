@@ -148,6 +148,12 @@ def _is_bulk_wipe(cypher: str) -> bool:
 #     its callers swallow it (the hosted sweeper at DEBUG, the SDK lazy hook at
 #     WARNING) — the per-team event cap no-ops without a build failure
 #     (tracked: #3007).
+#   * ``_is_bulk_wipe`` also UNDER-classifies: a bare ``"{" in cypher``
+#     exemption means a whole-graph wipe whose text contains a brace
+#     (``MATCH (n) DETACH DELETE n // {``, ``CALL { MATCH (n) DETACH DELETE
+#     n }``) is treated as targeted, so on the raw-query lane it reaches a
+#     production server graph with no name check and no token (tracked:
+#     #3037).
 #
 #
 # History: the pre-#2944 bypass was ``_skip_guard``, a plain boolean
@@ -2219,14 +2225,17 @@ class FalkorProjection(
 
     def _wipe_all_nodes(self, *, confirm_destructive: bool,
                         operation: str) -> None:
-        """The only AUTHORIZED path in this package that wipes a whole graph.
+        """The only AUTHORIZED REBUILD-LANE path in this package that issues
+        the literal whole-graph statement (`MATCH (n) DETACH DELETE n`).
 
-        "Unconditional" here means the literal `MATCH (n) DETACH DELETE n`
-        (no label, WHERE, or LIMIT) — the rebuild lane only ever passes that
-        statement. THIS METHOD never receives a scoped delete; whether a
-        scoped delete is *allowed* elsewhere is `_is_bulk_wipe`'s (L2's)
-        business, and that classifier is broader — see the KNOWN GAPS note in
-        the module comment (#3007).
+        "Unconditional" here means that literal statement (no label, WHERE, or
+        LIMIT) — the rebuild lane only ever passes it. THIS METHOD never
+        receives a scoped delete; whether a scoped delete is *allowed*
+        elsewhere is `_is_bulk_wipe`'s (L2's) business, and that classifier is
+        both broader (#3007) and narrower (#3037) than this statement — see
+        the KNOWN GAPS note in the module comment. The raw-query lane can wipe
+        an embedded or test-named graph with no token at all; that lane is
+        L2's, not this method's.
 
         L1 (#2944) enforces the caller's explicit per-call opt-in; the wipe
         itself then still passes L2 (`_assert_test_graph` via the guarded

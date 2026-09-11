@@ -395,12 +395,31 @@ def test_l1_chokepoint_itself_refuses_without_the_token():
 
 
 def test_wipe_all_nodes_consults_the_token_before_issuing_the_wipe(monkeypatch):
-    """(c) L1 must gate the wipe, in that order.
+    """(c) ``_wipe_all_nodes`` itself consults the token before wiping.
 
-    With the token check replaced by a sentinel raise, the wipe must never
-    reach the handle: if the call were dropped from ``_wipe_all_nodes`` the
-    rebuild would proceed to real I/O (a different exception) and/or record a
-    wipe here."""
+    The named method is called DIRECTLY: ``rebuild_all`` has its own L1
+    fast-fail, so driving this through ``rebuild_all`` would only prove that
+    *one* of the two calls exists (deleting the one in ``_wipe_all_nodes``
+    left the full file green — cycle-4 finding). With the token check
+    replaced by a sentinel raise, the direct call must raise and must never
+    reach the handle."""
+    proj = _bare_projection(graph_name="test_probe", embedded=True)
+
+    def _sentinel(confirm_destructive, operation):
+        raise RuntimeError("confirm_destructive: sentinel")
+
+    monkeypatch.setattr(proj, "_assert_destructive_confirmed", _sentinel)
+    with pytest.raises(RuntimeError, match="sentinel"):
+        proj._wipe_all_nodes(confirm_destructive=True, operation="probe")
+    assert proj.g.queries == [], "graph I/O ran before the token check"
+    assert proj.g.wipes() == [], "the wipe ran before the token check"
+
+
+def test_rebuild_all_fast_fails_before_any_work(monkeypatch):
+    """(c) The rebuild lane's own L1 fast-fail runs before snapshot/parse/wipe.
+
+    ``NO_IO_DIR`` does not exist, so a caller that got past L1 would raise a
+    filesystem error instead of the sentinel — the sentinel proves ordering."""
     proj = _bare_projection(graph_name="test_probe", embedded=True)
 
     def _sentinel(confirm_destructive, operation):
@@ -409,5 +428,4 @@ def test_wipe_all_nodes_consults_the_token_before_issuing_the_wipe(monkeypatch):
     monkeypatch.setattr(proj, "_assert_destructive_confirmed", _sentinel)
     with pytest.raises(RuntimeError, match="sentinel"):
         proj.rebuild_all(NO_IO_DIR, confirm_destructive=True)
-    assert proj.g.wipes() == [], "the wipe ran before the token check"
-    assert proj.g.queries == [], "graph I/O ran before the token check"
+    assert proj.g.queries == []

@@ -117,7 +117,10 @@ class _MockGroundingProjection:
     def compute_grounding(self):
         self.calls.append({"called": True})
 
-    def rebuild(self, log):
+    def rebuild(self, log, *, confirm_destructive: bool = False):
+        # ``confirm_destructive`` exists for Protocol parity with
+        # ``Projection.rebuild`` (#2944) and is IGNORED: this stub holds an
+        # in-memory list, so there is no graph to wipe.
         self.points = fold(log.read_all())
 
 
