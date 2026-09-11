@@ -3807,8 +3807,10 @@ class TortoiseSDK:
                 # P1 #1529 (D8/E3): the whitelisted props dict read above —
                 # E3's source_turn_id (arriving on the payload point dict) must
                 # never be dropped or rebuilt into a reduced {id, kind, text}
-                # shape. #2813: this is the SAME dict that was passed to
-                # create_point, so response and node can no longer diverge.
+                # shape. #2813: for a NEW point this is the SAME dict that was
+                # passed to create_point, so response and node can no longer
+                # diverge; a dedup hit already carries its props from the
+                # initial write (the seam never re-stamps a canonical).
                 extracted.append({
                     "id": pid, "kind": "statement", "text": content[:200],
                     "props": props, "dedup": dedup})
@@ -10654,20 +10656,22 @@ class TortoiseSDK:
         hash-less content+kind fallback. Returns None on no match.
 
         The SINGLE source of truth for content-dedup resolution, shared by
-        ``create_point``, the v2 capture seam (``_extract_session_v2``), and
-        ``_content_exists``. #2892: those were forked copies of the same
-        query; the fork is exactly what let the hash-less fallback go missing
-        from ``_content_exists``, so after a graph rebuild — where replay
-        leaves every ``content_hash`` NULL — ``checkpoint()``'s Tier-1 gate
-        treated already-present content as new and filed duplicates.
+        ``create_point``, the v2 capture seam (``_extract_session_v2``),
+        ``ingest_bundle``'s points loop, and ``_content_exists``. #2892: those
+        were forked copies of the same query; the fork is exactly what let the
+        hash-less fallback go missing from ``_content_exists``, so after a
+        graph rebuild — where replay leaves every ``content_hash`` NULL —
+        ``checkpoint()``'s Tier-1 gate treated already-present content as new
+        and filed duplicates.
 
         ``pointKind`` scopes the match (a duplicate observation must never
         suppress a decision, #784); ``exclude_id`` excludes a specific point
         (the dedup candidate itself — self-match guard, #784 review). Both
-        default to None (legacy any-kind behavior). ``is_operator`` accepts
-        the explicit-false modern shape AND the legacy property-absent shape
-        (plain Points written before ``is_operator:false`` was stamped), never
-        an operator node.
+        default to None (legacy any-kind behavior). The WHERE clause
+        ``(n.is_operator IS NULL OR n.is_operator = false)`` matches the
+        explicit-false modern shape AND the legacy property-absent shape
+        (plain Points written before ``is_operator:false`` was stamped) while
+        never matching an operator node.
 
         Order pin (inherited from create_point): the hash query runs first;
         the fallback runs on the miss and a fallback HIT is a normal dedup
