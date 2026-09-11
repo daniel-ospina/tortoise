@@ -847,6 +847,16 @@ def gate_output(*, issue: str, prereg: dict, qid_to_cls: dict[str, str],
                 f"gate_output: {_label} must contain classify_outcome "
                 "verdicts (missing the 'correct' key) — raw outcome rows "
                 "would render as an all-zero gate output.")
+    # A non-empty set with ZERO graded verdicts is a failed measurement, not
+    # a result: without this it renders "0 of 0" and still prints a decision
+    # branch (e.g. structural-path-evidence) — a fabricated finding.
+    _graded_n = sum(1 for v in baseline_verdicts
+                    if v.get("correct") is not None)
+    if not baseline_verdicts or _graded_n == 0:
+        raise ValueError(
+            f"gate_output: baseline has {len(baseline_verdicts)} verdict(s) "
+            f"and {_graded_n} graded — an all-ungraded baseline cannot "
+            "produce a decision branch (no measurement to report).")
     tables = aggregate_taxonomy(baseline_verdicts, qid_to_cls,
                                 pool_limit=pool_limit)
     comps = {arm_id: compare_arms_to_baseline(baseline_verdicts, vs)
@@ -1012,7 +1022,15 @@ def gate_output(*, issue: str, prereg: dict, qid_to_cls: dict[str, str],
 #: classify_outcome's position-ceiling subclasses).
 ARM_POOL_LIMIT: dict[str, int] = {
     "A-default": 40, "tr_top_k16": 40, "tr_top_k20": 40, "tr_top_k24": 40,
-    "c2-on": 40, "applied-rerank": 120, "pool-only-isolation": 120,
+    "c2-on": 40, "applied-rerank": 120,
+    # The pool-only control runs the deep pool with rerank OFF, and retrieve
+    # truncates pool[:top_k] then tr_top_k — so its EFFECTIVE admission
+    # horizon is the tr_top_k ceiling (40), NOT the 120 it fetches. Giving it
+    # 120 would mislabel every one of its admission failures as
+    # subclass "dropped-by-item-cap" instead of
+    # "admission-outside-rerank-depth". (applied-rerank keeps 120: its
+    # reranker can actually promote from ranks 25-120.)
+    "pool-only-isolation": 40,
     "cap3-only": 40,
 }
 
@@ -1047,7 +1065,12 @@ def rebuild_from_reports(*, reports_dir, census_path=CENSUS_DEFAULT,
     by_class = {r["qid"]: r["cls"]
                 for r in load_census(census_path)["rows"]}
     by_class = {q: c for q, c in by_class.items() if c in ANALYSIS_CLASSES}
-    inst = instances or {}
+    # The producer is the ONE committed path that turns dataset rows into
+    # measurement inputs, so the pre-registered session dedup runs HERE —
+    # otherwise `dedup_instance_sessions` stays a dormant helper and the
+    # date-shift defect it guards against can only be fixed out-of-band.
+    inst = {q: dedup_instance_sessions(r)
+            for q, r in (instances or {}).items()}
     verdicts: dict[str, list[dict]] = {}
     arm_meta: dict[str, dict] = {}
     outcomes_raw: dict[str, list[dict]] = {}

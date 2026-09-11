@@ -737,3 +737,21 @@ def test_gate_output_refuses_raw_outcomes(tmp_path):
         mt.gate_output(issue="2578", prereg=prereg, qid_to_cls={"q1": "interval"},
                        baseline_verdicts=[_mk_outcome("q1", True)],
                        arm_verdicts={}, arm_stats={})
+
+
+def test_gate_output_refuses_an_all_ungraded_baseline(tmp_path):
+    """A non-empty but entirely ungraded baseline is a FAILED measurement,
+    not a result: without this guard the gate renders '0 of 0' and still
+    publishes a decision branch (e.g. structural-path-evidence) — a
+    fabricated finding from a zero measurement."""
+    prereg = mt.write_preregistration(
+        mt.load_census(CENSUS)["rows"], tmp_path / "prereg.json")
+    ungraded = [mt.classify_outcome({"question_id": "q1", "label": None,
+                                     "measure_facts": None})]
+    with pytest.raises(ValueError, match="ungraded"):
+        mt.gate_output(issue="2578", prereg=prereg, qid_to_cls={"q1": "interval"},
+                       baseline_verdicts=ungraded, arm_verdicts={},
+                       arm_stats={})
+    with pytest.raises(ValueError, match="ungraded"):
+        mt.gate_output(issue="2578", prereg=prereg, qid_to_cls={},
+                       baseline_verdicts=[], arm_verdicts={}, arm_stats={})

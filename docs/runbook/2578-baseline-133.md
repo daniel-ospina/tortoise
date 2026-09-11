@@ -21,8 +21,8 @@ issue: 2578
 
 ## Accuracy by census class (95% Wilson CI)
 
-| class | n | correct | 95% CI | substantive correct | 95% CI | admission-attributed | conv-refusal | conv-wrong |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| class | n | correct (95% CI) | correct on answerable (n, 95% CI) | admission-attributed | conv-refusal | conv-wrong |
+| --- | --- | --- | --- | --- | --- | --- |
 | **ALL 133** | 133 | 8 (0.031–0.114) | 2/127 (0.004–0.056) | 125 | 0 | 0 |
 | ordering/compare | 34 | 2 (0.016–0.191) | 0/32 (0.000–0.107) | 32 | 0 | 0 |
 | ago-relative | 31 | 1 (0.006–0.162) | 1/31 (0.006–0.162) | 30 | 0 | 0 |

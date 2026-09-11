@@ -53,10 +53,13 @@ answerable-correct from **0 → 6 of 52** (McNemar p=0.0312, 6 discordant
 pairs, 6–0), with admission-attributed failures 52 → 30, refusal rate
 0.982 → 0.764, and mean reader context 94.9 → 624.0 tokens. `cap3-only`
 also lifts (answerable 0 → 5 of 52; p=0.0625, 5–0) — it is the same
-rerank family with the pool left at 40. `tr_top_k` 16/20/24, `c2-on`, and
-`pool-only-isolation` are all null: widening the pool WITHOUT reranking
-changes nothing (the isolation result the arms exist to test — 0
-answerable-correct, byte-identical to baseline).
+rerank family with the pool left at 40. `tr_top_k` 16, `tr_top_k20`, `c2-on`
+and `pool-only-isolation` are all null on answerable-correct (0/52).
+`pool-only-isolation` is the clean isolation result — widening the pool
+WITHOUT reranking changes nothing, answerable-correct byte-identical to
+baseline (0/52). `tr_top_k24` sits at the edge: 1/52 answerable-correct
+(one question), 1 discordant pair, p=1.0000 — reported as a single-question
+movement, not an effect.
 
 **Known limitations (recorded, not hidden):**
 1. The R5 rollback guard is non-discriminating on this data — the
@@ -81,7 +84,7 @@ answerable-correct, byte-identical to baseline).
    output reports the disagreement count alongside the split.
 4. The 55-Q gate baseline comes from its own `A-default` run rather than
    from the 133-Q run's subset (the plan asked for no duplicate default
-   run). The two agree exactly on the 52 shared qids (labels, classes and
+   run). The two agree exactly on all 55 shared qids (labels, classes and
    context tokens), so no number changes — recorded here as a divergence.
 5. Conversion is NOT observable in the 133-Q baseline: gold was admitted
    on 0 of 133 questions, so the channel is empty by construction (0
