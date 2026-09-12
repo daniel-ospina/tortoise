@@ -3,8 +3,10 @@
 #
 # The skills are downloaded from the Tortoise product site
 # (https://app.premiselabs.co/skills/<name>/SKILL.md) — no git clone, no
-# third-party repo. The source of truth is the public repo:
-# https://github.com/daniel-ospina/tortoise-skills-and-integrations
+# third-party repo. The canonical skill sources (and this script) live in the
+# public repo https://github.com/daniel-ospina/tortoise — script at
+# website/apps/dashboard/public/install-tortoise-skills.sh, skills under
+# skills/ and tortoise/onboarding/.
 #
 # Project-scoped for Claude Code / Codex / Cursor (installs into the current
 # project's skills dir — version-controllable, non-destructive to the
@@ -76,21 +78,45 @@ mkdir -p "$DEST"
 STAMP="$DEST/.tortoise-skills-version"
 prev_version=""
 if [ -f "$STAMP" ]; then
-  prev_version="$(sed -n 's/^skills_version=//p' "$STAMP" | head -1)"
+  # `awk ... exit` (not `sed | head`) — reading an advisory file must never
+  # abort the install under `set -euo pipefail`, and an unreadable stamp is
+  # not fatal.
+  prev_version="$(awk -F= '/^skills_version=/{print $2; exit}' "$STAMP" 2>/dev/null || true)"
 fi
+
+# Cross-platform digest (macOS ships shasum, GNU userland ships sha256sum).
+sha256_of() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | cut -d' ' -f1
+  else
+    shasum -a 256 "$1" | cut -d' ' -f1
+  fi
+}
 
 for s in "${SKILLS[@]}"; do
   mkdir -p "$DEST/$s"
   tmp="$DEST/$s/SKILL.md.tmp"
   if curl -fsSL --max-time 20 "$SKILLS_BASE/$s/SKILL.md" -o "$tmp" \
       && grep -q "^name: $s$" "$tmp"; then
-    # Drift detection (#3): warn when we are about to replace a differing copy.
-    # Across a version bump that is the expected upgrade; at the same version
-    # (or with no stamp at all) it means the on-disk copy was edited locally or
-    # came from an older/manual install.
-    if [ -f "$DEST/$s/SKILL.md" ] && ! cmp -s "$DEST/$s/SKILL.md" "$tmp" \
-        && { [ -z "$prev_version" ] || [ "$prev_version" = "$SKILLS_VERSION" ]; }; then
-      echo "  ⚠ $s — replaced a differing on-disk copy (edited locally, or installed outside this installer)" >&2
+    # Drift detection (#3): compare the on-disk copy against the digest the
+    # last install recorded — content, not version, so a local edit is caught
+    # even across a version bump. With no recorded digest (an older or manual
+    # install) fall back to comparing against the incoming file.
+    if [ -f "$DEST/$s/SKILL.md" ]; then
+      recorded=""
+      if [ -f "$STAMP" ]; then
+        recorded="$(awk -F= -v k="sha256.$s" '$1 == k {print $2; exit}' "$STAMP" 2>/dev/null || true)"
+      fi
+      cmp_rc=0
+      cmp -s "$DEST/$s/SKILL.md" "$tmp" 2>/dev/null || cmp_rc=$?
+      if [ -n "$recorded" ]; then
+        disk_hash="$(sha256_of "$DEST/$s/SKILL.md" 2>/dev/null || true)"
+        if [ "$disk_hash" != "$recorded" ]; then
+          echo "  ⚠ $s — installed copy was edited locally; overwriting" >&2
+        fi
+      elif [ "$cmp_rc" -eq 1 ]; then
+        echo "  ⚠ $s — replacing a differing on-disk copy from an older/manual install" >&2
+      fi
     fi
     mv "$tmp" "$DEST/$s/SKILL.md"
     echo "  ✓ $s"
@@ -167,22 +193,38 @@ done
 if [ ${#missing[@]} -eq 0 ]; then
   # Version stamp (#3): sidecar manifest, written only after every skill
   # verified — a failed install never claims a version it did not place.
-  {
+  # Written to a temp file then `mv`d into place: `mv` REPLACES a symlink
+  # instead of writing through it (a project may ship
+  # .claude/skills/.tortoise-skills-version -> ../../README.md), and the write
+  # is atomic, so an interrupted run cannot leave a truncated stamp.
+  stamp_tmp="$STAMP.tmp"
+  stamp_ok=0
+  if {
     printf '%s\n' \
       "# Tortoise skills install manifest — written by install-tortoise-skills.sh." \
       "# Do not edit by hand; re-run the installer to refresh this stamp." \
       "skills_version=$SKILLS_VERSION" \
       "harness=$HARNESS" \
-      "installed_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+      "source=$SKILLS_BASE" \
       "skills=${SKILLS[*]}"
-  } > "$STAMP"
+    for s in "${SKILLS[@]}"; do
+      printf 'sha256.%s=%s\n' "$s" "$(sha256_of "$DEST/$s/SKILL.md")"
+    done
+  } > "$stamp_tmp" 2>/dev/null; then
+    mv -f "$stamp_tmp" "$STAMP" && stamp_ok=1
+  fi
+  rm -f "$stamp_tmp"
   echo ""
   echo "✅ Tortoise skills installed to $DEST"
   echo "   ${SKILLS[*]} (${SKILLS_VERSION})"
-  if [ -n "$prev_version" ] && [ "$prev_version" != "$SKILLS_VERSION" ]; then
-    echo "   ⬆  version stamp updated: $prev_version -> $SKILLS_VERSION"
+  if [ "$stamp_ok" -eq 1 ]; then
+    if [ -n "$prev_version" ] && [ "$prev_version" != "$SKILLS_VERSION" ]; then
+      echo "   ⬆  version stamp updated: $prev_version -> $SKILLS_VERSION"
+    fi
+    echo "   version stamp: $STAMP (cat it to see what is installed)"
+  else
+    echo "   ⚠ could not write the version stamp to $STAMP" >&2
   fi
-  echo "   version stamp: $STAMP (cat it to see what is installed)"
   echo ""
   echo "Next: restart your agent, then confirm the skills are listed:"
   case "$HARNESS" in

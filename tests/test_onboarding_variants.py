@@ -134,7 +134,8 @@ def _declared_version() -> str:
 
 def _stub_curl_dir(tmp_path: Path) -> Path:
     """A `curl` stub that writes a valid SKILL.md for any requested skill,
-    so the installer can be exercised with no network."""
+    so the installer can be exercised with no network. Set
+    STUB_CURL_FAIL_SKILL=<name> to make that one download fail."""
     bindir = tmp_path / "bin"
     bindir.mkdir(exist_ok=True)
     stub = bindir / "curl"
@@ -149,6 +150,7 @@ def _stub_curl_dir(tmp_path: Path) -> Path:
         "  esac\n"
         "done\n"
         "skill=\"${url##*/skills/}\"; skill=\"${skill%%/*}\"\n"
+        "[ \"${STUB_CURL_FAIL_SKILL:-}\" = \"$skill\" ] && exit 22\n"
         "printf -- '---\\nname: %s\\ndescription: stub\\n---\\nbody\\n' \"$skill\" > \"$out\"\n",
         encoding="utf-8",
     )
@@ -156,10 +158,13 @@ def _stub_curl_dir(tmp_path: Path) -> Path:
     return bindir
 
 
-def _run_installer(tmp_path: Path, home: Path, harness: str = "pi"):
+def _run_installer(tmp_path: Path, home: Path, harness: str = "pi",
+                   fail_skill: str | None = None):
     bindir = _stub_curl_dir(tmp_path)
     env = dict(os.environ, HOME=str(home),
                PATH=f"{bindir}{os.pathsep}{os.environ['PATH']}")
+    if fail_skill:
+        env["STUB_CURL_FAIL_SKILL"] = fail_skill
     return subprocess.run(
         ["bash", str(INSTALLER_PUBLIC), "--harness", harness],
         cwd=tmp_path, env=env, text=True, capture_output=True,
@@ -200,6 +205,13 @@ def test_installer_records_a_sidecar_version_stamp(tmp_path):
     text = stamp.read_text(encoding="utf-8")
     assert f"skills_version={_declared_version()}" in text
     assert "harness=pi" in text
+    assert "source=" in text
+    # content identity per skill, so a local edit is catchable across versions
+    for s in ("how-to-use-tortoise", "tortoise-decide",
+              "tortoise-file-finding", "tortoise-onboarding"):
+        assert f"sha256.{s}=" in text, f"stamp must record a digest for {s}"
+    # no timestamp: the stamp also lands in version-controlled project dirs
+    assert "installed_at" not in text
     # sidecar choice: the installed bodies are the served bytes, unmutated
     for s in ("how-to-use-tortoise", "tortoise-decide",
               "tortoise-file-finding", "tortoise-onboarding"):
@@ -220,9 +232,10 @@ def test_installer_pi_success_output_prints_verification_and_stamp(tmp_path):
     assert ".tortoise-skills-version" in proc.stdout
 
 
-def test_installer_warns_when_replacing_a_differing_copy(tmp_path):
-    """Optional drift detection: a differing on-disk copy at the recorded
-    version is reported before it is overwritten."""
+def test_installer_warns_when_replacing_a_locally_edited_copy(tmp_path):
+    """Drift detection: a locally edited copy is reported before it is
+    overwritten, even at an unchanged version (content, not version, is the
+    signal)."""
     home = tmp_path / "home"
     home.mkdir()
     assert _run_installer(tmp_path, home).returncode == 0
@@ -233,7 +246,52 @@ def test_installer_warns_when_replacing_a_differing_copy(tmp_path):
     proc = _run_installer(tmp_path, home)
     assert proc.returncode == 0, proc.stderr
     assert "tortoise-decide" in proc.stderr
-    assert "differing on-disk copy" in proc.stderr
+    assert "edited locally" in proc.stderr
+
+
+def test_installer_warns_when_there_is_no_stamp(tmp_path):
+    """The issue's actual scenario: a stale copy installed by an OLDER
+    installer (no stamp at all) must be flagged before being replaced."""
+    home = tmp_path / "home"
+    home.mkdir()
+    assert _run_installer(tmp_path, home).returncode == 0
+    skills_dir = home / ".pi" / "agent" / "skills"
+    (skills_dir / ".tortoise-skills-version").unlink()
+    victim = skills_dir / "tortoise-decide" / "SKILL.md"
+    victim.write_text("---\nname: tortoise-decide\n---\nold copy\n",
+                      encoding="utf-8")
+    proc = _run_installer(tmp_path, home)
+    assert proc.returncode == 0, proc.stderr
+    assert "older/manual install" in proc.stderr
+
+
+def test_failed_install_does_not_write_a_version_stamp(tmp_path):
+    """A failed download must not leave a stamp claiming a version that was
+    not fully installed."""
+    home = tmp_path / "home"
+    home.mkdir()
+    proc = _run_installer(tmp_path, home, fail_skill="tortoise-onboarding")
+    assert proc.returncode != 0
+    assert not (home / ".pi" / "agent" / "skills"
+                / ".tortoise-skills-version").exists()
+
+
+def test_stamp_write_replaces_a_symlink_instead_of_writing_through_it(tmp_path):
+    """The installer runs inside an untrusted project clone for the project
+    harnesses; a planted `.tortoise-skills-version -> ../../README.md`
+    symlink must not turn the install into an arbitrary-file clobber."""
+    project = tmp_path
+    skills_dir = project / ".claude" / "skills"
+    skills_dir.mkdir(parents=True)
+    victim = project / "README.md"
+    victim.write_text("important project readme\n", encoding="utf-8")
+    stamp = skills_dir / ".tortoise-skills-version"
+    stamp.symlink_to(victim)
+    proc = _run_installer(tmp_path, tmp_path / "home", harness="claude")
+    assert proc.returncode == 0, proc.stderr
+    assert victim.read_text(encoding="utf-8") == "important project readme\n"
+    assert not stamp.is_symlink(), "the stamp write followed the symlink"
+    assert "skills_version=" in stamp.read_text(encoding="utf-8")
 
 
 def test_m8_no_live_reference_to_old_paths_outside_archive():
