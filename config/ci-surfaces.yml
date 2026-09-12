@@ -18,6 +18,11 @@ surfaces:
   # when nothing else matched — so a PR that reintroduced the bug in that file
   # alone would otherwise never run the guard.
   - test_boot_regressions.py
+  # #2988: /health/ready must never block the event loop (a synchronous probe
+  # froze every route in production — /openapi.json included). Same dual
+  # registration as the boot guards above, for the same reason: the file it
+  # guards is tortoise/hosted_api.py, which selects the `api` surface.
+  - test_health_ready_nonblocking.py
   - test_delivery_tenancy.py  # C6 #2115: delivery-shape tenancy + session_recording per-graph override
   - test_onboarding_email_http.py
   - test_sentry.py
@@ -27,14 +32,13 @@ surfaces:
   - test_api.py
   - test_action_endpoints_dual_auth.py
   - test_audit.py
-  - test_battery_arms.py
-  - test_battery_cli.py
-  - test_battery_config.py
-  - test_battery_determinism.py
-  - test_battery_enums.py
-  - test_battery_run.py
-  - test_battery_runner.py
-  - test_battery_setup.py
+  # #2938: the eight battery members previously dual-registered here (arms,
+  # cli, config, determinism, enums, run, runner, setup) were verified per
+  # file to pin no api-owned source — no api-pinned import, no api-pinned
+  # path string, module-level or through a followed helper — so their api
+  # half ran on every api-source edit for nothing. Moved to battery-only
+  # (the same class #2916 curated for 26 files); they remain listed under
+  # `battery:` below.
   - test_audit_events.py
   - test_auth.py
   - test_auth_flip.py
@@ -97,6 +101,7 @@ surfaces:
   - test_mcp_telemetry.py
   - test_metering.py
   - test_oauth_mcp.py
+  - test_oauth_token_fault.py  # #2863: /oauth/token fault-injection suite (fake CP + local HTTPServer seam)
   - test_pricing_tiers.py
   - test_provisioning_edge_function.py
   - test_quota.py
@@ -182,10 +187,12 @@ surfaces:
   # test_battery_parity_migration.py and test_battery_parity_hash.py, which
   # module-import battery.parity.runner yet were api-only (the same latent gap,
   # found in review).
-  # The other DUAL members here are inherited, not deliberate: arms, cli, config,
-  # determinism, enums, run, runner and setup pin no api-owned source either, so
-  # their api half is waste of the same kind #2916 moved out. Left in place here
-  # (out of that issue's scope) and tracked by #2938 with the wider class.
+  # The eight battery members that used to be dual-registered under `api`
+  # (arms, cli, config, determinism, enums, run, runner, setup) were curated by
+  # #2938: each was verified per file to pin no api-owned source — no
+  # api-pinned import, no api-pinned path string, module-level or through a
+  # followed helper — so their api half was waste of the kind #2916 moved out.
+  # They are now battery-only (listed below).
   # NOT dual — battery-only (it pins no api-owned surface):
   # test_battery_price_basis.py (#2906 — config/prices.py, runner, probes, judge).
   - test_battery_parity_executors.py
@@ -194,7 +201,9 @@ surfaces:
   - test_battery_parity_mabench_run.py
   - test_battery_parity_mabench_tortoise.py
   - test_battery_parity_migration.py
+  - test_battery_parity_vector_guard.py  # #2985 retrieval capability gate (fake SDK; hermetic)
   - test_battery_price_basis.py
+  - test_battery_derive_truth_leg.py  # #3100 battery-only (imports battery/* only)
   - test_battery_probes.py
   # #2906: provider-reported cost (#2906) + the declared fallback basis
   # (#2874) pin battery/config/prices.py, battery/runner/model_calls.py,
@@ -217,6 +226,7 @@ surfaces:
   - test_battery_runner.py
   - test_battery_setup.py
   - test_battery_real_run_gate.py  # #2633 real-run vendor-key pre-flight gate (hermetic)
+  - test_battery_retrieval_preflight.py  # #2985: shared hybrid-retrieval preflight + arm gate + leg provenance (pins battery/arms, battery/runner, battery/parity + tortoise/embeddings.py → also eval)
   # #2916: 26 files that pin battery/ (arms, cli, config, enums, exceptions,
   # exposure, judge, probes, report, runner, testing) and NOTHING api-owned — no
   # api-pinned import, no api-pinned path string — yet were registered api-only,
@@ -249,6 +259,15 @@ surfaces:
   - test_battery_token_relock.py
   - test_battery_validation_real.py
   - test_battery_write_channel.py
+  # #3221 (registration): derive-leg truth seam (envelope `confidences` + judged
+  # `outcomes`), added by #3100 and never registered — one of the two entries
+  # behind `manifest-integrity`'s persistent drift on main
+  # (`tools/ci_selection.py --integrity`). Battery-only: it pins battery
+  # scoring/derive code and no api-owned surface, so it belongs here and NOT
+  # dual-registered (the #2916 class). Appended at the end of the block rather
+  # than alphabetically so the registration does not disturb the curated
+  # groupings above.
+  - test_battery_derive_truth_leg.py
   core:
   - test_about_edges.py
   - test_about_event_untangle.py
@@ -269,14 +288,24 @@ surfaces:
   - test_backup_watcher.py
   - test_bfs_audit.py
   - test_boot_regressions.py
+  - test_collision_preflight.py
+  - test_health_ready_nonblocking.py  # #2988: /health/ready off-loop + bounded probes
   - test_build_window_transcript.py
   - test_canary_classify.py
   - test_canonical.py
+  - test_capture_loop_responsiveness.py
   - test_capture_session.py
   - test_capture_session_supersession_e2e.py
   - test_restore_container_recovery.py
   - test_session_attribution.py
   - test_ci_selection.py
+  # #3221: guard for tools/collision_preflight.py (the #3061 pre-dispatch
+  # collision check), added by #3148 and never registered. `core` is the
+  # surface a tools/-only change falls back to, so a preflight-only change runs
+  # the file that guards it instead of selecting no surface at all (#3153 hole).
+  # The companion selector wiring that makes the tool itself select `core`
+  # (TOOL_CORE_CARVEOUTS) rides in #3228, which overlaps this registration.
+  - test_collision_preflight.py
   - test_connector_loader.py
   - test_connector_secrets.py
   - test_connector_sources.py
@@ -292,6 +321,7 @@ surfaces:
   - test_de2e6_temporal.py
   - test_de2e7_gates_mcp.py
   - test_deploy_workflow.py
+  - test_ai_review_gate_contract.py  # #3076: gate↔record-review.sh signing contract (DB-free; runs the workflow's run block offline)
   - test_deployment.py
   - test_derived_names.py
   - test_divergence_conformance.py
@@ -397,6 +427,10 @@ surfaces:
   # this file pins the provider-cost surfacing on that adapter path — so a
   # model_adapters.py-only PR must run it (dual-registered with battery).
   - test_battery_provider_cost.py
+  # #2985: tortoise/sdk.py maps to core (no SOURCE_PATTERN) and this file pins
+  # the recall_state leg_trace threading the retrieval capability gate depends
+  # on — a sdk.py-only PR must run it (dual-registered with battery).
+  - test_battery_parity_vector_guard.py
   - test_monitoring.py
   - test_navigation.py
   - test_no_tests_imports_in_production.py
@@ -491,6 +525,13 @@ surfaces:
   - eval/write_path/test_write_path_benchmark.py
   ep:
   - test_a9_direct_edge_traversal.py
+  # #2938: direct unit tests of tortoise/analyze.py (an ep-mapped source).
+  # They were registered under `core`, which a `tortoise/analyze.py`-only
+  # change does NOT select (the path matches SOURCE_PATTERNS["ep"]) — so the
+  # module's own tests never ran on a change to it. Dual-registered: `core`
+  # keeps them for engine-wide changes, `ep` runs them on analyze.py edits.
+  - test_analyze.py
+  - test_analyze_scoped.py
   # W2-b (#2098): BPRE write-path gate — dream.py EP-pass changes must run
   # the deterministic replay gate. NOTE (posture split, #2098 round 2): the
   # strict-survival dimension is pinned at 0.0 on the m2 lane until the
@@ -533,6 +574,8 @@ surfaces:
   - test_retrieval_determinism_2952.py  # #2952: ranking determinism (hermetic; also registered under core)
   - test_2952_write_path_determinism.py  # #2952 defect 1: fresh-create write path must not skew fulltext/recall_state scores (docker-lane; DB)
   - test_recall_gaps_subgraph.py
+  - test_subgraph_pure.py  # #3011: subgraph traversal/ranking engine — seed policy, hop decay, hub damping, cap→dedupe (hermetic)
+  - test_subgraph_render.py  # #3011: frozen serializer — block order, provenance, confidence, word budget (hermetic)
   - test_recall_state.py
   - test_source_credibility.py
   - test_source_inheritance_own.py
@@ -541,6 +584,7 @@ surfaces:
   - test_w4_why_enrichment.py
   - test_weights.py
   onboarding:
+  - test_admin_return_to.py
   - test_github_connect.py
   - test_github_connector.py
   - test_github_indexer.py
@@ -595,6 +639,7 @@ surfaces:
   - test_models.py
   - test_namespace_uri_mode.py
   - test_reader.py
+  - test_reader_prerendered.py  # #3011: pre-rendered-evidence reader seam — byte-identical to the hit-list lane (hermetic)
   - test_reader_abstention_calibration.py
   - test_coverage_loop.py  # #2567 (docker-lane leg, mirrors test_retrieval.py)
   - test_coverage_loop_rules.py  # #2567 (hermetic rules leg)
@@ -642,13 +687,26 @@ surfaces:
   - longmem_eval/test_assembly_arm.py  # #2165 Task 7: v2-lane eval arm A/A-widened/B admission + R9 geometry (docker-lane)
   - longmem_eval/test_measure_temporal.py  # #2578 Task 2: measurement scaffold — census 133->55 pin, prereg writer, refusal classifier (embedded-safe)
   - longmem_eval/test_probe_v2.py  # #2578 Task 5: v2-lane structural probe — wave guard, saturation stop rule, substrate measurement (embedded-safe)
+  - longmem_eval/test_context_assembly_arms.py  # #3011: 4-arm (A/B/C/D) context-assembly runner — arm source selection, metrics 5/8/9, report shape (hermetic)
+  - longmem_eval/test_context_assembly_leakage.py  # #3011: gold-leakage hard stop — static reference assertion + gold-field perturbation (hermetic)
+  - longmem_eval/test_ep_activation.py  # #3011/#2598: EP activation — promote drafts, run EP, never fabricate a 0.5 (hermetic)
+  - longmem_eval/test_gold_evidence_claims.py  # #3011 §9.5: gold-evidence claim artifact builder — frozen tokenizer, MIN_GOLD_TOKENS, non-emptiness (hermetic)
   - eval/write_path/test_write_path_corpus.py
   - eval/write_path/test_write_path_grading.py
   - eval/write_path/test_write_path_runner.py
   - eval/write_path/test_write_path_benchmark.py
   - mini_beir/test_mini_beir.py
   - test_backfill_embeddings_force.py
+  - test_battery_retrieval_preflight.py  # #2985: pins tortoise/embeddings.py EmbeddingModel.get probe + recall_state leg_trace provenance (also battery)
   - test_calibrate_thresholds.py
+  # #2938: direct unit tests of eval-mapped sources — tortoise/embeddings.py
+  # (test_embeddings, test_embeddings_filters) and tortoise/cross_lens.py
+  # (test_cross_lens). They sit under `core`/`sdk`, neither of which a change
+  # to those modules selects, so they never ran on a change to their own
+  # subject. Dual-registered.
+  - test_cross_lens.py
+  - test_embeddings.py
+  - test_embeddings_filters.py
   - test_embedder_probe.py
   - test_eval_extraction_health.py
   - test_labeled_pairs_schema.py
@@ -754,6 +812,7 @@ carve_out:
 - bench/test_smoke_embedded.py
 push_extra: []
 durations:
+  test_oauth_token_fault.py: 100.0  # #2863: fault matrix + real-seam HTTPServer (measured ~100s locally)
   test_2199_decide_calibration.py: 8.5
   test_calibration.py: 52.1
   test_battery_setup.py: 26.0

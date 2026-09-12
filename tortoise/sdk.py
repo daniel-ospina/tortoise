@@ -13937,6 +13937,7 @@ class TortoiseSDK:
         centrality_weight: float = 0.10,
         object_centric: bool = True,
         state_ranker=None,
+        leg_trace: list[dict] | None = None,
     ) -> list[dict]:
         """UC1 "state" recall (epic #898 Wave A) — what is true and
         high-confidence right now.
@@ -13966,6 +13967,18 @@ class TortoiseSDK:
         (score breakdown), and state-context keys (``contested``,
         ``counter_evidence``, ``arguments``, ``nands``, ``mitigations``,
         ``related_objects`` / ``related_points``).
+
+        leg_trace (#2985): PRIVATE pass-through of the R3 #1542 D4 per-leg
+            trace contract into the underlying ``tortoise_fts_query``
+            call(s) — the same shape ``{"leg", "ran", "degraded", "reason",
+            "count"}``. It exists so an evaluation lane can PROVE the vector
+            leg was actually submitted before it records a score (a lane that
+            ran FTS-only measured a different, keyword-only surface).
+            Append-only, observational: passing it never changes retrieval —
+            default None is byte-identical behavior. When ``object_centric``
+            is True both the Point and Object reads append to the list (an
+            entry per query), so consumers should test which entries RAN
+            rather than assume one entry per leg.
         """
         from .ranking import StateRanker
 
@@ -14005,10 +14018,14 @@ class TortoiseSDK:
             # enrichment on the PRE-rerank pool would fold + project ~30k
             # candidates that StateRanker then discards ~2/3 of. Enrich
             # POST-rerank on the final top-limit list instead (see below).
-            w4_enrich=False)
+            w4_enrich=False,
+            # #2985: observational only — the call is byte-identical when
+            # leg_trace is None (the product default).
+            leg_trace=leg_trace)
         object_results = (
             self.tortoise_fts_query(
-                query, kind=kind, entity_type="object", limit=pool)
+                query, kind=kind, entity_type="object", limit=pool,
+                leg_trace=leg_trace)
             if object_centric else []
         )
         # #1350: Object status filter (decision 2a — completed/in_progress

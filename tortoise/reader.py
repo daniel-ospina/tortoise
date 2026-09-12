@@ -511,6 +511,23 @@ class Reader(Protocol):
     def ping(self, probe: str) -> str: ...
 
 
+class EvidenceReader(Reader, Protocol):
+    """OPTIONAL extension of :class:`Reader` for callers that already hold
+    RENDERED evidence text (#3011 context-assembly arms B/C/D).
+
+    Deliberately SEPARATE from :class:`Reader` so the base protocol stays
+    unchanged and every existing structural implementation (the eval's
+    ``MockReader``, test stubs) still satisfies it by construction: a plain
+    ``Reader`` is not required to expose ``answer_with_evidence``. Only
+    implementers that opt into the pre-rendered lane are checked against
+    this wider surface.
+    """
+
+    def answer_with_evidence(self, *, evidence: str, question: str,
+                             question_date: str | None = None,
+                             question_type: str | None = None) -> str: ...
+
+
 class LLMReader:
     """Reader backed by an OpenAI-compatible chat model.
 
@@ -541,8 +558,49 @@ class LLMReader:
         # prompt is type-tailored (#1366): temporal-reasoning and
         # single-session-preference get reasoning instructions that counter
         # the reader's documented hedging/miscounting failures.
+        #
+        # #3011 Track D: this path is EXACTLY ``answer_with_evidence`` with
+        # the rendered context supplied by ``render_context`` — one
+        # implementation of the model call, so the pre-rendered lane cannot
+        # drift from the hit-list lane.
         context = render_context(context_hits, question_date=question_date)
-        user = build_reader_user_message(context, question)
+        return self.answer_with_evidence(
+            evidence=context, question=question,
+            question_date=question_date, question_type=question_type)
+
+    def answer_with_evidence(self, *, evidence: str, question: str,
+                             question_date: str | None = None,
+                             question_type: str | None = None) -> str:
+        """Pre-rendered-evidence answer path (#3011 Track D).
+
+        Identical to :meth:`answer` except the caller supplies the ALREADY
+        RENDERED evidence text (e.g. arms B/C emit typed relation lines
+        such as ``C1 IMPLIES C3`` / ``confidence: 0.82``) instead of hit
+        dicts. Reuses the SAME system prompt, user-message builder, model
+        and call shape — the pre-rendered text is passed through verbatim
+        and is NEVER run through ``_render_block`` (no ``[session ?]`` or
+        ``[speaker]`` decoration), which would mangle a frozen render
+        format.
+
+        Byte-identity contract: whenever
+        ``render_context(context_hits, question_date=X) == evidence``, this
+        method produces byte-identical model inputs AND output to
+        ``answer(context_hits=..., question_date=X, ...)``.
+
+        ``question_date`` is accepted for signature symmetry with
+        :meth:`answer` and is IGNORED here: the date header is already baked
+        into the rendered evidence (and re-adding it would break the
+        byte-identity contract). Pass an evidence string that already
+        carries its own header.
+
+        Empty evidence (``evidence == ""`` — arm D sends no evidence) is
+        passed through exactly as ``answer(context_hits=[])`` would: the
+        user message becomes ``Memory context:\n\n\nQuestion: …``. The
+        reader does NOT substitute ``NO_EVIDENCE_TEXT`` — per the constant's
+        contract that substitution is the SDK/ask-lane surface's
+        responsibility, and doing it here would break byte-identity.
+        """
+        user = build_reader_user_message(evidence, question)
         raw = self._model.complete(
             system=system_prompt_for(question_type), user=user)
         # None-guard: a provider response with empty content (refusal / empty

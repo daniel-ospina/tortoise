@@ -37,6 +37,7 @@ Also:
 from __future__ import annotations
 
 import argparse
+import ast
 import json
 import os
 import re
@@ -108,7 +109,16 @@ SOURCE_PATTERNS = {
             # here (in addition to sdk): its only direct unit test is
             # test_metering.py::test_selfhost_transport_exemption.
             "tortoise/metering.py", "tortoise/selfhost.py",
-            "tortoise/transport.py"),
+            "tortoise/transport.py",
+            # #2938: EventAPI — the append surface `ingest.py`, `mining.py`,
+            # `extractor.py`, `m0.py` and `__main__.py` all write through.
+            # Without this entry a `tortoise/api.py`-only change matched no
+            # pattern, fell through to `core`, and skipped the api-registered
+            # tests that pin it (test_api.py, test_attribution_actor.py,
+            # test_1162_add_operator_local_svbp.py). Paired with CORE_ALSO:
+            # its pinning tests are registered across api, core AND ep, so the
+            # named-surface match must not drop `core` (see CORE_ALSO).
+            "tortoise/api.py"),
     # eval (#1349): the probe, LongMemEval/mini-BEIR harnesses, threshold
     # tools, benchmark infra, and the backfill script all produce gate
     # evidence — their tests live in the eval surface (config/ci-surfaces.yml).
@@ -128,6 +138,17 @@ SOURCE_PATTERNS = {
              "tortoise/embeddings.py", "tortoise/cross_lens.py"),
     # core is the fallback for any other python-relevant path
 }
+
+# #2938: a SOURCE_PATTERNS match REPLACES the `core` fallback in select() —
+# the named surface's file list is more specific than the always-on engine
+# set. That is wrong for a source whose pinning tests are registered across
+# surfaces: `tortoise/api.py` (EventAPI) is imported at module level by 16
+# `core`-registered tests (test_projection, test_extractor, test_m1/m2, the
+# de2e* suite, …) plus the api-registered trio, and a named-surface match
+# would run only the selected surface's half of them. A path listed here adds
+# `core` alongside its matched surface(s) — narrower than promoting the whole
+# module to SHARED_MODULES (which forces the full matrix).
+CORE_ALSO = ("tortoise/api.py",)
 
 # Paths that are NOT python-relevant (docs/config PRs skip the matrix).
 NON_PYTHON_PREFIXES = (
@@ -167,9 +188,34 @@ TOOL_CARVEOUTS = (
 )
 
 
+def _surface_members(value) -> list:
+    """A manifest surface value as a member list (#3073).
+
+    ``None`` means "empty surface" (a plausible hand-edit or bad-merge
+    artifact) and a non-list scalar is malformed. Both coerce to ``[]``
+    rather than crashing every consumer with
+    ``TypeError: argument of type 'NoneType' is not iterable`` or, worse,
+    iterating a string character-by-character. The drift gate still reports
+    the orphans, so an empty surface fails loudly later rather than silently
+    at selection time.
+    """
+    if isinstance(value, (list, tuple)):
+        return list(value)
+    return []
+
+
+def _normalize_surfaces(manifest: dict) -> dict:
+    """Coerce every surface block to a member list, in place (#3073)."""
+    surfaces = manifest.get("surfaces")
+    if isinstance(surfaces, dict):
+        manifest["surfaces"] = {
+            s: _surface_members(v) for s, v in surfaces.items()}
+    return manifest
+
+
 def load_manifest() -> dict:
     import yaml  # local import (uv provides pyyaml via the dev group)
-    return yaml.safe_load(MANIFEST.read_text())
+    return _normalize_surfaces(yaml.safe_load(MANIFEST.read_text()))
 
 
 def classify_test_file(name: str, manifest: dict) -> str | None:
@@ -183,7 +229,8 @@ def classify_test_file(name: str, manifest: dict) -> str | None:
     """
     base = name.rsplit("/", 1)[-1]
     for surface, files in manifest["surfaces"].items():
-        if name in files or base in files:
+        members = _surface_members(files)
+        if name in members or base in members:
             return surface
     return None
 
@@ -279,6 +326,12 @@ def select(changed_files: list[str], event: str, manifest: dict) -> dict:
             if any(c.startswith(p) for p in pats):
                 matched.add(surface)
                 found = True
+        # #2938: a CORE_ALSO path keeps `core` even though a named surface
+        # matched above (see CORE_ALSO) — otherwise its core-registered
+        # pinners silently drop out of the selection.
+        if any(c.startswith(p) for p in CORE_ALSO):
+            matched.add("core")
+            found = True
         if not found:  # noqa: SIM102
             if c.startswith("tortoise/") or c.startswith("tests/") or \
                c.startswith("graph-scripts/") or c.startswith("config/") or \
@@ -304,7 +357,7 @@ def select(changed_files: list[str], event: str, manifest: dict) -> dict:
     surfaces = sorted(matched)
     files = set(tier1)  # tier 2 = tier 1 ∪ surface-matched (scope v5 dec 5)
     for s in surfaces:
-        files.update(manifest["surfaces"].get(s, []))
+        files.update(_surface_members(manifest["surfaces"].get(s)))
     files -= slow  # #1371: slow files never run in the fast gate
     # #1988: carve-out (embedded-only) files run in the dedicated carve-out
     # job — on tier-2 PR legs the fast-matrix process runs everything embedded
@@ -410,7 +463,14 @@ def register_tests(manifest_path: Path, tests_dir: Path, surface: str,
     missing = unlisted_tests(tests_dir, manifest)
     if not missing:
         return []
-    lines = manifest_path.read_text().splitlines(keepends=True)
+    text = manifest_path.read_text()
+    # #3073: a manifest whose final line lacks a newline would concatenate the
+    # appended entry onto it (`  - test_b.py  - test_c.py`, malformed YAML).
+    # Normalise the terminator before splitting so every insertion point is a
+    # line boundary.
+    if text and not text.endswith(NL):
+        text += NL
+    lines = text.splitlines(keepends=True)
     # locate the surface block: "  <surface>:" then "  - name" lines (strip
     # any trailing inline comment from the key)
     block_start = None
@@ -472,7 +532,7 @@ def register_tests(manifest_path: Path, tests_dir: Path, surface: str,
 def register(manifest_path: Path, tests_dir: Path, surface: str) -> list[str]:
     """Load + register in one call (CLI entry)."""
     import yaml
-    manifest = yaml.safe_load(manifest_path.read_text())
+    manifest = _normalize_surfaces(yaml.safe_load(manifest_path.read_text()))
     return register_tests(manifest_path, tests_dir, surface, manifest)
 
 
@@ -737,11 +797,710 @@ def duration_issues(manifest: dict) -> list[str]:
     return issues
 
 
+# ── #2938: surface audit (report-only, non-blocking) ─────────────────────
+#
+# `config/ci-surfaces.yml` membership is hand-curated: a surface's members are
+# the test files that should RUN when that surface's source changes, which is
+# not the same thing as "the files that reference that surface's source".
+# Deriving membership mechanically was rejected (#2938: it proposed 326/562
+# file moves, 28 out of `onboarding`, and emptied `classify`) because a naive
+# import scan cannot resolve `from tortoise import X`, a source path no
+# SOURCE_PATTERNS entry maps, fixture/HTTP indirection, or human intent. This
+# mode derives nothing: it prints the mismatches, with evidence, for a human.
+#
+# Pin-resolution rules — each gap the mechanical attempt hit is handled (or
+# explicitly surfaced):
+#   (a) `from tortoise import X` / `import tortoise.X` -> `tortoise/X.py` or
+#       `tortoise/X/__init__.py`, accepted only when the file exists on disk
+#       (a class re-exported from the package root is not a submodule). The
+#       bare package roots `tortoise` / `tests` are never pins themselves:
+#       the root re-exports many surfaces and every test imports it.
+#   (b) a pinned source path that no SOURCE_PATTERNS entry maps (the #2938
+#       `tortoise/api.py` case, since fixed by mapping it) is reported under
+#       "uncovered source paths" rather than silently binned as `core` (the
+#       selection fallback), naming the pinning files and the surfaces they
+#       are registered under. A path named after a surface
+#       (`tortoise/<surface>.py`) is additionally called out under
+#       "SOURCE_PATTERNS coverage gaps".
+#   (c) string references: every non-docstring string literal is scanned for
+#       path-like tokens (a subprocess argv, a Path(...) literal, a path read
+#       from disk); evidence is rendered quoted (`file <- "path/string"`).
+#   (d) fixture/helper indirection: a test that imports another module under
+#       tests/ inherits that module's pins transitively (cycle-safe), EXCEPT
+#       helpers in SHARED_MODULES (conftest.py, fake_control_plane.py) —
+#       those already force the full matrix, so following them would make
+#       every test "pin" everything. Helper-derived evidence is tagged
+#       `(via tests/helper.py)` so direct and indirect evidence are distinct.
+# SHARED_MODULES are excluded from pins entirely (a change to them forces the
+# full matrix, so a file importing sdk.py is not a mismatch).
+#
+# Still undecided by construction (kept visible, never hidden):
+#   - `classify` and `core` have no SOURCE_PATTERNS entry, so "pins nothing
+#     from this surface" is undefined for them; the report says so and skips
+#     removal analysis instead of proposing to empty `classify`.
+#   - intent ("this suite should run when this area changes") is not derivable
+#     from references; a removal candidate whose only pins are uncovered or
+#     helper-derived is labelled rather than asserted.
+#   - seams the path scan cannot resolve at all (a pytest marker, a fixture
+#     name, an HTTP route string with no source path) stay invisible.
+
+# Bare package roots that are not pins: `from tortoise import X` / `import
+# tortoise` mean "the package", and the root re-exports many surfaces.
+_AUDIT_NAMESPACE_ROOTS = frozenset({"tortoise", "tests"})
+
+# Mirror of select()'s per-file fallback branch: engine/config paths with no
+# SOURCE_PATTERNS entry select the `core` surface.
+_AUDIT_CORE_FALLBACK = ("tortoise/", "graph-scripts/", "config/",
+                        "validation/", "packs/")
+
+# Source trees worth naming in the uncovered report (tests/ is test-internal
+# scaffolding, not a selectable source surface).
+_AUDIT_SOURCE_TREES = ("tortoise/", "tools/", "battery/", "graph-scripts/",
+                       "benchmarks/", "config/", "packs/", "validation/",
+                       "website/", "services/", "integrations/")
+
+# Source trees whose modules are followed TRANSITIVELY when a test imports
+# them (rule (d) extension, #2938 review P2). A test reaching a surface only
+# through a repo-root helper (tools/longmem_eval/retrieve.py ->
+# tortoise/retrieval.py) must not read as "pins nothing". `tortoise/` is
+# deliberately excluded: it IS the surface source, and its internals are not
+# helper indirection.
+_AUDIT_HELPER_TREES = ("tests/", "tools/", "graph-scripts/", "battery/",
+                       "benchmarks/", "services/", "integrations/")
+
+_AUDIT_PATH_TOKEN = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.\\/-]*")
+_AUDIT_EVIDENCE_CAP = 6
+
+
+def _audit_is_shared(path: str) -> bool:
+    return any(path == s or (s.endswith("/") and path.startswith(s))
+               for s in SHARED_MODULES)
+
+
+def _audit_module_files(module: str, repo: Path, tests_dir: Path) -> set[str]:
+    """Existing repo files a dotted module may resolve to.
+
+    Checked under BOTH import roots: the repo root and tests/ (pytest puts
+    tests/ on sys.path, so `eval.harness.schema` lives at
+    tests/eval/harness/schema.py while `tortoise.embeddings` lives at
+    tortoise/embeddings.py).
+    """
+    rel = module.replace(".", "/")
+    out: set[str] = set()
+    for root in (repo, tests_dir):
+        for cand in (root / f"{rel}.py", root / rel / "__init__.py"):
+            if cand.is_file():
+                out.add(cand.relative_to(repo).as_posix())
+    return out
+
+
+def _audit_classify(path: str) -> tuple[frozenset[str], bool, str]:
+    """(surfaces, covered, reason) for a repo-relative source path.
+
+    ``reason`` is ``pattern`` (matched SOURCE_PATTERNS), ``shared``
+    (SHARED_MODULES -> full matrix), ``core-fallback`` (select()'s core
+    branch) or ``outside`` (not selection-relevant).
+    """
+    if _audit_is_shared(path):
+        return frozenset(), False, "shared"
+    surfaces = {s for s, pats in SOURCE_PATTERNS.items()
+                if any(path == p or path.startswith(p) for p in pats)}
+    if surfaces:
+        return frozenset(surfaces), True, "pattern"
+    if any(path.startswith(p) for p in _AUDIT_CORE_FALLBACK):
+        return frozenset({"core"}), False, "core-fallback"
+    return frozenset(), False, "outside"
+
+
+def _audit_parse(abs_path: Path) -> ast.AST | None:
+    try:
+        return ast.parse(abs_path.read_text(encoding="utf-8"))
+    except (OSError, SyntaxError, UnicodeDecodeError):
+        return None
+
+
+def _audit_relative_base(node: ast.ImportFrom, pkg: list[str]) -> str:
+    """Resolve a (possibly relative) ImportFrom base module name."""
+    if node.level == 0:
+        return node.module or ""
+    base = list(pkg)
+    drop = node.level - 1
+    if drop:
+        base = base[:-drop] if drop <= len(base) else []
+    if node.module:
+        base = base + node.module.split(".")
+    return ".".join(base)
+
+
+def _audit_import_nodes(tree: ast.AST, module_level_only: bool):
+    """Import nodes to honor, optionally skipping deferred (call-time) ones.
+
+    #2938 review P1: `ast.walk` visits every nested import, so an import
+    inside a function body reads exactly like a module-level one. A helper
+    module that is only IMPORTED (never called) never executes its
+    function-local imports, so those must not become strong pins. Descend
+    through statements that execute at import time (if/try/with/class
+    bodies); stop at function/lambda scopes.
+    """
+    if not module_level_only:
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.Import, ast.ImportFrom)):
+                yield node
+        return
+    stack = [tree]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef,
+                             ast.Lambda)):
+            continue
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            yield node
+            continue
+        stack.extend(ast.iter_child_nodes(node))
+
+
+def _audit_import_paths(tree: ast.AST, module_name: str, repo: Path,
+                        tests_dir: Path,
+                        module_level_only: bool = False) -> list[str]:
+    """Repo-relative files the file's import statements resolve to.
+
+    `from A import n` descends into `A.n` as well as `A`, so
+    `from tortoise import onboarding` pins tortoise/onboarding/__init__.py
+    and `from tortoise.api import EventAPI` pins tortoise/api.py (api is a
+    module, not a package, so the name descent finds nothing and the base
+    does).
+
+    ``module_level_only`` skips imports nested in function/lambda bodies
+    (see :func:`_audit_import_nodes`): true for a transitively followed
+    helper, false for the root test file (whose function bodies DO run).
+    """
+    pkg = module_name.split(".")[:-1]
+    out: set[str] = set()
+    for node in _audit_import_nodes(tree, module_level_only):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name in _AUDIT_NAMESPACE_ROOTS:
+                    continue
+                out.update(_audit_module_files(alias.name, repo, tests_dir))
+        elif isinstance(node, ast.ImportFrom):
+            base = _audit_relative_base(node, pkg)
+            if base and base not in _AUDIT_NAMESPACE_ROOTS:
+                out.update(_audit_module_files(base, repo, tests_dir))
+            for alias in node.names:
+                if alias.name == "*":
+                    continue
+                sub = f"{base}.{alias.name}" if base else alias.name
+                out.update(_audit_module_files(sub, repo, tests_dir))
+    return sorted(out)
+
+
+def _audit_string_paths(tree: ast.AST) -> list[str]:
+    """Path-like tokens from non-docstring string literals (rule (c))."""
+    docstrings: set[int] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef,
+                             ast.AsyncFunctionDef)):
+            body = node.body
+            if body and isinstance(body[0], ast.Expr) \
+                    and isinstance(body[0].value, ast.Constant) \
+                    and isinstance(body[0].value.value, str):
+                docstrings.add(id(body[0].value))
+    out: set[str] = set()
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Constant) and isinstance(node.value, str)):
+            continue
+        if id(node) in docstrings:
+            continue
+        for raw in _AUDIT_PATH_TOKEN.findall(node.value):
+            token = raw.replace("\\", "/")
+            while token.startswith("./"):
+                token = token[2:]
+            out.add(token)
+    return sorted(out)
+
+
+def _audit_own_refs(abs_path: Path, module_name: str, repo: Path,
+                    tests_dir: Path,
+                    cache: dict[tuple[str, bool], tuple] | None = None,
+                    module_level_only: bool = False):
+    """Direct reference scan of one file.
+
+    Returns ``(surface_pins, uncovered, shared, helpers)`` where
+    surface_pins maps a SOURCE_PATTERNS surface to evidence strings,
+    uncovered maps a pinned-but-unmapped source path to evidence, shared is
+    the referenced SHARED_MODULES set, and helpers is the set of repo-relative
+    modules imported and worth following (rule (d): tests/ helpers plus any
+    module in ``_AUDIT_HELPER_TREES``). ``cache`` memoizes the scan (a helper
+    reached by many test roots is parsed once); the cache key carries
+    ``module_level_only`` because the same file can be scanned both as a
+    test root (all imports) and as a helper (module-level only).
+    """
+    key = (abs_path.as_posix(), module_level_only)
+    if cache is not None and key in cache:
+        return cache[key]
+    surface_pins: dict[str, set[str]] = {}
+    uncovered: dict[str, set[str]] = {}
+    shared: set[str] = set()
+    helpers: set[str] = set()
+    tree = _audit_parse(abs_path)
+    if tree is None:
+        result = (surface_pins, uncovered, shared, helpers)
+        if cache is not None:
+            cache[key] = result
+        return result
+
+    def record(path: str, evidence: str) -> None:
+        surfaces, covered, reason = _audit_classify(path)
+        if reason == "shared":
+            shared.add(path)
+        elif covered:
+            for s in surfaces:
+                surface_pins.setdefault(s, set()).add(evidence)
+        elif reason == "core-fallback" or any(
+                path.startswith(p) for p in _AUDIT_SOURCE_TREES):
+            uncovered.setdefault(path, set()).add(evidence)
+
+    for path in _audit_import_paths(tree, module_name, repo, tests_dir,
+                                    module_level_only):
+        if path.startswith("tests/") and path.endswith(".py"):
+            # test-internal module: a helper to follow, not a source pin.
+            if _audit_is_shared(path):
+                shared.add(path)
+            else:
+                helpers.add(path)
+            continue
+        record(path, path)
+        # #2938 review P2: a repo-root helper (tools/, graph-scripts/, …) is
+        # both a pin of its own surface AND indirection — follow it so a test
+        # reaching a surface only through it is not read as pinning nothing.
+        if path.endswith(".py") and path.startswith(_AUDIT_HELPER_TREES) \
+                and not _audit_is_shared(path):
+            helpers.add(path)
+    for token in _audit_string_paths(tree):
+        # rule (c) precision: a string naming no file/dir on disk is data,
+        # not a source reference (e.g. an MCP method name "tools/call").
+        if not (repo / token).exists():
+            continue
+        record(token, f'"{token}"')
+    result = (surface_pins, uncovered, shared, helpers)
+    if cache is not None:
+        cache[key] = result
+    return result
+
+
+def _audit_file_refs(abs_path: Path, rel: str, repo: Path, tests_dir: Path,
+                     cache: dict[tuple[str, bool], tuple] | None = None):
+    """Pins for one test file, following its imported helper modules.
+
+    Cycle-safe BFS over repo-relative paths: each helper contributes its own
+    pins tagged ``(via tests/helper.py)`` (or ``(via tools/…)`` for a
+    repo-root helper); SHARED_MODULES helpers are never followed. Helpers are
+    scanned module-level only (#2938 review P1): a helper is imported, not
+    called, so its function-local imports never execute — and a helper's own
+    deferred import of another helper is not followed either.
+    """
+    surface_pins: dict[str, set[str]] = {}
+    uncovered: dict[str, set[str]] = {}
+    shared: set[str] = set()
+    seen: set[str] = set()
+    root = rel if rel.startswith("tests/") else f"tests/{rel}"
+    queue = [root]
+    while queue:
+        cur = queue.pop(0)
+        if cur in seen:
+            continue
+        seen.add(cur)
+        cur_abs = repo / cur
+        if not cur_abs.is_file():
+            continue
+        module_name = cur[:-3].replace("/", ".")
+        sp, unc, sh, helpers = _audit_own_refs(
+            cur_abs, module_name, repo, tests_dir, cache,
+            module_level_only=(cur != root))
+        shared |= sh
+        tag = "" if cur == root else f" (via {cur})"
+        for s, evs in sp.items():
+            for ev in evs:
+                surface_pins.setdefault(s, set()).add(ev + tag)
+        for p, evs in unc.items():
+            for ev in evs:
+                uncovered.setdefault(p, set()).add(ev + tag)
+        for helper in sorted(helpers):
+            if helper not in seen:
+                queue.append(helper)
+    return surface_pins, uncovered, shared
+
+
+def _audit_coverage_gaps(repo: Path) -> dict[str, str]:
+    """Surface-named source paths absent from that surface's SOURCE_PATTERNS.
+
+    The #2938 case (b): a source named after a surface (`tortoise/<s>.py`,
+    e.g. `tortoise/api.py` before this PR mapped it) exists, but that
+    surface's `SOURCE_PATTERNS` entry does not list it — so a change to it
+    selects `core` (or nothing), and the surface-registered tests pinning it
+    never run. Reporting this explicitly is the whole point of the audit:
+    silently binning the path as `core` would make the numbers lie.
+    """
+    gaps: dict[str, str] = {}
+    for surface in sorted(SOURCE_PATTERNS):
+        pats = SOURCE_PATTERNS[surface]
+        for cand in (f"tortoise/{surface}.py", f"tortoise/{surface}",
+                     surface):
+            if not (repo / cand).exists() or _audit_is_shared(cand):
+                continue
+            covered = any(cand == p or cand.startswith(p) or p == cand + "/"
+                          for p in pats)
+            if not covered:
+                gaps[cand] = surface
+                break
+    return gaps
+
+
+def _audit_is_string_evidence(evidence: str) -> bool:
+    """True when the evidence came from a path *string*, not an import."""
+    return evidence.startswith('"')
+
+
+def _audit_entries(entries) -> list:
+    """Manifest surface value as a list.
+
+    #2938 review P3: a curated manifest can carry `null` for a surface, and a
+    hard-edited one a scalar. `None` means empty (like integrity()'s
+    `files or ()`); a non-list scalar is malformed and is treated as empty
+    rather than silently iterated (`api: "test_x.py"` used to become a list
+    of characters).
+    """
+    if entries is None:
+        return []
+    return _surface_members(entries)
+
+
+def _audit_gap_selection(rec: dict, manifest: dict) -> tuple[list[str], list[str], list[str]]:
+    """(selected_surfaces, victims, runners) for one coverage-gap record.
+
+    #2938 review P2: the previous renderer asserted the non-gap pinners "run
+    via {others}", but `others` is just the union of non-gap registrations —
+    `select([unmapped_path], ...)` selects only the fallback `core` surface
+    and does NOT select `ep`, so a pinner registered solely under `ep` does
+    not run. A pinner RUNS when it is in the change's fast-gate `test_files`,
+    in the selected surfaces' slow leg, or in a triggered carve-out job;
+    every other pinner is a victim. Callers pass a manifest whose surface
+    values are already normalised via :func:`_audit_entries`.
+    """
+    selection = select([rec["path"]], "pull_request", manifest)
+    if selection["full"] or selection["test_files"] == "ALL":
+        return sorted(manifest["surfaces"]), [], sorted(rec["files"])
+    runs: set[str] = set(selection["test_files"])
+    runs |= set(selection.get("slow_selected") or [])
+    if selection.get("carve_out_run"):
+        runs |= set(manifest.get("carve_out") or [])
+    runners, victims = [], []
+    for f in sorted(rec["files"]):
+        base = f.rsplit("/", 1)[-1]
+        (runners if (f in runs or base in runs) else victims).append(f)
+    return sorted(selection["surfaces"]), victims, runners
+
+
+def surface_audit(manifest: dict, repo: Path | None = None,
+                  tests_dir: Path | None = None) -> dict:
+    """#2938: report-only manifest/source mismatch audit.
+
+    Never mutates the manifest and never feeds selection: it returns a
+    structured report consumed by :func:`render_surface_audit`. ``repo`` /
+    ``tests_dir`` are injectable for synthetic-manifest tests. Surface values
+    are normalised with :func:`_audit_entries` (``null``/scalars -> empty),
+    so a curated manifest with a malformed value still audits without raising.
+    """
+    repo = Path(repo) if repo is not None else REPO
+    tests_dir = Path(tests_dir) if tests_dir is not None else TESTS_DIR
+    owners: dict[str, list[str]] = {
+        s: _audit_entries(entries)
+        for s, entries in manifest["surfaces"].items()
+    }
+    # select() gets the normalised surfaces (a scalar value would crash its
+    # `files.update(...)`); the original manifest is left untouched.
+    audit_manifest = {**manifest, "surfaces": owners}
+    source_mapped = set(SOURCE_PATTERNS)
+    gaps = _audit_coverage_gaps(repo)
+    cache: dict[tuple[str, bool], tuple] = {}
+
+    disk: list[str] = []
+    for f in sorted(tests_dir.rglob("test_*.py")):
+        rel_path = f.relative_to(tests_dir)
+        if rel_path.parts and rel_path.parts[0] == "e2e":
+            continue
+        disk.append(rel_path.as_posix())
+
+    def registered_in(rel: str) -> list[str]:
+        base = rel.rsplit("/", 1)[-1]
+        return sorted(s for s, entries in owners.items()
+                      if rel in entries or base in entries)
+
+    by_surface = {
+        s: {"members": list(entries),
+            "source_mapped": s in source_mapped,
+            "removal": [], "addition": []}
+        for s, entries in owners.items()
+    }
+    uncovered_index: dict[str, dict] = {}
+    for rel in disk:
+        surface_pins, uncovered, shared = _audit_file_refs(
+            tests_dir / rel, rel, repo, tests_dir, cache)
+        registered = registered_in(rel)
+        for s in sorted(surface_pins):
+            if s in by_surface and s not in registered:
+                evs = sorted(surface_pins[s])
+                # #2938 review P1-2: a path STRING is weak evidence — it may
+                # be fixture data (test_ci_selection.py's own corpus names six
+                # surfaces). Keep it visible (the renderer labels it), but only
+                # an import-derived reference makes the file an addition
+                # candidate a human should act on.
+                by_surface[s]["addition"].append({
+                    "file": rel, "evidence": evs,
+                    "strong": any(not _audit_is_string_evidence(e)
+                                   for e in evs),
+                    "registered": registered})
+        for s in registered:
+            if s not in source_mapped or surface_pins.get(s):
+                continue
+            by_surface[s]["removal"].append({
+                "file": rel, "surface": s,
+                "pins": {t: sorted(v)
+                         for t, v in sorted(surface_pins.items())},
+                "uncovered": sorted(uncovered), "shared": sorted(shared),
+                "gap": sorted(p for p in uncovered if p in gaps)})
+        for path, evs in uncovered.items():
+            rec = uncovered_index.setdefault(
+                path, {"path": path, "files": {}, "weak_files": {},
+                       "evidence": set()})
+            evs = sorted(evs)
+            # #2938 review P1-2: only a file with an import-derived reference
+            # to this path counts as a STRONG pinnner. A string-only pinnner
+            # (test_ci_selection.py names tortoise/api.py as fixture data) is
+            # kept in weak_files so the "never run" claim is not inflated.
+            bucket = (rec["files"]
+                      if any(not _audit_is_string_evidence(e) for e in evs)
+                      else rec["weak_files"])
+            bucket[rel] = sorted(registered)
+            rec["evidence"].update(evs)
+
+    uncovered = []
+    for rec in uncovered_index.values():
+        rec["files"] = {f: rec["files"][f] for f in sorted(rec["files"])}
+        rec["weak_files"] = {f: rec["weak_files"][f]
+                             for f in sorted(rec["weak_files"])}
+        rec["registered"] = sorted(
+            {s for regs in rec["files"].values() for s in regs}
+            | {s for regs in rec["weak_files"].values() for s in regs})
+        rec["evidence"] = sorted(rec["evidence"])
+        rec["surface"] = gaps.get(rec["path"])
+        uncovered.append(rec)
+    uncovered.sort(key=lambda r: (r["surface"] is None, r["path"]))
+
+    coverage_gaps = [r for r in uncovered if r["surface"] is not None]
+    for rec in coverage_gaps:
+        sel, victims, runners = _audit_gap_selection(rec, audit_manifest)
+        rec["selected_surfaces"] = sel
+        rec["victims"] = victims
+        rec["runs"] = runners
+
+    # #2938 review P3: a curated manifest can carry `null` for a surface;
+    # a bare `entries.count()` would traceback. `owners` is normalised above.
+    duplicates: dict[str, list[str]] = {}
+    for s, entries in owners.items():
+        dupes = sorted({e for e in entries if entries.count(e) > 1})
+        if dupes:
+            duplicates[s] = dupes
+
+    return {
+        "surfaces": by_surface,
+        "no_surface": sorted(r for r in disk if not registered_in(r)),
+        "duplicates": {s: d for s, d in duplicates.items() if d},
+        "coverage_gaps": coverage_gaps,
+        "uncovered": [r for r in uncovered if r["surface"] is None],
+        "disk_files": len(disk),
+    }
+
+
+def _audit_fmt_paths(paths: list[str], cap: int = _AUDIT_EVIDENCE_CAP) -> str:
+    shown = ", ".join(paths[:cap])
+    if len(paths) > cap:
+        shown += f", … (+{len(paths) - cap} more)"
+    return shown
+
+
+def _audit_label_evidence(evidence: str) -> str:
+    """Mark string-derived evidence so a human sees it is not an import."""
+    if not _audit_is_string_evidence(evidence):
+        return evidence
+    core, sep, via = evidence.partition(" (via ")
+    if sep:
+        return f"{core} (string, not an import; via {via}"
+    return f"{core} (string, not an import)"
+
+
+def _audit_fmt_evidence(evs: list[str],
+                        cap: int = _AUDIT_EVIDENCE_CAP) -> str:
+    return _audit_fmt_paths([_audit_label_evidence(e) for e in evs], cap)
+
+
+def _audit_removal_line(entry: dict) -> str:
+    parts = [f"{s}: {_audit_fmt_evidence(v)}"
+             for s, v in sorted(entry["pins"].items())]
+    if entry["shared"]:
+        parts.append(f"shared: {_audit_fmt_paths(entry['shared'])}")
+    if entry["uncovered"]:
+        parts.append(f"uncovered: {_audit_fmt_paths(entry['uncovered'])}")
+    if entry["gap"]:
+        parts.append(f"⚑ coverage gap: {_audit_fmt_paths(entry['gap'])}")
+        warn = ("  ⚑ surface-named source is unmapped — fix SOURCE_PATTERNS "
+                "before removing")
+    else:
+        # #2938 review P3: every entry in this list has NO pin for its own
+        # surface BY DEFINITION, so the "don't act" cue belongs on all of
+        # them — shared-only members (`shared: tortoise/sdk.py`) used to
+        # render as bare removal candidates.
+        warn = (f"  ⚠ no `{entry['surface']}` pin resolved — helper/dynamic "
+                "indirection unresolved; confirm before removing")
+    body = "; ".join(parts) if parts else "no source references at all"
+    return f"  {entry['file']} <- ({body}){warn}"
+
+
+def render_surface_audit(report: dict) -> str:
+    """Human-readable rendering of :func:`surface_audit` (deterministic)."""
+    lines = [
+        "CI surface audit (#2938) — report only; select() / --integrity are "
+        "unchanged.",
+        f"scanned tests/**/test_*.py (tests/e2e/ exempt): {report['disk_files']} files",
+        "",
+        "Summary (surface: members / no-pin removal candidates / addition "
+        "candidates):",
+    ]
+    for s in sorted(report["surfaces"]):
+        v = report["surfaces"][s]
+        if v["source_mapped"]:
+            n_add = sum(1 for e in v["addition"] if e["strong"])
+            lines.append(f"  {s:<11} {len(v['members']):>4} members   "
+                         f"{len(v['removal']):>3} no-pin   "
+                         f"{n_add:>3} additions")
+        else:
+            lines.append(f"  {s:<11} {len(v['members']):>4} members   "
+                         "  n/a (no SOURCE_PATTERNS entry)")
+    unmapped = sorted(s for s, v in report["surfaces"].items()
+                      if not v["source_mapped"])
+    if unmapped:
+        lines += [
+            "",
+            f"⚠ {', '.join(unmapped)}: no SOURCE_PATTERNS entry — nothing maps a "
+            "source change to this surface, so \"pins",
+            "  nothing from it\" is undefined and removal analysis is skipped "
+            "(a naive scan would propose",
+            "  emptying `classify`; the rejected mechanical rule did exactly "
+            "that).",
+        ]
+    lines.append("")
+    for s in sorted(report["surfaces"]):
+        v = report["surfaces"][s]
+        if not v["source_mapped"]:
+            continue
+        lines.append(f"── {s} " + "─" * max(0, 58 - len(s)))
+        if v["removal"]:
+            lines.append(f"removal candidates — members pinning nothing from "
+                         f"`{s}` ({len(v['removal'])}):")
+            lines += [_audit_removal_line(e) for e in v["removal"]]
+        else:
+            lines.append(f"removal candidates — none (every member pins `{s}`)")
+        strong_add = [e for e in v["addition"] if e["strong"]]
+        weak_add = [e for e in v["addition"] if not e["strong"]]
+        if strong_add:
+            lines.append(f"addition candidates — files pinning `{s}` but not "
+                         f"registered ({len(strong_add)}):")
+            for e in strong_add:
+                reg = ", ".join(e["registered"]) or "none"
+                lines.append(f"  {e['file']} <- "
+                             f"{_audit_fmt_evidence(e['evidence'])}"
+                             f"  (registered: {reg})")
+        else:
+            lines.append("addition candidates — none")
+        if weak_add:
+            lines.append(f"string-only references — weak evidence, not counted "
+                         f"as pins ({len(weak_add)}):")
+            for e in weak_add:
+                reg = ", ".join(e["registered"]) or "none"
+                lines.append(f"  {e['file']} <- "
+                             f"{_audit_fmt_evidence(e['evidence'])}"
+                             f"  (registered: {reg})")
+        lines.append("")
+
+    gaps = report["coverage_gaps"]
+    if gaps:
+        lines.append(f"⚑ SOURCE_PATTERNS coverage gaps ({len(gaps)}) — surface-named "
+                     "source that no pattern maps:")
+        for rec in gaps:
+            # #2938 review P2: do NOT assert which files run from the union of
+            # non-gap registrations — `select()` decides. Victims are the
+            # pinners this change does not select (e.g. a pinner registered
+            # only under a surface the change does not select).
+            victims = rec["victims"]
+            selected = "/".join(rec["selected_surfaces"]) or "none"
+            weak_victims = sorted(
+                f for f, regs in rec["weak_files"].items()
+                if rec["surface"] in regs)
+            total = len(rec["files"]) + len(rec["weak_files"])
+            weak_note = (f" (+{len(weak_victims)} string-only pinnner(s), "
+                         "weak)" if weak_victims else "")
+            lines.append(f"  {rec['path']} is not in "
+                         f"SOURCE_PATTERNS[{rec['surface']!r}] — a change to "
+                         f"it selects `{selected}`,")
+            if victims:
+                lines.append(f"    never run on a change to {rec['path']}: "
+                             f"{_audit_fmt_paths(victims)}")
+            else:
+                lines.append(f"    every pinning file still runs on a change "
+                             f"to {rec['path']} (via `{selected}`)")
+            lines.append(f"    (pinned by {total} file(s) in total; "
+                         f"{len(victims)} never run, {len(rec['runs'])} run via "
+                         f"`{selected}`{weak_note}; evidence: "
+                         f"{_audit_fmt_evidence(rec['evidence'])})")
+        lines.append("")
+
+    nosurf = report["no_surface"]
+    lines.append(f"files in NO surface ({len(nosurf)})"
+                 + (":" if nosurf else " — none"))
+    for f in nosurf:
+        lines.append(f"  {f} <- (unregistered; a tests/ change cannot select it)")
+    lines.append("")
+
+    dupes = report["duplicates"]
+    total_dupes = sum(len(v) for v in dupes.values())
+    lines.append(f"same-surface duplicate entries ({total_dupes})"
+                 + (":" if total_dupes else " — none"))
+    for s in sorted(dupes):
+        for e in dupes[s]:
+            lines.append(f"  {s}: {e} (listed "
+                         f"{report['surfaces'][s]['members'].count(e)}x)")
+    lines.append("")
+
+    unc = report["uncovered"]
+    lines.append(f"other pinned paths with no SOURCE_PATTERNS entry ({len(unc)}) "
+                 "— these select `core` (the fallback):")
+    for rec in unc:
+        reg = ", ".join(rec["registered"]) or "none"
+        weak = (f" (+{len(rec['weak_files'])} string-only)"
+                if rec["weak_files"] else "")
+        lines.append(f"  {rec['path']}  (pinned by {len(rec['files'])}{weak}, "
+                     f"registered: {reg})")
+    return NL.join(lines)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--changed-files", default="", help="newline-separated changed files")
     ap.add_argument("--event", default="pull_request", choices=["push", "pull_request", "schedule"])
     ap.add_argument("--integrity", action="store_true", help="verify manifest coverage")
+    ap.add_argument("--surface-audit", action="store_true",
+                    help="#2938: report manifest/source membership mismatches "
+                         "(non-blocking, never changes selection)")
     ap.add_argument("--register", action="store_true",
                     help="auto-register unlisted test files in the manifest (#1429)")
     ap.add_argument("--surface", default="core",
@@ -791,6 +1550,12 @@ def main() -> int:
             print(f"⚠️  {len(dupes)} duplicate manifest entr(y/ies) — invisible "
                   f"to select(), #2913: {', '.join(dupes)}")
         print("✅ integrity: all test files classified; slow_files consistent; halves consistent")
+        return 0
+
+    if args.surface_audit:
+        # #2938: report-only. Always exits 0 — a mismatch is a curation
+        # decision, never a gate; `--integrity` keeps its own exit code.
+        print(render_surface_audit(surface_audit(manifest)))
         return 0
 
     if args.register:
