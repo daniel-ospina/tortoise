@@ -84,6 +84,16 @@ def _inject_fake(monkeypatch, scorer=None):
     monkeypatch.setattr(rerank, "get_scorer", lambda model=None: (fake, ""))
 
 
+class _PrefersPoolTail:
+    """Rerank scorer that GUARANTEES a reorder: later pool entries score
+    strictly higher, so MMR's first selection has rank 0 ≠ its pool index.
+    Deterministic, no model — used by the D6 integration lane so the overlay
+    stamping path is exercised for real (never an accidental pool order)."""
+
+    def score(self, query, contents):
+        return [float(i) for i in range(len(contents))]
+
+
 def _trusted_audit() -> dict:
     from tools.longmem_eval.dataset_audit import audit_dataset
     return audit_dataset([{
@@ -568,8 +578,21 @@ def test_retrieve_rerank_leg_mix_partition(tmp_path, monkeypatch):
 
 def test_retrieve_rerank_flags_stamped(tmp_path, monkeypatch):
     """reranked/mmr_promoted overlay flags land on selected hits (D6) — an
-    overlay metric, never a leg bucket."""
-    _inject_fake(monkeypatch)
+    overlay metric, never a leg bucket.
+
+    #3095: the pre-#3018 version injected the plain ``FakeScorer`` and
+    asserted ``any(flags)`` — "the mechanism moved something". That is NOT an
+    invariant of the rerank: the overlay flag is stamped on a hit whose
+    SELECTED rank differs from its POOL index, and after #3018's correct
+    deterministic-ranking fix the fake scorer's order coincided with the pool
+    order, so legitimately nothing moved. Keying the assertion to the ambient
+    pool order also made it an accidental property of the retrieval lane. It
+    now injects a scorer that PREFERS THE POOL TAIL, so a real reorder is
+    guaranteed and this integration lane genuinely exercises the stamping
+    path (pool → MMR → selected hits) rather than degenerating into
+    ``moved == 0``. The hermetic ``test_rerank_flags_stamped_on_reorder``
+    pins the same mechanism without a DB."""
+    _inject_fake(monkeypatch, scorer=_PrefersPoolTail())
     sdk = _fresh_sdk(tmp_path)
     q = _mini()[0]
     try:
@@ -577,13 +600,52 @@ def test_retrieve_rerank_flags_stamped(tmp_path, monkeypatch):
         ret = retrieve_for_question(sdk, q, ks=(5, 10, 20), top_k=20,
                                     rerank=True, rerank_pool=40,
                                     per_session_cap=2, mmr_lambda=0.7)
+        assert ret["rerank_pass"]["applied"] is True
         flags = [h.get("reranked", False) for h in ret["hits"]]
-        assert any(flags)                     # the mechanism moved something
         moved = ret["rerank_pass"]["moved"]
+        # non-vacuity: the forced-reorder scorer MUST move the pool — if this
+        # ever reads 0 the scorer/pool wiring changed and the assertions
+        # below would silently test nothing.
+        assert moved > 0, (
+            "the forced-reorder scorer moved nothing — this test would be "
+            "vacuous; check the rerank pool wiring")
+        # the overlay flag is stamped exactly on the moved hits
         assert moved == sum(1 for f in flags if f)
+        assert any(flags), "the moved hits must carry the overlay flag"
         assert all(h["match_source"] for h in ret["hits"])  # provenance kept
     finally:
         sdk.close()
+
+
+def test_rerank_flags_stamped_on_reorder():
+    """D6 non-vacuity pin (#3095): a pool the scorer REORDERS must stamp
+    ``reranked`` on BOTH moved hits and ``mmr_promoted`` only on the hit
+    that moved UP. Deterministic + hermetic (no DB, no model) — this is the
+    guaranteed-movement counterpart to the integration test, whose pool
+    order now legitimately needs no movement."""
+
+    class _PrefersSecond:
+        def score(self, query, contents):
+            return [1.0 if "MARK-B" in c else 0.0 for c in contents]
+
+    hits = [{"id": "h0", "content": "MARK-A unrelated filler",
+             "session_id": "s1", "match_source": "fts"},
+            {"id": "h1", "content": "MARK-B the gym is at 5pm",
+             "session_id": "s2", "match_source": "fts"}]
+    selected, stats = rerank.rerank_hits(
+        "when is the gym", hits, scorer=_PrefersSecond(), proj=None,
+        top_k=20, per_session_cap=2, lambda_=0.7)
+    assert stats["applied"] is True
+    assert [h["id"] for h in selected] == ["h1", "h0"]
+    by_id = {h["id"]: h for h in selected}
+    # both hits left their pool index -> both carry the overlay flag
+    assert by_id["h1"].get("reranked") is True
+    assert by_id["h0"].get("reranked") is True
+    # only the hit that moved UP is mmr_promoted
+    assert by_id["h1"].get("mmr_promoted") is True
+    assert "mmr_promoted" not in by_id["h0"]
+    assert stats["moved"] == 2 == sum(
+        1 for h in selected if h.get("reranked"))
 
 
 # ── Task 3: CLI thread-through + fail-fast ─────────────────────────────────

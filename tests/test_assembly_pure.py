@@ -592,28 +592,48 @@ def test_resolver_docker_exact_and_both_halves(_docker_sdk):
 
 
 @_docker_only
-def test_resolver_docker_fts_paraphrase(_docker_sdk):
+def test_resolver_docker_fts_paraphrase(_docker_sdk, force_sparse_tfidf):
     """R7 docker-FTS paraphrase (RESOLUTION-ONLY — the fired-path assembly
     half is Task 6's): a subject term with NO exact-name head but a stored
     Object whose NAME token-matches via FTS ('the grey comfy couch from
-    the store' → couch) resolves source='fts' confidence='med'."""
+    the store' → couch) resolves source='fts' confidence='med'.
+
+    #3095: the embedder state is PINNED OFF (``force_sparse_tfidf``) because
+    this test asserts the NAME-FTS leg's count contract; with a live embedder
+    the hybrid vector leg matches every Object and the count assertion becomes
+    an embedder-availability flake. This test is ABOUT the name-FTS leg, so it
+    must pin the leg decomposition to stay a real FTS contract (see the
+    ``force_sparse_tfidf`` conftest note).
+
+    NOT a statement about the shipped configuration: with the embedder live
+    this term does NOT stay a single-candidate name-FTS match — the hybrid
+    FTS leg (RRF of name-FTS + vector) resolves it to 3 candidates, all
+    stamped ``source="fts"`` — tracked as the resolver leg-decomposition
+    divergence in #3223."""
     _ag.build_base_graph(_docker_sdk)
     from tortoise.assembly import docker_resolver_port
     port = docker_resolver_port(_docker_sdk)
     res = resolve_subjects(port, ["the grey comfy couch from the store"],
                            shape=AssemblyShape.CURRENT_STATE)
     assert not res.unresolved
-    assert len(res.candidates) == 1
-    c = res.candidates[0]
-    assert c.name == "couch"
-    assert c.source == "fts"
-    assert c.confidence == "med"
+    assert [(c.name, c.source, c.confidence) for c in res.candidates] == \
+        [("couch", "fts", "med")]
 
 
 @_docker_only
-def test_resolver_docker_unresolved_keeps_legacy(_docker_sdk):
+def test_resolver_docker_unresolved_keeps_legacy(_docker_sdk,
+                                                  force_sparse_tfidf):
     """A term matching NO Object stays unresolved on the live lane — the R1
-    fired=False signal (legacy fallback), never an empty/errored fire."""
+    fired=False signal (legacy fallback), never an empty/errored fire.
+
+    #3095: embedder state PINNED OFF (``force_sparse_tfidf``). This pins the
+    SPARSE-leg contract only. With the vector leg live the hybrid FTS leg
+    matches every Object for any query, so 'the teleporting exercise bike'
+    RESOLVES through it and this bootstrap signal is unreachable in the
+    shipped configuration — a pre-existing divergence (reproduced identically
+    before and after #3018), tracked in #3223. When #3223 lands, either this
+    test loses its pin (the fallback becomes reachable again) or it is
+    rewritten to state where the fallback can fire."""
     _ag.build_base_graph(_docker_sdk)
     from tortoise.assembly import docker_resolver_port
     port = docker_resolver_port(_docker_sdk)
@@ -621,26 +641,66 @@ def test_resolver_docker_unresolved_keeps_legacy(_docker_sdk):
                            ["the couch", "the teleporting exercise bike"],
                            shape=AssemblyShape.ORDERING)
     assert res.both_halves_ok(AssemblyShape.ORDERING) is False
-    assert len(res.unresolved) == 1
+    assert res.unresolved == ("the teleporting exercise bike",)
 
 
 @_docker_only
-def test_resolver_docker_alias_leg(_docker_sdk):
+def test_resolver_docker_alias_leg(_docker_sdk, force_sparse_tfidf):
     """R7 leg 3 live: the Object NAME does not token-match the term but an
     anchored Point search_keys does ('the ikea purchase' → couch — couch's
     bought-point search_keys 'couch ikea 800 dollars'). Exact + FTS both
-    miss (Object names couch/dog bed/sofa share no ikea token)."""
+    miss (Object names couch/dog bed/sofa share no ikea token).
+
+    #3095: embedder state PINNED OFF (``force_sparse_tfidf``) so the FTS leg
+    genuinely misses and the term reaches the alias leg — an unpinned vector
+    leg would swallow the term at the FTS step and the alias contract would
+    never be exercised. Sparse-leg contract only; the shipped-configuration
+    divergence is #3223."""
     _ag.build_base_graph(_docker_sdk)
     from tortoise.assembly import docker_resolver_port
     port = docker_resolver_port(_docker_sdk)
     res = resolve_subjects(port, ["the ikea purchase"],
                            shape=AssemblyShape.CURRENT_STATE)
     assert not res.unresolved
-    assert len(res.candidates) == 1
-    c = res.candidates[0]
-    assert c.name == "couch"
-    assert c.source == "alias"
-    assert c.confidence == "low"
+    assert [(c.name, c.source, c.confidence) for c in res.candidates] == \
+        [("couch", "alias", "low")]
+
+
+@_docker_only
+@pytest.mark.xfail(
+    strict=False,
+    reason="#3223: with the vector leg live the hybrid FTS query matches a "
+           "term that names no Object, so the R1 fired=False legacy "
+           "fallback is unreachable in the shipped configuration. strict="
+           "False on purpose: an unexpected PASS (the divergence fixed) is "
+           "reported as XPASS rather than failing, so this record can never "
+           "itself turn main red. Delete this test when #3223 lands.")
+def test_resolver_docker_shipped_hybrid_leg_leaves_nothing_unresolved(
+        _docker_sdk):
+    """Shipped-configuration record (#3223): asserts the INTENDED contract —
+    a subject term naming no Object stays in ``unresolved`` (the R1
+    ``fired=False`` signal). Expected to FAIL today, because with the
+    embedder live the hybrid FTS leg resolves such a term through its
+    semantic half, making the fallback unreachable in the configuration that
+    actually ships.
+
+    The three ``force_sparse_tfidf``-pinned tests above cover the SPARSE leg
+    decomposition only; this is the one place the shipped configuration is
+    recorded. Skips when the embedder is genuinely unavailable (a lane
+    without it cannot exercise the divergence at all) — see #3223 for making
+    that state deterministic instead of ambient."""
+    from tortoise.embeddings import EmbeddingModel
+    if EmbeddingModel.get() is None:
+        pytest.skip("embedder unavailable — the shipped hybrid leg cannot be "
+                    "exercised in this lane (see #3223)")
+    _ag.build_base_graph(_docker_sdk)
+    from tortoise.assembly import docker_resolver_port
+    port = docker_resolver_port(_docker_sdk)
+    res = resolve_subjects(port, ["the teleporting exercise bike"],
+                           shape=AssemblyShape.CURRENT_STATE)
+    assert res.unresolved == ("the teleporting exercise bike",), \
+        f"#3223 divergence: expected the no-match term to stay unresolved, "\
+        f"got candidates {[(c.name, c.source) for c in res.candidates]}"
 
 
 # ══════════════════════════════════════════════════════════════════════════

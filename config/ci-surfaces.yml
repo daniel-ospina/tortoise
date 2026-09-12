@@ -213,6 +213,7 @@ surfaces:
   # and is registered in this surface alongside the provider-cost file it guards
   # (it sits with the other battery-only entries above).
   - test_battery_provider_cost.py
+  - test_battery_derive_truth_leg.py  # #2740 truth-emission leg (hermetic; battery.runner.probe_scorer derives) — registered by #3095/#3140 after landing unclassified in #3100
   - test_battery_differential.py
   - test_battery_streams.py
   - test_battery_recall.py
