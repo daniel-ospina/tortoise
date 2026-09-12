@@ -3087,8 +3087,10 @@ def tortoise_session_capture(conversation: list[dict],
         model = sanitize_attribution_field(model, max_length=128)
 
     from tortoise.hosted_api import (
+        _CAPTURE_SESSION_IN_FLIGHT_DETAIL,
         SessionRequest,
         _capture_session_impl,
+        _capture_session_key,
         _record_capture_last_error,
         _reserve_capture_slot,
     )
@@ -3125,8 +3127,10 @@ def tortoise_session_capture(conversation: list[dict],
         # surface shares `_CAPTURE_EXECUTOR`, so without reserving here the cap
         # would not bind MCP captures at all — they would queue unboundedly
         # behind a stalled pool, the exact failure mode the cap closes
-        # (reviewer measurement: cap=2, 4 concurrent extractions).
-        slot = _reserve_capture_slot()
+        # (reviewer measurement: cap=2, 4 concurrent extractions). #3129:
+        # the session_id goes with it, so a duplicate in-flight capture of the
+        # same session is refused on this surface too (scoped to this tenant).
+        slot = _reserve_capture_slot(_capture_session_key(team, session_id))
         try:
             return asyncio.run(_capture_session_impl(body, None, team,
                                                      slot=slot))
@@ -3137,7 +3141,9 @@ def tortoise_session_capture(conversation: list[dict],
         detail = getattr(e, "detail", str(e))
         # #3060: the capacity 429 is a SERVER condition, not a team capture
         # failure — never paint it on the dashboard (REST does the same).
-        if status >= 400 and status != 429:
+        # #3129: likewise the in-flight 409.
+        if (status >= 400 and status != 429
+                and detail != _CAPTURE_SESSION_IN_FLIGHT_DETAIL):
             with contextlib.suppress(Exception):
                 _record_capture_last_error(team_id, harness, str(detail))
         return {"error": str(detail), "status": status}

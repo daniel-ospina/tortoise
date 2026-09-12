@@ -105,8 +105,10 @@ def _reset_capture_in_flight():
     import tortoise.hosted_api as ha_mod
 
     ha_mod._CAPTURE_IN_FLIGHT = 0
+    ha_mod._CAPTURE_SESSIONS.clear()
     yield
     ha_mod._CAPTURE_IN_FLIGHT = 0
+    ha_mod._CAPTURE_SESSIONS.clear()
 
 
 @pytest.mark.parametrize("mode", ["v2", "m2"])
@@ -700,3 +702,314 @@ def test_mcp_capture_path_reserves_admission(client, monkeypatch):
     assert mcp_refused.get("error"), mcp_refused
     assert rest_resp.status_code == 200, rest_resp.text
     assert ha_mod._CAPTURE_IN_FLIGHT == 0, ha_mod._CAPTURE_IN_FLIGHT
+
+
+def test_same_session_retry_during_an_in_flight_capture_is_refused(
+        client, monkeypatch):
+    """#3129: a retry for a session ALREADY being captured must not claim 200.
+
+    Moving the extraction off the event loop (#3060) made a window reachable
+    that the synchronous handler had closed by construction: a second request
+    for the same ``session_id`` is now served WHILE the first extraction is
+    parked. It reads ``capture_ok = NULL`` (written only at the very end of a
+    successful capture), the replay branch treats NULL as "presumed captured",
+    and answers **200 + a success receipt with 0 turns extracted** — for a
+    capture whose only real attempt then fails. Silent data loss, and the
+    client has been told to retry by the very ``Retry-After`` the capacity
+    gate advertises.
+
+    The refusal must happen AT ADMISSION (before anything is written), like
+    the capacity gate: a later rejection would itself leave a half-created
+    Session behind.
+    """
+    import tortoise.hosted_api as ha_mod
+    from tortoise.hosted_api import app
+
+    entered = threading.Event()
+    release = threading.Event()
+
+    def _stalled(_self, windowed, session_id, now, **kw):
+        entered.set()
+        release.wait(timeout=30)
+        return [], {}
+
+    monkeypatch.setattr(TortoiseSDK, "_extract_session_v2", _stalled)
+    payload = {"conversation": _CONV, "session_id": "s-inflight-3129",
+               "harness": _HARNESS}
+    receipt_key = f"session_capture_receipt_{_HARNESS}"
+
+    async def _run():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport,
+                                     base_url="http://test") as ac:
+            first = asyncio.create_task(ac.post("/v1/sessions", json=payload))
+            for _ in range(400):
+                if entered.is_set():
+                    break
+                await asyncio.sleep(0.05)
+            assert entered.is_set(), "the first capture never reached the extraction"
+            # The registry must be keyed by TENANT+session, not the bare
+            # client-chosen session_id (reviewer finding): otherwise one
+            # tenant's in-flight capture refuses another tenant's unrelated
+            # capture that happens to use the same generic harness name.
+            in_flight_keys = list(ha_mod._CAPTURE_SESSIONS)
+            assert in_flight_keys == [f"team-001:default:{payload['session_id']}"], (
+                f"the in-flight session registry is not tenant-scoped: "
+                f"{in_flight_keys} (#3129)")
+            try:
+                try:
+                    second = await asyncio.wait_for(
+                        ac.post("/v1/sessions", json=payload), timeout=10.0)
+                except TimeoutError:
+                    raise AssertionError(
+                        "a same-session request did not return within 10s "
+                        "while the first capture was still in flight — it "
+                        "must be refused at admission, not queued (#3129)"
+                    ) from None
+                # Sampled BEFORE the first capture is released, so a receipt
+                # written by the second request is unambiguous evidence.
+                receipt_during = ha_mod._get_onboarding_state(
+                    TEST_TEAM_ID).get(receipt_key)
+            finally:
+                release.set()
+            first_resp = await first
+            return second, first_resp, receipt_during
+
+    second, first_resp, receipt_during = asyncio.run(_run())
+
+    assert second.status_code == 409, (
+        f"a retry for a session that is STILL BEING CAPTURED returned "
+        f"{second.status_code} ({second.text[:200]}) — a 2xx here means the "
+        f"replay branch claimed success for a capture that had not finished "
+        f"(and may still fail): the dashboard gets a receipt + 0 extracted "
+        f"turns while the graph stays empty (#3129)")
+    assert "Retry-After" in second.headers, second.headers
+    assert receipt_during in (None, ""), (
+        f"the refused request still wrote a capture receipt ({receipt_during!r}) "
+        f"— a receipt for a capture that has not completed is the silent "
+        f"data-loss signal (#3129)")
+    assert first_resp.status_code == 200, first_resp.text
+    assert ha_mod._CAPTURE_IN_FLIGHT == 0, ha_mod._CAPTURE_IN_FLIGHT
+    assert ha_mod._CAPTURE_SESSIONS == {}, (
+        f"the in-flight session registry leaked: {ha_mod._CAPTURE_SESSIONS} — "
+        f"a stale entry would refuse every later retry for that session")
+
+
+def test_in_flight_session_key_outlives_the_extraction(client, monkeypatch):
+    """#3129 (reviewer finding): the key must outlive the EXTRACTION, not just it.
+
+    ``capture_ok`` is written only after the event mint, the audit record and
+    the receipt — well after the extraction returns. Releasing the session key
+    with the extraction future alone left a residual window in which a
+    concurrent same-session request was admitted and served 200 + a success
+    receipt with 0 turns extracted: the same silent data loss as the primary
+    bug, just narrower (reviewer-measured). The key therefore requires BOTH
+    the worker and the request's own teardown.
+    """
+    import tortoise.hosted_api as ha_mod
+    from tortoise.hosted_api import app
+
+    extraction_entered = threading.Event()
+    extraction_release = threading.Event()
+    audit_entered = threading.Event()
+    audit_release = threading.Event()
+
+    def _stalled_extract(_self, windowed, session_id, now, **kw):
+        extraction_entered.set()
+        extraction_release.wait(timeout=30)
+        return [], {}
+
+    async def _stalled_audit(*_a, **_kw):
+        # A post-extraction await: the extraction future has COMPLETED here,
+        # but the capture has not (capture_ok is still NULL).
+        audit_entered.set()
+        await asyncio.to_thread(audit_release.wait, 30)
+
+    monkeypatch.setattr(TortoiseSDK, "_extract_session_v2", _stalled_extract)
+    monkeypatch.setattr(ha_mod, "_async_audit", _stalled_audit)
+    payload = {"conversation": _CONV, "session_id": "s-postextract-3129",
+               "harness": _HARNESS}
+
+    async def _run():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport,
+                                     base_url="http://test") as ac:
+            first = asyncio.create_task(ac.post("/v1/sessions", json=payload))
+            for _ in range(400):
+                if extraction_entered.is_set():
+                    break
+                await asyncio.sleep(0.05)
+            assert extraction_entered.is_set(), "capture never reached the extraction"
+            extraction_release.set()
+            for _ in range(400):
+                if audit_entered.is_set():
+                    break
+                await asyncio.sleep(0.05)
+            assert audit_entered.is_set(), (
+                "the capture never reached its post-extraction audit — the "
+                "residual window this test pins was not reached")
+            keys_during = list(ha_mod._CAPTURE_SESSIONS)
+            try:
+                second = await asyncio.wait_for(
+                    ac.post("/v1/sessions", json=payload), timeout=10.0)
+            finally:
+                audit_release.set()
+            first_resp = await first
+            return second, first_resp, keys_during
+
+    second, first_resp, keys_during = asyncio.run(_run())
+
+    assert keys_during, (
+        "the in-flight session key was released when the EXTRACTION finished, "
+        "not when the CAPTURE finished — a concurrent same-session request "
+        "in this window is served 200 + a receipt for a capture that may "
+        "still fail (#3129)")
+    assert second.status_code == 409, (
+        f"a same-session request during a capture that had finished "
+        f"extracting but was still completing returned {second.status_code} "
+        f"({second.text[:200]}) — the #3129 silent-data-loss window (#3129)")
+    assert first_resp.status_code == 200, first_resp.text
+    assert ha_mod._CAPTURE_IN_FLIGHT == 0, ha_mod._CAPTURE_IN_FLIGHT
+    assert ha_mod._CAPTURE_SESSIONS == {}, ha_mod._CAPTURE_SESSIONS
+
+
+def test_cancelled_capture_keeps_the_key_and_leaves_a_retryable_attempt(
+        client, monkeypatch):
+    """#3129 (reviewer P1 + P2): an ABANDONED capture must not become a replay.
+
+    Two contracts, both reachable only by cancelling a session-bearing capture:
+
+    1. **Both sides** (P2) — the in-flight key is released only when the worker
+       AND the request teardown are done. A mutant that popped the key from the
+       request side alone left this whole file green (reviewer-measured 12/12),
+       because no other test cancelled a session-bearing capture.
+    2. **No replay of an unfinalized attempt** (P1) — the worker kept running
+       after the cancellation, but the impl coroutine was gone, so `capture_ok`
+       was never written and the session stayed NULL — which the replay rule
+       reads as "legacy, presumed captured". The next same-session request was
+       then served 200 + a success receipt with 0 turns extracted, permanently
+       (reviewer-measured end-to-end via the retry's own response). The
+       abandonment marker (`_capture_abandoned_marker`, wired through
+       `_run_capture_bounded(on_abandon=...)`) makes it a FAILED attempt
+       instead, so that retry takes the #2335 TRUE-retry lane.
+
+       Deliberately NOT extended to failures: a raise-shaped capture keeps its
+       documented NULL→legacy-replay shape
+       (test_hosted_api.py::TestSessionActorStamp2600 raise-shape (ii)), so a
+       re-POST never re-extracts a failed session under another actor's key.
+
+       This asserts the STATE that decides the lane (`capture_ok=False` +
+       `capture_extractor=v2`), not a second full capture: the retry lane's own
+       behaviour is already pinned by the hosted twin
+       (test_hosted_api.py::test_capture_true_retry_failed_session_reattempts),
+       and driving a real re-extraction here would pull the embedding model in
+       and test the extractor, not this guard.
+    """
+    import tortoise.hosted_api as ha_mod
+    from tortoise.hosted_api import app
+
+    entered = threading.Event()
+    release = threading.Event()
+
+    def _stalled(_self, windowed, session_id, now, **kw):
+        entered.set()
+        release.wait(timeout=30)
+        return [], {}
+
+    monkeypatch.setattr(TortoiseSDK, "_extract_session_v2", _stalled)
+    payload = {"conversation": _CONV, "session_id": "s-cancel-3129",
+               "harness": _HARNESS}
+    key = "team-001:default:s-cancel-3129"
+
+    async def _run():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport,
+                                     base_url="http://test") as ac:
+            task = asyncio.create_task(ac.post("/v1/sessions", json=payload))
+            for _ in range(200):
+                if entered.is_set():
+                    break
+                await asyncio.sleep(0.05)
+            assert entered.is_set(), "the capture never reached the extraction"
+            task.cancel()  # client goes away mid-extraction
+            with suppress(asyncio.CancelledError):
+                await task
+            await asyncio.sleep(0.2)  # let the cancellation settle
+            held_after_cancel = list(ha_mod._CAPTURE_SESSIONS)
+            try:
+                while_parked = await asyncio.wait_for(
+                    ac.post("/v1/sessions", json=payload), timeout=10.0)
+            except TimeoutError:
+                while_parked = None
+            release.set()  # the worker finishes now
+            for _ in range(400):
+                if not ha_mod._CAPTURE_SESSIONS:
+                    break
+                await asyncio.sleep(0.05)
+            return held_after_cancel, while_parked, list(ha_mod._CAPTURE_SESSIONS)
+
+    held, while_parked, drained = asyncio.run(_run())
+
+    assert held == [key], (
+        f"the in-flight session key was released by the REQUEST teardown while "
+        f"the worker was still running (registry={held!r}, expected {[key]!r}) "
+        f"— a same-session request is then admitted and replayed for a capture "
+        f"that has not finished (#3129)")
+    assert while_parked is not None and while_parked.status_code == 409, (
+        f"a same-session request while the abandoned capture's worker was still "
+        f"parked returned "
+        f"{getattr(while_parked, 'status_code', 'a timeout')} — it must be "
+        f"refused at admission, not queued (#3129)")
+    assert drained == [], drained
+    rows = ha_mod._make_sdk(namespace=TEST_TEAM_ID)._get_proj().g.query(
+        "MATCH (s:Session {id:$sid}) RETURN s.capture_ok, s.capture_extractor",
+        params={"sid": "s-cancel-3129"}).result_set
+    assert rows, "the capture never merged its Session row"
+    capture_ok, lane = rows[0][0], rows[0][1]
+    assert capture_ok is False, (
+        f"an ABANDONED capture left the session at capture_ok={capture_ok!r} — "
+        f"a NULL there is read by the replay rule as \"legacy, presumed "
+        f"captured\", so the next same-session request gets 200 + a success "
+        f"receipt with 0 turns extracted, permanently (#3129)")
+    assert lane == "v2", (
+        f"the abandoned attempt recorded lane {lane!r} — the #2335 TRUE-retry "
+        f"gate requires a v2 prior, and stamping the wrong lane either strands "
+        f"the session (m2) or re-runs the non-convergent lane #2473 exists to "
+        f"prevent (#3129)")
+    assert ha_mod._CAPTURE_IN_FLIGHT == 0, ha_mod._CAPTURE_IN_FLIGHT
+    assert ha_mod._CAPTURE_SESSIONS == {}, ha_mod._CAPTURE_SESSIONS
+
+
+def test_in_flight_session_keys_are_scoped_to_their_tenant():
+    """#3129 (reviewer finding): the in-flight key is per-TENANT.
+
+    Session ids are client-chosen and often generic, so a process-global bare
+    ``session_id`` key would refuse an unrelated tenant's capture (measured
+    409). Only the admission COUNTER is global — it bounds a server resource.
+    """
+    from fastapi import HTTPException
+
+    import tortoise.hosted_api as ha_mod
+    from tortoise.hosted_api import _capture_session_key, _reserve_capture_slot
+
+    team_a = {"team_id": "team-a", "graph_id": None}
+    team_b = {"team_id": "team-b", "graph_id": None}
+    key_a = _capture_session_key(team_a, "shared-id")
+    key_b = _capture_session_key(team_b, "shared-id")
+    key_a_g1 = _capture_session_key(
+        {"team_id": "team-a", "graph_id": "g_1"}, "shared-id")
+    assert _capture_session_key(team_a, None) is None
+    assert len({key_a, key_b, key_a_g1}) == 3, (key_a, key_b, key_a_g1)
+
+    baseline = ha_mod._CAPTURE_IN_FLIGHT
+    slot_a = _reserve_capture_slot(key_a)
+    try:
+        slot_b = _reserve_capture_slot(key_b)  # another tenant: admitted
+        slot_b.release()
+        with pytest.raises(HTTPException) as excinfo:
+            _reserve_capture_slot(key_a)  # same tenant: refused
+        assert excinfo.value.status_code == 409, excinfo.value
+    finally:
+        slot_a.release()
+    assert baseline == ha_mod._CAPTURE_IN_FLIGHT, ha_mod._CAPTURE_IN_FLIGHT
+    assert ha_mod._CAPTURE_SESSIONS == {}, ha_mod._CAPTURE_SESSIONS
