@@ -281,6 +281,44 @@ entry was added, and the machine lifecycle policy was made explicit (§6.2,
 change — §6.3 says exactly what blocks it and what would have to change. The
 redundancy work remains an operator decision; it was not attempted here.
 
+### 6.0 ⛔ Merge order — `#3063` must NOT merge before `#3062`
+
+**The top-level `[checks.loop_liveness]` entry is deploy-gating, and the listener
+it points at ships in #3062 (`fix/2850-health-liveness-decouple`), which is
+*not* yet merged.**
+
+- **The gate.** `flyctl`'s deploy health wait (`WaitForHealthchecksToPass`,
+  `internal/machine/leasable_machine.go`, called from
+  `machines_deploymachinesapp.go`) counts **`len(cfg.Checks)`** — the top-level
+  `[checks]` table — *plus* service checks, and then requires **every reported
+  check** to be passing. There is no informational/readiness filter in the deploy
+  path and `kind` is not consulted. "Top-level checks do not affect routing" is
+  true of the **proxy** and false of the **deploy gate**; they are separate
+  mechanisms.
+- **The consequence of merging #3063 alone.** `.github/workflows/deploy-hosted.yml`
+  triggers on any push touching `fly.toml`, so production auto-deploys an image
+  whose app does **not** listen on `0.0.0.0:9090` (that listener is added by
+  #3062). The deploy then fails after `--wait-timeout 420`, and the workflow
+  retries **5×** with a 45 s sleep — **~35 minutes of failing deploys**, with
+  **each retry rolling/replacing the sole production machine** (~85 s cold-boot
+  outage each time). At minimum, the check stays permanently red in
+  `fly checks list`, which also defeats the route-level alerting story (§6.6).
+- **Required order (either is acceptable).** (1) **#3062 merges first** — it
+  ships `monitoring.start_health_listener` (`_HealthzHandler`, bound to `0.0.0.0`
+  via `HEALTHZ_BIND` / `TORTOISE_HEALTHZ_BIND`, serving unauthenticated
+  `/healthz`) — *then* this PR lands the check that consumes it; **or** (2) both
+  PRs land in the **same batch** (merged and deployed together), so the image and
+  the check are never out of sync.
+- **Pre-merge verification — do this before the first deploy that introduces the
+  check.** Confirm the deployed image actually listens on `0.0.0.0:9090`:
+
+  ```bash
+  # Expect 0.0.0.0:9090 (NOT 127.0.0.1:9090):
+  fly ssh console -a tortoise-y4mjjq -C "ss -ltn | grep ':9090'"
+  # Expect 200 from a token-less request (contract: 200 progressing / 503 stalled):
+  fly ssh console -a tortoise-y4mjjq -C "python3 -c \"import urllib.request as u;print(u.urlopen('http://127.0.0.1:9090/healthz',timeout=5).status)\""
+  ```
+
 ### 6.1 What happened (2026-09-10, ~19:10–20:35 UTC)
 
 - Public API unreachable ~35 min. Fly's proxy logged `[PR01] no known healthy
@@ -305,8 +343,8 @@ The flap only became an outage because of three independent defects:
 
 | # | Defect | Status |
 |---|---|---|
-| 1 | `path = "/health"` was coupled to a downstream — process liveness inherited every DB/probe stall | **mitigated in the app** — `tortoise/hosted_api.py:1470` now returns 200 unconditionally with `status` = `ok`/`degraded`; DB truth lives in `/health/ready` (`tortoise/hosted_api.py:1496`) |
-| 2 | Routing was decided by an **HTTP** service check, so any application-level latency (probe latency, event-loop queueing) could de-register the only machine | **fixed in config** — `[[services.tcp_checks]]` is served by the kernel and can no longer be failed by a slow/starved app (§6.4); the application-level probe is now a non-routing check |
+| 1 | `path = "/health"` was coupled to a downstream — process liveness inherited every DB/probe stall | **mitigated in the app** — `hosted_api.health` (`@app.get("/health")`) returns 200 unconditionally with `status` = `ok`/`degraded`; DB truth lives in `/health/ready` (`hosted_api.health_ready`) |
+| 2 | Routing was decided by an **HTTP** service check, so any application-level latency (probe latency, event-loop queueing) could de-register the only machine | **fixed in config** — `[[services.tcp_checks]]` is kernel-served, so it is not starved by event-loop/thread-pool scheduling and a slow/starved app no longer de-registers the machine (§6.4); the application-level probe is now a non-routing check |
 | 3 | One machine + an implicit, undeclared lifecycle policy | policy now explicit (§6.2); machine redundancy **blocked** (§6.3) |
 
 ### 6.2 Machine lifecycle policy — now declared in `fly.toml`
@@ -371,21 +409,22 @@ volume attached, only the `rolling` deploy strategy is available — `canary` an
 background-critical state **in process memory**, so a second machine would
 serve *divergent* answers, not more capacity:
 
-| State | Location | What breaks with 2 machines |
+| State | Symbol(s) (module scope, `tortoise/hosted_api.py`) | What breaks with 2 machines |
 |---|---|---|
-| Index-job registry + ownership (`_INDEX_JOBS`, `_INDEX_JOB_OWNERS`) | `tortoise/hosted_api.py:18101`, `:18167` | `GET /v1/index/{github,docs}/{job_id}` polled on the other instance → 404; `POST /v1/index/*` in-flight dedup (`is_new`) stops working |
-| Dream queues/tasks (`_DREAM_QUEUES`, `_DREAM_TASKS`) | `tortoise/hosted_api.py:747`, `:750` | background work duplicated or stranded per instance |
-| Provisioning / team-create / invite locks (`_PROVISION_LOCKS`, `_TEAM_CREATE_LOCKS`, `_INVITE_TEAM_LOCKS`) | `:9296`, `:9017`, `:10854` | `asyncio.Lock` does not exclude across machines — mutual exclusion is lost (double-provision risk) |
-| Per-IP / per-key rate-limit buckets (`_SENSITIVE_BUCKETS`, `_SIGNUP_BUCKETS`, `_SESSION_BUCKETS`, `_CLAIM_BUCKETS`, `_RECOVER_*`, `_INVITE_ACCEPT_*`) | `:2914`, `:2920`, `:3259`, `:3256`, `:3195`, `:3305-3309` | effective limits multiply by the machine count; anti-abuse budgets become per-instance |
+| Index-job registry + ownership | `_INDEX_JOBS`, `_INDEX_JOB_OWNERS` | `GET /v1/index/{github,docs}/{job_id}` polled on the other instance → 404; `POST /v1/index/*` in-flight dedup (`is_new`) stops working |
+| Dream queues/tasks | `_DREAM_QUEUES`, `_DREAM_TASKS` | background work duplicated or stranded per instance |
+| Provisioning / team-create / invite locks | `_PROVISION_LOCKS`, `_TEAM_CREATE_LOCKS`, `_INVITE_TEAM_LOCKS` | `asyncio.Lock` does not exclude across machines — mutual exclusion is lost (double-provision risk) |
+| Per-IP / per-key rate-limit buckets | `_SENSITIVE_BUCKETS`, `_SIGNUP_BUCKETS`, `_SESSION_BUCKETS`, `_CLAIM_BUCKETS`, `_RECOVER_*`, `_INVITE_ACCEPT_*` | effective limits multiply by the machine count; anti-abuse budgets become per-instance |
 
 **(c) `/data` state would fork.** A per-machine volume means a per-machine
 `/data/ingest` corpus: `/v1/index/docs` re-runs on the other machine re-fetch
 the corpus (the hash-dedup cache is volume-local) and any state under `/data`
 stops being a single source of truth. Graph data itself is fine — it lives in
 FalkorDB Cloud, selected by `TORTOISE_DB_URI` — but the embedded fallback
-(`TORTOISE_DB_PATH`, default `/data/tortoise.db`, `hosted_api.py:188`) is
-per-machine, so a deploy missing `FALKORDB_CLOUD_URI` would silently split state
-across two SQLite files instead of failing closed.
+(`TORTOISE_DB_PATH`, default `/data/tortoise.db`; resolved by
+`hosted_api._resolve_embedded_db_path`) is per-machine, so a deploy missing
+`FALKORDB_CLOUD_URI` would silently split state across two SQLite files instead
+of failing closed.
 
 **What would have to change, in order, if we want ≥2 machines:**
 
@@ -428,13 +467,28 @@ is an HTTP probe of the application on the routing path.
 `grace_period = "180s"`). This replaced `[[services.http_checks]]` +
 `path = "/health"`.
 
-- A TCP check's connect is served by **the kernel** on the listening socket.
-  The event loop and any thread pool cannot starve it, so a slow or blocked
-  application **cannot** fail the check. Fly's documented semantics for a
-  failing *service* check are that the proxy stops routing to the Machine and
-  the Machine is not restarted or stopped — so with an HTTP check, application
-  latency could **de-register the only machine** (the #2850 outage). With TCP it
-  can only make a response slow, never remove the route.
+- A TCP check's connect is served by **the kernel** on the listening socket, so
+  the check **is not starved by event-loop or thread-pool scheduling**: the
+  kernel completes the handshake even while the application is slow. That is a
+  much wider safety margin than an HTTP check's, but it is **not** "cannot
+  fail". A connect still has to be *accepted*, and a kernel check passes only
+  while the listening socket's **accept backlog** has room — an application that
+  never returns to `accept()` for long enough will eventually have new
+  connections dropped/refused and the check will fail. The change sheds a large
+  class of failure modes (application-level latency, DB stalls, executor
+  saturation), not all of them.
+- **Deliberate tradeoff: TCP proves *reachable*, not *ready*.** A wedged-but-
+  listening process — accepting connections, doing no useful work — passes this
+  check and therefore stays routable. That is the accepted price of never
+  letting application latency remove the only route; the readiness signal
+  deliberately lives elsewhere (`/health/ready`, and the 9090 liveness check
+  below).
+- Fly's documented semantics for a failing *service* check are that the proxy
+  stops routing to the Machine and the Machine is not restarted or stopped — so
+  with an HTTP check, application latency could **de-register the only machine**
+  (the #2850 outage). With TCP the same latency can only make a response slow,
+  and cannot by itself remove the route (the accept-backlog case above is the
+  remaining, far narrower, path to a failed check).
 - `[[services.*_checks]]` has **no `port` key** — a service check always rides
   the service's `internal_port`, so it cannot be pointed at 9090.
 - `timeout = "5s"` against a 15 s interval (was 15 s/15 s — a 1:1 ratio with
@@ -450,22 +504,30 @@ is an HTTP probe of the application on the routing path.
 `port = 9090`, `path = "/healthz"`, `interval = "15s"`, `timeout = "5s"`,
 `grace_period = "180s"`).
 
-- **Top-level checks do not affect request routing.** Fly's config reference
-  scopes them to "independent health checks that don't affect request routing";
-  the proxy ignores them when choosing where to send traffic. The 9090/`/healthz`
-  signal is therefore purely an alerting/visibility channel — it exists so a
-  **stalled event loop** shows up to an operator, without that same signal being
-  able to take the app offline.
+- **Top-level checks do not affect request routing — but they DO gate
+  `fly deploy`.** Fly's config reference scopes them to "independent health
+  checks that don't affect request routing"; the proxy ignores them when
+  choosing where to send traffic, so the 9090/`/healthz` signal can never take
+  the app offline. That is *not* the whole story: `flyctl`'s deploy health wait
+  counts top-level checks too (see the "Determined" block in §6.9 and the
+  merge-order box in §6.0), so a failing or mis-bound `loop_liveness` check
+  **blocks a deploy** even though it cannot de-register the machine. The check is
+  therefore **routing-inert but deploy-gating**, and that is a **known, accepted
+  cost** — it is deliberately loud where it matters.
 - Top-level checks **require** `port`, and Fly requires that port to be bound on
-  **`0.0.0.0`**. This depends on the application-side listener; the bind-address
-  and auth questions are open and tracked in §6.9.
+  **`0.0.0.0`**. The application-side contract is
+  `monitoring.start_health_listener` (added by **#3062**): it binds `0.0.0.0`
+  (`HEALTHZ_BIND`, overridable via `TORTOISE_HEALTHZ_BIND`) and serves `/healthz`
+  **unauthenticated by construction**; the only residual is deployed-image
+  verification (§6.9 #2).
 - The interface contract for the listener is: `GET /healthz` returns **200**
   when the event loop is progressing and **503** when it has stalled.
 
 #### 6.4.1 The `grace_period` clamp — an open, testable question (not a fact)
 
-The `hosted_api.health` docstring (around `tortoise/hosted_api.py:1474`) asserts
-that "Fly caps the http_check grace period at 60s", attributed to the #338 fix.
+The `hosted_api.health` docstring (`tortoise/hosted_api.py`, `@app.get("/health")`)
+asserts that "Fly caps the http_check grace period at 60s", attributed to the
+#338 fix.
 Independent research could **not** confirm this: no such cap appears in Fly's
 config reference, in `flyctl`, or in `fly-go`, and `flyd` is closed-source, so an
 undocumented server-side clamp cannot be ruled out. The honest position is
@@ -490,17 +552,30 @@ in §6.9.
 
 ### 6.5 Cost reference (what "one machine warm" actually costs)
 
-Fly list price, region `iad`, as published on the
+> ⚠️ **APPROXIMATE and DATED (snapshot 2026-09-10) — not current list price.**
+> These figures are kept so the *shape* of the cost argument (one machine ≈ half
+> a two-machine fleet; RAM above the 512 MB preset dominates) stays reviewable.
+> Fly's live prices differ by ~8 % on these line items (re-checked 2026-09-12:
+> the 512 MB preset is ≈`$0.00000156/s · $0.0056/hr · $4.04/mo`, and the 4096 MB
+> machine ≈`$0.00000857/s · $0.0309/hr · $22.22/mo`), so every monthly total here
+> — including the two-machine figure and the ~$21.40 references in §6.2/§6.3 —
+> is **low**. The live
+> [pricing page](https://fly.io/docs/about/pricing/) **is the source of truth;
+> re-fetch it before making a spend decision.**> *Controller follow-up: re-fetch and re-derive this table (and the `fly.toml`
+> COST comment, which carries the same snapshot) — flagged, not silently
+> edited.*
+
+Fly list price at the snapshot date, region `iad`, as published on the
 [pricing page](https://fly.io/docs/about/pricing/) (retrieved 2026-09-10):
 
-| Item | Rate | Monthly |
+| Item | Rate (approx., 2026-09-10) | Monthly (approx.) |
 |---|---|---|
-| `shared-cpu-2x` / 512 MB (preset base) | $0.00000150/s · $0.0054/hr | $3.89 |
-| + 3.5 GB RAM above the 512 MB preset (4096 MB total) | $5/GB/30 days | +$17.50 |
-| **`shared-cpu-2x` / 4096 MB (current `[[vm]]`), running** | $0.00000826/s · $0.0297/hr | **$21.40** |
+| `shared-cpu-2x` / 512 MB (preset base) | ~$0.00000150/s · ~$0.0054/hr | ~$3.89 |
+| + 3.5 GB RAM above the 512 MB preset (4096 MB total) | $5/GB/30 days (rate unchanged) | +$17.50 |
+| **`shared-cpu-2x` / 4096 MB (current `[[vm]]`), running** | ~$0.00000826/s · ~$0.0297/hr | **~$21.40** |
 | Stopped machine | rootfs only | $0.15 per GB/30 days |
 | Volume storage (per volume, attached or not) | — | $0.15/GB/mo |
-| **Two-machine fleet (both warm, 4 GB each)** | — | **$42.80** (+ volumes) |
+| **Two-machine fleet (both warm, 4 GB each)** | — | **~$42.80** (+ volumes) |
 
 The current volume's provisioned size is **not recorded in the repo** (verify
 with `fly volumes list -a tortoise-y4mjjq`) — factor it in at $0.15/GB/mo per
@@ -550,8 +625,8 @@ fly machine restart <id> -a tortoise-y4mjjq
   window with no healthy instance. `canary`/`bluegreen` cannot fix this while a
   volume is attached; only §6.3 can.
 - **`/health` still spawns a DB probe per call** (`asyncio.to_thread`; the probe
-  is bounded at 1.5 s and abandons its worker thread on timeout,
-  `tortoise/monitoring.py:111`). Under a black-holed DB, threads can accumulate
+  is bounded at 1.5 s and abandons its worker thread on timeout —
+  `monitoring.probe_db`, via the `executor.shutdown(wait=False)` path). Under a black-holed DB, threads can accumulate
   slowly. This no longer affects routing (the routing check is TCP), but it still
   affects the human/operator view and any external probe that hits `/health`.
   App-layer, tracked outside this runbook; a `wait_for` wrapper would bound the
@@ -566,7 +641,9 @@ fly machine restart <id> -a tortoise-y4mjjq
 
 These are **unverified** — deliberately documented rather than assumed. They are
 the tests worth running in a throwaway/staging app before trusting this topology
-or re-introducing service-level checks.
+or re-introducing service-level checks. Two items from the original list have
+since been **determined** (deploy gating; the bind/auth design shipped by #3062)
+and are recorded at the end of this section instead of being left open.
 
 1. **Does a failing check on a second `[[services]]` block de-register the
    machine for the *primary* service?** A machine can carry multiple
@@ -580,25 +657,44 @@ or re-introducing service-level checks.
    traffic to the primary service continues, and confirm `fly checks list`
    reports the two checks independently. Until that is observed, treat
    "multiple service checks are independent" as an assumption.
-2. **Is the 9090 listener actually bound on `0.0.0.0`?** `fly.toml` now requires
-   9090 on `0.0.0.0` for the top-level check, but the existing standalone health
-   server defaults to loopback: `serve_health(port=9090, bind="127.0.0.1")`
-   (`tortoise/monitoring.py:253`), and the CLI default is also `127.0.0.1`
-   (`tortoise/__main__.py:5895-5896`). A loopback-only listener makes the check
-   fail permanently. Verify inside the machine:
-   `fly ssh console -a tortoise-y4mjjq -C "ss -ltn | grep 9090"`.
-3. **Is `/healthz` genuinely unauthenticated?** The existing 9090 handler
-   (`monitoring._Handler`) is auth-gated in prod mode (#7395) and returns 401
-   without a valid Bearer token. Top-level checks can only send a static header,
-   not a rotating secret, so the contract requires `/healthz` to be
-   unauthenticated (200/503). Verify with a token-less request from inside the
-   machine.
-4. **Does the top-level check block `fly deploy`?** Top-level checks are
-   documented as not affecting routing, but it is not documented whether a
-   failing top-level check counts against the rolling-deploy health wait (as
-   service checks do). If it does, a mis-bound or auth-gated 9090 listener could
-   deadlock deploys. Test alongside #2/#3 before relying on the check.
-5. **The `grace_period` clamp** — §6.4.1.
+2. **Is the 9090 listener bound on `0.0.0.0` and `/healthz` unauthenticated in
+   the deployed image?** The bind-address and auth *design* concerns are resolved
+   by **#3062**, not open. The listener serving 9090 in production is
+   **`monitoring.start_health_listener`** (`_HealthzHandler`), added by #3062: it
+   binds `0.0.0.0` by default (`HEALTHZ_BIND`, overridable via
+   `TORTOISE_HEALTHZ_BIND`) and serves `/healthz` **unauthenticated by
+   construction** — a separate handler from the Bearer-gated
+   `monitoring._Handler`, exposing only the loop heartbeat. The older
+   `monitoring.serve_health(port=9090, bind="127.0.0.1")` is **not** on this
+   path: it is started only by the standalone CLI (`tortoise health-server`,
+   `tortoise/__main__.py`), which the hosted app never invokes. The remaining
+   item is verification of the deployed image:
+   `fly ssh console -a tortoise-y4mjjq -C "ss -ltn | grep ':9090'"` (expect
+   `0.0.0.0:9090`), then a token-less request from inside the machine (expect
+   200).
+3. **The `grace_period` clamp** — §6.4.1. The genuinely `flyd`-internal residual
+   is **what status a check reports *during* grace_period**: if an undocumented
+   server-side clamp exists, a machine is marked unhealthy mid-boot. Run the
+   §6.4.1 staging test — first failure at ≈60 s ⇒ a clamp exists; at
+   ≈`grace_period` ⇒ none.
+
+**Determined — no longer open questions:**
+
+- **Does a failing top-level check block `fly deploy`? YES.**
+  `WaitForHealthchecksToPass` (`internal/machine/leasable_machine.go`, called
+  from `machines_deploymachinesapp.go`) counts `len(cfg.Checks)` *plus* service
+  checks and then requires every reported check to pass; it does not consult
+  `kind` and has no informational/readiness filter. So a top-level check is
+  **routing-inert but deploy-gating**: it can never de-register the machine, and
+  it *can* fail a deploy. That is a **known, accepted cost** of the check, and
+  the reason for the merge-order requirement in §6.0 (**#3062 must land first,
+  or in the same batch**).
+- **Is the loopback/401-auth risk real for the hosted app?** No — **#3062
+  resolves it** via `start_health_listener` / `TORTOISE_HEALTHZ_BIND` /
+  `_HealthzHandler` (see #2 above). The earlier framing of
+  `monitoring.serve_health(port=9090, bind="127.0.0.1")` and the Bearer-gated
+  `monitoring._Handler` as production risks was wrong: neither is on the hosted
+  9090 path.
 
 ## Secrets Matrix
 
@@ -638,6 +734,7 @@ Can a fresh Fly.io account + Cloudflare account follow §1 from zero and arrive 
 - [ ] Live `POST /v1/sessions` smoke returns 200 + `extraction_mode: "llm"` (not a 503)
 - [ ] `fly.toml` declares `auto_stop_machines` / `auto_start_machines` / `min_machines_running` explicitly (no implicit platform defaults) and `fly config show` matches (§6.2)
 - [ ] Every machine has its own volume (`fly volumes list` count == `fly machines list` count) — a machine sharing `tortoise_api_data` is impossible and must never be attempted (§6.3)
-- [ ] Routing check is `[[services.tcp_checks]]` (kernel-served, cannot be failed by a slow app) and no `[[services.http_checks]]` entry remains (§6.4)
-- [ ] Top-level `[checks.loop_liveness]` targets port 9090 / path `/healthz`; the listener binds `0.0.0.0` and `/healthz` is unauthenticated 200/503 (§6.4, §6.9)
+- [ ] Routing check is `[[services.tcp_checks]]` (kernel-served: **not starved by event-loop/thread-pool scheduling** — it can still fail if the accept backlog saturates) and no `[[services.http_checks]]` entry remains (§6.4)
+- [ ] Top-level `[checks.loop_liveness]` targets port 9090 / path `/healthz`; the listener (`monitoring.start_health_listener`, #3062) binds `0.0.0.0` and `/healthz` is unauthenticated 200/503 (§6.4, §6.9)
+- [ ] **Merge order honored:** #3062 is deployed before/with `[checks.loop_liveness]`, and `ss -ltn | grep ':9090'` inside the machine shows `0.0.0.0:9090` (§6.0)
 - [ ] A deliberately failing second `[[services]]` check does **not** de-register the primary service (§6.9 — open until observed)
