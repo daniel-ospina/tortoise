@@ -138,6 +138,53 @@ if [ -z "$GH_TOKEN" ]; then
 fi
 
 # ── dedup helpers (R2 create-once + GH-search fallback) ─────────────────────
+# Alert dedup keys (#2844). A subject-less (platform-scoped) incident is written
+# by TWO implementations: this driver and the server-side AlertStore
+# (tortoise/alert_store.py). They must agree on ONE key, or the R2 create-once is
+# not a single linearization point: each writer wins its own object and files its
+# own issue, and a resolve that deletes only one spelling strands the other
+# carrying a CLOSED issue's number — whose 412 branch then re-files an incident
+# that was just resolved.
+#   canonical: ops/alerts/{KIND}/{subject}.json, `_` when there is no subject
+#              (the spelling tortoise/alert_store.py writes)
+#   legacy:    ops/alerts/{KIND}/global.json — this driver's pre-#2844 spelling
+# Read and delete paths consult ALL spellings, so objects already in R2 are
+# adopted and cleaned up rather than stranded. Subject-scoped incidents have
+# exactly one key and are never crossed with another subject (#2375).
+kind_owner() { # kind -> the writer whose probes cover this kind's recovery (#3127)
+  # Mirrors AlertStore.KIND_OWNERS (tortoise/alert_store.py). The two MUST
+  # agree — test_kind_owner_contract_with_driver pins them. Resolution authority
+  # is evidence-gated: a writer whose probes do NOT cover the failing dependency
+  # must never clear the incident, or a real fault is marked recovered and the
+  # owner re-files it every run.
+  case "$1" in
+    # driver: its own R2 preflight + /status.storage_error + a measured pool.
+    R2_DOWN|APP_DOWN|WATCHER_DOWN|SWEEP_CONFIG_ERROR|SWEEP_OFF_STALE|SWEEP_NO_COVERAGE|LIVENESS_NO_WORK)
+      echo driver ;;
+    # watcher: archive/stamp freshness + the driver heartbeat, read in-process.
+    STALE|NEVER_BACKED_UP|METADATA_LOST|BACKUP_SET_MISSING|DRIVER_DOWN)
+      echo watcher ;;
+    # app: the drill resolves on its own success signal.
+    RESTORE_DRILL_FAILED)
+      echo app ;;
+    *) echo unspecified ;;
+  esac
+}
+alert_key() { # kind id -> the canonical dedup key for this incident
+  local kind="$1" id="${2:-}"
+  # `global` is this driver's pre-#2844 spelling of a subject-less incident;
+  # both spellings now canonicalize to `_` (the AlertStore's spelling), so the
+  # two writers share ONE create-once point.
+  if [ -z "$id" ] || [ "$id" = "global" ]; then id="_"; fi
+  printf 'ops/alerts/%s/%s.json\n' "$kind" "$id"
+}
+alert_keys_all() { # kind id -> the canonical key + every legacy spelling
+  local kind="$1" id="${2:-}"
+  alert_key "$kind" "$id"
+  if [ -z "$id" ] || [ "$id" = "global" ] || [ "$id" = "_" ]; then
+    printf 'ops/alerts/%s/global.json\n' "$kind"
+  fi
+}
 r2_put_once() { # key body_file
   aws s3api put-object --endpoint-url "$R2_ENDPOINT" \
     --bucket "$R2_BUCKET" --key "$1" --body "$2" --if-none-match "*" >/dev/null 2>&1
@@ -204,18 +251,28 @@ gh_close() { # number comment kind id
   # incident. Without this, file_alert's 412 branch would adopt the stale
   # object and silently swallow the recurrence (the #2796 class).
   if [ -n "$kind" ]; then
-    r2_delete "ops/alerts/${kind}/${id:-_}.json"
-    # The server-side AlertStore keys subject-less incidents as "_" while the
-    # driver uses "global"; the shared GH issue has TWO dedup objects. Drop
-    # the server-owned one too, or its stale issue_number outlives the closed
-    # issue and permanently swallows the recurrence (#2844, the #2796 class).
-    if [ "${id:-}" = "global" ]; then
-      r2_delete "ops/alerts/${kind}/_.json"
-    fi
+    # #2844: delete EVERY spelling of this incident's sentinel. Deleting one and
+    # leaving the other strands it holding a closed issue's number, and the next
+    # detection re-files the incident that was just resolved.
+    local _k
+    while IFS= read -r _k; do r2_delete "$_k"; done < <(alert_keys_all "$kind" "$id")
   fi
 }
 resolve_global() { # kind comment — close an open global incident (no-op if none)
-  local kind="$1" comment="$2" num=""
+  local kind="$1" comment="$2" num="" owner=""
+  # #3127: refuse to clear a kind this driver has no evidence for. Without this
+  # the driver's generic sweep-completed self-heal would close incidents the
+  # driver never observed recovering.
+  owner="$(kind_owner "$kind")"
+  # #3127: authority is decided by the owner map ALONE. There is deliberately no
+  # "but I opened it myself" exception — three review rounds found three ways a
+  # self-asserted filed-by note went wrong, each letting a non-owner clear a
+  # kind its probes never covered. A future call site for a watcher-owned kind
+  # must therefore NOT be routed through resolve_global.
+  if [ "$owner" != "driver" ] && [ "$owner" != "unspecified" ]; then
+    log "self-heal: refusing to close ${kind} — it is owned by the ${owner}, whose probes cover its recovery condition"
+    return 0
+  fi
   num="$(gh_find_open "$kind" "global")"
   if [ -n "$num" ]; then gh_close "$num" "$comment" "$kind" "global"; fi
 }
@@ -225,26 +282,48 @@ telegram() { # text
       --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" --data-urlencode "text=$1" >/dev/null 2>&1 || true
 }
 file_alert() { # kind title body dedup_id
-  local kind="$1" title="$2" body="$3" id="$4" num="" tmp="" issue_num=""
+  local kind="$1" title="$2" body="$3" id="$4" num="" tmp="" issue_num="" key="" filed=0
   LOUD=1
   tmp="$(mktemp)"
-  printf '{"kind":"%s","issue_number":null,"filed_at":"%s"}' "$kind" "$(date -u +%FT%TZ)" > "$tmp"
-  if r2_put_once "ops/alerts/${kind}/${id}.json" "$tmp"; then
+  key="$(alert_key "$kind" "$id")"
+  # #2844: another writer (the server-side AlertStore, or this driver pre-#2844)
+  # may already hold this incident under a DIFFERENT spelling. Consult every
+  # spelling BEFORE creating ours, or one condition gets two create-once points
+  # and each writer files its own issue.
+  local _k alias_num=""
+  while IFS= read -r _k; do
+    if [ "$_k" = "$key" ]; then continue; fi
+    alias_num="$(printf '%s' "$(r2_get "$_k")" | jq -r '.issue_number // empty' 2>/dev/null || true)"
+    if [ -n "$alias_num" ] && [ -z "${alias_num//[0-9]/}" ] && gh_issue_open "$alias_num"; then
+      log "dedup: ${kind} already tracked by open issue #${alias_num} (alias ${_k}) — no-op"
+      rm -f "$tmp"
+      return 0
+    fi
+  done < <(alert_keys_all "$kind" "$id")
+  printf '{"kind":"%s","issue_number":null,"filed_at":"%s","writer":"driver"}' "$kind" "$(date -u +%FT%TZ)" > "$tmp"
+  if r2_put_once "$key" "$tmp"; then
     num="$(gh_find_open "$kind" "$id")"
     if [ -z "$num" ]; then
       num="$(curl -sS -X POST -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
         "https://api.github.com/repos/${REPO}/issues" \
         -d "$(jq -nc --arg t "$title" --arg b "$body" '{title:$t, body:$b, labels:["dr:backup"]}')" \
         | jq -r '.number // empty' 2>/dev/null || true)"
+      [ -n "$num" ] && filed=1
     fi
     if [ -n "$num" ]; then
       # Review F7 (coherence): backfill the AUTHORITATIVE R2 object with the
       # issue number here too. Without it the object keeps issue_number=null
       # until the next run, so a transient empty GitHub search in that window
       # would create a duplicate (the 412 object-trust path cannot help).
-      printf '{"kind":"%s","issue_number":%s,"filed_at":"%s"}' "$kind" "$num" "$(date -u +%FT%TZ)" > "$tmp"
+      # Provenance is claimed ONLY when this driver created the issue (#3127):
+      # stamping an ADOPTED issue as driver-filed is the exact defect the store
+      # fixed in Python, and `resolve_global` treats this field as authority.
+      # telegram_pushed records that the announcement happened, so the store
+      # does not re-announce an issue this driver already showed a human.
+      _w=""; [ "$filed" = "1" ] && _w=',"writer":"driver"'
+      printf '{"kind":"%s","issue_number":%s,"filed_at":"%s"%s}' "$kind" "$num" "$(date -u +%FT%TZ)" "$_w" > "$tmp"
       aws s3api put-object --endpoint-url "$R2_ENDPOINT" --bucket "$R2_BUCKET" \
-        --key "ops/alerts/${kind}/${id}.json" --body "$tmp" >/dev/null 2>&1 || true
+        --key "$key" --body "$tmp" >/dev/null 2>&1 || true
       telegram "🚨 DR alert: ${kind} — issue #${num}"
     fi
   else
@@ -261,9 +340,9 @@ file_alert() { # kind title body dedup_id
     # If the recorded issue is still OPEN this incident is already tracked —
     # stop. Otherwise adopt an OPEN issue for this (kind, subject) if one
     # exists, else become the filer, then backfill our issue_number.
-    issue_num="$(printf '%s' "$(r2_get "ops/alerts/${kind}/${id}.json")" | jq -r '.issue_number // empty' 2>/dev/null || true)"
-    if [ -n "$issue_num" ] && gh_issue_open "$issue_num"; then
-      log "dedup: ${kind}/${id:-global} already tracked by open issue #${issue_num} — no-op"
+    issue_num="$(printf '%s' "$(r2_get "$key")" | jq -r '.issue_number // empty' 2>/dev/null || true)"
+    if [ -n "$issue_num" ] && [ -z "${issue_num//[0-9]/}" ] && gh_issue_open "$issue_num"; then
+      log "dedup: ${kind}/${id:-_} already tracked by open issue #${issue_num} — no-op"
       rm -f "$tmp"
       return 0
     fi
@@ -273,11 +352,13 @@ file_alert() { # kind title body dedup_id
         "https://api.github.com/repos/${REPO}/issues" \
         -d "$(jq -nc --arg t "$title" --arg b "$body" '{title:$t, body:$b, labels:["dr:backup"]}')" \
         | jq -r '.number // empty' 2>/dev/null || true)"
+      [ -n "$num" ] && filed=1
     fi
     if [ -n "$num" ]; then
-      printf '{"kind":"%s","issue_number":%s,"filed_at":"%s"}' "$kind" "$num" "$(date -u +%FT%TZ)" > "$tmp"
+      _w=""; [ "$filed" = "1" ] && _w=',"writer":"driver"'
+      printf '{"kind":"%s","issue_number":%s,"filed_at":"%s"%s}' "$kind" "$num" "$(date -u +%FT%TZ)" "$_w" > "$tmp"
       aws s3api put-object --endpoint-url "$R2_ENDPOINT" --bucket "$R2_BUCKET" \
-        --key "ops/alerts/${kind}/${id}.json" --body "$tmp" >/dev/null 2>&1 || true
+        --key "$key" --body "$tmp" >/dev/null 2>&1 || true
       telegram "🚨 DR alert: ${kind} — issue #${num}"
     fi
   fi

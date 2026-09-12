@@ -130,3 +130,37 @@ def search_open_incident(repo: str, token: str, kind: str,
         items = [i for i in items
                  if str(i.get("title", "")).endswith(suffix)]
     return [int(i["number"]) for i in items]
+
+
+def issue_is_open(repo: str, token: str, number: int) -> bool:
+    """Authoritative open/closed state for ONE issue (#3127).
+
+    Preferred over inferring liveness from a search result: the GH *search*
+    endpoint is rate limited (~30/min) and matches titles heuristically, so
+    "absent from the results" is NOT proof of closure. Reading the issue's own
+    state is, and it is what lets the dedup store trust a sentinel only while
+    the issue it names is still open — a sentinel naming a CLOSED issue would
+    otherwise swallow every recurrence of a live fault.
+    """
+    data = _request("GET", f"{_API}/repos/{repo}/issues/{number}", token)
+    return str(data.get("state", "open")) == "open"
+
+
+def issue_is_open_checked(repo: str, token: str, number: int) -> bool:
+    """``issue_is_open`` with 404/410 treated as CLOSED, not as an error.
+
+    A deleted (or bogus) issue number is POSITIVE evidence that the incident is
+    no longer tracked, and the bash driver's ``gh_issue_open`` already treats it
+    that way (404 -> re-file). Letting it surface as a generic failure would let
+    a sentinel naming a deleted issue swallow the recurrence forever — the
+    silent-outage class this whole mechanism exists to stop. Every other failure
+    (5xx, rate limit, transport) still raises, so a blip counts as "open" and
+    never re-files a live incident.
+    """
+    try:
+        data = _request("GET", f"{_API}/repos/{repo}/issues/{number}", token)
+    except GithubApiError as e:
+        if e.status in (404, 410):
+            return False
+        raise
+    return str(data.get("state", "open")) == "open"
