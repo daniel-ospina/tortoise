@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json  # noqa: F401
 import time
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -240,20 +241,25 @@ class TestProbeDb:
         allowance. The documented bound is ONE deadline of
         ``setup_timeout + PROBE_TIMEOUT`` for the whole call (retry included).
 
-        The stub CONSUMES 2.5s on attempt 1, so the retry's budget must
-        visibly SHRINK (≈0.5s of the 3.0s deadline). Without that, a
-        regression handing the retry either a fresh ``attempt_timeout`` (1.0s)
-        or the whole ``total_budget`` (3.0s) would satisfy any loose range —
-        the exact defect this test exists to catch.
+        Deterministic: an INJECTED clock makes attempt 1 consume exactly 2.5s
+        of the 3.0s deadline, so the retry budget must be exactly 0.5s. Without
+        that consumption a regression handing the retry a fresh
+        ``attempt_timeout`` (1.0s) or the whole ``total_budget`` (3.0s) would
+        satisfy any loose range — the exact defect this test exists to catch.
+        (No real sleeps: a wall-clock version left only ~0.5s of scheduling
+        slack and could flake on a loaded runner.)
         """
         monkeypatch.setattr(monitoring, "PROBE_TIMEOUT", 1.0)
         monkeypatch.setattr(monitoring, "PROBE_RETRY_DELAY", 0.0)
+        clock = SimpleNamespace(t=0.0)
+        monkeypatch.setattr(monitoring, "time", SimpleNamespace(
+            monotonic=lambda: clock.t, sleep=lambda _s: None))
         seen = []
 
         def fake_probe_once(sdk, timeout=None, setup_timeout=None):
             seen.append((timeout, setup_timeout))
             if len(seen) == 1:
-                time.sleep(2.5)  # a real attempt consumes its deadline
+                clock.t += 2.5  # the attempt consumed its deadline
             return False, "transient", True
 
         monkeypatch.setattr(monitoring, "_probe_once", fake_probe_once)
@@ -264,22 +270,25 @@ class TestProbeDb:
         # Retry rides the remaining deadline in COMBINED shape — never a second
         # 2s cold-start allowance (which would double the documented bound).
         assert seen[1][1] is None
-        # ~3.0s deadline − ~2.5s consumed → ~0.5s left. A fresh 1.0s or 3.0s
-        # allowance would fail this.
-        assert 0 < seen[1][0] < 0.9, seen[1][0]
+        # 3.0s deadline − 2.5s consumed → 0.5s. A fresh 1.0s or 3.0s allowance
+        # would fail this.
+        assert seen[1][0] == pytest.approx(0.5), seen[1][0]
 
     def test_exhausted_deadline_never_retries(self, monkeypatch):
         """#3143 review: when attempt 1 already spent the whole deadline the
         retry must NOT fire. A negative/zero remainder would otherwise be
         passed as the worker timeout, replacing the REAL transient error with
-        a bogus synthesized 'probe timeout after -0.1s'."""
+        a bogus synthesized 'probe setup timeout after -0.1s'."""
         monkeypatch.setattr(monitoring, "PROBE_TIMEOUT", 1.0)
         monkeypatch.setattr(monitoring, "PROBE_RETRY_DELAY", 0.0)
+        clock = SimpleNamespace(t=0.0)
+        monkeypatch.setattr(monitoring, "time", SimpleNamespace(
+            monotonic=lambda: clock.t, sleep=lambda _s: None))
         seen = []
 
         def fake_probe_once(sdk, timeout=None, setup_timeout=None):
             seen.append((timeout, setup_timeout))
-            time.sleep(1.2)  # overruns the 1.0s whole-call deadline
+            clock.t += 1.2  # overruns the 1.0s whole-call deadline
             return False, "connection refused", True
 
         monkeypatch.setattr(monitoring, "_probe_once", fake_probe_once)
@@ -331,6 +340,27 @@ class TestProbeSetupTimeoutResolution:
     def test_bad_env_falls_back_to_default_never_raises(self, monkeypatch, raw):
         monkeypatch.setenv("TORTOISE_PROBE_SETUP_TIMEOUT", raw)
         assert monitoring.probe_setup_timeout() == monitoring.PROBE_SETUP_TIMEOUT
+
+    @pytest.mark.parametrize("raw", ["abc", "0.1", "300.001", "nan"])
+    def test_invalid_env_warns_before_falling_back(
+            self, monkeypatch, caplog, raw):
+        """The operator-visible contract: an invalid value is not silent — the
+        warning names the variable and the fallback, so a typo'd 0.1 is not
+        discovered only via a resumed false-degrade."""
+        monkeypatch.setenv("TORTOISE_PROBE_SETUP_TIMEOUT", raw)
+        with caplog.at_level("WARNING", logger="tortoise.monitoring"):
+            monitoring.probe_setup_timeout()
+        assert "TORTOISE_PROBE_SETUP_TIMEOUT" in caplog.text, caplog.text
+
+    @pytest.mark.parametrize("raw", ["", "   "])
+    def test_blank_env_is_silent(self, monkeypatch, caplog, raw):
+        """The shipped ``.env.example`` line is blank-valued, so warning on
+        blank would warn on every default deployment."""
+        monkeypatch.setenv("TORTOISE_PROBE_SETUP_TIMEOUT", raw)
+        with caplog.at_level("WARNING", logger="tortoise.monitoring"):
+            assert monitoring.probe_setup_timeout() == monitoring.PROBE_SETUP_TIMEOUT
+        assert [r for r in caplog.records
+                if r.name.startswith("tortoise.monitoring")] == []
 
     def test_mcp_tortoise_health_honors_env_override(self, monkeypatch):
         """The `.env` knob must actually reach the tool (call-time read),
@@ -490,12 +520,15 @@ class TestProbeSetupBudget:
         assert sdk.query_calls == 0
 
     def test_metrics_default_shape_forwards_no_allowance(self, monkeypatch):
-        """#3143 review: every platform /health surface reaches the probe
-        through ``metrics()`` and passes NO allowance, so the #1384
-        fast-degrade contract holds. A refactor that had ``metrics()`` resolve
-        the allowance itself (the natural 'make all callers benefit' change)
-        would give /health a multi-second cold-start; this pins the explicit
-        ``setup_timeout=None`` it forwards AND the resulting degraded status."""
+        """#3143 review: the platform liveness surface that reaches the probe
+        through ``metrics()`` (the standalone ``serve_health`` server) passes NO
+        allowance, so the #1384 fast-degrade contract holds; ``selfhost`` and
+        hosted ``/health`` call ``probe_db`` directly with the same default
+        (pinned separately in ``tests/test_selfhost.py``). A refactor that had
+        ``metrics()`` resolve the allowance itself (the natural 'make all
+        callers benefit' change) would give that surface a multi-second
+        cold-start; this pins the explicit ``setup_timeout=None`` it forwards
+        AND the resulting degraded status."""
         monkeypatch.setattr(monitoring, "PROBE_TIMEOUT", 0.05)
         forwarded = {}
         real_probe_db = monitoring.probe_db
@@ -510,6 +543,62 @@ class TestProbeSetupBudget:
         assert result["status"] == "degraded"
         assert "setup timeout" in result["db"]["error"]
         assert result["graph_size"] == 0  # no taxonomy round-trip on a failed probe
+
+    def test_query_phase_keeps_its_own_budget_with_an_allowance(
+            self, monkeypatch):
+        """#3143 review: an explicit allowance must NOT be inherited by the
+        reachability query — the query keeps its own fresh ``PROBE_TIMEOUT``,
+        so the total stays ``setup_timeout + PROBE_TIMEOUT``. A regression
+        setting ``query_budget = setup_timeout`` (or the whole total) could pin
+        a black-hole query for the full allowance and would pass every other
+        test in this file."""
+        monkeypatch.setattr(monitoring, "PROBE_TIMEOUT", 0.05)
+        calls = []
+
+        class SlowQuerySDK:
+            def _get_proj(self):
+                proj = MagicMock()
+
+                def _q(*args, **kwargs):
+                    calls.append(time.monotonic())
+                    time.sleep(0.5)  # ≫ PROBE_TIMEOUT, ≪ the 20s allowance
+                    return MagicMock(result_set=[[1]])
+
+                proj.g.query.side_effect = _q
+                return proj
+
+            def taxonomy(self):
+                return {"Point": 1}
+
+        started = time.monotonic()
+        result = monitoring.probe_db(SlowQuerySDK(), setup_timeout=20.0)
+        elapsed = time.monotonic() - started
+        assert calls, "the query phase was never reached"
+        assert result["ok"] is False
+        assert "probe timeout" in result["error"]
+        assert "setup timeout" not in result["error"]  # the QUERY phase overran
+        assert elapsed < 1.0, f"query inherited the allowance: {elapsed:.2f}s"
+
+    def test_taxonomy_failure_is_recorded_not_raised(self):
+        """#3143 review: post-fix, ``graph_size`` is newly reachable on large
+        graphs. A reachable DB whose label COUNT raises must not surface as a
+        crash — the report stays ok/0 and the failure is recorded in
+        ``errors`` (never raised), which is the only signal distinguishing it
+        from a genuinely empty graph."""
+        class TaxonomyBoomSDK(FakeSDK):
+            def __init__(self):
+                super().__init__(db_ok=True)
+
+            def taxonomy(self):
+                raise RuntimeError("count failed")
+
+        monitoring._sdk = None
+        baseline = monitoring.metrics(sdk=FakeSDK(db_ok=True, graph_size=1))
+        result = monitoring.metrics(sdk=TaxonomyBoomSDK())
+        assert result["status"] == "ok"
+        assert result["db"]["ok"] is True
+        assert result["graph_size"] == 0
+        assert result["errors"] == baseline["errors"] + 1
 
     def test_deep_setup_budget_reports_a_reachable_large_graph_ok(
             self, monkeypatch):
@@ -597,6 +686,9 @@ class TestProbeSetupBudgetIntegration:
         # unbudgeted round-trip documented on monitoring.metrics().
         assert real_size > 0
         assert result["graph_size"] == real_size
+        # Issue #3143's third leg: the agent's diagnostic fallback
+        # (tortoise_status → sdk.status()) must agree with the health report.
+        assert sdk.status()["total_entities"] == result["graph_size"]
 
 
 class TestRecordFunctions:

@@ -52,15 +52,21 @@ PROBE_SETUP_TIMEOUT = 20.0
 #: Accepted range for the operator override. Out-of-range values are rejected
 #: in favour of the default (with a warning), never clamped and never honoured:
 #:
-#: * below PROBE_TIMEOUT an "allowance" is strictly worse than passing nothing
-#:   — it is too short to cover a real cold-start, so it can only turn a
-#:   REACHABLE graph into ``degraded``/``graph_size=0`` (the exact #3143
-#:   symptom), silently, because the value reads as "valid".
+#: * below ``PROBE_TIMEOUT`` the allowance is TIGHTER than the platform
+#:   liveness gate's own cold-start budget, so it can only make this tool
+#:   report worse than ``/health`` — a cold-start the platform gate would have
+#:   covered now fails, reproducing #3143's false-degrade. It is not
+#:   *strictly* worse in every case (an explicit allowance also buys the query
+#:   a fresh ``PROBE_TIMEOUT``, so the query phase is more permissive), but a
+#:   value below the gate's own budget is a misconfiguration, not a tuning.
 #: * above the max, a typo (``3000``) would pin an on-demand tool call for tens
 #:   of minutes.
 #:
-#: Both bounds are inclusive: ``1.5`` is accepted (same budget as the platform
-#: liveness gate, so it degrades exactly like the default /health shape).
+#: Both bounds are inclusive. ``1.5`` is accepted because it IS the gate's own
+#: setup budget — but it is the FLOOR, not a safe value for a large graph: the
+#: #3143 shape (a cold-start over 1.5s) still times out there. And the explicit
+#: form always hands the query its own fresh ``PROBE_TIMEOUT``, so the total is
+#: ``setup_timeout + PROBE_TIMEOUT`` — never ``/health``'s single shared budget.
 PROBE_SETUP_TIMEOUT_MIN = PROBE_TIMEOUT
 PROBE_SETUP_TIMEOUT_MAX = 300.0
 
@@ -332,9 +338,14 @@ def metrics(sdk=None, probe_setup_timeout=None) -> dict:
     and its failure must not inflate the very ``errors`` field this response
     reports. A degraded report carries graph_size 0 with the probe error. The
     count itself (``taxonomy()``) carries NO budget of its own — it is safe
-    only because it runs after a successful ``RETURN 1`` (a reachable server
-    answers label counts promptly), so the MCP tool's total latency is
-    ``probe_setup_timeout + PROBE_TIMEOUT`` PLUS that round-trip.
+    only because it runs after a successful ``RETURN 1`` (a reachable server is
+    expected to answer label counts promptly; that is an assumption, not a
+    measurement), so the MCP tool's total latency is ``probe_setup_timeout +
+    PROBE_TIMEOUT`` PLUS that round-trip. If the probe SUCCEEDS but the count
+    raises, the report is ``status="ok"`` with ``graph_size 0`` and an
+    incremented ``errors`` counter — the failure is recorded, never raised, so
+    ``ok`` + 0 is deliberately indistinguishable from a genuinely empty graph
+    and callers needing certainty must read ``errors``.
 
     #3143: ``probe_setup_timeout`` is the projection-cold-start allowance
     threaded to ``probe_db``. It is the MCP health tool's seam: the platform

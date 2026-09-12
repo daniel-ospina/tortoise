@@ -71,6 +71,28 @@ class TestHealth:
             assert body["db"]["ok"] is True
             assert isinstance(body["db"]["latency_ms"], (int, float))
 
+    def test_health_liveness_passes_no_setup_allowance(self, monkeypatch, tmp_path):
+        """#3143 review: the platform liveness gate must keep the tight shared
+        budget. A refactor that threaded the MCP tool's cold-start allowance
+        into ``/health`` (selfhost/hosted call ``probe_db`` directly, not via
+        ``metrics()``) would silently destroy the #1384 fast-degrade contract —
+        a dead DB would take up to the allowance to flip degraded."""
+        tc = _client_for_env(monkeypatch, tmp_path, TORTOISE_API_KEY="k")
+        import tortoise.monitoring as mon
+
+        seen = {}
+        real_probe_db = mon.probe_db
+
+        def _spy_probe_db(sdk, setup_timeout=None):
+            seen["setup_timeout"] = setup_timeout
+            return real_probe_db(sdk, setup_timeout=setup_timeout)
+
+        monkeypatch.setattr(mon, "probe_db", _spy_probe_db)
+        with tc:
+            r = tc.get("/health")
+            assert r.status_code == 200
+        assert seen["setup_timeout"] is None, seen
+
     def test_health_degraded_when_db_down(self, monkeypatch, tmp_path):
         """#1384: a stopped FalkorDB flips /health to degraded — 200, never
         500 or a crashed handler."""
