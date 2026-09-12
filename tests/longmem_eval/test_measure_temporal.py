@@ -796,3 +796,126 @@ def test_gate_output_refuses_an_empty_or_unregistered_arm_set(tmp_path):
                        baseline_verdicts=baseline,
                        arm_verdicts={"made-up-arm": baseline},
                        arm_stats={})
+
+
+# ── #2976 eval-lane rerank measurement hook ────────────────────────────────
+
+def _mk_rerank_outcome(qid: str, label: bool | None, *,
+                       admitted: list | None = None) -> dict:
+    """A run-row shape for the rerank hook: unlike ``_mk_outcome`` the facts
+    gate is ON for EVERY outcome (that is what the reranked arm's rows
+    carry), so gold admission is readable regardless of the label."""
+    return {"question_id": qid, "label": label,
+            "measure_facts": {"gold_admitted_ids": admitted or []}}
+
+
+def test_rerank_arm_measurement_reads_gold_admission_and_answerable_correct():
+    baseline = [
+        _mk_rerank_outcome("q1", False, admitted=[]),
+        _mk_rerank_outcome("q2", False, admitted=[]),
+        _mk_rerank_outcome("gpt4_93159ced_abs", True, admitted=[]),
+    ]
+    reranked = [
+        _mk_rerank_outcome("q1", False, admitted=["p1"]),
+        _mk_rerank_outcome("q2", True, admitted=["p2"]),
+        _mk_rerank_outcome("gpt4_93159ced_abs", True, admitted=[]),
+    ]
+    m = mt.rerank_arm_measurement(reranked, baseline_outcomes=baseline)
+    assert m["arm"] == mt.RERANK_ARM == "applied-rerank"
+    assert m["n"] == 3
+    assert m["gold_admitted"] == 2                 # q1+q2 promoted
+    assert m["answerable_n"] == 2                  # the _abs control excluded
+    assert m["answerable_correct"] == 1            # only q2 answered
+    assert m["delta"] == {"gold_admitted": 2, "answerable_correct": 1,
+                          "gold_admitted_interpretable": True}
+    assert m["unmeasured_n"] == 0
+    assert m["baseline"]["gold_admitted"] == 0
+    assert m["baseline"]["answerable_correct"] == 0
+
+
+def test_rerank_arm_measurement_without_a_baseline_omits_delta():
+    m = mt.rerank_arm_measurement([_mk_rerank_outcome("q1", True, admitted=["p"])])
+    assert "baseline" not in m and "delta" not in m
+    assert m["gold_admitted"] == 1 and m["answerable_correct"] == 1
+
+
+def test_rerank_arm_is_the_promoted_lever_over_the_pinned_55q_subset():
+    arm = mt.rerank_arm()
+    assert arm["id"] == "applied-rerank"
+    assert "--rerank" in arm["knobs"]
+    assert mt.ARM_POOL_LIMIT[mt.RERANK_ARM] == 120     # the deep-pool lever
+    assert len(mt.deterministic_subset(mt.load_census(CENSUS)["rows"])) == 55
+
+
+def test_run_outcomes_tolerates_flat_and_wrapped_run_shapes():
+    row = {"question_id": "q1"}
+    assert mt._run_outcomes({"outcomes": [row]}) == [row]
+    assert mt._run_outcomes({"report": {"outcomes": [row]}}) == [row]
+    assert mt._run_outcomes(None) == []
+    assert mt._run_outcomes({}) == []
+
+
+def test_rerank_arm_measurement_excludes_unjudged_rows():
+    """A non-bool label (retrieval-only run / missing judge label) is NOT a
+    wrong answer: it must leave the answerable denominator and be surfaced as
+    unjudged_n, never silently deflate the headline (review P1-1)."""
+    rows = [
+        _mk_rerank_outcome("q1", True, admitted=["p1"]),
+        _mk_rerank_outcome("q2", False, admitted=[]),
+        _mk_rerank_outcome("q3", None, admitted=["p3"]),
+    ]
+    m = mt.rerank_arm_measurement(rows)
+    assert m["n"] == 3
+    assert m["unjudged_n"] == 1
+    assert m["answerable_n"] == 2          # q3 excluded
+    assert m["answerable_correct"] == 1
+    assert m["gold_admitted"] == 2         # admission is judge-independent
+
+
+def test_rerank_arm_measurement_flags_a_facts_off_delta_as_uninterpretable():
+    """A facts-gate-OFF baseline (no ``measure_facts``) is indistinguishable
+    from "gold not admitted" — the hook must surface it, never let it inflate
+    the gold-admission delta silently (review cycle-2 P2)."""
+    facts_off_baseline = [{"question_id": "q1", "label": False}]
+    reranked = [_mk_rerank_outcome("q1", True, admitted=["p1"])]
+    m = mt.rerank_arm_measurement(reranked,
+                                  baseline_outcomes=facts_off_baseline)
+    assert m["unmeasured_n"] == 0
+    assert m["baseline"]["unmeasured_n"] == 1
+    assert m["delta"]["gold_admitted_interpretable"] is False
+
+
+def test_abs_controls_default_resolves_at_call_time():
+    """The ``abs_controls`` default must honor a patched ``ABS_CONTROLS``
+    (late binding, not a def-time capture)."""
+    with pytest.MonkeyPatch.context() as m:
+        m.setattr(mt, "ABS_CONTROLS", ("q-abs-a",))
+        assert mt.is_answerable_qid("q-abs-a") is False
+        got = mt.rerank_arm_measurement(
+            [_mk_rerank_outcome("q-abs-a", True, admitted=["p"])])
+        assert got["answerable_n"] == 0
+
+
+def test_run_reranked_arm_wraps_the_driver(monkeypatch, tmp_path):
+    """The runnable entry point delegates to run_one_arm (the committed
+    driver) and returns the #2976 measurement shape (review P2-6)."""
+    captured: dict = {}
+
+    def _fake_run_one_arm(arm, **kwargs):
+        captured["arm"] = arm
+        captured["kwargs"] = kwargs
+        return {"outcomes": [
+            _mk_rerank_outcome("q1", True, admitted=["p1"]),
+            _mk_rerank_outcome("q2", False, admitted=[]),
+        ]}
+
+    monkeypatch.setattr(mt, "run_one_arm", _fake_run_one_arm)
+    res = mt.run_reranked_arm(
+        data=tmp_path / "data.json", arm_dir=tmp_path / "arm",
+        output=tmp_path / "out", limit=55)
+    assert captured["arm"]["id"] == mt.RERANK_ARM
+    assert captured["kwargs"]["limit"] == 55
+    assert res["arm"] == "applied-rerank"
+    assert res["outcome_count"] == 2
+    assert res["measurement"]["gold_admitted"] == 1
+    assert res["measurement"]["answerable_correct"] == 1
