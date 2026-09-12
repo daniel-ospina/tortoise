@@ -441,6 +441,49 @@ class TestHealthProbe:
         assert result == {"ok": True, "latency_ms": 1.0, "error": None}
         assert probe.info()["in_flight"] is False
 
+    # ── #2850 round-3 review P2: /health must not probe per read ──
+
+    def test_snapshot_does_not_start_a_probe_per_read(self):
+        """``/health`` is a SKIP_AUTH route and calls ``snapshot()`` on every
+        request. ``begin()`` used to start a fresh probe as soon as the previous
+        finished, so the read path amplified into one DB ``RETURN 1`` per
+        request and duplicated the background refresher."""
+        calls = {"n": 0}
+
+        def _fn():
+            calls["n"] += 1
+            return {"ok": True, "latency_ms": 1.0, "error": None}
+
+        probe = monitoring.HealthProbe(_fn, refresh_budget=30.0)
+        assert probe.wait()["ok"] is True
+        assert calls["n"] == 1
+        for _ in range(50):
+            assert probe.snapshot()["ok"] is True
+        assert calls["n"] == 1, f"/health read amplified to {calls['n']} DB probes"
+
+    def test_snapshot_self_heals_a_dead_refresher_once_stale(self):
+        """The self-heal survives — a dead refresher is still recovered, just
+        no sooner than the refresh budget (one probe, not one per read)."""
+        import time
+
+        calls = {"n": 0}
+
+        def _fn():
+            calls["n"] += 1
+            return {"ok": True, "latency_ms": 1.0, "error": None}
+
+        probe = monitoring.HealthProbe(_fn, refresh_budget=0.3)
+        assert probe.wait()["ok"] is True
+        assert calls["n"] == 1
+        probe.snapshot()  # within budget: no new probe
+        assert calls["n"] == 1
+        time.sleep(0.35)
+        probe.snapshot()  # budget exceeded: self-heal starts one
+        deadline = time.monotonic() + 2.0
+        while calls["n"] < 2 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert calls["n"] == 2, "a dead refresher was never recovered"
+
     # ── #2850 review P1: readiness must not serve a pre-outage verdict ──
 
     def test_fresh_only_fails_closed_when_the_budget_expires(self):
@@ -705,6 +748,32 @@ class TestHealthzListener:
         monitoring._reset_heartbeat()
         status, _ = _http_get(server.server_address[1])
         assert status == 503
+
+    def test_busy_loop_is_not_reported_as_wedged(self):
+        """Round-3 review P1: a merely BUSY loop is not a wedged loop.
+
+        ``_capture_session_impl`` runs seconds-long synchronous DB/LLM work on
+        the event loop, so a legitimate request can exceed LOOP_STALE_AFTER.
+        With the deferred Fly check pointing here and 2xx-means-healthy, a 503
+        for that case would de-register the sole machine (total outage). The
+        signal must therefore be STALE **AND** IDLE — the same idle predicate
+        the stall watchdog uses.
+        """
+        import time
+
+        server = monitoring.start_health_listener(port=0, bind="127.0.0.1")
+        monitoring.heartbeat_record(
+            at=time.monotonic() - (monitoring.LOOP_STALE_AFTER + 2.0))
+        monitoring.workload_enter()
+        try:
+            status, body = _http_get(server.server_address[1])
+        finally:
+            monitoring.workload_exit()
+        assert status == 200, body
+        payload = json.loads(body)
+        assert payload["status"] == "ok"
+        assert payload["loop_stale"] is True
+        assert payload["workload_idle"] is False
 
     def test_unknown_path_is_404(self):
         server = monitoring.start_health_listener(port=0, bind="127.0.0.1")
@@ -996,6 +1065,51 @@ class TestHealthzHardening:
             left.close()
             right.close()
 
+    def test_reject_overloaded_returns_without_waiting_for_the_client(self):
+        """Round-3 review P1: the accept path must not WAIT on the rejected
+        client. The old blocking ``_drain_unread(..., 0.2, ...)`` spent its full
+        deadline once the queued request had been consumed (the peer stays
+        open), costing ~0.2s of accept time per rejected connection — ~5
+        conn/s, which lets an unauthenticated flood keep the 5-deep backlog
+        full and starve the one endpoint that must never go dark.
+        """
+        import time
+
+        left, right = self._socketpair()
+        try:
+            left.sendall(b"GET /healthz HTTP/1.1\r\nHost: x\r\n"
+                         b"Connection: close\r\n\r\n")
+            start = time.monotonic()
+            monitoring._HealthzServer._reject_overloaded(right)
+            elapsed = time.monotonic() - start
+            # The 503 still reaches the client...
+            left.settimeout(2)
+            head = left.recv(4096)
+            assert head.startswith(b"HTTP/1.1 503"), head
+        finally:
+            left.close()
+            right.close()
+        assert elapsed < 0.12, (
+            f"reject cost {elapsed:.3f}s of accept time — the drain still waits")
+
+    def test_nonblocking_drain_is_immediate_and_restores_blocking_mode(self):
+        import time
+
+        left, right = self._socketpair()
+        try:
+            left.sendall(b"x" * 4096)
+            start = time.monotonic()
+            monitoring._drain_unread_now(right, 8192)
+            elapsed = time.monotonic() - start
+            assert right.gettimeout() is None, "blocking mode was not restored"
+            right.settimeout(0)
+            with pytest.raises(BlockingIOError):
+                right.recv(1)
+        finally:
+            left.close()
+            right.close()
+        assert elapsed < 0.12, f"non-blocking drain took {elapsed:.3f}s"
+
     def test_drain_unread_is_bounded_in_bytes_and_time(self):
         """Round-2 review: the drain must not itself become the slowloris it
         exists to prevent — bounded on BOTH axes (byte cap, total deadline)."""
@@ -1183,6 +1297,13 @@ class TestStallWatchdog:
             threshold_s=0, exit_fn=lambda *_: None) is None
         assert monitoring.start_stall_watchdog(
             threshold_s=-5, exit_fn=lambda *_: None) is None
+        # Round-3 review P2: the PROGRAMMATIC API must reject a non-finite
+        # threshold too. ``nan <= 0`` is False, so without the isfinite guard
+        # this armed a killer whose ``age <= nan`` comparison is False forever.
+        assert monitoring.start_stall_watchdog(
+            threshold_s=float("nan"), exit_fn=lambda *_: None) is None
+        assert monitoring.start_stall_watchdog(
+            threshold_s=float("inf"), exit_fn=lambda *_: None) is None
 
     @staticmethod
     def _arm(fired, stop, *, threshold=0.2, **kwargs):

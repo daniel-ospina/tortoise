@@ -410,6 +410,11 @@ def _iter_registered_teams() -> list[dict]:
 #: ``db`` field fresh WITHOUT the request path doing any I/O. Must stay below
 #: monitoring.PROBE_STALE_AFTER (30s) or a healthy DB would read as degraded.
 HEALTH_PROBE_REFRESH_S = 10.0
+#: Lower bound on a configured probe period (round-3 review P2). ``1e-9`` is
+#: finite but turns the refresher into a ~50 Hz loop, each iteration spawning a
+#: probe daemon thread and issuing a DB round trip — the same busy-loop the
+#: ``nan`` rejection exists to prevent. The upper clamp was one-sided.
+HEALTH_PROBE_MIN_INTERVAL_S = 0.5
 
 
 def _health_probe_interval() -> float:
@@ -427,6 +432,9 @@ def _health_probe_interval() -> float:
     returns almost immediately — a busy loop hammering the DB probe and the
     event loop. ``inf`` means the probe never refreshes, so a healthy DB reads
     stale forever. Both DISABLE (fall back to ``HEALTH_PROBE_REFRESH_S``).
+
+    A finite but SUB-FLOOR period is rejected the same way (round-3 review
+    P2): ``1e-9`` busy-loops the probe exactly as ``nan`` did.
     """
     try:
         v = float(os.environ.get("TORTOISE_HEALTH_PROBE_INTERVAL") or HEALTH_PROBE_REFRESH_S)
@@ -440,6 +448,17 @@ def _health_probe_interval() -> float:
             v, HEALTH_PROBE_REFRESH_S)
         return HEALTH_PROBE_REFRESH_S
     if v <= 0:
+        return HEALTH_PROBE_REFRESH_S
+    # Round-3 review P2: a finite but tiny period busy-loops the probe just
+    # like ``nan`` did — ``1e-9`` yields ~50 generations/s, each spawning a
+    # daemon thread and issuing a DB round trip. The clamp below is
+    # one-sided, so a floor is required too.
+    if v < HEALTH_PROBE_MIN_INTERVAL_S:
+        _logger.warning(
+            "TORTOISE_HEALTH_PROBE_INTERVAL=%s is below the %.2fs floor — "
+            "falling back to the default %.0fs; a sub-floor period "
+            "busy-loops the probe and duplicates the DB round trip",
+            v, HEALTH_PROBE_MIN_INTERVAL_S, HEALTH_PROBE_REFRESH_S)
         return HEALTH_PROBE_REFRESH_S
     cap = PROBE_STALE_AFTER / 2.0
     if v > cap:
@@ -549,6 +568,19 @@ async def _run_boot_sweeps() -> None:
             _logger.warning("boot %s sweep failed: %s", label, exc)
 
 
+#: Task attributes armed across the lifespan that a re-entry or shutdown must
+#: disarm. SHARED by ``_start_liveness`` and ``_stop_liveness`` (round-3 review
+#: P2): the two lists used to differ, so a failed prior lifespan could leave
+#: ``_boot_sweep_task``/``_event_retention_task`` orphaned — a double boot
+#: sweep and "Task exception was never retrieved" at teardown.
+_LIVENESS_TASK_ATTRS = (
+    "_loop_heartbeat_task",
+    "_health_probe_task",
+    "_boot_sweep_task",
+    "_event_retention_task",
+)
+
+
 def _start_liveness(app) -> None:
     """Arm the heartbeat, the dedicated /healthz listener and the watchdog.
 
@@ -573,7 +605,7 @@ def _start_liveness(app) -> None:
     prev_stop = getattr(app.state, "_loop_watchdog_stop", None)
     if prev_stop is not None:
         prev_stop.set()
-    for attr in ("_loop_heartbeat_task", "_health_probe_task"):
+    for attr in _LIVENESS_TASK_ATTRS:
         prev = getattr(app.state, attr, None)
         if prev is not None:
             prev.cancel()
@@ -609,9 +641,8 @@ async def _stop_liveness(app) -> None:
     stop = getattr(app.state, "_loop_watchdog_stop", None)
     if stop is not None:
         stop.set()
-    pending = [t for t in (getattr(app.state, attr, None) for attr in (
-        "_loop_heartbeat_task", "_health_probe_task",
-        "_boot_sweep_task", "_event_retention_task")) if t is not None]
+    pending = [t for t in (getattr(app.state, attr, None)
+                           for attr in _LIVENESS_TASK_ATTRS) if t is not None]
     for task in pending:
         task.cancel()
     if pending:
@@ -872,6 +903,24 @@ async def _lifespan(app):
         # name for the WHOLE of _lifespan — so the earlier `os.environ.get(...)`
         # read above raised UnboundLocalError and aborted the entire watcher-start
         # block. Regression guard: tests/test_boot_regressions.py.
+        # #2953 (round-3 review P2): schedule the one-time BOOT sweeps FIRST,
+        # in their own try. They used to be created AFTER the ``interval``
+        # parse inside the SAME try, so a ``ValueError`` from
+        # ``TORTOISE_EVENT_RETENTION_INTERVAL=oops`` silently cancelled the
+        # boot sweeps too — a config typo disabled the retention purge at boot
+        # (and the deleted-team purge) for the process's lifetime. On
+        # origin/main the sweeps ran regardless (they were awaited before the
+        # parse); keep that independence.
+        try:
+            # #2953: the BOOT sweeps are NOT awaited here. uvicorn calls
+            # loop.create_server() only after lifespan.startup() returns, so
+            # awaiting them meant the machine had NO listening socket for the
+            # whole sweep — every deploy and restart. Background task instead.
+            app.state._boot_sweep_task = asyncio.get_event_loop().create_task(
+                _run_boot_sweeps())
+        except Exception as exc:
+            _logger.error("boot sweeps did NOT run: %s", exc, exc_info=True)
+
         try:
             # #2850/#2953: the inline `_sweep_events` closure and the two
             # `await asyncio.to_thread(...)` boot calls that used to live here
@@ -897,18 +946,16 @@ async def _lifespan(app):
 
             _retention_task = asyncio.get_event_loop().create_task(_event_retention_loop())
             app.state._event_retention_task = _retention_task
-            # #2953: the BOOT sweeps are NOT awaited here. uvicorn calls
-            # loop.create_server() only after lifespan.startup() returns, so
-            # awaiting them meant the machine had NO listening socket for the
-            # whole sweep — every deploy and restart. Background task instead.
-            app.state._boot_sweep_task = asyncio.get_event_loop().create_task(
-                _run_boot_sweeps())
         except Exception as exc:
             # Best-effort by design (a purge failure must never block bind), but
             # there is no retry: retention is off for this process's lifetime, so
             # this is the same "silently never runs" shape as #2922 and gets the
-            # same treatment — ERROR plus a traceback.
-            _logger.error("event retention loop not started: %s", exc, exc_info=True)
+            # same treatment — ERROR plus a traceback. The one-time boot sweeps
+            # are scheduled independently (above) and are NOT affected by a bad
+            # interval; say so explicitly so the log is not read as "nothing ran".
+            _logger.error(
+                "event retention loop not started (the one-time boot sweeps "
+                "above WERE scheduled independently): %s", exc, exc_info=True)
 
         # ── #2850: the DB probe refresher — keeps /health's ``db`` field
         # honest without the request path doing any I/O at all.
@@ -1949,7 +1996,8 @@ def _probe_db() -> dict:
 # #2850: the single-flight, hard-bounded coordinator BOTH health endpoints
 # read. The lambda resolves ``_probe_db`` at CALL time, so the existing
 # monkeypatch seams (tests patch ha_mod._probe_db) keep working.
-_HEALTH_PROBE = HealthProbe(lambda: _probe_db())
+_HEALTH_PROBE = HealthProbe(lambda: _probe_db(),
+                            refresh_budget=HEALTH_PROBE_REFRESH_S)
 
 
 def _probe_control_plane() -> dict:

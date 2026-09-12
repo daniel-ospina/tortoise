@@ -13,6 +13,7 @@ Backends behind the `Projection` protocol:
 from __future__ import annotations  # noqa: I001
 
 import hashlib
+import math
 import re
 import os
 import shutil
@@ -64,15 +65,25 @@ _FALKORDB_VERSION_CACHE: dict[tuple, tuple[int, int, int] | None] = {}
 # self-kill is OPT-IN and disabled by default).
 _DB_CONNECT_TIMEOUT_DEFAULT = 2.0
 _DB_SOCKET_TIMEOUT_DEFAULT = 10.0
+#: Sanity ceiling on a configured DB socket timeout (round-3 review P2).
+#: ``float()`` accepts ``inf`` and ``1e308``; both are semantically "block
+#: forever" — the literal #2850 failure mode — and an ``inf`` passed to
+#: redis-py's ``sock.settimeout`` raises ``OverflowError`` (NOT caught by its
+#: ``except OSError``), so the DB client could never connect at all. Clamp to
+#: a value that still bounds a hung socket.
+_DB_TIMEOUT_MAX_S = 60.0
 
 
 def _socket_timeouts() -> tuple[float, float]:
     """``(socket_connect_timeout, socket_timeout)`` from env, with defaults.
 
     ``TORTOISE_FALKORDB_CONNECT_TIMEOUT_S`` / ``TORTOISE_FALKORDB_SOCKET_TIMEOUT_S``.
-    A non-numeric or non-positive value falls back to the default rather than
-    disabling the bound (a 0/None redis timeout means "block forever" —
-    exactly the failure mode #2850 is about).
+    A non-numeric, NON-FINITE (``nan``/``inf``), non-positive or
+    above-``_DB_TIMEOUT_MAX_S`` value falls back/clamps rather than disabling
+    the bound (a 0/None redis timeout means "block forever" — exactly the
+    failure mode #2850 is about; ``inf``/``1e308`` mean the same and an ``inf``
+    socket timeout raises ``OverflowError`` inside redis-py, bricking the
+    client at boot).
     """
     def _one(name: str, default: float) -> float:
         raw = os.environ.get(name)
@@ -83,7 +94,18 @@ def _socket_timeouts() -> tuple[float, float]:
         except (TypeError, ValueError):
             logger.warning("%s=%r is not a number — using %ss", name, raw, default)
             return default
-        return v if v > 0 else default
+        if not math.isfinite(v):
+            logger.warning("%s=%r is not finite — using %ss (a non-finite "
+                           "socket timeout means 'block forever' or raises "
+                           "OverflowError in the client)", name, raw, default)
+            return default
+        if v <= 0:
+            return default
+        if v > _DB_TIMEOUT_MAX_S:
+            logger.warning("%s=%r exceeds the %.0fs ceiling — clamping",
+                           name, raw, _DB_TIMEOUT_MAX_S)
+            return _DB_TIMEOUT_MAX_S
+        return v
 
     return (_one("TORTOISE_FALKORDB_CONNECT_TIMEOUT_S", _DB_CONNECT_TIMEOUT_DEFAULT),
             _one("TORTOISE_FALKORDB_SOCKET_TIMEOUT_S", _DB_SOCKET_TIMEOUT_DEFAULT))

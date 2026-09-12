@@ -353,12 +353,21 @@ class HealthProbe:
                  stale_after: float = PROBE_STALE_AFTER,
                  max_supersedes: int = PROBE_MAX_SUPERSEDES,
                  poll_interval: float = PROBE_POLL_INTERVAL,
-                 fresh_only: bool = False) -> None:
+                 fresh_only: bool = False,
+                 refresh_budget: float = PROBE_STALE_AFTER) -> None:
         self._probe_fn = probe_fn
         self._timeout = timeout
         self._stale_after = stale_after
         self._max_supersedes = max_supersedes
         self._poll_interval = poll_interval
+        #: Age at which ``snapshot()``'s self-heal may start a probe when the
+        #: background refresher appears dead (round-3 review P2). Kept
+        #: separate from ``stale_after`` so the read path is gated on the
+        #: REFRESHER's period: without this, every ``/health`` read started a
+        #: probe once the previous finished, turning an unauthenticated
+        #: SKIP_AUTH route into a request→DB-query amplifier duplicating the
+        #: background loop.
+        self._refresh_budget = refresh_budget
         #: ``True`` -> /health semantics (stale-but-honest last-known-good is
         #: acceptable); ``False`` -> readiness semantics (never serve a verdict
         #: older than the read budget; see the class docstring item 5).
@@ -449,12 +458,23 @@ class HealthProbe:
 
     # ── public API ───────────────────────────────────────────────────────
 
-    def begin(self) -> None:
+    def begin(self, *, if_stale: bool = False) -> None:
         """Start a probe if none is live. Never blocks, never accumulates.
 
         A probe still running past ``stale_after`` is superseded (up to
         ``max_supersedes`` times) so a genuine recovery can be observed; its
         abandoned daemon thread is bounded by that cap.
+
+        ``if_stale=True`` gates the *self-heal* on the last result being
+        older than ``refresh_budget`` (round-3 review P2). Only
+        ``snapshot()`` — the unauthenticated ``/health`` read path — uses it:
+        otherwise each read started a fresh probe as soon as the previous
+        finished, so ``/health`` amplified into one DB ``RETURN 1`` per
+        request and duplicated the background refresher. A dead refresher is
+        still recovered, just no sooner than the refresh budget (one probe,
+        not one per read). ``run()``/``read()``/``wait()`` keep the
+        unconditional self-heal — they ARE the refresher/readiness callers
+        and must start work when asked.
         """
         with self._cv:
             if self._running and self._worker is not None and self._worker.is_alive():
@@ -463,7 +483,11 @@ class HealthProbe:
                     self._supersedes += 1
                     self._start_locked()
                 return
-            # Idle, or the worker died without recording a result — self-heal.
+            # Idle, or the worker died without recording a result — self-heal,
+            # but (opt-in) only when the recorded result is genuinely stale.
+            if (if_stale and self._result is not None
+                    and time.monotonic() - self._completed_at < self._refresh_budget):
+                return
             self._start_locked()
 
     async def run(self) -> dict:
@@ -511,14 +535,17 @@ class HealthProbe:
         saturated executor, or another caller — which is the whole point of
         decoupling liveness from work.
 
-        ``begin()`` is still called, and that is deliberate: it is
-        non-blocking (worst case it starts the ONE bounded single-flight
+        ``begin(if_stale=True)`` is still called, and that is deliberate: it
+        is non-blocking (worst case it starts the ONE bounded single-flight
         probe daemon thread), so it cannot delay this call, but it means a
         refresher task that died cannot pin the report to a frozen verdict
-        forever. Freshness normally comes from the background probe loop
-        (see ``hosted_api._health_probe_loop``); this is the self-heal path.
+        forever. The self-heal is gated on the refresh budget (round-3 review
+        P2) so a healthy refresher is never duplicated by the read path —
+        ``/health`` stays zero-I/O and is no longer a request→DB-query
+        amplifier. Freshness normally comes from the background probe loop
+        (see ``hosted_api._health_probe_loop``); this is the recovery path.
         """
-        self.begin()
+        self.begin(if_stale=True)
         with self._cv:
             return self._view_locked(time.monotonic())
 
@@ -683,12 +710,24 @@ def _reset_heartbeat() -> None:
 # ── #2850 item 4: the DEDICATED liveness listener (own port) ─────────────
 #
 # Fixed interface contract: port 9090, bound 0.0.0.0, ``GET /healthz`` ->
-# 200 fresh / 503 stale. A non-routing top-level Fly check points here, so
-# the answer must NOT depend on the app's event loop: this is a plain
+# 200 (loop fresh, OR loop stale with work in flight) / 503 (loop stale AND
+# nothing in flight). A non-routing top-level Fly check points here, so the
+# answer must NOT depend on the app's event loop: this is a plain
 # ``ThreadingHTTPServer`` on its own daemon thread, in its own OS thread(s),
-# touching nothing but an in-memory float. It never uses
+# touching nothing but in-memory state. It never uses
 # ``asyncio.to_thread`` or the app's default executor, so it cannot be
 # queued behind ~89 stalled DB calls the way /health was.
+#
+# ⚠ SIGNAL CONTRACT (round-3 review P1): this is an ALERTING signal, NOT an
+# availability/routing gate. It must not be wired as one (e.g. a Fly check
+# whose failure de-registers the machine) until the synchronous DB/LLM work
+# in ``_capture_session_impl`` is offloaded off the event loop — that is the
+# durable follow-up. Reason: a merely BUSY loop is not a wedged loop, and
+# this app runs seconds-long synchronous DB queries and 60s-timeout LLM calls
+# on the loop, so a legitimate request can exceed ``LOOP_STALE_AFTER``. With a
+# loop-stale 503 and 2xx-means-healthy semantics, that would de-register the
+# sole machine — a total outage. The handler therefore reports 503 ONLY for
+# stale-and-idle (a genuinely wedged loop); see ``_HealthzHandler.do_GET``.
 #
 # Deliberately NOT reusing ``serve_health``/``_Handler`` above: that handler
 # is Bearer-auth-gated in prod mode (#7395) and a platform check cannot send
@@ -752,8 +791,54 @@ def _drain_unread(sock, timeout: float, max_bytes: int) -> None:
         remaining -= len(chunk)
 
 
+def _drain_unread_now(sock, max_bytes: int) -> None:
+    """Non-blocking drain of bytes ALREADY buffered — for the ACCEPT path.
+
+    ``_drain_unread`` above WAITS (up to its timeout), which is fine on a
+    handler thread but not on the accept loop (round-3 review P1: ~0.2s per
+    rejected connection serialized accepts, capping the listener at ~5 conn/s
+    and letting a flood starve the one endpoint that must never go dark).
+    This variant flips the socket non-blocking, consumes only what is already
+    in the receive queue, and returns immediately when the queue empties or
+    ``max_bytes`` is reached — no wall-clock wait, ever. The kernel still sends
+    FIN on the subsequent close because the queued request has been consumed,
+    which is the RST this drain exists to prevent.
+
+    Blocking mode is RESTORED before returning, so the caller
+    (``_reject_overloaded``) leaves the socket in the mode it found it.
+    ``BlockingIOError``/``InterruptedError`` mean "nothing more is queued right
+    now" and stop the loop; any other ``OSError`` is swallowed (best-effort).
+    """
+    try:
+        sock.setblocking(False)
+    except OSError:
+        return
+    try:
+        remaining = max_bytes
+        while remaining > 0:
+            try:
+                chunk = sock.recv(min(remaining, 1024))
+            except (BlockingIOError, InterruptedError):
+                break
+            except OSError:
+                break
+            if not chunk:
+                break
+            remaining -= len(chunk)
+    finally:
+        with contextlib.suppress(OSError):
+            sock.setblocking(True)
+
+
 class _HealthzHandler(BaseHTTPRequestHandler):
     """Liveness only: one in-memory heartbeat read, HTTP 200 or 503.
+
+    The 503 condition is STALE **AND** IDLE (round-3 review P1): a busy loop
+    is not a wedged loop, so a stale heartbeat with a request in flight
+    (``workload_is_idle()`` false) reports 200. This is an ALERTING signal,
+    not an availability/routing gate — do not wire its failure to machine
+    de-registration until the synchronous on-loop work is offloaded (the
+    durable follow-up).
 
     Hardened because this port is unauthenticated and must never become the
     way the machine is exhausted (review P1/P2):
@@ -858,8 +943,17 @@ class _HealthzHandler(BaseHTTPRequestHandler):
             return
         info = loop_heartbeat_info()
         stale = bool(info["loop_stale"])
-        self._send(503 if stale else 200,
-                   {"status": "stale" if stale else "ok", **info})
+        # STALE **AND** IDLE — the same idle predicate the stall watchdog
+        # uses (#2850 round-3 review P1). A busy loop is not a wedged loop:
+        # with the deferred Fly check pointing here and 2xx-means-healthy,
+        # answering 503 for a legitimate synchronous multi-stage request
+        # would de-register the sole machine (total outage). Only "nothing
+        # has ticked AND nothing is in flight" is a genuinely wedged loop.
+        idle = workload_is_idle()
+        wedged = stale and idle
+        self._send(503 if wedged else 200,
+                   {"status": "stale" if wedged else "ok",
+                    "workload_idle": idle, **info})
 
     def _method_not_allowed(self):
         self._send(405, {"status": "method-not-allowed", "allow": "GET"})
@@ -928,7 +1022,22 @@ class _HealthzServer(ThreadingHTTPServer):
 
     @staticmethod
     def _reject_overloaded(request) -> None:
-        """Answer 503 directly on the accepted socket (no thread spawned)."""
+        """Answer 503 directly on the accepted socket (no thread spawned).
+
+        Runs ON THE ACCEPT LOOP, so it must never WAIT on the client in
+        either direction (round-3 review P1):
+          * the whole reject runs with the socket NON-BLOCKING — a client
+            advertising a closed receive window can no longer pin the accept
+            loop for the old 5s send timeout;
+          * the unread request is drained with ``_drain_unread_now``, which
+            consumes only bytes ALREADY in the receive queue and returns at
+            zero wall-clock cost. A drain that *waits* (the old
+            ``_drain_unread``, 0.2s) cost ~0.2s of accept time per rejected
+            connection, capping the listener at ~5 conn/s: a
+            ``request_queue_size`` of 5 stays full, further SYNs drop, and an
+            unauthenticated flood starves the one endpoint that must never go
+            dark — strictly worse than the RST it replaced.
+        """
         body = b'{"status":"overloaded"}'
         response = (
             b"HTTP/1.1 503 Service Unavailable\r\n"
@@ -937,14 +1046,20 @@ class _HealthzServer(ThreadingHTTPServer):
             b"Connection: close\r\n"
             b"Retry-After: 1\r\n\r\n" + body
         )
+        try:
+            request.setblocking(False)
+        except OSError:
+            return
+        # Non-blocking: a full send buffer (zero-window client) raises
+        # BlockingIOError instead of blocking — best-effort delivery is the
+        # right trade for keeping the accept path free.
         with contextlib.suppress(OSError):
-            request.settimeout(HEALTHZ_HANDLER_TIMEOUT_S)
             request.sendall(response)
-        # Review round 2: drain the unread request BEFORE the caller closes,
-        # or the kernel sends RST and the 503 is LOST — the exact failure
-        # observed (first probe 503, every later probe ConnectionResetError).
-        _drain_unread(request, HEALTHZ_REJECT_DRAIN_TIMEOUT_S,
-                      HEALTHZ_REJECT_DRAIN_MAX_BYTES)
+        # Drain what is already queued (non-blocking) so the caller's close
+        # sends FIN rather than RST, which would discard the 503 we just
+        # wrote (review round 2). This restores blocking mode before
+        # returning.
+        _drain_unread_now(request, HEALTHZ_REJECT_DRAIN_MAX_BYTES)
 
 
 _HEALTHZ_LOCK = threading.Lock()
@@ -1295,7 +1410,12 @@ def start_stall_watchdog(threshold_s: float | None = None, *, exit_fn=None,
     """
     if threshold_s is None:
         threshold_s = _loop_stall_threshold()
-    if threshold_s <= 0:
+    # Round-3 review P2: also reject a NON-FINITE programmatic threshold, not
+    # just at the env boundary. ``nan <= 0`` is False, so the old guard armed
+    # a killer whose ``age <= nan`` comparison is False forever — the same
+    # restart-loop the env parser rejects. This matches the docstring's
+    # promise ("a non-finite value DISABLES").
+    if not math.isfinite(threshold_s) or threshold_s <= 0:
         logger.warning(
             "#2850: in-process loop-stall self-kill DISABLED (threshold=%s). "
             "The /healthz listener still reports staleness; destructive "

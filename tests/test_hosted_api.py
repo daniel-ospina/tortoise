@@ -598,6 +598,27 @@ class TestHealthEndpoints:
             assert period == ha_mod.HEALTH_PROBE_REFRESH_S, (raw, period)
             assert any(r.levelno >= logging.ERROR for r in caplog.records), raw
 
+    def test_sub_floor_health_probe_interval_falls_back_to_default(
+            self, monkeypatch, caplog):
+        """Round-3 review P2: a finite but tiny period busy-loops the probe
+        exactly as ``nan`` did — ``1e-9`` is ~50 generations/s, each spawning a
+        daemon thread and issuing a DB round trip. The upper clamp was
+        one-sided; a floor is required too."""
+        import logging
+
+        import tortoise.hosted_api as ha_mod
+
+        for raw in ("1e-9", "0.001", "0.49"):
+            caplog.clear()
+            monkeypatch.setenv("TORTOISE_HEALTH_PROBE_INTERVAL", raw)
+            with caplog.at_level(logging.WARNING, logger="tortoise.hosted_api"):
+                period = _REAL_HEALTH_PROBE_INTERVAL()
+            assert period == ha_mod.HEALTH_PROBE_REFRESH_S, (raw, period)
+            assert any(r.levelno >= logging.WARNING for r in caplog.records), raw
+        # At/above the floor is honoured.
+        monkeypatch.setenv("TORTOISE_HEALTH_PROBE_INTERVAL", "0.5")
+        assert _REAL_HEALTH_PROBE_INTERVAL() == 0.5
+
     def test_probe_connection_is_reused_not_rebuilt_per_call(self, monkeypatch):
         """The probe must own ONE bounded DB connection, not build+leak a
         fresh SDK on every check (the connection half of the #2850 leak).
