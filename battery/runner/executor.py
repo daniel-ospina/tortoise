@@ -348,7 +348,19 @@ def _now() -> str:
 
 def envelope_events(envelope: Envelope) -> list[dict]:
     """MANDATORY envelope-field entries (stated_confidence /
-    stated_undecided / stated_defeat_conditions). Registry-valid."""
+    stated_undecided / stated_defeat_conditions) plus the arm's declared
+    ``position`` (payload-only — #2740).
+
+    ``position`` carries NO registry ``field``: it is not a probe-consumed
+    semantic scalar, it is the arm's own declared answer text, which the
+    judge-gated truth leg (#2740 R3/R5) needs as a VERIFIABLE source — the
+    alternative is mining the raw turn prose, which the envelope contract
+    forbids. Payload-only entries are registry-valid (validate_event_entry
+    checks only a PRESENT field) and are invisible to the scalar trace
+    (``emitted_trace``/``trace_from_log`` key on ``field``), so no probe
+    picks up prose as a scalar. Without this entry the executor parsed
+    ``position`` and dropped it the moment the episode ended.
+    """
     return [
         {"type": "envelope", "event": "declared", "at": _now(),
          "field": "stated_confidence",
@@ -359,6 +371,11 @@ def envelope_events(envelope: Envelope) -> list[dict]:
         {"type": "envelope", "event": "declared", "at": _now(),
          "field": "stated_defeat_conditions",
          "payload": {"value": list(envelope.defeat_conditions)}},
+        # #2740: the arm's declared position, payload-only (no field) — the
+        # emitted, verifiable source for the judged truth leg. Never a
+        # scalar; never read by a probe through trace_from_log.
+        {"type": "envelope", "event": "declared", "at": _now(),
+         "payload": {"position": envelope.position}},
     ]
 
 

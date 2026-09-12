@@ -43,7 +43,20 @@ class ExecutorUnavailable(RuntimeError):
 
     Raised for a missing dataset/fixture, a missing vendor key, or an import
     failure — the caller records a not-measured cell (never a default).
+
+    ``capability_gate`` (#2985): when the refusal is a CAPABILITY-GATE
+    refusal (the lane could not prove it exercised the real product
+    retrieval surface), the machine-readable gate record rides the exception
+    so the artifact writer can persist it — a refusal must never be a silent
+    absence. ``None`` for every ordinary unavailability.
     """
+
+    def __init__(self, *args: object,
+                 capability_gate: dict[str, Any] | None = None) -> None:
+        super().__init__(*args)
+        #: The gate record that caused the refusal, e.g.
+        #: ``{"vector_leg": False, "reason": "no_embedder", ...}``.
+        self.capability_gate = capability_gate
 
 
 #: Lane labels a measured cell may carry. "real"/"mock" are the released
