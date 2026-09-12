@@ -13,10 +13,14 @@ Backends behind the `Projection` protocol:
 from __future__ import annotations  # noqa: I001
 
 import hashlib
+import contextlib
+import json
 import re
 import os
 import shutil
+import stat
 import logging
+import tempfile
 import threading
 from collections import defaultdict
 from datetime import datetime, timezone
@@ -89,6 +93,444 @@ def _is_bulk_wipe(cypher: str) -> bool:
     if m and _WHERE_REAL_RE.search(m.group(1)):  # noqa: SIM103
         return False
     return True
+
+
+# ── #2943: durable pre-wipe snapshot sidecar ────────────────────────────────
+# #548 (graph-only Points) and #990 (:Batch quarantine markers + Point.batch_id
+# links) each snapshot the live graph into an IN-MEMORY list immediately before
+# `MATCH (n) DETACH DELETE n`, then restore from that list after replay. That
+# list is the only record of nodes the JSONL does not carry — that is exactly
+# what makes them graph-only. If the process dies between the wipe and the end
+# of replay (exception, OOM, SIGKILL, timeout), the list dies with it and those
+# nodes are gone for good: a retry re-reads the JSONL (by definition it has no
+# events for them) and re-snapshots an already-empty graph. Permanent data
+# loss on a recovery path (#2943).
+#
+# The fix is a durable sidecar written immediately before the wipe (after the
+# JSONL has been parsed, per the WIPE-AFTER-PARSE pin) and removed only once
+# replay completes. A later rebuild_all unions the leftover in (leftover wins),
+# so an interrupted rebuild is recovered by simply re-running it; the embedded
+# auto-recovery path (tortoise.consistency.recover_from_log) routes through
+# rebuild_all while a sidecar is pending — still under its #428 single-log
+# discriminator, because that route is a destructive wipe+replay.
+#
+# Why a sidecar and NOT appending the synthetic events to the .jsonl journal:
+# replay consumes those events POSITIONALLY — `last_recreate_seq`,
+# `operator_created_seq` and `max_inline_seq` are enumerate indices over the
+# combined event list (synthetic events PREPENDED, #2488/#2423 fold sweeps),
+# and synthetic-first ordering is what guarantees pass-1a nodes referenced by
+# journal events exist. A journal append lands the events at the END of one
+# file (and at an arbitrary position in the multi-file read order), which
+# silently changes the supersede/invalidate survivor rules and the pass-2b
+# re-point discriminator on the very run that needs them. Re-prepending from
+# the sidecar keeps replay order byte-identical to the uninterrupted case.
+_PREWIPE_SNAPSHOT_FILENAME = ".tortoise-prewipe-snapshot.json"
+_PREWIPE_SNAPSHOT_VERSION = 1
+_SNAPSHOT_SECTIONS = ("synthetic_events", "batch_snapshot",
+                      "batch_point_links")
+# The sidecar is read whole into memory before the wipe, so an unbounded file
+# (a planted one especially — the log dir is caller-supplied) would exhaust
+# memory on the recovery path. Nothing this writer produces comes close.
+_PREWIPE_SNAPSHOT_MAX_BYTES = 64 * 1024 * 1024
+# Property values FalkorDB can store: primitives, or arrays of primitives.
+# A sidecar carrying anything else passes a shape check but then dies INSIDE
+# the driver, after the wipe (`ResponseError: Property values can only be of
+# primitive types`), which is exactly the post-wipe failure this validator
+# exists to prevent.
+_PRIMITIVE_TYPES = (str, int, float, bool, type(None))
+
+
+def _is_snapshot_primitive(value) -> bool:
+    """A FalkorDB-storable property value: primitive, or array of those."""
+    if isinstance(value, _PRIMITIVE_TYPES):
+        return True
+    if isinstance(value, (list, tuple)):
+        return all(isinstance(v, _PRIMITIVE_TYPES) for v in value)
+    return False
+
+
+def _validate_point_entry(entry) -> str | None:
+    """Return a complaint about a ``synthetic_events`` entry, else None.
+
+    Shape AND value types are checked, and the ``type`` must be one the
+    replay dispatches on: an unknown type is silently skipped by EVERY pass
+    (pass 1a, 1b and 2 all filter on it), so the sidecar would be cleared
+    after a wipe that restored nothing. `operator.inputs` is the one nested
+    structure the capture writes; every other value must be storable.
+    """
+    if not isinstance(entry, dict):
+        return f"not an object ({type(entry).__name__})"
+    if entry.get("type") not in ("PointAdded", "OperatorAdded"):
+        return (f"type {entry.get('type')!r} is not one the replay handles "
+                f"(PointAdded/OperatorAdded)")
+    point = entry.get("point")
+    if not isinstance(point, dict):
+        return f"point is {type(point).__name__}, expected object"
+    if not isinstance(point.get("id"), str):
+        return f"point id {point.get('id')!r} is not a string"
+    for key, value in point.items():
+        if key == "operator":
+            if not isinstance(value, dict):
+                return f"operator is {type(value).__name__}, expected object"
+            inputs = value.get("inputs")
+            if inputs is not None and not (
+                    isinstance(inputs, (list, tuple))
+                    and all(isinstance(v, str) for v in inputs)):
+                return f"operator inputs {inputs!r} is not a list of strings"
+            # Every OTHER operator value is written to the node as well
+            # (`n.op_type=$opt`), so it must be storable too.
+            for okey, ovalue in value.items():
+                if okey != "inputs" and not _is_snapshot_primitive(ovalue):
+                    return (f"operator.{okey} value {ovalue!r} is not a "
+                            f"primitive or an array of primitives")
+            continue
+        if not _is_snapshot_primitive(value):
+            return (f"property {key!r} value {value!r} is not a primitive "
+                    f"or an array of primitives")
+    return None
+
+
+def _validate_batch_entry(entry) -> str | None:
+    """Return a complaint about a ``batch_snapshot`` entry, else None."""
+    if not isinstance(entry, dict):
+        return f"not an object ({type(entry).__name__})"
+    if not isinstance(entry.get("id"), str):
+        return f"batch id {entry.get('id')!r} is not a string"
+    for key, value in entry.items():
+        if not _is_snapshot_primitive(value):
+            return (f"property {key!r} value {value!r} is not a primitive "
+                    f"or an array of primitives")
+    return None
+
+
+def _validate_link_entry(entry) -> str | None:
+    """Return a complaint about a ``batch_point_links`` entry, else None.
+
+    The restore loop unpacks exactly two values, and writes both into
+    properties — so a longer entry (or a non-string member) must not reach it.
+    """
+    if not isinstance(entry, (list, tuple)) or len(entry) != 2:
+        return f"{entry!r} is not a 2-element list"
+    if not all(isinstance(v, str) for v in entry):
+        return f"{entry!r} is not a pair of strings"
+    return None
+
+
+_SNAPSHOT_ENTRY_CHECK = {
+    "synthetic_events": _validate_point_entry,
+    "batch_snapshot": _validate_batch_entry,
+    "batch_point_links": _validate_link_entry,
+}
+# Node properties a snapshot Point carries but `_upsert_point_props` does NOT
+# write (its SET list is fixed): restored verbatim in the pass-1b tail, because
+# `_upsert_point_props` would otherwise leave an invalidated Point EP-live
+# (#2488 ghost class) and a hash-less one invisible to every hash-keyed
+# dedup/terminal guard (#2971). Widening the SET list itself belongs to
+# #2948/#2958 — this keeps the repair inside the #2943 sidecar path.
+_REPLAY_GAP_PROPS = ("outdated", "expiredAt", "posterior_alpha",
+                     "posterior_beta", "content_hash")
+
+
+def prewipe_snapshot_path(log_dir: str) -> str:
+    """Durable #548/#990 pre-wipe snapshot path for an event-log directory."""
+    return os.path.join(log_dir, _PREWIPE_SNAPSHOT_FILENAME)
+
+
+def _validate_prewipe_snapshot(data: dict, path: str) -> None:
+    """Reject a sidecar whose shape the replay could not safely consume.
+
+    Section types, entry shapes AND property value types are all checked. An
+    entry-shape or value-type defect would otherwise surface as
+    AttributeError/ValueError/ResponseError in the restore loop AFTER
+    `DETACH DELETE` — i.e. after the wipe the validator exists to prevent (a
+    non-primitive value reaches the driver, and an unknown event type is
+    skipped by every pass, so the sidecar gets cleared with nothing restored).
+    """
+    version = data.get("version")
+    if version is not None and version != _PREWIPE_SNAPSHOT_VERSION:
+        raise RuntimeError(
+            f"a pre-wipe snapshot at {path} carries unsupported version "
+            f"{version!r} (this build writes {_PREWIPE_SNAPSHOT_VERSION}) — "
+            f"refusing to wipe the graph (#2943). Migrate or delete the file."
+        )
+    for key in _SNAPSHOT_SECTIONS:
+        section = data.get(key, [])
+        if not isinstance(section, list):
+            raise RuntimeError(
+                f"a pre-wipe snapshot at {path} has a malformed {key!r} "
+                f"section ({type(section).__name__}, expected list) — "
+                f"refusing to wipe the graph (#2943). Repair or delete the "
+                f"file."
+            )
+        check = _SNAPSHOT_ENTRY_CHECK[key]
+        for entry in section:
+            complaint = check(entry)
+            if complaint is None:
+                continue
+            raise RuntimeError(
+                f"a pre-wipe snapshot at {path} has a malformed {key!r} "
+                f"entry ({entry!r}): {complaint} — refusing to wipe the graph "
+                f"(#2943). Repair or delete the file."
+            )
+
+
+def _load_prewipe_snapshot(path: str) -> dict | None:
+    """Read a pending pre-wipe snapshot; None when there is none.
+
+    Raises RuntimeError when a sidecar EXISTS but cannot be trusted: it may be
+    the only surviving record of an interrupted rebuild's graph-only nodes, so
+    silently ignoring it and wiping anyway would turn a repairable situation
+    into permanent loss. The caller aborts BEFORE the wipe.
+
+    Opened with ``O_NOFOLLOW`` and no separate existence probe: the log
+    directory is caller-supplied and may be shared, so a planted symlink must
+    not be followed (and ``os.path.exists`` + ``open`` is a TOCTOU on its own).
+    For the same reason the descriptor must be a REGULAR file of bounded size:
+    a planted FIFO makes a plain ``O_RDONLY`` open block forever (recovery
+    runs on every embedded DB open, so that would hang every opener), a
+    planted device reader never ends, and an oversized file exhausts memory —
+    all of it before any guard or wipe.
+    """
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+                     | getattr(os, "O_NONBLOCK", 0))
+    except FileNotFoundError:
+        return None
+    except OSError as e:
+        raise RuntimeError(
+            f"a pre-wipe snapshot from an interrupted rebuild exists at "
+            f"{path} but cannot be opened ({e}; a symlink is refused). It may "
+            f"be the only surviving record of that rebuild's graph-only "
+            f"Points, so this rebuild refuses to wipe the graph (#2943). "
+            f"Repair the file, or delete it to accept the loss and rebuild "
+            f"from the JSONL alone."
+        ) from e
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            reason = (f"is not a regular file (mode "
+                      f"{stat.S_IFMT(st.st_mode):#o})")
+        elif st.st_size > _PREWIPE_SNAPSHOT_MAX_BYTES:
+            reason = (f"is absurdly large ({st.st_size} bytes > "
+                      f"{_PREWIPE_SNAPSHOT_MAX_BYTES})")
+        else:
+            reason = None
+        if reason is not None:
+            os.close(fd)
+            raise RuntimeError(
+                f"a pre-wipe snapshot from an interrupted rebuild exists at "
+                f"{path} but {reason} — refusing to wipe the graph (#2943). "
+                f"It may be the only surviving record of that rebuild's "
+                f"graph-only Points; inspect it before proceeding."
+            )
+        with os.fdopen(fd, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError) as e:
+        raise RuntimeError(
+            f"a pre-wipe snapshot from an interrupted rebuild exists at "
+            f"{path} but cannot be read ({e}). It may be the only surviving "
+            f"record of that rebuild's graph-only Points, so this rebuild "
+            f"refuses to wipe the graph (#2943). Repair the file, or delete "
+            f"it to accept the loss and rebuild from the JSONL alone."
+        ) from e
+    if not isinstance(data, dict):
+        raise RuntimeError(
+            f"a pre-wipe snapshot from an interrupted rebuild exists at "
+            f"{path} but is not a JSON object ({type(data).__name__}) — "
+            f"refusing to wipe the graph (#2943). Repair or delete the file."
+        )
+    _validate_prewipe_snapshot(data, path)
+    if not any(data.get(key) for key in _SNAPSHOT_SECTIONS):
+        # A retired sidecar (see _clear_prewipe_snapshot) — entry-less by
+        # construction, so there is nothing to merge and nothing to keep.
+        return None
+    return data
+
+
+def _write_prewipe_snapshot(path: str, payload: dict) -> None:
+    """Atomically + durably persist the pre-wipe snapshot.
+
+    ``mkstemp`` in the target directory (unpredictable name, mode 0600,
+    never following a planted symlink) + file fsync + ``os.replace`` +
+    best-effort DIRECTORY fsync: on POSIX the rename is not durable until the
+    containing directory is synced, so a host crash would otherwise reopen
+    the very window this file exists to close.
+    """
+    directory = os.path.dirname(os.path.abspath(path)) or "."
+    fd, tmp = tempfile.mkstemp(dir=directory, prefix=".tortoise-prewipe-",
+                               suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, ensure_ascii=False)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
+    try:
+        dir_fd = os.open(directory, os.O_RDONLY)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
+    except OSError:
+        pass  # best-effort — not every platform/filesystem supports it
+
+
+def _clear_prewipe_snapshot(path: str) -> None:
+    """Retire the sidecar after a completed replay.
+
+    The file is first REWRITTEN entry-less and only then removed, so neither a
+    crash between the two steps nor a failed unlink can leave pre-wipe truth
+    on disk: the next rebuild's union would otherwise re-merge it and roll
+    back state that changed after this rebuild — resurrecting nodes deleted
+    since, or re-arming a quarantine a later commit released. Atomicity comes
+    from the rewrite (``os.replace``); the unlink is then just tidiness.
+    """
+    try:
+        _write_prewipe_snapshot(path, {
+            "version": _PREWIPE_SNAPSHOT_VERSION,
+            "created_at": datetime.now(timezone.utc).isoformat(),  # noqa: UP017
+            "completed": True,
+            "synthetic_events": [],
+            "batch_snapshot": [],
+            "batch_point_links": [],
+        })
+    except (OSError, TypeError, ValueError) as e:
+        # ERROR, not warning: the pre-wipe payload is still on disk, so the
+        # next rebuild will re-merge it and may resurrect nodes deleted since.
+        logger.error(
+            "could not retire the pre-wipe snapshot %s after a completed "
+            "rebuild (%s) — the next rebuild will re-merge its pre-wipe "
+            "values and may resurrect nodes deleted after this one; delete "
+            "the file manually", path, e)
+    try:
+        os.remove(path)
+    except FileNotFoundError:
+        pass
+    except OSError as e:
+        # Harmless: the file left behind is the entry-less retirement payload.
+        logger.warning(
+            "could not remove the retired pre-wipe snapshot %s (%s) — it is "
+            "entry-less, so merging it is a no-op; delete it at leisure",
+            path, e)
+
+
+def _merge_entry(left: dict, fresh: dict, key: str) -> dict:
+    """Field-granular merge of two entries describing the SAME id.
+
+    Fresh wins wherever it HAS a value; the leftover fills the gaps. Neither
+    extreme is right on its own:
+
+    * Leftover-wins-everything rolls back newer state whenever the sidecar
+      outlived the wipe (a kill in the microsecond between the write and
+      `DETACH DELETE`, or a retirement that could not be written) — the
+      graph's current value is the newer one, and the leftover would put back
+      a released quarantine or an older `content`/`status`.
+    * Fresh-wins-everything throws away exactly what the leftover exists for.
+      A partial replay recreates the node through `_upsert_point_props`, whose
+      fixed SET list omits `outdated`/`expiredAt`/`posterior_*`/`content_hash`
+      — so the fresh capture of that node has those properties ABSENT while
+      the leftover still carries the pre-wipe values.
+
+    `absences fill, presence wins` distinguishes them without guessing: a
+    property the fresh capture lacks (or holds as null) is a replay gap; one
+    it holds is current truth. `operator.inputs` is the calibrated case — a
+    partial replay rebuilds no edges, so an empty fresh list is a gap and a
+    non-empty one is newer (the pre-#2943 precedence, kept for this field
+    only).
+    """
+    merged = dict(left)
+    left_point = left.get("point") if key == "synthetic_events" else None
+    fresh_point = fresh.get("point") if key == "synthetic_events" else None
+    if isinstance(left_point, dict) and isinstance(fresh_point, dict):
+        point = dict(left_point)
+        for name, value in fresh_point.items():
+            if value is None:
+                continue
+            if name == "operator":
+                lo = left_point.get("operator")
+                lo = lo if isinstance(lo, dict) else {}
+                fo = value if isinstance(value, dict) else {}
+                lo_inputs, fo_inputs = lo.get("inputs") or [], fo.get("inputs") or []
+                if not fo_inputs and lo_inputs:
+                    lo = {k: v for k, v in lo.items() if k != "inputs"}
+                    fo = {**fo, "inputs": lo_inputs}
+                point[name] = {**lo, **fo}
+            else:
+                point[name] = value
+        merged = {**merged, **fresh, "point": point}
+        return merged
+    for name, value in fresh.items():
+        if value is not None:
+            merged[name] = value
+    return merged
+
+
+def _union_prewipe_snapshot(leftover: dict | None, fresh: dict) -> dict:
+    """Order-stable, deduped union of a persisted snapshot with a fresh one.
+
+    Deduped on point id / batch id / (point id, batch id), leftover order
+    first so the synthetic prefix stays stable (the positional seq space the
+    fold sweeps index on is preserved by keeping every leftover entry and
+    appending only fresh-only ids). A colliding id is merged FIELD-wise by
+    ``_merge_entry`` — fresh truth where it exists, leftover values where the
+    fresh capture has none.
+    """
+    leftover = leftover or {}
+
+    def _union(raw, key, merge_key):
+        out: list = []
+        index: dict = {}
+        for entry in raw:
+            try:
+                k = key(entry)
+            except TypeError:
+                k = None
+            if k is None:
+                # unhashable/absent key — keep the entry, skip dedup
+                out.append(entry)
+                continue
+            if k in index:
+                if merge_key != "batch_point_links":
+                    out[index[k]] = _merge_entry(
+                        out[index[k]], entry, merge_key)
+                continue
+            index[k] = len(out)
+            out.append(entry)
+        return out
+
+    def _point_id(e):
+        p = e.get("point") if isinstance(e, dict) else None
+        pid = p.get("id") if isinstance(p, dict) else None
+        return pid if isinstance(pid, str) else None
+
+    def _batch_id(b):
+        bid = b.get("id") if isinstance(b, dict) else None
+        return bid if isinstance(bid, str) else None
+
+    def _link_key(link):
+        # exactly two, mirroring the restore loop's unpack (entry shapes are
+        # already validated on load; this is the writer-side contract).
+        if isinstance(link, (list, tuple)) and len(link) == 2:
+            k = (link[0], link[1])
+            return k if all(isinstance(v, str) for v in k) else None
+        return None
+
+    events = _union(
+        list(leftover.get("synthetic_events") or [])
+        + list(fresh["synthetic_events"]), _point_id, "synthetic_events")
+    batches = _union(
+        list(leftover.get("batch_snapshot") or [])
+        + list(fresh["batch_snapshot"]), _batch_id, "batch_snapshot")
+    links = [tuple(entry[:2]) for entry in _union(
+        list(leftover.get("batch_point_links") or [])
+        + list(fresh["batch_point_links"]), _link_key, "batch_point_links")
+        if _link_key(entry) is not None]
+    return {"synthetic_events": events, "batch_snapshot": batches,
+            "batch_point_links": links}
 
 
 class _GuardedGraph:
@@ -1181,6 +1623,18 @@ class FalkorProjection(
         SDK-created points that have no corresponding event in any .jsonl file.
         These are injected as synthetic PointAdded/OperatorAdded events before
         the JSONL replay so the two-pass logic handles them identically.
+
+        #2943 durability: that snapshot (Points AND the #990 :Batch markers /
+        Point.batch_id links) is ALSO persisted to a sidecar next to the event
+        log IMMEDIATELY BEFORE the wipe (after the JSONL parse, so a parse
+        abort writes nothing) and removed only once replay completes, so a
+        crash mid-replay cannot orphan graph-only nodes — they exist nowhere
+        else. The next rebuild_all unions the leftover in; the embedded
+        auto-recovery path (tortoise.consistency.recover_from_log) routes here
+        while a sidecar is pending (still under its single-log discriminator).
+        A failed snapshot CAPTURE, a write failure, an untrustworthy sidecar,
+        or a refused wipe all abort BEFORE the wipe. See
+        ``_PREWIPE_SNAPSHOT_FILENAME``.
         """
         import os  # noqa: I001
         from tortoise.log import EventLog
@@ -1190,16 +1644,31 @@ class FalkorProjection(
         # event in the JSONL log. Snapshot them now so they survive the
         # wipe+replay cycle.
         synthetic_events: list[dict] = []
+        capture_failed: list[str] = []
         try:
             rows = self.g.query(
                 "MATCH (n:Point) RETURN properties(n)"
             ).result_set
             existing_points = {}
+            non_str_ids = []
             for r in rows:
                 props = r[0]
                 pid = props.get("id")
-                if pid:
+                if isinstance(pid, str):
                     existing_points[pid] = props
+                elif pid is not None:
+                    # A non-str id cannot round-trip the sidecar (the replay
+                    # indexes by str, #331 r4) — pass 1a would skip the entry,
+                    # the wipe would destroy the node, and the sidecar written
+                    # from it would be rejected by the loader on the NEXT run,
+                    # making the directory permanently unrebuildable. Refuse
+                    # before the wipe instead: the node is the only record of
+                    # itself.
+                    non_str_ids.append(repr(pid))
+            if non_str_ids:
+                capture_failed.append(
+                    f"non-string Point id(s) that cannot survive a JSONL "
+                    f"replay: {', '.join(sorted(non_str_ids)[:5])}")
             if existing_points:
                 # Collect all JSONL events to find which IDs are already
                 # represented in the log.
@@ -1215,10 +1684,15 @@ class FalkorProjection(
                 for pid, props in existing_points.items():
                     if pid in log_point_ids:
                         continue  # log already covers this point
-                    # Strip volatile properties that are recomputed on replay
+                    # Strip volatile properties the replay recomputes or that
+                    # are not node properties. `content_hash` is NOT in this
+                    # list: `_upsert_point_props` never writes it (#2971), so
+                    # the sidecar is its only carrier and the pass-1b tail
+                    # re-applies it explicitly. `updatedAt` and `embedding`
+                    # are genuinely replay-owned.
                     clean = {k: v for k, v in props.items()
-                             if k not in ("embedding", "content_hash",
-                                          "updatedAt", "_nid", "_graph_id")}
+                             if k not in ("embedding", "updatedAt",
+                                          "_nid", "_graph_id")}
                     is_op = bool(props.get("is_operator") or props.get("op_type"))
                     ev_type = "OperatorAdded" if is_op else "PointAdded"
                     if is_op:
@@ -1232,9 +1706,19 @@ class FalkorProjection(
                                 f"RETURN m.id ORDER BY r.idx",
                                 params={"id": pid},
                             ).result_set
-                            inputs = [er[0] for er in edge_rows]
-                        except Exception:
-                            pass  # edge query may fail on corrupt graphs
+                            inputs = [er[0] for er in edge_rows
+                                      if isinstance(er[0], str)]
+                        except Exception as e:
+                            # NOT a tolerable skip: pass 2 rebuilds an
+                            # operator's edges from THIS list, so a failed
+                            # edge scan would persist an operator with no
+                            # inputs (EP then drops the factor entirely) and
+                            # wipe the real edges — silently. Fail closed
+                            # with the other capture failures below, or the
+                            # new gate's guarantee is false.
+                            capture_failed.append(
+                                f"operator inputs for {pid} "
+                                f"({type(e).__name__}: {e})")
                         clean["operator"] = {"op_type": props.get("op_type", "IMPL"),
                                              "inputs": inputs}
                         # Operators may not store 'content' as a node property;
@@ -1251,8 +1735,10 @@ class FalkorProjection(
                         "point": clean,
                         "projection_version": 2,
                     })
-        except Exception:
-            pass  # Graph may be corrupt — skip snapshot; JSONL replay is best-effort
+        except Exception as e:
+            # Graph may be corrupt — see the capture_failed gate below.
+            capture_failed.append(
+                f"Point/#548 snapshot ({type(e).__name__}: {e})")
 
         # ── :Batch marker snapshot (#990) ───────────────────────────
         # Batch lifecycle state (quarantine/commit) lives on :Batch marker
@@ -1279,24 +1765,125 @@ class FalkorProjection(
                 "RETURN p.id, p.batch_id"
             ).result_set
             batch_point_links = [(r[0], r[1]) for r in link_rows] if link_rows else []
-        except Exception:
-            pass  # graph may be corrupt — best-effort, like the #548 snapshot
+        except Exception as e:
+            # graph may be corrupt — see the capture_failed gate below.
+            capture_failed.append(
+                f":Batch/#990 snapshot ({type(e).__name__}: {e})")
+
+        # ── #2943: a FAILED capture must not fall through to the wipe ───
+        # Both capture blocks above are best-effort by design (the graph may
+        # be corrupt), but proceeding after a failed capture would wipe the
+        # graph with NO durable record of its graph-only nodes — the exact
+        # #2943 loss, silently. Fail closed: a graph that cannot answer a
+        # property scan is not evidence the wipe is safe (a heavy
+        # `properties(n)` read can fail — OOM/timeout — while the light
+        # DELETE succeeds).
+        if capture_failed:
+            raise RuntimeError(
+                "rebuild aborted BEFORE the graph wipe: the pre-wipe snapshot "
+                "could not be captured (" + "; ".join(capture_failed) +
+                "). Wiping now would destroy any graph-only Point or :Batch "
+                "marker that has no JSONL event, with no durable record "
+                "(#2943). The graph is untouched — repair the "
+                "graph/connection and re-run."
+            )
 
         # ── Wipe + rebuild ──────────────────────────────────────────
         # WIPE-AFTER-PARSE (epic #900 T12/T3, cycle-21 ordering pin): parse
         # ALL .jsonl into memory (line-tolerant — a torn TRAILING line from a
         # SIGKILL mid-append is skipped with a warning + count via
-        # EventLog.read_all, never raised — S15) BEFORE the wipe. A
-        # wipe-then-parse order would turn one torn line into TOTAL LOSS
-        # (wipe lands, then the parse raises, then the #548 snapshot phase
-        # swallows the same error silently).
+        # EventLog.read_all, never raised — S15) BEFORE the sidecar write and
+        # BEFORE the wipe. A wipe-then-parse order would turn one torn line
+        # into TOTAL LOSS (wipe lands, then the parse raises).
         #
-        # Collect all events from all files (synthetic first so their nodes
-        # exist before JSONL events that may reference them)
-        events = list(synthetic_events)
+        # Parsed into its own list so the #2943 block below can union a
+        # leftover sidecar into the synthetic events before assembling the
+        # final `events` (synthetic first, so their nodes exist before JSONL
+        # events that may reference them).
+        journal_events: list[dict] = []
         for fname in sorted(os.listdir(log_dir)):
             if fname.endswith('.jsonl'):
-                events.extend(EventLog(os.path.join(log_dir, fname)).read_all())
+                journal_events.extend(
+                    EventLog(os.path.join(log_dir, fname)).read_all())
+
+        # ── #2943: durable pre-wipe snapshot (crash-safe wipe+replay) ───
+        # A leftover sidecar means a previous rebuild died after the wipe
+        # landed (or in the microseconds between the write below and it).
+        # Union it in: the graph-only nodes it records exist nowhere else, so
+        # dropping them is permanent loss. Leftover entries win — see
+        # _union_prewipe_snapshot.
+        snapshot_path = prewipe_snapshot_path(log_dir)
+        if self._path and (os.path.dirname(os.path.abspath(self._path))
+                           != os.path.dirname(os.path.abspath(snapshot_path))):
+            # The durable sidecar is keyed to log_dir; embedded auto-recovery
+            # looks only in the DB's own directory. Warn (do not fail) — the
+            # explicit `tortoise rebuild --dir <log_dir>` retry still finds it.
+            logger.warning(
+                "rebuild: the event-log dir %s differs from the embedded DB "
+                "dir %s — the durable pre-wipe snapshot is written next to "
+                "the log, so automatic recovery on DB open will not see it; "
+                "re-run `tortoise rebuild --dir %s` to recover (#2943)",
+                log_dir, os.path.dirname(os.path.abspath(self._path)), log_dir)
+        leftover = _load_prewipe_snapshot(snapshot_path)
+        if leftover is not None:
+            logger.warning(
+                "rebuild: found a leftover pre-wipe snapshot at %s (%d "
+                "graph-only point event(s), %d batch(es), %d batch link(s)) "
+                "from an interrupted rebuild — merging it before this "
+                "wipe+replay",
+                snapshot_path,
+                len(leftover.get("synthetic_events") or []),
+                len(leftover.get("batch_snapshot") or []),
+                len(leftover.get("batch_point_links") or []))
+        merged = _union_prewipe_snapshot(leftover, {
+            "synthetic_events": synthetic_events,
+            "batch_snapshot": batch_snapshot,
+            "batch_point_links": batch_point_links,
+        })
+        synthetic_events = merged["synthetic_events"]
+        batch_snapshot = merged["batch_snapshot"]
+        batch_point_links = merged["batch_point_links"]
+        events = list(synthetic_events) + journal_events
+
+        # Guard the wipe BEFORE persisting the sidecar: a REFUSED wipe (a
+        # non-test graph in server mode) must not leave a sidecar behind, or a
+        # later rebuild of this directory would re-merge it. The wipe itself
+        # re-checks through _GuardedGraph (idempotent).
+        if not self._skip_guard:
+            self._assert_test_graph(
+                "REFUSING to run bulk DETACH DELETE on non-test graph")
+
+        # Persist immediately before the destructive wipe: after DETACH DELETE
+        # these nodes exist nowhere else, so replay must be able to recover
+        # them from disk even if THIS process dies. A write failure aborts the
+        # rebuild rather than proceeding into an unrecoverable wipe (never
+        # silently trade durability for convenience).
+        snapshot_pending = bool(
+            synthetic_events or batch_snapshot or batch_point_links)
+        if snapshot_pending:
+            try:
+                _write_prewipe_snapshot(snapshot_path, {
+                    "version": _PREWIPE_SNAPSHOT_VERSION,
+                    "created_at": datetime.now(timezone.utc).isoformat(),  # noqa: UP017
+                    "synthetic_events": synthetic_events,
+                    "batch_snapshot": batch_snapshot,
+                    "batch_point_links": [list(link) for link in
+                                          batch_point_links],
+                })
+            except (OSError, TypeError, ValueError) as e:
+                raise RuntimeError(
+                    f"rebuild aborted BEFORE the graph wipe: could not persist "
+                    f"the pre-wipe snapshot to {snapshot_path} ({e}). Wiping "
+                    f"now would destroy {len(synthetic_events)} graph-only "
+                    f"Point event(s), {len(batch_snapshot)} :Batch marker(s) "
+                    f"and {len(batch_point_links)} batch link(s) with no "
+                    f"durable record (#2943). Fix the cause — write "
+                    f"permissions/space on the event-log directory, or a "
+                    f"non-serializable Point property — and re-run."
+                ) from e
+        elif leftover is not None:
+            # Nothing left to protect — do not leave a stale sidecar behind.
+            _clear_prewipe_snapshot(snapshot_path)
 
         self.g.query("MATCH (n) DETACH DELETE n")
 
@@ -1653,6 +2240,24 @@ class FalkorProjection(
                 "MATCH (p:Point {id:$pid}) SET p.batch_id = $bid",
                 params={"pid": pid, "bid": bid},
             )
+
+        # Pass 1b tail (#2943): re-apply the snapshot Point properties the
+        # replay itself cannot rebuild. See _REPLAY_GAP_PROPS — this is what
+        # keeps a graph-only Point that was invalidated (or hash-keyed) before
+        # the wipe from coming back as a different node. Values are the
+        # pre-wipe capture's, i.e. the state of the node this wipe destroyed;
+        # the MATCH is a no-op for an id a journal event has since deleted.
+        for ev in synthetic_events:
+            sp = ev.get("point") if isinstance(ev, dict) else None
+            if not isinstance(sp, dict) or not isinstance(sp.get("id"), str):
+                continue
+            gap = {k: sp[k] for k in _REPLAY_GAP_PROPS
+                   if sp.get(k) is not None}
+            if gap:
+                self.g.query(
+                    "MATCH (n:Point {id:$pid}) SET n += $props",
+                    params={"pid": sp["id"], "props": gap},
+                )
 
         # Pass 2: create edges for all operators + provenance/entity wiring
         # (shared _upsert_point_edges — single source of truth with apply, #330).
@@ -2039,6 +2644,13 @@ class FalkorProjection(
                             params={"a": src_f, "b": tgt_f, "attrs": attrs},
                         )
 
+        # #2943: replay completed and the graph now holds everything the
+        # sidecar recorded — drop it BEFORE the count queries (a timeout there
+        # must not leave a sidecar that the next rebuild would re-merge). A
+        # failure above leaves it in place deliberately: the graph may be
+        # partially wiped, and the sidecar is the rescue data.
+        if snapshot_pending:
+            _clear_prewipe_snapshot(snapshot_path)
         node_count = self.g.query(
             "MATCH (n:Point) RETURN count(n)"
         ).result_set[0][0]
