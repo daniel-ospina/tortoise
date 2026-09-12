@@ -153,6 +153,17 @@ class TestCliExecutionSeam:
                                 revision="xiaowu0162/longmemeval-cleaned@s#abc")
 
         monkeypatch.setitem(ex.EXECUTORS, "longmemeval", _fake_executor)
+        # #3005 P1: the memoryagentbench family now has TWO pinned cells
+        # (full-context + retrieved-context). Stub both to explicit
+        # unavailability: this test is about the CLI execution seam for
+        # longmemeval, and the real lanes would otherwise attempt paid
+        # reader calls (network/spend) — hermetic by construction.
+        def _no_runner(*, mock=False, limit=None, out_dir=None):
+            raise ExecutorUnavailable("hermetic test: no real runner")
+
+        monkeypatch.setitem(ex.EXECUTORS, "memoryagentbench", _no_runner)
+        monkeypatch.setitem(ex.EXECUTORS, "memoryagentbench_tortoise",
+                            _no_runner)
         rc = cli.main(["parity", "--config", str(self._cfg(tmp_path)),
                        "--out", str(tmp_path), "--execute", "--allow-spend",
                        "--limit", "5"])
@@ -199,6 +210,11 @@ class TestCliExecutionSeam:
             raise ExecutorUnavailable("longmemeval: no dataset here")
 
         monkeypatch.setitem(ex.EXECUTORS, "longmemeval", _unavailable)
+        # #3005 P1: stub the second (retrieved-context) memoryagentbench
+        # cell too — it is now dispatched by the pinned loop and would
+        # otherwise run the real lane (network/spend).
+        monkeypatch.setitem(ex.EXECUTORS, "memoryagentbench_tortoise",
+                            _unavailable)
         rc = cli.main(["parity", "--config", str(self._cfg(tmp_path)),
                        "--out", str(tmp_path), "--execute", "--allow-spend"])
         assert rc == 0, "an unavailable executor must not crash the leg"

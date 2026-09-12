@@ -49,6 +49,7 @@ import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from battery.arms.base import ArmUnavailable
 from battery.enums import ExitCode
 from battery.parity.executors import ExecutedCell, ExecutorUnavailable
 from battery.parity.mabench import CrConfig, CrItem
@@ -416,6 +417,175 @@ class TestArmGate:
         # The arm OBSERVED the degraded leg — provenance without the gate.
         assert arm.observed_retrieval_legs == ["fts", "vector"]
         assert arm.observed_retrieval_degraded is True
+        # ...and the real-mode refusal was NOT armed by this hermetic run.
+        assert arm.require_observed_hybrid is False
+        assert arm.observed_retrieval_gate is None
+
+
+class TestArmObservedVectorRefusal:
+    """#3005 P1 — the a4 gate for the AVAILABILITY-ONLY hole.
+
+    ``require_hybrid_retrieval`` proves the embedder CAN load; it cannot see
+    a leg that fails at QUERY time (``encode_failed`` / ``breaker_open``).
+    The real runner arms ``require_observed_hybrid``, after which a read
+    whose VECTOR leg did not RUN is refused — no FTS-only a4 number.
+    Hermetic lanes never arm it, so the arm stays usable without the
+    ``embeddings`` extra.
+    """
+
+    def _arm(self, *, vector_ran: bool, reason: str = "encode_failed",
+             include_vector: bool = True):
+        from battery.arms.a4_tortoise import A4TortoiseArm
+        from battery.config.corpus import load_corpus
+
+        corpus = (Path(__file__).resolve().parent.parent
+                  / "battery" / "config" / "corpus.yaml")
+        scenario = load_corpus(corpus)[0]
+        arm = A4TortoiseArm()
+
+        class _FakeSDK:
+            def recall_state(self, query=None, *, kind=None, limit=10,
+                             object_centric=True, leg_trace=None):
+                if leg_trace is not None:
+                    leg_trace.append(
+                        {"leg": "fts", "ran": True, "degraded": False,
+                         "reason": "ok", "count": 0})
+                    if include_vector:
+                        leg_trace.append(
+                            {"leg": "vector", "ran": vector_ran,
+                             "degraded": not vector_ran, "reason": reason,
+                             "count": 0})
+                return []
+
+        arm._sdk_by_id[scenario.id] = _FakeSDK()
+        return arm, scenario
+
+    def _ctx(self, scenario):
+        from battery.arms.base import AgentContext
+        return AgentContext(scenario=scenario, episode_seed=1,
+                            prior_memories=(), user_message="q")
+
+    def test_query_time_leg_failure_is_refused_in_real_mode(self):
+        """The embedder loaded (preflight passes) but the leg failed at
+        query time — the exact #3005 P1 hole."""
+        arm, scenario = self._arm(vector_ran=False, reason="encode_failed")
+        arm.require_observed_hybrid = True
+        with pytest.raises(ArmUnavailable) as ei:
+            arm.retrieve(self._ctx(scenario))
+        msg = str(ei.value)
+        assert "capability gate FAILED" in msg
+        assert "encode_failed" in msg, "the refusal names the real reason"
+        assert "FTS-only" in msg
+        assert arm.observed_retrieval_degraded is True
+        gate = arm.observed_retrieval_gate
+        assert gate["vector_leg"] is False
+        assert gate["reason"] == "encode_failed"
+        assert gate["legs_seen"] == ["fts", "vector"]
+
+    def test_breaker_open_is_refused_with_that_reason(self):
+        arm, scenario = self._arm(vector_ran=False, reason="breaker_open")
+        arm.require_observed_hybrid = True
+        with pytest.raises(ArmUnavailable) as ei:
+            arm.retrieve(self._ctx(scenario))
+        assert arm.observed_retrieval_gate["reason"] == "breaker_open"
+        assert "breaker_open" in str(ei.value)
+
+    def test_absent_vector_entry_is_refused_generically(self):
+        arm, scenario = self._arm(vector_ran=False, include_vector=False)
+        arm.require_observed_hybrid = True
+        with pytest.raises(ArmUnavailable) as ei:
+            arm.retrieve(self._ctx(scenario))
+        assert arm.observed_retrieval_gate["reason"] == "vector_leg_absent"
+        assert "vector_leg_absent" in str(ei.value)
+
+    def test_healthy_hybrid_read_passes_in_real_mode(self):
+        arm, scenario = self._arm(vector_ran=True, reason="ok")
+        arm.require_observed_hybrid = True
+        assert arm.retrieve(self._ctx(scenario)) == []
+        assert arm.observed_retrieval_gate["vector_leg"] is True
+        assert arm.observed_retrieval_degraded is False
+
+    def test_hermetic_lane_is_never_refused(self):
+        """The refusal is keyed on the RUNNER-armed flag, not on the mere
+        absence of the vector leg — the equivalence/hermetic contract."""
+        arm, scenario = self._arm(vector_ran=False, reason="no_embedder")
+        assert arm.require_observed_hybrid is False
+        assert arm.retrieve(self._ctx(scenario)) == []  # no raise
+        assert arm.observed_retrieval_degraded is True
+
+    def test_real_runner_arms_the_flag_and_refuses_the_run(self, tmp_path,
+                                                           monkeypatch):
+        """End-to-end, hermetic: the preflight PASSES (embedder available)
+        but the query-time leg fails — the real run must refuse (exit 4, no
+        a4 number) and stamp the run degraded, instead of publishing an
+        FTS-only a4 score."""
+        from battery.arms import a4_tortoise as a4
+        from battery.runner import run as run_mod
+
+        cfg = _cfg_dir(tmp_path)
+        monkeypatch.setattr(run_mod, "require_hybrid_retrieval", lambda: None)
+        armed: dict = {}
+
+        class _FakeSDK:
+            def recall_state(self, query=None, *, kind=None, limit=10,
+                             object_centric=True, leg_trace=None):
+                if leg_trace is not None:
+                    leg_trace.append(
+                        {"leg": "fts", "ran": True, "degraded": False,
+                         "reason": "ok", "count": 0})
+                    leg_trace.append(
+                        {"leg": "vector", "ran": False, "degraded": True,
+                         "reason": "encode_failed", "count": 0})
+                return []
+
+        def _setup(self, scenarios, **kw):
+            armed["flag"] = self.require_observed_hybrid
+            for sc in scenarios:
+                self._sdk_by_id[sc.id] = _FakeSDK()
+
+        monkeypatch.setattr(a4.A4TortoiseArm, "setup_scenarios", _setup)
+        out = tmp_path / "out"
+        code = run_mod.run_battery(
+            run_mod.RunConfig(config_dir=cfg, arms=["a4"], executor="real",
+                              out_dir=out), stdout=lambda _: None)
+        assert armed["flag"] is True, (
+            "the real runner must arm the observed-vector refusal")
+        assert code is ExitCode.ARM_FAILED, (
+            "a query-time leg failure must not publish an a4 number")
+        summary = json.loads(
+            (sorted(out.iterdir())[0] / "summary.json").read_text())
+        assert summary["run"]["retrieval_degraded"] is True
+        assert "vector" in summary["run"]["retrieval_legs"]
+
+    def test_zero_observed_legs_fails_closed(self, tmp_path, monkeypatch):
+        """#3005 P2 — a real hybrid arm that observed NO legs cannot attest
+        hybrid: ``retrieval_legs: []`` + ``retrieval_degraded: false`` would
+        be indistinguishable from a run with no retrieval arm at all."""
+        from battery.arms import a4_tortoise as a4
+        from battery.runner import run as run_mod
+
+        cfg = _cfg_dir(tmp_path)
+        monkeypatch.setattr(run_mod, "require_hybrid_retrieval", lambda: None)
+
+        def _setup(self, scenarios, **kw):
+            return None  # no reads will happen; observed legs stay empty
+
+        def _no_read(self, ctx):
+            raise ArmUnavailable("store down before any trace")
+
+        monkeypatch.setattr(a4.A4TortoiseArm, "setup_scenarios", _setup)
+        monkeypatch.setattr(a4.A4TortoiseArm, "retrieve", _no_read)
+        out = tmp_path / "out"
+        code = run_mod.run_battery(
+            run_mod.RunConfig(config_dir=cfg, arms=["a4"], executor="real",
+                              out_dir=out), stdout=lambda _: None)
+        assert code is ExitCode.ARM_FAILED
+        summary = json.loads(
+            (sorted(out.iterdir())[0] / "summary.json").read_text())
+        assert summary["run"]["retrieval_legs"] == []
+        assert summary["run"]["retrieval_degraded"] is True, (
+            "zero observed legs must fail closed, not read as 'no retrieval "
+            "arm ran'")
 
 
 # ── artifact-level provenance: parity_record.json ───────────────────────
@@ -453,6 +623,11 @@ class TestParityRecordPersistence:
 
         monkeypatch.setitem(ex.EXECUTORS, "memoryagentbench",
                             _fake_executor)
+        # #3005 P1: the retrieved-context cell is now dispatched too — stub
+        # it (this test is about the baseline cell's provenance) so it never
+        # runs the real mock lane over the full pinned config.
+        monkeypatch.setitem(ex.EXECUTORS, "memoryagentbench_tortoise",
+                            _unavailable)
         # keep the test hermetic/fast: the released LongMemEval runner would
         # otherwise execute its committed mini fixture end to end (~50s)
         monkeypatch.setitem(ex.EXECUTORS, "longmemeval", _unavailable)
@@ -489,6 +664,7 @@ class TestParityRecordPersistence:
             raise err
 
         monkeypatch.setitem(ex.EXECUTORS, "memoryagentbench", _refuse)
+        monkeypatch.setitem(ex.EXECUTORS, "memoryagentbench_tortoise", _refuse)
         monkeypatch.setitem(ex.EXECUTORS, "longmemeval", _refuse)
         rc = cli.main(["parity", "--config", str(self._cfg(tmp_path)),
                        "--out", str(tmp_path), "--execute", "--allow-spend"])

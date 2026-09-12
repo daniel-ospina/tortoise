@@ -22,13 +22,34 @@ surface; the hosted image pre-downloads and pre-warms ``BAAI/bge-small-en-v1.5``
 
 WHAT THIS MODULE IS
 -------------------
-One shared, fail-closed preflight that every REAL lane reading through
-retrieval calls before it ingests or asks anything. A mock/hermetic lane has no
-retrieval engine and is exempt by construction (it never calls this).
+One shared, fail-closed preflight for the REAL lanes that read through
+retrieval. A mock/hermetic lane has no retrieval engine and is exempt by
+construction (it never calls this).
 
 ``hybrid_retrieval_available()`` is the labelling primitive;
 ``require_hybrid_retrieval()`` is the gate — it raises
 :class:`HybridRetrievalUnavailable` with an actionable message naming the fix.
+
+WHO CALLS IT, AND WHEN (the claim above is exact, not aspirational)
+-------------------------------------------------------------------
+* The **A4 arm's real runner** (``battery/runner/run.py``) calls
+  ``require_hybrid_retrieval()`` at arm-init, BEFORE setup/ingest. It is an
+  AVAILABILITY gate: it proves the embedder can load, and refuses the arm
+  when it cannot. It also arms the arm's observed-leg refusal
+  (``A4TortoiseArm.require_observed_hybrid``), which catches a leg that
+  fails at QUERY time (``encode_failed`` / ``breaker_open``) — a condition
+  this preflight cannot see.
+* The **parity Tortoise lane**
+  (``battery/parity/mabench_tortoise.run_cr_tortoise_lane``) does NOT call
+  ``require_hybrid_retrieval()``. It ingests the pinned pool FIRST, then
+  gates AFTER ingest on the OBSERVED per-leg trace
+  (``retrieval_capability_gate`` → ``_capability_refusal``). That gate is
+  trace-based rather than availability-based because the lane's own
+  ``recall`` already emits the trace, so there is no reason to probe the
+  embedder separately.
+
+``merge_leg_trace`` below is the one interpreter of the product's trace
+shape, shared by both lanes so they record identically.
 
 RETRY SEMANTICS (deliberate)
 ----------------------------
@@ -111,11 +132,14 @@ def hybrid_retrieval_available() -> bool:
 def require_hybrid_retrieval() -> None:
     """Fail closed unless the product's embedder is available.
 
-    Call this at the top of every REAL lane that reads through retrieval,
-    BEFORE any ingest or question. Raises :class:`HybridRetrievalUnavailable`
-    with a message that names the ``embeddings`` extra and how to verify the
-    fix — a lane that cannot run hybrid must not run at all, because its
-    number would be a keyword-only number wearing the product's label.
+    Call this at the top of every REAL lane that reads through retrieval
+    BEFORE any ingest or question — unless the lane has its own
+    trace-based gate (the parity Tortoise lane gates AFTER ingest on the
+    OBSERVED leg trace; see the module docstring). Raises
+    :class:`HybridRetrievalUnavailable` with a message that names the
+    ``embeddings`` extra and how to verify the fix — a lane that cannot
+    run hybrid must not run at all, because its number would be a
+    keyword-only number wearing the product's label.
     """
     available, reason = _probe()
     if not available:

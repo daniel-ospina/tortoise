@@ -785,6 +785,15 @@ def run_battery(config: RunConfig, *, stdout: Callable[[str], None] = print,
         try:
             if retrieval_required and run_mode == "real":
                 require_hybrid_retrieval()
+                # #3005 P1: the availability preflight cannot see a
+                # query-time leg failure (``encode_failed`` / ``breaker_open``)
+                # — it only proves the embedder CAN load. Arm the arm's
+                # observed-leg refusal so a read whose VECTOR leg never ran
+                # refuses (ArmUnavailable -> excluded episode -> exit 4)
+                # instead of publishing an FTS-only a4 number. Set only for
+                # the real lane, so hermetic/equivalence tests keep driving
+                # the arm in a degraded environment.
+                arm.require_observed_hybrid = True
             arm.setup_scenarios(scenarios)
         except HybridRetrievalUnavailable as e:
             run_retrieval_degraded = True
@@ -967,10 +976,20 @@ def run_battery(config: RunConfig, *, stdout: Callable[[str], None] = print,
         agg = aggregate(arm_episodes, HARNESS_METRIC_IDS)
         # #2985: fold this arm's OBSERVED retrieval legs into the run record
         # (union across arms). An arm with no retrieval reports nothing.
-        for _leg in getattr(arm, "observed_retrieval_legs", ()) or ():
+        observed_legs = list(
+            getattr(arm, "observed_retrieval_legs", ()) or ())
+        for _leg in observed_legs:
             if _leg not in run_retrieval_legs:
                 run_retrieval_legs.append(_leg)
         if getattr(arm, "observed_retrieval_degraded", False):
+            run_retrieval_degraded = True
+        # #3005 P2: a REAL arm that requires hybrid retrieval but OBSERVED
+        # no legs cannot attest it ran hybrid — fail CLOSED (mirrors the
+        # parity lane's ``if lane == LANE_REAL and not retrieval_legs:
+        # retrieval_degraded = True``). Without this, ``retrieval_legs: []``
+        # + ``retrieval_degraded: false`` is indistinguishable from a run
+        # with no retrieval arm at all.
+        if retrieval_required and run_mode == "real" and not observed_legs:
             run_retrieval_degraded = True
         arms_out.append(_arm_summary_block(
             arm_id, arm_present=True, run_mode=run_mode,

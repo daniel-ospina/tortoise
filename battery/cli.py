@@ -306,6 +306,13 @@ def _cmd_parity(args: argparse.Namespace) -> ExitCode:
               "released runners call paid reader/judge models) — no benchmark "
               "will run; every cell stays not-measured")
     cells: list[ParityRun] = []
+    # #3005 P1: the pinned benchmark id each cell was dispatched under. The
+    # record is keyed by THIS, not by ``ParityRun.benchmark`` — two pinned
+    # ids can share one benchmark (``memoryagentbench`` full-context and
+    # ``memoryagentbench_tortoise`` retrieved-context), and each cell's own
+    # ``lane`` says which arm produced it. Keying by ``c.benchmark`` would
+    # silently collapse the two cells into one.
+    cell_keys: list[str] = []
     # #2985: the retrieval capability gate per benchmark. Populated from a
     # measured cell's detail (the REAL lane that proved the vector leg ran)
     # OR from a gate REFUSAL (``ExecutorUnavailable.capability_gate``) — the
@@ -374,6 +381,7 @@ def _cmd_parity(args: argparse.Namespace) -> ExitCode:
                              revision=(executed.revision if executed else None),
                              lane=(executed.lane if executed else None))
             cells.append(res)
+            cell_keys.append(benchmark)
             unknown = bool(res.protocol_unknown or placeholder_pinned)
             state = f"protocol_unknown={unknown}" if unknown \
                 else "protocol verified"
@@ -418,7 +426,7 @@ def _cmd_parity(args: argparse.Namespace) -> ExitCode:
                 "protocol_unknown": bool(
                     cells[0].protocol_unknown or placeholder_pinned),
                 "benchmarks": {
-                    c.benchmark: {
+                    key: {
                         "version": c.version,
                         # #2797: the not-measured state is PERSISTED (and the
                         # accuracy is written as an explicit null, not
@@ -456,7 +464,7 @@ def _cmd_parity(args: argparse.Namespace) -> ExitCode:
                             False if bool(
                                 c.protocol_unknown or placeholder_pinned)
                             else c.methodology_matched),
-                    } for c in cells},
+                    } for key, c in zip(cell_keys, cells, strict=True)},
             }, indent=2, sort_keys=True), encoding="utf-8")
         print(f"parity record: {record_path}")
     return ExitCode.OK
