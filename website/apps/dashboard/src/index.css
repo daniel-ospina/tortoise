@@ -408,6 +408,10 @@ button:focus-visible, select:focus-visible, a:focus-visible, input:focus-visible
    headers (a11y) for the same rewrite. */
 .keys-table-wrap { overflow-x: auto; }
 .keys-table-wrap table { min-width: 620px; }
+/* #2784: the Last-backup column makes 6 — the same mobile crush as the keys
+   table (#2246), so the same scroller + sane minimum. */
+.graphs-table-wrap { overflow-x: auto; }
+.graphs-table-wrap table { min-width: 560px; }
 .key-toggle {
   position: relative; width: 34px; height: 19px; border-radius: 10px;
   border: 1px solid var(--border); background: var(--surface-hover);
