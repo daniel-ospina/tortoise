@@ -180,6 +180,7 @@ surfaces:
   - test_platform_seams.py            # epic #2080 end-state seams wave-1: per-turn volunteer CLI + install + shipped hook (embedded, lane-agnostic)
   battery:
   - test_battery_arms.py
+  - test_battery_derive_truth_leg.py  # main-side drift unblock: added on main by #3100 (#2740 truth-emission leg) but never registered — the --integrity gate fails every PR without it
   - test_battery_judge.py
   - test_battery_parity.py
   # Dual-registered (api + battery) where the test pins a battery/ module:
