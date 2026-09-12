@@ -244,8 +244,8 @@ class TestDocsPageAndSkillConfig:
     # Per-harness headings in the docs #mcp section. Rows are pinned by
     # heading (not a bare "Codex"/"Pi" substring) so deleting a row fails.
     ROW_HEADINGS = ("<h4>Claude Code</h4>", "<h4>Cursor", "<h4>Pi",
-                    "<h4>Codex CLI</h4>", "<h4>Claude Desktop</h4>",
-                    "<h4>Claude Web</h4>")
+                    "<h4>Codex CLI</h4>", "<h4>Codex Desktop (no terminal)</h4>",
+                    "<h4>Claude Desktop</h4>", "<h4>Claude Web</h4>")
 
     def _mcp_section(self) -> str:
         text = self.DOCS.read_text(encoding="utf-8")
@@ -287,9 +287,27 @@ class TestDocsPageAndSkillConfig:
             assert heading in section, f"docs #mcp must cover {heading} (#3145)"
         # pin the Codex command, not just the word "Codex"
         assert "codex mcp add tortoise --url" in section
+        # Codex Desktop is a separate, shell-export-free path (#2756/#2832)
+        desktop = self._row(section, "<h4>Codex Desktop (no terminal)</h4>",
+                            "<h4>Claude Desktop</h4>")
+        assert "~/.codex/config.toml" in desktop
+        assert "bearer_token_env_var" in desktop
+        assert "does <em>not</em> read shell exports" in desktop
 
     def test_docs_hosted_json_blocks_use_env_indirection_and_canonical_type(self):
         section = self._mcp_section()
+        # Global invariant: EVERY hosted JSON block keeps the key in an env var
+        # (a new harness row must not reintroduce a literal key).
+        hosted = self._row(section, "<h3>Setup — hosted (no install)</h3>",
+                           "<h3>Setup — self-hosted (stdio)</h3>")
+        blocks = re.findall(r"<pre><code>(\{.*?\})</code></pre>", hosted, re.S)
+        assert blocks, "no hosted MCP JSON blocks found in the docs #mcp section"
+        for raw in blocks:
+            server = json.loads(raw)["mcpServers"]["tortoise"]
+            assert "tt_" not in json.dumps(server), f"literal key in hosted block: {server}"
+            if "url" in server:
+                assert "${" in server["headers"]["Authorization"], (
+                    f"hosted block is not env-indirected: {server}")
         # Identify each block by heading slice — Claude Code and Pi share the
         # same plain ${VAR} header token, so a header search is ambiguous.
         claude = self._row(section, "<h4>Claude Code</h4>", "<h4>Cursor")
@@ -298,7 +316,7 @@ class TestDocsPageAndSkillConfig:
         claude_cfg = self._json_block(claude)
         cursor_cfg = self._json_block(cursor)
         pi_cfg = self._json_block(pi)
-        assert claude_cfg["type"] == "http"
+        assert claude_cfg.get("type") == "http", f"Claude Code must carry type http: {claude_cfg}"
         assert claude_cfg["headers"]["Authorization"] == "Bearer ${TORTOISE_API_KEY}"
         assert "type" not in cursor_cfg, "Cursor remote config must omit `type`"
         assert cursor_cfg["headers"]["Authorization"] == "Bearer ${env:TORTOISE_API_KEY}"

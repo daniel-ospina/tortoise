@@ -43,7 +43,7 @@
     h1 { font-family: var(--serif); font-size: 2rem; font-weight: 400; margin-bottom: 8px; }
     h2 { font-family: var(--serif); font-size: 1.4rem; font-weight: 400; margin: 40px 0 12px; color: var(--accent); }
     h3 { font-size: 1rem; margin: 24px 0 8px; }
-    h4 { font-size: .95rem; margin: 20px 0 6px; color: var(--text); }
+    h4 { font-size: .9rem; font-weight: 600; margin: 20px 0 6px; color: var(--text-dim); }
     p { margin-bottom: 12px; }
     a { color: var(--accent); }
     .lead { color: var(--text-dim); font-size: 1.1rem; margin-bottom: 32px; }
@@ -218,7 +218,7 @@ codex mcp add tortoise --url https://api.premiselabs.co/mcp/ --bearer-token-env-
       <p>In claude.ai go to <strong>Settings → Connectors → Add custom connector</strong>, name it <code>Tortoise</code>, and use the Server URL above. Claude Web has no environment to read a variable from, so its request header holds the key literally: <code>Authorization: Bearer YOUR_KEY</code>. The key is held by Anthropic in your account — keep it private and revoke it from the dashboard if it leaks.</p>
 
       <p class="callout">The hosted MCP server runs on our infrastructure — no Python or <code>tortoise</code> install needed. Your client just needs network access to <code>https://api.premiselabs.co/mcp/</code>.</p>
-      <p>After editing a config file, restart that client (Claude Code, Cursor, Pi, Codex). The Claude Desktop and Claude Web connectors are live immediately.</p>
+      <p>After editing a config file, restart that client (Claude Code, Cursor, Pi, and both Codex surfaces). The Claude Desktop and Claude Web connectors are live immediately.</p>
     </div>
     <div class="card">
       <h3>Setup — self-hosted (stdio)</h3>
@@ -229,12 +229,12 @@ codex mcp add tortoise --url https://api.premiselabs.co/mcp/ --bearer-token-env-
       "command": "python3",
       "args": ["-m", "tortoise.mcp_server"],
       "env": {
-        "TORTOISE_DB_URI": "docker://localhost:6379"
+        "TORTOISE_DB_URI": "docker://:falkordb@localhost:6379/tortoise"
       }
     }
   }
 }</code></pre>
-      <p>Cursor requires <code>"type": "stdio"</code> on stdio entries; Claude Code and Pi infer stdio from <code>command</code>.</p>
+      <p>Cursor requires <code>"type": "stdio"</code> on stdio entries; Claude Code and Pi infer stdio from <code>command</code>. Prefer the recommended Docker setup — its daemon speaks HTTP at <code>http://localhost:8000/mcp</code>, and stdio with an embedded database is a single-writer, eval-only fallback (never a durable team setup).</p>
       <p class="callout">Need <code>python3</code> and <code>tortoise</code> installed where the client runs? <code>pip install tortoise-graph</code> — the MCP server ships with the package.</p>
     </div>
     <div class="card">
