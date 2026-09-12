@@ -304,6 +304,42 @@ class TestNoPositionDecisionClass:
         assert env.undecided is False
 
 
+class TestDecisionClassListIsSingleSource:
+    """Review P2-3: ``ENVELOPE_DECISION_CLASSES`` was dead code. It is now
+    the SINGLE SOURCE ``validate_envelope`` enumerates, so the class list
+    and the validator cannot drift: a class declared without a witness
+    fails closed, and a witnessed class with no validator branch fails
+    closed too."""
+
+    def test_every_declared_class_has_a_witness(self):
+        import battery.runner.executor as ex
+        assert set(ex.ENVELOPE_DECISION_CLASSES) <= set(
+            ex._DECISION_CLASS_WITNESS)
+
+    def test_declared_class_without_witness_fails_closed(self, monkeypatch):
+        import battery.runner.executor as ex
+        from battery.exceptions import ConfigError
+        monkeypatch.setattr(ex, "ENVELOPE_DECISION_CLASSES",
+                            ("position", "no_position", "sentinel"))
+        with pytest.raises(ConfigError):
+            ex.validate_envelope({"position": "a real position",
+                                  "stated_confidence": 0.5,
+                                  "undecided": False})
+
+    def test_witnessed_class_without_validator_fails_closed(self,
+                                                           monkeypatch):
+        import battery.runner.executor as ex
+        from battery.exceptions import ConfigError
+        monkeypatch.setattr(ex, "ENVELOPE_DECISION_CLASSES",
+                            ("position", "no_position", "sentinel"))
+        monkeypatch.setitem(ex._DECISION_CLASS_WITNESS, "sentinel",
+                            lambda raw, position: raw.get("sentinel") is True)
+        with pytest.raises(ConfigError):
+            ex.validate_envelope({"sentinel": True,
+                                  "stated_confidence": 0.5,
+                                  "undecided": False})
+
+
 # ── 2. the R1 FP-control verdict producer ─────────────────────────────
 
 
@@ -341,6 +377,98 @@ class TestControlVerdictDerivation:
         assert ev["type"] == "derived" and ev["event"] == "control_verdict"
         assert ev["field"] == "false_positive"
         assert ev["payload"]["value"] is True
+
+    def test_verdict_event_rejects_truthy_non_bool(self):
+        """The no-coercion contract (review P2-1): a non-bool verdict value
+        must be REJECTED, never coerced. ``bool("false")`` is True and
+        ``bool("")``/``bool(None)``/``bool(0)`` are False, so coercing a
+        malformed channel value manufactures a measured verdict (a
+        fabricated false positive, or a fabricated restraint) out of a
+        value the arm never declared as a bool. The emitted payload is the
+        exact bool it was handed, never a re-derived one."""
+        from battery.runner.executor import control_verdict_event
+        for bad in ("false", "yes", "", [], [0], {}, 0, 1, None):
+            with pytest.raises(TypeError):
+                control_verdict_event(false_positive=bad)
+        assert control_verdict_event(
+            false_positive=False)["payload"]["value"] is False
+        assert control_verdict_event(
+            false_positive=True)["payload"]["value"] is True
+
+
+class _WriteFailingControlArm:
+    """Real-mode a0-shaped arm whose decide WRITE channel is dead: the
+    benign control still DECLARES a surfacing intent, but ``record`` raises
+    ``ArmUnavailable`` — the episode never got the chance to file (or not
+    file) anything."""
+
+    arm_id = "a0"
+    model_id = "deepseek/deepseek-v4-flash"  # real-mode (not mock-agent)
+    temperature = 0.0
+
+    def __init__(self, **config):
+        self._config = config
+
+    def setup_scenarios(self, scenarios):
+        return None
+
+    def retrieve(self, context):
+        # one retrieved claim so the declare-write loop actually reaches
+        # ``record`` (with an empty claim set the loop records the
+        # declared intent as ``intent_unfiled``/empty-claims and never
+        # touches the write channel).
+        from battery.arms.base import Memory
+        return [Memory(id="c1", content="server A is the bottleneck",
+                       confidence=0.7, kind="claim")]
+
+    def record(self, context, item):
+        from battery.arms.base import ArmUnavailable
+        raise ArmUnavailable("product write channel down")
+
+    def isolation_namespace(self):
+        return "write-failing-control"
+
+
+class TestFailedControlNeverManufacturesRestraint:
+    """HONESTY GUARD (review P2-2). A control episode whose write channel
+    FAILED did not complete the claim loop, so it must leave
+    ``false_positive`` ABSENT (family cell ``insufficient_n``) — NEVER
+    ``false_positive=False``, which reads as "the arm correctly restrained
+    itself": a fabricated virtue manufactured out of a channel that never
+    ran. Locks the ``if not write_failed`` gate in the real executor
+    against a future change that emits the verdict unconditionally."""
+
+    def test_failed_control_write_absent_not_false(self, tmp_path,
+                                                   monkeypatch):
+        import battery.runner.run as run_mod
+        from battery.runner.probe_scorer import _control_verdict
+
+        cfg = _config_dir(tmp_path)
+        out = tmp_path / "out"
+        monkeypatch.setattr(run_mod, "_resolve_arm",
+                            lambda *a, **k: _WriteFailingControlArm())
+        code = run_battery(RunConfig(
+            config_dir=cfg, out_dir=out, executor="real", arms=["a0"],
+            caller_factory=_BctFlaggingCaller, seed=1,
+            scorer_specs=["battery.probes.r1_contradiction"]),
+            stdout=lambda _: None)
+        # a dead write channel excludes the episode (never a clean run)
+        assert code is ExitCode.ARM_FAILED
+        attempt = sorted(out.iterdir())[0]
+        arts = [json.loads(p.read_text()) for p in attempt.glob("*.json")
+                if p.name not in ("summary.json", "recall.json")
+                and not p.name.startswith("family_")]
+        bct = next(a for a in arts if a["scenario_id"] == "bct-901")
+        assert bct["excluded"]["count"] == 1
+        # the load-bearing negative: NO false_positive entry at all — a
+        # False here would be the fabricated restraint verdict.
+        assert [e for e in bct["event_log"]
+                if e.get("field") == "false_positive"] == []
+        assert _control_verdict(bct["event_log"]) is None
+        # and the family still reports the no-data sentinel, never 0.0
+        payload = _family(attempt, "R1")
+        assert payload["cells"]["false-positive-rate"] == "insufficient_n"
+        assert payload["values"]["false-positive-rate"] == []
 
 
 # ── 3. bct end-to-end through the envelope ────────────────────────────

@@ -91,6 +91,71 @@ _TEMPLATE_POSITION_ECHOES = frozenset({
     "<one sentence position>",
 })
 
+#: Decision classes the envelope admits (#2702): a substantive ``position``
+#: or an explicit ``no_position`` no-op. Closed set — the classes exist so a
+#: benign control / non-decision phase is EXPRESSIBLE without fabricating a
+#: position sentence; they are not scalars and never feed a probe.
+#:
+#: SINGLE SOURCE (review P2-3): ``validate_envelope`` selects the turn's
+#: class by ENUMERATING this tuple through ``_DECISION_CLASS_WITNESS`` (a
+#: declared class with no witness fails closed, never silently dropped) and
+#: ``_validate_decision_class`` dispatches on the selected NAME (a member
+#: without a branch fails closed too). The list can no longer drift from the
+#: validator by being dead metadata.
+ENVELOPE_DECISION_CLASSES: tuple[str, ...] = ("position", "no_position")
+
+
+def _position_declared(raw: dict[str, Any], position: str) -> bool:
+    """Witness for the ``position`` decision class: a non-empty position IS
+    the declaration."""
+    return bool(position)
+
+
+def _no_position_declared(raw: dict[str, Any], position: str) -> bool:
+    """Witness for the ``no_position`` decision class: the explicit typed
+    ``no_position: true`` declaration (never a truthy value — the bool type
+    check in ``validate_envelope`` runs first)."""
+    return raw.get("no_position", False) is True
+
+
+#: Per-class declaration witness, keyed BY ``ENVELOPE_DECISION_CLASSES``.
+_DECISION_CLASS_WITNESS: dict[str, Any] = {
+    "position": _position_declared,
+    "no_position": _no_position_declared,
+}
+
+
+def _validate_decision_class(decision_class: str, raw: dict[str, Any],
+                             position: str) -> None:
+    """Enforce the SELECTED decision class's own rules (the no-op class
+    carries no prose and surfaces nothing; the position class rejects a
+    prompt-template echo). Exactly-one-class is enforced by the caller
+    before this runs."""
+    if decision_class == "position":
+        # Review #2717 P2: a verbatim echo of the prompt's template token is
+        # a harness artifact, never a position — reject it so the metric
+        # can never score the envelope request's own placeholder.
+        if position.lower() in _TEMPLATE_POSITION_ECHOES:
+            raise ValueError(
+                f"envelope.position is the prompt template echo "
+                f"{position!r}, not a position")
+        return
+    if decision_class == "no_position":
+        if position:
+            raise ValueError(
+                "envelope.no_position is true but a substantive position "
+                "was also declared — the no-op class carries no prose "
+                "(exactly one decision class per turn)")
+        if raw.get("intents"):
+            raise ValueError(
+                "envelope.no_position is true but surfacing intents were "
+                "also declared — a no-op turn surfaces nothing")
+        return
+    raise ConfigError(
+        f"envelope decision class {decision_class!r} has no validator — "
+        f"ENVELOPE_DECISION_CLASSES ({list(ENVELOPE_DECISION_CLASSES)}) "
+        f"drifted from the validator")
+
 
 def validate_envelope(raw: dict[str, Any]) -> Envelope:
     """Validate one envelope dict — TypeError/ValueError on any violation
@@ -111,26 +176,25 @@ def validate_envelope(raw: dict[str, Any]) -> Envelope:
             f"envelope.no_position must be a bool, got "
             f"{type(no_position).__name__}")
     position = str(raw.get("position", "")).strip()
-    if no_position:
-        if position:
-            raise ValueError(
-                "envelope.no_position is true but a substantive position "
-                "was also declared — the no-op class carries no prose "
-                "(exactly one decision class per turn)")
-        if raw.get("intents"):
-            raise ValueError(
-                "envelope.no_position is true but surfacing intents were "
-                "also declared — a no-op turn surfaces nothing")
-    else:
-        if not position:
-            raise ValueError("envelope.position is required and non-empty")
-        # Review #2717 P2: a verbatim echo of the prompt's template token is
-        # a harness artifact, never a position — reject it so the metric
-        # can never score the envelope request's own placeholder.
-        if position.lower() in _TEMPLATE_POSITION_ECHOES:
-            raise ValueError(
-                f"envelope.position is the prompt template echo "
-                f"{position!r}, not a position")
+    # The turn's decision class is SELECTED by enumerating the closed set
+    # (ENVELOPE_DECISION_CLASSES is the single source), and exactly one class
+    # must be declared: a substantive position and the explicit no-op are
+    # mutually exclusive, and neither is a silent default. A declared class
+    # with no witness is a hard failure — the list cannot drift.
+    missing_witness = [c for c in ENVELOPE_DECISION_CLASSES
+                       if c not in _DECISION_CLASS_WITNESS]
+    if missing_witness:
+        raise ConfigError(
+            f"ENVELOPE_DECISION_CLASSES declares {missing_witness} without "
+            f"a witness — the decision-class list and the validator drifted")
+    declared = [c for c in ENVELOPE_DECISION_CLASSES
+                if _DECISION_CLASS_WITNESS[c](raw, position)]
+    if len(declared) != 1:
+        raise ValueError(
+            f"envelope must declare exactly one decision class from "
+            f"{list(ENVELOPE_DECISION_CLASSES)} — a non-empty position or "
+            f"an explicit no_position no-op; declared {declared or 'none'}")
+    _validate_decision_class(declared[0], raw, position)
     conf = raw.get("stated_confidence")
     if not isinstance(conf, (int, float)) or isinstance(conf, bool):
         raise TypeError(
@@ -199,12 +263,6 @@ _PHASE_PROMPTS: dict[str, str] = {
 #: Early-exit rule: after this many Challenge/Deepen/Revise cycles with no
 #: declared revision, the scaffold converges early (n >= 3 per the plan).
 MAX_REVISION_CYCLES = 3
-
-#: Decision classes the envelope admits (#2702): a substantive ``position``
-#: or an explicit ``no_position`` no-op. Closed set — the classes exist so a
-#: benign control / non-decision phase is EXPRESSIBLE without fabricating a
-#: position sentence; they are not scalars and never feed a probe.
-ENVELOPE_DECISION_CLASSES: tuple[str, ...] = ("position", "no_position")
 
 #: Corrective suffix appended to the FULL phase prompt on a schema failure.
 #: The repair re-asks the SAME question (the phase render + phase
@@ -508,15 +566,25 @@ def control_verdict_event(*, false_positive: bool) -> dict:
     """The R1 FP-control verdict for a benign-control episode (#2702).
 
     Registry-shaped ``derived``/``control_verdict`` entry carrying a typed
-    BOOL (never a default): the probe's ``_control_verdict`` reader accepts
-    only an explicit bool payload, so a malformed/absent verdict can never
-    be coerced into a measured pass. The value is DERIVED by the executor
-    from its OWN tool channel — the only component that knows the channel
-    ran — never from prose and never as a fallback for a missing write.
+    BOOL (never a default, never a coercion): the probe's ``_control_verdict``
+    reader accepts only an explicit bool payload, so a malformed/absent
+    verdict can never be coerced into a measured pass. A non-bool
+    ``false_positive`` is REJECTED (TypeError), not coerced — ``bool("false")``
+    is True and ``bool("")``/``bool(None)`` are False, either of which would
+    manufacture a measured verdict (a fabricated false positive, or a
+    fabricated restraint) from a value the arm never declared. The value is
+    DERIVED by the executor from its OWN tool channel — the only component
+    that knows the channel ran — never from prose and never as a fallback
+    for a missing write.
     """
+    if not isinstance(false_positive, bool):
+        raise TypeError(
+            f"control verdict false_positive must be a bool, got "
+            f"{type(false_positive).__name__} — a truthy non-bool must never "
+            f"be coerced into a measured verdict")
     return {
         "type": "derived", "event": "control_verdict", "at": _now(),
-        "field": "false_positive", "payload": {"value": bool(false_positive)},
+        "field": "false_positive", "payload": {"value": false_positive},
     }
 
 
