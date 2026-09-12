@@ -256,6 +256,15 @@ surfaces:
   - test_battery_token_relock.py
   - test_battery_validation_real.py
   - test_battery_write_channel.py
+  # #3221 (registration): derive-leg truth seam (envelope `confidences` + judged
+  # `outcomes`), added by #3100 and never registered — one of the two entries
+  # behind `manifest-integrity`'s persistent drift on main
+  # (`tools/ci_selection.py --integrity`). Battery-only: it pins battery
+  # scoring/derive code and no api-owned surface, so it belongs here and NOT
+  # dual-registered (the #2916 class). Appended at the end of the block rather
+  # than alphabetically so the registration does not disturb the curated
+  # groupings above.
+  - test_battery_derive_truth_leg.py
   core:
   - test_about_edges.py
   - test_about_event_untangle.py
@@ -285,6 +294,13 @@ surfaces:
   - test_restore_container_recovery.py
   - test_session_attribution.py
   - test_ci_selection.py
+  # #3221: guard for tools/collision_preflight.py (the #3061 pre-dispatch
+  # collision check), added by #3148 and never registered. `core` is the
+  # surface a tools/-only change falls back to, so a preflight-only change runs
+  # the file that guards it instead of selecting no surface at all (#3153 hole).
+  # The companion selector wiring that makes the tool itself select `core`
+  # (TOOL_CORE_CARVEOUTS) rides in #3228, which overlaps this registration.
+  - test_collision_preflight.py
   - test_connector_loader.py
   - test_connector_secrets.py
   - test_connector_sources.py
