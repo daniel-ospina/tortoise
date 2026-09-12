@@ -902,10 +902,13 @@ def force_sparse_tfidf(monkeypatch):
 # ── #3280: the deterministic VECTOR-leg baseline (the mirror of the above) ──
 # Where ``force_sparse_tfidf`` pins the embedder OFF, these provide the
 # deterministic embedder ON — needed by any test whose pool must span more
-# than one session (a per-session cap cannot bind on a single-session pool).
-# One shared copy on purpose: this is a process-stable hash whose GEOMETRY is
-# depended on by pool-shape expectations in more than one module, so two
-# copies that drift would silently change each other's embedding space.
+# than one session. On a single-session pool a per-session cap can never
+# CAUSE a reorder: it binds and takes the identity prefix, so nothing moves.
+# Hoisted here so the embedding GEOMETRY has one home: pool-shape
+# expectations in more than one module depend on it, and two copies that drift
+# would silently change each other's embedding space. (``test_vector_arm.py``
+# and ``test_mini_beir.py`` still carry agreeing local copies; migrating them
+# is follow-up, not a prerequisite.)
 _FAKE_DIM = 32
 _FAKE_TOKEN_RE = _re.compile(r"[a-z0-9']+")
 

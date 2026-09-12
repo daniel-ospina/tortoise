@@ -84,7 +84,6 @@ def _inject_fake(monkeypatch, scorer=None):
     monkeypatch.setattr(rerank, "get_scorer", lambda model=None: (fake, ""))
 
 
-
 def _trusted_audit() -> dict:
     from tools.longmem_eval.dataset_audit import audit_dataset
     return audit_dataset([{
@@ -575,13 +574,16 @@ def test_retrieve_rerank_flags_stamped(tmp_path, monkeypatch, fake_token_embedde
     SPARSE pool, and went genuinely RED — NOT vacuously green.
     ``rerank.py`` sets ``reranked`` only when MMR returns a NON-IDENTITY
     permutation, so ``any(flags)`` means "the retrieval input order was not
-    already MMR-optimal". Sparse q0 selects 2 hits from a SINGLE session
-    (``mini-s1``); ``per_session_cap=2`` therefore cannot bind, ``moved`` is
-    legitimately 0, every flag is False, and the assertion fails with
-    ``assert False = any([False, False])``. (The COMPANION assertion
-    ``moved == sum(flags)`` was the vacuous one — ``0 == 0``.) The real defect
-    was that the assertion depended on the POOL SHAPE, not on the overlay's
-    contract.
+    already MMR-optimal". Sparse q0 is **4** chunk-hits from a SINGLE session
+    (``mini-s1``); ``per_session_cap=2`` BINDS and selects the identity prefix
+    ``[0, 1]`` (dropping 2 and 3), which leaves MMR no room to reorder, so
+    ``moved`` is 0, every flag is False, and the assertion fails with
+    ``assert False = any([False, False])``. Note the cap binding is precisely
+    WHY nothing moves: with ``cap=20`` the pool is uncapped, MMR selects all 4
+    and reorders 2, and the old assertion would have been GREEN — the pool
+    SHAPE, not the overlay's contract, decided the outcome. (The COMPANION
+    assertion ``moved == sum(flags)`` was the vacuous one — ``0 == 0``, since
+    both are set in the same ``if rank != i`` branch.)
 
     It had passed historically only because the RRF tie-break was then
     thread-COMPLETION order, which shuffled the input often enough that MMR
@@ -622,8 +624,9 @@ def test_retrieve_rerank_flags_stamped(tmp_path, monkeypatch, fake_token_embedde
         # uncapped singletons ("" groups), so match it.
         sessions = {h["session_id"] for h in ret["hits"] if h.get("session_id")}
         assert len(sessions) > 1, (
-            "#3280: expectation pool is single-session — per_session_cap "
-            f"cannot bind, so the reorder assertion is meaningless (got {sessions})")
+            "#3280: expectation pool is single-session — per_session_cap binds "
+            "and takes the identity prefix, so there is nothing to reorder "
+            f"(got {sessions})")
         assert any(flags)                     # the mechanism moved something
         assert moved == sum(1 for f in flags if f)   # flag/moved agree
         # the overlay REORDERS the selected pool, it never drops below it
