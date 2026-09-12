@@ -3243,14 +3243,24 @@ def _mask_uri_userinfo(target: str) -> str:
     terminal/log. Host/port/path stay visible for debuggability (matches
     the FALKORDB_* legacy display mask, conf 95).
 
-    #720 P2 conf 68: the userinfo→host boundary is the LAST '@' of the
-    authority region (everything before the first '?'/'#'), NOT
-    urlsplit's netloc — a password may contain '/' (docker://user:p/ss@
-    host:... is RFC-invalid but urlparse/redis-py accept it, and
-    urlsplit's netloc cuts at the first '/'), which would split
-    mid-credential and leak the tail. The '://' may also sit mid-message
-    (RELATIVE_PATH_ERROR embeds the raw URI in prose), so every
-    scheme:// pattern in the string is scanned, not just a leading one.
+    #720 P2 conf 68: the userinfo→host boundary is the LAST '@' of
+    everything after the scheme, NOT urlsplit's netloc — a password may
+    contain '/' (docker://user:p/ss@host:... is RFC-invalid but
+    urlparse/redis-py accept it, and urlsplit's netloc cuts at the first
+    '/'), which would split mid-credential and leak the tail. The '://'
+    may also sit mid-message (RELATIVE_PATH_ERROR embeds the raw URI in
+    prose), so the scheme token is recovered by walking back over scheme
+    characters rather than assuming a leading position.
+
+    #2983 fail-closed: a literal '?'/'#'/'://'/'@' inside a password is
+    RFC-invalid (it should be %3F/%23) but is copy-pasteable, and each
+    used to truncate the region before the real '@' and re-emit the
+    credential in clear. The boundary is therefore the LAST '@' of the
+    whole remainder: over-reaching past a genuine query/fragment, or
+    across later prose or a second URI in the same message, is
+    diagnosability loss and never a leak (it mirrors
+    entrypoint.sh::_redact_uri). For well-formed URIs the output is
+    unchanged.
     """
     from urllib.parse import urlsplit
 
@@ -3284,26 +3294,18 @@ def _mask_uri_userinfo(target: str) -> str:
                     break
             except ValueError:
                 pass  # malformed authority (e.g. unmatched '[') — mask below
-        # The authority region runs to the earliest of: the start of the
-        # next URI's scheme token (a second URI in the same message), or a
-        # '?'/'#' delimiter (query/fragment never belong to userinfo — an
-        # '@' in a query value must not swallow the host).
+        # #2983 fail-closed: the userinfo→host boundary is the LAST '@' of
+        # everything that follows the scheme. A password may contain '?',
+        # '#', '://' or '@' (RFC-invalid, but copy-pasteable); bounding the
+        # region on any of those truncates it before the real '@' and
+        # re-emits credential material. Masking to the last '@' can
+        # over-reach — past a genuine query/fragment, or across later prose
+        # or a second URI in the same message — which loses diagnosability
+        # but never leaks, and mirrors entrypoint.sh::_redact_uri. For
+        # well-formed URIs (delimiters only after the userinfo '@') the
+        # output is unchanged.
         rest_start = j + 3
-        cut = None
-        for c in ("?", "#"):
-            pos = target.find(c, rest_start)
-            if pos >= 0 and (cut is None or pos < cut):
-                cut = pos
-        nxt = target.find("://", rest_start)
-        if nxt >= 0:
-            s = nxt
-            while s > rest_start and (target[s - 1].isalnum()
-                                      or target[s - 1] in "+-."):
-                s -= 1
-            if s < nxt and (cut is None or s < cut):
-                cut = s
-        region_end = cut if cut is not None else len(target)
-        authority = target[rest_start:region_end]
+        authority = target[rest_start:]
         at = authority.rfind("@")
         if at < 0:
             out.append(target[i:j + 3])
@@ -3311,7 +3313,7 @@ def _mask_uri_userinfo(target: str) -> str:
             continue
         out.append(target[i:k])
         out.append(f"{scheme}://:***@{authority[at + 1:]}")
-        i = region_end
+        i = len(target)
     return "".join(out)
 
 
