@@ -21862,8 +21862,20 @@ async def webhooks_stripe(request: Request):
 # filings from this work: #3124 (the shared per-IP primitive + the generic
 # middleware's store are still unbounded), #3125 (`_check_claim_rate_limit`
 # keys on the proxy IP), #3128 (authorize/consent forward an unvalidated
-# scope into the minted token). #3036 already covers oauth_* token-table
-# retention/GC.
+# scope into the minted token), #3134 (dated measurement of real DCR volume —
+# the 600/1200 aggregates are not load-validated). #3036 already covers
+# oauth_* token-table retention/GC.
+#
+# CHARGING DOCTRINE DIVERGENCE (tracked, #1719 / #2051): this limiter charges
+# at CHECK time, like `_check_ip_bucket_rate_limit` without `defer_charge`,
+# not at the TERMINAL outcome the way #1719's `defer_charge=True` callers do.
+# Consequence: a control-plane 5xx from `register_client` still consumed the
+# caller's budget, so a post-recovery retry can meet a spurious 429 that masks
+# the underlying failure. That is the #2051 failure class, and #2051 does not
+# currently list DCR. Documented here rather than silently mirrored, per the
+# #2038 precedent (PR #2049 review) — see also the docs limitation in
+# docs/oauth-mcp.md. The phase-1/phase-2 seam already exists, so moving the
+# charge past `register_client` is the follow-up if #2051 is taken up.
 _OAUTH_DCR_WINDOW_S = 3600
 _OAUTH_DCR_PER_HOUR_DEFAULT = 20
 _OAUTH_DCR_ANON_AGGREGATE_PER_HOUR_DEFAULT = 600

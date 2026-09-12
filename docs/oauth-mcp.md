@@ -166,6 +166,18 @@ Accepted limitations (see the code comment for the full list):
 - The limiter runs **before body parsing**, so an invalid-JSON or oversized
   POST still consumes budget (charges ≤ 600/hr anonymous + 1200/hr trusted);
   row writes are not bounded by it.
+- **Charging doctrine:** the limiter charges at **check** time, not at the
+  terminal outcome (unlike #1719's `defer_charge=True` callers). A
+  control-plane 5xx from `register_client` therefore still consumes the
+  caller's budget, and a post-recovery retry can meet a spurious 429 that
+  masks the underlying failure — the #2051 failure class, which does not
+  currently list DCR. Tracked, not silent.
+- The **trusted aggregate (1200/hr) and anonymous aggregate (600/hr) are not
+  measured against production volume** — the pre-#2866 model was
+  `20/hr × distinct Anthropic egress IPs`, so 1200/hr could be either a large
+  increase or a new single point of failure for the traffic the policy exists
+  to protect. #3134 owns the dated measurement (owner @daniel-ospina,
+  2026-11-15).
 - `/register` also passes the generic `RateLimitMiddleware` (100/min, whose
   bucket store has no hard key cap — #3124).
 - The exemption rests on the Fly edge overwriting any client-supplied

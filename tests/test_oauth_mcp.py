@@ -1865,6 +1865,11 @@ class TestDcrCapacityPolicy:
         monkeypatch.setenv("TORTOISE_OAUTH_DCR_ANON_AGGREGATE_PER_HOUR", "1000")
         assert _dcr_post(tc, ip="203.0.113.5").status_code == 201
         assert _dcr_post(tc, ip="203.0.113.5").status_code == 429
+        # (m)(ii): a PER-KEY 429 must leave the anonymous aggregate uncharged —
+        # otherwise one client hammering its own bucket burns the global
+        # budget for everybody (phase 2 is unreachable on a denied request).
+        assert len(_ha_mod._OAUTH_DCR_ANON[
+            _ha_mod._OAUTH_DCR_ANON_KEY]) == 1
 
     # ── (o3) STORE_CAP=0 → served by overflow, then its cap binds ───────
     def test_o3_store_cap_zero_uses_overflow(self, api_client, monkeypatch):

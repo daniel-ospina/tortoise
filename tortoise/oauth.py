@@ -51,10 +51,15 @@ from urllib.parse import parse_qs, urlencode, urlparse  # noqa: F401
 # ── Protocol constants ──────────────────────────────────────────────────────
 
 # SCOPES_SUPPORTED is the *client-facing default* / PRM document scope set;
-# SCOPES_ACCEPTED is the superset the DCR + authorize gates must accept
-# (#2866). `offline_access` is accepted (Claude's connector requests it, and
-# the AS does mint refresh tokens) without becoming a default fallback or a
-# PRM-advertised scope. The superset relation is structural.
+# SCOPES_ACCEPTED is the superset the DCR gate accepts and the AS metadata
+# advertises (#2866). `offline_access` is accepted (Claude's connector
+# requests it, and the AS does mint refresh tokens unconditionally) without
+# becoming a default fallback or a PRM-advertised scope. The superset
+# relation is structural. NOTE: scope enforcement is DCR-only today —
+# `validate_authorize_params` takes no `scope` parameter, so the
+# authorize/consent path forwards an unvalidated scope into the minted token
+# (pre-existing, filed as #3128). Do not read this constant as an authorize
+# gate.
 SCOPES_SUPPORTED = ["mcp"]
 SCOPES_ACCEPTED = [*SCOPES_SUPPORTED, "offline_access"]
 ACCESS_TOKEN_TTL_S = int(os.environ.get("TORTOISE_OAUTH_ACCESS_TTL", "3600"))
