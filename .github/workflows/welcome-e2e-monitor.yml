@@ -77,11 +77,44 @@ jobs:
       - name: Auto-file issue on failure (monitor signal — never blocks merges)
         if: failure()
         run: |
-          # #2140: --fail-with-body so a failed issue create (403/429/etc.)
-          # fails the step loudly instead of silently skipping the file
-          # (curl -s exits 0 on HTTP errors — the deaf-monitor class).
-          curl --fail-with-body -sS -X POST \
-            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-            -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/repos/${{ github.repository }}/issues" \
-            -d '{"title":"live-signup-monitor: welcome-e2e failed (run ${{ github.run_id }})","body":"Monitor failure — run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}. This is the #801 live signup funnel monitor (schedule + on-merge). The smoke asserts POST /v1/signup/email → 200 and the auto sign-in (auth/v1/token?grant_type=password) → 200; failures are typically a real signup-funnel regression, an API 429 (over_email_send_rate_limit / over_request_rate_limit / over_request_rate_limit_ip), or a stale test vs the deployed page. Investigate or re-run; it is NOT a PR regression gate.","labels":["bug"]}'
+          # Dedupe (#2706): at most ONE open auto-filed issue per monitor
+          # identity — not one per run. The stable title (no run id) is the
+          # dedupe key: search OPEN issues by title prefix and comment on the
+          # oldest match, so consecutive failing runs consolidate onto a single
+          # ticket. Once the monitor goes green and the ticket is closed, the
+          # next failure opens a fresh issue. Pre-#2706 run-id titles start
+          # with the same prefix, so existing duplicates consolidate too.
+          #
+          # Fail-safe: dedupe is best-effort. If the search itself errors we
+          # still CREATE — filing loudly is the monitor's core contract and
+          # must never silently no-op (the #2140 deaf-monitor class).
+          MONITOR_TITLE='live-signup-monitor: welcome-e2e failed'
+          set -eo pipefail
+          EXISTING=''
+          if EXISTING="$(gh issue list --repo "$GITHUB_REPOSITORY" --state open \
+              --search "\"$MONITOR_TITLE\" in:title" --limit 100 \
+              --json number,createdAt \
+              --jq 'sort_by(.createdAt) | .[0].number // empty' 2>/dev/null)"; then
+            if [ -n "$EXISTING" ]; then
+              echo "dedupe: open ticket #$EXISTING already filed for this monitor identity — commenting instead of creating"
+            else
+              echo "dedupe: no open ticket — creating a fresh issue"
+            fi
+          else
+            echo "::warning::dedupe search failed — falling back to issue create"
+          fi
+          if [ -n "$EXISTING" ]; then
+            # Comment on the open ticket with the new failing run (audit trail)
+            gh issue comment "$EXISTING" --repo "$GITHUB_REPOSITORY" \
+              --body "Monitor still failing — run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+              || { echo "::error::could not comment dedupe update on #$EXISTING"; exit 1; }
+          else
+            # #2140: --fail-with-body so a failed issue create (403/429/etc.)
+            # fails the step loudly instead of silently skipping the file
+            # (curl -s exits 0 on HTTP errors — the deaf-monitor class).
+            curl --fail-with-body -sS -X POST \
+              -H "Authorization: Bearer $GITHUB_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/$GITHUB_REPOSITORY/issues" \
+              -d "{\"title\":\"$MONITOR_TITLE\",\"body\":\"Monitor failure — run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID. This is the #801 live signup funnel monitor (schedule + on-merge). The smoke asserts POST /v1/signup/email → 200 and the auto sign-in (auth/v1/token?grant_type=password) → 200; failures are typically a real signup-funnel regression, an API 429 (over_email_send_rate_limit / over_request_rate_limit / over_request_rate_limit_ip), or a stale test vs the deployed page. Investigate or re-run; it is NOT a PR regression gate. One open ticket per monitor identity (#2706) — later failing runs comment here.\",\"labels\":[\"bug\"]}"
+          fi
