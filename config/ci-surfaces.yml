@@ -32,14 +32,13 @@ surfaces:
   - test_api.py
   - test_action_endpoints_dual_auth.py
   - test_audit.py
-  - test_battery_arms.py
-  - test_battery_cli.py
-  - test_battery_config.py
-  - test_battery_determinism.py
-  - test_battery_enums.py
-  - test_battery_run.py
-  - test_battery_runner.py
-  - test_battery_setup.py
+  # #2938: the eight battery members previously dual-registered here (arms,
+  # cli, config, determinism, enums, run, runner, setup) were verified per
+  # file to pin no api-owned source — no api-pinned import, no api-pinned
+  # path string, module-level or through a followed helper — so their api
+  # half ran on every api-source edit for nothing. Moved to battery-only
+  # (the same class #2916 curated for 26 files); they remain listed under
+  # `battery:` below.
   - test_audit_events.py
   - test_auth.py
   - test_auth_flip.py
@@ -187,10 +186,12 @@ surfaces:
   # test_battery_parity_migration.py and test_battery_parity_hash.py, which
   # module-import battery.parity.runner yet were api-only (the same latent gap,
   # found in review).
-  # The other DUAL members here are inherited, not deliberate: arms, cli, config,
-  # determinism, enums, run, runner and setup pin no api-owned source either, so
-  # their api half is waste of the same kind #2916 moved out. Left in place here
-  # (out of that issue's scope) and tracked by #2938 with the wider class.
+  # The eight battery members that used to be dual-registered under `api`
+  # (arms, cli, config, determinism, enums, run, runner, setup) were curated by
+  # #2938: each was verified per file to pin no api-owned source — no
+  # api-pinned import, no api-pinned path string, module-level or through a
+  # followed helper — so their api half was waste of the kind #2916 moved out.
+  # They are now battery-only (listed below).
   # NOT dual — battery-only (it pins no api-owned surface):
   # test_battery_price_basis.py (#2906 — config/prices.py, runner, probes, judge).
   - test_battery_parity_executors.py
@@ -257,6 +258,15 @@ surfaces:
   - test_battery_token_relock.py
   - test_battery_validation_real.py
   - test_battery_write_channel.py
+  # #3221 (registration): derive-leg truth seam (envelope `confidences` + judged
+  # `outcomes`), added by #3100 and never registered — one of the two entries
+  # behind `manifest-integrity`'s persistent drift on main
+  # (`tools/ci_selection.py --integrity`). Battery-only: it pins battery
+  # scoring/derive code and no api-owned surface, so it belongs here and NOT
+  # dual-registered (the #2916 class). Appended at the end of the block rather
+  # than alphabetically so the registration does not disturb the curated
+  # groupings above.
+  - test_battery_derive_truth_leg.py
   core:
   - test_about_edges.py
   - test_about_event_untangle.py
@@ -288,6 +298,13 @@ surfaces:
   - test_restore_container_recovery.py
   - test_session_attribution.py
   - test_ci_selection.py
+  # #3221: guard for tools/collision_preflight.py (the #3061 pre-dispatch
+  # collision check), added by #3148 and never registered. `core` is the
+  # surface a tools/-only change falls back to, so a preflight-only change runs
+  # the file that guards it instead of selecting no surface at all (#3153 hole).
+  # The companion selector wiring that makes the tool itself select `core`
+  # (TOOL_CORE_CARVEOUTS) rides in #3228, which overlaps this registration.
+  - test_collision_preflight.py
   - test_connector_loader.py
   - test_connector_secrets.py
   - test_connector_sources.py
@@ -303,6 +320,7 @@ surfaces:
   - test_de2e6_temporal.py
   - test_de2e7_gates_mcp.py
   - test_deploy_workflow.py
+  - test_ai_review_gate_contract.py  # #3076: gate↔record-review.sh signing contract (DB-free; runs the workflow's run block offline)
   - test_deployment.py
   - test_derived_names.py
   - test_divergence_conformance.py
@@ -506,6 +524,13 @@ surfaces:
   - eval/write_path/test_write_path_benchmark.py
   ep:
   - test_a9_direct_edge_traversal.py
+  # #2938: direct unit tests of tortoise/analyze.py (an ep-mapped source).
+  # They were registered under `core`, which a `tortoise/analyze.py`-only
+  # change does NOT select (the path matches SOURCE_PATTERNS["ep"]) — so the
+  # module's own tests never ran on a change to it. Dual-registered: `core`
+  # keeps them for engine-wide changes, `ep` runs them on analyze.py edits.
+  - test_analyze.py
+  - test_analyze_scoped.py
   # W2-b (#2098): BPRE write-path gate — dream.py EP-pass changes must run
   # the deterministic replay gate. NOTE (posture split, #2098 round 2): the
   # strict-survival dimension is pinned at 0.0 on the m2 lane until the
@@ -672,6 +697,14 @@ surfaces:
   - test_backfill_embeddings_force.py
   - test_battery_retrieval_preflight.py  # #2985: pins tortoise/embeddings.py EmbeddingModel.get probe + recall_state leg_trace provenance (also battery)
   - test_calibrate_thresholds.py
+  # #2938: direct unit tests of eval-mapped sources — tortoise/embeddings.py
+  # (test_embeddings, test_embeddings_filters) and tortoise/cross_lens.py
+  # (test_cross_lens). They sit under `core`/`sdk`, neither of which a change
+  # to those modules selects, so they never ran on a change to their own
+  # subject. Dual-registered.
+  - test_cross_lens.py
+  - test_embeddings.py
+  - test_embeddings_filters.py
   - test_embedder_probe.py
   - test_eval_extraction_health.py
   - test_labeled_pairs_schema.py

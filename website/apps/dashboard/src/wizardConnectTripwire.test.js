@@ -124,7 +124,7 @@ test('#2710/#2912: the no-key affordance is the KEY block branch — never a pla
   // PR-gate UX (P2): with no key there is NO procedure block at all. A numbered
   // "2 Copy the setup prompt" heading promised a prompt that does not exist —
   // the residue of reported defect 2.
-  assert.match(owner, /\{harnessKey && \(\s*<WizardBlock step=\{2\} title=\{procedureTitle\}>/,
+  assert.match(owner, /\{harnessKey && \(\s*<>\s*<WizardBlock step=\{2\} title=\{procedureTitle\}>/,
     'the procedure block renders only once a key exists')
   assert.doesNotMatch(owner, /'Copy the setup prompt'/,
     'no heading may promise a setup prompt that has not been minted yet')
@@ -296,7 +296,7 @@ test('#2912: the connect step renders a family→surface chooser wired to the le
   // test-review P2: scope the heading assertion to the WizardBlock DEFINITION —
   // matching the whole file was satisfied by the definition itself even if
   // nothing rendered.
-  assert.match(mainJsx, /function WizardBlock\(\{ step, title, children \}\)[\s\S]{0,220}?<h2 className="wizard-block-title">/,
+  assert.match(mainJsx, /function WizardBlock\(\{ step, title, children \}\)[\s\S]{0,320}?<h2 className="wizard-block-title"/,
     'WizardBlock renders its title as <h2> (h1 → h2 order, no skipped level)')
   // PR-gate UX: the Codex Desktop leaf is a SINGLE numbered block — its key
   // lives inside the config block, so an empty "1 Get your API key" promised an
@@ -375,8 +375,12 @@ test('#2912: the Codex Desktop block keeps the "shown once" advisory', () => {
   const desktop = src.slice(i, src.indexOf(') : (', i))
   // the merged block dropped the only unrecoverable-key cue on this surface
   // (HARNESS_INTRO.codexDesktop / UNIVERSAL_COMMAND.codexDesktop never say it)
-  assert.match(desktop, /Your API key is inside the block below — it&apos;s shown once, so keep it private\./,
-    'the Desktop surface must still say the key is shown once and private')
+  assert.match(desktop, /Your API key is inside the block below — keep it private\./,
+    'the Desktop surface must still say the key is private')
+  // #3218: this surface has no key ROW, so the shared visibility + recovery
+  // note must render here too (the caption alone says neither).
+  assert.match(desktop, /<p className="wizard-note">\{KEY_VISIBILITY_NOTE\}<\/p>/,
+    'the Desktop surface renders the shared key-visibility note')
 })
 
 test('#2912: the step announcement re-renders when the paused state is resolved', () => {
@@ -399,4 +403,108 @@ test('#2912: the build-fork blocks own their rhythm (no inline margins stacking 
     'the SDK button row must not add a margin on top of the block gap')
   assert.doesNotMatch(build, /marginBottom: '0\.75rem'/,
     'the SDK caption must not add a margin on top of the block gap')
+})
+
+// ── #3218 (reported from a live walkthrough) ──────────────────────────────
+
+// The numbered circles must match the parts the USER performs. Pi/Cursor have
+// three (key → set up → restart/verify) and Claude Desktop/Web have three
+// (key → connector → hand Claude the workflows); before this the third part
+// rendered as a bare caption inside block 2, so the step count lied.
+test('#3218: every multi-part connect procedure renders a numbered step 3', () => {
+  const owner = ownerBranch()
+  // the derivation: one declaration + exactly TWO procedures that own a step 3
+  assert.match(owner, /let procedureTail = null/,
+    'the tail is derived in the same block as the procedure')
+  assert.equal((owner.match(/procedureTailTitle =/g) || []).length, 3,
+    'one `let` declaration + exactly two assignments (Pi/Cursor + Claude Desktop/Web) — ' +
+    'Claude Code / Codex / Codex Desktop must leave the tail null')
+  // Pi/Cursor: the restart-and-verify card is its own numbered block
+  assert.match(owner, /procedureTailTitle = `Restart \$\{HARNESS_NAMES\[wizardHarness\]\} and verify`/,
+    'Pi/Cursor title their step 3 after the restart')
+  assert.match(owner, /procedureTailTitle = 'Give Claude the Tortoise workflows'/,
+    'Claude Desktop/Web title their step 3 after the prompt hand-off')
+  assert.match(owner, /<WizardBlock step=\{3\} title=\{procedureTailTitle\}>\s*\{procedureTail\}/,
+    'the tail renders as the numbered step-3 block')
+  // gated exactly like step 2 — a numbered heading with nothing under it is the
+  // #2912 defect this file already pins for step 2
+  assert.match(owner, /\{procedureTail && \(\s*<WizardBlock step=\{3\}/,
+    'the step-3 block renders only when a tail exists')
+  assert.match(owner, /\{harnessKey && \(\s*<>\s*<WizardBlock step=\{2\} title=\{procedureTitle\}>[\s\S]{0,200}?\{procedureTail && \(/,
+    'both procedure blocks sit inside the harnessKey gate (no key → no procedure)')
+})
+
+// #3218 (item 3): the parenthetical beside the key said "shown once", which
+// does not match the runtime — the plaintext is React state that stays visible
+// for the whole connect step, is never persisted, and is dropped on exit. The
+// visibility window AND the recovery path are now stated on their own line.
+test('#3218: the key surfaces state the visibility window + the recovery path, never "shown once"', () => {
+  const connect = connectStep()
+  assert.match(mainJsx, /const KEY_VISIBILITY_NOTE = `Visible while you're on this step — we can't show it again after you leave setup\. Need another\? Create one from the API Keys page; rotating replaces this key, so your agent would need the new one\.`/,
+    'ONE shared note so the three key surfaces cannot drift')
+  assert.doesNotMatch(connect, /shown once/,
+    'the connect step must not claim the plaintext is unrecoverable-after-one-paint')
+  assert.match(connect, /<p className="dim small">Your API key:<\/p>/,
+    'the key row labels the token without the parenthetical that was too long')
+  // review cycle 1 (P1): the note must NOT be gated on the separate-key row.
+  // `wizardKeyMode` defaults to 'included', so on the commonest path no row
+  // renders — a note living inside keyDisplayRow would leave that path with no
+  // cue at all (and this diff removed the old caption's "shown once" cue).
+  assert.doesNotMatch(connect, /keyDisplayRow = [\s\S]{0,400}?KEY_VISIBILITY_NOTE/,
+    'the note must live OUTSIDE keyDisplayRow (it has to render in every mode)')
+  assert.match(connect, /\{keyDisplayRow\}[\s\S]{0,700}?<p className="wizard-note">\{KEY_VISIBILITY_NOTE\}<\/p>/,
+    'the shared key block renders the note after the (optional) row')
+  assert.match(connect, /Copy your API key now\./,
+    'the build-fork caption is short — the note owns the window + recovery text')
+  assert.doesNotMatch(connect, /Your API key is visible while you&apos;re on this step/,
+    'the build fork must not restate the note\u2019s opening clause (review cycle 1, P2)')
+  assert.equal((stripComments(mainJsx).match(/KEY_VISIBILITY_NOTE/g) || []).length, 4,
+    'one definition + three renders (shared key block, Codex Desktop block, build fork)')
+  // #3218 (a11y): the circle ordinal is aria-hidden, so the heading's
+  // accessible name must carry it — otherwise a screen reader hears three
+  // unnumbered sibling h2s.
+  assert.match(mainJsx, /<h2 className="wizard-block-title" aria-label=\{step != null \? `Step \$\{step\}: \$\{title\}` : undefined\}>/,
+    'the numbered heading exposes its ordinal to assistive tech')
+})
+
+// #3218 (item 3, hygiene): the plaintext-clearing set is uniform across the
+// connect step's exits. NOTE: the only exits that can hold a live key are
+// wizardComplete and the header escape (both drop welcomeKey too) — the
+// build-fork handler this pins is its NO-KEY arm, so this is a drift guard for
+// a future key-present exit, not a leak fix.
+test('#3218: every wizard exit inside the connect step clears the in-memory plaintext', () => {
+  const connect = connectStep()
+  const exits = [...connect.matchAll(/setWelcomeMode\(false\)/g)]
+  assert.ok(exits.length >= 1, 'the connect step has at least one exit')
+  for (const m of exits) {
+    assert.match(connect.slice(m.index, m.index + 220), /setWizardDurableKey\(''\)/,
+      'each connect-step exit must drop the plaintext it was showing')
+  }
+})
+
+// #3218 (item 2 follow-up, review cycle 1 P1): the numbered circles and the
+// card labels must not carry competing numberings — a heading reading "3 Restart
+// Pi and verify" above a button reading "Copy step 2 prompt" told the user two
+// different things about the same card.
+test('#3218: the prompt-card labels describe the prompt, never a rival step number', () => {
+  const owner = ownerBranch()
+  assert.doesNotMatch(owner, /'Copy step \d prompt'/,
+    'no card label may carry its own step number once the circles own the order')
+  assert.match(owner, /label="Copy the connect prompt"/, 'the block-2 card names the connect prompt')
+  assert.match(owner, /label="Copy the verify prompt"/, 'the block-3 card names the verify prompt')
+  assert.match(owner, /label="Copy the workflows prompt"/,
+    'the Claude Web/Desktop block-3 card names the workflows prompt')
+})
+
+// #3218 (item 4): the agent is told to install the skills BEFORE it is told to
+// restart — the old order (restart, then install) made an agent that acted on
+// the cue load the skills directory before the skills existed.
+test('#3218: the Pi/Cursor step-1 prompts install the skills before the restart note', () => {
+  const fn = slice('function wizardPromptText(', 'function wizardWorkflowsText(', 'wizardPromptText')
+  assert.match(fn, /from \$\{SKILLS_INSTALL_URL\}\.\\n\$\{twoStepNote\} Pi\./,
+    'Pi: skills install first, restart note last')
+  assert.match(fn, /from \$\{SKILLS_INSTALL_URL\}\.\\n\$\{twoStepNote\} Cursor\./,
+    'Cursor: skills install first, restart note last')
+  assert.doesNotMatch(fn, /\$\{twoStepNote\} (Pi|Cursor)\.\\nThen install the Tortoise skills/,
+    'the restart-before-skills order must not come back')
 })
