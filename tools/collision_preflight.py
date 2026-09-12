@@ -17,10 +17,13 @@ Design contract
 1. EVERY surface is always evaluated. There is no ``--only`` flag, no partial
    mode, no early exit. If a surface cannot be queried the run is INCOMPLETE,
    never CLEAN.
-2. Worktree enumeration is UNTRUNCATED. This module never pipes, heads or
-   tails git output — the reported count is the full count, and a partial read
-   must be visible in the output (the *code* is the thing that must not
-   truncate; the operator is not asked to be careful).
+2. Worktree enumeration is UNTRUNCATED, and the GitHub PR surfaces are
+   enumerated to COMPLETENESS. This module never pipes, heads or tails git
+   output — the reported count is the full count — and a PR list is fetched
+   with ``--limit N+1`` so a list longer than its cap is detectable and is
+   reported TRUNCATED → INCOMPLETE, never silently partial. A capped list that
+   quietly queried a subset of PRs is the same fail-open class as the bug this
+   tool exists to fix.
 3. A hit exits non-zero and names the surface. An unqueryable surface exits
    non-zero as INCOMPLETE. "No collision" (0) and "could not check" (2) are
    different outcomes by construction.
@@ -30,8 +33,12 @@ Design contract
 
 Surfaces (7 rows; 6 are hit-capable, the 7th is the keyword source)
 -------------------------------------------------------------------
-  open PRs                  gh pr list --state open   (title / body / branch)
-  recently-closed PRs       gh pr list --state closed (title / body / branch)
+  open PRs                  gh pr list --state open   (title / headRef;
+                                                         body only as a closing
+                                                         reference)
+  recently-closed PRs       gh pr list --state closed (title / headRef;
+                                                         body only as a closing
+                                                         reference)
   local branches            git for-each-ref refs/heads
   remote branches           git for-each-ref refs/remotes   (all remotes)
   local worktrees           git worktree list --porcelain   (UNTRUNCATED)
@@ -41,7 +48,7 @@ Surfaces (7 rows; 6 are hit-capable, the 7th is the keyword source)
 Number matching is applied to full refs/paths/PR text; keyword matching is
 applied only to NAME-LIKE fields (branch refs, worktree basenames, PR head
 refs) and requires at least `--min-keywords` (default 2) DISTINCT keywords to
-coincide. Two precision guards are deliberate, both learned from a real run:
+coincide. Three precision guards are deliberate, each learned from a real run:
 
   * Keyword matching is NOT applied to PR bodies (prose), to worktree parent
 directories (the literal `.worktrees/` component is structural, and a title
@@ -53,6 +60,14 @@ issue. Remote branches are number-matched only (the convention is
   * A single keyword is too weak: "remote" matches hundreds of branches, so a
 keyword-only hit requires `--min-keywords` distinct keywords. Number hits are
 always hits.
+  * PR-BODY PROSE IS NOT A COLLISION. A closed PR cannot be in-flight, and a
+body that merely cross-references an issue ("restored in #2745", "triaged and
+filed as #2751") is not work for it. On the body of a PR only a CLOSING
+REFERENCE (`closes` / `fixes` / `resolves #N`, case-insensitive) is a strong
+hit; a bare number mention is recorded as a WEAK, non-blocking signal — it is
+printed for transparency but can never by itself produce a "do NOT dispatch"
+verdict. This is a live-bug fix: those two exact bodies produced a false
+COLLISION for #2745 and #2751 because every `#N` in prose was treated as work.
 
 Keywords are the issue title's distinctive tokens (length >= 5, minus a
 generic/process vocabulary); pass ``--keywords`` to override when ``gh`` cannot
@@ -62,19 +77,22 @@ Usage
 -----
     python3 tools/collision_preflight.py <issue-number> [--repo PATH]
         [--keywords a,b,c] [--min-keywords N] [--gh PATH] [--git PATH]
-        [--timeout SECS]
+        [--timeout SECS] [--pr-limit N] [--closed-pr-limit N]
 
 Exit codes
 ----------
-    0  CLEAN        every surface queried and no hit
+    0  CLEAN        every surface queried and no hit (weak prose-only
+                    cross-references may be listed; they are non-blocking)
     1  COLLISION    >= 1 hit on >= 1 surface (do NOT dispatch)
     2  INCOMPLETE   >= 1 surface could not be queried (NOT clean)
     3  usage / internal error
 
 Env seams (tests point these at stubs; production defaults are the real tools)
-    COLLISION_PREFLIGHT_GH       gh binary        (default: gh)
-    COLLISION_PREFLIGHT_GIT      git binary       (default: git)
-    COLLISION_PREFLIGHT_TIMEOUT  per-command secs (default: 20)
+    COLLISION_PREFLIGHT_GH                gh binary        (default: gh)
+    COLLISION_PREFLIGHT_GIT               git binary       (default: git)
+    COLLISION_PREFLIGHT_TIMEOUT           per-command secs (default: 60)
+    COLLISION_PREFLIGHT_PR_LIMIT          open-PR cap     (default: 1000)
+    COLLISION_PREFLIGHT_CLOSED_PR_LIMIT   closed-PR cap    (default: 5000)
 """
 from __future__ import annotations
 
@@ -92,9 +110,14 @@ EXIT_COLLISION = 1
 EXIT_INCOMPLETE = 2
 EXIT_USAGE = 3
 
-DEFAULT_TIMEOUT = 20.0
-PR_LIMIT = 200
-CLOSED_PR_LIMIT = 100
+DEFAULT_TIMEOUT = 60.0
+# PR caps are completeness bounds, not sampling windows: the lists are fetched
+# with `--limit cap+1` and a longer list is reported TRUNCATED -> INCOMPLETE.
+# `gh pr list --search` is deliberately never used: the search API silently
+# caps at 1000 results (observed on this repo's closed surface), which is the
+# exact partial-query failure mode this tool exists to prevent.
+PR_LIMIT = 1000
+CLOSED_PR_LIMIT = 5000
 DEFAULT_MIN_KEYWORDS = 2
 MAX_HITS_SHOWN = 20
 
@@ -179,7 +202,7 @@ class Hit:
     surface: str
     ref: str
     detail: str
-    strength: str  # "strong" (issue number) | "keyword"
+    strength: str  # "strong" (issue number / claim) | "keyword" | "weak"
 
 
 @dataclass
@@ -188,6 +211,8 @@ class Surface:
     status: str = STATUS_CLEAN
     hits: list[Hit] = field(default_factory=list)
     note: str = ""
+    truncated: bool = False
+    truncation_note: str = ""
 
     def add(self, ref: str, detail: str, strength: str) -> None:
         self.hits.append(Hit(self.name, ref, detail, strength))
@@ -196,6 +221,13 @@ class Surface:
     def incomplete(self, note: str) -> None:
         self.status = STATUS_INCOMPLETE
         self.note = note
+
+    def mark_truncated(self, note: str) -> None:
+        """The surface was queried but the list hit its cap, so it is PARTIAL.
+        Tracked separately from `status` so a hit found in the partial list is
+        still reported while the truncation keeps the run out of CLEAN."""
+        self.truncated = True
+        self.truncation_note = note
 
 
 # ── process helpers ──────────────────────────────────────────────────────────
@@ -227,6 +259,24 @@ def number_present(text: str, issue: int) -> bool:
     """Boundary-exact issue-number match: 3061 matches '#3061', 'w3061',
     'fix/3061-x' but NEVER '30610'."""
     return re.search(r"(?<![0-9])%d(?![0-9])" % issue, text or "") is not None
+
+
+def closing_reference(text: str, issue: int) -> bool:
+    """True only for a GitHub CLOSING KEYWORD bound to the issue number
+    (`closes` / `fixes` / `resolves #N`, all inflections, optional colon).
+
+    This is a statement that the PR *is* the work for #N. It is deliberately
+    narrower than `number_present`: a body saying "restored in #2745" or
+    "triaged and filed as #2751" only cross-references the issue and is NOT
+    work for it, so it must never block a dispatch for #2745 / #2751.
+    """
+    if not text:
+        return False
+    pattern = (
+        r"(?i)\b(?:close[sd]?|fix(?:es|ed)?|resolve[sd]?)\s*:?\s*#%d(?![0-9])"
+        % issue
+    )
+    return re.search(pattern, text) is not None
 
 
 def _tokens(text: str) -> set[str]:
@@ -379,6 +429,16 @@ def scan_pr_surface(
     surface: Surface, prs: list[dict], issue: int, keywords: list[str],
     min_keywords: int,
 ) -> None:
+    """PR surface matching.
+
+    STRONG hits are name-like or contractual fields: the title (this repo's
+    convention is `type(scope): #N ...`), the head ref (`<type>/<N>-<slug>`),
+    or a BODY CLOSING REFERENCE (`Closes #N`). The body is otherwise PROSE:
+    a bare `#N` mention there is recorded as a WEAK, non-blocking signal —
+    cross-reference prose is not work (live bug: "restored in #2745" on closed
+    PR #2926 and "filed as #2751" on PR #2754 read as strong COLLISIONs).
+    Keyword matching applies to the head ref only (name-like), never prose.
+    """
     for pr in prs:
         title = pr.get("title") or ""
         body = pr.get("body") or ""
@@ -386,18 +446,27 @@ def scan_pr_surface(
         if number_present(title, issue):
             surface.add(_pr_ref(pr), f"matched issue-number ({issue}) in title", "strong")
             continue
-        if number_present(body, issue):
-            surface.add(_pr_ref(pr), f"matched issue-number ({issue}) in body", "strong")
-            continue
         if number_present(head, issue):
             surface.add(_pr_ref(pr), f"matched issue-number ({issue}) in branch", "strong")
             continue
-        # Keyword matching on the PR head ref only (name-like); never the
-        # prose title/body, which would match generic issue vocabulary.
+        if closing_reference(body, issue):
+            surface.add(_pr_ref(pr),
+                        f"closing reference to #{issue} in body", "strong")
+            continue
         kws = keyword_hit(head, keywords, min_keywords)
         if kws:
             surface.add(_pr_ref(pr),
                         "keyword(s): " + ", ".join(kws), "keyword")
+            continue
+        if str(pr.get("number")) == str(issue):
+            surface.add(_pr_ref(pr),
+                        f"PR number == issue ({issue}): this PR *is* the issue, "
+                        "not separate in-flight work (non-blocking)", "weak")
+            continue
+        if number_present(body, issue):
+            surface.add(_pr_ref(pr),
+                        f"prose mention of #{issue} in body — not a closing "
+                        "reference (non-blocking)", "weak")
 
 
 def scan_issue_surface(surface: Surface, issue_data: dict) -> None:
@@ -426,6 +495,8 @@ def run_preflight(
     timeout: float,
     explicit_keywords: str | None = None,
     min_keywords: int = DEFAULT_MIN_KEYWORDS,
+    open_pr_limit: int = PR_LIMIT,
+    closed_pr_limit: int = CLOSED_PR_LIMIT,
 ) -> tuple[list[Surface], str | None, list[str], int, bool]:
     surfaces: dict[str, Surface] = {name: Surface(name) for name in ALL_SURFACES}
 
@@ -463,21 +534,33 @@ def run_preflight(
             "--keywords was not supplied"
         )
 
-    # 2. PR surfaces.
+    # 2. PR surfaces — enumerated to COMPLETENESS. Each list is fetched with an
+    #    extra row (`--limit cap+1`) so a longer list is detectable: hitting the
+    #    cap marks the surface TRUNCATED, which keeps the run out of CLEAN. The
+    #    `--search` filter is deliberately NOT used (the search API silently
+    #    caps at 1000 results — a partial query wearing a complete face).
     for surface_name, state, limit in (
-        (SURFACE_OPEN_PRS, "open", PR_LIMIT),
-        (SURFACE_CLOSED_PRS, "closed", CLOSED_PR_LIMIT),
+        (SURFACE_OPEN_PRS, "open", open_pr_limit),
+        (SURFACE_CLOSED_PRS, "closed", closed_pr_limit),
     ):
         surface = surfaces[surface_name]
         try:
-            args = ["pr", "list", "--state", state, "--limit", str(limit),
+            args = ["pr", "list", "--state", state, "--limit", str(limit + 1),
                     "--json", "number,title,body,headRefName,state,url"]
-            if state == "closed":
-                args += ["--search", "sort:updated-desc"]
             prs = _gh_json(gh_bin, args, repo, timeout)
             if not isinstance(prs, list):
                 raise SurfaceError("gh pr list returned non-list JSON")
+            if len(prs) > limit:
+                surface.mark_truncated(
+                    f"truncated at the {limit} cap — more than {limit} {state} "
+                    f"PR(s) exist and were NOT scanned; this surface is "
+                    "INCOMPLETE (never CLEAN). Widen with --pr-limit / "
+                    "--closed-pr-limit (or COLLISION_PREFLIGHT_*_PR_LIMIT)."
+                )
+                prs = prs[:limit]
             scan_pr_surface(surface, prs, issue, keywords, min_keywords)
+            if not surface.truncated:
+                surface.note = f"{len(prs)} PR(s) enumerated (complete, cap {limit})"
         except SurfaceError as exc:
             surface.incomplete(f"gh-unavailable: {exc}")
 
@@ -540,8 +623,10 @@ def format_report(
     _assert_all_surfaces(ordered)
 
     hits = [h for s in ordered for h in s.hits]
-    incomplete = [s for s in ordered if s.status == STATUS_INCOMPLETE]
+    incomplete = [s for s in ordered if s.status == STATUS_INCOMPLETE or s.truncated]
     strong = [h for h in hits if h.strength == "strong"]
+    keyword_hits = [h for h in hits if h.strength == "keyword"]
+    weak = [h for h in hits if h.strength == "weak"]
 
     lines: list[str] = []
     lines.append(f"collision-preflight: issue #{issue}")
@@ -553,6 +638,8 @@ def format_report(
     lines.append(f"{'SURFACE':<24} {'STATUS':<11} {'HITS':<5} NOTE")
     for surface in ordered:
         note = surface.note or ""
+        if surface.truncated:
+            note = (note + " " if note else "") + "⚠ TRUNCATED — list is partial"
         lines.append(f"{surface.name:<24} {surface.status:<11} {len(surface.hits):<5} {note}")
     if hits:
         lines.append("")
@@ -562,7 +649,8 @@ def format_report(
             by_surface.setdefault(hit.surface, []).append(hit)
         for surface_name, surface_hits in by_surface.items():
             for hit in surface_hits[:MAX_HITS_SHOWN]:
-                tag = "number" if hit.strength == "strong" else "keyword"
+                tag = {"strong": "number", "keyword": "keyword",
+                       "weak": "weak"}.get(hit.strength, hit.strength)
                 lines.append(f"  [{hit.surface}] {hit.ref} — {hit.detail} ({tag})")
             if len(surface_hits) > MAX_HITS_SHOWN:
                 # The COUNT is complete and visible; only the detail sample is
@@ -571,17 +659,35 @@ def format_report(
                     f"  [{surface_name}] … +{len(surface_hits) - MAX_HITS_SHOWN} "
                     f"more hit(s) on this surface (total {len(surface_hits)})"
                 )
+    if weak and not strong and not keyword_hits:
+        lines.append("")
+        lines.append("WEAK SIGNALS (non-blocking — prose is not work)")
+        lines.append(
+            f"  {len(weak)} prose-only cross-reference(s) of #{issue}; no title / "
+            "branch / worktree / closing-reference match. These do NOT block."
+        )
     if incomplete:
         lines.append("")
         lines.append("INCOMPLETE SURFACES")
         for surface in incomplete:
-            lines.append(f"  [{surface.name}] {surface.note}")
+            lines.append(f"  [{surface.name}] {surface.truncation_note or surface.note}")
     lines.append("")
-    if hits:
-        label = "COLLISION" + ("" if strong else " (keyword-only)")
+    if strong:
         lines.append(
-            f"VERDICT: {label} (exit {EXIT_COLLISION}) — {len(hits)} hit(s) across "
+            f"VERDICT: COLLISION (exit {EXIT_COLLISION}) — {len(hits)} hit(s) across "
             f"{len({h.surface for h in hits})} surface(s); do NOT dispatch work for #{issue}"
+        )
+        if incomplete:
+            lines.append(
+                f"  ALSO INCOMPLETE: {len(incomplete)} surface(s) could not be queried "
+                f"({', '.join(s.name for s in incomplete)}) — fix gh auth/network and re-run."
+            )
+        return "\n".join(lines) + "\n", EXIT_COLLISION
+    if keyword_hits:
+        lines.append(
+            f"VERDICT: COLLISION (keyword-only) (exit {EXIT_COLLISION}) — {len(hits)} "
+            f"hit(s) across {len({h.surface for h in hits})} surface(s); do NOT dispatch "
+            f"work for #{issue}"
         )
         if incomplete:
             lines.append(
@@ -596,6 +702,11 @@ def format_report(
             "this is NOT clean — fix gh auth/network and re-run"
         )
         return "\n".join(lines) + "\n", EXIT_INCOMPLETE
+    if weak:
+        lines.append(
+            f"NOTE: {len(weak)} weak prose signal(s) ignored (cross-reference prose "
+            "is not work; non-blocking)"
+        )
     lines.append(
         f"VERDICT: CLEAN (exit {EXIT_CLEAN}) — {len(ordered)}/{len(ALL_SURFACES)} surfaces "
         f"queried, no in-flight work found for #{issue}"
@@ -623,6 +734,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--timeout", type=float,
                         default=float(os.environ.get("COLLISION_PREFLIGHT_TIMEOUT", DEFAULT_TIMEOUT)),
                         help="per-command timeout in seconds (env COLLISION_PREFLIGHT_TIMEOUT)")
+    parser.add_argument("--pr-limit", type=int,
+                        default=int(os.environ.get("COLLISION_PREFLIGHT_PR_LIMIT", PR_LIMIT)),
+                        help="open-PR completeness cap; a longer list is TRUNCATED/INCOMPLETE "
+                             f"(default {PR_LIMIT}; env COLLISION_PREFLIGHT_PR_LIMIT)")
+    parser.add_argument("--closed-pr-limit", type=int,
+                        default=int(os.environ.get("COLLISION_PREFLIGHT_CLOSED_PR_LIMIT", CLOSED_PR_LIMIT)),
+                        help="closed-PR completeness cap; a longer list is TRUNCATED/INCOMPLETE "
+                             f"(default {CLOSED_PR_LIMIT}; env COLLISION_PREFLIGHT_CLOSED_PR_LIMIT)")
     args = parser.parse_args(argv)
 
     if args.issue <= 0:
@@ -637,11 +756,15 @@ def main(argv: list[str] | None = None) -> int:
     if args.min_keywords < 1:
         print("collision-preflight: --min-keywords must be >= 1", file=sys.stderr)
         return EXIT_USAGE
+    if args.pr_limit < 1 or args.closed_pr_limit < 1:
+        print("collision-preflight: --pr-limit / --closed-pr-limit must be >= 1",
+              file=sys.stderr)
+        return EXIT_USAGE
 
     try:
         ordered, title, keywords, issue, _ = run_preflight(
             args.issue, args.repo, args.gh, args.git, args.timeout, args.keywords,
-            args.min_keywords,
+            args.min_keywords, args.pr_limit, args.closed_pr_limit,
         )
         report, code = format_report(
             ordered, issue, args.repo, title, keywords, args.min_keywords

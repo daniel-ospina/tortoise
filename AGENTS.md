@@ -376,15 +376,29 @@ run the collision pre-flight — **all surfaces, untruncated**:
 python3 tools/collision_preflight.py <N>
 ```
 
-It checks open **and** recently-closed PRs (title/body/branch), local **and** remote branches,
+It checks open **and** recently-closed PRs (title / headRef; a PR **body** counts only as an
+explicit closing reference — `Closes`/`Fixes`/`Resolves #N` — because cross-reference prose such
+as "restored in #2745" is not work, and matching it fabricated a false COLLISION for #2745 and
+#2751), local **and** remote branches,
 **`git worktree list` untruncated** (no `head`/`tail` — a 300-worktree hub hides matches inside
 a window), and `gh issue view N` (assignee + claim comments), matching the issue number
 boundary-exactly (`3061` never matches `30610`) plus the issue's distinctive title keywords.
 
 - `exit 0` **CLEAN** — every surface queried, no in-flight work → proceed.
 - `exit 1` **COLLISION** — a hit; do **not** dispatch, coordinate on the named surface first.
-- `exit 2` **INCOMPLETE** — a surface could not be queried (gh auth/network). This is **not**
-  clean. Fix the surface and re-run; never treat it as a pass.
+- `exit 2` **INCOMPLETE** — a surface could not be queried (gh auth/network) **or a PR list was
+truncated at its completeness cap**. This is **not** clean. Fix the surface and re-run; never
+treat it as a pass.
+
+PR lists are enumerated to completeness (`--pr-limit`, default 1000; `--closed-pr-limit`, default
+5000). A list longer than its cap is reported **TRUNCATED** and the run is `exit 2` — a partial
+list is never CLEAN.
+
+**Enforcement lives in the agent skills, outside this repo.** The dispatch-path gate is wired
+into `~/.pi/agent/skills/`: `epic-executor` (Step 3 pre-dispatch, fail-closed), `issue-workflow`
+(`## Dispatch` gate), `executing-plans` (Step 0), and `subagent-driven-development` (controller
+step 0 — run before worktree creation). Those files are **not** part of this repository's diff;
+the compliance row above declares the rule, the skills enforce it.
 
 **Consequence of skipping:** a parallel agent duplicates work already in flight — two overlapping
 PRs, a wasted dispatch cycle, and a consolidation decision that should never have been needed

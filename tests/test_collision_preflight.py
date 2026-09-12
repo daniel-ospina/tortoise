@@ -12,6 +12,11 @@ Coverage:
   * one stubbed/real HIT per hit-capable surface -> exit != 0, surface named
   * UNTRUNCATED worktree scan: a hit that a `tail -8` window would hide is found
   * number boundary: `3061` does NOT match `30610` (no fabricated collision)
+  * PR-body PROSE is not a collision: a closed PR body that merely
+    cross-references `#N` (the live #2926/#2754 shapes) is WEAK/non-blocking ->
+    CLEAN; a body closing reference (`Closes #N`) is still a strong hit
+  * PR lists are completeness-checked: a list longer than its cap is reported
+    TRUNCATED and the run is INCOMPLETE (exit 2), never CLEAN
   * keyword hits match name-like fields only (`.worktrees/` structural token
     in a title does not collide)
   * an unqueryable surface (gh / git / keyword source) -> INCOMPLETE, exit 2,
@@ -149,7 +154,8 @@ class CollisionPreflightTest(unittest.TestCase):
     # ── runner ──────────────────────────────────────────────────────────────
 
     def run_tool(self, issue: int = ISSUE, keywords: str | None = None,
-                 git_bin: Path | None = None, env_extra: dict | None = None):
+                 git_bin: Path | None = None, env_extra: dict | None = None,
+                 extra_args: list[str] | None = None):
         env = dict(os.environ)
         env["GH_STUB_DIR"] = str(self.gh_dir)
         if env_extra:
@@ -159,6 +165,8 @@ class CollisionPreflightTest(unittest.TestCase):
             cmd += ["--keywords", keywords]
         if git_bin:
             cmd += ["--git", str(git_bin)]
+        if extra_args:
+            cmd += [str(a) for a in extra_args]
         proc = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=90)
         return proc.returncode, proc.stdout + proc.stderr
 
@@ -200,6 +208,78 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertNotEqual(rc, 0, out)
         self.assertIn("VERDICT: COLLISION", out)
         self.assertIn("[recently-closed PRs]", out)
+
+    def test_closed_pr_body_prose_mention_is_not_a_collision(self):
+        # LIVE-BUG FIXTURES. These are verbatim shapes from a real run:
+        #   * closed PR #2926's body says "(restored in #2745)"
+        #   * closed PR #2754's body says "Triaged and filed as #2751"
+        # A closed PR cannot be in-flight and cross-reference prose is not
+        # work. Matching the bare number used to fabricate a strong COLLISION
+        # ("do NOT dispatch") for #2745 and #2751. Both must now be weak
+        # signals only -> CLEAN, exit 0.
+        self.gh_fixtures(closed_prs=[
+            {"number": 2926,
+             "title": "chore(battery): remove the unreachable class-sentinel pre-flight branch (#2746)",
+             "body": "`test_real_preflight_refuses_unpinned_or_fixed_sentinel` "
+                     "(restored in #2745): the arms.yaml pin must win.",
+             "headRefName": "chore/2746-dead-sentinel"},
+            {"number": 2754,
+             "title": "test(e2e): migrate dashboard specs to local-preview document loads",
+             "body": "Triaged and filed as #2751 — **not introduced by this PR**.",
+             "headRefName": "fix/2744-local-preview-migration"},
+        ])
+        rc, out = self.run_tool(issue=2745)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("VERDICT: CLEAN", out)
+        self.assertNotIn("VERDICT: COLLISION", out)
+        self.assertNotIn("do NOT dispatch", out)
+        self.assertIn("[recently-closed PRs]", out)
+        self.assertIn("prose mention of #2745", out)
+        self.assertIn("WEAK SIGNALS", out)
+        self.assertIn("non-blocking", out)
+
+        rc, out = self.run_tool(issue=2751)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("VERDICT: CLEAN", out)
+        self.assertNotIn("do NOT dispatch", out)
+        self.assertIn("prose mention of #2751", out)
+
+    def test_closed_pr_own_number_is_weak_not_blocking(self):
+        # Closed PR #3061 (the issue is itself a closed PR). Its own number and
+        # any prose in its body are not separate in-flight work.
+        self.gh_fixtures(closed_prs=[{
+            "number": 3061, "title": "fix(battery): #2712 restore the pin test",
+            "body": "restored in #3061", "headRefName": "fix/2712-pin-preflight-test",
+        }])
+        rc, out = self.run_tool()
+        self.assertEqual(rc, 0, out)
+        self.assertIn("VERDICT: CLEAN", out)
+        self.assertNotIn("do NOT dispatch", out)
+        self.assertIn("PR number == issue (3061)", out)
+
+    def test_closed_pr_closing_reference_is_still_a_hit(self):
+        # "Closes #N" IS a claim on the issue and must stay a strong hit.
+        for body in ("Closes #3061.", "closes: #3061", "Fixes #3061",
+                     "Resolves #3061", "fixed #3061"):
+            self.gh_fixtures(closed_prs=[{
+                "number": 9997, "title": "unrelated title",
+                "body": body, "headRefName": "chore/9997-unrelated",
+            }])
+            rc, out = self.run_tool()
+            self.assertNotEqual(rc, 0, f"body={body!r}\n{out}")
+            self.assertIn("VERDICT: COLLISION", out)
+            self.assertIn("closing reference to #3061", out)
+
+    def test_closed_pr_prose_without_closing_keyword_is_not_a_hit(self):
+        # "fixed in #3061" / "see #3061" are prose, not closing keywords.
+        for body in ("fixed in #3061", "see #3061 for context", "restored in #3061"):
+            self.gh_fixtures(closed_prs=[{
+                "number": 9996, "title": "unrelated title",
+                "body": body, "headRefName": "chore/9996-unrelated",
+            }])
+            rc, out = self.run_tool()
+            self.assertEqual(rc, 0, f"body={body!r}\n{out}")
+            self.assertNotIn("do NOT dispatch", out)
 
     def test_remote_branch_hit(self):
         _git(self.repo, "update-ref", "refs/remotes/origin/fix/3061-collision", "HEAD")
@@ -353,6 +433,43 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertIn("VERDICT: INCOMPLETE", out)
         self.assertIn("[issue keywords]", out)
         self.assertIn("keyword-source-unavailable", out)
+
+    # ── truncation is INCOMPLETE, never CLEAN ───────────────────────────────
+
+    def test_open_pr_list_truncation_is_incomplete(self):
+        # A PR list longer than its cap is a PARTIAL query — the fail-open
+        # class this tool exists to prevent. It must read INCOMPLETE (exit 2).
+        self.gh_fixtures(open_prs=[
+            {"number": 1, "title": "a", "body": "", "headRefName": "chore/a"},
+            {"number": 2, "title": "b", "body": "", "headRefName": "chore/b"},
+        ])
+        rc, out = self.run_tool(extra_args=["--pr-limit", "1"])
+        self.assertEqual(rc, 2, out)
+        self.assertIn("VERDICT: INCOMPLETE", out)
+        self.assertNotIn("VERDICT: CLEAN", out)
+        self.assertIn("TRUNCATED", out)
+        self.assertIn("[open PRs]", out)
+
+    def test_closed_pr_list_truncation_is_incomplete(self):
+        self.gh_fixtures(closed_prs=[
+            {"number": 3, "title": "a", "body": "", "headRefName": "chore/a"},
+            {"number": 4, "title": "b", "body": "", "headRefName": "chore/b"},
+        ])
+        rc, out = self.run_tool(extra_args=["--closed-pr-limit", "1"])
+        self.assertEqual(rc, 2, out)
+        self.assertIn("VERDICT: INCOMPLETE", out)
+        self.assertNotIn("VERDICT: CLEAN", out)
+        self.assertIn("TRUNCATED", out)
+        self.assertIn("[recently-closed PRs]", out)
+
+    def test_complete_pr_list_reports_the_count_and_stays_clean(self):
+        self.gh_fixtures(open_prs=[
+            {"number": 1, "title": "a", "body": "", "headRefName": "chore/a"},
+        ])
+        rc, out = self.run_tool(extra_args=["--pr-limit", "5"])
+        self.assertEqual(rc, 0, out)
+        self.assertIn("VERDICT: CLEAN", out)
+        self.assertIn("1 PR(s) enumerated (complete, cap 5)", out)
 
     # ── partial-run prevention ──────────────────────────────────────────────
 
