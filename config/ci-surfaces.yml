@@ -542,6 +542,9 @@ surfaces:
   - test_directional_impl.py
   - test_directional_impl_fix.py
   - test_dream.py
+  # #3139: the silent-no-op guard + index-independent dream/EP selection
+  # (GRAPH.COPY drops the `false` entries of the is_operator index, #3154).
+  - test_dream_noop_3139.py
   - test_ep_calibration.py
   - test_ep_directed_nand.py
   - test_ep_directional.py
