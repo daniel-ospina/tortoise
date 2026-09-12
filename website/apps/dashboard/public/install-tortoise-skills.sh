@@ -14,7 +14,8 @@
 #   curl -fsSL https://app.premiselabs.co/install-tortoise-skills.sh | bash -s -- --harness claude
 #   (or codex | cursor | pi)
 #
-# Idempotent: re-running updates the skills in place. Prints the verify step.
+# Idempotent: re-running updates the skills in place and refreshes the version
+# stamp. Prints the verify step.
 set -euo pipefail
 
 SKILLS_VERSION="v2"   # bump when the skill set changes
@@ -67,11 +68,30 @@ esac
 echo "Installing Tortoise skills (${SKILLS_VERSION}) into: $DEST"
 mkdir -p "$DEST"
 
+# Version stamp (#3): record the installed version in a SIDECAR, never in the
+# skill bodies — the served SKILL.md files must stay byte-identical to their
+# originals (the `^name:` payload check below and the canonical<->mirror parity
+# test both depend on that). Read any previous stamp first so a re-run can
+# report an upgrade and flag an on-disk copy that drifted.
+STAMP="$DEST/.tortoise-skills-version"
+prev_version=""
+if [ -f "$STAMP" ]; then
+  prev_version="$(sed -n 's/^skills_version=//p' "$STAMP" | head -1)"
+fi
+
 for s in "${SKILLS[@]}"; do
   mkdir -p "$DEST/$s"
   tmp="$DEST/$s/SKILL.md.tmp"
   if curl -fsSL --max-time 20 "$SKILLS_BASE/$s/SKILL.md" -o "$tmp" \
       && grep -q "^name: $s$" "$tmp"; then
+    # Drift detection (#3): warn when we are about to replace a differing copy.
+    # Across a version bump that is the expected upgrade; at the same version
+    # (or with no stamp at all) it means the on-disk copy was edited locally or
+    # came from an older/manual install.
+    if [ -f "$DEST/$s/SKILL.md" ] && ! cmp -s "$DEST/$s/SKILL.md" "$tmp" \
+        && { [ -z "$prev_version" ] || [ "$prev_version" = "$SKILLS_VERSION" ]; }; then
+      echo "  ⚠ $s — replaced a differing on-disk copy (edited locally, or installed outside this installer)" >&2
+    fi
     mv "$tmp" "$DEST/$s/SKILL.md"
     echo "  ✓ $s"
   else
@@ -145,16 +165,37 @@ for s in "${SKILLS[@]}"; do
 done
 
 if [ ${#missing[@]} -eq 0 ]; then
+  # Version stamp (#3): sidecar manifest, written only after every skill
+  # verified — a failed install never claims a version it did not place.
+  {
+    printf '%s\n' \
+      "# Tortoise skills install manifest — written by install-tortoise-skills.sh." \
+      "# Do not edit by hand; re-run the installer to refresh this stamp." \
+      "skills_version=$SKILLS_VERSION" \
+      "harness=$HARNESS" \
+      "installed_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+      "skills=${SKILLS[*]}"
+  } > "$STAMP"
   echo ""
   echo "✅ Tortoise skills installed to $DEST"
-  echo "   ${SKILLS[*]}"
+  echo "   ${SKILLS[*]} (${SKILLS_VERSION})"
+  if [ -n "$prev_version" ] && [ "$prev_version" != "$SKILLS_VERSION" ]; then
+    echo "   ⬆  version stamp updated: $prev_version -> $SKILLS_VERSION"
+  fi
+  echo "   version stamp: $STAMP (cat it to see what is installed)"
   echo ""
   echo "Next: restart your agent, then confirm the skills are listed:"
   case "$HARNESS" in
     claude) echo "   claude — the skills appear under /skills" ;;
     codex)  echo "   codex — open the project in Codex and check /skills, or ask the agent \"Set up Tortoise\"" ;;
     cursor) echo "   cursor — skills load from .cursor/skills" ;;
-    pi)     echo "   pi — ~/.pi/agent/skills is scanned on startup" ;;
+    pi)
+      echo "   pi — skills load from ~/.pi/agent/skills when the session starts."
+      echo "   pi — verify the MCP CONNECTION too (installed skills are not proof it connected):"
+      echo "        ask the agent to call tortoise_health — \"ok\" is a graph-status reply, not a tool error."
+      echo "        If tortoise_health is missing, the first connect to the cold hosted machine"
+      echo "        failed: have the agent run  mcp_load tortoise  and call tortoise_health again."
+      ;;
   esac
 
   # #2329/#2330: Codex standing instructions — only for the codex harness
