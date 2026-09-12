@@ -1339,3 +1339,66 @@ def test_object_visibility_vocabularies_are_declared_views():
         OBJECT_TERMINAL_STATUSES | {"outdated"}), (
         "assembly's Object set diverged — decide deliberately, then update "
         "this assertion and the #2901/(d) deferral together")
+
+
+def test_archived_object_still_folds_on_reopen(tmp_path):
+    """D-10's other side: the guard excludes `retracted` ONLY, so an `archived`
+    Object must still be revived by a replayed github.issue.reopened.
+
+    PAYLOAD SHAPE: `_upsert_event` does `inner = event.get("event", event)`
+    (entities.py:787) and then `inner.get("id")`. Passing `"event": "<string>"`
+    makes `inner` a STRING and raises `AttributeError: 'str' object has no
+    attribute 'get'` (reproduced live in cycle 5) — the nested form requires a
+    DICT. This test uses the FLAT form (keys at top level, `eventKind`), which
+    is the shape the production read paths emit and which reaches the guard.
+    """
+    sdk = TortoiseSDK(str(tmp_path / "arch.db"))
+    proj = sdk._get_proj()
+    sdk.create_entity("object", "AR1", objectKind="core:other", is_episodic=False)
+    proj.g.query("MATCH (o:Object {name:'AR1'}) SET o.status='archived'")
+    proj.apply({"type": "EventRecorded", "eventId": "e1",
+                "eventKind": "github.issue.reopened", "object": "AR1",
+                "objectKind": "core:other", "summary": "reopened"})
+    assert proj.g.query(
+        "MATCH (o:Object {name:'AR1'}) RETURN o.status"
+    ).result_set[0][0] == "in_progress", \
+        "archived must still fold — D-10 narrows to `retracted` only"
+
+
+def test_closed_event_does_not_unretract(tmp_path):
+    """D-10's second branch: the guard covers `open|reopened` AND `closed`
+    (entities.py:921-933). Acceptance names both, so both need a test — a
+    one-sided test would miss a fix applied to only one of the two guards.
+    """
+    sdk = TortoiseSDK(str(tmp_path / "closed.db"))
+    proj = sdk._get_proj()
+    sdk.create_entity("object", "closed-obj", objectKind="core:other",
+                      is_episodic=False)
+    oid = _entity_name_id("Object", "closed-obj")
+    proj._fold_object_retracted({"id": oid, "name": "closed-obj", "ts": "T"})
+    proj.apply({"type": "EventRecorded", "eventId": "e1",
+                "eventKind": "github.issue.closed", "object": "closed-obj",
+                "objectKind": "core:other", "summary": "closed"})
+    rows = proj.g.query("MATCH (o:Object {id:$id}) RETURN o.status",
+                        params={"id": oid}).result_set
+    assert rows[0][0] == "retracted", \
+        "a replayed `closed` must not un-retract a deleted Object"
+
+
+def test_reopened_event_does_not_unretract(tmp_path):
+    """Payload shape matters: _upsert_event does `inner = event.get("event", event)`
+    (entities.py:787) and then reads `inner["eventKind"]` / `inner["object"]`
+    (entities.py:865, :909). The FLAT form used here (no `event` key) is the one
+    the production paths emit. A nested form needs `event` to be a DICT —
+    `{"event": "github.issue.reopened"}` makes `inner` a str and raises
+    `AttributeError` on the next line (reproduced live, cycle 5)."""
+    sdk = TortoiseSDK(str(tmp_path / "t11.db"))
+    proj = sdk._get_proj()
+    sdk.create_entity("object", "issue-obj", objectKind="core:other", is_episodic=False)
+    oid = _entity_name_id("Object", "issue-obj")
+    proj._fold_object_retracted({"id": oid, "name": "issue-obj", "ts": "T"})
+    proj.apply({"type": "EventRecorded", "eventId": "e1",
+                "eventKind": "github.issue.reopened", "object": "issue-obj",
+                "subject": "s"})
+    rows = proj.g.query("MATCH (o:Object {id:$id}) RETURN o.status", params={"id": oid}).result_set
+    assert rows[0][0] == "retracted"

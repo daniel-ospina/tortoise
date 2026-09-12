@@ -990,17 +990,37 @@ class _EntityHandlers:
         # event. Aligns with the #1350 clobber doctrine (a re-mention cannot
         # reset superseded→live). Live Objects (status IS NULL or <>'superseded')
         # still fold normally.
+        # #2977: the guard also excludes `retracted`. WITHOUT this, a replayed
+        # connector lifecycle event silently UN-RETRACTS a deleted Object — the
+        # read surfaces then serve it as current again, undoing the whole
+        # point of the retraction lane on the one path that emits these events
+        # in production.
+        #
+        # DELIBERATELY NARROW (D-10): `<> 'retracted'` ONLY. `archived` and
+        # `deprecated` stay resettable by a reopen — widening to the whole
+        # `_RECALL_OBJECT_EXCLUDED_STATUS` tuple would change existing
+        # behaviour for two statuses nothing currently writes. Pinned in BOTH
+        # directions by `test_archived_object_still_folds_on_reopen` and
+        # `test_reopened_event_does_not_unretract`.
+        #
+        # This adds a hand-typed Object-status literal to the hardcoded
+        # event->status map that open issue #2729 exists to replace. #2977
+        # touches that map but cannot generalize it, so the predicate is
+        # recorded on #2729 and filed as owned fork (k).
+        _status_guard = ("(o.status IS NULL OR "
+                         "(o.status <> 'superseded' AND "
+                         "o.status <> 'retracted'))")
         if _obj_name and _wk in ("pm:cardCreated", "github.issue.open",
                                  "github.issue.reopened"):
             self.g.query(
                 "MATCH (o:Object {name:$n}) "
-                "WHERE (o.status IS NULL OR o.status <> 'superseded') "
+                f"WHERE {_status_guard} "
                 "SET o.status='in_progress'",
                 params={"n": _obj_name})
         elif _obj_name and _wk in ("pm:cardCompleted", "github.issue.closed"):
             self.g.query(
                 "MATCH (o:Object {name:$n}) "
-                "WHERE (o.status IS NULL OR o.status <> 'superseded') "
+                f"WHERE {_status_guard} "
                 "SET o.status='completed'",
                 params={"n": _obj_name})
         # Event -[:uses]-> Object (input entities, #122; #125 structured dicts)
