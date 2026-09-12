@@ -62,6 +62,9 @@ from battery.runner.artifacts import (
 from battery.runner.emit import MANDATORY
 from battery.runner.episode import EpisodeResult, EpisodeTracker, TurnRecord  # noqa: F401
 from battery.runner.executor import (
+    SURFACING_INTENTS,
+    control_verdict_event,
+    control_verdict_from_events,
     envelope_events,
     execute_tvde_episode,
     state_events,
@@ -413,7 +416,7 @@ def _execute_real_episode(*, config: RunConfig, arm, scenario: Scenario,
     write_failed = False
     for idx, env in enumerate(ep.envelopes):
         for intent in env.intents:
-            if intent not in ("register_conflict", "file_nand"):
+            if intent not in SURFACING_INTENTS:
                 # Schema-bounded verbs the executor does not route to a
                 # product write this round: declared, so traced as unfiled
                 # (never silently dropped, never a fake ref).
@@ -477,6 +480,25 @@ def _execute_real_episode(*, config: RunConfig, arm, scenario: Scenario,
                                  "reason": "no-op"}})
         if write_failed:
             break
+
+    # #2702: R1 FP-control verdict for a benign-control episode (bct-*).
+    # The control verdict is DERIVED here because the executor is the only
+    # component that knows its OWN tool channel ran: every declare-write
+    # loop iteration above either filed a surfacing (emission-loss-proof
+    # tool_event with a real product ref) or recorded why it did not
+    # (intent_unfiled). For a valid, non-excluded control episode the loop
+    # completed, so a missing surfacing is PROVABLY the arm not surfacing —
+    # never a lost emission and never a fabricated 0.0. A scenario with a
+    # planted ¬A pair (ct-*) is NEVER control-population and never gets a
+    # verdict. The probe's reader (`_control_verdict`) accepts only an
+    # explicit bool, and the expected-set gate only demands the field when
+    # this entry exists, so a verdict-less control keeps the no-data
+    # sentinel (insufficient_n).
+    if not write_failed:
+        from battery.runner.probe_scorer import episode_population
+        if episode_population(scenario) == "control":
+            events.append(control_verdict_event(
+                false_positive=control_verdict_from_events(events)))
 
     # state-terminal: decide_cycles harness-side; ep_outcome + contested
     # from the product terminal table where the arm exposes it (a4), else
