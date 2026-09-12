@@ -159,6 +159,24 @@ _CAPTURE_EXECUTOR = ThreadPoolExecutor(
 _CAPTURE_MAX_IN_FLIGHT = max(1, min(_int_env("TORTOISE_CAPTURE_IN_FLIGHT", 8), 16))
 _CAPTURE_IN_FLIGHT = 0
 _CAPTURE_IN_FLIGHT_LOCK = threading.Lock()
+# #3129: session ids with a capture IN FLIGHT. `capture_ok` is written only at
+# the very END of a successful capture, so once the extraction moved off the
+# event loop (#3060) a second request for the same session_id could be served
+# while the first was parked: it read `capture_ok = NULL`, the replay branch
+# treated NULL as "presumed captured" (#2335 legacy semantics), and it answered
+# 200 + a success receipt with 0 turns extracted — for a capture whose only
+# real attempt then FAILED. Silent data loss, and the client is actively told
+# to retry by the `Retry-After` the capacity gate advertises. Refusing at
+# ADMISSION closes it without touching the replay semantics for a session that
+# is genuinely finished. Bounded by _CAPTURE_IN_FLIGHT (one key per in-flight
+# capture).
+_CAPTURE_SESSIONS: dict[str, int] = {}
+# The detail string is the carve-out key for the team-visible last-error state
+# (both surfaces): an in-flight refusal is a SERVER concurrency condition, not
+# a team capture failure — same rationale as the capacity 429. A shared
+# constant so the raise site and the two carve-outs cannot drift.
+_CAPTURE_SESSION_IN_FLIGHT_DETAIL = (
+    "a capture for this session_id is already in flight — retry shortly")
 
 # /health is the FLY liveness signal (fly.toml: path=/health, 15s timeout): the
 # one request that must answer even when everything else is wedged. Its probe
@@ -195,8 +213,8 @@ async def _run_off_loop(executor: ThreadPoolExecutor, fn, /, *args, **kwargs):
     return await asyncio.wrap_future(_submit_off_loop(executor, fn, *args, **kwargs))
 
 
-def _capture_slot_decrement() -> None:
-    """Return one reserved capture slot (lock-guarded, clamped at zero).
+def _capture_slot_decrement(session_key: str | None = None) -> None:
+    """Return one reserved capture slot + its in-flight session key.
 
     The clamp is a safety net, NOT a licence: a decrement with nothing in
     flight means the accounting leaked somewhere, which silently under-counts
@@ -204,6 +222,8 @@ def _capture_slot_decrement() -> None:
     """
     global _CAPTURE_IN_FLIGHT
     with _CAPTURE_IN_FLIGHT_LOCK:
+        if session_key is not None:
+            _CAPTURE_SESSIONS.pop(session_key, None)
         if _CAPTURE_IN_FLIGHT > 0:
             _CAPTURE_IN_FLIGHT -= 1
         else:
@@ -229,11 +249,13 @@ class _CaptureSlot:
       reservation would leak and permanently burn capacity.
     """
 
-    __slots__ = ("_done", "_handed_off")
+    __slots__ = ("_done", "_handed_off", "_session_key")
 
-    def __init__(self) -> None:
+    def __init__(self, session_key: str | None = None) -> None:
         self._done = False
         self._handed_off = False
+        # #3129: released with the slot, by the same exactly-once machinery.
+        self._session_key = session_key
 
     def hand_off(self) -> None:
         """Transfer ownership to the extraction future (before any await)."""
@@ -243,17 +265,17 @@ class _CaptureSlot:
         if self._done or self._handed_off:
             return
         self._done = True
-        _capture_slot_decrement()
+        _capture_slot_decrement(self._session_key)
 
     def worker_done(self, _fut=None) -> None:
         if self._done:
             return
         self._done = True
-        _capture_slot_decrement()
+        _capture_slot_decrement(self._session_key)
 
 
-def _reserve_capture_slot() -> _CaptureSlot:
-    """Reserve a capture slot, or fail fast with 429 at capacity (#3060).
+def _reserve_capture_slot(session_id: str | None = None) -> _CaptureSlot:
+    """Reserve a capture slot, or fail fast at capacity / on a duplicate.
 
     Called at ADMISSION — before the impl writes anything. A 429 raised later
     (after the Session MERGE) would leave ``capture_ok`` NULL, and the
@@ -261,8 +283,13 @@ def _reserve_capture_slot() -> _CaptureSlot:
     — silent permanent data loss. Reserving (not just checking) is what bounds
     the queue: a burst of simultaneous requests cannot all pass the gate and
     then wait on the pool forever while holding their transcripts.
+
+    #3129: the same reasoning for a SECOND request carrying a ``session_id``
+    that is already being captured — it is refused (409) here, before any
+    write, instead of racing the first capture's `capture_ok` write.
     """
     global _CAPTURE_IN_FLIGHT
+    session_key = str(session_id) if session_id else None
     with _CAPTURE_IN_FLIGHT_LOCK:
         if _CAPTURE_IN_FLIGHT >= _CAPTURE_MAX_IN_FLIGHT:
             raise HTTPException(
@@ -270,8 +297,15 @@ def _reserve_capture_slot() -> _CaptureSlot:
                 detail=("capture capacity saturated — too many captures in "
                         "flight; retry shortly"),
                 headers={"Retry-After": "30"})
+        if session_key is not None and session_key in _CAPTURE_SESSIONS:
+            raise HTTPException(
+                status_code=409,
+                detail=_CAPTURE_SESSION_IN_FLIGHT_DETAIL,
+                headers={"Retry-After": "30"})
+        if session_key is not None:
+            _CAPTURE_SESSIONS[session_key] = 1
         _CAPTURE_IN_FLIGHT += 1
-    return _CaptureSlot()
+    return _CaptureSlot(session_key)
 
 
 async def _run_capture_bounded(slot, fn, /, *args, **kwargs):
@@ -6961,7 +6995,8 @@ async def capture_session(body: SessionRequest, request: Request, team: dict = D
     the provider 503 / quota 402) so disabled teams do no quota work at all; any
     non-2xx failure records ``session_capture_last_error_{harness}`` (the
     dashboard failure sub-line reads this, NOT client state) — except the #3060
-    capacity 429, a server condition — and 2xx records
+    capacity 429 and the #3129 in-flight 409, which are server conditions — and
+    2xx records
     ``session_capture_receipt_{harness}`` (bare ``session_capture_receipt``
     for legacy no-harness hooks).
     """
@@ -6970,7 +7005,7 @@ async def capture_session(body: SessionRequest, request: Request, team: dict = D
         # #3060: reserve ADMISSION before ANY state is written. Reserving (not
         # merely checking) bounds the queue under a concurrent burst, and a
         # 429 here cannot leave a half-created Session behind.
-        slot = _reserve_capture_slot()
+        slot = _reserve_capture_slot(body.session_id)
         try:
             return await _capture_session_impl(body, request, team, slot=slot)
         finally:
@@ -6980,9 +7015,13 @@ async def capture_session(body: SessionRequest, request: Request, team: dict = D
         # failure — recording it in the team-visible last-error slot (and
         # clearing it on the retry, which then replays) would misreport
         # capacity as a capture fault and mask a genuine prior error.
+        # #3129: the same for the in-flight 409 — a concurrency condition on
+        # the server side; the retry this advertises is the ping that will
+        # succeed once the first capture finishes.
         # Review PR #1827: a last-error state-write failure must never mask the
         # intended 403/402/503 with a 500.
-        if e.status_code >= 400 and e.status_code != 429:
+        if (e.status_code >= 400 and e.status_code != 429
+                and e.detail != _CAPTURE_SESSION_IN_FLIGHT_DETAIL):
             try:
                 _record_capture_last_error(
                     team["team_id"], body.harness, e.detail)
@@ -8122,8 +8161,9 @@ def _capture_last_error_key(harness: str | None) -> str | None:
 def _record_capture_last_error(team_id: str, harness: str | None,
                                detail: str | None) -> None:
     """Set (detail) or clear (None) the per-harness last-attempt failure key.
-    Called on every non-2xx (set) EXCEPT the #3060 capacity 429 — a server
-    condition, not a team capture failure — and every 2xx (cleared)."""
+    Called on every non-2xx (set) EXCEPT the #3060 capacity 429 and the #3129
+    in-flight 409 — server conditions, not team capture failures — and every
+    2xx (cleared)."""
     key = _capture_last_error_key(harness)
     if key is None:
         return

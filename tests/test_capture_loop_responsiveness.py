@@ -105,8 +105,10 @@ def _reset_capture_in_flight():
     import tortoise.hosted_api as ha_mod
 
     ha_mod._CAPTURE_IN_FLIGHT = 0
+    ha_mod._CAPTURE_SESSIONS.clear()
     yield
     ha_mod._CAPTURE_IN_FLIGHT = 0
+    ha_mod._CAPTURE_SESSIONS.clear()
 
 
 @pytest.mark.parametrize("mode", ["v2", "m2"])
@@ -700,3 +702,86 @@ def test_mcp_capture_path_reserves_admission(client, monkeypatch):
     assert mcp_refused.get("error"), mcp_refused
     assert rest_resp.status_code == 200, rest_resp.text
     assert ha_mod._CAPTURE_IN_FLIGHT == 0, ha_mod._CAPTURE_IN_FLIGHT
+
+
+def test_same_session_retry_during_an_in_flight_capture_is_refused(
+        client, monkeypatch):
+    """#3129: a retry for a session ALREADY being captured must not claim 200.
+
+    Moving the extraction off the event loop (#3060) made a window reachable
+    that the synchronous handler had closed by construction: a second request
+    for the same ``session_id`` is now served WHILE the first extraction is
+    parked. It reads ``capture_ok = NULL`` (written only at the very end of a
+    successful capture), the replay branch treats NULL as "presumed captured",
+    and answers **200 + a success receipt with 0 turns extracted** — for a
+    capture whose only real attempt then fails. Silent data loss, and the
+    client has been told to retry by the very ``Retry-After`` the capacity
+    gate advertises.
+
+    The refusal must happen AT ADMISSION (before anything is written), like
+    the capacity gate: a later rejection would itself leave a half-created
+    Session behind.
+    """
+    import tortoise.hosted_api as ha_mod
+    from tortoise.hosted_api import app
+
+    entered = threading.Event()
+    release = threading.Event()
+
+    def _stalled(_self, windowed, session_id, now, **kw):
+        entered.set()
+        release.wait(timeout=30)
+        return [], {}
+
+    monkeypatch.setattr(TortoiseSDK, "_extract_session_v2", _stalled)
+    payload = {"conversation": _CONV, "session_id": "s-inflight-3129",
+               "harness": _HARNESS}
+    receipt_key = f"session_capture_receipt_{_HARNESS}"
+
+    async def _run():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport,
+                                     base_url="http://test") as ac:
+            first = asyncio.create_task(ac.post("/v1/sessions", json=payload))
+            for _ in range(400):
+                if entered.is_set():
+                    break
+                await asyncio.sleep(0.05)
+            assert entered.is_set(), "the first capture never reached the extraction"
+            try:
+                try:
+                    second = await asyncio.wait_for(
+                        ac.post("/v1/sessions", json=payload), timeout=10.0)
+                except TimeoutError:
+                    raise AssertionError(
+                        "a same-session request did not return within 10s "
+                        "while the first capture was still in flight — it "
+                        "must be refused at admission, not queued (#3129)"
+                    ) from None
+                # Sampled BEFORE the first capture is released, so a receipt
+                # written by the second request is unambiguous evidence.
+                receipt_during = ha_mod._get_onboarding_state(
+                    TEST_TEAM_ID).get(receipt_key)
+            finally:
+                release.set()
+            first_resp = await first
+            return second, first_resp, receipt_during
+
+    second, first_resp, receipt_during = asyncio.run(_run())
+
+    assert second.status_code == 409, (
+        f"a retry for a session that is STILL BEING CAPTURED returned "
+        f"{second.status_code} ({second.text[:200]}) — a 2xx here means the "
+        f"replay branch claimed success for a capture that had not finished "
+        f"(and may still fail): the dashboard gets a receipt + 0 extracted "
+        f"turns while the graph stays empty (#3129)")
+    assert "Retry-After" in second.headers, second.headers
+    assert receipt_during in (None, ""), (
+        f"the refused request still wrote a capture receipt ({receipt_during!r}) "
+        f"— a receipt for a capture that has not completed is the silent "
+        f"data-loss signal (#3129)")
+    assert first_resp.status_code == 200, first_resp.text
+    assert ha_mod._CAPTURE_IN_FLIGHT == 0, ha_mod._CAPTURE_IN_FLIGHT
+    assert ha_mod._CAPTURE_SESSIONS == {}, (
+        f"the in-flight session registry leaked: {ha_mod._CAPTURE_SESSIONS} — "
+        f"a stale entry would refuse every later retry for that session")
