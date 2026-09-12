@@ -17,6 +17,7 @@ import socket
 import socketserver
 import threading
 import time
+from collections.abc import Callable
 from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 
 from prometheus_client import Counter, Histogram, generate_latest
@@ -70,6 +71,44 @@ PROBE_POLL_INTERVAL = 0.02
 # outage (NXDOMAIN, stopped FalkorDB) fails the retry identically and still
 # reports degraded ~0.1s later — the retry never masks a persistent failure.
 PROBE_RETRY_DELAY = 0.1
+
+#: Default period for the event-retention sweep (seconds). Shared by the
+#: hosted retention loop and the SDK lazy purge so both fall back identically.
+EVENT_RETENTION_INTERVAL_DEFAULT_S = 3600
+
+
+def event_retention_interval() -> int:
+    """Validate ``TORTOISE_EVENT_RETENTION_INTERVAL`` to a positive int.
+
+    Round-4 review P2 (PRE-EXISTING, fixed here): a bare ``int()`` in both
+    call sites accepted ``0``/``-1``. In the hosted retention loop
+    ``asyncio.sleep(0)``/``sleep(-1)`` return immediately, hammering
+    ``_sweep_events``/``_purge_deleted_teams`` with no delay; in the SDK lazy
+    purge the gate ``now - _EVENT_PURGE_LAST < interval`` is always false, so
+    every ``events_poll`` issued a DELETE. A non-numeric value also raised out
+    of the SDK poll. Anything that is not a positive whole number of seconds
+    falls back to ``EVENT_RETENTION_INTERVAL_DEFAULT_S`` with a warning.
+    """
+    raw = os.environ.get("TORTOISE_EVENT_RETENTION_INTERVAL")
+    if raw is None or not str(raw).strip():
+        return EVENT_RETENTION_INTERVAL_DEFAULT_S
+    try:
+        value = int(str(raw).strip())
+    except (TypeError, ValueError):
+        logger.warning(
+            "TORTOISE_EVENT_RETENTION_INTERVAL=%r is not a whole number of "
+            "seconds — using %ds", raw, EVENT_RETENTION_INTERVAL_DEFAULT_S)
+        return EVENT_RETENTION_INTERVAL_DEFAULT_S
+    if value < 1:
+        logger.warning(
+            "TORTOISE_EVENT_RETENTION_INTERVAL=%r is not a positive number "
+            "of seconds — using %ds; a zero/negative interval makes "
+            "asyncio.sleep() return immediately and the SDK purge gate always "
+            "false (a DELETE on every events_poll)",
+            raw, EVENT_RETENTION_INTERVAL_DEFAULT_S)
+        return EVENT_RETENTION_INTERVAL_DEFAULT_S
+    return value
+
 
 # Prometheus metrics
 REQUEST_COUNT = Counter("tortoise_requests_total", "Total HTTP requests", ["endpoint"])
@@ -354,7 +393,7 @@ class HealthProbe:
                  max_supersedes: int = PROBE_MAX_SUPERSEDES,
                  poll_interval: float = PROBE_POLL_INTERVAL,
                  fresh_only: bool = False,
-                 refresh_budget: float = PROBE_STALE_AFTER) -> None:
+                 refresh_budget: float | Callable[[], float] = PROBE_STALE_AFTER) -> None:
         self._probe_fn = probe_fn
         self._timeout = timeout
         self._stale_after = stale_after
@@ -366,7 +405,10 @@ class HealthProbe:
         #: REFRESHER's period: without this, every ``/health`` read started a
         #: probe once the previous finished, turning an unauthenticated
         #: SKIP_AUTH route into a request→DB-query amplifier duplicating the
-        #: background loop.
+        #: background loop. A CALLABLE is resolved per read (round-4 review
+        #: P2): ``_HEALTH_PROBE``'s operator-configurable refresher period is
+        #: 0.5-15s, so freezing the import-time default here let ``/health``
+        #: start a duplicate probe once the operator's period exceeded it.
         self._refresh_budget = refresh_budget
         #: ``True`` -> /health semantics (stale-but-honest last-known-good is
         #: acceptable); ``False`` -> readiness semantics (never serve a verdict
@@ -382,6 +424,27 @@ class HealthProbe:
         self._supersedes = 0
 
     # ── internals (all callers hold self._cv) ────────────────────────────
+
+    def _refresh_budget_now(self) -> float:
+        """Resolve the self-heal gate to a float (round-4 review P2).
+
+        ``refresh_budget`` may be a float (tests, fixed coordinators) or a
+        zero-arg callable that returns one (``_HEALTH_PROBE`` wires it to
+        ``_health_probe_interval()`` so the gate always equals the refresher's
+        ACTUAL, operator-resolved period rather than the import-time default).
+        A callable that raises falls back to ``PROBE_STALE_AFTER`` — the gate
+        must never break an unauthenticated ``/health`` read.
+        """
+        budget = self._refresh_budget
+        if callable(budget):
+            try:
+                budget = float(budget())
+            except Exception:  # noqa: BLE001, RUF100 — a read path must not raise
+                logger.warning(
+                    "health probe refresh_budget callable failed — using the "
+                    "default %.0fs gate", PROBE_STALE_AFTER, exc_info=True)
+                return PROBE_STALE_AFTER
+        return budget
 
     def _start_locked(self) -> None:
         self._seq += 1
@@ -486,7 +549,7 @@ class HealthProbe:
             # Idle, or the worker died without recording a result — self-heal,
             # but (opt-in) only when the recorded result is genuinely stale.
             if (if_stale and self._result is not None
-                    and time.monotonic() - self._completed_at < self._refresh_budget):
+                    and time.monotonic() - self._completed_at < self._refresh_budget_now()):
                 return
             self._start_locked()
 
@@ -1319,6 +1382,18 @@ def workload_is_idle() -> bool:
     return workload_in_flight() == 0
 
 
+def _loop_stall_floor_s() -> float:
+    """Minimum safe threshold for the DESTRUCTIVE in-process self-kill.
+
+    The threshold must sit above the total floor: it has to exceed
+    ``2 * LOOP_STALE_AFTER`` so /healthz reports the stall before the process
+    dies, and it has to clear the absolute floor that keeps a GC pause from
+    becoming a crash loop. Shared by the env parser and the programmatic API
+    (round-4 review P2) so the two cannot drift.
+    """
+    return max(LOOP_STALL_EXIT_FLOOR_S, LOOP_STALE_AFTER * 2.0)
+
+
 def _loop_stall_threshold() -> float:
     """Resolve the self-kill threshold, validating it (review P2).
 
@@ -1361,7 +1436,7 @@ def _loop_stall_threshold() -> float:
                        "in-process self-kill is DISABLED (0 is the documented "
                        "disable value)", raw)
         return 0.0
-    floor = max(LOOP_STALL_EXIT_FLOOR_S, LOOP_STALE_AFTER * 2.0)
+    floor = _loop_stall_floor_s()
     if value < floor:
         logger.error(
             "TORTOISE_LOOP_STALL_EXIT_S=%r is below the safe floor (%.0fs: "
@@ -1422,6 +1497,22 @@ def start_stall_watchdog(threshold_s: float | None = None, *, exit_fn=None,
             "action belongs to the out-of-band watchdog.", threshold_s)
         return None
     if exit_fn is None:
+        # Round-4 review P2: the env path floors an enabled threshold, but a
+        # PROGRAMMATIC finite-but-absurd value (``1e-9``) passed the
+        # isfinite/<=0 guard and armed the DESTRUCTIVE default. With
+        # ``poll_interval = max(0.1, min(2.0, threshold/4))`` that is ~0.3s of
+        # a stale heartbeat before ``os._exit`` — the "GC pause becomes a
+        # crash loop" the floor exists to prevent. Floor only the destructive
+        # path: an injected ``exit_fn`` is the test seam and keeps its exact
+        # threshold.
+        floor = _loop_stall_floor_s()
+        if threshold_s < floor:
+            logger.warning(
+                "start_stall_watchdog: programmatic threshold %.3fs is below "
+                "the safe floor (%.0fs) for the destructive exit path — "
+                "clamping; a sub-second threshold turns a GC pause into a "
+                "crash loop", threshold_s, floor)
+            threshold_s = floor
         exit_fn = os._exit
     if stop_event is None:
         stop_event = threading.Event()

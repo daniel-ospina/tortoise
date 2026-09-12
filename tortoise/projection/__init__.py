@@ -72,18 +72,26 @@ _DB_SOCKET_TIMEOUT_DEFAULT = 10.0
 #: ``except OSError``), so the DB client could never connect at all. Clamp to
 #: a value that still bounds a hung socket.
 _DB_TIMEOUT_MAX_S = 60.0
+#: Sanity floor on a configured DB socket timeout (round-4 review P2). No
+#: socket round trip ever completes in microseconds. ``float()`` accepts
+#: ``1e-9``, which turns every FalkorDB operation into an instant timeout —
+#: ``TORTOISE_FALKORDB_SOCKET_TIMEOUT_S=1e-9`` is a typo-induced total outage
+#: (fail-closed, so not #2850, but the same "finite but absurd" class floored
+#: for the health-probe interval). Below the floor we fall back to the default.
+_DB_TIMEOUT_MIN_S = 0.05
 
 
 def _socket_timeouts() -> tuple[float, float]:
     """``(socket_connect_timeout, socket_timeout)`` from env, with defaults.
 
     ``TORTOISE_FALKORDB_CONNECT_TIMEOUT_S`` / ``TORTOISE_FALKORDB_SOCKET_TIMEOUT_S``.
-    A non-numeric, NON-FINITE (``nan``/``inf``), non-positive or
-    above-``_DB_TIMEOUT_MAX_S`` value falls back/clamps rather than disabling
-    the bound (a 0/None redis timeout means "block forever" — exactly the
-    failure mode #2850 is about; ``inf``/``1e308`` mean the same and an ``inf``
-    socket timeout raises ``OverflowError`` inside redis-py, bricking the
-    client at boot).
+    A non-numeric, NON-FINITE (``nan``/``inf``), non-positive, below-
+    ``_DB_TIMEOUT_MIN_S`` or above-``_DB_TIMEOUT_MAX_S`` value falls
+    back/clamps rather than disabling the bound (a 0/None redis timeout means
+    "block forever" — exactly the failure mode #2850 is about; ``inf``/``1e308``
+    mean the same and an ``inf`` socket timeout raises ``OverflowError`` inside
+    redis-py, bricking the client at boot; ``1e-9`` times out every operation
+    before it can complete).
     """
     def _one(name: str, default: float) -> float:
         raw = os.environ.get(name)
@@ -100,6 +108,11 @@ def _socket_timeouts() -> tuple[float, float]:
                            "OverflowError in the client)", name, raw, default)
             return default
         if v <= 0:
+            return default
+        if v < _DB_TIMEOUT_MIN_S:
+            logger.warning("%s=%r is below the %.2fs floor — using %ss (a "
+                           "sub-floor timeout fails every DB operation before "
+                           "it can complete)", name, raw, _DB_TIMEOUT_MIN_S, default)
             return default
         if v > _DB_TIMEOUT_MAX_S:
             logger.warning("%s=%r exceeds the %.0fs ceiling — clamping",

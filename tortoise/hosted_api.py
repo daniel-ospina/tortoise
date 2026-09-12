@@ -63,6 +63,7 @@ from tortoise.mcp_server import create_http_app
 from tortoise.monitoring import (  # #2850/2953 liveness-readiness decouple
     PROBE_STALE_AFTER,
     HealthProbe,
+    event_retention_interval,
     heartbeat_record,
     loop_heartbeat_info,
     loop_heartbeat_task,
@@ -1094,10 +1095,16 @@ async def _lifespan(app):
             _logger.error("boot sweeps did NOT run: %s", exc, exc_info=True)
 
         try:
-            import asyncio
-            import os
-
-            interval = int(os.environ.get("TORTOISE_EVENT_RETENTION_INTERVAL", "3600"))
+            # #2850/#2953: the inline `_sweep_events` closure and the two
+            # `await asyncio.to_thread(...)` boot calls that used to live here
+            # are GONE. `_sweep_events` is now hoisted to module scope (see its
+            # own definition above), and both boot sweeps run as a background
+            # task (`_run_boot_sweeps`) so the listening socket binds before any
+            # DB work. The previous `import asyncio` / `import os` lines are also
+            # gone — module-scope imports already cover them, and a function-local
+            # `import os` shadowed the module name for the WHOLE of `_lifespan`
+            # (#2851/#2922; regression guard tests/test_boot_regressions.py).
+            interval = event_retention_interval()
 
             async def _event_retention_loop() -> None:
                 while True:
@@ -2162,8 +2169,13 @@ def _probe_db() -> dict:
 # #2850: the single-flight, hard-bounded coordinator BOTH health endpoints
 # read. The lambda resolves ``_probe_db`` at CALL time, so the existing
 # monkeypatch seams (tests patch ha_mod._probe_db) keep working.
+# Round-4 review P2: the self-heal gate is wired to ``_health_probe_interval()``
+# (resolved per read) so it always equals the refresher's ACTUAL period. The
+# old hardcoded ``HEALTH_PROBE_REFRESH_S`` (10s) was wrong whenever the
+# operator set the period anywhere in 0.5-15s — with a 15s period, ``/health``
+# started a duplicate DB probe once per cycle (age 11s > 10s gate).
 _HEALTH_PROBE = HealthProbe(lambda: _probe_db(),
-                            refresh_budget=HEALTH_PROBE_REFRESH_S)
+                            refresh_budget=lambda: _health_probe_interval())
 
 
 def _probe_control_plane() -> dict:

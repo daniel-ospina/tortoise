@@ -484,6 +484,30 @@ class TestHealthProbe:
             time.sleep(0.01)
         assert calls["n"] == 2, "a dead refresher was never recovered"
 
+    def test_refresh_budget_callable_is_resolved_live_not_frozen(self):
+        """Round-4 review P2: the self-heal gate must follow the refresher's
+        RESOLVED period. ``_HEALTH_PROBE`` passes ``_health_probe_interval``
+        (a callable) because the operator can set that period anywhere in
+        0.5-15s; a frozen float would gate on the import-time default."""
+        budget = {"s": 10.0}
+        probe = monitoring.HealthProbe(
+            lambda: {"ok": True, "latency_ms": 1.0, "error": None},
+            refresh_budget=lambda: budget["s"])
+        assert probe._refresh_budget_now() == 10.0
+        budget["s"] = 15.0
+        assert probe._refresh_budget_now() == 15.0, (
+            "a callable refresh budget was frozen at first read")
+
+    def test_refresh_budget_callable_failure_falls_back(self):
+        """A broken callable must not break the unauthenticated /health read."""
+        def _boom():
+            raise RuntimeError("nope")
+
+        probe = monitoring.HealthProbe(
+            lambda: {"ok": True, "latency_ms": 1.0, "error": None},
+            refresh_budget=_boom)
+        assert probe._refresh_budget_now() == monitoring.PROBE_STALE_AFTER
+
     # ── #2850 review P1: readiness must not serve a pre-outage verdict ──
 
     def test_fresh_only_fails_closed_when_the_budget_expires(self):
@@ -1484,6 +1508,47 @@ class TestStallWatchdog:
         assert fired == []
         assert not thread.is_alive()
 
+    def test_destructive_threshold_floor_is_shared_with_the_env_path(self):
+        """The programmatic floor reuses the env parser's minimum so the two
+        cannot drift (round-4 review P2)."""
+        assert monitoring._loop_stall_floor_s() == max(
+            monitoring.LOOP_STALL_EXIT_FLOOR_S,
+            monitoring.LOOP_STALE_AFTER * 2.0)
+
+    def test_programmatic_subsecond_threshold_is_floored_on_the_destructive_path(
+            self, monkeypatch):
+        """Round-4 review P2: a FINITE but absurd programmatic threshold
+        (``1e-9``) passed the isfinite/<=0 guard and armed the DESTRUCTIVE
+        default. ``poll_interval = max(0.1, min(2.0, threshold/4))`` then fired
+        ``os._exit`` after ~0.3s of a stale heartbeat — a GC pause becomes a
+        crash loop. With ``exit_fn=None`` the threshold must be floored; an
+        injected ``exit_fn`` (the test seam) keeps its exact value.
+        """
+        import threading
+        import time
+
+        monitoring._reset_heartbeat()
+        monitoring._reset_workload()
+        monitoring.heartbeat_record()  # synthetic startup tick
+        monitoring.heartbeat_record()  # a real loop_heartbeat_task tick
+        exited: list = []
+        # Never let the destructive default actually kill pytest: the watchdog
+        # reads ``os._exit`` off the module, so patch that seam (monkeypatch
+        # restores it).
+        monkeypatch.setattr(monitoring.os, "_exit",
+                            lambda code=0: exited.append(code))
+        stop = threading.Event()
+        thread = monitoring.start_stall_watchdog(1e-9, stop_event=stop)
+        assert thread is not None, "a finite positive threshold must still arm"
+        try:
+            time.sleep(0.8)
+            assert exited == [], (
+                "a 1e-9s threshold exited the process in under a second; the "
+                "destructive default must be floored to the safe minimum")
+        finally:
+            stop.set()
+            thread.join(timeout=2)
+
 
 def test_oserror_branch_classification():
     """#1565 review: pin the OSError-branch classification — builtin
@@ -1499,3 +1564,25 @@ def test_oserror_branch_classification():
     assert _is_transient_connect_error(TimeoutError()) is False
     assert _is_transient_connect_error(TimeoutError()) is False
     assert _is_transient_connect_error(RuntimeError()) is False
+
+
+def test_event_retention_interval_validation(monkeypatch):
+    """Round-4 review P2 (PRE-EXISTING): the retention interval must be a
+    POSITIVE whole number of seconds. ``0``/``-1`` make ``asyncio.sleep()``
+    return immediately in the hosted retention loop and the SDK purge gate
+    ``now - _EVENT_PURGE_LAST < interval`` always false (a DELETE on every
+    ``events_poll``). A non-numeric value raised out of the SDK poll."""
+    from tortoise.monitoring import (
+        EVENT_RETENTION_INTERVAL_DEFAULT_S,
+        event_retention_interval,
+    )
+
+    monkeypatch.delenv("TORTOISE_EVENT_RETENTION_INTERVAL", raising=False)
+    assert event_retention_interval() == EVENT_RETENTION_INTERVAL_DEFAULT_S
+
+    monkeypatch.setenv("TORTOISE_EVENT_RETENTION_INTERVAL", "900")
+    assert event_retention_interval() == 900
+
+    for raw in ("0", "-1", "-3600", "oops", "3.5", "", "   "):
+        monkeypatch.setenv("TORTOISE_EVENT_RETENTION_INTERVAL", raw)
+        assert event_retention_interval() == EVENT_RETENTION_INTERVAL_DEFAULT_S, raw

@@ -617,6 +617,10 @@ def test_boot_sweeps_are_scheduled_before_the_retention_interval_parse():
     the process's lifetime. On origin/main the sweeps ran regardless (they were
     awaited before the parse). Pin the ordering statically — this file needs no
     app import, DB, or network.
+
+    Round-4 review P2 routed the parse through ``event_retention_interval()``
+    (it now validates to a positive int instead of accepting ``0``/``-1``), so
+    the marker is that call rather than the inline ``int(...)``.
     """
     lifespan = _lifespan_fn()
     boot_line: int | None = None
@@ -632,13 +636,12 @@ def test_boot_sweeps_are_scheduled_before_the_retention_interval_parse():
         if (
             isinstance(node, ast.Call)
             and isinstance(node.func, ast.Name)
-            and node.func.id == "int"
-            and "TORTOISE_EVENT_RETENTION_INTERVAL" in ast.unparse(node)
+            and node.func.id == "event_retention_interval"
         ):
             parse_line = node.lineno
     assert boot_line is not None, "no _boot_sweep_task assignment found in _lifespan"
     assert parse_line is not None, (
-        "no TORTOISE_EVENT_RETENTION_INTERVAL parse found in _lifespan"
+        "no event_retention_interval() call found in _lifespan"
     )
     assert boot_line < parse_line, (
         f"_boot_sweep_task is assigned at line {boot_line}, AFTER the retention "
@@ -655,6 +658,10 @@ def test_liveness_start_and_stop_share_one_task_attribute_tuple():
     failed prior lifespan could orphan the latter two (double boot sweeps,
     "Task exception was never retrieved" at teardown). They must both read the
     one shared ``_LIVENESS_TASK_ATTRS`` tuple, with no hardcoded attr names.
+
+    Round-4 review P2: the shared-reference check alone was too weak — it also
+    passed when a member was DROPPED from the tuple (exactly the orphan round 3
+    fixed). Pin membership so the tuple must cover all four lifespan tasks.
     """
     tree = ast.parse(
         (TORTOISE_PKG / "hosted_api.py").read_text(), filename="hosted_api.py"
@@ -666,6 +673,38 @@ def test_liveness_start_and_stop_share_one_task_attribute_tuple():
         and node.name in ("_start_liveness", "_stop_liveness")
     }
     assert set(fns) == {"_start_liveness", "_stop_liveness"}, sorted(fns)
+
+    # Round-4 review P2: pin the tuple's MEMBERSHIP. Without this, deleting
+    # ``_boot_sweep_task``/``_event_retention_task`` from the tuple still
+    # passed (both functions still "reference the name"), which is the exact
+    # orphan round 3 fixed. Parsed from source so this file keeps its
+    # "no app import" contract.
+    expected_attrs = {
+        "_loop_heartbeat_task",
+        "_health_probe_task",
+        "_boot_sweep_task",
+        "_event_retention_task",
+    }
+    attr_tuple: tuple[str, ...] | None = None
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Assign)
+            and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name)
+            and node.targets[0].id == "_LIVENESS_TASK_ATTRS"
+            and isinstance(node.value, ast.Tuple)
+        ):
+            attr_tuple = tuple(
+                elt.value for elt in node.value.elts
+                if isinstance(elt, ast.Constant) and isinstance(elt.value, str)
+            )
+    assert attr_tuple is not None, "no _LIVENESS_TASK_ATTRS tuple found"
+    assert set(attr_tuple) == expected_attrs, (
+        f"_LIVENESS_TASK_ATTRS must exactly cover {sorted(expected_attrs)}; "
+        f"got {sorted(attr_tuple)} — a dropped member is orphaned on "
+        f"re-entry/shutdown"
+    )
+
     for name, fn in fns.items():
         assert any(
             isinstance(node, ast.Name) and node.id == "_LIVENESS_TASK_ATTRS"

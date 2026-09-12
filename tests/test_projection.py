@@ -2955,6 +2955,7 @@ def test_socket_timeouts_reject_fail_open_values(monkeypatch):
         _DB_CONNECT_TIMEOUT_DEFAULT,
         _DB_SOCKET_TIMEOUT_DEFAULT,
         _DB_TIMEOUT_MAX_S,
+        _DB_TIMEOUT_MIN_S,
         _socket_timeouts,
     )
 
@@ -2981,6 +2982,23 @@ def test_socket_timeouts_reject_fail_open_values(monkeypatch):
     for raw in ("inf", "-inf", "nan"):
         monkeypatch.setenv("TORTOISE_FALKORDB_SOCKET_TIMEOUT_S", raw)
         assert _socket_timeouts()[1] == _DB_SOCKET_TIMEOUT_DEFAULT, raw
+
+    # Round-4 review P2: a finite-but-absurd SMALL value is the other half of
+    # the same class. ``1e-9`` is finite, > 0, and below the ceiling, so it
+    # passed every guard — yet it makes every FalkorDB operation time out
+    # before it can complete (fail-closed, but a typo-induced total outage).
+    # Below ``_DB_TIMEOUT_MIN_S`` fall back to the DEFAULT, mirroring the
+    # health-probe interval floor.
+    assert _DB_TIMEOUT_MIN_S > 0
+    for raw in ("1e-9", "0.001", "0.049"):
+        monkeypatch.setenv("TORTOISE_FALKORDB_CONNECT_TIMEOUT_S", raw)
+        monkeypatch.setenv("TORTOISE_FALKORDB_SOCKET_TIMEOUT_S", raw)
+        assert _socket_timeouts() == (
+            _DB_CONNECT_TIMEOUT_DEFAULT, _DB_SOCKET_TIMEOUT_DEFAULT), raw
+    # At the floor the configured value is honored (not clamped away).
+    monkeypatch.setenv("TORTOISE_FALKORDB_CONNECT_TIMEOUT_S", "0.05")
+    monkeypatch.setenv("TORTOISE_FALKORDB_SOCKET_TIMEOUT_S", "0.05")
+    assert _socket_timeouts() == (0.05, 0.05)
 
 
 def test_server_projection_receives_the_bounded_timeouts(monkeypatch):

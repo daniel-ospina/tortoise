@@ -2225,7 +2225,7 @@ class TortoiseSDK:
         import os
         import time
 
-        interval = int(os.environ.get("TORTOISE_EVENT_RETENTION_INTERVAL", "3600"))
+        interval = monitoring.event_retention_interval()
         now = time.monotonic()
         if now - TortoiseSDK._EVENT_PURGE_LAST < interval:
             return
