@@ -397,7 +397,7 @@ class AlertStore:
         # recurrence, a gate that left an incident filed but never shown, a
         # clause that let an adopter claim provenance, and a hard-coded flag in
         # bash that marked an outage as announced. Until that is designed on its
-        # own terms (issue #3295), prefer the failure that pages: an adopted
+        # own terms (issue #3338), prefer the failure that pages: an adopted
         # issue can be announced twice — noise — rather than not at all.
         if issue_number is not None:
             self._push_with_pending(key, self._telegram_text(kind, team_id, detail, issue_number))
