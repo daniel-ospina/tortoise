@@ -1127,3 +1127,215 @@ def test_fold_sweep_handles_2500_folds(tmp_path):
             proj.g.query("MATCH (o:Object) DETACH DELETE o")
         finally:
             proj.close()
+
+
+def test_retracted_object_excluded_from_recall_even_with_superseded(tmp_path):
+    sdk = TortoiseSDK(str(tmp_path / "t10.db"))
+    sdk.create_entity("object", "hidden", objectKind="core:other", is_episodic=False)
+    oid = _entity_name_id("Object", "hidden")
+    sdk._get_proj()._fold_object_retracted({"id": oid, "name": "hidden", "ts": "T"})
+    for include in (False, True):
+        # recall_state returns list[dict], NOT a dict. Match on `content` (the
+        # result dict's name slot is "content" — SearchResult.to_dict() emits no
+        # `name` key) or on `id`; matching on `name` would be vacuously green.
+        rows = sdk.recall_state("hidden", include_superseded=include)
+        assert not [r for r in rows
+                    if r.get("entity_type") == "object"
+                    and (r.get("id") == oid or r.get("content") == "hidden")], \
+            f"retracted Object leaked (include_superseded={include})"
+
+
+def test_live_object_still_returned(tmp_path):
+    """Positive control — a filter that hides everything must fail this."""
+    sdk = TortoiseSDK(str(tmp_path / "t10e.db"))
+    sdk.create_entity("object", "visible", objectKind="core:other", is_episodic=False)
+    rows = sdk.recall_state("visible")
+    assert [r for r in rows if r.get("content") == "visible"], \
+        "a LIVE Object must still be returned — guard against a vacuous test"
+
+
+def test_retracted_object_excluded_from_search(tmp_path):
+    """Drive the real public surface. TortoiseSDK has NO `search()` method —
+    the object-search entry point is tortoise_fts_query."""
+    sdk = TortoiseSDK(str(tmp_path / "t10b.db"))
+    sdk.create_entity("object", "hidden2", objectKind="core:other", is_episodic=False)
+    oid = _entity_name_id("Object", "hidden2")
+    sdk._get_proj()._fold_object_retracted({"id": oid, "name": "hidden2", "ts": "T"})
+    hits = sdk.tortoise_fts_query("hidden2", entity_type="object")
+    assert not [h for h in hits if h.get("id") == oid or h.get("content") == "hidden2"]
+
+
+def test_retracted_object_excluded_from_structural_leg(tmp_path):
+    """VERIFY-1 P1-1 (Reviewer slot 1, EMPIRICAL): Task 5's acceptance names
+    "all four search_engine legs plus the sdk.py:12317 post-filter" as the
+    pinned surface, but the plan's own tests reach only TWO legs. Slot 1 spied
+    on `_status_vocab_for` during the plan's own object-search test and got
+    `['Object', 'Object']` — FTS + vector-index only. The structural leg's
+    conditions are empty unless `kind` is passed, and it short-circuits to `[]`.
+
+    This test passes `kind` to force THAT leg to build its WHERE clause, so a
+    transcription error in its `_exclude_status_clause` call is caught.
+    """
+    sdk = TortoiseSDK(str(tmp_path / "t10g.db"))
+    sdk.create_entity("object", "leg-hidden", objectKind="core:other",
+                      is_episodic=False)
+    live_id = _entity_name_id("Object", "leg-hidden")
+    sdk.create_entity("object", "leg-gone", objectKind="core:other",
+                      is_episodic=False)
+    gone_id = _entity_name_id("Object", "leg-gone")
+    sdk._get_proj()._fold_object_retracted(
+        {"id": gone_id, "name": "leg-gone", "ts": "T"})
+    # VERIFY-2 P0-1 (slot 1, EMPIRICAL): `kind` must equal the stored
+    # `objectKind`, NOT the `core:`-stripped short form. `run_structural_query`
+    # builds `WHERE n.objectKind = $kind` (search_engine.py:798-821), so
+    # `kind="other"` matched NOTHING and the live control returned `[]` —
+    # making this test unsatisfiable. Probed live: `objectKind='core:other'`
+    # with `kind="other"` -> `[]`; with `kind="core:other"` -> live hit
+    # (`structural: 1.0`), and the retracted Object is correctly excluded.
+    hits = sdk.tortoise_fts_query("leg", entity_type="object", kind="core:other")
+    ids = {h.get("id") for h in hits}
+    assert live_id in ids, "the structural leg must still return a LIVE Object"
+    assert gone_id not in ids, (
+        "the structural leg must exclude a retracted Object — if this is the "
+        "only failure, that leg's `_exclude_status_clause` call is unparameterised")
+
+
+def test_retracted_object_excluded_by_post_filter(tmp_path):
+    """VERIFY-1 P1-1 (Reviewer slot 1): the `sdk.py:12317` post-filter is DEAD
+    CODE under the plan's own tests — no test passes `exclude_status`, and every
+    production caller that does uses `entity_type="point"`, so the `graph_label
+    in ("Point", "Object")` edit is exercised by nothing.
+
+    VERIFY-2 P1-1 (slot 1, EMPIRICAL): merely PASSING `exclude_status` is NOT
+    enough. Slot 1 reverted the edit (`graph_label in ("Point","Object")` ->
+    `graph_label == "Point"`) and this test STILL PASSED, because the FTS and
+    vector legs already drop `retracted` Objects (Task 5(b) threads the Object
+    vocabulary into them). The result set never contains the retracted id, so
+    the post-filter is entered with nothing to filter — a GREEN BLIND TEST, the
+    exact class this plan condemns elsewhere.
+
+    The honest pin SPIES ON THE GRAPH, as the sibling
+    `test_fold_object_retracted_skips_null_id_branch` does: record every query,
+    then assert the post-filter query for `graph_label == "Object"` actually
+    RAN. That is green only when the label gate admits Objects, and red when it
+    reads `== "Point"` — i.e. it detects the only edit this test exists to pin.
+    """
+    sdk = TortoiseSDK(str(tmp_path / "t10h.db"))
+    proj = sdk._get_proj()
+    sdk.create_entity("object", "pf-gone", objectKind="core:other",
+                      is_episodic=False)
+    gone_id = _entity_name_id("Object", "pf-gone")
+    proj._fold_object_retracted({"id": gone_id, "name": "pf-gone", "ts": "T"})
+
+    class _RecordingGraph:
+        def __init__(self, inner):
+            self._inner = inner
+            self.calls: list[str] = []
+        def query(self, q, **kw):
+            self.calls.append(q)
+            return self._inner.query(q, **kw)
+
+    rec = _RecordingGraph(proj.g)
+    proj.g = rec
+    try:
+        # VERIFY-3 P0-2 (slot 1, EMPIRICAL) — `include_terminal=True` IS REQUIRED
+        # here, and its absence made this test UNSATISFIABLE. Task 5(b) threads
+        # the Object vocabulary into the FTS / vector-index / brute-force legs,
+        # so with the default `include_terminal=False` those legs ALREADY drop
+        # the retracted Object — `result_ids` is then empty, and the post-filter's
+        # own `if exclude_status and result_ids and …` short-circuits before
+        # running. Slot 1 confirmed: without this flag the assertion fails with
+        # `Queries seen: […FTS…, …MATCH (n:Object) WHERE n.embedding…]` and no
+        # post-filter query. WITH it, the legs skip their own filter, `result_ids`
+        # is non-empty, the post-filter RUNS, the test passes on the correct gate
+        # **and FAILS when the gate is reverted to `== "Point"`** — i.e. only now
+        # is it falsifiable in the direction it claims to pin.
+        hits = sdk.tortoise_fts_query(
+            "pf-gone", entity_type="object",
+            exclude_status=["retracted"], include_terminal=True)
+    finally:
+        proj.g = rec._inner
+    assert any("MATCH (n:Object) WHERE n.id IN" in q for q in rec.calls), (
+        "the sdk.py:12317 post-filter did not run for graph_label='Object' — "
+        "either the label gate still reads `== \"Point\"` (the edit this test "
+        "pins) or the block's try/except swallowed an error. Queries seen: "
+        f"{[q[:60] for q in rec.calls]}")
+    assert not [h for h in hits if h.get("id") == gone_id], (
+        "the post-filter must drop a retracted Object")
+
+
+def test_audit_optin_still_returns_retracted(tmp_path):
+    """`include_terminal=True` is the documented full-scan opt-in; it routes to
+    `excluded_statuses=()` at sdk.py:12036."""
+    sdk = TortoiseSDK(str(tmp_path / "t10d.db"))
+    sdk.create_entity("object", "audit-me", objectKind="core:other", is_episodic=False)
+    oid = _entity_name_id("Object", "audit-me")
+    sdk._get_proj()._fold_object_retracted({"id": oid, "name": "audit-me", "ts": "T"})
+    hits = sdk.tortoise_fts_query("audit-me", entity_type="object", include_terminal=True)
+    assert [h for h in hits if h.get("id") == oid], \
+        "the audit opt-in must still see retracted Objects"
+
+
+def test_outdated_object_stays_visible(tmp_path):
+    """The Object clause must NOT carry the Point `outdated` conjunct."""
+    sdk = TortoiseSDK(str(tmp_path / "t10c.db"))
+    proj = sdk._get_proj()
+    sdk.create_entity("object", "legacy", objectKind="core:other", is_episodic=False)
+    proj.g.query("MATCH (o:Object {name:'legacy'}) SET o.status='live', o.outdated=true")
+    hits = sdk.tortoise_fts_query("legacy", entity_type="object")
+    assert [h for h in hits if h.get("content") == "legacy"], \
+        "an outdated Object must stay visible — `outdated` is a Point-only flag"
+
+
+def test_superseded_object_visibility_unchanged(tmp_path):
+    """Pin the PRE-EXISTING behaviour: the four search legs applied no Object
+    terminal-status filter before this plan. It adds `retracted` only — it must
+    not silently start hiding superseded/deprecated/archived Objects.
+    (That wider gap is filed as a follow-up in Task 7 (c).)"""
+    sdk = TortoiseSDK(str(tmp_path / "t10f.db"))
+    proj = sdk._get_proj()
+    proj.g.query("CREATE (:Object {id:'sup1', name:'wassuperseded', "
+                 "status:'superseded', objectKind:'core:other'})")
+    hits = sdk.tortoise_fts_query("wassuperseded", entity_type="object")
+    assert [h for h in hits if h.get("id") == "sup1"], (
+        "narrowing the search view to {retracted} must leave superseded "
+        "Objects visible exactly as before — widening is follow-up (c), not "
+        "a silent side effect of this plan")
+
+
+def test_object_visibility_vocabularies_are_declared_views():
+    r"""#688 D4/D7: NOTHING asserted any pair of Object-visibility sets agrees
+    (`grep -rn "_RECALL_OBJECT_EXCLUDED\\|OBJECT_TERMINAL\\|OBJECT_SEARCH" tests/`
+    → 0 assertions, 1 comment). That absence was the finding.
+
+    CYCLE 5 — STRENGTHENED. The first form was structurally blind in both
+    directions: `_RECALL is OBJECT_TERMINAL` is an ALIAS identity (CPython's
+    `frozenset(x)` returns `x` unchanged when `x` is already a frozenset, so a
+    re-literalisation with the same values passed), and
+    `OBJECT_SEARCH < OBJECT_TERMINAL` stays TRUE if the canonical set grows a
+    member — i.e. exactly the drift this test exists to catch. Both are now
+    explicit VALUE assertions, and `assembly.py`'s divergent set is IMPORTED
+    and pinned as a NAMED divergence so aligning it is a deliberate, RED edit.
+    """
+    from tortoise.commit_ops import (OBJECT_TERMINAL_STATUSES,
+                                     _RECALL_OBJECT_EXCLUDED_STATUS,
+                                     OBJECT_SEARCH_EXCLUDED_STATUS)
+    from tortoise.sdk import OBJECT_STATUS_VALUES
+    import tortoise.assembly as _assembly
+
+    # Values, not identities: a re-literalised alias must not slip through.
+    assert OBJECT_TERMINAL_STATUSES == frozenset(
+        {"superseded", "deprecated", "archived", "retracted"})
+    assert _RECALL_OBJECT_EXCLUDED_STATUS == OBJECT_TERMINAL_STATUSES
+    # The search view is a strict, DELIBERATE subset — pinned BY VALUE, so
+    # growing the canonical set cannot silently widen search visibility.
+    assert OBJECT_SEARCH_EXCLUDED_STATUS == frozenset({"retracted"})
+    assert OBJECT_SEARCH_EXCLUDED_STATUS < OBJECT_TERMINAL_STATUSES
+    # Every canonical status must be writable by some legitimate writer.
+    assert OBJECT_TERMINAL_STATUSES <= OBJECT_STATUS_VALUES
+    # assembly.py:1017's divergence is NAMED, not described in a comment:
+    # changing either set breaks this line. Tracked in #2901; filed as (d).
+    assert _assembly._RECALL_OBJECT_EXCLUDED_STATUSES == (
+        OBJECT_TERMINAL_STATUSES | {"outdated"}), (
+        "assembly's Object set diverged — decide deliberately, then update "
+        "this assertion and the #2901/(d) deferral together")

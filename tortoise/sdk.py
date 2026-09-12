@@ -12490,11 +12490,22 @@ class TortoiseSDK:
         #     limit cut would silently shrink results when superseded/deprecated
         #     points dominate the pool. Points with no status are kept; only
         #     Point-label entities have status (operators are Points too).
-        if exclude_status and result_ids and graph_label == "Point":
+        # #2977: the Object lane is now admitted here too. `graph_label` is
+        # parameterised so the post-filter's query body reads the SAME label it
+        # was gated on — the body was hardcoded `MATCH (n:Point)`, so admitting
+        # Objects without changing it would have made the clause inert.
+        #
+        # The `try/except` pass-through wrapper is PRESERVED, and `sorted()` on
+        # both params is preserved: the ONLY functional edit is the label gate
+        # and the label interpolation. Dropping the wrapper would let a
+        # FalkorDB error propagate out of `tortoise_fts_query` / `recall_state`
+        # for Points as well as Objects — a production read-path regression
+        # outside this change's scope.
+        if exclude_status and result_ids and graph_label in ("Point", "Object"):
             try:
                 excluded = set(exclude_status)
                 status_rows = graph.query(
-                    "MATCH (n:Point) WHERE n.id IN $ids AND n.status IN $statuses "
+                    f"MATCH (n:{graph_label}) WHERE n.id IN $ids AND n.status IN $statuses "
                     "RETURN n.id",
                     params={"ids": result_ids, "statuses": sorted(excluded)},
                 ).result_set
@@ -14060,9 +14071,17 @@ class TortoiseSDK:
         # from the state view unless include_superseded brings them back).
         objects = [dict(r, entity_type="object") for r in object_results]
         if not include_superseded:
+            # #2977: import the canonical set instead of re-literalling it, so
+            # the vocabulary has ONE home. (The `include_superseded` re-admit
+            # inversion the scope flagged is closed upstream: every search leg
+            # now excludes `retracted` at the query level, so the branch above
+            # can no longer be reached with a retracted Object. Adding a second
+            # copy of the rule here that nothing can exercise would read as
+            # coverage without being any.)
+            from tortoise.commit_ops import _RECALL_OBJECT_EXCLUDED_STATUS
             objects = [o for o in objects
                        if (o.get("status") or "") not in
-                       ("superseded", "deprecated", "archived", "retracted")]
+                       _RECALL_OBJECT_EXCLUDED_STATUS]
 
         # UC1 state view: hide mitigation bookkeeping points (they are
         # surfaced ATTACHED to results as context, not standalone claims —
