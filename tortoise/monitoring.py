@@ -116,6 +116,13 @@ def probe_setup_timeout() -> float:
 # reports degraded ~0.1s later — the retry never masks a persistent failure.
 PROBE_RETRY_DELAY = 0.1
 
+#: Prefix of ``_probe_once``'s synthesized SETUP-phase timeout. ``probe_db``
+#: matches it to tell a retry that never reached the reachability query (its
+#: remaining slice of the deadline could not redo the cold-start) from a
+#: genuine verdict: the former carries no verdict about the DB, so it must not
+#: replace the FIRST attempt's real error (#3143 review).
+_PROBE_SETUP_TIMEOUT_MSG = "probe setup timeout after "
+
 # Prometheus metrics
 REQUEST_COUNT = Counter("tortoise_requests_total", "Total HTTP requests", ["endpoint"])
 REQUEST_LATENCY = Histogram("tortoise_request_latency_seconds", "Request latency")
@@ -218,7 +225,7 @@ def _probe_once(sdk, timeout=None,
         try:
             proj = setup.result(timeout=setup_timeout)
         except concurrent.futures.TimeoutError:
-            return False, f"probe setup timeout after {setup_timeout}s", False
+            return False, f"{_PROBE_SETUP_TIMEOUT_MSG}{setup_timeout}s", False
         except Exception as e:  # noqa: BLE001, RUF100
             return False, str(e)[:200], _is_transient_connect_error(e)
 
@@ -293,7 +300,19 @@ def probe_db(sdk, setup_timeout=None) -> dict:
             time.sleep(PROBE_RETRY_DELAY)
             # Combined shape on purpose: the retry gets what the deadline has
             # LEFT, split across both phases — not a second allowance.
-            ok, error, _ = _probe_once(sdk, timeout=remaining, setup_timeout=None)
+            retry_ok, retry_error, _ = _probe_once(
+                sdk, timeout=remaining, setup_timeout=None)
+            if retry_ok:
+                ok, error = True, None
+            elif not (retry_error or "").startswith(_PROBE_SETUP_TIMEOUT_MSG):
+                # The retry reached (and failed at) the query — a genuine
+                # verdict; take it.
+                ok, error = retry_ok, retry_error
+            # else: the remainder was too small to REDO the cold-start, so the
+            # retry never observed the DB. Keep the FIRST attempt's real error
+            # instead of letting the clock artifact ("probe setup timeout
+            # after 0.01s") mask it — the `remaining > 0` guard alone does not
+            # cover the 0 < remaining < cold-start window (#3143 review).
     return {
         "ok": ok,
         "latency_ms": round((time.monotonic() - start) * 1000, 1),

@@ -300,6 +300,36 @@ class TestProbeDb:
         assert result["ok"] is False
         assert result["error"] == "connection refused"  # the real error, not a fake timeout
 
+    def test_retry_short_budget_never_masks_the_real_error(self, monkeypatch):
+        """#3143 review: the ``remaining > 0`` guard does NOT cover the
+        window ``0 < remaining < cold-start``. There the retry still fires,
+        cannot redo the cold-start, and its synthesized setup timeout used to
+        OVERWRITE the real transient error — so ``/health`` reported a clock
+        artifact ("probe setup timeout after 0.01s") instead of the outage
+        cause, and abandoned a second worker thread for nothing."""
+        monkeypatch.setattr(monitoring, "PROBE_TIMEOUT", 1.5)
+        monkeypatch.setattr(monitoring, "PROBE_RETRY_DELAY", 0.1)
+        clock = SimpleNamespace(t=0.0)
+        monkeypatch.setattr(monitoring, "time", SimpleNamespace(
+            monotonic=lambda: clock.t, sleep=lambda _s: None))
+        seen = []
+
+        def fake_probe_once(sdk, timeout=None, setup_timeout=None):
+            seen.append((timeout, setup_timeout))
+            if len(seen) == 1:
+                clock.t += 1.39  # transient failure LATE in the shared budget
+                return False, "NXDOMAIN / connection refused", True
+            # The remainder (~0.01s) is far below the cold-start it must redo.
+            return False, f"probe setup timeout after {timeout}s", False
+
+        monkeypatch.setattr(monitoring, "_probe_once", fake_probe_once)
+        result = monitoring.probe_db(object())
+        assert len(seen) == 2, seen  # the retry did fire...
+        assert seen[1][0] == pytest.approx(0.01), seen[1]  # ...on the remainder
+        assert result["ok"] is False
+        # ...but its inconclusive setup timeout must not mask the real cause.
+        assert result["error"] == "NXDOMAIN / connection refused", result["error"]
+
 
 class TestProbeSetupTimeoutResolution:
     """#3143 review: the operator knob is read at CALL time and is tolerant.
