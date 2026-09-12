@@ -25,6 +25,12 @@ surfaces:
   - test_health_ready_nonblocking.py
   - test_delivery_tenancy.py  # C6 #2115: delivery-shape tenancy + session_recording per-graph override
   - test_onboarding_email_http.py
+  # #3287: the selfhost health probes must not ride the loop's SHARED default
+  # executor — a starved readiness probe returned a false 503 for a healthy DB
+  # (measured 6020 ms, probe never ran), which fails publish-selfhost.yml. Dual
+  # registration like test_health_ready_nonblocking.py: the file it guards is
+  # tortoise/selfhost.py, which selects the `api` surface.
+  - test_selfhost_health_probe_executor.py
   - test_sentry.py
   - test_tenancy_spine.py     # C5 #2114: data-plane tenancy spine (cross-graph suite)
   - test_agent_signup.py
@@ -290,6 +296,7 @@ surfaces:
   - test_boot_regressions.py
   - test_collision_preflight.py
   - test_health_ready_nonblocking.py  # #2988: /health/ready off-loop + bounded probes
+  - test_selfhost_health_probe_executor.py  # #3287: selfhost probes own their pool (dual-registered)
   - test_build_window_transcript.py
   - test_canary_classify.py
   - test_canonical.py
