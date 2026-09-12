@@ -233,6 +233,7 @@ class GraphRanker:
         recency_weight: float = DEFAULT_RECENCY_WEIGHT,
         recency_half_life_days: float = DEFAULT_HALF_LIFE_DAYS,
         use_degree: bool = True,
+        now=None,
     ):
         total = similarity_weight + graph_boost_weight + recency_weight
         if abs(total - 1.0) > 1e-6:
@@ -248,6 +249,15 @@ class GraphRanker:
         # #1348: use_degree=False isolates the CONFIDENCE contribution (ablation
         # arm — degree term neutralized so the graph_boost is confidence-only).
         self.use_degree = use_degree
+        # #2952: recency decay is INTENTIONAL product behaviour (γ·e^(-λ·age),
+        # 30-day half-life), so the fix is not to delete it but to make the
+        # reference time it measures against EXPLICIT and injectable. A caller
+        # replaying a fixed store (eval lane, reproducibility audit) passes a
+        # pinned ``now`` and gets a ranking that is byte-identical across a
+        # wall-clock jump; the default stays the live UTC clock (unchanged
+        # behaviour for every existing caller).
+        self._now = now if now is not None else (
+            lambda: datetime.now(timezone.utc))  # noqa: UP017
 
     # ── Public API ────────────────────────────────────────────────────────
 
@@ -364,12 +374,16 @@ class GraphRanker:
         return 0.0
 
     def recency_boost(self, result: dict, signals: dict) -> float:
-        """Exponential recency decay from createdAt/startedAt; missing → 1.0."""
+        """Exponential recency decay from createdAt/startedAt; missing → 1.0.
+
+        The reference time is ``self._now`` (#2952) — the live UTC clock by
+        default, or the caller's pinned anchor for a reproducible replay.
+        """
         ts = signals.get("created") or result.get("createdAt") or result.get("startedAt")
         dt = _parse_iso(ts)
         if dt is None:
             return 1.0  # unknown age — neutral, no demotion
-        age_days = max(0.0, (datetime.now(timezone.utc) - dt).total_seconds() / 86400.0)  # noqa: UP017
+        age_days = max(0.0, (self._now() - dt).total_seconds() / 86400.0)
         return round(recency_decay(age_days, self.recency_half_life_days), 4)
 
     # ── Graph queries ─────────────────────────────────────────────────────

@@ -7,8 +7,10 @@ The done step exits WITHOUT patching onboarding_complete (accept-and-drop).
 
 #2710 / #2711 / #2755 / #2756 (2026-09-09 connect-step fixes) brought this spec
 to the SHIPPED post-#2698 UI and added the owner/admin connect branch:
-  - the connect step has 6 harness tabs (ChatGPT is key-less OAuth and is
-    filtered OUT of the wizard tab row), NOT the pre-#2698 7;
+  - the connect step has 4 harness FAMILIES (Claude / Codex / Cursor / Pi)
+    with a second-level SURFACE row (#2912): Claude → Code / Desktop / Web,
+    Codex → CLI / Desktop. ChatGPT is key-less OAuth and is filtered OUT of
+    the wizard chooser (#2698);
   - the dead pre-#2698 "Copy setup" button is gone — setup content is a
     WizardPromptCard with its own Copy control;
   - an owner/admin who lands on the connect step with no in-memory key gets an
@@ -69,9 +71,12 @@ def _local_preview_servers() -> None:
     """#2744: fail fast (one clear error) when :8788/:8790 are not serving."""
     _preflight_local_servers()
 
-# #2698: ChatGPT is key-less OAuth — deliberately NOT a wizard harness tab.
-WIZARD_HARNESS_TABS = ["Claude Code", "Claude Desktop", "Claude Web",
-                       "Codex", "Cursor", "Pi"]
+# #2698: ChatGPT is key-less OAuth — deliberately NOT a wizard harness choice.
+# #2912: level 1 = the harness family, level 2 = the surface (only Claude and
+# Codex have one).
+WIZARD_HARNESS_FAMILIES = ["Claude", "Codex", "Cursor", "Pi"]
+WIZARD_CLAUDE_SURFACES = ["Claude Code", "Claude Desktop", "Claude Web"]
+WIZARD_CODEX_SURFACES = ["Codex CLI", "Codex Desktop"]
 
 MINTED_KEY = "tt_minted_0123456789abcdef0123456789abcdef"
 # #2711: a realistic worst case for the unbreakable token (72 chars, no
@@ -267,10 +272,11 @@ def _walk_to_fork(page: Page) -> None:
     expect(page.locator("body")).to_contain_text("Continue setup", timeout=20_000)
     page.get_by_role("button", name="Continue setup").click()
     # STEP 0: create/join org — an account that already holds an org sees a
-    # read-only summary (never a second mint, #2323) and advances. #2364
-    # round-1: the org-holder step title branches to 'Your Organization' —
-    # the 'Create your Organization' title must never re-show on an
-    # org-holder resume/re-entry (step-mapping is W9/#2005).
+    # read-only summary (never a second mint, #2323) and advances. #2912: the
+    # header h1 names the stage — 'Your Organization' for this read-only state.
+    # #2364 round-1 (kept through the merge): the org-holder step must never
+    # re-read the org-create title, wherever it renders.
+    expect(page.locator(".welcome-title")).to_have_text("Your Organization", timeout=10_000)
     expect(page.locator("body")).not_to_contain_text("Create your Organization", timeout=10_000)
     expect(page.locator("body")).to_contain_text("You're set up in", timeout=5_000)
     page.get_by_role("button", name="Continue →").click()
@@ -329,7 +335,7 @@ def _expect_left_wizard(page: Page) -> None:
     must not be an instantaneous snapshot."""
     expect(page.locator(".wizard-prompt-card")).to_have_count(0, timeout=15_000)
     expect(page.get_by_text("You're all set")).to_have_count(0, timeout=15_000)
-    expect(page.locator(".harness-tab")).to_have_count(0, timeout=15_000)
+    expect(page.locator(".harness-family")).to_have_count(0, timeout=15_000)
     expect(page.locator("[data-tab=keys]")).to_be_visible(timeout=15_000)
     page.wait_for_timeout(400)  # bounded: one settle tick after the mount
 
@@ -352,8 +358,15 @@ def test_first_timer_wizard_human_steps(page: Page) -> None:
     _walk_to_connect(page)
     # MEMBER: no harness tabs (the known, separately-owned "members get no
     # setup instructions" gap) — only the paste escape.
-    assert page.locator(".harness-tab").count() == 0, \
-        "members must not see harness tabs (owner/admin-only surface)"
+    assert page.locator(".harness-family").count() == 0, \
+        "members must not see harness choices (owner/admin-only surface)"
+    # #2912 (test-review P2): the member LEDE, measured rather than inferred.
+    # "Pick which harness to connect." would be a lie here (no chooser renders),
+    # and the string the issue reported as vague must not come back.
+    expect(page.locator(".welcome-lede")).to_have_text(
+        "Paste an API key to connect your agent.", timeout=10_000)
+    assert "Pick which harness to connect" not in page.locator(".welcome-lede").inner_text()
+    assert "Connect Tortoise to your Organization" not in page.locator(".welcome-head").inner_text()
     # The mint CTA is owner/admin render-gated (POST /v1/team/keys is
     # _require_owner_admin server-side) — a member must never see a 403 button.
     assert page.get_by_role("button", name="Create an API key").count() == 0, \
@@ -370,7 +383,12 @@ def test_first_timer_wizard_human_steps(page: Page) -> None:
     page.get_by_role("button", name="Skip for now").click()
     # STEP 3: done — agent takes over; NO onboarding_complete PATCH (the
     # node's gate owns completion; accept-and-drop).
-    expect(page.locator("body")).to_contain_text("You're all set", timeout=10_000)
+    # #2912 (PR-gate UX): skipping = the PAUSED state, so the <h1> names that
+    # state. It used to read "You're all set" — the opposite — directly above
+    # the "isn't connected yet" body.
+    expect(page.locator(".welcome-title")).to_have_text(
+        "Setup paused — your agent is not connected yet", timeout=10_000)
+    expect(page.locator("body")).to_contain_text("your agent isn't connected yet", timeout=10_000)
     # the done step's exit (wizardComplete) — scoped: the header carries a
     # same-named 'Open my dashboard →' escape.
     page.locator(".wizard-actions").get_by_role("button", name="Open my dashboard →").click()
@@ -392,27 +410,46 @@ def test_owner_connect_step_mints_never_expiring_key_in_flow(page: Page) -> None
     Pre-fix: the step showed the dead sentence "Create an API key to see the
     setup prompt." with no control, pill clicks were no-ops, and the queued
     auto-open modal then popped a stray "Create new API key" (30-day default)
-    on the dashboard after exit. Now: the shipped 6 harness tabs render, the
-    mint CTA mints a NEVER-expiring key (the connect step's own Never-only
-    contract), the prompt card renders, the step's OWN advance writes the
-    harness-connected checkpoint, and the HEADER exit leaks no modal."""
+    on the dashboard after exit. Now: the shipped two-level harness chooser
+    renders, the mint CTA mints a NEVER-expiring key (the connect step's own
+    Never-only contract), the prompt card renders, the step's OWN advance writes
+    the harness-connected checkpoint, and the HEADER exit leaks no modal."""
     _seed_cookie(page, "u-owner")
     cap = _wire(page, role="owner")
     _walk_to_connect(page)
 
-    # #2698 shipped tab row: 6 tabs, ChatGPT (key-less OAuth) filtered out.
-    tab_names = page.locator(".harness-tab").all_inner_texts()
-    assert tab_names == WIZARD_HARNESS_TABS, f"connect-step tab row drifted: {tab_names}"
-    assert "ChatGPT" not in tab_names, "ChatGPT is not a wizard harness tab (#2698)"
+    # #2698/#2912 shipped chooser: 4 families at the top level, ChatGPT
+    # (key-less OAuth) filtered out.
+    family_names = page.locator(".harness-family").all_inner_texts()
+    assert family_names == WIZARD_HARNESS_FAMILIES, f"connect-step family row drifted: {family_names}"
+    # Level 2: Claude expands to its three surfaces; the default is Claude Code.
+    surface_names = page.locator(".harness-surface").all_inner_texts()
+    assert [s.split("\n")[0] for s in surface_names] == WIZARD_CLAUDE_SURFACES, \
+        f"the Claude family must offer its three surfaces: {surface_names}"
+
+    # #2912: KEY FIRST — the key block is step 1 and the procedure is step 2,
+    # so the setup prompt is never offered before a key exists. With no key the
+    # procedure block is NOT rendered at all (a "2 Copy the setup prompt"
+    # heading promised a prompt that did not exist — the reported defect 2).
+    expect(page.locator(".wizard-block-title")).to_have_count(1)
+    assert page.locator(".wizard-block-title").all_inner_texts()[0].endswith("Get your API key")
+    assert "Copy the setup prompt" not in page.locator(".wizard-block-title").all_inner_texts()[0]
+    assert page.locator(".wizard-prompt-card").count() == 0, \
+        "no prompt card may render before a key exists"
 
     # The promised path exists: the sentence AND its affordance.
     expect(page.locator("body")).to_contain_text("Create an API key to see the setup prompt.")
     expect(page.get_by_role("button", name="Create an API key")).to_be_visible()
-    # Pill clicks are display-mode toggles — assert the CLICK DID ITS JOB (the
-    # mode actually switched) rather than a dialog count that cannot change
-    # inside the wizard tree (test-review P2: that assertion was vacuous).
+
+    _mint_from_connect(page)
+    # #2912: the key-mode pills live in the KEY block, so they appear only once
+    # a key exists (there is nothing to include/separate before that). Pill
+    # clicks are display-mode toggles — assert the CLICK DID ITS JOB (the mode
+    # actually switched) rather than a dialog count that cannot change inside
+    # the wizard tree (test-review P2: that assertion was vacuous).
     separate_pill = page.get_by_role("button", name="Key separate from prompt")
     included_pill = page.get_by_role("button", name="Key included in prompt")
+    expect(separate_pill).to_be_visible(timeout=5_000)
     separate_pill.click()
     assert "active" in (separate_pill.get_attribute("class") or ""), \
         "the 'separate' pill must become the selected mode (pure toggle, no modal)"
@@ -421,8 +458,6 @@ def test_owner_connect_step_mints_never_expiring_key_in_flow(page: Page) -> None
     # "easiest" path); both pill states are pure toggles.
     included_pill.click()
     assert "active" in (included_pill.get_attribute("class") or "")
-
-    _mint_from_connect(page)
     # The wizard mint is Never-only: no expires_in on the wire.
     assert len(cap["mint"]) == 1, f"expected ONE wizard mint, got {cap['mint']}"
     body = cap["mint"][0]
@@ -460,7 +495,9 @@ def test_owner_wizard_complete_exit_after_mint_is_modal_free(page: Page) -> None
     _walk_to_connect(page)
     _mint_from_connect(page)
     page.get_by_role("button", name="Skip for now").click()
-    expect(page.locator("body")).to_contain_text("You're all set", timeout=10_000)
+    # #2912 (PR-gate UX): skipped → paused, and the heading says so.
+    expect(page.locator(".welcome-title")).to_have_text(
+        "Setup paused — your agent is not connected yet", timeout=10_000)
     page.locator(".wizard-actions").get_by_role("button", name="Open my dashboard →").click(timeout=15_000)
     _expect_left_wizard(page)
     assert page.locator("[role=dialog]").count() == 0, \
@@ -680,62 +717,63 @@ def test_owner_connect_mint_failure_is_visible(page: Page) -> None:
     assert page.locator(".wizard-prompt-card").count() == 0
 
 
-@pytest.mark.parametrize("tab,sync_text", [
+@pytest.mark.parametrize("surface,sync_text", [
     ("Claude Desktop", "Open Claude Desktop → Settings → Connectors"),
     ("Claude Web", "Open claude.ai → Settings → Connectors"),
 ])
-def test_owner_no_key_affordance_on_manual_harness_tabs(page: Page, tab: str, sync_text: str) -> None:
-    """#2710 (code-review P1): the two MANUAL harness tabs must not dead-end.
+def test_owner_no_key_affordance_on_manual_harness_surfaces(page: Page, surface: str, sync_text: str) -> None:
+    """#2710 (code-review P1): the two MANUAL Claude surfaces must not dead-end.
 
     Pre-fix they kept a `YOUR_API_KEY` placeholder in the config block plus a
     Copy button whose handler wrote `harnessKey` — an empty string with no key —
-    so an owner/admin on those tabs had no mint CTA, no paste escape, and a Copy
-    control that silently clobbered the clipboard.
+    so an owner/admin on those surfaces had no mint CTA, no paste escape, and a
+    Copy control that silently clobbered the clipboard.
 
-    The no-key state shows ONLY the affordance (the tab's own lead-in sentence is
-    gated with the block it introduces), so the tab switch is synchronised on the
-    tab button's `active` class — a tab-unique signal — and the tab-unique
-    lead-in is asserted AFTER the key lands, which proves the manual block really
-    rendered in key mode."""
-    _seed_cookie(page, "u-manual-" + tab.split()[-1].lower())
+    #2912: these are now level-2 surfaces under the Claude family, and the
+    no-key state renders ONLY step 1 (the key block) — the connector lead-in is
+    step 2 and stays absent until a key lands, which is what proves the
+    key-first order rather than a caption above an empty slot."""
+    _seed_cookie(page, "u-manual-" + surface.split()[-1].lower())
     _wire(page, role="owner", key_rows=[DURABLE_ROW])
     _walk_to_connect(page)
-    tab_btn = page.get_by_role("button", name=tab, exact=True)
-    tab_btn.click()
-    expect(tab_btn).to_have_class(re.compile(r"\bactive\b"), timeout=10_000)
-    # The no-key state offers the SAME in-flow path as the agent-driven tabs …
+    # Level 1 → level 2: Claude is already the active family; pick the surface.
+    page.get_by_role("button", name="Claude", exact=True).click()
+    surface_btn = page.get_by_role("button", name=re.compile(re.escape(surface)))
+    surface_btn.click()
+    expect(surface_btn).to_have_class(re.compile(r"\bactive\b"), timeout=10_000)
+    # The no-key state offers the SAME in-flow path as the agent-driven surfaces …
     expect(page.get_by_role("button", name="Create an API key")).to_be_visible(timeout=5_000)
     assert "YOUR_API_KEY" not in page.locator("body").inner_text(), \
-        f"{tab}: the placeholder key must not render"
+        f"{surface}: the placeholder key must not render"
     assert page.locator("code", has_text="…").count() == 0, \
-        f"{tab}: no fake '…' key row"
+        f"{surface}: no fake '…' key row"
     assert page.locator(".wizard-prompt-card").count() == 0, \
-        f"{tab}: the config block must not render before a key exists"
+        f"{surface}: the config block must not render before a key exists"
     assert sync_text not in page.locator("body").inner_text(), \
-        f"{tab}: the config lead-in must not dangle above the affordance"
-    # … and the paste escape lands a real key, after which the manual block renders.
+        f"{surface}: the config lead-in must not dangle above the affordance"
+    # … and the paste escape lands a real key, after which step 2 renders.
     page.get_by_role("button", name="I already have a key — paste it instead").click()
     page.get_by_label("Paste an API key").fill(PASTED_KEY)
     page.get_by_role("button", name="Use this key").click()
     expect(page.locator("body")).to_contain_text(sync_text, timeout=5_000)
-    expect(page.locator("code", has_text=PASTED_KEY)).to_be_visible(timeout=5_000)
+    expect(page.locator("code", has_text=PASTED_KEY).first).to_be_visible(timeout=5_000)
     assert "YOUR_API_KEY" not in page.locator("body").inner_text(), \
-        f"{tab}: the placeholder must be replaced by the real key"
+        f"{surface}: the placeholder must be replaced by the real key"
 
 
 def test_codex_desktop_hides_the_key_mode_pills(page: Page) -> None:
-    """#2756 (code-review P1): the Codex Desktop surface embeds the key in the
-    config block by construction, so the "Key separate from prompt" promise
-    cannot be honored there — the pills AND the separate key row must be gone on
-    that surface, and both must come back on the CLI surface."""
+    """#2756/#2912: the Codex Desktop surface embeds the key in the config block
+    by construction, so the "Key separate from prompt" promise cannot be honored
+    there — the pills AND the separate key row must be gone on that surface, and
+    both must come back on the CLI surface."""
     _seed_cookie(page, "u-codex-mode")
     _wire(page, role="owner")
     _walk_to_connect(page)
     _mint_from_connect(page)
     pills = page.get_by_role("button", name=re.compile("Key (included in|separate from) prompt"))
-    group = page.get_by_role("group", name="Codex setup surface")
+    group = page.get_by_role("group", name="Codex surface")
     page.get_by_role("button", name="Codex", exact=True).click()
-    expect(group).to_be_visible(timeout=10_000)  # sync: the Codex surface rendered
+    expect(group).to_be_visible(timeout=10_000)  # sync: the Codex surface row rendered
     expect(pills).to_have_count(2, timeout=5_000)
     # "separate" on the CLI surface shows the separate key row and keeps the key
     # OUT of the prompt card.
@@ -743,23 +781,23 @@ def test_codex_desktop_hides_the_key_mode_pills(page: Page) -> None:
     expect(page.locator("code", has_text=MINTED_KEY)).to_be_visible(timeout=5_000)
     # Desktop: the pills and the separate row go away; the key lives in the
     # config block instead.
-    page.get_by_role("button", name="Desktop (no terminal)").click()
-    expect(group.get_by_role("button", name="Desktop (no terminal)")).to_have_attribute("aria-pressed", "true")
+    group.get_by_role("button", name="Codex Desktop").click()
+    expect(group.get_by_role("button", name="Codex Desktop")).to_have_attribute("aria-pressed", "true")
     expect(pills).to_have_count(0, timeout=5_000)
     assert page.locator("code", has_text=MINTED_KEY).count() == 0, \
         "the separate key row must not sit beside a key-embedding Desktop block"
     expect(page.locator(".wizard-prompt-card").first).to_contain_text(MINTED_KEY, timeout=5_000)
     # … and back to CLI.
-    page.get_by_role("button", name="CLI (terminal)").click()
+    group.get_by_role("button", name="Codex CLI").click()
     expect(pills).to_have_count(2, timeout=5_000)
 
 
-def test_codex_desktop_toggle_reaches_config_toml_instructions(page: Page) -> None:
-    """#2756: Codex has two surfaces (CLI needs a terminal; Desktop does not).
-    Selecting the Codex tab must offer the surface toggle, and Desktop must
-    reach the ~/.codex/config.toml instructions — pre-fix the toggle's state
-    and the `codexDesktop` copy in harnesses.js were dead, so a Desktop user
-    got the CLI command.
+def test_codex_desktop_surface_reaches_config_toml_instructions(page: Page) -> None:
+    """#2756/#2912: Codex has two surfaces (CLI needs a terminal; Desktop does
+    not). The Codex family must offer them as a level-2 surface row, and Desktop
+    must reach the ~/.codex/config.toml instructions — pre-fix the toggle's
+    state and the `codexDesktop` copy in harnesses.js were dead, so a Desktop
+    user got the CLI command.
 
     The assertion pins UNIVERSAL_COMMAND.codexDesktop's distinctive stanza
     (`[mcp_servers.tortoise]`), not just the intro sentence that shares the
@@ -769,29 +807,30 @@ def test_codex_desktop_toggle_reaches_config_toml_instructions(page: Page) -> No
     _walk_to_connect(page)
     _mint_from_connect(page)
     page.get_by_role("button", name="Codex", exact=True).click()
-    group = page.get_by_role("group", name="Codex setup surface")
+    group = page.get_by_role("group", name="Codex surface")
     expect(group).to_be_visible(timeout=5_000)
-    expect(page.get_by_role("button", name="Desktop (no terminal)")).to_be_visible()
+    assert group.locator(".harness-surface").all_inner_texts()[0].startswith("Codex CLI"), \
+        "Codex CLI is the default surface (terminal path)"
     # CLI (default) is the terminal path — no config.toml, no TOML stanza.
     cli_text = page.locator(".wizard-prompt-card").first.inner_text()
     assert "config.toml" not in cli_text, \
         "the Codex CLI variant must not claim the Desktop config file"
     assert "[mcp_servers.tortoise]" not in cli_text, \
         "the Codex CLI variant must not render the Desktop TOML block"
-    page.get_by_role("button", name="Desktop (no terminal)").click()
+    group.get_by_role("button", name="Codex Desktop").click()
     card = page.locator(".wizard-prompt-card").first
     expect(card).to_contain_text("~/.codex/config.toml", timeout=5_000)
     assert "[mcp_servers.tortoise]" in card.inner_text(), \
         "the Desktop variant must render UNIVERSAL_COMMAND.codexDesktop (the TOML block)"
     # The Desktop copy control uses the harness's own label (HARNESS_COPY_LABEL).
     expect(card.get_by_role("button", name="Copy instructions")).to_be_visible()
-    # The toggle is reversible and scoped to the Codex tab.
-    page.get_by_role("button", name="CLI (terminal)").click()
+    # The surface choice is reversible and scoped to the Codex family.
+    group.get_by_role("button", name="Codex CLI").click()
     assert "config.toml" not in page.locator(".wizard-prompt-card").first.inner_text(), \
         "switching back to CLI must restore the terminal instructions"
     page.get_by_role("button", name="Pi", exact=True).click()
-    assert page.get_by_role("group", name="Codex setup surface").count() == 0, \
-        "the Codex surface toggle must not leak onto other harness tabs"
+    assert page.locator(".harness-surfaces").count() == 0, \
+        "the surface row must not leak onto single-choice families (Pi)"
 
 
 def test_first_timer_wizard_build_fork_marks_catalog(page: Page) -> None:
@@ -813,9 +852,11 @@ def test_first_timer_wizard_build_fork_marks_catalog(page: Page) -> None:
     _goto_local_dashboard(page)
     expect(page.locator("body")).to_contain_text("Continue setup", timeout=20_000)
     page.get_by_role("button", name="Continue setup").click()
-    # STEP 0: create/join org (orientation removed per epic #2534). #2364
-    # round-1: the org-holder step title branches to 'Your Organization' —
-    # never 'Create your Organization' on resume/re-entry (#2323 read-only).
+    # STEP 0: create/join org (orientation removed per epic #2534). #2912: the
+    # org-holding read-only summary shows the stage h1 'Your Organization'.
+    # #2364 round-1 (kept through the merge): never 'Create your Organization'
+    # on resume/re-entry (#2323 read-only).
+    expect(page.locator(".welcome-title")).to_have_text("Your Organization", timeout=10_000)
     expect(page.locator("body")).not_to_contain_text("Create your Organization", timeout=10_000)
     expect(page.locator("body")).to_contain_text("You're set up in", timeout=5_000)
     page.get_by_role("button", name="Continue →").click()

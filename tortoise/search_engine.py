@@ -980,7 +980,15 @@ def rrf_fusion(
             w = recency_weights.get(pid, 0.0)
             if w > 0:
                 scores[pid] = scores[pid] * (1.0 + recency_boost * w)
-    return dict(sorted(scores.items(), key=lambda x: x[1], reverse=True))
+    # #2952: deterministic TOTAL order over ties. RRF scores tie constantly on
+    # real corpora (a doc at the same rank in different legs, or FalkorDBLite's
+    # fulltext scores, which are 0.0 for every doc). A stable sort alone keeps
+    # tie order at the mercy of the order the caller passed ``ranked_lists`` in
+    # — which in the SDK is ``as_completed`` (thread COMPLETION) order, i.e.
+    # wall-clock/timing dependent. ``(-score, id)`` makes the fused order a pure
+    # function of the leg CONTENTS, so the same (graph, query, params) always
+    # truncates to the same top-k.
+    return dict(sorted(scores.items(), key=lambda x: (-x[1], x[0])))
 
 
 # ── Degradation chain ────────────────────────────────────────────────────────
@@ -1145,7 +1153,18 @@ def degradation_chain(
                 if entries:
                     leg_trace.extend(entries)
 
-    return results
+    # #2952: return the legs in FIXED strategy order (fts, vector, structural).
+    # ``results`` above is populated inside ``as_completed`` — i.e. in thread
+    # COMPLETION order — so the same leg contents could reach the fusion (and
+    # every other consumer of this mapping) in a different order run to run.
+    # Downstream RRF then inherited that order as its tie-break. Fixed order
+    # makes the returned mapping a pure function of the leg contents (the trace
+    # merge above already uses this order for the same reason).
+    return {
+        name: results[name]
+        for name in ("fts", "vector", "structural")
+        if name in results
+    }
 
 
 # ── EP annotation ────────────────────────────────────────────────────────────

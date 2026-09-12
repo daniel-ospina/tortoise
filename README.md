@@ -61,10 +61,18 @@ New to Tortoise? Choose a path:
 
   ```bash
   git clone https://github.com/daniel-ospina/tortoise.git && cd tortoise
-  uv sync                             # creates .venv from committed uv.lock (Python 3.12)
+  uv sync --extra embeddings --extra parity   # canonical dev env incl. the eval/parity extras
   # or straight from GitHub (no clone):
   pip install git+https://github.com/daniel-ospina/tortoise.git
   ```
+
+  ⚠️ `uv sync` on its own gives you a **keyword-only product**
+  (`EmbeddingModel.get()` → `None`, hybrid retrieval silently degrades to
+  FTS-only). And an explicit `--extra` list is EXACT — it removes every extra
+  you leave out (`uv sync --extra embeddings` drops `parity`/pyarrow, which is
+  how a measurement run broke mid-investigation). Name every extra in ONE
+  command, or use `--all-extras`. Real measurement lanes fail closed on a
+  keyword-only env (#2985).
 
   Embedded (no Docker) is the EVAL-ONLY fallback: `tortoise init` creates
   `~/.tortoise/tortoise.db` (a bare init prints a one-line "embedded engine
@@ -147,8 +155,9 @@ Point it at a running server (`TORTOISE_MCP_URL`, default `http://localhost:8000
 
 ```bash
 pip install tortoise-graph   # server package: engine + daemon + MCP server
-# from source (clone): uv sync && uv run python -m tortoise.selfhost
-#   uv sync --extra embeddings  # or: uv sync (core + dev group) — extras mirror the PyPI package
+# from source (clone): uv sync --extra embeddings --extra parity && uv run python -m tortoise.selfhost
+#   The explicit --extra list is EXACT: name every extra the env needs in ONE
+#   command (or use --all-extras) — `uv sync --extra embeddings` alone drops parity.
 ```
 
 Full split mechanics (build, version coupling, license boundary): [docs/client-server-split.md](docs/client-server-split.md).

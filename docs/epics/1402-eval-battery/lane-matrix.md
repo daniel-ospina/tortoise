@@ -20,4 +20,45 @@ and never issues a raw graph query; every verb goes through the per-scenario
 construction); env stripped in fixtures (`TORTOISE_DB_URI`/`TORTOISE_DB_PATH`),
 per-run embedded store, never `tortoise_test_matrix`; no `require_calibration=False`
 anywhere in battery/.
+
+## Running a real leg — install + retrieval preflight (#2985)
+
+Canonical dev env, ONE command with every extra the real lanes need:
+
+    uv sync --extra embeddings --extra parity
+
+⚠️ `uv sync` with an explicit `--extra` is EXACT: it SILENTLY REMOVES
+every extra you do not name (`uv sync --extra embeddings` drops
+`parity`/pyarrow, which is how a measurement run broke mid-investigation).
+Name every extra in ONE command, or use `--all-extras`. A plain `uv sync`
+yields a **KEYWORD-ONLY product** (no `sentence-transformers` →
+`EmbeddingModel.get()` returns None → the dense retrieval leg is never
+submitted → retrieval silently degrades to FTS-only).
+
+Real lanes now fail closed on that degraded environment, from two angles:
+
+| Real path | Gate on a degraded env |
+|---|---|
+| MABench Tortoise parity lane (`memoryagentbench_tortoise_executor`) | `TortoiseCrMemory.retrieval_legs()` probes `recall_state` with a `leg_trace`; when the VECTOR leg did not run the lane REFUSES (`ExecutorUnavailable` carrying a machine-readable `capability_gate`) → explicit not-measured cell, never an FTS-only number wearing `real_tortoise` |
+| Battery real arm run (`battery/runner/run.py`; arm `a4` declares `requires_hybrid_retrieval`) | `require_hybrid_retrieval()` runs at arm-init BEFORE setup/ingest; the arm is skipped, `summary.run.retrieval_degraded=true`, and the `init_failure` reason names the preflight |
+
+The shared fail-closed primitive is
+`battery/runner/retrieval_preflight.py::require_hybrid_retrieval()` (used at
+arm-init, where no trace exists yet); the parity lane prefers the product's
+OBSERVED `leg_trace` (`retrieval_capability_gate`) because availability must
+never be used as a guess when an observed trace exists. Mock/hermetic lanes
+are exempt by construction (their fake memory has no retrieval engine).
+
+Persisted provenance: the parity record carries the `capability_gate`
+(`vector_leg` / `reason` / `legs_seen` / raw `leg_trace`) AND the observed
+`retrieval_legs` / `retrieval_degraded`
+(`battery/cli.py` → `parity_record.json`); `summary.json` carries the
+run-level union of legs the retrieval-reading arms observed. A number
+persisted without the retrieval conditions behind it is not a product
+measurement.
+
+Example legs (real reader/judge — needs `OPENROUTER_API_KEY`):
+
+    battery run --executor real --arms a0,a4 --tier 1
+    battery parity --execute --mock     # hermetic parity smoke (no keys/spend)
 """

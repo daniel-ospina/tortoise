@@ -306,6 +306,27 @@ def _cmd_parity(args: argparse.Namespace) -> ExitCode:
               "released runners call paid reader/judge models) — no benchmark "
               "will run; every cell stays not-measured")
     cells: list[ParityRun] = []
+    # #3005 P1: the pinned benchmark id each cell was dispatched under. The
+    # record is keyed by THIS, not by ``ParityRun.benchmark`` — two pinned
+    # ids can share one benchmark (``memoryagentbench`` full-context and
+    # ``memoryagentbench_tortoise`` retrieved-context), and each cell's own
+    # ``lane`` says which arm produced it. Keying by ``c.benchmark`` would
+    # silently collapse the two cells into one.
+    cell_keys: list[str] = []
+    # #2985: the retrieval capability gate per benchmark. Populated from a
+    # measured cell's detail (the REAL lane that proved the vector leg ran)
+    # OR from a gate REFUSAL (``ExecutorUnavailable.capability_gate``) — the
+    # refusal is persisted, never a silent absence.
+    capability_gates: dict[str, dict] = {}
+    # #2985: the OBSERVED retrieval conditions each executed (or refused) cell
+    # reported, keyed by benchmark — persisted into parity_record.json so a
+    # stored number carries what produced it (the cell `detail` alone is
+    # in-memory only; #2919 tracks the general drop). ``retrieval_legs`` is
+    # the leg union the lane actually observed via the product's leg_trace,
+    # never an availability guess; ``retrieval_degraded`` is the fail-closed
+    # label (True for a refused real lane, or a real lane that observed no
+    # legs).
+    retrieval_conditions: dict[str, dict] = {}
     for benchmark, version in PINNED_VERSIONS.items():
         try:
             # #2797: an accuracy is supplied ONLY from a released runner's
@@ -328,8 +349,30 @@ def _cmd_parity(args: argparse.Namespace) -> ExitCode:
                         executed = executor(
                             mock=bool(args.mock), limit=args.limit,
                             out_dir=_Path(args.out or _DEFAULT_OUT))
+                        detail = getattr(executed, "detail", None) or {}
+                        gate = detail.get("capability_gate")
+                        if gate is not None:
+                            capability_gates[benchmark] = gate
+                        retrieval_conditions[benchmark] = {
+                            "retrieval_legs": detail.get("retrieval_legs"),
+                            "retrieval_degraded":
+                                detail.get("retrieval_degraded"),
+                        }
                     except ExecutorUnavailable as e:
                         print(f"{benchmark}: executor unavailable — {e}")
+                        # #2985: a capability-gate refusal carries its
+                        # machine-readable record — persist it (the printed
+                        # reason alone is not an artifact), plus the
+                        # fail-closed degraded label the refusal implies.
+                        gate = getattr(e, "capability_gate", None)
+                        if gate is not None:
+                            capability_gates[benchmark] = gate
+                            retrieval_conditions[benchmark] = {
+                                "retrieval_legs": list(
+                                    gate.get("legs_seen") or []),
+                                "retrieval_degraded": not bool(
+                                    gate.get("vector_leg")),
+                            }
             res = run_parity(benchmark, version, arm_id,
                              reader_prompt, judge_rubric, baseline,
                              accuracy=(executed.accuracy if executed else None),
@@ -338,6 +381,7 @@ def _cmd_parity(args: argparse.Namespace) -> ExitCode:
                              revision=(executed.revision if executed else None),
                              lane=(executed.lane if executed else None))
             cells.append(res)
+            cell_keys.append(benchmark)
             unknown = bool(res.protocol_unknown or placeholder_pinned)
             state = f"protocol_unknown={unknown}" if unknown \
                 else "protocol verified"
@@ -382,7 +426,7 @@ def _cmd_parity(args: argparse.Namespace) -> ExitCode:
                 "protocol_unknown": bool(
                     cells[0].protocol_unknown or placeholder_pinned),
                 "benchmarks": {
-                    c.benchmark: {
+                    key: {
                         "version": c.version,
                         # #2797: the not-measured state is PERSISTED (and the
                         # accuracy is written as an explicit null, not
@@ -395,6 +439,20 @@ def _cmd_parity(args: argparse.Namespace) -> ExitCode:
                         "samples": c.samples,
                         "revision": c.revision,
                         "lane": c.lane,
+                        # #2985: the retrieval capability gate — machine-
+                        # readable, never silent. A refused REAL lane records
+                        # {vector_leg: false, reason: ...}; a real lane that
+                        # ran records {vector_leg: true, ...}. Benchmarks with
+                        # no retrieval lane (or no run) record null.
+                        "capability_gate": capability_gates.get(c.benchmark),
+                        # #2985: the observed retrieval conditions behind the
+                        # number — null for a benchmark with no retrieval lane
+                        # (longmemeval) or no run. A refused real lane records
+                        # its observed legs + retrieval_degraded=true.
+                        "retrieval_legs": retrieval_conditions.get(
+                            c.benchmark, {}).get("retrieval_legs"),
+                        "retrieval_degraded": retrieval_conditions.get(
+                            c.benchmark, {}).get("retrieval_degraded"),
                         # Round-4 P2 (consistency): a protocol-UNKNOWN
                         # record must NEVER carry methodology_matched=True —
                         # the two persisted fields would contradict (an
@@ -406,7 +464,7 @@ def _cmd_parity(args: argparse.Namespace) -> ExitCode:
                             False if bool(
                                 c.protocol_unknown or placeholder_pinned)
                             else c.methodology_matched),
-                    } for c in cells},
+                    } for key, c in zip(cell_keys, cells, strict=True)},
             }, indent=2, sort_keys=True), encoding="utf-8")
         print(f"parity record: {record_path}")
     return ExitCode.OK
