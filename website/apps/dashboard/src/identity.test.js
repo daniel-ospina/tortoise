@@ -61,11 +61,53 @@ test('shouldRefetchOnFocus: interval-gated', () => {
 
 test('reauthStale boundary: exactly-at-window is fresh, past is stale', () => {
   const windowS = 900
-  const now = Date.now()
-  const at = new Date(now - windowS * 1000 + 1).toISOString()   // 1ms inside
-  assert.equal(reauthStale(at, windowS), false)                 // ≤ window → fresh
-  const past = new Date(now - (windowS + 1) * 1000).toISOString()
-  assert.equal(reauthStale(past, windowS), true)                // > window → stale
+  const now = Date.parse('2026-09-06T00:00:00Z') // frozen clock — no wall-clock race
+  const iso = (ms) => new Date(now - ms).toISOString()
+  assert.equal(reauthStale(iso(windowS * 1000 - 1), windowS, now), false) // 1ms inside → fresh
+  // mutation-verified: `> windowS` → `>=` fails this (1ms-past alone does not)
+  assert.equal(reauthStale(iso(windowS * 1000), windowS, now), false)     // exactly-at → fresh
+  assert.equal(reauthStale(iso(windowS * 1000 + 1), windowS, now), true)  // 1ms past → stale
+  assert.equal(reauthStale(iso((windowS + 1) * 1000), windowS, now), true) // 1s past → stale
+})
+
+test('reauthStale: fail-closed for every degenerate clock or window', (t) => {
+  const windowS = 900
+  const now = Date.parse('2026-09-06T00:00:00Z')
+  const old = new Date(now - 3_600_000).toISOString() // genuinely stale session
+  const iso = (ms) => new Date(now - ms).toISOString()
+
+  // These two sweeps are BEHAVIOUR DOCUMENTATION — they enumerate what must
+  // fail closed. The DISCRIMINATING rows (those that kill a specific clause if
+  // it is deleted) are: `NaN` for !Number.isFinite(nowMs); `1` and `2` for
+  // nowMs < t; `NaN`/`Infinity`/`'abc'`/`{}` for !Number.isFinite(windowS);
+  // and the two dedicated clause-killers below for the <= 0 clauses. The
+  // remaining rows overlap and cannot fail alone — that is expected, not a gap.
+  for (const bad of [NaN, null, '123', Infinity, -Infinity, 0, -1, 1, 2]) {
+    assert.equal(reauthStale(old, windowS, bad), true, `nowMs=${String(bad)} must fail closed`)
+  }
+  for (const bad of [NaN, Infinity, -Infinity, 'abc', {}, null, 0, -1]) {
+    assert.equal(reauthStale(old, bad, now), true, `windowS=${String(bad)} must fail closed`)
+  }
+
+  // legitimate path still opens (non-stale input); the dedicated killers BELOW supply the ONLY
+  // non-tautological discrimination for `nowMs <= 0` / `windowS <= 0` — do not delete them.
+  assert.equal(reauthStale(iso(1000), windowS, now), false)
+  assert.equal(reauthStale(iso(windowS * 1000), windowS, now), false)
+  assert.equal(reauthStale(iso((windowS + 1) * 1000), windowS, now), true)
+
+  // clause killers — a NON-stale input where the comparison alone would return false
+  assert.equal(reauthStale('1970-01-01T00:00:00Z', windowS, 0), true)  // kills `nowMs <= 0`
+  assert.equal(reauthStale(new Date(now).toISOString(), 0, now), true)  // kills `windowS <= 0`
+  // kills the `!lastSignInAt` guard: `0` is falsy, but Date.parse(0) is a VALID
+  // date (946706400000), so without that clause this reports FRESH (age 0). The
+  // clock is aligned to Date.parse(0) so no other clause can mask it.
+  assert.equal(reauthStale(0, windowS, Date.parse(0)), true)
+
+  // default substitution — pinned deterministically with mock timers (NOT a guard case)
+  t.mock.timers.enable({ apis: ['Date'], now })
+  assert.equal(reauthStale(iso(1000), windowS), false)
+  assert.equal(reauthStale(iso((windowS + 1) * 1000), windowS), true)
+  t.mock.timers.reset()
 })
 
 test('createdByTierClass: client-supplied namespace → other', () => {
