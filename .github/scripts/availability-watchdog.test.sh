@@ -67,6 +67,14 @@
 #    70. an unreadable previous ledger fails CLOSED (no restart) (P2)
 #    71/72. DNS and TLS/certificate failures do NOT restart (P2)
 #    73/74/75. transport failures / 5xx still do (the contrast cases)
+#    Round 3 (each FAILS on the round-2 code):
+#    76. a Telegram HTTP 4xx is a failure, not a silent success (--fail-with-body)
+#    77. another App's bot (renovate[bot]) is not adopted (reserved login only)
+#    78. adoption needs the EXACT title AND the body marker, not loose terms
+#    79. a corrupt SEEDED ledger names the SOURCE issue, not the new one
+#    80. a bare fm2_ macaroon fragment is shape-redacted
+#    81. the run log records the restart verdict
+#    82. a real certificate message under a generic code is still TLS
 #
 # Fixtures are simulated; the real watchdog is the script under test.
 
@@ -74,6 +82,14 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WATCHDOG="$SCRIPT_DIR/availability-watchdog.sh"
+
+# The EXACT production titles + body marker the watchdog now demands before it
+# adopts a returned search item (round 3, P2-2/P2-3). Fixtures that expect
+# adoption MUST use these verbatim; anything else is treated as NOT ours.
+DOWN_TITLE_FIXTURE='[monitor] PROD DOWN — api.premiselabs.co is not answering the availability probe'
+DEGRADED_TITLE_FIXTURE='[monitor] PROD DEGRADED — api.premiselabs.co answered the availability probe unexpectedly'
+DRILL_DOWN_TITLE_FIXTURE='[monitor] DRILL DOWN — staging.example.test [DRILL] is not answering the availability probe'
+INCIDENT_STATE_MARKER_FIXTURE='<!-- availability-watchdog-state -->'
 
 PASS=0
 FAIL=0
@@ -109,7 +125,7 @@ cat > "$BIN/curl" <<'CURL_EOF'
 # Handles exactly the two shapes the watchdog uses:
 #   probe:    curl -sS -o FILE -w '<fmt>' --connect-timeout N --max-time N URL
 #   telegram: curl -sS --max-time 15 -o /dev/null URL --data-urlencode k=v ...
-out_file=""; write_fmt=""; url=""; data=""
+out_file=""; write_fmt=""; url=""; data=""; fail_body=0
 args=("$@"); i=0
 while [ $i -lt ${#args[@]} ]; do
   a="${args[$i]}"
@@ -119,6 +135,7 @@ while [ $i -lt ${#args[@]} ]; do
     --data-urlencode) data="${data}${data:+&}${args[$((i+1))]:-}"; i=$((i+2)) ;;
     --connect-timeout|--max-time|-H) i=$((i+2)) ;;
     -s|-sS|-S|-L|-k|--fail) i=$((i+1)) ;;
+    --fail-with-body) fail_body=1; i=$((i+1)) ;;
     *) if [ -z "$url" ]; then url="$a"; fi; i=$((i+1)) ;;
   esac
 done
@@ -130,6 +147,18 @@ case "$url" in
       # curl echoes the URL (which carries the bot token) in its error text.
       echo "curl: (6) Could not resolve host: $url" >&2
       exit 1
+    fi
+    if [ "${STUB_TELEGRAM_HTTP:-0}" != "0" ]; then
+      # A live Telegram API 4xx (400 chat not found / 401 Unauthorized). A bare
+      # `curl -sS` EXITS 0 on an HTTP error, so the watchdog believed it had
+      # paged a human. With --fail-with-body curl exits 22. This stub only fails
+      # when the flag WAS passed, so the P2-1 assertion is sensitive to the fix.
+      if [ "$fail_body" = "1" ]; then
+        echo "curl: (22) The requested URL returned error: ${STUB_TELEGRAM_HTTP}" >&2
+        exit 22
+      fi
+      printf '{"ok":false,"error_code":%s}' "$STUB_TELEGRAM_HTTP" > /dev/null
+      exit 0
     fi
     printf '{"ok":true}' > /dev/null
     exit 0 ;;
@@ -179,13 +208,14 @@ cat > "$BIN/gh" <<'GH_EOF'
 # macOS bash 3.2 dev box), which silently corrupts the JSON fixture.
 DEFAULT_ITEMS_JSON='{"items":[]}'
 [ "${1:-}" = "api" ] || { echo "GH unexpected: $*" >&2; exit 1; }
-path="${2:-}"; method="GET"; input=0
+path="${2:-}"; method="GET"; input=0; paginate=0
 shift 2 || true
 while [ $# -gt 0 ]; do
   case "$1" in
     --method) method="$2"; shift 2 ;;
     --input) input=1; shift ;;
     --jq) shift 2 ;;
+    --paginate) paginate=1; shift ;;
     *) shift ;;
   esac
 done
@@ -196,8 +226,12 @@ echo "GH $method ${path%%\?*}" >> "$STUB_TMP/calls.log"
 case "$path" in
   search/issues*)
     [ "${STUB_SEARCH_FAIL:-0}" = "1" ] && { echo "gh: search failed" >&2; exit 1; }
+    case "$path" in
+      *is%3Aopen*) : ;;
+      *) [ "${STUB_LEDGER_SEARCH_FAIL:-0}" = "1" ] && { echo "gh: ledger search failed" >&2; exit 1; } ;;
+    esac
     # The full query is logged so a test can prove WHICH dedupe key was used.
-    echo "GH-Q $path" >> "$STUB_TMP/calls.log"
+    echo "GH-Q paginate=${paginate} $path" >> "$STUB_TMP/calls.log"
     # TWO distinct searches hit this endpoint: the OPEN-incident dedupe
     # (is:open) and the cross-incident LEDGER lookup (no is:open — it must see
     # CLOSED incidents too). They need separate fixtures: a test has to be able
@@ -320,11 +354,11 @@ reset_case() {
         "$STUB_TMP/comments.log" "$STUB_TMP/issue.json"
   unset STUB_PROBE_CODES STUB_PROBE_BODY STUB_PROBE_TIME STUB_SEARCH_JSON \
         STUB_SEARCH_FAIL STUB_SEARCH_MARKER STUB_CREATE_FAIL STUB_NEW_ISSUE \
-        STUB_LEDGER_SEARCH_JSON STUB_LEDGER_SEARCH_MARKER \
+        STUB_LEDGER_SEARCH_JSON STUB_LEDGER_SEARCH_MARKER STUB_LEDGER_SEARCH_FAIL \
         STUB_PROBE_RC STUB_PROBE_STDERR \
         STUB_FLY_MACHINES STUB_FLY_LIST_FAIL STUB_FLY_RESTART_FAIL STUB_FLY_LEAK \
         STUB_FLY_LEAK_SHAPE STUB_FLY_SPLIT STUB_ISSUE_CREATED_AT \
-        STUB_TELEGRAM_FAIL STUB_COMMENT_FAIL STUB_GET_BODY_FAIL \
+        STUB_TELEGRAM_FAIL STUB_TELEGRAM_HTTP STUB_COMMENT_FAIL STUB_GET_BODY_FAIL \
         STUB_CONTROL_CODES \
         PROBE_URL FLY_API_TOKEN TELEGRAM_BOT_TOKEN \
         TELEGRAM_CHAT_ID PROBE_HOST_LABEL STUB_PATCH_FAIL \
@@ -388,6 +422,13 @@ scrub_unit() { # <text> <max>
   WATCHDOG_LIB_ONLY=1 bash -c 'source "$0"; scrub_output "$1" "$2"' "$WATCHDOG" "$1" "$2"
 }
 
+# Unit-call redact_text() (the PUBLICATION-BOUNDARY pass, which does NOT
+# reflow) so the bare-macaroon shape rule can be asserted without scrub_output
+# rejoining a wrapped fragment first.
+redact_unit() { # <text>
+  WATCHDOG_LIB_ONLY=1 bash -c 'source "$0"; redact_text "$1"' "$WATCHDOG" "$1"
+}
+
 # seed an existing open incident in the stub's issue store.
 seed_issue() { # <kind> <first_failure_ts> <down_runs> <last_comment_ts> <restarts> [number] [last_down_ts]
   # The real writer emits restarts as ts,ts — normalize any space-separated
@@ -400,12 +441,15 @@ seed_issue() { # <kind> <first_failure_ts> <down_runs> <last_comment_ts> <restar
   last_down="${7:-$((NOW - 60))}"
   jq -n --arg b "<!-- watchdog-state kind=$1 first_failure_ts=$2 down_runs=$3 last_down_ts=$last_down last_comment_ts=$4 cap_notified_ts=0 restarts=$restarts -->" \
     '{body:$b}' > "$STUB_TMP/issue.json"
-  STUB_SEARCH_JSON="$(search_json "${6:-42}" "[monitor] PROD DOWN — seeded")"
+  STUB_SEARCH_JSON="$(search_json "${6:-42}" "$DOWN_TITLE_FIXTURE")"
   export STUB_SEARCH_JSON
-  # Only the seeded KIND matches the search (jq @uri encodes spaces as %20).
+  # Only the seeded KIND matches the search (jq @uri encodes spaces as %20); the
+  # fixture title must be the EXACT production title the watchdog expects.
   if [ "$1" = "down" ]; then
     export STUB_SEARCH_MARKER='PROD%20DOWN'
   else
+    STUB_SEARCH_JSON="$(search_json "${6:-42}" "$DEGRADED_TITLE_FIXTURE")"
+    export STUB_SEARCH_JSON
     export STUB_SEARCH_MARKER='PROD%20DEGRADED'
   fi
 }
@@ -415,9 +459,12 @@ seed_issue() { # <kind> <first_failure_ts> <down_runs> <last_comment_ts> <restar
 # that expects adoption MUST carry this author. Use a different author
 # deliberately in the hijack tests.
 search_json() { # <number> [title] [login] [type]
-  local n="${1:-42}" t="${2:-seeded}" l="${3:-github-actions[bot]}" ty="${4:-Bot}"
-  printf '{"items":[{"number":%s,"title":"%s","user":{"login":"%s","type":"%s"}}]}' \
-    "$n" "$t" "$l" "$ty"
+  # The default title is the EXACT production DOWN title, and every item
+  # carries the body-only marker, because the watchdog now refuses to adopt an
+  # item that lacks either (round 3, P2-2).
+  local n="${1:-42}" t="${2:-$DOWN_TITLE_FIXTURE}" l="${3:-github-actions[bot]}" ty="${4:-Bot}"
+  printf '{"items":[{"number":%s,"title":"%s","body":"%s","user":{"login":"%s","type":"%s"}}]}' \
+    "$n" "$t" "$INCIDENT_STATE_MARKER_FIXTURE" "$l" "$ty"
 }
 
 num_lines() { # <file>
@@ -1054,7 +1101,7 @@ assert_contains "$(patched_body)" "restarts=$NOW" "a future ledger stamp → rew
 reset_case
 printf '%s' '{"body":"<!-- watchdog-state kind=down first_failure_ts=1800000000 down_runs=3 last_down_ts=0 last_comment_ts=0 cap_notified_ts=0 restarts= -->"}' > "$STUB_TMP/issue.json"
 export STUB_SEARCH_MARKER='DRILL%20DOWN'
-export STUB_SEARCH_JSON="$(search_json 777 '[monitor] DRILL DOWN — staged')"
+export STUB_SEARCH_JSON="$(search_json 777 "$DRILL_DOWN_TITLE_FIXTURE")"
 export STUB_PROBE_CODES="200"
 export PROBE_URL="https://staging.example.test/v1/teams"
 run_watchdog
@@ -1161,6 +1208,7 @@ assert_eq "$(count_calls 'GH-Q.*is%3Aopen.*author%3Aapp%2Fgithub-actions')" "1" 
 # The cross-incident ledger lookup (Fix 4) must carry it too — it reads a body
 # and seeds machine state from it, so it is the same hijack surface.
 assert_eq "$(count_calls 'GH-Q.*author%3Aapp%2Fgithub-actions')" "2" "both searches (open dedupe + cross-incident ledger) carry the constraint"
+assert_eq "$(count_calls 'GH-Q paginate=1')" "2" "both searches PAGINATE — no page-1-only truncation (round 3, P3-12)"
 
 # ── 61: a forged HUMAN-authored look-alike incident is never adopted (P1) ──
 # Anyone can open an issue with the watchdog's title and a forged state block:
@@ -1270,7 +1318,8 @@ assert_not_contains "$(scrub_unit "$CRLF_TEXT" 300)" "REFLOW_DISTINCTIVE" "a \\r
 assert_not_contains "$(scrub_unit "$SP_TEXT" 300)" "REFLOW_DISTINCTIVE" "a space-split FlyV1 token is redacted by scrub_output() itself"
 assert_contains "$(scrub_unit "$NL_TEXT" 300)" "<redacted>" "the reflow path publishes the redaction marker"
 assert_contains "$(scrub_unit "$NL_TEXT" 300)" "Error: token" "the reflow path keeps the non-secret diagnostic text"
-assert_not_contains "$(scrub_unit "$NL_TEXT" 12)" "REFLOW_DISTINCTIVE" "the reflow path still redacts BEFORE it truncates"
+assert_contains "$(scrub_unit "$NL_TEXT" 40)" "<redacted>" "the reflow path still redacts BEFORE it truncates (a budget INSIDE the credential keeps the marker)"
+assert_not_contains "$(scrub_unit "$NL_TEXT" 40)" "fm2_REFLOW" "the reflow path still redacts BEFORE it truncates (no credential prefix survives)"
 
 # ── 67b: …and the same credential never reaches a public surface end-to-end ──
 reset_case
@@ -1315,7 +1364,7 @@ reset_case
 # inside the hour. The open-incident dedupe answers "none" (default empty
 # fixture) while the ledger lookup (no is:open) still finds this one.
 printf '%s' "{\"body\":\"<!-- watchdog-state kind=down first_failure_ts=$((NOW - 2400)) down_runs=4 last_down_ts=$((NOW - 3000)) last_comment_ts=0 cap_notified_ts=0 restarts=$((NOW - 2400)),$((NOW - 2100)) -->\"}" > "$STUB_TMP/issue.json"
-export STUB_LEDGER_SEARCH_JSON="$(search_json 777 '[monitor] PROD DOWN — previous (closed)')"
+export STUB_LEDGER_SEARCH_JSON="$(search_json 777 "$DOWN_TITLE_FIXTURE")"
 export STUB_PROBE_CODES="000"
 export FLY_API_TOKEN="fly-token"
 run_watchdog
@@ -1335,13 +1384,21 @@ assert_contains "$(patched_body)" "velocity cap" "cross-incident cap → the bod
 export WATCHDOG_NOW_EPOCH="$NOW"
 
 # ── 70: an unreadable previous ledger fails CLOSED (no restart) ─────────────
+# STUB_LEDGER_SEARCH_FAIL fails ONLY the ledger lookup (no is:open): the open
+# dedupe still succeeds with an empty fixture, so main actually reaches
+# recent_restart_ledger(). STUB_SEARCH_FAIL failed BOTH searches, so main exited
+# at the open-search check and the disarmed:no_ledger branch was never run —
+# the old assertions passed vacuously (round 3, P2-6).
 reset_case
-export STUB_SEARCH_FAIL=1
+export STUB_LEDGER_SEARCH_FAIL=1
 export STUB_PROBE_CODES="000"
 export FLY_API_TOKEN="fly-token"
 run_watchdog
-assert_eq "$RC" "1" "unreadable ledger → exit 1 (still alerts)"
-assert_eq "$(count_calls 'FLYCTL')" "0" "unreadable ledger → NO restart (the hourly budget cannot be proven)"
+assert_eq "$RC" "1" "unreadable previous ledger → exit 1 (still alerts)"
+assert_eq "$(count_calls 'FLYCTL')" "0" "unreadable previous ledger → NO restart (the hourly budget cannot be proven)"
+assert_contains "$OUT" "restart-ledger search failed" "unreadable previous ledger → the LEDGER search failure is named"
+assert_contains "$(patched_body)" "previous incident's restart ledger could not be read" "unreadable previous ledger → the NEW incident body says why no restart ran"
+assert_eq "$(count_calls 'GH POST .*/issues$')" "1" "unreadable previous ledger → still files the alert"
 
 # ── 71: a DNS failure must NOT restart, and must say so ─────────────────────
 # A restart cannot repair name resolution; it only spends the restart budget.
@@ -1391,7 +1448,8 @@ assert_eq "$(count_calls 'FLYCTL machine restart')" "1" "a 5xx (the app answered
 
 # ── 75: classify_failure() coverage on the message-only fallback path ───────
 # Some builds report a cert/name failure under a generic curl code; the stderr
-# text is then the only signal.
+# text is then the only signal. curl 52/55/56 are excluded from this fallback
+# (round 3, P2-8): their text is a half-dead-process signature, not a cert one.
 reset_case
 seed_issue down "$((NOW - 1200))" 3 0 ""
 export STUB_PROBE_CODES="000"
@@ -1399,7 +1457,131 @@ export STUB_PROBE_RC=56
 export STUB_PROBE_STDERR="OpenSSL SSL_read: error:0A000126:SSL routines::unexpected eof"
 export FLY_API_TOKEN="fly-token"
 run_watchdog
-assert_eq "$(count_calls 'FLYCTL')" "0" "a generic curl code + an SSL stderr message → treated as TLS → NO restart"
+assert_eq "$(count_calls 'FLYCTL machine restart')" "1" "curl 56 + SSL_read eof → a HALF-DEAD PROCESS → restart stays ARMED (round 3, P2-8)"
+
+# ══ Round 3 (each FAILS on the round-2 code) ═══════════════════════════════
+
+# ── 76: a Telegram HTTP 4xx is a FAILURE, not a silent success (P2-1) ────────
+# `curl -sS` exits 0 on an HTTP error, so 400 chat not found / 401 Unauthorized
+# looked like a delivered page. The stub only fails when --fail-with-body was
+# actually passed, so this assertion is sensitive to the fix.
+reset_case
+export STUB_PROBE_CODES="000"
+export TELEGRAM_BOT_TOKEN="tg-token"
+export TELEGRAM_CHAT_ID="12345"
+export STUB_TELEGRAM_HTTP=400
+run_watchdog
+assert_contains "$OUT" "telegram page failed" "a Telegram 4xx → the dead escalation channel is logged (--fail-with-body)"
+assert_contains "$OUT" "400" "a Telegram 4xx → the status is surfaced"
+
+# ── 77: another installed App's bot is NOT the Actions bot (P2-3) ───────────
+# `renovate[bot]` has user.type == "Bot", so the old local re-check admitted it.
+reset_case
+printf '%s' "{\"body\":\"<!-- watchdog-state kind=down first_failure_ts=$((NOW - 86400)) down_runs=999 last_down_ts=$((NOW - 60)) last_comment_ts=0 cap_notified_ts=0 restarts= -->\"}" > "$STUB_TMP/issue.json"
+export STUB_SEARCH_JSON="$(search_json 555 "$DOWN_TITLE_FIXTURE" 'renovate[bot]' 'Bot')"
+export STUB_SEARCH_MARKER='PROD%20DOWN'
+export STUB_PROBE_CODES="000"
+export FLY_API_TOKEN="fly-token"
+run_watchdog
+assert_eq "$(count_calls 'FLYCTL machine restart')" "0" "a renovate[bot] look-alike → NO restart"
+assert_eq "$(count_calls 'GH PATCH repos/.*/issues/555')" "0" "a renovate[bot] look-alike → never PATCHed with machine state"
+assert_eq "$(count_calls 'GH GET repos/.*/issues/555')" "0" "a renovate[bot] look-alike → its body is never read"
+assert_eq "$(count_calls 'GH POST .*/issues$')" "1" "a renovate[bot] look-alike → a fresh machine issue is filed"
+
+# ── 78: the dedupe requires the EXACT title AND the body marker (P2-2) ──────
+# `in:title "<phrase>"` is a loose AND, not an exact phrase, and this repo
+# carries hundreds of bot-authored monitor issues — the exact title plus the
+# body-only marker are the tokens no other producer emits.
+reset_case
+printf '%s' "{\"body\":\"<!-- watchdog-state kind=down first_failure_ts=$((NOW - 86400)) down_runs=999 last_down_ts=$((NOW - 60)) last_comment_ts=0 cap_notified_ts=0 restarts= -->\"}" > "$STUB_TMP/issue.json"
+# A different workflow's bot issue whose title merely CONTAINS our terms.
+export STUB_SEARCH_JSON='{"items":[{"number":556,"title":"[monitor] PROD DOWN — api.premiselabs.co is not answering the availability probe (legacy)","body":"<!-- availability-watchdog-state -->","user":{"login":"github-actions[bot]","type":"Bot"}}]}'
+export STUB_SEARCH_MARKER='PROD%20DOWN'
+export STUB_PROBE_CODES="000"
+export FLY_API_TOKEN="fly-token"
+run_watchdog
+assert_eq "$(count_calls 'FLYCTL machine restart')" "0" "a near-title bot issue → NOT adopted (no restart)"
+assert_eq "$(count_calls 'GH PATCH repos/.*/issues/556')" "0" "a near-title bot issue → never PATCHed with machine state"
+assert_eq "$(count_calls 'GH POST .*/issues$')" "1" "a near-title bot issue → a fresh machine issue is filed"
+
+# …and the exact title WITHOUT the body marker is still not ours.
+reset_case
+printf '%s' "{\"body\":\"<!-- watchdog-state kind=down first_failure_ts=$((NOW - 86400)) down_runs=999 last_down_ts=$((NOW - 60)) last_comment_ts=0 cap_notified_ts=0 restarts= -->\"}" > "$STUB_TMP/issue.json"
+export STUB_SEARCH_JSON="$(printf '{"items":[{"number":557,"title":"%s","body":"no marker here","user":{"login":"github-actions[bot]","type":"Bot"}}]}' "$DOWN_TITLE_FIXTURE")"
+export STUB_SEARCH_MARKER='PROD%20DOWN'
+export STUB_PROBE_CODES="000"
+export FLY_API_TOKEN="fly-token"
+run_watchdog
+assert_eq "$(count_calls 'FLYCTL machine restart')" "0" "the exact title without the marker → NOT adopted (no restart)"
+assert_eq "$(count_calls 'GH PATCH repos/.*/issues/557')" "0" "the exact title without the marker → never PATCHed"
+assert_eq "$(count_calls 'GH POST .*/issues$')" "1" "the exact title without the marker → a fresh machine issue is filed"
+
+# ── 79: a corrupt SEEDED ledger names the SOURCE, not the new incident (P2-4) ─
+# The corrupt value came from #777, but the message named the just-created
+# #900, and the run exited before the end-of-run body write — leaving the new
+# incident promising a self-healing decision the run never wrote.
+reset_case
+printf '%s' "{\"body\":\"<!-- watchdog-state kind=down first_failure_ts=$((NOW - 2400)) down_runs=4 last_down_ts=$((NOW - 3000)) last_comment_ts=0 cap_notified_ts=0 restarts=abc -->\"}" > "$STUB_TMP/issue.json"
+export STUB_LEDGER_SEARCH_JSON="$(search_json 777 "$DOWN_TITLE_FIXTURE")"
+export STUB_PROBE_CODES="000"
+export FLY_API_TOKEN="fly-token"
+run_watchdog
+assert_eq "$RC" "1" "a corrupt previous ledger → exit 1 (still alerts)"
+assert_eq "$(count_calls 'FLYCTL')" "0" "a corrupt previous ledger → NO restart"
+assert_contains "$OUT" "restart ledger in incident #777" "a corrupt previous ledger → names the SOURCE (#777)"
+assert_contains "$OUT" "restart decision: disarmed:corrupt_ledger" "a corrupt previous ledger → the run logs its disarm verdict (P2-5)"
+assert_not_contains "$OUT" "restart ledger in incident #900" "a corrupt previous ledger → does NOT blame the newly-created incident"
+assert_contains "$(patched_body)" "#777" "a corrupt previous ledger → the NEW incident body points at the source"
+assert_contains "$(patched_body)" "corrupt" "a corrupt previous ledger → the NEW incident body records the disarm"
+assert_eq "$(count_calls 'GH PATCH repos/.*/issues/777')" "0" "a corrupt previous ledger → the SOURCE is never PATCHed (its ledger is not erased)"
+
+# ── 80: a bare macaroon fragment is shape-redacted (P3-10) ──────────────────
+# A hard wrap can split the `FlyV1 ` prefix off, leaving `fm2_<40 chars>` on
+# its own line. The old shape rule required the `FlyV1 ` prefix, so the fragment
+# survived at the publication boundary (redact_text, which does not reflow).
+reset_case
+FM2_FRAG="fm2_$(printf 'Z%.0s' {1..40})"
+FM2_TEXT="$(printf 'Error: token\n%s rejected' "$FM2_FRAG")"
+export FLY_API_TOKEN="unrelated-token"
+assert_not_contains "$(redact_unit "$FM2_TEXT")" "ZZZZ" "a bare fm2_ macaroon fragment is shape-redacted"
+assert_contains "$(redact_unit "$FM2_TEXT")" "<redacted>" "a bare fm2_ fragment → the redaction marker is published"
+unset FLY_API_TOKEN
+
+# ── 81: the run log records the restart verdict (P2-5 / runbook §6.4) ───────
+reset_case
+seed_issue down "$((NOW - 300))" 1 0 ""
+export STUB_PROBE_CODES="000"
+export FLY_API_TOKEN="fly-token"
+run_watchdog
+assert_contains "$OUT" "restart decision: DOWN" "an armed run logs its restart verdict ('DOWN')"
+reset_case
+seed_issue down "$((NOW - 1200))" 3 0 ""
+export STUB_PROBE_CODES="000"
+export FLY_API_TOKEN="fly-token"
+export PROBE_URL="https://staging.example.test/v1/teams"
+run_watchdog
+assert_contains "$OUT" "restart decision: disarmed:drill" "a drill logs its disarm reason"
+reset_case
+seed_issue down "$((NOW - 1200))" 3 0 ""
+export STUB_PROBE_CODES="000"
+export STUB_PROBE_RC=6
+export STUB_PROBE_STDERR="Could not resolve host: api.premiselabs.co"
+export FLY_API_TOKEN="fly-token"
+run_watchdog
+assert_contains "$OUT" "restart decision: disarmed:unfixable" "a DNS failure logs its disarm reason"
+
+# ── 82: a genuine certificate message under a generic code is still TLS ─────
+# The narrowed fallback must still catch a real cert failure (it only drops the
+# bare `ssl`/`tls` tokens and the 52/55/56 transport codes).
+reset_case
+seed_issue down "$((NOW - 1200))" 3 0 ""
+export STUB_PROBE_CODES="000"
+export STUB_PROBE_RC=1
+export STUB_PROBE_STDERR="SSL certificate problem: unable to get local issuer certificate"
+export FLY_API_TOKEN="fly-token"
+run_watchdog
+assert_eq "$(count_calls 'FLYCTL machine restart')" "0" "a generic code + a certificate message → TLS → NO restart"
+assert_contains "$(patched_body)" "a TLS/certificate failure" "a certificate message → the body names the TLS class"
 
 echo
 if [ "$FAIL" -eq 0 ]; then

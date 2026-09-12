@@ -100,11 +100,15 @@
 #          last_down_ts=… last_comment_ts=… cap_notified_ts=… restarts=ts,ts -->
 #   The title is the dedupe key — the script searches for an open issue whose
 #   title contains the marker before filing, CONSTRAINED TO A MACHINE AUTHOR
-#   (`author:app/github-actions` + a `user.type == "Bot"` re-check). On a PUBLIC
-#   repo anyone can open an issue with our title and a forged state block;
-#   adopting it would hand an attacker the sustained clock and the restart
-#   ledger (a restart storm). A non-machine match is NEVER adopted, patched or
-#   closed — it is treated as "no incident" and a fresh machine issue is filed.
+#   (`author:app/github-actions` + the reserved `github-actions[bot]` login
+#   re-check). Adoption additionally requires an EXACT title match and the
+#   body-only `INCIDENT_STATE_MARKER` line, so an unrelated workflow's bot
+#   issue whose title merely contains the loose terms is never adopted. On a
+#   PUBLIC repo anyone can open an issue with our title and a forged state
+#   block; adopting it would hand an attacker the sustained clock and the
+#   restart ledger (a restart storm). A non-machine or non-ours match is NEVER
+#   adopted, patched or closed — it is treated as "no incident" and a fresh
+#   machine issue is filed.
 #   The body is HUMAN-EDITABLE, so every parsed value is bounded/validated
 #   (to_int), a stale clock (no failing run within STALE_RESET_MINUTES)
 #   restarts the sustained window instead of trusting it, and the sustained
@@ -151,9 +155,11 @@
 #     is still caught. stdout is DATA only (all logging is on stderr) so a log
 #     line can never corrupt a captured helper return.
 #   * Only a MACHINE-authored issue is ever adopted or mutated: the dedupe
-#     search carries `author:app/github-actions` AND the returned item's
-#     `user.type`/`user.login` is re-checked before its number is used, so no
-#     public account can seed or hijack the incident state (see STATE above).
+#     search carries `author:app/github-actions` AND the returned item is
+#     re-checked for the RESERVED `github-actions[bot]` login, an EXACT title
+#     and the body-only `INCIDENT_STATE_MARKER` before its number is used, so
+#     no public account (and no other workflow's bot issue) can seed or hijack
+#     the incident state (see STATE above).
 #   * Every notification is gated on a DURABLE record: the restart attempt and
 #     the cap/INCONCLUSIVE escalation stamps are written BEFORE the side effect,
 #     and a routine comment is published only after the body (which carries the
@@ -236,6 +242,15 @@ TELEGRAM_BOT_TOKEN="${TELEGRAM_BOT_TOKEN:-}"
 TELEGRAM_CHAT_ID="${TELEGRAM_CHAT_ID:-}"
 # Test seam: pin "now" so cooldown/velocity arithmetic is deterministic.
 WATCHDOG_NOW_EPOCH="${WATCHDOG_NOW_EPOCH:-}"
+
+# A body-only marker for machine incidents. `in:title "…"` is an
+# order-insensitive AND of loose terms (NOT an exact phrase), and this PUBLIC
+# repo carries hundreds of bot-authored monitor issues, so title text alone is
+# not proof that an issue is OURS. This literal appears in every body we write
+# and in no other producer's, so the dedupe requires it — plus an EXACT title
+# match and the reserved `github-actions[bot]` login — before it will adopt,
+# patch, or close a returned item (round 3, P2-2/P2-3).
+INCIDENT_STATE_MARKER='<!-- availability-watchdog-state -->'
 
 DOWN_MARKER="[monitor] PROD DOWN"
 DOWN_TITLE="${DOWN_MARKER} — ${PROBE_HOST_LABEL} is not answering the availability probe"
@@ -441,6 +456,7 @@ redact_text() {
   printf '%s' "$t" | sed -E \
     -e 's#([?&](token|key|secret|sig|signature|api_key|apikey|access_token)=)[^&"[:space:]]*#\1<redacted>#g' \
     -e 's#FlyV1[[:space:]]+[A-Za-z0-9_=+/.,-]+#<redacted>#g' \
+    -e 's#fm2_[A-Za-z0-9_=+/.,-]{20,}#<redacted>#g' \
     -e 's#[0-9]{6,12}:[A-Za-z0-9_-]{30,}#<redacted>#g'
 }
 
@@ -514,11 +530,20 @@ classify_failure() { # <curl_exit_code> <stderr>
     28)                                   printf 'timeout'; return 0 ;;
     7)                                    printf 'refused'; return 0 ;;
     35|51|58|59|60|66|77|80|82|83|90|91)   printf 'tls';     return 0 ;;
+    # 52 (empty reply), 55 (send error) and 56 (recv error) are the transport
+    # signatures of a process that is HALF-DEAD mid-connection — a wedged
+    # process, which a restart clears. `OpenSSL SSL_read … unexpected eof`
+    # under 56 is exactly that signature, not a certificate problem, so these
+    # codes NEVER take the message fallback below (round 3, P2-8).
+    52|55|56)                              printf 'transport'; return 0 ;;
   esac
   # Some builds / a TLS-terminating proxy report a cert or name failure with a
   # generic code; the message is then the only signal. Match case-insensitively.
+  # The tokens are deliberately NARROW: bare `ssl`/`tls` matched the half-dead
+  # `SSL_read … eof` text and DISARMED restarting on it — a restart candidate
+  # (round 3, P2-8). Only an explicit certificate/handshake phrase counts.
   case "$(printf '%s' "$text" | tr 'A-Z' 'a-z')" in
-    *"certificate"*|*"ssl"*|*"tls"*|*"self-signed"*|*"self signed"*) printf 'tls'; return 0 ;;
+    *"certificate"*|*"self-signed"*|*"self signed"*|*"handshake failure"*) printf 'tls'; return 0 ;;
     *"resolve host"*|*"could not resolve"*|*"name or service not known"*|*"nodename nor servname"*) printf 'dns'; return 0 ;;
   esac
   printf 'transport'
@@ -645,12 +670,14 @@ urlencode() { printf '%s' "$1" | jq -sRr @uri; }
 # and the restart ledger — `down_runs=999` bypasses SUSTAINED_MIN_RUNS and a
 # forged `restarts=` bypasses the cooldown AND the hourly cap (a restart storm
 # that makes an outage worse). So the search carries `author:app/github-actions`
-# AND the returned item's author is re-checked below (`.user.type == "Bot"` /
-# `.user.login == "github-actions[bot]"`); a non-machine match is treated as
-# "no incident" (a fresh machine issue is filed) and is NEVER adopted, patched,
-# commented on or closed.
-search_open_alert() { # <marker>
-  local q enc out n total
+# AND each returned item is re-checked below against the RESERVED Actions login
+# (`github-actions[bot]` — NOT the broader `type == "Bot"`, which also admits
+# `renovate[bot]`/`dependabot[bot]`, round 3 P2-3), an EXACT title match and the
+# body-only `INCIDENT_STATE_MARKER`. A non-machine or non-ours match is treated
+# as "no incident" (a fresh machine issue is filed) and is NEVER adopted,
+# patched, commented on or closed.
+search_open_alert() { # <marker> <exact-title>
+  local q enc out n total want_title="$2"
   # TITLE-ONLY dedupe key (no `label:` filter): a renamed/deleted label would
   # silently empty the search and turn the monitor back into a duplicate-issue
   # spammer (#2706 class). The label is applied when FILING, not when searching.
@@ -659,7 +686,11 @@ search_open_alert() { # <marker>
   enc="$(urlencode "$q")"
   # NB: the query MUST go in the URL path — `gh api -f q=…` switches the method
   # to POST and 404s on this endpoint (tenant-provision-monitor, #1133).
-  if ! out="$(gh api "search/issues?q=${enc}&per_page=5" 2>"$RUN_TMP/search.err")"; then
+  # BOUNDED pagination (P3-12): `--paginate` walks every page and GitHub's own
+  # 1000-result cap bounds it at ≤10 pages of 100, so the watchdog's own
+  # duplicate accumulation (#2706) can never push the real incident off page 1
+  # into a duplicate filing. `jq -s` below slurps the concatenated page docs.
+  if ! out="$(gh api "search/issues?q=${enc}&per_page=100" --paginate 2>"$RUN_TMP/search.err")"; then
     warn "GitHub issue search failed: $(scrub_output "$(cat "$RUN_TMP/search.err" 2>/dev/null || true)" 200)"
     printf '__ERR__'
     return 0
@@ -667,7 +698,8 @@ search_open_alert() { # <marker>
   # "no open incident" (an empty item list) is NOT a failure — only an
   # unparseable answer is. Conflating the two makes the watchdog refuse to file
   # on every first outage (the search result for a fresh incident is empty).
-  if ! n="$(printf '%s' "$out" | jq -r '[.items[]? | select((.user.type // "") == "Bot" or (.user.login // "") == "github-actions[bot]")][0].number // empty' 2>/dev/null)"; then
+  if ! n="$(printf '%s' "$out" | jq -rs --arg login "github-actions[bot]" --arg title "$want_title" --arg marker "$INCIDENT_STATE_MARKER" \
+      '[.[].items[]? | select((.user.login // "") == $login) | select((.title // "") == $title) | select(((.body // "") | contains($marker)))][0].number // empty' 2>/dev/null)"; then
     warn "GitHub issue search returned an unparseable body"
     printf '__ERR__'
     return 0
@@ -676,12 +708,12 @@ search_open_alert() { # <marker>
     # Distinguish "nothing matched" from "something matched but was NOT ours":
     # the latter is the hijack attempt this guard exists for, and it is worth a
     # loud line (we still file a fresh machine issue).
-    total="$(printf '%s' "$out" | jq -r '.items | length' 2>/dev/null || true)"
+    total="$(printf '%s' "$out" | jq -rs '[.[].items[]?] | length' 2>/dev/null || true)"
     case "$total" in
       ''|*[!0-9]*) total=0 ;;
     esac
     if [ "$total" -gt 0 ]; then
-      warn "issue search matched ${total} open issue(s) but NONE was authored by the GitHub Actions bot — ignoring them (a forged look-alike is never adopted) and filing a fresh machine issue"
+      warn "issue search matched ${total} open issue(s) but NONE was authored by the GitHub Actions bot with our exact title and state marker — ignoring them (a forged look-alike is never adopted) and filing a fresh machine issue"
     fi
     printf ''
     return 0
@@ -789,7 +821,7 @@ page() { # <text>
   # The bot token is IN THE URL, and curl echoes the URL in its error text —
   # which would land in a PUBLIC Actions log. Capture stderr and redact the
   # token before logging.
-  if ! err="$(curl -sS --max-time 15 -o /dev/null \
+  if ! err="$(curl -sS --fail-with-body --max-time 15 -o /dev/null \
       "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
       --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
       --data-urlencode "text=$text" 2>&1)"; then
@@ -810,6 +842,10 @@ STATE_RESTARTS=""
 # only WEAKEN the cooldown/cap.
 STATE_RESTARTS_INVALID="0"
 STATE_RESTARTS_RAW=""
+# The issue number the CURRENT ledger was read from (round 3, P2-4). On a NEW
+# incident seeded from a previous one, this is the PREVIOUS issue — naming it in
+# the corrupt-ledger failure is what sends the operator to the right place.
+LEDGER_SOURCE_ISSUE=""
 
 parse_state() { # <body>
   local body="$1"
@@ -920,29 +956,38 @@ parse_state() { # <body>
 # So a NEW incident seeds its ledger with the still-in-window restart stamps of
 # the most recent MACHINE-authored incident for this marker — open OR closed,
 # i.e. the ledger the previous incident left behind. `sort=created&order=desc`
-# makes `.items[0]` the most recent. The same hijack guard as the dedupe search
-# applies: a non-machine look-alike is never read.
+# makes `.items[0]` the most recent. The SAME round-3 adoption guard as the
+# dedupe search applies (exact title + body marker + reserved login), so an
+# unrelated bot-authored issue whose title merely contains the loose terms is
+# never read as this incident's ledger.
 # Reads STATE_RESTARTS / STATE_RESTARTS_INVALID. Returns 1 when the previous
 # ledger could not be READ, and the caller then fails closed (no restart
 # without a provable hourly budget).
-recent_restart_ledger() { # <marker> <now>
-  local q enc out n body now="$2" ledger ts
+recent_restart_ledger() { # <marker> <now> <exact-title>
+  local q enc out n body now="$2" want_title="$3" ledger ts
   q="repo:${REPO} is:issue author:app/github-actions in:title \"$1\""
   enc="$(urlencode "$q")"
-  if ! out="$(gh api "search/issues?q=${enc}&per_page=5&sort=created&order=desc" 2>"$RUN_TMP/ledger.err")"; then
+  # Bounded pagination (P3-12), same bound as search_open_alert: `--paginate`
+  # cannot page the real ledger off page 1 into a silent budget reset.
+  if ! out="$(gh api "search/issues?q=${enc}&per_page=100&sort=created&order=desc" --paginate 2>"$RUN_TMP/ledger.err")"; then
     warn "restart-ledger search failed: $(scrub_output "$(cat "$RUN_TMP/ledger.err" 2>/dev/null || true)" 200)"
     return 1
   fi
-  if ! n="$(printf '%s' "$out" | jq -r '[.items[]? | select((.user.type // "") == "Bot" or (.user.login // "") == "github-actions[bot]")][0].number // empty' 2>/dev/null)"; then
+  if ! n="$(printf '%s' "$out" | jq -rs --arg login "github-actions[bot]" --arg title "$want_title" --arg marker "$INCIDENT_STATE_MARKER" \
+      '[.[].items[]? | select((.user.login // "") == $login) | select((.title // "") == $title) | select(((.body // "") | contains($marker)))][0].number // empty' 2>/dev/null)"; then
     warn "restart-ledger search returned an unparseable body"
     return 1
   fi
   case "$n" in
-    '') STATE_RESTARTS=""; STATE_RESTARTS_INVALID="0"; return 0 ;;
+    '') STATE_RESTARTS=""; STATE_RESTARTS_INVALID="0"; LEDGER_SOURCE_ISSUE=""; return 0 ;;
     *[!0-9]*|0)
       warn "restart-ledger search returned a non-numeric issue id ('${n}')"
       return 1 ;;
   esac
+  # Record WHERE this ledger came from. On a NEW incident whose seeded ledger is
+  # corrupt, main must name THIS issue (not the just-created one) in the
+  # fail-closed message (round 3, P2-4).
+  LEDGER_SOURCE_ISSUE="$n"
   body="$(get_issue_body "$n")"
   if [ "$body" = "__ERR__" ]; then return 1; fi
   # Reuse the ONE normalizer/validator (to_int bounds, future-stamp clamp,
@@ -979,6 +1024,7 @@ render_body() { # <kind> <kindlabel> <selfheal-note>
   fi
   cat <<EOF
 $(state_block "$kind")
+${INCIDENT_STATE_MARKER}
 
 > 🤖 Machine-managed by \`.github/scripts/availability-watchdog.sh\` (#2850).
 > The body is rewritten on every probe run — **add human notes as comments**.
@@ -994,7 +1040,7 @@ $(state_block "$kind")
 | **Probe** | \`GET $(redact_url "$PROBE_URL")\` from GitHub Actions — OUTSIDE Fly (a different failure domain than the app) |
 | **First observed** | $(fmt_iso "$STATE_FIRST_FAILURE_TS") |
 | **Failing probe runs** | ${STATE_DOWN_RUNS} (scheduled every 5 min; last at $(fmt_iso "$STATE_LAST_DOWN_TS")) |
-| **Automated restart attempts (this incident)** | $(if [ -n "$(restart_history)" ]; then printf '%s' "$(restart_history)"; else printf 'none'; fi) |
+| **Restart attempts in the rolling hour (may include a prior incident)** | $(if [ -n "$(restart_history)" ]; then printf '%s' "$(restart_history)"; else printf 'none'; fi) |
 
 The probe asserts the **real user path**, not just that a socket is open: an
 authenticated API route served by the app. \`2xx\`/\`401\`/\`403\`/\`429\` all mean
@@ -1082,7 +1128,7 @@ do_restart() {
 # ── main ────────────────────────────────────────────────────────────────────
 main() {
   local now kind kindlabel title marker issue decision heal_note comment_body
-  local transition_kind restarted_ids rc n_loop kind_loop stale_note="" is_prod=0 body_loop=""
+  local transition_kind restarted_ids rc n_loop kind_loop title_loop ledger_src stale_note="" is_prod=0 body_loop=""
   # Cross-incident restart budget (see recent_restart_ledger): the ledger
   # carried from the previous incident, whether it was readable, and whether the
   # carried ledger was itself corrupt (which must stay fail-closed).
@@ -1170,8 +1216,8 @@ main() {
 
     if [ "$confirmed" = "1" ]; then
       for kind_loop in DOWN DEGRADED; do
-        if [ "$kind_loop" = "DOWN" ]; then marker="$DOWN_MARKER"; else marker="$DEGRADED_MARKER"; fi
-        n_loop="$(search_open_alert "$marker")"
+        if [ "$kind_loop" = "DOWN" ]; then marker="$DOWN_MARKER"; title_loop="$DOWN_TITLE"; else marker="$DEGRADED_MARKER"; title_loop="$DEGRADED_TITLE"; fi
+        n_loop="$(search_open_alert "$marker" "$title_loop")"
         case "$n_loop" in
           __ERR__*|'')
             if [ "$n_loop" = "__ERR__" ]; then
@@ -1218,8 +1264,8 @@ The service failed ${STATE_DOWN_RUNS} probe run(s), starting $(fmt_iso "$STATE_F
     # DOWN/UNEXPECTED path below with the failing confirmation probe's verdict.
     local any_open=0
     for kind_loop in DOWN DEGRADED; do
-      if [ "$kind_loop" = "DOWN" ]; then marker="$DOWN_MARKER"; else marker="$DEGRADED_MARKER"; fi
-      n_loop="$(search_open_alert "$marker")"
+      if [ "$kind_loop" = "DOWN" ]; then marker="$DOWN_MARKER"; title_loop="$DOWN_TITLE"; else marker="$DEGRADED_MARKER"; title_loop="$DEGRADED_TITLE"; fi
+      n_loop="$(search_open_alert "$marker" "$title_loop")"
       case "$n_loop" in
         __ERR__*) fail "issue search failed while checking for an open incident (flapping probe) — the monitor cannot confirm incident state; failing the run"; exit 1 ;;
         *[!0-9]*) fail "issue search returned a non-numeric issue id ('${n_loop}') — refusing to act"; exit 1 ;;
@@ -1259,7 +1305,7 @@ The service failed ${STATE_DOWN_RUNS} probe run(s), starting $(fmt_iso "$STATE_F
     log "probe failed at the '${PROBE_FAILURE_CLASS}' layer — NOT restartable; the incident will be reported without a restart"
   fi
 
-  issue="$(search_open_alert "$marker")"
+  issue="$(search_open_alert "$marker" "$title")"
   case "$issue" in
     __ERR__*)
       fail "GitHub issue search failed — refusing to file (never duplicate). This failing run IS the alert."
@@ -1275,7 +1321,7 @@ The service failed ${STATE_DOWN_RUNS} probe run(s), starting $(fmt_iso "$STATE_F
     # and reopening the incident (which is what flapping looks like) cannot
     # reset the hourly cap. Only the restart path needs it.
     if [ "$restart_mode" = "DOWN" ]; then
-      if recent_restart_ledger "$marker" "$now"; then
+      if recent_restart_ledger "$marker" "$now" "$title"; then
         carried_ledger="$STATE_RESTARTS"
         carried_invalid="$STATE_RESTARTS_INVALID"
       else
@@ -1380,7 +1426,22 @@ The service failed ${STATE_DOWN_RUNS} probe run(s), starting $(fmt_iso "$STATE_F
       # turns into a restart storm. Refuse to act (like an unreadable issue
       # body) and fail the run loudly — the open incident remains the standing
       # alert.
-      fail "the restart ledger in incident #${issue} is present but not fully parseable ('$(scrub_output "$STATE_RESTARTS_RAW" 120)') — refusing to restart: a dropped entry could only WEAKEN the cooldown/hourly cap. Fix the \`restarts=\` field in the issue body (ts,ts or empty) and the next run resumes."
+      # NAME THE SOURCE (round 3, P2-4): on a NEW incident the corrupt value
+      # came from the PREVIOUS incident's body (recent_restart_ledger read it),
+      # so naming the just-created #$issue sent the operator to the wrong issue.
+      ledger_src="${LEDGER_SOURCE_ISSUE:-$issue}"
+      log "restart decision: disarmed:corrupt_ledger"
+      fail "the restart ledger in incident #${ledger_src} is present but not fully parseable ('$(scrub_output "$STATE_RESTARTS_RAW" 120)') — refusing to restart: a dropped entry could only WEAKEN the cooldown/hourly cap. Fix the \`restarts=\` field in #${ledger_src}'s body (ts,ts or empty) and the next run resumes."
+      # Do not leave a NEW incident promising "⏳ Diagnosing — the self-healing
+      # decision is written at the end of this run" when this run ends here.
+      # Record the disarm in the new incident — but NEVER PATCH the source: on a
+      # repeat run $issue IS the corrupt issue and a write there would ERASE the
+      # ledger we refused to trust (tests 44b/c/d assert zero PATCHes there).
+      if [ "$progress" = "new" ]; then
+        if ! update_issue_body "$issue" "$(render_body "$kind" "$kindlabel" "⛔ **No restart attempted — the restart ledger in incident #${ledger_src} is corrupt.** The \`restarts=\` field there is present but not fully parseable ('$(scrub_output "$STATE_RESTARTS_RAW" 120)'), so the watchdog cannot prove another restart is inside the ${MAX_RESTARTS_PER_HOUR}/hour cap and fails closed rather than risk a restart storm. Fix the \`restarts=\` field in #${ledger_src}'s body (a comma-separated list of epoch stamps, or empty) and the next run resumes. Runbook § *Out-of-band availability watchdog*.")"; then
+          warn "could not record the corrupt-ledger disarm in #${issue} (the run still fails closed)"
+        fi
+      fi
       exit 1
     fi
     # Runner-side egress control: a DOWN verdict from a runner that cannot
@@ -1391,6 +1452,12 @@ The service failed ${STATE_DOWN_RUNS} probe run(s), starting $(fmt_iso "$STATE_F
       warn "control probe $(redact_url "$CONTROL_URL") also failed from this runner — cannot distinguish a runner network failure from an app outage; NOT restarting"
     fi
   fi
+
+  # Round 3, P2-5: the runbook (§6.4) states every run records its verdict as
+  # `disarmed:<reason>` or the armed path. `restart_mode` was only ever
+  # COMPARED, never printed, so the doc was false. Emit it once the mode is
+  # final (after the ledger/egress downgrades above).
+  log "restart decision: ${restart_mode}"
 
   if [ "$restart_mode" = "DOWN" ]; then
     decision="$(decide_restart "$now")"

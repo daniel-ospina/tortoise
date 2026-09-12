@@ -328,8 +328,10 @@ before the run declares DOWN, so a single transient blip cannot fire an alarm.
    so editing `first_failure_ts` can delay a restart but never make one happen
    earlier than `SUSTAINED_DOWN_MINUTES` after the issue was created. The
    watchdog only ever adopts/mutates an issue authored by the GitHub Actions
-   bot (`author:app/github-actions`); a look-alike issue from any other account
-   is ignored and a fresh machine issue is filed (see §6.8).
+   bot (`author:app/github-actions`) whose title is an **exact** match and whose
+   body carries the watchdog marker line; a look-alike from any other account —
+   or another workflow's bot issue whose title merely contains the marker terms
+   — is ignored and a fresh machine issue is filed (see §6.8).
 
 **One incident = one issue.** Repeats comment with an incremented count; the
 issue is closed automatically with a `Recovered` comment when a probe answers
@@ -379,9 +381,10 @@ its body names the class and why nothing was restarted: restarting a machine
 never repairs a resolver or an expired certificate, it only burns the budget.
 Timeouts (28), connection-refused (7), and app-level 5xx stay restartable;
 (d) when the previous incident's restart ledger cannot be read
-(`disarmed:no_ledger` — fail closed, per above). Every run records its verdict
-as `disarmed:<reason>` or the armed path, so *why* a restart did not happen is
-in the run log rather than inferred. Three further safeguards worth knowing:
+(`disarmed:no_ledger` — fail closed, per above). Every run logs its verdict as
+`restart decision: disarmed:<reason>` (or `restart decision: DOWN` on the armed
+path), so *why* a restart did not happen is in the run log rather than
+inferred. Three further safeguards worth knowing:
 
 - **Write-then-act:** the attempt is recorded in the incident body *before*
   `flyctl` runs. If that write fails the restart does **not** happen — the body
@@ -415,12 +418,14 @@ cannot file is a deaf monitor.
 ### 6.6 When restarts do not help
 
 The watchdog stops after `MAX_RESTARTS_PER_HOUR` and asks for a human — treat
-that as “this is not a wedged process”. Two disarm reasons also land here
-without the cap being reached, and both are named in the incident body and the
+that as “this is not a wedged process”. Three disarm reasons also land here
+without the cap being reached, and all are named in the incident body and the
 run log: **`disarmed:unfixable`** (a DNS or TLS/certificate failure — repair the
-resolver or the certificate; a restart is not the fix) and
-**`disarmed:no_ledger`** (the prior incident's restart ledger was unreadable, so
-the restart leg failed closed):
+resolver or the certificate; a restart is not the fix), **`disarmed:no_ledger`**
+(the prior incident's restart ledger could not be read), and
+**`disarmed:corrupt_ledger`** (the ledger was read but not fully parseable —
+fix `restarts=` in the issue the message names). The two ledger disarms fail
+closed: the restart leg cannot prove the hourly budget, so nothing restarts:
 
 1. `flyctl logs -a tortoise-y4mjjq` — look for `Timeout reading from socket`,
    `Failed to create index`, or a crash loop.
@@ -485,14 +490,17 @@ your shell environment. `gh workflow run` cannot pass them inline.
   zone, a Cloudflare/ASN block on the runner IP) leaves the control green and
   still reads as DOWN.
 - **The dedupe search is a loose `in:title` term match**, not an exact phrase,
-  **and it is constrained to a machine author**: it searches
-  `author:app/github-actions` and re-checks the returned item's
-  `user.type == "Bot"` before using its number. On a public repo an unrelated
-  account can open an issue sharing the marker's terms (`monitor` + `PROD` +
-  `DOWN`), but it is **never** adopted, patched, commented on or closed — the
-  watchdog treats it as "no incident" and files its own fresh issue. Because
-  the author is GitHub-assigned and cannot be chosen or forged by the issue
-  creator, a look-alike filed by any other account is never a match.
+  **and an adopted item must clear three checks**: the search is constrained to
+  `author:app/github-actions`; the returned item's `user.login` must be the
+  RESERVED `github-actions[bot]` (not merely `user.type == "Bot"`, which also
+  admits `renovate[bot]`/`dependabot[bot]`); its title must be an EXACT match;
+  and its body must carry the watchdog's own marker line
+  (`<!-- availability-watchdog-state -->`), which no other producer emits. On a
+  public repo an unrelated account — or another workflow's bot issue whose title
+  merely contains the marker's terms — is **never** adopted, patched, commented
+  on or closed: the watchdog treats it as "no incident" and files its own fresh
+  issue. Because the author is GitHub-assigned and cannot be chosen or forged by
+  the issue creator, a look-alike filed by any other account is never a match.
 - **Truth is derived from the incident body**, which is human-editable, **plus
   a server-side anchor the body cannot forge.** The sustained window is clamped
   to the incident issue's GitHub-assigned `created_at`, so a hand-edited

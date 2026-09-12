@@ -77,10 +77,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
-      # Explicit: Actions does NOT export GITHUB_TOKEN into step envs, so a
-      # driver reading $GH_TOKEN would see an empty value and every issue
-      # write would 401 (the "deaf monitor" class, #2140 / registry-cron).
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       # Left EMPTY on the scheduled path so the SCRIPT's single default applies
       # (availability-watchdog.sh DEFAULT_PROBE_URL). Duplicating the production
       # URL here would mean that changing one copy silently turns every
@@ -133,9 +129,16 @@ jobs:
         uses: superfly/flyctl-actions/setup-flyctl@ed8efb33836e8b2096c7fd3ba1c8afe303ebbff1
       - name: Probe the public endpoint (self-heal + deduplicated alert)
         env:
-          # STEP-level: the token is exported ONLY to the step that runs the
-          # watchdog (which needs it for `flyctl machine restart`). At job
-          # level it would also be handed to actions/checkout and to the
-          # third-party setup-flyctl action.
+          # STEP-level (round 3, P3-11): BOTH tokens are exported ONLY to the
+          # step that runs the watchdog. At job level they would also be handed
+          # to actions/checkout and to the third-party setup-flyctl action —
+          # `GH_TOKEN` carries issues:write and `FLY_API_TOKEN` can restart the
+          # production machine, so neither belongs in the checkout step's env.
+          # Actions does NOT export GITHUB_TOKEN itself, so GH_TOKEN must be
+          # named explicitly here or the monitor is deaf (#2140 / registry-cron).
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # The restart token: passed to the step that runs `flyctl machine
+          # restart`. Absent → the restart leg is skipped with a loud log line
+          # and an incident comment naming the secret to create.
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
         run: bash .github/scripts/availability-watchdog.sh
