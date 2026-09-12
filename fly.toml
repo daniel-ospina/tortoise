@@ -1,5 +1,5 @@
 # Tortoise Hosted API — Fly.io configuration
-# See: docs/epics/2026-08-03-tortoise-hosted-platform/04-plan.md §5
+# See: docs/infra-runbook.md §6 — availability & machine topology (#2850)
 
 app = "tortoise-y4mjjq"
 primary_region = "iad"
@@ -30,8 +30,9 @@ primary_region = "iad"
   #   change (>=1 machine always warm, ~$21.40/mo; see COST below).
   # auto_start_machines=true — safety net. If a machine is ever stopped
   #   out-of-band (operator stop, host failure, crash-loop give-up), the next
-  #   request starts it. Never-stop + always-startable is the safe pairing;
-  #   Fly's warning targets the reverse (stop + never-start).
+  #   request starts it. Fly recommends both-on or both-off to avoid machines
+  #   that never start *or* never stop; we deliberately take the never-stop
+  #   side, which cannot strand a stopped machine.
   # min_machines_running=1 — availability floor: keep >=1 machine warm in iad.
   #   Fly documents this as inert while auto_stop_machines="off" (declarative
   #   today, load-bearing if autostop is enabled or a 2nd machine is added).
@@ -46,6 +47,9 @@ primary_region = "iad"
   #   continuously. A genuinely redundant 2-machine topology is ~$42.80/mo
   #   (+$21.40/mo, plus a 2nd volume at $0.15/GB/mo) and is blocked on the
   #   app-state work in runbook §6. Operator decides that spend; not taken here.
+  #   ⚠️ LIST-PRICE ESTIMATE, NOT A QUOTE, AND DATED (snapshot 2026-09-10).
+  #   Fly bills actual usage; live rates have since moved ~4% higher. Re-fetch
+  #   Fly's pricing page before a spend decision. Full caveat: runbook §6.5.
   auto_stop_machines = "off"
   auto_start_machines = true
   min_machines_running = 1
@@ -63,10 +67,14 @@ primary_region = "iad"
     hard_limit = 200
 
   # ── Routing check: TCP, NOT HTTP (#2850, P0) ────────────────────────────────
-  # A [[services.tcp_checks]] connect is served by the KERNEL on the listening
-  # socket. The event loop and any thread pool cannot starve it, so a slow or
-  # blocked application CANNOT fail this check. That converts "a slow moment
-  # becomes a total outage" into "a slow moment is a slow response".
+  # A [[services.tcp_checks]] connect handshake is served by the KERNEL on the
+  # listening socket, so the event loop and any thread pool cannot starve it.
+  # It is NOT "cannot fail": a connect still has to be ACCEPTED, and an app that
+  # never returns to accept() long enough to saturate the listening socket's
+  # accept backlog will eventually have connections dropped/refused and fail
+  # the check. TCP sheds application-level latency, DB stalls, and executor
+  # saturation — not every failure mode. That converts "a slow moment becomes a
+  # total outage" into "a slow moment is a slow response".
   #
   # The previous [[services.http_checks]] rode internal_port 8000 and hit
   # path = "/health". A failing *service* check does NOT restart or stop the
@@ -74,8 +82,9 @@ primary_region = "iad"
   # — it only makes the proxy STOP ROUTING to it. On 2026-09-10 (#2850) the sole
   # machine's HTTP check flapped for 45 min and then failed; the machine was
   # de-registered and the site was unreachable for ~35 min while the process was
-  # alive and answering on loopback. TCP removes that failure mode: no
-  # application-level latency can de-register the machine.
+  # alive and answering on loopback. TCP removes that failure mode:
+  # application-level latency alone can no longer de-register the machine (the
+  # accept-backlog saturation above is the remaining, far narrower path).
   #
   # NOTE: [[services.*_checks]] has NO `port` key — a service check always rides
   # the service's internal_port (8000 here). It cannot be pointed at 9090. The
@@ -87,9 +96,12 @@ primary_region = "iad"
   # timeout=5s against a 15s interval (was 15s/15s — a 1:1 ratio with zero
   # headroom, so a hung probe consumed its whole period). A kernel accept is
   # effectively instant (Fly's tcp_checks default timeout is 2s); 5s is
-  # generous headroom, not a latency budget. grace_period stays 180s: boot is
-  # ~85s (torch + model load, #545) and the listening socket must exist before
-  # the check starts. See docs/infra-runbook.md §6.4.
+  # generous headroom, not a latency budget. grace_period = 180s is a
+  # deliberately generous carry-over from the HTTP era, NOT a requirement of the
+  # TCP check: the app binds 0.0.0.0:8000 IMMEDIATELY on start (entrypoint.sh;
+  # hosted_api._lifespan spawns the ~85s torch/model pre-warm as a daemon=True
+  # thread that never blocks bind), so the listener exists within seconds and the
+  # model load does not gate a TCP connect. See docs/infra-runbook.md §6.4.
   [[services.tcp_checks]]
     interval = "15s"
     timeout = "5s"
@@ -101,8 +113,10 @@ primary_region = "iad"
 # (fix/2850-health-liveness-decouple) is deployed and the 9090 listener is
 # verified bound on 0.0.0.0 inside the machine:
 #
-#     fly ssh console -a tortoise-y4mjjq -C "ss -ltn | grep ':9090'"
-#     # expect 0.0.0.0:9090, then a token-less 200 from /healthz
+#     fly ssh console -a tortoise-y4mjjq -C "grep ':2382' /proc/net/tcp"
+#     # expect a line whose LOCAL address is 00000000:2382 (= 0.0.0.0:9090).
+#     # 0100007F:2382 would mean loopback-only, and a Fly check would never pass.
+#     # Then expect a token-less 200 from /healthz.
 #
 # Why it is split out: flyctl's deploy health wait counts top-level checks
 # (WaitForHealthchecksToPass counts len(cfg.Checks) plus service checks and

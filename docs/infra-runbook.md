@@ -278,7 +278,8 @@ wrangler pages deploy dist --project-name=tortoise-dashboard
 check was changed from HTTP to TCP, and the machine lifecycle policy was made
 explicit (§6.2, §6.4). A separate non-routing `[checks.loop_liveness]` entry was
 **designed but is deferred to a follow-up PR** (§6.0, §6.4): it is deploy-gating
-and depends on the 9090 listener shipped by #3062. Genuine 2-machine redundancy
+and depends on the 9090 listener added by #3062 (not yet deployed). Genuine
+2-machine redundancy
 is still **not** achievable as a config-only change — §6.3 says exactly what
 blocks it and what would have to change. The redundancy work remains an operator
 decision; it was not attempted here.
@@ -316,8 +317,13 @@ removes the only source of that hazard from this PR.
   precondition — verify **before** merging the follow-up:
 
   ```bash
-  # Expect 0.0.0.0:9090 (NOT 127.0.0.1:9090):
-  fly ssh console -a tortoise-y4mjjq -C "ss -ltn | grep ':9090'"
+  # Expect a line whose LOCAL address is 00000000:2382 (= 0.0.0.0:9090). The
+  # check asserts BOTH facts that matter: the port is listening, AND it is bound
+  # on the wildcard address rather than loopback-only (0100007F:2382 would mean
+  # a Fly check can never reach it, §6.4). `/proc/net/tcp` and `grep` are both
+  # present in the image; `ss`/iproute2 is NOT (Dockerfile.hosted installs only
+  # curl + build-essential), so an `ss` probe prints "ss: not found":
+  fly ssh console -a tortoise-y4mjjq -C "grep ':2382' /proc/net/tcp"
   # Expect 200 from a token-less request (contract: 200 progressing / 503 stalled):
   fly ssh console -a tortoise-y4mjjq -C "python3 -c \"import urllib.request as u;print(u.urlopen('http://127.0.0.1:9090/healthz',timeout=5).status)\""
   ```
@@ -355,7 +361,7 @@ The flap only became an outage because of three independent defects:
 | # | Defect | Status |
 |---|---|---|
 | 1 | `path = "/health"` was coupled to a downstream — process liveness inherited every DB/probe stall | **mitigated in the app** — `hosted_api.health` (`@app.get("/health")`) returns 200 unconditionally with `status` = `ok`/`degraded`; DB truth lives in `/health/ready` (`hosted_api.health_ready`) |
-| 2 | Routing was decided by an **HTTP** service check, so any application-level latency (probe latency, event-loop queueing) could de-register the only machine | **fixed in config** — `[[services.tcp_checks]]` is kernel-served, so it is not starved by event-loop/thread-pool scheduling and a slow/starved app no longer de-registers the machine (§6.4); the application-level probe is now a non-routing check |
+| 2 | Routing was decided by an **HTTP** service check, so any application-level latency (probe latency, event-loop queueing) could de-register the only machine | **fixed in config** — `[[services.tcp_checks]]` is kernel-served, so it is not starved by event-loop/thread-pool scheduling and a slow/starved app no longer de-registers the machine (§6.4); the application-level probe is **deferred** to a follow-up non-routing check (§6.0/§6.4), so nothing probes the application today |
 | 3 | One machine + an implicit, undeclared lifecycle policy | policy now explicit (§6.2); machine redundancy **blocked** (§6.3) |
 
 ### 6.2 Machine lifecycle policy — now declared in `fly.toml`
@@ -368,7 +374,7 @@ semantics in the `[[services]]` section of the [config reference](https://fly.io
 | Key | Default if absent | Set now | Deliberate choice |
 |---|---|---|---|
 | `auto_stop_machines` | `"off"` | `"off"` | **Never stop.** A stopped sole machine means zero healthy instances (the #2850 signature) and the next request waits out an ~85 s cold boot. This restates the effective default — no behavior change, no cost change. |
-| `auto_start_machines` | `true` | `true` | Fly's explicit "run continuously" recipe is `off` + `false`. We deliberately keep `true`: it turns autostart back into a self-heal path, so a machine that is genuinely **stopped** (operator stop, host failure, crash-loop give-up) is started again by the next request. It does **not** apply to a de-registered machine: de-registration removes the machine from the router only — the machine keeps running, is never stopped or restarted, and is re-added to routing when its check passes again. Fly's mismatch warning targets the reverse pairing (stop + never-start), which strands an app with stopped machines. |
+| `auto_start_machines` | `true` | `true` | Fly's explicit "run continuously" recipe is `off` + `false`. We deliberately keep `true`: it turns autostart back into a self-heal path, so a machine that is genuinely **stopped** (operator stop, host failure, crash-loop give-up) is started again by the next request. It does **not** apply to a de-registered machine: de-registration removes the machine from the router only — the machine keeps running, is never stopped or restarted, and is re-added to routing when its check passes again. Fly recommends both-on or both-off (to avoid machines that never start *or* never stop). We deliberately take the never-stop side, which cannot strand a stopped machine. |
 | `min_machines_running` | `0` | `1` | Availability floor: ≥1 machine warm in the primary region. Fly documents this as **inert unless `auto_stop_machines` is `"stop"`/`"suspend"`**, so today it is declarative intent; it becomes load-bearing the moment autostop is enabled or a second machine exists. |
 
 **Why `auto_stop_machines` matters here specifically:** a failing service check
@@ -526,10 +532,14 @@ section so the follow-up can restore it.
   zero headroom, so a hung probe consumed its whole period). A kernel accept is
   effectively instant (Fly's `tcp_checks` default timeout is 2 s); 5 s is
   generous headroom, not a latency budget.
-- `grace_period = "180s"` is retained (boot is ~85 s — torch + model load,
-  #545 — and the listening socket must exist first). Whether Fly honors the full
-  180 s is unresolved; see §6.4.1. `[deploy] wait_timeout = "5m"` (CI passes
-  420 s) still exceeds boot + `grace_period` under either reading of §6.4.1.
+- `grace_period = "180s"` is a deliberately generous carry-over, not a
+  requirement of the TCP check. The app binds `0.0.0.0:8000` **immediately** on
+  start: `entrypoint.sh` states it, and `hosted_api._lifespan` spawns the ~85 s
+  torch/model pre-warm as a `daemon=True` thread that never blocks bind — so the
+  listening socket exists within seconds and the model load does not gate a TCP
+  connect. Whether Fly honors the full 180 s is unresolved; see §6.4.1.
+  `[deploy] wait_timeout = "5m"` (CI passes 420 s) still exceeds boot +
+  `grace_period` under either reading of §6.4.1.
 
 **Deferred — non-routing check, top-level `[checks.loop_liveness]` (NOT in this
 PR).** Shape when restored: `type = "http"`, `port = 9090`, `path = "/healthz"`,
@@ -569,20 +579,27 @@ undocumented server-side clamp cannot be ruled out. The honest position is
 above must not be read as assuming either outcome:
 
 - **If no clamp exists** (what the documented field list implies): the effective
-  `grace_period` is the configured `"180s"`, which clears the ~85 s boot plus
-  the ~2 min FalkorDB DNS tail (#1381, surfaced by the deploy workflow's DB
-  health gate).
-- **If the clamp exists**: the effective grace period is **60 s**, which is
-  *shorter than the ~85 s boot*. The machine would be marked unhealthy during
-  every cold start, and the right response would be to write
-  `grace_period = "60s"` (or re-tune the boot path) — not to raise it.
+  `grace_period` is the configured `"180s"` — generous headroom the TCP check
+  does not need. The listener exists within seconds of start (the ~85 s
+  torch/model load does not gate a connect), and the ~2 min FalkorDB DNS tail
+  (#1381) is surfaced by the deploy workflow's DB health gate, not by this check.
+- **If the clamp exists**: the effective grace period is **60 s**, still far
+  longer than the seconds it takes the listener to bind, so the clamp is no
+  longer a cold-start hazard for the TCP check. The historical worry — that a
+  60 s clamp would mark every cold start unhealthy — applied to the old HTTP
+  check, whose probe depended on the boot-time model load; it does not carry
+  over to a kernel-connect check.
 
-**How to test it** (staging app only, never production): set `grace_period`
-above 60 s, boot a machine, and record the delay from machine start to the first
-failed check in `fly checks list` / `fly logs`. A first failure at ≈60 s ⇒ the
-clamp is real; ≈`grace_period` s ⇒ no clamp. `fly config show` only echoes the
-local config and cannot answer this. Nobody has run this test yet — it is listed
-in §6.9.
+**How to test it** (staging app only, never production). The check must be made
+to **fail deterministically** — with the normal image the socket binds within
+seconds, so the check passes and the clamp question is never exercised. Point
+the staging service's check at a deliberately **closed port** (or hold the app
+down), set `grace_period` above 60 s, start the machine, and record the delay
+from machine start to the first failed check in `fly checks list` / `fly logs`.
+A first failure at ≈60 s ⇒ the clamp is real; ≈`grace_period` s (or no failure
+before grace expires) ⇒ no clamp. `fly config show` only echoes the local
+config and cannot answer this. Nobody has run this test yet — it is listed in
+§6.9.
 
 ### 6.5 Cost reference (what "one machine warm" actually costs)
 
@@ -594,7 +611,7 @@ in §6.9.
 > `iad`, running continuously — and one attached volume.
 > These figures are kept so the *shape* of the cost argument (one machine ≈ half
 > a two-machine fleet; RAM above the 512 MB preset dominates) stays reviewable.
-> Fly's live prices differ by ~8 % on these line items (re-checked 2026-09-12:
+> Fly's live prices differ by ~4 % on these line items (re-checked 2026-09-12:
 > the 512 MB preset is ≈`$0.00000156/s · $0.0056/hr · $4.04/mo`, and the 4096 MB
 > machine ≈`$0.00000857/s · $0.0309/hr · $22.22/mo`), so every monthly total here
 > — including the two-machine figure and the ~$21.40 references in §6.2/§6.3 —
@@ -683,7 +700,7 @@ fly machine restart <id> -a tortoise-y4mjjq
 These are **unverified** — deliberately documented rather than assumed. They are
 the tests worth running in a throwaway/staging app before trusting this topology
 or re-introducing service-level checks. Two items from the original list have
-since been **determined** (deploy gating; the bind/auth design shipped by #3062)
+since been **determined** (deploy gating; the bind/auth design from #3062)
 and are recorded at the end of this section instead of being left open.
 
 1. **Does a failing check on a second `[[services]]` block de-register the
@@ -711,15 +728,19 @@ and are recorded at the end of this section instead of being left open.
    `monitoring.serve_health(port=9090, bind="127.0.0.1")` is **not** on this
    path: it is started only by the standalone CLI (`tortoise health-server`,
    `tortoise/__main__.py`), which the hosted app never invokes. The remaining
-   item is verification of the deployed image:
-   `fly ssh console -a tortoise-y4mjjq -C "ss -ltn | grep ':9090'"` (expect
-   `0.0.0.0:9090`), then a token-less request from inside the machine (expect
-   200).
+   item is verification of the deployed image: the 9090 port accepts a
+   connection from inside the machine —
+   `fly ssh console -a tortoise-y4mjjq -C "grep ':2382' /proc/net/tcp"`
+   (expect a line whose local address is `00000000:2382` — i.e. `0.0.0.0:9090`,
+   not the loopback-only `0100007F:2382`; `ss` is not in the image, `grep` and
+   `/proc/net/tcp` are) — then a
+   token-less request from inside the machine (expect 200).
 3. **The `grace_period` clamp** — §6.4.1. The genuinely `flyd`-internal residual
    is **what status a check reports *during* grace_period**: if an undocumented
-   server-side clamp exists, a machine is marked unhealthy mid-boot. Run the
-   §6.4.1 staging test — first failure at ≈60 s ⇒ a clamp exists; at
-   ≈`grace_period` ⇒ none.
+   server-side clamp exists, the effective window is shorter than configured.
+   (A mid-boot failure only matters for a check that depends on the boot-time
+   model load — a kernel TCP connect does not.) Run the §6.4.1 staging test —
+   first failure at ≈60 s ⇒ a clamp exists; at ≈`grace_period` ⇒ none.
 
 **Determined — no longer open questions:**
 
@@ -777,6 +798,6 @@ Can a fresh Fly.io account + Cloudflare account follow §1 from zero and arrive 
 - [ ] `fly.toml` declares `auto_stop_machines` / `auto_start_machines` / `min_machines_running` explicitly (no implicit platform defaults) and `fly config show` matches (§6.2)
 - [ ] Every machine has its own volume (`fly volumes list` count == `fly machines list` count) — a machine sharing `tortoise_api_data` is impossible and must never be attempted (§6.3)
 - [ ] Routing check is `[[services.tcp_checks]]` (kernel-served: **not starved by event-loop/thread-pool scheduling** — it can still fail if the accept backlog saturates) and no `[[services.http_checks]]` entry remains (§6.4)
-- [ ] **Deferred check absent from this PR:** `fly.toml` has no top-level `[checks]`; the follow-up that restores `[checks.loop_liveness]` merges only after #3062 is deployed and `ss -ltn | grep ':9090'` shows `0.0.0.0:9090` (§6.0, §6.4)
+- [ ] **Deferred check absent from this PR:** `fly.toml` has no top-level `[checks]`; the follow-up that restores `[checks.loop_liveness]` merges only after #3062 is deployed and the 9090 port is listening **on `0.0.0.0`** — `fly ssh console -a tortoise-y4mjjq -C "grep ':2382' /proc/net/tcp"` shows a line whose local address is `00000000:2382` (not the loopback-only `0100007F:2382`) (§6.0, §6.4)
 - [ ] **(Follow-up only)** Top-level `[checks.loop_liveness]` targets port 9090 / path `/healthz`; the listener (`monitoring.start_health_listener`, #3062) binds `0.0.0.0` and `/healthz` is unauthenticated 200/503 (§6.4, §6.9)
 - [ ] A deliberately failing second `[[services]]` check does **not** de-register the primary service (§6.9 — open until observed)
