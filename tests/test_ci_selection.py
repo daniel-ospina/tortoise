@@ -1550,26 +1550,17 @@ def test_surface_audit_is_deterministic_and_non_mutating(tmp_path):
 
 
 def test_surface_audit_coverage_gap_names_only_gap_surface_members(tmp_path):
-    # P1-1: only files REGISTERED under the gap surface fail to run when the
+    # P1-1: only files this change does not select fail to run when the
     # unmapped source changes. A core-registered pinner still runs (via core),
     # so naming it under "never run" overstated the blast radius.
+    # P3: assert on the DERIVED data (gap["files"]/["victims"]), not the
+    # rendered sentence, so a legitimate wording change cannot break this.
     repo = _audit_repo(tmp_path, {
         "tests/test_api_registered.py": "from tortoise.api import EventAPI\n",
         "tests/test_core_registered.py": "from tortoise.api import EventAPI\n"})
     manifest = _audit_manifest(api=["test_api_registered.py"],
                                core=["test_core_registered.py"])
     report = _audit(manifest, repo)
-    # behavior first: the rendered "never run" line must name ONLY the
-    # api-registered pinner
-    out = render_surface_audit(report)
-    victim_line = out.split("never run:")[1].split("\n")[0]
-    assert "test_api_registered.py" in victim_line
-    assert "test_core_registered.py" not in victim_line, (
-        "a core-registered pinner runs via core and must not be in the "
-        "\"never run\" list")
-    assert ("(pinned by 2 file(s) in total, of which 1 are registered under "
-            "`api`; the rest run via core;") in out
-    # ... and the structure carries per-file registration
     gap = next(g for g in report["coverage_gaps"]
                if g["path"] == "tortoise/api.py")
     # both files are STRONG pinners (they import it); registration differs
@@ -1578,6 +1569,111 @@ def test_surface_audit_coverage_gap_names_only_gap_surface_members(tmp_path):
     assert gap["files"]["test_api_registered.py"] == ["api"]
     assert gap["files"]["test_core_registered.py"] == ["core"]
     assert gap["registered"] == ["api", "core"]
+    # `select(['tortoise/api.py'])` selects `core`, so only the api-registered
+    # pinner is a victim; the core-registered one runs.
+    assert gap["selected_surfaces"] == ["core"]
+    assert gap["victims"] == ["test_api_registered.py"]
+    assert gap["runs"] == ["test_core_registered.py"]
+    # ... and the rendered line agrees with the data
+    never_line = render_surface_audit(report).split(
+        "never run on a change to tortoise/api.py:")[1].split("\n")[0]
+    assert "test_api_registered.py" in never_line
+    assert "test_core_registered.py" not in never_line, (
+        "a core-registered pinner runs via core and must not be in the "
+        "\"never run\" list")
+
+
+def test_surface_audit_coverage_gap_counts_unselected_surface_as_victim(tmp_path):
+    # P2: `select(['tortoise/api.py'], 'pull_request', manifest)` yields
+    # `surfaces=['core']` — it does NOT select `ep`, so the ep-registered
+    # pinner never runs. The previous renderer asserted the non-gap pinners
+    # "run via core/ep", which was false for the ep one.
+    repo = _audit_repo(tmp_path, {
+        "tests/test_api_registered.py": "from tortoise.api import EventAPI\n",
+        "tests/test_core_registered.py": "from tortoise.api import EventAPI\n",
+        "tests/test_ep_registered.py": "from tortoise.api import EventAPI\n"})
+    manifest = _audit_manifest(api=["test_api_registered.py"],
+                               core=["test_core_registered.py"],
+                               ep=["test_ep_registered.py"])
+    report = _audit(manifest, repo)
+    gap = next(g for g in report["coverage_gaps"]
+               if g["path"] == "tortoise/api.py")
+    assert set(gap["files"]) == {"test_api_registered.py",
+                                 "test_core_registered.py",
+                                 "test_ep_registered.py"}
+    assert gap["files"]["test_ep_registered.py"] == ["ep"]
+    assert gap["selected_surfaces"] == ["core"]
+    assert gap["victims"] == ["test_api_registered.py",
+                              "test_ep_registered.py"]
+    assert gap["runs"] == ["test_core_registered.py"]
+    never_line = render_surface_audit(report).split(
+        "never run on a change to tortoise/api.py:")[1].split("\n")[0]
+    assert "test_ep_registered.py" in never_line, (
+        "an ep-registered pinner is not selected by a change that yields core")
+    assert "test_core_registered.py" not in never_line
+
+
+def test_surface_audit_ignores_function_local_helper_import(tmp_path):
+    # P1 (this fix): a helper module is IMPORTED, not called, so an import
+    # nested in one of its function bodies never executes and must not become
+    # a strong addition. The previous BFS followed `ast.walk`, fabricating 25
+    # battery additions from one call-time import in
+    # tools/longmem_eval/report.py::build_methodology.
+    repo = _audit_repo(tmp_path, {
+        "battery/parity/runner.py": "",
+        "tests/_deferred.py":
+            "def build():\n"
+            "    from battery.parity.runner import run\n"
+            "    return run\n",
+        "tests/test_via_deferred.py": "from tests._deferred import build\n"})
+    report = _audit(_audit_manifest(core=["test_via_deferred.py"]), repo)
+    assert report["surfaces"]["battery"]["addition"] == [], (
+        "a function-local import in a helper never runs on import")
+    assert "test_via_deferred.py" not in {
+        e["file"] for s in report["surfaces"].values()
+        for e in s["addition"] if e["strong"]}
+
+
+def test_surface_audit_honors_module_level_helper_import(tmp_path):
+    # complement of the test above: a MODULE-LEVEL import in a helper DOES
+    # execute when the helper is imported, so it stays a strong pin.
+    repo = _audit_repo(tmp_path, {
+        "tests/_eager.py": "from battery.cli import main\n",
+        "tests/test_via_eager.py": "from tests._eager import main\n"})
+    report = _audit(_audit_manifest(core=["test_via_eager.py"]), repo)
+    additions = {e["file"]: e for e in report["surfaces"]["battery"]["addition"]}
+    assert additions["test_via_eager.py"]["evidence"] == [
+        "battery/cli.py (via tests/_eager.py)"]
+    assert additions["test_via_eager.py"]["strong"] is True
+
+
+def test_surface_audit_honors_root_function_local_import(tmp_path):
+    # the ROOT test file's function bodies DO run when the test runs, so its
+    # own call-time imports stay strong pins — only HELPERS are pruned.
+    repo = _audit_repo(tmp_path, {
+        "tests/test_deferred_own.py":
+            "def test_x():\n"
+            "    from battery.cli import main\n"
+            "    assert main\n"})
+    report = _audit(_audit_manifest(core=["test_deferred_own.py"]), repo)
+    additions = {e["file"]: e
+                 for e in report["surfaces"]["battery"]["addition"]}
+    assert additions["test_deferred_own.py"]["evidence"] == ["battery/cli.py"]
+    assert additions["test_deferred_own.py"]["strong"] is True
+
+
+def test_surface_audit_normalises_scalar_surface_values(tmp_path):
+    # P3: a hand-edited scalar (`api: 3`, `api: {...}`, `api: "x.py"`) must
+    # not raise or silently become a character list; it normalises to empty.
+    repo = _audit_repo(tmp_path, {
+        "tests/test_scalar.py": "from tortoise.api import EventAPI\n"})
+    for bad in (3, {"a": 1}, "test_scalar.py"):
+        manifest = _audit_manifest(core=["test_scalar.py"])
+        manifest["surfaces"]["api"] = bad
+        report = _audit(manifest, repo)  # must not raise
+        assert report["surfaces"]["api"]["members"] == []
+        assert report["surfaces"]["api"]["removal"] == []
+        render_surface_audit(report)  # must not raise
 
 
 def test_surface_audit_string_only_pin_is_weak_and_labelled(tmp_path):

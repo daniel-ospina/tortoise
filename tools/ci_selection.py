@@ -871,8 +871,36 @@ def _audit_relative_base(node: ast.ImportFrom, pkg: list[str]) -> str:
     return ".".join(base)
 
 
+def _audit_import_nodes(tree: ast.AST, module_level_only: bool):
+    """Import nodes to honor, optionally skipping deferred (call-time) ones.
+
+    #2938 review P1: `ast.walk` visits every nested import, so an import
+    inside a function body reads exactly like a module-level one. A helper
+    module that is only IMPORTED (never called) never executes its
+    function-local imports, so those must not become strong pins. Descend
+    through statements that execute at import time (if/try/with/class
+    bodies); stop at function/lambda scopes.
+    """
+    if not module_level_only:
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.Import, ast.ImportFrom)):
+                yield node
+        return
+    stack = [tree]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef,
+                             ast.Lambda)):
+            continue
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            yield node
+            continue
+        stack.extend(ast.iter_child_nodes(node))
+
+
 def _audit_import_paths(tree: ast.AST, module_name: str, repo: Path,
-                        tests_dir: Path) -> list[str]:
+                        tests_dir: Path,
+                        module_level_only: bool = False) -> list[str]:
     """Repo-relative files the file's import statements resolve to.
 
     `from A import n` descends into `A.n` as well as `A`, so
@@ -880,10 +908,14 @@ def _audit_import_paths(tree: ast.AST, module_name: str, repo: Path,
     and `from tortoise.api import EventAPI` pins tortoise/api.py (api is a
     module, not a package, so the name descent finds nothing and the base
     does).
+
+    ``module_level_only`` skips imports nested in function/lambda bodies
+    (see :func:`_audit_import_nodes`): true for a transitively followed
+    helper, false for the root test file (whose function bodies DO run).
     """
     pkg = module_name.split(".")[:-1]
     out: set[str] = set()
-    for node in ast.walk(tree):
+    for node in _audit_import_nodes(tree, module_level_only):
         if isinstance(node, ast.Import):
             for alias in node.names:
                 if alias.name in _AUDIT_NAMESPACE_ROOTS:
@@ -928,7 +960,8 @@ def _audit_string_paths(tree: ast.AST) -> list[str]:
 
 def _audit_own_refs(abs_path: Path, module_name: str, repo: Path,
                     tests_dir: Path,
-                    cache: dict[str, tuple] | None = None):
+                    cache: dict[tuple[str, bool], tuple] | None = None,
+                    module_level_only: bool = False):
     """Direct reference scan of one file.
 
     Returns ``(surface_pins, uncovered, shared, helpers)`` where
@@ -937,9 +970,11 @@ def _audit_own_refs(abs_path: Path, module_name: str, repo: Path,
     the referenced SHARED_MODULES set, and helpers is the set of repo-relative
     modules imported and worth following (rule (d): tests/ helpers plus any
     module in ``_AUDIT_HELPER_TREES``). ``cache`` memoizes the scan (a helper
-    reached by many test roots is parsed once).
+    reached by many test roots is parsed once); the cache key carries
+    ``module_level_only`` because the same file can be scanned both as a
+    test root (all imports) and as a helper (module-level only).
     """
-    key = abs_path.as_posix()
+    key = (abs_path.as_posix(), module_level_only)
     if cache is not None and key in cache:
         return cache[key]
     surface_pins: dict[str, set[str]] = {}
@@ -964,7 +999,8 @@ def _audit_own_refs(abs_path: Path, module_name: str, repo: Path,
                 path.startswith(p) for p in _AUDIT_SOURCE_TREES):
             uncovered.setdefault(path, set()).add(evidence)
 
-    for path in _audit_import_paths(tree, module_name, repo, tests_dir):
+    for path in _audit_import_paths(tree, module_name, repo, tests_dir,
+                                    module_level_only):
         if path.startswith("tests/") and path.endswith(".py"):
             # test-internal module: a helper to follow, not a source pin.
             if _audit_is_shared(path):
@@ -992,12 +1028,15 @@ def _audit_own_refs(abs_path: Path, module_name: str, repo: Path,
 
 
 def _audit_file_refs(abs_path: Path, rel: str, repo: Path, tests_dir: Path,
-                     cache: dict[str, tuple] | None = None):
+                     cache: dict[tuple[str, bool], tuple] | None = None):
     """Pins for one test file, following its imported helper modules.
 
     Cycle-safe BFS over repo-relative paths: each helper contributes its own
     pins tagged ``(via tests/helper.py)`` (or ``(via tools/…)`` for a
-    repo-root helper); SHARED_MODULES helpers are never followed.
+    repo-root helper); SHARED_MODULES helpers are never followed. Helpers are
+    scanned module-level only (#2938 review P1): a helper is imported, not
+    called, so its function-local imports never execute — and a helper's own
+    deferred import of another helper is not followed either.
     """
     surface_pins: dict[str, set[str]] = {}
     uncovered: dict[str, set[str]] = {}
@@ -1014,8 +1053,9 @@ def _audit_file_refs(abs_path: Path, rel: str, repo: Path, tests_dir: Path,
         if not cur_abs.is_file():
             continue
         module_name = cur[:-3].replace("/", ".")
-        sp, unc, sh, helpers = _audit_own_refs(cur_abs, module_name, repo,
-                                               tests_dir, cache)
+        sp, unc, sh, helpers = _audit_own_refs(
+            cur_abs, module_name, repo, tests_dir, cache,
+            module_level_only=(cur != root))
         shared |= sh
         tag = "" if cur == root else f" (via {cur})"
         for s, evs in sp.items():
@@ -1059,20 +1099,70 @@ def _audit_is_string_evidence(evidence: str) -> bool:
     return evidence.startswith('"')
 
 
+def _audit_entries(entries) -> list:
+    """Manifest surface value as a list.
+
+    #2938 review P3: a curated manifest can carry `null` for a surface, and a
+    hard-edited one a scalar. `None` means empty (like integrity()'s
+    `files or ()`); a non-list scalar is malformed and is treated as empty
+    rather than silently iterated (`api: "test_x.py"` used to become a list
+    of characters).
+    """
+    if entries is None:
+        return []
+    if isinstance(entries, (list, tuple)):
+        return list(entries)
+    return []
+
+
+def _audit_gap_selection(rec: dict, manifest: dict) -> tuple[list[str], list[str], list[str]]:
+    """(selected_surfaces, victims, runners) for one coverage-gap record.
+
+    #2938 review P2: the previous renderer asserted the non-gap pinners "run
+    via {others}", but `others` is just the union of non-gap registrations —
+    `select(['tortoise/api.py'], 'pull_request', manifest)` yields `['core']`
+    and does NOT select `ep`, so the single ep-registered pinner does not
+    run. A pinner RUNS when it is in the change's fast-gate `test_files`, in
+    the selected surfaces' slow leg, or in a triggered carve-out job; every
+    other pinner is a victim. Callers pass a manifest whose surface values
+    are already normalised via :func:`_audit_entries`.
+    """
+    selection = select([rec["path"]], "pull_request", manifest)
+    if selection["full"] or selection["test_files"] == "ALL":
+        return sorted(manifest["surfaces"]), [], sorted(rec["files"])
+    runs: set[str] = set(selection["test_files"])
+    runs |= set(selection.get("slow_selected") or [])
+    if selection.get("carve_out_run"):
+        runs |= set(manifest.get("carve_out") or [])
+    runners, victims = [], []
+    for f in sorted(rec["files"]):
+        base = f.rsplit("/", 1)[-1]
+        (runners if (f in runs or base in runs) else victims).append(f)
+    return sorted(selection["surfaces"]), victims, runners
+
+
 def surface_audit(manifest: dict, repo: Path | None = None,
                   tests_dir: Path | None = None) -> dict:
     """#2938: report-only manifest/source mismatch audit.
 
     Never mutates the manifest and never feeds selection: it returns a
     structured report consumed by :func:`render_surface_audit`. ``repo`` /
-    ``tests_dir`` are injectable for synthetic-manifest tests.
+    ``tests_dir`` are injectable for synthetic-manifest tests. Surface values
+    are normalised with :func:`_audit_entries` (``null``/scalars -> empty),
+    so a curated manifest with a malformed value still audits without raising.
     """
     repo = Path(repo) if repo is not None else REPO
     tests_dir = Path(tests_dir) if tests_dir is not None else TESTS_DIR
-    owners: dict[str, list[str]] = manifest["surfaces"]
+    owners: dict[str, list[str]] = {
+        s: _audit_entries(entries)
+        for s, entries in manifest["surfaces"].items()
+    }
+    # select() gets the normalised surfaces (a scalar value would crash its
+    # `files.update(...)`); the original manifest is left untouched.
+    audit_manifest = {**manifest, "surfaces": owners}
     source_mapped = set(SOURCE_PATTERNS)
     gaps = _audit_coverage_gaps(repo)
-    cache: dict[str, tuple] = {}
+    cache: dict[tuple[str, bool], tuple] = {}
 
     disk: list[str] = []
     for f in sorted(tests_dir.rglob("test_*.py")):
@@ -1084,10 +1174,10 @@ def surface_audit(manifest: dict, repo: Path | None = None,
     def registered_in(rel: str) -> list[str]:
         base = rel.rsplit("/", 1)[-1]
         return sorted(s for s, entries in owners.items()
-                      if rel in (entries or ()) or base in (entries or ()))
+                      if rel in entries or base in entries)
 
     by_surface = {
-        s: {"members": list(entries or ()),
+        s: {"members": list(entries),
             "source_mapped": s in source_mapped,
             "removal": [], "addition": []}
         for s, entries in owners.items()
@@ -1148,13 +1238,16 @@ def surface_audit(manifest: dict, repo: Path | None = None,
     uncovered.sort(key=lambda r: (r["surface"] is None, r["path"]))
 
     coverage_gaps = [r for r in uncovered if r["surface"] is not None]
+    for rec in coverage_gaps:
+        sel, victims, runners = _audit_gap_selection(rec, audit_manifest)
+        rec["selected_surfaces"] = sel
+        rec["victims"] = victims
+        rec["runs"] = runners
 
-    # #2938 review P3: a curated manifest can carry `null` for a surface; a
-    # bare `entries.count()` / `list(entries)` would traceback. Treat it as
-    # empty, like integrity()'s `files or ()`.
+    # #2938 review P3: a curated manifest can carry `null` for a surface;
+    # a bare `entries.count()` would traceback. `owners` is normalised above.
     duplicates: dict[str, list[str]] = {}
     for s, entries in owners.items():
-        entries = entries or ()
         dupes = sorted({e for e in entries if entries.count(e) > 1})
         if dupes:
             duplicates[s] = dupes
@@ -1284,35 +1377,30 @@ def render_surface_audit(report: dict) -> str:
         lines.append(f"⚑ SOURCE_PATTERNS coverage gaps ({len(gaps)}) — surface-named "
                      "source that no pattern maps:")
         for rec in gaps:
-            # #2938 review P1-1: only files REGISTERED under the gap surface
-            # actually fail to run when the unmapped source changes. The rest
-            # are core/ep and DO run — naming all of them overstated the
-            # blast radius (18 of 21 were core/ep).
-            victims = sorted(f for f, regs in rec["files"].items()
-                             if rec["surface"] in regs)
+            # #2938 review P2: do NOT assert which files run from the union of
+            # non-gap registrations — `select()` decides. Victims are the
+            # pinners this change does not select (e.g. the ep-registered
+            # pinner of tortoise/api.py, since that change selects `core`).
+            victims = rec["victims"]
+            selected = "/".join(rec["selected_surfaces"]) or "none"
             weak_victims = sorted(
                 f for f, regs in rec["weak_files"].items()
                 if rec["surface"] in regs)
-            others = sorted({s for f, regs in rec["files"].items()
-                             if rec["surface"] not in regs for s in regs})
             total = len(rec["files"]) + len(rec["weak_files"])
-            lines.append(f"  {rec['path']} is not in "
-                         f"SOURCE_PATTERNS[{rec['surface']!r}] — a change to "
-                         "it selects `core`,")
-            if victims:
-                lines.append(f"    so the {len(victims)} "
-                             f"{rec['surface']}-registered test(s) that pin "
-                             f"it never run: {_audit_fmt_paths(victims)}")
-            else:
-                lines.append(f"    so no `{rec['surface']}`-registered test "
-                             "pins it (the strong pins are registered "
-                             f"elsewhere: {'/'.join(others) or 'none'})")
-            rest = f"; the rest run via {'/'.join(others)}" if others else ""
             weak_note = (f" (+{len(weak_victims)} string-only pinnner(s), "
                          "weak)" if weak_victims else "")
-            lines.append(f"    (pinned by {total} file(s) in total, of which "
-                         f"{len(victims)} are registered under "
-                         f"`{rec['surface']}`{weak_note}{rest}; evidence: "
+            lines.append(f"  {rec['path']} is not in "
+                         f"SOURCE_PATTERNS[{rec['surface']!r}] — a change to "
+                         f"it selects `{selected}`,")
+            if victims:
+                lines.append(f"    never run on a change to {rec['path']}: "
+                             f"{_audit_fmt_paths(victims)}")
+            else:
+                lines.append(f"    every pinning file still runs on a change "
+                             f"to {rec['path']} (via `{selected}`)")
+            lines.append(f"    (pinned by {total} file(s) in total; "
+                         f"{len(victims)} never run, {len(rec['runs'])} run via "
+                         f"`{selected}`{weak_note}; evidence: "
                          f"{_audit_fmt_evidence(rec['evidence'])})")
         lines.append("")
 
