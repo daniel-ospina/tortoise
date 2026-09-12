@@ -18429,6 +18429,165 @@ def _store_github_org(team_id: str, encrypted: str, org: str) -> None:
         )
 
 
+# ── Connector CRUD (#2636, epic #2632) ────────────────────────────────────
+# Universal source connectors: GitHub, Slack, Linear, Google Drive, etc.
+# Each connector row stores source_type, scope config, encrypted credentials,
+# and sync state. The pattern is identical across sources — only the
+# extractors differ.
+
+
+class ConnectorCreateRequest(BaseModel):
+    source_type: str
+    config: dict | None = None
+
+
+class ConnectorUpdateRequest(BaseModel):
+    config: dict | None = None
+    sync_status: str | None = None
+    sync_cursor: dict | None = None
+    last_error: str | None = None
+
+
+@app.get("/v1/connectors")
+async def list_connectors(
+    team: dict = Depends(get_current_team_session_ungated),  # noqa: B008
+):
+    """List all connectors for the authenticated team's org."""
+    from tortoise.supabase_control import (
+        connector_by_org as _sb_conn_by_org,
+        get_control_plane,
+        is_supabase_enabled,
+    )
+    team_id = team["team_id"]
+    if is_supabase_enabled():
+        return {"connectors": _sb_conn_by_org(get_control_plane(), team_id)}
+    # Self-host: read from registry graph
+    sdk = _make_sdk(namespace="registry")
+    rows = sdk._get_registry().query(
+        "MATCH (c:Connector {org_id: $tid}) RETURN c ORDER BY c.created_at",
+        params={"tid": team_id},
+    ).result_set
+    return {"connectors": [dict(row[0]) for row in rows] if rows else []}
+
+
+@app.post("/v1/connectors")
+async def create_connector(
+    body: ConnectorCreateRequest,
+    team: dict = Depends(get_current_team_session_ungated),  # noqa: B008
+):
+    """Create a new connector (no credential yet — OAuth step follows)."""
+    from tortoise.supabase_control import (
+        connector_create as _sb_conn_create,
+        get_control_plane,
+        is_supabase_enabled,
+    )
+    team_id = team["team_id"]
+    if is_supabase_enabled():
+        row = _sb_conn_create(get_control_plane(), org_id=team_id,
+                              source_type=body.source_type, config=body.config)
+        if not row:
+            raise HTTPException(status_code=500, detail="Failed to create connector")
+        return {"connector": row}
+    raise HTTPException(status_code=501, detail="Self-host connector creation not yet implemented")
+
+
+@app.get("/v1/connectors/{connector_id}")
+async def get_connector(
+    connector_id: str,
+    team: dict = Depends(get_current_team_session_ungated),  # noqa: B008
+):
+    """Get a single connector by id."""
+    from tortoise.supabase_control import (
+        connector_by_id as _sb_conn_by_id,
+        get_control_plane,
+        is_supabase_enabled,
+    )
+    if is_supabase_enabled():
+        row = _sb_conn_by_id(get_control_plane(), connector_id)
+        if not row:
+            raise HTTPException(status_code=404, detail="Connector not found")
+        return {"connector": row}
+    raise HTTPException(status_code=501, detail="Self-host not yet implemented")
+
+
+@app.patch("/v1/connectors/{connector_id}")
+async def update_connector(
+    connector_id: str,
+    body: ConnectorUpdateRequest,
+    team: dict = Depends(get_current_team_session_ungated),  # noqa: B008
+):
+    """Update connector config/sync state."""
+    from tortoise.supabase_control import (
+        connector_update as _sb_conn_update,
+        get_control_plane,
+        is_supabase_enabled,
+    )
+    if is_supabase_enabled():
+        updates = body.model_dump(exclude_none=True)
+        _sb_conn_update(get_control_plane(), connector_id, **updates)
+        return {"status": "updated"}
+    raise HTTPException(status_code=501, detail="Self-host not yet implemented")
+
+
+@app.delete("/v1/connectors/{connector_id}")
+async def delete_connector(
+    connector_id: str,
+    team: dict = Depends(get_current_team_session_ungated),  # noqa: B008
+):
+    """Delete a connector (disconnect source, clean up)."""
+    from tortoise.supabase_control import (
+        connector_delete as _sb_conn_delete,
+        get_control_plane,
+        is_supabase_enabled,
+    )
+    if is_supabase_enabled():
+        _sb_conn_delete(get_control_plane(), connector_id)
+        return {"status": "deleted"}
+    raise HTTPException(status_code=501, detail="Self-host not yet implemented")
+
+
+@app.post("/v1/connectors/{source_type}/auth")
+async def connector_auth(
+    source_type: str,
+    team: dict = Depends(get_current_team_session_ungated),  # noqa: B008
+):
+    """Initiate OAuth for a connector source type. Returns the authorize URL.
+
+    Dispatches to the correct OAuth flow based on source_type.
+    Creates the connector row if it doesn't exist yet.
+    """
+    team_id = team["team_id"]
+    if source_type == "github":
+        # Reuse the existing GitHub OAuth flow
+        import secrets
+        from urllib.parse import urlencode
+        import os as _os
+        client_id = _os.environ.get("GITHUB_CLIENT_ID")
+        if not client_id:
+            raise HTTPException(status_code=503, detail="GitHub OAuth not configured")
+        state = secrets.token_urlsafe(24)
+        # Store CSRF state with connector context
+        from tortoise.hosted_api import _GITHUB_STATES
+        _GITHUB_STATES[state] = {
+            "team_id": team_id,
+            "connector_create": True,  # signal to create connector on callback
+            "created_at": __import__("time").time(),
+        }
+        callback = _os.environ.get(
+            "GITHUB_CALLBACK_URL",
+            "https://api.premiselabs.co/v1/onboarding/github/callback",
+        )
+        params = {
+            "client_id": client_id,
+            "redirect_uri": callback,
+            "scope": "repo",
+            "state": state,
+        }
+        auth_url = f"{_GITHUB_AUTHORIZE_URL}?{urlencode(params)}"
+        return {"auth_url": auth_url, "state": state}
+    raise HTTPException(status_code=400, detail=f"Unsupported source type: {source_type}")
+
+
 def _cleanup_legacy_docs_corpus(team_id: str,
                                 walk_items: list[tuple[str, str | None]]) -> None:
     """Review (deep bug scan): remove a pre-#1845 UNQUALIFIED docs corpus.
