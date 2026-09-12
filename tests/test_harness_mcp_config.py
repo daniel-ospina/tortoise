@@ -334,7 +334,9 @@ class TestDocsPageAndSkillConfig:
         )
         env = self._json_block(stdio)["env"]
         assert "TORTOISE_API_KEY" not in env, "stdio config must not set TORTOISE_API_KEY (#702)"
-        assert "TORTOISE_DB_URI" in env, "stdio config must set TORTOISE_DB_URI"
+        # canonical compose sidecar URI (password + graph) — pinned so the
+        # docs cannot silently drift back to the passwordless form.
+        assert env.get("TORTOISE_DB_URI") == "docker://:falkordb@localhost:6379/tortoise", env
 
     # ── onboarding skill (canonical) ───────────────────────────────────
 
