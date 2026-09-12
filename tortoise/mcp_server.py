@@ -3090,6 +3090,7 @@ def tortoise_session_capture(conversation: list[dict],
         _CAPTURE_SESSION_IN_FLIGHT_DETAIL,
         SessionRequest,
         _capture_session_impl,
+        _capture_session_key,
         _record_capture_last_error,
         _reserve_capture_slot,
     )
@@ -3128,8 +3129,8 @@ def tortoise_session_capture(conversation: list[dict],
         # behind a stalled pool, the exact failure mode the cap closes
         # (reviewer measurement: cap=2, 4 concurrent extractions). #3129:
         # the session_id goes with it, so a duplicate in-flight capture of the
-        # same session is refused on this surface too.
-        slot = _reserve_capture_slot(session_id)
+        # same session is refused on this surface too (scoped to this tenant).
+        slot = _reserve_capture_slot(_capture_session_key(team, session_id))
         try:
             return asyncio.run(_capture_session_impl(body, None, team,
                                                      slot=slot))
