@@ -66,7 +66,7 @@ def inputs(tmp_path):
     wall = _write(tmp_path, "step_wall.txt", "1200")
     divlog = _write(tmp_path, "divergence.md",
                     "# log\nD6: tests/test_divergence_conformance.py::"
-                    "test_d6_freshness_composite_mode_split\n")
+                    "test_d6_freshness_index_excludes_boolean_property\n")
     return {"junitxml": junit, "manifest": manifest, "step_wall": wall,
             "divergence_log": divlog}
 
@@ -103,7 +103,7 @@ def test_d_entry_failure_non_reset_logged(inputs):
         inputs["junitxml"].rsplit("/", 1)[0], "junit2.xml",
         _junit_xml(failures=[
             ("tests/test_divergence_conformance.py::"
-             "test_d6_freshness_composite_mode_split[server]",
+             "test_d6_freshness_index_excludes_boolean_property[server]",
              "assert 1 == 0")]))
     rec = classify(junit, inputs["manifest"], inputs["step_wall"],
                    inputs["divergence_log"], prev, RUN)

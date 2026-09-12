@@ -85,6 +85,13 @@ surfaces:
   - test_free_team_entitlement.py   # main-side drift unblock (#1929): committed on main (entitlement gate work) but never added to selection — the --integrity gate fails every PR without it
   - test_one_free_org_entitlement.py  # main-side drift unblock (#2789/#2822): one-free-org entitlement test merged on main but never added to selection — the --integrity gate fails every PR without it
   - test_fallback_snapshot.py
+  # #3154: GRAPH.COPY can drop the `false` entries of a copied boolean RANGE
+  # index (on copies whose index set carries it; a composite-only source copies
+  # healthy). Owns to `api` (#2159 first-match) because it pins
+  # tortoise/hosted_backup.py's restore/import swap; hosted_backup.py is
+  # therefore added to SOURCE_PATTERNS["api"] + CORE_ALSO so both an api-only
+  # and a hosted_backup.py-only change select it (the #2938 precedent).
+  - test_graphcopy_boolean_index_3154.py
   - test_hosted_api.py
   - test_hosted_auth.py
   - test_hosted_backup.py
@@ -755,6 +762,7 @@ slow_files:
 - test_ep_sources.py
 - test_event_provenance.py
 - test_flip_gate.py
+- test_graphcopy_boolean_index_3154.py
 - test_hosted_api.py
 - test_hosted_backup.py
 - test_index_cli.py

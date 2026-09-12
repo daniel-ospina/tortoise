@@ -13646,7 +13646,10 @@ async def _quarantine_import(
     """Record a rejected import: audit event + quarantine ledger prop.
 
     Best-effort by design — a control-plane blip must never mask the 422
-    (mirrors the #669 P3 metadata contract). The live graph is NEVER touched.
+    (mirrors the #669 P3 metadata contract). This helper itself never touches
+    the live graph; note that #3154's post-swap boolean-index audit raises
+    AFTER the swap, so at that call site the live graph may already have been
+    replaced (the verified temp + pre-restore copies are preserved).
     """
     try:
         await _async_audit(
@@ -14041,9 +14044,12 @@ async def import_team(team_id: str, request: Request,
                 )
                 raise HTTPException(status_code=422, detail=f"Import rejected: {e}")  # noqa: B904
             except RuntimeError as e:
-                # Server-side swap failure — verified temp graph intact, live
-                # graph untouched or recoverable; still quarantined (a failed
-                # import attempt is recorded; the ledger makes re-import converge).
+                # Server-side swap failure — verified temp graph intact, and
+                # the live graph is untouched for pre-swap failures / the
+                # pre-restore copy is recoverable for post-swap failures
+                # (#3154's post-swap boolean-index audit raises after the
+                # swap); still quarantined (a failed import attempt is
+                # recorded; the ledger makes re-import converge).
                 await _quarantine_import(
                     request, team_id, user, sha256=sha, reason=str(e)
                 )

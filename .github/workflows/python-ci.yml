@@ -890,6 +890,7 @@ jobs:
             files: >-
               test_backfill_sources test_cli_context
               test_enumeration_surfaces test_event_provenance
+              test_graphcopy_boolean_index_3154
               test_index_directory test_ingest test_ingest_validation
               test_mcp_http test_mcp_route_challenge test_pack_shipping_wheel
               test_sdk test_search_engine_gaps
