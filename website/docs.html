@@ -126,7 +126,7 @@
     </div>
     <div class="card">
       <h3>Confidence (EP)</h3>
-      <p>Each live Point carries a belief score. Tortoise computes it with <strong>expectation propagation</strong>: evidence is passed back and forth along the IMPL/NAND edges until the values settle. Support pulls a Point's belief up; a NAND edge pulls it down. Both remain in the graph, so the disagreement stays visible instead of being resolved by deleting one side.</p>
+      <p>Each live Point carries a belief score. Tortoise computes it with <strong>expectation propagation</strong> (<code>tortoise/ep.py</code>, read back via <code>sdk.get_confidence()</code>): evidence is passed back and forth along the IMPL/NAND edges until the values settle. Support pulls a Point's belief up; a NAND edge pulls it down. Both remain in the graph, so the disagreement stays visible instead of being resolved by deleting one side.</p>
       <p>The result is a <em>distribution</em>, not a single number — a mean and a variance. A tight spread means the evidence has settled; a wide spread means the posterior is weakly determined — thin evidence, or evidence pulling in opposite directions — which is how a Point gets flagged as <strong>contested</strong>. The hosted API exposes the mean as <code>confidence</code> on search and read results.</p>
       <p>Confidence is <em>derived</em>, never a stored verdict. Change the evidence — add a claim, supersede one, record a contradiction — and the affected scores recompute.</p>
     </div>

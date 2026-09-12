@@ -190,10 +190,10 @@ FOOTER_SELECTOR = "footer, .legal-footer, .footer"
 # with NO pricing content — the id="pricing-section" anchor exists only in
 # product.html (served at '/' on the tortoise host via the middleware rewrite).
 PRICING_PAGE_URL = "https://tortoise.premiselabs.co/#pricing-section"
-FOOTER_PAGES = ("/welcome", "/auth", "/signup", "/signin", "/self-hosted.html")
+FOOTER_PAGES = ("/welcome", "/auth", "/signup", "/signin", "/self-hosted.html", "/faq")
 CRAWL_PAGES = (
     "/welcome", "/signup", "/signin", "/self-hosted.html", "/docs.html",
-    "/privacy", "/tos", "/license", "/dpa", "/security",
+    "/privacy", "/tos", "/license", "/dpa", "/security", "/faq",
 )
 
 # ── Pinned canonical sentences (T1/T2 Step 2 — the authoritative set; ──────
@@ -606,9 +606,10 @@ def test_tortoise_host_footer_half(page: Page) -> None:
 
 
 def test_company_host_legal_pages_redirect_to_tortoise(page: Page) -> None:
-    """UNCONDITIONAL consolidation half (#5, 2026-08-17): all 12 tortoise-only
-    pages (docs, security, self-hosted, the 5 legal pages, signup/signin,
-    welcome, invite-accept) are canonical on tortoise.premiselabs.co; the
+    """UNCONDITIONAL consolidation half (#5, 2026-08-17): all 14 tortoise-only
+    pages (docs, FAQ, security, self-hosted, the 5 legal pages, auth,
+    signup/signin, welcome, invite-accept) are canonical on
+    tortoise.premiselabs.co; the
     middleware 301s their copies on the exact premiselabs.co hostname
     (redirect target is a constant, so this is safe on stale-DNS runs).
     Local dev / *.pages.dev previews pass through with 200 — not indexed,
@@ -618,7 +619,7 @@ def test_company_host_legal_pages_redirect_to_tortoise(page: Page) -> None:
     # The full company-host consolidation surface of the middleware
     # TORTOISE_ONLY set (extensionless forms; .html/trailing-slash variants
     # normalize onto these canonicals).
-    for path in ("/docs", "/security", "/self-hosted", "/privacy", "/tos",
+    for path in ("/docs", "/faq", "/security", "/self-hosted", "/privacy", "/tos",
                  "/license", "/dpa", "/aviso-privacidad", "/auth", "/signup", "/signin",
                  "/welcome", "/invite-accept"):
         r = page.request.get(BASE_URL + path, timeout=15_000, max_redirects=0)
@@ -1056,7 +1057,7 @@ def test_docs_html_contact_is_mailto(page: Page) -> None:
 
 
 @pytest.mark.parametrize(
-    "path", ["/privacy", "/tos", "/welcome", "/signup", "/docs.html", "/security"]
+    "path", ["/privacy", "/tos", "/welcome", "/signup", "/docs.html", "/security", "/faq"]
 )
 def test_mobile_render_no_horizontal_scroll(page: Page, path: str) -> None:
     """At 375px the page must render without horizontal scroll (S8).

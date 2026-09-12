@@ -55,6 +55,18 @@
     }
     .lede { color: var(--text-dim); font-size: 0.95rem; margin-top: 0.75rem; }
 
+    .meta {
+      margin: 1.5rem 0 0; background: var(--surface);
+      border: 1px solid var(--border); border-radius: 0.75rem;
+      padding: 1rem 1.25rem; display: flex; flex-wrap: wrap; gap: 0.9rem 2.25rem;
+    }
+    .meta .label {
+      display: block; font-family: var(--mono); font-size: 0.64rem;
+      text-transform: uppercase; letter-spacing: 0.08em;
+      color: var(--text-dim); margin-bottom: 0.2rem;
+    }
+    .meta .value { font-family: var(--mono); font-size: 0.82rem; color: var(--text); }
+
     .toc {
       margin: 1.75rem 0 2.75rem; background: var(--surface);
       border: 1px solid var(--border); border-radius: 0.75rem; padding: 1rem 1.25rem;
@@ -126,9 +138,27 @@
       <p class="doc-type">FAQ</p>
       <h1>Questions we get asked about the design</h1>
       <p class="lede">Most of these are variations on one question: why store the relationships between claims instead of letting the model work them out each time it answers. Here is the reasoning, and where we haven't measured something we say so.</p>
+      <div class="meta">
+        <div>
+          <span class="label">Last updated</span>
+          <span class="value">2026-09-12</span>
+        </div>
+        <div>
+          <span class="label">Source of truth</span>
+          <span class="value"><a href="https://github.com/daniel-ospina/tortoise/blob/main/docs/ONTOLOGY.md">docs/ONTOLOGY.md</a> · <a href="/docs">technical docs</a></span>
+        </div>
+      </div>
     </header>
 
     <main>
+      <!-- Mechanisms on this page are deliberately held to the minimum needed to
+           answer an objection. The full technical account lives on /docs, and the
+           canonical source for the belief model is docs/ONTOLOGY.md §5 plus the EP
+           engine in tortoise/ep.py. When the ontology version, the Point status
+           list, or how confidence is computed changes, update /docs first and let
+           this page defer to it — restating the mechanism in two places is what
+           let the two pages drift apart. tests/test_website_docs_consistency.py
+           fails if they disagree on those three facts. -->
       <nav class="toc" aria-label="Questions">
         <span class="toc-label">Why this design</span>
         <ol>
@@ -137,9 +167,8 @@
           <li><a href="#source-text">Do you replace my source text with extracted facts?</a></li>
           <li><a href="#corrections">What happens when the graph is wrong?</a></li>
           <li><a href="#contradiction">Does a contradiction delete the losing belief?</a></li>
-          <li><a href="#cost">Is a graph slower and more expensive than vector search?</a></li>
+          <li><a href="#cost">Is a graph slower than vector search?</a></li>
           <li><a href="#scale">How does it scale?</a></li>
-          <li><a href="#different">How is this different from other memory systems?</a></li>
         </ol>
         <span class="toc-label" style="margin-top:1rem;">How belief works</span>
         <ol>
@@ -147,6 +176,13 @@
           <li><a href="#variance">What does the variance on a confidence score mean?</a></li>
           <li><a href="#ep">What is expectation propagation?</a></li>
           <li><a href="#missed">What happens if extraction misses something?</a></li>
+          <li><a href="#different">How is this different from other memory systems?</a></li>
+        </ol>
+        <span class="toc-label" style="margin-top:1rem;">Using Tortoise</span>
+        <ol>
+          <li><a href="#pricing">What does it cost?</a></li>
+          <li><a href="#export">Can I export my graph, and what if I stop using it?</a></li>
+          <li><a href="#data-access">Who can read my data?</a></li>
         </ol>
       </nav>
 
@@ -164,7 +200,7 @@
 
       <h3 id="source-text">Do you replace my source text with extracted facts?</h3>
       <p>No, and this is the one we would most want you to hold us to. Your source stays, verbatim and authoritative. Extraction is a revisable index over unrewritten evidence — the source is never rewritten, and claims carry a quoted span of the text they came from. (That quote field is partially implemented today.)</p>
-      <p>An external study — <em>“Verbatim Chunks Beat Extracted Artifacts: A Controlled Ablation”</em> (arXiv 2601.00821v3) — held the retriever, reranker, answerer and judge fixed and swapped <em>only</em> the stored representation: verbatim source won by <strong>15.9 points on LoCoMo</strong> and <strong>22.0 points on LongMemEval-S</strong>, and a one-hop semantic graph did not close the gap. The gap tracks how far the stored representation departs from the source.</p>
+      <p>An external study — <a href="https://arxiv.org/abs/2601.00821"><em>Fidelity Before Structure: Verbatim Chunks Beat Lossy Artifact Extraction in Long-Conversation LLM Memory</em></a> (Tao An, arXiv 2601.00821) — held the retriever, reranker, answerer and judge fixed and swapped <em>only</em> the stored representation: verbatim source won by <strong>15.9 points on LoCoMo</strong> and <strong>22.0 points on LongMemEval-S</strong>, and a one-hop semantic graph did not close the gap. The authors read the result as lossy distillation rather than structure as such: accuracy tracks how much source text survives in the store.</p>
       <p>Read that study as the case for keeping the source layer, not as evidence that this graph works — it tested a one-hop semantic graph, not typed-relation propagation or contradiction surfacing. We keep both layers: verbatim source as the evidence layer, the graph as the reasoning layer over it.</p>
 
       <h3 id="corrections">What happens when the graph is wrong?</h3>
@@ -180,7 +216,7 @@
       <p>No. Both claims stay in the graph, with the tension recorded. That is the point of keeping a contradiction as a first-class relationship instead of overwriting one side.</p>
       <p>A deleted belief leaves no trace of the disagreement, so a later reader sees a confident answer with no idea it was ever contested. A recorded contradiction stays visible, and keeps pulling on the confidence of the claims it connects — on both sides for a mutual contradiction, on the target only for a directed one — until it is genuinely resolved or superseded.</p>
 
-      <h3 id="cost">Is a graph slower and more expensive than vector search?</h3>
+      <h3 id="cost">Is a graph slower than vector search?</h3>
       <p>Two different costs, and it depends on how often you read.</p>
       <p>The expensive part of Tortoise is at write time: reading and judging incoming material to extract the relationships. That cost is linear in how much you ingest, and it does not get cheaper per item as you grow.</p>
       <p>The read path is the opposite trade. Because the relationships are already recorded, working out a claim's belief needs only its neighbourhood, and the lookup itself is index-backed rather than a scan of the corpus. Retrieval runs in parallel across full-text, vector and structural strategies, against a pre-registered end-to-end target of 300&nbsp;ms p95. That target has <strong>not yet been certified</strong> on production-class hardware — measured p95 on a development box has been 345–460&nbsp;ms — so treat it as the bar we hold ourselves to, not a published result.</p>
@@ -197,10 +233,6 @@
       <div class="callout open">
         <p><strong>In progress.</strong> A published capacity page — graph sizes, memory footprint per tier, and measured scaling behaviour — is being prepared. Until then we are not going to state limits we haven't tested.</p>
       </div>
-
-      <h3 id="different">How is this different from other memory systems?</h3>
-      <p>The category has converged on graph retrieval. What is much less common is <strong>propagated confidence</strong> — a belief score that moves when the evidence around it moves, rather than a static field written once.</p>
-      <p>Across the systems we have surveyed, most have some form of graph, several have provenance, a few have contradiction, and very few propagate credence through the graph. We also publish a mechanism-named comparison — what each system actually does, not what it claims — with an explicit rule that we make no win claims on benchmarks we haven't run.</p>
 
       <h2>How belief works</h2>
 
@@ -221,6 +253,25 @@
       <h3 id="missed">What happens if extraction misses something?</h3>
       <p>If a relationship is missed when it is observable, it is gone — no later search recovers it, because the relationship was never inside either document. That is a real loss and the main risk of this approach.</p>
       <p>That is why the source text is kept verbatim and authoritative, and why the graph is positioned as an index over the evidence rather than a replacement for it. A missed relationship makes the graph incomplete; it does not make the underlying record wrong, and the raw material is still there to search directly.</p>
+
+      <h3 id="different">How is this different from other memory systems?</h3>
+      <p>One specific thing: <strong>propagated confidence</strong> — a belief score that moves when the evidence around it moves, rather than a static field written once. The category converged on graph retrieval some time ago, so the graph itself is not the differentiator.</p>
+      <p>Across the systems we have surveyed: most have some form of graph, two have partial contradiction handling, one has a formal revision theory, and <strong>no surveyed agent-memory product propagates credence</strong> — the single exception being an alpha, single-maintainer reimplementation that is not a competitor product. The honest reading is that our combination is unoccupied, but the unoccupied area is narrower than it was: one competitor has already taken contradiction plus temporal validity, another took formal revision over a graph, and the reimplementation showed that propagated credence is bolt-on-able rather than out of reach.</p>
+      <p>We keep a mechanism-named comparison in the public repo — what each system actually does, not what it claims — under an explicit rule that we make no win claims on benchmarks we haven't run. It is readable here: <a href="https://github.com/daniel-ospina/tortoise/blob/main/docs/benchmarks/comparison-systems.md">docs/benchmarks/comparison-systems.md</a>.</p>
+
+      <h2>Using Tortoise</h2>
+
+      <h3 id="pricing">What does it cost?</h3>
+      <p>Pricing is stated on the <a href="/#pricing-section">product page</a>, and the engine is also open source — self-hosting is a real option if you would rather run it yourself than pay per request (see <a href="/self-hosted">self-hosted</a>).</p>
+      <p>We are not going to restate a price here, because a copy of a price is exactly the kind of thing that goes stale without anyone noticing. The product page is the single place it is stated.</p>
+
+      <h3 id="export">Can I export my graph, and what if I stop using it?</h3>
+      <p>The evidence layer was never locked into a proprietary representation — your source material is stored verbatim — and self-hosting puts the graph itself in your own database. What that means for export, retention and termination is set out in the <a href="/tos">Terms of Service</a> and the <a href="/dpa">DPA</a>.</p>
+      <p>Those documents govern. This page does not, and will not attempt to.</p>
+
+      <h3 id="data-access">Who can read my data?</h3>
+      <p>The technical controls — encryption in transit and at rest, how API key credentials are stored, what control-plane activity is logged — are on the <a href="/security">security page</a>. The data-handling commitments are in the <a href="/privacy">privacy policy</a> and the <a href="/dpa">DPA</a>.</p>
+      <p>We deliberately do not summarise legal commitments on a FAQ page: a summary is precisely the artefact that drifts out of sync with the document it describes. The links above are the answer.</p>
     </main>
 
     <footer>
@@ -228,9 +279,11 @@
         <a href="/">Product</a> ·
         <a href="/docs">Docs</a> ·
         <a href="/self-hosted">Self-hosted</a> ·
-        <a href="/security">Security</a> ·
+        <a href="/privacy">Privacy</a> ·
+        <a href="/tos">Terms of Service</a> ·
         <a href="/license">License</a> ·
-        <a href="/privacy">Privacy</a>
+        <a href="/dpa">DPA</a> ·
+        <a href="/security">Security</a>
       </p>
       <p>Premise Labs · Tortoise</p>
     </footer>

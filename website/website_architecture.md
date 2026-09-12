@@ -47,6 +47,7 @@ Host routing lives in `website/functions/_middleware.ts`:
 | Product | `website/product.html` | Tortoise marketing: features, pricing (Free/Solo/Pro/Team), self-hosted section |
 | Blog | `website/functions/blog/[[path]].ts` (SSR at `/blog` + `/blog/:slug`) · `sitemap.xml.ts` (`/blog/sitemap.xml`) · `feed.xml.ts` (`/blog/feed.xml`) · `api/posts.ts` (agent publish/edit, `/blog/api/posts`) · `website/blog/` (favicon, og-image) | Tortoise blog: server-rendered markdown posts (Supabase `blog_posts`), agent-published with review queue, PostHog + consent |
 | Docs | `website/docs.html` | Static docs: what/how/quickstart/MCP/API |
+| FAQ | `website/faq.html` | Design-objection FAQ at `/faq`: why relationships are stored, how EP confidence is computed, and pointers to pricing/legal for the commercial questions. Defers mechanism detail to `/docs` rather than restating it |
 | Auth (single page) | `website/signup.html` served at `/auth` | Combined Log in / Sign up card — GitHub / Google / email+password (modal login + forgot-password) / API key; `/signin*` 301 → `/auth`; `/signup` is a redirect-free alias |
 | Welcome | `website/welcome.html` | Post-signup provisioning: team + API key (reveal-once), two-path chooser (one-click MCP prompt vs SDK quickstart), auto-redirect to dashboard |
 | Invite accept | `website/invite-accept.html` | Public team-invite accept page (`/invite-accept?token=…`), reads `/v1/invites/info` |
@@ -188,12 +189,12 @@ dashboard.
 | --- | --- | --- |
 | `website/robots.txt` | both premise-labs hosts | Google **cross-submission**: lists all four sitemap locations; each sitemap contains only same-host URLs (protocol requirement) |
 | `website/sitemap-company.xml` | `premiselabs.co` | single URL (`/`) — company page |
-| `website/sitemap-product.xml` | `tortoise.premiselabs.co` | `/`, `/docs`, `/signup`, `/signin`, `/self-hosted`, `/security`, 5 legal pages |
+| `website/sitemap-product.xml` | `tortoise.premiselabs.co` | `/`, `/docs`, `/faq`, `/signup`, `/signin`, `/self-hosted`, `/security`, 5 legal pages |
 | `website/_redirects` | both premise-labs hosts | trailing-slash 301s → extensionless canonicals; `/index.html → /`; `.html` dedupe for non-auth pages |
 | `website/apps/dashboard/public/{robots.txt,sitemap.xml}` | `app.premiselabs.co` | Vite copies `public/` → `dist/`; mirrored in committed `dist/` so a no-rebuild deploy still serves them |
 
 Rules:
-- **Host consolidation (the core fix):** legal pages + docs + auth are
+- **Host consolidation (the core fix):** legal pages + docs + FAQ + auth are
   canonical on `tortoise.premiselabs.co` (where the service operates and the
   product footer links them). The middleware 301s the tortoise-only pages
   from the exact `premiselabs.co` hostname to their canonical — a 301 is the
