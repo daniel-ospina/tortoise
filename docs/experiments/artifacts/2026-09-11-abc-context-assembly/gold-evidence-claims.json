@@ -1612,19 +1612,19 @@
     },
     {
       "claim": "I'm thinking of getting a new bike rack for my car",
-      "source_turn_id": "lme:gpt4_76048e76:s19:t0",
+      "source_turn_id": "lme:gpt4_76048e76:s20:t0",
       "tokens": 7,
       "trivial": false
     },
     {
       "claim": "Do you have any recommendations",
-      "source_turn_id": "lme:gpt4_76048e76:s19:t0",
+      "source_turn_id": "lme:gpt4_76048e76:s20:t0",
       "tokens": 2,
       "trivial": true
     },
     {
       "claim": "By the way, I've been having some issues with my bike lately - in mid-February, I had to take it in for repairs because the gears were acting up and I couldn't shift properly",
-      "source_turn_id": "lme:gpt4_76048e76:s19:t0",
+      "source_turn_id": "lme:gpt4_76048e76:s20:t0",
       "tokens": 17,
       "trivial": false
     },
