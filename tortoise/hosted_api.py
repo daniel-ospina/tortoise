@@ -21857,8 +21857,13 @@ async def webhooks_stripe(request: Request):
 # limiter runs before body parsing, so invalid-JSON / oversized POSTs DO
 # consume budget; the anonymous aggregate is a one-source DoS (trusted CIDRs
 # unaffected); the exemption's security rests on the Fly edge stripping
-# client `Fly-*` headers (assumption 12 — operator recipe + dated
-# re-verification issue referenced from the PR).
+# client `Fly-*` headers (assumption 12 — dated re-verification with an
+# operator recipe is #3126, owner @daniel-ospina, 2026-11-15). Sibling
+# filings from this work: #3124 (the shared per-IP primitive + the generic
+# middleware's store are still unbounded), #3125 (`_check_claim_rate_limit`
+# keys on the proxy IP), #3128 (authorize/consent forward an unvalidated
+# scope into the minted token). #3036 already covers oauth_* token-table
+# retention/GC.
 _OAUTH_DCR_WINDOW_S = 3600
 _OAUTH_DCR_PER_HOUR_DEFAULT = 20
 _OAUTH_DCR_ANON_AGGREGATE_PER_HOUR_DEFAULT = 600
