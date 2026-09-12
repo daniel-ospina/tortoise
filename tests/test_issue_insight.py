@@ -19,6 +19,15 @@ import pytest
 from tortoise.sdk import TortoiseSDK
 
 GRAPH_TOPIC = "decision: keep JWT rotation for auth refresh tokens"
+# Every Point seeded by _seed_graph — one home so (a) _seed_graph and the E2E
+# share a single source of truth and (b) the E2E's retrieval window can be
+# derived from the fixture's size instead of a hand-maintained magic number.
+# Gate-passing candidates are a SUBSET of these (owner/b #7 shares no token
+# with the query), so `limit=len(SEEDED_POINTS)` can never truncate one away.
+SEEDED_OBS_A101 = "owner/a #101: auth refresh token rotation failed in prod"
+SEEDED_OBS_A102 = "owner/a #102: plan JWT rotation rollout to all services"
+SEEDED_OBS_B7 = "owner/b #7: unrelated payment retry backoff tuning"
+SEEDED_POINTS = (SEEDED_OBS_A101, SEEDED_OBS_A102, SEEDED_OBS_B7, GRAPH_TOPIC)
 
 
 @pytest.fixture(autouse=True)
@@ -58,18 +67,18 @@ def _seed_graph(sdk: TortoiseSDK, *, include_repo_a: bool = True) -> None:
     if include_repo_a:
         obs_101 = sdk.create_point(
             kind="observation",
-            content="owner/a #101: auth refresh token rotation failed in prod",
+            content=SEEDED_OBS_A101,
             source="github", github_repo="owner/a", github_number=101, github_state="closed",
         )
         sdk.create_point(
             kind="observation",
-            content="owner/a #102: plan JWT rotation rollout to all services",
+            content=SEEDED_OBS_A102,
             source="github", github_repo="owner/a", github_number=102, github_state="open",
         )
     # repo b — must never bleed into owner/a scoped queries
     sdk.create_point(
         kind="observation",
-        content="owner/b #7: unrelated payment retry backoff tuning",
+        content=SEEDED_OBS_B7,
         source="github", github_repo="owner/b", github_number=7, github_state="open",
     )
     # cross-session decision (the semantic "aha" — non-GitHub-covered space)
@@ -79,9 +88,14 @@ def _seed_graph(sdk: TortoiseSDK, *, include_repo_a: bool = True) -> None:
     )
     if obs_101 is not None:
         # EP-back the decision (review c70: the semantic stage counts only
-        # EP-confirmed claims — confidence_mean >= 0.5). The #101 prod failure
-        # supports keeping rotation -> IMPL edge -> confidence_mean = 1/1 = 1.0.
-        # Keeps the seeded E2E green in both FTS and TF-IDF fallback modes.
+        # EP-confirmed claims — confidence_mean >= 0.5). FIXTURE FIDELITY ONLY:
+        # the decision clears the relevance gate on the >= 2-shared-token floor
+        # (7 shared tokens with the query) in every retrieval mode, so this edge
+        # is NOT load-bearing for any assertion in this file — mutation-tested by
+        # deleting it, and the decision still reports has_ep=True at 0.75 (the
+        # same class of leak as #3276). The old `confidence_mean = 1/1 = 1.0`
+        # claim here was simply stale; nothing asserts the posterior, whose key
+        # is attached only when `ep` is present.
         sdk._get_proj().g.query(
             "MATCH (a:Point), (b:Point) WHERE a.id = $a AND b.id = $b "
             "CREATE (a)-[:IMPL]->(b)",
@@ -97,22 +111,86 @@ class TestIssueInsightE2E:
         _seed_graph(sdk)
         ms = _dispatch_sdk(monkeypatch, sdk)
 
+        # #3254: `limit=len(SEEDED_POINTS)` covers every seeded Point, and the
+        # gate-passing candidates are a subset of those — so the decision is
+        # EMITTED at whatever rank the ambient ranking gives it, in either
+        # retrieval mode. Emission is therefore a STRUCTURAL invariant, not a
+        # mode- or rank-dependent one — whereas the old `data_points[0]` pin was
+        # an incidental-value assertion, the same stale-pin class as #3095. The
+        # bound is derived from the fixture (not a magic number) so growing the
+        # fixture cannot silently re-arm the rank dependency. The shipped default
+        # is limit=2, which in the degraded (no-embedder) mode truncates the
+        # decision away: that is a real product bug tracked by #3277 and pinned
+        # deterministically by
+        # `test_decision_is_dropped_at_the_shipped_default_limit_when_sparse`
+        # below — not smuggled in here.
         result = ms.tortoise_issue_insight(
             title="Should we keep JWT rotation for auth refresh tokens?",
             repo="owner/a",
+            limit=len(SEEDED_POINTS),
         )
 
         assert result["has_prior"] is True
         assert result["no_prior_knowledge"] is False
         # ≥1 live-derived data point, content from the graph (never hardcoded)
         assert len(result["data_points"]) >= 1
-        assert result["data_points"][0]["content"] == GRAPH_TOPIC
-        assert result["data_points"][0]["kind"] == "decision"
+        # #3254: the EP-confirmed cross-session decision must be EMITTED, not
+        # sit at index 0. Candidate order is retrieved, not promised (and #3018
+        # re-derived it), so an index pin asserted the ambient ranking.
+        #
+        # NO `confidence_mean` assertion here, deliberately (code review):
+        # (a) not a mutation-killer — deleting the seeded IMPL edge leaves the
+        # decision at has_ep=True / 0.75, so the discriminating variable is the
+        # point KIND (#3276); and (b) mode-fragile — `issue_insight` attaches
+        # the key only when `ep` is present. Caveat, recorded so it is not lost:
+        # this leaves the payload-side attachment of `confidence_mean`
+        # UNCOVERED. TestIssueInsightRelevanceGate does NOT cover it — that
+        # class tests the gate's threshold on injected `ep` dicts, never a
+        # `data_points` row.
+        decisions = [dp for dp in result["data_points"] if dp["kind"] == "decision"]
+        assert [dp["content"] for dp in decisions] == [GRAPH_TOPIC]
         # repo stage: prior-issue stats for owner/a only (no bleed from owner/b)
         assert result["repo_stats"] == {"repo": "owner/a", "prior_issues": 2, "open": 1}
-        # pointer topic is live-derived from the top hit
-        assert "JWT rotation" in result["more_in_graph"]
+        # `more_in_graph` is semantic_hits[0][:80], i.e. rank-0 dependent.
+        # Assert the ORDER-INDEPENDENT contract — the pointer is the TOP hit's
+        # content, whatever the ranking chose — instead of pinning which point
+        # won. (Both fields truncate the same hit; the pointer at 80 chars, the
+        # data point at 200, so the pointer is a prefix.)
+        assert result["more_in_graph"]
+        assert result["data_points"][0]["content"].startswith(result["more_in_graph"])
         assert "graph hit" in result["insight"]
+
+    @pytest.mark.xfail(
+        strict=True,
+        reason="#3277: with the leg pinned sparse the two unmeasured GitHub "
+               "observations outrank the EP-confirmed decision, so the shipped "
+               "default limit=2 truncates the 'we already decided this' claim "
+               "away. The leg is pinned so this record is deterministic — with "
+               "the embedder live the decision ranks first and the claim "
+               "holds, so asserting the default WITHOUT the pin would make "
+               "this test itself mode-dependent (the #3254 failure mode). "
+               "strict=True turns this into a FAILURE once #3277 is fixed, "
+               "forcing this record's removal.",
+    )
+    def test_decision_is_dropped_at_the_shipped_default_limit_when_sparse(
+        self, tmp_path, monkeypatch, force_sparse_tfidf,
+    ):
+        """#3277 record: a caller at the DEFAULT limit is supposed to still see
+        the EP-confirmed decision. In the degraded retrieval mode it does not.
+
+        Pinning the leg makes this deterministic; the fix belongs to #3277, not
+        here. See the strict xfail reason.
+        """
+        sdk = _sdk(tmp_path)
+        _seed_graph(sdk)
+        ms = _dispatch_sdk(monkeypatch, sdk)
+
+        result = ms.tortoise_issue_insight(
+            title="Should we keep JWT rotation for auth refresh tokens?",
+            repo="owner/a",
+        )
+
+        assert GRAPH_TOPIC in [dp["content"] for dp in result["data_points"]]
 
     def test_repo_scope_does_not_bleed_across_repos(self, tmp_path, monkeypatch):
         sdk = _sdk(tmp_path)
