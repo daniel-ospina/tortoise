@@ -310,6 +310,22 @@ def test_stamp_write_is_not_clobbered_via_a_planted_temp_symlink(tmp_path):
                                  / ".tortoise-skills-version").read_text()
 
 
+def test_download_temp_is_not_clobbered_via_a_planted_symlink(tmp_path):
+    """The per-skill download temp is mktemp-named too: a planted
+    `<skill>/SKILL.md.tmp -> ../../../README.md` must not make curl clobber an
+    arbitrary file in an untrusted project clone."""
+    skill_dir = tmp_path / ".claude" / "skills" / "tortoise-decide"
+    skill_dir.mkdir(parents=True)
+    victim = tmp_path / "README.md"
+    victim.write_text("important project readme\n", encoding="utf-8")
+    (skill_dir / "SKILL.md.tmp").symlink_to(victim)
+    proc = _run_installer(tmp_path, tmp_path / "home", harness="claude")
+    assert proc.returncode == 0, proc.stderr
+    assert victim.read_text(encoding="utf-8") == "important project readme\n"
+    installed = (skill_dir / "SKILL.md").read_text(encoding="utf-8")
+    assert "name: tortoise-decide" in installed
+
+
 def test_stamp_write_is_reported_when_it_cannot_be_written(tmp_path):
     """A stamp path that cannot hold a file (a directory) must be reported as
     a failure, not silently announced as written."""

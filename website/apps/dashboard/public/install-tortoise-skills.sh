@@ -101,9 +101,11 @@ sha256_of() {
 
 for s in "${SKILLS[@]}"; do
   mkdir -p "$DEST/$s"
-  tmp="$DEST/$s/SKILL.md.tmp"
-  if curl -fsSL --max-time 20 "$SKILLS_BASE/$s/SKILL.md" -o "$tmp" \
-      && grep -q "^name: $s$" "$tmp"; then
+  # mktemp (unpredictable name) so a planted `SKILL.md.tmp` symlink/hardlink in
+  # an untrusted project clone cannot make curl clobber an arbitrary file.
+  tmp="$(mktemp "$DEST/$s/SKILL.md.XXXXXX" 2>/dev/null || true)"
+  if [ -n "$tmp" ] && curl -fsSL --max-time 20 "$SKILLS_BASE/$s/SKILL.md" -o "$tmp" \
+      && [ ! -L "$tmp" ] && grep -q "^name: $s$" "$tmp"; then
     # Drift detection (#3): compare the on-disk copy against the digest the
     # last install recorded — content, not version, so a local edit is caught
     # even across a version bump. With no recorded digest (an older or manual
@@ -129,7 +131,7 @@ for s in "${SKILLS[@]}"; do
     mv "$tmp" "$DEST/$s/SKILL.md"
     echo "  ✓ $s"
   else
-    rm -f "$tmp"
+    [ -n "$tmp" ] && rm -f "$tmp"
     echo "  ✗ $s — download failed or payload was not the skill file ($SKILLS_BASE/$s/SKILL.md)" >&2
     exit 1
   fi
@@ -224,8 +226,14 @@ if [ ${#missing[@]} -eq 0 ]; then
       done
     fi
   } > "$stamp_tmp" 2>/dev/null; then
-    if mv -f "$stamp_tmp" "$STAMP" 2>/dev/null; then stamp_tmp=""; fi
-    if [ -f "$STAMP" ] && [ ! -L "$STAMP" ]; then stamp_ok=1; fi
+    # mktemp creates 0600; keep the stamp world-readable like a normal
+    # redirection would, so a shared/CI checkout can still read it.
+    chmod 0644 "$stamp_tmp" 2>/dev/null || true
+    if mv -f "$stamp_tmp" "$STAMP" 2>/dev/null \
+        && [ -f "$STAMP" ] && [ ! -L "$STAMP" ]; then
+      stamp_tmp=""
+      stamp_ok=1
+    fi
   fi
   [ -n "$stamp_tmp" ] && rm -f "$stamp_tmp" || true
   echo ""
