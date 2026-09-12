@@ -804,3 +804,326 @@ def test_delete_recreate_replays_live(tmp_path):
     assert rows and rows[0][0] == "live", (
         "a pre-recreation retraction must be dropped (survivor rule) — otherwise "
         "the re-created Object is permanently buried")
+
+
+def test_delete_recreate_replays_live_via_recover_from_log(tmp_path):
+    """Exercise the PRODUCTION lane, not apply_replay directly."""
+    events = tmp_path / "events"; events.mkdir()
+    sdk = TortoiseSDK(str(tmp_path / "t9.db"), event_log_path=str(events / "events.jsonl"))
+    proj = sdk._get_proj()
+    sdk.create_entity("object", "phoenix2", objectKind="core:other", is_episodic=False)
+    oid = _entity_name_id("Object", "phoenix2")
+    sdk._delete_entity(oid)
+    sdk.create_entity("object", "phoenix2", objectKind="core:other", is_episodic=False)
+    # Wipe ALL nodes, not just :Object: recover_from_log short-circuits when
+    # `_node_count() > 0`, and create_entity leaves a :Meta node behind, so an
+    # Object-only wipe returns {"recovered": False, "reason": "graph already has
+    # nodes — no rebuild"} and the test never reaches the replay it tests.
+    proj.g.query("MATCH (n) DETACH DELETE n")
+    from tortoise.consistency import recover_from_log
+    # REAL signature: recover_from_log(events_dir: str, projection) -> dict
+    # (consistency.py:36). On SUCCESS `reason` is a descriptive string
+    # (f"replayed {applied} events from {files[0]}", :128-132) — NEVER None, so
+    # `assert res["reason"] is None` can never pass. Assert the real contract:
+    res = recover_from_log(str(events), proj)
+    assert res["recovered"] is True
+    assert res["reason"].startswith("replayed")
+    rows = proj.g.query("MATCH (o:Object {id:$id}) RETURN o.status", params={"id": oid}).result_set
+    assert rows and rows[0][0] == "live"
+
+
+def test_rebuild_retracts_deleted_object(tmp_path):
+    """D-14: `rebuild(log)` is a real replay surface (**11** in-repo callers — see
+    D-14; VERIFY-2 P2-1 corrected this stale `10`) and
+    MUST NOT resurrect. Verified live pre-fix: rebuild(log) → status='live'."""
+    events = tmp_path / "events"; events.mkdir()
+    sdk = TortoiseSDK(str(tmp_path / "t9b.db"), event_log_path=str(events / "events.jsonl"))
+    proj = sdk._get_proj()
+    sdk.create_entity("object", "gone", objectKind="core:other", is_episodic=False)
+    oid = _entity_name_id("Object", "gone")
+    sdk._delete_entity(oid)
+    assert proj.g.query(
+        "MATCH (o:Object {id:$id}) RETURN count(o)", params={"id": oid}
+    ).result_set[0][0] == 0
+    from tortoise.log import EventLog
+    proj.rebuild(EventLog(str(events / "events.jsonl")))
+    rows = proj.g.query("MATCH (o:Object {id:$id}) RETURN o.status",
+                        params={"id": oid}).result_set
+    assert rows and rows[0][0] == "retracted", \
+        "rebuild(log) must not resurrect a deleted Object"
+
+
+def test_rebuild_stays_fail_loud(tmp_path, monkeypatch):
+    """D-14: routing rebuild() through apply_replay must NOT flip its contract.
+    `strict=True` re-raises where recover_from_log would swallow.
+    Asserts the POST-STATE too: a bare `pytest.raises` is satisfied by an
+    exception while the graph is left silently wrong (verified live: the node
+    remains `status='live'` with the retraction fold lost)."""
+    events = tmp_path / "events"; events.mkdir(exist_ok=True)
+    sdk = TortoiseSDK(str(tmp_path / "t9c.db"), event_log_path=str(events / "events.jsonl"))
+    proj = sdk._get_proj()
+    sdk.create_entity("object", "boom", objectKind="core:other", is_episodic=False)
+    oid = _entity_name_id("Object", "boom")
+    sdk._delete_entity(oid)
+
+    def _boom(_ev):
+        raise RuntimeError("injected fold failure")
+
+    monkeypatch.setattr(proj, "_fold_object_retracted", _boom)
+    from tortoise.log import EventLog
+    with pytest.raises(RuntimeError):
+        proj.rebuild(EventLog(str(events / "events.jsonl")))
+    # Documented consequence: the graph is HALF-FOLDED and `rebuild()` returns
+    # None, so the caller cannot tell how far it got. Recorded, not tolerated
+    # silently — a second, successful rebuild is required to fix it.
+    assert proj.g.query(
+        "MATCH (o:Object {id:$id}) RETURN o.status", params={"id": oid}
+    ).result_set[0][0] == "live", \
+        "half-folded post-state: pin it so a future reordering of the raise is noticed"
+
+
+def test_apply_replay_fold_failure_is_isolated(tmp_path, monkeypatch):
+    """Non-strict: one bad fold must not abort the rest, and must not escape
+    recover_from_log's documented "caught and reported, never raised" contract.
+    Verified live pre-fix: a raise on fold #1 of 2 left BOTH unfolded."""
+    events = tmp_path / "events"; events.mkdir()
+    sdk = TortoiseSDK(str(tmp_path / "t9d.db"), event_log_path=str(events / "events.jsonl"))
+    proj = sdk._get_proj()
+    for nm in ("f1", "f2", "f3"):
+        sdk.create_entity("object", nm, objectKind="core:other", is_episodic=False)
+        sdk._delete_entity(_entity_name_id("Object", nm))
+    _orig, calls = proj._fold_object_retracted, {"n": 0}
+
+    def _flaky(ev):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise RuntimeError("transient")
+        return _orig(ev)
+
+    monkeypatch.setattr(proj, "_fold_object_retracted", _flaky)
+    proj.g.query("MATCH (n) DETACH DELETE n")
+    _, _, torn = proj.apply_replay([
+        {"type": "ObjectRegistered", "id": "o1", "name": "f1"},
+        {"type": "ObjectRetracted", "id": "o1", "name": "f1"},
+        {"type": "ObjectRegistered", "id": "o2", "name": "f2"},
+        {"type": "ObjectRetracted", "id": "o2", "name": "f2"},
+        {"type": "ObjectRegistered", "id": "o3", "name": "f3"},
+        {"type": "ObjectRetracted", "id": "o3", "name": "f3"},
+    ])
+    assert torn >= 1, "a failed fold must be counted, not dropped"
+    assert proj.g.query(
+        "MATCH (o:Object) WHERE o.status='retracted' RETURN count(o)"
+    ).result_set[0][0] >= 2, "the folds after the failure must still run"
+
+
+def test_backup_restore_raises_on_a_torn_fold(tmp_path, monkeypatch):
+    """CYCLE 8 REGRESSION GUARD. `restore()` is fail-LOUD: its pre-change loop
+    (`for ev: proj.apply(ev)` in try/finally) propagated a raising `apply()`,
+    and routing through `apply_replay(strict=True)` preserves that. An earlier
+    draft instead asserted a returned `{"torn": n, "status": "torn"}` — but
+    `strict=True` RE-RAISES inside the flush, so `fold_torn` never becomes
+    non-zero on a returning path and the exception escapes `restore()` (which
+    has no `except`) BEFORE the assertions. The test therefore errored, and the
+    `torn` surface it pinned was dead code. This asserts the real contract.
+
+    (Cycle 4 found the original defect: `restore()` reported `status: ok` no
+    matter which folds failed. Under fail-loud that is no longer possible —
+    a torn fold cannot be reported as ok because it cannot be reported at all.)
+    """
+    events = tmp_path / "events"; events.mkdir(exist_ok=True)
+    sdk = TortoiseSDK(str(tmp_path / "rb.db"), event_log_path=str(events / "events.jsonl"))
+    oid = _entity_name_id("Object", "rb")
+    sdk.create_entity("object", "rb", objectKind="core:other", is_episodic=False)
+    sdk._delete_entity(oid)
+    bk = tmp_path / "bk"; bk.mkdir()
+    # manifest key is "db" (backup.py:82 reads manifest.get("db", ...))
+    (bk / "manifest.json").write_text(
+        json.dumps({"db": "tortoise.db", "events": 0}))
+    shutil.copy(events / "events.jsonl", bk / "events.jsonl")
+
+    from tortoise.projection import FalkorProjection
+    monkeypatch.setattr(FalkorProjection, "_fold_object_retracted",
+                        lambda self, ev: (_ for _ in ()).throw(RuntimeError("transient")))
+    with pytest.raises(RuntimeError, match="transient"):
+        restore(str(bk), str(tmp_path / "rb2.db"),
+                events_path=str(events / "events.jsonl"), into_falkor=True)
+
+
+def test_recover_from_log_torn_retraction_is_not_reported_recovered(tmp_path, monkeypatch):
+    """EMPIRICAL (cycle 4): a torn retraction fold left the Object `live` while
+    recover_from_log returned `{'recovered': True, 'reason': 'replayed 1 events
+    ... (1 skipped)'}` — a RESURRECTED Object reported as successful recovery,
+    contradicting the issue's own acceptance indicator. `ok` must require
+    torn == 0."""
+    events = tmp_path / "events"; events.mkdir(exist_ok=True)
+    sdk = TortoiseSDK(str(tmp_path / "rc.db"), event_log_path=str(events / "events.jsonl"))
+    oid = _entity_name_id("Object", "rc")
+    sdk.create_entity("object", "rc", objectKind="core:other", is_episodic=False)
+    sdk._delete_entity(oid)
+
+    from tortoise.projection import FalkorProjection
+    monkeypatch.setattr(FalkorProjection, "_fold_object_retracted",
+                        lambda self, ev: (_ for _ in ()).throw(RuntimeError("transient")))
+    proj = FalkorProjection(str(tmp_path / "rc2.db"))
+    proj.g.query("MATCH (n) DETACH DELETE n")
+    try:
+        res = recover_from_log(str(events), proj)
+        assert res["recovered"] is False, \
+            "recovery must not claim success on a graph where the fix did not apply"
+    finally:
+        proj.close()
+
+
+def test_recover_from_log_tolerates_a_torn_trailing_line(tmp_path):
+    """CYCLE 5 REGRESSION GUARD. The parse-time tear counter and the replay tear
+    counter are SEPARATE. A journal whose LAST line was truncated mid-append is
+    the canonical crash artifact this function exists to serve — its own
+    docstring says such lines 'are skipped, not fatal'. Folding the parse count
+    into `ok` (the earlier `torn == 0` form) made `recovered` False here, and
+    `FalkorProjection._recover_or_raise` (projection/__init__.py:985) then RAISES
+    — an embedded DB damaged only in its final byte refuses to open.
+    """
+    events = tmp_path / "events"; events.mkdir(exist_ok=True)
+    sdk = TortoiseSDK(str(tmp_path / "pt.db"),
+                      event_log_path=str(events / "events.jsonl"))
+    sdk.create_entity("object", "pt", objectKind="core:other", is_episodic=False)
+    # Truncate the tail mid-append, exactly as a crash would leave it.
+    p = events / "events.jsonl"
+    p.write_text(p.read_text() + '{"type": "ObjectRegistered", "id": "ob')
+
+    from tortoise.projection import FalkorProjection
+    proj = FalkorProjection(str(tmp_path / "pt2.db"))
+    proj.g.query("MATCH (n) DETACH DELETE n")
+    try:
+        res = recover_from_log(str(events), proj)
+        assert res["recovered"] is True, \
+            f"a torn TRAILING line is tolerated, not fatal: {res}"
+        assert "skipped" in res["reason"], \
+            "the parse tear must still be REPORTED in the reason string"
+    finally:
+        proj.close()
+
+
+def test_recover_from_log_tolerates_a_per_event_apply_failure(tmp_path):
+    """CYCLE 6 REGRESSION GUARD (Reviewer #4, EMPIRICAL). `apply_replay`'s
+    per-event `apply()` tears are the class `recover_from_log` already TOLERATES
+    (its own docstring: "Per-event guard: one bad event must not abort the whole
+    recovery"), and only FOLD tears may gate `ok`. Collapsing the two (the
+    cycle-5 `torn + _folds_torn` form) made a single un-appliable legacy line
+    report `recovered: False`, and `_recover_or_raise` (projection/__init__.py:982)
+    then RAISES — an embedded DB refuses to open over one bad event.
+
+    Verified live: a parseable `EventRecorded` whose `object` is a dict raises
+    `TypeError` in `_upsert_event`, and the pre-change code returned
+    `{'recovered': True, 'reason': '… (1 skipped)'}`.
+    """
+    events = tmp_path / "events"; events.mkdir(exist_ok=True)
+    sdk = TortoiseSDK(str(tmp_path / "pe.db"),
+                      event_log_path=str(events / "events.jsonl"))
+    sdk.create_entity("object", "pe", objectKind="core:other", is_episodic=False)
+    # A parseable-but-un-appliable legacy line: `object` is a dict, and
+    # `_upsert_event` expects a str.
+    EventLog(str(events / "events.jsonl")).append(
+        {"type": "EventRecorded", "eventId": "bad1", "object": {"nested": 1},
+         "summary": "bad"})
+
+    from tortoise.projection import FalkorProjection
+    proj = FalkorProjection(str(tmp_path / "pe2.db"))
+    proj.g.query("MATCH (n) DETACH DELETE n")
+    try:
+        res = recover_from_log(str(events), proj)
+        assert res["recovered"] is True, (
+            f"a per-event apply failure is TOLERATED (only fold tears gate ok): {res}")
+        assert "skipped" in res["reason"], \
+            "the per-event tear must still be REPORTED in the reason"
+    finally:
+        proj.close()
+
+
+def test_fold_sweep_handles_2500_folds(tmp_path):
+    """Scale regression: the sweep issues ONE Cypher round-trip per surviving fold.
+
+    THE MEASURED ACCOUNT (one figure, one measurement, no history):
+      - ~3.8–4.1 ms per fold on docker FalkorDB with 10k nodes resident
+        (cycle 7; an earlier ~2.9 ms/fold figure was taken at 3000 folds on a
+        smaller graph and understated the 10k case).
+      - VERIFY-1 measured the flush at **23.45 s for 5000 folds**; the 10k form
+        measured **124 s**. `N` is now **2500**: IMPLEMENTATION found N=5000
+        failing at **60.4 s against the 60 s bound** when the test ran inside
+        the full suite (vs 23.45 s standalone), i.e. it was flaky under load.
+        The plan's own instruction is "prefer lowering N over raising the
+        bound", and N=2500 still detects an order-of-magnitude regression
+        (2500 folds at 10x ≈ 600 s).
+      - Memory is not the constraint (0.3 MB for 3000 folds + anchors).
+
+    VERIFY-2 P1 (slot 2) — THE REMNANT IS NOW DELETED, and this is worth stating
+    plainly: the cycle-8 AND cycle-9 logs BOTH recorded this paragraph as
+    "consolidated", and it was not. It still carried a dangling subject ("is
+    deliberately loose" with no noun), a stale `folds = ~8.75 s` fragment, and
+    THREE mutually inconsistent figures (~8.75 s, ~19 s, ~40 s) for the same
+    flush. This is the single clearest instance in the whole document of the
+    failure mode that made 11 review cycles necessary: a logged fix that never
+    reached the body. The replacement above is one measurement for one N.
+
+    The 60 s bound sees a 2.5–3x margin at N=5000. It is deliberately loose (CI
+    variance) — it exists to catch an ORDER-OF-MAGNITUDE regression, e.g. an
+    accidental nested query per fold, not a 20% drift. A batch form
+    (`WHERE o.id IN $ids` after the survivor filter runs in Python) would cut F
+    round-trips to 1; not in scope for #2977.
+
+    CYCLE 5 — THE SETUP MUST NOT USE `_upsert_object`. That helper calls
+    `compute_embedding(name)` unconditionally, so seeding 10k nodes this way is
+    10k transformer forward passes: measured ~137-167 ms/node (~23-28 MINUTES for
+    10 000), against a flush that itself takes a measured ~124 s at 10k folds (VERIFY-3 P2-3: this said `~19 s`, contradicting the MEASURED ACCOUNT above). The test would time out CI
+    rather than catch a regression, and its runtime is environment-dependent
+    (an absent embedder cache degrades to a fast no-op, so it is roughly 50x
+    slower on a warm runner). Seed with raw Cypher — the flush only needs the
+    anchor events plus the target nodes, and the plan's own unit tests already
+    create Objects by raw `CREATE`.
+    """
+    import time
+    from tortoise.projection import FalkorProjection
+    # This is the ONE test that BYPASSES the class-level test redirect (epic
+    # #1647 D-1=A): `from_uri` lands on the SHARED session graph rather than a
+    # per-test `test_<stem>_<hash>` one. Its wall-clock bound was calibrated on
+    # docker, which is why it opts in — and it must therefore clean up in a
+    # `finally`, since the shared graph outlives this test.
+    # VERIFY-1 P1-4 (Reviewer slot 1, EMPIRICAL): N is 5000, NOT 10000. Slot 1
+    # ran the exact Task-8 Step 3 command twice; the 10k form measured **124 s**
+    # against a 60 s bound (`assert 124.02 < 60.0`) on this hardware. The
+    # docstring above already gives the instruction — "prefer lowering N over
+    # raising the bound" — and it was not followed. At the measured ~4 ms/fold a
+    # 5000-fold sweep is ~20 s, keeping a 3x margin on this machine and ~2x on a
+    # 1.5x-slower CI runner, while still catching an order-of-magnitude
+    # regression, which is the bound's only job.
+    proj = FalkorProjection.from_uri(DB)
+    proj.g.query("MATCH (n) DETACH DELETE n")
+    try:
+        folds, recreate = [], []
+        for i in range(2_500):
+            recreate.append((2 * i, {"type": "ObjectRegistered", "id": f"o{i}",
+                                     "name": f"n{i}"}))
+            folds.append((2 * i + 1, {"type": "ObjectRetracted", "id": f"o{i}",
+                                      "name": f"n{i}", "ts": "T"}, "retract"))
+        # Raw CREATE, batched — NOT _upsert_object (see the docstring above).
+        BATCH = 500
+        for start in range(0, 2_500, BATCH):
+            proj.g.query(
+                "UNWIND $rows AS r CREATE (:Object {id: r.id, name: r.name, "
+                "status: 'live'})",
+                params={"rows": [{"id": f"o{i}", "name": f"n{i}"}
+                                  for i in range(start, min(start + BATCH, 2_500))]})
+        t0 = time.monotonic()
+        proj._flush_object_folds(folds, recreate)
+        elapsed = time.monotonic() - t0
+        assert elapsed < 60.0, (
+            f"fold sweep took {elapsed:.1f}s for 2.5k folds — an order-of-magnitude "
+            f"regression; consider batching")
+    finally:
+        # `from_uri(DB)` targets the SHARED session graph (see the Lane note) —
+        # leaving 10k :Object nodes behind would poison every later test in the
+        # session, so clean up here and not only at the start.
+        try:
+            proj.g.query("MATCH (o:Object) DETACH DELETE o")
+        finally:
+            proj.close()

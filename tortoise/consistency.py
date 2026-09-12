@@ -114,19 +114,38 @@ def recover_from_log(events_dir: str, projection) -> dict:
         return {"recovered": False, "log_points": 0, "db_points": 0,
                 "reason": "event log empty or unreadable — nothing to recover"}
 
-    # Faithful replay via apply() (preserves context; restore uses the same
-    # path). Per-event guard: one bad event must not abort the whole recovery.
-    applied = 0
-    for ev in events:
-        try:
-            projection.apply(ev)
-            applied += 1
-        except Exception:
-            torn += 1
+    # Faithful replay via the apply-based engine (preserves context; the
+    # backup restore fallback uses the same path). #2977: routing through
+    # apply_replay also defers + folds the Object terminal-status families,
+    # which a bare apply() loop silently skipped.
+    #
+    # TWO replay counters, SEPARATE from each other AND from the parse-time
+    # `torn` above: a per-event apply failure is a tolerated legacy-line skip
+    # (the pre-#2977 contract), a FOLD failure means the durability fix did not
+    # apply, and a torn trailing line is a tolerated crash artifact. Collapsing
+    # them makes the first two look fatal (verified live: a single un-appliable
+    # EventRecorded flipped `recovered` to False and would have made
+    # `_recover_or_raise` refuse to open an embedded DB).
+    applied, replay_apply_torn, replay_fold_torn = projection.apply_replay(events)
     after = _node_count()
-    ok = applied > 0 and after is not None and after > 0
+    # A folded-but-retained (tombstoned) node and an unfolded live node are
+    # indistinguishable by node count alone. Until they are distinguishable, a
+    # non-zero REPLAY tear means the recovery is NOT trustworthy — and this is
+    # the embedding startup auto-recovery lane, where silence resurrects data.
+    # Parse tears stay tolerated (`torn` above).
+    ok = (applied > 0 and after is not None and after > 0
+          and replay_fold_torn == 0)
+    _skipped = torn + replay_apply_torn
     return {"recovered": ok, "log_points": len(events),
             "db_points": after if after is not None else 0,
-            "reason": f"replayed {applied} events from {files[0]}"
-            + (f" ({torn} skipped)" if torn else "") if ok
-            else "replay produced an empty graph"}
+            # The counts are reported on BOTH branches — putting them only in
+            # the ok=True form loses them on exactly the path this change is
+            # ABOUT (fold_torn > 0 → ok False), and so does the RuntimeError
+            # `_recover_or_raise` raises from it.
+            "reason": (f"replayed {applied} events from {files[0]}"
+                       + (f" ({_skipped} skipped)" if _skipped else "")
+                       + (f" ({replay_fold_torn} fold(s) failed)"
+                          if replay_fold_torn else "")) if ok else
+                      (f"replay produced {applied} events from {files[0]} "
+                       f"({_skipped} skipped, {replay_fold_torn} fold(s) "
+                       f"failed) — graph empty or fold failed")}
