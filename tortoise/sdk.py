@@ -2104,6 +2104,10 @@ class TortoiseSDK:
         synced — matching create_point's behavior, a non-list tag value is
         stored as a plain property but gets no edges (and leaves existing
         edges untouched).
+
+        Replay mirror: tortoise/projection/entities.py::_sync_tag_edges.
+        Any change to the MERGE shape, stale-edge removal, or orphan :Tag GC
+        must be mirrored there (or a shared helper extracted).
         """
         if not isinstance(tags, list):
             return

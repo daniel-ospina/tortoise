@@ -120,6 +120,7 @@ class _GuardedGraph:
         return getattr(self._g, name)
 
 from tortoise.config import RELATIVE_PATH_ERROR, SUPPORTED_URI_SCHEMES, LOOPBACK_HOSTS  # noqa: E402, I001
+from tortoise.ids import content_hash  # noqa: E402
 from tortoise.live import _live_only, _terminal_excluded  # noqa: E402
 from tortoise.embedded_lifecycle import (  # noqa: E402
     atexit_fast_close,  # #1371: registers the batch flush
@@ -2709,6 +2710,46 @@ class FalkorProjection(
                 params["embedding"] = None  # wipe stale embedding on failure (#19)
 
         set_clauses = ["n.content = coalesce($c, n.content)"]
+        # #2942: a content edit MUST recompute content_hash in the same write
+        # (mirror the live writer, sdk.update_point's #1904 fix). Every dedup
+        # surface matches on the STORED hash (create_point dedup, ingest,
+        # _content_exists), so replaying PointRevised without re-deriving it
+        # is dangerous — but WHICH lane matters for the defect:
+        #
+        # 1) rebuild_all wipes the graph first, so pre-fix EVERY replayed
+        #    Point (revised or not) carried content_hash NULL. NULL is
+        #    survivable: create_point(dedup=True) falls through to its
+        #    content-equality fallback scan which still dedups. This fix
+        #    turns that NULL into the correct hash for revised Points.
+        #
+        # 2) The incremental apply() lane (production: connectors, backup
+        #    restore, tortoise/api.py, mining.py, sdk.py, consistency.py)
+        #    operates on an ALREADY-LIVE point carrying sha256(old content)
+        #    from the live writer. Pre-fix, replaying PointRevised stored
+        #    the new content but left that STALE hash. The indexed dedup
+        #    `MATCH (n:Point {content_hash:$ch})` then misses, AND the
+        #    fallback scan requires content_hash IS NULL — so a re-ingest
+        #    created a DUPLICATE (verified empirically: 1 -> 2 points).
+        #
+        # Gate matches the content write above: new_content None keeps the
+        # old content (hash untouched); "" is a real edit (hash of "").
+        if new_content is not None:
+            set_clauses.append("n.content_hash = $ch")
+            try:
+                params["ch"] = content_hash(new_content)
+            except Exception:
+                # Malformed/legacy event with a non-string new_content (a
+                # hand-edited or corrupt JSONL line — rebuild is the recovery
+                # path, must not crash on one bad line): NULL the hash instead
+                # of crashing the whole pass. NULL falls through to
+                # create_point's content-equality fallback; a present-but-wrong
+                # stale hash would not.
+                logger.warning(
+                    "PointRevised %s: content_hash failed (%s); hash NULLed",
+                    params.get("id", "?"),
+                    new_content.__class__.__name__,
+                )
+                params["ch"] = None
         # Phase 2 #49: context removed — new_context no longer written
         if "embedding" in params:
             set_clauses.append("n.embedding = $embedding")
