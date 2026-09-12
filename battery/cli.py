@@ -318,15 +318,19 @@ def _cmd_parity(args: argparse.Namespace) -> ExitCode:
     # OR from a gate REFUSAL (``ExecutorUnavailable.capability_gate``) — the
     # refusal is persisted, never a silent absence.
     capability_gates: dict[str, dict] = {}
-    # #2985: the OBSERVED retrieval conditions each executed (or refused) cell
-    # reported, keyed by benchmark — persisted into parity_record.json so a
-    # stored number carries what produced it (the cell `detail` alone is
-    # in-memory only; #2919 tracks the general drop). ``retrieval_legs`` is
-    # the leg union the lane actually observed via the product's leg_trace,
-    # never an availability guess; ``retrieval_degraded`` is the fail-closed
-    # label (True for a refused real lane, or a real lane that observed no
-    # legs).
-    retrieval_conditions: dict[str, dict] = {}
+    # #2919: the ``ExecutedCell.detail`` each executed (or refused) cell
+    # reported, keyed by the pinned benchmark id — persisted into
+    # parity_record.json so a stored number carries what produced it. #3005
+    # opened this channel for the retrieval conditions behind a number
+    # (``retrieval_legs`` = the leg union the lane actually observed via the
+    # product's leg_trace, never an availability guess; ``retrieval_degraded``
+    # = the fail-closed label; ``capability_gate``); #2919 extends the SAME
+    # map to the measured spend and its derivation (``spend_usd`` /
+    # ``cost_basis`` / ``calls`` / ``config``). Without it the cell `detail`
+    # is in-memory only and a recorded run cannot answer "what did this cost,
+    # and was the number provider-reported or estimated" from its own
+    # artifact.
+    cell_details: dict[str, dict] = {}
     for benchmark, version in PINNED_VERSIONS.items():
         try:
             # #2797: an accuracy is supplied ONLY from a released runner's
@@ -350,14 +354,10 @@ def _cmd_parity(args: argparse.Namespace) -> ExitCode:
                             mock=bool(args.mock), limit=args.limit,
                             out_dir=_Path(args.out or _DEFAULT_OUT))
                         detail = getattr(executed, "detail", None) or {}
+                        cell_details[benchmark] = detail
                         gate = detail.get("capability_gate")
                         if gate is not None:
                             capability_gates[benchmark] = gate
-                        retrieval_conditions[benchmark] = {
-                            "retrieval_legs": detail.get("retrieval_legs"),
-                            "retrieval_degraded":
-                                detail.get("retrieval_degraded"),
-                        }
                     except ExecutorUnavailable as e:
                         print(f"{benchmark}: executor unavailable — {e}")
                         # #2985: a capability-gate refusal carries its
@@ -367,7 +367,11 @@ def _cmd_parity(args: argparse.Namespace) -> ExitCode:
                         gate = getattr(e, "capability_gate", None)
                         if gate is not None:
                             capability_gates[benchmark] = gate
-                            retrieval_conditions[benchmark] = {
+                            # A refusal measured nothing: only the observed
+                            # legs and the fail-closed label are recorded. The
+                            # spend keys stay ABSENT (→ null in the record),
+                            # never a 0.0 that would read as a free run.
+                            cell_details[benchmark] = {
                                 "retrieval_legs": list(
                                     gate.get("legs_seen") or []),
                                 "retrieval_degraded": not bool(
@@ -449,10 +453,25 @@ def _cmd_parity(args: argparse.Namespace) -> ExitCode:
                         # number — null for a benchmark with no retrieval lane
                         # (longmemeval) or no run. A refused real lane records
                         # its observed legs + retrieval_degraded=true.
-                        "retrieval_legs": retrieval_conditions.get(
+                        "retrieval_legs": cell_details.get(
                             c.benchmark, {}).get("retrieval_legs"),
-                        "retrieval_degraded": retrieval_conditions.get(
+                        "retrieval_degraded": cell_details.get(
                             c.benchmark, {}).get("retrieval_degraded"),
+                        # #2919: the measured spend behind the number plus how
+                        # it was derived — persisted as the pair the issue
+                        # asks for (a figure is only meaningful with its
+                        # basis: a provider receipt vs a token-basis
+                        # estimate), alongside what produced it. Null (never
+                        # 0.0) when the cell reported no spend — absence is
+                        # not a free run.
+                        "spend_usd": cell_details.get(
+                            c.benchmark, {}).get("spend_usd"),
+                        "cost_basis": cell_details.get(
+                            c.benchmark, {}).get("cost_basis"),
+                        "calls": cell_details.get(
+                            c.benchmark, {}).get("calls"),
+                        "config": cell_details.get(
+                            c.benchmark, {}).get("config"),
                         # Round-4 P2 (consistency): a protocol-UNKNOWN
                         # record must NEVER carry methodology_matched=True —
                         # the two persisted fields would contradict (an
