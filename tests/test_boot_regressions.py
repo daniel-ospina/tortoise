@@ -600,3 +600,83 @@ def test_ruff_config_does_not_ignore_f823():
     assert "F823" not in lint.get("ignore", []), "pyproject.toml globally ignores F823"
     for pattern, rules in lint.get("per-file-ignores", {}).items():
         assert "F823" not in rules, f"pyproject.toml per-file-ignores[{pattern!r}] ignores F823"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# #2953 round-3 review — boot ordering / lifespan task disarm
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_boot_sweeps_are_scheduled_before_the_retention_interval_parse():
+    """Round-3 review P2: a malformed ``TORTOISE_EVENT_RETENTION_INTERVAL``
+    must not cancel the one-time boot sweeps.
+
+    The ``_boot_sweep_task`` creation used to sit inside the SAME ``try`` as the
+    ``int(os.environ.get(...))`` parse, so ``...=oops`` raised ``ValueError``
+    and dropped the boot sweeps too (retention purge + deleted-team purge) for
+    the process's lifetime. On origin/main the sweeps ran regardless (they were
+    awaited before the parse). Pin the ordering statically — this file needs no
+    app import, DB, or network.
+    """
+    lifespan = _lifespan_fn()
+    boot_line: int | None = None
+    parse_line: int | None = None
+    for node in ast.walk(lifespan):
+        if (
+            isinstance(node, ast.Assign)
+            and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Attribute)
+            and node.targets[0].attr == "_boot_sweep_task"
+        ):
+            boot_line = node.lineno
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "int"
+            and "TORTOISE_EVENT_RETENTION_INTERVAL" in ast.unparse(node)
+        ):
+            parse_line = node.lineno
+    assert boot_line is not None, "no _boot_sweep_task assignment found in _lifespan"
+    assert parse_line is not None, (
+        "no TORTOISE_EVENT_RETENTION_INTERVAL parse found in _lifespan"
+    )
+    assert boot_line < parse_line, (
+        f"_boot_sweep_task is assigned at line {boot_line}, AFTER the retention "
+        f"interval parse at line {parse_line} — a bad interval would cancel it"
+    )
+
+
+def test_liveness_start_and_stop_share_one_task_attribute_tuple():
+    """Round-3 review P2: ``_start_liveness`` (re-entry disarm) and
+    ``_stop_liveness`` (shutdown) must disarm the SAME task set.
+
+    The two literals used to differ — start knew only the heartbeat and probe
+    tasks while stop also knew the boot-sweep and event-retention tasks — so a
+    failed prior lifespan could orphan the latter two (double boot sweeps,
+    "Task exception was never retrieved" at teardown). They must both read the
+    one shared ``_LIVENESS_TASK_ATTRS`` tuple, with no hardcoded attr names.
+    """
+    tree = ast.parse(
+        (TORTOISE_PKG / "hosted_api.py").read_text(), filename="hosted_api.py"
+    )
+    fns = {
+        node.name: node
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name in ("_start_liveness", "_stop_liveness")
+    }
+    assert set(fns) == {"_start_liveness", "_stop_liveness"}, sorted(fns)
+    for name, fn in fns.items():
+        assert any(
+            isinstance(node, ast.Name) and node.id == "_LIVENESS_TASK_ATTRS"
+            for node in ast.walk(fn)
+        ), f"{name} does not read the shared _LIVENESS_TASK_ATTRS tuple"
+        literals = {
+            node.value
+            for node in ast.walk(fn)
+            if isinstance(node, ast.Constant)
+            and isinstance(node.value, str)
+            and node.value.startswith("_")
+            and node.value.endswith("_task")
+        }
+        assert not literals, f"{name} still hardcodes task attributes {literals}"
