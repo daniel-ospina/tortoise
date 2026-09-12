@@ -229,6 +229,8 @@ _ROUTED_FROM_URI_SITES: dict[str, list[str]] = {
     "test_pipeline_cli.py": [r"from_uri\("],
     # invalid-scheme raise tests (raise BEFORE any connection)
     "test_projection.py": [r"from_uri\(\"postgresql://", r"from_uri\(\"localhost:6379"],
+    # __init__-stubbed parse asserts (fake_init captures kwargs, never connects)
+    "test_sdk_props_coercion.py": [r'from_uri\(\s*"rediss://', r'from_uri\(\s*"docker://'],
     # raw-client migration test — per-test tortoise_test_r2_migrate_<uuid> path
     "test_search_engine.py": [
         # module availability probe (env pre-set to a test-prefixed URI)

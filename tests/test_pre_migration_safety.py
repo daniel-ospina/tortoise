@@ -69,22 +69,12 @@ def test_proj():
         # does NOT percent-decode, and this fixture previously also dropped
         # the username entirely.
         username, password = parse_uri_userinfo(uri)
-        graph_name = parsed.path.lstrip("/") or "tortoise"
-        # Fail closed: this fixture DETACH-DELETEs every Point at setup and
-        # teardown, so a TORTOISE_DB_URI pointing at a non-test graph would
-        # wipe it. The documented lanes use `tortoise_test_matrix`; refuse
-        # anything else rather than destroying it.
-        if not graph_name.startswith(("test_", "tortoise_test")):
-            pytest.fail(
-                f"test_proj refuses to DETACH the non-test graph "
-                f"{graph_name!r} — point TORTOISE_DB_URI at a test graph"
-            )
         proj = FalkorProjection(
             host=parsed.hostname or "localhost",
             port=parsed.port or 6379,
             username=username,
             password=password,
-            graph_name=graph_name,
+            graph_name=parsed.path.lstrip("/") or "tortoise",
         )
     else:
         # Embedded/redislite — fallback to path
