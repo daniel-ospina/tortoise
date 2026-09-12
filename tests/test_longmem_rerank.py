@@ -14,11 +14,9 @@ from __future__ import annotations
 import json
 import math
 import os
-import re
 import sys
 import threading
 import time
-import zlib
 from collections import Counter
 from pathlib import Path
 
@@ -40,24 +38,6 @@ from tools.longmem_eval.run import (  # noqa: E402, RUF100
 )
 
 MINI = Path(__file__).parent / "fixtures" / "longmemeval_mini.json"
-
-# ── #3280: deterministic VECTOR-leg embedding ─────────────────────────────
-# Token-overlap hashing (crc32 -> fixed dim, L2-normalised). Stable across
-# processes, no model download — the same shape as
-# ``tests/longmem_eval/test_vector_arm.py::_fake_vec``.
-_TOKEN_RE = re.compile(r"[a-z0-9]+")
-_FAKE_DIM = 256
-
-
-def _fake_vec(text: str) -> list[float]:
-    dims: dict[str, float] = {}
-    for tok in _TOKEN_RE.findall((text or "").lower()):
-        dims[tok] = dims.get(tok, 0.0) + 1.0
-    vec = [0.0] * _FAKE_DIM
-    for tok, c in dims.items():
-        vec[zlib.crc32(tok.encode("utf-8")) % _FAKE_DIM] += c
-    norm = math.sqrt(sum(v * v for v in vec)) or 1.0
-    return [v / norm for v in vec]
 
 
 def _mini() -> list[dict]:
@@ -103,32 +83,6 @@ def _inject_fake(monkeypatch, scorer=None):
     fake = scorer if scorer is not None else rerank.FakeScorer()
     monkeypatch.setattr(rerank, "get_scorer", lambda model=None: (fake, ""))
 
-
-class _FakeEmbedder:
-    """Deterministic token-overlap embedder for the VECTOR leg (#3280).
-
-    The module's autouse fixture pins ``EmbeddingModel.get -> None`` (sparse
-    TF-IDF) because the pool-SIZE pins are calibrated on that baseline. But a
-    sparse pool for ``longmemeval_mini`` q0 is 4 chunks from a SINGLE session
-    (``mini-s1``), which cannot exercise a per-session reorder. This injects a
-    deterministic multi-session-capable embedder through the same
-    ``EmbeddingModel.get`` seam the pin uses — no model download, no ~57s load
-    (Gate 7), and stable across processes.
-    """
-
-    def encode(self, texts, batch_size=32, **kwargs):
-        import numpy as np
-
-        return np.array([_fake_vec(t) for t in texts], dtype=np.float32)
-
-
-def _inject_fake_embedder(monkeypatch):
-    """Deterministic embedding path — makes the vector leg live and the
-    retrieved pool span >1 session, so a per-session cap can actually bind."""
-    from tortoise.embeddings import EmbeddingModel
-
-    monkeypatch.setattr(EmbeddingModel, "get", classmethod(
-        lambda cls, load_timeout=None: _FakeEmbedder()))
 
 
 def _trusted_audit() -> dict:
@@ -613,33 +567,41 @@ def test_retrieve_rerank_leg_mix_partition(tmp_path, monkeypatch):
         sdk.close()
 
 
-def test_retrieve_rerank_flags_stamped(tmp_path, monkeypatch):
+def test_retrieve_rerank_flags_stamped(tmp_path, monkeypatch, fake_token_embedder):
     """reranked/mmr_promoted overlay flags land on selected hits (D6) — an
     overlay metric, never a leg bucket.
 
     #3280: this test previously asserted ``any(flags)`` on the module's default
-    SPARSE pool, where the assertion was **vacuous**. ``rerank.py`` sets
-    ``reranked`` only when MMR returns a NON-IDENTITY permutation, so
-    ``any(flags)`` means "the retrieval input order was not already
-    MMR-optimal". Sparse q0 is 4 chunks from a single session (``mini-s1``);
-    ``per_session_cap=2`` therefore selects the identity prefix ``[0, 1]``,
-    ``moved`` is legitimately 0, and ANY flag assertion holds trivially —
-    mutation-verified: deleting the ``h["reranked"] = True`` line still passed.
+    SPARSE pool, and went genuinely RED — NOT vacuously green.
+    ``rerank.py`` sets ``reranked`` only when MMR returns a NON-IDENTITY
+    permutation, so ``any(flags)`` means "the retrieval input order was not
+    already MMR-optimal". Sparse q0 selects 2 hits from a SINGLE session
+    (``mini-s1``); ``per_session_cap=2`` therefore cannot bind, ``moved`` is
+    legitimately 0, every flag is False, and the assertion fails with
+    ``assert False = any([False, False])``. (The COMPANION assertion
+    ``moved == sum(flags)`` was the vacuous one — ``0 == 0``.) The real defect
+    was that the assertion depended on the POOL SHAPE, not on the overlay's
+    contract.
 
     It had passed historically only because the RRF tie-break was then
     thread-COMPLETION order, which shuffled the input often enough that MMR
     sometimes reordered. ``b0093cede`` (#2952) fixed that real nondeterminism
-    and pinned the order — exposing that the test never actually exercised a
-    move. The product got more correct; the test is what must change.
+    and pinned the order — exposing that the test never exercised a move on
+    this corpus. The product got more correct; the test is what must change.
 
     So this now injects a deterministic fake embedder to make the vector leg
-    live, which gives the multi-session pool the assertion needs. The
-    precondition below is asserted explicitly so that if the leg mix (or the
-    autouse sparse pin) ever changes again, this fails LOUDLY instead of
-    silently reverting to a vacuous pass.
+    live, giving the multi-session pool the assertion needs. The precondition
+    below is asserted explicitly so that if the leg mix (or the autouse sparse
+    pin) changes again, this fails LOUDLY on the SETUP rather than silently
+    reverting to a shape-dependent result.
+
+    Mutation-verified NON-VACUOUS **on the fixed version**: deleting either
+    ``h["reranked"] = True`` or ``moved += 1`` in ``rerank.py`` makes this
+    test FAIL. This is what the first attempt at this fix lacked — that
+    attempt dropped ``any(flags)`` in favour of a shape-independent invariant
+    and passed Mutation A, i.e. it would have shipped vacuous.
     """
     _inject_fake(monkeypatch)
-    _inject_fake_embedder(monkeypatch)
     sdk = _fresh_sdk(tmp_path)
     q = _mini()[0]
     try:
@@ -650,13 +612,18 @@ def test_retrieve_rerank_flags_stamped(tmp_path, monkeypatch):
         assert ret["rerank_pass"]["applied"] is True
         flags = [h.get("reranked", False) for h in ret["hits"]]
         moved = ret["rerank_pass"]["moved"]
-        # PRECONDITION: the pool must span >1 session, or the cap cannot bind
-        # and "the mechanism moved something" is unassertable. This is the
-        # guard that keeps the assertion below from going vacuous.
-        sessions = {h.get("session_id") for h in ret["hits"]}
+        # PRECONDITION: the pool must span >1 REAL session, or the cap cannot
+        # bind and "the mechanism moved something" is unassertable. This is
+        # the guard that keeps the assertion below shape-dependent-safe.
+        # Falsy session ids are excluded: a hit with no session_id would
+        # otherwise contribute None/"" as a distinct set member and satisfy
+        # the guard with only ONE real session — the exact condition it
+        # exists to reject. rerank.py's own accounting treats those as
+        # uncapped singletons ("" groups), so match it.
+        sessions = {h["session_id"] for h in ret["hits"] if h.get("session_id")}
         assert len(sessions) > 1, (
             "#3280: expectation pool is single-session — per_session_cap "
-            f"cannot bind, so the reorder assertion is vacuous (got {sessions})")
+            f"cannot bind, so the reorder assertion is meaningless (got {sessions})")
         assert any(flags)                     # the mechanism moved something
         assert moved == sum(1 for f in flags if f)   # flag/moved agree
         # the overlay REORDERS the selected pool, it never drops below it

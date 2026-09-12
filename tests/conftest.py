@@ -897,3 +897,61 @@ def force_sparse_tfidf(monkeypatch):
     monkeypatch.setattr(EmbeddingModel, "get", classmethod(
         lambda cls, load_timeout=None: None))
     return None
+
+
+# ── #3280: the deterministic VECTOR-leg baseline (the mirror of the above) ──
+# Where ``force_sparse_tfidf`` pins the embedder OFF, these provide the
+# deterministic embedder ON — needed by any test whose pool must span more
+# than one session (a per-session cap cannot bind on a single-session pool).
+# One shared copy on purpose: this is a process-stable hash whose GEOMETRY is
+# depended on by pool-shape expectations in more than one module, so two
+# copies that drift would silently change each other's embedding space.
+_FAKE_DIM = 32
+_FAKE_TOKEN_RE = _re.compile(r"[a-z0-9']+")
+
+
+def fake_token_vec(text: str) -> list[float]:
+    """Deterministic token-overlap embedding (stable across processes).
+
+    ``zlib.crc32`` rather than the builtin ``hash()``, which is salted by
+    ``PYTHONHASHSEED`` and would make pool shape run-dependent.
+    """
+    import math
+    import zlib
+
+    dims: dict[str, float] = {}
+    for tok in _FAKE_TOKEN_RE.findall((text or "").lower()):
+        dims[tok] = dims.get(tok, 0.0) + 1.0
+    vec = [0.0] * _FAKE_DIM
+    for tok, c in dims.items():
+        vec[zlib.crc32(tok.encode("utf-8")) % _FAKE_DIM] += c
+    norm = math.sqrt(sum(v * v for v in vec)) or 1.0
+    return [v / norm for v in vec]
+
+
+class FakeTokenEmbedder:
+    """Stand-in for the ``EmbeddingModel`` singleton, injecting ``fake_token_vec``.
+
+    Imports numpy lazily so this module stays importable without the optional
+    extra, exactly like the production path it substitutes for.
+    """
+
+    def encode(self, texts, batch_size=32, **kwargs):
+        import numpy as np
+
+        return np.array([fake_token_vec(t) for t in texts], dtype=np.float32)
+
+
+@pytest.fixture
+def fake_token_embedder(monkeypatch):
+    """#3280: deterministic embedding path via the SAME ``EmbeddingModel.get``
+    seam ``force_sparse_tfidf`` patches — so a test that requests both gets
+    the one applied last (its own), and the vector leg goes live.
+
+    No model download, no ~57s bge cold load: stays inside Gate 7.
+    """
+    from tortoise.embeddings import EmbeddingModel
+
+    monkeypatch.setattr(EmbeddingModel, "get", classmethod(
+        lambda cls, load_timeout=None: FakeTokenEmbedder()))
+    return FakeTokenEmbedder()
