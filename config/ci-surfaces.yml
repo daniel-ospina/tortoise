@@ -560,6 +560,7 @@ surfaces:
   - test_ep_selector.py
   - test_pointsuperseded_rebuild.py
   - test_pointinvalidated_rebuild.py
+  - test_provenance_extractedfrom_3263.py  # #3263: extractedFrom inferred from the write context + live==rebuild parity (docker-lane)
   - test_weights_mitigation.py
   - test_ep_sources.py
   - test_2199_decide_calibration.py
@@ -709,6 +710,7 @@ surfaces:
   - test_eval_extraction_health.py
   - test_labeled_pairs_schema.py
   - test_lme_ingest_v2_supersession.py
+  - test_provenance_extractedfrom_3263.py  # #3263: pins tools/longmem_eval/ingest_v2._write_payload provenance (dual-registered with ep; #2938 precedent)
   - test_load_test.py
   - test_pair_label_runner.py
 tier1:
