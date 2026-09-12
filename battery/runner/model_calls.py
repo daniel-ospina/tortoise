@@ -230,6 +230,31 @@ class OutcomeRecordingCaller:
     def temperature(self) -> float:
         return getattr(self._caller, "temperature", 0.0)
 
+    # ── usage / meter surface (#2919) ──────────────────────────────────
+    # A wrapper is only a valid wrapper if it is transparent to the meter:
+    # ``UsageRecordingCaller`` and the probe HARD STOP read these after each
+    # call. Without the proxy, wrapping a caller silently zeroes the token
+    # counts (the codebase reads them via ``getattr(..., 0)``), so every
+    # spend estimate drops to 0.0 — a fabricated free run.
+
+    @property
+    def last_prompt_tokens(self) -> int:
+        return int(getattr(self._caller, "last_prompt_tokens", 0) or 0)
+
+    @property
+    def last_completion_tokens(self) -> int:
+        return int(getattr(self._caller, "last_completion_tokens", 0) or 0)
+
+    @property
+    def last_cost_usd(self) -> float | None:
+        """The inner caller's provider-reported charge for the last call, or
+        ``None`` when it reports none. Never coerced to 0.0 (#2906): an
+        absent charge means "fall back to the declared token basis", while
+        0.0 is an authoritative free call — conflating them re-prices a real
+        free call from a basis known to be wrong."""
+        cost = getattr(self._caller, "last_cost_usd", None)
+        return None if cost is None else float(cost)
+
     def call(self, *, prompt: str) -> str:
         """Run one model call with the retry table; record the terminal
         outcome. Returns the (possibly cached) response text."""

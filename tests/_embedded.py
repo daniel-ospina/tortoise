@@ -456,6 +456,42 @@ def _projection_host(proj) -> str | None:
     return host
 
 
+def _live_peer_session_graphs() -> set[str]:
+    """Graph names journaled by a LIVE session OTHER than this process.
+
+    #3074: test graphs are server-GLOBAL names (the redirect derives
+    ``test_<stem>_<hash>`` on one shared Docker FalkorDB), and every
+    migrated test graph is ``test_``-prefixed — so a prefix-wide sweep is
+    indistinguishable from a cross-session wipe. A ``scope=None``
+    (server-global) sweep used to DETACH-DELETE every live peer's graphs,
+    which surfaces as a random test losing the nodes it wrote moments
+    earlier (``test_falkor_apply_points_merged``: ``count(a)==0``).
+    ``tests/test_wipe_server.py`` calls ``wipe_server(proj)`` (scope=None)
+    directly, so any concurrently running session's graphs were fair game.
+
+    Ownership is the session journal (the single source of truth for
+    graphs a session minted, cycle-8 P1-2) keyed by the LIVE session
+    nonces from ``active_suite_markers()``. THIS process's own nonce is
+    skipped: a session may always sweep its own graphs. Embedded
+    (redislite) markers carry a random uuid nonce with no journal — they
+    contribute nothing, which is correct (an embedded DB is not on the
+    server).
+    """
+    from tortoise.embedded_reaper import ACTIVE_SUITES_DIR, active_suite_markers
+    ours = os.environ.get("TORTOISE_TEST_SESSION", "")
+    owned: set[str] = set()
+    for marker in active_suite_markers():
+        token = marker.get("token") or ""
+        if "-" not in token:
+            continue
+        nonce = token.split("-", 1)[1]
+        if not nonce or nonce == ours:
+            continue  # our own session — its graphs are ours to sweep
+        owned.update(_read_journal_file(
+            os.path.join(ACTIVE_SUITES_DIR, f"{nonce}.graphs.jsonl")))
+    return owned
+
+
 def wipe_server(proj, scope: set[str] | None = None, drop: bool = False) -> None:
     """Server-mode hermeticity wipe (epic #1647, D-4).
 
@@ -467,7 +503,10 @@ def wipe_server(proj, scope: set[str] | None = None, drop: bool = False) -> None
     scope (the session's created set, cycle-3 P1-7): when given, ONLY names
     in the scope are considered — a per-test wipe never blind-wipes another
     concurrent session's live graphs. scope=None is the server-global sweep,
-    reserved for the session-end/last-suite-standing sweep ONLY.
+    reserved for the session-end/last-suite-standing sweep ONLY — and since
+    #3074 it also SPARES every graph journaled by a LIVE PEER session
+    (``_live_peer_session_graphs``), so no caller can destroy a concurrently
+    running session's graphs by accident.
 
     drop=True (cycle-4 P1-9): after DETACH, GRAPH.DELETE the wiped names via
     graph.delete() so server GRAPH.LIST stays bounded (E2E-7). Per-test
@@ -482,6 +521,10 @@ def wipe_server(proj, scope: set[str] | None = None, drop: bool = False) -> None
         raise RuntimeError(
             f"wipe_server() refuses non-loopback host {host!r} — test wipes "
             f"are local-only (decision D-4)")
+    # #3074: the scope=None sweep is the ONLY path that names no graphs up
+    # front, so it is the ONLY one that can land on a live peer's graph.
+    # An explicit scope is journal-derived (the caller's own session).
+    protected = _live_peer_session_graphs() if scope is None else set()
     failures: list[tuple[str, Exception]] = []
     dropped: list[str] = []
     default_graph = _uri_default_graph_name()
@@ -497,6 +540,8 @@ def wipe_server(proj, scope: set[str] | None = None, drop: bool = False) -> None
             continue
         if not g.startswith(("test_", "tortoise_test")):
             continue  # fail-closed: never wipe a non-test graph
+        if g in protected:
+            continue  # #3074: a live PEER session still owns this graph
         try:
             proj.db.select_graph(g).query("MATCH (n) DETACH DELETE n")
         except Exception as e:  # P2-7: collect + re-raise, never pass silently

@@ -137,6 +137,64 @@ def test_wipe_server_clears_only_test_prefixed(server_proj):
                 pass
 
 
+def test_wipe_server_global_scope_spares_live_peer_graphs(monkeypatch, tmp_path):
+    """#3074: a scope=None (server-global) sweep must never DETACH a graph
+    journaled by a LIVE PEER session.
+
+    Regression: migrated test graphs are server-GLOBAL ``test_*`` names on
+    one shared Docker FalkorDB, so ``wipe_server(proj)`` (scope=None) used
+    to DETACH every ``test_``-prefixed graph on the server — including a
+    concurrently running session's. That surfaced as a random test losing
+    the nodes it had written moments earlier, e.g.
+    ``tests/test_projection.py::test_falkor_apply_points_merged`` failing at
+    ``assert count(n:Point {id:'a'}) == 1`` with ``0 == 1`` (both ``a`` and
+    ``b`` gone). ``tests/test_wipe_server.py`` calls ``wipe_server(proj)``
+    (scope=None) itself, so an unlucky interleaving was reproducible while
+    running this file next to any other session.
+
+    Ownership is the session journal (the single source of truth for the
+    graphs a session minted) keyed by live-session nonces: a live peer's
+    graphs survive, unowned/orphan graphs are still swept.
+    """
+    peer_nonce = "abcdef123456"
+    (tmp_path / f"{peer_nonce}.graphs.jsonl").write_text(
+        "test_peer_live_graph\ntest_peer_live_graph_2\n")
+    monkeypatch.setenv("TORTOISE_TEST_SESSION", "000000000000")
+    monkeypatch.setattr(
+        "tortoise.embedded_reaper.ACTIVE_SUITES_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        "tortoise.embedded_reaper.active_suite_markers",
+        lambda: [{"token": f"{os.getpid()}-{peer_nonce}",
+                  "pid": os.getpid(), "start": None}])
+    db = _FakeDb()
+    db.graphs = ["test_peer_live_graph", "test_peer_live_graph_2",
+                 "test_orphan_graph"]
+    wipe_server(_FakeProj(db), scope=None)
+    assert db.detached == ["test_orphan_graph"], (
+        "a live peer session's journaled graphs must survive a scope=None "
+        f"sweep; detached={db.detached}")
+
+
+def test_wipe_server_global_scope_sweeps_own_session_graphs(monkeypatch,
+                                                            tmp_path):
+    """#3074 companion: the protection is PEER-only — a session may still
+    sweep its OWN journaled graphs with scope=None (the last-suite-standing
+    leftover sweep and this file's own wipe_server calls depend on that)."""
+    our_nonce = "000000000000"
+    monkeypatch.setenv("TORTOISE_TEST_SESSION", our_nonce)
+    (tmp_path / f"{our_nonce}.graphs.jsonl").write_text("test_own_graph\n")
+    monkeypatch.setattr(
+        "tortoise.embedded_reaper.ACTIVE_SUITES_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        "tortoise.embedded_reaper.active_suite_markers",
+        lambda: [{"token": f"{os.getpid()}-{our_nonce}",
+                  "pid": os.getpid(), "start": None}])
+    db = _FakeDb()
+    db.graphs = ["test_own_graph"]
+    wipe_server(_FakeProj(db), scope=None)
+    assert db.detached == ["test_own_graph"], db.detached
+
+
 def test_wipe_server_localhost_acceptance(uri_env):
     # Cycle-3 P0-1 (RED-FIRST): from_uri with a LOOPBACK host must WIPE, not
     # raise. Host extraction reads the host RECORDED ON THE PROJECTION
