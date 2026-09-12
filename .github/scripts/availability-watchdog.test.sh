@@ -58,6 +58,15 @@
 #    65. a >300-char token never leaks as a PREFIX (redact BEFORE truncate, P2)
 #    66. a Fly-SHAPED token of unknown value is redacted too (P2)
 #   44b/c/d. a corrupt `restarts=` ledger fails closed (P2 — refused, not dropped)
+#    Round 2 (each FAILS on the round-1 code):
+#    67/67b. a WRAPPED `FlyV1 <macaroon>` token (split by \n, \r\n and a space)
+#           is redacted — scrub_output() must REFLOW first, THEN redact (P1)
+#    68. a URI whose userinfo contains a '/' never leaks the password through
+#        the published host label, and the same guard covers redact_url() (P2)
+#    69. the restart budget survives an incident close/reopen (flapping) (P2)
+#    70. an unreadable previous ledger fails CLOSED (no restart) (P2)
+#    71/72. DNS and TLS/certificate failures do NOT restart (P2)
+#    73/74/75. transport failures / 5xx still do (the contrast cases)
 #
 # Fixtures are simulated; the real watchdog is the script under test.
 
@@ -151,8 +160,14 @@ idx=$((n - 1)); [ "$idx" -ge "${#codes[@]}" ] && idx=$(( ${#codes[@]} - 1 ))
 code="${codes[$idx]}"
 echo "CURL probe #${n} code=${code} url=${url}" >> "$STUB_TMP/calls.log"
 [ -n "$out_file" ] && printf '%s' "${STUB_PROBE_BODY:-}" > "$out_file"
+# A real curl emits the -w output even when the transfer FAILED (http_code is
+# then 000) and exits non-zero with the reason on stderr. STUB_PROBE_RC /
+# STUB_PROBE_STDERR reproduce that so the harness can drive classify_failure().
+if [ -n "${STUB_PROBE_RC:-}" ] && [ "${STUB_PROBE_RC:-0}" != "0" ]; then
+  echo "curl: (${STUB_PROBE_RC}) ${STUB_PROBE_STDERR:-connection failed}" >&2
+fi
 if [ -n "$write_fmt" ]; then printf '%s %s' "$code" "${STUB_PROBE_TIME:-0.42}"; fi
-exit 0
+exit "${STUB_PROBE_RC:-0}"
 CURL_EOF
 
 # ── stub: gh ────────────────────────────────────────────────────────────────
@@ -183,15 +198,26 @@ case "$path" in
     [ "${STUB_SEARCH_FAIL:-0}" = "1" ] && { echo "gh: search failed" >&2; exit 1; }
     # The full query is logged so a test can prove WHICH dedupe key was used.
     echo "GH-Q $path" >> "$STUB_TMP/calls.log"
+    # TWO distinct searches hit this endpoint: the OPEN-incident dedupe
+    # (is:open) and the cross-incident LEDGER lookup (no is:open — it must see
+    # CLOSED incidents too). They need separate fixtures: a test has to be able
+    # to say "no open incident" AND "a closed machine issue still has ledger".
+    json="${STUB_SEARCH_JSON:-$DEFAULT_ITEMS_JSON}"
+    marker="${STUB_SEARCH_MARKER:-}"
+    case "$path" in
+      *is%3Aopen*) : ;;
+      *) json="${STUB_LEDGER_SEARCH_JSON-$json}"
+         marker="${STUB_LEDGER_SEARCH_MARKER-$marker}" ;;
+    esac
     # Marker-aware: only the seeded KIND answers, exactly as production search
     # would (an encoded marker match). Unset → always answer.
-    if [ -n "${STUB_SEARCH_MARKER:-}" ]; then
+    if [ -n "$marker" ]; then
       case "$path" in
-        *"$STUB_SEARCH_MARKER"*) printf '%s' "${STUB_SEARCH_JSON:-$DEFAULT_ITEMS_JSON}" ;;
+        *"$marker"*) printf '%s' "$json" ;;
         *) printf '%s' "$DEFAULT_ITEMS_JSON" ;;
       esac
     else
-      printf '%s' "${STUB_SEARCH_JSON:-$DEFAULT_ITEMS_JSON}"
+      printf '%s' "$json"
     fi ;;
   */comments)
     echo "GH-COMMENT" >> "$STUB_TMP/calls.log"
@@ -246,6 +272,18 @@ case "${1:-} ${2:-}" in
                       # A Fly-shaped macaroon the caller does NOT hold the value
                       # of: only SHAPE redaction can catch it.
                       echo "Error: unauthorized: token FlyV1 fm2_lJAbCdEf$(printf 'x%.0s' {1..400}) rejected" >&2
+                    elif [ "${STUB_FLY_SPLIT:-0}" = "1" ]; then
+                      # A WRAPPED credential. A real Fly token is
+                      # `FlyV1 <macaroon>` — a SPACE-bearing value — and a
+                      # captured log wraps it at that space. Emit the SAME
+                      # credential three ways (newline, CRLF, plain space at the
+                      # wrap point): only the reflow-then-redact order catches
+                      # the first two, and the third is the control.
+                      half_a="${FLY_API_TOKEN%% *}"; half_b="${FLY_API_TOKEN#* }"
+                      printf 'Error: unauthorized: token %s\n%s rejected\n' "$half_a" "$half_b" >&2
+                      printf 'Error: unauthorized: token %s\r\n%s rejected\r\n' "$half_a" "$half_b" >&2
+                      printf 'Error: unauthorized: token %s %s rejected\n' "$half_a" "$half_b" >&2
+                      exit 1
                     elif [ "${STUB_FLY_LEAK:-0}" = "1" ]; then
                       echo "Error: unauthorized: token ${FLY_API_TOKEN:-leaked} rejected" >&2
                     else
@@ -282,8 +320,10 @@ reset_case() {
         "$STUB_TMP/comments.log" "$STUB_TMP/issue.json"
   unset STUB_PROBE_CODES STUB_PROBE_BODY STUB_PROBE_TIME STUB_SEARCH_JSON \
         STUB_SEARCH_FAIL STUB_SEARCH_MARKER STUB_CREATE_FAIL STUB_NEW_ISSUE \
+        STUB_LEDGER_SEARCH_JSON STUB_LEDGER_SEARCH_MARKER \
+        STUB_PROBE_RC STUB_PROBE_STDERR \
         STUB_FLY_MACHINES STUB_FLY_LIST_FAIL STUB_FLY_RESTART_FAIL STUB_FLY_LEAK \
-        STUB_FLY_LEAK_SHAPE STUB_ISSUE_CREATED_AT \
+        STUB_FLY_LEAK_SHAPE STUB_FLY_SPLIT STUB_ISSUE_CREATED_AT \
         STUB_TELEGRAM_FAIL STUB_COMMENT_FAIL STUB_GET_BODY_FAIL \
         STUB_CONTROL_CODES \
         PROBE_URL FLY_API_TOKEN TELEGRAM_BOT_TOKEN \
@@ -331,6 +371,22 @@ run_watchdog_no_flyctl() { # -> RC, OUT, OUT_STDOUT (PATH without flyctl)
 }
 
 first_chars_stub() { printf '%s' "$1" | head -c 200 || true; }
+
+# Unit-call probe_host_label() straight from the script. WATCHDOG_LIB_ONLY=1 is
+# the script's own seam (it skips main), so a pure parser can be tested without
+# dragging the whole state machine through a probe.
+probe_label() { # <url>
+  WATCHDOG_LIB_ONLY=1 bash -c 'source "$0"; probe_host_label "$1"' "$WATCHDOG" "$1"
+}
+
+# Unit-call scrub_output() so its REDACTION CONTRACT can be asserted directly.
+# Deliberately NOT end-to-end only: every publication helper applies redact_text
+# a SECOND time, which masks an order bug for a token whose value we hold, while
+# a captured log line goes to the PUBLIC Actions log through warn/fail with NO
+# second pass at all.
+scrub_unit() { # <text> <max>
+  WATCHDOG_LIB_ONLY=1 bash -c 'source "$0"; scrub_output "$1" "$2"' "$WATCHDOG" "$1" "$2"
+}
 
 # seed an existing open incident in the stub's issue store.
 seed_issue() { # <kind> <first_failure_ts> <down_runs> <last_comment_ts> <restarts> [number] [last_down_ts]
@@ -1101,7 +1157,10 @@ assert_contains "$(patched_body)" "cap_notified_ts=$NOW" "a future cap stamp →
 reset_case
 export STUB_PROBE_CODES="000"
 run_watchdog
-assert_eq "$(count_calls 'GH-Q.*author%3Aapp%2Fgithub-actions')" "1" "the dedupe search carries the author:app/github-actions constraint"
+assert_eq "$(count_calls 'GH-Q.*is%3Aopen.*author%3Aapp%2Fgithub-actions')" "1" "the dedupe search carries the author:app/github-actions constraint"
+# The cross-incident ledger lookup (Fix 4) must carry it too — it reads a body
+# and seeds machine state from it, so it is the same hijack surface.
+assert_eq "$(count_calls 'GH-Q.*author%3Aapp%2Fgithub-actions')" "2" "both searches (open dedupe + cross-incident ledger) carry the constraint"
 
 # ── 61: a forged HUMAN-authored look-alike incident is never adopted (P1) ──
 # Anyone can open an issue with the watchdog's title and a forged state block:
@@ -1163,9 +1222,11 @@ run_watchdog
 assert_eq "$(count_calls 'FLYCTL machine restart')" "0" "an omitted last_down_ts → UNKNOWN → stale reset → NO restart"
 assert_contains "$OUT" "stale incident" "an omitted last_down_ts → the stale clock is logged"
 
-# ── 65: a LONG token must not leak as a PREFIX (redact BEFORE truncate) ──
-# The old order truncated captured flyctl output to 200 chars FIRST, splitting
-# a >300-char token so the literal-value match no longer matched the survivor.
+# ── 65: a LONG token must not leak as a PREFIX (reflow → redact → truncate) ──
+# The round-1 order truncated captured flyctl output to 200 chars FIRST,
+# splitting a >300-char token so the literal-value match no longer matched the
+# survivor. (The order is now reflow → redact → truncate; see tests 67/67b for
+# the WRAPPING half of that bug.)
 reset_case
 seed_issue down "$((NOW - 1200))" 3 0 ""
 LONG_TOKEN="fly-live-$(printf 'a%.0s' {1..400})"
@@ -1192,6 +1253,153 @@ assert_not_contains "$(comments_all)" "fm2_lJ" "a Fly-shaped token (unknown valu
 assert_not_contains "$OUT" "fm2_lJ" "a Fly-shaped token → shape-redacted from the log"
 assert_not_contains "$(patched_body)" "fm2_lJ" "a Fly-shaped token → shape-redacted from the body"
 assert_contains "$(comments_all)" "<redacted>" "a Fly-shaped token → redaction marker present"
+
+# ── 67: a WRAPPED credential must be redacted (reflow BEFORE redact) ──────────
+# Round 1 kept the order REDACT → reflow. A real Fly token is
+# `FlyV1 <macaroon>` — a SPACE-bearing value — and a captured log wraps it at
+# that space, so the literal-value match failed on the newline and the reflow
+# that followed RE-JOINED the fragments into a complete, readable credential.
+# Asserted on the token's DISTINCTIVE substring, not on its length.
+SPLIT_TAIL="fm2_REFLOW_DISTINCTIVE_$(printf 'q%.0s' {1..30})"
+NL_TEXT="$(printf 'Error: token FlyV1\n%s rejected' "$SPLIT_TAIL")"
+CRLF_TEXT="$(printf 'Error: token FlyV1\r\n%s rejected' "$SPLIT_TAIL")"
+SP_TEXT="$(printf 'Error: token FlyV1 %s rejected' "$SPLIT_TAIL")"
+export FLY_API_TOKEN="FlyV1 $SPLIT_TAIL"
+assert_not_contains "$(scrub_unit "$NL_TEXT" 300)" "REFLOW_DISTINCTIVE" "a \\n-wrapped FlyV1 token is redacted by scrub_output() itself"
+assert_not_contains "$(scrub_unit "$CRLF_TEXT" 300)" "REFLOW_DISTINCTIVE" "a \\r\\n-wrapped FlyV1 token is redacted by scrub_output() itself"
+assert_not_contains "$(scrub_unit "$SP_TEXT" 300)" "REFLOW_DISTINCTIVE" "a space-split FlyV1 token is redacted by scrub_output() itself"
+assert_contains "$(scrub_unit "$NL_TEXT" 300)" "<redacted>" "the reflow path publishes the redaction marker"
+assert_contains "$(scrub_unit "$NL_TEXT" 300)" "Error: token" "the reflow path keeps the non-secret diagnostic text"
+assert_not_contains "$(scrub_unit "$NL_TEXT" 12)" "REFLOW_DISTINCTIVE" "the reflow path still redacts BEFORE it truncates"
+
+# ── 67b: …and the same credential never reaches a public surface end-to-end ──
+reset_case
+seed_issue down "$((NOW - 1200))" 3 0 ""
+export FLY_API_TOKEN="FlyV1 $SPLIT_TAIL"
+export STUB_PROBE_CODES="000"
+export STUB_FLY_RESTART_FAIL=1
+export STUB_FLY_SPLIT=1
+run_watchdog
+assert_contains "$OUT" "automatic restart failed" "wrapped token → the restart failure is still escalated"
+assert_not_contains "$(comments_all)" "REFLOW_DISTINCTIVE" "a wrapped token → no fragment in the PUBLIC comment"
+assert_not_contains "$(patched_body)" "REFLOW_DISTINCTIVE" "a wrapped token → no fragment in the PUBLIC body"
+assert_not_contains "$OUT" "REFLOW_DISTINCTIVE" "a wrapped token → no fragment in the PUBLIC log"
+assert_contains "$(comments_all)" "<redacted>" "a wrapped token → the redaction marker is what is published"
+
+# ── 68: a credentialed URI must not leak through the HOST LABEL ─────────────
+# The label is published in the issue TITLE on its own (redact_url only cleans
+# the full URL), and a hand-written userinfo containing a `/` walked past the
+# naive "authority, then @-strip" split: `rediss://user:pa/ss@host:6379` made
+# the label `user:pa` — the password prefix.
+assert_eq "$(probe_label 'rediss://user:pa/ss@host:6379')" "<redacted-host>" "a '/' inside the userinfo → the label is REDACTED (not the password prefix)"
+assert_eq "$(probe_label 'https://user:s3cr3t@staging.example.test/v1/teams')" "staging.example.test" "a normal userinfo is stripped from the label"
+assert_eq "$(probe_label 'https://user:s3cr3t@staging.example.test:8443/v1')" "staging.example.test" "the port is stripped with the userinfo"
+assert_eq "$(probe_label 'https://api.premiselabs.co/v1/teams')" "api.premiselabs.co" "a credential-free URL still yields its host"
+assert_eq "$(probe_label 'https://host/v1?x=a@b')" "<redacted-host>" "an '@' outside the authority fails closed (never publish an unverified cut)"
+# …and the same guard end-to-end: the DRILL issue TITLE must not carry it.
+reset_case
+export STUB_PROBE_CODES="000"
+export PROBE_URL="rediss://user:pa/ss@host:6379"
+run_watchdog
+assert_eq "$RC" "1" "credentialed-URI drill → still alerts"
+assert_not_contains "$(created_json)" "pa/ss" "credentialed-URI drill → the public TITLE carries no password fragment"
+assert_contains "$(created_json)" "<redacted-host>" "credentialed-URI drill → the title uses the redacted placeholder"
+
+# ── 69: the restart budget survives an incident close/reopen (flapping) ─────
+# MAX_RESTARTS_PER_HOUR used to be counted against the CURRENT incident, so a
+# machine flapping every ~10 min closed its incident, opened a new one with an
+# EMPTY ledger and restarted forever without ever tripping the cap. A new
+# incident must inherit the still-in-window stamps of the previous (closed) one.
+reset_case
+# The PREVIOUS incident: closed, machine-authored, with 2 restarts already spent
+# inside the hour. The open-incident dedupe answers "none" (default empty
+# fixture) while the ledger lookup (no is:open) still finds this one.
+printf '%s' "{\"body\":\"<!-- watchdog-state kind=down first_failure_ts=$((NOW - 2400)) down_runs=4 last_down_ts=$((NOW - 3000)) last_comment_ts=0 cap_notified_ts=0 restarts=$((NOW - 2400)),$((NOW - 2100)) -->\"}" > "$STUB_TMP/issue.json"
+export STUB_LEDGER_SEARCH_JSON="$(search_json 777 '[monitor] PROD DOWN — previous (closed)')"
+export STUB_PROBE_CODES="000"
+export FLY_API_TOKEN="fly-token"
+run_watchdog
+assert_eq "$(count_calls 'FLYCTL')" "0" "cross-incident cap → run 1 of the new incident waits (the sustained window restarts)"
+assert_contains "$(patched_body)" "restarts=$((NOW - 2400)),$((NOW - 2100))" "a NEW incident SEEDS its ledger from the previous closed incident"
+# Run 2, 10 min later: the open incident now carries the inherited ledger, so
+# the 3rd restart inside the hour is what the cap must BLOCK.
+jq -n --arg b "$(patched_body)" '{body:$b}' > "$STUB_TMP/issue.json"
+STUB_SEARCH_JSON="$(search_json 900)"
+export STUB_SEARCH_JSON
+export STUB_SEARCH_MARKER='PROD%20DOWN'
+: > "$STUB_TMP/calls.log"
+export WATCHDOG_NOW_EPOCH="$((NOW + 600))"
+run_watchdog
+assert_eq "$(count_calls 'FLYCTL machine restart')" "0" "cross-incident cap → the 3rd restart in the hour is BLOCKED after the reopen"
+assert_contains "$(patched_body)" "velocity cap" "cross-incident cap → the body reports the cap"
+export WATCHDOG_NOW_EPOCH="$NOW"
+
+# ── 70: an unreadable previous ledger fails CLOSED (no restart) ─────────────
+reset_case
+export STUB_SEARCH_FAIL=1
+export STUB_PROBE_CODES="000"
+export FLY_API_TOKEN="fly-token"
+run_watchdog
+assert_eq "$RC" "1" "unreadable ledger → exit 1 (still alerts)"
+assert_eq "$(count_calls 'FLYCTL')" "0" "unreadable ledger → NO restart (the hourly budget cannot be proven)"
+
+# ── 71: a DNS failure must NOT restart, and must say so ─────────────────────
+# A restart cannot repair name resolution; it only spends the restart budget.
+# The incident is filed and the body must explain the disarm explicitly.
+reset_case
+seed_issue down "$((NOW - 1200))" 3 0 ""
+export STUB_PROBE_CODES="000"
+export STUB_PROBE_RC=6
+export STUB_PROBE_STDERR="Could not resolve host: api.premiselabs.co"
+export FLY_API_TOKEN="fly-token"
+run_watchdog
+assert_eq "$RC" "1" "DNS failure → still alerts (exit 1)"
+assert_eq "$(count_calls 'FLYCTL')" "0" "DNS failure → NO restart (a restart cannot fix resolution)"
+assert_contains "$(patched_body)" "a DNS resolution failure" "DNS failure → the body names the failure class"
+assert_contains "$(patched_body)" "cannot fix" "DNS failure → the body explains the disarm"
+
+# ── 72: a TLS/certificate failure must NOT restart either ───────────────────
+reset_case
+seed_issue down "$((NOW - 1200))" 3 0 ""
+export STUB_PROBE_CODES="000"
+export STUB_PROBE_RC=60
+export STUB_PROBE_STDERR="SSL certificate problem: certificate has expired"
+export FLY_API_TOKEN="fly-token"
+run_watchdog
+assert_eq "$(count_calls 'FLYCTL')" "0" "TLS failure → NO restart (a restart cannot fix a certificate)"
+assert_contains "$(patched_body)" "a TLS/certificate failure" "TLS failure → the body names the failure class"
+
+# ── 73: a TRANSPORT failure still restarts (contrast case) ──────────────────
+# Same sustained state and same 000, but connection refused is the signature of
+# a wedged process — the restart leg must stay armed.
+reset_case
+seed_issue down "$((NOW - 1200))" 3 0 ""
+export STUB_PROBE_CODES="000"
+export STUB_PROBE_RC=7
+export STUB_PROBE_STDERR="Failed to connect to api.premiselabs.co port 443: Connection refused"
+export FLY_API_TOKEN="fly-token"
+run_watchdog
+assert_eq "$(count_calls 'FLYCTL machine restart')" "1" "connection refused → the restart leg is still ARMED (contrast with DNS/TLS)"
+
+# ── 74: a 5xx is an APP failure, not a DNS one — restart stays armed ────────
+reset_case
+seed_issue down "$((NOW - 1200))" 3 0 ""
+export STUB_PROBE_CODES="503"
+export FLY_API_TOKEN="fly-token"
+run_watchdog
+assert_eq "$(count_calls 'FLYCTL machine restart')" "1" "a 5xx (the app answered) → restart stays armed"
+
+# ── 75: classify_failure() coverage on the message-only fallback path ───────
+# Some builds report a cert/name failure under a generic curl code; the stderr
+# text is then the only signal.
+reset_case
+seed_issue down "$((NOW - 1200))" 3 0 ""
+export STUB_PROBE_CODES="000"
+export STUB_PROBE_RC=56
+export STUB_PROBE_STDERR="OpenSSL SSL_read: error:0A000126:SSL routines::unexpected eof"
+export FLY_API_TOKEN="fly-token"
+run_watchdog
+assert_eq "$(count_calls 'FLYCTL')" "0" "a generic curl code + an SSL stderr message → treated as TLS → NO restart"
 
 echo
 if [ "$FAIL" -eq 0 ]; then

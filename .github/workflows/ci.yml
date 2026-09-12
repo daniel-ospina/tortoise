@@ -189,15 +189,22 @@ jobs:
                   # precedent) — review R12/Config.
                   isfile(".github/workflows/ci.yml"),
               ),
-              # availability-watchdog (#2850): the out-of-band availability
-              # probe's state-machine harness (verdict classification, issue
-              # dedupe, restart cooldown/velocity cap, drill disarm, redaction).
-              # Gated on the probe surface so a PR touching the watchdog (or the
-              # cron that runs it) re-runs its suite — #2149 pattern, not an
+              # watchdog_scripts: the OUT-OF-BAND MONITORS' harnesses (the key
+              # keeps its historical name so the required-check mapping does not
+              # churn; it now covers BOTH monitor scripts).
+              #   * availability-watchdog (#2850): the probe's state-machine
+              #     harness (verdict classification, issue dedupe, restart
+              #     cooldown/velocity cap, drill disarm, redaction).
+              #   * welcome-e2e-monitor (#2706/#2850): the auto-file harness
+              #     (machine-author dedupe, forged-title hijack guard).
+              # Gated on the monitor surface so a PR touching a monitor (or the
+              # workflow that runs it) re-runs its suite — #2149 pattern, not an
               # always-on job.
               "watchdog_scripts": any_file(
                   startswith(".github/scripts/availability-watchdog"),
+                  startswith(".github/scripts/welcome-e2e-monitor"),
                   isfile(".github/workflows/availability-watchdog.yml"),
+                  isfile(".github/workflows/welcome-e2e-monitor.yml"),
                   # a job-definition change re-runs its own suite (dashboard_e2e
                   # precedent) — review R12/Config.
                   isfile(".github/workflows/ci.yml"),
@@ -450,16 +457,21 @@ jobs:
 
   availability-watchdog:
     needs: changes
-    if: needs.changes.outputs.watchdog_scripts == 'true'  # #2850: probe surface only
-    # #2850: the out-of-band availability probe's state machine — verdict
-    # classification, issue dedupe (#2706 class), restart cooldown/velocity cap,
-    # drill disarm, public-body redaction. Self-contained: stubs curl/gh/flyctl,
+    if: needs.changes.outputs.watchdog_scripts == 'true'  # #2850: monitor-script surfaces only
+    # Monitor-script harnesses. Both are self-contained: stubs curl/gh/flyctl,
     # no network. Mirrors backup-driver-scripts (#2796).
+    #   * the availability probe's state machine — verdict classification, issue
+    #     dedupe (#2706 class), restart cooldown/velocity cap, drill disarm,
+    #     public-body redaction (#2850);
+    #   * the welcome-e2e auto-file monitor — machine-author dedupe and the
+    #     forged-title hijack guard (#3064 review).
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - name: Availability watchdog state machine (#2850)
         run: bash .github/scripts/availability-watchdog.test.sh
+      - name: Welcome-e2e auto-file monitor (#2706/#2850)
+        run: bash .github/scripts/welcome-e2e-monitor.test.sh
 
   entrypoint-guards:
     needs: changes

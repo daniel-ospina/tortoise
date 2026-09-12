@@ -371,7 +371,17 @@ velocity and involve a human when the cap is hit).
 Override them in the `env:` block of `availability-watchdog.yml`. The watchdog
 restarts **only**: (a) on a DOWN verdict — never on UNEXPECTED, where a restart
 cannot help; (b) when `PROBE_URL` is the production endpoint — a drill
-automatically disarms the restart leg. Three safeguards worth knowing:
+automatically disarms the restart leg; (c) when the failure is one a restart
+cannot fix — `classify_failure()` maps curl's exit code to a class, and **DNS**
+(6) and **TLS/certificate** (35, 51, 58–60, 66, 77, 80, 82–83, 90–91) failures
+disarm the restart leg (`disarmed:unfixable`). The incident is still filed and
+its body names the class and why nothing was restarted: restarting a machine
+never repairs a resolver or an expired certificate, it only burns the budget.
+Timeouts (28), connection-refused (7), and app-level 5xx stay restartable;
+(d) when the previous incident's restart ledger cannot be read
+(`disarmed:no_ledger` — fail closed, per above). Every run records its verdict
+as `disarmed:<reason>` or the armed path, so *why* a restart did not happen is
+in the run log rather than inferred. Three further safeguards worth knowing:
 
 - **Write-then-act:** the attempt is recorded in the incident body *before*
   `flyctl` runs. If that write fails the restart does **not** happen — the body
@@ -405,7 +415,12 @@ cannot file is a deaf monitor.
 ### 6.6 When restarts do not help
 
 The watchdog stops after `MAX_RESTARTS_PER_HOUR` and asks for a human — treat
-that as “this is not a wedged process”:
+that as “this is not a wedged process”. Two disarm reasons also land here
+without the cap being reached, and both are named in the incident body and the
+run log: **`disarmed:unfixable`** (a DNS or TLS/certificate failure — repair the
+resolver or the certificate; a restart is not the fix) and
+**`disarmed:no_ledger`** (the prior incident's restart ledger was unreadable, so
+the restart leg failed closed):
 
 1. `flyctl logs -a tortoise-y4mjjq` — look for `Timeout reading from socket`,
    `Failed to create index`, or a crash loop.
@@ -510,16 +525,20 @@ your shell environment. `gh workflow run` cannot pass them inline.
   clock is **preserved** while the incident stays open (it is only reset when
   the gap since the last failing run exceeds `STALE_RESET_MINUTES`), so a flap
   does not delay self-healing; a flap that recovers long enough to close the
-  incident starts a fresh clock *and* a fresh restart budget (next bullet). If a
-  flap is seen with NO incident open, the watchdog files one for the observed
-  failure rather than reporting a green run.
-- **The restart ledger is per-incident.** Recovery closes the incident, so a
-  service that flaps (recovers ≥1 probe, then fails ≥10 min again) starts a
-  fresh `MAX_RESTARTS_PER_HOUR` budget each cycle. A flap can therefore exceed
-  2 restarts/hour *globally* while never exceeding it within one incident. The
-  sustained window + recovery confirmation + 20-min cooldown bound it to a few
-  restarts per hour; if that is ever observed, the fix is a cross-incident
-  ledger (inherit the stamps from the most recently closed incident).
+  incident starts a fresh sustained clock, but the restart budget is **shared
+  across incidents** and does not reset (next bullet). If a flap is seen with
+  NO incident open, the watchdog files one for the observed failure rather than
+  reporting a green run.
+- **The restart ledger is cross-incident.** Recovery closes the incident, so a
+  naive per-incident budget would let a flapping service (recovers ≥1 probe,
+  then fails ≥10 min again) draw a fresh `MAX_RESTARTS_PER_HOUR` allowance every
+  cycle, exceeding the cap *globally* while never exceeding it within one
+  incident. Instead, when a new incident is filed the watchdog **seeds its
+  ledger from the still-in-window stamps** of the most recent machine-authored
+  incident — open *or* closed — via `recent_restart_ledger()`. The rolling-hour
+  cap therefore holds across incident boundaries. If that prior ledger cannot
+  be read, the restart leg is **disarmed** (`disarmed:no_ledger`) rather than
+  restarting without a provable budget; alerting is unaffected.
 - **GitHub scheduled workflows can be delayed** under platform load, and GitHub
   **disables** schedules after ~60 days of repo inactivity — a missing run looks
   like silence. After any long quiet period, dispatch the workflow once to

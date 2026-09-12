@@ -61,10 +61,21 @@
 #                  SUSTAINED_MIN_RUNS (≥2) observed failing runs before the
 #                  FIRST restart,
 #                * RESTART_COOLDOWN_MINUTES (20) between attempts,
-#                * MAX_RESTARTS_PER_HOUR (2) across a rolling hour;
+#                * MAX_RESTARTS_PER_HOUR (2) across a rolling hour, tracked
+#                  INDEPENDENT of incident identity: a NEW incident inherits the
+#                  still-in-window restart stamps left by the previous (now
+#                  closed) incident, so a machine that flaps — down, restarted,
+#                  recovers, incident closes, down again — cannot reset the
+#                  budget at every incident boundary and restart forever;
 #              when the cap is hit we do NOT restart and we comment (and page)
 #              asking for a human — the "get a human involved" leg, re-notified
 #              at most once per CAP_RENOTIFY_MINUTES (60).
+#              A DNS-resolution or TLS/certificate failure is NOT restartable:
+#              no machine restart repairs a name-resolution or certificate
+#              problem, so the incident is filed and reported but the restart
+#              leg is disarmed and the issue body says exactly why (the restart
+#              budget is reserved for the transport-level failures a wedged
+#              process actually produces).
 #              An ATTEMPT is recorded to the incident BEFORE flyctl runs, so a
 #              crash or a failed API call cannot erase the cooldown/cap record
 #              (write-then-act: the durable record gates the side effect). A
@@ -126,8 +137,14 @@
 #     page) so it scrubs the probe URL (credentials + query string), the Fly
 #     token and the Telegram token from every public body/comment/page/log
 #     line — including text echoed back by flyctl. Captured command output goes
-#     through scrub_output(), which REDACTES FIRST and ONLY THEN truncates:
-#     truncating first splits a long token, after which the literal-value match
+#     through scrub_output(), whose order is REFLOW → REDACT → TRUNCATE.
+#     Reflowing the whitespace FIRST is what makes a WRAPPED credential
+#     matchable: a real Fly token is `FlyV1 <macaroon>`, a SPACE-bearing value
+#     that a captured log wraps at that space, so redacting first left both
+#     fragments unmatched and the subsequent reflow re-joined them into a
+#     complete, readable credential in the published body/comment/log.
+#     Redacting before truncating is what keeps a long token whole:
+#     truncating first splits it, after which the literal-value match
 #     no longer matches the surviving prefix and a PARTIAL production token is
 #     published. redact_text() also scrubs BY SHAPE (Fly `FlyV1 …` macaroons,
 #     `id:secret` Telegram tokens) so a partial whose full value we do not hold
@@ -225,15 +242,48 @@ DOWN_TITLE="${DOWN_MARKER} — ${PROBE_HOST_LABEL} is not answering the availabi
 DEGRADED_MARKER="[monitor] PROD DEGRADED"
 DEGRADED_TITLE="${DEGRADED_MARKER} — ${PROBE_HOST_LABEL} answered the availability probe unexpectedly"
 
+# The label published when the probe URL cannot be parsed safely (see
+# probe_host_label). A constant, so an unparseable DRILL URL can never fall
+# back to the production label and read as a production outage.
+PROBE_HOST_REDACTED="<redacted-host>"
+
 # Host label for the probe URL (a drill's issue must name the host it actually
-# probed). Falls back to the configured label when the URL is unparseable.
+# probed). Falls back to the REDACTED placeholder above when the URL cannot be
+# parsed — never to `$PROBE_HOST_LABEL`, which in the drill branch is the
+# PRODUCTION label and would mislabel a drill as a production outage.
 # SECURITY: the host is taken WITHOUT the userinfo — `https://user:s3cr3t@h/`
 # must not put credentials in a public issue TITLE (redact_url() strips them
-# from the full URL, but this label is published on its own).
+# from the full URL, but this label is published on its own). The naive
+# "cut the authority at the first `/`, then strip up to `@`" split leaks a
+# PASSWORD when a hand-written userinfo contains a `/` (legal in practice, not
+# per RFC 3986): `rediss://user:pa/ss@host:6379` made the authority `user:pa`
+# — the password prefix — because the `@` fell outside the cut. So an `@` that
+# is present in the string but ABSENT from the authority we cut is treated as a
+# parse failure and the label is redacted outright.
 probe_host_label() { # <url>
-  local host
-  host="$(printf '%s' "$1" | sed -E 's#^[a-zA-Z][a-zA-Z0-9+.-]*://##; s#^[^/?#]*@##; s#[/?#].*$##')"
-  if [ -n "$host" ] && [ "$host" != "$1" ]; then printf '%s' "$host"; else printf '%s' "$PROBE_HOST_LABEL"; fi
+  local rest authority host
+  rest="$1"
+  # 1. drop the scheme (a scheme-less URL — a hand-written drill — still parses)
+  case "$rest" in
+    *://*) rest="${rest#*://}" ;;
+  esac
+  [ -n "$rest" ] || { printf '%s' "$PROBE_HOST_REDACTED"; return 0; }
+  # 2. authority = everything before the first `/`, `?` or `#`
+  authority="${rest%%[/?#]*}"
+  # 3. an `@` in the remainder that the authority does not contain means the
+  #    userinfo was NOT where the split assumed it was (see the header) — fail
+  #    closed instead of publishing whatever we happened to cut.
+  case "$rest" in
+    *@*)
+      case "$authority" in
+        *@*) : ;;  # normal: the userinfo sits inside the authority
+        *) printf '%s' "$PROBE_HOST_REDACTED"; return 0 ;;
+      esac ;;
+  esac
+  # 4. strip the userinfo (everything up to the LAST `@`) and the `:port`
+  host="${authority##*@}"
+  host="$(printf '%s' "$host" | sed -E 's/:[0-9]+$//' || true)"
+  if [ -n "$host" ]; then printf '%s' "$host"; else printf '%s' "$PROBE_HOST_REDACTED"; fi
 }
 
 # The incident IDENTITY (marker + title + label) is per-target. The title is the
@@ -349,10 +399,31 @@ int_or() {
 
 # A probe URL may carry credentials (user:pass@) AND a query string that can
 # carry a token. The issue body is PUBLIC — publish neither.
+# The userinfo strip must not assume the authority cut comes first: a
+# hand-written userinfo containing a `/` (`rediss://user:pa/ss@host:6379`) put
+# the `@` OUTSIDE the naive `[^@/]*` window, so the sed-only version published
+# the password prefix VERBATIM in the issue body. An `@` that is present in the
+# remaining string but absent from the authority we cut therefore means the URL
+# is unparseable, and the whole authority is replaced with `<redacted-url>`
+# rather than guessed at.
 redact_url() {
-  printf '%s' "$1" \
-    | sed -E 's#(://)[^@/]*@#\1<redacted>@#' \
-    | sed -E 's#\?.*$#?<redacted>#'
+  local url="$1" scheme="" rest auth tail
+  case "$url" in
+    *://*) scheme="${url%%://*}://"; rest="${url#*://}" ;;
+    *)     rest="$url" ;;
+  esac
+  # The authority ends at the first `/`, `?` or `#`.
+  auth="${rest%%[/?#]*}"
+  tail="${rest#"$auth"}"
+  case "$rest" in
+    *@*)
+      case "$auth" in
+        *@*) auth="<redacted>@${auth##*@}" ;;
+        *)   printf '%s<redacted-url>' "$scheme"; return 0 ;;
+      esac ;;
+  esac
+  printf '%s%s%s' "$scheme" "$auth" \
+    "$(printf '%s' "$tail" | sed -E 's#\?.*$#?<redacted>#' || true)"
 }
 
 # Scrub anything secret out of text that ends up in a public issue body, a
@@ -380,16 +451,24 @@ first_chars() { # <text> <max>
 }
 
 # Capture-then-publish helper for COMMAND OUTPUT we are about to put in a
-# public body/comment/log. The ORDER is the whole point: REDACT FIRST, THEN
-# truncate. `first_chars` alone publishes the first N chars of a secret when N
-# splits it — redact_text's literal-value match then no longer matches the
-# surviving PREFIX, so a partial production token would be published (issue
-# body, comment, and Actions log all at once). `tr` runs AFTER redaction so a
-# line-wrapped secret is still matched whole.
+# public body/comment/log. The ORDER is the whole point:
+#   1. REFLOW the whitespace to a single line, THEN
+#   2. REDACT by value and by shape, THEN
+#   3. TRUNCATE.
+# (1) is load-bearing and was round 1's bug: a real Fly token is
+# `FlyV1 <macaroon>` — a SPACE-bearing value — and a captured log wraps it at
+# that space. Redacting FIRST left both fragments unmatched (the literal value
+# contains a space, the log contained a newline) and the reflow that followed
+# then RE-JOINED them into a complete, readable credential in the published
+# body/comment/log. `tr -s '[:space:]' ' '` (not `tr '\n' ' '`) also folds the
+# `\r` of a CRLF wrap, so `FlyV1\r\nfm2_…` reassembles to the exact token.
+# (2) before (3) keeps a long token whole: truncating first splits it, after
+# which the literal-value match no longer matches the surviving PREFIX and a
+# partial production token would be published.
 scrub_output() { # <text> <max>
   local t
-  t="$(redact_text "$1")"
-  t="$(printf '%s' "$t" | tr '\n' ' ' || true)"
+  t="$(printf '%s' "$1" | tr -s '[:space:]' ' ' || true)"
+  t="$(redact_text "$t")"
   first_chars "$t" "$2"
 }
 
@@ -412,14 +491,71 @@ classify_code() {
   esac
 }
 
+# curl exit code -> the LAYER that failed. A "no answer" (000) can come from
+# very different layers, and only some of them are a restart's business:
+# a WEDGED PROCESS shows up as a transport-level failure (the app refused the
+# connection, timed out, or answered 5xx), which a restart can clear; a
+# DNS-resolution or TLS/certificate failure is a name/service/certificate
+# problem that no machine restart can repair — restarting on one only burns the
+# automated-restart budget and adds noise to an incident a human must fix
+# (review round 2, P2).
+#   dns       — curl 6 (could not resolve host)
+#   tls       — curl 35/51/58/59/60/66/77/80/82/83/90/91 (handshake/cert/SNI)
+#   timeout   — curl 28
+#   refused   — curl 7
+#   transport — any other non-zero curl exit (56 recv failure, 52 empty reply…)
+#   app       — curl itself succeeded; the HTTP status carries the story
+#   none      — nothing recorded
+classify_failure() { # <curl_exit_code> <stderr>
+  local rc="$1" text="$2"
+  case "$rc" in
+    0)                                    printf 'app';     return 0 ;;
+    6)                                    printf 'dns';     return 0 ;;
+    28)                                   printf 'timeout'; return 0 ;;
+    7)                                    printf 'refused'; return 0 ;;
+    35|51|58|59|60|66|77|80|82|83|90|91)   printf 'tls';     return 0 ;;
+  esac
+  # Some builds / a TLS-terminating proxy report a cert or name failure with a
+  # generic code; the message is then the only signal. Match case-insensitively.
+  case "$(printf '%s' "$text" | tr 'A-Z' 'a-z')" in
+    *"certificate"*|*"ssl"*|*"tls"*|*"self-signed"*|*"self signed"*) printf 'tls'; return 0 ;;
+    *"resolve host"*|*"could not resolve"*|*"name or service not known"*|*"nodename nor servname"*) printf 'dns'; return 0 ;;
+  esac
+  printf 'transport'
+}
+
+# 0 = this failure class IS a restart's business; 1 = a restart cannot fix it.
+restartable_failure() { # <class>
+  case "$1" in
+    dns|tls) return 1 ;;
+    *)       return 0 ;;
+  esac
+}
+
+# Human-readable form of a failure class, for the public issue body.
+failure_label() { # <class>
+  case "$1" in
+    dns)       printf 'a DNS resolution failure' ;;
+    tls)       printf 'a TLS/certificate failure' ;;
+    timeout)   printf 'a connection timeout' ;;
+    refused)   printf 'a connection refusal' ;;
+    transport) printf 'a transport-level failure' ;;
+    app)       printf 'an application error (the app itself answered 5xx)' ;;
+    *)         printf 'a probe failure' ;;
+  esac
+}
+
 # ── probe ───────────────────────────────────────────────────────────────────
-# Sets: PROBE_VERDICT, PROBE_CODE, PROBE_EVIDENCE (multi-line)
+# Sets: PROBE_VERDICT, PROBE_CODE, PROBE_FAILURE_CLASS, PROBE_EVIDENCE
+# (multi-line). PROBE_FAILURE_CLASS is the curl-level failure layer from
+# classify_failure() and is what decides whether a restart is even on the table.
 # Retries DOWN verdicts (transient blips) — an UNEXPECTED verdict is a
 # deterministic answer, so it stops immediately.
 probe() {
-  local attempt code timing body_file err_file err_body v=""
+  local attempt code timing body_file err_file err_raw err_body v="" rc=0
   PROBE_EVIDENCE=""
   PROBE_CODE="000"
+  PROBE_FAILURE_CLASS="none"
 
   attempt=1
   while [ "$attempt" -le "$PROBE_ATTEMPTS" ]; do
@@ -427,16 +563,22 @@ probe() {
     err_file="$RUN_TMP/err.$attempt"
     : > "$body_file"
     : > "$err_file"
+    # Capture curl's EXIT CODE, not just its -w output: an HTTP 000 is emitted
+    # for a DNS failure, a TLS failure, a refusal and a timeout alike, and the
+    # exit code is the only thing that tells them apart (see classify_failure).
+    rc=0
     timing="$(curl -sS -o "$body_file" -w '%{http_code} %{time_total}' \
       --connect-timeout "$PROBE_CONNECT_TIMEOUT_S" \
-      --max-time "$PROBE_TIMEOUT_S" "$PROBE_URL" 2>"$err_file" || true)"
+      --max-time "$PROBE_TIMEOUT_S" "$PROBE_URL" 2>"$err_file")" || rc=$?
     code="${timing%% *}"
     [ -n "$code" ] || code="000"
     timing="${timing#* }"
     [ "$timing" != "$code" ] || timing="?"
     PROBE_CODE="$code"
-    err_body="$(scrub_output "$(cat "$err_file" 2>/dev/null || true)" 300)"
-    PROBE_EVIDENCE="${PROBE_EVIDENCE}attempt ${attempt}/${PROBE_ATTEMPTS}: http_code=${code} elapsed=${timing}s"
+    err_raw="$(cat "$err_file" 2>/dev/null || true)"
+    PROBE_FAILURE_CLASS="$(classify_failure "$rc" "$err_raw")"
+    err_body="$(scrub_output "$err_raw" 300)"
+    PROBE_EVIDENCE="${PROBE_EVIDENCE}attempt ${attempt}/${PROBE_ATTEMPTS}: http_code=${code} curl_exit=${rc} failure=${PROBE_FAILURE_CLASS} elapsed=${timing}s"
     [ -n "$err_body" ] && PROBE_EVIDENCE="${PROBE_EVIDENCE} curl=\"${err_body}\""
     PROBE_EVIDENCE="${PROBE_EVIDENCE}"$'\n'
 
@@ -769,6 +911,53 @@ parse_state() { # <body>
   return 0
 }
 
+# CROSS-INCIDENT RESTART BUDGET (review round 2, P2).
+# The restart ledger used to die with its incident. A machine that flaps — down
+# 10 min, restart, recovers, the incident closes, down again — therefore began
+# every NEW incident with an EMPTY ledger, so MAX_RESTARTS_PER_HOUR never
+# tripped: one restart per ~10 min forever, which is precisely the unbounded
+# self-inflicted restart loop the cap exists to bound.
+# So a NEW incident seeds its ledger with the still-in-window restart stamps of
+# the most recent MACHINE-authored incident for this marker — open OR closed,
+# i.e. the ledger the previous incident left behind. `sort=created&order=desc`
+# makes `.items[0]` the most recent. The same hijack guard as the dedupe search
+# applies: a non-machine look-alike is never read.
+# Reads STATE_RESTARTS / STATE_RESTARTS_INVALID. Returns 1 when the previous
+# ledger could not be READ, and the caller then fails closed (no restart
+# without a provable hourly budget).
+recent_restart_ledger() { # <marker> <now>
+  local q enc out n body now="$2" ledger ts
+  q="repo:${REPO} is:issue author:app/github-actions in:title \"$1\""
+  enc="$(urlencode "$q")"
+  if ! out="$(gh api "search/issues?q=${enc}&per_page=5&sort=created&order=desc" 2>"$RUN_TMP/ledger.err")"; then
+    warn "restart-ledger search failed: $(scrub_output "$(cat "$RUN_TMP/ledger.err" 2>/dev/null || true)" 200)"
+    return 1
+  fi
+  if ! n="$(printf '%s' "$out" | jq -r '[.items[]? | select((.user.type // "") == "Bot" or (.user.login // "") == "github-actions[bot]")][0].number // empty' 2>/dev/null)"; then
+    warn "restart-ledger search returned an unparseable body"
+    return 1
+  fi
+  case "$n" in
+    '') STATE_RESTARTS=""; STATE_RESTARTS_INVALID="0"; return 0 ;;
+    *[!0-9]*|0)
+      warn "restart-ledger search returned a non-numeric issue id ('${n}')"
+      return 1 ;;
+  esac
+  body="$(get_issue_body "$n")"
+  if [ "$body" = "__ERR__" ]; then return 1; fi
+  # Reuse the ONE normalizer/validator (to_int bounds, future-stamp clamp,
+  # strict whole-value parse) rather than a second parser that could drift.
+  parse_state "$body"
+  # Keep only the stamps still inside the rolling hour. decide_restart re-checks
+  # the window; this just keeps the carried body small and the semantics plain.
+  ledger=""
+  for ts in $STATE_RESTARTS; do
+    if [ $((now - ts)) -lt 3600 ]; then ledger="${ledger:+$ledger }$ts"; fi
+  done
+  STATE_RESTARTS="$ledger"
+  return 0
+}
+
 restart_history() { printf '%s' "$STATE_RESTARTS" | tr ' ' ','; }
 
 state_block() { # <kind>
@@ -894,6 +1083,10 @@ do_restart() {
 main() {
   local now kind kindlabel title marker issue decision heal_note comment_body
   local transition_kind restarted_ids rc n_loop kind_loop stale_note="" is_prod=0 body_loop=""
+  # Cross-incident restart budget (see recent_restart_ledger): the ledger
+  # carried from the previous incident, whether it was readable, and whether the
+  # carried ledger was itself corrupt (which must stay fail-closed).
+  local carried_ledger="" carried_invalid="0" ledger_ok=1
 
   # Fail closed: a monitor that cannot file is a DEAF monitor (#2140 class).
   if [ -z "$GH_TOKEN" ]; then
@@ -1050,13 +1243,20 @@ The service failed ${STATE_DOWN_RUNS} probe run(s), starting $(fmt_iso "$STATE_F
     kind="DEGRADED"; kindlabel="UNEXPECTED (answered wrongly)"; title="$DEGRADED_TITLE"; marker="$DEGRADED_MARKER"
   fi
 
-  # UNEXPECTED never restarts (a restart cannot fix a 404 / a redirect) and a
-  # non-default PROBE_URL is a drill.
+  # UNEXPECTED never restarts (a restart cannot fix a 404 / a redirect), a
+  # non-default PROBE_URL is a drill, and a DNS/TLS failure is not a restart's
+  # business (see restartable_failure).
   local restart_mode="$kind"
   if [ "$kind" = "DEGRADED" ]; then
     restart_mode="disarmed:unexpected"
   elif [ "$is_prod" != 1 ]; then
     restart_mode="disarmed:drill"
+  elif ! restartable_failure "$PROBE_FAILURE_CLASS"; then
+    # No machine restart repairs a name-resolution or certificate problem; it
+    # would only spend the restart budget and add noise. The incident is still
+    # filed and reported, and the body says why no restart ran.
+    restart_mode="disarmed:unfixable"
+    log "probe failed at the '${PROBE_FAILURE_CLASS}' layer — NOT restartable; the incident will be reported without a restart"
   fi
 
   issue="$(search_open_alert "$marker")"
@@ -1070,13 +1270,26 @@ The service failed ${STATE_DOWN_RUNS} probe run(s), starting $(fmt_iso "$STATE_F
   esac
 
   if [ -z "$issue" ]; then
+    # CROSS-INCIDENT RESTART BUDGET (P2): a new incident inherits the
+    # still-in-window restart stamps of the last machine incident, so closing
+    # and reopening the incident (which is what flapping looks like) cannot
+    # reset the hourly cap. Only the restart path needs it.
+    if [ "$restart_mode" = "DOWN" ]; then
+      if recent_restart_ledger "$marker" "$now"; then
+        carried_ledger="$STATE_RESTARTS"
+        carried_invalid="$STATE_RESTARTS_INVALID"
+      else
+        ledger_ok=0
+      fi
+    fi
     # New incident — the issue IS the dedupe key and the state store.
     STATE_FIRST_FAILURE_TS="$now"
     STATE_DOWN_RUNS="0"
     STATE_LAST_DOWN_TS="$now"
     STATE_LAST_COMMENT_TS="0"
     STATE_CAP_NOTIFIED_TS="0"
-    STATE_RESTARTS=""
+    STATE_RESTARTS="$carried_ledger"
+    STATE_RESTARTS_INVALID="$carried_invalid"
     progress="new"
   else
     body_loop="$(get_issue_body "$issue")"
@@ -1151,16 +1364,22 @@ The service failed ${STATE_DOWN_RUNS} probe run(s), starting $(fmt_iso "$STATE_F
   transition_kind="repeat"
 
   if [ "$restart_mode" = "DOWN" ]; then
-    # FAIL CLOSED on an unparseable restart ledger BEFORE anything else — not
-    # after the egress control, so a runner-side network failure cannot mask a
-    # corrupt ledger (and the run never rewrites the body with the corrupt
-    # ledger silently discarded). `restarts=` is the only cooldown/cap memory;
-    # if we cannot read it whole we cannot prove a restart is allowed, and
-    # silently treating it as "no restarts" is exactly the fail-OPEN direction
-    # that turns into a restart storm. Refuse to act (like an unreadable issue
-    # body) and fail the run loudly — the open incident remains the standing
-    # alert.
-    if [ "$STATE_RESTARTS_INVALID" = "1" ]; then
+    if [ "$ledger_ok" = "0" ]; then
+      # Fail closed: without the previous incident's ledger we cannot prove
+      # this restart is inside the hourly cap, and a restart storm is the worse
+      # failure. The incident is still filed/escalated below.
+      restart_mode="disarmed:no_ledger"
+      warn "the previous incident's restart ledger could not be read — cannot prove the hourly budget; NOT restarting (fail closed)"
+    elif [ "$STATE_RESTARTS_INVALID" = "1" ]; then
+      # FAIL CLOSED on an unparseable restart ledger BEFORE the egress control,
+      # so a runner-side network failure cannot mask a corrupt ledger (and the
+      # run never rewrites the body with the corrupt ledger silently
+      # discarded). `restarts=` is the only cooldown/cap memory; if we cannot
+      # read it whole we cannot prove a restart is allowed, and silently
+      # treating it as "no restarts" is exactly the fail-OPEN direction that
+      # turns into a restart storm. Refuse to act (like an unreadable issue
+      # body) and fail the run loudly — the open incident remains the standing
+      # alert.
       fail "the restart ledger in incident #${issue} is present but not fully parseable ('$(scrub_output "$STATE_RESTARTS_RAW" 120)') — refusing to restart: a dropped entry could only WEAKEN the cooldown/hourly cap. Fix the \`restarts=\` field in the issue body (ts,ts or empty) and the next run resumes."
       exit 1
     fi
@@ -1260,6 +1479,20 @@ A restart is a **symptom fix** — if this recurs, the root cause is still live 
         ;;
       disarmed:unexpected)
         heal_note="⛔ **No restart attempted** — the app ANSWERED (an unexpected status, not silence), so a process restart is not the remediation. An unexpected \`404\`/\`3xx\` on an authenticated API route usually means a bad deploy or a moved route, not a wedged process: check the deployed revision and the route."
+        transition_kind="disarmed"
+        ;;
+      disarmed:unfixable)
+        # DNS and TLS/certificate failures (classify_failure) — the incident is
+        # reported, the restart leg is disarmed, and the body says exactly why
+        # so a human is not left wondering why self-healing did not fire.
+        heal_note="⛔ **No restart attempted — the probe failed at a layer a machine restart cannot fix.** The last failing probe was $(failure_label "$PROBE_FAILURE_CLASS") against \`$(redact_url "$PROBE_URL")\`. Restarting the Fly machine would not repair name resolution or a TLS/certificate problem; it would only spend the automated-restart budget and add noise to an incident a human has to fix anyway. Check, in this order: the DNS record for the probe host, the certificate/SNI the app presents, then the platform proxy trace (\`flyctl logs -a ${FLY_APP}\`). Runbook § *Out-of-band availability watchdog*."
+        transition_kind="disarmed"
+        ;;
+      disarmed:no_ledger)
+        # The cross-incident restart budget is only as good as the previous
+        # incident's ledger; without it we cannot prove this restart is inside
+        # the hourly cap, so we fail closed (the incident is still reported).
+        heal_note="⛔ **No restart attempted — the previous incident's restart ledger could not be read**, so the watchdog cannot prove another restart is inside the ${MAX_RESTARTS_PER_HOUR}/hour cap. It fails closed rather than risk a restart storm (an unbounded restart loop is what the cap exists to bound). Re-run once GitHub's search API responds, or inspect manually: \`flyctl machine list -a ${FLY_APP}\`, \`flyctl logs -a ${FLY_APP}\`. Runbook § *Out-of-band availability watchdog*."
         transition_kind="disarmed"
         ;;
       disarmed:no_egress)

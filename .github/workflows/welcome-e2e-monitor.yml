@@ -89,34 +89,16 @@ jobs:
         # one-time bulk cleanup — filed as #3014.
         # A failed search refuses to file (never duplicate) but fails the step
         # loudly, so the monitor can never go silently deaf.
+        #
+        # The logic lives in .github/scripts/welcome-e2e-monitor.sh so it can be
+        # TESTED (.github/scripts/welcome-e2e-monitor.test.sh, run by the
+        # availability-watchdog CI lane). The #3064 round-2 review found the
+        # inline version deduped on TITLE ALONE — on this PUBLIC repo any
+        # external account could open an issue with our title and be adopted as
+        # the state carrier. The script carries the same author guard the
+        # availability watchdog uses (`author:app/github-actions` + a
+        # `user.type`/`user.login` re-check) and fails safe (a fresh machine
+        # issue) on a non-machine match.
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          title="live-signup-monitor: welcome-e2e failing"
-          run_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-          body="Monitor failure — run: ${run_url}
-
-          This is the #801 live signup funnel monitor (schedule + on-merge). The smoke asserts POST /v1/signup/email → 200 and the auto sign-in (auth/v1/token?grant_type=password) → 200; failures are typically a real signup-funnel regression, an API 429 (over_email_send_rate_limit / over_request_rate_limit / over_request_rate_limit_ip), or a stale test vs the deployed page. Investigate or re-run; it is NOT a PR regression gate.
-
-          **One issue per failing streak (#2706):** later failures comment here instead of filing a new issue. The body is not machine-managed; close this issue when the streak ends."
-          # The search query MUST go in the URL path — `gh api -f q=…` switches
-          # the method to POST and 404s on search/issues (tenant-provision-monitor).
-          q="repo:${GITHUB_REPOSITORY} is:issue is:open in:title \"${title}\""
-          enc="$(printf '%s' "$q" | jq -sRr @uri)"
-          if ! found="$(gh api "search/issues?q=${enc}&per_page=1" --jq '.items[0].number // empty')"; then
-            echo "::error::issue search failed — refusing to file a possible duplicate; this failing run IS the alert"
-            exit 1
-          fi
-          if [ -n "$found" ]; then
-            # `gh api` exits non-zero on an HTTP 4xx/5xx, so a failed comment
-            # fails the step loudly (the #2140 deaf-monitor class: a bare
-            # `curl -s` would exit 0 on an HTTP error).
-            gh api "repos/${GITHUB_REPOSITORY}/issues/${found}/comments" \
-              --method POST -f body="🔁 Still failing — run: ${run_url}" >/dev/null
-            echo "::notice::monitor issue #${found} is already open — commented instead of filing a duplicate (#2706)"
-          else
-            gh api "repos/${GITHUB_REPOSITORY}/issues" --method POST \
-              -f title="${title}" -f body="${body}" -f 'labels[]=bug' >/dev/null
-            echo "::notice::no open monitor issue — filed one (further failures will comment on it)"
-          fi
+        run: bash .github/scripts/welcome-e2e-monitor.sh
