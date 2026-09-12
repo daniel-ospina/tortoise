@@ -204,6 +204,7 @@ surfaces:
   - test_battery_parity_vector_guard.py  # #2985 retrieval capability gate (fake SDK; hermetic)
   - test_battery_price_basis.py
   - test_battery_derive_truth_leg.py  # #3100 battery-only (imports battery/* only)
+  - test_battery_envelope_contract_2702.py  # #2702 battery-only (imports battery/* only)
   - test_battery_probes.py
   # #2906: provider-reported cost (#2906) + the declared fallback basis
   # (#2874) pin battery/config/prices.py, battery/runner/model_calls.py,

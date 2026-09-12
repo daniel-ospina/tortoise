@@ -977,7 +977,8 @@ def test_scan_eval_graph_reads_points_and_typed_relations():
 
 
 @pytest.mark.skipif(not os.environ.get("TORTOISE_DB_URI"),
-                    reason="live FalkorDB required (TORTOISE_DB_URI unset)")
+                    reason="requires TORTOISE_DB_URI (live FalkorDB smoke — "
+                           "tier-2 embedded lanes skip)")
 def test_scan_eval_graph_live_smoke():
     from tortoise.sdk import TortoiseSDK
 
