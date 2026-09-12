@@ -634,6 +634,287 @@ def test_falkor_rebuild_then_apply():
         pass  # shared session projection — module helper owns close
 
 
+# --------------------------- #2795 open-set Point writer (live + replay)
+
+def test_falkor_rebuild_preserves_unknown_point_prop():
+    """#2795: an unrecognised primitive Point prop is not dropped by
+    rebuild_all — the replay half of the shared writer's closed-set drop."""
+    if _skip_if_no_falkor():
+        pytest.skip("redislite falkordb unavailable")
+    api, log = _api()
+    pid = api.add_point("keeps extras", provenance("d.txt", [0, 5], "q"),
+                        custom_keep="yes")
+    proj = _shared_proj()
+    try:
+        proj.rebuild_all(str(log.path.parent))
+        row = proj.query(
+            "MATCH (n:Point {id:$id}) RETURN n.custom_keep", id=pid
+        ).result_set
+        assert row and row[0][0] == "yes", row
+    finally:
+        pass  # shared session projection — module helper owns close
+
+
+def test_falkor_rebuild_dict_prop_not_persisted_no_crash():
+    """#2894/#2795: a dict-valued unknown prop must not crash the writer and
+    must not be persisted as a node property (FalkorDB rejects maps)."""
+    if _skip_if_no_falkor():
+        pytest.skip("redislite falkordb unavailable")
+    api, log = _api()
+    pid = api.add_point("dict prop", provenance("d.txt", [0, 5], "q"),
+                        custom_map={"nested": 1})
+    proj = _shared_proj()
+    try:
+        proj.rebuild_all(str(log.path.parent))
+        row = proj.query(
+            "MATCH (n:Point {id:$id}) RETURN n.custom_map", id=pid
+        ).result_set
+        assert row and row[0][0] is None, row
+    finally:
+        pass  # shared session projection — module helper owns close
+
+
+def test_falkor_rebuild_recomputes_content_hash():
+    """#2795: content_hash is recomputed on rebuild (previously every replayed
+    node had content_hash=NULL, degrading the indexed dedup MATCH)."""
+    if _skip_if_no_falkor():
+        pytest.skip("redislite falkordb unavailable")
+    import hashlib
+    api, log = _api()
+    pid = api.add_point("hash me", provenance("d.txt", [0, 5], "q"))
+    proj = _shared_proj()
+    try:
+        proj.rebuild_all(str(log.path.parent))
+        row = proj.query(
+            "MATCH (n:Point {id:$id}) RETURN n.content_hash, n.is_operator",
+            id=pid,
+        ).result_set
+        assert row and row[0][1] is False, row
+        assert row[0][0] is not None, "content_hash must be non-NULL after rebuild"
+        assert row[0][0] == hashlib.sha256(b"hash me").hexdigest(), row
+    finally:
+        pass  # shared session projection — module helper owns close
+
+
+def test_falkor_rebuild_operator_has_no_content_hash():
+    """#2795: operators store no content (#548) — the synthesized fallback
+    content hash is skipped so it cannot match anything."""
+    if _skip_if_no_falkor():
+        pytest.skip("redislite falkordb unavailable")
+    api, log = _api()
+    a = api.add_point("a", provenance("d.txt", [0, 5], "q"))
+    b = api.add_point("b", provenance("d.txt", [5, 10], "q"))
+    op = api.add_operator("IMPL", [a, b], provenance("d.txt", [0, 10], "q"))
+    proj = _shared_proj()
+    try:
+        proj.rebuild_all(str(log.path.parent))
+        row = proj.query(
+            "MATCH (n:Point {id:$id}) RETURN n.content_hash, n.is_operator",
+            id=op,
+        ).result_set
+        assert row and row[0][1] is True, row
+        assert row[0][0] is None, row
+    finally:
+        pass  # shared session projection — module helper owns close
+
+
+def test_falkor_live_point_write_preserves_unknown_prop():
+    """#2795: a door-3 live write through _upsert_point_props preserves an
+    unrecognised primitive prop (the live-drop half of the same writer)."""
+    if _skip_if_no_falkor():
+        pytest.skip("redislite falkordb unavailable")
+    proj = _shared_proj()
+    try:
+        proj.apply({"type": "PointAdded",
+                    "point": {"id": "p-live-extra", "content": "x",
+                              "custom_live": "kept"}})
+        row = proj.query(
+            "MATCH (n:Point {id:'p-live-extra'}) RETURN n.custom_live"
+        ).result_set
+        assert row and row[0][0] == "kept", row
+    finally:
+        pass  # shared session projection — module helper owns close
+
+
+def test_falkor_rebuild_undeclared_list_prop_denied(caplog):
+    """#2795 (D2 mechanic 1): an UNDECLARED list prop is never written raw —
+    including `tags`, whose raw list would half-restore a node without its
+    TAGGED edges (#2897) — and the drop is REPORTED (indicator 4)."""
+    if _skip_if_no_falkor():
+        pytest.skip("redislite falkordb unavailable")
+    import logging
+    api, log = _api()
+    pid = api.add_point("list prop", provenance("d.txt", [0, 5], "q"),
+                        custom_list=["a", "b"], tags=["alpha"])
+    proj = _shared_proj()
+    try:
+        with caplog.at_level(logging.WARNING,
+                             logger="tortoise.projection.entities"):
+            proj.rebuild_all(str(log.path.parent))
+        row = proj.query(
+            "MATCH (n:Point {id:$id}) RETURN n.custom_list, n.tags", id=pid
+        ).result_set
+        assert row and row[0][0] is None, row
+        assert row[0][1] is None, row
+        assert any("undeclared list props" in r.getMessage()
+                   and "tags" in r.getMessage()
+                   for r in caplog.records), caplog.text
+    finally:
+        pass  # shared session projection — module helper owns close
+
+
+def test_falkor_point_deny_list_drop_is_reported(caplog):
+    """#2795 indicator 4 / D4: a deny-listed prop that arrives in the payload
+    is dropped AND reported, not silently discarded."""
+    if _skip_if_no_falkor():
+        pytest.skip("redislite falkordb unavailable")
+    import logging
+    api, log = _api()
+    api.add_point("denied prop", provenance("d.txt", [0, 5], "q"),
+                  reason="because")
+    proj = _shared_proj()
+    try:
+        with caplog.at_level(logging.WARNING,
+                             logger="tortoise.projection.entities"):
+            proj.rebuild_all(str(log.path.parent))
+        assert any("deny-listed" in r.getMessage() and "reason" in r.getMessage()
+                   for r in caplog.records), caplog.text
+    finally:
+        pass  # shared session projection — module helper owns close
+
+
+def test_falkor_rebuild_preserves_nested_list_prop_on_object_layer():
+    """#2795 / #2894 (code-review): FalkorDB stores arbitrarily NESTED arrays
+    of scalars, so the shared `_persist_extra_props` value-type filter must
+    NOT drop them. The earlier flat-list-only rule silently lost a nested-list
+    prop on every one of the six non-Point layers (Subject/Object/Document/
+    Event/Source), which previously filtered only `v is not None`. Exercised on
+    the Object layer, where no list policy applies (`list_props` is None).
+    Verified against the docker lane: the engine stores `[[1, 2], [3, 4]]`."""
+    if _skip_if_no_falkor():
+        pytest.skip("redislite falkordb unavailable")
+    api, log = _api()
+    api.add_object("Nested Co", "organization",
+                   custom_nested=[[1, 2], [3, 4]])
+    proj = _shared_proj()
+    try:
+        proj.rebuild_all(str(log.path.parent))
+        row = proj.query(
+            "MATCH (o:Object {name:'Nested Co'}) RETURN o.custom_nested"
+        ).result_set
+        assert row and row[0][0] == [[1, 2], [3, 4]], row
+    finally:
+        pass  # shared session projection — module helper owns close
+
+
+def test_falkor_rebuild_nested_dict_in_list_not_persisted_no_crash():
+    """#2894 (code-review): the engine REJECTS an array containing a dict at
+    any depth — that is the crash this filter exists to prevent, and the
+    nested-array relaxation must not re-open it."""
+    if _skip_if_no_falkor():
+        pytest.skip("redislite falkordb unavailable")
+    api, log = _api()
+    api.add_object("Mixed Co", "organization", custom_mixed=[1, {"a": 1}])
+    proj = _shared_proj()
+    try:
+        proj.rebuild_all(str(log.path.parent))  # must not raise
+        row = proj.query(
+            "MATCH (o:Object {name:'Mixed Co'}) RETURN o.custom_mixed"
+        ).result_set
+        assert row and row[0][0] is None, row
+    finally:
+        pass  # shared session projection — module helper owns close
+
+
+def test_is_persistable_prop_value_matches_engine_type_model():
+    """#2894 / #2795 (code-review): pin the predicate to the ENGINE's actual
+    type model, verified empirically against the docker FalkorDB lane —
+    scalars and arbitrarily nested arrays of scalars (lists AND tuples, which
+    the driver encodes as an array) are stored; maps/dicts (including an array
+    that contains one at any depth), bytes and sets are rejected."""
+    from tortoise.projection.entities import _is_persistable_prop_value as ok
+    assert ok("x") and ok(1) and ok(1.5) and ok(True)
+    assert ok([]) and ok(["a", 1, True])
+    assert ok([[1, 2], [3, 4]])          # engine stores this
+    assert ok([[['deep']]])              # arbitrary nesting is stored
+    assert ok((1, 2))                    # tuple -> array on the wire
+    assert not ok({"k": 1})             # engine rejects maps
+    assert not ok([1, {"a": 1}])        # dict at any depth is rejected
+    assert not ok([{"a": 1}])
+    assert not ok([[{"a": 1}]])
+    assert not ok(b"x") and not ok({1, 2}) and not ok(None)
+
+
+def test_falkor_rebuild_malformed_revised_content_does_not_crash():
+    """#2958 review / #2795: a PointRevised carrying a non-string
+    `new_content` (a hand-edited or corrupt JSONL line — rebuild is the
+    RECOVERY path) must not crash the rebuild pass: the content_hash
+    recompute degrades to NULL instead of raising inside sha256()."""
+    if _skip_if_no_falkor():
+        pytest.skip("redislite falkordb unavailable")
+    api, log = _api()
+    pid = api.add_point("malformed revise", provenance("d.txt", [0, 5], "q"))
+    log.append({"type": "PointRevised", "id": pid, "new_content": 12345,
+                "projection_version": 2, "initiated_by": "test",
+                "agent_id": "test"})
+    proj = _shared_proj()
+    try:
+        proj.rebuild_all(str(log.path.parent))  # must not raise
+        row = proj.query(
+            "MATCH (n:Point {id:$id}) RETURN n.content_hash", id=pid
+        ).result_set
+        assert row, "malformed revise lost the point"
+        assert row[0][0] is None, row
+    finally:
+        pass  # shared session projection — module helper owns close
+
+
+def test_falkor_live_point_tuple_prop_denied_by_list_policy():
+    """#2958 review: the engine persists a TUPLE as an array exactly like a
+    list, so the Point list policy (empty `_POINT_LIST_PROPS` = deny
+    undeclared arrays) must cover tuples too — otherwise a tuple-valued key
+    bypasses the denial that refuses the equivalent list."""
+    if _skip_if_no_falkor():
+        pytest.skip("redislite falkordb unavailable")
+    proj = _shared_proj()
+    try:
+        proj.apply({"type": "PointAdded",
+                    "point": {"id": "p-live-tuple", "content": "x",
+                              "custom_tup": ("a", "b")}})
+        row = proj.query(
+            "MATCH (n:Point {id:'p-live-tuple'}) RETURN n.custom_tup"
+        ).result_set
+        assert row and row[0][0] is None, row
+    finally:
+        pass  # shared session projection — module helper owns close
+
+
+def test_falkor_rebuild_deny_warning_emitted_once_per_key(caplog):
+    """#2958 review: the deny-drop report is emitted once per key per rebuild
+    pass. The #548 synthetic snapshot carries EP-owned state for EVERY dreamed
+    graph-only point, so a per-row warning emitted O(N) lines on a supported
+    path and buried genuine violations."""
+    if _skip_if_no_falkor():
+        pytest.skip("redislite falkordb unavailable")
+    import logging
+    proj = FalkorProjection(_tmp("deny_once.db"), graph_name="test")
+    try:
+        for pid in ("dream-a", "dream-b", "dream-c"):
+            proj.g.query(
+                "CREATE (n:Point {id:$id, content:'x', pointKind:'statement', "
+                "is_operator:false, status:'live', posterior_alpha:2.0})",
+                params={"id": pid})
+        with caplog.at_level(logging.WARNING,
+                             logger="tortoise.projection.entities"):
+            proj.rebuild_all(tempfile.mkdtemp(prefix="tortoise_deny_once_"))
+        hits = [r.getMessage() for r in caplog.records
+                if "deny-listed" in r.getMessage()
+                and "posterior_alpha" in r.getMessage()]
+        assert len(hits) == 1, (len(hits), caplog.text)
+    finally:
+        proj.close()
+
+
 # ----------------------------------------------- FalkorProjection.edge_stats
 
 def test_falkor_edge_stats():
