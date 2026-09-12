@@ -78,9 +78,9 @@ the evidence allows:
    read/delete legacy alias; `_` is the only write spelling.
 2. **Resolution authority is evidence-gated.** For each kind exactly one writer's
    probes cover its recovery condition, and only that writer may declare it
-   recovered — or a caller clearing a sentinel **it** opened, whose own probe
-   observed the condition being cleared. Anything else is refused and logged
-   with the sentinel left intact. The mapping lives in `KIND_OWNERS`
+   recovered — or a caller clearing an incident whose issue **it** filed, since
+   its own probe observed the condition being cleared. Anything else is refused
+   and logged with the sentinel left intact. The mapping lives in `KIND_OWNERS`
    (`tortoise/alert_store.py`), is mirrored by `kind_owner()`
    (`.github/scripts/registry-cron.sh`), and is pinned across the language
    boundary by `test_kind_owner_contract_with_driver`. Each sentinel records the
@@ -88,9 +88,10 @@ the evidence allows:
    only by the kind's owner.
 3. **Liveness comes from the issue, not the sentinel.** A sentinel is trusted
    only while the issue it names is still open, read by state
-   (`github_issue.issue_is_open`), never inferred from a search result. Closure
-   requires positive evidence: a failed state read, or an unwired reader, counts
-   as open.
+   (`github_issue.issue_is_open_checked`), never inferred from a search result.
+   Refusing to trust a sentinel requires positive evidence of closure: a failed
+   state read, or an unwired reader, counts as open. A 404/410 is positive
+   evidence of closure and re-files.
 
 ## Alternatives considered
 
@@ -127,6 +128,16 @@ the evidence allows:
 - Unlisted kinds (`SIZE_GUARD_ABORT`, `DATA_LOSS_CANDIDATE`, `abuse_suspended`)
   are unguarded — authority was never contested there, and inventing an owner
   for them would be a guess rather than a decision.
+- A caller that opened a sentinel but **adopted** someone else's issue for it
+  cannot clear that incident (provenance follows the issue, not the sentinel).
+  That is deliberate — the alternative reintroduces the false recovery — but on
+  a leg where the issue's filer never runs again the incident stays open until
+  the kind's owner does. Tracked with the kind split in #3147.
+- A **persistent** non-404 failure of the issue-state read (revoked token, 403,
+  sustained 5xx) still counts as "open", so a sentinel naming a closed issue is
+  trusted for as long as the failure lasts. A blip must not re-file; a permanent
+  failure must not be silent. Counting consecutive failures and escalating is
+  not implemented here.
 
 ## Evidence base
 

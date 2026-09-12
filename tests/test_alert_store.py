@@ -729,12 +729,40 @@ def test_non_owner_that_adopts_an_issue_does_not_gain_authority():
     assert sentinel["issue_number"] == 50, "the driver's issue is adopted, not re-filed"
     assert len(ch.issues) == 1
     assert "writer" not in sentinel, "an adopter must not claim provenance"
-    assert ch.telegram == [], "the filer already announced it — no duplicate push"
+    # No sentinel recorded an announcement for #50 (this store created the
+    # sentinel itself, so `telegram_pushed` is False), therefore the incident is
+    # announced ONCE — the create-then-die window must not leave it silent
+    # (round 3 P1). A second poll must not announce it again.
+    assert len(ch.telegram) == 1
+    store.open_incident("R2_DOWN")
+    assert len(ch.telegram) == 1, "the persisted flag stops a re-announcement"
 
-    # ...so the authority check falls through to KIND_OWNERS: R2_DOWN is the
+    # ...and the authority check falls through to KIND_OWNERS: R2_DOWN is the
     # driver's, and the watcher cannot clear it.
     assert store.resolve_incident("R2_DOWN") is False
     assert ch.closed == []
+
+
+def test_adopted_issue_already_announced_is_not_re_announced():
+    """The other half: a sentinel that RECORDS the announcement is not repeated.
+
+    The driver writes `telegram_pushed: true` alongside its backfill, so a store
+    that adopts the driver's issue stays silent — the round-2 behaviour, now
+    driven by persisted state instead of by who happened to file.
+    """
+    ch = _FakeChannels()
+    storage = MemoryStorage()
+    ch.issues[50] = "[DR] R2_DOWN"
+    storage.upload(_DRIVER_KEY, json.dumps({
+        "kind": "R2_DOWN", "issue_number": 50,
+        "filed_at": "2026-09-12T00:00:00Z", "writer": "driver",
+        "telegram_pushed": True,
+    }).encode())
+    store = _store(ch, storage, issue_open=lambda n: True, writer="watcher")
+
+    assert store.open_incident("R2_DOWN") is False
+    assert ch.telegram == []
+    assert len(ch.issues) == 1
 
 
 def test_deleted_issue_is_treated_as_closed_not_as_a_blip():

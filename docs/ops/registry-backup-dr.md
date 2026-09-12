@@ -363,7 +363,8 @@ R2 are adopted and cleaned up rather than stranded holding a closed issue's
 number. Adoption is qualified by issue state on **both** sides (#3127): the
 `driver` checks `gh_issue_open` and re-files when the recorded issue is closed
 or 404, and the `AlertStore` reads the issue's own state via
-`github_issue.issue_is_open` — a sentinel naming a CLOSED issue is dropped and
+`github_issue.issue_is_open_checked` — a sentinel naming a CLOSED or DELETED
+(404/410) issue is dropped and
 the incident re-filed. Positive evidence of closure is required: a failed state
 read, or no state reader wired, counts as OPEN. Refusing to adopt on a blip is
 the duplicate-issue defect #2844 exists to fix; adopting a stale sentinel is the
@@ -382,9 +383,9 @@ duplicates.
 cover a kind's recovery condition may declare it recovered — `KIND_OWNERS` in
 `tortoise/alert_store.py`, mirrored by `kind_owner()` in `registry-cron.sh` and
 pinned across the language boundary by `test_kind_owner_contract_with_driver`.
-A caller may also clear a sentinel **it** opened, since its own probe observed
-the condition being cleared. Anything else is refused and logged with the
-sentinel left intact. This exists because one shared object let the weaker probe
+A caller may also clear an incident whose issue **it** filed, since its own
+probe observed the condition being cleared. Anything else is refused and logged
+with the sentinel left intact. This exists because one shared object let the weaker probe
 win: the watcher's reachability check cannot distinguish "R2 unreachable" from
 "the bucket cannot be listed" (the driver's `R2_LIST_OK=0` class), so its
 all-clear would close the driver's `R2_DOWN` — a false recovery, and the driver

@@ -282,7 +282,7 @@ telegram() { # text
       --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" --data-urlencode "text=$1" >/dev/null 2>&1 || true
 }
 file_alert() { # kind title body dedup_id
-  local kind="$1" title="$2" body="$3" id="$4" num="" tmp="" issue_num="" key=""
+  local kind="$1" title="$2" body="$3" id="$4" num="" tmp="" issue_num="" key="" filed=0
   LOUD=1
   tmp="$(mktemp)"
   key="$(alert_key "$kind" "$id")"
@@ -308,16 +308,23 @@ file_alert() { # kind title body dedup_id
         "https://api.github.com/repos/${REPO}/issues" \
         -d "$(jq -nc --arg t "$title" --arg b "$body" '{title:$t, body:$b, labels:["dr:backup"]}')" \
         | jq -r '.number // empty' 2>/dev/null || true)"
+      [ -n "$num" ] && filed=1
     fi
     if [ -n "$num" ]; then
       # Review F7 (coherence): backfill the AUTHORITATIVE R2 object with the
       # issue number here too. Without it the object keeps issue_number=null
       # until the next run, so a transient empty GitHub search in that window
       # would create a duplicate (the 412 object-trust path cannot help).
-      printf '{"kind":"%s","issue_number":%s,"filed_at":"%s","writer":"driver"}' "$kind" "$num" "$(date -u +%FT%TZ)" > "$tmp"
+      # Provenance is claimed ONLY when this driver created the issue (#3127):
+      # stamping an ADOPTED issue as driver-filed is the exact defect the store
+      # fixed in Python, and `resolve_global` treats this field as authority.
+      # telegram_pushed records that the announcement happened, so the store
+      # does not re-announce an issue this driver already showed a human.
+      _w=""; [ "$filed" = "1" ] && _w=',"writer":"driver"'
+      printf '{"kind":"%s","issue_number":%s,"filed_at":"%s"%s,"telegram_pushed":true}' "$kind" "$num" "$(date -u +%FT%TZ)" "$_w" > "$tmp"
       aws s3api put-object --endpoint-url "$R2_ENDPOINT" --bucket "$R2_BUCKET" \
         --key "$key" --body "$tmp" >/dev/null 2>&1 || true
-      telegram "🚨 DR alert: ${kind} — issue #${num}"
+      [ "$filed" = "1" ] && telegram "🚨 DR alert: ${kind} — issue #${num}"
     fi
   else
     # 412 — the object exists, so a prior creator won the create-once race.
@@ -345,12 +352,14 @@ file_alert() { # kind title body dedup_id
         "https://api.github.com/repos/${REPO}/issues" \
         -d "$(jq -nc --arg t "$title" --arg b "$body" '{title:$t, body:$b, labels:["dr:backup"]}')" \
         | jq -r '.number // empty' 2>/dev/null || true)"
+      [ -n "$num" ] && filed=1
     fi
     if [ -n "$num" ]; then
-      printf '{"kind":"%s","issue_number":%s,"filed_at":"%s","writer":"driver"}' "$kind" "$num" "$(date -u +%FT%TZ)" > "$tmp"
+      _w=""; [ "$filed" = "1" ] && _w=',"writer":"driver"'
+      printf '{"kind":"%s","issue_number":%s,"filed_at":"%s"%s,"telegram_pushed":true}' "$kind" "$num" "$(date -u +%FT%TZ)" "$_w" > "$tmp"
       aws s3api put-object --endpoint-url "$R2_ENDPOINT" --bucket "$R2_BUCKET" \
         --key "$key" --body "$tmp" >/dev/null 2>&1 || true
-      telegram "🚨 DR alert: ${kind} — issue #${num}"
+      [ "$filed" = "1" ] && telegram "🚨 DR alert: ${kind} — issue #${num}"
     fi
   fi
   rm -f "$tmp"

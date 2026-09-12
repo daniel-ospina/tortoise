@@ -383,10 +383,20 @@ class AlertStore:
                 logger.warning("incident filing failed for %s: %s — will adopt on next poll", kind, e)
         state["issue_number"] = issue_number
         state["detail"] = detail
-        if filed_here and writer != WRITER_UNSPECIFIED:
-            state["writer"] = writer  # provenance: who FILED it, not who adopted it
+        # Provenance records who FILED this issue. Adopting someone else's issue
+        # through the GH-search fallback must NOT claim it: that would let a
+        # non-owner clear a kind on its own weaker evidence (#3127 round 2). A
+        # sentinel with no issue number stays ours — we opened it and nobody
+        # else holds an issue for it, so we may still clear it ourselves.
+        if writer != WRITER_UNSPECIFIED and (filed_here or issue_number is None):
+            state["writer"] = writer
         _write_json(self._storage, key, state)
-        if issue_number is not None and filed_here:
+        # The announcement is gated on the PERSISTED flag, never on who filed.
+        # In the create-then-die window the filer creates the issue and dies
+        # before pushing; the adopter finds that issue via search and must then
+        # announce it. Gating on `filed_here` left the incident filed but never
+        # shown to a human, with nothing retrying (round 3 P1).
+        if issue_number is not None and not state.get("telegram_pushed"):
             self._push_with_pending(key, self._telegram_text(kind, team_id, detail, issue_number))
             state["telegram_pushed"] = True
             _write_json(self._storage, key, state)
@@ -463,10 +473,24 @@ class AlertStore:
                 + " — issue " + ", ".join(f"#{n}" for n in numbers),
             )
         # delete-to-resolve across the whole alias set: a surviving spelling
-        # would adopt the next recurrence (the #2796 class). Best-effort — a
-        # failed delete must not abort the remaining spellings.
-        for key, _ in states:
+        # would adopt the next recurrence (the #2796 class). Best-effort, and
+        # compare-and-delete exactly like `_forget`: the closes and the push
+        # above are GitHub round trips, and a writer that re-files this incident
+        # with a NEW issue number during them would have its fresh sentinel
+        # deleted — orphaning an open issue that no sentinel names (the #3030
+        # class) and re-filing a duplicate on the next detection (#2844).
+        for key, seen in states:
             try:
+                current = _read_json(self._storage, key)
+                if current and (
+                    current.get("issue_number") != seen.get("issue_number")
+                    or current.get("filed_at") != seen.get("filed_at")
+                ):
+                    logger.warning(
+                        "dedup: %s was re-filed while resolving — leaving the new "
+                        "sentinel in place (its issue stays open)", key,
+                    )
+                    continue
                 self._storage.delete(key)
             except Exception as e:
                 logger.warning("sentinel delete failed (%s): %s — spelling left behind", key, e)
