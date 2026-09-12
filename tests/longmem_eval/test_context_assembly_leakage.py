@@ -612,6 +612,72 @@ def test_imported_helper_class_method_is_caught(monkeypatch):
     assert not any(f.kind == "scope" for f in report.findings), [str(f) for f in report.findings]
 
 
+@pytest.mark.parametrize(
+    ("import_line", "call"),
+    [
+        ("import tortoise.subgraph as _sgmod", "_sgmod.Subgraph()"),
+        ("from tortoise import subgraph as _submod", "_submod.Subgraph()"),
+    ],
+    ids=["import-module-as", "from-package-import-submodule"],
+)
+def test_imported_module_class_construction_is_not_a_stale_scope_finding(
+    monkeypatch, import_line, call
+):
+    """P2 false positive: ``pkg.Class()`` is not a stale entry point.
+
+    ``tortoise.subgraph.Subgraph`` is a ``@dataclass`` (no explicit
+    ``__init__``) living in a scanned code path. The attribute-call branch
+    returned ``(path, "Subgraph")`` for ``_sgmod.Subgraph()``, but class
+    methods are keyed ``Class.method`` — so the frontier looked up a
+    non-existent ``Subgraph`` function and reported this gold-free construct
+    as ``declared entry point not found — the guard is stale``: a HARD STOP on
+    a legitimate B/C branch. Both import spellings (module import and
+    submodule-from-import) must resolve it as a class, not a function.
+    """
+    injected = _inject_in_bc_branch(
+        _real_driver_source() + f"\n{import_line}\n", f"        _ = {call}"
+    )
+    report = _scan_with_driver_source(monkeypatch, injected)
+    scope_findings = [str(f) for f in report.findings if f.kind == "scope"]
+    assert not scope_findings, scope_findings
+    assert report.clean, [str(f) for f in report.findings]
+
+
+def test_imported_module_class_path_still_carries_a_real_leak(monkeypatch):
+    """Non-vacuity: the same imported-module class path still catches gold.
+
+    The fix must not turn the false positive into a silent skip. ``_rdrmod``
+    is bound to the module itself (``symbol is None``), so ``_rdrmod._S5()``
+    has to enqueue the imported class's ``__init__`` — a gold literal placed
+    there (or read via ``self``) is a real finding.
+    """
+    helper = (
+        "\n\nclass _S5:\n"
+        "    def __init__(self):\n"
+        '        self._keys = ("has_answer", "lme_session_index")\n'
+        "\n"
+        "    def scrub(self, props):\n"
+        "        return {k: v for k, v in props.items() if k not in self._keys}\n"
+    )
+    driver = _inject_in_bc_branch(
+        _real_driver_source() + "\nimport tools.longmem_eval.reader as _rdrmod\n",
+        "        _ = _rdrmod._S5().scrub(qctx.raw)",
+    )
+    report = _scan_with_module_sources(
+        monkeypatch, {_DRIVER_PATH: driver, _HELPER_PATH: lg._read(_HELPER_PATH) + helper}
+    )
+    assert any(
+        entry.startswith(_HELPER_PATH) and "_S5.scrub" in entry for entry in report.visited
+    ), "the imported class method was not followed"
+    assert any(
+        f.code_path == _HELPER_PATH and f.function == "_S5.__init__" for f in report.findings
+    ), [str(f) for f in report.findings]
+    assert any(f.code_path == _HELPER_PATH and f.kind == "string" for f in report.findings), [
+        str(f) for f in report.findings
+    ]
+    assert not any(f.kind == "scope" for f in report.findings), [str(f) for f in report.findings]
+
+
 def test_module_binding_post_definition_mutation_is_caught(monkeypatch):
     """P2: a gold value written into a module binding *after* its definition.
 

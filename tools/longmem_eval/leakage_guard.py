@@ -1329,6 +1329,32 @@ def _constructor_init_target(
     return None
 
 
+def _imported_module_attr_target(
+    module_path: str,
+    attr: str,
+    cache: dict[str, _Module],
+) -> tuple[str, str] | None:
+    """``(path, target)`` for a call on an **imported module's** attribute.
+
+    ``import pkg; pkg.Class()`` (and the submodule form ``from pkg import sub;
+    sub.Class()``) names a *class*, whose methods are keyed ``Class.method`` —
+    never a bare ``Class``. Returning ``(path, attr)`` for it enqueued a
+    non-existent function target, so the frontier looked up ``funcs[attr]``,
+    found nothing and faked a stale-scope finding on legitimate gold-free
+    code. This mirrors the ``ast.Name`` branch of :func:`_call_target`: a class
+    resolves to its ``__init__`` (or to nothing when it defines none, e.g. a
+    dataclass), a module-level function to itself, and anything else to
+    ``None`` — never to a target that cannot exist.
+    """
+    imported = _load(module_path, cache)
+    if attr in imported.classes:
+        target = f"{attr}.__init__"
+        return (module_path, target) if target in imported.funcs else None
+    if attr in imported.funcs:
+        return (module_path, attr)
+    return None
+
+
 def _call_target(
     call: ast.Call,
     module: _Module,
@@ -1375,10 +1401,14 @@ def _call_target(
             if base in module.imports:
                 target_path, symbol = module.imports[base]
                 if symbol is None:
-                    return (target_path, attr)
+                    # ``import pkg`` — ``pkg.attr`` is an attribute of the
+                    # imported module (a class, a function, or neither).
+                    return _imported_module_attr_target(target_path, attr, cache)
                 submodule = _submodule_path(target_path, symbol)
                 if submodule is not None:
-                    return (submodule, attr)
+                    # ``from pkg import sub`` — ``sub.attr`` is an attribute of
+                    # the imported submodule; same class/function resolution.
+                    return _imported_module_attr_target(submodule, attr, cache)
             if base == "self" and class_name:
                 target_class = class_name
             elif base in module.classes:
