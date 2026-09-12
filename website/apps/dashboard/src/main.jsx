@@ -6772,9 +6772,10 @@ function claimIntentInFlight() {
                   ) : (
                     <div className="harness">
                       {/* #2865: the ONLY remaining body here is the mint-cap
-                          remedy (capNotice is reachable only for owner/admins
-                          — a 402 from the Keys-tab create/rotate or the
-                          wizard mint), so the pre-#2865 member arm —
+                          remedy (capNotice is set only by the Keys-tab
+                          create/rotate 402s, both owner/admin-only — the
+                          wizard mint's 402 sets wizardDurableError, not
+                          this), so the pre-#2865 member arm —
                           "Only owners and admins can create API keys…" above a
                           paste row — is gone: members now reach the chooser
                           above and get the paste escape on a keyed leaf. */}
