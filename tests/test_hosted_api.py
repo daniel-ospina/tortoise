@@ -440,36 +440,56 @@ class TestHealthEndpoints:
     def test_health_ready_fails_closed_when_probe_hangs(self, client, monkeypatch):
         """Readiness stays fail-closed (503) — but DROPPING the old unbounded
         on-loop ``_get_proj().g.query()`` means a hung DB can no longer block
-        the event loop for every other request. Readiness reads its OWN
-        coordinator (``_READY_PROBE``), so it probes LIVE rather than joining
-        the liveness refresher's in-flight probe."""
-        import time
+        the event loop for every other request. The probe is dispatched with
+        ``asyncio.to_thread`` under the module wall bound
+        (``_READY_PROBE_TIMEOUT_S``), so a hung plane is REPORTED, not waited
+        out.
+
+        #3062 rebase note: the probe is released in ``finally``. With the
+        ``to_thread`` dispatch the worker is a non-daemon default-executor
+        thread, so a probe that never returns would be joined at loop shutdown
+        (~300s warning); the reviewer-approved coordinator shape used a
+        daemon thread, which is why the original test could leak it.
+        """
+        import threading
 
         import tortoise.hosted_api as ha_mod
 
+        release = threading.Event()
+
         def _hang():
-            time.sleep(600)
+            release.wait(600)
             return {"ok": True, "latency_ms": 0.0, "error": None}
 
         monkeypatch.setattr(ha_mod, "_probe_db", _hang)
-        monkeypatch.setattr(ha_mod._READY_PROBE, "_timeout", 0.2)
+        monkeypatch.setattr(ha_mod, "_READY_PROBE_TIMEOUT_S", 0.2)
 
-        r = client.get("/health/ready")
-        assert r.status_code == 503
+        try:
+            r = client.get("/health/ready")
+            assert r.status_code == 503
+        finally:
+            release.set()
 
     def test_health_ready_never_serves_a_pre_outage_verdict(self, client, monkeypatch):
         """#2850 review P1: readiness must not answer 200 from a completed probe.
 
         Readiness records ``{ok: True}``; the plane then dies; the next probe
-        cannot finish before ``run()``'s deadline. Pre-fix, ``run()`` returned
-        ``_view_locked()`` — the stale completed verdict, still inside the 30s
-        ``stale_after`` window — so /health/ready answered 200 "connected" for
+        cannot finish before the read deadline. Pre-fix, the coordinator
+        returned the stale completed verdict, still inside the 30s
+        ``stale_after`` window, so /health/ready answered 200 "connected" for
         ~5s while the plane was dead (which matters because deploy-hosted.yml
         asserts readiness LAST). The autouse ``_reset_health_probe`` fixture
         resets the coordinators before every test, which is why priming has to
         happen INSIDE the test and the old suite missed this.
+
+        #3062 rebase note: readiness now probes the plane LIVE through
+        ``asyncio.to_thread`` (main's #2988 shape), so a completed pre-outage
+        verdict can never be served by construction. The coordinator is still
+        primed below to pin that its own fail-closed read semantics hold;
+        the probe is released in ``finally`` (non-daemon worker, see
+        ``test_health_ready_fails_closed_when_probe_hangs``).
         """
-        import time
+        import threading
 
         import tortoise.hosted_api as ha_mod
 
@@ -481,16 +501,21 @@ class TestHealthEndpoints:
         assert ha_mod._READY_PROBE.wait(timeout=2.0)["ok"] is True
 
         # The plane dies and the probe wedges; the read budget expires.
+        release = threading.Event()
+
         def _hang():
-            time.sleep(600)
+            release.wait(600)
             return {"ok": True, "latency_ms": 0.0, "error": None}
 
         monkeypatch.setattr(ha_mod, "_probe_db", _hang)
-        monkeypatch.setattr(ha_mod._READY_PROBE, "_timeout", 0.2)
+        monkeypatch.setattr(ha_mod, "_READY_PROBE_TIMEOUT_S", 0.2)
 
-        r = client.get("/health/ready")
-        assert r.status_code == 503, (
-            "readiness answered from a completed pre-outage probe")
+        try:
+            r = client.get("/health/ready")
+            assert r.status_code == 503, (
+                "readiness answered from a completed pre-outage probe")
+        finally:
+            release.set()
 
     def test_in_flight_gauge_tracks_requests_and_releases(self):
         """#2850 review P0: the watchdog's idle gate is fed by this gauge.

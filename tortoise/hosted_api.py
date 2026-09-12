@@ -2178,25 +2178,38 @@ _HEALTH_PROBE = HealthProbe(lambda: _probe_db(),
                             refresh_budget=lambda: _health_probe_interval())
 
 
-def _probe_control_plane() -> dict:
-    """Bounded Supabase control-plane probe (#2850 item 6). Never raises.
+def _probe_control_plane() -> None:
+    """Minimal control-plane probe — a 1-row teams read exercises the PostgREST
+    path without depending on any tenant data.
 
-    ``/health/ready`` used to run ``get_control_plane().query("teams", ...)``
-    DIRECTLY on the event loop with no timeout — the same hazard as the
-    FalkorDB half: a black-holed PostgREST endpoint blocked EVERY request in
-    the process, not just the readiness check. It now runs on the probe's own
-    daemon worker through ``_CONTROL_PLANE_PROBE``.
+    #2988: this is a SYNCHRONOUS HTTP call and it RAISES on failure. Callers
+    (``/health/ready``) MUST run it off the event loop (``asyncio.to_thread``)
+    under a wall bound, and treat any exception as not-ready (503) — the
+    handler does not read a return value. Done on the loop, one black-holed
+    socket froze every route in the process.
 
     ``get_control_plane()`` is a process-wide lazy singleton, so the probe
     does not build a client per check (and a construction failure — missing
-    creds in Supabase mode — is reported as not-ready, fail-closed).
+    creds in Supabase mode — surfaces as an exception → not-ready,
+    fail-closed).
+    """
+    from tortoise.supabase_control import get_control_plane
+
+    get_control_plane().query("teams", select=["id"], limit=1)
+
+
+def _probe_control_plane_result() -> dict:
+    """Never-raise ``{ok, latency_ms, error}`` view of the control-plane probe.
+
+    The ``HealthProbe`` coordinator (``_CONTROL_PLANE_PROBE``) requires a
+    never-raising, dict-returning callable, whereas the request-path handler
+    needs ``_probe_control_plane`` to raise (#2988). This wraps the latter for
+    the coordinator, which no longer sits on the readiness request path but is
+    still consumed by the monitoring tests.
     """
     start = time.monotonic()
     try:
-        from tortoise.supabase_control import get_control_plane
-        # Minimal control-plane probe — a 1-row teams read exercises the
-        # PostgREST path without depending on any tenant data.
-        get_control_plane().query("teams", select=["id"], limit=1)
+        _probe_control_plane()
     except Exception as exc:  # never raise, always report
         return {"ok": False,
                 "latency_ms": round((time.monotonic() - start) * 1000, 1),
@@ -2213,7 +2226,7 @@ def _probe_control_plane() -> dict:
 # ``fresh_only=True``: readiness is a FAIL-CLOSED gate, so it must never answer
 # 200 from a verdict older than its own read budget (review P1). See the
 # ``_READY_PROBE`` note below.
-_CONTROL_PLANE_PROBE = HealthProbe(lambda: _probe_control_plane(), fresh_only=True)
+_CONTROL_PLANE_PROBE = HealthProbe(lambda: _probe_control_plane_result(), fresh_only=True)
 
 
 # #2850 item 6: READINESS gets its own coordinator, distinct from the one the
@@ -2235,6 +2248,17 @@ _CONTROL_PLANE_PROBE = HealthProbe(lambda: _probe_control_plane(), fresh_only=Tr
 # while the control plane (5s httpx timeout) or FalkorDB was already dead, and
 # deploy-hosted.yml asserts readiness LAST as its strongest post-deploy signal.
 _READY_PROBE = HealthProbe(lambda: _probe_db(), fresh_only=True)
+
+# #2988 (main, superseding the #2850 request-path shape for /health/ready):
+# the readiness handler dispatches both plane probes with
+# ``asyncio.to_thread`` under this wall bound. ORDERING INVARIANT — the bound
+# must be STRICTLY ABOVE the probe client's own timeout ("SupabaseControlPlane"
+# defaults to 5.0s; "probe_db" self-bounds at ~1.6s). ``asyncio.wait_for``
+# cancels the AWAIT, not the worker thread: when the outer bound wins the race
+# it returns while the thread is still in its socket read. Keeping the outer
+# bound above the inner one means the client timeout normally fires first and
+# the thread returns on its own.
+_READY_PROBE_TIMEOUT_S = 6.0
 
 
 @app.get("/health")
@@ -2261,11 +2285,12 @@ async def health():
     ok) flips status to "degraded" + db.ok=false, visible immediately without
     any graph-touching request.
 
-    #2850 (P0): this handler now collects NO I/O and takes NO thread
-    # hand-off. It reads one in-memory value from ``_HEALTH_PROBE``
-    # (``snapshot()``) and one in-memory heartbeat timestamp, and returns.
-    # Nothing on the request path submits work to the event loop's DEFAULT
-    # ThreadPoolExecutor — the executor /health used to ride via
+    #2850 (P0): this handler takes NO thread hand-off from the event
+    # loop's DEFAULT ThreadPoolExecutor. It reads ``_HEALTH_PROBE`` (the
+    # single-flight, hard-bounded coordinator — its probe runs on its own
+    # daemon thread, never the shared pool) and one in-memory heartbeat
+    # timestamp. Nothing on the request path submits work to the DEFAULT
+    # executor — the executor /health used to ride via
     # ``asyncio.to_thread(_probe_db)``, shared with ~89 other ``to_thread``
     # call sites whose queue wait has no timeout. That shared queue is what
     # let a stalled FalkorDB push the check past Fly's 15s budget while the
@@ -2279,7 +2304,13 @@ async def health():
     # It never 5xxes: a dead DB is "degraded", never a killed process.
     """
     try:
-        db = _HEALTH_PROBE.snapshot()
+        # #3060/#2850 reconciliation: the probe MUST actually run (Fly's
+        # check has to exercise the DB — a short-circuiting handler would
+        # answer "ok" for a dead DB), but it runs on the coordinator's own
+        # never-joined daemon thread, single-flight and hard-bounded, so a
+        # saturated default executor cannot delay it and repeated reads
+        # cannot accumulate probe threads.
+        db = await _HEALTH_PROBE.run()
     except Exception as exc:  # liveness must answer, always
         db = {"ok": False, "latency_ms": 0.0, "error": str(exc)[:200]}
     try:
@@ -2304,13 +2335,11 @@ async def health_ready():
     (today's behavior — selfhost has no second plane). Fail-closed: not-ready
     is a 503, never a 200.
 
-    #2850: the FalkorDB half reads its OWN bounded, single-flight coordinator
-    (``_READY_PROBE`` — deliberately NOT the liveness refresher's, or a
-    readiness call could join a probe that began before the outage and report a
-    stale "ok"). The pre-fix code ran ``_make_sdk(...)._get_proj().g.query(...)``
-    directly on the event loop with no timeout, so a hung DB blocked EVERY
-    request, not just this one. A stalled probe now reads as not-ready (503),
-    fail-closed, without ever blocking the loop.
+    #2850/#2988: both halves are dispatched with ``asyncio.to_thread`` under
+    the module wall bound (``_READY_PROBE_TIMEOUT_S``) — synchronous network
+    I/O on the event loop is what froze every route in the process. The bound
+    is what makes readiness ANSWER when a plane black-holes instead of waiting
+    it out; a stalled probe reads as not-ready (503), fail-closed.
     """
     # Data plane. Reuses /health's probe: itself hard-bounded (~1.5s) and it
     # never raises, so a dead DB degrades the result instead of the process.
@@ -2326,9 +2355,10 @@ async def health_ready():
         # registry_control_plane on every health check (post-flip
         # verification finding, #669). Probe the data plane via the default
         # graph (never the registry namespace).
-        db = await _READY_PROBE.run()
+        db = await asyncio.wait_for(
+            asyncio.to_thread(_probe_db), timeout=_READY_PROBE_TIMEOUT_S)
         db_ok = db.get("ok") is True
-    except Exception:
+    except Exception:  # incl. asyncio.TimeoutError — not-ready, never a hang
         db_ok = False
     if not db_ok:
         raise HTTPException(status_code=503, detail="Database unreachable")
@@ -2338,11 +2368,12 @@ async def health_ready():
         # A wedged/unreachable control plane is a 503 (fail-closed), never a
         # blocked event loop.
         try:
-            control = await _CONTROL_PLANE_PROBE.run()
-        except Exception:  # fail closed
-            control = {"ok": False}
-        if control.get("ok") is not True:
-            raise HTTPException(status_code=503, detail="Control plane unreachable")
+            await asyncio.wait_for(
+                asyncio.to_thread(_probe_control_plane),
+                timeout=_READY_PROBE_TIMEOUT_S,
+            )
+        except Exception:
+            raise HTTPException(status_code=503, detail="Control plane unreachable")  # noqa: B904
         return {"status": "ok", "db": "connected", "control_plane": "connected"}
     return {"status": "ok", "db": "connected"}
 
