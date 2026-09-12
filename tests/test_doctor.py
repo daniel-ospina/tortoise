@@ -307,6 +307,44 @@ class TestDoctorPath:
         assert set(selected) == {"tenant-alpha"}
         assert "tortoise" not in selected
 
+    def test_doctor_db_uri_probe_uses_decoded_credentials(
+            self, clear_db_env, monkeypatch, capsys):
+        """#3039: the Step 2 probe must percent-DECODE URI userinfo — urlparse
+        does not, so a raw read forwards a literal %XX and the probe reports a
+        false auth failure. Pin the (username, password) it hands FalkorDB."""
+        import falkordb as _falkordb
+
+        calls: list[dict] = []
+
+        class _FakeGraph:
+            def query(self, q):
+                return None
+
+        class _FakeFalkorDB:
+            def __init__(self, *a, **k):
+                calls.append(
+                    {key: k.get(key) for key in ("username", "password")}
+                )
+
+            def select_graph(self, name):
+                return _FakeGraph()
+
+        monkeypatch.setattr(_falkordb, "FalkorDB", _FakeFalkorDB)
+        # ad%6Din -> admin ; p%40ss -> p@ss
+        rc = _run_doctor([
+            "--db", "docker://ad%6Din:p%40ss@127.0.0.1:59997/test_doctor_tenant"])
+        capsys.readouterr()
+
+        assert rc == 1  # dead port — both probe and Step 3 still construct
+        # Step 2 (the probe under test) is followed by Step 3's from_uri
+        # construction, so a single mutable dict would be overwritten by the
+        # later, already-decoded call. Assert on EVERY construction:
+        # reverting the probe to raw `parsed.username` must red this test.
+        assert calls, "doctor constructed no FalkorDB client"
+        assert all(
+            c == {"username": "admin", "password": "p@ss"} for c in calls
+        ), calls
+
     def test_doctor_embedded_target_skips_docker_probe(self, clear_db_env, tmp_path, capsys):
         """#720 conf 78: embedded target → probe reports embedded mode
         instead of attempting a fake localhost:16379 connection."""

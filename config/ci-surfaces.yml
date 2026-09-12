@@ -82,6 +82,11 @@ surfaces:
   - test_export_cli.py
   - test_export_pack_config.py
   - test_failure_contract.py
+  # #3039: percent-decoding of URI userinfo — api-surface consumers
+  # (tortoise/acl_graph_users.py::_admin_client, tortoise/__main__.py doctor
+  # probe) feed the same rule in tortoise/config.py; registered here so an
+  # acl/__main__-only change runs the pinned tests.
+  - test_from_uri_userinfo.py
   - test_fake_control_plane.py
   - test_free_team_entitlement.py   # main-side drift unblock (#1929): committed on main (entitlement gate work) but never added to selection — the --integrity gate fails every PR without it
   - test_one_free_org_entitlement.py  # main-side drift unblock (#2789/#2822): one-free-org entitlement test merged on main but never added to selection — the --integrity gate fails every PR without it
@@ -175,6 +180,7 @@ surfaces:
   - test_platform_seams.py            # epic #2080 end-state seams wave-1: per-turn volunteer CLI + install + shipped hook (embedded, lane-agnostic)
   battery:
   - test_battery_arms.py
+  - test_battery_derive_truth_leg.py  # main-side drift unblock: added on main by #3100 (#2740 truth-emission leg) but never registered — the --integrity gate fails every PR without it
   - test_battery_judge.py
   - test_battery_parity.py
   # Dual-registered (api + battery) where the test pins a battery/ module:
@@ -340,6 +346,10 @@ surfaces:
   - test_file_indexer.py
   - test_flip_gate.py
   - test_fly_machines_guard.py
+  # #3039: percent-decoding of URI userinfo (the single shared rule in
+  # tortoise/config.py, which is a core-surface path) — registered here so a
+  # config.py-only change still runs the guard.
+  - test_from_uri_userinfo.py
   - test_frontmatter_validator.py
   - test_gate_b_tooling.py
   - test_graph_diagnostics.py

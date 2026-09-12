@@ -591,12 +591,17 @@ def _proj_for_uri(uri: str):
     """A host-mode projection for a URI, constructed WITHOUT from_uri so the
     frame-gated journal append never fires from sweep code."""
     from urllib.parse import urlparse
+
+    from tortoise.config import parse_uri_userinfo
     parsed = urlparse(uri)
+    # #3039: decode userinfo through the single shared rule (urlparse does
+    # NOT percent-decode; the client constructor does not either).
+    username, password = parse_uri_userinfo(uri)
     return FalkorProjection(
         host=parsed.hostname or "localhost",
         port=parsed.port or 16379,
-        username=parsed.username or None,
-        password=parsed.password or None,
+        username=username,
+        password=password,
         graph_name=f"test_sweep_{os.urandom(4).hex()}",
         ssl=(parsed.scheme == "rediss"),
         skip_health_check=True,

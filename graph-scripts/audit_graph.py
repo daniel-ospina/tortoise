@@ -7,15 +7,23 @@ connection now env-based (TORTOISE_DB_URI).
 from falkordb import FalkorDB  # noqa: I001
 import json, os, sys  # noqa: E401, F401
 
+# Repo-root import (matches the sibling graph-scripts).
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 
 def _parse_uri(uri: str) -> dict:
     """Parse docker:// URI into components."""
     from urllib.parse import urlparse
+
+    from tortoise.config import parse_uri_userinfo
     parsed = urlparse(uri)
+    # #3039: decode userinfo through the single shared rule — urlparse does
+    # NOT percent-decode, and FalkorDB(...) does not either.
+    _username, password = parse_uri_userinfo(uri)
     return {
         "host": parsed.hostname or "localhost",
         "port": parsed.port or 16379,
-        "password": parsed.password or "",
+        "password": password or "",
         "graph": parsed.path.lstrip("/") or "tortoise",
     }
 

@@ -4560,6 +4560,8 @@ def _cmd_doctor(args):
     # Docker server to probe.
     if target is not None and is_db_uri(target):
         from urllib.parse import urlparse
+
+        from tortoise.config import parse_uri_userinfo
         # urlparse raises ValueError on malformed URIs (e.g. dangling IPv6
         # bracket `docker://:pw@[abc`) — keep ALL parsing inside the guard
         # so it surfaces as a clean ❌ + rc 1, never a traceback (#720 P2
@@ -4573,8 +4575,9 @@ def _cmd_doctor(args):
         try:
             parsed = urlparse(target)
             probe_host = parsed.hostname or "localhost"
-            probe_user = parsed.username or None
-            probe_pass = parsed.password or None
+            # #3039: decode userinfo through the single shared rule —
+            # urlparse does NOT percent-decode userinfo.
+            probe_user, probe_pass = parse_uri_userinfo(target)
             # Same graph derivation from_uri uses (parsed.path.lstrip('/') or
             # "tortoise") — probe the URI path's graph, never a hardcoded
             # "tortoise" (#720 P2 conf 62): a non-default graph name must be
