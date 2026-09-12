@@ -288,7 +288,8 @@ def _walk_to_connect(page: Page) -> None:
     """The shared prefix of every journey: re-entry → step 0 → fork SELF →
     connect. The account already holds an org (_wire's team_row)."""
     _walk_to_fork(page)
-    page.get_by_role("button", name="Use it for your own agents").click()
+    # #3218: the self-fork option is first-person now.
+    page.get_by_role("button", name="For my internal setup").click()
     expect(page.locator("body")).to_contain_text("Connect your agent", timeout=10_000)
 
 
@@ -831,6 +832,70 @@ def test_codex_desktop_surface_reaches_config_toml_instructions(page: Page) -> N
     page.get_by_role("button", name="Pi", exact=True).click()
     assert page.locator(".harness-surfaces").count() == 0, \
         "the surface row must not leak onto single-choice families (Pi)"
+
+
+def test_3218_multi_part_procedures_render_a_numbered_step_three(page: Page) -> None:
+    """#3218: Pi's connect procedure has two user-visible parts (set up, then
+    restart + verify) and Claude Web/Desktop's has two (add the connector,
+    then hand Claude the workflows). Each part is its own numbered block — the
+    second one used to be a bare caption inside block 2, so the circles said
+    (1, 2) while the user had three things to do."""
+    _seed_cookie(page, "u-3218")
+    _wire(page, role="owner")
+    _walk_to_connect(page)
+    _mint_from_connect(page)
+
+    # Pi: 1 key → 2 Set up Pi → 3 Restart Pi and verify
+    page.get_by_role("button", name="Pi", exact=True).click()
+    titles = page.locator(".wizard-block-title").all_inner_texts()
+    assert len(titles) == 3, f"Pi must render three numbered blocks, got {titles}"
+    assert titles[0].endswith("Get your API key"), titles
+    assert titles[1].endswith("Set up Pi"), titles
+    assert titles[2].endswith("Restart Pi and verify"), titles
+
+    # Claude Web: 1 key → 2 Add the Claude Web connector → 3 the workflows prompt
+    page.get_by_role("button", name="Claude", exact=True).click()
+    page.get_by_role("button", name="Claude Web").click()
+    titles = page.locator(".wizard-block-title").all_inner_texts()
+    assert len(titles) == 3, f"Claude Web must render three numbered blocks, got {titles}"
+    assert titles[1].endswith("Add the Claude Web connector"), titles
+    assert titles[2].endswith("Give Claude the Tortoise workflows"), titles
+
+    # Claude Code is a single-prompt flow — the circles stay (1, 2).
+    page.get_by_role("button", name="Claude Code").click()
+    titles = page.locator(".wizard-block-title").all_inner_texts()
+    assert len(titles) == 2, f"Claude Code stays at two numbered blocks, got {titles}"
+    assert titles[1].endswith("Set up Claude Code"), titles
+
+
+def test_3218_key_row_states_the_visibility_window(page: Page) -> None:
+    """#3218: the key surfaces no longer say "(shown once)" — they state the real
+    window (visible while on this step) and the recovery path (create one from
+    the API Keys page; rotating replaces it).
+
+    The note must render in the DEFAULT 'included' mode too: that mode hides the
+    separate key row, and a note gated on the row would leave the commonest
+    connect path with no cue at all (review cycle 1, P1)."""
+    _seed_cookie(page, "u-3218-key")
+    _wire(page, role="owner")
+    _walk_to_connect(page)
+    _mint_from_connect(page)
+    # DEFAULT mode: no separate key row, but the note must still be on screen.
+    assert page.locator(".key-row").count() == 0, \
+        "the default 'included' mode hides the separate key row"
+    note = page.locator(".wizard-note", has_text="Visible while you're on this step")
+    expect(note).to_be_visible(timeout=5_000)
+    note_text = note.inner_text()
+    assert "API Keys page" in note_text, note_text
+    assert "rotating replaces this key" in note_text, note_text
+    # Switching to 'separate' shows the row; the note must NOT be duplicated.
+    page.get_by_role("button", name="Key separate from prompt").click()
+    row = page.locator(".key-row")
+    expect(row).to_contain_text("Your API key:", timeout=5_000)
+    assert "shown once" not in row.inner_text(), \
+        "the row must not claim 'shown once'"
+    assert page.locator(".wizard-note", has_text="Visible while you're on this step").count() == 1, \
+        "exactly ONE visibility note may render (not one per key surface)"
 
 
 def test_first_timer_wizard_build_fork_marks_catalog(page: Page) -> None:
