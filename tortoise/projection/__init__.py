@@ -539,6 +539,13 @@ def split(points: dict[str, dict]) -> tuple[list[dict], list[dict]]:
 class Projection(Protocol):
     def apply(self, event: dict) -> None: ...
     def rebuild(self, log) -> None: ...
+    # #2977: the shared replay entrypoint, as the Protocol requires it —
+    # `isinstance` checks METHOD PRESENCE, and
+    # `tests/test_projection.py:323-326` asserts `isinstance(InMemoryProjection(), Projection)`,
+    # so adding it to the Protocol WITHOUT implementing it on InMemoryProjection
+    # makes that assertion return False.
+    def apply_replay(self, events,
+                     strict: bool = False) -> tuple[int, int, int]: ...
 
 
 class InMemoryProjection:
@@ -550,6 +557,20 @@ class InMemoryProjection:
 
     def rebuild(self, log) -> None:
         self.points = fold(log.read_all())
+
+    def apply_replay(self, events, strict: bool = False) -> tuple[int, int, int]:
+        """#2977 Protocol conformance for the in-memory projection.
+
+        The in-memory fold is Object-BLIND BY DESIGN (`fold()` returns `{}` for
+        `[ObjectRegistered, ObjectRetracted]`), so there are no object folds to
+        flush here and this returns a 3-tuple of zeros for the tears. It exists
+        so `isinstance(InMemoryProjection(), Projection)` stays True.
+        """
+        applied = 0
+        for ev in events:
+            self.apply(ev)
+            applied += 1
+        return applied, 0, 0
 
 
 def _validate_uri_scheme(scheme: str) -> str:
@@ -1292,10 +1313,78 @@ class FalkorProjection(
                                ev.get("event_id"), exc_info=True)
         return torn
 
+    def apply_replay(self, events, strict: bool = False) -> tuple[int, int, int]:
+        """#2977: replay a journal, deferring BOTH Object fold families to the
+        shared seq-ordered flush.
+
+        Replay-ONLY. `apply()` must not gain deferred state: it is also the LIVE
+        write path (the entity funnel, api.py's emit, the connectors, backup
+        restore, bulk import, the GitHub indexer).
+
+        `ObjectSuperseded` is deferred here rather than left to `apply()`'s
+        INLINE fold: a trailing-only retraction flush would make a retraction
+        beat a LATER supersession, so the engines would disagree on
+        `Reg→Retract→Supersede` (D-12).
+
+        `strict=True` re-raises instead of isolating. BOTH `rebuild(log)` and
+        `rebuild_all` pass it — both were fail-loud before this change — **and
+        so does `backup.py`'s restore fallback** (its loop is a bare
+        `for ev: proj.apply(ev)` in `try/finally` with no `except`). **Exactly
+        ONE caller uses the fail-soft default: `recover_from_log`** — its
+        documented contract is "query/log failures are caught and reported in
+        the result, never raised", and it reads all three return values.
+
+        The anchor is recorded only AFTER ``apply()`` succeeds, so a torn
+        registration cannot seed a survivor anchor and silently drop a
+        legitimate retraction — the same ordering rebuild_all uses.
+
+        Returns ``(applied, apply_torn, fold_torn)``. **Two tear counts, not
+        one.** ``apply_torn`` counts per-event ``apply()`` failures — the SAME
+        tolerated class the pre-existing ``recover_from_log`` reports as
+        "(N skipped)". ``fold_torn`` counts failed **folds**, which mean the
+        durability fix did not apply. Collapsing them makes a single
+        un-appliable legacy event — e.g. a parseable `EventRecorded` whose
+        `object` is a dict, raising `TypeError` in `_upsert_event` — report
+        `recovered: False`, and `_recover_or_raise` then REFUSES TO OPEN THE DB.
+        Pre-existing behaviour returned `{'recovered': True, 'reason': '…
+        (1 skipped)'}`. ``applied`` counts every event accepted, INCLUDING
+        deferred folds that folded cleanly.
+        """
+        object_folds: list[tuple[int, dict, str]] = []
+        _recreate: list[tuple[int, dict]] = []
+        applied = apply_torn = 0
+        for seq, ev in enumerate(events):
+            ev = self._norm(ev)
+            t = ev.get("type")
+            if t in ("ObjectSuperseded", "ObjectRetracted"):
+                object_folds.append(
+                    (seq, ev,
+                     "supersede" if t == "ObjectSuperseded" else "retract"))
+                continue
+            try:
+                self.apply(ev)
+                applied += 1
+                if t == "ObjectRegistered":
+                    _recreate.append((seq, ev))
+            except Exception:
+                if strict:
+                    raise
+                apply_torn += 1
+                logger.warning("replay: event failed (type=%s event_id=%s)",
+                               t, ev.get("event_id"), exc_info=True)
+        fold_torn = self._flush_object_folds(object_folds, _recreate,
+                                            strict=strict)
+        applied += len(object_folds) - fold_torn
+        return applied, apply_torn, fold_torn
+
     def rebuild(self, log) -> None:
         self.g.query("MATCH (n) DETACH DELETE n")
-        for ev in log.read_all():
-            self.apply(ev)
+        # #2977 D-14: reuse the apply-based replay engine so the Object folds
+        # run. strict=True preserves this method's pre-existing fail-loud
+        # contract — it must NOT silently become fail-soft. Leaving this as a
+        # bare `for ev: self.apply(ev)` resurrects every deleted Object,
+        # because apply() has no ObjectRetracted branch.
+        self.apply_replay(list(log.read_all()), strict=True)
 
     def rebuild_all(self, log_dir: str) -> dict:
         """Rebuild from all .jsonl files in a directory. Returns counts.
