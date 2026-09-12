@@ -81,7 +81,7 @@ _READY_PROBE_TIMEOUT_S = 6.0
 #                   concurrent poll. (The ABANDONED inner worker is a separate,
 #                   pre-existing leak — in the embedded lane it has no socket
 #                   timeout at all, so it parks forever, and ``/health`` is
-#                   un-throttled: #3334.)
+#                   un-throttled: #3350.)
 #
 #   /health/ready -> ``_READY_PROBE_EXECUTOR``. Its probe is ``sdk._get_proj()``
 #                   called DIRECTLY — the engine's real path, deliberately not
