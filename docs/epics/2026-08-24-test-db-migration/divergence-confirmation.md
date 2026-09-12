@@ -53,8 +53,8 @@ D2: tests/test_divergence_conformance.py::test_d2_probe_failure_recovery
 D3: tests/test_divergence_conformance.py::test_d3_lost_graph_recovery
 D4: tests/test_divergence_conformance.py::test_d4_bulk_wipe_graph_guard
 D5: tests/test_divergence_conformance.py::test_d5_range_index_identical
-D6: tests/test_divergence_conformance.py::test_d6_freshness_composite_mode_split
-D7: tests/test_divergence_conformance.py::test_d7_embedded_repair_sweep
+D6: tests/test_divergence_conformance.py::test_d6_freshness_index_excludes_boolean_property
+D7: tests/test_divergence_conformance.py::test_d7_boolean_index_purge
 D8: tests/test_divergence_conformance.py::test_d8_hnsw_vector_index
 D9: tests/test_divergence_conformance.py::test_d9_cross_lens_calibration
 D10: tests/test_divergence_conformance.py::test_d10_retrieval_pool_floor_flag
@@ -74,8 +74,8 @@ D16: tests/test_divergence_conformance.py::test_d16_version_probe
 | D3 | lost-graph recovery embedded-only | Confirmed (carve-out lane) | ✓ |
 | D4 | bulk-wipe guard embedded-disabled / server-refusing | Confirmed (D-4, `wipe_server`) | ✓ |
 | D5 | range index identical both modes | Confirmed | ✓ |
-| D6 | freshness composite index server-only | Confirmed (docker: composite; embedded: absent) | ✓ |
-| D7 | repair sweep embedded-only code path | Confirmed (carve-out lane) | ✓ |
+| D6 | freshness index — no boolean property (#3154) | Confirmed both lanes: plain `lastDreamedAt`, no `is_operator` | ✓ |
+| D7 | boolean-index purge — now BOTH lanes (#3154) | Confirmed (carve-out lane + docker seeded legacy index dropped) | ✓ |
 | D8 | HNSW vector index server-only | Confirmed (docker: HNSW; embedded: brute-force) | ✓ |
 | D9 | cross-lens calibration mode-split | Confirmed via divergence pass (docker-calibrated expectations) | ✓ |
 | D10 | pool-floor flag parity | Confirmed | ✓ |

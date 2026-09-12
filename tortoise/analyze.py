@@ -616,10 +616,10 @@ def _stale_first_claims(proj, limit: int | None = None) -> list[str]:
     n.lastDreamedAt`` would rank never-dreamed claims FRESHEST, the
     opposite of the contract). This is the plan's explicit-null-scan-union
     alternative: one deterministic query instead of a union scan, at the
-    cost of not sorting on the raw indexed property (the :Point(
-    lastDreamedAt) / :Point(is_operator, lastDreamedAt) indexes still
-    accelerate the property access and the is_operator filter on
-    docker/server).
+    cost of not sorting on the raw indexed property (the plain :Point(
+    lastDreamedAt) index still accelerates the property access; #3154
+    retired the :Point(is_operator, lastDreamedAt) composite — no engine
+    indexes the boolean property).
     """
     base = (
         "MATCH (n:Point) "

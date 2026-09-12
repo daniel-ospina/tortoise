@@ -2281,26 +2281,30 @@ class FalkorProjection(
 
         FTS and vector indexes are gated on FalkorDB >= 4.x.
 
-        Embedded (redislite) note (#522): the is_operator RANGE index is
-        intentionally NOT created on embedded DBs. redislite merges
-        per-property indexes into a composite whose is_operator entries are
-        written with the FIRST process's type encoding; a later process
-        reopening the same DB file inherits a stale composite and
-        `n.is_operator = false` (which the query planner routes through the
-        index) silently matches ZERO rows — verified on the crash-recovery
-        reopen path (test_crash_recovery). The full label scan for
-        `= false` is correct on embedded; docker/server FalkorDB keeps the
-        index for the Node By Index Scan perf win.
+        Boolean-index policy (#522 embedded, #3154 docker/server): the
+        property ``is_operator`` is intentionally NEVER indexed, on any
+        backend. For embedded (redislite) the original reason was the stale
+        bool type table across reopen (#522). #3154 established the same
+        hazard on docker/server FalkorDB via ``GRAPH.COPY``: a copied
+        boolean index can contain no entry for ``false``, so
+        ``n.is_operator = false`` silently matches ZERO rows on graphs copied
+        with the index in its SDK-created position (the pre-#3154 shape — the
+        boolean index built alongside the other Point indexes; verified on
+        docker FalkorDB 4.20.4, the boolean-single and the
+        ``(is_operator, lastDreamedAt)`` composite schemas) — and the copy
+        DESTINATION cannot be healed by rebuilding: after ``DROP INDEX`` a
+        fresh ``CREATE INDEX`` on ``is_operator`` is corrupt too (also
+        measured). The full label scan for `= false` is correct on every
+        backend; ``lastDreamedAt`` (never ``is_operator``) carries the
+        staleness ordering. See the purge block below and
+        ``hosted_backup._audit_copied_boolean_indexes`` for the copy-path
+        verification.
         """
         # ── Range indexes (always safe, pre-4.x compatible) ──
-        # NOTE: the single `is_operator` index is NOT created here on
-        # server mode — the composite (is_operator, lastDreamedAt) below
-        # subsumes it (leftmost prefix serves `n.is_operator = false`), and
-        # FalkorDB rejects a composite containing an already-indexed
-        # attribute ("Attribute 'is_operator' is already indexed"), which
-        # silently disabled the lastDreamedAt composite (the epic-903
-        # staleness-ranking index). Embedded skips is_operator entirely
-        # (#522 stale-bool-type repair).
+        # NOTE: no index on `is_operator` is created here on ANY backend —
+        # see the boolean-index policy in the docstring and the #3154 purge
+        # below. The epic-903 staleness ordering rides on the plain
+        # lastDreamedAt index.
         point_props = ("id", "pointKind", "content_hash")
         for prop in point_props:
             try:
@@ -2314,65 +2318,54 @@ class FalkorProjection(
                     logging.getLogger(__name__).error(
                         "Failed to create index on n.%s: %s", prop, e)
 
+        # ── #3154: purge boolean `is_operator` indexes (ALL backends) ──
+        # GRAPH.COPY silently drops the `false` postings of a boolean RANGE
+        # index: the destination's index can have no entry for `false`, so
+        # `n.is_operator = false` silently matches ZERO rows on graphs copied
+        # with the boolean index in its SDK-created position (verified on
+        # docker FalkorDB 4.20.4: a source built by the pre-#3154
+        # `_ensure_indexes` — id/pointKind/content_hash singles then the
+        # `(is_operator, lastDreamedAt)` composite — copies as 0 false + 5
+        # true, while `NOT n.is_operator` still returns 10 and
+        # `typeof(n.is_operator)` stays Boolean: the DATA is intact, the
+        # index is corrupt; a composite-ONLY source copies healthy, so the
+        # trigger is the index set, not the property alone). The copy destination is also poisoned for
+        # boolean index BUILDING: a freshly CREATEd is_operator index on it
+        # is corrupt too, so drop-and-recreate cannot heal a graph. The only
+        # durable fix is for the index not to exist.
+        #
+        # Unconditional best-effort DROP on every backend: an absent index
+        # raises "no such index" in O(1) (the healthy case, so there is no
+        # startup penalty on large graphs), while legacy and copied graphs
+        # are healed on open. Both the single `:Point(is_operator)` and the
+        # composite `(is_operator, lastDreamedAt)` forms are swept. This runs
+        # BEFORE the lastDreamedAt index is (re)created below so a loose
+        # match that also removed lastDreamedAt cannot leave the staleness
+        # ordering unindexed.
+        for _stmt in ("DROP INDEX ON :Point(is_operator)",
+                      "DROP INDEX ON :Point(is_operator, lastDreamedAt)"):
+            try:  # noqa: SIM105
+                self.g.query(_stmt)
+            except Exception:
+                pass  # no such index — the healthy case
+
         # ── lastDreamedAt freshness index (epic 903-C2, #1240) ──
         # Powers the stale-first scheduler's staleness ranking
-        # (ORDER BY lastDreamedAt ASC, null = stalest). Composite
-        # (is_operator, lastDreamedAt) on docker/server FalkorDB; embedded
-        # (redislite) gets the plain lastDreamedAt index only — a composite
-        # containing is_operator is #522-unsafe on embedded (stale bool type
-        # table across reopen silently zeroes `= false` lookups; the repair
-        # sweep below drops such composites on open). Idempotent +
-        # AOF-replay-safe (CREATE INDEX survives AOF replay —
+        # (ORDER BY lastDreamedAt ASC, null = stalest). #3154: the PLAIN
+        # lastDreamedAt index on every backend — `is_operator` is never
+        # indexed (see the purge above). Idempotent + AOF-replay-safe
+        # (CREATE INDEX survives AOF replay —
         # tests/test_embedded_concurrency.py:532).
-        if getattr(self, "_is_embedded", False):
-            dreamed_props = ("lastDreamedAt",)
-        else:
-            dreamed_props = ("is_operator", "lastDreamedAt")
         try:
-            self.g.query(
-                "CREATE INDEX FOR (n:Point) ON ("
-                + ", ".join(f"n.{p}" for p in dreamed_props) + ")"
-            )
+            self.g.query("CREATE INDEX FOR (n:Point) ON (n.lastDreamedAt)")
         except Exception as e:
             msg = str(e).lower()
-            if not getattr(self, "_is_embedded", False) \
-                    and ("is_operator" in msg or "lastdreamedat" in msg):
-                # Server mode only: single-property indexes from older
-                # _ensure_indexes runs (plain `is_operator` OR plain
-                # `lastDreamedAt`) block the composite — FalkorDB rejects a
-                # composite containing an already-indexed attribute.
-                # The composite subsumes both singles, so drop them and
-                # retry once. (Idempotent: a later startup with the
-                # composite present hits "already indexed" on the composite
-                # and no-ops below.) Embedded is deliberately EXCLUDED — the
-                # plain lastDreamedAt index there is the correct one and must
-                # not be dropped/recreated on every reopen (churn).
-                try:
-                    for _single in ("is_operator", "lastDreamedAt"):
-                        try:  # noqa: SIM105
-                            self.g.query(f"DROP INDEX ON :Point({_single})")
-                        except Exception:
-                            pass  # no such single index — fine
-                    self.g.query(
-                        "CREATE INDEX FOR (n:Point) ON ("
-                        + ", ".join(f"n.{p}" for p in dreamed_props) + ")"
-                    )
-                except Exception as e2:
-                    msg2 = str(e2).lower()
-                    if "already indexed" in msg2 or "already exists" in msg2:
-                        pass  # composite already exists from prior startup
-                    else:
-                        import logging
-                        logging.getLogger(__name__).error(
-                            "Failed to create index on :Point(%s): %s",
-                            ", ".join(dreamed_props), e2)
-            elif "already indexed" in msg or "already exists" in msg:
+            if "already indexed" in msg or "already exists" in msg:
                 pass  # expected — index exists from prior startup
             else:
                 import logging
                 logging.getLogger(__name__).error(
-                    "Failed to create index on :Point(%s): %s",
-                    ", ".join(dreamed_props), e)
+                    "Failed to create index on :Point(lastDreamedAt): %s", e)
 
         # ── Embedded repair: drop stale composite Point indexes (#522) ──
         # A composite index containing is_operator (created by an older

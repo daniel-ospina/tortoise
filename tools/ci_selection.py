@@ -100,7 +100,17 @@ SOURCE_PATTERNS = {
             # there: test_ask_spotcheck_judge.py).
             "tools/ask_spotcheck.py", "tools/ask_spotcheck_consistency.py",
             "tools/ask_spotcheck_probe.py"),
-    "api": ("tortoise/hosted_api.py", "tortoise/acl_graph_users.py", "tortoise/__main__.py", "tortoise/mcp_auth.py",
+    "api": ("tortoise/hosted_api.py", "tortoise/hosted_backup.py",
+            "tortoise/acl_graph_users.py", "tortoise/__main__.py", "tortoise/mcp_auth.py",
+            # #3154: hosted_api.py imports hosted_backup.py at module level (the
+            # backup/restore/import endpoints), and the boolean-index audit lives
+            # there — without this entry a hosted_backup.py-only change matched
+            # no pattern and fell through to `core`, skipping the api-registered
+            # tests that pin it (test_graphcopy_boolean_index_3154.py,
+            # test_hosted_backup.py, test_dr_endpoints.py). Paired with
+            # CORE_ALSO: many core-registered tests (test_backup_sweep.py,
+            # test_backup_multigraph_e2e.py, test_backup_watcher.py,
+            # test_alert_store.py) also pin it.
             "tortoise/quota.py", "tortoise/supabase_control.py",
             "tortoise/selfhost_api.py", "tortoise/session_auth.py",
             # ask-lane server surfaces: test_metering.py + test_selfhost_rest.py
@@ -148,7 +158,7 @@ SOURCE_PATTERNS = {
 # would run only the selected surface's half of them. A path listed here adds
 # `core` alongside its matched surface(s) — narrower than promoting the whole
 # module to SHARED_MODULES (which forces the full matrix).
-CORE_ALSO = ("tortoise/api.py",)
+CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py")
 
 # Paths that are NOT python-relevant (docs/config PRs skip the matrix).
 NON_PYTHON_PREFIXES = (
