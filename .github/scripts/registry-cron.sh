@@ -300,7 +300,7 @@ file_alert() { # kind title body dedup_id
       return 0
     fi
   done < <(alert_keys_all "$kind" "$id")
-  printf '{"kind":"%s","issue_number":null,"filed_at":"%s","writer":"driver"}' "$kind" "$(date -u +%FT%TZ)" > "$tmp"
+  printf '{"kind":"%s","issue_number":null,"filed_at":"%s"}' "$kind" "$(date -u +%FT%TZ)" > "$tmp"
   if r2_put_once "$key" "$tmp"; then
     num="$(gh_find_open "$kind" "$id")"
     if [ -z "$num" ]; then
@@ -315,11 +315,12 @@ file_alert() { # kind title body dedup_id
       # issue number here too. Without it the object keeps issue_number=null
       # until the next run, so a transient empty GitHub search in that window
       # would create a duplicate (the 412 object-trust path cannot help).
-      # Provenance is claimed ONLY when this driver created the issue (#3127):
-      # stamping an ADOPTED issue as driver-filed is the exact defect the store
-      # fixed in Python, and `resolve_global` treats this field as authority.
-      # telegram_pushed records that the announcement happened, so the store
-      # does not re-announce an issue this driver already showed a human.
+      # Provenance is claimed ONLY when this driver created the issue (#3127),
+      # never when adopting one — stamping an ADOPTED issue as driver-filed is
+      # the exact defect the store fixed in Python. The `writer` field is
+      # DIAGNOSTIC ONLY: resolution authority is decided by KIND_OWNERS ALONE,
+      # here (`resolve_global`) and in the store (`resolve_incident`), never by
+      # this field — there is deliberately no provenance exception.
       _w=""; [ "$filed" = "1" ] && _w=',"writer":"driver"'
       printf '{"kind":"%s","issue_number":%s,"filed_at":"%s"%s}' "$kind" "$num" "$(date -u +%FT%TZ)" "$_w" > "$tmp"
       aws s3api put-object --endpoint-url "$R2_ENDPOINT" --bucket "$R2_BUCKET" \

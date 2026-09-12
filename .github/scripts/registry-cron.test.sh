@@ -68,6 +68,11 @@
 #  56. the measurable-empty lock branch is the silent one
 #  57. a subject-less incident is written ONCE, under the CANONICAL `_.json`
 #      (the AlertStore's spelling) — never the legacy `global.json` (#2844)
+#  58. a legacy sentinel holding a CLOSED issue still lets the incident re-file
+#      (#2844), so the alias does not swallow a recurrence
+#  59. the driver's OWNERSHIP refusal in `resolve_global` is pinned (#3127): a
+#      watcher-owned kind is refused (no search, no close); a driver-owned
+#      kind resolves normally
 #
 # Fixtures are simulated; the real driver defers nothing.
 
@@ -990,6 +995,41 @@ export STUB_GET_BODY='{"kind":"R2_DOWN","issue_number":91}'
 export GH_ISSUE_STATE=closed
 run_driver
 assert_match "$(cat "$LOG")" "AWS put-object key=ops/alerts/R2_DOWN/_.json" "58. a closed legacy sentinel still lets the incident re-file"
+
+# ── 59. the driver's ownership refusal is pinned (#3127) ────────────────────
+# `resolve_global` must self-heal ONLY kinds the driver owns (KIND_OWNERS). The
+# refusal had no test: deleting the whole block kept every other assertion
+# green, so a regression could quietly restore driver authority over
+# watcher/app kinds — the false recovery #3127 exists to prevent. The full
+# driver cannot reach this path (every call site is driver-owned BY CONTRACT,
+# pinned by test_kind_owner_contract_with_driver), so the real functions are
+# extracted and driven directly with stubbed I/O. Extract from the SHIPPING
+# script, never a copy, so deleting the block fails this case.
+reset_case
+RESOLVE_EXT="$(mktemp)"
+RESOLVE_LOG="$(mktemp)"
+sed -n '/^kind_owner()/,/^}/p; /^resolve_global()/,/^}/p' "$DRIVER" > "$RESOLVE_EXT"
+run_resolve() { # kind — real kind_owner/resolve_global + stubbed log/gh/r2
+  local kind="$1"
+  : > "$RESOLVE_LOG"
+  (
+    set +e
+    log() { printf 'REFUSE %s\n' "$1" >> "$RESOLVE_LOG"; }
+    gh_find_open() { printf 'FIND %s\n' "$*" >> "$RESOLVE_LOG"; printf '55'; }
+    gh_close() { printf 'CLOSE %s\n' "$*" >> "$RESOLVE_LOG"; }
+    # shellcheck disable=SC1090
+    . "$RESOLVE_EXT"
+    resolve_global "$kind" "Resolved — test."
+  ) >/dev/null 2>&1 || true
+  cat "$RESOLVE_LOG"
+}
+assert_contains "$(run_resolve STALE)" "refusing to close" "59. a watcher-owned kind is refused"
+assert_not_contains "$(run_resolve STALE)" "FIND" "59. the refusal never searches for an issue"
+assert_not_contains "$(run_resolve STALE)" "CLOSE" "59. the refusal never closes one"
+assert_contains "$(run_resolve WATCHER_DOWN)" "FIND" "59. a driver-owned kind searches for the incident"
+assert_contains "$(run_resolve WATCHER_DOWN)" "CLOSE" "59. a driver-owned kind closes the incident"
+assert_not_contains "$(run_resolve WATCHER_DOWN)" "refusing to close" "59. the driver-owned path does not refuse"
+rm -f "$RESOLVE_EXT" "$RESOLVE_LOG"
 
 echo ""
 echo "registry-cron.test.sh: $PASS passed, $FAIL failed"

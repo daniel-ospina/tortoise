@@ -389,7 +389,7 @@ class AlertStore:
             state["writer"] = writer
         _write_json(self._storage, key, state)
         # Announce whenever this call ends up holding the issue number. The
-        # ANNOUNCEMENT STATE MACHINE (a persisted `telegram_pushed` flag with
+        # ANNOUNCEMENT STATE MACHINE (a persisted announcement flag with
         # resume-on-adoption) is deliberately NOT here: review rounds 3 and 4
         # each found P1s inside it — a flag that suppressed a genuine
         # recurrence, a gate that left an incident filed but never shown, a

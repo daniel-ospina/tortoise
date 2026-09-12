@@ -354,7 +354,7 @@ def test_search_fallback_is_subject_scoped():
         "ops/alerts/STALE/team_b.json",
         json.dumps({"kind": "STALE", "team_id": "team_b", "detail": {},
                     "filed_at": "2026-08-08T00:00:00+00:00",
-                    "issue_number": None, "telegram_pushed": False}).encode(),
+                    "issue_number": None}).encode(),
     )
     # Adopter for team_b: the search must be scoped to team_b (no match — the
     # only open issue belongs to team_a), so team_b files its OWN issue.
@@ -418,6 +418,43 @@ def _driver_sentinel(storage, issue_number, writer=None):
     if writer is not None:
         payload["writer"] = writer
     storage.upload(_DRIVER_KEY, json.dumps(payload).encode())
+
+
+class _RefilingStorage(MemoryStorage):
+    """MemoryStorage whose sentinel is RE-FILED by another writer mid-operation.
+
+    The concurrent writer #2844 is about: after ``reads_before`` reads of
+    ``key``, the stored body is replaced with one carrying a NEW
+    ``issue_number`` and ``filed_at`` — the re-file landing between the state
+    snapshot a compare-and-delete guard took and its confirming re-read.
+    """
+
+    def __init__(
+        self,
+        key: str,
+        *,
+        reads_before: int = 1,
+        new_issue: int = 99,
+        new_filed_at: str = "2026-09-11T00:00:00Z",
+    ) -> None:
+        super().__init__()
+        self._watched = key
+        self._reads_before = reads_before
+        self._new_issue = new_issue
+        self._new_filed_at = new_filed_at
+        self.refiles = 0
+
+    def download(self, key: str) -> bytes:
+        data = super().download(key)
+        if key == self._watched:
+            self.refiles += 1
+            if self.refiles > self._reads_before:
+                body = json.loads(data)
+                body["issue_number"] = self._new_issue
+                body["filed_at"] = self._new_filed_at
+                data = json.dumps(body).encode()
+                self.upload(key, data)
+        return data
 
 
 def test_resolve_deletes_the_driver_sentinel_alias():
@@ -590,6 +627,58 @@ def test_open_adopts_while_the_recorded_issue_is_open():
     assert ch.telegram == []
 
 
+def test_resolve_leaves_a_sentinel_another_writer_re_filed():
+    """#2844 compare-and-delete: resolve must not delete a sentinel that was
+    re-filed while it worked.
+
+    `resolve_incident` reads the alias states, closes their issues and pushes
+    Telegram — several GitHub round trips. A writer that re-files the incident
+    with a NEW issue number during them would have its fresh sentinel deleted:
+    the issue it names is orphaned (no sentinel references it — the #3030 class)
+    and the next detection re-files a duplicate (#2844). The confirming re-read
+    must see the change and leave the new sentinel alone.
+    """
+    ch = _FakeChannels()
+    storage = _RefilingStorage(_DRIVER_KEY)
+    _driver_sentinel(storage, issue_number=7)
+    store = _store(ch, storage)
+
+    assert store.resolve_incident("R2_DOWN") is True
+    reads_during_resolve = storage.refiles
+    # The issue the store legitimately read is closed...
+    assert ch.closed == [7]
+    # ...but the re-filed sentinel SURVIVES, still naming its (new) open issue,
+    # and that new issue was never closed by this resolve.
+    assert _DRIVER_KEY in storage.list("ops/alerts/")
+    assert json.loads(storage.download(_DRIVER_KEY))["issue_number"] == 99
+    assert 99 not in ch.closed
+    assert reads_during_resolve == 2, "the guard must re-read the sentinel to compare"
+
+
+def test_open_leaves_a_sentinel_another_writer_re_filed():
+    """#2844 compare-and-delete: `open_incident` must not drop a sentinel that
+    was re-filed while it checked the recorded issue's liveness.
+
+    A stale sentinel (its recorded issue is not live) is cleared so the
+    incident can re-file on the canonical key. But `_issue_is_live` is a GitHub
+    round trip: a writer that re-files with a NEW issue number during it would
+    have its fresh sentinel deleted, orphaning that issue (#3030) and re-filing
+    a duplicate (#2844). `_forget` must leave the changed object alone.
+    """
+    ch = _FakeChannels()
+    storage = _RefilingStorage(_DRIVER_KEY)
+    _driver_sentinel(storage, issue_number=7)
+    store = _store(ch, storage, issue_open=lambda n: False)  # the recorded issue is dead
+
+    assert store.open_incident("R2_DOWN") is True
+    # The re-filed sentinel survives with its NEW number...
+    assert _DRIVER_KEY in storage.list("ops/alerts/")
+    assert json.loads(storage.download(_DRIVER_KEY))["issue_number"] == 99
+    # ...so the store does not treat the alias as free: it files under the
+    # CANONICAL key, keeping one create-once point for the incident.
+    assert _CANONICAL_KEY in storage.list("ops/alerts/")
+
+
 def test_open_trusts_the_sentinel_when_issue_state_cannot_be_read():
     """No positive evidence of closure, no re-file — an API blip is not a close."""
     def boom(number):
@@ -734,13 +823,13 @@ def test_non_owner_that_adopts_an_issue_does_not_gain_authority():
     assert sentinel["issue_number"] == 50, "the driver's issue is adopted, not re-filed"
     assert len(ch.issues) == 1
     assert "writer" not in sentinel, "an adopter must not claim provenance"
-    # No sentinel recorded an announcement for #50 (this store created the
-    # sentinel itself, so `telegram_pushed` is False), therefore the incident is
-    # announced ONCE — the create-then-die window must not leave it silent
-    # (round 3 P1). A second poll must not announce it again.
+    # This store created its own sentinel, so the incident is announced ONCE —
+    # the create-then-die window must not leave it silent (round 3 P1). The
+    # second poll short-circuits on the ADOPTION path (the sentinel now names
+    # the still-open issue #50), so it does not announce again.
     assert len(ch.telegram) == 1
     store.open_incident("R2_DOWN")
-    assert len(ch.telegram) == 1, "the persisted flag stops a re-announcement"
+    assert len(ch.telegram) == 1, "an already-open adopted incident is not re-announced"
 
     # ...and the authority check falls through to KIND_OWNERS: R2_DOWN is the
     # driver's, and the watcher cannot clear it.
@@ -748,12 +837,14 @@ def test_non_owner_that_adopts_an_issue_does_not_gain_authority():
     assert ch.closed == []
 
 
-def test_adopted_issue_already_announced_is_not_re_announced():
-    """The other half: a sentinel that RECORDS the announcement is not repeated.
+def test_adopted_open_incident_is_not_re_announced_on_a_later_poll():
+    """An adopted incident whose issue is still OPEN is not announced again.
 
-    The driver writes `telegram_pushed: true` alongside its backfill, so a store
-    that adopts the driver's issue stays silent — the round-2 behaviour, now
-    driven by persisted state instead of by who happened to file.
+    The sentinel carries a LIVE issue number, so the second `open_incident`
+    short-circuits on the record that is actually load-bearing — the issue's
+    state — and not on any announcement flag (that flag was removed; see
+    `_become_filer`). The driver's issue is adopted, the store stays silent,
+    and no second issue is filed.
     """
     ch = _FakeChannels()
     storage = MemoryStorage()
@@ -761,7 +852,6 @@ def test_adopted_issue_already_announced_is_not_re_announced():
     storage.upload(_DRIVER_KEY, json.dumps({
         "kind": "R2_DOWN", "issue_number": 50,
         "filed_at": "2026-09-12T00:00:00Z", "writer": "driver",
-        "telegram_pushed": True,
     }).encode())
     store = _store(ch, storage, issue_open=lambda n: True, writer="watcher")
 
