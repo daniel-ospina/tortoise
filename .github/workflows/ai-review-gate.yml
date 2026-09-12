@@ -2,8 +2,9 @@ name: ai-review-gate
 
 # Hard GitHub-enforced AI review merge gate (#2055, #2982).
 # Branch protection requires the `ai-review-gate` status check on every PR to
-# main. It passes only when the PR body carries a FRESH, SIGNED AI-review
-# evidence marker produced by record-review.sh:
+# main. It passes only when the PR body carries a SIGNED AI-review evidence
+# marker produced by record-review.sh, bound to this PR and repo and to
+# EITHER the PR's current head sha OR its current diff:
 #   review recorded: reviews/<PR>.json verdict=clean @ <full-sha> (<owner/repo>) sig=<hmac>
 #   review recorded: reviews/<PR>.json verdict=clean @ <full-sha> diff=<sha256> (<owner/repo>) sig=<hmac>
 #
@@ -33,6 +34,20 @@ name: ai-review-gate
 # sha-match path remains usable. A network failure never becomes a pass.
 # Explicitly: a marker with diff= must never be accepted when live_diff_hash
 # is empty.
+#
+# Delegation, stated plainly: rule (b) cannot tell WHICH revision the reviewer
+# saw. It verifies only that the marker is signed and that the signed `diff=`
+# equals this PR's diff at check time. The binding between a recorded sha and
+# the diff actually reviewed is enforced by record-review.sh's stale-sha guard,
+# not here. The producer's `--force-stale` override and its head-fetch
+# fail-open arm compute `diff=` from the PR's CURRENT diff while keeping the
+# caller-supplied stale sha, so a marker minted that way is accepted by rule
+# (b) even though the reviewed artifact cannot be shown unchanged. Close that
+# trust gap on the PRODUCER side (agent-infra#784) — do NOT add a
+# "recorded sha is an ancestor of head" bound here: the repo's documented
+# refresh path is `git rebase origin/main` (sha rewritten, three-dot diff
+# byte-identical), which an ancestor bound would reject, re-creating the
+# #2982 deadlock this change exists to remove.
 #
 # ⛔ GH_TOKEN is mandatory for any of this to work (#2982): `gh` refuses to
 # run inside GitHub Actions without it. It is declared in the step env; do
@@ -113,9 +128,21 @@ jobs:
 
           # Full PR body. The env-var form truncates at ~48KB — fetch via the
           # REST API (pull-requests: read) and fall back to the env var.
+          #
+          # The exit status MUST be honoured. `gh api` prints HTTP error bodies
+          # (JSON) to STDOUT and exits non-zero, and `--jq` is not applied on
+          # the error path. Masking it with `|| true` — which is what this did
+          # before #2982 made the fetch live by adding GH_TOKEN — would assign
+          # that error JSON to `body`, discard the PR_BODY fallback, and report
+          # "No AI review evidence found" for a PR that carries valid evidence:
+          # an API blip turned into a red REQUIRED check with a diagnostic
+          # pointing the wrong way.
           body="${PR_BODY:-}"
-          fetched="$(gh api "repos/${REPO_NAME}/pulls/${PR_NUMBER}" --jq .body 2>/dev/null || true)"
-          [ -n "$fetched" ] && [ "$fetched" != "null" ] && body="$fetched"
+          if fetched="$(gh api "repos/${REPO_NAME}/pulls/${PR_NUMBER}" --jq .body 2>/dev/null)"; then
+            [ -n "$fetched" ] && [ "$fetched" != "null" ] && body="$fetched"
+          else
+            echo "::warning::PR body fetch via the REST API failed — falling back to the event-payload PR_BODY (truncated at ~48KB; the evidence marker must lie inside the truncated prefix)."
+          fi
 
           expected="${HEAD_SHA}"
           # Escape ERE metachars in the repo name before interpolating into
@@ -187,7 +214,17 @@ jobs:
               echo "::error::  record-review.sh ${PR_NUMBER} ${HEAD_SHA} clean ${REPO_NAME}"
             else
               latest_sha="$(printf '%s' "$latest" | sed -E 's/.*@ ([0-9a-f]{40}) .*/\1/')"
-              if [ "$latest_sha" = "$expected" ]; then
+              # The `latest` grep above is PR-scoped but repo-agnostic, so a
+              # marker recorded for a DIFFERENT repo lands here. Name that
+              # cause: reporting it as a stale/diff divergence prints two
+              # byte-identical hashes and sends the debugger after the wrong
+              # thing.
+              latest_repo="$(printf '%s' "$latest" | sed -nE 's/^.* \(([^)]*)\) sig=[0-9a-f]{64}$/\1/p')"
+              if [ -n "$latest_repo" ] && [ "$latest_repo" != "$REPO_NAME" ]; then
+                echo "::error::AI review evidence was found for ${latest_repo}, not for ${REPO_NAME} (this PR's repo) — evidence is bound to the repo it was recorded for and cannot be accepted here."
+                echo "::error::Re-record for this repo:"
+                echo "::error::  record-review.sh ${PR_NUMBER} ${HEAD_SHA} clean ${REPO_NAME}"
+              elif [ "$latest_sha" = "$expected" ]; then
                 echo "::error::AI review evidence for the current head exists but is not signed or not for ${REPO_NAME}."
                 echo "::error::Re-record with a record-review.sh that has AI_REVIEW_GATE_KEY configured:"
                 echo "::error::  record-review.sh ${PR_NUMBER} ${HEAD_SHA} clean ${REPO_NAME}"

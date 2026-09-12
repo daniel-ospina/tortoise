@@ -451,9 +451,20 @@ jobs:
     # #2982: the ai-review-gate's evidence-validation shell logic runs inline
     # in the workflow (pull_request_target never checks out PR code). This
     # harness extracts that run block and drives it with fabricated signed
-    # markers + a stubbed gh, proving sha-match, diff-match, backward compat,
-    # fail-closed-on-API-failure, and signature-over-diff. Self-contained, no
+    # markers + a stubbed gh, covering sha-match, diff-match, backward compat,
+    # fail-closed-on-API-failure, signature-over-diff, PR/repo binding, and the
+    # PR-body source. It ALSO asserts the non-runtime invariants the required
+    # job depends on: no if:/needs:/continue-on-error:, trigger stays
+    # pull_request_target with no paths: filter, permissions keep
+    # pull-requests: read, and GH_TOKEN is declared. Self-contained, no
     # network, no secrets.
+    #
+    # ⚠️ This job is NOT a required status check: a red harness does not block a
+    # merge, so a regression here can land and then silently make the REQUIRED
+    # `ai-review-gate` check pass without evaluating evidence. Tracked in #3091
+    # (add this job to branch protection, or move the harness into an
+    # always-run required job). The `if:` above is a complete per-surface guard:
+    # it fires on any change to the gate workflow, this harness, or ci.yml.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
