@@ -1,13 +1,26 @@
 // #1643: per-harness MCP onboarding data (ported from welcome.html's
 // HARNESS_* constants). Single source for the wizard's harness chooser;
 // env-indirection configs keep the raw key out of config files (#529 J5/T7b).
+// #984/#2849: the KEYED-harness URL — the CLI self-install surfaces
+// (claude / codex / codexDesktop / cursor / pi) register this slashed form
+// deliberately: it is a #984-era convention pinned by six assertions in
+// tests/test_harness_mcp_config.py. It is NOT the Claude connector URL.
 const MCP_URL = 'https://api.premiselabs.co/mcp/'
 
-// #1701: ChatGPT's custom-connector URL — NO trailing slash. OpenAI's
-// connector validates an '/mcp' suffix, and bare POST /mcp dispatches
-// directly into the mounted MCP app (no 307). MCP_URL above keeps its
-// slash for the 6 keyed harnesses (byte-identical copy).
-const CHATGPT_MCP_URL = 'https://api.premiselabs.co/mcp'
+// #2865 (lifted from #2864's plan, Task 2 Step 3): the CANONICAL CONNECTOR
+// URL — no trailing slash. This is the exact value of the OAuth resource
+// indicator (`tortoise/oauth.py::mcp_resource_url` = base + '/mcp') that the
+// protected-resource-metadata document advertises, so a connector configured
+// with it matches `resource` byte-for-byte. Before #2864 the PRM said '/mcp'
+// while every connector surface said '/mcp/' — that mismatch is what #2849 was
+// filed for. CONNECTOR surfaces (the two Claude leaves + ChatGPT) must use
+// THIS value; keyed surfaces keep MCP_URL above. #2864 removed the
+// /mcp → /mcp/ 307 and `parse_resource` accepts both forms, so an existing
+// connector with the slashed URL keeps working — no re-add is required.
+export const CANONICAL_MCP_URL = 'https://api.premiselabs.co/mcp'
+
+// #1701: the name the shipped chatgpt copy still uses — same value.
+const CHATGPT_MCP_URL = CANONICAL_MCP_URL
 
 // #1701: the skills-as-prompt body shared by every filesystem-less harness
 // that therefore has no local skills to install — Claude Web, Claude Desktop
@@ -68,13 +81,17 @@ const PI_MCP_CONFIG_ENV = {
 // button for that value. A function of (harness, key) so steps can embed
 // the real key (Cursor's export step).
 export const HARNESS_STEPS = (harness, key) => ({
+  // #2865: Claude Web connects key-less over OAuth (HARNESS_OAUTH) — no
+  // Request-headers field, no API key. The canonical no-slash URL matches the
+  // server's resource indicator.
   'claude-web': [
     'Go to claude.ai > Settings > Connectors',
     'Add custom connector and name it "Tortoise"',
-    { label: 'Server URL', code: MCP_URL, copy: MCP_URL },
-    'In Request headers (advanced): Authorization: Bearer <your-key>',
+    { label: 'Server URL', code: CANONICAL_MCP_URL, copy: CANONICAL_MCP_URL },
+    'No API key is needed — leave Request headers empty.',
+    'Sign in to Tortoise when Claude opens the authorization page and click Authorize, then pick your Organization.',
     'Paste the prompt below into a Claude Web chat — it gives Claude the Tortoise workflows:',
-    '(Claude connects from its own cloud — your key is stored by Anthropic. No local skills on web — the prompt gives Claude the workflows.)',
+    '(Claude connects from its own cloud — the authorization lives with Anthropic, not on your machine. No local skills on web — the prompt gives Claude the workflows.)',
   ],
   cursor: [
     { label: 'Export the key — add this line to your shell profile (~/.zshrc or ~/.bashrc) so it persists:', code: `export TORTOISE_API_KEY=${key}`, copy: `export TORTOISE_API_KEY=${key}` },
@@ -97,10 +114,12 @@ export const HARNESS_STEPS = (harness, key) => ({
 // paste into the agent). NOT part of the copied content.
 export const HARNESS_INTRO = {
   claude: 'Run these commands in your terminal:',
-  'claude-desktop': 'Open Claude Desktop → Settings → Connectors → Add custom connector, then enter the Server URL and the Authorization: Bearer <key> request header. (For local stdio servers only, advanced users can still edit ~/Library/Application Support/Claude/claude_desktop_config.json on macOS, or %APPDATA%\\Claude\\claude_desktop_config.json on Windows, from Settings → Developer in the app.)',
+  // #2865: both Claude connector surfaces are key-less OAuth — the intro names
+  // the sign-in, never a Bearer request header.
+  'claude-desktop': 'Open Claude Desktop → Settings → Connectors → Add custom connector, name it "Tortoise" and enter the Server URL. No API key is needed: Claude opens Tortoise\u2019s sign-in page on the first connection — sign in and click Authorize. (For local stdio servers only, advanced users can still edit ~/Library/Application Support/Claude/claude_desktop_config.json on macOS, or %APPDATA%\\Claude\\claude_desktop_config.json on Windows, from Settings → Developer in the app.)',
   // #2361 review-r1 (UX-3): Claude Web had no intro — the copy button said
   // 'Copy prompt' but nothing explained where the prompt goes.
-  'claude-web': 'Start a new chat at claude.ai (or the Claude web app) and paste the prompt below into it — that conversation becomes your connected agent. The prompt keeps the key literal: do not share the chat or the key.',
+  'claude-web': 'Start a new chat at claude.ai (or the Claude web app) and paste the prompt below into it — that conversation becomes your connected agent.',
   codex: 'Run these commands in your terminal:',
   // #2328: Desktop variant intro (no terminal).
   codexDesktop: 'Edit ~/.codex/config.toml (create it if missing) — Codex Desktop and the CLI share this file. Copy the block, paste it in, then fully quit and reopen Codex Desktop:',
@@ -160,8 +179,11 @@ chmod +x .claude/hooks/session-start.sh .claude/hooks/session-end.sh
   // local stdio servers only, so a "type"/"headers" shape silently does
   // nothing (no server, no error). These connector field values are what the
   // user actually pastes into the Connectors UI.
-  'claude-desktop': (key) =>
-    `Connector name: Tortoise\nServer URL:   ${MCP_URL}\nRequest headers:\n  Authorization: Bearer ${key}`,
+  // #2865: key-less OAuth — deleting the Bearer line is the whole point of the
+  // issue (Anthropic's "Request headers" field is beta and absent on many
+  // accounts). The `key` argument is kept so every caller keeps one signature.
+  'claude-desktop': () =>
+    `Tortoise — Claude Desktop (OAuth, no API key)\nClaude Desktop reaches a remote MCP server through the Connectors UI:\n1. Open Claude Desktop → Settings → Connectors → Add custom connector.\n2. Name: Tortoise\n3. Server URL: ${CANONICAL_MCP_URL}\n4. Leave Request headers empty — no API key is needed. Claude opens\n   Tortoise's sign-in page on the first connection: sign in, click Authorize,\n   then pick the Organization you're onboarding.\n5. Start a new chat and paste the Tortoise workflows prompt — it gives Claude\n   the Tortoise workflows. Then say "Set up Tortoise" so the agent calls\n   tortoise_health to verify, and click "I've connected it — Continue" in the\n   dashboard connect step (that writes the harness-connected checkpoint).`,
   'claude-web': () => {
     const base = WORKFLOWS_PROMPT
     // The session-filing paragraph is gated on HARNESS_CAPTURE_SUPPORT — the
@@ -222,10 +244,13 @@ export const HARNESS_COPY_LABEL = {
 }
 
 // #1694: per-harness label for the post-copy Continue affordance — for
-// harnesses with manual UI steps (Claude Web), copying ≠ setup done, so
-// the button says what copying actually achieved.
+// harnesses with manual UI steps (the Claude connectors, Claude Web), copying
+// ≠ setup done, so the button says what copying actually achieved.
+// #2865: both Claude connector leaves are OAuth now — the user completes the
+// connector + Authorize in Claude, so "I've connected it" is the honest label.
 export const HARNESS_CONTINUE_LABEL = {
-  'claude-web': "I've pasted it — Continue →",
+  'claude-desktop': "I've connected it — Continue →",
+  'claude-web': "I've connected it — Continue →",
   chatgpt: "I've connected it — Continue →",
 }
 
@@ -295,7 +320,10 @@ export const HARNESS_ORDER = ['claude', 'claude-desktop', 'claude-web', 'codex',
 // per-harness payload (UNIVERSAL_COMMAND, wizardPromptText, HARNESS_NAMES,
 // capture support) stays keyed exactly as before — this is a UI grouping, not
 // a vocabulary change (DE2E-5's 7-harness contract is untouched).
-// ChatGPT stays out: it is key-less OAuth (#2698) and has its own path.
+// ChatGPT stays out: it has no Claude/Codex-style surface split and its
+// Developer-mode path is not reachable from the dashboard chooser (#2698).
+// #2865: Claude's Desktop/Web surfaces ARE key-less OAuth (HARNESS_OAUTH) and
+// stay here, so every role can reach them — including members.
 export const HARNESS_FAMILIES = Object.freeze([
   Object.freeze({
     id: 'claude',
@@ -365,10 +393,13 @@ export const HARNESS_SELF_INSTALL = ['claude', 'codex', 'cursor', 'pi']
 
 export const HARNESS_TEACH_HUMAN = ['claude-desktop', 'claude-web', 'chatgpt']
 
-// #1701: OAuth-only harnesses (ChatGPT) — no API key, no tt_ token. The
-// wizard connect step renders these key-less (no key-mint, no universal
-// command).
-export const HARNESS_OAUTH = ['chatgpt']
+// OAuth-only harnesses — no API key, no tt_ token: the wizard connect step
+// renders these key-less (no key-mint, no key row). #1701 added chatgpt;
+// #2865 added the two Claude connector leaves, whose Bearer recipe was
+// unreachable on accounts without Anthropic's beta "Request headers" field.
+// This is a VOCABULARY export, not a render gate — the live connect step
+// branches on it directly (main.jsx), so a change here must be mirrored there.
+export const HARNESS_OAUTH = ['claude-desktop', 'claude-web', 'chatgpt']
 
 // The skill installer line every config-writing harness command appends
 // (v2 SKILLS includes tortoise-onboarding + the 3 core skills).
@@ -447,23 +478,26 @@ ${JSON.stringify(PI_MCP_CONFIG_ENV, null, 2)}
 4. Reload Pi (run \"/reload\" — tortoise connects eagerly at startup).
    Then call tortoise_health — when it passes, tell me "Tortoise is
    connected".`,
-  'claude-desktop': (key) =>
-    `# Tortoise — universal setup command (Claude Desktop — manual setup)
+  // #2865: key-less OAuth. `key` is accepted (one signature for every harness)
+  // but deliberately unused — neither of these surfaces takes a credential.
+  'claude-desktop': () =>
+    `# Tortoise — universal setup command (Claude Desktop — OAuth, no API key)
 # Claude Desktop is filesystem-less for remote MCP: use the Connectors UI, NOT
 # claude_desktop_config.json (that file only accepts local stdio servers, so an
 # mcpServers block with a type/headers remote shape silently does nothing).
 # YOU complete these steps, then the agent verifies:
 1. Open Claude Desktop → Settings → Connectors → Add custom connector.
 2. Connector name: Tortoise
-3. Server URL:   ${MCP_URL}
-4. Request headers:
-     Authorization: Bearer ${key}
+3. Server URL:   ${CANONICAL_MCP_URL}
+4. Leave Request headers empty — no API key is needed. On the first
+   connection Claude opens Tortoise's sign-in page: sign in, click Authorize,
+   then pick the Organization you're onboarding.
 5. Start a new chat, paste the Tortoise workflows prompt, then say "Set up
-   Tortoise" — the agent calls tortoise_health to verify. Click "I've set it up
-   — Continue" in the dashboard connect step when it passes (that writes the
+   Tortoise" — the agent calls tortoise_health to verify. Click "I've connected
+   it — Continue" in the dashboard connect step when it passes (that writes the
    harness-connected checkpoint).`,
-  'claude-web': (key) =>
-    `Tortoise — universal setup command (Claude Web — manual setup)\nClaude Web runs in Anthropic's cloud — no local files. Complete the connector\nsteps below, then the agent (with the connector's tortoise_* tools) verifies:\n1. Go to claude.ai > Settings > Connectors > Add custom connector, name it "Tortoise".\n2. Server URL: ${MCP_URL}\n3. Request headers (advanced): Authorization: Bearer ${key}  (stored by Anthropic)\n4. In a Claude Web chat, say "Set up Tortoise" — the agent calls tortoise_health\n   to verify, then click "I've pasted it — Continue" in the dashboard connect\n   step (that writes the harness-connected checkpoint).`,
+  'claude-web': () =>
+    `Tortoise — universal setup command (Claude Web — OAuth, no API key)\nClaude Web runs in Anthropic's cloud — no local files. Complete the connector\nsteps below, then the agent (with the connector's tortoise_* tools) verifies:\n1. Go to claude.ai > Settings > Connectors > Add custom connector, name it "Tortoise".\n2. Server URL: ${CANONICAL_MCP_URL}\n3. Leave Request headers empty — no API key is needed. On the first connection\n   Claude opens Tortoise's sign-in page: sign in, click Authorize, then pick the\n   Organization you're onboarding.\n4. In a Claude Web chat, say "Set up Tortoise" — the agent calls tortoise_health\n   to verify, then click "I've connected it — Continue" in the dashboard connect\n   step (that writes the harness-connected checkpoint).`,
   chatgpt: () =>
     `Tortoise — ChatGPT (Developer mode, OAuth)\n1. Enable Developer mode: chatgpt.com → Settings → Security and login →\n   Developer mode (Plus/Pro/Business/Enterprise/Education).\n2. Open chatgpt.com/plugins → the + button → create a Developer-mode app.\n3. MCP server URL: ${CHATGPT_MCP_URL}  (no API key — choose OAuth; ChatGPT\n   discovers Tortoise's authorization server automatically).\n4. Click Scan Tools — sign in to Tortoise when prompted and click Authorize.\n   When Tortoise prompts you to choose an organization, pick the one you're onboarding for.\n5. The tortoise_* tools appear (Developer mode). In the SAME ChatGPT chat,\n   paste the prompt below — it gives ChatGPT the Tortoise workflows:\n\n${WORKFLOWS_PROMPT}\n\nAfter you paste it, ask ChatGPT a Tortoise question (e.g. "are we connected?")\nand confirm it answers from the connected MCP tools, then click "I've\nconnected it — Continue →" in the dashboard connect step (that writes the\nharness-connected checkpoint).`,
 }

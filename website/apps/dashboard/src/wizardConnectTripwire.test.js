@@ -51,8 +51,11 @@ const connectStep = () =>
 // #2912: the owner/admin branch (chooser + key block + procedure block + nav).
 // Sliced on its own so a key-mode assertion cannot be satisfied by the
 // build-fork or member branch.
+// #2865: the gate is no longer role-only — members reach the same branch, so
+// the rail to slice on is the cap remedy below it. Assertions scoped to
+// owner-only behaviour live in their own `isOwnerAdmin`-anchored checks.
 const ownerBranch = () =>
-  slice(') : (isOwnerAdmin && !capNotice ? (',
+  slice(') : (!capNotice ? (',
         ') : (\n                    <div className="harness">', 'owner connect branch')
 
 // ── #2710: the connect step can mint/paste, and never queues the modal ──────
@@ -116,8 +119,11 @@ test('#2710/#2912: the no-key affordance is the KEY block branch — never a pla
   // `{true ? (` made the mint CTA unreachable and the suite stayed green.
   assert.match(owner, /<WizardBlock step=\{1\} title="Get your API key">\s*\{harnessKey \? \(/,
     'the key block condition is harnessKey (else the no-key branch is dead code)')
-  assert.match(owner, /\)\s*:\s*\(\s*wizardNoKeyAffordance\s*\)/,
-    'the key block renders the no-key affordance as its NO-KEY branch')
+  // #2865: the no-key branch is now role-aware. Only an owner/admin can mint
+  // (POST /v1/team/keys is `_require_owner_admin`), so a member on a keyed leaf
+  // gets the paste escape instead of a CTA that would 403.
+  assert.match(owner, /\)\s*:\s*\(\s*isOwnerAdmin \? wizardNoKeyAffordance : wizardPasteRow\s*\)/,
+    'the key block renders the mint affordance for owner/admins and the paste row for members')
   assert.doesNotMatch(owner, /YOUR_API_KEY/, 'no placeholder key may remain')
   assert.doesNotMatch(owner, /wizardKeyCodeStyle\}>\{harnessKey \|\| '…'\}/,
     'no fake key row may render before a key exists')
@@ -216,19 +222,16 @@ test('#2711: every shown-once key row can break/shrink its token', () => {
     assert.ok(style.includes(token),
       `the shared key style must carry ${token} (or the unbreakable tt_ token overflows)`)
   }
-  // The connector header literal is a different shape (`'Authorization: Bearer '
-  // + harnessKey`) and must break too — asserted on its own shared style.
-  const headerStyle = slice('const wizardHeaderCodeStyle = {', '\n', 'wizardHeaderCodeStyle')
-  for (const token of ["minWidth: 0", "overflowWrap: 'anywhere'", "wordBreak: 'break-all'"]) {
-    assert.ok(headerStyle.includes(token),
-      `the header-literal style must carry ${token}`)
-  }
+  // The connector header literal (`'Authorization: Bearer ' + harnessKey`)
+  // was the other shape that had to break — #2865 removed it from the live
+  // connect step entirely (no Bearer recipe on a connector surface), so
+  // `wizardHeaderCodeStyle` is gone and only the raw-key rows above remain.
   const connect = connectStep()
   // PER ROW: each rendered RAW-key token must be able to break or shrink — the
   // pre-fix agent rows carried NO breaking property and measured 531px at a
   // 390px viewport. #2912 renders the raw key in exactly TWO places: the shared
   // step-1 key row (all harnesses except Codex Desktop) and the build fork's
-  // own row; the manual tabs' connector header literal is covered above.
+  // own row.
   const codeEls = [...connect.matchAll(/<code style=\{\{?([^}]*)\}\}?>[\s\S]{0,80}?\{harnessKey/g)]
   assert.equal(codeEls.length, 2,
     'the connect step renders 2 raw-key tokens (shared key row + build-fork row)')
@@ -301,7 +304,7 @@ test('#2912: the connect step renders a family→surface chooser wired to the le
   // PR-gate UX: the Codex Desktop leaf is a SINGLE numbered block — its key
   // lives inside the config block, so an empty "1 Get your API key" promised an
   // action that does not exist on that surface.
-  assert.match(connect, /\{wizardConnectHarness === 'codexDesktop' \? \(\s*<WizardBlock step=\{1\} title=\{harnessKey \? procedureTitle : 'Get your API key'\}>/,
+  assert.match(connect, /\) : wizardConnectHarness === 'codexDesktop' \? \(\s*<WizardBlock step=\{1\} title=\{harnessKey \? procedureTitle : 'Get your API key'\}>/,
     'the key-embedding Desktop surface renders ONE block, not an empty step 1')
   assert.match(owner, /const agentDriven1Step = \['claude', 'codex', 'codexDesktop'\]/,
     "'codexDesktop' must reach the 1-step procedure branch (its own leaf id)")
@@ -370,7 +373,7 @@ test('#2912: the org eyebrow renders only when an org exists AND its name is kno
 // can pin cheaply. Each one was a real regression/finding in this commit.
 test('#2912: the Codex Desktop block keeps the "shown once" advisory', () => {
   const src = stripComments(mainJsx)
-  const i = src.indexOf("{wizardConnectHarness === 'codexDesktop' ? (")
+  const i = src.indexOf(") : wizardConnectHarness === 'codexDesktop' ? (")
   assert.ok(i > -1, 'the single-block Desktop branch exists')
   const desktop = src.slice(i, src.indexOf(') : (', i))
   // the merged block dropped the only unrecoverable-key cue on this surface
@@ -396,7 +399,7 @@ test('#2912: the build-fork blocks own their rhythm (no inline margins stacking 
   const src = stripComments(mainJsx)
   const i = src.indexOf('<div className="connect-build">')
   assert.ok(i > -1, 'the build-fork container exists')
-  const build = src.slice(i, src.indexOf(') : (isOwnerAdmin && !capNotice ? (', i))
+  const build = src.slice(i, src.indexOf(') : (!capNotice ? (', i))
   assert.match(build, /<pre className="snippet" style=\{\{ margin: 0 \}\}>/,
     'the snippet has no margin of its own')
   assert.doesNotMatch(build, /marginTop: '0\.9rem'/,
@@ -507,4 +510,93 @@ test('#3218: the Pi/Cursor step-1 prompts install the skills before the restart 
     'Cursor: skills install first, restart note last')
   assert.doesNotMatch(fn, /\$\{twoStepNote\} (Pi|Cursor)\.\\nThen install the Tortoise skills/,
     'the restart-before-skills order must not come back')
+})
+
+// ── #2865: key-less OAuth on the LIVE Claude Desktop / Claude Web leaves ───
+// The issue premise ("add an OAuth affordance") pointed at DEAD CODE:
+// `HARNESS_OAUTH` had ONE render consumer (`{LEGACY_WIZARD_ARCHIVED && …}`)
+// and `LEGACY_WIZARD_ARCHIVED = false`. These assertions are anchored on the
+// LIVE connect step (`connectStep()`), never on the archived block — the
+// archived block still contains the old `Request headers` recipe by design.
+test('#2865: the live connect step makes the two Claude leaves key-less OAuth', () => {
+  const connect = connectStep()
+  // the live branch keys off the shared vocabulary, not a second literal list
+  assert.match(connect, /const wizardKeyless = HARNESS_OAUTH\.includes\(wizardHarness\)/,
+    'the live OAuth branch reads HARNESS_OAUTH (one vocabulary with harnesses.js)')
+  // a key-less leaf opens on the CONNECTOR block — no "1 Get your API key"
+  // step. #3218's numbered prompt block still follows it, so the arm is a
+  // fragment wrapping (connector → prompt), never a key block.
+  assert.match(connect, /\{wizardKeyless \? \(\s*(?:<>\s*)?<WizardBlock step=\{1\} title=\{procedureTitle\}>/,
+    'a key-less OAuth leaf opens on the connector block, never a key block')
+  assert.match(connect, /\{procedureTail && \(\s*<WizardBlock step=\{2\} title=\{procedureTailTitle\}>/,
+    '#3218: the prompt hand-off keeps its own numbered block on the key-less leaf too')
+  // the recipe: connector name + canonical URL + sign-in → Authorize → org
+  const oauth = slice("} else if (wizardKeyless) {", '\n\n                      return (',
+                      'live OAuth branch')
+  assert.match(oauth, /Add custom connector/,
+    'the recipe names Add custom connector')
+  assert.match(oauth, /<code>\{CANONICAL_MCP_URL\}<\/code>/,
+    'the Server URL is the canonical connector constant (matches the PRM resource)')
+  assert.match(oauth, /sign in/, 'the recipe has a sign-in step')
+  assert.match(oauth, /<strong>Authorize<\/strong>/, 'the recipe has an Authorize step')
+  assert.match(oauth, /Pick the Organization/, 'the recipe has an org chooser step')
+  assert.match(oauth, /Leave <strong>Request headers<\/strong> empty/,
+    'the recipe tells the user the header field is empty, not required')
+  assert.match(oauth, /wizardWorkflowsText\('', 'included'\)/,
+    'the prompt is composed KEY-LESS (a connector surface never carries a key)')
+  // …and NO credential recipe survives on these surfaces.
+  assert.doesNotMatch(oauth, /Authorization: Bearer/,
+    'no Bearer recipe may render on a Claude connector surface')
+  assert.doesNotMatch(oauth, /wizardHeaderCodeStyle/,
+    'the old connector header literal must be gone')
+  assert.doesNotMatch(oauth, /rolling out in Anthropic/,
+    'the beta Request-headers caveat must be gone (it is the blocker, not a hint)')
+  assert.doesNotMatch(oauth, /use the Claude Code surface instead/,
+    'the divert-to-another-tab escape hatch must be gone')
+  assert.doesNotMatch(oauth, /harnessKey/,
+    'nothing in the key-less recipe may depend on a key')
+  // the whole live connect step no longer mentions the beta caveat anywhere
+  assert.doesNotMatch(connect, /rolling out in Anthropic/,
+    'no surface in the live connect step may carry the beta caveat')
+})
+
+test('#2865: the two Claude tabs are no longer hidden from members', () => {
+  const src = stripComments(mainJsx)
+  // the old gate was `isOwnerAdmin && !capNotice` — role-only, which sent every
+  // member to a paste-a-key row and made an OAuth connect unreachable.
+  assert.doesNotMatch(src, /\)\s*:\s*\(isOwnerAdmin && !capNotice \? \(/,
+    'the connect-step gate must no longer be role-only')
+  assert.match(src, /\)\s*:\s*\(!capNotice \? \(/,
+    'the connect-step gate is the cap remedy alone (capNotice is owner/admin-only)')
+  // a member on a KEYED leaf keeps a paste escape, never a mint CTA that 403s
+  assert.match(ownerBranch(), /isOwnerAdmin \? wizardNoKeyAffordance : wizardPasteRow/,
+    'the keyed-leaf no-key branch is role-aware')
+  // the member-only dead-end subtree must be gone, not left unreachable
+  assert.doesNotMatch(src, /Only owners and admins can create API keys in this dashboard/,
+    'the pre-#2865 member paste-only subtree is deleted (no unreachable branch)')
+  // the step-2 lede must not promise a key to a member on an OAuth leaf
+  const lede = src.slice(src.indexOf('if (wizardStep === 2) {'),
+                        src.indexOf('if (wizardStep === 2) {') + 2600)
+  const oauthLede = lede.indexOf('Claude signs in to Tortoise')
+  const memberLede = lede.indexOf('Paste an API key to connect your agent.')
+  assert.ok(oauthLede > -1, 'the OAuth leaves get their own lede')
+  assert.ok(oauthLede < memberLede,
+    'the OAuth lede must precede the member paste lede (a member on Claude Desktop must not be told to paste a key)')
+})
+
+test('#2865: a user holding a key does NOT get a key row on a key-less OAuth leaf', () => {
+  // The issue asks explicitly whether the key path survives. Decision: on these
+  // two leaves it is retired (HARNESS_OAUTH is explicit and the AC calls them
+  // "unconditionally key-less") — the key-less single block never renders
+  // keyDisplayRow, the pills, or the step-2 gate, so a held key cannot leak in.
+  const connect = connectStep()
+  const i = connect.indexOf('{wizardKeyless ? (')
+  assert.ok(i > -1, 'the key-less branch exists')
+  const keylessBlock = connect.slice(i, connect.indexOf(") : wizardConnectHarness === 'codexDesktop'", i))
+  assert.doesNotMatch(keylessBlock, /keyDisplayRow/,
+    'no key row on a key-less OAuth leaf')
+  assert.doesNotMatch(keylessBlock, /keyModeToggleable/,
+    'no key-mode pills on a key-less OAuth leaf')
+  assert.doesNotMatch(keylessBlock, /\{harnessKey &&/,
+    'the key-less leaf block is not key-gated')
 })
