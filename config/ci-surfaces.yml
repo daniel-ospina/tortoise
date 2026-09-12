@@ -209,7 +209,6 @@ surfaces:
   # and is registered in this surface alongside the provider-cost file it guards
   # (it sits with the other battery-only entries above).
   - test_battery_provider_cost.py
-  - test_battery_derive_truth_leg.py  # #2740 truth-emission leg (hermetic; battery.runner.probe_scorer derives) — registered by #3095/#3140 after landing unclassified in #3100
   - test_battery_differential.py
   # #3140 (landed here with #3221): guards
   # `battery/runner/probe_scorer.py`'s `derive_envelope_truth` /
@@ -224,7 +223,11 @@ surfaces:
   # entry still inherits the other and cannot produce a green
   # `manifest-integrity` — the two are mutually blocking and cannot be
   # serialised.
-  - test_battery_derive_truth_leg.py
+  #
+  # Registered by both #3095 and #3221/#3140; the two identical same-surface
+  # entries were merged into this one when the fixes landed together — a
+  # same-surface duplicate is invisible to select() (#2913).
+  - test_battery_derive_truth_leg.py  # #2740 truth-emission leg (hermetic; battery.runner.probe_scorer derives) — landed unclassified in #3100
   - test_battery_streams.py
   - test_battery_recall.py
   - test_battery_report.py
