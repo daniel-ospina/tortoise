@@ -178,7 +178,7 @@ _STRUCTURAL = {
     "feat", "feature", "fix", "fixes", "bugfix", "chore", "hotfix", "release",
     "refactor", "test", "tests", "docs", "ci", "build", "perf", "style",
     "revert", "wip", "main", "master", "dev", "develop", "head", "origin",
-    "upstream", "head", "worktree", "worktrees", "detached", "bare",
+    "upstream", "worktree", "worktrees", "detached", "bare",
 }
 
 _CLAIM_RE = re.compile(
@@ -258,7 +258,7 @@ def _one_line(text: str, limit: int = 200) -> str:
 def number_present(text: str, issue: int) -> bool:
     """Boundary-exact issue-number match: 3061 matches '#3061', 'w3061',
     'fix/3061-x' but NEVER '30610'."""
-    return re.search(r"(?<![0-9])%d(?![0-9])" % issue, text or "") is not None
+    return re.search(rf"(?<![0-9]){issue}(?![0-9])", text or "") is not None
 
 
 def closing_reference(text: str, issue: int) -> bool:
@@ -273,8 +273,7 @@ def closing_reference(text: str, issue: int) -> bool:
     if not text:
         return False
     pattern = (
-        r"(?i)\b(?:close[sd]?|fix(?:es|ed)?|resolve[sd]?)\s*:?\s*#%d(?![0-9])"
-        % issue
+        rf"(?i)\b(?:close[sd]?|fix(?:es|ed)?|resolve[sd]?)\s*:?\s*#{issue}(?![0-9])"
     )
     return re.search(pattern, text) is not None
 
@@ -418,11 +417,10 @@ def _gh_json(gh_bin: str, args: list[str], repo: str, timeout: float):
 
 
 def _pr_ref(pr: dict) -> str:
-    return "PR #%s %s [%s]" % (
-        pr.get("number", "?"),
-        _one_line(pr.get("title", ""), 90),
-        pr.get("headRefName", ""),
-    )
+    number = pr.get("number", "?")
+    title = _one_line(pr.get("title", ""), 90)
+    head = pr.get("headRefName", "")
+    return f"PR #{number} {title} [{head}]"
 
 
 def scan_pr_surface(

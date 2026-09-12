@@ -36,7 +36,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from tortoise.reader import (  # noqa: E402
+from tortoise.reader import (
     NO_EVIDENCE_TEXT,
     EvidenceReader,
     LLMReader,
@@ -44,7 +44,7 @@ from tortoise.reader import (  # noqa: E402
     build_reader_user_message,
     system_prompt_for,
 )
-from tortoise.retrieval import render_context  # noqa: E402
+from tortoise.retrieval import render_context
 
 
 class _RecordingModel:
