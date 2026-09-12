@@ -747,29 +747,42 @@ def test_anchor_ignores_a_registration_that_created_no_node(tmp_path):
 
 
 def test_survivor_anchor_cross_key_disagreement_is_documented(tmp_path):
-    """PINS the name-preferred anchor rule on the CROSS-KEY shape.
+    """PINS the cross-key shape under NAME-IDENTITY semantics.
 
         OR(iA, NA)@0,  RT(iA, NB)@1,  OR(iB, NB)@2
 
-    The retraction's `id` and `name` resolve to DIFFERENT registrations. This
-    test previously pinned the OPPOSITE outcome (iA stayed `live`), because the
-    anchor was `max(last_by_id, last_by_name)`.
+    The retraction's `id` and `name` resolve to DIFFERENT registrations. Both
+    earlier pinned answers were wrong, and this test has now pinned three
+    different outcomes — worth stating why the first two were wrong rather than
+    presenting the third as if it had always been obvious:
 
-    **THE RULE CHANGED DELIBERATELY (#2977 code review, P1), not as a side
-    effect.** `max` across keys let a reused `id` speak for a name it does not
-    identify: `OR(U1,X) -> RT(U1,X) -> OR(U1,Y)` read the seq-2 registration of
-    the DIFFERENT name `Y` as a replacement of `X`, dropped the retraction, and
-    RESURRECTED X on all four replay engines. That shape is
-    PRODUCTION-REACHABLE via the public `EventAPI.add_object(..., id=...)`
-    explicit-id override (api.py:256-269) — see
-    `test_reused_id_under_new_name_does_not_resurrect_the_old_name`.
+    1. ORIGINAL (`max(last_by_id, last_by_name)`): pinned `iA == "live"`. The
+       seq-2 registration of `NB` was read as a replacement, the fold dropped,
+       and NA survived — but for the wrong reason. That same `max` resurrected
+       `X` in `OR(U1,X) -> RT(U1,X) -> OR(U1,Y)`, which IS production-reachable.
+    2. CYCLE-2 FIX (name-preferred anchor, id branch unconstrained): pinned
+       `iA == "retracted"`. Applying the fold was right; but the id branch was a
+       bare `MATCH (o:Object {id:$id})`, so the `SET` tombstoned iA **and** every
+       other node sharing that id. That rationalised a multi-node write.
+    3. NOW: name-identity, both branches identity-constrained.
 
-    Object identity is the NAME (`_upsert_object` MERGEs by name), so the
-    anchor is now the name when the fold carries one, falling back to the id
-    anchors only for a keyless fold. On THIS shape the name is `NB`, whose
-    first registration is the seq-2 one: `2 < 1 < 2` is false, so the seq-1
-    fold APPLIES — consistent with the #2164 pinned boundary that a fold
-    emitted before its target's first registration still applies.
+    **The retraction names `NB`, so NB is its target** (`_upsert_object` MERGEs
+    by name; `id` is a derived cache). `NB` first registers at seq 2 — AFTER the
+    seq-1 fold — and the #2164 boundary this plan pins is that a fold emitted
+    before its target's first registration still APPLIES (the `[OS@0, OR@1]`
+    shape). So `iB`/`NB` replays `retracted`, and `iA`/`NA` is untouched: the
+    fold does not name it and the id branch now requires the name to agree.
+
+    **ACCEPTED LIVE/REPLAY DIVERGENCE, not a claim of correctness.** LIVE
+    would differ, which is exactly why this shape is unreachable in production:
+    `_delete_entity(iA)` reads `id` and `name` from ONE `MATCH
+    (o:Object {id:$id}) RETURN o.name`, so it emits `RT(iA, NA)` — an id/name
+    pair that never disagree. Live would tombstone NA and then leave NB live;
+    replay tombstones NB. The divergence is a property of a hand-written or
+    legacy journal, and is recorded with the family's other anchor edge under
+    follow-up (g). If this assertion starts failing, decide deliberately.
+
+    Reachability: NONE from production writers.
     """
     events = tmp_path / "events"; events.mkdir(exist_ok=True)
     log = EventLog(str(events / "events.jsonl"))
@@ -781,15 +794,49 @@ def test_survivor_anchor_cross_key_disagreement_is_documented(tmp_path):
     log.append({"type": "ObjectRegistered", "id": "iB", "name": "NB"})
     proj = _drive("rebuild_all", tmp_path, events, "iA")
     try:
-        # The name anchor resolves to the seq-2 registration, which is AFTER
-        # the fold, so `first < seq < last` cannot hold and the fold applies.
-        # The retraction's match-by-id then finds iA (live, non-terminal).
-        assert proj.g.query(
-            "MATCH (o:Object {id:'iA'}) RETURN o.status"
-        ).result_set[0][0] == "retracted", (
-            "name-preferred anchor: `NB` first registers at seq 2, so the seq-1 "
-            "fold applies (pre-first-fold boundary, #2164). A change here must "
-            "be a deliberate decision — see this docstring and Surface Map row 6")
+        rows = {r[0]: r[1] for r in proj.g.query(
+            "MATCH (o:Object) RETURN o.name, o.status").result_set}
+        assert rows["NA"] == "live", (
+            "the fold names NB, so a differently-named node sharing the id must "
+            "be untouched — the id branch requires the name to agree (#2977 "
+            f"review-2 P0). Got {rows}")
+        assert rows["NB"] == "retracted", (
+            "the fold targets NB by name; NB's first registration is AFTER the "
+            "fold, and the #2164 pre-first boundary makes such a fold apply. A "
+            f"change here must be a deliberate decision. Got {rows}")
+    finally:
+        proj.close()
+
+
+def test_reused_id_does_not_multi_tombstone_the_supersede_lane(tmp_path):
+    """The P0's SUPERSEDE TWIN (#2977 review 2).
+
+    Both fold families go through `_fold_object_match_and_apply`, so the
+    unconstrained id branch tombstoned every node sharing an id on the
+    supersede lane too:
+
+        OR(U1, X)@0,  OS(U1, X)@1,  OR(U1, Y)@2
+
+    `Y` is never superseded in the journal, yet was excluded from every read
+    surface. This is asserted separately from the retraction case because the
+    two families pass different `skip_terminal` values and a fix applied to one
+    body but not the shared selection rule would only show up here.
+    """
+    events = tmp_path / "events"; events.mkdir(exist_ok=True)
+    log = EventLog(str(events / "events.jsonl"))
+    log.append({"type": "ObjectRegistered", "id": "U1", "name": "X"})
+    log.append({"type": "ObjectSuperseded", "id": "U1", "name": "X",
+                "supersedes_by": "X2", "ts": "T1"})
+    log.append({"type": "ObjectRegistered", "id": "U1", "name": "Y"})
+    proj = _drive("rebuild_all", tmp_path, events, "U1")
+    try:
+        rows = {r[0]: r[1] for r in proj.g.query(
+            "MATCH (o:Object) RETURN o.name, o.status").result_set}
+        assert rows["Y"] == "live", (
+            "Y was never superseded — the id branch must not tombstone every "
+            f"node sharing the id (#2977 review-2 P0, supersede lane). Got {rows}")
+        assert rows["X"] == "superseded", (
+            f"X IS superseded by the seq-1 fold. Got {rows}")
     finally:
         proj.close()
 
@@ -825,13 +872,22 @@ def test_reused_id_under_new_name_does_not_resurrect_the_old_name(tmp_path):
     for engine in ("rebuild_all", "rebuild", "recover_from_log"):
         proj = _drive(engine, tmp_path, events, "U1")
         try:
-            rows = proj.g.query(
+            rows = [list(r) for r in proj.g.query(
                 "MATCH (o:Object) RETURN o.name, o.status ORDER BY o.name"
-            ).result_set
-            assert ["X", "retracted"] in [list(r) for r in rows], (
+            ).result_set]
+            assert ["X", "retracted"] in rows, (
                 f"{engine}: X was never re-registered — the reused id 'U1' must "
                 f"not count as a replacement of the name 'X' (#2977 P1). "
                 f"Got {rows}")
+            # THE OTHER HALF, and it was MISSING (review 2, P0): the fold must
+            # not BURY the unrelated Object that reused the id. The id branch
+            # was a bare `MATCH {id:$id}` with no single-carrier restriction,
+            # so `SET` tombstoned X **and** Y — Y is never retracted in the
+            # journal. Asserting only X would have passed straight over it.
+            assert ["Y", "live"] in rows, (
+                f"{engine}: Y was never retracted — the retraction names X, and "
+                f"the id branch must not tombstone every node sharing the id "
+                f"(#2977 review-2 P0). Got {rows}")
         finally:
             proj.close()
 

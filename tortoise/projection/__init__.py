@@ -1206,12 +1206,21 @@ class FalkorProjection(
         behaviour (#2164 round-2, the connector/journaled-producer lane) that
         asserts it replays `superseded`; the naive form makes it `live`.
 
-        Why the MAXIMUM across both keys for ``last`` (not id-first): when a
-        name was registered under two different ids, an id-first lookup finds
-        the STALE id's early anchor, keeps the fold, then the fold's name
-        fallback stamps the re-created LIVE node. The MINIMUM across both keys
-        for ``first`` is the dual: a key whose first registration predates the
-        fold is evidence the target existed then.
+        Why the NAME is the anchor and not the id, and why NOT the maximum
+        across both keys (review 2 — this paragraph stated the DELETED rule,
+        and a reader trusting it would restore ``max(last_by_id, last_by_name)``
+        and re-introduce the resurrection): ``_upsert_object`` MERGEs by name,
+        so the ``id`` is a DERIVED CACHE and a reused id is not the same Object.
+        ``max`` across keys let a reused id speak for a name it does not
+        identify — ``OR(U1,X) -> RT(U1,X) -> OR(U1,Y)`` read the seq-2
+        registration of the DIFFERENT name ``Y`` as a replacement of ``X``,
+        dropped the fold, and resurrected X on all four engines. The anchor is
+        therefore the name whenever the fold carries one, falling back to the id
+        anchors only for a keyless fold. This covers both shapes without a
+        cross-key trade-off:
+
+            OR(U1,X) -> RT(U1,X) -> OR(U2,X)   name anchor 0 < 1 < 2 -> drop
+            OR(U1,X) -> RT(U1,X) -> OR(U1,Y)   name anchor 0 < 1 < 0 -> apply
 
         Why supersessions are NOT exempt: a re-create with no intervening
         delete is an ON MATCH and is NOT re-journaled, so the anchor stays put
@@ -1225,9 +1234,13 @@ class FalkorProjection(
         ``backup.py``'s restore fallback passes ``strict=True`` to PRESERVE its
         pre-change fail-loud behaviour.
 
-        Returns the FOLD tear count as a plain ``int`` — a ``torn`` COUNT is
-        meaningful only on the fail-soft path (``recover_from_log``), because
-        the ``strict=True`` paths RE-RAISE and so always return 0.
+        Returns ``(torn, survivor_skipped)`` — a 2-TUPLE, not a plain ``int``
+        (the plain-``int`` contract was removed with the ``applied`` accounting
+        fix; a caller unpacking it as an int would silently read a tuple). A
+        ``torn`` COUNT is meaningful only on the fail-soft path
+        (``recover_from_log``), because the ``strict=True`` paths RE-RAISE and so
+        always return 0. ``survivor_skipped`` is folds the survivor rule DROPPED
+        — they did no work, so ``apply_replay`` must not count them as applied.
         """
         first_by_id: dict[str, int] = {}
         last_by_id: dict[str, int] = {}
