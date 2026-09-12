@@ -933,52 +933,79 @@ def refresh_grant(cp, body: dict, base: str) -> dict:
     a fresh pair. Team suspension revokes the whole (user, team) family;
     a lapsed membership revokes the presented token.
     """
-    client = _verify_client_auth(cp, body.get("client_id"), body)
-    refresh_token = body.get("refresh_token", "")
-    rows = cp.query("oauth_refresh_tokens", select=[
-        "id", "token_hash", "client_id", "user_id", "team_id", "scope",
-        "expires_at", "revoked_at",
-    ], filters=[("token_hash", "eq", _sha256(refresh_token))])
-    if not rows:
-        raise OAuthError(400, "invalid_grant", "Invalid refresh token.")
-    row = rows[0]
-    if row.get("revoked_at") is not None:
-        raise OAuthError(400, "invalid_grant",
-                         "Refresh token already revoked (rotated or invalidated).")
-    if row["client_id"] != client["id"]:
-        raise OAuthError(401, "unauthorized_client",
-                         "Refresh token was issued to a different client.")
-    if _parse_ts(row.get("expires_at")) is None or _parse_ts(row["expires_at"]) < _now():
-        raise OAuthError(400, "invalid_grant", "Refresh token expired.")
-    resource = body.get("resource")
-    if resource:
-        _, requested_team = parse_resource(base, resource)
-        if requested_team is not None and requested_team != row["team_id"]:
-            raise OAuthError(400, "invalid_grant",
-                             "Resource indicator does not match the token's team.")
-    # D5: suspension → revoke the whole (user, team) family, then reject.
+    # #2863: wrap every pre-mint read (the FIRST one is `_verify_client_auth` →
+    # `oauth_clients`; a wrap starting at the refresh-token SELECT leaves it
+    # leaking), and un-mask the two revokes that used to swallow a terminal
+    # OAuthError into a bare 500.
     try:
-        _assert_team_usable(cp, row["team_id"])
+        client = _verify_client_auth(cp, body.get("client_id"), body)
+        refresh_token = body.get("refresh_token", "")
+        rows = cp.query("oauth_refresh_tokens", select=[
+            "id", "token_hash", "client_id", "user_id", "team_id", "scope",
+            "expires_at", "revoked_at",
+        ], filters=[("token_hash", "eq", _sha256(refresh_token))])
+        if not rows:
+            raise OAuthError(400, "invalid_grant", "Invalid refresh token.")
+        row = rows[0]
+        if row.get("revoked_at") is not None:
+            raise OAuthError(400, "invalid_grant",
+                             "Refresh token already revoked (rotated or invalidated).")
+        if row["client_id"] != client["id"]:
+            raise OAuthError(401, "unauthorized_client",
+                             "Refresh token was issued to a different client.")
+        if _parse_ts(row.get("expires_at")) is None or _parse_ts(row["expires_at"]) < _now():
+            raise OAuthError(400, "invalid_grant", "Refresh token expired.")
+        resource = body.get("resource")
+        if resource:
+            _, requested_team = parse_resource(base, resource)
+            if requested_team is not None and requested_team != row["team_id"]:
+                raise OAuthError(400, "invalid_grant",
+                                 "Resource indicator does not match the token's team.")
+        # D5: suspension → revoke the whole (user, team) family, then reject.
+        try:
+            _assert_team_usable(cp, row["team_id"])
+        except OAuthTemporarilyUnavailable:
+            raise        # a transient signal must NEVER trigger family revocation
+        except OAuthError:
+            try:
+                _revoke_team_family(cp, row["user_id"], row["team_id"])
+            except Exception as exc:  # correction #8: the single capture for this path
+                _log_and_capture(exc, where="family revoke")
+            raise
+        # Lapsed membership → revoke this token (the grant dies with the seat).
+        from tortoise.supabase_control import membership_for_user_team
+        if membership_for_user_team(cp, row["user_id"], row["team_id"]) is None:
+            try:
+                cp.query("oauth_refresh_tokens", method="PATCH",
+                         filters=[("id", "eq", row["id"])],
+                         json_body={"revoked_at": _now_iso()})
+            except Exception as exc:  # correction #8: the single capture for this path
+                _log_and_capture(exc, where="membership revoke")
+            raise OAuthError(403, "invalid_grant",
+                             "Membership in the team has ended — the grant was revoked.")
+        prev_access = cp.query("oauth_access_tokens",
+                               select=["id"],
+                               filters=[("refresh_token_id", "eq", row["id"]),
+                                        ("revoked_at", "is", None)])
     except OAuthError:
-        _revoke_team_family(cp, row["user_id"], row["team_id"])
         raise
-    # Lapsed membership → revoke this token (the grant dies with the seat).
-    from tortoise.supabase_control import membership_for_user_team
-    if membership_for_user_team(cp, row["user_id"], row["team_id"]) is None:
-        cp.query("oauth_refresh_tokens", method="PATCH",
-                 filters=[("id", "eq", row["id"])],
-                 json_body={"revoked_at": _now_iso()})
-        raise OAuthError(403, "invalid_grant",
-                         "Membership in the team has ended — the grant was revoked.")
-    prev_access = cp.query("oauth_access_tokens",
-                           select=["id"],
-                           filters=[("refresh_token_id", "eq", row["id"]),
-                                    ("revoked_at", "is", None)])
-    out = _issue_tokens(cp, client_id=row["client_id"], user_id=row["user_id"],
-                        team_id=row["team_id"], scope=row.get("scope")
-                        or " ".join(SCOPES_SUPPORTED), resource=resource,
-                        prev_refresh=row,
-                        prev_access_id=prev_access[0]["id"] if prev_access else None)
+    except Exception as exc:
+        _log_and_capture(exc, where="refresh_grant pre-mint")
+        raise OAuthTemporarilyUnavailable(
+            "Temporary control-plane failure before token rotation — retry.") from None
+    try:
+        out = _issue_tokens(cp, client_id=row["client_id"], user_id=row["user_id"],
+                            team_id=row["team_id"], scope=row.get("scope")
+                            or " ".join(SCOPES_SUPPORTED), resource=resource,
+                            prev_refresh=row,
+                            prev_access_id=prev_access[0]["id"] if prev_access else None)
+    except OAuthMintAborted as exc:
+        logger.warning("oauth: refresh mint aborted (recovered=%s)", exc.recovered)   # I4: log-only
+        if exc.recovered:
+            raise OAuthTemporarilyUnavailable() from None
+        raise OAuthError(400, "invalid_grant",
+                         "The refresh token could not be rotated — re-run "
+                         "authorization.") from None
     return {k: v for k, v in out.items() if not k.startswith("_")}
 
 

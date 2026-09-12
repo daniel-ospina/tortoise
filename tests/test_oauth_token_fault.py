@@ -544,3 +544,118 @@ def test_bad_pkce_never_re_arms_the_code(fault_client):
     _seed_code(cp, "p1", client_id=_CLIENT_ID, redirect_uri=_REDIRECT)
     r = _post_code(tc, cp, "p1", verifier="wrong-verifier-wrong-verifier-wrong-verifier")
     assert r.status_code == 400 and cp.tables["oauth_codes"][0]["used_at"] is not None
+
+
+# ── Task 5: `refresh_grant` — wrap the pre-mint reads, map the abort, unmask ──
+
+@pytest.mark.parametrize("table,select", [
+    ("oauth_clients", None),        # FIRST read on the path — the :726 leak
+    ("oauth_refresh_tokens", None),  # the refresh-token SELECT
+    ("teams", None),                # _assert_team_usable
+    ("team_memberships", None),     # membership_for_user_team — S4 call site #4
+    ("oauth_access_tokens", ["id"]),  # prev_access
+])
+def test_refresh_pre_mint_read_failure_is_503_not_500(fault_client, table, select):
+    tc, cp = fault_client
+    _rid, rt = _seed_refresh_token(cp, "rt-pre")
+    cp.fail_query(table=table, method="GET", select=select, times=1)
+    r = _post_refresh(tc, cp, rt)
+    assert r.status_code == 503 and r.json()["error"] == "temporarily_unavailable"
+    assert cp.tables["oauth_refresh_tokens"][0]["revoked_at"] is None    # grant untouched
+    assert _post_refresh(tc, cp, rt).status_code == 200                  # retry works
+
+
+def test_refresh_membership_revoke_failure_still_returns_403_invalid_grant(fault_client):
+    tc, cp = fault_client
+    _rid, rt = _seed_refresh_token(cp, "rt-mem")
+    cp.tables["team_memberships"] = []     # `setdefault` would be a NO-OP: the fixture seeded one
+    cp.fail_query(table="oauth_refresh_tokens", method="PATCH",
+                  match=lambda t, m, sel, f: m == "PATCH" and not sel,
+                  times=1, after_mutation=True)   # the revoke commits, then raises
+    r = _post_refresh(tc, cp, rt)
+    assert r.status_code == 403 and r.json()["error"] == "invalid_grant"  # not a 500
+    assert cp.tables["oauth_refresh_tokens"][0]["revoked_at"] is not None
+
+
+def test_refresh_suspension_family_revoke_failure_still_returns_403(fault_client):
+    tc, cp = fault_client
+    _rid, rt = _seed_refresh_token(cp, "rt-susp")
+    cp.tables["teams"][0]["suspended_at"] = "2026-01-01T00:00:00+00:00"
+    cp.fail_query(table="oauth_refresh_tokens", method="PATCH", times=1)  # _revoke_team_family
+    assert _post_refresh(tc, cp, rt).status_code == 403
+
+
+def test_refresh_mint_abort_recovered_true_is_503_and_retry_succeeds(fault_client):
+    tc, cp = fault_client
+    _rid, rt = _seed_refresh_token(cp, "rt-ok")
+    cp.fail_query(table="oauth_access_tokens", method="POST", times=1)      # mint abort
+    r1 = _post_refresh(tc, cp, rt)
+    assert r1.status_code == 503 and r1.json()["error"] == "temporarily_unavailable"
+    r2 = _post_refresh(tc, cp, rt)                                          # retry
+    assert r2.status_code == 200 and "refresh_token" in r2.json()
+
+
+def test_refresh_mint_abort_recovered_false_is_terminal_invalid_grant(fault_client):
+    tc, cp = fault_client
+    _rid, rt = _seed_refresh_token(cp, "rt-bad")
+    cp.fail_query(table="oauth_access_tokens", method="POST", times=1)
+    cp.fail_query(table="oauth_refresh_tokens", method="PATCH",
+                  match=lambda t, m, sel, f: m == "PATCH" and not sel, times=1)   # rollback fails
+    r = _post_refresh(tc, cp, rt)
+    assert r.status_code == 400 and r.json()["error"] == "invalid_grant"
+
+
+def test_refresh_claim_raise_pre_commit_is_503_and_retry_succeeds(fault_client):
+    """matrix row 6 — the claim PATCH raises pre-commit. Both minted rows exist and the OLD
+    token is still unrevoked, so `recovered` depends on `_prev_refresh_unclaimed`."""
+    tc, cp = fault_client
+    rid, rt = _seed_refresh_token(cp, "rt-6")
+    cp.fail_query(table="oauth_refresh_tokens", method="PATCH", select=["id"], times=1)
+    r1 = _post_refresh(tc, cp, rt)
+    assert r1.status_code == 503 and r1.json()["error"] == "temporarily_unavailable"
+    # every MINTED refresh row is revoked (the seeded previous one must stay live)
+    minted = [r for r in cp.tables["oauth_refresh_tokens"] if r["id"] != rid]
+    assert minted and all(r["revoked_at"] is not None for r in minted)
+    assert _post_refresh(tc, cp, rt).status_code == 200       # the old token still works
+
+
+def test_refresh_claim_committed_then_lost_response_is_terminal_and_no_live_family(fault_client):
+    """The ambiguous-claim lockout shape (a): the claim landed, our rollback un-revokes
+    the new pair, `_prev_refresh_unclaimed` sees revoked_at set → recovered=False."""
+    tc, cp = fault_client
+    _rid, rt = _seed_refresh_token(cp, "rt-amb")
+    cp.fail_query(table="oauth_refresh_tokens", method="PATCH", select=["id"],
+                  times=1, after_mutation=True)              # claim commits, response lost
+    r = _post_refresh(tc, cp, rt)
+    assert r.status_code == 400 and r.json()["error"] == "invalid_grant"
+
+
+def test_row7_prev_access_revoke_failure_delivers_a_USABLE_pair(fault_client, caplog):
+    """The fix's headline (matrix row 7): the client must receive a pair it can use."""
+    tc, cp = fault_client
+    rid, rt = _seed_refresh_token(cp, "rt-7")
+    _seed_access_token(cp, refresh_id=rid)                     # the row lane 3 will revoke
+    cp.fail_query(table="oauth_access_tokens", method="PATCH",
+                  match=lambda t, m, sel, f: m == "PATCH" and not sel, times=1)   # lane 3 only
+    with caplog.at_level(logging.WARNING, logger="tortoise.oauth"):
+        r1 = _post_refresh(tc, cp, rt)
+    assert r1.status_code == 200 and "refresh_token" in r1.json()
+    assert _live(cp, "oauth_access_tokens")                    # a NEW live pair exists
+    r2 = _post_refresh(tc, cp, r1.json()["refresh_token"])      # the delivered pair ROTATES
+    assert r2.status_code == 200
+    assert "prev-access revoke failed" in caplog.text
+
+
+@pytest.mark.parametrize("table", ["oauth_clients", "teams"])
+@pytest.mark.parametrize("grant", ["code", "refresh"])
+def test_exactly_one_capture_per_conversion_path(monkeypatch, fault_client, table, grant):
+    calls = []
+    monkeypatch.setattr("tortoise.sentry.capture_exception", lambda exc, **kw: calls.append(exc))
+    tc, cp = fault_client
+    cp.fail_query(table=table, method="GET", times=1)
+    if grant == "code":                                        # pre-consume
+        v = _seed_code(cp, f"cap-{table}")
+        _post_code(tc, cp, f"cap-{table}", v)
+    else:                                                      # refresh pre-mint
+        _post_refresh(tc, cp, _seed_refresh_token(cp, f"cap-{table}-rt")[1])
+    assert len(calls) == 1
