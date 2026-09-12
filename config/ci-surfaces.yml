@@ -545,6 +545,8 @@ surfaces:
   - test_retrieval_determinism_2952.py  # #2952: ranking determinism (hermetic; also registered under core)
   - test_2952_write_path_determinism.py  # #2952 defect 1: fresh-create write path must not skew fulltext/recall_state scores (docker-lane; DB)
   - test_recall_gaps_subgraph.py
+  - test_subgraph_pure.py  # #3011: subgraph traversal/ranking engine — seed policy, hop decay, hub damping, cap→dedupe (hermetic)
+  - test_subgraph_render.py  # #3011: frozen serializer — block order, provenance, confidence, word budget (hermetic)
   - test_recall_state.py
   - test_source_credibility.py
   - test_source_inheritance_own.py
@@ -607,6 +609,7 @@ surfaces:
   - test_models.py
   - test_namespace_uri_mode.py
   - test_reader.py
+  - test_reader_prerendered.py  # #3011: pre-rendered-evidence reader seam — byte-identical to the hit-list lane (hermetic)
   - test_reader_abstention_calibration.py
   - test_coverage_loop.py  # #2567 (docker-lane leg, mirrors test_retrieval.py)
   - test_coverage_loop_rules.py  # #2567 (hermetic rules leg)
@@ -654,6 +657,10 @@ surfaces:
   - longmem_eval/test_assembly_arm.py  # #2165 Task 7: v2-lane eval arm A/A-widened/B admission + R9 geometry (docker-lane)
   - longmem_eval/test_measure_temporal.py  # #2578 Task 2: measurement scaffold — census 133->55 pin, prereg writer, refusal classifier (embedded-safe)
   - longmem_eval/test_probe_v2.py  # #2578 Task 5: v2-lane structural probe — wave guard, saturation stop rule, substrate measurement (embedded-safe)
+  - longmem_eval/test_context_assembly_arms.py  # #3011: 4-arm (A/B/C/D) context-assembly runner — arm source selection, metrics 5/8/9, report shape (hermetic)
+  - longmem_eval/test_context_assembly_leakage.py  # #3011: gold-leakage hard stop — static reference assertion + gold-field perturbation (hermetic)
+  - longmem_eval/test_ep_activation.py  # #3011/#2598: EP activation — promote drafts, run EP, never fabricate a 0.5 (hermetic)
+  - longmem_eval/test_gold_evidence_claims.py  # #3011 §9.5: gold-evidence claim artifact builder — frozen tokenizer, MIN_GOLD_TOKENS, non-emptiness (hermetic)
   - eval/write_path/test_write_path_corpus.py
   - eval/write_path/test_write_path_grading.py
   - eval/write_path/test_write_path_runner.py
