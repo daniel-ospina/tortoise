@@ -292,3 +292,341 @@ def test_fold_object_retracted_skips_null_id_branch(tmp_path):
     assert (folded, matched) == (1, 1)
     assert not any("{id:$id}" in c for c in rec.calls), \
         "a name-only event must not run the id branch"
+
+
+def _jsonl(events_dir):
+    p = events_dir / "events.jsonl"
+    return [json.loads(l) for l in p.read_text().splitlines() if l.strip()] if p.exists() else []
+
+
+def test_delete_journals_one_retraction(tmp_path):
+    events = tmp_path / "events"; events.mkdir()
+    sdk = TortoiseSDK(str(tmp_path / "t4.db"), event_log_path=str(events / "events.jsonl"))
+    sdk.create_entity("object", "del-obj", objectKind="core:other", is_episodic=False)
+    oid = _entity_name_id("Object", "del-obj")
+    assert sdk._delete_entity(oid) is True
+    retr = [l for l in _jsonl(events) if l.get("type") == "ObjectRetracted"]
+    assert len(retr) == 1 and retr[0]["id"] == oid and retr[0]["name"] == "del-obj"
+
+
+def test_double_delete_emits_once(tmp_path):
+    events = tmp_path / "events"; events.mkdir()
+    sdk = TortoiseSDK(str(tmp_path / "t4b.db"), event_log_path=str(events / "events.jsonl"))
+    sdk.create_entity("object", "twice", objectKind="core:other", is_episodic=False)
+    oid = _entity_name_id("Object", "twice")
+    assert sdk._delete_entity(oid) is True
+    assert sdk._delete_entity(oid) is False, "second delete must report no rows"
+    assert len([l for l in _jsonl(events) if l.get("type") == "ObjectRetracted"]) == 1
+
+
+def test_delete_of_absent_id_emits_nothing(tmp_path):
+    events = tmp_path / "events"; events.mkdir()
+    sdk = TortoiseSDK(str(tmp_path / "t5.db"), event_log_path=str(events / "events.jsonl"))
+    assert sdk._delete_entity("obj-nope") is False
+    assert [l for l in _jsonl(events) if l.get("type") == "ObjectRetracted"] == []
+
+
+def test_delete_of_point_warns_about_non_durability(tmp_path, caplog):
+    """D-9's other half, which the plan states as an acceptance criterion and
+    previously never asserted: a non-Object delete with a journal configured must
+    WARN (the contract is now label-inconsistent), and must NOT warn when no
+    journal is configured (nothing is being lost)."""
+    events = tmp_path / "events"; events.mkdir(exist_ok=True)
+    sdk = TortoiseSDK(str(tmp_path / "t6e.db"), event_log_path=str(events / "events.jsonl"))
+    pid = sdk.create_point("statement", "pw")["id"]
+    with caplog.at_level("WARNING"):
+        assert sdk._delete_entity(pid) is True
+    assert any("NOT durable across rebuild" in r.getMessage() for r in caplog.records), \
+        "a non-Object delete with a journal must warn (D-9)"
+    caplog.clear()
+    sdk2 = TortoiseSDK(str(tmp_path / "t6f.db"))          # no event_log_path
+    pid2 = sdk2.create_point("statement", "pw2")["id"]
+    with caplog.at_level("WARNING"):
+        assert sdk2._delete_entity(pid2) is True
+    assert not [r for r in caplog.records if "NOT durable" in r.getMessage()], \
+        "no journal configured => nothing lost => no warning"
+
+
+def test_delete_of_point_does_not_emit_object_retracted(tmp_path):
+    events = tmp_path / "events"; events.mkdir()
+    sdk = TortoiseSDK(str(tmp_path / "t6.db"), event_log_path=str(events / "events.jsonl"))
+    # create_point(...) returns an OrderedDict (verified live), NOT an id string —
+    # passing the dict makes _delete_entity return False without deleting.
+    pid = sdk.create_point("statement", "p")["id"]
+    assert sdk._delete_entity(pid) is True
+    assert [l for l in _jsonl(events) if l.get("type") == "ObjectRetracted"] == []
+
+
+def test_delete_of_object_emits_zero_non_durability_warnings(tmp_path, caplog):
+    """VERIFY-1 P1-2 (Reviewer slot 1, EMPIRICAL) — the EXACT-COUNT pin for
+    D-9's warning gate that the plan claimed to have but did not.
+
+    Cycle 6 found the gate written `if not n and label != "Object"`, which fired
+    on every arm that matched NOTHING — 5 spurious "NOT durable" warnings on an
+    Object delete. The gate was corrected to `if n and label != "Object"`.
+
+    Without an exact-count assertion the INVERTED form is invisible to the whole
+    suite: slot 1 flipped `if n and` back to `if not n and` and every Task-2 test
+    still passed (`5 passed`). These assertions are what make the gate
+    regression-visible; the sibling test above pins the POSITIVE (Point warns)
+    and the no-journal negative, neither of which catches the inversion.
+    """
+    events = tmp_path / "events"; events.mkdir(exist_ok=True)
+    sdk = TortoiseSDK(str(tmp_path / "t6e2.db"), event_log_path=str(events / "events.jsonl"))
+    oid = sdk.create_object("wd-object", objectKind="core:other")["id"]
+    with caplog.at_level("WARNING"):
+        assert sdk._delete_entity(oid) is True
+    assert [r for r in caplog.records if "NOT durable" in r.getMessage()] == [], \
+        ("an OBJECT delete with a journal must emit ZERO non-durability warnings "
+         "— the Object lane IS journaled (D-9). A non-zero count means the gate "
+         "regressed to the cycle-6 `if not n` form, which fires on empty matches.")
+    caplog.clear()
+    # The exact-count positive: a Point delete warns exactly ONCE, not 1+N.
+    pid = sdk.create_point("statement", "wd-point")["id"]
+    with caplog.at_level("WARNING"):
+        assert sdk._delete_entity(pid) is True
+    assert len([r for r in caplog.records if "NOT durable" in r.getMessage()]) == 1, \
+        "a Point delete warns exactly once (D-9); >1 means the empty-match arm fired"
+
+
+def test_update_entity_object_guard_holds_for_point_object_multi_label(tmp_path):
+    """EMPIRICAL (cycle 4): `labels(n)[0]` returns 'Point' for a :Point:Object
+    node, so a probe using [0] resolves to Point and BYPASSES the Object guard.
+    Use `'Object' IN labels(n)`.
+
+    CYCLE 5 — POINT-LABEL PRECEDENCE. A :Point:Object node is governed by the
+    POINT vocabulary, because POINT_STATUS_VALUES allows `draft`/`outdated`
+    (both ABSENT from OBJECT_STATUS_VALUES) and the Point writers write the
+    same physical property. Without the `NOT 'Point' IN labels(n)` conjunct,
+    `update_entity(<point-object id>, status='draft')` — a working public call
+    (verified live in cycle 5) — would raise AFTER the Point branch had already
+    written. The Object-ONLY guard is asserted below; the multi-label
+    Object-status gap is UNCHANGED from today and is filed as follow-up (m).
+    """
+    sdk = TortoiseSDK(str(tmp_path / "t6g.db"))
+    proj = sdk._get_proj()
+    proj.g.query(
+        "CREATE (:Point:Object {id:'ml1', name:'ML1', status:'live'})")
+    # Point vocabulary governs a :Point:Object node — neither may raise.
+    sdk.update_entity("ml1", status="draft")
+    sdk.update_entity("ml1", status="outdated")
+    assert proj.g.query(
+        "MATCH (n {id:'ml1'}) RETURN n.status").result_set[0][0] == "outdated"
+    # An Object-ONLY node still gets the full guard.
+    sdk.create_entity("object", "obj-only", objectKind="core:other", is_episodic=False)
+    oid = _entity_name_id("Object", "obj-only")
+    with pytest.raises(ValueError):
+        sdk.update_entity(oid, status="retracted")
+    with pytest.raises(ValueError):
+        sdk.update_entity(oid, status="nonsense")
+
+
+def test_delete_point_object_multilabel_emits_one_retraction(tmp_path):
+    """CYCLE 5: `:Point` is the FIRST arm of _delete_entity's loop, so for a
+    :Point:Object node the Point arm deletes it and the Object arm returns 0
+    rows. Keying the emission on the Object arm therefore emits NOTHING.
+    Verified live: the journal was empty after `_delete_entity('ml1')` returned
+    True. The emission is now keyed on a LABEL probe taken before any delete.
+
+    **CYCLE 8 — WHAT THIS TEST DOES *NOT* ESTABLISH, and why the claim shrank.**
+    An earlier draft said the emitted line stops the resurrection. It does not.
+    `:Object` is added to a Point by raw Cypher (`SET n:Object` — the ONLY
+    source; no production path mints a :Point:Object, and
+    `tests/test_write_consolidation.py:156` is a test), that label write is
+    NEVER journaled, and `_upsert_point_props` does not re-apply labels — so
+    replay reconstructs the node as `:Point`-ONLY. Both fold branches
+    (`MATCH (o:Object {id:$id})` / `(o:Object {name:$name})`) therefore match
+    NOTHING and the retraction is a silent orphan. **Verified live in cycle 8:**
+    live labels `['Point','Object']` -> replay labels `['Point']`, replay
+    `:Object` count 0. So a `:Point:Object` delete is NOT made durable by
+    #2977; the emitted line is journal noise on that shape.
+
+    This test asserts ONLY the emission (it counts journal lines). It is
+    green on a graph that still resurrects, which is exactly why the limitation is
+    written down here and pinned separately by
+    `test_multilabel_point_object_delete_is_still_not_durable` below. Filed as
+    follow-up (r).
+    """
+    events = tmp_path / "events"; events.mkdir()
+    sdk = TortoiseSDK(str(tmp_path / "t6i.db"),
+                      event_log_path=str(events / "events.jsonl"))
+    proj = sdk._get_proj()
+    proj.g.query(
+        "CREATE (:Point:Object {id:'ml2', name:'ML2', status:'live'})")
+    assert sdk._delete_entity("ml2") is True
+    rets = [l for l in _jsonl(events) if l.get("type") == "ObjectRetracted"]
+    assert len(rets) == 1, (
+        f"a :Point:Object delete must emit exactly ONE ObjectRetracted "
+        f"(got {len(rets)}) — the Point arm runs first, so an Object-arm-keyed "
+        "emission never fires")
+    assert rets[0]["id"] == "ml2" and rets[0].get("name") == "ML2"
+
+
+def test_multilabel_point_object_delete_is_still_not_durable(tmp_path):
+    """CYCLE 8 REGRESSION GUARD (Reviewer #4, EMPIRICAL) — pins a LIMITATION,
+    not a fix. Same fixture as the test above, but asserts the REPLAY OUTCOME
+    rather than the emission, which is what makes the gap visible.
+
+    A `:Point:Object` node: (1) gets its `:Object` label from a raw `SET n:Object`
+    that is never journaled; (2) replays through `PointAdded` as a `:Point`-only
+    node, because `_upsert_point_props` does not re-apply labels. The
+    `ObjectRetracted` line IS emitted, but BOTH fold branches match on
+    `(o:Object …)`, so neither matches and the fold is a silent orphan — the
+    retraction is not durable on this shape.
+
+    NOTE the trap this also documents: D-11's headline acceptance indicator
+    ("0 Objects with `status='live'`") is VACUOUSLY satisfied here — there are
+    zero `:Object` nodes at all — while a live `:Point` is served by every read
+    surface. An acceptance check written only against `:Object` cannot see this
+    class. Filed as follow-up (r); fix directions: emit the Point-side terminal
+    event too, fold by `id` across labels, or journal the label add.
+    """
+    events = tmp_path / "events"; events.mkdir()
+    sdk = TortoiseSDK(str(tmp_path / "t6i2.db"),
+                      event_log_path=str(events / "events.jsonl"))
+    proj = sdk._get_proj()
+    # CYCLE 10 (Reviewer #4, EMPIRICAL): the fixture MUST pass status="live".
+    # `create_point` defaults to `status="draft"` (sdk.py:2455, #131), so the
+    # cycle-9 draft of this pin asserted `[["live"]]` against a Point that
+    # replays as `draft` — an unsatisfiable pin whose own failure message told
+    # the implementer to DELETE the pin and close (r), in the dangerous
+    # direction. Verified live: with status="live" the replay is `[["live"]]`,
+    # and it still flips to `retracted`/absent under all three (r) fix
+    # directions, so the pin remains falsifiable in the right direction.
+    p = sdk.create_point("observation", "multilabel claim", status="live")
+    pid = p["id"]
+    proj.g.query("MATCH (n:Point {id:$id}) SET n:Object", params={"id": pid})
+    assert ["Object"] == [l for l in proj.g.query(
+        "MATCH (n {id:$id}) RETURN labels(n)", params={"id": pid}
+    ).result_set[0][0] if l == "Object"], "precondition: :Object is present live"
+    assert sdk._delete_entity(pid) is True
+    proj.rebuild_all(str(events))
+    rows = proj.g.query("MATCH (o:Object) RETURN count(o)").result_set
+    assert rows[0][0] == 0, "no :Object survives — the label was never journaled"
+    live_point = proj.g.query(
+        "MATCH (n:Point {id:$id}) RETURN n.status", params={"id": pid}
+    ).result_set
+    # CYCLE 9 (Reviewers #2 and #4): this must assert the STATUS, not merely
+    # that a row exists. `assert live_point` (an earlier draft) is true whether
+    # the replayed Point is `live` OR `retracted`, so it stays GREEN under two
+    # of the three fix directions (fold-by-id-across-labels; emit the Point-side
+    # terminal event) and would be left stale while (r) is closed — the "green
+    # blind test" this plan condemns elsewhere. Verified: only the
+    # journal-the-label-add fix flips a truthiness assertion.
+    # CYCLE 10: the failure DIRECTION matters. This pin fails when the shape
+    # changes, and the only value that means a fix landed is `retracted`/no row.
+    assert live_point == [["live"]], (
+        "PINNED LIMITATION (r): the deleted claim is served again as a `live` "
+        ":Point — the ObjectRetracted line could not fold because replay drops "
+        "the :Object label. CYCLE 10: read the observed value before acting. "
+        "`[['draft']]` means the FIXTURE is wrong (it must pass "
+        "status=\"live\"); only `retracted` or an EMPTY row means one of the "
+        "three (r) fix directions landed, in which case invert this pin to "
+        "expect the retracted status (or no row) and close (r).")
+
+
+def test_create_object_rejects_retracted_and_unknown(tmp_path):
+    """EMPIRICAL (cycle 4): the CREATE funnel accepts status via **props and
+    journals it — a DURABLE bad tombstone. Guarding only _update_entity leaves
+    this open."""
+    sdk = TortoiseSDK(str(tmp_path / "t6h.db"))
+    with pytest.raises(ValueError):
+        sdk.create_object("co-retracted", objectKind="core:other", status="retracted")
+    with pytest.raises(ValueError):
+        sdk.create_entity("object", "co-bogus", objectKind="core:other", status="bogus")
+    assert sdk._get_proj().g.query(
+        "MATCH (o:Object) RETURN count(o)").result_set[0][0] == 0, \
+        "a rejected create must leave no node behind"
+
+
+def _post_objects(client, team):
+    for bad in ("retracted", "bogus"):
+        r = client.post("/v1/objects", json={
+            "name": f"api-bad-{bad}", "objectKind": "core:other", "status": bad})
+        assert r.status_code == 422, (
+            f"status={bad!r} must be a 422 client error, got {r.status_code} "
+            f"({r.text[:200]}) — a 500 here means the guard was raised INSIDE the "
+            "handler's blanket `except Exception` and got converted")
+        assert r.status_code != 500
+
+
+def test_hosted_api_create_object_rejects_unknown_status_with_422(tmp_path):
+    """VERIFY-1 P1-3 (Reviewer slot 1): Task 5's Step 4 names "the 422 test" as
+    required output, but no such test existed anywhere in the plan — the new
+    `HTTPException(422)` branch and its placement were entirely unverified.
+
+    `fastapi.HTTPException` SUBCLASSES `Exception`, and the handler wraps
+    `sdk.create_object` in `except Exception: raise HTTPException(500, ...)`. So
+    a 422 raised INSIDE that `try` is caught and re-reported as a 500 — the
+    exact "client error reported as a server fault" defect this change removes.
+    This test fails loudly in that case: it asserts 422 AND asserts not 500.
+
+    VERIFY-2 P0-2 (slot 1, EMPIRICAL): a bare `TestClient(app)` CANNOT reach the
+    handler. `/v1/objects` is `Depends(get_current_team_session_ungated)`, so an
+    unauthenticated POST returns `401 {"detail":"Missing session token"}` — the
+    test never exercised the guard. It also needs a team-limits dict, because
+    the guard sits AFTER `_check_team_limit(team, "points")`, which 500s on a
+    stub team (`Quota check failed: team limits missing max_points`). So this
+    test must install the SAME override the repo's own route tests use —
+    `app.dependency_overrides[get_current_team]` plus a populated `TEST_TEAM`
+    limits dict — exactly as `tests/test_hosted_api.py` does.
+    """
+    from fastapi.testclient import TestClient
+    from tortoise.hosted_api import app, get_current_team
+    from tests.test_hosted_api import TEST_TEAM
+
+    app.dependency_overrides[get_current_team] = lambda: TEST_TEAM
+    try:
+        client = TestClient(app)
+        _post_objects(client, TEST_TEAM)
+    finally:
+        app.dependency_overrides.pop(get_current_team, None)
+
+
+
+
+def test_update_entity_point_status_vocab_unaffected(tmp_path):
+    """The Object vocabulary guard must not fire for Points.
+    POINT_STATUS_VALUES (sdk.py:266) has 'draft' and 'outdated', which are absent
+    from OBJECT_STATUS_VALUES — a guard keyed on the six-label loop variable
+    would reject a currently-working public call (verified live)."""
+    sdk = TortoiseSDK(str(tmp_path / "t6c.db"))
+    pid = sdk.create_point("statement", "pd")["id"]
+    for st in ("draft", "outdated"):
+        sdk.update_entity(pid, status=st)          # must not raise
+
+
+def test_update_entity_rejects_retracted_and_unknown(tmp_path):
+    """The A8 loophole: `_update_entity` could write status='retracted' with no
+    journal line and no retractedAt. Reject it (fail-closed), plus unknowns."""
+    sdk = TortoiseSDK(str(tmp_path / "t6d.db"))
+    sdk.create_entity("object", "guarded", objectKind="core:other", is_episodic=False)
+    oid = _entity_name_id("Object", "guarded")
+    with pytest.raises(ValueError):
+        sdk.update_entity(oid, status="bogus")
+    with pytest.raises(ValueError):
+        sdk.update_entity(oid, status="retracted")
+    # No partial write: the node is untouched by either rejected call.
+    assert sdk._get_proj().g.query(
+        "MATCH (o:Object {id:$id}) RETURN o.status", params={"id": oid}
+    ).result_set[0][0] == "live"
+
+
+def test_retraction_append_failure_warns(tmp_path, monkeypatch, caplog):
+    """Pins the partial-failure contract: graph delete succeeds, journal append
+    fails. _emit_event swallows the raise (sdk.py:2340-2352), so the delete still
+    returns True and the Object is live-deleted but NOT durable."""
+    events = tmp_path / "events"; events.mkdir()
+    sdk = TortoiseSDK(str(tmp_path / "t6b.db"), event_log_path=str(events / "events.jsonl"))
+    sdk.create_entity("object", "lost", objectKind="core:other", is_episodic=False)
+    from tortoise.log import EventLog
+    monkeypatch.setattr(EventLog, "append", lambda self, e: (_ for _ in ()).throw(OSError("disk")))
+    with caplog.at_level("WARNING"):
+        assert sdk._delete_entity(_entity_name_id("Object", "lost")) is True
+    # Assert the SPECIFIC message, not `"append" or "event"` — that `or` is
+    # satisfied by nearly every warning this logging surface emits, so it never
+    # pins the swallowed-append case it names.
+    msgs = [r.getMessage() for r in caplog.records]
+    assert any("ObjectRetracted" in m and "append" in m.lower() for m in msgs), \
+        ("a swallowed journal-append failure must be logged with a message that "
+         "names the cause; got: %r" % (msgs,))

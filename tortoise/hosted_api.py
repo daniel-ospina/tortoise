@@ -70,6 +70,7 @@ from tortoise.quota import (
 )
 from tortoise.schemas import AskRequest
 from tortoise.sdk import (
+    OBJECT_STATUS_VALUES,  # #2977: the Object status vocabulary
     REPORT_HOOK_URL,  # #2335 WI-2: the bug_report.yml report-hook target
     TortoiseSDK,
     _apply_capture_ingest_ep,  # W5 Phase C (#2104): live-at-capture + ingest EP pass
@@ -3756,6 +3757,23 @@ async def create_object(body: CreateObjectRequest, request: Request,
     """
     _require_scope(team, "graphs:write", "create_object")
     _check_team_limit(team, "points")
+    # #2977: validate at the API boundary, OUTSIDE the try below.
+    #
+    # The handler parameter is `body`, NOT `req`. And `retracted` MUST be
+    # rejected HERE, explicitly: it IS a member of `OBJECT_STATUS_VALUES` (it is
+    # the Object lane's terminal vocabulary), so a guard testing only `not in
+    # OBJECT_STATUS_VALUES` would pass it straight through to
+    # `sdk.create_object`, whose `_create_entity` guard raises `ValueError`,
+    # which the blanket `except Exception` below converts to a **500** — i.e.
+    # the exact "client error reported as a server fault" defect this change
+    # exists to remove, for the one status that must be rejected.
+    #
+    # PLACEMENT IS LOAD-BEARING: `fastapi.HTTPException` SUBCLASSES `Exception`,
+    # so a 422 raised INSIDE the try is caught and re-reported as a 500.
+    if body.status is not None and (
+            body.status == "retracted"
+            or body.status not in OBJECT_STATUS_VALUES):
+        raise HTTPException(422, f"status {body.status!r} is not creatable")
     sdk = _data_sdk(team)
     try:
         props = {}
