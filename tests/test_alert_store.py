@@ -368,3 +368,179 @@ def test_search_fallback_is_subject_scoped():
     assert ch.closed == [2]
     store.resolve_incident("STALE", "team_a")
     assert ch.closed == [2, 1]
+
+
+# ── #2844: the platform-scoped sentinel is written by TWO implementations ─────
+# Canonical spelling is `ops/alerts/{KIND}/_.json` — written by BOTH this store
+# and (since #2844) the bash DR driver, so one incident has ONE create-once
+# point. `.../global.json` is the driver's PRE-#2844 spelling, kept as a legacy
+# alias: every read path consults it and every resolve deletes it, so objects
+# already in R2 are adopted and cleaned up rather than stranded holding a
+# closed issue's number.
+
+_CANONICAL_KEY = "ops/alerts/R2_DOWN/_.json"
+_DRIVER_KEY = "ops/alerts/R2_DOWN/global.json"  # legacy alias spelling
+
+
+def test_platform_incident_key_contract():
+    """Pin the exact key contract (#2844).
+
+    The fix is a string agreement between two languages: the bash driver's
+    `alert_key()` and this store's `_key()` MUST produce the same object name,
+    or the condition silently regains two create-once points. Both sides pin
+    their own literal (this test; `registry-cron.test.sh` cases 29/57/58), so a
+    rename on either side fails loudly instead of drifting back into two pens.
+    """
+    store = _store(_FakeChannels())
+    assert store._key("R2_DOWN", "") == _CANONICAL_KEY
+    assert set(store._keys("R2_DOWN", "")) == {_CANONICAL_KEY, _DRIVER_KEY}
+    # Subject-scoped incidents have exactly ONE key — never an alias, and never
+    # the platform sentinel (#2375).
+    assert store._keys("STALE", "team_a") == ("ops/alerts/STALE/team_a.json",)
+    assert store._key("STALE", "team_a") == "ops/alerts/STALE/team_a.json"
+
+
+def _driver_sentinel(storage, issue_number):
+    """Seed the R2 object the bash DR driver's `file_alert` writes.
+
+    Shape mirrors `.github/scripts/registry-cron.sh` (`kind`, `issue_number`,
+    `filed_at` with a `date -u +%FT%TZ` timestamp), under the legacy `global`
+    alias so the alias-consulting paths are the ones exercised.
+    """
+    storage.upload(
+        _DRIVER_KEY,
+        json.dumps({
+            "kind": "R2_DOWN",
+            "issue_number": issue_number,
+            "filed_at": "2026-09-10T00:00:00Z",
+        }).encode(),
+    )
+
+
+def test_resolve_deletes_the_driver_sentinel_alias():
+    """#2844: resolving must delete EVERY sentinel for the incident, not just the
+    one this store happens to spell.
+
+    Asymmetric resolve is the defect: the driver's `global.json` outlived the
+    close, so it still carried the number of an issue that was already closed.
+    The driver's `file_alert` 412 branch reads that object, sees a non-open
+    issue_number, finds no open issue and files a NEW one — an incident that was
+    resolved pages again, and the duplicate is closed only on the next sweep.
+    """
+    ch = _FakeChannels()
+    storage = MemoryStorage()
+    store = _store(ch, storage)
+    # An unrelated subject's sentinel must survive — otherwise `== []` below
+    # would also pass if the resolve wiped the whole ops/alerts/ prefix.
+    storage.upload(
+        "ops/alerts/STALE/team_x.json",
+        json.dumps({"kind": "STALE", "team_id": "team_x", "issue_number": 3}).encode(),
+    )
+    _driver_sentinel(storage, issue_number=7)
+
+    assert store.resolve_incident("R2_DOWN") is True
+    assert ch.closed == [7]
+    assert storage.list("ops/alerts/") == ["ops/alerts/STALE/team_x.json"]
+
+
+def test_open_adopts_the_driver_sentinel_instead_of_filing():
+    """#2844: a store-side open must SEE the driver's sentinel.
+
+    Without cross-spelling adoption each writer wins its own create-once, so a
+    condition detected by both files two issues. Asserted on the OBSERVABLE
+    consequences of adopting: no second sentinel is created, no issue is filed,
+    the GH-search fallback is never consulted, and no Telegram is pushed.
+    """
+    ch = _FakeChannels()
+    storage = MemoryStorage()
+    store = _store(ch, storage)
+    _driver_sentinel(storage, issue_number=11)
+
+    assert store.open_incident("R2_DOWN") is False
+    assert ch.issues == {}  # no second issue for one condition
+    # The decisive assertion: our own canonical sentinel was never created. An
+    # implementation that created it and only noticed the sibling afterwards
+    # would leave a second create-once point — the defect itself.
+    assert storage.list("ops/alerts/") == [_DRIVER_KEY]
+    assert ch.search_calls == []  # adoption short-circuits the search fallback
+    assert ch.telegram == []  # "stay silent" — adopting must not page again
+
+
+def test_subject_scoped_resolve_never_touches_another_subject():
+    """The #2375 invariant the alias set must NOT break.
+
+    Aliasing exists only for subject-less incidents. A team-scoped resolve has
+    exactly one key: it must not delete a sibling subject's sentinel, and it
+    must not sweep the platform-scoped one either.
+    """
+    ch = _FakeChannels()
+    storage = MemoryStorage()
+    store = _store(ch, storage)
+    storage.upload(
+        "ops/alerts/STALE/team_a.json",
+        json.dumps({"kind": "STALE", "team_id": "team_a", "issue_number": 3}).encode(),
+    )
+    storage.upload(
+        "ops/alerts/STALE/team_b.json",
+        json.dumps({"kind": "STALE", "team_id": "team_b", "issue_number": 4}).encode(),
+    )
+    storage.upload("ops/alerts/STALE/_.json", json.dumps({"kind": "STALE", "issue_number": 5}).encode())
+
+    assert store.resolve_incident("STALE", "team_a") is True
+    assert ch.closed == [3]
+    assert "ops/alerts/STALE/team_b.json" in storage.list("ops/alerts/")
+    assert "ops/alerts/STALE/_.json" in storage.list("ops/alerts/")
+    assert "ops/alerts/STALE/team_a.json" not in storage.list("ops/alerts/")
+
+
+def test_platform_resolve_closes_the_duplicate_filed_by_the_other_writer():
+    """#2844: if BOTH writers filed before the aliasing fix shipped, the two
+    issues are one condition and resolve must close both — otherwise the orphan
+    stays open forever (no sentinel references it any more).
+    """
+    ch = _FakeChannels()
+    storage = MemoryStorage()
+    store = _store(ch, storage)
+    storage.upload(
+        "ops/alerts/R2_DOWN/_.json",
+        json.dumps({"kind": "R2_DOWN", "issue_number": 21}).encode(),
+    )
+    _driver_sentinel(storage, issue_number=22)
+
+    assert store.resolve_incident("R2_DOWN") is True
+    # Deterministic close order: _keys() iterates PLATFORM_ALIASES ("_", "global").
+    assert ch.closed == [21, 22]
+    assert storage.list("ops/alerts/") == []
+
+
+def test_full_cross_writer_cycle_files_once_then_pages_again():
+    """#2844 end-to-end: the ORDERED driver→store→resolve→recurrence cycle.
+
+    The defect was an ordering disagreement between two writers, so per-half
+    unit tests cannot catch drift between the halves. This sequences the real
+    lifecycle and asserts the invariants at each stage: exactly one issue while
+    the condition persists, one close on recovery, and — crucially — a genuine
+    recurrence pages AGAIN after recovery (delete-to-resolve, the #2796 class).
+
+    Direction B (this store opens, the driver later detects) is owned by
+    `.github/scripts/registry-cron.test.sh` cases 21/22 — not duplicated here.
+    """
+    ch = _FakeChannels()
+    storage = MemoryStorage()
+    store = _store(ch, storage)
+    # 1. The driver got there first.
+    _driver_sentinel(storage, issue_number=11)
+    # 2. The watcher detects the same condition — it must adopt, not file.
+    assert store.open_incident("R2_DOWN") is False
+    assert ch.issues == {}
+    assert ch.telegram == []
+    assert storage.list("ops/alerts/") == [_DRIVER_KEY]
+    # 3. Recovery: close the driver's issue, drop every spelling.
+    assert store.resolve_incident("R2_DOWN") is True
+    assert ch.closed == [11]
+    assert storage.list("ops/alerts/") == []
+    # 4. A RECURRENCE is a NEW incident with a NEW issue — delete-to-resolve
+    #    must not let the resolved sentinel swallow it.
+    assert store.open_incident("R2_DOWN") is True
+    assert list(ch.issues) == [1]  # the fake's first filing — the driver's #11 was seeded, not filed
+    assert len(ch.telegram) == 2  # resolved (cycle 1) + reopened (cycle 2)

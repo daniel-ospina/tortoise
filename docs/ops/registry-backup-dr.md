@@ -259,7 +259,7 @@ jurisdiction-restricted buckets require the `cf-r2-jurisdiction` header.)
 - **Driver:** `.github/workflows/registry-backup-cron.yml` (hourly, GH Actions) → internal-key endpoints. Independent failure domain — an OOM crash-loop (#545) must not blind the pipeline.
 - **Watcher (driver-disabled leg):** in-process read-only staleness daemon (spawned in `_lifespan`) that files GitHub issues + pushes Telegram ITSELF — covered by construction when the workflow is disabled.
 - **Direct R2 leg (app-down leg):** the driver computes the DEFAULT graph's freshness from R2 prefixes (aws CLI) — nested `backups/{team}/default/` + legacy flat (`backups/{team}/2…`, the pre-#2313 default dumps; a legacy-flat classification index #2370 excludes C5-era custom flats when present) — independent of `/status`. A fresh CUSTOM graph can never mask a stale default (#2375).
-- **Alert sink (dual-channel):** GitHub issue (agent) + Telegram push (human), R2 create-once per-incident dedup (`ops/alerts/{KIND}/{team}.json`, delete-to-resolve), GH-search fallback, pending-push retries.
+- **Alert sink (dual-channel):** GitHub issue (agent) + Telegram push (human), R2 create-once per-incident dedup (`ops/alerts/{KIND}/{subject}.json` — `_` when the incident is subject-less, delete-to-resolve), GH-search fallback, pending-push retries.
 
 ## R2 layout
 - `backups/{team}/{graph}/{ts}_{rnd}/dump.enc` + `manifest.json` — per-GRAPH archives (#2313; the default graph uses the literal `default` segment; custom graphs their control-plane id). Retention per graph: 24 hourly + 7 daily + 4 weekly (`keep_hourly`) ≈ **35 objects/pool** — keep ALL dumps younger than 24 h, then the NEWEST per UTC day within the 7-day horizon, then the newest per ISO week (4). #2373: day-bucket anchors — the pre-#2373 implementation kept one anchor per UTC HOUR-bucket (~172 objects/pool over the horizon); #2319's lock-window math uses the ~35 figure. Pre-#2313 team-level flat objects (`backups/{team}/{ts}_{rnd}/…`) are the DEFAULT graph's legacy archives — read-bucketed as default, drained by the sweep's per-team legacy prune.
@@ -352,14 +352,25 @@ clears it, because unknown is not evidence the daemon is alive.
 `graph_totals.backed_up`, not `teams_backed_up`.
 
 **Dedup lifecycle:** incidents are create-once in R2
-(`ops/alerts/{kind}/{subject}.json`) with a GitHub-search fallback. A global
-incident exists under **both** `global.json` (driver) and `_.json` (the
-server-side `AlertStore`); resolve deletes **both**, so a recurrence is a new
-incident on either writer (#2844). Resolution is delete-to-resolve — the object
-is dropped so a recurring condition pages again instead of being swallowed. The
-412 create-race branch reads the recorded R2 object and its issue state: an
-open issue is a no-op, a closed **or deleted (404)** issue re-files, and a
-transient/rate-limited response is treated as open so a blip never duplicates.
+(`ops/alerts/{kind}/{subject}.json`, `_` when the incident is subject-less) with
+a GitHub-search fallback. **One incident = one create-once point (#2844):** the
+driver and the server-side `AlertStore` both write the canonical `_.json` for a
+subject-less incident, so the conditional write actually linearizes — two
+spellings meant two winners and two issues for one condition. The driver's
+pre-#2844 spelling `global.json` is retained as a **legacy alias**: every read
+path consults it and every resolve deletes every spelling, so objects already in
+R2 are adopted and cleaned up rather than stranded holding a closed issue's
+number. Adoption is qualified by issue state on the **driver** side only: the
+driver checks `gh_issue_open` and re-files when the recorded issue is closed or
+404, while the `AlertStore` has no issue-state callable and adopts on a recorded
+number alone (its R2 object is the authoritative linearization point by design;
+tracked as a separate gap). Subject-scoped incidents have exactly one key and
+are never crossed with another subject (#2375). Resolution is delete-to-resolve —
+the object is dropped so a recurring condition pages again instead of being
+swallowed. The 412 create-race branch reads the recorded R2 object and its issue
+state: an open issue is a no-op, a closed **or deleted (404)** issue re-files,
+and a transient/rate-limited response is treated as open so a blip never
+duplicates.
 
 **Publication redaction:** `config_error`/`storage_error`, the raw sweep body,
 the purge failure body and `last_sweep` (whose `graph_failures[].error` carries

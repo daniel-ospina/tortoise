@@ -36,7 +36,8 @@
 #  26. unquoted/bare secret runs are redacted too (security review)
 #  27. last_sweep (graph_failures[].error) is redacted before publication
 #  28. a 404 (deleted) tracked issue re-files; a 500 blip does not duplicate
-#  29. resolve deletes BOTH global.json and the server-owned _.json (#2844)
+#  29. resolve deletes BOTH spellings of the sentinel: canonical _.json
+#      (the AlertStore's) and the legacy global.json (#2844)
 #  30. a missing .watcher block neither files nor self-heals WATCHER_DOWN
 #  31. degraded is healthy; no_eligible_teams is the no-coverage family
 #  32. lock held with no usable last_sweep + pool data → SWEEP_NO_COVERAGE
@@ -65,6 +66,8 @@
 #  54. an unparseable archive timestamp is never read as fresh
 #  55. a stale watcher AGE alone (running=true, age>30) files WATCHER_DOWN
 #  56. the measurable-empty lock branch is the silent one
+#  57. a subject-less incident is written ONCE, under the CANONICAL `_.json`
+#      (the AlertStore's spelling) — never the legacy `global.json` (#2844)
 #
 # Fixtures are simulated; the real driver defers nothing.
 
@@ -351,7 +354,7 @@ export GH_ISSUE_WATCHER_DOWN=55
 run_driver
 assert_eq "$RC" 1 "5. enabled-no-coverage exits RED (1)"
 assert_filed "$(cat "$LOG")" SWEEP_NO_COVERAGE "5. enabled-no-coverage files SWEEP_NO_COVERAGE"
-assert_match "$(cat "$LOG")" "AWS put-object key=ops/alerts/WATCHER_DOWN/global.json" "5. the stale watcher incident is recorded"
+assert_match "$(cat "$LOG")" "AWS put-object key=ops/alerts/WATCHER_DOWN/_.json" "5. the stale watcher incident is recorded"
 assert_not_match "$(cat "$LOG")" "GH PATCH .*/issues/55" "5. enabled-no-coverage does NOT self-heal WATCHER_DOWN"
 
 # ── 6. enabled, 0 teams, R2 pool also empty (chronic pre-beta) → silent ─────
@@ -433,7 +436,7 @@ export STUB_SWEEP_BODY='{"status":"no_teams","teams_backed_up":0}'
 export GH_ISSUE_R2_DOWN=88
 run_driver
 assert_eq "$RC" 1 "13. R2 down + 0 teams exits RED (1)"
-assert_match "$(cat "$LOG")" "AWS put-object key=ops/alerts/R2_DOWN/global.json" "13. R2_DOWN is recorded"
+assert_match "$(cat "$LOG")" "AWS put-object key=ops/alerts/R2_DOWN/_.json" "13. R2_DOWN is recorded"
 assert_not_match "$(cat "$LOG")" "GH PATCH .*/issues/88" "13. a failed R2 probe does NOT self-close the R2_DOWN it filed"
 
 # ── 14. 202 lock held + stale last_sweep → SWEEP_NO_COVERAGE ────────────────
@@ -508,6 +511,9 @@ assert_not_contains "$(cat "$LOG")" "SECRETKEY9" "20. the key prefix is NOT publ
 assert_not_contains "$OUT" "SECRETKEY9" "20. the key prefix is NOT logged either"
 
 # ── 21. 412 + R2 object with an OPEN issue_number → no duplicate ────────────
+# After #2844 this path is reached via the alias pre-check: the stub's r2_get
+# answers for the legacy `global.json` too, so a legacy sentinel holding an OPEN
+# issue is adopted before the driver ever attempts its own create-once.
 reset_case
 export R2_TEAMS=$'backups/teamA/'
 export R2_DEFAULT_LIST="$TS_RECENT"
@@ -610,8 +616,9 @@ run_driver
 assert_eq "$RC" 1 "28b. transient 500 exits RED (1)"
 assert_not_match "$(cat "$LOG")" "GH POST .*/issues \{" "28b. a transient 500 assumes open (no duplicate)"
 
-# ── 29. resolve deletes BOTH global.json and _.json (#2844) ─────────────────
+# ── 29. resolve deletes BOTH spellings: canonical _.json + legacy global.json ─
 reset_case
+# The driver's post-#2844 sentinel is the canonical spelling…
 export R2_TEAMS=$'backups/teamA/'
 export R2_DEFAULT_LIST="$TS_RECENT"
 export STUB_STATUS_BODY="$(status_body true null null)"
@@ -619,8 +626,8 @@ export STUB_SWEEP_BODY='{"status":"backed_up","teams_backed_up":1}'
 export GH_ISSUE_APP_DOWN=99
 run_driver
 assert_eq "$RC" 0 "29. healthy run exits 0"
-assert_match "$(cat "$LOG")" "AWS delete-object key=ops/alerts/APP_DOWN/global.json" "29. the driver dedup object is deleted on resolve"
-assert_match "$(cat "$LOG")" "AWS delete-object key=ops/alerts/APP_DOWN/_.json" "29. the server-side dedup object is deleted too"
+assert_match "$(cat "$LOG")" "AWS delete-object key=ops/alerts/APP_DOWN/_.json" "29. the driver dedup object is deleted on resolve"
+assert_match "$(cat "$LOG")" "AWS delete-object key=ops/alerts/APP_DOWN/global.json" "29. the legacy spelling is deleted too (#2844)"
 
 # ── 30. missing .watcher block neither files nor self-heals WATCHER_DOWN ────
 reset_case
@@ -778,7 +785,7 @@ export STUB_SWEEP_BODY='{"status":"backed_up","teams_backed_up":1}'
 export GH_ISSUE_R2_DOWN=88
 run_driver
 assert_eq "$RC" 1 "41. storage_error while enabled exits RED (1)"
-assert_match "$(cat "$LOG")" "AWS put-object key=ops/alerts/R2_DOWN/global.json" "41. storage_error while enabled records R2_DOWN"
+assert_match "$(cat "$LOG")" "AWS put-object key=ops/alerts/R2_DOWN/_.json" "41. storage_error while enabled records R2_DOWN"
 assert_not_match "$(cat "$LOG")" "GH PATCH .*/issues/88" "41. R2_DOWN is NOT closed while storage_error is set"
 
 # ── 42. no_work with graph_totals.backed_up>0 is not a coverage gap ───────
@@ -958,6 +965,31 @@ run_driver
 assert_eq "$RC" 0 "56. a lock with a measured-empty pool exits 0"
 assert_contains "$OUT" "leaving silent" "56. the measured-empty lock is the silent branch"
 assert_not_match "$(cat "$LOG")" "GH POST .*/issues .*SWEEP_NO_COVERAGE" "56. no incident for a measured-empty lock"
+
+# ── 57. a subject-less incident is written ONCE, under the canonical spelling ─
+# #2844: the driver's pre-fix spelling was `global.json` while the server-side
+# AlertStore writes `_.json`. Two spellings = two create-once points = two issues
+# for one condition, and a resolve that deletes only one strands the other.
+reset_case
+export STUB_R2_DOWN=1
+export STUB_STATUS_BODY="$(status_body true null null)"
+export STUB_SWEEP_BODY='{"status":"no_teams","teams_backed_up":0}'
+run_driver
+assert_match "$(cat "$LOG")" "AWS put-object key=ops/alerts/R2_DOWN/_.json" "57. the canonical (AlertStore) spelling is written"
+assert_not_match "$(cat "$LOG")" "AWS put-object key=ops/alerts/R2_DOWN/global.json" "57. the legacy spelling is NOT written (one create-once point)"
+
+# ── 58. a legacy sentinel holding a CLOSED issue does not block re-filing ───
+# The other half of #2844: adopting on sight would swallow a recurrence. The
+# alias is adopted only while its issue is still OPEN.
+reset_case
+export STUB_R2_DOWN=1
+export STUB_STATUS_BODY="$(status_body true null null)"
+export STUB_SWEEP_BODY='{"status":"no_teams","teams_backed_up":0}'
+export STUB_412=0
+export STUB_GET_BODY='{"kind":"R2_DOWN","issue_number":91}'
+export GH_ISSUE_STATE=closed
+run_driver
+assert_match "$(cat "$LOG")" "AWS put-object key=ops/alerts/R2_DOWN/_.json" "58. a closed legacy sentinel still lets the incident re-file"
 
 echo ""
 echo "registry-cron.test.sh: $PASS passed, $FAIL failed"
