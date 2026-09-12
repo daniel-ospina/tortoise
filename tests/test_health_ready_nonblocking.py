@@ -32,6 +32,14 @@ HOSTED_API = REPO / "tortoise" / "hosted_api.py"
 SELFHOST = REPO / "tortoise" / "selfhost.py"
 
 
+def _ancestors(node: ast.AST, parents: dict[int, ast.AST]):
+    """Walk from ``node`` up to the root, yielding each ancestor."""
+    current = parents.get(id(node))
+    while current is not None:
+        yield current
+        current = parents.get(id(current))
+
+
 def _handler(name: str, source: Path = HOSTED_API) -> ast.AsyncFunctionDef:
     tree = ast.parse(source.read_text())
     for node in ast.walk(tree):
@@ -243,6 +251,22 @@ def test_selfhost_ready_does_not_probe_on_the_loop():
     assert dedicated, (
         "selfhost health_ready dispatches nothing through the module's dedicated "
         "probe pool (_submit_probe) — #3287"
+    )
+    # Presence alone is not enough: a call whose future is dropped satisfies the
+    # check above while the endpoint answers nothing. The future must be AWAITED,
+    # so the probe's result is what the handler responds with.
+    parents = {
+        id(child): parent for parent in ast.walk(node) for child in ast.iter_child_nodes(parent)
+    }
+    not_awaited = [
+        call.lineno
+        for call in dedicated
+        if not any(a is not None and isinstance(a, ast.Await) for a in _ancestors(call, parents))
+    ]
+    assert not not_awaited, (
+        f"selfhost health_ready calls _submit_probe at line(s) {not_awaited} but never "
+        "awaits its future — the probe's result is discarded, so the endpoint answers "
+        "whatever the fall-through path produces (#3287)"
     )
 
 

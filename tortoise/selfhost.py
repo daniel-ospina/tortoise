@@ -76,9 +76,12 @@ _READY_PROBE_TIMEOUT_S = 6.0
 #                   which is hard-bounded INTERNALLY: ``_probe_once`` runs the
 #                   ping in its own worker under ``PROBE_TIMEOUT`` (1.5s, plus a
 #                   single 0.1s transient retry) and abandons that worker
-#                   (``shutdown(wait=False)``). This pool's worker therefore
-#                   always comes back, so one would do; two costs nothing and
-#                   absorbs a concurrent poll.
+#                   (``shutdown(wait=False)``). THIS pool worker therefore always
+#                   comes back, so one would do; two costs nothing and absorbs a
+#                   concurrent poll. (The ABANDONED inner worker is a separate,
+#                   pre-existing leak — in the embedded lane it has no socket
+#                   timeout at all, so it parks forever, and ``/health`` is
+#                   un-throttled: #3334.)
 #
 #   /health/ready -> ``_READY_PROBE_EXECUTOR``. Its probe is ``sdk._get_proj()``
 #                   called DIRECTLY — the engine's real path, deliberately not
@@ -91,13 +94,28 @@ _READY_PROBE_TIMEOUT_S = 6.0
 #                   than one pool of N. A shared pool is reproduced as a hang in
 #                   test_liveness_answers_while_readiness_workers_are_parked.
 #
+#                   Because its workers really do park, this pool must NOT be
+#                   NARROWER than the executor it replaced. The point of the
+#                   change is isolation from UNRELATED work, not smallness: a
+#                   2-worker pool narrows the cushion from the default
+#                   executor's ``min(32, cpu+4)`` (6 on the 2-vCPU hosted box),
+#                   and a 3rd concurrent readiness request would then queue,
+#                   spend its whole ``_READY_PROBE_TIMEOUT_S`` waiting, and
+#                   report a FALSE 503 for a healthy DB — the same symptom this
+#                   change exists to remove, reached through readiness fan-in
+#                   instead of through unrelated load. Width is pinned by
+#                   test_probe_pool_is_module_level_sized_and_named and exercised
+#                   by test_readiness_fan_in_does_not_produce_a_false_503.
+#
 # Residual (pre-existing #2988, NOT introduced here): the client read timeout
 # (10s) exceeds ``_READY_PROBE_TIMEOUT_S`` (6.0s), so for a genuinely
 # black-holed DB the OUTER bound wins the race and leaves the readiness worker
-# parked until its socket times out. That is a latency cost on one endpoint and
-# a thread held past its answer — not a liveness risk, because liveness has its
-# own pool — and it needs an inner bound on ``_get_proj`` (the hosted twin keeps
-# the outer strictly above the inner for exactly this reason). Filed separately.
+# parked until its socket times out. That is NOT merely a latency cost — it is
+# what makes the fan-in above possible, because a parked worker cannot serve the
+# next request — and it needs an inner bound on ``_get_proj`` so the worker
+# frees itself (the hosted twin keeps the outer strictly above the inner for
+# exactly this reason). Filed as #3320; this pool's width is the mitigation, not
+# the fix.
 #
 # Why not ``asyncio.to_thread``: it ALWAYS uses the shared default executor —
 # there is no way to pass a pool, which is the whole defect. Why not a bare
@@ -106,8 +124,10 @@ _READY_PROBE_TIMEOUT_S = 6.0
 _LIVENESS_PROBE_EXECUTOR = ThreadPoolExecutor(
     max_workers=2, thread_name_prefix="selfhost-liveness-probe"
 )
+# 8 >= the 6 workers the shared default executor provided on the smallest hosted
+# box (`min(32, cpu+4)`, 2 vCPU). Isolation is the fix; narrowing the pool is not.
 _READY_PROBE_EXECUTOR = ThreadPoolExecutor(
-    max_workers=2, thread_name_prefix="selfhost-ready-probe"
+    max_workers=8, thread_name_prefix="selfhost-ready-probe"
 )
 
 
