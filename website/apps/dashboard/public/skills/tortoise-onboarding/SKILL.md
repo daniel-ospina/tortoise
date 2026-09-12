@@ -163,6 +163,28 @@ Pi infer the transport from `url` and carry **no** `type` — that is also the
 tested shape in `tortoise/__main__.py::_harness_mcp_config` and the
 dashboard wizard (`website/apps/dashboard/src/harnesses.js`).
 
+**Before you write: check for an existing `tortoise` entry (every harness).**
+`mcpServers` is a JSON object, so writing a `tortoise` key over an existing
+`tortoise` key silently **replaces** it — "MERGE, never replace" protects the
+other servers, not this one. The prior entry may point at a different graph
+(a self-hosted daemon, a local stdio server, or another organization), so
+overwriting it is a **data-routing change**, not a config tidy-up:
+
+1. **Detect** — read the config and check whether `tortoise` is already
+   declared, and what it points at.
+2. **Report and confirm** — tell the user what the existing entry targets and,
+   when you can reach it, how much is in that graph. Get explicit confirmation
+   BEFORE overwriting. This is a human decision.
+3. **Preserve** — rename the existing entry to `tortoise-local`, keeping its
+   original `command`/`url`/`env` verbatim, and set `"lazy": true` so it does
+   not spawn at startup. Never delete it.
+4. **Write** the new `tortoise` entry, then verify (§4).
+
+If the existing entry already points at the hosted URL you are about to
+write, it is already correct — go straight to verification. Do not "fix" a
+local entry that merely looks misconfigured: preserve it as-is and say what
+you found, so the user can decide.
+
 ### Claude Code (self-install)
 
 ```bash
@@ -226,14 +248,47 @@ prompt for approval — `tortoise_health` and the read tools are safe to allow.
 
 ### Pi (self-install)
 
-Create/merge `.mcp.json` in the project (MERGE — never replace an existing
-`mcpServers` block):
+1. **Export the key to your shell profile first.** Pi expands `${VAR}` from
+   the environment of the process that LAUNCHES it, so the variable must
+   already be set when Pi starts:
 
-```json
-{ "mcpServers": { "tortoise": { "url": "https://api.premiselabs.co/mcp/", "headers": { "Authorization": "Bearer ${TORTOISE_API_KEY}" } } } }
-```
+   ```bash
+   echo 'export TORTOISE_API_KEY=<key>' >> ~/.zshrc   # ~/.bashrc on bash
+   ```
+
+2. Create/merge `.mcp.json` in the project (MERGE — never replace an existing
+   `mcpServers` block, and check for a pre-existing `tortoise` entry first —
+   see "Before you write" above):
+
+   ```json
+   { "mcpServers": { "tortoise": { "url": "https://api.premiselabs.co/mcp/", "headers": { "Authorization": "Bearer ${TORTOISE_API_KEY}" } } } }
+   ```
+
+3. **Restart Pi from a NEW shell** — a reload is not a restart. The
+   environment is captured when the shell starts, so a long-lived terminal
+   keeps its old value even after the profile changes; and if the variable is
+   unset at launch the header becomes `Authorization: Bearer ` and the server
+   returns a 401 naming the expected format. Confirm the new shell took it:
+
+   ```bash
+   echo $TORTOISE_API_KEY   # must print the key, not an empty line
+   ```
 
 Pi's mcp-client expands plain `${TORTOISE_API_KEY}` (no `env:` prefix).
+
+**Which config Pi reads.** Pi searches upward from its working directory and
+uses the **first** `.mcp.json` it finds, falling back to
+`~/.pi/agent/.mcp.json`. A project config therefore **shadows** the home base
+config: in a repo that already has its own `.mcp.json`, editing the home one
+has no effect and produces no error. Write the config for the directory you
+actually start Pi in.
+
+**Which graph you connect to is decided by the environment, not the config
+file.** If a stale or different `TORTOISE_API_KEY` is exported, Pi connects to
+that key's organization and every tool result comes from that graph — with no
+error and no warning. After restarting, confirm you reached the intended org
+before reporting anything based on it (compare `tortoise_status`'s
+`namespace`, or run `tortoise_health`, against the org you expected).
 
 ### Claude Desktop (teach-human)
 
