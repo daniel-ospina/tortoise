@@ -77,9 +77,31 @@ def test_handler_makes_no_direct_query_call():
     )
 
 
-def test_both_probes_run_off_the_loop():
+def test_both_probes_are_dispatched_through_their_coordinators():
+    """#2850 x #2988 — ``health_ready`` must not run either plane probe inline.
+
+    The #2988 guard pinned ``asyncio.to_thread(_probe_db)``. #2850 replaced that
+    with dedicated single-flight coordinators on a private daemon worker, which
+    is strictly stronger: ``to_thread`` rides the SHARED default executor, so a
+    timed-out probe leaks a worker out of the pool every other request depends
+    on, and the submission queue is unbounded. The INVARIANT this pins is
+    unchanged — the handler must not perform the synchronous network I/O itself
+    — so the mechanism pin moves with the mechanism instead of being dropped.
+    """
     node = _handler("health_ready")
-    off_loop = {
+    dispatched = {
+        call.func.value.id
+        for call in ast.walk(node)
+        if isinstance(call, ast.Call)
+        and isinstance(call.func, ast.Attribute)
+        and call.func.attr == "run"
+        and isinstance(call.func.value, ast.Name)
+    }
+    assert {"_READY_PROBE", "_CONTROL_PLANE_PROBE"} <= dispatched, (
+        f"probes not dispatched through their coordinators (found {sorted(dispatched)})"
+    )
+    # No to_thread fallback for the plane probes may creep back in.
+    inline = [
         arg.id
         for call in ast.walk(node)
         if isinstance(call, ast.Call)
@@ -87,89 +109,67 @@ def test_both_probes_run_off_the_loop():
         and call.func.attr == "to_thread"
         for arg in call.args
         if isinstance(arg, ast.Name)
-    }
-    assert {"_probe_db", "_probe_control_plane"} <= off_loop, (
-        f"probes not dispatched with asyncio.to_thread (found {sorted(off_loop)})"
-    )
-
-
-def test_every_off_loop_probe_is_bounded():
-    """Dispatching off the loop keeps the process alive; the bound is what makes
-    the endpoint ANSWER when a plane black-holes. Without it a hung probe still
-    leaks an executor thread per request."""
-    node = _handler("health_ready")
-    parents = _parents(node)
-    unbounded = []
-    for call in ast.walk(node):
-        if not (
-            isinstance(call, ast.Call)
-            and isinstance(call.func, ast.Attribute)
-            and call.func.attr == "to_thread"
-        ):
-            continue
-        walker, inside = call, False
-        while walker in parents:
-            walker = parents[walker]
-            if (
-                isinstance(walker, ast.Call)
-                and isinstance(walker.func, ast.Attribute)
-                and walker.func.attr == "wait_for"
-            ):
-                inside = True
-                break
-        if not inside:
-            unbounded.append(call.lineno)
-    assert not unbounded, (
-        f"to_thread at line(s) {unbounded} is not wrapped in asyncio.wait_for — "
-        "a black-holed probe would be waited on indefinitely (#2988)"
-    )
-    # Non-vacuity: with NO to_thread calls the check above passes trivially.
-    # (test_both_probes_run_off_the_loop catches that, but each pin should stand
-    # on its own — a vacuous guard is a guard that silently stops guarding.)
-    dispatched = [
-        call
-        for call in ast.walk(node)
-        if isinstance(call, ast.Call)
-        and isinstance(call.func, ast.Attribute)
-        and call.func.attr == "to_thread"
     ]
-    assert len(dispatched) >= 2, (
-        f"expected the data-plane and control-plane probes dispatched off the loop, "
-        f"found {len(dispatched)} to_thread call(s)"
+    assert "_probe_db" not in inline and "_probe_control_plane" not in inline, (
+        f"a plane probe is dispatched via the SHARED default executor ({sorted(inline)}) — "
+        "use the dedicated HealthProbe coordinators instead"
     )
 
 
-def test_wait_for_uses_the_module_bound():
-    node = _handler("health_ready")
-    uses = [
-        kw
-        for call in ast.walk(node)
-        if isinstance(call, ast.Call)
-        and isinstance(call.func, ast.Attribute)
-        and call.func.attr == "wait_for"
-        for kw in call.keywords
-        if kw.arg == "timeout" and isinstance(kw.value, ast.Name)
-    ]
-    assert uses, "no wait_for(...) pins the module-level probe bound"
-    assert all(kw.value.id == "_READY_PROBE_TIMEOUT_S" for kw in uses), (
-        "the probe bound must be the module constant, so it can be reasoned "
-        "about (and tested) in one place"
+def test_every_plane_probe_is_hard_bounded_and_fail_closed():
+    """The bound is what makes the endpoint ANSWER when a plane black-holes.
+
+    It now lives on each ``HealthProbe`` (``timeout=PROBE_HARD_TIMEOUT``) rather
+    than in a per-handler ``wait_for``, so pin BOTH the shared bound and the
+    fail-closed flag. ``_READY_PROBE_TIMEOUT_S`` is gone with the mechanism it
+    bounded; a reintroduced per-handler literal would be an unreasoned second
+    source of truth.
+    """
+    import inspect
+
+    import tortoise.hosted_api as mod
+    from tortoise.monitoring import PROBE_HARD_TIMEOUT
+
+    assert (
+        inspect.signature(mod.HealthProbe.__init__).parameters["timeout"].default
+        == PROBE_HARD_TIMEOUT
+    ), "HealthProbe's default wall bound must be the shared module constant"
+    assert "_READY_PROBE_TIMEOUT_S" not in HOSTED_API.read_text(), (
+        "the superseded per-handler readiness bound is back — the bound belongs "
+        "to HealthProbe (one reasoned place)"
     )
+    assert mod._READY_PROBE._timeout == PROBE_HARD_TIMEOUT, (
+        "the FalkorDB readiness probe should take the shared default bound"
+    )
+    for name in ("_READY_PROBE", "_CONTROL_PLANE_PROBE"):
+        probe = getattr(mod, name)
+        assert probe._timeout > 0, f"{name} has no usable bound"
+        assert probe._fresh_only is True, (
+            f"{name} must be fresh_only=True — readiness is a FAIL-CLOSED gate and "
+            "must never answer 200 from a verdict older than its read budget (#1384/#2850)"
+        )
 
 
-def test_probe_bound_is_strictly_above_the_client_timeout():
-    """The bound is a SAFETY NET, not the mechanism.
+def test_each_plane_bound_sits_above_its_own_client_timeout():
+    """The #2988 layered-timeout invariant, expressed PER PLANE.
 
-    ``asyncio.wait_for`` cancels the await, not the worker thread. If the outer
-    bound can win the race against the probe client's own timeout, every
-    timed-out request leaves a thread in its socket read (measured: 16
-    concurrent timeouts starve the shared executor). Keeping the outer bound
-    strictly above the inner one makes the client timeout fire first, so the
-    thread returns by itself.
+    Abandoning a probe does not stop its thread — ``wait_for`` cancels the
+    awaitable, not the worker (CPython #87185), so the worker stays parked in
+    its socket read. The defence is ordering: keep the outer bound ABOVE the
+    probe client's own timeout, so the client times out first and the thread
+    returns by itself. If the outer bound can win that race, every timeout
+    strands a thread.
 
-    The earlier version of this test asserted the bound was below Fly's 15s
-    /health timeout — a constraint that does not exist, because Fly checks
-    /health, never /health/ready. It guarded nothing.
+    #2850 initially INVERTED this (2s outer vs a 5s inner on the control plane)
+    and leaned on ``PROBE_MAX_SUPERSEDES`` instead. That rationale was
+    overstated: the supersede counter RESETS on any live completion, so it caps
+    a single wedge episode rather than the process lifetime. Both invariants
+    are now satisfied at once — each bound is above its own inner timeout, AND
+    the probe still runs on a dedicated coordinator rather than the shared
+    default pool.
+
+    This test is the tripwire: raise a client timeout above its plane's bound
+    and it fails.
     """
     import inspect
 
@@ -177,19 +177,23 @@ def test_probe_bound_is_strictly_above_the_client_timeout():
     from tortoise.monitoring import PROBE_TIMEOUT
     from tortoise.supabase_control import SupabaseControlPlane
 
-    bound = float(re.search(r"_READY_PROBE_TIMEOUT_S = ([\d.]+)", HOSTED_API.read_text()).group(1))
-    assert bound == mod._READY_PROBE_TIMEOUT_S
+    # Data plane: ``_probe_db`` self-bounds at PROBE_TIMEOUT.
+    assert mod._READY_PROBE._timeout > PROBE_TIMEOUT, (
+        f"the FalkorDB readiness bound ({mod._READY_PROBE._timeout}s) must exceed "
+        f"_probe_db's own bound ({PROBE_TIMEOUT}s) or the outer bound wins the race "
+        "and strands a worker thread per timeout (#2988)"
+    )
 
+    # Control plane: SupabaseControlPlane defaults to a 5.0s httpx timeout, and
+    # CONTROL_PLANE_HARD_TIMEOUT is sized against it.
     client_timeout = inspect.signature(SupabaseControlPlane.__init__).parameters["timeout"].default
-    assert bound > client_timeout, (
-        f"_READY_PROBE_TIMEOUT_S ({bound}) must be strictly above the control-plane "
-        f"client timeout ({client_timeout}) or the outer bound wins the race and "
-        "leaks an executor worker per timed-out request (#2988)"
+    assert mod._CONTROL_PLANE_PROBE._timeout > client_timeout, (
+        f"the control-plane readiness bound ({mod._CONTROL_PLANE_PROBE._timeout}s) must "
+        f"exceed the SupabaseControlPlane client timeout ({client_timeout}s) for the same "
+        "reason — that is exactly what CONTROL_PLANE_HARD_TIMEOUT is sized against"
     )
-    assert bound > PROBE_TIMEOUT, (
-        f"_READY_PROBE_TIMEOUT_S ({bound}) must be above probe_db's own bound "
-        f"({PROBE_TIMEOUT}) for the same reason"
-    )
+    # Still a safety net, well inside Fly's 15s /health budget.
+    assert mod._CONTROL_PLANE_PROBE._timeout < 15.0
 
 
 # ── the selfhost twin of the same defect ───────────────────────────────────
@@ -317,7 +321,8 @@ def test_hung_data_plane_returns_503_within_the_bound(monkeypatch):
     import tortoise.hosted_api as mod
 
     release = threading.Event()
-    monkeypatch.setattr(mod, "_READY_PROBE_TIMEOUT_S", 0.2)
+    monkeypatch.setattr(mod._READY_PROBE, "_timeout", 0.2)
+    mod._READY_PROBE.reset()
     monkeypatch.setattr(mod, "_probe_db", lambda: release.wait(30))
 
     async def scenario():
@@ -343,7 +348,8 @@ def test_hung_control_plane_returns_503_within_the_bound(monkeypatch):
     import tortoise.supabase_control as sc
 
     release = threading.Event()
-    monkeypatch.setattr(mod, "_READY_PROBE_TIMEOUT_S", 0.2)
+    monkeypatch.setattr(mod._CONTROL_PLANE_PROBE, "_timeout", 0.2)
+    mod._CONTROL_PLANE_PROBE.reset()
     monkeypatch.setattr(mod, "_probe_db", lambda: {"ok": True, "latency_ms": 1.0, "error": None})
     monkeypatch.setattr(mod, "_probe_control_plane", lambda: release.wait(30))
     monkeypatch.setattr(sc, "is_supabase_enabled", lambda: True)
@@ -370,7 +376,17 @@ def test_ready_when_both_planes_answer(monkeypatch):
 
     monkeypatch.setattr(mod, "_probe_db", lambda: {"ok": True, "latency_ms": 2.0, "error": None})
     called = []
-    monkeypatch.setattr(mod, "_probe_control_plane", lambda: called.append(1))
+
+    def _fake_control():
+        # #2850: the control-plane probe now RETURNS its verdict (the
+        # coordinator reads `{"ok": ...}`); under #2988 success was implied by
+        # not raising, so this stub used to return None.
+        called.append(1)
+        return {"ok": True, "latency_ms": 1.0, "error": None}
+
+    mod._CONTROL_PLANE_PROBE.reset()
+    mod._READY_PROBE.reset()
+    monkeypatch.setattr(mod, "_probe_control_plane", _fake_control)
     monkeypatch.setattr(sc, "is_supabase_enabled", lambda: True)
 
     assert _run(mod.health_ready()) == {
