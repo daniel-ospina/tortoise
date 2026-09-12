@@ -662,6 +662,25 @@ def _server_graph_hygiene(_redislite_hygiene):
 
 
 # ── Epic #1647 Task 4 (P2): session-start backend-identity tripwire ────────
+def _poisoned_aof_hint_for_uri(uri: str) -> str | None:
+    """#2961 recovery hint when the backend for ``uri`` shows a poisoned AOF.
+
+    Diagnosis aid for the tripwire's failure path — never raises, never
+    gates a green session, returns None whenever the state cannot be
+    established (no Docker, no matching container, malformed URI).
+    """
+    from urllib.parse import urlparse
+    try:
+        port = urlparse(uri).port or 6379
+    except ValueError:
+        return None
+    try:
+        from tortoise.graph_delete_guard import diagnose_poisoned_aof
+        return diagnose_poisoned_aof(port)
+    except Exception:
+        return None
+
+
 @pytest.fixture(scope="session", autouse=True)
 def _assert_backend_identity():
     """Epic #1647 E2E-6 tripwire: on docker-URI sessions, the session must
@@ -758,6 +777,17 @@ def _assert_backend_identity():
                 and "health check failed" in str(exc)):
             from tests._embedded import _remove_journal_file
             _remove_journal_file(os.environ.get("TORTOISE_TEST_JOURNAL_FILE", ""))
+            # #2961: at this point a poisoned-AOF crash loop and a genuine
+            # backend outage are INDISTINGUISHABLE — both surface as a
+            # connection-class failure, and the poison path silently blocks
+            # every verification run. When the backend's container log
+            # shows the AOF-load signature, fail with the actionable
+            # recovery steps instead of a bare connection error. Best-effort
+            # only: no Docker / no matching container / a clean log leaves
+            # the original failure untouched.
+            _hint = _poisoned_aof_hint_for_uri(uri)
+            if _hint:
+                raise RuntimeError(f"{exc}\n\n{_hint}") from exc
         raise
     try:
         assert probe._is_embedded is False, (

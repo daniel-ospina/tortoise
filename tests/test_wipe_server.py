@@ -71,11 +71,14 @@ class _FakeGraph:
 
 
 class _FakeDb:
-    def __init__(self, fail_delete=()):
+    def __init__(self, fail_delete=(), graphs=()):
         self.detached: list[str] = []
         self.deleted: list[str] = []
         self._fail_delete = set(fail_delete)
-        self.graphs: list[str] = []
+        # #2961: the sweep's drop is now presence-gated (GRAPH.LIST first),
+        # so a fake must model which graphs the server actually holds —
+        # otherwise every drop is correctly skipped as already-absent.
+        self.graphs: list[str] = list(graphs)
 
     def list_graphs(self):
         return list(self.graphs)
@@ -636,7 +639,8 @@ def test_sweep_delete_error_logs_and_continues(tmp_path):
     still RAISES (D-4/P2-7 intact — pinned elsewhere)."""
     journal = tmp_path / "session.graphs.jsonl"
     journal.write_text("test_ws_ok\ntest_ws_bad\n")
-    db = _FakeDb(fail_delete={"test_ws_bad"})
+    db = _FakeDb(fail_delete={"test_ws_bad"},
+                 graphs=["test_ws_ok", "test_ws_bad"])
     res = _sweep_drop(_FakeProj(db), str(journal), drop=True)
     assert res["failed"] == ["test_ws_bad"]
     assert res["dropped"] == ["test_ws_ok"]
@@ -650,13 +654,14 @@ def test_sweep_partial_delete_failure_keeps_journal(tmp_path):
     subsequent clean sweep drops the remainder and ONLY THEN removes it."""
     journal = tmp_path / "session.graphs.jsonl"
     journal.write_text("test_ws_first\ntest_ws_second\n")
-    db = _FakeDb(fail_delete={"test_ws_second"})
+    db = _FakeDb(fail_delete={"test_ws_second"},
+                 graphs=["test_ws_first", "test_ws_second"])
     res1 = _sweep_drop(_FakeProj(db), str(journal), drop=True)
     assert res1["dropped"] == ["test_ws_first"]
     assert res1["journal_removed"] is False
     assert journal.exists()
     # second sweep (the next session's stale sweep): both succeed → removed
-    db2 = _FakeDb()
+    db2 = _FakeDb(graphs=["test_ws_first", "test_ws_second"])
     res2 = _sweep_drop(_FakeProj(db2), str(journal), drop=True)
     assert res2["journal_removed"] is True
     assert not journal.exists()
@@ -675,7 +680,7 @@ def test_sweep_skips_uri_default_graph(monkeypatch, tmp_path):
     assert default == "tortoise_test_matrix"
     journal = tmp_path / "session.graphs.jsonl"
     journal.write_text(f"{default}\ntest_ws_own_graph\n")
-    db = _FakeDb()
+    db = _FakeDb(graphs=[default, "test_ws_own_graph"])
     res = _sweep_drop(_FakeProj(db), str(journal), drop=True)
     assert res["dropped"] == ["test_ws_own_graph"]
     assert default not in db.deleted, \
@@ -705,7 +710,7 @@ def test_sweep_dedupes_journal_entries(tmp_path):
     from tests._embedded import _sweep_drop
     journal = tmp_path / "dup.graphs.jsonl"
     journal.write_text("test_ws_dup_a\ntest_ws_dup_a\ntest_ws_dup_b\n")
-    db = _FakeDb()
+    db = _FakeDb(graphs=["test_ws_dup_a", "test_ws_dup_b"])
     res = _sweep_drop(_FakeProj(db), str(journal), drop=True)
     assert res["dropped"] == ["test_ws_dup_a", "test_ws_dup_b"]
     assert db.deleted == ["test_ws_dup_a", "test_ws_dup_b"]
@@ -729,7 +734,7 @@ def test_stale_sweep_recycled_pid_marker_journal_dead(monkeypatch, tmp_path):
         f"pid={os.getpid()}\nstart=1.0\n")  # start mismatch → recycled
     j = adir / f"{nonce}.graphs.jsonl"
     j.write_text("test_ws_recycled_graph\n")
-    db = _FakeDb()
+    db = _FakeDb(graphs=["test_ws_recycled_graph"])
     monkeypatch.setattr("tests._embedded._proj_for_uri",
                         lambda uri: _FakeProj(db))
     assert er.active_suite_markers() == []  # the recycled marker is NOT live
@@ -751,7 +756,7 @@ def test_concurrent_suite_end_sweep_leaves_other_suite_graphs(monkeypatch, tmp_p
     j_b = adir / "nonce_b.graphs.jsonl"
     j_a.write_text("test_ws_a_graph\n")
     j_b.write_text("test_ws_b_graph\n")
-    db = _FakeDb()
+    db = _FakeDb(graphs=["test_ws_a_graph", "test_ws_b_graph"])
     monkeypatch.setattr("tests._embedded._proj_for_uri",
                         lambda uri: _FakeProj(db))
     # A's END sweep drops ONLY journal A's set — B's graph untouched
