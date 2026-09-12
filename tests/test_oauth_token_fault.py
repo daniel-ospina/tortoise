@@ -8,14 +8,19 @@ tests instead of an untyped 500 in production.
 from __future__ import annotations
 
 import base64
+import copy
 import hashlib
+import json
 import os
 import secrets
 import tempfile
+import threading
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from fastapi.testclient import TestClient
 
+import tortoise.oauth as oauth
 from tests._http_fixtures import patched_tortoise_sdk
 from tests.fake_control_plane import _FAULT_CPS, FakeControlPlane  # noqa: RUF100
 from tests.test_oauth_mcp import (  # noqa: RUF100
@@ -29,6 +34,9 @@ from tortoise.oauth import (  # noqa: RUF100
     _expires_iso,
     _sha256,
 )
+from tortoise.supabase_control import SupabaseControlPlane
+
+FIXED_NOW = datetime(2026, 1, 1, tzinfo=UTC)
 
 _CLIENT_ID = "client-1"                      # must equal the seeded oauth_clients.id
 _REDIRECT = "https://app.example/cb"
@@ -188,3 +196,138 @@ def test_fixture_layer_no_fault_probe(fault_client):
     _, rt = _seed_refresh_token(cp, "probe-rt")
     r2 = _post_refresh(tc, cp, rt)
     assert r2.status_code == 200, r2.text
+
+
+# ── Task 2: read-only observation / CAS primitives + the dialect contract ───
+
+@pytest.mark.parametrize("used_at,expires_in,expected", [
+    (None, 600, "unconsumed"),
+    ("2026-01-01T00:00:00+00:00", 600, "consumed"),
+    (None, -10, "consumed"),
+])
+def test_consume_state_outcomes(used_at, expires_in, expected):
+    cp = FakeControlPlane()
+    _seed_code(cp, "c", used_at=used_at, expires_in=expires_in)
+    assert oauth._consume_state(cp, "c") == expected
+
+
+def test_consume_state_missing_row_is_consumed():
+    assert oauth._consume_state(FakeControlPlane(), "nope") == "consumed"
+
+
+def test_consume_state_unknown_on_raise_and_never_writes():
+    cp = FakeControlPlane()
+    _seed_code(cp, "c")
+    before = copy.deepcopy(cp.tables)
+    cp.fail_query(table="oauth_codes", method="GET", times=1, exc=RuntimeError("down"))
+    assert oauth._consume_state(cp, "c") == "unknown"
+    assert cp.tables == before              # read-only: no clobber of a concurrent claim
+
+
+def test_restore_code_cas_match_miss_expiry_and_raise():
+    cp = FakeControlPlane()
+    _seed_code(cp, "c", used_at="T1")
+    assert oauth._restore_code(cp, "c", "T1") is True
+    assert cp.tables["oauth_codes"][0]["used_at"] is None
+    cp = FakeControlPlane()
+    _seed_code(cp, "c", used_at="T1")
+    assert oauth._restore_code(cp, "c", "T2") is False                       # CAS miss
+    cp = FakeControlPlane()
+    _seed_code(cp, "c", used_at="T1", expires_in=-10)
+    assert oauth._restore_code(cp, "c", "T1") is False                       # over TTL
+    cp = FakeControlPlane()
+    _seed_code(cp, "c", used_at="T1")
+    cp.fail_query(table="oauth_codes", method="PATCH", select=["used_at", "expires_at"],
+                  times=1, exc=RuntimeError("down"))
+    assert oauth._restore_code(cp, "c", "T1") is False                       # raise → terminal
+
+
+def test_rollback_minted_zero_rows_is_success_not_failure():
+    """A never-inserted row must NOT be reported as a failed rollback."""
+    cp = FakeControlPlane()
+    oauth._rollback_minted(cp, [("oauth_refresh_tokens", "never-existed")], "now",
+                           capture=False)                      # must not raise
+    assert oauth._mint_observably_clean(cp, [("oauth_refresh_tokens", "never-existed")]) is True
+
+
+def test_expiry_forms_agree_and_the_iso_encoders_are_offset_form(monkeypatch):
+    """Pin the FORMAT invariant (the fake's `gt` is a lexical compare), not an
+    absolute timestamp: a hardcoded literal cannot separate the two suffix forms
+    because the date/time prefix decides the comparison first. Freeze the clock and
+    build a definitely-future instant in both forms."""
+    monkeypatch.setattr(oauth, "_now", lambda: FIXED_NOW)
+    assert oauth._now_iso().endswith("+00:00") and oauth._expires_iso(60).endswith("+00:00")
+    future = FIXED_NOW + timedelta(seconds=600)
+    forms = [future.isoformat(), future.strftime("%Y-%m-%dT%H:%M:%S") + "Z"]
+    results = []
+    for rendered in forms:
+        cp = FakeControlPlane()
+        _seed_code(cp, "c", used_at="T1")
+        cp.tables["oauth_codes"][0]["expires_at"] = rendered
+        results.append((oauth._restore_code(cp, "c", "T1"), oauth._consume_state(cp, "c")))
+    assert results[0][0] is True and results[1][0] is True      # future in BOTH forms
+    assert results[0][1] == results[1][1] == "unconsumed"       # lexical and semantic agree
+
+
+@pytest.fixture
+def capture_server():
+    """Start a local HTTPServer, record (command, self.path, headers, body) per request,
+    and serve a configurable (status, body) — defaults to a representation list.
+    `self.path` is the RAW request target, so the query string is included."""
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    class Handler(BaseHTTPRequestHandler):
+        def _serve(self):
+            body = self.rfile.read(int(self.headers.get("Content-Length") or 0))
+            self.server.seen.append((self.command, self.path, dict(self.headers), body))
+            code, payload = self.server.respond
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(payload)
+        do_GET = do_PATCH = do_POST = _serve
+
+        def log_message(self, *a):      # keep the test output clean
+            pass
+
+    httpd = HTTPServer(("127.0.0.1", 0), Handler)
+    httpd.seen, httpd.respond = [], (200, b"[]")
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    yield httpd
+    httpd.shutdown()
+
+
+def test_real_seam_encodes_the_cas_dialect(capture_server):
+    """Drive the REAL SupabaseControlPlane and assert the dialect the CAS relies on.
+    No live PostgREST is needed."""
+    cp = SupabaseControlPlane(url=f"http://127.0.0.1:{capture_server.server_port}",
+                              service_key="svc")
+    captured = "2026-01-01T00:00:00+00:00"
+    capture_server.respond = (200, json.dumps(
+        [{"used_at": None, "expires_at": "2099-01-01T00:00:00+00:00"}]).encode())
+    assert oauth._restore_code(cp, "c", captured) is True        # representation non-empty → True
+    cmd, path, headers, _ = capture_server.seen[-1]
+    assert cmd == "PATCH"
+    assert "code_hash=eq." in path and "used_at=eq." in path and "expires_at=gt." in path
+    assert "used_at=eq.2026-01-01T00%3A00%3A00%2B00%3A00" in path   # ':'→%3A, '+'→%2B
+    assert headers["Prefer"] == "return=representation"
+    assert "Content-Profile" not in headers      # pins that no schema profile is switched
+
+    capture_server.respond = (200, json.dumps([{"used_at": None,
+                                                "expires_at": "2099-01-01T00:00:00+00:00"}]).encode())
+    oauth._consume_code(cp, "c")
+    assert "used_at=is.null" in capture_server.seen[-1][1]
+
+
+@pytest.mark.parametrize("status,payload,expected", [
+    (500, b'{"message":"boom"}', "unknown"),      # S1(a)
+    (200, b"<html>not json</html>", "unknown"),   # S1(c) unparseable 2xx
+])
+def test_real_seam_maps_status_and_unparseable_body(capture_server, status, payload, expected):
+    """The fake's injector raises a Python error, so it CANNOT exercise the seam's own
+    HTTP branches. Assert the callers surface a typed outcome, never a raw exception."""
+    cp = SupabaseControlPlane(url=f"http://127.0.0.1:{capture_server.server_port}",
+                              service_key="svc")
+    capture_server.respond = (status, payload)
+    assert oauth._consume_state(cp, "c") == expected
+    assert oauth._restore_code(cp, "c", "T1") is False

@@ -39,14 +39,18 @@ fail closed with 503 via hosted_api; ``tt_`` keys keep working unchanged.
 from __future__ import annotations
 
 import base64
+import contextlib
 import hashlib
 import ipaddress
 import json
+import logging
 import os
 import re  # noqa: F401
 import secrets
 from datetime import datetime, timedelta, timezone
 from urllib.parse import parse_qs, urlencode, urlparse  # noqa: F401
+
+logger = logging.getLogger("tortoise.oauth")
 
 # ── Protocol constants ──────────────────────────────────────────────────────
 
@@ -74,6 +78,10 @@ class OAuthError(Exception):
     ``status`` is the HTTP status (400/401/403); ``error`` is the RFC error
     code (invalid_request / invalid_grant / unauthorized_client / ...);
     ``error_description`` is a human-readable, client-safe explanation.
+
+    #2863: ``status`` may also be 500 (the /oauth/token last-resort boundary)
+    or 503 (``OAuthTemporarilyUnavailable``) — both still render through the
+    same RFC 6749 §5.2 body producer, ``_oauth_error_response``.
     """
 
     def __init__(self, status: int, error: str, error_description: str):
@@ -84,6 +92,56 @@ class OAuthError(Exception):
 
     def body(self) -> dict:
         return {"error": self.error, "error_description": self.error_description}
+
+
+# Transient-failure contract (#2863). /oauth/token's consumer (mcp 1.29.0) parses the
+# RFC 6749 §5.2 body, so it must NOT reuse `hosted_api._control_plane_unavailable()`'s
+# FastAPI {"detail": {"error_code": ...}} shape. Same STATUS (503), different driver:
+# that is deliberate, and the endpoint test pins the status parity. §8.5 permits the
+# extra error code; §5.2's charset admits "_".
+
+
+class OAuthMintAborted(Exception):
+    """Internal (#2863): `_issue_tokens` failed after possibly writing.
+    `recovered` is True iff an observation confirmed the mint left no live minted row
+    (and, on the rotation path, left the previous refresh token unclaimed). Never
+    escapes `oauth.py` — callers map it to a typed `OAuthError`."""
+
+    def __init__(self, recovered: bool, cause: str = ""):
+        super().__init__(cause or "token mint aborted")
+        self.recovered = recovered
+
+
+class OAuthTemporarilyUnavailable(OAuthError):
+    """503 `temporarily_unavailable` — raised ONLY when the grant is established
+    still-usable: by observation where a write may have landed, or constructively
+    where no write was attempted. Never on an unobserved write state."""
+
+    def __init__(self, error_description: str = "Temporary control-plane failure — retry."):
+        super().__init__(503, "temporarily_unavailable", error_description)
+
+
+def _log_and_capture(exc: BaseException, *, where: str) -> None:
+    """One WARNING + at most one Sentry capture for a conversion path. Must never raise.
+
+    OWNER TABLE (I4 — never capture twice for one request):
+      lane 2 of `_issue_tokens`        → the single capture of the TRIGGERING exception
+      lane 1 loser rollback (capture=True)  → the single capture for the loser path
+                                               (nothing else captures there)
+      lane 2 rollback/observation (capture=False) → log only (lane 2 captured the trigger)
+      lane 3 prev-access revoke        → log only (non-decision-bearing hygiene)
+      the two correction-#8 revokes    → each the single capture for its terminal path
+      `exchange_auth_code` / `refresh_grant` pre-consume/pre-mint `except Exception`
+                                       → this call IS the single capture for that path
+      `oauth_token` boundary           → this call IS the single capture for that path
+    """
+    with contextlib.suppress(Exception):  # logging never breaks the response
+        logger.warning("oauth: %s failed: %s", where, exc, exc_info=True)
+    try:
+        from tortoise.sentry import capture_exception as _capture
+        _capture(exc, tags={"component": "oauth", "where": where})
+    except Exception:
+        pass
 
 
 # ── Small helpers ───────────────────────────────────────────────────────────
@@ -503,6 +561,101 @@ def issue_auth_code(cp, *, client_id: str, user_id: str, base: str,
         "created_at": _now_iso(),
     })
     return code, team_id
+
+
+def _consume_state(cp, code: str) -> str:
+    """READ-ONLY observation of a code's redemption state (#2863).
+
+    "unconsumed" iff the row exists, is unclaimed and unexpired (a retry provably
+    works); "consumed" for any other observed state (non-NULL `used_at`, no row,
+    expired); "unknown" on any failure of the read OR its predicate.
+
+    Performs NO write — this is what separates it from the withdrawn v4/v5 re-arm
+    helpers, which cleared `used_at` and could clobber a concurrent claim.
+    """
+    try:
+        rows = cp.query("oauth_codes", select=["used_at", "expires_at"],
+                        filters=[("code_hash", "eq", _sha256(code))])
+        if not rows or rows[0].get("used_at") is not None:
+            return "consumed"
+        expires = _parse_ts(rows[0].get("expires_at"))
+        if expires is None or expires < _now():
+            return "consumed"
+        return "unconsumed"
+    except Exception as exc:
+        logger.warning("oauth: consume-state observation failed: %s", exc)
+        return "unknown"
+
+
+def _restore_code(cp, code: str, expected) -> bool:
+    """CAS re-arm (#2863): clear `used_at` ONLY if it still holds the value this
+    request wrote, and only while the code is still redeemable.
+
+    True iff the re-arm is confirmed observable. Any raise / empty result / None
+    expectation ⇒ False (terminal) — never a retryable signal on unobserved state.
+    The expiry filter mirrors `_consume_state`: the failure path can spend ~20 s
+    before the re-arm, so a near-TTL code must not be re-armed into a 503 whose retry
+    then returns expired `invalid_grant`.
+    """
+    if expected is None:
+        return False
+    try:
+        rows = cp.query("oauth_codes", method="PATCH",
+                        select=["used_at", "expires_at"],
+                        filters=[("code_hash", "eq", _sha256(code)),
+                                 ("used_at", "eq", expected),
+                                 ("expires_at", "gt", _now_iso())],
+                        json_body={"used_at": None})
+        return bool(rows)
+    except Exception as exc:
+        logger.warning("oauth: code re-arm failed: %s", exc)
+        return False
+
+
+def _rollback_minted(cp, minted: list[tuple[str, str]], now: str, *, capture: bool) -> None:
+    """Idempotent soft-revoke by id of every row this request may have written.
+
+    A PATCH filtered by `id` is a VERIFIED no-op on a missing row in both seams
+    (real: `Prefer: return=minimal` → `[]`; fake: `select is None` → `[]`), so zero
+    affected rows is the EXPECTED SUCCESS for a write that never committed — this
+    function must never raise on an empty result. Each row is attempted in its own
+    try/except. `capture=True` is for lane 1 (nothing else captures on that path);
+    lane 2 passes False because it already captured the trigger (I4).
+    """
+    for table, row_id in minted:
+        try:
+            cp.query(table, method="PATCH", filters=[("id", "eq", row_id)],
+                     json_body={"revoked_at": now})
+        except Exception as exc:
+            if capture:
+                _log_and_capture(exc, where=f"loser rollback {table}")
+            else:
+                logger.warning("oauth: mint rollback failed for %s/%s: %s", table, row_id, exc)
+
+
+def _mint_observably_clean(cp, minted: list[tuple[str, str]]) -> bool:
+    """True iff no minted row is live. Any raise → False (terminal, never fail-open)."""
+    try:
+        for table, row_id in minted:
+            rows = cp.query(table, select=["id"],
+                            filters=[("id", "eq", row_id), ("revoked_at", "is", None)])
+            if rows:
+                return False
+        return True
+    except Exception as exc:
+        logger.warning("oauth: mint observation failed: %s", exc)
+        return False
+
+
+def _prev_refresh_unclaimed(cp, prev_refresh: dict) -> bool:
+    """True iff the presented refresh token is still unrevoked. Any raise → False."""
+    try:
+        rows = cp.query("oauth_refresh_tokens", select=["revoked_at"],
+                        filters=[("id", "eq", prev_refresh["id"])])
+        return bool(rows) and rows[0].get("revoked_at") is None
+    except Exception as exc:
+        logger.warning("oauth: prev-refresh observation failed: %s", exc)
+        return False
 
 
 def _consume_code(cp, code: str) -> dict:
