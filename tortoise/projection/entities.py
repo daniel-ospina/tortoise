@@ -42,6 +42,24 @@ def _is_real_source_url(url: str) -> bool:
     return url.startswith(("http://", "https://"))
 
 
+def _classify(result, cas: bool) -> tuple:
+    """Shared (folded, matched) classification for the Object folds.
+
+    Hoisted out of ``_fold_object_superseded`` (#2977) so the retraction fold
+    reuses it instead of defining a second copy of the same rule.
+
+    ``cas`` is REQUIRED: a defaulted False would silently blind the live #2242
+    compare-and-set path (``commit_ops.py:629-630``), where a present-but-
+    terminal node must classify as ``(0, N)``, not ``(1, 1)``.
+    """
+    rows = result.result_set or []
+    if cas:
+        # RETURN live per row: folded = rows actually flipped
+        return (sum(1 for r in rows if r and r[0]), len(rows))
+    # cas=False (blind legacy SET): every matched row folded
+    return (len(rows), len(rows))
+
+
 def _build_search_text(title, summary=None, topics=None) -> str:
     """#125: compute the Document FTS search surface.
 
@@ -608,15 +626,6 @@ class _EntityHandlers:
         from tortoise.commit_ops import _RECALL_OBJECT_EXCLUDED_STATUS
         excluded = list(_RECALL_OBJECT_EXCLUDED_STATUS)
 
-        def _classify(result) -> tuple:
-            rows = result.result_set or []
-            if cas:
-                # RETURN live per row: folded = rows actually flipped
-                folded = sum(1 for r in rows if r and r[0])
-                return (folded, len(rows))
-            # cas=False (blind legacy SET): every matched row folded
-            return (len(rows), len(rows))
-
         if cas:
             # Engine-verified form (#2242 round-1 probe): FalkorDB rejects a
             # bare `NOT IN $param`; `NOT (o.status IN $excluded)` parses and
@@ -629,38 +638,101 @@ class _EntityHandlers:
                     "    o.supersededBy = CASE WHEN live THEN $sb "
                     "                          ELSE o.supersededBy END, "
                     "    o.supersededAt = CASE WHEN live THEN $sa "
-                    "                          ELSE o.supersededAt END "
+                    "                          ELSE o.supersededAt END, "
+                    # #2977 terminal hygiene: a bare `REMOVE` cannot be
+                    # `live`-conditional, so null it out instead.
+                    "    o.retractedAt  = CASE WHEN live THEN null "
+                    "                          ELSE o.retractedAt END "
                     "RETURN live")
         else:
             live = ("SET o.status='superseded', o.supersededBy=$sb, "
-                    "    o.supersededAt=$sa RETURN o.id LIMIT 1")
+                    "    o.supersededAt=$sa "
+                    "REMOVE o.retractedAt "          # #2977 terminal hygiene
+                    "RETURN o.id LIMIT 1")
         common_params = {"sb": supersedes_by, "sa": superseded_at}
         if cas:
             common_params["excluded"] = excluded
+        return self._fold_object_match_and_apply(
+            oid, name, live, common_params, cas=cas, skip_terminal=None)
+
+    def _fold_object_match_and_apply(self, oid, name, body: str,
+                                     common_params: dict, *, cas: bool,
+                                     skip_terminal: str | None) -> tuple:
+        """#2977: the SHARED match/fallback SELECTION rule for the Object folds.
+
+        Owns four things, all of which were live-verified defects when each fold
+        carried its own copy:
+          (i)   early return when neither key is present;
+          (ii)  SKIP the id branch when ``oid`` is None — never issue
+                ``{id: null}`` and rely on Cypher null-pattern semantics;
+          (iii) fall back to the name branch ONLY on genuine absence
+                (``matched == 0``). A present-but-terminal id node ``(0, N)`` is
+                a #2242 CAS loss and must NOT fall back (a fallback could fold a
+                dup-name carrier or re-claim a terminal target);
+          (iv)  the name branch is deterministic and single-row. Names are not
+                unique, so a bare ``MATCH {name}`` tombstones EVERY carrier
+                (verified live: ``matched == 2``); and a bare ``LIMIT 1`` is
+                scan-order dependent and may pick an ALREADY-retracted node,
+                reporting a clean ``(1, 1)`` while the LIVE node stays visible.
+
+        ``skip_terminal`` is the ONLY family-specific part of the selection rule
+        and is therefore a REQUIRED keyword PARAMETER (no default): the
+        retraction fold passes ``'retracted'``, the supersede fold passes
+        ``None``. A default would let a THIRD family (e.g. a future
+        ``ObjectDeprecated``) silently inherit the supersede family's semantics.
+
+        Cypher shape (verified live): FalkorDB REJECTS
+        ``WITH o WHERE … ORDER BY …``; ``WHERE`` must bind to its own ``WITH``
+        and ``ORDER BY`` must follow the bare ``WITH o``.
+        """
+        oid = oid if isinstance(oid, str) else None
+        name = name if isinstance(name, str) else None
+        if not oid and not name:
+            return (0, 0)
+        folded = matched = 0
         if oid:
+            result = self.g.query(f"MATCH (o:Object {{id:$id}}) {body}",
+                                  params={"id": oid, **common_params})
+            folded, matched = _classify(result, cas=cas)
+        if folded == 0 and matched == 0 and name:
             result = self.g.query(
-                "MATCH (o:Object {id:$id}) " + live,
-                params={"id": oid, **common_params})
-            folded, matched = _classify(result)
-            if folded == 0 and matched == 0 and name:
-                # #2164 review (P2, ISSUE B): the id branch matched NOTHING
-                # — the event's id is not the key the node carries (a legacy
-                # id-less Object journaled with its SYNTHESIZED canonical
-                # id). Fall back to the name branch — the same name-keyed
-                # fold the live path uses. #2242: fallback ONLY on genuine
-                # absence (matched == 0) — a present-but-terminal id node
-                # (0, 1) is a CAS loss and must NOT fall back (a fallback
-                # could fold a dup-name carrier or re-claim a terminal
-                # target under a different name spelling).
-                result = self.g.query(
-                    "MATCH (o:Object {name:$name}) " + live,
-                    params={"name": name, **common_params})
-                folded, matched = _classify(result)
-            return (folded, matched)
-        result = self.g.query(
-            "MATCH (o:Object {name:$name}) " + live,
-            params={"name": name, **common_params})
-        return _classify(result)
+                "MATCH (o:Object {name:$name}) "
+                "WHERE ($skip IS NULL OR coalesce(o.status,'') <> $skip) "
+                # `o.id` is a DETERMINISTIC TIEBREAKER: names are not unique and
+                # two carriers can share `createdAt`, which would make the pick
+                # scan-order dependent — the same false-success class the
+                # `skip_terminal` filter exists to remove.
+                "WITH o ORDER BY o.createdAt DESC, o.id LIMIT 1 " + body,
+                params={"name": name, "skip": skip_terminal,
+                        **common_params})
+            folded, matched = _classify(result, cas=cas)
+        return (folded, matched)
+
+    def _fold_object_retracted(self, ev: dict) -> tuple:
+        """#2977: mark a deleted Object ``status='retracted'`` (tombstone).
+
+        The removal counterpart of ``_fold_object_superseded`` — without it the
+        Object's surviving ``ObjectRegistered`` line resurrects it on replay.
+
+        The name fallback is load-bearing: ``_event_plain_merge`` can mint a stub
+        Object with a RANDOM ulid (``entities.py:887-897``), so an id-only match
+        would orphan those retractions.
+
+        Clears the supersession lane's fields so a retracted node cannot carry a
+        contradictory ``supersededBy`` (read status-blind by
+        ``assembly.py:677-682``). Idempotent: ``retractedAt`` coalesces so a
+        re-fold keeps the FIRST stamp. Returns ``(folded, matched)``;
+        ``(0, 0)`` = no node (orphan — never a create).
+
+        Replay-only (no live caller) → no CAS variant.
+        """
+        return self._fold_object_match_and_apply(
+            ev.get("id"), ev.get("name"),
+            "SET o.status='retracted', "
+            "    o.retractedAt=coalesce(o.retractedAt, $ts) "
+            "REMOVE o.supersededBy, o.supersededAt "
+            "RETURN o.id",
+            {"ts": ev.get("ts")}, cas=False, skip_terminal="retracted")
 
     def _upsert_document(self, ev: dict) -> None:
         """MERGE Document node."""
