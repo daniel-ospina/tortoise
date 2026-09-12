@@ -265,8 +265,13 @@ resolve_global() { # kind comment — close an open global incident (no-op if no
   # driver never observed recovering.
   owner="$(kind_owner "$kind")"
   if [ "$owner" != "driver" ] && [ "$owner" != "unspecified" ]; then
-    log "self-heal: refusing to close ${kind} — it is owned by the ${owner}, whose probes cover its recovery condition"
-    return 0
+    # Provenance exception (#3127): the driver may always clear a sentinel it
+    # opened itself — its own probes observed the condition being cleared.
+    _w="$(printf '%s' "$(r2_get "$(alert_key "$kind" "global")")" | jq -r '.writer // empty' 2>/dev/null || true)"
+    if [ "$_w" != "driver" ]; then
+      log "self-heal: refusing to close ${kind} — it is owned by the ${owner}, whose probes cover its recovery condition"
+      return 0
+    fi
   fi
   num="$(gh_find_open "$kind" "global")"
   if [ -n "$num" ]; then gh_close "$num" "$comment" "$kind" "global"; fi
@@ -289,13 +294,13 @@ file_alert() { # kind title body dedup_id
   while IFS= read -r _k; do
     if [ "$_k" = "$key" ]; then continue; fi
     alias_num="$(printf '%s' "$(r2_get "$_k")" | jq -r '.issue_number // empty' 2>/dev/null || true)"
-    if [ -n "$alias_num" ] && gh_issue_open "$alias_num"; then
+    if [ -n "$alias_num" ] && [ -z "${alias_num//[0-9]/}" ] && gh_issue_open "$alias_num"; then
       log "dedup: ${kind} already tracked by open issue #${alias_num} (alias ${_k}) — no-op"
       rm -f "$tmp"
       return 0
     fi
   done < <(alert_keys_all "$kind" "$id")
-  printf '{"kind":"%s","issue_number":null,"filed_at":"%s"}' "$kind" "$(date -u +%FT%TZ)" > "$tmp"
+  printf '{"kind":"%s","issue_number":null,"filed_at":"%s","writer":"driver"}' "$kind" "$(date -u +%FT%TZ)" > "$tmp"
   if r2_put_once "$key" "$tmp"; then
     num="$(gh_find_open "$kind" "$id")"
     if [ -z "$num" ]; then
@@ -329,7 +334,7 @@ file_alert() { # kind title body dedup_id
     # stop. Otherwise adopt an OPEN issue for this (kind, subject) if one
     # exists, else become the filer, then backfill our issue_number.
     issue_num="$(printf '%s' "$(r2_get "$key")" | jq -r '.issue_number // empty' 2>/dev/null || true)"
-    if [ -n "$issue_num" ] && gh_issue_open "$issue_num"; then
+    if [ -n "$issue_num" ] && [ -z "${issue_num//[0-9]/}" ] && gh_issue_open "$issue_num"; then
       log "dedup: ${kind}/${id:-_} already tracked by open issue #${issue_num} — no-op"
       rm -f "$tmp"
       return 0

@@ -20088,10 +20088,19 @@ def _backup_config_safe() -> BackupConfig | None:  # noqa: F821
     return cfg if cfg.enabled else None
 
 
-def _alert_store_from(cfg, writer: str = "unspecified") -> AlertStore:  # noqa: F821
+def _alert_store_from(cfg, writer: str | None = None) -> AlertStore:  # noqa: F821
+    """Build the store. `writer` is the identity its resolves act as.
+
+    Defaults to the app (this factory is the app's), so the declared owner in
+    KIND_OWNERS actually declares itself — otherwise the authority check is
+    short-circuited for the whole app path and the map is inert. The watcher
+    passes WRITER_WATCHER explicitly at its construction site.
+    """
     from tortoise import github_issue as gi
-    from tortoise.alert_store import AlertStore
+    from tortoise.alert_store import WRITER_APP, AlertStore
     from tortoise.telegram_push import send_message
+
+    writer = WRITER_APP if writer is None else writer
 
     storage = _backup_storage()
 
@@ -20112,7 +20121,7 @@ def _alert_store_from(cfg, writer: str = "unspecified") -> AlertStore:  # noqa: 
         send_message(cfg.telegram_bot_token, cfg.telegram_chat_id, text)
 
     def issue_open(number: int) -> bool:
-        return gi.issue_is_open(cfg.gh_repo, cfg.github_issues_pat, number)
+        return gi.issue_is_open_checked(cfg.gh_repo, cfg.github_issues_pat, number)
 
     return AlertStore(
         storage, file_issue=file_issue, close_issue=close_issue,

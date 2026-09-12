@@ -627,7 +627,9 @@ def test_become_filer_writes_the_canonical_key():
     assert store.open_incident("R2_DOWN") is True
     canonical = json.loads(storage.download(_CANONICAL_KEY))
     assert canonical["issue_number"] == 1, "the canonical key must hold the number"
-    assert canonical["writer"] == "unspecified"  # no declared writer → recorded as such
+    # Provenance is absent when the caller declared none, so KIND_OWNERS governs
+    # (an undeclared writer buys no authority).
+    assert "writer" not in canonical
     with pytest.raises(KeyError):
         storage.download(_DRIVER_KEY)
 
@@ -705,6 +707,69 @@ def test_resolve_tolerates_a_corrupt_issue_number():
 
     assert store.resolve_incident("R2_DOWN") is True  # must not raise
     assert ch.closed == []
+
+
+def test_non_owner_that_adopts_an_issue_does_not_gain_authority():
+    """#3127 round 2 (P1): adopting someone else's issue must not confer authority.
+
+    The watcher creates its own placeholder, then the GH-search fallback finds
+    the DRIVER's already-filed open issue and adopts its number. Stamping the
+    watcher as the sentinel's `writer` made the provenance carve-out pass, so
+    the watcher could close the driver's `R2_DOWN` on its weaker reachability
+    probe — the false recovery the guard exists to stop, one layer deeper. This
+    reproduced against the previous commit.
+    """
+    ch = _FakeChannels()
+    storage = MemoryStorage()
+    ch.issues[50] = "[DR] R2_DOWN"  # filed by the driver, still open
+    store = _store(ch, storage, issue_open=lambda n: True, writer="watcher")
+
+    store.open_incident("R2_DOWN")
+    sentinel = json.loads(storage.download(_CANONICAL_KEY))
+    assert sentinel["issue_number"] == 50, "the driver's issue is adopted, not re-filed"
+    assert len(ch.issues) == 1
+    assert "writer" not in sentinel, "an adopter must not claim provenance"
+    assert ch.telegram == [], "the filer already announced it — no duplicate push"
+
+    # ...so the authority check falls through to KIND_OWNERS: R2_DOWN is the
+    # driver's, and the watcher cannot clear it.
+    assert store.resolve_incident("R2_DOWN") is False
+    assert ch.closed == []
+
+
+def test_deleted_issue_is_treated_as_closed_not_as_a_blip():
+    """#3127 round 2 (P1): 404/410 on the issue-state read means GONE.
+
+    `issue_is_open_checked` returns False for 404/410 so a deleted issue cannot
+    swallow the recurrence, while every other failure still counts as open so a
+    blip never re-files a live incident. (The bash driver's `gh_issue_open`
+    already treated 404 as definitive; the two now agree.)
+    """
+    from tortoise.github_issue import GithubApiError, issue_is_open_checked
+
+    calls = []
+
+    def _raise_404(method, url, token, payload=None, **kw):
+        calls.append(url)
+        raise GithubApiError(404, "gone")
+
+    import tortoise.github_issue as gi
+
+    original = gi._request
+    gi._request = _raise_404
+    try:
+        assert issue_is_open_checked("r/r", "t", 7) is False
+    finally:
+        gi._request = original
+    assert calls
+
+    # A deleted-issue sentinel therefore re-files rather than being adopted.
+    ch = _FakeChannels()
+    storage = MemoryStorage()
+    _driver_sentinel(storage, 7)
+    store = _store(ch, storage, issue_open=lambda n: False)
+    assert store.open_incident("R2_DOWN") is True
+    assert len(ch.issues) == 1
 
 
 def test_kind_owner_contract_with_driver():

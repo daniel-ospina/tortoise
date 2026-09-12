@@ -182,7 +182,20 @@ class AlertStore:
 
     def _alias_states(self, kind: str, team_id: str) -> list[tuple[str, dict[str, Any]]]:
         """Every sentinel that currently exists for this incident."""
-        return [(k, state) for k in self._keys(kind, team_id) if (state := _read_json(self._storage, k))]
+        out: list[tuple[str, dict[str, Any]]] = []
+        for k in self._keys(kind, team_id):
+            state = _read_json(self._storage, k)
+            if not state:
+                continue
+            # A PLATFORM spelling must not adopt a sentinel belonging to a real
+            # subject literally named "global"/"_" — `hosted_api` opens
+            # RESTORE_DRILL_FAILED with that subject. A subject-scoped sentinel
+            # carries its subject in the body; the driver's platform sentinel
+            # does not (it predates the field).
+            if team_id == "" and state.get("team_id"):
+                continue
+            out.append((k, state))
+        return out
 
     def _suppressed(self, kind: str) -> bool:
         supp = _read_json(self._storage, _SUPPRESSION_KEY)
@@ -255,7 +268,6 @@ class AlertStore:
             "filed_at": self._clock().isoformat(),
             "issue_number": None,
             "telegram_pushed": False,
-            "writer": writer,
         }
         created = self._storage.create_if_not_exists(key, json.dumps(placeholder).encode())
         if created:
@@ -267,7 +279,10 @@ class AlertStore:
                     continue
                 number = state.get("issue_number")
                 if number and self._issue_is_live(kind, team_id, number):
-                    self._storage.delete(key)
+                    try:
+                        self._storage.delete(key)
+                    except Exception as e:
+                        logger.warning("dedup: could not drop our own sentinel %s: %s", key, e)
                     return False
             return self._become_filer(kind, team_id, detail, key, placeholder, writer)
         # 412 — adopt the winner's object; never double-file.
@@ -291,6 +306,21 @@ class AlertStore:
         """
         for sibling, state in adopted:
             try:
+                # Compare-and-delete: another writer may have re-filed (and
+                # backfilled a DIFFERENT issue number) during the GitHub round
+                # trips above. Deleting its fresh sentinel would file a third
+                # issue for one condition — the #2844 defect in the recovery
+                # path — so only delete the exact object we read.
+                current = _read_json(self._storage, sibling)
+                if current and (
+                    current.get("issue_number") != state.get("issue_number")
+                    or current.get("filed_at") != state.get("filed_at")
+                ):
+                    logger.warning(
+                        "dedup: %s changed while we were checking it — leaving it"
+                        " alone (the other writer re-filed)", sibling,
+                    )
+                    continue
                 self._storage.delete(sibling)
                 logger.warning(
                     "dedup: dropped stale sentinel %s for %s (recorded issue #%s "
@@ -331,6 +361,7 @@ class AlertStore:
         self, kind, team_id, detail, key, state, writer: str = WRITER_UNSPECIFIED,
     ) -> bool:
         issue_number = None
+        filed_here = False
         try:
             # Subject-scoped search (#2313 Task 4): the query must match the
             # incident's OWN title (kind + team/graph subject). A kind-only
@@ -347,14 +378,15 @@ class AlertStore:
                 issue_number = self._file(
                     self._title(kind, team_id, detail), self._body(kind, team_id, detail)
                 )
+                filed_here = issue_number is not None
             except Exception as e:
                 logger.warning("incident filing failed for %s: %s — will adopt on next poll", kind, e)
         state["issue_number"] = issue_number
         state["detail"] = detail
-        if writer != WRITER_UNSPECIFIED:
-            state["writer"] = writer  # provenance for the #3127 authority check
+        if filed_here and writer != WRITER_UNSPECIFIED:
+            state["writer"] = writer  # provenance: who FILED it, not who adopted it
         _write_json(self._storage, key, state)
-        if issue_number is not None:
+        if issue_number is not None and filed_here:
             self._push_with_pending(key, self._telegram_text(kind, team_id, detail, issue_number))
             state["telegram_pushed"] = True
             _write_json(self._storage, key, state)

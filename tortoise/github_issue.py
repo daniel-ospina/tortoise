@@ -144,3 +144,23 @@ def issue_is_open(repo: str, token: str, number: int) -> bool:
     """
     data = _request("GET", f"{_API}/repos/{repo}/issues/{number}", token)
     return str(data.get("state", "open")) == "open"
+
+
+def issue_is_open_checked(repo: str, token: str, number: int) -> bool:
+    """``issue_is_open`` with 404/410 treated as CLOSED, not as an error.
+
+    A deleted (or bogus) issue number is POSITIVE evidence that the incident is
+    no longer tracked, and the bash driver's ``gh_issue_open`` already treats it
+    that way (404 -> re-file). Letting it surface as a generic failure would let
+    a sentinel naming a deleted issue swallow the recurrence forever — the
+    silent-outage class this whole mechanism exists to stop. Every other failure
+    (5xx, rate limit, transport) still raises, so a blip counts as "open" and
+    never re-files a live incident.
+    """
+    try:
+        data = _request("GET", f"{_API}/repos/{repo}/issues/{number}", token)
+    except GithubApiError as e:
+        if e.status in (404, 410):
+            return False
+        raise
+    return str(data.get("state", "open")) == "open"
