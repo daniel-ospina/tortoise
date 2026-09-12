@@ -386,6 +386,7 @@ surfaces:
   - test_ingest_event_endpoint.py
   - test_ingest_safety.py
   - test_ingest_v2_consolidation.py
+  - test_ingest_v2_parallel.py
   - test_ingest_validation.py
   - test_integration_search.py
   - test_issue_insight.py
