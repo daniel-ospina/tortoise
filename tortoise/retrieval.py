@@ -468,6 +468,27 @@ def _render_block(h: dict) -> str:
     return f"{prefix} {h.get('content', '')}"
 
 
+def _has_claim_text(h: dict) -> bool:
+    """True when a hit renders reader-visible CLAIM text (#2978).
+
+    ``_render_block`` contributes exactly TWO claim-text sources beyond the
+    ``[session N]`` / session-date / speaker decorations: the hit's
+    ``content`` and the supersession/validity marker text
+    (``_validity_marker`` — e.g. ``[SUPERSEDED BY: <snippet>]``, whose text
+    comes from ``superseded_by.content_snippet`` / ``supersedes`` and is
+    INDEPENDENT of ``content``). A hit with neither source renders
+    decorations only and carries nothing for the reader. Gating the #2978
+    skip on this predicate (not on ``content`` alone) keeps it aligned with
+    what actually reaches the reader.
+
+    Keep in sync with ``_render_block``: any NEW claim-text source added
+    there must be reflected here, or the skip would silently drop it.
+    """
+    if str(h.get("content") or "").strip():
+        return True
+    return bool(_validity_marker(h))
+
+
 def assemble_context(
     pool: list[dict], *,
     top_k: int,
@@ -508,15 +529,18 @@ def assemble_context(
     ``int()`` drift). Oversized hits are SKIPPED (continue), never starving
     the rest of the context.
 
-    Content-less hits (#2978) consume NO item slot and NO budget. A hit
-    whose ``content`` is empty/whitespace renders a prefix-only block (just
-    the ``[session N]`` / speaker / validity decorations — e.g. an
-    epistemic operator node: ``is_operator=true``, ``op_type`` IMPL/NAND,
-    which ``create_operator`` writes with no ``content`` property).
-    Admitting such a hit burned an item slot and left the reader window
-    mostly empty (measured 61.3% of slots); it is now SKIPPED like an
-    oversized hit (skip-not-starve), so later real hits are admitted up to
-    the cap. Skipped hits are absent from the returned list, so
+    Claim-text-less hits (#2978) consume NO item slot and NO budget. A hit
+    that renders ONLY decorations (``[session N]`` / session date / speaker
+    — no ``content`` AND no supersession/validity marker text) carries
+    nothing for the reader — e.g. an epistemic operator node:
+    ``is_operator=true``, ``op_type`` IMPL/NAND, which ``create_operator``
+    writes with no ``content`` property. Admitting such a hit burned an item
+    slot and left the reader window mostly empty (measured 61.3% of slots);
+    it is now SKIPPED like an oversized hit (skip-not-starve), so later real
+    hits are admitted up to the cap. The decision is
+    :func:`_has_claim_text`, NOT ``content`` alone: a content-less hit that
+    still carries a supersession snippet DOES render claim text and is
+    KEPT. Skipped hits are absent from the returned list, so
     ``render_context`` never renders them and the accounting invariant
     above is unaffected.
     """
@@ -544,12 +568,15 @@ def assemble_context(
     for h in pool:
         if len(selected) >= item_bound:
             break
-        # #2978: a content-less hit renders a prefix-only block (decorations
-        # with no claim text) — it carries nothing for the reader, so it must
-        # not consume an item slot or budget. Skipping it preserves the
-        # skip-not-starve semantics below: later real hits still get their
-        # chance, and the admitted REAL-item set/order is unchanged.
-        if not str(h.get("content") or "").strip():
+        # #2978: a hit rendering ONLY decorations (no content AND no
+        # supersession/validity marker text) carries nothing for the reader,
+        # so it must not consume an item slot or budget. Skipping it leaves
+        # the RELATIVE ORDER of the admitted real hits unchanged, but frees
+        # BOTH the empty hit's item slot AND its words/bytes budget, so
+        # later real hits may additionally be ADMITTED up to the cap (the
+        # admitted set can grow, not just shift). Same skip-not-starve
+        # semantics as the oversized-hit path below.
+        if not _has_claim_text(h):
             continue
         block = _render_block(h)
         cost = len(block.split())

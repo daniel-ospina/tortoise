@@ -390,6 +390,62 @@ def test_context_normal_items_render_byte_identical():
     ])
 
 
+def test_context_contentless_hit_with_marker_text_is_kept():
+    """#2978 (FIX 1): the skip predicate is "renders no CLAIM text", NOT
+    "``content`` is empty". ``_render_block`` also emits supersession /
+    validity marker text whose source is ``superseded_by.content_snippet`` /
+    ``supersedes`` / the validity window — INDEPENDENT of ``content``. A
+    content-less hit carrying such a snippet renders reader-visible claim
+    text and must be KEPT; a plain content-less operator hit (no content, no
+    marker) is still SKIPPED."""
+    pool = [
+        {"id": "op1", "is_operator": True, "op_type": "IMPL",
+         "lme_session_index": 0},  # no content, no marker -> SKIPPED
+        {"id": "sb", "content": "", "lme_session_index": 1,
+         "superseded_by": {"id": "y",
+                           "content_snippet": "the office hours are 9-5"}},
+        {"id": "sup", "content": "   ", "lme_session_index": 2,
+         "supersedes": [{"id": "z",
+                          "content_snippet": "old hours are 8-4"}]},
+        {"id": "vf", "content": "", "lme_session_index": 3,
+         "valid_from": "2026-06-10"},
+    ]
+    ctx = assemble_context(pool, top_k=20, max_context_tokens=10**6)
+    ids = [h["id"] for h in ctx]
+    # plain content-less operator is still skipped (the #2978 win holds)
+    assert "op1" not in ids
+    # every hit whose render carries marker claim text survives
+    assert ids == ["sb", "sup", "vf"]
+    text = render_context(ctx)
+    assert "the office hours are 9-5" in text
+    assert "old hours are 8-4" in text
+    assert "[SUPERSEDED BY: the office hours are 9-5]" in text
+    assert "[SUPERSEDES: old hours are 8-4]" in text
+    # accounting invariant holds with the marker-only blocks admitted
+    # (no question_date -> no header words; ASCII text -> no CJK surcharge)
+    assert estimate_tokens(text) == int(len(text.split()) * 1.1)
+
+
+def test_context_skipped_hit_frees_budget_for_later_real_hit():
+    """#2978 (FIX 2): the skipped content-less hit frees not only its item
+    slot but also its words/bytes budget, so a later real hit can be
+    ADDITIONALLY ADMITTED — the admitted set grows, it is not merely
+    reordered. At a 26-token cap the empty hit's 2 words are decisive:
+    r1+r2 use ``int(24 * 1.1) == 26``, while keeping the empty hit's words
+    would make it ``int(26 * 1.1) == 28 > 26`` and drop r2."""
+    filler = " ".join(f"w{i}" for i in range(10))
+    pool = [
+        {"id": "e0", "is_operator": True, "op_type": "NAND",
+         "lme_session_index": 0},  # content-less -> skipped
+        {"id": "r1", "content": filler, "lme_session_index": 1},
+        {"id": "r2", "content": filler, "lme_session_index": 2},
+    ]
+    ctx = assemble_context(pool, top_k=20, max_context_tokens=26)
+    assert [h["id"] for h in ctx] == ["r1", "r2"]
+    assert estimate_tokens(render_context(ctx)) <= 26
+    assert estimate_tokens(render_context(ctx)) == int((12 + 12) * 1.1)
+
+
 def test_context_reader_alignment_invariant():
     """The alignment invariant (R1 #1540): the assembly's budget accounting
     (raw whitespace words + the once-prepended date header, 1.1 markup ONCE)
