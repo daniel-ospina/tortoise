@@ -437,18 +437,29 @@ def _build_anchor(
     prop_width = len(_POINT_PROP_KEYS)
     for row in raw["ops"]:
         values = _row(row, 4 + prop_width)
-        et_raw, n_idx, _other_idx, _op_id = values[:4]
+        et_raw, n_idx, other_idx, _op_id = values[:4]
         other_id = values[4]
         other_content = values[5]
         edge_type = _norm_edge_type(et_raw)
         if edge_type is None or other_id is None:
             continue
         props_by_id.setdefault(str(other_id), _props(values[4:]))
-        # idx == 0 is the source; idx > 0 the targets.
+        # Frozen edge semantics: ``r.idx == 0`` is the SOURCE and every
+        # ``idx > 0`` a TARGET, with real edges ``source → target``.
+        # Direction therefore needs BOTH indices, not ``n_idx`` alone. When
+        # the anchor is a target (``n_idx > 0``) and the other endpoint is
+        # the source (``other_idx == 0``) the edge runs other → anchor — the
+        # mirror of the anchor-as-source case. When BOTH are targets the two
+        # endpoints are siblings under the operator and **no edge exists
+        # between them**, so neither a relation nor a candidate occurrence
+        # may be emitted (deriving direction from ``n_idx`` alone fabricated
+        # ``T2 IMPLIES T1`` for a 3-endpoint operator).
         if n_idx == 0:
             relations.append(Relation(anchor_id, edge_type, str(other_id), ""))
-        else:
+        elif other_idx == 0:
             relations.append(Relation(str(other_id), edge_type, anchor_id, ""))
+        else:
+            continue
         occs.append(_occurrence(other_id, other_content, anchor_id, edge_type, 1, s_norm, None))
 
     # 1-hop aboutObject — the entity is a hub, never a candidate claim.

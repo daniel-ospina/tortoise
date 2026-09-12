@@ -264,6 +264,54 @@ def test_two_anchors_render_two_blocks_back_to_back_with_mirrored_nand():
     assert result.relations_rendered == 2
 
 
+def test_supersession_rendered_when_anchor_is_the_superseder():
+    # P1 regression: the superseded claim is a non-seed candidate, so
+    # attributing the relation only to its target silently dropped the line
+    # from every block. Attribution is symmetric with NAND, and the marker
+    # always names the SUPERSEDED claim (the relation's target).
+    superseder = "lme:q1:s1:t0"
+    superseded = "lme:q1:s2:t0"
+    sg = _sg(
+        (superseder,),
+        candidates=(
+            _cand(
+                superseded,
+                anchor_id=superseder,
+                edge_type="supersession",
+                reserved=True,
+                content="old claim",
+            ),
+        ),
+        relations=(Relation(superseder, "supersession", superseded, ""),),
+        content={superseder: "new claim", superseded: "old claim"},
+    )
+    result = render_arm_b(sg, haystack_session_ids=_SESSIONS)
+    lines = result.text.split("\n")
+    assert lines[0] == "C1: new claim"
+    assert lines[1] == "C2 [SUPERSEDED BY C1]"
+    assert result.relations_rendered == 1
+
+
+def test_two_anchors_render_mirrored_supersession_in_both_blocks():
+    # Both endpoints admitted as anchors: each block leads with the same
+    # marker line naming the superseded claim.
+    new = "lme:q1:s0:t0"
+    old = "lme:q1:s1:t0"
+    sg = _sg(
+        (new, old),
+        relations=(Relation(new, "supersession", old, ""),),
+        content={new: "claim new", old: "claim old"},
+    )
+    result = render_arm_b(sg, haystack_session_ids=_SESSIONS)
+    lines = result.text.split("\n")
+    assert lines[0] == "C1: claim new"
+    assert lines[1] == "C2 [SUPERSEDED BY C1]"
+    assert lines[4] == "C2: claim old"
+    assert lines[5] == "C2 [SUPERSEDED BY C1]"
+    assert result.claims_rendered == 2
+    assert result.relations_rendered == 2
+
+
 # ── fallbacks ────────────────────────────────────────────────────────────
 
 _PLAIN_ANCHOR = "point-without-turn-id"
@@ -303,7 +351,10 @@ def test_valid_from_wins_over_created_at():
     assert "(2024-02-03)" in result.text
 
 
-def test_session_dates_fallback_used_only_when_point_has_no_date():
+def test_session_dates_fallback_is_ignored_point_without_date_is_unknown():
+    # The spec's frozen chain is validFrom → createdAt → (date unknown); it
+    # defines no session-level date fallback, so a supplied session_dates map
+    # must never fabricate a date the point does not carry.
     sg = _sg((_ANCHOR,), content={_ANCHOR: "text"})
     result = render_arm_b(
         sg,
@@ -311,7 +362,8 @@ def test_session_dates_fallback_used_only_when_point_has_no_date():
         session_dates={"s11": "2022-12-31"},
         points_by_id={_ANCHOR: {"session_id": "s11"}},
     )
-    assert "(2022-12-31)" in result.text
+    assert "(2022-12-31)" not in result.text
+    assert "(date unknown)" in result.text
 
 
 def test_session_id_absent_from_frozen_list_is_session_question():

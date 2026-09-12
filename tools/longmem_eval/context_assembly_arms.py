@@ -9,8 +9,9 @@ This module is the **driver** for the pre-registered A/B/C/D experiment:
 =============  ====================================================
 arm            context slot handed to the one pinned reader
 =============  ====================================================
-``A``          the existing lane's retrieved context (``retrieve_for_question``
-               → ``context_points``) rendered through ``render_context``
+``A``          the **GOLD** sessions rendered **verbatim** through
+               ``render_context`` (turn text intact), resolved from
+               ``answer_session_ids`` — the oracle ceiling, not a retrieval arm
 ``B``          the epistemic subgraph (``build_subgraph`` → ``render_arm_b``),
                typed relation lines, **no raw turn text**
 ``C``          arm B plus each anchor claim's verbatim source turns
@@ -78,6 +79,7 @@ import logging
 import os
 import re
 import statistics
+import subprocess
 import sys
 import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
@@ -95,14 +97,13 @@ from tools.longmem_eval.gold_evidence_claims import (
 )
 from tools.longmem_eval.judge import build_judge, is_abstention
 from tools.longmem_eval.reader import build_reader
-from tools.longmem_eval.retrieve import retrieve_for_question
 from tortoise.reader import (
     _looks_abstained,
     build_reader_user_message,
     reader_prompt_constants,
 )
 from tortoise.retrieval import render_context
-from tortoise.subgraph import Subgraph, build_subgraph
+from tortoise.subgraph import SEED_COUNT, SEED_LIMIT, Subgraph, build_subgraph
 from tortoise.subgraph_render import (
     render_arm_b,
     render_arm_c,
@@ -125,6 +126,7 @@ __all__ = [
     "build_context_arm",
     "build_report",
     "claim_matches_point",
+    "embedder_model_id",
     "graph_metrics",
     "load_census_classes",
     "load_gold_claims",
@@ -132,6 +134,7 @@ __all__ = [
     "main",
     "reader_prompt_hash",
     "reader_prompt_sha256",
+    "repo_git_sha",
     "run_experiment",
     "scan_eval_graph",
 ]
@@ -162,6 +165,17 @@ TYPED_RELATIONS: tuple[str, ...] = ("IMPL", "NAND", "supersession")
 
 #: Budget-unit factor (§5): ``int(len(text.split()) * 1.1)``.
 _WORD_TOKEN_FACTOR = 1.1
+
+#: Repo root — ``<root>/tools/longmem_eval/context_assembly_arms.py``.
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
+#: The frozen serializer module whose path + git sha the manifest records (§3).
+SERIALIZER_MODULE_PATH = "tortoise/subgraph_render.py"
+
+#: The fixed §10.1 ``lme_session_index`` permutation seed. Mirrors
+#: ``leakage_guard.fixed_session_index_permutation``'s ``seed`` default, so the
+#: perturbation the manifest records is the one the leakage test applies.
+SESSION_INDEX_PERMUTATION_SEED = 0xD1CE
 
 #: Turn-node id suffix ``…:s<si>:t<ti>`` (ti is 0-based).
 _TURN_ID_RE = re.compile(r":s(\d+):t(\d+)$")
@@ -216,6 +230,11 @@ class ArmContext:
     #: Anchor blocks rendered (claim lines) — the rendered subset.
     claims_rendered: int
     relations_rendered: int
+    #: Count of reserved relation lines dropped by budget truncation (§3
+    #: ``reserved_overflow``; B/C only — 0 for A/D).
+    reserved_overflow: int = 0
+    #: Selected seeds in **rank order** (§3 seed policy; B/C only).
+    seed_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -384,14 +403,64 @@ def build_context_arm(
     namespace: str | None = None,
     max_words: int = DEFAULT_MAX_WORDS,
 ) -> ArmContext:
-    """Render one arm's ``{context}`` slot (the render path; gold-free)."""
+    """Render one arm's ``{context}`` slot.
+
+    The B/C render path is gold-free (spec §3 labeling rule); arm A is the
+    gold-verbatim oracle ceiling and reads the question's gold sessions by
+    design, inside its own branch.
+    """
     if arm == "A":
-        ret = retrieve_for_question(sdk, dict(qctx.raw))
-        points = list(ret.get("context_points") or [])
-        text = render_context(points, question_date=qctx.question_date)
+        # ── the gold-verbatim ORACLE CEILING (spec §3) ────────────────────
+        # Arm A is NOT a retrieval arm. Spec §3 defines it as the question's
+        # GOLD sessions rendered verbatim through ``render_context`` with the
+        # turn text intact — resolved from ``answer_session_ids``. Every
+        # F/H statistic is computed relative to arm A, and §7 F3's frozen
+        # ``A_ref = 42/52`` exists only for the gold render, so a
+        # retrieval-based A would invalidate every reported delta.
+        #
+        # This is the ONLY gold read in the driver and it is legitimate: the
+        # §3/§10 leakage rule governs the seed / traversal / ranking / B-C
+        # render paths, never the arm-A oracle. ``leakage_guard`` carves this
+        # ``arm == "A"`` branch out of the §10.2 static assertion by name.
+        position_by_sid: dict[str, list[int]] = {}
+        for i, sid in enumerate(qctx.haystack_session_ids):
+            position_by_sid.setdefault(str(sid), []).append(i)
+        selected: list[int] = []
+        for sid in qctx.answer_session_ids:
+            positions = position_by_sid.get(str(sid))
+            if not positions:
+                raise ValueError(
+                    f"{qctx.qid}: gold session id {sid!r} is not resolvable "
+                    "against haystack_session_ids — arm A cannot be built")
+            for index in positions:
+                if index >= len(qctx.haystack_sessions):
+                    raise ValueError(
+                        f"{qctx.qid}: gold session {sid!r} maps to index "
+                        f"{index} but haystack_sessions has "
+                        f"{len(qctx.haystack_sessions)} entries")
+                selected.append(index)
+        hits: list[dict[str, Any]] = []
+        for index in sorted(set(selected)):
+            session = qctx.haystack_sessions[index]
+            transcript = "\n".join(
+                f"{str(turn.get('role') or 'unknown').title()}: "
+                f"{turn.get('content') or ''}"
+                for turn in session
+            )
+            sid = qctx.haystack_session_ids[index]
+            hits.append({
+                "id": f"lme:{qctx.qid}:s{index}",
+                "content": transcript,
+                "session_id": str(sid),
+                "lme_session_index": index,
+                "session_date": (
+                    qctx.haystack_dates[index]
+                    if index < len(qctx.haystack_dates) else ""),
+            })
+        text = render_context(hits, question_date=qctx.question_date)
         return ArmContext(
             arm=arm, text=text, word_count=_words(text),
-            budget_words=_budget_words(text), context_source="verbatim",
+            budget_words=_budget_words(text), context_source="gold-verbatim",
             zero_seed=None, seed_fn=None, claims_admitted=0,
             claims_rendered=0,
             relations_rendered=0,
@@ -431,6 +500,8 @@ def build_context_arm(
             claims_admitted=len(sg.anchors) + len(sg.candidates),
             claims_rendered=result.claims_rendered,
             relations_rendered=result.relations_rendered,
+            reserved_overflow=result.reserved_overflow,
+            seed_ids=tuple(str(point_id) for point_id, _score in sg.seeds),
         )
 
     raise ValueError(f"unknown arm {arm!r}; expected one of {ARMS}")
@@ -902,7 +973,9 @@ def run_experiment(
 
     Seams (all injectable for hermetic tests): ``sdk_factory``,
     ``scan_fn``, ``ep_fn``. The metrics layer (5/8/9) runs **after** the
-    context slot is rendered; the render path never receives gold data.
+    context slot is rendered. The B/C render path never receives gold data;
+    arm A is the gold-verbatim oracle ceiling by construction (spec §3) and
+    its gold read is confined to ``build_context_arm``'s arm-A branch.
     """
     if sdk_factory is None:
         sdk_factory = _default_sdk_factory
@@ -917,6 +990,10 @@ def run_experiment(
     per_arm: dict[str, list[dict]] = {arm: [] for arm in arms}
     per_question_graph_metrics: dict[str, dict[str, Any]] = {}
     ep_summary: dict[str, Any] = {"ran": 0, "failed": 0, "engine": None}
+    #: §3 reserved-overflow flag, per question → arm → dropped reserved lines.
+    reserved_overflow: dict[str, dict[str, int]] = {}
+    #: §3 seed policy provenance, per question → arm → {seed_fn, seed_ids}.
+    seed_selection: dict[str, dict[str, dict[str, Any]]] = {}
 
     for row in rows:
         qctx = load_question_context(row)
@@ -987,6 +1064,8 @@ def run_experiment(
                                     if arm in ("B", "C") else None),
                 "relations_rendered": (ctx.relations_rendered
                                        if arm in ("B", "C") else None),
+                "reserved_overflow": ctx.reserved_overflow,
+                "seed_ids": list(ctx.seed_ids),
                 "reader_refusal": bool(_looks_abstained(hypothesis)),
                 "measure_facts": {
                     "reader_refusal": bool(_looks_abstained(hypothesis)),
@@ -996,6 +1075,18 @@ def run_experiment(
                 "metrics": gm,
                 "ep": ep_manifest,
             }
+            # Aggregate the §3 provenance the manifest must carry: a question
+            # whose reserved claims alone exceed the budget is flagged with the
+            # count of dropped reserved lines; the eight selected seed ids are
+            # recorded in rank order with the seed function per question.
+            if ctx.reserved_overflow:
+                reserved_overflow.setdefault(qctx.qid, {})[arm] = (
+                    ctx.reserved_overflow)
+            if ctx.seed_ids or (arm in ("B", "C") and ctx.seed_fn):
+                seed_selection.setdefault(qctx.qid, {})[arm] = {
+                    "seed_fn": ctx.seed_fn,
+                    "seed_ids": list(ctx.seed_ids),
+                }
             per_arm[arm].append(outcome)
 
     # ── methodology + reports ─────────────────────────────────────────────
@@ -1052,6 +1143,8 @@ def run_experiment(
         "graph_metrics": graph_rates,
         "per_question_graph_metrics": per_question_graph_metrics,
         "ep_summary": ep_summary,
+        "reserved_overflow": reserved_overflow,
+        "seed_selection": seed_selection,
     }
 
 
@@ -1064,11 +1157,112 @@ def assert_reader_constancy(arms_meta: Mapping[str, Mapping[str, Any]]) -> None:
 # ── run manifest ──────────────────────────────────────────────────────────
 
 
+def repo_git_sha() -> str | None:
+    """``git rev-parse HEAD`` captured at run time (§3 "Frozen artifact").
+
+    The serializer's git sha is part of the manifest, so a silent re-render
+    after a serializer change is detectable. Returns ``None`` when git is
+    unavailable (a non-repo export) rather than inventing a value.
+    """
+    try:
+        proc = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=REPO_ROOT,
+            capture_output=True, text=True, check=True, timeout=10)
+    except Exception:  # pragma: no cover - env without git
+        return None
+    sha = proc.stdout.strip()
+    return sha or None
+
+
+def embedder_model_id() -> str:
+    """The embedder identity ``vector_search`` seeds with (§3 seed policy)."""
+    from tortoise.embeddings import EMBEDDING_MODEL
+    return str(EMBEDDING_MODEL)
+
+
+def _seed_selection_manifest(
+    seed_selection: Mapping[str, Mapping[str, Mapping[str, Any]]] | None,
+    embedder: str | None,
+) -> dict[str, Any]:
+    """Normalize the per-question seed provenance recorded by the run (§3).
+
+    Records the **eight selected seed ids in rank order** plus the seed
+    function per question, the fetch width/normalization constants, and the
+    embedder model id — so a boundary difference between two runs is visible.
+    ``mixed_seed_functions`` flags a run that mixed vector and BM25 seeding
+    across arms, which §3 forbids.
+    """
+    per_question = {
+        str(qid): {
+            str(arm): {
+                "seed_fn": entry.get("seed_fn"),
+                "seed_ids": [str(s) for s in (entry.get("seed_ids") or ())],
+            }
+            for arm, entry in per_arm.items()
+        }
+        for qid, per_arm in (seed_selection or {}).items()
+    }
+    seed_fns = sorted({
+        str(entry["seed_fn"]) for per_arm in per_question.values()
+        for entry in per_arm.values() if entry.get("seed_fn")
+    })
+    return {
+        "seed_fn": (seed_fns[0] if len(seed_fns) == 1
+                    else (seed_fns or None)),
+        "mixed_seed_functions": len(seed_fns) > 1,
+        "seed_limit": SEED_LIMIT,
+        "seed_count": SEED_COUNT,
+        "embedder_model_id": (embedder if embedder is not None
+                              else embedder_model_id()),
+        "per_question": per_question,
+    }
+
+
+def _reserved_overflow_manifest(
+    per_question: Mapping[str, Mapping[str, int]] | None,
+) -> dict[str, Any]:
+    """The §3 ``reserved_overflow`` block: per question + the dropped count.
+
+    A question whose reserved claims alone exceed the §5 budget is flagged
+    here with the count of dropped reserved lines.
+    """
+    normalized = {
+        str(qid): {str(arm): int(count) for arm, count in per_arm.items()}
+        for qid, per_arm in (per_question or {}).items()
+    }
+    total = sum(count for per_arm in normalized.values()
+                for count in per_arm.values())
+    return {
+        "unit": "dropped reserved relation lines (§3)",
+        "flagged_question_ids": sorted(normalized),
+        "n_flagged_questions": len(normalized),
+        "total_dropped_reserved_lines": total,
+        "per_question": normalized,
+    }
+
+
 def build_manifest(
     *, arms: Sequence[str], gold_path: str, gold_sha: str | None,
-    max_words: int, reader: Any, judge: Any, extra: Mapping[str, Any] | None = None,
+    max_words: int, reader: Any, judge: Any,
+    seed_selection: Mapping[str, Mapping[str, Mapping[str, Any]]] | None = None,
+    reserved_overflow: Mapping[str, Mapping[str, int]] | None = None,
+    embedder_model: str | None = None,
+    serializer_path: str = SERIALIZER_MODULE_PATH,
+    serializer_git_sha: str | None = None,
+    session_index_permutation_seed: int = SESSION_INDEX_PERMUTATION_SEED,
+    extra: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """The run manifest: provenance + every resolved ambiguity (spec §3/§5/§9)."""
+    """The run manifest: provenance + every resolved ambiguity (spec §3/§5/§9).
+
+    Provenance the spec requires beyond the artifact hashes:
+
+    * ``seed_selection`` — the eight selected seed ids in rank order, the seed
+      function, and the embedder model id (§3 seed policy);
+    * ``serializer_module_path`` + ``serializer_git_sha`` — the frozen
+      serializer and the commit it was rendered from (§3 Frozen artifact);
+    * ``session_index_permutation_seed`` — the §10.1 perturbation seed;
+    * ``reserved_overflow`` — per question, the dropped reserved line count.
+    """
     manifest: dict[str, Any] = {
         "schema": "context-assembly-run-manifest/v1",
         "issue": "3011",
@@ -1092,13 +1286,29 @@ def build_manifest(
         "stopwords_sha256": stopwords_hash(),
         "gold_evidence_tokenizer": "tools.longmem_eval.gold_evidence_claims.tokenize",
         "gold_evidence_min_tokens": 3,
+        # §3 Frozen artifact — the serializer module path + the commit it ran at.
+        "serializer_module_path": serializer_path,
+        "serializer_git_sha": (serializer_git_sha if serializer_git_sha is not None
+                               else repo_git_sha()),
+        "serializer_engine_path": "tortoise/subgraph.py",
+        # §10.1 — the one fixed permutation applied to lme_session_index.
+        "session_index_permutation_seed": int(session_index_permutation_seed),
+        # §3 seed policy provenance + the §3 reserved-overflow flag.
+        "seed_selection": _seed_selection_manifest(seed_selection,
+                                                   embedder_model),
+        "reserved_overflow": _reserved_overflow_manifest(reserved_overflow),
         "resolved_ambiguities": {
             "arm_a_source": (
-                "Task directive: arm A reuses the existing lane "
-                "(retrieve_for_question → context_points) rendered with "
-                "render_context. Spec §3's arm-A row says 'gold sessions "
-                "rendered verbatim'; the task directive is implemented and "
-                "this divergence is recorded."),
+                "Spec §3 wins: arm A is the GOLD-verbatim oracle ceiling — "
+                "the question's answer_session_ids resolved positionally "
+                "against haystack_session_ids, those sessions taken from "
+                "haystack_sessions and rendered verbatim through "
+                "render_context (the frozen Current Date: header preserved). "
+                "It is NOT a retrieval arm: every F/H statistic is relative "
+                "to it and §7 F3's A_ref = 42/52 is a property of the gold "
+                "render only. This is the sole legitimate gold read in the "
+                "driver, confined to build_context_arm's arm-A branch, which "
+                "leakage_guard excludes from the §10.2 static assertion."),
             "date_header_for_b_c": (
                 "render_arm_b/render_arm_c emit no 'Current Date:' header; "
                 "render_context embeds it for A/D. Because §5 makes the "
@@ -1213,6 +1423,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     manifest = build_manifest(
         arms=arms, gold_path=str(gold_path), gold_sha=gold_sha,
         max_words=DEFAULT_MAX_WORDS, reader=reader, judge=judge,
+        seed_selection=result["seed_selection"],
+        reserved_overflow=result["reserved_overflow"],
         extra={"graph_metrics": result["graph_metrics"],
                "ep_summary": result["ep_summary"]})
     manifest_path = work_dir / "context-assembly-manifest.json"

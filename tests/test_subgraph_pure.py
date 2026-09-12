@@ -368,6 +368,51 @@ def test_operator_endpoint_in_a_mixed_operator_is_skipped():
     assert _ids(sg.candidates) == ["C1"]
 
 
+def test_nary_operator_does_not_fabricate_relation_between_targets():
+    # P2 regression: a single operator with 3+ non-operator endpoints is
+    # S idx=0 (source), T1 idx=1, T2 idx=2 (both targets). Traversing from T1
+    # must emit the real edge S IMPLIES T1 and must NOT fabricate
+    # T2 IMPLIES T1 — both are targets, so no edge exists between them. The
+    # sibling target is not even a candidate reached from T1.
+    g = FakeGraph()
+    g.add_point("S", "source")
+    g.add_point("T1", "target one")
+    g.add_point("T2", "target two")
+    g.add_operator("op", "IMPL", [("S", 0), ("T1", 1), ("T2", 2)])
+    sg = build_subgraph_from_seeds(g, [("T1", 1.0)])
+    rels = {(r.source_id, r.relation, r.target_id) for r in sg.relations}
+    assert rels == {("S", "IMPL", "T1")}
+    assert ("T2", "IMPL", "T1") not in rels
+    assert ("T1", "IMPL", "T2") not in rels
+    assert not any("T2" in (r.source_id, r.target_id) for r in sg.relations)
+    assert _ids(sg.candidates) == ["S"]
+
+
+@pytest.mark.parametrize(
+    ("anchor", "expected"),
+    [
+        # From the source: both targets are real outgoing edges.
+        ("S", {("S", "IMPL", "T1"), ("S", "IMPL", "T2")}),
+        # From a target: only the source link is real; the sibling target must
+        # never be emitted in either direction.
+        ("T1", {("S", "IMPL", "T1")}),
+        ("T2", {("S", "IMPL", "T2")}),
+    ],
+)
+def test_nary_operator_edges_always_run_source_to_target(anchor, expected):
+    # Frozen semantics: r.idx == 0 is the SOURCE, every idx > 0 a TARGET, and
+    # the only real edges are source → target, regardless of which endpoint
+    # the anchor is.
+    g = FakeGraph()
+    g.add_point("S", "source")
+    g.add_point("T1", "target one")
+    g.add_point("T2", "target two")
+    g.add_operator("op", "IMPL", [("S", 0), ("T1", 1), ("T2", 2)])
+    sg = build_subgraph_from_seeds(g, [(anchor, 1.0)])
+    rels = {(r.source_id, r.relation, r.target_id) for r in sg.relations}
+    assert rels == expected
+
+
 # ── 1-hop vs hub-mediated 2-hop ───────────────────────────────────────────
 
 

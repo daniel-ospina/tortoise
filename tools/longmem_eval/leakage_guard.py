@@ -38,6 +38,9 @@ code path        entry point(s)
 traversal/rank   ``tortoise/subgraph.py`` (whole module;
 seed entry       ``build_subgraph`` → ``_fetch_seeds``)
 B/C render       ``tortoise/subgraph_render.py`` (whole module)
+B/C builder      ``tools/longmem_eval/context_assembly_arms.py`` →
+(arms B/C)       ``build_context_arm`` (**B/C branches only** — the arm-A
+                 branch is excluded, see below), ``turns_by_point``
 seed             ``tools/longmem_eval/retrieve.py`` → ``vector_search``
 seed backends    ``tortoise/search_engine.py`` → ``run_vector_query``,
                  ``run_fts_query`` (the frozen BM25 fallback)
@@ -46,16 +49,35 @@ confidence       ``tools/longmem_eval/ep_activation.py`` →
 dependency)
 ===============  ====================================================
 
+The B/C builder is scanned by **entry point**, never whole-module: the
+metrics layer in the same file legitimately names the gold-evidence artifact
+for metrics 5/9, so a file-level scan would be a false positive. Arm A's and
+arm D's branches of ``build_context_arm`` are **deliberately out of scope**
+(see ``CODE_PATHS[...].branch_exclusions``): arm A is the gold-verbatim
+oracle ceiling and reads ``answer_session_ids`` by design (spec §3), and arm
+D is the no-context control that calls the legacy lane renderer. Only the
+B/C branches are in scope. :func:`scan_code_paths` reports both the scanned
+functions and the excluded regions, so the coverage claim is auditable.
+
 Three detection channels per scanned function:
 
 1. **identifiers** — ``Name``/``Attribute``/argument/import/def names whose
    lowercased text contains a gold marker (``has_answer``,
-   ``answer_session``, ``session_index``, ``gold``). This catches source
-   assembled from fragments and any gold loader symbol (all live under a
-   ``gold`` name).
-2. **string literals** — non-docstring constants containing a gold marker;
-   this catches the artifact path/filename and any string-keyed property
-   read.
+   ``answer_session``, ``session_index``, ``gold``). Any gold loader symbol
+   is caught here, because every gold loader/constant lives under a ``gold``
+   name.
+2. **constant strings (after constant folding)** — non-docstring string
+   *values* containing a gold marker. The scan resolves constant string
+   expressions before matching, so a reference assembled from fragments is
+   caught in its assembled form: ``"answer" + "_session_ids"``,
+   ``"has_" + "answer"``, ``f"has_{'answer'}"``,
+   ``getattr(props, "answer" + "_session_ids")``,
+   ``"_".join(["answer", "session_ids"])``,
+   ``"has_{}".format("answer")`` and ``"has_%s" % "answer"`` all resolve to
+   their concrete value and are matched. A bytes literal (``b"has_answer"``)
+   and ``b"has_answer".decode()`` are decoded and matched on the same
+   channel. This also catches the artifact path/filename and any
+   string-keyed property read.
 3. **comments** — ``tokenize`` comments in the scanned line range containing
    a gold marker.
 
@@ -63,6 +85,24 @@ Docstrings are deliberately exempt: the spec's frozen modules document the
 leakage rule *by name* ("never reads … the gold annotation"), and naming the
 forbidden thing in prose is not referencing it in code. The literal property
 names and the artifact path never appear in a docstring.
+
+Known limits — what this guard does NOT catch
+---------------------------------------------
+This is a static, constant-folding assertion; it performs no dataflow or
+runtime analysis. The following still evade the **static** check and are the
+responsibility of the §10.1 gold-field perturbation run and human review:
+
+* a name/value assembled at runtime from non-constant input
+  (``"has_" + user_key``, ``props.get(k)`` where ``k`` is a parameter);
+* **cross-statement constant propagation** — ``part = "answer"`` then
+  ``"has_" + part`` never resolves, because locals are not tracked;
+* a join/format whose arguments are not literals
+  (``"_".join(parts)``, ``template.format(name)``);
+* ``exec`` / ``eval`` / ``compile`` of assembler text,
+  ``getattr(props, name)`` / ``props.__dict__`` reflection, and opening the
+  gold artifact through a computed path;
+* a gold *value* reaching a mapping through any key that is not a literal or
+  a resolvable constant expression.
 
 Perturbation helpers (part 1 of the leakage test) live here too so the test
 and any future runner share one definition of "the perturbation":
@@ -89,6 +129,7 @@ __all__ = [
     "GOLD_EVIDENCE_ARTIFACT_PATH",
     "GOLD_EVIDENCE_LOADER_SYMBOLS",
     "GOLD_PROPERTY_TOKENS",
+    "BranchExclusion",
     "CodePath",
     "LeakFinding",
     "RecordingMapping",
@@ -201,10 +242,35 @@ class ScanReport:
     findings: tuple[LeakFinding, ...]
     visited: tuple[str, ...]  # "path::function" for every scanned function
     modules: tuple[str, ...]  # every module reached by the call-graph walk
+    excluded: tuple[str, ...] = ()  # deliberately out-of-scope regions (auditable)
 
     @property
     def clean(self) -> bool:
         return not self.findings
+
+
+@dataclass(frozen=True)
+class BranchExclusion:
+    """An arm/branch subtree that is deliberately **out of scan scope**.
+
+    When ``build_context_arm`` is scanned, the guard skips every
+    ``if <parameter> == <value>:`` subtree inside ``function`` (and the
+    comment lines it spans) and reports the exclusion by name. Arm A is the
+    gold-verbatim oracle ceiling (spec §3) and reads ``answer_session_ids``
+    by design; only the B/C branches are part of the B/C render path the
+    §10.2 static assertion names.
+    """
+
+    function: str
+    parameter: str
+    value: str
+    reason: str
+
+    def describe(self, code_path: str) -> str:
+        return (
+            f"{code_path}::{self.function} — branch {self.parameter} == "
+            f"{self.value!r} skipped: {self.reason}"
+        )
 
 
 # ── Declared code-path scope ──────────────────────────────────────────────
@@ -217,11 +283,50 @@ class CodePath:
     ``entry_points == ("*",)`` scans the whole module (every function plus
     module-level statements/comments) — correct for the two single-purpose
     modules that *are* the code path.
+
+    ``branch_exclusions`` carve deliberately out-of-scope branches (e.g. arm
+    A of the B/C builder) out of an otherwise-scanned entry point.
+    ``excluded_functions`` name functions that are out of scope even when a
+    scanned function calls them (they are not entered by the call-graph
+    walk). Both are surfaced in :class:`ScanReport` so the guard's coverage
+    claim states exactly what is and is not asserted.
     """
 
     path: str  # repo-relative
     entry_points: tuple[str, ...]
     label: str
+    branch_exclusions: tuple[BranchExclusion, ...] = ()
+    excluded_functions: tuple[str, ...] = ()
+
+
+#: Arm A of the B/C builder is the gold-verbatim oracle ceiling (spec §3):
+#: it reads ``answer_session_ids`` **by design**, so its branch is excluded
+#: from the B/C static assertion. Only the B/C branches are in scope.
+_ARM_A_EXCLUSION = BranchExclusion(
+    function="build_context_arm",
+    parameter="arm",
+    value="A",
+    reason=(
+        "arm A is the gold-verbatim oracle ceiling (spec §3) and reads "
+        "answer_session_ids by design; only the B/C branches are asserted"
+    ),
+)
+
+#: Arm D is the no-context control (question + date header only): it is not a
+#: B/C render and not a gold path, but it calls the **legacy lane renderer**
+#: ``tortoise.retrieval.render_context``, which legitimately reads
+#: ``lme_session_index`` and is not part of the §10.2 B/C assertion. Excluding
+#: the branch keeps the guard from following that call graph.
+_ARM_D_EXCLUSION = BranchExclusion(
+    function="build_context_arm",
+    parameter="arm",
+    value="D",
+    reason=(
+        "arm D is the no-context control (question + date header only) and "
+        "calls the legacy lane renderer; neither it nor its callees are part "
+        "of the B/C render path the §10.2 assertion names"
+    ),
+)
 
 
 #: The four named code paths (spec §10.2) + the renderer's confidence
@@ -236,6 +341,12 @@ CODE_PATHS: tuple[CodePath, ...] = (
         "tortoise/subgraph_render.py",
         ("*",),
         "arm B/C render (Track B)",
+    ),
+    CodePath(
+        "tools/longmem_eval/context_assembly_arms.py",
+        ("build_context_arm", "turns_by_point"),
+        "arm B/C context builder (Track B/C) — arm A and arm D branches excluded",
+        branch_exclusions=(_ARM_A_EXCLUSION, _ARM_D_EXCLUSION),
     ),
     CodePath(
         "tools/longmem_eval/retrieve.py",
@@ -339,6 +450,190 @@ def _import_table(tree: ast.Module, current: str) -> dict[str, tuple[str, str | 
 # ── scanning channels ─────────────────────────────────────────────────────
 
 
+def _constant_str(node: ast.AST | None) -> str | None:
+    """Resolve a **constant** string expression, or ``None`` when not constant.
+
+    Resolution is recursive, so an assembly of 3+ fragments folds to one
+    value. Covered forms:
+
+    * ``ast.Constant`` str;
+    * ``ast.BinOp`` ``+`` over constant strings, and ``%`` over a constant
+      string and a literal right operand;
+    * ``ast.JoinedStr`` (f-string) whose parts are all constant;
+    * ``"_".join(["a", "b"])`` over a constant list/tuple of constants;
+    * ``"has_{}".format("answer")`` with a constant template and constant
+      args.
+
+    **Not** covered (see the module docstring's *Known limits*): locals are
+    not tracked, so a value assembled from a name never resolves.
+    """
+    if node is None:
+        return None
+
+    if isinstance(node, ast.Constant):
+        if isinstance(node.value, str):
+            return node.value
+        if isinstance(node.value, bytes):
+            # A bytes literal is the same reference in another encoding.
+            return node.value.decode("utf-8", "replace")
+        return None
+
+    if isinstance(node, ast.BinOp):
+        left = _constant_str(node.left)
+        if left is None:
+            return None
+        if isinstance(node.op, ast.Add):
+            right = _constant_str(node.right)
+            return None if right is None else left + right
+        if isinstance(node.op, ast.Mod):
+            try:
+                rhs = ast.literal_eval(node.right)
+            except (ValueError, SyntaxError, TypeError):
+                return None
+            try:
+                return left % rhs
+            except (TypeError, ValueError):
+                return None
+        return None
+
+    if isinstance(node, ast.JoinedStr):
+        parts: list[str] = []
+        for value in node.values:
+            if isinstance(value, ast.Constant) and isinstance(value.value, str):
+                parts.append(value.value)
+            elif isinstance(value, ast.FormattedValue):
+                resolved = _constant_str(value.value)
+                if resolved is None:
+                    return None
+                parts.append(resolved)
+            else:
+                return None
+        return "".join(parts)
+
+    if isinstance(node, ast.Call):
+        func = node.func
+        if not isinstance(func, ast.Attribute) or node.keywords:
+            return None
+        target = _constant_str(func.value)
+        if target is None:
+            return None
+        args = [_constant_str(arg) for arg in node.args]
+        if func.attr == "join":
+            # ``sep.join(iterable)`` — one iterable of constant strings.
+            if len(node.args) != 1 or not isinstance(node.args[0], (ast.List, ast.Tuple)):
+                return None
+            items = [_constant_str(elt) for elt in node.args[0].elts]
+            if any(item is None for item in items):
+                return None
+            return target.join(items)
+        if func.attr == "format":
+            if any(arg is None for arg in args):
+                return None
+            try:
+                return target.format(*args)
+            except (IndexError, KeyError, ValueError):
+                return None
+        if func.attr == "decode" and not node.args and not node.keywords:
+            # ``b"...".decode()`` — closes the bytes-literal bypass.
+            if isinstance(func.value, ast.Constant) and isinstance(func.value.value, bytes):
+                return func.value.value.decode("utf-8", "replace")
+            return None
+        return None
+
+    return None
+
+
+def _resolvable_string(node: ast.AST) -> str | None:
+    """The assembled constant value of ``node`` when it is worth re-checking.
+
+    ``ast.Constant`` is excluded: plain literals are checked by the dedicated
+    constant branch. ``getattr(obj, <resolvable>)`` resolves its attribute
+    argument explicitly so the call site (not just the argument) is reported.
+    """
+    if isinstance(node, (ast.BinOp, ast.JoinedStr)):
+        return _constant_str(node)
+    if isinstance(node, ast.Call):
+        func = node.func
+        if isinstance(func, ast.Name) and func.id == "getattr" and len(node.args) >= 2:
+            return _constant_str(node.args[1])
+        return _constant_str(node)
+    return None
+
+
+def _branch_value(test: ast.expr, parameter: str) -> str | None:
+    """Return the literal when ``test`` is ``<parameter> == <literal>``."""
+    if not (isinstance(test, ast.Compare) and len(test.ops) == 1):
+        return None
+    if not isinstance(test.ops[0], ast.Eq):
+        return None
+    left, right = test.left, test.comparators[0]
+    for name_node, literal in ((left, right), (right, left)):
+        if (
+            isinstance(name_node, ast.Name)
+            and name_node.id == parameter
+            and isinstance(literal, ast.Constant)
+            and isinstance(literal.value, str)
+        ):
+            return literal.value
+    return None
+
+
+def _is_excluded_if(
+    node: ast.AST,
+    function: str,
+    exclusions: tuple[BranchExclusion, ...],
+) -> bool:
+    """True when ``node`` is an ``if`` matching an in-scope exclusion."""
+    if not isinstance(node, ast.If):
+        return False
+    return any(
+        exclusion.function == function
+        and _branch_value(node.test, exclusion.parameter) == exclusion.value
+        for exclusion in exclusions
+    )
+
+
+def _excluded_line_ranges(
+    node: ast.AST,
+    function: str,
+    exclusions: tuple[BranchExclusion, ...],
+) -> list[tuple[int, int]]:
+    """Source line ranges of excluded branches inside ``node`` (for comments)."""
+    ranges: list[tuple[int, int]] = []
+    for child in ast.walk(node):
+        if _is_excluded_if(child, function, exclusions):
+            start = getattr(child, "lineno", 1)
+            ranges.append((start, getattr(child, "end_lineno", start)))
+    return ranges
+
+
+def _line_in_ranges(line: int, ranges: list[tuple[int, int]]) -> bool:
+    return any(start <= line <= end for start, end in ranges)
+
+
+def _iter_scanned_calls(
+    node: ast.AST,
+    function: str,
+    exclusions: tuple[BranchExclusion, ...],
+) -> Iterator[ast.Call]:
+    """Yield every ``ast.Call`` in the **scanned** region of ``node``.
+
+    Excluded branch subtrees are not descended into, so a call that lives
+    only in an out-of-scope branch (e.g. arm A's ``retrieve_for_question``,
+    or arm D's legacy ``render_context``) is not followed by the call-graph
+    closure and cannot expand the scan into unrelated modules.
+    """
+    for child in ast.iter_child_nodes(node):
+        if _is_excluded_if(child, function, exclusions):
+            continue
+        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            yield from _iter_scanned_calls(child, child.name, exclusions)
+            continue
+        if isinstance(child, ast.Call):
+            yield child
+        yield from _iter_scanned_calls(child, function, exclusions)
+
+
 def _check_identifier(
     name: str | None,
     *,
@@ -427,13 +722,17 @@ def _scan_tree(
     findings: list[LeakFinding],
     function: str = "<module>",
     restrict_to: set[str] | None = None,
+    branch_exclusions: tuple[BranchExclusion, ...] = (),
 ) -> None:
     """Recursively scan ``node``, attributing findings to the enclosing def.
 
     ``restrict_to`` (a set of function names) stops descent into functions
     that are outside the declared scope; ``None`` scans everything.
+    ``branch_exclusions`` skips deliberately out-of-scope branch subtrees.
     """
     for child in ast.iter_child_nodes(node):
+        if branch_exclusions and _is_excluded_if(child, function, branch_exclusions):
+            continue
         if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
             if restrict_to is not None and child.name not in restrict_to:
                 continue
@@ -481,6 +780,7 @@ def _scan_tree(
                 findings=findings,
                 function=child.name,
                 restrict_to=None,
+                branch_exclusions=branch_exclusions,
             )
             continue
 
@@ -501,6 +801,7 @@ def _scan_tree(
                 findings=findings,
                 function=function,
                 restrict_to=None,
+                branch_exclusions=branch_exclusions,
             )
             continue
 
@@ -542,14 +843,26 @@ def _scan_tree(
             )
         elif (
             isinstance(child, ast.Constant)
-            and isinstance(child.value, str)
+            and isinstance(child.value, (str, bytes))
             and id(child) not in docstrings
         ):
+            literal = _constant_str(child)
+            if literal is not None:
+                _check_string(
+                    literal,
+                    code_path=code_path,
+                    function=function,
+                    line=child.lineno,
+                    findings=findings,
+                )
+
+        resolved = _resolvable_string(child)
+        if resolved is not None:
             _check_string(
-                child.value,
+                resolved,
                 code_path=code_path,
                 function=function,
-                line=child.lineno,
+                line=getattr(child, "lineno", 1),
                 findings=findings,
             )
 
@@ -562,15 +875,29 @@ def _scan_tree(
             findings=findings,
             function=function,
             restrict_to=None,
+            branch_exclusions=branch_exclusions,
         )
 
 
-def scan_source(source: str, code_path: str = "<synthetic>") -> tuple[LeakFinding, ...]:
-    """Scan a whole synthetic/real module source string (self-test seam)."""
+def scan_source(
+    source: str,
+    code_path: str = "<synthetic>",
+    *,
+    branch_exclusions: tuple[BranchExclusion, ...] = (),
+) -> tuple[LeakFinding, ...]:
+    """Scan a whole synthetic/real module source string (self-test seam).
+
+    ``branch_exclusions`` lets a test reproduce the declared scope (e.g. the
+    arm-A/arm-D carve-out of the B/C builder) on synthetic source.
+    """
     tree = ast.parse(source)
     docstrings = _docstring_ids(tree)
     comments = _comments(source)
     findings: list[LeakFinding] = []
+    excluded_ranges: list[tuple[int, int]] = []
+    for fn in ast.walk(tree):
+        if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            excluded_ranges.extend(_excluded_line_ranges(fn, fn.name, branch_exclusions))
     _scan_tree(
         tree,
         source=source,
@@ -578,8 +905,11 @@ def scan_source(source: str, code_path: str = "<synthetic>") -> tuple[LeakFindin
         docstrings=docstrings,
         comments=comments,
         findings=findings,
+        branch_exclusions=branch_exclusions,
     )
     for line, text in comments:
+        if _line_in_ranges(line, excluded_ranges):
+            continue
         lowered = text.lower()
         for marker in _GOLD_COMMENT_MARKERS:
             if marker in lowered:
@@ -667,6 +997,7 @@ def _scan_function(
     node: ast.AST,
     function_name: str,
     findings: list[LeakFinding],
+    branch_exclusions: tuple[BranchExclusion, ...] = (),
 ) -> None:
     _scan_tree(
         node,
@@ -677,11 +1008,13 @@ def _scan_function(
         findings=findings,
         function=function_name,
         restrict_to=None,
+        branch_exclusions=branch_exclusions,
     )
     start = getattr(node, "lineno", 1)
     end = getattr(node, "end_lineno", start)
+    excluded_ranges = _excluded_line_ranges(node, function_name, branch_exclusions)
     for line, text in module.comments:
-        if start <= line <= end:
+        if start <= line <= end and not _line_in_ranges(line, excluded_ranges):
             lowered = text.lower()
             for marker in _GOLD_COMMENT_MARKERS:
                 if marker in lowered:
@@ -711,6 +1044,33 @@ def scan_code_paths() -> ScanReport:
     modules_seen: list[str] = []
     scanned: set[tuple[str, str]] = set()
 
+    branch_exclusions_by_module: dict[str, tuple[BranchExclusion, ...]] = {}
+    excluded_functions_by_module: dict[str, frozenset[str]] = {}
+    excluded: list[str] = []
+    for code_path in CODE_PATHS:
+        if code_path.branch_exclusions:
+            branch_exclusions_by_module[code_path.path] = (
+                *branch_exclusions_by_module.get(code_path.path, ()),
+                *code_path.branch_exclusions,
+            )
+            excluded.extend(
+                exclusion.describe(code_path.path) for exclusion in code_path.branch_exclusions
+            )
+        if code_path.excluded_functions:
+            excluded_functions_by_module[code_path.path] = frozenset(
+                {
+                    *excluded_functions_by_module.get(code_path.path, frozenset()),
+                    *code_path.excluded_functions,
+                }
+            )
+            excluded.extend(
+                f"{code_path.path}::{function} — deliberately out of scope (not called)"
+                for function in code_path.excluded_functions
+            )
+
+    def _is_excluded_target(target: tuple[str, str]) -> bool:
+        return target[1] in excluded_functions_by_module.get(target[0], frozenset())
+
     frontier: list[tuple[str, str | None]] = []
     for code_path in CODE_PATHS:
         if not (REPO_ROOT / code_path.path).is_file():
@@ -735,8 +1095,15 @@ def scan_code_paths() -> ScanReport:
         if path not in modules_seen:
             modules_seen.append(path)
 
+        exclusions = branch_exclusions_by_module.get(module.path, ())
+
         if name is None:
             # Whole-module scan: every function + module-level statements.
+            whole_module_excluded: list[tuple[int, int]] = []
+            for func_name, func_node in module.funcs.items():
+                whole_module_excluded.extend(
+                    _excluded_line_ranges(func_node, func_name, exclusions)
+                )
             _scan_tree(
                 module.tree,
                 source=module.source,
@@ -746,8 +1113,11 @@ def scan_code_paths() -> ScanReport:
                 findings=findings,
                 function="<module>",
                 restrict_to=None,
+                branch_exclusions=exclusions,
             )
             for line, text in module.comments:
+                if _line_in_ranges(line, whole_module_excluded):
+                    continue
                 lowered = text.lower()
                 for marker in _GOLD_COMMENT_MARKERS:
                     if marker in lowered:
@@ -762,15 +1132,17 @@ def scan_code_paths() -> ScanReport:
                         )
                         break
             for func_name, node in module.funcs.items():
+                if func_name in excluded_functions_by_module.get(module.path, frozenset()):
+                    continue
                 key = (module.path, func_name)
                 if key in scanned:
                     continue
                 scanned.add(key)
                 visited.append(f"{module.path}::{func_name}")
-                _scan_function(module, node, func_name, findings)
-                for call in (n for n in ast.walk(node) if isinstance(n, ast.Call)):
+                _scan_function(module, node, func_name, findings, exclusions)
+                for call in _iter_scanned_calls(node, func_name, exclusions):
                     target = _call_target(call, module)
-                    if target and target not in scanned:
+                    if target and target not in scanned and not _is_excluded_target(target):
                         frontier.append(target)
             continue
 
@@ -791,10 +1163,10 @@ def scan_code_paths() -> ScanReport:
             continue
         scanned.add(key)
         visited.append(f"{module.path}::{name}")
-        _scan_function(module, node, name, findings)
-        for call in (n for n in ast.walk(node) if isinstance(n, ast.Call)):
+        _scan_function(module, node, name, findings, exclusions)
+        for call in _iter_scanned_calls(node, name, exclusions):
             target = _call_target(call, module)
-            if target and target not in scanned:
+            if target and target not in scanned and not _is_excluded_target(target):
                 frontier.append(target)
 
     seen: set[tuple] = set()
@@ -808,6 +1180,7 @@ def scan_code_paths() -> ScanReport:
         findings=tuple(unique),
         visited=tuple(visited),
         modules=tuple(modules_seen),
+        excluded=tuple(excluded),
     )
 
 
@@ -943,6 +1316,10 @@ def _main(argv: list[str] | None = None) -> int:
     report = scan_code_paths()
     print(f"#3011 gold-leakage static assertion — scanned {len(report.visited)} functions ")
     print(f"across {len(report.modules)} modules")
+    for entry in report.visited:
+        print(f"  scanned: {entry}")
+    for entry in report.excluded:
+        print(f"  out of scope: {entry}")
     if report.findings:
         print(f"FAIL — {len(report.findings)} gold reference(s):")
         for finding in report.findings:

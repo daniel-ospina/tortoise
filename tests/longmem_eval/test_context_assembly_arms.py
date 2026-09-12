@@ -37,13 +37,14 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 import tools.longmem_eval.context_assembly_arms as caa  # noqa: E402
+from tools.longmem_eval import leakage_guard as lg  # noqa: E402
 from tortoise.reader import (  # noqa: E402
     LLMReader,
     build_reader_user_message,
     system_prompt_for,
 )
 from tortoise.retrieval import render_context  # noqa: E402
-from tortoise.subgraph import Subgraph  # noqa: E402
+from tortoise.subgraph import Candidate, Relation, Subgraph  # noqa: E402
 from tortoise.subgraph_render import EMPTY_CONTEXT_SENTINEL  # noqa: E402
 
 _ROWS = _REPO_ROOT / "tests" / "_assembly_census.json"
@@ -70,7 +71,40 @@ def _row(qid: str = "q1", *, qtype: str = "multi-session",
     }
 
 
+def _row_two_sessions(qid: str = "q1") -> dict:
+    """Two haystack sessions; the SECOND is gold (positional resolution)."""
+    return {
+        "question_id": qid,
+        "question_type": "multi-session",
+        "question": "Where is the user flying?",
+        "answer": "Lisbon",
+        "question_date": "2026-07-10",
+        "haystack_session_ids": ["sid-0", "sid-1"],
+        "haystack_dates": ["2023-01-01", "2023-05-06"],
+        "haystack_sessions": [
+            [{"role": "user", "content": "Unrelated: I like tea."}],
+            [{"role": "user", "content": "I'm flying to Lisbon on 6 May."},
+             {"role": "assistant", "content": "Got it."}],
+        ],
+        "answer_session_ids": ["sid-1"],
+    }
+
+
 _CLAIM_TEXT = "The user is flying to Lisbon on 6 May 2023."
+
+
+def _point_props(point_id: str, **overrides) -> dict:
+    props = {
+        "id": point_id,
+        "content": _CLAIM_TEXT,
+        "session_id": "sid-1",
+        "source_turn_id": "lme:q1:s0:t0",
+        "createdAt": "2023-05-06T10:00:00Z",
+        "posterior_alpha": 4.0,
+        "posterior_beta": 1.0,
+    }
+    props.update(overrides)
+    return props
 
 
 def _sg(*, zero_seed: bool = False) -> Subgraph:
@@ -87,15 +121,43 @@ def _sg(*, zero_seed: bool = False) -> Subgraph:
         reserved_overflow=0,
         seed_fn="vector",
         content_by_id={"P1": _CLAIM_TEXT},
-        point_props={"P1": {
-            "id": "P1",
-            "content": _CLAIM_TEXT,
-            "session_id": "sid-1",
-            "source_turn_id": "lme:q1:s0:t0",
-            "createdAt": "2023-05-06T10:00:00Z",
-            "posterior_alpha": 4.0,
-            "posterior_beta": 1.0,
-        }},
+        point_props={"P1": _point_props("P1")},
+    )
+
+
+def _sg_two_seeds() -> Subgraph:
+    """Seeds deliberately NOT in ascending-id order (rank order is preserved)."""
+    return Subgraph(
+        seeds=(("P2", 0.91), ("P1", 0.42)),
+        anchors=("P2",),
+        candidates=(),
+        relations=(),
+        zero_seed=False,
+        reserved_overflow=0,
+        seed_fn="vector",
+        content_by_id={"P2": _CLAIM_TEXT},
+        point_props={"P2": _point_props("P2")},
+    )
+
+
+def _sg_with_reserved_relation() -> Subgraph:
+    """Anchored NAND relation: dropped first when the word budget is tiny."""
+    return Subgraph(
+        seeds=(("P1", 0.9),),
+        anchors=("P1",),
+        candidates=(
+            Candidate(point_id="P2", content="Other claim.", anchor_id="P1",
+                      edge_type="NAND", hop=1, s_norm=1.0, raw_score=0.8,
+                      score=0.8, damped=False, reserved=True),
+        ),
+        relations=(Relation(source_id="P1", relation="NAND",
+                            target_id="P2", target_label=""),),
+        zero_seed=False,
+        reserved_overflow=0,
+        seed_fn="vector",
+        content_by_id={"P1": _CLAIM_TEXT, "P2": "Other claim."},
+        point_props={"P1": _point_props("P1"),
+                     "P2": _point_props("P2", content="Other claim.")},
     )
 
 
@@ -160,10 +222,9 @@ class _FakeSdk:
 
 
 def _patch_render_seams(monkeypatch, *, subgraph: Subgraph | None = None) -> None:
-    monkeypatch.setattr(
-        caa, "retrieve_for_question",
-        lambda sdk, question: {"context_points": [
-            {"content": "VERBATIM-A", "session_date": "2023-05-06"}]})
+    # The subgraph seam is for B/C. Arm A is the gold-verbatim oracle and does
+    # NOT go through the retrieval lane (there is no retrieve_for_question
+    # import to patch — see test_arm_a_does_not_use_the_retrieval_lane).
     monkeypatch.setattr(
         caa, "build_subgraph",
         lambda sdk, question, namespace=None: subgraph or _sg())
@@ -171,7 +232,7 @@ def _patch_render_seams(monkeypatch, *, subgraph: Subgraph | None = None) -> Non
 
 def _run_arms(monkeypatch, reader, judge, *, rows=None, arms=caa.ARMS,
               qid_to_class=None, scan_fn=None, namespaces=None,
-              subgraph=None):
+              subgraph=None, max_words=caa.DEFAULT_MAX_WORDS):
     _patch_render_seams(monkeypatch, subgraph=subgraph)
 
     def _factory(qid: str):
@@ -186,21 +247,61 @@ def _run_arms(monkeypatch, reader, judge, *, rows=None, arms=caa.ARMS,
         qid_to_class=qid_to_class or {"q1": "interval"},
         scan_fn=scan_fn or (lambda sdk: caa.GraphScan(
             points=(), typed_relation_endpoint_ids=frozenset())),
-        ep_fn=None, max_retries=0)
+        ep_fn=None, max_retries=0, max_words=max_words)
 
 
 # ══ 1. each arm selects the right context source ══════════════════════════
 
 
-def test_arm_a_uses_retrieve_context_points(monkeypatch):
+def test_arm_a_is_the_gold_sessions_rendered_verbatim(monkeypatch):
+    """Arm A is the gold-verbatim ORACLE CEILING (spec §3), not retrieval."""
+    _patch_render_seams(monkeypatch)
+    ctx = caa.build_context_arm(
+        "A", caa.load_question_context(_row_two_sessions()), sdk=object())
+    # The gold session (haystack index 1) renders verbatim, turn text intact.
+    assert "I'm flying to Lisbon on 6 May." in ctx.text
+    assert "Got it." in ctx.text
+    # The non-gold session is NOT in the oracle's context.
+    assert "Unrelated: I like tea." not in ctx.text
+    # The frozen Current Date header + the render_context block shape survive.
+    assert ctx.text.startswith("Current Date: 2026-07-10")
+    assert "[session 1]" in ctx.text
+    assert "(session date 2023-05-06)" in ctx.text
+    assert "[session 0]" not in ctx.text
+    assert ctx.context_source == "gold-verbatim"
+    # A is never the subgraph sentinel.
+    assert EMPTY_CONTEXT_SENTINEL not in ctx.text
+
+
+def test_arm_a_resolves_answer_session_ids_positionally(monkeypatch):
+    """The gold read is the positional join on ``answer_session_ids``."""
+    _patch_render_seams(monkeypatch)
+    row = _row_two_sessions()
+    row["answer_session_ids"] = ["sid-0"]
+    ctx = caa.build_context_arm(
+        "A", caa.load_question_context(row), sdk=object())
+    assert "Unrelated: I like tea." in ctx.text
+    assert "I'm flying to Lisbon on 6 May." not in ctx.text
+
+
+def test_arm_a_does_not_use_the_retrieval_lane(monkeypatch):
+    """P0 regression: arm A must never call ``retrieve_for_question``."""
+    assert not hasattr(caa, "retrieve_for_question")
+    assert "retrieve_for_question" not in inspect.getsource(
+        caa.build_context_arm)
     _patch_render_seams(monkeypatch)
     ctx = caa.build_context_arm(
         "A", caa.load_question_context(_row()), sdk=object())
-    assert "VERBATIM-A" in ctx.text
-    assert ctx.text.startswith("Current Date: 2026-07-10")
-    assert ctx.context_source == "verbatim"
-    # A is never the subgraph sentinel.
-    assert EMPTY_CONTEXT_SENTINEL not in ctx.text
+    assert "I'm flying to Lisbon on 6 May." in ctx.text
+
+
+def test_arm_a_raises_on_an_unresolvable_gold_session(monkeypatch):
+    _patch_render_seams(monkeypatch)
+    row = _row()
+    row["answer_session_ids"] = ["sid-missing"]
+    with pytest.raises(ValueError, match="not resolvable"):
+        caa.build_context_arm(
+            "A", caa.load_question_context(row), sdk=object())
 
 
 def test_arm_b_uses_subgraph_and_excludes_raw_turn_text(monkeypatch):
@@ -253,6 +354,117 @@ def test_arm_d_without_a_date_renders_empty_evidence():
     ctx = caa.build_context_arm(
         "D", caa.load_question_context(_row(qdate="")), sdk=object())
     assert ctx.text == ""
+
+
+# ══ §3 provenance — reserved_overflow + seed selection + manifest ════════
+
+
+def test_reserved_overflow_propagates_from_render_to_the_run(monkeypatch):
+    reader = LLMReader(_RecordingModel(), model_id="test-reader",
+                       model_spec="test:reader")
+    result = _run_arms(
+        monkeypatch, reader, _FakeJudge(),
+        subgraph=_sg_with_reserved_relation(), arms=("B", "C"), max_words=1)
+    for arm in ("B", "C"):
+        outcome = result["reports"][arm]["outcomes"][0]
+        assert outcome["reserved_overflow"] >= 1
+        assert result["reserved_overflow"]["q1"][arm] == (
+            outcome["reserved_overflow"])
+    assert result["reports"]["B"]["metrics"]["subgraph_size"][
+        "total_relations_rendered"] == 0
+
+
+def test_reserved_overflow_is_absent_when_nothing_is_dropped(monkeypatch):
+    reader = LLMReader(_RecordingModel(), model_id="test-reader",
+                       model_spec="test:reader")
+    result = _run_arms(monkeypatch, reader, _FakeJudge(), arms=("B",))
+    assert result["reports"]["B"]["outcomes"][0]["reserved_overflow"] == 0
+    assert result["reserved_overflow"] == {}
+
+
+def test_seed_ids_and_seed_fn_are_recorded_in_rank_order(monkeypatch):
+    reader = LLMReader(_RecordingModel(), model_id="test-reader",
+                       model_spec="test:reader")
+    result = _run_arms(monkeypatch, reader, _FakeJudge(),
+                       subgraph=_sg_two_seeds(), arms=("B",))
+    outcome = result["reports"]["B"]["outcomes"][0]
+    assert outcome["seed_ids"] == ["P2", "P1"]
+    assert outcome["seed_fn"] == "vector"
+    assert result["seed_selection"]["q1"]["B"] == {
+        "seed_fn": "vector", "seed_ids": ["P2", "P1"]}
+
+
+def test_manifest_records_seeds_serializer_and_permutation_provenance():
+    reader = types.SimpleNamespace(model_spec="r", model_id="r")
+    judge = types.SimpleNamespace(model_spec="j", model_id="j")
+    manifest = caa.build_manifest(
+        arms=caa.ARMS, gold_path="/tmp/gold.json", gold_sha="deadbeef",
+        max_words=caa.DEFAULT_MAX_WORDS, reader=reader, judge=judge,
+        seed_selection={"q1": {"B": {"seed_fn": "vector",
+                                       "seed_ids": ["P1"]}}},
+        reserved_overflow={"q1": {"B": 2, "C": 1}},
+        embedder_model="BAAI/bge-small-en-v1.5",
+        serializer_git_sha="abc123")
+    # (b) serializer module path + git sha (§3 Frozen artifact).
+    assert manifest["serializer_module_path"] == "tortoise/subgraph_render.py"
+    assert manifest["serializer_git_sha"] == "abc123"
+    # (c) the fixed §10.1 permutation seed, matching the leakage guard's own.
+    assert manifest["session_index_permutation_seed"] == 0xD1CE
+    assert manifest["session_index_permutation_seed"] == inspect.signature(
+        lg.fixed_session_index_permutation).parameters["seed"].default
+    # (a) eight selected seed ids in rank order + seed_fn + embedder model id.
+    seeds = manifest["seed_selection"]
+    assert seeds["seed_fn"] == "vector"
+    assert seeds["mixed_seed_functions"] is False
+    assert seeds["seed_limit"] == 64
+    assert seeds["seed_count"] == 8
+    assert seeds["embedder_model_id"] == "BAAI/bge-small-en-v1.5"
+    assert seeds["per_question"]["q1"]["B"] == {
+        "seed_fn": "vector", "seed_ids": ["P1"]}
+    # reserved_overflow flags the question with the dropped-count.
+    overflow = manifest["reserved_overflow"]
+    assert overflow["flagged_question_ids"] == ["q1"]
+    assert overflow["n_flagged_questions"] == 1
+    assert overflow["total_dropped_reserved_lines"] == 3
+    assert overflow["per_question"]["q1"] == {"B": 2, "C": 1}
+    # arm A is no longer documented as a retrieval arm.
+    arm_a_note = manifest["resolved_ambiguities"]["arm_a_source"]
+    assert "GOLD" in arm_a_note
+    assert "Task directive" not in arm_a_note
+
+
+def test_manifest_defaults_repo_head_sha_and_embedder_model():
+    reader = types.SimpleNamespace(model_spec="r", model_id="r")
+    judge = types.SimpleNamespace(model_spec="j", model_id="j")
+    manifest = caa.build_manifest(
+        arms=caa.ARMS, gold_path="g", gold_sha="s",
+        max_words=caa.DEFAULT_MAX_WORDS, reader=reader, judge=judge)
+    sha = caa.repo_git_sha()
+    assert manifest["serializer_git_sha"] == sha
+    assert sha is None or (len(sha) == 40
+                           and all(c in "0123456789abcdef" for c in sha))
+    assert manifest["seed_selection"]["embedder_model_id"] == (
+        caa.embedder_model_id())
+    assert caa.embedder_model_id()
+    assert manifest["seed_selection"]["per_question"] == {}
+    assert manifest["reserved_overflow"]["per_question"] == {}
+
+
+def test_run_manifest_carries_the_run_seed_and_overflow_provenance(monkeypatch):
+    reader = LLMReader(_RecordingModel(), model_id="test-reader",
+                       model_spec="test:reader")
+    result = _run_arms(monkeypatch, reader, _FakeJudge(),
+                       subgraph=_sg_with_reserved_relation(), arms=("B",),
+                       max_words=1)
+    manifest = caa.build_manifest(
+        arms=("B",), gold_path="g", gold_sha="s", max_words=1,
+        reader=reader, judge=_FakeJudge(),
+        seed_selection=result["seed_selection"],
+        reserved_overflow=result["reserved_overflow"],
+        serializer_git_sha="x", embedder_model="m")
+    assert manifest["seed_selection"]["per_question"]["q1"]["B"][
+        "seed_ids"] == ["P1"]
+    assert manifest["reserved_overflow"]["per_question"]["q1"]["B"] >= 1
 
 
 # ══ 3. ONE prompt scaffolding across all four arms ════════════════════════

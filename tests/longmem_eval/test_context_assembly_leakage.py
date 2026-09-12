@@ -210,6 +210,10 @@ def test_every_named_code_path_is_actually_scanned():
         "tortoise/subgraph.py::_fetch_seeds",
         "tortoise/subgraph_render.py::render_arm_b",
         "tortoise/subgraph_render.py::render_arm_c",
+        # P1: the module that actually builds the B/C context must be scanned
+        # (it holds the full dataset row + calls render_arm_b/render_arm_c).
+        "tools/longmem_eval/context_assembly_arms.py::build_context_arm",
+        "tools/longmem_eval/context_assembly_arms.py::turns_by_point",
         "tools/longmem_eval/retrieve.py::vector_search",
         "tortoise/search_engine.py::run_vector_query",
         "tortoise/search_engine.py::run_fts_query",
@@ -302,6 +306,141 @@ def test_scanner_does_not_flag_unrelated_gold_free_code():
         "    return sorted(best.items())\n"
     )
     assert findings == ()
+
+
+# ── P0 regression: assembled references must not evade the scan ───────────
+
+
+@pytest.mark.parametrize(
+    ("label", "source"),
+    [
+        # The four demonstrated evasions from the review finding — each
+        # returned ZERO findings before constant folding was added.
+        (
+            "concat_two_fragments",
+            'def seed(x):\n    k = "answer" + "_session_ids"\n    return x.get(k)\n',
+        ),
+        ("concat_has_answer", 'def seed(x):\n    k = "has_" + "answer"\n    return x.get(k)\n'),
+        (
+            "concat_three_fragments",
+            'def seed(x):\n    k = "lme_" + "session" + "_index"\n    return x.get(k)\n',
+        ),
+        (
+            "getattr_concatenated",
+            'def seed(props):\n    return getattr(props, "answer" + "_session_ids")\n',
+        ),
+        # Other constant-assembly routes the resolver closes.
+        ("fstring_constant", "def seed(x):\n    k = f\"has_{'answer'}\"\n    return x.get(k)\n"),
+        (
+            "join_constants",
+            'def seed(x):\n    k = "_".join(["answer", "session", "ids"])\n    return x.get(k)\n',
+        ),
+        (
+            "format_constant",
+            'def seed(x):\n    k = "has_{}".format("answer")\n    return x.get(k)\n',
+        ),
+        ("percent_constant", 'def seed(x):\n    k = "has_%s" % "answer"\n    return x.get(k)\n'),
+        ("bytes_literal", 'def seed(x):\n    return x.get(b"has_answer")\n'),
+        (
+            "bytes_decode",
+            'def seed(x):\n    return x.get(b"answer_session_ids".decode())\n',
+        ),
+        (
+            "subscript_key_concat",
+            'def seed(x):\n    return x["lme_" + "session" + "_index"]\n',
+        ),
+    ],
+)
+def test_scanner_detects_assembled_gold_reference(label, source):
+    """A gold marker assembled from constant fragments is still caught."""
+    findings = lg.scan_source(source)
+    assert findings, f"{label}: assembled gold reference evaded the scan"
+    assert any(f.kind == "string" for f in findings), (label, findings)
+
+
+def test_scanner_detects_assembled_artifact_path():
+    """The gold artifact path assembled from fragments is caught."""
+    findings = lg.scan_source(
+        'P = "docs/experiments/artifacts/2026-09-11-abc" '
+        '+ "-context-assembly/gold-evidence-claims.json"\n'
+    )
+    assert any(f.kind == "string" for f in findings)
+
+
+def test_scanner_still_flags_direct_reference_after_folding():
+    """Constant folding did not weaken the direct-literal channel."""
+    assert lg.scan_source('def seed(x):\n    return x.get("has_answer")\n')
+    assert lg.scan_source("def seed(x):\n    return x.answer_session_ids\n")
+
+
+# ── P1 regression: B/C builder is in scope, arm A/D carve-out is explicit ──
+
+
+_BC_BUILDER_WITH_ARM_A_GOLD_READ = """
+def build_context_arm(arm, qctx):
+    if arm == "A":
+        # arm A is the gold-verbatim oracle ceiling (spec §3)
+        return qctx.answer_session_ids
+    if arm == "D":
+        return render_context([], question_date=qctx.question_date)
+    if arm in ("B", "C"):
+        return build_subgraph(qctx.question_text)
+"""
+
+
+def _arm_exclusion(value: str) -> lg.BranchExclusion:
+    return lg.BranchExclusion(
+        function="build_context_arm", parameter="arm", value=value, reason="test carve-out"
+    )
+
+
+def test_bc_builder_and_turn_helper_are_scanned():
+    """P1: the guard covers the module that builds the B/C context."""
+    report = lg.scan_code_paths()
+    visited = set(report.visited)
+    assert "tools/longmem_eval/context_assembly_arms.py::build_context_arm" in visited
+    assert "tools/longmem_eval/context_assembly_arms.py::turns_by_point" in visited
+    # Reached through the builder's B/C branch — proves the closure is live.
+    assert "tortoise/subgraph_render.py::render_arm_b" in visited
+    assert "tortoise/subgraph_render.py::render_arm_c" in visited
+
+
+def test_guard_report_names_which_functions_are_out_of_scope():
+    """The coverage claim is auditable: exclusions are stated verbatim."""
+    report = lg.scan_code_paths()
+    joined = "\n".join(report.excluded)
+    assert "tools/longmem_eval/context_assembly_arms.py::build_context_arm" in joined
+    assert "arm == 'A'" in joined
+    assert "arm == 'D'" in joined
+
+
+def test_arm_a_gold_read_is_excluded_from_the_bc_scan():
+    """Arm A reads answer_session_ids legitimately; the carve-out hides it."""
+    exclusions = (_arm_exclusion("A"), _arm_exclusion("D"))
+    excluded = lg.scan_source(_BC_BUILDER_WITH_ARM_A_GOLD_READ, branch_exclusions=exclusions)
+    assert excluded == (), [str(f) for f in excluded]
+    # The same source without the carve-out IS flagged — the exclusion is real.
+    assert lg.scan_source(_BC_BUILDER_WITH_ARM_A_GOLD_READ) != ()
+
+
+def test_bc_branch_leak_is_not_hidden_by_the_arm_a_exclusion():
+    """A gold reference in the B/C branch is still a hard failure."""
+    source = (
+        "def build_context_arm(arm, qctx):\n"
+        '    if arm == "A":\n'
+        "        return qctx.answer_session_ids\n"
+        '    if arm in ("B", "C"):\n'
+        '        return getattr(qctx, "answer" + "_session_ids")\n'
+    )
+    findings = lg.scan_source(source, branch_exclusions=(_arm_exclusion("A"),))
+    assert findings, "a B/C-branch gold read must still be caught"
+    assert any(f.kind == "string" for f in findings)
+
+
+def test_guard_reports_no_stale_scope():
+    """A missing declared entry point is itself a finding (stale-scope guard)."""
+    report = lg.scan_code_paths()
+    assert not any(f.kind == "scope" for f in report.findings)
 
 
 # ══════════════════════════════════════════════════════════════════════════

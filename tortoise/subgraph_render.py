@@ -170,23 +170,16 @@ def _parse_date(value: Any) -> str | None:
     return match.group(1) if match else None
 
 
-def _render_date(
-    props: Mapping[str, Any],
-    session_id: Any,
-    session_dates: Mapping[str, str] | None,
-) -> str:
-    """``validFrom`` → ``createdAt`` → optional session-date fallback → unknown.
+def _render_date(props: Mapping[str, Any]) -> str:
+    """``validFrom`` → ``createdAt`` → ``(date unknown)`` (spec §3, frozen).
 
-    The spec's frozen source is the point's own stored ``validFrom`` /
-    ``createdAt``; ``session_dates`` (keyed by ``session_id``) is only
-    consulted when the point carries neither, and never overrides them.
+    The frozen chain is the point's own stored ``validFrom`` then
+    ``createdAt``. The spec defines no session-level fallback, so a point
+    carrying neither renders ``(date unknown)`` — never a fabricated date
+    borrowed from the point's session.
     """
     for key in ("validFrom", "createdAt"):
         parsed = _parse_date(props.get(key))
-        if parsed is not None:
-            return parsed
-    if session_dates and session_id is not None:
-        parsed = _parse_date(session_dates.get(str(session_id)))
         if parsed is not None:
             return parsed
     return "date unknown"
@@ -235,9 +228,12 @@ def _block_relations(sg: Subgraph, anchor_id: str) -> list[Any]:
             if str(relation.source_id) == anchor_id:
                 out.append(relation)
         elif relation.relation == "supersession":
-            # ``(superseder) -[:CORRECTS]-> (superseded)``; the marker belongs
-            # to the superseded claim's block.
-            if str(relation.target_id) == anchor_id:
+            # ``(superseder) -[:CORRECTS]-> (superseded)``. Symmetric with
+            # NAND: the anchor may be EITHER endpoint, and the line always
+            # names the superseded claim (the relation's target) — otherwise
+            # a supersession reached from its superseder is silently dropped
+            # whenever the superseded claim is a non-seed candidate.
+            if anchor_id in (str(relation.source_id), str(relation.target_id)):
                 out.append(relation)
         elif anchor_id in (str(relation.source_id), str(relation.target_id)):
             out.append(relation)
@@ -321,6 +317,10 @@ def _render(
     max_words: int,
     points_by_id: Mapping[str, Mapping[str, Any]] | None,
 ) -> RenderResult:
+    # ``session_dates`` is accepted for caller compatibility only and is never
+    # consulted: the spec's frozen date chain is ``validFrom`` → ``createdAt``
+    # → ``(date unknown)``, with no session-level fallback.
+    del session_dates
     if sg.zero_seed or not sg.anchors:
         return RenderResult(
             text=EMPTY_CONTEXT_SENTINEL,
@@ -351,7 +351,7 @@ def _render(
         turn_number = _turn_ordinal(anchor_id, props)
         session_phrase = f"session {session_number}" if session_number is not None else "session ?"
         turn_phrase = f"turn {turn_number}" if turn_number is not None else "turn ?"
-        date = _render_date(props, session_id, session_dates)
+        date = _render_date(props)
         lines.append(
             _Line(f"{label} came from {session_phrase} ({date}), {turn_phrase}", "provenance")
         )
@@ -396,12 +396,12 @@ def render_arm_b(
 
     ``haystack_session_ids`` is the question's frozen session-id list; the
     rendered session number is the 1-based position of the point's stored
-    ``session_id`` in it. ``session_dates`` is an optional
-    ``{session_id: date}`` fallback consulted only when a point carries
-    neither ``validFrom`` nor ``createdAt``. ``points_by_id`` is the graph
-    point-property map (``point_id → properties``) the serializer reads for
-    provenance, dates and EP confidence; when omitted, ``sg.points_by_id``
-    is used if present.
+    ``session_id`` in it. ``session_dates`` is accepted for caller
+    compatibility only and is **ignored**: the spec's frozen date chain is
+    ``validFrom`` → ``createdAt`` → ``(date unknown)``, with no session-level
+    fallback. ``points_by_id`` is the graph point-property map
+    (``point_id → properties``) the serializer reads for provenance, dates
+    and EP confidence; when omitted, ``sg.point_props`` is used if present.
     """
     return _render(
         sg,
