@@ -26,7 +26,7 @@ Node is optional (the repo's convention — see test_cross_subdomain_cookie_sync
 the test skips cleanly when node is unavailable.
 """
 
-from __future__ import annotations  # noqa: I001
+from __future__ import annotations
 
 import json
 import shutil
@@ -245,7 +245,7 @@ def test_next_is_honoured_for_admin_paths() -> None:
     """A well-formed /admin return-to becomes the post-login destination."""
     cases = {"early": [[p, ""] for p in ("?next=/admin", "?next=/admin/blog", "?next=%2Fadmin%2Fblog", "?next=/admin/")], "headGate": [], "claim": []}
     expected = ["/admin", "/admin/blog", "/admin/blog", "/admin/"]
-    for result, want in zip(_run(cases)["early"], expected):
+    for result, want in zip(_run(cases)["early"], expected, strict=True):
         assert result["base"] == ORIGIN + want, f"{result} != {ORIGIN + want}"
         assert result["ret"] == want, f"__ADMIN_RETURN_TO not set: {result}"
 
@@ -407,7 +407,7 @@ def test_session_status_mapping_matches_supabase() -> None:
         (429, "", "unavailable"),
     ]
     got = _run({"sessionStatus": [[c[0], c[1]] for c in cases]})["sessionKind"]
-    for (status, body, want), actual in zip(cases, got):
+    for (status, body, want), actual in zip(cases, got, strict=True):
         assert actual == want, f"HTTP {status} {body!r} → {actual!r}, want {want!r}"
 
 

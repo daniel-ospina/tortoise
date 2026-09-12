@@ -538,6 +538,7 @@ surfaces:
   - test_w4_why_enrichment.py
   - test_weights.py
   onboarding:
+  - test_admin_return_to.py
   - test_github_connect.py
   - test_github_connector.py
   - test_github_indexer.py
