@@ -769,51 +769,74 @@ def _issue_tokens(cp, *, client_id: str, user_id: str, team_id: str,
     refresh_id = secrets.token_urlsafe(16)
     access_id = secrets.token_urlsafe(16)
     now = _now_iso()
-    cp.query("oauth_refresh_tokens", method="POST", json_body={
-        "id": refresh_id,
-        "token_hash": _sha256(refresh),
-        "client_id": client_id,
-        "user_id": user_id,
-        "team_id": team_id,
-        "scope": scope,
-        "expires_at": _expires_iso(REFRESH_TOKEN_TTL_S),
-        "revoked_at": None,
-        "rotated_from": prev_refresh["id"] if prev_refresh is not None else None,
-        "created_at": now,
-    })
-    cp.query("oauth_access_tokens", method="POST", json_body={
-        "id": access_id,
-        "token_hash": _sha256(access),
-        "client_id": client_id,
-        "user_id": user_id,
-        "team_id": team_id,
-        "scope": scope,
-        "expires_at": _expires_iso(ACCESS_TOKEN_TTL_S),
-        "revoked_at": None,
-        "refresh_token_id": refresh_id,
-        "created_at": now,
-    })
-    if prev_refresh is not None:
-        claimed = cp.query("oauth_refresh_tokens", method="PATCH",
-                           select=["id"],
-                           filters=[("id", "eq", prev_refresh["id"]),
-                                    ("revoked_at", "is", None)],
-                           json_body={"revoked_at": _now_iso()})
-        if not claimed:
-            # A concurrent worker already rotated this grant — roll back the
-            # orphan pair so only the winner's tokens survive.
-            cp.query("oauth_refresh_tokens", method="PATCH",
-                     filters=[("id", "eq", refresh_id)],
-                     json_body={"revoked_at": now})
+    # #2863: appended BEFORE the POST, so a commit-then-lost POST still gets its
+    # rollback (the row exists even though the response never arrived).
+    minted: list[tuple[str, str]] = []
+    try:
+        minted.append(("oauth_refresh_tokens", refresh_id))
+        cp.query("oauth_refresh_tokens", method="POST", json_body={
+            "id": refresh_id,
+            "token_hash": _sha256(refresh),
+            "client_id": client_id,
+            "user_id": user_id,
+            "team_id": team_id,
+            "scope": scope,
+            "expires_at": _expires_iso(REFRESH_TOKEN_TTL_S),
+            "revoked_at": None,
+            "rotated_from": prev_refresh["id"] if prev_refresh is not None else None,
+            "created_at": now,
+        })
+        minted.append(("oauth_access_tokens", access_id))
+        cp.query("oauth_access_tokens", method="POST", json_body={
+            "id": access_id,
+            "token_hash": _sha256(access),
+            "client_id": client_id,
+            "user_id": user_id,
+            "team_id": team_id,
+            "scope": scope,
+            "expires_at": _expires_iso(ACCESS_TOKEN_TTL_S),
+            "revoked_at": None,
+            "refresh_token_id": refresh_id,
+            "created_at": now,
+        })
+        if prev_refresh is not None:
+            claimed = cp.query("oauth_refresh_tokens", method="PATCH",
+                               select=["id"],
+                               filters=[("id", "eq", prev_refresh["id"]),
+                                        ("revoked_at", "is", None)],
+                               json_body={"revoked_at": _now_iso()})
+            if not claimed:
+                # A concurrent worker already rotated this grant — roll back the
+                # orphan pair so only the winner's tokens survive (lane 1: the
+                # INTENTIONAL signal — its rollback failure must not convert it
+                # into OAuthMintAborted, or the pinned invalid_grant would break).
+                try:
+                    _rollback_minted(cp, minted, now, capture=True)
+                except Exception as exc:
+                    logger.warning("oauth: loser rollback raised: %s", exc)
+                raise OAuthError(400, "invalid_grant",
+                                 "Refresh token already revoked (rotated or invalidated).")
+    except OAuthError:
+        raise                                              # lane 1 — intentional signal
+    except Exception as exc:
+        # lane 2 — the SINGLE capture of the triggering exception (I4).
+        _log_and_capture(exc, where="_issue_tokens")
+        try:
+            _rollback_minted(cp, minted, now, capture=False)   # lane 2 already captured
+            recovered = _mint_observably_clean(cp, minted)
+            if recovered and prev_refresh is not None:
+                recovered = _prev_refresh_unclaimed(cp, prev_refresh)
+        except Exception as inner:                          # structural no-leak guarantee
+            logger.warning("oauth: mint compensation raised: %s", inner)
+            recovered = False
+        raise OAuthMintAborted(recovered) from exc
+    if prev_access_id:                                      # lane 3 — outside the handler
+        try:
             cp.query("oauth_access_tokens", method="PATCH",
-                     filters=[("id", "eq", access_id)],
+                     filters=[("id", "eq", prev_access_id)],
                      json_body={"revoked_at": now})
-            raise OAuthError(400, "invalid_grant",
-                             "Refresh token already revoked (rotated or invalidated).")
-    if prev_access_id:
-        cp.query("oauth_access_tokens", method="PATCH",
-                 filters=[("id", "eq", prev_access_id)],
-                 json_body={"revoked_at": now})
+        except Exception as exc:
+            logger.warning("oauth: prev-access revoke failed: %s", exc)
     return {
         "access_token": access,
         "token_type": "Bearer",

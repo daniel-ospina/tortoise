@@ -11,6 +11,7 @@ import base64
 import copy
 import hashlib
 import json
+import logging
 import os
 import secrets
 import tempfile
@@ -331,3 +332,117 @@ def test_real_seam_maps_status_and_unparseable_body(capture_server, status, payl
     capture_server.respond = (status, payload)
     assert oauth._consume_state(cp, "c") == expected
     assert oauth._restore_code(cp, "c", "T1") is False
+
+
+# ── Task 3: `_issue_tokens` — 3-lane taxonomy, structural no-leak guarantee ──
+
+def _mint(cp, **over):
+    return oauth._issue_tokens(cp, client_id="c1", user_id="u1", team_id="t1",
+                               scope="mcp", resource=None, **over)
+
+
+def test_refresh_insert_failure_rolls_back_and_observes():
+    cp = FakeControlPlane()
+    cp.fail_query(table="oauth_refresh_tokens", method="POST")
+    with pytest.raises(oauth.OAuthMintAborted) as ei:
+        _mint(cp)
+    assert ei.value.recovered is True       # never inserted → nothing to revoke → clean
+    assert _live(cp, "oauth_refresh_tokens") == [] and _live(cp, "oauth_access_tokens") == []
+
+
+def test_access_insert_failure_removes_the_live_orphan():
+    cp = FakeControlPlane()
+    cp.fail_query(table="oauth_access_tokens", method="POST")
+    with pytest.raises(oauth.OAuthMintAborted) as ei:
+        _mint(cp)
+    assert ei.value.recovered is True
+    assert _live(cp, "oauth_refresh_tokens") == []      # TODAY this is the live orphan (matrix row 5)
+
+
+@pytest.mark.parametrize("table", ["oauth_refresh_tokens", "oauth_access_tokens"])
+def test_mint_write_that_committed_then_lost_its_response_is_rolled_back(table):
+    cp = FakeControlPlane()
+    cp.fail_query(table=table, method="POST", after_mutation=True, times=1)
+    with pytest.raises(oauth.OAuthMintAborted) as ei:
+        _mint(cp)
+    assert ei.value.recovered is True
+    assert _live(cp, table) == []           # a live orphan here would be a #3036-class leak
+
+
+def test_double_fault_reports_recovered_false():
+    cp = FakeControlPlane()
+    cp.fail_query(table="oauth_access_tokens", method="POST")
+    cp.fail_query(table="oauth_refresh_tokens", method="PATCH", times=1)   # the rollback
+    with pytest.raises(oauth.OAuthMintAborted) as ei:
+        _mint(cp)
+    assert ei.value.recovered is False
+
+
+def test_observation_read_failure_is_terminal_never_fail_open():
+    cp = FakeControlPlane()
+    cp.fail_query(table="oauth_access_tokens", method="POST")                 # trigger
+    cp.fail_query(table="oauth_access_tokens", method="GET", select=["id"])   # observation
+    with pytest.raises(oauth.OAuthMintAborted) as ei:
+        _mint(cp)
+    assert ei.value.recovered is False
+
+
+def test_prev_refresh_observed_revoked_is_recovered_false():
+    cp = FakeControlPlane()
+    _seed_refresh_token(cp)
+    cp.fail_query(table="oauth_access_tokens", method="POST")       # trigger after the claim
+    cp.tables["oauth_refresh_tokens"][0]["revoked_at"] = "T"        # claim landed
+    with pytest.raises(oauth.OAuthMintAborted) as ei:
+        _mint(cp, prev_refresh=cp.tables["oauth_refresh_tokens"][0])
+    assert ei.value.recovered is False
+
+
+def test_loser_rollback_failure_still_raises_invalid_grant(caplog, monkeypatch):
+    """Pin lane 1's rollback-failure path. The fault MATCHES BY SHAPE (select-less
+    PATCH), never by a hand-written filter literal — and the autouse `_no_silent_faults`
+    guard fails this test if the injector never fires."""
+    calls = []
+    monkeypatch.setattr("tortoise.sentry.capture_exception", lambda exc, **kw: calls.append(exc))
+    cp = FakeControlPlane()
+    row_id, _ = _seed_refresh_token(cp, "old")
+    cp.query("oauth_refresh_tokens", method="PATCH", select=["id"],
+             filters=[("id", "eq", row_id)], json_body={"revoked_at": "T"})   # pre-claim → loser
+    # Match the ROLLBACK by its select-less shape; a bare match would be taken by the
+    # claim PATCH (select=["id"]) and land in lane 2 instead.
+    cp.fail_query(table="oauth_refresh_tokens", method="PATCH",
+                  match=lambda t, m, sel, f: m == "PATCH" and not sel, times=1)
+    with caplog.at_level(logging.WARNING, logger="tortoise.oauth"), \
+         pytest.raises(oauth.OAuthError) as ei:
+        _mint(cp, prev_refresh={"id": row_id})
+    assert ei.value.status == 400 and ei.value.error == "invalid_grant"   # NOT OAuthMintAborted
+    assert len(calls) == 1 and "loser rollback" in caplog.text   # lane 1 captured exactly once
+
+
+def test_prev_access_revoke_failure_does_not_fail_a_delivered_pair(caplog):
+    cp = FakeControlPlane()
+    rid, _ = _seed_refresh_token(cp, "acc-parent")
+    acc = _seed_access_token(cp, refresh_id=rid)
+    cp.fail_query(table="oauth_access_tokens", method="PATCH",
+                  match=lambda t, m, sel, f: m == "PATCH" and not sel, times=1)   # lane 3
+    with caplog.at_level(logging.WARNING, logger="tortoise.oauth"):
+        out = _mint(cp, prev_access_id=acc)
+    assert out["access_token"] and out["refresh_token"]          # delivered
+    assert "prev-access revoke failed" in caplog.text            # the fault DID fire
+
+
+@pytest.mark.parametrize("second_fault", ["none", "one_rollback", "both_rollbacks"])
+def test_one_capture_per_abort(monkeypatch, second_fault):
+    calls = []
+    monkeypatch.setattr("tortoise.sentry.capture_exception",
+                        lambda exc, **kw: calls.append(exc))
+    cp = FakeControlPlane()
+    cp.fail_query(table="oauth_access_tokens", method="POST", times=1)          # trigger
+    if second_fault in ("one_rollback", "both_rollbacks"):
+        cp.fail_query(table="oauth_refresh_tokens", method="PATCH",
+                      match=lambda t, m, sel, f: m == "PATCH" and not sel, times=1)
+    if second_fault == "both_rollbacks":
+        cp.fail_query(table="oauth_access_tokens", method="PATCH",
+                      match=lambda t, m, sel, f: m == "PATCH" and not sel, times=1)
+    with pytest.raises(oauth.OAuthMintAborted):
+        _mint(cp)
+    assert len(calls) == 1          # counts, not presence — the panic case would be 3
