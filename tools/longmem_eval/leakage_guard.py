@@ -64,7 +64,14 @@ closure additionally scans:
   receiver** (``helper = Helper(); helper.strip(props)``; ``self.strip()``
   inside a class method; and, as a scan-safe over-approximation, any
   ``x.method()`` whose ``method`` exactly one module-level class defines),
-  including class-level bindings those methods read via ``self``.
+  including class-level bindings those methods read via ``self`` **and**
+  instance attributes assigned in a reached ``__init__``;
+* every **method of an imported helper class** constructed in a scanned
+  scope (``from pkg import Helper; Helper().scrub(x)``, or
+  ``import pkg; pkg.Helper().scrub(x)``): the constructor resolves through
+  the import table, the imported module is loaded, and its ``__init__`` +
+  methods are enqueued, so an ``__init__``-held gold literal read via
+  ``self.<attr>`` is caught.
 
 Scanning stays **reachability-bounded**, which is why the driver is not
 scanned with a literal whole-module ``("*",)``: the metrics/runner layer in
@@ -424,9 +431,10 @@ def _module_bindings(
 ) -> tuple[
     dict[str, ast.AST],
     dict[tuple[str, str], ast.AST],
+    dict[tuple[str, str], ast.AST],
     dict[str, list[ast.AST]],
 ]:
-    """Module-level and class-level assignments, keyed by name.
+    """Module-level, class-level and ``__init__`` instance assignments.
 
     The driver's B/C path is scanned by entry point, so a gold constant that
     lives *outside* ``build_context_arm`` — ``_STRIP = ("has_answer", …)`` at
@@ -434,13 +442,20 @@ def _module_bindings(
     naive call-graph walk. The reference closure resolves a scanned function's
     ``Name``/``self.attr`` references through these maps.
 
-    The third map is the **companion statements**: every module-level
+    The third map holds **instance attributes assigned in ``__init__``**
+    (``self._keys = ("has_answer", …)``): a gold literal placed in a
+    constructor and read via ``self.<attr>`` in a method was previously never
+    scanned, because only class-body bindings were tracked. It is kept
+    separate from the class-body map so the two never shadow each other.
+
+    The fourth map is the **companion statements**: every module-level
     statement that references a name. It closes the post-definition mutation
     pattern ``_CONFIG = {}`` … ``_CONFIG["strip"] = "has_answer"``, where the
     gold value sits in a statement *after* the binding's own value node.
     """
     bindings: dict[str, ast.AST] = {}
     class_bindings: dict[tuple[str, str], ast.AST] = {}
+    instance_bindings: dict[tuple[str, str], ast.AST] = {}
     for node in tree.body:
         if isinstance(node, ast.Assign):
             for target in node.targets:
@@ -464,6 +479,7 @@ def _module_bindings(
                     and sub.value is not None
                 ):
                     class_bindings[(node.name, sub.target.id)] = sub.value
+            _collect_init_instance_bindings(node, instance_bindings)
 
     companions: dict[str, list[ast.AST]] = {}
     for node in tree.body:
@@ -472,7 +488,40 @@ def _module_bindings(
         for child in ast.walk(node):
             if isinstance(child, ast.Name):
                 companions.setdefault(child.id, []).append(node)
-    return bindings, class_bindings, companions
+    return bindings, class_bindings, instance_bindings, companions
+
+
+def _self_attr_name(node: ast.AST) -> str | None:
+    """``node.attr`` when ``node`` is a ``self.<attr>`` access, else ``None``."""
+    if (
+        isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "self"
+    ):
+        return node.attr
+    return None
+
+
+def _collect_init_instance_bindings(
+    class_node: ast.ClassDef,
+    out: dict[tuple[str, str], ast.AST],
+) -> None:
+    """Record ``self.<attr> = <value>`` assignments inside a class ``__init__``."""
+    for sub in class_node.body:
+        if not isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if sub.name != "__init__":
+            continue
+        for stmt in ast.walk(sub):
+            if isinstance(stmt, ast.Assign):
+                for target in stmt.targets:
+                    name = _self_attr_name(target)
+                    if name is not None:
+                        out[(class_node.name, name)] = stmt.value
+            elif isinstance(stmt, ast.AnnAssign) and stmt.value is not None:
+                name = _self_attr_name(stmt.target)
+                if name is not None:
+                    out[(class_node.name, name)] = stmt.value
 
 
 def _resolve_module_path(module: str | None, level: int, current: str) -> str | None:
@@ -1061,6 +1110,7 @@ class _Module:
     comments: list[tuple[int, str]]
     bindings: dict[str, ast.AST]
     class_bindings: dict[tuple[str, str], ast.AST]
+    instance_bindings: dict[tuple[str, str], ast.AST]
     companions: dict[str, list[ast.AST]]
     classes: frozenset[str]
 
@@ -1069,7 +1119,7 @@ def _load(path: str, cache: dict[str, _Module]) -> _Module:
     if path not in cache:
         source = _read(path)
         tree = ast.parse(source)
-        bindings, class_bindings, companions = _module_bindings(tree)
+        bindings, class_bindings, instance_bindings, companions = _module_bindings(tree)
         cache[path] = _Module(
             path=path,
             source=source,
@@ -1080,6 +1130,7 @@ def _load(path: str, cache: dict[str, _Module]) -> _Module:
             comments=_comments(source),
             bindings=bindings,
             class_bindings=class_bindings,
+            instance_bindings=instance_bindings,
             companions=companions,
             classes=_module_classes(tree),
         )
@@ -1094,6 +1145,43 @@ def _class_of(value: ast.AST | None, classes: frozenset[str]) -> str | None:
         return value.func.id if value.func.id in classes else None
     if isinstance(value, ast.Name) and value.id in classes:
         return value.id
+    return None
+
+
+def _constructed_class_target(
+    value: ast.AST | None,
+    module: _Module,
+    cache: dict[str, _Module],
+) -> tuple[str, str] | None:
+    """``(module path, class name)`` for a constructed module/imported class.
+
+    Extends :func:`_class_of` through the module's **imports**: a helper class
+    imported from another module (``from pkg import Helper``, or ``import pkg``
+    then ``pkg.Helper()``) previously resolved to no class, so its methods
+    were never followed. Resolving it loads the imported module and lets the
+    call-graph closure enqueue its ``__init__`` and methods.
+    """
+    if value is None:
+        return None
+    if isinstance(value, ast.Call):
+        value = value.func
+    if isinstance(value, ast.Name):
+        name = value.id
+        if name in module.classes:
+            return (module.path, name)
+        entry = module.imports.get(name)
+        if entry is not None:
+            path, symbol = entry
+            if symbol and symbol in _load(path, cache).classes:
+                return (path, symbol)
+        return None
+    if isinstance(value, ast.Attribute) and isinstance(value.value, ast.Name):
+        entry = module.imports.get(value.value.id)
+        if entry is not None:
+            path, symbol = entry
+            # ``symbol is None`` → the name is bound to the module itself.
+            if symbol is None and value.attr in _load(path, cache).classes:
+                return (path, value.attr)
     return None
 
 
@@ -1183,9 +1271,15 @@ def _resolve_binding_keys(
         return [base] if base in module.bindings else []
     if attr is None:
         return []
-    if base == "self" and class_name and (class_name, attr) in module.class_bindings:
+    if base == "self" and class_name and (
+        (class_name, attr) in module.class_bindings
+        or (class_name, attr) in module.instance_bindings
+    ):
         return [f"{class_name}.{attr}"]
-    if base in module.classes and (base, attr) in module.class_bindings:
+    if base in module.classes and (
+        (base, attr) in module.class_bindings
+        or (base, attr) in module.instance_bindings
+    ):
         return [f"{base}.{attr}"]
     return []
 
@@ -1206,7 +1300,33 @@ def _binding_nodes(module: _Module, key: str) -> list[ast.AST]:
         node = module.class_bindings.get((class_name, attr))
         if node is not None:
             out.append(node)
+        node = module.instance_bindings.get((class_name, attr))
+        if node is not None:
+            out.append(node)
     return out
+
+
+def _constructor_init_target(
+    call: ast.Call,
+    module: _Module,
+    cache: dict[str, _Module],
+) -> tuple[str, str] | None:
+    """``(module path, "<Class>.__init__")`` for a constructor call, if defined.
+
+    The guard resolved ``_S2().scrub(x)`` to ``_S2.scrub`` but never followed
+    ``_S2.__init__``, so a gold literal placed in the constructor and read via
+    ``self.<attr>`` was never scanned. Returns ``None`` when the class has no
+    explicit ``__init__`` (a dataclass, or one that only inherits it), so a
+    non-existent target never becomes a spurious stale-scope finding.
+    """
+    constructed = _constructed_class_target(call.func, module, cache)
+    if constructed is None:
+        return None
+    path, class_name = constructed
+    target = f"{class_name}.__init__"
+    if target in _load(path, cache).funcs:
+        return (path, target)
+    return None
 
 
 def _call_target(
@@ -1215,6 +1335,7 @@ def _call_target(
     *,
     class_name: str | None = None,
     scope: ast.AST | None = None,
+    cache: dict[str, _Module],
 ) -> tuple[str, str] | None:
     """Resolve a call to ``(repo-relative module path, function name)``.
 
@@ -1232,7 +1353,15 @@ def _call_target(
             return (module.path, func.id)
         if func.id in module.imports:
             target_path, symbol = module.imports[func.id]
-            return (target_path, symbol) if symbol else None
+            if symbol is None:
+                return None
+            # An imported *class* is not a function: its constructor and
+            # methods are followed through ``_constructed_class_target`` /
+            # ``_constructor_init_target``. Returning it here would enqueue a
+            # non-existent target and fake a stale-scope finding.
+            if symbol in _load(target_path, cache).classes:
+                return None
+            return (target_path, symbol)
         return None
 
     if isinstance(func, ast.Attribute):
@@ -1257,8 +1386,13 @@ def _call_target(
             else:
                 target_class = _local_class_binding(scope, module, base)
         else:
-            # ``Helper().method()`` — a class instance built inline.
-            target_class = _class_of(base_node, module.classes)
+            # ``Helper().method()`` — a class instance built inline, possibly
+            # an imported class (resolved through the import table).
+            constructed = _constructed_class_target(base_node, module, cache)
+            if constructed is not None:
+                cls_path, cls_name = constructed
+                if f"{cls_name}.{attr}" in _load(cls_path, cache).funcs:
+                    return (cls_path, f"{cls_name}.{attr}")
         if target_class and f"{target_class}.{attr}" in module.funcs:
             return (module.path, f"{target_class}.{attr}")
         candidates = [cls for cls in sorted(module.classes) if f"{cls}.{attr}" in module.funcs]
@@ -1374,9 +1508,18 @@ def scan_code_paths() -> ScanReport:
     ) -> None:
         """Follow a scanned scope's calls and enqueue its binding references."""
         for call in _iter_scanned_calls(node, function, exclusions):
-            target = _call_target(call, module, class_name=class_name, scope=node)
+            target = _call_target(
+                call, module, class_name=class_name, scope=node, cache=cache
+            )
             if target and target not in scanned and not _is_excluded_target(target):
                 frontier.append(target)
+            init_target = _constructor_init_target(call, module, cache)
+            if (
+                init_target
+                and init_target not in scanned
+                and not _is_excluded_target(init_target)
+            ):
+                frontier.append(init_target)
         for ref in _iter_scanned_refs(node, function, exclusions):
             for binding_key in _resolve_binding_keys(ref, module, class_name):
                 token = (module.path, binding_key)

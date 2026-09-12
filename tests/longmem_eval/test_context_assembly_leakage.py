@@ -454,6 +454,7 @@ def test_guard_reports_no_stale_scope():
 # asserts the guard now reports a finding.
 
 _DRIVER_PATH = "tools/longmem_eval/context_assembly_arms.py"
+_HELPER_PATH = "tools/longmem_eval/reader.py"
 _BC_BRANCH_ANCHOR = '    if arm in ("B", "C"):'
 _ARM_A_ANCHOR = '    if arm == "A":'
 
@@ -462,15 +463,20 @@ def _real_driver_source() -> str:
     return lg._read(_DRIVER_PATH)
 
 
-def _scan_with_driver_source(monkeypatch, source: str) -> lg.ScanReport:
-    """Run ``scan_code_paths`` with ``source`` standing in for the driver."""
+def _scan_with_module_sources(monkeypatch, overrides: dict[str, str]) -> lg.ScanReport:
+    """Run ``scan_code_paths`` with ``overrides`` standing in for those paths."""
     real_read = lg._read
 
     def fake_read(path: str) -> str:
-        return source if path == _DRIVER_PATH else real_read(path)
+        return overrides.get(path, real_read(path))
 
     monkeypatch.setattr(lg, "_read", fake_read)
     return lg.scan_code_paths()
+
+
+def _scan_with_driver_source(monkeypatch, source: str) -> lg.ScanReport:
+    """Run ``scan_code_paths`` with ``source`` standing in for the driver."""
+    return _scan_with_module_sources(monkeypatch, {_DRIVER_PATH: source})
 
 
 def _inject_in_bc_branch(source: str, block: str) -> str:
@@ -540,6 +546,70 @@ def test_instance_method_class_constant_read_via_self_is_caught(monkeypatch):
     report = _scan_with_driver_source(monkeypatch, injected)
     assert any("_Scrubber._KEYS" in entry for entry in report.visited)
     assert any(f.kind == "string" for f in report.findings), [str(f) for f in report.findings]
+
+
+def test_instance_attr_assigned_in_dunder_init_read_via_self_is_caught(monkeypatch):
+    """P2 evasion (a): an ``__init__`` instance attribute read via ``self``.
+
+    ``_S2().scrub(x)`` resolves to ``_S2.scrub``, but the guard never followed
+    ``_S2.__init__`` and only resolved ``self.<attr>`` against **class-body**
+    bindings. A gold literal placed in ``__init__`` and read as
+    ``self._keys`` was therefore never scanned. Both the constructor itself
+    and the ``self.<attr>`` binding must now be reached.
+    """
+    helper = (
+        "\n\nclass _S2:\n"
+        "    def __init__(self):\n"
+        '        self._keys = ("has_answer", "lme_session_index")\n'
+        "\n"
+        "    def scrub(self, props):\n"
+        "        return {k: v for k, v in props.items() if k not in self._keys}\n"
+    )
+    injected = _inject_in_bc_branch(
+        _real_driver_source() + helper, "        _S2().scrub(qctx.raw)"
+    )
+    report = _scan_with_driver_source(monkeypatch, injected)
+    assert any("_S2.__init__" in entry for entry in report.visited), (
+        "the constructor was not followed from the B/C branch"
+    )
+    assert any(f.function == "_S2.__init__" for f in report.findings), [
+        str(f) for f in report.findings
+    ]
+    # A class whose only ``__init__`` work is a gold literal must not be
+    # mistaken for a stale entry point.
+    assert not any(f.kind == "scope" for f in report.findings), [str(f) for f in report.findings]
+
+
+def test_imported_helper_class_method_is_caught(monkeypatch):
+    """P2 evasion (b): a helper class imported from another module.
+
+    ``_class_of`` only knew classes defined in the scanned module, so
+    ``Helper().scrub(x)`` from another module was not followed. The
+    constructor now resolves through the import table, loads the imported
+    module and enqueues its ``__init__`` + methods.
+    """
+    helper = (
+        "\n\nclass _S3:\n"
+        "    def __init__(self, tag='x'):\n"
+        "        self.tag = tag\n"
+        "\n"
+        "    def scrub(self, props):\n"
+        '        return {k: v for k, v in props.items() if k != "has_answer"}\n'
+    )
+    driver = _inject_in_bc_branch(
+        _real_driver_source() + "\nfrom tools.longmem_eval.reader import _S3\n",
+        "        _S3().scrub(qctx.raw)",
+    )
+    report = _scan_with_module_sources(
+        monkeypatch, {_DRIVER_PATH: driver, _HELPER_PATH: lg._read(_HELPER_PATH) + helper}
+    )
+    assert any(
+        entry.startswith(_HELPER_PATH) and "_S3.scrub" in entry for entry in report.visited
+    ), "the imported helper class method was not followed"
+    assert any(
+        f.code_path == _HELPER_PATH and f.function == "_S3.scrub" for f in report.findings
+    ), [str(f) for f in report.findings]
+    assert not any(f.kind == "scope" for f in report.findings), [str(f) for f in report.findings]
 
 
 def test_module_binding_post_definition_mutation_is_caught(monkeypatch):

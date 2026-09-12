@@ -770,11 +770,19 @@ def per_class_accuracy(
 
     ``current-state`` (n=1) is reported for completeness and flagged
     ``excluded_from_inference``: never used for per-class inference.
+
+    The three ``_abs`` abstention controls are filtered out here (not at the
+    call site) so every caller inherits the exclusion: the census maps them
+    to analysis classes, so counting them inflates the denominators —
+    34 / 19 / 2 instead of the frozen 32 / 19 / 1 = 52.
     """
     out: dict[str, Any] = {}
+    counted = 0
     for cls in ANALYSIS_CLASSES:
         rows = [o for o in outcomes
-                if qid_to_class.get(str(o.get("question_id"))) == cls]
+                if qid_to_class.get(str(o.get("question_id"))) == cls
+                and _is_answerable(str(o.get("question_id")))]
+        counted += len(rows)
         graded = [o for o in rows if isinstance(o.get("label"), bool)]
         correct = sum(1 for o in graded if o["label"] is True)
         out[cls] = {
@@ -784,6 +792,18 @@ def per_class_accuracy(
             "accuracy": round(correct / len(graded), 4) if graded else None,
             "excluded_from_inference": cls == "current-state",
         }
+    # Invariant guard: the per-class denominators must sum to the answerable
+    # census subset. A re-introduced `_abs` row makes `counted` exceed the
+    # answerable count and trips this assertion.
+    answerable_n = sum(
+        1 for o in outcomes
+        if qid_to_class.get(str(o.get("question_id"))) in ANALYSIS_CLASSES
+        and _is_answerable(str(o.get("question_id")))
+    )
+    assert counted == answerable_n, (
+        f"per-class counts sum to {counted}, but the answerable census "
+        f"subset is {answerable_n} — an '_abs' control leaked into metric 4"
+    )
     return out
 
 

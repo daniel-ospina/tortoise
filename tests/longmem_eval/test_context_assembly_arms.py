@@ -26,7 +26,6 @@ import json
 import os
 import sys
 import types
-from collections import Counter
 from dataclasses import replace
 from pathlib import Path
 
@@ -837,13 +836,25 @@ def test_run_experiment_wires_the_graph_metrics_into_outcomes(monkeypatch):
 
 
 def test_per_class_counts_sum_to_52():
+    """The REAL metric 4 excludes the `_abs` controls: 32 / 19 / 1 = 52.
+
+    The census maps the three `_abs` abstention controls to analysis
+    classes, so feeding every class-mapped qid (including the controls) to
+    :func:`per_class_accuracy` is what exercises the exclusion. Filtering
+    the classes in the test would hide the leak the metric had.
+    """
     classes = caa.load_census_classes(_ROWS)
-    answerable = Counter(
-        cls for qid, cls in classes.items() if not qid.endswith("_abs"))
-    assert sum(answerable.values()) == 52
-    assert answerable["interval"] == 19
-    assert answerable["ordering/compare"] == 32
-    assert answerable["current-state"] == 1
+    controls = [qid for qid in classes if qid.endswith("_abs")]
+    assert len(controls) == 3, controls
+    outcomes = [
+        {"question_id": qid, "label": True, "reader_refusal": False}
+        for qid in classes
+    ]
+    per = caa.per_class_accuracy(outcomes, classes)
+    assert per["interval"]["n"] == 19
+    assert per["ordering/compare"]["n"] == 32
+    assert per["current-state"]["n"] == 1
+    assert sum(row["n"] for row in per.values()) == 52
 
 
 def test_zero_seed_rate_is_reported_for_b_and_c_only(monkeypatch):
