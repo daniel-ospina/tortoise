@@ -780,6 +780,20 @@ class TestLivenessDecouple:
         view = ha_mod._HEALTH_PROBE.snapshot()
         assert view["ok"] is True, view
 
+    def test_health_probe_refresh_budget_tracks_the_resolved_interval(
+            self, monkeypatch):
+        """Round-4 review P2: the ``/health`` self-heal gate must equal the
+        refresher's RESOLVED period, not the hardcoded ``HEALTH_PROBE_REFRESH_S``
+        (10s). With an operator period in 0.5-15s, a frozen 10s gate let
+        ``/health`` start a duplicate DB probe once per cycle while the
+        refresher was still healthy."""
+        import tortoise.hosted_api as ha_mod
+
+        monkeypatch.setattr(ha_mod, "_health_probe_interval", lambda: 12.5)
+        assert ha_mod._HEALTH_PROBE._refresh_budget_now() == 12.5, (
+            "the /health self-heal gate is frozen at the hardcoded default, "
+            "not the resolved refresher period")
+
     def test_health_shape_is_backwards_compatible(self, client):
         """The dashboard and the deploy workflow read this shape; the #2850
         fields are additive and status stays 200 either way."""

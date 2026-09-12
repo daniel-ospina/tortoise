@@ -1253,3 +1253,27 @@ def test_promotion_survives_rebuild(sdk, tmp_path):
         assert rows and rows[0][0] == "live", (
             f"rebuild must preserve promotion for {pid}, got {rows}"
         )
+
+
+def test_event_retention_interval_rejects_nonpositive_in_sdk(monkeypatch):
+    """Round-4 review P2 (PRE-EXISTING): ``TORTOISE_EVENT_RETENTION_INTERVAL``
+    was parsed with a bare ``int()``, so ``0``/``-1`` made the gate
+    ``now - _EVENT_PURGE_LAST < interval`` always false — a purge DELETE on
+    every ``events_poll``. The validated interval must keep the gate closed."""
+    import tortoise.event_store as es
+
+    purges: list[str] = []
+    monkeypatch.setattr(es, "purge_expired",
+                        lambda *a, **k: purges.append("expired"))
+    monkeypatch.setattr(es, "purge_overflow",
+                        lambda *a, **k: purges.append("overflow"))
+    monkeypatch.setenv("TORTOISE_EVENT_RETENTION_INTERVAL", "0")
+    TortoiseSDK._EVENT_PURGE_LAST = 0.0
+    # ``_maybe_purge_events`` reads only module-level state + the (patched)
+    # purge fns here, so a placeholder receiver/projection is sufficient.
+    TortoiseSDK._maybe_purge_events(object(), None)
+    first = len(purges)
+    assert first > 0, "the first gated purge did not run"
+    TortoiseSDK._maybe_purge_events(object(), None)
+    assert len(purges) == first, (
+        "interval=0 made the purge gate always false — a DELETE on every poll")
