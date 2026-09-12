@@ -658,3 +658,98 @@ def test_emit_manifest_collect_failure_writes_no_manifest(tmp_path):
                                    runner=lambda cmd: (2, ""))
     assert rc == 2
     assert not out.exists()
+
+
+# ── #3290: the live-URI gate has ONE reason string ────────────────────────
+
+def _live_uri_skip_reasons() -> list[tuple[str, int, str]]:
+    """Every skip/xfail reason under tests/ that gates on TORTOISE_DB_URI.
+
+    Returns (repo-relative path, lineno, reason). Parsed with `ast` rather than
+    a regex so a reason built from a non-constant expression is skipped rather
+    than mis-matched.
+
+    Scope is deliberate (code review P2): the walker covers `skipif` DECORATORS
+    **and** in-body `pytest.skip(...)` / `pytest.xfail(...)` calls, because the
+    #3339 fix itself skips from the body — a skipif-only scanner would be blind
+    to the very form it introduced. The `TORTOISE_DB_URI` filter keeps the
+    deliberately-RED probe class (`Live FalkorDB (Docker) not available`) out of
+    scope: those are SUPPOSED to red the runtime guard when they fire, so
+    asserting them here would be wrong.
+    """
+    import ast
+
+    root = Path(__file__).resolve().parents[1]
+    found: list[tuple[str, int, str]] = []
+    for path in sorted((root / "tests").rglob("*.py")):
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+        except (UnicodeDecodeError, SyntaxError):  # pragma: no cover
+            continue
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            name = getattr(node.func, "attr", None) or getattr(node.func, "id", None)
+            if name not in ("skipif", "skip", "xfail"):
+                continue
+            reason: object = None
+            for kw in node.keywords:
+                if kw.arg == "reason" and isinstance(kw.value, ast.Constant):
+                    reason = kw.value.value
+            # in-body form: pytest.skip("<reason>")
+            if reason is None and node.args and isinstance(node.args[0], ast.Constant):
+                reason = node.args[0].value
+            if isinstance(reason, str) and "TORTOISE_DB_URI" in reason:
+                found.append((str(path.relative_to(root)), node.lineno, reason))
+    return found
+
+
+def test_live_uri_skipif_reasons_are_guard_exempt():
+    """#3339: no test may invent its own live-URI skip reason.
+
+    tools/skip-guard.py exempts the intentional availability-class families by
+    REASON PREFIX, so that a live test legitimately skipping in the tier-2
+    URI-less lane does not red `test (a)`.
+
+    An ad-hoc skip reason mentioning TORTOISE_DB_URI ("live FalkorDB required
+    (TORTOISE_DB_URI unset)" — the #3339 offender) skips in that lane AND trips
+    the guard, redding whichever PR's selection happened to land in the URI-less
+    shape. Route through tests/_live_utils.py::_skip_unless_live_uri instead.
+
+    The exemption predicate is the guard's OWN `is_falkor_reason_violation()`,
+    not a re-derived startswith (code review P3): re-deriving it drops the
+    embedded-prefix family and the case-insensitive handling, so the static and
+    runtime checks could disagree.
+    """
+    scanned = _live_uri_skip_reasons()
+    # Anti-vacuity: the exempt live-URI gates really do exist in this tree, so a
+    # scan that finds nothing means the walker broke, not that the tree is clean.
+    assert scanned, "walker found no live-URI skip reasons — scan is broken"
+
+    offenders = [
+        (path, line, reason)
+        for path, line, reason in scanned
+        if _skip_guard.is_falkor_reason_violation(reason)
+    ]
+    assert offenders == [], (
+        "live-URI skip reason(s) the #1436 guard treats as a REAL violation — "
+        "they red `test (a)` in the tier-2 URI-less lane. Use "
+        "tests/_live_utils._skip_unless_live_uri() / LIVE_URI_SKIP_REASON:\n"
+        + "\n".join(f"  {p}:{ln}: {r!r}" for p, ln, r in offenders)
+    )
+
+
+def test_shared_live_uri_reason_stays_in_the_exempt_family():
+    """#3339: the shared reason string is the ONE owner — pin it to the exemption.
+
+    Every other live-URI skip routes through it, so if this string were ever
+    edited outside the guard's exempt prefixes the whole tree would start
+    redding `test (a)` at once. Cheapest possible place to catch that.
+    """
+    from tests._live_utils import LIVE_URI_SKIP_REASON
+
+    assert not _skip_guard.is_falkor_reason_violation(LIVE_URI_SKIP_REASON), (
+        f"tests/_live_utils.LIVE_URI_SKIP_REASON is no longer exempt: "
+        f"{LIVE_URI_SKIP_REASON!r} — tools/skip-guard.py exempts by prefix "
+        f"{_skip_guard._EXEMPT_REASON_PREFIXES}; update BOTH together"
+    )

@@ -16,12 +16,22 @@ via the docker lane on tests/_assembly_graph.build_base_graph fixtures with
 question_date="2026-09-10" + a FakeReader (deterministic; no LLM in the
 evidence path).
 
+#3095: the goldens were RE-CAPTURED under this policy after #3018
+(`fix(retrieval): deterministic ranking order for a static store`) changed
+the engine's opaque fulltext scan order. The row SET is unchanged for every
+golden — only the order of the same rows moved. That claim is mechanically
+guarded, not just recorded: ``_FROZEN_CHUNKS`` holds the PRE-#3018 chunk
+multisets as an independent (never-re-captured) record for the five
+re-captured legacy goldens, and ``_assert_golden`` checks content first and
+order second so the two failure modes stay distinguishable.
+
 Docker lane only (live FalkorDB — dedicated per-test graph with fulltext,
 deleted at teardown)."""
 import contextlib
 import os
 import sys
 import uuid
+from collections import Counter
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -113,67 +123,119 @@ from tests.test_ask_sdk import FakeReader, _install_fake  # noqa: E402
 Q_DATE = "2026-09-10"
 
 # ── Golden evidence records (captured Task-6 Step 1, deterministic) ──────
+# #3095 RE-CAPTURE (R17 invalidation policy): commit #3018
+# (`fix(retrieval): deterministic ranking order for a static store`) removed
+# the post-CREATE write whose fulltext index-statistic skew had produced the
+# engine's old opaque scan order, so the legacy lane's row ORDER moved. The
+# ROW SET is byte-for-byte unchanged for every golden (verified by diff on
+# tests/_assembly_graph.build_base_graph / build_out_of_subgraph_gold,
+# question_date="2026-09-10", FakeReader, embedder pinned off) — only the
+# order of the same rows changed. Re-captured from the docker lane per the
+# policy above; the golden assertions in
+# ``test_flag_off_golden_byte_identity`` etc. now pin the invariant
+# explicitly via ``_assert_golden`` — a CONTENT chunk-multiset check
+# (``_FROZEN_CHUNKS``, header + rows, order-insensitive, duplicate-aware)
+# followed by the ORDER byte check — so a future order drift is diagnosed as
+# a re-capture, not a content regression.
 GOLD_LEGACY_CURRENT = """Current Date: 2026-09-10
 
 [session ?] [valid since 2026-08-10] bought the grey couch from ikea for 800 dollars
 
-[session ?] talked about phone battery replacement shop with a friend
-
 [session ?] [valid since 2026-09-01] sold the old couch and ordered a new sofa instead
 
-[session ?] the new sofa was delivered on the first of september"""
+[session ?] the new sofa was delivered on the first of september
+
+[session ?] talked about phone battery replacement shop with a friend"""
 GOLD_LEGACY_MISFIRE = """Current Date: 2026-09-10
-
-[session ?] [valid since 2026-08-10] bought the grey couch from ikea for 800 dollars
-
-[session ?] talked about phone battery replacement shop with a friend
-
-[session ?] [valid since 2026-09-01] sold the old couch and ordered a new sofa instead
 
 [session ?] the dog chewed the corner of the dog bed cushion
 
-[session ?] took the dog to the vet for the chewed cushion
-
-[session ?] the new sofa was delivered on the first of september"""
-GOLD_LEGACY_AGO = """Current Date: 2026-09-10
-
 [session ?] [valid since 2026-08-10] bought the grey couch from ikea for 800 dollars
-
-[session ?] talked about phone battery replacement shop with a friend
 
 [session ?] [valid since 2026-09-01] sold the old couch and ordered a new sofa instead
-
-[session ?] the new sofa was delivered on the first of september"""
-GOLD_LEGACY_COMPARE = """Current Date: 2026-09-10
-
-[session ?] [valid since 2026-08-10] bought the grey couch from ikea for 800 dollars
 
 [session ?] the new sofa was delivered on the first of september
 
 [session ?] talked about phone battery replacement shop with a friend
 
+[session ?] took the dog to the vet for the chewed cushion"""
+GOLD_LEGACY_AGO = """Current Date: 2026-09-10
+
+[session ?] [valid since 2026-08-10] bought the grey couch from ikea for 800 dollars
+
+[session ?] [valid since 2026-09-01] sold the old couch and ordered a new sofa instead
+
+[session ?] the new sofa was delivered on the first of september
+
+[session ?] talked about phone battery replacement shop with a friend"""
+GOLD_LEGACY_COMPARE = """Current Date: 2026-09-10
+
 [session ?] the dog chewed the corner of the dog bed cushion
+
+[session ?] the new sofa was delivered on the first of september
+
+[session ?] [valid since 2026-08-10] bought the grey couch from ikea for 800 dollars
+
+[session ?] talked about phone battery replacement shop with a friend
 
 [session ?] [valid since 2026-09-01] sold the old couch and ordered a new sofa instead
 
 [session ?] took the dog to the vet for the chewed cushion"""
 GOLD_LEGACY_CANARY = """Current Date: 2026-09-10
 
-[session ?] [valid since 2026-08-10] bought the grey couch from ikea for 800 dollars
+[session ?] the dog chewed the corner of the dog bed cushion
 
-[session ?] talked about phone battery replacement shop with a friend
+[session ?] [valid since 2026-08-10] bought the grey couch from ikea for 800 dollars
 
 [session ?] the new sofa was delivered on the first of september
 
 [session ?] [valid since 2026-09-01] sold the old couch and ordered a new sofa instead
 
-[session ?] took the dog to the vet for the chewed cushion
+[session ?] talked about phone battery replacement shop with a friend
 
-[session ?] the dog chewed the corner of the dog bed cushion
+[session ?] took the dog to the vet for the chewed cushion
 
 [session ?] [valid since 2026-09-05] on the fifth of september we moved the bookshelf into the study and bought a reading lamp - the same week the old couch was discussed and the dog bed got chewed, but the bookshelf was the newest thing we bought that month"""
 CANARY_QUESTION = ("which came first - buying the couch or the "
                   "dog bed getting chewed?")
+
+# ── FROZEN row sets — the INDEPENDENT content record (#3095) ─────────────
+# The byte-goldens above are re-captured whenever the engine's opaque
+# fulltext ORDER moves (R17). That makes them useless as a content guard: a
+# reflexive regeneration (the exact thing R17 forbids) satisfies them by
+# construction. These frozensets were transcribed from the PRE-#3018
+# capture and are NOT re-captured — they are the independent record that
+# makes "order drift" mechanically distinguishable from "content loss".
+# Update ONLY with a documented, reviewed content change (never as a
+# re-capture). Scope: the flag-OFF legacy lane's five goldens.
+_ROW_COUCH_STATUS = frozenset({
+    "[session ?] [valid since 2026-08-10] bought the grey couch from ikea for 800 dollars",
+    "[session ?] [valid since 2026-09-01] sold the old couch and ordered a new sofa instead",
+    "[session ?] the new sofa was delivered on the first of september",
+    "[session ?] talked about phone battery replacement shop with a friend",
+})
+_ROW_COUCH_DOGBED = _ROW_COUCH_STATUS | frozenset({
+    "[session ?] the dog chewed the corner of the dog bed cushion",
+    "[session ?] took the dog to the vet for the chewed cushion",
+})
+_ROW_CANARY = _ROW_COUCH_DOGBED | frozenset({
+    "[session ?] [valid since 2026-09-05] on the fifth of september we moved the bookshelf into the study and bought a reading lamp - the same week the old couch was discussed and the dog bed got chewed, but the bookshelf was the newest thing we bought that month",
+})
+_FROZEN_ROWS = {
+    "what is the current status of the couch?": _ROW_COUCH_STATUS,
+    "compare the couch and the dog bed, which should i keep?": _ROW_COUCH_DOGBED,
+    "what was the couch status two weeks ago?": _ROW_COUCH_STATUS,
+    "which came first - the couch or the dog bed?": _ROW_COUCH_DOGBED,
+    CANARY_QUESTION: _ROW_CANARY,
+}
+# The full frozen CHUNK multiset per question: the literal row sets above plus
+# the rendered header chunk. Built from the literals (never from the
+# goldens), so it stays an independent record of the PRE-#3018 output.
+_HEADER_CHUNK = "Current Date: 2026-09-10"
+_FROZEN_CHUNKS = {
+    q: tuple(sorted(rows | {_HEADER_CHUNK}))
+    for q, rows in _FROZEN_ROWS.items()
+}
 
 
 GOLD_FIRED_CURRENT = """Current Date: 2026-09-10
@@ -241,6 +303,56 @@ def _ask(sdk, monkeypatch, q, *, flag_on=False, question_type=None,
 
 
 # ── Step 1/2: flag-OFF byte-identity + unrouted flag-ON byte-identity ─────
+def _evidence_chunks(evidence: str) -> tuple[str, ...]:
+    """Order-insensitive MULTISET of an evidence block's chunks (the
+    ``Current Date:`` header included) — the content half of the golden
+    contract.
+
+    A tuple of the chunk-sorted chunks, NOT a set: a set erases multiplicity,
+    so a DUPLICATED row would compare equal and the byte assertion below
+    would then report it as an order drift — pointing the reader at a
+    re-capture (which would launder the regression permanently)."""
+    return tuple(sorted(ag.evidence_chunks(evidence)))
+
+
+def _assert_golden(evidence: str, question: str, gold: str) -> None:
+    """Two-layer golden gate (#3095): CONTENT then ORDER.
+
+    Layer 1 (content) compares the full chunk multiset — header and rows,
+    order-insensitively — against ``_FROZEN_CHUNKS``, frozen from the
+    PRE-#3018 capture and never re-captured. So a reflexive regeneration of
+    the byte-golden still fails here, and a dropped, duplicated, or
+    re-rendered chunk reports as a *content regression*.
+
+    Layer 2 (order) compares the re-captured byte-golden; when the engine's
+    opaque fulltext sequence moves it reports as an *order drift*, which is
+    R17 re-capture territory rather than a bug.
+
+    Content is asserted FIRST on purpose: a byte assert first would abort
+    before the content comparison, making the two failure modes
+    indistinguishable (the trap the first cut of this fix fell into).
+
+    Scope: the five flag-OFF legacy goldens. The FIRED/hosted goldens were
+    not invalidated by #3018 and remain bare byte-equality."""
+    live = _evidence_chunks(evidence)
+    frozen = _FROZEN_CHUNKS[question]
+    assert live == frozen, (
+        f"CONTENT regression on {question!r}: the evidence chunk multiset "
+        "(header + rows, order-insensitive) moved. This is NOT an order "
+        "drift — do NOT re-capture the golden, that would launder it; "
+        "investigate the pipeline. "
+        # multiset diagnostics on purpose: a set difference reports a pure
+        # DUPLICATE as "Missing: []; unexpected: []" — the regression the
+        # multiset comparison exists to catch.
+        f"Missing: {sorted((Counter(frozen) - Counter(live)).elements())}; "
+        f"unexpected: {sorted((Counter(live) - Counter(frozen)).elements())}")
+    assert evidence == gold, (
+        f"ROW ORDER drifted on {question!r}: the chunk multiset is intact, "
+        "so this is the engine's opaque fulltext sequence moving, not a "
+        "content change — verify the set then RE-CAPTURE + RE-REVIEW per "
+        "the R17 policy at the top of this module.")
+
+
 def test_flag_off_golden_byte_identity(sdk, monkeypatch):
     """Flag OFF == the committed legacy golden (capture-time record)."""
     ag.build_base_graph(sdk)
@@ -249,9 +361,13 @@ def test_flag_off_golden_byte_identity(sdk, monkeypatch):
         ("compare the couch and the dog bed, which should i keep?",
          GOLD_LEGACY_MISFIRE),
         ("what was the couch status two weeks ago?", GOLD_LEGACY_AGO),
+        # #3095: GOLD_LEGACY_COMPARE was re-captured but never asserted by
+        # any test (dead since its introduction) — its byte-identity
+        # contract is now actually enforced.
+        ("which came first - the couch or the dog bed?", GOLD_LEGACY_COMPARE),
     ]:
         res = _ask(sdk, monkeypatch, q, flag_on=False)
-        assert res["evidence"] == gold, q
+        _assert_golden(res["evidence"], q, gold)
         # NOTE: the legacy lane's retrieval_degraded is the AMBIENT
         # no-embedder signal (vector leg ran:False) — NOT part of this
         # golden contract; only EVIDENCE equality is pinned here.
@@ -267,7 +383,7 @@ def test_flag_on_unrouted_byte_identity(sdk, monkeypatch):
         ("what was the couch status two weeks ago?", GOLD_LEGACY_AGO),
     ]:
         res = _ask(sdk, monkeypatch, q, flag_on=True)
-        assert res["evidence"] == gold, q
+        _assert_golden(res["evidence"], q, gold)
 
 
 def test_fired_routing_exact_goldens(sdk, monkeypatch):
@@ -331,8 +447,7 @@ def test_out_of_subgraph_gold_a1_b0(sdk, monkeypatch):
     o = ag.build_out_of_subgraph_gold(sdk)
     legacy = _ask(sdk, monkeypatch, o["question"], flag_on=False)
     assert o["question"] == CANARY_QUESTION, o["question"]
-    assert legacy["evidence"] == GOLD_LEGACY_CANARY, \
-        "Step-1 capture: legacy canary output must match the golden"
+    _assert_golden(legacy["evidence"], o["question"], GOLD_LEGACY_CANARY)
     assert "reading lamp" in legacy["evidence"], \
         "A≥1: legacy must admit the out-of-subgraph gold"
     aa = sdk.ask_assembled(o["question"], question_date=Q_DATE)

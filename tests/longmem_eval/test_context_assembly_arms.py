@@ -23,7 +23,6 @@ from __future__ import annotations
 
 import inspect
 import json
-import os
 import sys
 import types
 from dataclasses import replace
@@ -976,11 +975,20 @@ def test_scan_eval_graph_reads_points_and_typed_relations():
     assert scan.typed_relation_endpoint_ids == frozenset({"P1", "P2", "P3"})
 
 
-@pytest.mark.skipif(not os.environ.get("TORTOISE_DB_URI"),
-                    reason="live FalkorDB required (TORTOISE_DB_URI unset)")
 def test_scan_eval_graph_live_smoke():
+    # #3339: use the SHARED live-URI gate. This test used to carry its own
+    # inline `skipif` with the ad-hoc reason "live FalkorDB required
+    # (TORTOISE_DB_URI unset)". tools/skip-guard.py exempts the intentional
+    # availability-class families by REASON PREFIX, and only
+    # "requires TORTOISE_DB_URI" is on that list — so in the tier-2 URI-less
+    # lane (CARVE_OUT=1, TORTOISE_DB_URI empty) this test skipped with a
+    # non-exempt reason and redded `test (a)` for every PR whose selection
+    # landed in that shape. Routing through _skip_unless_live_uri() keeps the
+    # reason string in one place (tests/_live_utils.LIVE_URI_SKIP_REASON).
+    from tests._live_utils import _skip_unless_live_uri
     from tortoise.sdk import TortoiseSDK
 
+    _skip_unless_live_uri()
     sdk = TortoiseSDK(namespace="caa_test_empty_namespace")
     try:
         scan = caa.scan_eval_graph(sdk)
