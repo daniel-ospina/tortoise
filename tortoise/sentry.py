@@ -42,6 +42,12 @@ def init() -> bool:
             environment=os.environ.get("SENTRY_ENV", "production"),
             traces_sample_rate=float(os.environ.get("SENTRY_TRACES_SAMPLE_RATE", "0.0")),
             send_default_pii=False,
+            # #2863 security review: sentry-sdk defaults to attaching every frame's
+            # LOCAL VARIABLES to the event. On the /oauth/token path those frames
+            # hold plaintext `refresh_token` / `code_verifier` / `client_secret` and
+            # the freshly minted `oat_`/`ort_` pair, so the default ships live
+            # credentials to Sentry. The traceback itself is still sent.
+            include_local_variables=False,
         )
         _enabled = True
         _log.info("sentry enabled for %s", _service)

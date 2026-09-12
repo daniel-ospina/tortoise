@@ -620,14 +620,19 @@ def _rollback_minted(cp, minted: list[tuple[str, str]], now: str, *, capture: bo
     affected rows is the EXPECTED SUCCESS for a write that never committed — this
     function must never raise on an empty result. Each row is attempted in its own
     try/except. `capture=True` is for lane 1 (nothing else captures on that path);
-    lane 2 passes False because it already captured the trigger (I4).
+    lane 2 passes False because it already captured the trigger (I4). At most ONE
+    capture is emitted per call: the loser path may fail on both rows (refresh +
+    access), and I4 permits exactly one Sentry event for that request — the
+    subsequent row failures are logged only.
     """
+    captured = False
     for table, row_id in minted:
         try:
             cp.query(table, method="PATCH", filters=[("id", "eq", row_id)],
                      json_body={"revoked_at": now})
         except Exception as exc:
-            if capture:
+            if capture and not captured:
+                captured = True
                 _log_and_capture(exc, where=f"loser rollback {table}")
             else:
                 logger.warning("oauth: mint rollback failed for %s/%s: %s", table, row_id, exc)
@@ -808,12 +813,11 @@ def _issue_tokens(cp, *, client_id: str, user_id: str, team_id: str,
             if not claimed:
                 # A concurrent worker already rotated this grant — roll back the
                 # orphan pair so only the winner's tokens survive (lane 1: the
-                # INTENTIONAL signal — its rollback failure must not convert it
-                # into OAuthMintAborted, or the pinned invalid_grant would break).
-                try:
-                    _rollback_minted(cp, minted, now, capture=True)
-                except Exception as exc:
-                    logger.warning("oauth: loser rollback raised: %s", exc)
+                # INTENTIONAL signal). `_rollback_minted` is contractually
+                # non-raising (per-row try/except + a raise-proof `_log_and_capture`),
+                # so this cannot spill into lane 2 and convert the pinned
+                # `invalid_grant` into an `OAuthMintAborted`.
+                _rollback_minted(cp, minted, now, capture=True)
                 raise OAuthError(400, "invalid_grant",
                                  "Refresh token already revoked (rotated or invalidated).")
     except OAuthError:

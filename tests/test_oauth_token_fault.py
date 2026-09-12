@@ -65,15 +65,22 @@ def test_fault_hook_raises_before_and_after_mutation():
 
 def test_fault_hook_discriminates_call_sites_by_select_shape():
     """The observation SELECT and the consume PATCH share table+method; only `select`
-    distinguishes them — this is what makes the CAS/observation tests possible."""
+    distinguishes them — this is what makes the CAS/observation tests possible.
+    `times=2`: the non-matching call must NOT consume the injector, and the matching
+    shape must still be armed afterwards. (With `times=1` this test is vacuous — the
+    injector is spent by the first matching call, so the 'different select' assertion
+    passes even if `_take_fault` ignores `select` entirely.)"""
     cp = FakeControlPlane()
     cp.fail_query(table="oauth_codes", method="PATCH", select=["used_at", "expires_at"],
-                  times=1, exc=RuntimeError("observation only"))
+                  times=2, exc=RuntimeError("observation only"))
     with pytest.raises(RuntimeError):
         cp.query("oauth_codes", method="PATCH", select=["used_at", "expires_at"],
                  filters=[], json_body={"used_at": None})
     assert cp.query("oauth_codes", method="PATCH", select=["id"], filters=[],
                     json_body={"revoked_at": "T"}) == []      # different select → no fault
+    with pytest.raises(RuntimeError):                          # still armed for the real shape
+        cp.query("oauth_codes", method="PATCH", select=["used_at", "expires_at"],
+                 filters=[], json_body={"used_at": None})
 
 
 # ── Task 1b: the shared fixture layer ───────────────────────────────────────
@@ -397,6 +404,39 @@ def test_prev_refresh_observed_revoked_is_recovered_false():
     assert ei.value.recovered is False
 
 
+def test_prev_refresh_observation_failure_is_recovered_false():
+    """`_prev_refresh_unclaimed` must fail CLOSED: an unreadable observation is not
+    evidence that the grant is intact, so `recovered` goes False (terminal), never a
+    retryable 503 on an unobserved rotation claim."""
+    cp = FakeControlPlane()
+    _seed_refresh_token(cp)
+    cp.fail_query(table="oauth_access_tokens", method="POST")                        # trigger
+    cp.fail_query(table="oauth_refresh_tokens", method="GET", select=["revoked_at"])
+    with pytest.raises(oauth.OAuthMintAborted) as ei:
+        _mint(cp, prev_refresh=cp.tables["oauth_refresh_tokens"][0])
+    assert ei.value.recovered is False
+
+
+def test_loser_both_rollbacks_fail_capture_once(monkeypatch):
+    """I4: the lane-1 loser holds TWO minted rows; both rollback PATCHes failing in one
+    outage must still emit exactly ONE Sentry capture (the second row is log-only)."""
+    calls = []
+    monkeypatch.setattr("tortoise.sentry.capture_exception", lambda exc, **kw: calls.append(exc))
+    cp = FakeControlPlane()
+    row_id, _ = _seed_refresh_token(cp, "old-2rows")
+    cp.query("oauth_refresh_tokens", method="PATCH", select=["id"],
+             filters=[("id", "eq", row_id)], json_body={"revoked_at": "T"})   # pre-claim → loser
+    def sel_less(t, m, sel, f):
+        return m == "PATCH" and not sel
+
+    cp.fail_query(table="oauth_refresh_tokens", method="PATCH", match=sel_less)
+    cp.fail_query(table="oauth_access_tokens", method="PATCH", match=sel_less)
+    with pytest.raises(oauth.OAuthError) as ei:
+        _mint(cp, prev_refresh={"id": row_id})
+    assert ei.value.status == 400 and ei.value.error == "invalid_grant"
+    assert len(calls) == 1
+
+
 def test_loser_rollback_failure_still_raises_invalid_grant(caplog, monkeypatch):
     """Pin lane 1's rollback-failure path. The fault MATCHES BY SHAPE (select-less
     PATCH), never by a hand-written filter literal — and the autouse `_no_silent_faults`
@@ -529,14 +569,28 @@ def test_mint_abort_recovered_false_is_terminal_invalid_grant(fault_client):
     assert cp.tables["oauth_codes"][0]["used_at"] is not None
 
 
-def test_mint_abort_with_cas_miss_is_terminal_and_leaves_used_at_set(fault_client):
+def test_mint_abort_with_restore_raise_is_terminal_and_leaves_used_at_set(fault_client):
     tc, cp = fault_client
     v = _seed_code(cp, "m-cas", client_id=_CLIENT_ID, redirect_uri=_REDIRECT)
     cp.fail_query(table="oauth_access_tokens", method="POST", times=1)      # recovered=True
     cp.fail_query(table="oauth_codes", method="PATCH",
-                  select=["used_at", "expires_at"], times=1)                # CAS restore fails
+                  select=["used_at", "expires_at"], times=1)                # restore RAISES
     r = _post_code(tc, cp, "m-cas", v)
     assert r.status_code == 400 and cp.tables["oauth_codes"][0]["used_at"] is not None
+
+
+def test_mint_abort_with_unobservable_restore_is_terminal(monkeypatch, fault_client):
+    """A restore that matched ZERO rows (a genuine CAS miss — the value another worker
+    wrote is no longer ours) is unobservable: `_restore_code` returns False and the
+    endpoint must go terminal, leaving `used_at` set. The raise case above and the
+    CAS-miss unit test in Task 2 cover the other halves."""
+    tc, cp = fault_client
+    v = _seed_code(cp, "m-casmiss", client_id=_CLIENT_ID, redirect_uri=_REDIRECT)
+    cp.fail_query(table="oauth_access_tokens", method="POST", times=1)      # abort, recovered=True
+    monkeypatch.setattr("tortoise.oauth._restore_code", lambda *a, **k: False)   # CAS miss → False
+    r = _post_code(tc, cp, "m-casmiss", v)
+    assert r.status_code == 400 and r.json()["error"] == "invalid_grant"
+    assert cp.tables["oauth_codes"][0]["used_at"] is not None
 
 
 def test_bad_pkce_never_re_arms_the_code(fault_client):
@@ -650,7 +704,11 @@ def test_row7_prev_access_revoke_failure_delivers_a_USABLE_pair(fault_client, ca
 @pytest.mark.parametrize("grant", ["code", "refresh"])
 def test_exactly_one_capture_per_conversion_path(monkeypatch, fault_client, table, grant):
     calls = []
-    monkeypatch.setattr("tortoise.sentry.capture_exception", lambda exc, **kw: calls.append(exc))
+
+    def _cap(exc, **kw):
+        calls.append(kw)
+
+    monkeypatch.setattr("tortoise.sentry.capture_exception", _cap)
     tc, cp = fault_client
     cp.fail_query(table=table, method="GET", times=1)
     if grant == "code":                                        # pre-consume
@@ -659,6 +717,10 @@ def test_exactly_one_capture_per_conversion_path(monkeypatch, fault_client, tabl
     else:                                                      # refresh pre-mint
         _post_refresh(tc, cp, _seed_refresh_token(cp, f"cap-{table}-rt")[1])
     assert len(calls) == 1
+    # The capture must come from the oauth CONVERSION path (`where=` tag), not from the
+    # pre-existing global unhandled-exception handler (which tags method/path) — without
+    # this, the count alone is 1 both pre- and post-fix and pins nothing.
+    assert calls[0].get("tags", {}).get("where"), calls[0]
 
 
 # ── Task 6: POST /oauth/token — typed boundary + coherent last-resort net ────

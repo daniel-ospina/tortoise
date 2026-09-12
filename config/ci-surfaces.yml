@@ -808,6 +808,7 @@ carve_out:
 - bench/test_smoke_embedded.py
 push_extra: []
 durations:
+  test_oauth_token_fault.py: 100.0  # #2863: fault matrix + real-seam HTTPServer (measured ~100s locally)
   test_2199_decide_calibration.py: 8.5
   test_calibration.py: 52.1
   test_battery_setup.py: 26.0
