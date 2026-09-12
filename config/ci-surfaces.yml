@@ -213,6 +213,19 @@ surfaces:
   # (it sits with the other battery-only entries above).
   - test_battery_provider_cost.py
   - test_battery_differential.py
+  # #2702/#3289: the TVDE envelope contract for the bct/cal families. It pins
+  # battery/runner/emit.py, battery/runner/executor.py and
+  # battery/runner/probe_scorer.py — it imports battery/* only — so `battery`
+  # is the surface that selects it; registering it anywhere else would leave
+  # it unrun for the very files it guards.
+  #
+  # #3289 landed this file UNREGISTERED, which reds `manifest-integrity` on
+  # main. That red is inherited by every branch, whatever it touches: a
+  # pull_request run evaluates the MERGE ref (PR head + current main), so
+  # main's drift is in every PR's tree and no PR can produce a green
+  # `manifest-integrity` until it is cleared on main itself. This one line is
+  # therefore the whole of a repo-wide merge block.
+  - test_battery_envelope_contract_2702.py
   - test_battery_streams.py
   - test_battery_recall.py
   - test_battery_report.py
