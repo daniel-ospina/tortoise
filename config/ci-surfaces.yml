@@ -211,6 +211,20 @@ surfaces:
   - test_battery_provider_cost.py
   - test_battery_derive_truth_leg.py  # #2740 truth-emission leg (hermetic; battery.runner.probe_scorer derives) — registered by #3095/#3140 after landing unclassified in #3100
   - test_battery_differential.py
+  # #3140 (landed here with #3221): guards
+  # `battery/runner/probe_scorer.py`'s `derive_envelope_truth` /
+  # `derive_judged_truth` — the #2740 truth-emission legs. That module is
+  # source-mapped to `battery` (SOURCE_PATTERNS), so a change to it selects
+  # THIS surface; registering the guard anywhere else would leave it unrun for
+  # the very file it guards (the #3153 hole), which is the failure this whole
+  # drift gate exists to prevent.
+  #
+  # Both main drift entries had to clear in ONE PR: a pull_request CI run
+  # evaluates the MERGE ref (PR head + current main), so a PR fixing only one
+  # entry still inherits the other and cannot produce a green
+  # `manifest-integrity` — the two are mutually blocking and cannot be
+  # serialised.
+  - test_battery_derive_truth_leg.py
   - test_battery_streams.py
   - test_battery_recall.py
   - test_battery_report.py
@@ -286,6 +300,17 @@ surfaces:
   - test_restore_container_recovery.py
   - test_session_attribution.py
   - test_ci_selection.py
+  # #3221: guard for tools/collision_preflight.py (the #3061 pre-dispatch
+  # collision check). Registered under `core`, and the tool is wired to the
+  # same surface from the selector's core-fallback branch
+  # (TOOL_CORE_CARVEOUTS) — a preflight-only change matches no SOURCE_PATTERNS
+  # entry, so that per-file fallback is the only route by which `core` (and
+  # therefore this guard) is selected; without the wiring the change would
+  # select no surface at all and this guard would never run for the file it
+  # guards (#3153 hole). `core` is the only surface route that selects the
+  # guard (its only registered home), but it is also the largest surface, so
+  # the change pulls the whole core set and carries its slow / carve-out legs.
+  - test_collision_preflight.py
   - test_connector_loader.py
   - test_connector_secrets.py
   - test_connector_sources.py

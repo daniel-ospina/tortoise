@@ -167,6 +167,23 @@ TOOL_CARVEOUTS = (
     "tools/ci_selection.py",
 )
 
+# tools/ paths that ARE python-relevant for selection but map to select()'s
+# `core` fallback instead of a SOURCE_PATTERNS surface (#3221). Same
+# NON_PYTHON_PREFIXES carve-out as TOOL_CARVEOUTS, different destination:
+# `core` is deliberately absent from SOURCE_PATTERNS (#2938 —
+# tests/test_ci_selection.py pins `core`/`classify` as unmapped so the surface
+# audit cannot propose emptying them), so the guarded-file wiring for a
+# core-surface tool has to go through the fallback branch below. The file it
+# guards is tools/collision_preflight.py, whose guard
+# (tests/test_collision_preflight.py) is registered under `core`; without this
+# entry a preflight-only change selects NO surface and the guard never runs for
+# the file it guards (#3153). Sole member: unrelated tools changes
+# (tools/kappa.py) keep tier-1 smoke, and tools/ci_selection.py keeps the
+# full-matrix fail-closed branch.
+TOOL_CORE_CARVEOUTS = (
+    "tools/collision_preflight.py",
+)
+
 
 def load_manifest() -> dict:
     import yaml  # local import (uv provides pyyaml via the dev group)
@@ -254,10 +271,12 @@ def select(changed_files: list[str], event: str, manifest: dict) -> dict:
 
     tier1 = set(manifest.get("tier1", [])) - slow
     # Filter out non-python-relevant paths, but RE-INCLUDE the tools carve-out
-    # paths so they reach SOURCE_PATTERNS (see TOOL_CARVEOUTS).
+    # paths so they reach SOURCE_PATTERNS (see TOOL_CARVEOUTS) or the core
+    # fallback (see TOOL_CORE_CARVEOUTS).
     changed = [c for c in changed_files
                if c and (not c.startswith(NON_PYTHON_PREFIXES)
-                         or c.startswith(TOOL_CARVEOUTS))]
+                         or c.startswith(TOOL_CARVEOUTS)
+                         or c.startswith(TOOL_CORE_CARVEOUTS))]
     if not changed:
         # docs-only PR -> tier 1 (curated smoke) only; no slow/carve surface
         # is touched, so both diff-gated legs skip (#2147/#2148).
@@ -283,7 +302,8 @@ def select(changed_files: list[str], event: str, manifest: dict) -> dict:
         if not found:  # noqa: SIM102
             if c.startswith("tortoise/") or c.startswith("tests/") or \
                c.startswith("graph-scripts/") or c.startswith("config/") or \
-               c.startswith("validation/") or c.startswith("packs/"):
+               c.startswith("validation/") or c.startswith("packs/") or \
+               c.startswith(TOOL_CORE_CARVEOUTS):
                 matched.add("core")  # engine/registry code -> core surface
                 found = True
         if not found:
@@ -788,7 +808,10 @@ def duration_issues(manifest: dict) -> list[str]:
 _AUDIT_NAMESPACE_ROOTS = frozenset({"tortoise", "tests"})
 
 # Mirror of select()'s per-file fallback branch: engine/config paths with no
-# SOURCE_PATTERNS entry select the `core` surface.
+# SOURCE_PATTERNS entry select the `core` surface. Two deliberate divergences
+# from that branch: `tests/` is not a source path here (the audit scans test
+# files as roots), and TOOL_CORE_CARVEOUTS is omitted because `tools/` is
+# already in _AUDIT_SOURCE_TREES — listing it changes no audit output (#3221).
 _AUDIT_CORE_FALLBACK = ("tortoise/", "graph-scripts/", "config/",
                         "validation/", "packs/")
 

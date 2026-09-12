@@ -174,6 +174,23 @@ def test_unrelated_tools_change_still_tier1():
     assert set(r["test_files"]) == _tier1()
 
 
+def test_collision_preflight_tool_change_selects_core_not_tier1():
+    # #3221: tools/collision_preflight.py is carved out of
+    # NON_PYTHON_PREFIXES (TOOL_CORE_CARVEOUTS) and falls back to `core` — the
+    # surface its guard, test_collision_preflight.py, is registered under. A
+    # preflight-only change must therefore RUN that guard; the pre-fix
+    # behavior selected no surface at all, so the guard never ran for the file
+    # it guards (the #3153 hole: registering the test alone is not enough).
+    r = _sel(["tools/collision_preflight.py"])
+    assert r["full"] is False
+    assert r["surfaces"] == ["core"]
+    assert "test_collision_preflight.py" in r["test_files"]
+    assert set(r["test_files"]) != _tier1()
+    # a test-file change selects its owning surface too
+    r2 = _sel(["tests/test_collision_preflight.py"])
+    assert "test_collision_preflight.py" in r2["test_files"]
+
+
 def test_ask_spotcheck_tools_change_selects_sdk_not_tier1():
     # #2071: tools/ask_spotcheck*.py are carved out of NON_PYTHON_PREFIXES
     # and mapped to the sdk surface — a spot-check-only change selects the
