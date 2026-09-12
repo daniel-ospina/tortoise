@@ -968,7 +968,12 @@ def test_rebuild_stays_fail_loud(tmp_path, monkeypatch):
     oid = _entity_name_id("Object", "boom")
     sdk._delete_entity(oid)
 
-    def _boom(_ev):
+    def _boom(_ev, **_kw):
+        # `**_kw` is REQUIRED: the replay lane now passes `anchored_ids` /
+        # `anchored_names` so the name branch can apply its id-identity
+        # constraint. A double without it raises TypeError instead of the
+        # RuntimeError this test injects, which would make the test pass for
+        # the wrong reason.
         raise RuntimeError("injected fold failure")
 
     monkeypatch.setattr(proj, "_fold_object_retracted", _boom)
@@ -996,11 +1001,16 @@ def test_apply_replay_fold_failure_is_isolated(tmp_path, monkeypatch):
         sdk._delete_entity(_entity_name_id("Object", nm))
     _orig, calls = proj._fold_object_retracted, {"n": 0}
 
-    def _flaky(ev):
+    def _flaky(ev, **kw):
+        # `**kw` forwards `anchored_ids`/`anchored_names` — the replay lane
+        # passes them so the name branch can apply its id-identity constraint.
+        # Dropping them would make `_orig` fall back to the LEGACY
+        # unconditional name fallback, i.e. the double would test a rule that
+        # no longer runs in production.
         calls["n"] += 1
         if calls["n"] == 2:
             raise RuntimeError("transient")
-        return _orig(ev)
+        return _orig(ev, **kw)
 
     monkeypatch.setattr(proj, "_fold_object_retracted", _flaky)
     proj.g.query("MATCH (n) DETACH DELETE n")
@@ -1045,7 +1055,13 @@ def test_backup_restore_raises_on_a_torn_fold(tmp_path, monkeypatch):
 
     from tortoise.projection import FalkorProjection
     monkeypatch.setattr(FalkorProjection, "_fold_object_retracted",
-                        lambda self, ev: (_ for _ in ()).throw(RuntimeError("transient")))
+                        lambda self, ev, **kw: (_ for _ in ()).throw(RuntimeError("transient"))
+    # `**kw` is REQUIRED on the injected fold: the replay lane passes
+    # `anchored_ids`/`anchored_names` so the name branch can apply its
+    # id-identity constraint. A double without it raises TypeError instead of
+    # the RuntimeError being injected, so the test would pass for the wrong
+    # reason and stop exercising the real fold signature.
+)
     with pytest.raises(RuntimeError, match="transient"):
         restore(str(bk), str(tmp_path / "rb2.db"),
                 events_path=str(events / "events.jsonl"), into_falkor=True)
@@ -1065,7 +1081,7 @@ def test_recover_from_log_torn_retraction_is_not_reported_recovered(tmp_path, mo
 
     from tortoise.projection import FalkorProjection
     monkeypatch.setattr(FalkorProjection, "_fold_object_retracted",
-                        lambda self, ev: (_ for _ in ()).throw(RuntimeError("transient")))
+                        lambda self, ev, **kw: (_ for _ in ()).throw(RuntimeError("transient")))
     proj = FalkorProjection(str(tmp_path / "rc2.db"))
     proj.g.query("MATCH (n) DETACH DELETE n")
     try:
@@ -2034,3 +2050,82 @@ def test_delete_of_two_id_sharing_objects_is_lossless_end_to_end(tmp_path):
         sdk.close()
 
 
+
+
+def test_retraction_whose_id_is_anchored_nowhere_does_not_bury_the_name(tmp_path):
+    """P0 REGRESSION (#2977 review 4) — the NAME branch's id-identity constraint,
+    the exact MIRROR of the id branch's name constraint.
+
+        OR(ID1, SHARED)@0,  RT(ID2, SHARED)@1
+
+    `ID2` was never registered, so the retraction is an ORPHAN. But the name
+    branch saw `SHARED` registered (by ID1) and tombstoned ID1 — a LIVE,
+    registered Object buried, and `applied` counted the fold as work done.
+
+    PRODUCTION-REACHABLE two ways:
+      - `_connect_issue_objects` executes
+        `MERGE (o:Object {id:$oid}) SET o.name=$name`, minting a SECOND carrier
+        of an existing name under a different id (session_indexer.py, sdk.py);
+      - `update_entity(id, name=...)` renames a node on the public/MCP surface.
+    Both then yield a retraction whose id is anchored nowhere while the name
+    belongs to another node.
+
+    The guard must be INERT for the stub lane it exists to serve: a stub node
+    minted by `_event_plain_merge` has NO ObjectRegistered line, so its name is
+    not anchored and the fallback still folds.
+    """
+    events = tmp_path / "events"; events.mkdir(exist_ok=True)
+    log = EventLog(str(events / "events.jsonl"))
+    log.append({"type": "ObjectRegistered", "id": "ID1", "name": "SHARED"})
+    log.append({"type": "ObjectRetracted", "id": "ID2", "name": "SHARED",
+                "ts": "T1"})
+    proj = _drive("rebuild_all", tmp_path, events, "ID1")
+    try:
+        rows = {r[0]: r[1] for r in proj.g.query(
+            "MATCH (o:Object) RETURN o.name, o.status").result_set}
+        assert rows.get("SHARED") == "live", (
+            "the journal retracts ID2, which was NEVER registered — the fold's "
+            "id is anchored nowhere, so it is an orphan and must not tombstone "
+            "the ID1 incarnation that carries the same name (#2977 review-4 "
+            f"P0). Got {rows}")
+    finally:
+        proj.close()
+
+
+def test_stub_lane_fallback_still_folds_after_the_id_identity_guard(tmp_path):
+    """The guard added above must NOT break the fallback it exists to protect.
+
+    A stub Object minted by `_event_plain_merge` has NO `ObjectRegistered` line,
+    so its name is never anchored — the guard is inert and the name fallback
+    still tombstones it. Without this test the guard could be widened to
+    "always refuse the fallback" and every stub retraction would silently
+    become a no-op.
+    """
+    events = tmp_path / "events"; events.mkdir(exist_ok=True)
+    sdk = TortoiseSDK(str(tmp_path / "stub.db"),
+                      event_log_path=str(events / "events.jsonl"))
+    try:
+        proj = sdk._get_proj()
+        # Mint a stub the way the connector lane does: EventRecorded first, so
+        # `_event_plain_merge` creates the node under the event's id — no
+        # ObjectRegistered is ever journaled for it.
+        proj.apply({"type": "EventRecorded", "eventId": "ev-1",
+                    "eventKind": "github.issue.opened", "object": "stub-name",
+                    "objectKind": "core:other", "summary": "opened"})
+        assert proj.g.query(
+            "MATCH (o:Object {name:'stub-name'}) RETURN count(o)"
+        ).result_set[0][0] == 1, "the connector lane minted the stub"
+
+        # A retraction carrying a canonical id that matches NOTHING, and a name
+        # that is anchored NOWHERE (no ObjectRegistered) — the fallback MUST fire.
+        proj._flush_object_folds(
+            [(0, {"type": "ObjectRetracted", "id": "obj-not-a-real-id",
+                  "name": "stub-name", "ts": "T1"}, "retract")], [])
+        rows = proj.g.query(
+            "MATCH (o:Object {name:'stub-name'}) RETURN o.status").result_set
+        assert rows and rows[0][0] == "retracted", (
+            "the stub lane's only durability path IS the name fallback — an "
+            "unanchored name must still fold. Got "
+            f"{rows}")
+    finally:
+        sdk.close()
