@@ -1,7 +1,7 @@
 """Tests for monitoring — health checks, Prometheus metrics, cost tracking."""
 from __future__ import annotations
 
-import json  # noqa: F401
+import json
 import time
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -279,7 +279,7 @@ class TestProbeDb:
         """#3143 review: when attempt 1 already spent the whole deadline the
         retry must NOT fire. A negative OR ZERO remainder would otherwise be
         passed as the worker timeout, replacing the REAL transient error with
-        a bogus synthesized 'probe setup timeout after <negative>s'. The
+        a bogus synthesized 'probe setup timeout after <non-positive>s'. The
         ``overrun=1.0`` case pins the exact-deadline boundary (``>`` must not
         be ``>=``)."""
         monkeypatch.setattr(monitoring, "PROBE_TIMEOUT", 1.0)
@@ -592,6 +592,89 @@ class TestProbeSetupBudget:
         assert "probe timeout" in result["error"]
         assert "setup timeout" not in result["error"]  # the QUERY phase overran
         assert elapsed < 1.0, f"query inherited the allowance: {elapsed:.2f}s"
+
+    def test_combined_budget_exhausted_in_setup_never_submits_the_query(
+            self, monkeypatch):
+        """#3143 review: in the COMBINED (platform) shape, a cold-start that
+        consumes the whole budget must early-return WITHOUT submitting the
+        query — the guard that keeps ``future.result`` from being handed a
+        zero/negative timeout. Pinned by the observable: the query is never
+        called."""
+        monkeypatch.setattr(monitoring, "PROBE_TIMEOUT", 1.0)
+        clock = SimpleNamespace(t=0.0)
+        monkeypatch.setattr(monitoring, "time", SimpleNamespace(
+            monotonic=lambda: clock.t, sleep=lambda _s: None))
+        # Deterministic discriminator: the guard's ONLY effect is that the query
+        # is never SUBMITTED. Counting submits (setup=1, query=2) is exact,
+        # whereas watching proj.g.query races with the abandoned worker thread.
+        import concurrent.futures
+        submits = {"n": 0}
+        real_executor = concurrent.futures.ThreadPoolExecutor
+
+        class CountingExecutor:
+            def __init__(self, *args, **kwargs):
+                self._ex = real_executor(*args, **kwargs)
+
+            def submit(self, *args, **kwargs):
+                submits["n"] += 1
+                return self._ex.submit(*args, **kwargs)
+
+            def shutdown(self, *args, **kwargs):
+                return self._ex.shutdown(*args, **kwargs)
+
+        monkeypatch.setattr(concurrent.futures, "ThreadPoolExecutor",
+                            CountingExecutor)
+
+        class SetupHogSDK:
+            def _get_proj(self):
+                clock.t += 1.5  # overruns the whole shared budget
+                proj = MagicMock()
+                proj.g.query.return_value = MagicMock(result_set=[[1]])
+                return proj
+
+        result = monitoring.probe_db(SetupHogSDK())
+        assert result["ok"] is False
+        assert result["error"] == "probe timeout after 1.0s"
+        assert submits["n"] == 1, "the query was submitted past the deadline"
+
+    def test_serve_health_handler_forwards_no_allowance(self, monkeypatch):
+        """#3143 review: the standalone ``serve_health`` server is the third
+        platform liveness caller. Its handler calls ``metrics()`` with NO
+        arguments — pin that end-to-end, because a handler-level
+        ``probe_setup_timeout=probe_setup_timeout()`` would otherwise give the
+        standalone liveness server a multi-second cold-start with the whole
+        suite green."""
+        import threading
+        import urllib.request
+        from http.server import HTTPServer
+
+        from tortoise import auth
+
+        monkeypatch.setattr(auth, "is_dev_mode", lambda: True)
+        monitoring.register(FakeSDK(db_ok=True, graph_size=3))
+        seen = {}
+        real_probe_db = monitoring.probe_db
+
+        def spy_probe_db(target, setup_timeout=None):
+            seen["setup_timeout"] = setup_timeout
+            return real_probe_db(target, setup_timeout=setup_timeout)
+
+        monkeypatch.setattr(monitoring, "probe_db", spy_probe_db)
+        server = HTTPServer(("127.0.0.1", 0), monitoring._Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            url = f"http://127.0.0.1:{server.server_port}/health"
+            with urllib.request.urlopen(url, timeout=10) as resp:
+                assert resp.status == 200
+                body = json.loads(resp.read().decode())
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
+        assert seen["setup_timeout"] is None, seen
+        assert body["db"]["ok"] is True
+        assert body["graph_size"] == 3
 
     def test_taxonomy_failure_is_recorded_not_raised(self):
         """#3143 review: post-fix, ``graph_size`` is newly reachable on large
