@@ -192,21 +192,43 @@ def test_model_factory_invoked_once_per_session_when_parallel(monkeypatch):
     assert stats["sessions"] == n and stats["errors"] == []
 
 
-def test_model_factory_also_used_in_sequential_branch(monkeypatch):
-    """session_workers == 1 keeps the sequential comprehension — the factory
-    contract holds there too (one model per session)."""
-    monkeypatch.setattr(ev2, "extract_session_v2", _extract_factory())
+def test_sequential_branch_uses_shared_model_ignoring_factory(monkeypatch):
+    """#1744 review (P2): ``session_workers == 1`` must use the SHARED,
+    fingerprinted run-level model — never the worker factory. run.py's
+    ``--per-session-census`` lane passes ``session_workers=1`` alongside a
+    factory built for the OUTER ``--session-workers``, and pre-#1744 the
+    sequential path never referenced the factory. Consulting it silently
+    swaps the extracting model away from the fingerprinted one AND breaks
+    the usage-sink attachment (the factory models carry no sink)."""
+    seen_models: list[object] = []
+    monkeypatch.setattr(
+        ev2, "extract_session_v2",
+        _extract_factory(on_call=lambda m, c: seen_models.append(m)))
     n = len(_question()["haystack_sessions"])
+    shared = object()
     count = {"n": 0}
 
     def _factory():
         count["n"] += 1
         return object()
 
-    stats = ingest_haystack_v2(_FakeSDK(), _question(), object(),
+    stats = ingest_haystack_v2(_FakeSDK(), _question(), shared,
                                session_workers=1, model_factory=_factory)
-    assert count["n"] == n
+    assert count["n"] == 0, "sequential path must NOT build factory models"
+    assert seen_models and all(m is shared for m in seen_models), (
+        "sequential path must extract with the shared run-level model")
     assert stats["sessions"] == n
+
+
+def test_session_workers_gt1_without_factory_raises(monkeypatch):
+    """#1744 review (P2): fail CLOSED. ``session_workers > 1`` with no
+    ``model_factory`` would back the worker pool with ONE shared
+    RoutingModel — a data race on its mutable route/truncation state. The
+    docstring says the factory is REQUIRED; enforce it instead of failing
+    open. run.py always supplies one when it passes ``>1``."""
+    with pytest.raises(ValueError, match="model_factory"):
+        ingest_haystack_v2(_FakeSDK(), _question(n_sessions=4), object(),
+                           session_workers=4)
 
 
 # ── 3. the extraction phase is genuinely concurrent ───────────────────────
@@ -370,3 +392,140 @@ def test_write_marker_armed_controls_exhausted_sentinel(monkeypatch):
         ingest_haystack_v2(_FakeSDK(fail_first_point_write=True),
                            _question(n_sessions=1), object(),
                            ingest_write_retries=0, write_marker_armed=False)
+
+
+# ── 6. partial failure keeps results/context positionally aligned ─────────
+
+
+def test_parallel_partial_failure_aligns_results_to_sessions(monkeypatch):
+    """#1744 review (P2): the batched path pairs ``ctxs`` with
+    ``_ex.map`` results POSITIONALLY (``zip(ctxs, results)``). A future
+    refactor to ``as_completed`` would silently misattribute session k's
+    result to the wrong ctx — corrupting ``stats['errors']``,
+    ``error_census``, ``llm['calls']`` and writing payloads for the WRONG
+    session — with only the all-fail test going red. Fail exactly ONE
+    session (keyed off ``session_id``) and pin every downstream effect."""
+    n = 4
+    turns = 2
+
+    def _fake(model, conversation, *, sdk=None, session_id=None,
+              session_date=None):
+        if session_id and session_id.endswith(":s2"):
+            raise ValueError("deterministic extractor bug")
+        return {"payload": {"points": [
+                    {"id": f"pt-{session_id}",
+                     "content": f"fact extracted for {session_id}"}]},
+                "minted_kinds": [], "supersessions": [],
+                "errors": [], "stats": {}, "error_census": {}}
+
+    monkeypatch.setattr(ev2, "extract_session_v2", _fake)
+    sdk = _FakeSDK()
+    stats = ingest_haystack_v2(sdk, _question(n_sessions=n, turns=turns),
+                               object(), session_workers=n,
+                               model_factory=lambda: object())
+
+    # exactly one error, naming the failing session index
+    assert len(stats["errors"]) == 1
+    assert stats["errors"][0].startswith("s2:")
+    assert sum(stats["error_census"].values()) == 1
+    assert stats["llm"]["calls"] == 1
+    # turns / payload points reflect ONLY the three succeeding sessions
+    assert stats["turns"] == (n - 1) * turns
+    assert stats["points"] == n - 1
+    written_si = {p[2]["lme_session_index"] for p in sdk.points
+                  if p[0] == "statement"}
+    assert written_si == {0, 1, 3}, (
+        "payloads written for the wrong session set — positional "
+        f"result/context misattribution: {sorted(written_si)}")
+
+
+def test_workers_greater_than_sessions_parallelises_all(monkeypatch):
+    """``session_workers=8`` with only 2 sessions must still run the
+    parallel branch (the pool simply has spare threads) and process both."""
+    n = 2
+    barrier = threading.Barrier(n, timeout=20)
+    monkeypatch.setattr(
+        ev2, "extract_session_v2",
+        _extract_factory(on_call=lambda m, c: barrier.wait()))
+    stats = ingest_haystack_v2(_FakeSDK(), _question(n_sessions=n), object(),
+                               session_workers=8,
+                               model_factory=lambda: object())
+    assert stats["errors"] == [], "workers > sessions must still parallelise"
+    assert stats["sessions"] == n
+
+
+def test_single_session_with_workers_gt1_uses_fallback(monkeypatch):
+    """``session_workers=4`` on a ONE-session question takes the interleaved
+    fallback (no thread pool) — and still builds the per-worker model
+    (session_workers>1 fingerprints the factory config)."""
+    import concurrent.futures
+
+    def _no_pool(*_a, **_k):
+        raise AssertionError(
+            "ThreadPoolExecutor must not be used for a single session")
+
+    monkeypatch.setattr(concurrent.futures, "ThreadPoolExecutor", _no_pool)
+    monkeypatch.setattr(ev2, "extract_session_v2", _extract_factory())
+    calls = {"n": 0}
+
+    def _factory():
+        calls["n"] += 1
+        return object()
+
+    stats = ingest_haystack_v2(_FakeSDK(), _question(n_sessions=1), object(),
+                               session_workers=4, model_factory=_factory)
+    assert calls["n"] == 1
+    assert stats["sessions"] == 1 and stats["errors"] == []
+    assert stats["turns"] == 2
+
+
+# ── 7. parallel workers keep cost telemetry attached (#1744 review P2) ────
+
+
+class _SinkModel:
+    """A minimal adapter surface ``usage.attach`` recognizes: a callable
+    ``complete`` plus a writable ``usage_sink`` (as the real adapters have,
+    initialized to ``None``)."""
+
+    def __init__(self) -> None:
+        self.usage_sink = None
+
+    def complete(self, **_kwargs):
+        return None
+
+
+def test_parallel_worker_usage_sink_attached_and_attributed(monkeypatch):
+    """#1744 review (P2): factory-built worker models start with
+    ``usage_sink=None`` while run.py attaches the collector to the SHARED
+    run-level model only — so parallel ingest cost silently read zero.
+    ``ingest_haystack_v2`` must attach the collector to each worker model
+    AND re-bind the question-key ContextVar in the worker thread (contextvars
+    do not cross ThreadPoolExecutor threads), or the rows land keyless."""
+    from tools.longmem_eval import usage as lme_usage
+    lme_usage.reset_collector()
+
+    def _fake(model, conversation, *, sdk=None, session_id=None,
+              session_date=None):
+        assert model.usage_sink is not None, (
+            "factory-built worker model must carry the run-level usage sink")
+        model.usage_sink(provider="deepseek", model_id="fake-wire",
+                         usage={"prompt_tokens": 10, "completion_tokens": 4},
+                         usage_present=True)
+        return {"payload": {}, "minted_kinds": [], "supersessions": [],
+                "errors": [], "stats": {}, "error_census": {}}
+
+    monkeypatch.setattr(ev2, "extract_session_v2", _fake)
+    n = 3
+    try:
+        ingest_haystack_v2(_FakeSDK(), _question(n_sessions=n), object(),
+                           session_workers=n, model_factory=_SinkModel)
+        env = lme_usage.get_collector().drain_question("par_q_001")
+    finally:
+        lme_usage.reset_collector()
+    assert env is not None, (
+        "parallel ingest usage rows were not attributed to the question "
+        "(keyless overhead)")
+    bucket = env["by_stage"]["ingest"]["deepseek"]["fake-wire"]
+    assert bucket["calls"] == n
+    assert bucket["prompt_tokens"] == 10 * n
+    assert bucket["completion_tokens"] == 4 * n

@@ -1256,6 +1256,17 @@ def _build_fingerprint(*, reader_model: str, judge_model: str,
                        ingest_write_retries: int = INGEST_WRITE_RETRIES,
                        ingest_question_retries: int = INGEST_QUESTION_RETRIES,
                        resume_attempts_cap: int = RESUME_ATTEMPTS_CAP,
+                       # #1744 (review P1): ``--session-workers > 1`` is a
+                       # GRAPH-CONTENT-affecting knob — the batched
+                       # A-all → B-parallel → C-all phase order drops the
+                       # cross-session NOOP / DELETE / supersession
+                       # consolidation records the interleaved sequential
+                       # path writes. ALWAYS present (the retry-constant
+                       # precedent): a pre-#1744 checkpoint carries no key,
+                       # so ANY resume under the new defaults refuses via
+                       # CheckpointStaleError (the SAFE direction) instead of
+                       # silently crossing the toggle.
+                       session_workers: int = 1,
                        # #1786 (R5): the eval's HYBRID-arm retrieval deadline
                        # (ms) — conditional presence (present iff non-default:
                        # the eval always passes EVAL_RETRIEVAL_BUDGET_MS, so a
@@ -1267,6 +1278,11 @@ def _build_fingerprint(*, reader_model: str, judge_model: str,
 
     ``workers`` is deliberately EXCLUDED (per-question isolation makes
     results workers-invariant) but recorded in ``methodology.workers``.
+    #1744 (review P1): ``session_workers`` IS included — unlike ``workers``
+    it is NOT results-invariant: the parallel phase order batches extraction
+    ahead of payload writes, so cross-session NOOP / DELETE / supersession
+    consolidation (E7 / E2E-11) is not visible to the workers. It is
+    therefore graph-content-affecting and must gate resume.
     R6 (#1545, D9): the full effective rerank config rides the fingerprint
     (``rerank_config``) — a config-mismatched resume is refused by the
     existing fingerprint gate (a baseline checkpoint resumed with
@@ -1331,9 +1347,14 @@ def _build_fingerprint(*, reader_model: str, judge_model: str,
         # changing retry semantics (0 retries → 2 write retries + 1 R2 + 2
         # resumes). ``--retry-failed`` is NOT fingerprinted (a recorded
         # resume-mode, methodology + checkpoint field — Task 2 Step 1).
+        # #1744 (review P1): ``session_workers`` is ALWAYS present for the
+        # same reason — since the parallel path is live it changes graph
+        # content (cross-session consolidation is dropped when batched), so
+        # an unrecorded toggle would silently cross regimes on resume.
         "ingest_write_retries": ingest_write_retries,
         "ingest_question_retries": ingest_question_retries,
         "resume_attempts_cap": resume_attempts_cap,
+        "session_workers": session_workers,
     } | {
         # C1/C2/C5 (#1745): the effective reader-context + evidence-boost
         # knobs ride the fingerprint (present only when the caller passes
@@ -2601,24 +2622,30 @@ def extractor_prompt_digest() -> str:
 
 def ingest_cache_fingerprint(*, question: dict, extractor_model: Any,
                              code_hash: str, prompt_digest: str,
-                             chunk_turns: int) -> str:
+                             chunk_turns: int, session_workers: int) -> str:
     """Deterministic per-question INGEST fingerprint (#2080): sha256 over
     (extractor code version + extraction model id + extraction prompt
-    hash + question id + question content + chunk_turns).
+    hash + question id + question content + chunk_turns + session_workers).
 
     ``extractor_model`` uses the SAME identity source as the outcome
     checkpoint (``_model_id`` — M7 #1739: wire id + tuning; the
     session_workers>1 run fingerprints the worker-factory config).
     ``chunk_turns`` rides the digest because it changes the raw-chunk leg
-    (R1 #1540 graph content); the full question JSON rides it so a dataset
-    revision under a stable qid cannot false-hit a stale graph. Identical
-    inputs → identical hash across processes (no repr/address)."""
+    (R1 #1540 graph content); #1744 (review P1) ``session_workers`` rides
+    it for the SAME reason — >1 selects the batched phase order, which
+    drops cross-session NOOP / DELETE / supersession consolidation records
+    the interleaved sequential path writes. Two toggles that produce
+    different graphs MUST NOT share a cache marker. The full question JSON
+    rides it so a dataset revision under a stable qid cannot false-hit a
+    stale graph. Identical inputs → identical hash across processes (no
+    repr/address)."""
     qid = str(question.get("question_id") or "?")
     content = json.dumps(question, sort_keys=True, default=str)
     h = hashlib.sha256()
     for part in (code_hash,
                  _model_id(extractor_model) or "none",
-                 prompt_digest, qid, content, str(int(chunk_turns))):
+                 prompt_digest, qid, content, str(int(chunk_turns)),
+                 str(int(session_workers))):
         h.update(part.encode("utf-8", "replace"))
         h.update(b"\x1f")
     return h.hexdigest()
@@ -3572,6 +3599,13 @@ def run_evaluation(
         ingest_write_retries=ingest_write_retries,
         ingest_question_retries=ingest_question_retries,
         resume_attempts_cap=resume_attempts_cap,
+        # #1744 (review P1): the graph-content-affecting session-parallel
+        # toggle — ALWAYS present, so a pre-#1744 checkpoint (no key)
+        # refuses on resume rather than silently crossing the mode. Recorded
+        # as the EFFECTIVE ingest value: the per-session census lane forces
+        # ingest to sequential, so recording the outer value would fingerprint
+        # a regime that did not actually run.
+        session_workers=(1 if per_session_census else session_workers),
         retrieval_budget_ms=retrieval_budget_ms,
         # #2578 (Task 1): conditional presence — the DEFAULT tr_top_k (12)
         # fingerprints as absent so pre-feature checkpoints resume
@@ -3691,7 +3725,12 @@ def run_evaluation(
                 question=question, extractor_model=extractor_model,
                 code_hash=ingest_code_fingerprint(),
                 prompt_digest=extractor_prompt_digest(),
-                chunk_turns=chunk_turns)
+                chunk_turns=chunk_turns,
+                # #1744 (review P1): the cache marker distinguishes the
+                # graph-content-affecting parallel toggle (the cache is
+                # DISARMED on the per-session census lane, so the outer
+                # value is exactly what this ingest serves).
+                session_workers=session_workers)
         try:
             # #1786 (code-review F9 cycle 2): acquire-then-claim INSIDE the
             # try — (a) the limiter slot is released by the outer finally even
@@ -4672,6 +4711,14 @@ def run_evaluation(
             "ingest_write_retries": ingest_write_retries,
             "ingest_question_retries": ingest_question_retries,
             "resume_attempts_cap": resume_attempts_cap,
+            # #1744 (review P1): the session-parallel ingest toggle recorded
+            # verbatim so a reader can tell which phase regime (interleaved
+            # vs batched) produced a number — it changes graph content via
+            # cross-session consolidation, so it is fingerprinted too.
+            # Recorded as the EFFECTIVE value: the per-session census lane
+            # forces ingest to sequential, so the outer value would name a
+            # regime that did not run.
+            "session_workers": (1 if per_session_census else session_workers),
         },
         # R5 (#1544) D7: TR knob values recorded verbatim in the
         # methodology (the run protocol step-2/6 knob sweeps consume them;
@@ -6005,8 +6052,11 @@ def _run_main(parser: argparse.ArgumentParser, args,
     # is reusable after close(), so no double-close hazard with the
     # fingerprint guard's served model. (Per-worker model_factory models are
     # built inside ingest_v2.py's worker threads when the parallel path is
-    # live — out of run.py's reach and out of PR scope; since #1744 that
-    # path is live whenever ``session_workers > 1``.)
+    # live — out of run.py's lexical reach, but since #1744 that path is
+    # live whenever ``session_workers > 1`` and ingest_v2 attaches THIS
+    # run-level collector to each worker model — see
+    # ``ingest_v2._attach_ingest_usage`` — so their token/cost rows are
+    # attributed to the question rather than lost.)
     try:
         # M2 (#1523): the pre-flight gate runs AFTER reader/judge/extractor_model
         # are built and BEFORE anything in the question loop starts. --mock skips

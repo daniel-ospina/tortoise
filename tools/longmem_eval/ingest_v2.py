@@ -632,6 +632,31 @@ def _bump_retry(counter: dict[str, int], _exc: BaseException) -> None:
     counter["n"] += 1
 
 
+def _attach_ingest_usage(worker_model: Any, qid: str) -> None:
+    """#1744 (review P2): keep parallel-ingest cost telemetry attached.
+
+    ``run.py`` attaches the run-level usage collector to the SHARED
+    ``extractor_model`` only; the parallel workers call their own
+    ``model_factory()`` models, whose ``usage_sink`` starts ``None`` — so
+    without this the parallel path's token/cost reporting silently reads
+    zero. Attach the run-level collector (module singleton) to the worker
+    model and RE-BIND the question-key ContextVar: contextvars do NOT cross
+    ``ThreadPoolExecutor`` threads (CPython 3.12), so without the re-bind
+    the sink rows would land under the keyless overhead sentinel instead of
+    this question. Best-effort — metering must never flip an ingest outcome
+    — but a failure is logged loudly (never silent)."""
+    from . import usage as lme_usage
+    lme_usage.set_question_key(qid)
+    try:
+        lme_usage.get_collector().attach(worker_model, stage="ingest",
+                                         provider=None)
+    except Exception:
+        logger.warning(
+            "parallel-ingest usage attach failed for %r — token/cost "
+            "telemetry for this worker is lost",
+            type(worker_model).__name__, exc_info=True)
+
+
 def ingest_haystack_v2(sdk: TortoiseSDK, question: dict,
                        model: Any, *, chunk_turns: int = 2,
                        session_workers: int = 1,
@@ -659,7 +684,11 @@ def ingest_haystack_v2(sdk: TortoiseSDK, question: dict,
     ``model_factory()`` model so the RoutingModel's mutable route/truncation
     state is never shared across threads), phase C writes each payload +
     consolidation records. ``model_factory`` (callable → fresh model) is
-    REQUIRED for session_workers > 1; otherwise the shared model is used.
+    REQUIRED for session_workers > 1 — a ``session_workers > 1`` call with
+    ``model_factory=None`` raises ``ValueError`` (fail closed: a shared
+    RoutingModel's mutable route/truncation state must never back the
+    worker pool). The sequential path uses the SHARED ``model`` exactly as
+    the pre-#1744 live behaviour did (a factory, if passed, is ignored).
 
     #1744: the parallel path is BATCHED (A-all → B-parallel → C-all), so a
     worker's S3 prior-graph search cannot see the payload points of the
@@ -668,8 +697,17 @@ def ingest_haystack_v2(sdk: TortoiseSDK, question: dict,
     visibility, so the default sequential path stays INTERLEAVED (A→B→C per
     session, byte-identical to the pre-#1744 live behaviour); the batched
     order — and its cross-session consolidation trade-off — is entered only
-    when the caller explicitly opts into session parallelism.
+    when the caller explicitly opts into session parallelism. Because the
+    mode changes graph content, ``session_workers`` rides the run fingerprint
+    AND the per-question ingest-cache digest (run.py).
     """
+    if session_workers > 1 and model_factory is None:
+        raise ValueError(
+            "ingest_haystack_v2: session_workers > 1 requires a "
+            "model_factory (callable → fresh model); without one every "
+            "worker would share a single RoutingModel's mutable "
+            "route/truncation state (data race). Pass "
+            "model_factory=<callable> or use session_workers <= 1.")
     from tortoise.extractor_v2 import _classify_error, extract_session_v2
 
     qid = question["question_id"]
@@ -791,7 +829,19 @@ def ingest_haystack_v2(sdk: TortoiseSDK, question: dict,
     # across threads. The sdk is shared for S3 reads — Phase A has already
     # written the full raw graph (cross-session linking, E7). ──
     def _extract_ctx(ctx: dict) -> dict:
-        worker_model = model_factory() if model_factory else model
+        # #1744 (review P2): the SEQUENTIAL branch must stay byte-identical
+        # to the pre-#1744 live behaviour — it uses the SHARED, fingerprinted
+        # run-level model. The factory exists purely to give each PARALLEL
+        # worker its own RoutingModel; consulting it when session_workers<=1
+        # (e.g. run.py's --per-session-census lane passes session_workers=1
+        # alongside a factory built for the OUTER value) would silently swap
+        # the extracting model away from the fingerprinted one. Only the
+        # parallel branch builds + attaches a worker model.
+        if session_workers > 1 and model_factory is not None:
+            worker_model = model_factory()
+            _attach_ingest_usage(worker_model, qid)
+        else:
+            worker_model = model
         try:
             return {"si": ctx["si"],
                     "out": extract_session_v2(
