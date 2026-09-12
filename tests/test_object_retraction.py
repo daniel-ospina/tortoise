@@ -630,3 +630,177 @@ def test_retraction_append_failure_warns(tmp_path, monkeypatch, caplog):
     assert any("ObjectRetracted" in m and "append" in m.lower() for m in msgs), \
         ("a swallowed journal-append failure must be logged with a message that "
          "names the cause; got: %r" % (msgs,))
+
+
+def test_deleted_object_not_resurrected_on_rebuild(tmp_path):
+    events = tmp_path / "events"; events.mkdir()
+    sdk = TortoiseSDK(str(tmp_path / "t7.db"), event_log_path=str(events / "events.jsonl"))
+    proj = sdk._get_proj()
+    sdk.create_entity("object", "gone", objectKind="core:other", is_episodic=False)
+    assert sdk._delete_entity(_entity_name_id("Object", "gone")) is True
+    proj.rebuild_all(str(events))
+    rows = proj.g.query("MATCH (o:Object {name:'gone'}) RETURN o.status").result_set
+    # EXACT, not `(not rows) or rows[0][0] == "retracted"`: accepting both states
+    # makes the assertion blind to the very difference it exists to pin
+    # (Surface Map row 14, #688 D7's "parity test blind to its subject").
+    assert rows == [["retracted"]], (
+        "Object removal must replay as a TOMBSTONE, never as absence and never "
+        "as live — the tombstone is what keeps a later re-creation coherent")
+
+
+def test_live_delete_and_replayed_tombstone_diverge_by_design(tmp_path):
+    """D-5's PIN. An earlier draft ended `assert inbound >= 0` — a TAUTOLOGY
+    (a COUNT is never negative) over an edge that was never journaled, so it
+    could not fail and did not observe the divergence it claimed to make
+    'audible'. This version asserts BOTH sides concretely.
+
+    CYCLE 5 — THE EDGE MUST COME FROM THE PRODUCTION LANE. The earlier draft
+    built the edge with raw Cypher between two **Objects**; nothing in
+    `tortoise/` generates an Object→Object `aboutObject` edge, so the green
+    `count == 0` was not evidence about the declared divergence (a #688 D8
+    "measured lane ≠ production lane" defect). The real lane is Point→Object,
+    reconstructed on replay from the Point's journaled `aboutEntities`
+    (pass-2 → `_upsert_point_edges` → `_create_about_edges`,
+    `projection/edges.py:257`).
+
+    CYCLE 6 — AND THE LIVE SIDE MUST BE WIRED, OR IT IS VACUOUS. Driving
+    `create_point(aboutEntities=[...])` alone does NOT create a live
+    `aboutObject` edge — verified live (0 edges), and that is open issue
+    **#2501** ("`create_point(aboutEntities=...)` never wires about edges live,
+    but rebuild derives them from the journaled PointAdded snapshot"). With that
+    fixture the live `count == 0` holds BEFORE the delete too, so it could not
+    fail and the `_delete_entity` call was decorative. The live edge is now
+    materialized through the production writer (`proj._create_about_edges`,
+    the same call `sdk.py:8541` makes), asserted present BEFORE the delete and
+    absent after — verified live: 0 (create_point alone) → 1 (writer) → 0
+    (delete).
+
+    VERIFIED LIVE: live → 0 Objects, 0 `aboutObject` edges; replay → 1 Object
+    and 1 `aboutObject` edge, reconstructed from the Point snapshot.
+    """
+    events = tmp_path / "events"; events.mkdir(exist_ok=True)
+    sdk = TortoiseSDK(str(tmp_path / "t7b.db"), event_log_path=str(events / "events.jsonl"))
+    proj = sdk._get_proj()
+    sdk.create_entity("object", "EDGEY", objectKind="core:other", is_episodic=False)
+    oid = _entity_name_id("Object", "EDGEY")
+    # The PRODUCTION lane: the Point's journaled aboutEntities names the Object,
+    # AND the live edge is wired by the production writer (#2501 means
+    # create_point alone does not do it).
+    pid = sdk.create_point("statement", "a point about EDGEY",
+                           aboutEntities=["EDGEY"])["id"]
+    proj._create_about_edges(pid, "EDGEY")
+    assert proj.g.query(
+        "MATCH ()-[r:aboutObject]->() RETURN count(r)").result_set[0][0] == 1, (
+        "the live edge must EXIST before the delete, or the live == 0 "
+        "assertion below is vacuous (cycle 6)")
+
+    sdk._delete_entity(oid)
+
+    # ── LIVE: node gone, so the edge that pointed at it is gone with it. ──
+    assert proj.g.query(
+        "MATCH (o:Object {id:$id}) RETURN count(o)", params={"id": oid}
+    ).result_set[0][0] == 0
+    assert proj.g.query(
+        "MATCH ()-[r:aboutObject]->() RETURN count(r)").result_set[0][0] == 0
+
+    # ── REPLAY: the node is back as a TOMBSTONE, and pass-2 reconstructs the
+    # Point→Object edge from the Point's own snapshot — the divergence D-5
+    # records. If the fold ever starts deleting recorded edges, this fires.
+    proj.rebuild_all(str(events))
+    assert proj.g.query(
+        "MATCH (o:Object {id:$id}) RETURN o.status", params={"id": oid}
+    ).result_set[0][0] == "retracted"
+    assert proj.g.query(
+        "MATCH (p:Point)-[r:aboutObject]->(o:Object {id:$id}) RETURN count(r)",
+        params={"id": oid}).result_set[0][0] == 1, (
+        "replay KEEPS the recorded edge that live dropped — the accepted D-5 "
+        "divergence; preserving it is what keeps the tombstone auditable")
+    assert proj.g.query("MATCH (o:Object) RETURN count(o)").result_set[0][0] == 1
+
+
+def test_anchor_ignores_a_registration_that_created_no_node(tmp_path):
+    """CYCLE 7 REGRESSION GUARD (Reviewer #4, EMPIRICAL). `_upsert_object`
+    early-returns WITHOUT raising when `not oid or not name`
+    (projection/entities.py:487-489), so an empty-name `ObjectRegistered` still
+    reached `_recreate`. Verified live on the pre-fix code:
+
+        journal [OR(U1,'X'), RT(U1,'X'), OR(U1,'')]
+        -> `_last` = 2, the seq-1 retraction DROPPED, node `['U1','X','live']`
+
+    i.e. a de-registration that created nothing extended the anchor window and
+    buried a legitimate retraction — the exact #2977 failure direction. The
+    anchor now requires BOTH keys truthy (mirroring `_upsert_object`'s guard).
+    """
+    events = tmp_path / "events"; events.mkdir(exist_ok=True)
+    log = EventLog(str(events / "events.jsonl"))
+    log.append({"type": "ObjectRegistered", "id": "U1", "name": "X"})
+    log.append({"type": "ObjectRetracted", "id": "U1", "name": "X", "ts": "T1"})
+    log.append({"type": "ObjectRegistered", "id": "U1", "name": ""})   # created NOTHING
+    proj = _drive("rebuild_all", tmp_path, events, "U1")
+    try:
+        assert proj.g.query(
+            "MATCH (o:Object {id:'U1'}) RETURN o.status").result_set[0][0] \
+            == "retracted", \
+            "a node-less registration must not drop the retraction that follows it"
+    finally:
+        proj.close()
+
+
+def test_survivor_anchor_cross_key_disagreement_is_documented(tmp_path):
+    """PINS an acknowledged ambiguity in the `max(by_id, by_name)` anchor
+    (cycle 5, Reviewer #4). When a fold's `id` and `name` resolve to DIFFERENT
+    registrations, the max across keys can drop a fold whose id-target was
+    never re-created:
+
+        OR(iA, NA)@0,  RT(iA, NB)@1,  OR(iB, NB)@2
+        -> max(by_id['iA']=0, by_name['NB']=2) = 2  =>  the seq-1 fold is DROPPED
+           and iA/NA stays `live`, though its own id was never re-created.
+
+    The `max` is NOT wrong for the case it was introduced for —
+    `OR(U1,X) -> Retract(U1,X) -> OR(U2,X)`, where an ID-FIRST lookup finds the
+    stale anchor, the fold is wrongly kept, and its name fallback then stamps
+    the re-created LIVE node `retracted` (verified live, cycle 3). Both shapes
+    route through the same two lines; changing one flips the other, so the
+    behaviour is PINNED rather than silently adjusted.
+
+    Reachability is low: production never emits a retraction whose id and name
+    come from different nodes — `_delete_entity` reads both from ONE
+    `MATCH (o:Object {id:$id}) RETURN o.name`. A hand-written or legacy journal
+    can produce it. Filed alongside follow-up (g) as the family's known edge.
+    """
+    events = tmp_path / "events"; events.mkdir(exist_ok=True)
+    log = EventLog(str(events / "events.jsonl"))
+    # OR(iA, NA)@0 — an Object whose NAME is NA
+    log.append({"type": "ObjectRegistered", "id": "iA", "name": "NA"})
+    # RT(iA, NB)@1 — a retraction naming the SAME id under a DIFFERENT name
+    log.append({"type": "ObjectRetracted", "id": "iA", "name": "NB", "ts": "T1"})
+    # OR(iB, NB)@2 — a LATER registration of the name NB under a different id
+    log.append({"type": "ObjectRegistered", "id": "iB", "name": "NB"})
+    proj = _drive("rebuild_all", tmp_path, events, "iA")
+    try:
+        # PINNED CURRENT BEHAVIOUR: the cross-key max drops the seq-1 fold, so
+        # iA stays live. If this assertion starts failing, the anchor rule
+        # changed — decide deliberately and update Surface Map row 6 + (g).
+        assert proj.g.query(
+            "MATCH (o:Object {id:'iA'}) RETURN o.status"
+        ).result_set[0][0] == "live", (
+            "the cross-key max drops the seq-1 fold (documented ambiguity) — "
+            "a change here must be a deliberate decision, not a side effect")
+    finally:
+        proj.close()
+
+
+def test_delete_recreate_replays_live(tmp_path):
+    events = tmp_path / "events"; events.mkdir()
+    sdk = TortoiseSDK(str(tmp_path / "t8.db"), event_log_path=str(events / "events.jsonl"))
+    proj = sdk._get_proj()
+    sdk.create_entity("object", "phoenix", objectKind="core:other", is_episodic=False)
+    oid = _entity_name_id("Object", "phoenix")
+    sdk._delete_entity(oid)
+    sdk.create_entity("object", "phoenix", objectKind="core:other", is_episodic=False)
+    proj.rebuild_all(str(events))
+    rows = proj.g.query("MATCH (o:Object {id:$id}) RETURN o.status, o.createdAt",
+                        params={"id": oid}).result_set
+    assert rows and rows[0][0] == "live", (
+        "a pre-recreation retraction must be dropped (survivor rule) — otherwise "
+        "the re-created Object is permanently buried")
