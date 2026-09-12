@@ -221,15 +221,17 @@ Follow these four steps in order — each one is load-bearing, the first two are
 yours to execute, step 3 is a handoff to the user, and step 4 is the check.
 
 **1. Export the key to your shell profile.** Pi expands `${VAR}` from
-`process.env` **at process start**, so a missing export produces
-`Authorization: Bearer ` and a 401 — not a config error:
+`process.env` **at process start**, so a missing export produces an empty
+bearer token (`Authorization: Bearer`) and a 401 — not a config error:
 
 ```bash
 echo 'export TORTOISE_API_KEY=<key>' >> ~/.zshrc   # or ~/.bashrc
 ```
 
 **2. Create/merge `.mcp.json` in the project** (MERGE — never replace an
-existing `mcpServers` block):
+existing `mcpServers` block; if the EFFECTIVE config already has a `tortoise`
+entry — even one that only lives in the home/base config — run the collision
+protocol below BEFORE writing):
 
 ```json
 { "mcpServers": { "tortoise": { "type": "http", "url": "https://api.premiselabs.co/mcp/", "headers": { "Authorization": "Bearer ${TORTOISE_API_KEY}" } } } }
@@ -243,6 +245,58 @@ Pi's mcp-client expands plain `${TORTOISE_API_KEY}` (no `env:` prefix).
 > (`resolveMcpJsonPath`, agent-infra #104). Writing only
 > `~/.pi/agent/.mcp.json` is therefore a silent no-op inside any repo that
 > has its own `.mcp.json` — write the PROJECT file.
+>
+> ⛔ **Collision protocol — a `tortoise` entry already exists.** `mcpServers`
+> is a JSON object, so writing the `tortoise` key over an existing `tortoise`
+> key silently REPLACES it. "MERGE" protects the *other* servers, not this
+> one. In this workspace 10 repos declare `tortoise` across three backends,
+> and the local stdio one holds a POPULATED graph (1,263 nodes, verified via
+> `GRAPH.QUERY tortoise "MATCH (n) RETURN count(n)"`) — so a blind write is a
+> backend switch with no warning, no data check, and no way back. Work
+> through these five steps before writing — step 1 can stop you early if the
+> entry is already correct:
+>
+> 1. **Detect** — resolve which `.mcp.json` is EFFECTIVE first (the first one
+>    found walking up from cwd, else `~/.pi/agent/.mcp.json` — a project file
+>    shadows the home config), then read that file's `tortoise` entry before
+>    writing. Never write blind. An entry that looks right in a SHADOWED file
+>    does not count: if the effective file has no `tortoise`, the connection
+>    is absent. If the effective entry already matches the intended shape
+>    (same `url` AND `Authorization: Bearer ${TORTOISE_API_KEY}`), report
+>    "already correct — no repoint needed" and STOP: no confirm, no preserve,
+>    no rewrite. Same `url` with a different header or key variable (e.g.
+>    `${TORTOISE_MCP_API_KEY}`) is NOT correct — report it, confirm, then
+>    write the corrected `tortoise` entry into the PROJECT `.mcp.json`. A
+>    home/base entry is left untouched and merely shadowed, so nothing is
+>    overwritten and there is no preserve step.
+> 2. **Report** — tell the human the existing entry's backend (its `url`, or
+>    the local stdio `command`) and its graph size when that backend is
+>    reachable (local/self-hosted: query the node count). If it is
+>    unreachable, report the size as unknown — never guess.
+> 3. **Confirm** — get explicit human confirmation before repointing. This is
+>    a data-routing change, and it is the ONE human gate inside the otherwise
+>    one-block universal command: the copy block stays one block, and YOU ask.
+>    Never absorb the switch silently.
+> 4. **Preserve** — only when the existing `tortoise` entry lives in the SAME
+>    file you are about to write into (an overwrite in place). Rename it to a
+>    name that is FREE in that file: the obvious `tortoise-local` may already
+>    be taken (it is an occupied key in this workspace) — check, and walk to
+>    the next free name (`tortoise-local-2`, `tortoise-local-<backend>`, …).
+>    Never write onto an already-present key. Set `"lazy": true` on the
+>    preserved entry so it is not started eagerly at launch (it stays loadable
+>    on demand via `mcp_load`). When the effective entry lives in a DIFFERENT
+>    file (the home/base config, which your project write only SHADOWS), there
+>    is nothing to preserve — skip this step; Report + Confirm still apply,
+>    and the base entry stays intact and recoverable by deleting the project
+>    entry.
+> 5. **Write** — only now add the hosted `tortoise` entry above, into the
+>    PROJECT `.mcp.json` (never into the home/base config — see the
+>    resolution-order note).
+>
+> Preserving the prior entry does **not** certify it: the preserved local
+> stdio entry in this workspace is itself buggy (wrong port/password,
+> agent-infra #639). Preserve it so the switch stays recoverable in one step —
+> not as an endorsement of it.
 
 **3. Restart Pi from a NEW shell** (hand this to the user — the running Pi
 process cannot restart itself). Not `/reload`, and not a restart of an
