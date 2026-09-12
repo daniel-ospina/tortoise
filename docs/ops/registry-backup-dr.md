@@ -360,17 +360,38 @@ spellings meant two winners and two issues for one condition. The driver's
 pre-#2844 spelling `global.json` is retained as a **legacy alias**: every read
 path consults it and every resolve deletes every spelling, so objects already in
 R2 are adopted and cleaned up rather than stranded holding a closed issue's
-number. Adoption is qualified by issue state on the **driver** side only: the
-driver checks `gh_issue_open` and re-files when the recorded issue is closed or
-404, while the `AlertStore` has no issue-state callable and adopts on a recorded
-number alone (its R2 object is the authoritative linearization point by design;
-tracked as a separate gap). Subject-scoped incidents have exactly one key and
-are never crossed with another subject (#2375). Resolution is delete-to-resolve —
-the object is dropped so a recurring condition pages again instead of being
+number. Adoption is qualified by issue state on **both** sides (#3127): the
+`driver` checks `gh_issue_open` and re-files when the recorded issue is closed
+or 404, and the `AlertStore` reads the issue's own state via
+`github_issue.issue_is_open` — a sentinel naming a CLOSED issue is dropped and
+the incident re-filed. Positive evidence of closure is required: a failed state
+read, or no state reader wired, counts as OPEN. Refusing to adopt on a blip is
+the duplicate-issue defect #2844 exists to fix; adopting a stale sentinel is the
+silent-outage defect #3127 exists to fix — prefer the failure that pages. A state
+read is used rather than a search result because GH *search* is rate limited
+(~30/min) and matches titles heuristically, so "absent from the results" is not
+proof of closure. Subject-scoped incidents have exactly one key and are never
+crossed with another subject (#2375). Resolution is delete-to-resolve — the
+object is dropped so a recurring condition pages again instead of being
 swallowed. The 412 create-race branch reads the recorded R2 object and its issue
 state: an open issue is a no-op, a closed **or deleted (404)** issue re-files,
 and a transient/rate-limited response is treated as open so a blip never
 duplicates.
+
+**Resolution authority is evidence-gated (#3127):** only the writer whose probes
+cover a kind's recovery condition may declare it recovered — `KIND_OWNERS` in
+`tortoise/alert_store.py`, mirrored by `kind_owner()` in `registry-cron.sh` and
+pinned across the language boundary by `test_kind_owner_contract_with_driver`.
+A caller may also clear a sentinel **it** opened, since its own probe observed
+the condition being cleared. Anything else is refused and logged with the
+sentinel left intact. This exists because one shared object let the weaker probe
+win: the watcher's reachability check cannot distinguish "R2 unreachable" from
+"the bucket cannot be listed" (the driver's `R2_LIST_OK=0` class), so its
+all-clear would close the driver's `R2_DOWN` — a false recovery, and the driver
+would then re-file on its next run: one duplicate issue + Telegram pair per
+hour. Each sentinel records the `writer` that filed it for exactly this check; a
+legacy object with no `writer` field is closable only by the kind's owner. See
+`docs/adr/ADR-011-resolution-authority-for-dr-alerts.md`.
 
 **Publication redaction:** `config_error`/`storage_error`, the raw sweep body,
 the purge failure body and `last_sweep` (whose `graph_failures[].error` carries

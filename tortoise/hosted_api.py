@@ -568,8 +568,9 @@ async def _lifespan(app):
                             team_id, exc)
                         return None
 
+                from tortoise.alert_store import WRITER_WATCHER
                 watcher = BackupWatcher(
-                    _backup_storage(), _alert_store_from(cfg),
+                    _backup_storage(), _alert_store_from(cfg, writer=WRITER_WATCHER),
                     team_provider=_sweep_teams,
                     graph_provider=_graph_provider,
                     state_reader=read_team_state,
@@ -20087,7 +20088,7 @@ def _backup_config_safe() -> BackupConfig | None:  # noqa: F821
     return cfg if cfg.enabled else None
 
 
-def _alert_store_from(cfg) -> AlertStore:  # noqa: F821
+def _alert_store_from(cfg, writer: str = "unspecified") -> AlertStore:  # noqa: F821
     from tortoise import github_issue as gi
     from tortoise.alert_store import AlertStore
     from tortoise.telegram_push import send_message
@@ -20110,9 +20111,13 @@ def _alert_store_from(cfg) -> AlertStore:  # noqa: F821
     def push_telegram(text: str) -> None:
         send_message(cfg.telegram_bot_token, cfg.telegram_chat_id, text)
 
+    def issue_open(number: int) -> bool:
+        return gi.issue_is_open(cfg.gh_repo, cfg.github_issues_pat, number)
+
     return AlertStore(
         storage, file_issue=file_issue, close_issue=close_issue,
         search_open=search_open, push_telegram=push_telegram,
+        issue_open=issue_open, default_writer=writer,
         repo=cfg.gh_repo, assignee=cfg.alert_assignee,
     )
 

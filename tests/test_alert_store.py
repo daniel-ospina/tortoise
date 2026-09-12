@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-import pytest  # noqa: F401
+import pytest
 
 from tortoise.alert_store import AlertStore
 from tortoise.hosted_backup import MemoryStorage
@@ -49,13 +49,15 @@ class _FakeChannels:
         self.telegram.append(text)
 
 
-def _store(channels, storage=None) -> AlertStore:
+def _store(channels, storage=None, issue_open=None, writer="unspecified") -> AlertStore:
     return AlertStore(
         storage or MemoryStorage(),
         file_issue=channels.file_issue,
         close_issue=channels.close_issue,
         search_open=channels.search_open,
         push_telegram=channels.push_telegram,
+        issue_open=issue_open,
+        default_writer=writer,
         repo="daniel-ospina/tortoise",
         assignee="daniel-ospina",
     )
@@ -400,21 +402,22 @@ def test_platform_incident_key_contract():
     assert store._key("STALE", "team_a") == "ops/alerts/STALE/team_a.json"
 
 
-def _driver_sentinel(storage, issue_number):
+def _driver_sentinel(storage, issue_number, writer=None):
     """Seed the R2 object the bash DR driver's `file_alert` writes.
 
     Shape mirrors `.github/scripts/registry-cron.sh` (`kind`, `issue_number`,
-    `filed_at` with a `date -u +%FT%TZ` timestamp), under the legacy `global`
-    alias so the alias-consulting paths are the ones exercised.
+    `filed_at` with a `date -u +%FT%TZ` timestamp, plus `writer` since #3127),
+    under the legacy `global` alias so the alias-consulting paths are the ones
+    exercised.
     """
-    storage.upload(
-        _DRIVER_KEY,
-        json.dumps({
-            "kind": "R2_DOWN",
-            "issue_number": issue_number,
-            "filed_at": "2026-09-10T00:00:00Z",
-        }).encode(),
-    )
+    payload = {
+        "kind": "R2_DOWN",
+        "issue_number": issue_number,
+        "filed_at": "2026-09-10T00:00:00Z",
+    }
+    if writer is not None:
+        payload["writer"] = writer
+    storage.upload(_DRIVER_KEY, json.dumps(payload).encode())
 
 
 def test_resolve_deletes_the_driver_sentinel_alias():
@@ -544,3 +547,207 @@ def test_full_cross_writer_cycle_files_once_then_pages_again():
     assert store.open_incident("R2_DOWN") is True
     assert list(ch.issues) == [1]  # the fake's first filing — the driver's #11 was seeded, not filed
     assert len(ch.telegram) == 2  # resolved (cycle 1) + reopened (cycle 2)
+
+
+# ── #3127: sentinel liveness + resolution authority ─────────────────────────
+#
+# Two rules, both about not believing a sentinel more than the evidence allows:
+#   1. The sentinel is the dedup LOCK; the ISSUE is the record of whether the
+#      incident is still live. A sentinel naming a CLOSED issue is stale.
+#   2. Recovery is evidence-gated: only the writer whose probes cover a kind's
+#      recovery condition may declare it recovered (single-writer principle).
+
+
+def test_open_refiles_when_the_sentinel_names_a_closed_issue():
+    """#3127: a sentinel holding a CLOSED issue's number must not swallow the
+    recurrence.
+
+    Adopting on `issue_number` truthiness alone made `open_incident` a permanent
+    no-op for any stranded sentinel naming a closed issue — a live fault that
+    pages once and never again, on the one leg (driver disabled) where nobody
+    else can repair it. Pre-fix `main` re-filed here.
+    """
+    ch = _FakeChannels()
+    storage = MemoryStorage()
+    _driver_sentinel(storage, 7)
+    store = _store(ch, storage, issue_open=lambda n: n != 7)
+
+    assert store.open_incident("R2_DOWN") is True
+    assert len(ch.issues) == 1, "the recurrence must be re-filed"
+    assert ch.telegram, "the human must be told"
+
+
+def test_open_adopts_while_the_recorded_issue_is_open():
+    """The other half: an OPEN issue is still the dedup — no duplicate filing."""
+    ch = _FakeChannels()
+    storage = MemoryStorage()
+    _driver_sentinel(storage, 7)
+    ch.issues[7] = "[DR] R2_DOWN"
+    store = _store(ch, storage, issue_open=lambda n: n == 7)
+
+    assert store.open_incident("R2_DOWN") is False
+    assert list(ch.issues) == [7]
+    assert ch.telegram == []
+
+
+def test_open_trusts_the_sentinel_when_issue_state_cannot_be_read():
+    """No positive evidence of closure, no re-file — an API blip is not a close."""
+    def boom(number):
+        raise RuntimeError("github 502")
+
+    ch = _FakeChannels()
+    storage = MemoryStorage()
+    _driver_sentinel(storage, 7)
+    assert _store(ch, storage, issue_open=boom).open_incident("R2_DOWN") is False
+    assert len(ch.issues) == 0
+
+
+def test_open_without_a_state_reader_never_refiles():
+    """Unwired callers keep the historical adopt-on-number path (no re-filing)."""
+    ch = _FakeChannels()
+    storage = MemoryStorage()
+    _driver_sentinel(storage, 7)
+    assert _store(ch, storage).open_incident("R2_DOWN") is False
+    assert len(ch.issues) == 0
+
+
+def test_become_filer_writes_the_canonical_key():
+    """#3127: backfill the CANONICAL key, never the adopted legacy spelling.
+
+    Writing the number back into `global.json` leaves `_.json` free, so the
+    driver's `r2_put_once _.json` still succeeds and files a second issue —
+    two create-once points again, in the create-then-die window the store
+    exists to recover.
+    """
+    ch = _FakeChannels()
+    storage = MemoryStorage()
+    storage.upload(_DRIVER_KEY, json.dumps({"kind": "R2_DOWN", "issue_number": None}).encode())
+    store = _store(ch, storage)
+
+    assert store.open_incident("R2_DOWN") is True
+    canonical = json.loads(storage.download(_CANONICAL_KEY))
+    assert canonical["issue_number"] == 1, "the canonical key must hold the number"
+    assert canonical["writer"] == "unspecified"  # no declared writer → recorded as such
+    with pytest.raises(KeyError):
+        storage.download(_DRIVER_KEY)
+
+
+def test_resolve_refuses_a_kind_owned_by_another_writer():
+    """#3127: the watcher cannot clear R2_DOWN — its probe covers the wrong thing.
+
+    A reachability check cannot distinguish "R2 unreachable" from "the key
+    cannot ListObjects", so the watcher's all-clear may be false. Pre-fix it
+    deleted only its own spelling; once both writers shared one key it would
+    close the driver's issue and the driver would re-file — one duplicate pair
+    per hour, with a real storage fault recorded as resolved.
+    """
+    ch = _FakeChannels()
+    storage = MemoryStorage()
+    _driver_sentinel(storage, 7, writer="driver")
+    ch.issues[7] = "[DR] R2_DOWN"
+    store = _store(ch, storage, writer="watcher")
+
+    assert store.resolve_incident("R2_DOWN") is False
+    assert ch.closed == []
+    assert storage.download(_DRIVER_KEY), "the sentinel must survive the refusal"
+
+
+def test_resolve_allowed_for_the_declared_owner():
+    ch = _FakeChannels()
+    storage = MemoryStorage()
+    _driver_sentinel(storage, 7, writer="driver")
+    store = _store(ch, storage, writer="driver")
+
+    assert store.resolve_incident("R2_DOWN") is True
+    assert ch.closed == [7]
+    with pytest.raises(KeyError):
+        storage.download(_DRIVER_KEY)
+
+
+def test_resolve_allowed_for_a_sentinel_the_caller_itself_opened():
+    """A writer may always clear its OWN observation.
+
+    Without this, the driver-disabled leg (where the watcher is the only
+    observer) would open R2_DOWN and strand it open forever, since no driver
+    run would ever come along to close it.
+    """
+    ch = _FakeChannels()
+    storage = MemoryStorage()
+    _driver_sentinel(storage, 7, writer="watcher")
+    store = _store(ch, storage, writer="watcher")
+
+    assert store.resolve_incident("R2_DOWN") is True
+    assert ch.closed == [7]
+
+
+def test_owned_kind_still_resolves_for_its_owner():
+    """The guard must not break the watcher's own kinds (no false refusal)."""
+    ch = _FakeChannels()
+    store = _store(ch, MemoryStorage(), writer="watcher")
+    store.open_incident("STALE", "team_a")
+    assert store.resolve_incident("STALE", "team_a") is True
+    assert store.resolve_incident("R2_DOWN") is False  # nothing open, still no raise
+
+
+def test_resolve_tolerates_a_corrupt_issue_number():
+    """#3127: a malformed sentinel must not abort the watcher poll.
+
+    `int()` outside the per-close guard raised ValueError out of
+    `resolve_incident`, skipping the heartbeat write and retry_pending on every
+    cycle — a permanently wedged poll from one bad object.
+    """
+    ch = _FakeChannels()
+    storage = MemoryStorage()
+    storage.upload(
+        _DRIVER_KEY, json.dumps({"kind": "R2_DOWN", "issue_number": "abc"}).encode(),
+    )
+    store = _store(ch, storage, writer="driver")
+
+    assert store.resolve_incident("R2_DOWN") is True  # must not raise
+    assert ch.closed == []
+
+
+def test_kind_owner_contract_with_driver():
+    """The bash `kind_owner` must agree with KIND_OWNERS (#3127).
+
+    Two writers, two languages, one policy. If the maps drift, one side starts
+    closing incidents its probes never covered — the defect the guard exists to
+    prevent — so the mapping is pinned across the language boundary.
+    """
+    import re
+    from pathlib import Path
+
+    from tortoise.alert_store import KIND_OWNERS
+
+    sh = (Path(__file__).resolve().parent.parent
+          / ".github/scripts/registry-cron.sh").read_text(encoding="utf-8")
+    body = sh.split("kind_owner() {", 1)[1].split("esac", 1)[0]
+    parsed: dict[str, str] = {}
+    pending: list[str] = []
+    for raw in body.splitlines():
+        line = raw.strip()
+        if re.fullmatch(r"[A-Z0-9_|]+\)", line):
+            pending = line[:-1].split("|")
+            continue
+        m = re.fullmatch(r"echo ([a-z]+) ;;", line)
+        if m and pending:
+            parsed.update(dict.fromkeys(pending, m.group(1)))
+            pending = []
+    assert parsed, "kind_owner() did not parse — the bash shape changed"
+    assert parsed == KIND_OWNERS
+
+    # No driver call site may resolve a kind the driver does not own: the
+    # guard would silently no-op it, and the intent ("the driver has evidence
+    # for this") would be wrong. The self-heal loop is the one variable-shaped
+    # call site, so its kind list is checked explicitly.
+    from tortoise.alert_store import kind_owner
+
+    for kind in re.findall(r"resolve_global ([A-Z][A-Z0-9_]*)\b", sh):
+        assert kind_owner(kind) in ("driver", "unspecified"), (
+            f"registry-cron.sh resolves {kind}, which is owned by {kind_owner(kind)}")
+    loops = re.findall(r"for kind in ([A-Z_ ]+); do", sh)
+    assert loops, "the self-heal kind loop moved — re-verify the guard covers it"
+    for loop in loops:
+        for kind in loop.split():
+            assert kind_owner(kind) in ("driver", "unspecified"), (
+                f"the self-heal loop resolves {kind}, owned by {kind_owner(kind)}")

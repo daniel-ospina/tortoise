@@ -151,6 +151,25 @@ fi
 # Read and delete paths consult ALL spellings, so objects already in R2 are
 # adopted and cleaned up rather than stranded. Subject-scoped incidents have
 # exactly one key and are never crossed with another subject (#2375).
+kind_owner() { # kind -> the writer whose probes cover this kind's recovery (#3127)
+  # Mirrors AlertStore.KIND_OWNERS (tortoise/alert_store.py). The two MUST
+  # agree — test_kind_owner_contract_with_driver pins them. Resolution authority
+  # is evidence-gated: a writer whose probes do NOT cover the failing dependency
+  # must never clear the incident, or a real fault is marked recovered and the
+  # owner re-files it every run.
+  case "$1" in
+    # driver: its own R2 preflight + /status.storage_error + a measured pool.
+    R2_DOWN|APP_DOWN|WATCHER_DOWN|SWEEP_CONFIG_ERROR|SWEEP_OFF_STALE|SWEEP_NO_COVERAGE|LIVENESS_NO_WORK)
+      echo driver ;;
+    # watcher: archive/stamp freshness + the driver heartbeat, read in-process.
+    STALE|NEVER_BACKED_UP|METADATA_LOST|BACKUP_SET_MISSING|DRIVER_DOWN)
+      echo watcher ;;
+    # app: the drill resolves on its own success signal.
+    RESTORE_DRILL_FAILED)
+      echo app ;;
+    *) echo unspecified ;;
+  esac
+}
 alert_key() { # kind id -> the canonical dedup key for this incident
   local kind="$1" id="${2:-}"
   # `global` is this driver's pre-#2844 spelling of a subject-less incident;
@@ -240,7 +259,15 @@ gh_close() { # number comment kind id
   fi
 }
 resolve_global() { # kind comment — close an open global incident (no-op if none)
-  local kind="$1" comment="$2" num=""
+  local kind="$1" comment="$2" num="" owner=""
+  # #3127: refuse to clear a kind this driver has no evidence for. Without this
+  # the driver's generic sweep-completed self-heal would close incidents the
+  # driver never observed recovering.
+  owner="$(kind_owner "$kind")"
+  if [ "$owner" != "driver" ] && [ "$owner" != "unspecified" ]; then
+    log "self-heal: refusing to close ${kind} — it is owned by the ${owner}, whose probes cover its recovery condition"
+    return 0
+  fi
   num="$(gh_find_open "$kind" "global")"
   if [ -n "$num" ]; then gh_close "$num" "$comment" "$kind" "global"; fi
 }
@@ -282,7 +309,7 @@ file_alert() { # kind title body dedup_id
       # issue number here too. Without it the object keeps issue_number=null
       # until the next run, so a transient empty GitHub search in that window
       # would create a duplicate (the 412 object-trust path cannot help).
-      printf '{"kind":"%s","issue_number":%s,"filed_at":"%s"}' "$kind" "$num" "$(date -u +%FT%TZ)" > "$tmp"
+      printf '{"kind":"%s","issue_number":%s,"filed_at":"%s","writer":"driver"}' "$kind" "$num" "$(date -u +%FT%TZ)" > "$tmp"
       aws s3api put-object --endpoint-url "$R2_ENDPOINT" --bucket "$R2_BUCKET" \
         --key "$key" --body "$tmp" >/dev/null 2>&1 || true
       telegram "🚨 DR alert: ${kind} — issue #${num}"
@@ -315,7 +342,7 @@ file_alert() { # kind title body dedup_id
         | jq -r '.number // empty' 2>/dev/null || true)"
     fi
     if [ -n "$num" ]; then
-      printf '{"kind":"%s","issue_number":%s,"filed_at":"%s"}' "$kind" "$num" "$(date -u +%FT%TZ)" > "$tmp"
+      printf '{"kind":"%s","issue_number":%s,"filed_at":"%s","writer":"driver"}' "$kind" "$num" "$(date -u +%FT%TZ)" > "$tmp"
       aws s3api put-object --endpoint-url "$R2_ENDPOINT" --bucket "$R2_BUCKET" \
         --key "$key" --body "$tmp" >/dev/null 2>&1 || true
       telegram "🚨 DR alert: ${kind} — issue #${num}"

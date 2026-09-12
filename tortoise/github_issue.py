@@ -130,3 +130,17 @@ def search_open_incident(repo: str, token: str, kind: str,
         items = [i for i in items
                  if str(i.get("title", "")).endswith(suffix)]
     return [int(i["number"]) for i in items]
+
+
+def issue_is_open(repo: str, token: str, number: int) -> bool:
+    """Authoritative open/closed state for ONE issue (#3127).
+
+    Preferred over inferring liveness from a search result: the GH *search*
+    endpoint is rate limited (~30/min) and matches titles heuristically, so
+    "absent from the results" is NOT proof of closure. Reading the issue's own
+    state is, and it is what lets the dedup store trust a sentinel only while
+    the issue it names is still open — a sentinel naming a CLOSED issue would
+    otherwise swallow every recurrence of a live fault.
+    """
+    data = _request("GET", f"{_API}/repos/{repo}/issues/{number}", token)
+    return str(data.get("state", "open")) == "open"

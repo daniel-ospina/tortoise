@@ -56,6 +56,59 @@ FileIssue = Callable[[str, str], int]      # (title, body) -> issue number
 CloseIssue = Callable[[int, str | None], None]
 SearchOpen = Callable[[str, str], list[int]]  # (kind, team_id) -> open issue numbers
 PushTelegram = Callable[[str], None]
+IssueOpen = Callable[[int], bool]           # (issue number) -> still open?
+
+# ── Resolution authority (#2844 → #3127) ─────────────────────────────────────
+# Single-writer principle: for each incident kind, exactly ONE writer's probes
+# cover that kind's recovery condition, and only that writer may declare it
+# recovered. A writer whose probe does NOT cover the failing dependency must
+# never clear it, because "the condition stopped looking true to me" is not
+# recovery: it hides a live fault AND leaves no sentinel, so the owner re-files
+# on its next run — one duplicate issue + Telegram pair per cycle. Recovery is
+# evidence-gated (recovery thresholds / "only the probe that covers the failing
+# dependency may clear it" — see docs/adr/ADR-011).
+#
+# `R2_DOWN` is the case that forced this: the driver tests its OWN head-bucket
+# preflight + `/status.storage_error` + a measured pool, while the watcher tests
+# only its own reachability probe. They are two different failure modes behind
+# one kind ("cannot reach R2" vs "can reach it but the key cannot ListObjects"),
+# so the watcher cannot distinguish them and must not clear the driver's.
+#
+# Mirrored in `.github/scripts/registry-cron.sh` (`kind_owner`); the two MUST
+# agree — `test_kind_owner_contract_with_driver` pins them.
+WRITER_DRIVER = "driver"
+WRITER_WATCHER = "watcher"
+WRITER_APP = "app"
+WRITER_UNSPECIFIED = "unspecified"
+
+KIND_OWNERS: dict[str, str] = {
+    # driver: its own R2 preflight + storage_error + a measured pool.
+    "R2_DOWN": WRITER_DRIVER,
+    "APP_DOWN": WRITER_DRIVER,
+    "WATCHER_DOWN": WRITER_DRIVER,
+    "SWEEP_CONFIG_ERROR": WRITER_DRIVER,
+    "SWEEP_OFF_STALE": WRITER_DRIVER,
+    "SWEEP_NO_COVERAGE": WRITER_DRIVER,
+    "LIVENESS_NO_WORK": WRITER_DRIVER,
+    # watcher: archive/stamp freshness + the driver heartbeat, read in-process.
+    "STALE": WRITER_WATCHER,
+    "NEVER_BACKED_UP": WRITER_WATCHER,
+    "METADATA_LOST": WRITER_WATCHER,
+    "BACKUP_SET_MISSING": WRITER_WATCHER,
+    "DRIVER_DOWN": WRITER_WATCHER,
+    # app: the drill resolves on its own success signal.
+    "RESTORE_DRILL_FAILED": WRITER_APP,
+}
+
+
+def kind_owner(kind: str) -> str:
+    """The single writer whose probes cover recovery of ``kind``.
+
+    Unlisted kinds return ``WRITER_UNSPECIFIED`` — anyone may clear them, which
+    preserves the pre-#3127 behaviour where authority was never contested
+    (``SIZE_GUARD_ABORT``, ``DATA_LOSS_CANDIDATE``, ``abuse_suspended``, ...).
+    """
+    return KIND_OWNERS.get(kind, WRITER_UNSPECIFIED)
 
 
 def _read_json(storage, key: str) -> dict[str, Any]:
@@ -81,6 +134,8 @@ class AlertStore:
         close_issue: CloseIssue,
         search_open: SearchOpen,
         push_telegram: PushTelegram,
+        issue_open: IssueOpen | None = None,
+        default_writer: str = WRITER_UNSPECIFIED,
         repo: str,
         assignee: str | None = None,
         now: datetime | None = None,
@@ -90,6 +145,16 @@ class AlertStore:
         self._close = close_issue
         self._search = search_open
         self._push = push_telegram
+        # #3127: authoritative per-issue state reader. Preferred over the
+        # GH-search result: search is rate limited (~30/min) and matches titles
+        # heuristically, so "absent from the results" is not proof of closure.
+        # Absent → never distrust a sentinel (no re-filing on an unverifiable
+        # sentinel), which keeps test/embedding callers unchanged.
+        self._issue_open = issue_open
+        # #3127: the writer this instance acts as. Declared once per construction
+        # site (the watcher's store is built with writer="watcher") so every
+        # resolve call inherits the authority check without a per-call argument.
+        self._writer = default_writer
         self._repo = repo
         self._assignee = assignee
         self._now = now or (lambda: datetime.now(timezone.utc))  # noqa: UP017
@@ -148,18 +213,41 @@ class AlertStore:
         return f"🚨 DR alert: {kind}{team}{issue}"
 
     # ── incident lifecycle ──────────────────────────────────────────────────
-    def open_incident(self, kind: str, team_id: str = "", detail: dict | None = None) -> bool:
+    def open_incident(
+        self,
+        kind: str,
+        team_id: str = "",
+        detail: dict | None = None,
+        writer: str | None = None,
+    ) -> bool:
         """Open (or re-use) an incident. True if this call is the filer."""
+        writer = self._writer if writer is None else writer
         detail = detail or {}
         if self._suppressed(kind):
             return False
         key = self._key(kind, team_id)
-        # #2844: a sibling spelling (the DR driver's `global.json`) may already
-        # own this incident. Adopt it before creating our own sentinel, or one
-        # condition gets two create-once points and two issues.
+        # #2844: one canonical sentinel per (kind, subject) — a sibling spelling
+        # (the DR driver's legacy `global.json`) may already hold this incident,
+        # so adopt it rather than becoming a second create-once point.
+        # #3127: adoption is only valid while the recorded issue is still OPEN.
+        # The sentinel is the dedup LOCK; the ISSUE's state is the authoritative
+        # record of whether the incident is live. A sentinel holding a CLOSED
+        # issue's number is stale — the #2844 defect itself, a manual close, or
+        # a legacy cross-writer close — and trusting it swallows every
+        # recurrence of a live fault (pre-fix `main` re-filed here). Clear it
+        # and re-file.
         adopted = self._alias_states(kind, team_id)
+        for sibling, state in adopted:
+            number = state.get("issue_number")
+            if number and self._issue_is_live(kind, team_id, number):
+                logger.info(
+                    "dedup: %s already tracked via %s (issue #%s) — no-op",
+                    kind, sibling, number,
+                )
+                return False
         if adopted:
-            return self._adopt_alias(kind, team_id, detail, adopted)
+            self._forget(adopted, kind)
+            # `key` may itself have just been dropped — fall through to create.
         placeholder = {
             "kind": kind,
             "team_id": team_id,
@@ -167,44 +255,81 @@ class AlertStore:
             "filed_at": self._clock().isoformat(),
             "issue_number": None,
             "telegram_pushed": False,
+            "writer": writer,
         }
         created = self._storage.create_if_not_exists(key, json.dumps(placeholder).encode())
         if created:
             # Re-check: the other writer may have won the race while we were
-            # creating. If its sentinel recorded an issue, it IS the filer —
+            # creating. If its sentinel recorded a LIVE issue it IS the filer —
             # drop ours rather than file a second issue.
-            if any(s.get("issue_number") for k, s in self._alias_states(kind, team_id) if k != key):
-                self._storage.delete(key)
-                return False
-            return self._become_filer(kind, team_id, detail, key, placeholder)
+            for sibling, state in self._alias_states(kind, team_id):
+                if sibling == key:
+                    continue
+                number = state.get("issue_number")
+                if number and self._issue_is_live(kind, team_id, number):
+                    self._storage.delete(key)
+                    return False
+            return self._become_filer(kind, team_id, detail, key, placeholder, writer)
         # 412 — adopt the winner's object; never double-file.
         existing = _read_json(self._storage, key)
-        if existing.get("issue_number"):
-            return False  # already filed — nothing to do
-        # Placeholder (winner died mid-filing): become the filer via GH-search
-        # fallback to avoid duplicates.
-        return self._become_filer(kind, team_id, detail, key, existing)
+        number = existing.get("issue_number")
+        if number and self._issue_is_live(kind, team_id, number):
+            return False  # already filed and still live — nothing to do
+        # Placeholder (winner died mid-filing) or a stale closed-issue sentinel:
+        # become the filer on the CANONICAL key, so the incident keeps ONE
+        # linearization point. Backfilling into an adopted legacy spelling would
+        # leave the canonical key free for the other writer's `r2_put_once` to
+        # succeed on — two create-once points again (#3127).
+        return self._become_filer(kind, team_id, detail, key, existing, writer)
 
-    def _adopt_alias(self, kind, team_id, detail, adopted) -> bool:
-        """Adopt the issue a SIBLING spelling already recorded (#2844).
+    def _forget(self, adopted: list[tuple[str, dict[str, Any]]], kind: str) -> None:
+        """Best-effort delete of stale / unbackfilled sentinels.
 
-        If the sibling carries an issue number the incident is already tracked —
-        stay silent. If it is a placeholder (its writer died between create and
-        backfill, or the driver's object is created before its issue lands),
-        become the filer ON THAT KEY so the incident keeps ONE linearization
-        point instead of the two spellings racing.
+        Never raises: one failed delete must not abort the poll, and a sentinel
+        left behind is only a duplicate-report risk (the next poll re-checks),
+        never a swallowed one.
         """
-        for key, state in adopted:
-            if state.get("issue_number"):
-                logger.info(
-                    "dedup: %s already tracked via alias %s (issue #%s) — no-op",
-                    kind, key, state["issue_number"],
+        for sibling, state in adopted:
+            try:
+                self._storage.delete(sibling)
+                logger.warning(
+                    "dedup: dropped stale sentinel %s for %s (recorded issue #%s "
+                    "is not open) — re-filing",
+                    sibling, kind, state.get("issue_number"),
                 )
-                return False
-        key, state = adopted[0]
-        return self._become_filer(kind, team_id, detail, key, state)
+            except Exception as e:
+                logger.warning("dedup: could not drop stale sentinel %s: %s", sibling, e)
 
-    def _become_filer(self, kind, team_id, detail, key, state) -> bool:
+    def _issue_is_live(self, kind: str, team_id: str, number: Any) -> bool:
+        """Is the sentinel's recorded issue still OPEN? (#3127)
+
+        Distrusting a sentinel requires POSITIVE evidence of closure — never the
+        absence of a search hit. A state read that fails, or a non-numeric
+        ``issue_number``, is treated as OPEN: refusing to adopt on a blip is the
+        duplicate-issue defect #2844 exists to fix, whereas adopting a stale
+        sentinel is the silent-outage defect #3127 exists to fix. Prefer the
+        failure that pages.
+        """
+        try:
+            parsed = int(number)
+        except (TypeError, ValueError):
+            logger.warning("dedup: %s sentinel has a non-numeric issue_number %r", kind, number)
+            return True
+        if self._issue_open is None:
+            return True  # no state reader injected — never re-file unverified
+        try:
+            return bool(self._issue_open(parsed))
+        except Exception as e:
+            logger.warning(
+                "dedup: issue-state read failed for %s #%s (%s) — trusting the "
+                "sentinel; an API blip must not re-file a live incident",
+                kind, parsed, e,
+            )
+            return True
+
+    def _become_filer(
+        self, kind, team_id, detail, key, state, writer: str = WRITER_UNSPECIFIED,
+    ) -> bool:
         issue_number = None
         try:
             # Subject-scoped search (#2313 Task 4): the query must match the
@@ -226,6 +351,8 @@ class AlertStore:
                 logger.warning("incident filing failed for %s: %s — will adopt on next poll", kind, e)
         state["issue_number"] = issue_number
         state["detail"] = detail
+        if writer != WRITER_UNSPECIFIED:
+            state["writer"] = writer  # provenance for the #3127 authority check
         _write_json(self._storage, key, state)
         if issue_number is not None:
             self._push_with_pending(key, self._telegram_text(kind, team_id, detail, issue_number))
@@ -233,7 +360,9 @@ class AlertStore:
             _write_json(self._storage, key, state)
         return True
 
-    def resolve_incident(self, kind: str, team_id: str = "") -> bool:
+    def resolve_incident(
+        self, kind: str, team_id: str = "", writer: str | None = None,
+    ) -> bool:
         """Close + delete-to-resolve across EVERY spelling of the sentinel.
 
         #2844: deleting only the key this store spells stranded the DR driver's
@@ -244,15 +373,46 @@ class AlertStore:
         If both writers filed before the alias fix shipped, the incident has two
         issues; both are closed, or the orphan outlives its sentinel and can
         never be resolved by any surface (#3030).
+
+        #3127 resolution authority: only the kind's OWNER (the writer whose
+        probes cover its recovery condition) may clear it — or a caller
+        clearing a sentinel that IT opened, whose own probe observed the
+        condition it is clearing. A caller with neither refuses: its evidence
+        does not cover the failing dependency, so the "recovery" may be false
+        and the owner re-files on its next run (one duplicate pair per cycle).
+        The sentinel is left intact. Declaring no writer keeps the historical
+        behaviour for callers outside the DR watcher/driver pair.
         """
         states = self._alias_states(kind, team_id)
         if not states:
             return False
+        writer = self._writer if writer is None else writer
+        if writer != WRITER_UNSPECIFIED:
+            owner = kind_owner(kind)
+            if owner != WRITER_UNSPECIFIED and owner != writer \
+                    and not all(s.get("writer") == writer for _, s in states):
+                logger.warning(
+                    "resolution refused: %s is owned by the %s but %s is clearing "
+                    "it (sentinel opened by: %s) — the caller's evidence does not "
+                    "cover this kind's recovery condition (#3127)",
+                    kind, owner, writer,
+                    ", ".join(sorted({str(s.get("writer")) for _, s in states})),
+                )
+                return False
         numbers: list[int] = []
         for _, state in states:
-            number = state.get("issue_number")
-            if number and int(number) not in numbers:
-                numbers.append(int(number))
+            try:
+                number = int(state.get("issue_number"))
+            except (TypeError, ValueError):
+                # A corrupt sentinel must not abort the poll — raising here would
+                # skip the heartbeat write and retry_pending on every cycle.
+                logger.warning(
+                    "dedup: %s sentinel has a non-numeric issue_number %r — "
+                    "skipping its close", kind, state.get("issue_number"),
+                )
+                continue
+            if number not in numbers:
+                numbers.append(number)
         for number in numbers:
             try:
                 self._close(number, "Resolved — condition cleared.")
@@ -267,12 +427,17 @@ class AlertStore:
                 )
             self._push_with_pending(
                 states[0][0],
-                f"✅ DR resolved: {kind}" + (f" ({team_id})" if team_id else "") + f" — issue #{numbers[0]}",
+                f"✅ DR resolved: {kind}" + (f" ({team_id})" if team_id else "")
+                + " — issue " + ", ".join(f"#{n}" for n in numbers),
             )
         # delete-to-resolve across the whole alias set: a surviving spelling
-        # would adopt the next recurrence and swallow it (the #2796 class).
+        # would adopt the next recurrence (the #2796 class). Best-effort — a
+        # failed delete must not abort the remaining spellings.
         for key, _ in states:
-            self._storage.delete(key)
+            try:
+                self._storage.delete(key)
+            except Exception as e:
+                logger.warning("sentinel delete failed (%s): %s — spelling left behind", key, e)
         return True
 
     def _push_with_pending(self, key: str, text: str) -> None:
