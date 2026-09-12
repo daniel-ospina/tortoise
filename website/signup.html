@@ -33,11 +33,16 @@
       try {
         var raw = new URLSearchParams(window.location.search).get("next");
         if (!raw) return;
-        // Same-origin PATH only: reject schemes + backslashes, then resolve and
-        // re-derive the path so dot-segments cannot escape the allowlist
+        // Same-origin PATH only: reject backslashes, then resolve and re-derive
+        // the path so dot-segments cannot escape the allowlist
         // (/admin/../blog resolves to /blog) and an absolute or
         // protocol-relative value cannot change the origin.
-        if (/[:\\]/.test(raw) || raw.charAt(0) !== "/") return;
+        // NOTE: ':' is deliberately NOT rejected — a colon is legal in a path
+        // and the server gate emits it (returnToPath accepts /admin/a:b), so
+        // rejecting it here would silently drop the return-to and reproduce
+        // #3080 for colon paths. Schemes are already excluded by the leading
+        // '/' requirement plus the same-origin check below.
+        if (/\\/.test(raw) || raw.charAt(0) !== "/") return;
         var u;
         try { u = new URL(raw, window.location.origin); } catch (e) { return; }
         if (u.origin !== window.location.origin) return;

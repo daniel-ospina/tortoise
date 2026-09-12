@@ -77,15 +77,29 @@ def _function(html: str, name: str) -> str:
 
 def _blocks() -> dict[str, str]:
     html = SIGNUP.read_text(encoding="utf-8")
+    gate_src = GATE.read_text(encoding="utf-8")
+    # The server's returnToPath carries TS annotations; strip only its signature
+    # so the harness can execute it. A renamed/retyped signature makes the
+    # replace a no-op and node fails loudly, prompting an update here.
+    server = (
+        _function(gate_src, "returnToPath")
+        .replace("function returnToPath(request: Request): string {", "function returnToPath(request) {")
+        .replace("let path: string;", "let path;")
+    )
+    assert "function returnToPath(request) {" in server, "returnToPath signature changed — update this harness"
+    assert ": Request" not in server and ": string" not in server, (
+        "TS annotations remain in the extracted returnToPath — update this harness"
+    )
     return {
         "early": _script_after(html, _EARLY),
         "headGate": _script_after(html, _HEAD_GATE),
         "claim": _function(html, "claimRedirectTarget") + "\n" + _function(html, "gotrueRedirectTarget"),
-        "gate": _function(GATE.read_text(encoding="utf-8"), "gateDecision")
+        "gate": _function(gate_src, "gateDecision")
         + "\n"
-        + _function(GATE.read_text(encoding="utf-8"), "sessionKindForStatus")
+        + _function(gate_src, "sessionKindForStatus")
         + "\n"
-        + _function(GATE.read_text(encoding="utf-8"), "adminKindForResponse"),
+        + _function(gate_src, "adminKindForResponse"),
+        "server": server,
     }
 
 
@@ -94,10 +108,10 @@ const fs = require('fs');
 const path = require('path');
 const dir = process.argv[2];
 const blocks = [];
-for (const n of ['early.js', 'headgate.js', 'claim.js', 'gate.js']) {
+for (const n of ['early.js', 'headgate.js', 'claim.js', 'gate.js', 'server.js']) {
   blocks.push(fs.readFileSync(path.join(dir, n), 'utf8'));
 }
-const early = blocks[0], headGate = blocks[1], claimSrc = blocks[2], gateSrc = blocks[3];
+const early = blocks[0], headGate = blocks[1], claimSrc = blocks[2], gateSrc = blocks[3], serverSrc = blocks[4];
 const cases = JSON.parse(fs.readFileSync(path.join(dir, 'cases.json'), 'utf8'));
 const ORIGIN = process.argv[3];
 const APP = process.argv[4];
@@ -180,6 +194,19 @@ for (const c of cases.gate) {
 out.sessionKind = {};
 out.sessionKind = cases.sessionStatus.map(function (c) { return decide.sessionKindForStatus(c[0], c[1]); });
 out.adminKind = cases.adminResponse.map(function (c) { return decide.adminKindForResponse(c[0], c[1]); });
+
+// #3080: cross-allowlist agreement. Whatever the SERVER gate emits for a path
+// must be accepted by the CLIENT allowlist — drift silently loses the return-to.
+// Each entry is [path, expected server output] so the server side is pinned to
+// FIDELITY, not just agreement: agreement alone is satisfied by a server that
+// degrades every deep path to the /admin fallback while the client accepts it.
+const serverDecide = new Function(serverSrc + '\\nreturn returnToPath;')();
+out.corpus = cases.corpus.map(function (e) {
+  const p = e[0];
+  const s = serverDecide({ url: ORIGIN + p });
+  const c = runEarly('?next=' + encodeURIComponent(s), '');
+  return { path: p, expected: e[1], server: s, clientRet: c.ret };
+});
 console.log(JSON.stringify(out));
 """
 
@@ -192,11 +219,12 @@ def _run(cases: dict) -> dict:
         cases.setdefault(key, [])
     cases.setdefault("sessionStatus", [])
     cases.setdefault("adminResponse", [])
+    cases.setdefault("corpus", [])
     blocks = _blocks()
     import tempfile
 
     with tempfile.TemporaryDirectory() as td:
-        for key, name in (("early", "early.js"), ("headGate", "headgate.js"), ("claim", "claim.js"), ("gate", "gate.js")):
+        for key, name in (("early", "early.js"), ("headGate", "headgate.js"), ("claim", "claim.js"), ("gate", "gate.js"), ("server", "server.js")):
             (Path(td) / name).write_text(blocks[key], encoding="utf-8")
         (Path(td) / "cases.json").write_text(json.dumps(cases), encoding="utf-8")
         driver = Path(td) / "driver.js"
@@ -432,6 +460,46 @@ def test_gate_maps_every_decision_to_a_response() -> None:
         assert i != -1, f"the gate no longer handles {decision}"
         window = src[i : i + 160]
         assert call in window, f"{decision} does not return {call}: {window[:120]!r}"
+
+
+def test_server_and_client_allowlists_agree() -> None:
+    """Whatever the gate emits, the auth page must accept it.
+
+    These two allowlists drifted once: the server emitted `next=/admin/a:b` and
+    the client rejected it for containing ':', so the return-to was silently
+    dropped and post-login navigation fell through to the app root — #3080 for
+    colon paths. This is the class-level guard, not just that one case.
+    """
+    corpus = [
+        # (path, expected server output). Deep /admin paths must survive intact —
+        # a server that degrades them to the fallback would otherwise satisfy a
+        # pure agreement check.
+        ("/admin", "/admin"),
+        ("/admin/", "/admin/"),
+        ("/admin/blog", "/admin/blog"),
+        ("/admin/a:b", "/admin/a:b"),          # the drift that was found
+        ("/admin/edit/1", "/admin/edit/1"),
+        ("/admin/sub/deep/path", "/admin/sub/deep/path"),
+        ("/admin/assets/index-DS3aDc5i.js", "/admin/assets/index-DS3aDc5i.js"),
+        ("/admin/#/edit/1", "/admin/"),         # fragment is not part of the path
+        ("/admin/../blog", "/admin"),           # normalises out of the allowlist
+        ("/administer", "/admin"),              # not under /admin
+        ("/blog", "/admin"),                    # outside the allowlist
+    ]
+    rows = _run({"corpus": corpus})["corpus"]
+    assert len(rows) == len(corpus), (
+        f"corpus harness returned {len(rows)} rows for {len(corpus)} cases — a short "
+        "result would make this test pass without checking anything"
+    )
+    for row in rows:
+        assert row["server"] == row["expected"], (
+            f"server allowlist changed for {row['path']!r}: "
+            f"expected {row['expected']!r}, got {row['server']!r}"
+        )
+        assert row["clientRet"] == row["server"], (
+            f"allowlist drift for {row['path']!r}: server emits {row['server']!r}, "
+            f"client reads {row['clientRet']!r}"
+        )
 
 
 def test_email_flows_use_the_gotrue_target_not_the_console() -> None:
