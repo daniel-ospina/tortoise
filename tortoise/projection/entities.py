@@ -686,6 +686,11 @@ class _EntityHandlers:
         ``None``. A default would let a THIRD family (e.g. a future
         ``ObjectDeprecated``) silently inherit the supersede family's semantics.
 
+        BOTH branches are IDENTITY-CONSTRAINED (review 2). The id branch
+        requires the name to agree when one is present; the name branch selects
+        exactly one carrier. Either branch alone tombstoning a set is the bug
+        that made replay disagree with live on the reused-id shape.
+
         Cypher shape (verified live): FalkorDB REJECTS
         ``WITH o WHERE … ORDER BY …``; ``WHERE`` must bind to its own ``WITH``
         and ``ORDER BY`` must follow the bare ``WITH o``.
@@ -696,8 +701,37 @@ class _EntityHandlers:
             return (0, 0)
         folded = matched = 0
         if oid:
-            result = self.g.query(f"MATCH (o:Object {{id:$id}}) {body}",
-                                  params={"id": oid, **common_params})
+            # ── THE ID BRANCH MUST RESPECT THE NAME IDENTITY (P0, review 2) ──
+            # `_upsert_object` MERGEs by NAME, so `id` is a derived cache and a
+            # reused id is NOT the same Object. A bare
+            # `MATCH (o:Object {id:$id})` has no single-carrier restriction and
+            # `RETURN o.id` does not cap the `SET`, so it tombstoned EVERY node
+            # sharing that id — including an unrelated live Object that merely
+            # reused the id. Measured:
+            #
+            #   journal  OR(U1,X) -> RT(U1,X) -> OR(U1,Y)
+            #   live     [['U1','Y','live']]                 (only X was deleted)
+            #   replay   [['U1','X','retracted'], ['U1','Y','retracted']]  <-- Y BURIED
+            #
+            # Y is never retracted in the journal, yet was excluded from every
+            # read surface on all four replay engines. The supersede twin had
+            # the identical defect. (Before the name-preferred anchor landed the
+            # fold was DROPPED here, so the multi-node `SET` was unreachable on
+            # this shape — the anchor fix exposed it rather than causing it.)
+            #
+            # `AND ($name IS NULL OR o.name = $name)` fixes the root cause: an
+            # id match must agree with the name it claims to identify. The
+            # keyless legacy fold (`$name IS NULL`) is unchanged, and a genuine
+            # id/name mismatch now falls through to the name branch, which
+            # already selects exactly one carrier.
+            #
+            # NOTE a `LIMIT 1` on this branch is NOT a fix — inside a `MATCH` it
+            # caps only the rows RETURNed, never the rows the trailing `SET`
+            # applies to.
+            result = self.g.query(
+                "MATCH (o:Object {id:$id}) "
+                "WHERE ($name IS NULL OR o.name = $name) " + body,
+                params={"id": oid, "name": name, **common_params})
             folded, matched = _classify(result, cas=cas)
         if folded == 0 and matched == 0 and name:
             result = self.g.query(
