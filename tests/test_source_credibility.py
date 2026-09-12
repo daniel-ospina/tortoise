@@ -208,6 +208,19 @@ class TestResolveTier:
         assert SOURCE_KIND_DEFAULTS["T0"] == "T0"
         assert SOURCE_KIND_DEFAULTS["document"] is None
 
+    def test_meeting_capture_kinds_registered_neutral(self):
+        """#2726: both meeting-capture kinds resolve NEUTRAL (tier deferred).
+
+        Membership is asserted explicitly — ``.get()`` returns None for an
+        ABSENT key too, so the tier check alone cannot tell registered-NEUTRAL
+        from never-registered.
+        """
+        for kind in ("meeting_transcript", "meeting_minutes"):
+            assert kind in SOURCE_KIND_DEFAULTS
+            assert SOURCE_KIND_DEFAULTS[kind] is None
+            assert resolve_source_tier(kind) is None
+            assert resolve_tier(None, kind) is None
+
     def test_register_invalid_tier_raises(self):
         with pytest.raises(ValueError):
             register_source_kind_default("bad", "T9")
