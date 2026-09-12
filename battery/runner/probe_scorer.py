@@ -35,10 +35,13 @@ no-data sentinel. Two legs close what can be closed honestly:
 ``confidences`` (raw envelope scalar, no judge); ``derive_judged_truth``
 emits the JUDGED truth fields (``outcomes``/``outcome_correct``/
 ``update_correct_direction``/``coverage_subscore``) ONLY when a configured
-truth judge returns a typed verdict over the arm's DECLARED position vs the
-sealed gold. No judge, no verdict, or an undecidable verdict leaves the
-field absent -> the post-derive re-check sentinels the episode
-(``insufficient_n``), never a fabricated ``0.0``.
+truth judge returns an EVIDENCED verdict over the arm's DECLARED position
+vs the sealed gold (both sides required). No judge, no declared position,
+no gold, an undecidable verdict, or a malformed/un-evidenced verdict leaves
+the field absent -> the post-derive re-check sentinels the episode
+(``insufficient_n``), never a fabricated ``0.0``. A partially-judged family
+refuses its headline (``family_report``) rather than reporting a subset
+score as measured.
 
 R1 population split (PR #2341 review round 2, P2): contradiction-family
 episodes split at the scorer seam by planted-pair presence — a scenario that
@@ -357,11 +360,52 @@ def derive_append(log: list[dict], scenario, expected: set[str]) -> None:
 #     judged semantic ... they need the judge leg wired at the scoring seam,
 #     not a derive"). The judge is an injectable seam so the leg is provably
 #     hermetic in tests and fail-closed in production:
-#       - judge present + verdict  -> emit the typed entry
-#       - judge absent / None / malformed -> emit NOTHING (honest gap; the
-#         post-derive re-check turns it into `insufficient_n`, NEVER 0.0).
+#       - judge present + EVIDENCED verdict -> emit the typed entry
+#       - judge absent / None / malformed / un-evidenced -> emit NOTHING
+#         (honest gap; the post-derive re-check turns it into
+#         `insufficient_n`, NEVER 0.0).
 # The judge reads the arm's DECLARED position (the payload-only envelope
 # entry, never the raw turn prose), so the scalar channel contract holds.
+#
+# #3100 review P1: the comparison needs BOTH sides. With no declared
+# position there is no arm-side evidence; with no sealed gold there is
+# nothing to be correct against — either missing half means the judge is
+# NEVER asked (pre-fix it was asked with `position=""`/`gold=""` and its
+# typed verdict landed as a MEASURED cell).
+# #3100 review P2-a: the verdict CARRIES its justification (`TruthVerdict`),
+# so an un-evidenced bool/float is structurally impossible to emit.
+
+
+@dataclass(frozen=True)
+class TruthVerdict:
+    """A judged truth verdict THAT CARRIES ITS JUSTIFICATION (#3100 P2-a).
+
+    The honesty gate — a measurement must have evidence behind it — binds the
+    judge as much as the emitter: a bare ``bool``/``float`` that cannot say
+    WHAT it compared is an un-evidenced verdict, and emitting it as a
+    MEASURED R2/R3/R5 cell is exactly the fabricated-verdict failure this leg
+    exists to prevent. ``support`` is the judge's non-empty justification
+    (the declared-position-vs-gold evidence it relied on); it is REFUSED at
+    construction, so an un-evidenced verdict cannot exist, let alone be
+    emitted. It is persisted on the emitted entry's payload so the
+    measurement is auditable in the event log.
+
+    ``value`` is the typed verdict: ``bool`` for correctness/direction,
+    ``float`` in [0, 1] for the coverage rubric (range enforced by the leg).
+    """
+
+    value: bool | float
+    support: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.value, (bool, int, float)):
+            raise ValueError(
+                f"truth verdict value must be a bool or a real number, got "
+                f"{self.value!r}")
+        if not isinstance(self.support, str) or not self.support.strip():
+            raise ValueError(
+                "truth verdict requires non-empty support — a measurement "
+                "must carry the evidence it relied on")
 
 
 @dataclass(frozen=True)
@@ -378,9 +422,11 @@ class TruthQuery:
     carries the authored scenario metadata the comparison needs (e.g. the
     ``retraction`` block, the scenario question) — never the arm's prose.
 
-    The judge MUST return the typed verdict for its kind (bool for
-    correctness/direction, float in [0,1] for coverage) or ``None`` when it
-    cannot decide: ``None`` keeps the field absent, never a default.
+    The judge MUST return an EVIDENCED ``TruthVerdict`` for its kind (bool
+    for correctness/direction, float in [0,1] for coverage) or ``None`` when
+    it cannot decide: ``None`` keeps the field absent, never a default. A
+    bare scalar is refused (#3100 review P2-a) — a verdict that cannot say
+    what it compared is not a measurement.
     """
 
     kind: str
@@ -391,13 +437,13 @@ class TruthQuery:
     evidence: dict[str, Any] = field(default_factory=dict)
 
 
-#: Injectable truth judge: TruthQuery -> bool | float | None. A real run
+#: Injectable truth judge: TruthQuery -> TruthVerdict | None. A real run
 #: wires a validated/metered judge (battery/judge/); a hermetic test injects
 #: a fake. An absent judge means the judged fields stay gapped. A caller
 #: that hands over ``JudgeClient`` in mock mode would be fabricating a
 #: scored verdict from a validation-only scorer — the wiring owns that
 #: (see RunConfig.truth_judge), the leg cannot detect it generically.
-TruthJudge = Callable[["TruthQuery"], "bool | float | None"]
+TruthJudge = Callable[["TruthQuery"], "TruthVerdict | None"]
 
 
 def envelope_scalars(log: list[dict]) -> tuple[list[float], list[str]]:
@@ -448,18 +494,29 @@ def derive_envelope_truth(log: list[dict], expected: set[str]) -> None:
 def derive_judged_truth(log: list[dict], scenario, expected: set[str],
                         judge: TruthJudge | None) -> None:
     """#2740 judge leg — emit the judged truth fields when (and only when) a
-    truth judge returns a typed verdict.
+    truth judge returns an EVIDENCED verdict.
 
     Fail-closed: ``judge is None`` emits nothing; a ``None`` / malformed
     return emits nothing; either way the post-derive coverage re-check in
     ``ProbeScorer.score`` turns the missing field into ``insufficient_n`` —
     never a fabricated ``0.0``. Idempotent per field. The judge reads the
     DECLARED envelope position (payload-only entries), never raw prose.
+
+    Evidence gate (#3100 review P1): the comparison needs BOTH sides. With
+    no declared position there is no arm-side evidence; with no sealed gold
+    there is nothing to be correct against. Either missing half means the
+    judge is NEVER asked and the fields stay absent -> sentinel (pre-fix the
+    judge was asked with ``position=""``/``gold=""`` and a typed verdict
+    became a MEASURED cell with zero arm evidence).
     """
     if judge is None:
         return
     _confs, positions = envelope_scalars(log)
+    if not positions:
+        return
     gold = scenario.golds()[0] if scenario.golds() else ""
+    if not isinstance(gold, str) or not gold.strip():
+        return
     evidence: dict[str, Any] = {
         "question": getattr(scenario, "question", ""),
     }
@@ -467,39 +524,45 @@ def derive_judged_truth(log: list[dict], scenario, expected: set[str],
     if retraction:
         evidence["retraction"] = dict(retraction)
 
-    def _ask(kind: str) -> bool | float | None:
+    def _ask(kind: str) -> TruthVerdict | None:
         return judge(TruthQuery(
             kind=kind, scenario_id=scenario.id,
-            position=positions[-1] if positions else "",
-            positions=tuple(positions), gold=gold, evidence=evidence))
+            position=positions[-1], positions=tuple(positions),
+            gold=gold, evidence=evidence))
 
     if "outcomes" in expected and not _has(log, "outcomes"):
         verdict = _ask("outcome_correct")
-        if isinstance(verdict, bool):
+        if isinstance(verdict, TruthVerdict) and isinstance(verdict.value, bool):
             log.append({"type": "gold_store", "event": "expected",
                         "at": len(log), "field": "outcomes",
-                        "payload": {"value": [1 if verdict else 0]}})
+                        "payload": {"value": [1 if verdict.value else 0],
+                                    "support": verdict.support}})
             # Same verdict enables R3's confident-wrong diagnostic; the
             # registry pins it derived/correctness_delta. Emitted only as a
-            # consequence of a real judged verdict.
+            # consequence of a real evidenced verdict.
             if not _has(log, "outcome_correct"):
                 log.append({"type": "derived", "event": "correctness_delta",
                             "at": len(log), "field": "outcome_correct",
-                            "payload": {"value": verdict}})
+                            "payload": {"value": verdict.value,
+                                        "support": verdict.support}})
     if ("update_correct_direction" in expected
             and not _has(log, "update_correct_direction")):
         verdict = _ask("update_correct_direction")
-        if isinstance(verdict, bool):
+        if isinstance(verdict, TruthVerdict) and isinstance(verdict.value, bool):
             log.append({"type": "derived", "event": "direction_ok",
                         "at": len(log), "field": "update_correct_direction",
-                        "payload": {"value": verdict}})
+                        "payload": {"value": verdict.value,
+                                    "support": verdict.support}})
     if "coverage_subscore" in expected and not _has(log, "coverage_subscore"):
         verdict = _ask("coverage_subscore")
-        if (isinstance(verdict, (int, float)) and not isinstance(verdict, bool)
-                and 0.0 <= float(verdict) <= 1.0):
+        if (isinstance(verdict, TruthVerdict)
+                and isinstance(verdict.value, (int, float))
+                and not isinstance(verdict.value, bool)
+                and 0.0 <= float(verdict.value) <= 1.0):
             log.append({"type": "judge_annotation", "event": "rubric_item",
                         "at": len(log), "field": "coverage_subscore",
-                        "payload": {"value": float(verdict)}})
+                        "payload": {"value": float(verdict.value),
+                                    "support": verdict.support}})
 
 
 class ProbeScorer:
@@ -672,6 +735,12 @@ class ProbeScorer:
         (Task-9 executor-owned — absent verdicts keep the cell at
         insufficient_n).
 
+        Partial-judging refusal (#3100 review P2): the PRIMARY cell reads
+        ``insufficient_n`` whenever some attempted (valid) episode on that
+        metric was sentinelled — a judge resolving 1 of N is a subset
+        score, never a measured family headline. ``n``/``values`` still
+        carry the honest measured subset; the refusal is the cell state.
+
         ``primary`` stamps the payload's headline cal metric (PR #2341
         review round 3, P2) — the family-level report value is the PRIMARY
         metric by construction; a consumer can refuse a payload whose only
@@ -695,9 +764,26 @@ class ProbeScorer:
             m: [float(r.value) for r in self._records
                 if r.metric == m and r.measured and r.valid]
             for m in metrics}
-        cells = {m: ("measured" if values[m] else "insufficient_n")
-                 for m in metrics}
         counts = {m: len(values[m]) for m in metrics}
+        # Partial-judging guard (#3100 review P2): a metric whose VALID
+        # episodes were only partly judged is a SUBSET score. A judge that
+        # resolves 1 of N leaves N-1 sentinelled; reporting the family
+        # HEADLINE (the declared primary metric) as "measured" off that one
+        # verdict would present a partial sample as a measured family. The
+        # primary cell is refused (`insufficient_n`) until every attempted
+        # episode is judged; `n`/`values` stay the honest measured subset.
+        # Secondary/control cells (R1's FP-control) are ROUTED separately and
+        # never become the family headline (battery/cli.py), so they keep
+        # their existing semantics.
+        attempted = {m: sum(1 for r in self._records
+                            if r.metric == m and r.valid)
+                     for m in metrics}
+        primary = self.probe.cal_metric
+        cells: dict[str, str] = {}
+        for m in metrics:
+            partial = m == primary and counts[m] < attempted[m]
+            cells[m] = ("insufficient_n"
+                        if (not values[m] or partial) else "measured")
         return {
             "family": self.family,
             #: Headline cal metric (RC2/P2): the family-level report value

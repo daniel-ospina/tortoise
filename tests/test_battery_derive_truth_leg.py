@@ -13,13 +13,17 @@ two honest legs that close what can be closed:
   2. ``derive_judged_truth`` — the JUDGED truth fields
      (``outcomes``/``outcome_correct``/``update_correct_direction``/
      ``coverage_subscore``) emitted ONLY when an injected truth judge returns
-     a typed verdict over the arm's DECLARED position vs the sealed gold.
+     an EVIDENCED ``TruthVerdict`` over the arm's DECLARED position vs the
+     sealed gold. Both sides of the comparison must be present: with no
+     declared position, or no sealed gold, the judge is never asked.
 
 The negative locks are as load-bearing as the positive ones: with no judge,
-an undecidable judge, or a malformed verdict, the field stays ABSENT and the
-episode sentinels — never a fabricated ``0.0``. A real ``0.0`` verdict
-(judge says "wrong") must stay a MEASURED 0.0, distinguishable from the
-sentinel.
+an undecidable judge, a malformed/unevidenced verdict, a missing declared
+position, or a missing gold, the field stays ABSENT and the episode
+sentinels — never a fabricated ``0.0``. A real ``0.0`` verdict (judge says
+"wrong") must stay a MEASURED 0.0, distinguishable from the sentinel. A
+partially-judged family refuses its headline (a subset score is not a
+measured family).
 
 Hermetic: NO model/API calls. The judge is a scripted callable.
 """
@@ -121,7 +125,8 @@ def _scorer(probe, metric, judge=None):
 
 class _ScriptedJudge:
     """Scripted truth judge — records every query and returns a staged
-    verdict (bool/float/None). No model calls."""
+    verdict (``TruthVerdict``/``None``, or a deliberately malformed value
+    for the fail-closed locks). No model calls."""
 
     def __init__(self, verdicts):
         self._verdicts = dict(verdicts)
@@ -130,6 +135,15 @@ class _ScriptedJudge:
     def __call__(self, query):
         self.queries.append(query)
         return self._verdicts.get(query.kind)
+
+
+def _v(value, support="judged against the sealed gold"):
+    """Build an EVIDENCED truth verdict (#3100 review P2-a).
+
+    The pre-fix leg accepted a bare ``bool``/``float``; the guard now
+    requires the justification-carrying ``TruthVerdict``."""
+    from battery.runner.probe_scorer import TruthVerdict
+    return TruthVerdict(value, support)
 
 
 # ── 1. the envelope position is emitted (pre-fix: dropped) ────────────
@@ -204,7 +218,7 @@ class TestJudgedTruth:
         sc = _r3(tmp_path)
         log = _envelope_log([0.9, 0.5, 0.4],
                             ["upgrade caused it", "maybe", "it did not"])
-        judge = _ScriptedJudge({"outcome_correct": True})  # the arm was right
+        judge = _ScriptedJudge({"outcome_correct": _v(True)})  # arm was right
         scorer = _scorer(R3CalibrationProbe(), "brier", judge)
         ep = _episode(sc.id, log)
         assert ep.valid
@@ -225,7 +239,7 @@ class TestJudgedTruth:
         sc = _r5(tmp_path)
         log = _envelope_log([0.8, 0.2],
                             ["the upgrade caused it", "it did not"])
-        judge = _ScriptedJudge({"update_correct_direction": True})
+        judge = _ScriptedJudge({"update_correct_direction": _v(True)})
         scorer = _scorer(R5UpdateProbe(), "correct-direction-rate", judge)
         scorer.score(_episode(sc.id, log), sc)
         rec = scorer.last_record()
@@ -244,7 +258,7 @@ class TestJudgedTruth:
         the no-data sentinel. (Fabrication would be the reverse.)"""
         sc = _r5(tmp_path)
         log = _envelope_log([0.8, 0.7], ["held", "held"])
-        judge = _ScriptedJudge({"update_correct_direction": False})
+        judge = _ScriptedJudge({"update_correct_direction": _v(False)})
         scorer = _scorer(R5UpdateProbe(), "correct-direction-rate", judge)
         scorer.score(_episode(sc.id, log), sc)
         rec = scorer.last_record()
@@ -304,24 +318,120 @@ class TestJudgedTruth:
             assert not [e for e in log
                         if e.get("field") == "update_correct_direction"], bad
 
-    def test_no_declared_position_still_judged_by_gold_only(self, tmp_path):
-        """An episode whose executor emitted no position still gets a judge
-        call (position=""): the judge MAY decide from gold alone, and a
-        verdict is still a real measurement — not a fabricated default. The
-        point of the lock is that the LEG never invents the verdict."""
+    def test_no_declared_position_never_judged(self, tmp_path):
+        """P1 (#3100 review): the seam's contract is the arm's DECLARED
+        position vs the sealed gold. With NO declared position the arm side
+        of the comparison is missing, so the judge is NEVER asked and no
+        value is emitted -> sentinel. (Pre-fix the judge was called with
+        ``position=""`` and its typed verdict was emitted as a MEASURED R5
+        cell with zero arm evidence.)"""
         sc = _r5(tmp_path)
         log = _envelope_log([0.8, 0.2])  # no position entries
+        judge = _ScriptedJudge({"update_correct_direction": _v(True)})
+        scorer = _scorer(R5UpdateProbe(), "correct-direction-rate", judge)
+        scorer.score(_episode(sc.id, log), sc)
+        assert judge.queries == []                        # no judge call
+        assert not [e for e in log
+                    if e.get("field") == "update_correct_direction"]
+        rec = scorer.last_record()
+        assert rec is not None and not rec.measured and rec.value is None
+        assert scorer.family_report()["cells"]["correct-direction-rate"] == \
+            "insufficient_n"
+
+    def test_no_gold_never_judged(self, tmp_path):
+        """P1 (#3100 review): with no SEALED GOLD there is nothing the arm's
+        position can be correct against, so the judge is NEVER asked and no
+        value is emitted. (Pre-fix ``gold=""`` was handed to the judge and
+        its typed verdict became a measured cell.)"""
+        from battery.runner.probe_scorer import derive_judged_truth
+
+        class _NoGoldScenario:
+            id = "no-gold"
+            family = "R5"
+            question = "What caused the outage?"
+
+            def golds(self):
+                return []
+
+        log = _envelope_log([0.8], ["it did not"])
+        judge = _ScriptedJudge({"update_correct_direction": _v(True)})
+        derive_judged_truth(log, _NoGoldScenario(),
+                            {"update_correct_direction"}, judge)
+        assert judge.queries == []                        # no judge call
+        assert not [e for e in log
+                    if e.get("field") == "update_correct_direction"]
+
+    def test_bare_bool_verdict_refused(self, tmp_path):
+        """P2-a (#3100 review): a bare bool/float is an UN-EVIDENCED
+        verdict — the leg refuses it. Only an evidenced ``TruthVerdict``
+        (non-empty support) is a measurement. (Pre-fix the bare bool was
+        accepted and emitted as a measured cell.)"""
+        sc = _r5(tmp_path)
+        log = _envelope_log([0.8, 0.2], ["a", "b"])
         judge = _ScriptedJudge({"update_correct_direction": True})
         scorer = _scorer(R5UpdateProbe(), "correct-direction-rate", judge)
         scorer.score(_episode(sc.id, log), sc)
-        assert judge.queries[0].position == ""
-        assert scorer.last_record().measured
+        assert judge.queries and judge.queries[0].kind == \
+            "update_correct_direction"                     # the judge WAS asked
+        assert not [e for e in log
+                    if e.get("field") == "update_correct_direction"]
+        assert not scorer.last_record().measured
+
+    def test_verdict_carries_its_justification(self, tmp_path):
+        """P2-a (#3100 review): an evidenced verdict PERSISTS the evidence
+        it relied on, so the measured cell is auditable in the log."""
+        sc = _r5(tmp_path)
+        log = _envelope_log([0.8, 0.2], ["a", "b"])
+        judge = _ScriptedJudge({"update_correct_direction": _v(
+            True, "final position matches the retracted cause")})
+        scorer = _scorer(R5UpdateProbe(), "correct-direction-rate", judge)
+        scorer.score(_episode(sc.id, log), sc)
+        entry = next(e for e in log
+                     if e.get("field") == "update_correct_direction")
+        assert entry["payload"]["value"] is True
+        assert entry["payload"]["support"] == \
+            "final position matches the retracted cause"
+
+    def test_empty_support_refused_at_construction(self):
+        """P2-a (#3100 review): a verdict whose justification is empty
+        cannot even be constructed — the hole is structural, not
+        conventional."""
+        from battery.runner.probe_scorer import TruthVerdict
+        for empty in ("", "   ", None):
+            with pytest.raises((ValueError, TypeError)):
+                TruthVerdict(True, empty)
+
+    def test_partial_judging_refuses_family_headline(self, tmp_path):
+        """P2 (#3100 review): a judge resolving 1 of N attempted episodes is
+        a SUBSET score — the family headline (primary cell) is refused
+        (insufficient_n) while ``n`` stays the honest measured count.
+        (Pre-fix the single verdict flipped ``cells[brier]`` to "measured"
+        and the N-1 sentinelled episodes were reported as if covered.)"""
+        sc = _r3(tmp_path)
+
+        class _Once:
+            def __init__(self):
+                self.calls = 0
+
+            def __call__(self, query):
+                self.calls += 1
+                return _v(True) if self.calls == 1 else None
+
+        scorer = _scorer(R3CalibrationProbe(), "brier", _Once())
+        scorer.score(
+            _episode(sc.id, _envelope_log([0.9, 0.5], ["a", "b"])), sc)
+        scorer.score(
+            _episode(sc.id, _envelope_log([0.7, 0.6], ["c", "d"])), sc)
+        rep = scorer.family_report()
+        assert rep["n"]["brier"] == 1                     # honest count kept
+        assert len(rep["values"]["brier"]) == 1           # the measured subset
+        assert rep["cells"]["brier"] == "insufficient_n"   # partial -> refused
 
     def test_judged_truth_is_idempotent(self, tmp_path):
         from battery.runner.probe_scorer import derive_judged_truth
         sc = _r5(tmp_path)
         log = _envelope_log([0.8], ["x"])
-        judge = _ScriptedJudge({"update_correct_direction": True})
+        judge = _ScriptedJudge({"update_correct_direction": _v(True)})
         expected = {"update_correct_direction"}
         derive_judged_truth(log, sc, expected, judge)
         derive_judged_truth(log, sc, expected, judge)
@@ -337,7 +447,7 @@ class TestJudgedTruth:
                        "turns": [{"role": "user", "content": "q"}]},
             "gold": {"expected": "do the thing"}}]}, "r2")
         log = _envelope_log([0.7], ["weigh both sides"])
-        judge = _ScriptedJudge({"coverage_subscore": 0.75})
+        judge = _ScriptedJudge({"coverage_subscore": _v(0.75)})
         scorer = _scorer(R2CoverageProbe(), "coverage-subscore", judge)
         scorer.score(_episode(sc.id, log), sc)
         rec = scorer.last_record()
