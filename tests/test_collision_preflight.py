@@ -474,7 +474,7 @@ class CollisionPreflightTest(unittest.TestCase):
     # ── partial-run prevention ──────────────────────────────────────────────
 
     def test_every_surface_is_always_evaluated(self):
-        rc, out = self.run_tool()
+        _rc, out = self.run_tool()
         self.assert_all_surface_rows(out)
         self.assertIn("7/7 surfaces queried", out)
 
