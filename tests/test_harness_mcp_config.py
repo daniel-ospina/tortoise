@@ -18,6 +18,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -224,3 +225,92 @@ class TestPrintHarnessInstructions:
                     end = i
                     break
             json.loads("\n".join(lines[start : end + 1]))
+
+
+class TestDocsPageAndSkillConfig:
+    """#3145: the public docs page (`#mcp` section) and the onboarding skill
+    must agree with the tested harness shapes — no literal key, no
+    `"type": "streamable-http"`, Pi + Codex present, and the per-harness
+    `type` rule (claude = http; cursor/pi omit it).
+
+    These two surfaces were previously unasserted, which is exactly how the
+    docs shipped `streamable-http` + a literal key and the skill taught
+    `"type": "http"` for Cursor/Pi against `_harness_mcp_config`.
+    """
+
+    DOCS = REPO_ROOT / "website" / "docs.html"
+    SKILL = REPO_ROOT / "tortoise" / "onboarding" / "SKILL.md"
+
+    def _mcp_section(self) -> str:
+        text = self.DOCS.read_text(encoding="utf-8")
+        start = text.index('<h2 id="mcp">')
+        end = text.index('<h2 id="api">')
+        return text[start:end]
+
+    # ── docs page (#mcp) ───────────────────────────────────────────────
+
+    def test_docs_mcp_section_has_no_literal_key(self):
+        section = self._mcp_section()
+        assert "tt_YOUR_KEY" not in section
+        # no header/config snippet ships a literal-looking tt_ key
+        assert '"Authorization": "Bearer tt_' not in section
+
+    def test_docs_mcp_section_has_no_streamable_type(self):
+        # The prose may WARN about the alias; no config value may use it.
+        assert '"type": "streamable-http"' not in self._mcp_section()
+
+    def test_docs_mcp_section_lists_pi_and_codex(self):
+        section = self._mcp_section()
+        assert "Codex" in section, "docs #mcp must cover Codex (#3145)"
+        assert "Pi" in section, "docs #mcp must cover Pi (#3145)"
+
+    def test_docs_hosted_json_blocks_use_env_indirection_and_canonical_type(self):
+        section = self._mcp_section()
+        configs = []
+        for raw in re.findall(r"<pre><code>(\{.*?\})</code></pre>", section, re.S):
+            try:
+                cfg = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            server = cfg.get("mcpServers", {}).get("tortoise")
+            if server and "url" in server:
+                configs.append(server)
+        assert configs, "no hosted MCP JSON block found in the docs #mcp section"
+        # every committable hosted block keeps the key in an env var
+        for server in configs:
+            header = server["headers"]["Authorization"]
+            assert "tt_" not in header, f"literal key in hosted block: {server}"
+            assert "${" in header, f"hosted block is not env-indirected: {server}"
+        # exactly one block carries a type, and it is the canonical "http"
+        typed = [s for s in configs if "type" in s]
+        assert len(typed) == 1, f"expected exactly one typed block, got {typed}"
+        assert typed[0]["type"] == "http"
+        assert typed[0]["headers"]["Authorization"] == "Bearer ${TORTOISE_API_KEY}"
+        # Cursor uses ${env:...}; Cursor + Pi omit `type`
+        cursor = [s for s in configs if "${env:TORTOISE_API_KEY}" in s["headers"]["Authorization"]]
+        assert len(cursor) == 1 and "type" not in cursor[0]
+        pi = [s for s in configs if s["headers"]["Authorization"] == "Bearer ${TORTOISE_API_KEY}" and "type" not in s]
+        assert len(pi) == 1, "Pi hosted block (plain ${VAR}, no type) missing"
+
+    # ── onboarding skill (canonical) ───────────────────────────────────
+
+    def test_skill_does_not_teach_streamable_type(self):
+        skill = self.SKILL.read_text(encoding="utf-8")
+        assert '"type": "streamable-http"' not in skill
+        assert 'use `"http"`' in skill, "skill must state the canonical type value"
+
+    def test_skill_cursor_and_pi_rows_omit_type(self):
+        skill = self.SKILL.read_text(encoding="utf-8")
+        cursor_row = skill.split("### Cursor (self-install)", 1)[1].split("### Codex CLI", 1)[0]
+        pi_row = skill.split("### Pi (self-install)", 1)[1].split("### Claude Desktop", 1)[0]
+        assert '"type"' not in cursor_row, "Cursor remote config must omit `type`"
+        assert '"type"' not in pi_row, "Pi remote config must omit `type`"
+
+    # ── cross-surface agreement (issue #3145 verification checklist) ───
+
+    def test_docs_and_skill_agree_on_canonical_type(self):
+        docs = self.DOCS.read_text(encoding="utf-8")
+        skill = self.SKILL.read_text(encoding="utf-8")
+        assert '"type": "http"' in docs
+        for name, surface in (("docs.html", docs), ("SKILL.md", skill)):
+            assert '"type": "streamable-http"' not in surface, f"{name} still teaches streamable-http"
