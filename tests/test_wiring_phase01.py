@@ -329,9 +329,10 @@ class TestRdbSnapshotRestore:
         assert cfg["graph"] == "tortoise"
 
     def test_parse_uri_percent_decodes_credentials(self):
-        """#3039: the graph-scripts helpers feed FalkorDB directly, so they
-        must percent-decode userinfo (urlparse does not). ``parse_uri``
-        exposes only the password (anonymous-user docker form)."""
+        """#3039: ``parse_uri`` must percent-decode userinfo (urlparse does
+        not). ``parse_uri`` exposes only the password (anonymous-user docker
+        form) and this module's callers currently discard the dict, so the
+        assertion pins the shared rule rather than a live client feed (#3089)."""
         cfg = rdb_snapshot_restore.parse_uri(
             "docker://:p%40ss@localhost:6379/tortoise")
         assert cfg["password"] == "p@ss"

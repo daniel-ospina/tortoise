@@ -17,14 +17,16 @@ These tests pin:
 2. **Negative controls** — ``+`` is a literal plus (``unquote``, not
    ``unquote_plus``); an *unencoded* clean password and a percent-escaped one
    parse to the same plaintext; absent/empty userinfo stays ``None``.
-3. **Source guard** — a future refactor cannot reintroduce a raw
-   ``urlparse(...).username``/``.password`` read anywhere under ``tortoise/``
-   or ``graph-scripts/`` (the display-only
-   ``graph-scripts/connectivity_gate.py`` is allowlisted), plus the two
-   test-infra modules this fix converted. Bindings covered: plain/annotated
-   assignment, attribute targets, unpacking (positional), walrus, ``for`` and
-   ``with`` targets. It is a prompt to look, not a proof — index surgery and
-   cross-function aliasing remain out of reach.
+3. **Source guard** — the covered binding shapes cannot reintroduce a raw
+   ``urlparse(...).username``/``.password`` read under ``tortoise/`` or
+   ``graph-scripts/``. The only exempt readers are ``tortoise/config.py``
+   (the rule itself) and the display-only
+   ``graph-scripts/connectivity_gate.py``; the two test-infra modules this fix
+   converted are scanned explicitly. Bindings covered: plain/annotated
+   assignment, attribute targets, unpacking (positional), walrus (*binding and
+   inline base*), ``for``, ``with`` and starred targets. It is a prompt to
+   look, not a proof — index surgery, ``getattr`` reads and cross-function
+   aliasing remain out of reach.
 4. **Helper decode** — each of the six converted ``graph-scripts`` parsers is
    exercised for real (the guard cannot see a plumbing regression).
 """
@@ -640,12 +642,19 @@ _GRAPH_SCRIPT_HELPERS = (
 
 @pytest.mark.parametrize("module_name", _GRAPH_SCRIPT_HELPERS)
 def test_graph_script_helpers_decode_credentials(module_name):
-    """The six graph-scripts URI parsers feed ``FalkorDB(..., password=...)``.
+    """The URI parsers six ``graph-scripts`` helpers expose to their callers.
 
     They read ``parsed.password`` before #3039; the AST guard proves no raw
     read remains but cannot catch a plumbing regression (dropping the key,
     swapping fields, reading a different source), so each helper is exercised
     for real through its own module.
+
+    Five of the six (``audit_graph``, ``audit_graph_deep``,
+    ``context_removal_audit``, ``parity_sample``, ``pre_migration_snapshot``)
+    forward ``cfg["password"]`` to ``FalkorDB(...)``. ``rdb_snapshot_restore``
+    is pinned for consistency with the shared rule only: its callers discard
+    the dict (``# noqa: F841``) and drive the instance through
+    ``docker exec … redis-cli`` without credentials (#3089).
     """
     import importlib.util
     import sys

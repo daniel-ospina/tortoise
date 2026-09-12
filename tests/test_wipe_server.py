@@ -604,6 +604,26 @@ def test_sweep_partial_delete_failure_keeps_journal(tmp_path):
     assert not journal.exists()
 
 
+def test_sweep_preserves_non_owned_graphs(tmp_path):
+    """#7795 fail-closed: the sweep may only DETACH+DELETE the name families
+    it owns (``test_``/``tortoise_test``/``team_``). A shared graph name that
+    reached the journal because a test drove PRODUCT code with a shared path
+    (e.g. ``doctor --db docker://…/tortoise`` — the doctor CLI runs
+    in-process, so its ``from_uri`` journals from the test frame) must be
+    PRESERVED: a test run may never wipe the dev/compose graph."""
+    journal = tmp_path / "session.graphs.jsonl"
+    journal.write_text("test_ws_ours\nteam_acme\ntortoise\nx\n")
+    db = _FakeDb()
+    res = _sweep_drop(_FakeProj(db), str(journal), drop=True)
+    assert res["dropped"] == ["test_ws_ours", "team_acme"]
+    assert res["preserved"] == ["tortoise", "x"]
+    assert res["failed"] == []
+    # Retrying a non-owned name cannot help — the journal is still consumed.
+    assert res["journal_removed"] is True
+    assert db.deleted == ["test_ws_ours", "team_acme"]
+    assert "tortoise" not in db.detached and "x" not in db.detached
+
+
 def test_sweep_skips_uri_default_graph(monkeypatch, tmp_path):
     """Cycle-4 P2-2 / cycle-8 P1-1 (review P1-2): the shared URI-default
     graph is swept ONLY by the last-suite-standing full sweep — a session's

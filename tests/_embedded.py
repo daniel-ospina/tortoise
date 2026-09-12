@@ -427,6 +427,13 @@ def _created_since_last_wipe() -> set[str]:
     return set(names[_read_wiped_cursor():])
 
 
+# Graph-name families the session sweep OWNS — the only names it may
+# DETACH + GRAPH.DELETE. Anything else found in the journal is preserved
+# (#7795): a non-owned name means a test drove product code with a shared
+# path (e.g. `doctor --db docker://…/tortoise`).
+_SWEEP_OWNED_PREFIXES = ("test_", "tortoise_test", "team_")
+
+
 def _uri_default_graph_name() -> str | None:
     """The URI-path default graph name, or None when no URI is set
     (cycle-6 P2-12). `from_uri(uri)` without an explicit graph_name resolves
@@ -667,7 +674,17 @@ def _sweep_drop(proj, journal_file: str, *, drop: bool = True,
     the journal file is removed ONLY when every graph dropped (cycle-8 P2-4
     keep-on-partial — a crashed/partial sweep cannot lose its own drop-set
     bookkeeping; the next session's stale sweep retries). Returns a summary
-    dict {"dropped", "failed", "journal_removed"} or {"skipped": ...}.
+    dict {"dropped", "failed", "preserved", "journal_removed"} or
+    {"skipped": ...}.
+
+    FAIL-CLOSED name gate (#7795): only the families in
+    ``_SWEEP_OWNED_PREFIXES`` are ever DETACH+DELETEd. A name outside them
+    reached the journal because a test drove PRODUCT code with a shared path
+    (e.g. ``doctor --db docker://…/tortoise`` — the doctor CLI runs
+    in-process, so its ``from_uri`` journals from the test frame). Those are
+    PRESERVED and reported in ``preserved``: a test run must never wipe the
+    dev/compose/Cloud graph, and retrying would not make the name ours, so
+    the journal is still removed.
 
     #1686: team_* graphs reach the drop set ONLY via the journal — they are
     never test-prefixed (hosted parity: team_create + the hosted mint sites
@@ -686,6 +703,7 @@ def _sweep_drop(proj, journal_file: str, *, drop: bool = True,
     default_graph = _uri_default_graph_name()
     dropped: list[str] = []
     failed: list[str] = []
+    preserved: list[str] = []
     seen: set[str] = set()
     for g in names:
         if g in seen:
@@ -697,6 +715,11 @@ def _sweep_drop(proj, journal_file: str, *, drop: bool = True,
             # a per-session own/stale drop would race other concurrent
             # sessions' live writes on the shared default.
             continue
+        if not g.startswith(_SWEEP_OWNED_PREFIXES):
+            # #7795 fail-closed: a name the sweep does not own is PRESERVED —
+            # never DETACH+DELETE a dev/compose/Cloud graph. See the docstring.
+            preserved.append(g)
+            continue
         if _drop_one_graph(proj, g, drop=drop):
             dropped.append(g)
         else:
@@ -705,7 +728,8 @@ def _sweep_drop(proj, journal_file: str, *, drop: bool = True,
     if not failed:
         _remove_journal_file(journal_file)
         removed = True
-    return {"dropped": dropped, "failed": failed, "journal_removed": removed}
+    return {"dropped": dropped, "failed": failed, "preserved": preserved,
+            "journal_removed": removed}
 
 
 def _session_end_own_sweep(uri: str, journal_file: str, *,
