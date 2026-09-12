@@ -75,6 +75,13 @@
 #    80. a bare fm2_ macaroon fragment is shape-redacted
 #    81. the run log records the restart verdict
 #    82. a real certificate message under a generic code is still TLS
+#    Round 4 (each FAILS on the round-3 code):
+#    83. the adoption marker survives render_body — run 2's search fixture is
+#        built from run 1's REAL published body, not a synthetic marker
+#    84. the fail-closed ledger verdict is DURABLE and RESUMABLE (a corrupt or
+#        unreadable source ledger cannot be silently replaced by an empty budget)
+#    70b. an unreadable previous ledger persists `ledger_state=unreadable` and
+#        the next run RETRIES the lookup instead of arming with an empty budget
 #
 # Fixtures are simulated; the real watchdog is the script under test.
 
@@ -154,6 +161,12 @@ case "$url" in
       # paged a human. With --fail-with-body curl exits 22. This stub only fails
       # when the flag WAS passed, so the P2-1 assertion is sensitive to the fix.
       if [ "$fail_body" = "1" ]; then
+        # `--fail-with-body` still passes the response BODY through to -o, which
+        # is where the actionable `description` lives (round 4, P3-7).
+        if [ -n "$out_file" ] && [ "$out_file" != "/dev/null" ]; then
+          printf '{"ok":false,"error_code":%s,"description":"%s"}' \
+            "$STUB_TELEGRAM_HTTP" "${STUB_TELEGRAM_DESC:-Bad Request: chat not found}" > "$out_file"
+        fi
         echo "curl: (22) The requested URL returned error: ${STUB_TELEGRAM_HTTP}" >&2
         exit 22
       fi
@@ -266,7 +279,15 @@ case "$path" in
   */issues/*)
     if [ "$method" = "GET" ]; then
       [ "${STUB_GET_BODY_FAIL:-0}" = "1" ] && { echo "gh: body read failed" >&2; exit 1; }
-      if [ -f "$STUB_TMP/issue.json" ]; then
+      # A PER-ISSUE body store (round 4): the fail-closed ledger retry reads BOTH
+      # the open incident and the named SOURCE incident in one run, so a single
+      # shared issue.json cannot express "the current body says X, the source
+      # says Y". `issue.<n>.json` wins when present; `issue.json` is the
+      # fallback that keeps every existing fixture working.
+      issue_num="${path##*/}"
+      issue_file="$STUB_TMP/issue.json"
+      [ -n "$issue_num" ] && [ -f "$STUB_TMP/issue.${issue_num}.json" ] && issue_file="$STUB_TMP/issue.${issue_num}.json"
+      if [ -f "$issue_file" ]; then
         # GitHub ALWAYS returns a server-side created_at. Emulate it: fixtures
         # may set STUB_ISSUE_CREATED_AT explicitly (ISO-8601 or `epoch:<n>`);
         # otherwise derive it from the state block's first_failure_ts so the
@@ -274,11 +295,11 @@ case "$path" in
         # non-timestamp (e.g. "not-a-timestamp") to exercise the fail-closed
         # "no usable anchor" path.
         if [ -n "${STUB_ISSUE_CREATED_AT:-}" ]; then
-          jq -c --arg c "$STUB_ISSUE_CREATED_AT" '. + {created_at:$c}' "$STUB_TMP/issue.json"
+          jq -c --arg c "$STUB_ISSUE_CREATED_AT" '. + {created_at:$c}' "$issue_file"
         else
           jq -c 'if ((.created_at // "") != "") then .
                  else . + {created_at: ("epoch:" + (try (((.body // "") | capture("first_failure_ts=(?<ts>[0-9]+)").ts)) catch "0"))} end' \
-            "$STUB_TMP/issue.json" 2>/dev/null || cat "$STUB_TMP/issue.json"
+            "$issue_file" 2>/dev/null || cat "$issue_file"
         fi
       else printf '{"body":""}'; fi
     else
@@ -351,14 +372,14 @@ reset_case() {
   : > "$STUB_TMP/calls.log"
   rm -f "$STUB_TMP/stderr.log"
   rm -f "$STUB_TMP/probe.count" "$STUB_TMP/control.count" "$STUB_TMP/created.json" "$STUB_TMP/patched.log" \
-        "$STUB_TMP/comments.log" "$STUB_TMP/issue.json"
+        "$STUB_TMP/comments.log" "$STUB_TMP/issue.json" "$STUB_TMP"/issue.*.json
   unset STUB_PROBE_CODES STUB_PROBE_BODY STUB_PROBE_TIME STUB_SEARCH_JSON \
         STUB_SEARCH_FAIL STUB_SEARCH_MARKER STUB_CREATE_FAIL STUB_NEW_ISSUE \
         STUB_LEDGER_SEARCH_JSON STUB_LEDGER_SEARCH_MARKER STUB_LEDGER_SEARCH_FAIL \
         STUB_PROBE_RC STUB_PROBE_STDERR \
         STUB_FLY_MACHINES STUB_FLY_LIST_FAIL STUB_FLY_RESTART_FAIL STUB_FLY_LEAK \
         STUB_FLY_LEAK_SHAPE STUB_FLY_SPLIT STUB_ISSUE_CREATED_AT \
-        STUB_TELEGRAM_FAIL STUB_TELEGRAM_HTTP STUB_COMMENT_FAIL STUB_GET_BODY_FAIL \
+        STUB_TELEGRAM_FAIL STUB_TELEGRAM_HTTP STUB_TELEGRAM_DESC STUB_COMMENT_FAIL STUB_GET_BODY_FAIL \
         STUB_CONTROL_CODES \
         PROBE_URL FLY_API_TOKEN TELEGRAM_BOT_TOKEN \
         TELEGRAM_CHAT_ID PROBE_HOST_LABEL STUB_PATCH_FAIL \
@@ -467,6 +488,16 @@ search_json() { # <number> [title] [login] [type]
     "$n" "$t" "$INCIDENT_STATE_MARKER_FIXTURE" "$l" "$ty"
 }
 
+# A search item built from a PUBLISHED body (round 4, P3-3): the marker round-
+# trip must be driven by what render_body actually wrote, not by a marker the
+# harness injects itself — otherwise deleting the marker from render_body leaves
+# the suite green.
+search_json_body() { # <number> <title> <body> [login] [type]
+  local n="$1" t="$2" b="$3" l="${4:-github-actions[bot]}" ty="${5:-Bot}"
+  jq -n --arg n "$n" --arg t "$t" --arg b "$b" --arg l "$l" --arg ty "$ty" \
+    '{items:[{number:($n|tonumber),title:$t,body:$b,user:{login:$l,type:$ty}}]}'
+}
+
 num_lines() { # <file>
   [ -f "$1" ] && wc -l < "$1" | tr -d ' ' || echo 0
 }
@@ -540,6 +571,7 @@ assert_contains "$(created_json)" "[monitor] PROD DOWN" "new incident → title 
 assert_contains "$(created_json)" "auto-filed" "new incident → uses the pre-existing auto-filed label"
 assert_contains "$(patched_body)" "down_runs=1" "new incident → state block records down_runs=1"
 assert_contains "$(patched_body)" "kind=down" "new incident → state block records the kind"
+assert_contains "$(created_json)" "$INCIDENT_STATE_MARKER_FIXTURE" "new incident → the PUBLISHED body carries the adoption marker (round 4, P3-3)"
 
 # ── 12: an existing open incident is adopted, never duplicated ──────────────
 reset_case
@@ -633,6 +665,7 @@ export FLY_API_TOKEN="fly-token"
 run_watchdog
 assert_eq "$(count_calls 'FLYCTL machine restart')" "0" "restarted 5 min ago → cooldown blocks"
 assert_contains "$(patched_body)" "cooldown" "cooldown → body explains why"
+assert_contains "$OUT" "restart outcome: wait_cooldown" "cooldown → the run log carries the decide_restart reason (round 4, P3-8)"
 
 # ── 22: velocity cap ────────────────────────────────────────────────────────
 reset_case
@@ -1399,6 +1432,24 @@ assert_eq "$(count_calls 'FLYCTL')" "0" "unreadable previous ledger → NO resta
 assert_contains "$OUT" "restart-ledger search failed" "unreadable previous ledger → the LEDGER search failure is named"
 assert_contains "$(patched_body)" "previous incident's restart ledger could not be read" "unreadable previous ledger → the NEW incident body says why no restart ran"
 assert_eq "$(count_calls 'GH POST .*/issues$')" "1" "unreadable previous ledger → still files the alert"
+# ── 70b: …and that fail-closed verdict is DURABLE (round 4, P2-7) ────────────
+# Without the persisted sentinel, run 2 adopts the new incident, reads its EMPTY
+# `restarts=` as valid, and arms with an empty hourly budget — the cap stamps
+# the source carried are gone. The sentinel keeps the retry fail-closed until a
+# lookup actually succeeds.
+assert_contains "$(patched_body)" "ledger_state=unreadable" "unreadable previous ledger → the fail-closed verdict is PERSISTED in the state block"
+jq -n --arg b "$(patched_body)" '{body:$b}' > "$STUB_TMP/issue.json"
+STUB_SEARCH_JSON="$(search_json 900)"
+STUB_LEDGER_SEARCH_JSON="$(search_json 900)"
+unset STUB_LEDGER_SEARCH_FAIL
+unset STUB_SEARCH_FAIL
+: > "$STUB_TMP/calls.log"
+export STUB_SEARCH_JSON STUB_LEDGER_SEARCH_JSON STUB_SEARCH_MARKER='PROD%20DOWN'
+export WATCHDOG_NOW_EPOCH="$((NOW + 600))"
+run_watchdog
+assert_eq "$(count_calls 'GH POST .*/issues$')" "0" "run 2 adopts the incident (no duplicate) and RETRIES the ledger lookup"
+assert_eq "$(count_calls 'FLYCTL machine restart')" "1" "run 2's lookup now succeeds (no other incident) → the budget is genuinely empty → self-heal resumes"
+export WATCHDOG_NOW_EPOCH="$NOW"
 
 # ── 71: a DNS failure must NOT restart, and must say so ─────────────────────
 # A restart cannot repair name resolution; it only spends the restart budget.
@@ -1473,6 +1524,7 @@ export STUB_TELEGRAM_HTTP=400
 run_watchdog
 assert_contains "$OUT" "telegram page failed" "a Telegram 4xx → the dead escalation channel is logged (--fail-with-body)"
 assert_contains "$OUT" "400" "a Telegram 4xx → the status is surfaced"
+assert_contains "$OUT" "chat not found" "a Telegram 4xx → Telegram's own error description reaches the log (round 4, P3-7)"
 
 # ── 77: another installed App's bot is NOT the Actions bot (P2-3) ───────────
 # `renovate[bot]` has user.type == "Bot", so the old local re-check admitted it.
@@ -1554,6 +1606,7 @@ export STUB_PROBE_CODES="000"
 export FLY_API_TOKEN="fly-token"
 run_watchdog
 assert_contains "$OUT" "restart decision: DOWN" "an armed run logs its restart verdict ('DOWN')"
+assert_contains "$OUT" "restart outcome: wait_sustained" "an armed run logs WHY no restart happened yet — the decide_restart outcome (round 4, P3-8)"
 reset_case
 seed_issue down "$((NOW - 1200))" 3 0 ""
 export STUB_PROBE_CODES="000"
@@ -1582,6 +1635,98 @@ export FLY_API_TOKEN="fly-token"
 run_watchdog
 assert_eq "$(count_calls 'FLYCTL machine restart')" "0" "a generic code + a certificate message → TLS → NO restart"
 assert_contains "$(patched_body)" "a TLS/certificate failure" "a certificate message → the body names the TLS class"
+
+# ══ Round 4 (each FAILS on the round-3 code) ═══════════════════════════════
+
+# ── 83: the adoption marker survives render_body (P3-3) ─────────────────────
+# The marker is LOAD-BEARING (search_open_alert refuses an item that lacks it)
+# but was UNTESTED: deleting it from render_body left the suite green because
+# every fixture injected it synthetically via search_json(). Here run 2's search
+# result is built from run 1's REAL published body + title, so dropping the
+# marker makes run 2 fail to recognise its own incident and file a duplicate.
+reset_case
+export STUB_PROBE_CODES="000"
+run_watchdog
+assert_contains "$(created_json)" "$INCIDENT_STATE_MARKER_FIXTURE" "the PUBLISHED incident body carries the adoption marker"
+RUN1_TITLE="$(created_json | jq -r '.title')"
+RUN1_BODY="$(created_json | jq -r '.body')"
+STUB_SEARCH_JSON="$(search_json_body 900 "$RUN1_TITLE" "$RUN1_BODY")"
+export STUB_SEARCH_JSON
+export STUB_SEARCH_MARKER='PROD%20DOWN'
+jq -n --arg b "$RUN1_BODY" '{body:$b}' > "$STUB_TMP/issue.json"
+: > "$STUB_TMP/calls.log"
+export WATCHDOG_NOW_EPOCH="$((NOW + 300))"
+run_watchdog
+assert_eq "$(count_calls 'GH POST .*/issues$')" "0" "run 2 adopts run 1's REAL published body — no duplicate (#2706)"
+assert_contains "$(patched_body)" "down_runs=2" "run 2 read the REAL published state back (1 → 2)"
+export WATCHDOG_NOW_EPOCH="$NOW"
+
+# ── 84: the fail-closed ledger verdict is DURABLE and RESUMABLE (P2-7) ──────
+# Round 3 persisted nothing: a NEW incident seeded from a corrupt source kept an
+# EMPTY `restarts=`, so the next run adopted the open incident, read the empty
+# ledger as valid, and armed with an EMPTY hourly budget — silently dropping the
+# cap stamps the source carried (a restart storm). The sentinel is persisted
+# instead, re-verified on every run, and cleared only when the source parses.
+reset_case
+printf '%s' "{\"body\":\"<!-- watchdog-state kind=down first_failure_ts=$((NOW - 7200)) down_runs=9 last_down_ts=$((NOW - 3000)) last_comment_ts=0 cap_notified_ts=0 restarts=abc -->\"}" > "$STUB_TMP/issue.777.json"
+export STUB_LEDGER_SEARCH_JSON="$(search_json 777 "$DOWN_TITLE_FIXTURE")"
+export STUB_PROBE_CODES="000"
+export FLY_API_TOKEN="fly-token"
+run_watchdog
+assert_eq "$RC" "1" "run 1: corrupt seeded ledger → exit 1 (still alerts)"
+assert_eq "$(count_calls 'FLYCTL')" "0" "run 1: corrupt seeded ledger → NO restart"
+assert_contains "$(patched_body)" "ledger_state=invalid" "run 1: the fail-closed verdict is PERSISTED in the new incident"
+assert_contains "$(patched_body)" "ledger_src=777" "run 1: the SOURCE issue is persisted so the next run can re-check it"
+assert_eq "$(count_calls 'GH GET repos/.*/issues/777')" "1" "run 1: the corrupt source is read exactly ONCE (no redundant re-verify in the same run)"
+# Run 2, 10 min later: the source is STILL corrupt. Without the sentinel this run
+# would arm with an empty budget (sustained + 2 observed runs) and restart.
+jq -n --arg b "$(patched_body)" '{body:$b}' > "$STUB_TMP/issue.json"
+STUB_SEARCH_JSON="$(search_json 900)"
+export STUB_SEARCH_JSON
+export STUB_SEARCH_MARKER='PROD%20DOWN'
+: > "$STUB_TMP/calls.log"
+export WATCHDOG_NOW_EPOCH="$((NOW + 600))"
+run_watchdog
+assert_eq "$RC" "1" "run 2: still fail-closed (exit 1)"
+assert_eq "$(count_calls 'FLYCTL')" "0" "run 2: the persisted verdict is RE-DERIVED → NO restart from an empty budget"
+assert_contains "$OUT" "restart decision: disarmed:corrupt_ledger" "run 2: the disarm verdict is logged again"
+assert_contains "$OUT" "restart ledger in incident #777" "run 2: the persisted SOURCE (#777) is named"
+# Run 3, 20 min later: the source is FIXED. The recovered stamps must be adopted
+# (so the cap still applies), not silently discarded.
+printf '%s' "{\"body\":\"<!-- watchdog-state kind=down first_failure_ts=$((NOW - 7200)) down_runs=9 last_down_ts=$((NOW - 3000)) last_comment_ts=0 cap_notified_ts=0 restarts=$((NOW - 1500)),$((NOW - 1300)) -->\"}" > "$STUB_TMP/issue.777.json"
+: > "$STUB_TMP/calls.log"
+export WATCHDOG_NOW_EPOCH="$((NOW + 1200))"
+run_watchdog
+assert_eq "$(count_calls 'FLYCTL machine restart')" "0" "run 3: the REPAIRED source ledger is adopted → its 2 stamps still cap the hour"
+assert_contains "$(patched_body)" "restarts=$((NOW - 1500)),$((NOW - 1300))" "run 3: the recovered ledger is carried into the incident body"
+assert_contains "$(patched_body)" "velocity cap" "run 3: the recovered stamps trip the cap — the budget was NOT lost"
+assert_not_contains "$(patched_body)" "ledger_state=invalid" "run 3: the sentinel is CLEARED once the source parses"
+export WATCHDOG_NOW_EPOCH="$NOW"
+
+# ── 85: workflow credential containment (round 4, P3-5/P3-6) ────────────────
+# These invariants live in the workflow, not the script, so the harness cannot
+# drive them — a STATIC check is the only automated guard. Both FAIL on the
+# round-3 workflow (no `persist-credentials`, TELEGRAM at job level).
+WORKFLOW="$SCRIPT_DIR/../workflows/availability-watchdog.yml"
+# Comments NAME these invariants to explain them, so every assertion runs
+# against a comment-stripped view — otherwise the guard is satisfied by its own
+# explanatory comment (it was: the first draft passed with the fix reverted).
+WORKFLOW_CODE="$(grep -v '^[[:space:]]*#' "$WORKFLOW")"
+assert_contains "$WORKFLOW_CODE" "persist-credentials: false" \
+  "the checkout step does not persist the workflow token into .git/config (P3-5)"
+assert_contains "$WORKFLOW_CODE" "TELEGRAM_BOT_TOKEN: \${{ secrets.TELEGRAM_BOT_TOKEN }}" \
+  "TELEGRAM_BOT_TOKEN is exported to the probe step"
+assert_contains "$WORKFLOW_CODE" "TELEGRAM_CHAT_ID: \${{ secrets.TELEGRAM_CHAT_ID }}" \
+  "TELEGRAM_CHAT_ID is exported to the probe step"
+# Everything up to and including `steps:` is the JOB-level env — a secret there
+# is handed to actions/checkout and to the third-party setup-flyctl action.
+# Comments are stripped: the comments legitimately NAME the secrets to explain
+# why they are not here.
+JOB_ENV="$(sed -n '1,/^    steps:/p' "$WORKFLOW" | grep -v '^[[:space:]]*#' || true)"
+assert_not_contains "$JOB_ENV" "TELEGRAM_BOT_TOKEN" "TELEGRAM_BOT_TOKEN is NOT job-level (step env only, P3-6)"
+assert_not_contains "$JOB_ENV" "TELEGRAM_CHAT_ID" "TELEGRAM_CHAT_ID is NOT job-level (step env only, P3-6)"
+assert_not_contains "$JOB_ENV" "FLY_API_TOKEN" "FLY_API_TOKEN is NOT job-level (step env only)"
+assert_not_contains "$JOB_ENV" "GH_TOKEN" "GH_TOKEN is NOT job-level (step env only)"
 
 echo
 if [ "$FAIL" -eq 0 ]; then

@@ -14,6 +14,8 @@
 #      machine issue is filed instead (the #3064 round-2 P1)
 #   5. a forged item alongside a real machine item → adopts the machine one
 #   6. a non-Bot `user.type` but the bot login → still adopted (belt-and-braces)
+#   6b/6c. ANOTHER App's bot (`renovate[bot]`, `dependabot[bot]`) → NOT adopted
+#      (round 4, P3-9: `user.type == "Bot"` is not a security boundary)
 #   7. a failed search → exit 1, files NOTHING, comments on NOTHING
 #   8. a non-numeric id → refuse loudly
 #   9. no GH_TOKEN → fail closed before contacting GitHub
@@ -185,6 +187,25 @@ reset_case
 export STUB_SEARCH_JSON="$(search_json 43 'monitor' 'github-actions[bot]' 'User')"
 run_monitor
 assert_eq "$(count_calls 'GH POST repos/.*/issues/43/comments$')" "1" "user.type User but login github-actions[bot] → still adopted (the login is reserved)"
+
+# ── 6b: another App's bot is NOT our bot (round 4, P3-9) ────────────────────
+# `renovate[bot]`/`dependabot[bot]` have user.type == "Bot", so the old
+# OR-guard adopted them. The reserved LOGIN is the boundary. This case FAILS on
+# the round-3 code (it commented on #666).
+reset_case
+export STUB_SEARCH_JSON="$(search_json 666 'live-signup-monitor: welcome-e2e failing' 'renovate[bot]' 'Bot')"
+run_monitor
+assert_eq "$RC" "0" "renovate[bot] look-alike → exit 0"
+assert_eq "$(count_calls 'GH POST repos/.*/issues/666/comments$')" "0" "renovate[bot] look-alike → NEVER commented on (type=Bot is not the boundary)"
+assert_eq "$(count_calls 'GH POST repos/.*/issues$')" "1" "renovate[bot] look-alike → a FRESH machine issue is filed instead"
+assert_contains "$OUT" "NONE was authored by" "renovate[bot] look-alike → logged loudly"
+
+# ── 6c: dependabot[bot] is likewise not ours ────────────────────────────────
+reset_case
+export STUB_SEARCH_JSON="$(search_json 667 'live-signup-monitor: welcome-e2e failing' 'dependabot[bot]' 'Bot')"
+run_monitor
+assert_eq "$(count_calls 'GH POST repos/.*/issues/667/comments$')" "0" "dependabot[bot] look-alike → NEVER commented on"
+assert_eq "$(count_calls 'GH POST repos/.*/issues$')" "1" "dependabot[bot] look-alike → a fresh machine issue is filed"
 
 # ── 7: a failed search refuses to file (never duplicate) ────────────────────
 reset_case

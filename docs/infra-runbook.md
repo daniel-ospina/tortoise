@@ -383,8 +383,12 @@ Timeouts (28), connection-refused (7), and app-level 5xx stay restartable;
 (d) when the previous incident's restart ledger cannot be read
 (`disarmed:no_ledger` — fail closed, per above). Every run logs its verdict as
 `restart decision: disarmed:<reason>` (or `restart decision: DOWN` on the armed
-path), so *why* a restart did not happen is in the run log rather than
-inferred. Three further safeguards worth knowing:
+path); on the armed path the run also logs `restart outcome:
+<go|wait_sustained|wait_runs|wait_cooldown|cap>`, which is the reason a restart
+did **not** happen yet — so *why* a restart did not happen is in the run log
+rather than inferred. (Both lines are needed: an armed-but-waiting run prints
+`restart decision: DOWN`, so the mode line alone does not carry the reason.)
+Three further safeguards worth knowing:
 
 - **Write-then-act:** the attempt is recorded in the incident body *before*
   `flyctl` runs. If that write fails the restart does **not** happen — the body
@@ -425,7 +429,14 @@ resolver or the certificate; a restart is not the fix), **`disarmed:no_ledger`**
 (the prior incident's restart ledger could not be read), and
 **`disarmed:corrupt_ledger`** (the ledger was read but not fully parseable —
 fix `restarts=` in the issue the message names). The two ledger disarms fail
-closed: the restart leg cannot prove the hourly budget, so nothing restarts:
+closed: the restart leg cannot prove the hourly budget, so nothing restarts,
+and the fail-closed verdict is **durable**: it is persisted in the incident's
+machine-readable state block, so the next run cannot silently arm with an
+empty budget. The watchdog re-reads the named source issue on every subsequent
+run and resumes automatically once its `restarts=` field parses again
+(`disarmed:no_ledger` retries the previous-incident lookup instead — a source
+that is found and valid is adopted, and a successful lookup that finds no other
+incident means the budget really is empty):
 
 1. `flyctl logs -a tortoise-y4mjjq` — look for `Timeout reading from socket`,
    `Failed to create index`, or a crash loop.
@@ -546,7 +557,12 @@ your shell environment. `gh workflow run` cannot pass them inline.
   incident — open *or* closed — via `recent_restart_ledger()`. The rolling-hour
   cap therefore holds across incident boundaries. If that prior ledger cannot
   be read, the restart leg is **disarmed** (`disarmed:no_ledger`) rather than
-  restarting without a provable budget; alerting is unaffected.
+  restarting without a provable budget; alerting is unaffected. The disarm is
+  **durable**: a sentinel (`ledger_state=`/`ledger_src=`) is written into the
+  incident's state block, so the next run keeps failing closed instead of
+  adopting the freshly-opened incident with an empty ledger (which would erase
+  the cap stamps the prior incident carried). Each run retries the lookup and
+  clears the sentinel only when the source ledger parses again.
 - **GitHub scheduled workflows can be delayed** under platform load, and GitHub
   **disables** schedules after ~60 days of repo inactivity — a missing run looks
   like silence. After any long quiet period, dispatch the workflow once to

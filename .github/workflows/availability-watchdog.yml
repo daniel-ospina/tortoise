@@ -91,10 +91,11 @@ jobs:
       # ABSENT IS OK: the watchdog skips the restart leg with a loud log line
       # and a comment on the incident naming the secret to create.
       FLY_APP: tortoise-y4mjjq
-      # Optional paging channel — reuses the secrets the DR driver already uses.
-      # Absent → the page is skipped with a log line.
-      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      # The Telegram paging credentials are passed at STEP level (see the probe
+      # step) — NOT here (round 4, P3-6): a job-level env is exported to EVERY
+      # step, including actions/checkout and the third-party setup-flyctl
+      # action. A durable bot token is exactly the credential class that must
+      # not sit in a third party's environment.
       # Probe politeness: a generous per-request timeout, and 3 attempts ~10s
       # apart before declaring DOWN so a transient blip cannot fire an alarm.
       PROBE_TIMEOUT_S: '25'
@@ -112,7 +113,15 @@ jobs:
       # increments on every run regardless (the dedupe contract).
       COMMENT_THROTTLE_MINUTES: '15'
     steps:
+      # persist-credentials: false (round 4, P3-5): actions/checkout writes the
+      # workflow token into `.git/config` by DEFAULT, where a later step (the
+      # third-party setup-flyctl action) can read it — so moving GH_TOKEN to the
+      # probe step's env did NOT keep an `issues: write` token out of the
+      # checkout/setup-flyctl environment; the on-disk copy remained. This step
+      # only reads files and needs no git auth.
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       # Installs flyctl for the self-healing restart leg. It runs
       # unconditionally — a step `if:` can no longer read the token (it moved to
       # the probe step, which is the whole point), and this action does NOT need
@@ -141,4 +150,10 @@ jobs:
           # restart`. Absent → the restart leg is skipped with a loud log line
           # and an incident comment naming the secret to create.
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          # The paging credentials moved here from the job-level env (round 4,
+          # P3-6): the same rationale that moved GH_TOKEN/Fly applies verbatim
+          # to a durable bot token — only the step running the watchdog gets it.
+          # Absent → the page is skipped with a log line.
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: bash .github/scripts/availability-watchdog.sh

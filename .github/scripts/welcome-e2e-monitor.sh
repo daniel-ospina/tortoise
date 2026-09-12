@@ -13,12 +13,19 @@
 #   hardened one file over (`.github/scripts/availability-watchdog.sh`), and it
 #   gets the same two-part guard here:
 #     1. the search carries `author:app/github-actions`, AND
-#     2. the returned item's `user.type` / `user.login` is RE-CHECKED before its
-#        number is used.
+#     2. the returned item's `user.login` is RE-CHECKED (exactly
+#        `github-actions[bot]`) before its number is used.
 #   A title match that is NOT machine-authored is never commented on: it is
 #   treated as "no incident" and a fresh machine issue is filed. The lookup is
 #   driven by `.github/scripts/welcome-e2e-monitor.test.sh` (forged-title case
 #   included).
+#
+#   ROUND 4 FIX (P3-9): the local re-check used to accept `user.type == "Bot"`
+#   as well. That is not a security boundary — `renovate[bot]` and
+#   `dependabot[bot]` are also `Bot`, so any App-authored issue whose title
+#   matched could be adopted and commented on. The reserved
+#   `github-actions[bot]` LOGIN is the boundary; `type` is not used.
+#   (Same flaw, same fix as `availability-watchdog.sh`.)
 #
 # BEHAVIOUR (unchanged from the inline version)
 #   ONE issue per failing streak (#2706), never one per run: the old title
@@ -61,8 +68,11 @@ find_own_open_issue() { # <title>
   # TITLE-ONLY dedupe key (the label is not filtered on: a renamed/deleted label
   # would silently empty the search and turn the monitor back into a
   # duplicate-issue spammer). The author qualifier is the load-bearing security
-  # constraint, and it is only the FIRST half of the guard — `user.type` /
-  # `user.login` are re-checked on the returned item below.
+  # constraint, and it is only the FIRST half of the guard — `user.login` is
+  # re-checked on the returned item below. The check is the RESERVED LOGIN
+  # ALONE: `user.type == "Bot"` is true for EVERY installed App's bot
+  # (`renovate[bot]`, `dependabot[bot]`), so admitting it would let another
+  # App's issue be adopted (round 4, P3-9).
   q="repo:${REPO} is:issue is:open in:title author:app/github-actions \"$1\""
   enc="$(printf '%s' "$q" | jq -sRr @uri)"
   # NB: the query MUST go in the URL path — `gh api -f q=…` switches the method
@@ -75,7 +85,7 @@ find_own_open_issue() { # <title>
   # An empty item list ("no incident") is NOT a failure — only an unparseable
   # answer is. Conflating the two makes the monitor refuse to file on the very
   # first outage.
-  if ! n="$(printf '%s' "$out" | jq -r '[.items[]? | select((.user.type // "") == "Bot" or (.user.login // "") == "'"$BOT_LOGIN"'")][0].number // empty' 2>/dev/null)"; then
+  if ! n="$(printf '%s' "$out" | jq -r '[.items[]? | select((.user.login // "") == "'"$BOT_LOGIN"'")][0].number // empty' 2>/dev/null)"; then
     err "issue search returned an unparseable body"
     printf '__ERR__'
     return 0

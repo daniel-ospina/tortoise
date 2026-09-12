@@ -809,7 +809,7 @@ close_issue() { # <n> -> 0 ok / 1 failed
 
 # ── optional Telegram page (transitions only; never fails the run) ──────────
 page() { # <text>
-  local err
+  local err body_file resp
   # Same publication boundary as the issue helpers: a page carries the probe
   # URL, flyctl's echoed output and (inside curl's URL) the bot token.
   local text
@@ -818,14 +818,27 @@ page() { # <text>
     log "telegram page skipped (TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID not set)"
     return 0
   fi
+  # Round 4, P3-7: `--fail-with-body` makes an HTTP 4xx a failure, but
+  # `-o /dev/null` THREW AWAY Telegram's own error JSON — the actionable
+  # `description` ("chat not found", "Unauthorized") never reached the log,
+  # only curl's opaque `(22) ... error: 400`. Capture the body to a file and
+  # surface it through scrub_output (which already covers the token) so a dead
+  # paging channel is diagnosable from the public run log.
+  body_file="$RUN_TMP/telegram-body.json"
+  : > "$body_file"
   # The bot token is IN THE URL, and curl echoes the URL in its error text —
   # which would land in a PUBLIC Actions log. Capture stderr and redact the
   # token before logging.
-  if ! err="$(curl -sS --fail-with-body --max-time 15 -o /dev/null \
+  if ! err="$(curl -sS --fail-with-body --max-time 15 -o "$body_file" \
       "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
       --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
       --data-urlencode "text=$text" 2>&1)"; then
-    warn "telegram page failed (non-fatal): $(scrub_output "$err" 200)"
+    resp="$(scrub_output "$(cat "$body_file" 2>/dev/null || true)" 200)"
+    if [ -n "$resp" ]; then
+      warn "telegram page failed (non-fatal): $(scrub_output "$err" 200) — api response: ${resp}"
+    else
+      warn "telegram page failed (non-fatal): $(scrub_output "$err" 200)"
+    fi
   fi
   return 0
 }
@@ -842,6 +855,19 @@ STATE_RESTARTS=""
 # only WEAKEN the cooldown/cap.
 STATE_RESTARTS_INVALID="0"
 STATE_RESTARTS_RAW=""
+# DURABLE FAIL-CLOSED LEDGER STATE (round 4, P2-7). A previous run may have
+# failed closed because the restart ledger could not be TRUSTED — either the
+# source ledger was present but corrupt (`invalid`) or the lookup could not be
+# read at all (`unreadable`). That verdict used to live only in the run's log
+# and heal note: the incident was left with `restarts=` EMPTY, so the NEXT run
+# adopted the now-open incident, read the empty ledger as valid, and armed with
+# an empty hourly budget — silently dropping the cap stamps the source carried
+# (the restart-storm the cross-incident ledger exists to prevent). These two
+# fields make the verdict DURABLE. `ledger_state` absent/unknown means clean;
+# `ledger_src` names the issue to re-check (empty for the unreadable case,
+# where the retry is a fresh lookup instead).
+STATE_LEDGER_STATE=""
+STATE_LEDGER_SRC=""
 # The issue number the CURRENT ledger was read from (round 3, P2-4). On a NEW
 # incident seeded from a previous one, this is the PREVIOUS issue — naming it in
 # the corrupt-ledger failure is what sends the operator to the right place.
@@ -864,6 +890,20 @@ parse_state() { # <body>
   STATE_RESTARTS=""
   STATE_RESTARTS_INVALID="0"
   STATE_RESTARTS_RAW=""
+  STATE_LEDGER_STATE=""
+  STATE_LEDGER_SRC=""
+  # ── the durable fail-closed ledger sentinel (round 4, P2-7) ────────────────
+  # Mirrors the state_block fields. Only the two values this script writes are
+  # honoured; anything else (including an explicit `ok`) is treated as clean,
+  # because the field is machine-written and an unrecognised value must not be
+  # able to lock self-healing forever. That is NOT a new trust hole: whoever
+  # can write this field can already clear `restarts=` — the same accepted
+  # body-edit boundary the ledger integrity already rests on.
+  STATE_LEDGER_STATE="$(printf '%s' "$body" \
+    | sed -n 's/.*watchdog-state[^>]*ledger_state=\([a-z]*\).*/\1/p' | head -1 || true)"
+  case "$STATE_LEDGER_STATE" in invalid|unreadable) : ;; *) STATE_LEDGER_STATE="" ;; esac
+  STATE_LEDGER_SRC="$(to_int "$(printf '%s' "$body" \
+    | sed -n 's/.*watchdog-state[^>]*ledger_src=\([0-9][0-9]*\).*/\1/p' | head -1 || true)" "")"
   # ── the restart ledger: FAIL CLOSED ────────────────────────────────────────
   # Every other state read in this script fails closed (get_issue_body /
   # search_open_alert return __ERR__ and the caller exits 1). This one used to
@@ -963,8 +1003,12 @@ parse_state() { # <body>
 # Reads STATE_RESTARTS / STATE_RESTARTS_INVALID. Returns 1 when the previous
 # ledger could not be READ, and the caller then fails closed (no restart
 # without a provable hourly budget).
-recent_restart_ledger() { # <marker> <now> <exact-title>
-  local q enc out n body now="$2" want_title="$3" ledger ts
+# The optional <exclude-issue> (round 4, P2-7) drops ONE issue from the result:
+# the fail-closed RETRY path runs while this incident is already open, so
+# without it the lookup would return the current (empty-ledger) incident as
+# "the most recent" and never see the real previous one.
+recent_restart_ledger() { # <marker> <now> <exact-title> [exclude-issue]
+  local q enc out n body now="$2" want_title="$3" exclude="${4:-}" ledger ts
   q="repo:${REPO} is:issue author:app/github-actions in:title \"$1\""
   enc="$(urlencode "$q")"
   # Bounded pagination (P3-12), same bound as search_open_alert: `--paginate`
@@ -973,8 +1017,8 @@ recent_restart_ledger() { # <marker> <now> <exact-title>
     warn "restart-ledger search failed: $(scrub_output "$(cat "$RUN_TMP/ledger.err" 2>/dev/null || true)" 200)"
     return 1
   fi
-  if ! n="$(printf '%s' "$out" | jq -rs --arg login "github-actions[bot]" --arg title "$want_title" --arg marker "$INCIDENT_STATE_MARKER" \
-      '[.[].items[]? | select((.user.login // "") == $login) | select((.title // "") == $title) | select(((.body // "") | contains($marker)))][0].number // empty' 2>/dev/null)"; then
+  if ! n="$(printf '%s' "$out" | jq -rs --arg login "github-actions[bot]" --arg title "$want_title" --arg marker "$INCIDENT_STATE_MARKER" --arg exclude "$exclude" \
+      '[.[].items[]? | select((.user.login // "") == $login) | select((.title // "") == $title) | select(((.body // "") | contains($marker))) | select($exclude == "" or ((.number // 0) | tostring) != $exclude)][0].number // empty' 2>/dev/null)"; then
     warn "restart-ledger search returned an unparseable body"
     return 1
   fi
@@ -990,9 +1034,21 @@ recent_restart_ledger() { # <marker> <now> <exact-title>
   LEDGER_SOURCE_ISSUE="$n"
   body="$(get_issue_body "$n")"
   if [ "$body" = "__ERR__" ]; then return 1; fi
+  # This helper's contract is to return a LEDGER, not to adopt the SOURCE
+  # incident's clock/counters/sentinel. Snapshot every other state field around
+  # the parse and restore it (round 4, P2-7): the round-4 retry runs while the
+  # CURRENT incident's state is live, so clobbering it here would fabricate a
+  # sustained window (and a sentinel) from the previous incident's body.
+  local sff sdr sld slc scn sls slsrc
+  sff="$STATE_FIRST_FAILURE_TS"; sdr="$STATE_DOWN_RUNS"; sld="$STATE_LAST_DOWN_TS"
+  slc="$STATE_LAST_COMMENT_TS"; scn="$STATE_CAP_NOTIFIED_TS"
+  sls="$STATE_LEDGER_STATE"; slsrc="$STATE_LEDGER_SRC"
   # Reuse the ONE normalizer/validator (to_int bounds, future-stamp clamp,
   # strict whole-value parse) rather than a second parser that could drift.
   parse_state "$body"
+  STATE_FIRST_FAILURE_TS="$sff"; STATE_DOWN_RUNS="$sdr"; STATE_LAST_DOWN_TS="$sld"
+  STATE_LAST_COMMENT_TS="$slc"; STATE_CAP_NOTIFIED_TS="$scn"
+  STATE_LEDGER_STATE="$sls"; STATE_LEDGER_SRC="$slsrc"
   # Keep only the stamps still inside the rolling hour. decide_restart re-checks
   # the window; this just keeps the carried body small and the semantics plain.
   ledger=""
@@ -1003,13 +1059,50 @@ recent_restart_ledger() { # <marker> <now> <exact-title>
   return 0
 }
 
+# RE-VERIFY A DISARMED LEDGER (round 4, P2-7). Called on a repeat run whose
+# durable sentinel says the previous run could not trust the ledger: re-read the
+# named SOURCE issue and adopt its ledger only if it parses cleanly now.
+# Returns 0 = repaired (STATE_RESTARTS carries the window-filtered ledger),
+# 1 = still corrupt / unreadable (the caller must keep failing closed).
+reseed_ledger_from_source() { # <source-issue>
+  local src="$1" body now kept ts
+  local sff sdr sld slc scn sls slsrc
+  body="$(get_issue_body "$src")"
+  if [ "$body" = "__ERR__" ]; then return 1; fi
+  sff="$STATE_FIRST_FAILURE_TS"; sdr="$STATE_DOWN_RUNS"; sld="$STATE_LAST_DOWN_TS"
+  slc="$STATE_LAST_COMMENT_TS"; scn="$STATE_CAP_NOTIFIED_TS"
+  sls="$STATE_LEDGER_STATE"; slsrc="$STATE_LEDGER_SRC"
+  parse_state "$body"
+  STATE_FIRST_FAILURE_TS="$sff"; STATE_DOWN_RUNS="$sdr"; STATE_LAST_DOWN_TS="$sld"
+  STATE_LAST_COMMENT_TS="$slc"; STATE_CAP_NOTIFIED_TS="$scn"
+  STATE_LEDGER_STATE="$sls"; STATE_LEDGER_SRC="$slsrc"
+  if [ "$STATE_RESTARTS_INVALID" = "1" ]; then
+    # Never adopt HALF of a corrupt ledger.
+    STATE_RESTARTS=""
+    return 1
+  fi
+  now="$(now_epoch)"
+  kept=""
+  for ts in $STATE_RESTARTS; do
+    if [ $((now - ts)) -lt 3600 ]; then kept="${kept:+$kept }$ts"; fi
+  done
+  STATE_RESTARTS="$kept"
+  STATE_RESTARTS_INVALID="0"
+  STATE_RESTARTS_RAW=""
+  return 0
+}
+
 restart_history() { printf '%s' "$STATE_RESTARTS" | tr ' ' ','; }
 
 state_block() { # <kind>
   # kind is lowercased in the machine-readable block (stable for parsers).
-  printf '<!-- watchdog-state kind=%s first_failure_ts=%s down_runs=%s last_down_ts=%s last_comment_ts=%s cap_notified_ts=%s restarts=%s -->' \
+  # FIELD ORDER MATTERS: `ledger_state`/`ledger_src` are parsed with a
+  # whitespace-terminated capture and MUST precede `restarts=`, whose parser
+  # captures the remaining `[^>]*` tail (round 4, P2-7).
+  printf '<!-- watchdog-state kind=%s first_failure_ts=%s down_runs=%s last_down_ts=%s last_comment_ts=%s cap_notified_ts=%s ledger_state=%s ledger_src=%s restarts=%s -->' \
     "$(printf '%s' "$1" | tr 'A-Z' 'a-z')" "$STATE_FIRST_FAILURE_TS" "$STATE_DOWN_RUNS" \
     "$STATE_LAST_DOWN_TS" "$STATE_LAST_COMMENT_TS" "$STATE_CAP_NOTIFIED_TS" \
+    "${STATE_LEDGER_STATE}" "${STATE_LEDGER_SRC}" \
     "$(restart_history)"
 }
 
@@ -1132,7 +1225,7 @@ main() {
   # Cross-incident restart budget (see recent_restart_ledger): the ledger
   # carried from the previous incident, whether it was readable, and whether the
   # carried ledger was itself corrupt (which must stay fail-closed).
-  local carried_ledger="" carried_invalid="0" ledger_ok=1
+  local carried_ledger="" carried_invalid="0" carried_source="" ledger_ok=1
 
   # Fail closed: a monitor that cannot file is a DEAF monitor (#2140 class).
   if [ -z "$GH_TOKEN" ]; then
@@ -1324,6 +1417,7 @@ The service failed ${STATE_DOWN_RUNS} probe run(s), starting $(fmt_iso "$STATE_F
       if recent_restart_ledger "$marker" "$now" "$title"; then
         carried_ledger="$STATE_RESTARTS"
         carried_invalid="$STATE_RESTARTS_INVALID"
+        carried_source="$LEDGER_SOURCE_ISSUE"
       else
         ledger_ok=0
       fi
@@ -1336,6 +1430,16 @@ The service failed ${STATE_DOWN_RUNS} probe run(s), starting $(fmt_iso "$STATE_F
     STATE_CAP_NOTIFIED_TS="0"
     STATE_RESTARTS="$carried_ledger"
     STATE_RESTARTS_INVALID="$carried_invalid"
+    # DURABLE FAIL-CLOSED LEDGER SENTINEL (round 4, P2-7): persist WHY the
+    # seeded ledger is empty, so the next run cannot read that emptiness as a
+    # valid, unlimited budget. See the globals and the re-verify block below.
+    if [ "$ledger_ok" = "0" ]; then
+      STATE_LEDGER_STATE="unreadable"
+      STATE_LEDGER_SRC=""
+    elif [ "$carried_invalid" = "1" ]; then
+      STATE_LEDGER_STATE="invalid"
+      STATE_LEDGER_SRC="$carried_source"
+    fi
     progress="new"
   else
     body_loop="$(get_issue_body "$issue")"
@@ -1410,13 +1514,53 @@ The service failed ${STATE_DOWN_RUNS} probe run(s), starting $(fmt_iso "$STATE_F
   transition_kind="repeat"
 
   if [ "$restart_mode" = "DOWN" ]; then
-    if [ "$ledger_ok" = "0" ]; then
+    # ── DURABLE FAIL-CLOSED LEDGER SENTINEL, re-verify (round 4, P2-7) ────
+    # An earlier run refused to trust the ledger and PERSISTED that verdict in
+    # the state block. Re-derive it BEFORE the decision: without this, adopting
+    # the now-open incident would read its empty `restarts=` as valid and arm
+    # with an EMPTY hourly budget — silently losing the cap stamps the source
+    # carried (the restart-storm the cross-incident ledger exists to prevent).
+    # NOT on `progress=new`: this run's carry block ABOVE just read the source
+    # (recent_restart_ledger did the authoritative lookup), so re-reading it here
+    # would be a second, identical GET on the same body.
+    if [ "$progress" != "new" ]; then
+      case "$STATE_LEDGER_STATE" in
+        invalid)
+          if [ -n "$STATE_LEDGER_SRC" ] && reseed_ledger_from_source "$STATE_LEDGER_SRC"; then
+            log "restart ledger in #${STATE_LEDGER_SRC} parses again — resuming with ledger [$(restart_history)]"
+            STATE_LEDGER_STATE=""
+            STATE_LEDGER_SRC=""
+          fi ;;
+        unreadable)
+          # Retry the previous-incident lookup, EXCLUDING this incident — it is
+          # open now and would otherwise be returned as "the most recent", so the
+          # real previous ledger would never be seen. A successful lookup that
+          # finds no OTHER incident means the budget really is empty.
+          if recent_restart_ledger "$marker" "$now" "$title" "${issue:-}"; then
+            if [ "$STATE_RESTARTS_INVALID" = "1" ]; then
+              # A source WAS found this time, and it is corrupt.
+              STATE_LEDGER_STATE="invalid"
+              STATE_LEDGER_SRC="${LEDGER_SOURCE_ISSUE:-}"
+            else
+              log "previous-incident ledger lookup succeeded — resuming with ledger [$(restart_history)]"
+              STATE_LEDGER_STATE=""
+              STATE_LEDGER_SRC="${LEDGER_SOURCE_ISSUE:-}"
+            fi
+          fi ;;
+      esac
+    fi
+
+    if [ "$ledger_ok" = "0" ] || [ "$STATE_LEDGER_STATE" = "unreadable" ]; then
       # Fail closed: without the previous incident's ledger we cannot prove
       # this restart is inside the hourly cap, and a restart storm is the worse
-      # failure. The incident is still filed/escalated below.
+      # failure. The incident is still filed/escalated below, and the verdict
+      # is PERSISTED so the next run keeps failing closed rather than arming
+      # with an empty budget (round 4, P2-7).
       restart_mode="disarmed:no_ledger"
-      warn "the previous incident's restart ledger could not be read — cannot prove the hourly budget; NOT restarting (fail closed)"
-    elif [ "$STATE_RESTARTS_INVALID" = "1" ]; then
+      STATE_LEDGER_STATE="unreadable"
+      STATE_LEDGER_SRC=""
+      warn "the previous incident's restart ledger could not be read — cannot prove the hourly budget; NOT restarting (fail closed; the next run retries the lookup)"
+    elif [ "$STATE_RESTARTS_INVALID" = "1" ] || [ "$STATE_LEDGER_STATE" = "invalid" ]; then
       # FAIL CLOSED on an unparseable restart ledger BEFORE the egress control,
       # so a runner-side network failure cannot mask a corrupt ledger (and the
       # run never rewrites the body with the corrupt ledger silently
@@ -1426,10 +1570,17 @@ The service failed ${STATE_DOWN_RUNS} probe run(s), starting $(fmt_iso "$STATE_F
       # turns into a restart storm. Refuse to act (like an unreadable issue
       # body) and fail the run loudly — the open incident remains the standing
       # alert.
-      # NAME THE SOURCE (round 3, P2-4): on a NEW incident the corrupt value
-      # came from the PREVIOUS incident's body (recent_restart_ledger read it),
-      # so naming the just-created #$issue sent the operator to the wrong issue.
-      ledger_src="${LEDGER_SOURCE_ISSUE:-$issue}"
+      # NAME THE SOURCE (round 3, P2-4; extended round 4, P2-7): on a NEW
+      # incident the corrupt value came from the PREVIOUS incident's body
+      # (recent_restart_ledger read it), and on the durable-sentinel retry it
+      # is named by `ledger_src=` — so taking $issue would send the operator to
+      # the wrong (or to a freshly-recreated) issue.
+      ledger_src="${LEDGER_SOURCE_ISSUE:-${STATE_LEDGER_SRC:-$issue}}"
+      # Persist the verdict so the next run does not re-arm: on a repeat run
+      # this is what keeps the incident fail-closed without relying on the
+      # empty `restarts=` being non-empty (round 4, P2-7).
+      STATE_LEDGER_STATE="invalid"
+      STATE_LEDGER_SRC="$ledger_src"
       log "restart decision: disarmed:corrupt_ledger"
       fail "the restart ledger in incident #${ledger_src} is present but not fully parseable ('$(scrub_output "$STATE_RESTARTS_RAW" 120)') — refusing to restart: a dropped entry could only WEAKEN the cooldown/hourly cap. Fix the \`restarts=\` field in #${ledger_src}'s body (ts,ts or empty) and the next run resumes."
       # Do not leave a NEW incident promising "⏳ Diagnosing — the self-healing
@@ -1461,6 +1612,13 @@ The service failed ${STATE_DOWN_RUNS} probe run(s), starting $(fmt_iso "$STATE_F
 
   if [ "$restart_mode" = "DOWN" ]; then
     decision="$(decide_restart "$now")"
+    # Round 4, P3-8: the mode line above is the ARM/DISARM verdict, but on the
+    # armed path it prints only `DOWN` — the REASON a restart did not happen
+    # yet (`wait_sustained` / `wait_runs` / `wait_cooldown` / `cap`) is decided
+    # here and was logged NOWHERE, so the runbook's "why a restart did not
+    # happen is in the run log" was false for a sustained-but-in-cooldown run.
+    # Print the outcome too; the runbook now names both lines.
+    log "restart outcome: ${decision}"
     case "$decision" in
       go)
         if [ -z "$FLY_API_TOKEN" ]; then
