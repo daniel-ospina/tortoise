@@ -365,6 +365,31 @@ Public repository that houses:
 | Reviewing a PR | `skills/code-review/SKILL.md` | Unreviewed code in production |
 | Finding bugs | `skills/find-bugs/SKILL.md` | Missed regressions |
 | Any non-trivial research | `skills/research/SKILL.md` | Shallow analysis, costly rework |
+| Dispatching work on any issue (worktree, branch, sub-agent, parallel workstream) | `python3 tools/collision_preflight.py <N>` — must exit 0 before dispatch | A second agent duplicates live work; overlapping PRs and a wasted dispatch cycle (#3061) |
+
+### ⛔ HARD RULE: Collision Pre-Flight Before Any Dispatch
+
+Before spawning a workstream, opening a worktree, or dispatching a sub-agent for issue **N**,
+run the collision pre-flight — **all surfaces, untruncated**:
+
+```bash
+python3 tools/collision_preflight.py <N>
+```
+
+It checks open **and** recently-closed PRs (title/body/branch), local **and** remote branches,
+**`git worktree list` untruncated** (no `head`/`tail` — a 300-worktree hub hides matches inside
+a window), and `gh issue view N` (assignee + claim comments), matching the issue number
+boundary-exactly (`3061` never matches `30610`) plus the issue's distinctive title keywords.
+
+- `exit 0` **CLEAN** — every surface queried, no in-flight work → proceed.
+- `exit 1` **COLLISION** — a hit; do **not** dispatch, coordinate on the named surface first.
+- `exit 2` **INCOMPLETE** — a surface could not be queried (gh auth/network). This is **not**
+  clean. Fix the surface and re-run; never treat it as a pass.
+
+**Consequence of skipping:** a parallel agent duplicates work already in flight — two overlapping
+PRs, a wasted dispatch cycle, and a consolidation decision that should never have been needed
+(#2985 vs PR #3005, #2952 vs PR #3018 — the incident in #3061). A truncated or partial check is
+worse than none: it manufactures false confidence. Never `grep`/`head`/`tail` a completeness check.
 
 ### Key Directories
 
@@ -374,6 +399,7 @@ Public repository that houses:
 | `tests/` | Test suite (pytest) |
 | `graph-scripts/` | Historical graph operations (pricing decisions, migrations, audit) |
 | `scripts/` → `$AGENT_INFRA_PATH/scripts` | Agent-infra shared scripts (symlink) |
+| `tools/` | In-repo tooling — e.g. `collision_preflight.py` (pre-dispatch in-flight-work check, #3061) |
 | `config/` | YAML configs (routing, pipelines) |
 | `docs/` | Architecture, ontology, legal, strategy docs |
 | `data/` | Event logs, extracted documents, ontology |
