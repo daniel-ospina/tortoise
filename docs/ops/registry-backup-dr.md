@@ -383,15 +383,15 @@ duplicates.
 cover a kind's recovery condition may declare it recovered — `KIND_OWNERS` in
 `tortoise/alert_store.py`, mirrored by `kind_owner()` in `registry-cron.sh` and
 pinned across the language boundary by `test_kind_owner_contract_with_driver`.
-A caller may also clear an incident whose issue **it** filed, since its own
-probe observed the condition being cleared. Anything else is refused and logged
-with the sentinel left intact. This exists because one shared object let the weaker probe
-win: the watcher's reachability check cannot distinguish "R2 unreachable" from
+Anything else is refused and logged with the sentinel left intact. This exists
+because one shared object let the weaker probe win: the watcher's reachability
+check cannot distinguish "R2 unreachable" from
 "the bucket cannot be listed" (the driver's `R2_LIST_OK=0` class), so its
 all-clear would close the driver's `R2_DOWN` — a false recovery, and the driver
 would then re-file on its next run: one duplicate issue + Telegram pair per
-hour. Each sentinel records the `writer` that filed it for exactly this check; a
-legacy object with no `writer` field is closable only by the kind's owner. See
+hour. Each sentinel records the `writer` that filed it for diagnosis only — it
+is not an authority token, and a legacy object with no `writer` field resolves
+by the same `KIND_OWNERS` rule. See
 `docs/adr/ADR-011-resolution-authority-for-dr-alerts.md`.
 
 **Publication redaction:** `config_error`/`storage_error`, the raw sweep body,

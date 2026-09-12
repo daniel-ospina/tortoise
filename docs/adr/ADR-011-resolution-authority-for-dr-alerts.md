@@ -78,14 +78,13 @@ the evidence allows:
    read/delete legacy alias; `_` is the only write spelling.
 2. **Resolution authority is evidence-gated.** For each kind exactly one writer's
    probes cover its recovery condition, and only that writer may declare it
-   recovered — or a caller clearing an incident whose issue **it** filed, since
-   its own probe observed the condition being cleared. Anything else is refused
-   and logged with the sentinel left intact. The mapping lives in `KIND_OWNERS`
-   (`tortoise/alert_store.py`), is mirrored by `kind_owner()`
-   (`.github/scripts/registry-cron.sh`), and is pinned across the language
-   boundary by `test_kind_owner_contract_with_driver`. Each sentinel records the
-   `writer` that filed it; a legacy object with no `writer` field is closable
-   only by the kind's owner.
+   recovered. Anything else is refused and logged with the sentinel left intact.
+   The mapping lives in `KIND_OWNERS` (`tortoise/alert_store.py`), is mirrored
+   by `kind_owner()` (`.github/scripts/registry-cron.sh`), and is pinned across
+   the language boundary by `test_kind_owner_contract_with_driver`. Each
+   sentinel records the `writer` that filed it for diagnosis only — the field is
+   never an authority token, and a legacy object with no `writer` field resolves
+   by the same `KIND_OWNERS` rule.
 3. **Liveness comes from the issue, not the sentinel.** A sentinel is trusted
    only while the issue it names is still open, read by state
    (`github_issue.issue_is_open_checked`), never inferred from a search result.
@@ -99,8 +98,7 @@ the evidence allows:
 |---|---|
 | **Keep two sentinels, cross-check on read** (the pre-#2844 shape, symmetric) | Two keys can never be one linearization point: two writers failing at the same instant still produce two issues. It fixes the regressions by giving up the duplicate-fix, and `#2844` exists precisely because duplicates were the problem. |
 | **Designate one global writer** (e.g. the app's watcher reconciles all incidents) | Viable only if the app is up. The incidents that matter most — `APP_DOWN`, `WATCHER_DOWN`, and the driver's own `R2_DOWN` — are filed *because* the app is unreachable, so the driver must be able to open incidents independently. |
-| **Guard by provenance only** ("you may only close what you opened") | Correct but insufficient: it leaves the `R2_DOWN` false-recovery class intact, since the issue is not who filed it but whether the caller's evidence covers the kind at all. |
-| **Guard by ownership only** ("only the owner may close, ever") | Strands incidents on the driver-disabled leg: the watcher would open `R2_DOWN` it is allowed to file but never allowed to clear, with no driver run coming to close it. Provenance is the needed exception. |
+| **Guard by provenance only** ("you may only close what you opened") | Rejected after three review rounds each found a way the self-asserted note failed: it was stamped by an adopter that never filed the issue, it survived a placeholder that was never filed, and it outlived the issue it described. A field the caller writes cannot decide authority — each defect let a non-owner clear a kind it had no evidence about. |
 | **Split `R2_DOWN` into two kinds** (unreachable vs. unlistable) | The cleanest *long-term* shape — one kind should correspond to one recovery condition — but it changes the runbook triage table, issue titles, suppression config and the driver's filing sites. Deferred; the ownership guard makes one kind with two failure modes safe in the meantime. |
 | **Require N consecutive healthy polls before closing** (recovery thresholds / hysteresis) | Standard practice and the right anti-flap measure, but orthogonal: it does not stop a probe clearing a condition it never tested. Deferred to its own issue. |
 
@@ -118,21 +116,23 @@ the evidence allows:
 
 **Negative / accepted**
 
-- The watcher cannot clear an `R2_DOWN` it filed if the driver is disabled *and*
-  a legacy driver-written sentinel for the same incident exists (no `writer`
-  field → closable only by the owner). Bounded: the driver's next healthy run
-  closes it, and the stale sentinel is dropped on the next open attempt.
+- **Driver-disabled stranding is an accepted cost.** With authority decided by
+  `KIND_OWNERS` alone, the watcher cannot clear an `R2_DOWN` — even one it
+  filed — while the driver is disabled or dead, so the incident stays open with
+  no writer able to close it. That is correct rather than a defect: if the
+  driver is off, the evidence that storage recovered (its own `head-bucket`
+  preflight, a clear `storage_error`, and a measured pool) does not exist, so
+  the incident **should** stay open. The driver's next healthy run closes it,
+  and a stale sentinel is dropped on the next open attempt.
 - Kinds that are genuinely contested remain one kind with two failure modes,
   which the ownership map papers over rather than models. Tracked for the
   split.
 - Unlisted kinds (`SIZE_GUARD_ABORT`, `DATA_LOSS_CANDIDATE`, `abuse_suspended`)
   are unguarded — authority was never contested there, and inventing an owner
   for them would be a guess rather than a decision.
-- A caller that opened a sentinel but **adopted** someone else's issue for it
-  cannot clear that incident (provenance follows the issue, not the sentinel).
-  That is deliberate — the alternative reintroduces the false recovery — but on
-  a leg where the issue's filer never runs again the incident stays open until
-  the kind's owner does. Tracked with the kind split in #3147.
+- An incident whose kind's owner never runs again stays open until it does (or
+  a human closes it) — the same accepted cost, on the leg where the owner is
+  gone rather than merely disabled. Tracked with the kind split in #3147.
 - A **persistent** non-404 failure of the issue-state read (revoked token, 403,
   sustained 5xx) still counts as "open", so a sentinel naming a closed issue is
   trusted for as long as the failure lasts. A blip must not re-file; a permanent
