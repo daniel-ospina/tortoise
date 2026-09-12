@@ -53,12 +53,13 @@ PROBE_SETUP_TIMEOUT = 20.0
 #: in favour of the default (with a warning), never clamped and never honoured:
 #:
 #: * below ``PROBE_TIMEOUT`` the allowance is TIGHTER than the platform
-#:   liveness gate's own cold-start budget, so it can only make this tool
-#:   report worse than ``/health`` — a cold-start the platform gate would have
-#:   covered now fails, reproducing #3143's false-degrade. It is not
-#:   *strictly* worse in every case (an explicit allowance also buys the query
-#:   a fresh ``PROBE_TIMEOUT``, so the query phase is more permissive), but a
-#:   value below the gate's own budget is a misconfiguration, not a tuning.
+#:   liveness gate's own cold-start budget: a cold-start the platform gate
+#:   would have covered now fails, reproducing #3143's false-degrade. The tool
+#:   is not uniformly stricter — an explicit allowance also buys the query a
+#:   fresh ``PROBE_TIMEOUT``, so the query phase can be MORE permissive than
+#:   ``/health``'s shared budget — but that compensation is not a reason to
+#:   accept the value: the cold-start bound is the one this knob exists to set,
+#:   so a value below the gate's own budget is a misconfiguration, not a tuning.
 #: * above the max, a typo (``3000``) would pin an on-demand tool call for tens
 #:   of minutes.
 #:

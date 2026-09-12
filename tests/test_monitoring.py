@@ -274,11 +274,14 @@ class TestProbeDb:
         # would fail this.
         assert seen[1][0] == pytest.approx(0.5), seen[1][0]
 
-    def test_exhausted_deadline_never_retries(self, monkeypatch):
+    @pytest.mark.parametrize("overrun", [1.0, 1.2])
+    def test_exhausted_deadline_never_retries(self, monkeypatch, overrun):
         """#3143 review: when attempt 1 already spent the whole deadline the
-        retry must NOT fire. A negative/zero remainder would otherwise be
+        retry must NOT fire. A negative OR ZERO remainder would otherwise be
         passed as the worker timeout, replacing the REAL transient error with
-        a bogus synthesized 'probe setup timeout after -0.1s'."""
+        a bogus synthesized 'probe setup timeout after <negative>s'. The
+        ``overrun=1.0`` case pins the exact-deadline boundary (``>`` must not
+        be ``>=``)."""
         monkeypatch.setattr(monitoring, "PROBE_TIMEOUT", 1.0)
         monkeypatch.setattr(monitoring, "PROBE_RETRY_DELAY", 0.0)
         clock = SimpleNamespace(t=0.0)
@@ -288,7 +291,7 @@ class TestProbeDb:
 
         def fake_probe_once(sdk, timeout=None, setup_timeout=None):
             seen.append((timeout, setup_timeout))
-            clock.t += 1.2  # overruns the 1.0s whole-call deadline
+            clock.t += overrun  # 1.0 = exactly the deadline, 1.2 = overrun
             return False, "connection refused", True
 
         monkeypatch.setattr(monitoring, "_probe_once", fake_probe_once)
@@ -345,12 +348,13 @@ class TestProbeSetupTimeoutResolution:
     def test_invalid_env_warns_before_falling_back(
             self, monkeypatch, caplog, raw):
         """The operator-visible contract: an invalid value is not silent — the
-        warning names the variable and the fallback, so a typo'd 0.1 is not
-        discovered only via a resumed false-degrade."""
+        warning names the variable AND the fallback it substituted, so a
+        typo'd 0.1 is not discovered only via a resumed false-degrade."""
         monkeypatch.setenv("TORTOISE_PROBE_SETUP_TIMEOUT", raw)
         with caplog.at_level("WARNING", logger="tortoise.monitoring"):
             monitoring.probe_setup_timeout()
         assert "TORTOISE_PROBE_SETUP_TIMEOUT" in caplog.text, caplog.text
+        assert f"using {monitoring.PROBE_SETUP_TIMEOUT}s" in caplog.text, caplog.text
 
     @pytest.mark.parametrize("raw", ["", "   "])
     def test_blank_env_is_silent(self, monkeypatch, caplog, raw):
@@ -359,6 +363,15 @@ class TestProbeSetupTimeoutResolution:
         monkeypatch.setenv("TORTOISE_PROBE_SETUP_TIMEOUT", raw)
         with caplog.at_level("WARNING", logger="tortoise.monitoring"):
             assert monitoring.probe_setup_timeout() == monitoring.PROBE_SETUP_TIMEOUT
+        assert [r for r in caplog.records
+                if r.name.startswith("tortoise.monitoring")] == []
+
+    def test_valid_env_is_silent(self, monkeypatch, caplog):
+        """A valid in-range value is honoured silently — the warning path
+        must not fire for it (e.g. a log hoisted above the early return)."""
+        monkeypatch.setenv("TORTOISE_PROBE_SETUP_TIMEOUT", "42.5")
+        with caplog.at_level("WARNING", logger="tortoise.monitoring"):
+            assert monitoring.probe_setup_timeout() == 42.5
         assert [r for r in caplog.records
                 if r.name.startswith("tortoise.monitoring")] == []
 
@@ -522,13 +535,14 @@ class TestProbeSetupBudget:
     def test_metrics_default_shape_forwards_no_allowance(self, monkeypatch):
         """#3143 review: the platform liveness surface that reaches the probe
         through ``metrics()`` (the standalone ``serve_health`` server) passes NO
-        allowance, so the #1384 fast-degrade contract holds; ``selfhost`` and
-        hosted ``/health`` call ``probe_db`` directly with the same default
-        (pinned separately in ``tests/test_selfhost.py``). A refactor that had
-        ``metrics()`` resolve the allowance itself (the natural 'make all
-        callers benefit' change) would give that surface a multi-second
-        cold-start; this pins the explicit ``setup_timeout=None`` it forwards
-        AND the resulting degraded status."""
+        allowance, so the #1384 fast-degrade contract holds. The two surfaces
+        that call ``probe_db`` DIRECTLY are pinned in their own files —
+        selfhost in ``tests/test_selfhost.py``, hosted ``_probe_db`` in
+        ``tests/test_hosted_api.py``. A refactor that had ``metrics()`` resolve
+        the allowance itself (the natural 'make all callers benefit' change)
+        would give that surface a multi-second cold-start; this pins the
+        explicit ``setup_timeout=None`` it forwards AND the resulting degraded
+        status."""
         monkeypatch.setattr(monitoring, "PROBE_TIMEOUT", 0.05)
         forwarded = {}
         real_probe_db = monitoring.probe_db
