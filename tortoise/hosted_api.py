@@ -22002,6 +22002,7 @@ async def oauth_token(request: Request):
     """
     from tortoise.oauth import (
         OAuthError,
+        _log_and_capture,
         exchange_auth_code,
         refresh_grant,
     )
@@ -22027,6 +22028,10 @@ async def oauth_token(request: Request):
                              "grant_type must be authorization_code or refresh_token")
     except OAuthError as exc:
         return _oauth_error_response(exc)
+    except Exception as exc:            # last-resort bug detector, NOT a retry signal
+        _log_and_capture(exc, where="oauth/token boundary")
+        return _oauth_error_response(
+            OAuthError(500, "server_error", "Internal error processing the token request."))
     return out
 
 

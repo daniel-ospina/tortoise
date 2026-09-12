@@ -23,7 +23,7 @@ from fastapi.testclient import TestClient
 
 import tortoise.oauth as oauth
 from tests._http_fixtures import patched_tortoise_sdk
-from tests.fake_control_plane import _FAULT_CPS, FakeControlPlane  # noqa: RUF100
+from tests.fake_control_plane import _FAULT_CPS, ErrorControlPlane, FakeControlPlane  # noqa: RUF100
 from tests.test_oauth_mcp import (  # noqa: RUF100
     _U1,
     _enable_supabase,
@@ -659,3 +659,71 @@ def test_exactly_one_capture_per_conversion_path(monkeypatch, fault_client, tabl
     else:                                                      # refresh pre-mint
         _post_refresh(tc, cp, _seed_refresh_token(cp, f"cap-{table}-rt")[1])
     assert len(calls) == 1
+
+
+# ── Task 6: POST /oauth/token — typed boundary + coherent last-resort net ────
+
+@pytest.mark.parametrize("fn,data", [
+    ("exchange_auth_code", {"grant_type": "authorization_code", "code": "x"}),
+    ("refresh_grant", {"grant_type": "refresh_token", "refresh_token": "x"}),
+])
+def test_unconverted_failure_returns_coherent_500_not_bare_detail(monkeypatch, fault_client, fn, data):
+    """Raise from OUTSIDE the dispatch — patching `_verify_client_auth` would be caught by
+    Task 4's own constructive-clean arm (503), never reaching this net. The body must drive
+    the grant whose function is patched, or the other one runs and never hits the net."""
+    monkeypatch.setattr(f"tortoise.oauth.{fn}",
+                        lambda *a, **k: (_ for _ in ()).throw(ValueError("boom")))
+    tc, _ = fault_client
+    r = tc.post("/oauth/token", data=data)
+    assert r.status_code == 500
+    assert r.json().get("error") == "server_error" and "detail" not in r.json()
+
+
+@pytest.mark.parametrize("grant,data", [
+    ("authorization_code", {"code": "x", "client_id": _CLIENT_ID, "redirect_uri": _REDIRECT}),
+    ("refresh_token", {"refresh_token": "rt", "client_id": _CLIENT_ID}),
+])
+def test_boundary_converts_control_plane_failures_to_503_not_500(monkeypatch, grant, data):
+    """ErrorControlPlane (every call raises) — the wrap in oauth.py must turn it into a
+    503 before the boundary, on BOTH grant types."""
+    cp = ErrorControlPlane()
+    monkeypatch.setattr("tortoise.hosted_api._oauth_control_plane", lambda: (cp, True))
+    with TestClient(app, raise_server_exceptions=False) as tc:
+        r = tc.post("/oauth/token", data={"grant_type": grant, **data})
+    assert r.status_code == 503 and r.json()["error"] == "temporarily_unavailable"
+
+
+def test_boundary_logs_and_captures_the_unconverted_exception(monkeypatch, caplog, fault_client):
+    calls = []
+    monkeypatch.setattr("tortoise.sentry.capture_exception",
+                        lambda exc, **kw: calls.append(exc))
+    monkeypatch.setattr("tortoise.oauth.exchange_auth_code",
+                        lambda *a, **k: (_ for _ in ()).throw(ValueError("boom")))
+    tc, _ = fault_client
+    with caplog.at_level(logging.WARNING, logger="tortoise.oauth"):
+        r = tc.post("/oauth/token", data={"grant_type": "authorization_code", "code": "x"})
+    assert r.status_code == 500 and len(calls) == 1 and "oauth/token boundary" in caplog.text
+
+
+def test_capture_exception_raising_does_not_break_the_typed_error(monkeypatch, fault_client):
+    """S6(c): if Sentry itself raises, the typed 503/400 must survive (it must not
+    become the bare 500 this task exists to remove)."""
+    monkeypatch.setattr("tortoise.sentry.capture_exception",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("sentry down")))
+    tc, cp = fault_client
+    v = _seed_code(cp, "sentry", client_id=_CLIENT_ID, redirect_uri=_REDIRECT)
+    cp.fail_query(table="teams", method="GET", times=1)
+    r = _post_code(tc, cp, "sentry", v)
+    assert r.status_code == 503 and r.json()["error"] == "temporarily_unavailable"
+
+
+def test_transient_503_conventions_agree_on_status():
+    """Two drivers (OAuth §5.2 body vs the dashboard detail body), one rule: a transient
+    control-plane failure is a 503. This pins only the STATUS agreement — the bodies are
+    deliberately different, and that divergence is documented on the class."""
+    from tortoise.hosted_api import _control_plane_unavailable
+    assert _control_plane_unavailable().status_code == 503
+    assert oauth.OAuthTemporarilyUnavailable().status == 503
+    assert oauth.OAuthTemporarilyUnavailable().body() == {
+        "error": "temporarily_unavailable",
+        "error_description": "Temporary control-plane failure — retry."}
