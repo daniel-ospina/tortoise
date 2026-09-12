@@ -30,6 +30,12 @@
 //   with the 402 tier gate on free/anon only — solo CAN create up to its
 //   409 quota, so only free/anon show the locked create.
 
+// #3136: the per-graph "Last backup" cell reuses the memory-sources
+// relative-time semantics (memorySourcesStatus.formatRelativeTime) — the
+// SAME helper the API-Keys "Last used" cell uses, so there is exactly one
+// relative-time formatter in the dashboard.
+import { formatRelativeTime } from './memorySourcesStatus.js'
+
 export const GRAPH_KEY_SCOPES = Object.freeze(['graphs:read', 'graphs:write'])
 
 // Tier gate (indicator 5): only tiers the server 402-blocks on graph
@@ -180,4 +186,53 @@ export function sortedTrashRows(rows) {
     if (Number.isNaN(db)) return 1
     return da - db
   })
+}
+
+// ── #3136 per-graph backup recency (pure) ────────────────────────────────
+// Server contract (hosted_api.backups_list / _manifest_graph, verified on
+// this checkout): GET /backups entries are {backup_id, team_id, graph_id,
+// kind, graph_name, created_at, node_count, edge_count} newest-first, and
+// _manifest_graph GUARANTEES graph_id on every entry — legacy pre-#2313
+// flat manifests (2-segment backup_id) bucket to 'default' by key shape
+// unless the #2313 index/CP reverse lookup resolves their graph_name. The
+// client therefore NEVER guesses a bucket: an entry with no graph_id is
+// skipped — the server is the only authority on legacy identity.
+
+// graph_id → newest (max created_at) ISO stamp. A Map, not an object:
+// graph ids are server-provided strings, and obj['__proto__'] on a plain
+// object returns Object.prototype (truthy) — a Map has no prototype keys.
+// Max is computed explicitly (never array order): the newest-first contract
+// is the server's, and a reorder regression must not blank the column.
+export function lastBackupAtByGraph(backups) {
+  const byGraph = new Map()
+  for (const b of backups || []) {
+    if (!b || !b.graph_id) continue          // no server identity → no claim
+    const iso = b.created_at
+    const t = Date.parse(iso || '')          // unreadable stamp never wins
+    if (Number.isNaN(t)) continue
+    const prev = byGraph.get(b.graph_id)
+    if (prev === undefined || t > Date.parse(prev)) byGraph.set(b.graph_id, iso)
+  }
+  return byGraph
+}
+
+// One graph row's Last-backup cell.
+// loading → '…' (never a false "no backups"); error/denied → '—' + failure
+// tooltip (the removed BackupsCard disclosed this — it must not be lost);
+// ok + no entry → '—' + "No backups yet" (never a count); ok + entry → the
+// relative label (absolute-time tooltip is composed in main.jsx from
+// fmtTime, so there is exactly one absolute formatter in the codebase).
+export function lastBackupCell(row, byGraph, backupsStatus, nowMs) {
+  if (backupsStatus === 'loading') {
+    return { state: 'loading', label: '…', title: 'Loading backups…' }
+  }
+  if (backupsStatus !== 'ok') {
+    return { state: 'error', label: '—', title: "Couldn't load backups — retry later" }
+  }
+  const gid = row && row.graph_id
+  const iso = gid != null && byGraph ? byGraph.get(gid) : undefined
+  if (!iso) {
+    return { state: 'none', label: '—', title: 'No backups yet for this graph' }
+  }
+  return { state: 'at', iso, label: formatRelativeTime(iso, nowMs) || '—' }
 }

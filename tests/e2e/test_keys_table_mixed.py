@@ -74,6 +74,7 @@ import json
 import os
 import re
 import urllib.parse
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from playwright.sync_api import Page, expect
@@ -242,14 +243,18 @@ def _absent_via_legacy() -> dict:
 
 
 def _wire_mixed_harness(page: Page, keys: list[dict], mint_calls: list | None = None,
-                        key_authed: list | None = None) -> None:
+                        key_authed: list | None = None,
+                        team_row: dict | None = None) -> None:
     """Cookie-seeded session + layered api mock (gate.py style, §S5): teams
     rows with role:'owner', a localStorage-seeded LEGACY_RESIDUE that the
     mount PURGES (never probed/adopted — #2246), GET /v1/team/keys returns
     the mixed fixture. POST /v1/session/key is a loud 500 + counter — the
     #2167 zero-mint tripwire. key_authed collects any request whose
-    Authorization is a Bearer tt_ key (must stay empty — session JWT only)."""
+    Authorization is a Bearer tt_ key (must stay empty — session JWT only).
+    team_row overrides the /v1/team(s) payload (#3136: dashboard_key_login
+    ON/OFF render proof)."""
     user_id = "u-mixed2178"
+    row = team_row if team_row is not None else TEAM_ROW
     mint_calls = mint_calls if mint_calls is not None else []
     key_authed = key_authed if key_authed is not None else []
 
@@ -274,7 +279,7 @@ def _wire_mixed_harness(page: Page, keys: list[dict], mint_calls: list | None = 
                 return
             if path.endswith("/v1/teams") and route.request.method == "GET":
                 route.fulfill(status=200, content_type="application/json",
-                              body=json.dumps([TEAM_ROW]))
+                              body=json.dumps([row]))
                 return
             if path.endswith("/v1/team/keys") and route.request.method == "GET":
                 route.fulfill(status=200, content_type="application/json",
@@ -292,7 +297,7 @@ def _wire_mixed_harness(page: Page, keys: list[dict], mint_calls: list | None = 
                 # #2246: this answers completeLogin's SESSION read — the
                 # key-lane probe leg is deleted.
                 route.fulfill(status=200, content_type="application/json",
-                              body=json.dumps(TEAM_ROW))
+                              body=json.dumps(row))
                 return
             # Everything else (graphs/members/alerts/…) — deterministic 401
             # so the app shell renders without a real network round trip.
@@ -326,9 +331,37 @@ def _open_keys_tab(page: Page, mint_calls: list | None = None,
     _goto_local_dashboard(page)
     expect(page.locator("body")).to_contain_text("Graphs", timeout=25_000)
     page.locator('[data-tab="keys"]').click()
-    # The keys table is the only <table> in the active tab's DOM (BackupsCard
-    # is a div card; other tab sections don't render when inactive).
+    # The keys table is the only <table> in the active tab's DOM (other tab
+    # sections don't render when inactive).
     expect(page.locator("tbody tr")).to_have_count(8, timeout=15_000)
+
+
+def test_off_state_copy_never_nags(page: Page) -> None:
+    """#3136 (render proof): a team whose dashboard_key_login is false reads
+    the consequence line on the API Keys tab and NEVER the disable
+    recommendation (the pre-fix defect). Positive control below."""
+    off = {**TEAM_ROW, "dashboard_key_login": False}
+    _wire_mixed_harness(page, _mixed_keys_fixture(), team_row=off)
+    _goto_local_dashboard(page)
+    expect(page.locator("body")).to_contain_text("Graphs", timeout=25_000)
+    page.locator('[data-tab="keys"]').click()
+    expect(page.locator("body")).to_contain_text("API key dashboard login", timeout=15_000)
+    expect(page.locator("body")).to_contain_text("disabled ✓")
+    expect(page.locator("body")).not_to_contain_text("We recommend disabling")
+    expect(page.locator("body")).to_contain_text("Your API key can no longer sign in")
+
+
+def test_on_state_copy_still_recommends(page: Page) -> None:
+    """#3136 positive control: while dashboard_key_login is not false (the
+    agent-signup cohort) the recommendation still renders — the fix gates the
+    copy, it does not delete the nudge."""
+    on = {**TEAM_ROW, "dashboard_key_login": True}
+    _wire_mixed_harness(page, _mixed_keys_fixture(), team_row=on)
+    _goto_local_dashboard(page)
+    expect(page.locator("body")).to_contain_text("Graphs", timeout=25_000)
+    page.locator('[data-tab="keys"]').click()
+    expect(page.locator("body")).to_contain_text("We recommend disabling", timeout=15_000)
+    expect(page.locator("body")).not_to_contain_text("Your API key can no longer sign in")
 
 
 def test_zero_session_key_posts_and_zero_key_authed_requests(page: Page) -> None:
@@ -600,14 +633,15 @@ def test_rotate_durable_key_replaces_in_place_without_holding(page: Page) -> Non
 
 
 def test_two_team_session_only_backups_pin_selected_team(page: Page) -> None:
-    """#2167 F2 (the plan's step-10 two-team CI case — structurally invisible
-    to a single-team suite): with ZERO keys (no stored durable, no mint), a
-    multi-membership user whose SELECTED team ≠ first membership sees the
-    SELECTED team's Backups data. The session-mode /backups call must pin
-    ?team_id=<selected> (rule 2) — the pre-#2167 shape team-scoped by the KEY
-    header, so a zero-key + non-default-team session silently rendered the
-    first membership's backups (server /backups → ungated → resolves
-    memberships[0] without the param). Zero POST /v1/session/key throughout."""
+    """#2167 F2 + #3136 (the plan's step-10 two-team CI case — structurally
+    invisible to a single-team suite): with ZERO keys (no stored durable, no
+    mint), a multi-membership user whose SELECTED team ≠ first membership
+    sees the SELECTED team's backup data on the Graphs tab. The session-mode
+    /backups call must pin ?team_id=<selected> (rule 2) — the pre-#2167 shape
+    team-scoped by the KEY header, so a zero-key + non-default-team session
+    silently rendered the first membership's backups (server /backups →
+    ungated → resolves memberships[0] without the param). Zero POST
+    /v1/session/key throughout."""
     import re as _re
     # NOTE: the shell reads t.team_name (main.jsx) — `name` alone renders
     # empty (identity.py fixture convention); team_name drives the switcher.
@@ -645,8 +679,17 @@ def test_two_team_session_only_backups_pin_selected_team(page: Page) -> None:
                 return
             if path.endswith("/backups"):
                 backup_reads.append(tid)
-                # distinct per-team payloads — wrong-team data is VISIBLE
-                rows = [{"id": "bk-b1"}, {"id": "bk-b2"}] if tid == "team_b" else [{"id": "bk-a1"}]
+                # #3136: distinct per-team PER-GRAPH manifests — the Graphs
+                # "Last backup" cell renders the SELECTED team's stamp, so
+                # wrong-team data is VISIBLE. 3h vs 5h keeps the relative
+                # label ("N hr ago") stable for the whole run.
+                hours = 3 if tid == "team_b" else 5
+                stamp = datetime.now(UTC) - timedelta(hours=hours)
+                rows = [{
+                    "backup_id": f"{tid}/default/bk", "graph_id": "default",
+                    "created_at": stamp.isoformat().replace("+00:00", "Z"),
+                    "node_count": 1, "edge_count": 0,
+                }]
                 route.fulfill(status=200, content_type="application/json",
                               body=json.dumps({"backups": rows}))
                 return
@@ -662,7 +705,15 @@ def test_two_team_session_only_backups_pin_selected_team(page: Page) -> None:
                 t = team_b if tid == "team_b" else team_a
                 route.fulfill(status=200, content_type="application/json", body=json.dumps(t))
                 return
-            if path.endswith("/v1/graphs") or path.endswith("/v1/team/alerts"):
+            if path.endswith("/v1/graphs"):
+                # #3136: one default graph row so the Last-backup column has
+                # a row to render against.
+                route.fulfill(status=200, content_type="application/json",
+                              body=json.dumps([{"graph_id": "default", "name": "default",
+                                                "kind": "default", "status": "active",
+                                                "key_count": 0}]))
+                return
+            if path.endswith("/v1/team/alerts"):
                 route.fulfill(status=200, content_type="application/json", body="[]")
                 return
             route.fulfill(status=401, content_type="application/json", body="{}")
@@ -692,10 +743,14 @@ def test_two_team_session_only_backups_pin_selected_team(page: Page) -> None:
     # The Backups read after the switch must pin team_b (rule 2).
     expect(page.locator("body")).to_contain_text("Bravo", timeout=15_000)
     assert "team_b" in backup_reads, f"/backups must pin ?team_id=team_b after the switch: {backup_reads}"
-    # UI check: open the API Keys tab (the relocated BackupsCard) — the
-    # count reflects team B's payload, never Alpha's.
-    page.locator('[data-tab="keys"]').click()
-    expect(page.locator("body")).to_contain_text("Backups", timeout=15_000)
+    # UI check: open the Graphs tab — the Last backup cell reflects team B's
+    # per-graph manifest (3 hr ago), never Alpha's (5 hr ago). #3136: the
+    # team-wide BackupsCard left the API Keys tab.
+    page.locator('[data-tab="graphs"]').click()
+    expect(page.locator("body")).to_contain_text("Last backup", timeout=15_000)
+    default_row = page.locator("tbody tr").first
+    expect(default_row).to_contain_text("3 hr ago", timeout=15_000)
+    expect(default_row).not_to_contain_text("5 hr ago")
     assert mint_calls == [], f"zero-mint tripwire: POST /v1/session/key fired: {mint_calls}"
 
 
