@@ -1222,6 +1222,11 @@ class FalkorProjection(
             OR(U1,X) -> RT(U1,X) -> OR(U2,X)   name anchor 0 < 1 < 2 -> drop
             OR(U1,X) -> RT(U1,X) -> OR(U1,Y)   name anchor 0 < 1 < 0 -> apply
 
+        These two are the FOLD-ANCHOR shapes only. They are NOT the whole class:
+        a third shape (two live Objects sharing one id, one delete) is a WRITER
+        problem — `_delete_entity` must journal one line per matched Object — and
+        is fixed there, not here.
+
         Why supersessions are NOT exempt: a re-create with no intervening
         delete is an ON MATCH and is NOT re-journaled, so the anchor stays put
         and the fold correctly applies; a re-create AFTER a hard delete IS

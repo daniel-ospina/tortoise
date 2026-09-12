@@ -719,11 +719,21 @@ class _EntityHandlers:
             # fold was DROPPED here, so the multi-node `SET` was unreachable on
             # this shape — the anchor fix exposed it rather than causing it.)
             #
-            # `AND ($name IS NULL OR o.name = $name)` fixes the root cause: an
-            # id match must agree with the name it claims to identify. The
-            # keyless legacy fold (`$name IS NULL`) is unchanged, and a genuine
-            # id/name mismatch now falls through to the name branch, which
-            # already selects exactly one carrier.
+            # `AND ($name IS NULL OR o.name = $name)` fixes THIS branch: an id
+            # match must agree with the name it claims to identify. The keyless
+            # legacy fold (`$name IS NULL`) is unchanged, and a genuine id/name
+            # mismatch now falls through to the name branch, which already
+            # selects exactly one carrier.
+            #
+            # THIRD SHAPE — NOT COVERED HERE (review 3, P0). This constraint
+            # fixes the FOLD side only. The WRITER side was separately lossy:
+            # `_delete_entity` deletes every id-sharer but journaled only ONE
+            # name, so on replay the unnamed sharers were left `live`. Before
+            # this constraint the bare id `MATCH` tombstoned every sharer and
+            # ACCIDENTALLY masked that. Read `_delete_entity`'s emit loop
+            # (sdk.py:16495-16515) before concluding the pair is exhaustive —
+            # an earlier wording claimed it was, and that wording is exactly what
+            # would stop the next reader from looking there.
             #
             # NOTE a `LIMIT 1` on this branch is NOT a fix — inside a `MATCH` it
             # caps only the rows RETURNed, never the rows the trailing `SET`
