@@ -32,6 +32,15 @@ from tortoise.hosted_api import (  # noqa: I001
 )
 from tortoise.sdk import TortoiseSDK
 
+# The autouse ``_reset_health_probe`` fixture replaces
+# ``hosted_api._health_probe_interval`` with a near-infinite lambda for EVERY
+# test in this module (so the background refresher cannot overwrite a test's
+# patched verdict). Clamp assertions must use the REAL resolver, captured here
+# before any fixture runs.
+import tortoise.hosted_api as _ha_mod
+
+_REAL_HEALTH_PROBE_INTERVAL = _ha_mod._health_probe_interval
+
 
 # ── Test constants ───────────────────────────────────────────────────────────
 
@@ -439,6 +448,88 @@ class TestHealthEndpoints:
 
         r = client.get("/health/ready")
         assert r.status_code == 503
+
+    def test_health_ready_never_serves_a_pre_outage_verdict(self, client, monkeypatch):
+        """#2850 review P1: readiness must not answer 200 from a completed probe.
+
+        Readiness records ``{ok: True}``; the plane then dies; the next probe
+        cannot finish before ``run()``'s deadline. Pre-fix, ``run()`` returned
+        ``_view_locked()`` — the stale completed verdict, still inside the 30s
+        ``stale_after`` window — so /health/ready answered 200 "connected" for
+        ~5s while the plane was dead (which matters because deploy-hosted.yml
+        asserts readiness LAST). The autouse ``_reset_health_probe`` fixture
+        resets the coordinators before every test, which is why priming has to
+        happen INSIDE the test and the old suite missed this.
+        """
+        import time
+
+        import tortoise.hosted_api as ha_mod
+
+        # Prime the readiness coordinator with a completed OK.
+        monkeypatch.setattr(
+            ha_mod, "_probe_db",
+            lambda: {"ok": True, "latency_ms": 0.5, "error": None})
+        ha_mod._READY_PROBE.reset()
+        assert ha_mod._READY_PROBE.wait(timeout=2.0)["ok"] is True
+
+        # The plane dies and the probe wedges; the read budget expires.
+        def _hang():
+            time.sleep(600)
+            return {"ok": True, "latency_ms": 0.0, "error": None}
+
+        monkeypatch.setattr(ha_mod, "_probe_db", _hang)
+        monkeypatch.setattr(ha_mod._READY_PROBE, "_timeout", 0.2)
+
+        r = client.get("/health/ready")
+        assert r.status_code == 503, (
+            "readiness answered from a completed pre-outage probe")
+
+    def test_in_flight_gauge_tracks_requests_and_releases(self):
+        """#2850 review P0: the watchdog's idle gate is fed by this gauge.
+
+        Two halves: a request is counted WHILE it is in flight (so a loop
+        blocked serving it is never mistaken for a wedge), and the slot is
+        released exactly once, including on an exception — a leaked count
+        would permanently disarm the kill.
+        """
+        import asyncio
+
+        import tortoise.hosted_api as ha_mod
+        import tortoise.monitoring as monitoring
+
+        seen = {}
+
+        async def _inner(scope, receive, send):
+            seen["during"] = monitoring.workload_in_flight()
+
+        async def _drive():
+            await ha_mod.InFlightMiddleware(_inner)({"type": "http"}, None, None)
+
+        assert monitoring.workload_in_flight() == 0
+        asyncio.run(_drive())
+        assert seen["during"] == 1
+        assert monitoring.workload_in_flight() == 0
+
+        async def _boom(scope, receive, send):
+            raise RuntimeError("handler exploded")
+
+        with pytest.raises(RuntimeError):
+            asyncio.run(
+                ha_mod.InFlightMiddleware(_boom)({"type": "http"}, None, None))
+        assert monitoring.workload_in_flight() == 0, "in-flight slot leaked"
+
+    def test_health_probe_interval_is_clamped_below_the_stale_window(self, monkeypatch):
+        """A refresh period above PROBE_STALE_AFTER reports a HEALTHY DB as
+        degraded and then fails the deploy gate (review P2)."""
+        import tortoise.hosted_api as ha_mod
+        from tortoise.monitoring import PROBE_STALE_AFTER
+
+        monkeypatch.setenv("TORTOISE_HEALTH_PROBE_INTERVAL", "3600")
+        assert _REAL_HEALTH_PROBE_INTERVAL() <= PROBE_STALE_AFTER / 2.0
+        monkeypatch.setenv("TORTOISE_HEALTH_PROBE_INTERVAL", "5")
+        assert _REAL_HEALTH_PROBE_INTERVAL() == 5.0
+        monkeypatch.setenv("TORTOISE_HEALTH_PROBE_INTERVAL", "-3")
+        assert _REAL_HEALTH_PROBE_INTERVAL() == ha_mod.HEALTH_PROBE_REFRESH_S
 
     def test_probe_connection_is_reused_not_rebuilt_per_call(self, monkeypatch):
         """The probe must own ONE bounded DB connection, not build+leak a

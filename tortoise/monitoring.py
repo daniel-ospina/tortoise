@@ -332,6 +332,15 @@ class HealthProbe:
        stops being reported as live once it is older than ``stale_after``
        (or once a superseded probe has been in flight that long) — /health
        flips to ``degraded`` instead of serving a fossil "ok".
+    5. **Optional fail-closed reads (`fresh_only`).** /health is allowed to
+       serve "stale but honest" last-known-good; READINESS is not. With
+       ``fresh_only=True`` a completed result is only served while it is
+       younger than the READ BUDGET (``timeout``), and a read that exhausts
+       its budget fails closed instead of returning the previous verdict.
+       Without this flag a readiness check that JOINED a probe which then
+       outlived the budget returned the pre-outage ``{ok: True}`` for the
+       whole ``stale_after`` window (30s) — a 200 "connected" while the
+       control plane or DB was already dead (review P1).
 
     Escape hatches: ``reset()`` (tests / ops recovery) drops the in-flight
     state so a fresh probe may start; ``info()`` exposes the age/supersede
@@ -341,12 +350,17 @@ class HealthProbe:
     def __init__(self, probe_fn, *, timeout: float = PROBE_HARD_TIMEOUT,
                  stale_after: float = PROBE_STALE_AFTER,
                  max_supersedes: int = PROBE_MAX_SUPERSEDES,
-                 poll_interval: float = PROBE_POLL_INTERVAL) -> None:
+                 poll_interval: float = PROBE_POLL_INTERVAL,
+                 fresh_only: bool = False) -> None:
         self._probe_fn = probe_fn
         self._timeout = timeout
         self._stale_after = stale_after
         self._max_supersedes = max_supersedes
         self._poll_interval = poll_interval
+        #: ``True`` -> /health semantics (stale-but-honest last-known-good is
+        #: acceptable); ``False`` -> readiness semantics (never serve a verdict
+        #: older than the read budget; see the class docstring item 5).
+        self._fresh_only = fresh_only
         self._cv = threading.Condition()
         self._running = False
         self._seq = 0
@@ -388,12 +402,37 @@ class HealthProbe:
                 self._supersedes = 0  # a live completion proves the wedge cleared
             self._cv.notify_all()
 
+    def _fail_closed_locked(self, why: str) -> dict:
+        """Explicit NOT-ok verdict for a read that has no fresh basis.
+
+        Readiness (``fresh_only=True``) must never answer 200 from a verdict
+        it cannot vouch for; this is the shape it returns instead.
+        """
+        latency = float(self._result.get("latency_ms") or 0.0) \
+            if self._result else 0.0
+        return {"ok": False, "latency_ms": latency, "error": why}
+
     def _view_locked(self, now: float) -> dict:
-        """Best honest result available right now (never blocks)."""
+        """Best honest result available right now (never blocks).
+
+        The freshness window depends on the coordinator's mode:
+
+        * ``fresh_only=False`` (/health): serve a completed result while it is
+          younger than ``stale_after`` (the documented "stale but honest"
+          window), else report it stale.
+        * ``fresh_only=True`` (readiness): serve a completed result only while
+          it is younger than the READ BUDGET (``timeout``) — a readiness gate
+          may not claim a freshness it does not have — else fail closed.
+        """
         if self._result is not None:
             age = now - self._completed_at
-            if age <= self._stale_after:
+            max_age = self._timeout if self._fresh_only else self._stale_after
+            if age <= max_age:
                 return dict(self._result)
+            if self._fresh_only:
+                return self._fail_closed_locked(
+                    f"probe result too old for readiness "
+                    f"({age:.1f}s > {max_age:g}s budget)")
             return {
                 "ok": False,
                 "latency_ms": float(self._result.get("latency_ms") or 0.0),
@@ -442,6 +481,15 @@ class HealthProbe:
             remaining = deadline - loop.time()
             if remaining <= 0:
                 with self._cv:
+                    if self._fresh_only:
+                        # The probe we joined is still in flight and this read
+                        # exhausted its budget: fail closed. Returning the
+                        # coordinator's older cached verdict here is the
+                        # fail-open the review caught (a 200 for the whole
+                        # stale_after window after the plane died).
+                        return self._fail_closed_locked(
+                            f"probe did not complete within {self._timeout:g}s "
+                            "— readiness fails closed")
                     return self._view_locked(time.monotonic())
             await asyncio.sleep(min(self._poll_interval, remaining))
 
@@ -482,6 +530,10 @@ class HealthProbe:
                     return self._view_locked(time.monotonic())
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
+                    if self._fresh_only:
+                        return self._fail_closed_locked(
+                            f"probe did not complete within {self._timeout:g}s "
+                            "— readiness fails closed")
                     return self._view_locked(time.monotonic())
                 self._cv.wait(min(self._poll_interval, remaining))
 
@@ -531,7 +583,28 @@ class HealthProbe:
 # forward step makes a hung app look fresh. Monotonic never goes backwards and
 # is immune to both.
 LOOP_HEARTBEAT_INTERVAL = 0.25   # tick period of the loop-side heartbeat task
-LOOP_STALE_AFTER = 2.5           # /healthz flips to 503 past this age (seconds)
+
+#: Age (seconds) past which /healthz reports 503 "the loop is not currently
+#: scheduling".
+#:
+#: WHY 90s, and what the signal does NOT mean (review P2). This app still
+#: makes SYNCHRONOUS calls on the event loop, so "the loop did not tick" is
+#: NOT proof of a wedge — a busy loop looks identical to a hung one:
+#:   * the LLM extractor is called synchronously from ``_capture_session_impl``
+#:     with HTTP timeouts of 60s (``tortoise/models.py`` urlopen(timeout=60),
+#:     ``tortoise/model_adapters.py`` httpx timeout=(10, 60)), and the v2 path
+#:     runs several stages;
+#:   * the FalkorDB client's own socket timeouts are 2s connect / 10s read
+#:     (``projection._socket_timeouts``), and one request can run a per-turn
+#:     loop of synchronous queries.
+#: A low threshold therefore flaps 503 on ordinary slow requests. The value is
+#: set ABOVE the longest single bounded on-loop operation (the 60s LLM call) so
+#: it distinguishes "wedged" from "busy" for the single-operation case. It is
+#: still not a load signal: multi-stage extraction can legitimately exceed it,
+#: which is exactly why the destructive self-kill below is opt-in and gated on
+#: an idle workload, and why the durable remedy is offloading these synchronous
+#: calls rather than tuning this number.
+LOOP_STALE_AFTER = 90.0
 
 #: monotonic timestamp of the last loop tick; 0.0 == the loop has NEVER ticked
 #: (which is reported as stale, never as healthy).
@@ -622,28 +695,86 @@ def _reset_heartbeat() -> None:
 # — a fail-open foot-gun next to #7395.
 HEALTHZ_PORT = 9090
 HEALTHZ_BIND = "0.0.0.0"
+#: Socket timeout for one healthz request. ``BaseHTTPRequestHandler.timeout``
+#: defaults to ``None`` (a client that completes the handshake and then sends
+#: nothing holds a thread + fd FOREVER — slowloris against the one listener
+#: that must survive overload). A liveness check is a few hundred bytes; 5s is
+#: generous and still bounded.
+HEALTHZ_HANDLER_TIMEOUT_S = 5.0
+#: Max concurrent healthz handler threads. The whole point of this listener is
+#: that it keeps answering when the app is overloaded, so it must bound its own
+#: work: a saturated listener answers 503 (the platform sees an unhealthy
+#: machine) instead of spawning unbounded threads and dying.
+HEALTHZ_MAX_THREADS = 8
+#: Small accept backlog — keep the kernel queue short so overload is shed at
+#: accept time instead of being buffered into an unbounded connection set.
+HEALTHZ_REQUEST_QUEUE_SIZE = 5
 
 
 class _HealthzHandler(BaseHTTPRequestHandler):
-    """Liveness only: one in-memory heartbeat read, HTTP 200 or 503."""
+    """Liveness only: one in-memory heartbeat read, HTTP 200 or 503.
+
+    Hardened because this port is unauthenticated and must never become the
+    way the machine is exhausted (review P1/P2):
+      * ``timeout`` bounds a slow/partial request (slowloris);
+      * ``protocol_version = HTTP/1.1`` + ``Connection: close`` on every reply
+        (no keep-alive thread pinning);
+      * request bodies are rejected unread — a liveness GET has none;
+      * the version banner is a fixed product string, not
+        ``BaseHTTP/0.6 Python/<exact version>``, so an unauthenticated endpoint
+        discloses nothing about the interpreter.
+    """
+
+    # #2850 review P2: do not advertise the Python interpreter version.
+    server_version = "tortoise-healthz"
+    sys_version = ""
+    protocol_version = "HTTP/1.1"
+    timeout = HEALTHZ_HANDLER_TIMEOUT_S
+
+    def _send(self, status: int, payload: dict) -> None:
+        body = json.dumps(payload).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self.close_connection = True
+        # A check that gave up and disconnected mid-reply is normal; it must
+        # not print a traceback from the server's handler thread.
+        with contextlib.suppress(BrokenPipeError, ConnectionResetError, OSError):
+            self.wfile.write(body)
+
+    def _has_body(self) -> bool:
+        """True when the request carries (or ambiguously frames) a body."""
+        if self.headers.get("Transfer-Encoding"):
+            return True
+        try:
+            return int(self.headers.get("Content-Length") or 0) > 0
+        except (TypeError, ValueError):
+            return True
 
     def do_GET(self):
+        if self._has_body():
+            # Never read the body: reading an attacker-sized body is the
+            # resource the listener must not spend. Close instead.
+            self._send(413, {"status": "body-not-allowed"})
+            return
         if self.path.split("?", 1)[0] != "/healthz":
-            self.send_response(404)
-            self.send_header("Content-Length", "0")
-            self.end_headers()
+            self._send(404, {"status": "not-found"})
             return
         info = loop_heartbeat_info()
         stale = bool(info["loop_stale"])
-        body = json.dumps({"status": "stale" if stale else "ok", **info}).encode()
-        self.send_response(503 if stale else 200)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        # A check that gave up and disconnected mid-reply is normal; it must
-        # not print a traceback from the server's handler thread.
-        with contextlib.suppress(BrokenPipeError, ConnectionResetError):
-            self.wfile.write(body)
+        self._send(503 if stale else 200,
+                   {"status": "stale" if stale else "ok", **info})
+
+    def _method_not_allowed(self):
+        self._send(405, {"status": "method-not-allowed", "allow": "GET"})
+
+    do_POST = _method_not_allowed
+    do_PUT = _method_not_allowed
+    do_PATCH = _method_not_allowed
+    do_DELETE = _method_not_allowed
+    do_OPTIONS = _method_not_allowed
 
     def log_message(self, *args):
         pass  # silence per-request logs (Fly polls this every few seconds)
@@ -664,6 +795,16 @@ class _HealthzServer(ThreadingHTTPServer):
 
     daemon_threads = True
     allow_reuse_address = True
+    request_queue_size = HEALTHZ_REQUEST_QUEUE_SIZE
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        # Bound the handler fleet (review P1): ThreadingHTTPServer spawns one
+        # OS thread per connection with no ceiling, and this listener is the
+        # unauthenticated one that must survive overload. Shedding load with a
+        # 503 is honest and keeps the accept loop alive; unbounded threads is
+        # how the last-resort liveness port becomes the outage.
+        self._slots = threading.BoundedSemaphore(HEALTHZ_MAX_THREADS)
 
     def server_bind(self) -> None:
         socketserver.TCPServer.server_bind(self)
@@ -671,9 +812,81 @@ class _HealthzServer(ThreadingHTTPServer):
         self.server_name = str(host)
         self.server_port = port
 
+    def process_request(self, request, client_address) -> None:
+        if not self._slots.acquire(blocking=False):
+            self._reject_overloaded(request)
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            # The thread never started / never reached
+            # process_request_thread's finally — return the slot here or the
+            # listener bleeds capacity.
+            self._slots.release()
+            raise
+
+    def process_request_thread(self, request, client_address) -> None:
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._slots.release()
+
+    @staticmethod
+    def _reject_overloaded(request) -> None:
+        """Answer 503 directly on the accepted socket (no thread spawned)."""
+        body = b'{"status":"overloaded"}'
+        response = (
+            b"HTTP/1.1 503 Service Unavailable\r\n"
+            b"Content-Type: application/json\r\n"
+            b"Content-Length: " + str(len(body)).encode() + b"\r\n"
+            b"Connection: close\r\n"
+            b"Retry-After: 1\r\n\r\n" + body
+        )
+        with contextlib.suppress(OSError):
+            request.settimeout(HEALTHZ_HANDLER_TIMEOUT_S)
+            request.sendall(response)
+
 
 _HEALTHZ_LOCK = threading.Lock()
 _HEALTHZ_SERVERS: dict[tuple[str, int], ThreadingHTTPServer] = {}
+
+
+def _healthz_port_from_env() -> int:
+    """``TORTOISE_HEALTHZ_PORT`` or the 9090 contract, NEVER raising.
+
+    Review P2: the previous inline ``int(os.environ.get(...) or HEALTHZ_PORT)``
+    ran BEFORE the try in ``start_health_listener`` and the try only caught
+    ``OSError`` — so ``TORTOISE_HEALTHZ_PORT=http`` raised ``ValueError`` and
+    ``-1``/``70000`` raised ``OverflowError``, neither of which is an OSError,
+    and both escaped the UNGUARDED ``_start_liveness`` call and aborted
+    ``lifespan.startup()``. A one-character typo crash-looped the machine at
+    boot. Parse defensively here and fall back to the contract with a loud log.
+    """
+    raw = os.environ.get("TORTOISE_HEALTHZ_PORT")
+    if raw is None or not str(raw).strip():
+        return HEALTHZ_PORT
+    try:
+        port = int(str(raw).strip())
+    except (TypeError, ValueError):
+        logger.error("TORTOISE_HEALTHZ_PORT=%r is not an integer — using the "
+                     "default %d", raw, HEALTHZ_PORT)
+        return HEALTHZ_PORT
+    if not (0 <= port <= 65535):
+        logger.error("TORTOISE_HEALTHZ_PORT=%r is outside 0-65535 — using "
+                     "the default %d", raw, HEALTHZ_PORT)
+        return HEALTHZ_PORT
+    return port
+
+
+def _healthz_required() -> bool:
+    """Truthy spellings of ``TORTOISE_HEALTHZ_REQUIRED`` (review P2).
+
+    The previous exact ``== "1"`` match made ``true``/``yes``/``on`` silently
+    do nothing — a deploy-time contract believed to be enforced and not.
+    """
+    return (os.environ.get("TORTOISE_HEALTHZ_REQUIRED", "").strip().lower()
+            in ("1", "true", "yes", "on"))
 
 
 def resolve_healthz_target(port: int | None = None, bind: str | None = None,
@@ -683,9 +896,16 @@ def resolve_healthz_target(port: int | None = None, bind: str | None = None,
     Defaults are the FIXED deployment contract: ``0.0.0.0`` on port ``9090``
     (a non-routing top-level Fly check points at it). Split out from
     ``start_health_listener`` so the contract is assertable without binding.
+
+    Never raises for a bad port — an env typo must degrade to the default with
+    an ERROR log, not abort boot (see ``_healthz_port_from_env``).
     """
     if port is None:
-        port = int(os.environ.get("TORTOISE_HEALTHZ_PORT") or HEALTHZ_PORT)
+        port = _healthz_port_from_env()
+    elif not isinstance(port, int) or not (0 <= port <= 65535):
+        logger.error("invalid healthz port %r — using the default %d",
+                     port, HEALTHZ_PORT)
+        port = HEALTHZ_PORT
     if bind is None:
         bind = os.environ.get("TORTOISE_HEALTHZ_BIND") or HEALTHZ_BIND
     return bind, port
@@ -717,10 +937,10 @@ def start_health_listener(port: int | None = None, bind: str | None = None,
             return existing
         try:
             server = _HealthzServer((bind, port), _HealthzHandler)
-        except OSError as exc:
+        except (OSError, OverflowError, ValueError) as exc:
             msg = (f"#2850: could not bind the dedicated liveness listener on "
                    f"{bind}:{port} — {exc}")
-            if os.environ.get("TORTOISE_HEALTHZ_REQUIRED") == "1":
+            if _healthz_required():
                 raise RuntimeError(msg) from exc
             logger.error("%s (the platform liveness check on that port will fail)", msg)
             return None
@@ -753,77 +973,225 @@ def stop_health_listener(server: ThreadingHTTPServer | None = None) -> None:
             srv.server_close()
 
 
-# ── #2850 item 5: loop-stall watchdog (exit so the platform restarts) ────
+# ── #2850 item 5: loop-stall watchdog (opt-in, default OFF) ───────────────
 #
-# TRADEOFF, stated deliberately: this KILLS A RUNNING PROCESS. Precedent is
-# systemd's ``WatchdogSec`` (terminates with SIGABRT when the app stops
-# pinging) and Fly's own machine-level supervision: a wedge the process
-# cannot perceive is unrecoverable in-process, so the only honest remedy is
-# to die and let the orchestrator start a clean one. The cost is real —
-# in-flight requests during the exit are lost, and a false positive turns a
-# slow-but-healthy machine into a restart loop. So:
-#   * the threshold is CONSERVATIVE (default 30s) and must stay well above
-#     the longest legitimate loop-blocking operation. This app still performs
-#     synchronous FalkorDB calls on the loop in places, bounded by the client's
-#     socket timeouts (see projection.FalkorProjection). With the shipped
-#     connect/read timeouts (2s/10s, env-overridable) a single such call
-#     stalls the loop for at most ~10s; 30s leaves ~3x headroom.
-#   * if you reduce the socket timeouts further, the safe floor for this
-#     threshold falls with them; if you RAISE them above ~10s, raise this too
-#     or a burst of slow-but-legitimate queries will restart the machine.
-#   * ``TORTOISE_LOOP_STALL_EXIT_S=0`` disables it outright (the test suite
-#     and the embedded/stdio lanes set this).
+# DEFAULT: DISABLED. The in-process self-kill is OPT-IN via
+# ``TORTOISE_LOOP_STALL_EXIT_S``; the default behaviour is to PUBLISH the
+# stall signal (the /healthz 503) and NOT exit.
+#
+# WHY the default flipped (review P0). The pre-review default (30s, exit on
+# the first stale poll) would have caused the very outage it was meant to
+# prevent. This app still performs UNBOUNDED synchronous work on the event
+# loop:
+#   * ``_capture_session_impl`` (hosted_api) calls the LLM extractor
+#     SYNCHRONOUSLY — not awaited, not offloaded — with HTTP timeouts of 60s
+#     (models.py urlopen(timeout=60); model_adapters httpx timeout=(10, 60)),
+#     and the v2 path runs several stages back to back;
+#   * the same handler runs a per-turn loop of synchronous
+#     ``proj.g.query()`` calls (up to 1000 turns; SessionRequest.conversation
+#     max_length=1000), i.e. thousands of sequential round trips with no
+#     ``await``.
+# So ONE authenticated request (free-tier signup is open) can stall the loop
+# for 60-180s+, and a heartbeat-age self-kill would ``os._exit`` the process
+# mid-request, killing every other tenant's in-flight work — repeatedly, in a
+# restart loop. That converts transient provider slowness into a total outage.
+#
+# The correct split, therefore:
+#   * the /healthz signal (above) is the DETECTOR — it publishes staleness;
+#   * destructive action belongs OUT OF PROCESS (PR #3064's external watchdog,
+#     which is not stuck behind the same loop and can be given a real budget);
+#   * the in-process self-kill exists only as an operator escape hatch, and
+#     even then it demands (a) N CONSECUTIVE stale windows (hysteresis), (b) an
+#     IDLE WORKLOAD — never "the loop is busy serving a request" — and (c) at
+#     least one REAL heartbeat tick, so a slow boot can never be mistaken for a
+#     wedge. See ``start_stall_watchdog``.
+#
+# The DURABLE fix is offloading those synchronous calls off the loop; until
+# that lands, any age-only kill is unsafe.
+#
+#   * ``TORTOISE_LOOP_STALL_EXIT_S=0`` (or unset) disables the self-kill, which
+#     is the shipped default. A NEGATIVE value also disables it, but logs at
+#     WARNING because it is indistinguishable from a typo.
+#   * when enabled, the threshold is clamped UP to
+#     ``max(LOOP_STALL_EXIT_FLOOR_S, 2 * LOOP_STALE_AFTER)`` so the process can
+#     never die before /healthz has had a chance to report.
 #   * ``os._exit`` rather than a graceful shutdown: a wedged interpreter must
 #     not be given the chance to run atexit/finalizers that may themselves
 #     block. Non-zero status is what makes the platform restart the machine.
-LOOP_STALL_EXIT_S = 30.0
+LOOP_STALL_EXIT_S = 0.0            # 0 == self-kill DISABLED (the default)
+LOOP_STALL_EXIT_FLOOR_S = 120.0    # lower bound on an ENABLED threshold
+LOOP_STALL_EXIT_WINDOWS = 3        # consecutive stale polls required to exit
+LOOP_STALL_EXIT_MIN_TICKS = 2      # at least one REAL heartbeat tick before judging
+
+
+# ── #2850 P0 review: workload-in-flight gauge for the idle gate ───────────
+#
+# The self-kill must never fire while the loop is merely BUSY. The watchdog
+# cannot see that from heartbeat age alone, so the request path increments
+# this counter for as long as a request is in flight; a wedged request keeps
+# it above zero, which is exactly the case the kill must not act on. Plain
+# int behind a lock (the watcher reads it from its own thread).
+_WORKLOAD_LOCK = threading.Lock()
+_WORKLOAD_IN_FLIGHT = 0
+
+
+def workload_enter() -> None:
+    """Mark one request as in flight (called by the app's middleware)."""
+    global _WORKLOAD_IN_FLIGHT
+    with _WORKLOAD_LOCK:
+        _WORKLOAD_IN_FLIGHT += 1
+
+
+def workload_exit() -> None:
+    """Mark one in-flight request as finished (always in a ``finally``)."""
+    global _WORKLOAD_IN_FLIGHT
+    with _WORKLOAD_LOCK:
+        _WORKLOAD_IN_FLIGHT = max(0, _WORKLOAD_IN_FLIGHT - 1)
+
+
+def workload_in_flight() -> int:
+    """Requests currently in flight — the watchdog's idle predicate."""
+    with _WORKLOAD_LOCK:
+        return _WORKLOAD_IN_FLIGHT
+
+
+def _reset_workload() -> None:
+    """Test seam: pretend no request is in flight."""
+    global _WORKLOAD_IN_FLIGHT
+    with _WORKLOAD_LOCK:
+        _WORKLOAD_IN_FLIGHT = 0
+
+
+def workload_is_idle() -> bool:
+    """Default idle predicate for the watchdog: no request in flight."""
+    return workload_in_flight() == 0
 
 
 def _loop_stall_threshold() -> float:
+    """Resolve the self-kill threshold, validating it (review P2).
+
+    Returns ``0`` (disabled) for unset/blank/0, for a non-numeric value, and
+    for a negative value. An ENABLED threshold is clamped up to the safe floor
+    because ``STALL_EXIT_S <= STALE_AFTER`` would kill the process before
+    /healthz could ever report the stall, and a sub-second value would turn a
+    GC pause into a permanent crash loop.
+    """
     raw = os.environ.get("TORTOISE_LOOP_STALL_EXIT_S")
     if raw is None or not str(raw).strip():
         return LOOP_STALL_EXIT_S
     try:
-        return float(raw)
+        value = float(raw)
     except (TypeError, ValueError):
-        logger.warning("TORTOISE_LOOP_STALL_EXIT_S=%r is not a number — using %ss",
-                       raw, LOOP_STALL_EXIT_S)
-        return LOOP_STALL_EXIT_S
+        logger.warning("TORTOISE_LOOP_STALL_EXIT_S=%r is not a number — the "
+                       "in-process self-kill stays disabled", raw)
+        return 0.0
+    if value == 0:
+        return 0.0
+    if value < 0:
+        logger.warning("TORTOISE_LOOP_STALL_EXIT_S=%r is negative — the "
+                       "in-process self-kill is DISABLED (0 is the documented "
+                       "disable value)", raw)
+        return 0.0
+    floor = max(LOOP_STALL_EXIT_FLOOR_S, LOOP_STALE_AFTER * 2.0)
+    if value < floor:
+        logger.error(
+            "TORTOISE_LOOP_STALL_EXIT_S=%r is below the safe floor (%.0fs: "
+            "it must exceed 2x LOOP_STALE_AFTER=%.0fs so /healthz reports the "
+            "stall before the process dies, and must sit above the app's "
+            "legitimate synchronous on-loop work) — clamping",
+            raw, floor, LOOP_STALE_AFTER)
+        return floor
+    return value
 
 
 def start_stall_watchdog(threshold_s: float | None = None, *, exit_fn=None,
                          stop_event: threading.Event | None = None,
                          poll_interval: float | None = None,
+                         consecutive_windows: int = LOOP_STALL_EXIT_WINDOWS,
+                         min_ticks: int = LOOP_STALL_EXIT_MIN_TICKS,
+                         workload_idle_fn=None,
                          ) -> threading.Thread | None:
-    """Daemon thread that exits the process if the loop stops ticking.
+    """Daemon thread that MAY exit the process if the loop stops ticking.
 
-    ``threshold_s <= 0`` disables (returns ``None``). ``exit_fn`` defaults to
-    ``os._exit``; it is injected by tests so a test can never kill the test
-    process. ``stop_event`` lets the lifespan stop the watchdog on shutdown —
-    without it, a clean shutdown (which cancels the heartbeat task, making the
-    heartbeat legitimately stale) would look exactly like a wedge.
+    DISABLED BY DEFAULT: with ``threshold_s`` resolved to ``0`` (unset env, the
+    shipped default) this returns ``None`` and no thread is started — the
+    /healthz 503 is the only signal, and destructive action stays out of
+    process. Read the constant block above for why that is the safe default.
+
+    When explicitly enabled, an exit requires ALL of:
+
+    1. the heartbeat older than ``threshold_s`` for
+       ``consecutive_windows`` CONSECUTIVE polls (hysteresis — a single stale
+       sample, or an unlucky pause straddling two polls, must not suffice);
+    2. ``min_ticks`` heartbeat ticks recorded (default 2: the synthetic
+       startup tick plus at least ONE tick from the real
+       ``loop_heartbeat_task``). Without this the watchdog judges a loop that
+       has never demonstrated liveness and can kill the process during a slow
+       boot — before the machine has bound a socket (review P2);
+    3. ``workload_idle_fn()`` truthy. The default reads
+       :func:`workload_in_flight`, so the watchdog refuses to kill while a
+       request is in flight — the exact shape of "the loop is blocked doing
+       legitimate work". A raising predicate is treated as NOT idle
+       (fail-closed, i.e. no kill).
+
+    ``exit_fn`` defaults to ``os._exit``; tests inject it so a test can never
+    kill the test process. ``stop_event`` lets the lifespan stop the watchdog
+    on shutdown — without it, a clean shutdown (which cancels the heartbeat
+    task, making the heartbeat legitimately stale) would look like a wedge.
     """
     if threshold_s is None:
         threshold_s = _loop_stall_threshold()
     if threshold_s <= 0:
-        logger.info("#2850: loop-stall watchdog disabled (threshold=%s)", threshold_s)
+        logger.warning(
+            "#2850: in-process loop-stall self-kill DISABLED (threshold=%s). "
+            "The /healthz listener still reports staleness; destructive "
+            "action belongs to the out-of-band watchdog.", threshold_s)
         return None
     if exit_fn is None:
         exit_fn = os._exit
     if stop_event is None:
         stop_event = threading.Event()
+    if workload_idle_fn is None:
+        workload_idle_fn = workload_is_idle
     if poll_interval is None:
         poll_interval = max(0.1, min(2.0, threshold_s / 4.0))
+    consecutive_needed = max(1, int(consecutive_windows))
 
     def _watch() -> None:
+        stale_windows = 0
         while not stop_event.wait(poll_interval):
+            # (2) judge only a loop that has demonstrated liveness.
+            _, ticks = heartbeat_read()
+            if ticks < min_ticks:
+                stale_windows = 0
+                continue
             age = loop_heartbeat_age()
             if age is not None and age <= threshold_s:
+                stale_windows = 0
+                continue
+            # (3) never kill a loop that is busy doing work.
+            try:
+                idle = bool(workload_idle_fn())
+            except Exception:  # a broken predicate must not authorise a kill
+                idle = False
+            if not idle:
+                stale_windows = 0
+                continue
+            # (1) hysteresis.
+            stale_windows += 1
+            if stale_windows < consecutive_needed:
+                logger.warning(
+                    "#2850 loop-stall watchdog: stale window %d/%d "
+                    "(age %s, threshold %.1fs, workload idle)",
+                    stale_windows, consecutive_needed,
+                    "never" if age is None else f"{age:.1f}s", threshold_s)
                 continue
             logger.critical(
                 "#2850 loop-stall watchdog: event loop has not ticked for %s "
-                "(threshold %.1fs) — exiting so the platform restarts a clean "
-                "process", "never" if age is None else f"{age:.1f}s", threshold_s)
+                "across %d consecutive windows (threshold %.1fs) with no "
+                "request in flight — exiting so the platform restarts a clean "
+                "process", "never" if age is None else f"{age:.1f}s",
+                consecutive_needed, threshold_s)
             with contextlib.suppress(BaseException):
                 exit_fn(1)  # we are exiting anyway
             return
