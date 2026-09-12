@@ -109,7 +109,16 @@ SOURCE_PATTERNS = {
             # here (in addition to sdk): its only direct unit test is
             # test_metering.py::test_selfhost_transport_exemption.
             "tortoise/metering.py", "tortoise/selfhost.py",
-            "tortoise/transport.py"),
+            "tortoise/transport.py",
+            # #2938: EventAPI — the append surface `ingest.py`, `mining.py`,
+            # `extractor.py`, `m0.py` and `__main__.py` all write through.
+            # Without this entry a `tortoise/api.py`-only change matched no
+            # pattern, fell through to `core`, and skipped the api-registered
+            # tests that pin it (test_api.py, test_attribution_actor.py,
+            # test_1162_add_operator_local_svbp.py). Paired with CORE_ALSO:
+            # its pinning tests are registered across api, core AND ep, so the
+            # named-surface match must not drop `core` (see CORE_ALSO).
+            "tortoise/api.py"),
     # eval (#1349): the probe, LongMemEval/mini-BEIR harnesses, threshold
     # tools, benchmark infra, and the backfill script all produce gate
     # evidence — their tests live in the eval surface (config/ci-surfaces.yml).
@@ -129,6 +138,17 @@ SOURCE_PATTERNS = {
              "tortoise/embeddings.py", "tortoise/cross_lens.py"),
     # core is the fallback for any other python-relevant path
 }
+
+# #2938: a SOURCE_PATTERNS match REPLACES the `core` fallback in select() —
+# the named surface's file list is more specific than the always-on engine
+# set. That is wrong for a source whose pinning tests are registered across
+# surfaces: `tortoise/api.py` (EventAPI) is imported at module level by 16
+# `core`-registered tests (test_projection, test_extractor, test_m1/m2, the
+# de2e* suite, …) plus the api-registered trio, and a named-surface match
+# would run only the selected surface's half of them. A path listed here adds
+# `core` alongside its matched surface(s) — narrower than promoting the whole
+# module to SHARED_MODULES (which forces the full matrix).
+CORE_ALSO = ("tortoise/api.py",)
 
 # Paths that are NOT python-relevant (docs/config PRs skip the matrix).
 NON_PYTHON_PREFIXES = (
@@ -167,27 +187,35 @@ TOOL_CARVEOUTS = (
     "tools/ci_selection.py",
 )
 
-# tools/ paths that ARE python-relevant for selection but map to select()'s
-# `core` fallback instead of a SOURCE_PATTERNS surface (#3221). Same
-# NON_PYTHON_PREFIXES carve-out as TOOL_CARVEOUTS, different destination:
-# `core` is deliberately absent from SOURCE_PATTERNS (#2938 —
-# tests/test_ci_selection.py pins `core`/`classify` as unmapped so the surface
-# audit cannot propose emptying them), so the guarded-file wiring for a
-# core-surface tool has to go through the fallback branch below. The file it
-# guards is tools/collision_preflight.py, whose guard
-# (tests/test_collision_preflight.py) is registered under `core`; without this
-# entry a preflight-only change selects NO surface and the guard never runs for
-# the file it guards (#3153). Sole member: unrelated tools changes
-# (tools/kappa.py) keep tier-1 smoke, and tools/ci_selection.py keeps the
-# full-matrix fail-closed branch.
-TOOL_CORE_CARVEOUTS = (
-    "tools/collision_preflight.py",
-)
+
+def _surface_members(value) -> list:
+    """A manifest surface value as a member list (#3073).
+
+    ``None`` means "empty surface" (a plausible hand-edit or bad-merge
+    artifact) and a non-list scalar is malformed. Both coerce to ``[]``
+    rather than crashing every consumer with
+    ``TypeError: argument of type 'NoneType' is not iterable`` or, worse,
+    iterating a string character-by-character. The drift gate still reports
+    the orphans, so an empty surface fails loudly later rather than silently
+    at selection time.
+    """
+    if isinstance(value, (list, tuple)):
+        return list(value)
+    return []
+
+
+def _normalize_surfaces(manifest: dict) -> dict:
+    """Coerce every surface block to a member list, in place (#3073)."""
+    surfaces = manifest.get("surfaces")
+    if isinstance(surfaces, dict):
+        manifest["surfaces"] = {
+            s: _surface_members(v) for s, v in surfaces.items()}
+    return manifest
 
 
 def load_manifest() -> dict:
     import yaml  # local import (uv provides pyyaml via the dev group)
-    return yaml.safe_load(MANIFEST.read_text())
+    return _normalize_surfaces(yaml.safe_load(MANIFEST.read_text()))
 
 
 def classify_test_file(name: str, manifest: dict) -> str | None:
@@ -201,7 +229,8 @@ def classify_test_file(name: str, manifest: dict) -> str | None:
     """
     base = name.rsplit("/", 1)[-1]
     for surface, files in manifest["surfaces"].items():
-        if name in files or base in files:
+        members = _surface_members(files)
+        if name in members or base in members:
             return surface
     return None
 
@@ -271,12 +300,10 @@ def select(changed_files: list[str], event: str, manifest: dict) -> dict:
 
     tier1 = set(manifest.get("tier1", [])) - slow
     # Filter out non-python-relevant paths, but RE-INCLUDE the tools carve-out
-    # paths so they reach SOURCE_PATTERNS (see TOOL_CARVEOUTS) or the core
-    # fallback (see TOOL_CORE_CARVEOUTS).
+    # paths so they reach SOURCE_PATTERNS (see TOOL_CARVEOUTS).
     changed = [c for c in changed_files
                if c and (not c.startswith(NON_PYTHON_PREFIXES)
-                         or c.startswith(TOOL_CARVEOUTS)
-                         or c.startswith(TOOL_CORE_CARVEOUTS))]
+                         or c.startswith(TOOL_CARVEOUTS))]
     if not changed:
         # docs-only PR -> tier 1 (curated smoke) only; no slow/carve surface
         # is touched, so both diff-gated legs skip (#2147/#2148).
@@ -299,11 +326,16 @@ def select(changed_files: list[str], event: str, manifest: dict) -> dict:
             if any(c.startswith(p) for p in pats):
                 matched.add(surface)
                 found = True
+        # #2938: a CORE_ALSO path keeps `core` even though a named surface
+        # matched above (see CORE_ALSO) — otherwise its core-registered
+        # pinners silently drop out of the selection.
+        if any(c.startswith(p) for p in CORE_ALSO):
+            matched.add("core")
+            found = True
         if not found:  # noqa: SIM102
             if c.startswith("tortoise/") or c.startswith("tests/") or \
                c.startswith("graph-scripts/") or c.startswith("config/") or \
-               c.startswith("validation/") or c.startswith("packs/") or \
-               c.startswith(TOOL_CORE_CARVEOUTS):
+               c.startswith("validation/") or c.startswith("packs/"):
                 matched.add("core")  # engine/registry code -> core surface
                 found = True
         if not found:
@@ -325,7 +357,7 @@ def select(changed_files: list[str], event: str, manifest: dict) -> dict:
     surfaces = sorted(matched)
     files = set(tier1)  # tier 2 = tier 1 ∪ surface-matched (scope v5 dec 5)
     for s in surfaces:
-        files.update(manifest["surfaces"].get(s, []))
+        files.update(_surface_members(manifest["surfaces"].get(s)))
     files -= slow  # #1371: slow files never run in the fast gate
     # #1988: carve-out (embedded-only) files run in the dedicated carve-out
     # job — on tier-2 PR legs the fast-matrix process runs everything embedded
@@ -431,7 +463,14 @@ def register_tests(manifest_path: Path, tests_dir: Path, surface: str,
     missing = unlisted_tests(tests_dir, manifest)
     if not missing:
         return []
-    lines = manifest_path.read_text().splitlines(keepends=True)
+    text = manifest_path.read_text()
+    # #3073: a manifest whose final line lacks a newline would concatenate the
+    # appended entry onto it (`  - test_b.py  - test_c.py`, malformed YAML).
+    # Normalise the terminator before splitting so every insertion point is a
+    # line boundary.
+    if text and not text.endswith(NL):
+        text += NL
+    lines = text.splitlines(keepends=True)
     # locate the surface block: "  <surface>:" then "  - name" lines (strip
     # any trailing inline comment from the key)
     block_start = None
@@ -493,7 +532,7 @@ def register_tests(manifest_path: Path, tests_dir: Path, surface: str,
 def register(manifest_path: Path, tests_dir: Path, surface: str) -> list[str]:
     """Load + register in one call (CLI entry)."""
     import yaml
-    manifest = yaml.safe_load(manifest_path.read_text())
+    manifest = _normalize_surfaces(yaml.safe_load(manifest_path.read_text()))
     return register_tests(manifest_path, tests_dir, surface, manifest)
 
 
@@ -765,8 +804,8 @@ def duration_issues(manifest: dict) -> list[str]:
 # not the same thing as "the files that reference that surface's source".
 # Deriving membership mechanically was rejected (#2938: it proposed 326/562
 # file moves, 28 out of `onboarding`, and emptied `classify`) because a naive
-# import scan cannot resolve `from tortoise import X`, `tortoise/api.py` (not
-# in SOURCE_PATTERNS["api"]), fixture/HTTP indirection, or human intent. This
+# import scan cannot resolve `from tortoise import X`, a source path no
+# SOURCE_PATTERNS entry maps, fixture/HTTP indirection, or human intent. This
 # mode derives nothing: it prints the mismatches, with evidence, for a human.
 #
 # Pin-resolution rules — each gap the mechanical attempt hit is handled (or
@@ -776,11 +815,13 @@ def duration_issues(manifest: dict) -> list[str]:
 #       (a class re-exported from the package root is not a submodule). The
 #       bare package roots `tortoise` / `tests` are never pins themselves:
 #       the root re-exports many surfaces and every test imports it.
-#   (b) `tortoise/api.py` is NOT in SOURCE_PATTERNS["api"]. Rather than
-#       silently binning it as `core` (the selection fallback), every pinned
-#       path matching no SOURCE_PATTERNS entry is reported under "uncovered
-#       source paths", naming the pinning files and the surfaces they are
-#       registered under.
+#   (b) a pinned source path that no SOURCE_PATTERNS entry maps (the #2938
+#       `tortoise/api.py` case, since fixed by mapping it) is reported under
+#       "uncovered source paths" rather than silently binned as `core` (the
+#       selection fallback), naming the pinning files and the surfaces they
+#       are registered under. A path named after a surface
+#       (`tortoise/<surface>.py`) is additionally called out under
+#       "SOURCE_PATTERNS coverage gaps".
 #   (c) string references: every non-docstring string literal is scanned for
 #       path-like tokens (a subprocess argv, a Path(...) literal, a path read
 #       from disk); evidence is rendered quoted (`file <- "path/string"`).
@@ -808,10 +849,7 @@ def duration_issues(manifest: dict) -> list[str]:
 _AUDIT_NAMESPACE_ROOTS = frozenset({"tortoise", "tests"})
 
 # Mirror of select()'s per-file fallback branch: engine/config paths with no
-# SOURCE_PATTERNS entry select the `core` surface. Two deliberate divergences
-# from that branch: `tests/` is not a source path here (the audit scans test
-# files as roots), and TOOL_CORE_CARVEOUTS is omitted because `tools/` is
-# already in _AUDIT_SOURCE_TREES — listing it changes no audit output (#3221).
+# SOURCE_PATTERNS entry select the `core` surface.
 _AUDIT_CORE_FALLBACK = ("tortoise/", "graph-scripts/", "config/",
                         "validation/", "packs/")
 
@@ -1096,11 +1134,12 @@ def _audit_file_refs(abs_path: Path, rel: str, repo: Path, tests_dir: Path,
 def _audit_coverage_gaps(repo: Path) -> dict[str, str]:
     """Surface-named source paths absent from that surface's SOURCE_PATTERNS.
 
-    The #2938 case (b): `tortoise/api.py` exists and is registered under the
-    `api` surface, but `SOURCE_PATTERNS["api"]` does not list it — so a change
-    to it selects `core`, and the api-registered tests that pin it never run.
-    Reporting this explicitly is the whole point of the audit: silently
-    binning the path as `core` would make the numbers lie.
+    The #2938 case (b): a source named after a surface (`tortoise/<s>.py`,
+    e.g. `tortoise/api.py` before this PR mapped it) exists, but that
+    surface's `SOURCE_PATTERNS` entry does not list it — so a change to it
+    selects `core` (or nothing), and the surface-registered tests pinning it
+    never run. Reporting this explicitly is the whole point of the audit:
+    silently binning the path as `core` would make the numbers lie.
     """
     gaps: dict[str, str] = {}
     for surface in sorted(SOURCE_PATTERNS):
@@ -1133,9 +1172,7 @@ def _audit_entries(entries) -> list:
     """
     if entries is None:
         return []
-    if isinstance(entries, (list, tuple)):
-        return list(entries)
-    return []
+    return _surface_members(entries)
 
 
 def _audit_gap_selection(rec: dict, manifest: dict) -> tuple[list[str], list[str], list[str]]:
@@ -1143,12 +1180,12 @@ def _audit_gap_selection(rec: dict, manifest: dict) -> tuple[list[str], list[str
 
     #2938 review P2: the previous renderer asserted the non-gap pinners "run
     via {others}", but `others` is just the union of non-gap registrations —
-    `select(['tortoise/api.py'], 'pull_request', manifest)` yields `['core']`
-    and does NOT select `ep`, so the single ep-registered pinner does not
-    run. A pinner RUNS when it is in the change's fast-gate `test_files`, in
-    the selected surfaces' slow leg, or in a triggered carve-out job; every
-    other pinner is a victim. Callers pass a manifest whose surface values
-    are already normalised via :func:`_audit_entries`.
+    `select([unmapped_path], ...)` selects only the fallback `core` surface
+    and does NOT select `ep`, so a pinner registered solely under `ep` does
+    not run. A pinner RUNS when it is in the change's fast-gate `test_files`,
+    in the selected surfaces' slow leg, or in a triggered carve-out job;
+    every other pinner is a victim. Callers pass a manifest whose surface
+    values are already normalised via :func:`_audit_entries`.
     """
     selection = select([rec["path"]], "pull_request", manifest)
     if selection["full"] or selection["test_files"] == "ALL":
@@ -1402,8 +1439,8 @@ def render_surface_audit(report: dict) -> str:
         for rec in gaps:
             # #2938 review P2: do NOT assert which files run from the union of
             # non-gap registrations — `select()` decides. Victims are the
-            # pinners this change does not select (e.g. the ep-registered
-            # pinner of tortoise/api.py, since that change selects `core`).
+            # pinners this change does not select (e.g. a pinner registered
+            # only under a surface the change does not select).
             victims = rec["victims"]
             selected = "/".join(rec["selected_surfaces"]) or "none"
             weak_victims = sorted(

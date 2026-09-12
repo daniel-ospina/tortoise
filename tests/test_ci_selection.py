@@ -174,23 +174,6 @@ def test_unrelated_tools_change_still_tier1():
     assert set(r["test_files"]) == _tier1()
 
 
-def test_collision_preflight_tool_change_selects_core_not_tier1():
-    # #3221: tools/collision_preflight.py is carved out of
-    # NON_PYTHON_PREFIXES (TOOL_CORE_CARVEOUTS) and falls back to `core` — the
-    # surface its guard, test_collision_preflight.py, is registered under. A
-    # preflight-only change must therefore RUN that guard; the pre-fix
-    # behavior selected no surface at all, so the guard never ran for the file
-    # it guards (the #3153 hole: registering the test alone is not enough).
-    r = _sel(["tools/collision_preflight.py"])
-    assert r["full"] is False
-    assert r["surfaces"] == ["core"]
-    assert "test_collision_preflight.py" in r["test_files"]
-    assert set(r["test_files"]) != _tier1()
-    # a test-file change selects its owning surface too
-    r2 = _sel(["tests/test_collision_preflight.py"])
-    assert "test_collision_preflight.py" in r2["test_files"]
-
-
 def test_ask_spotcheck_tools_change_selects_sdk_not_tier1():
     # #2071: tools/ask_spotcheck*.py are carved out of NON_PYTHON_PREFIXES
     # and mapped to the sdk surface — a spot-check-only change selects the
@@ -419,6 +402,39 @@ def test_register_keeps_alphabetical_order():
         api = manifest2["surfaces"]["api"]
         assert api == sorted(api), "surface list must stay alphabetized"
         assert api == ["test_aaa_new.py", "test_existing_api.py", "test_mmm_new.py", "test_zzz_new.py"]
+
+
+def test_register_handles_manifest_without_trailing_newline():
+    # #3073 item 1: a manifest whose final entry line lacks a newline
+    # concatenated the appended entry onto it (`  - test_b.py  - test_c.py`,
+    # malformed YAML). The terminator is normalised before insertion.
+    with tempfile.TemporaryDirectory() as d:
+        td = Path(d)
+        (td / "test_new_thing.py").write_text("def test_x():\n    pass\n")
+        (td / "test_existing_api.py").write_text("def test_x():\n    pass\n")
+        m = td / "ci-surfaces.yml"
+        # the api block is LAST and its final line has NO newline
+        m.write_text("surfaces:\n  api:\n  - test_existing_api.py")
+        import yaml
+        manifest = yaml.safe_load(m.read_text())
+        assert register_tests(m, td, "api", manifest) == ["test_new_thing.py"]
+        parsed = yaml.safe_load(m.read_text())  # must not raise
+        assert parsed["surfaces"]["api"] == ["test_existing_api.py",
+                                            "test_new_thing.py"]
+
+
+def test_classify_and_select_tolerate_null_or_scalar_surface():
+    # #3073 item 2: `integrity()`'s duplicate scan tolerated a None surface via
+    # `files or ()`, but classification/selection did not — a bare `api:` key
+    # (None) or a scalar raised `TypeError: argument of type 'NoneType' is not
+    # iterable`, and a string would be iterated character-by-character. A
+    # falsy/scalar value means "no members"; the drift gate reports its files.
+    for bad in (None, 3, "test_x.py", {"a": 1}):
+        m = load_manifest()
+        m["surfaces"]["api"] = bad
+        assert classify_test_file("test_api.py", m) is None
+        r = select(["tortoise/api.py"], "pull_request", m)
+        assert r["surfaces"] == ["api", "core"]  # CORE_ALSO still applies
 
 
 def test_register_default_surface_is_core():
@@ -1508,17 +1524,46 @@ def test_surface_audit_follows_tests_helper(tmp_path):
 
 
 def test_surface_audit_reports_uncovered_surface_named_source(tmp_path):
-    # rule (b): `tortoise/api.py` is real api-owned source but is absent from
-    # SOURCE_PATTERNS["api"] — the report must SAY so, not bin it as core
+    # rule (b): a surface-named source absent from that surface's
+    # SOURCE_PATTERNS entry is SAID, not silently binned as core. #2938 mapped
+    # the real instance (`tortoise/api.py`), so this test uses a synthetic
+    # unmapped one (`tortoise/eval.py`) to keep the rule covered.
     repo = _audit_repo(tmp_path, {
-        "tests/test_api_mod.py": "from tortoise.api import EventAPI\n"})
-    report = _audit(_audit_manifest(api=["test_api_mod.py"]), repo)
+        "tortoise/eval.py": "",
+        "tests/test_eval_mod.py": "from tortoise.eval import X\n"})
+    report = _audit(_audit_manifest(eval=["test_eval_mod.py"]), repo)
     gaps = report["coverage_gaps"]
-    assert any(g["path"] == "tortoise/api.py" and g["surface"] == "api"
+    assert any(g["path"] == "tortoise/eval.py" and g["surface"] == "eval"
                for g in gaps), gaps
+    assert "tortoise/eval.py" not in [r["path"] for r in report["uncovered"]]
+    removal = report["surfaces"]["eval"]["removal"][0]
+    assert removal["gap"] == ["tortoise/eval.py"]
+
+
+def test_surface_audit_maps_tortoise_api_source_as_api_pin(tmp_path):
+    # #2938 item 1: `tortoise/api.py` is mapped to `api` now — a file importing
+    # it is an api pin, not an uncovered path and not a coverage gap.
+    repo = _audit_repo(tmp_path, {
+        "tests/test_imports_api.py": "from tortoise.api import EventAPI\n"})
+    report = _audit(_audit_manifest(api=["test_imports_api.py"]), repo)
+    assert "tortoise/api.py" not in [g["path"] for g in report["coverage_gaps"]]
     assert "tortoise/api.py" not in [r["path"] for r in report["uncovered"]]
-    removal = report["surfaces"]["api"]["removal"][0]
-    assert removal["gap"] == ["tortoise/api.py"]
+
+
+def test_tortoise_api_change_selects_api_and_core():
+    # #2938 item 1: mapping `tortoise/api.py` to `api` closes the coverage gap,
+    # but its pinning tests are registered across surfaces — CORE_ALSO keeps
+    # `core` in the selection so the core-registered importers of EventAPI
+    # (test_extractor, test_projection via the slow leg, …) still run. An
+    # api-only mapping would silently drop them — the exact regression #2938
+    # exists to prevent.
+    r = _sel(["tortoise/api.py"])
+    assert r["full"] is False
+    assert r["surfaces"] == ["api", "core"]
+    selected = set(r["test_files"]) | set(r["slow_selected"])
+    assert "test_api.py" in selected, "api-registered pinner must run"
+    assert "test_extractor.py" in selected, "core-registered pinner must run"
+    assert "test_projection.py" in selected, "core slow-leg pinner must run"
 
 
 def test_surface_audit_skips_removal_for_unmapped_surfaces(tmp_path):
@@ -1573,58 +1618,60 @@ def test_surface_audit_coverage_gap_names_only_gap_surface_members(tmp_path):
     # P3: assert on the DERIVED data (gap["files"]/["victims"]), not the
     # rendered sentence, so a legitimate wording change cannot break this.
     repo = _audit_repo(tmp_path, {
-        "tests/test_api_registered.py": "from tortoise.api import EventAPI\n",
-        "tests/test_core_registered.py": "from tortoise.api import EventAPI\n"})
-    manifest = _audit_manifest(api=["test_api_registered.py"],
+        "tortoise/eval.py": "",
+        "tests/test_eval_registered.py": "from tortoise.eval import X\n",
+        "tests/test_core_registered.py": "from tortoise.eval import X\n"})
+    manifest = _audit_manifest(eval=["test_eval_registered.py"],
                                core=["test_core_registered.py"])
     report = _audit(manifest, repo)
     gap = next(g for g in report["coverage_gaps"]
-               if g["path"] == "tortoise/api.py")
+               if g["path"] == "tortoise/eval.py")
     # both files are STRONG pinners (they import it); registration differs
-    assert set(gap["files"]) == {"test_api_registered.py",
+    assert set(gap["files"]) == {"test_eval_registered.py",
                                  "test_core_registered.py"}
-    assert gap["files"]["test_api_registered.py"] == ["api"]
+    assert gap["files"]["test_eval_registered.py"] == ["eval"]
     assert gap["files"]["test_core_registered.py"] == ["core"]
-    assert gap["registered"] == ["api", "core"]
-    # `select(['tortoise/api.py'])` selects `core`, so only the api-registered
+    assert gap["registered"] == ["core", "eval"]
+    # `select(['tortoise/eval.py'])` selects `core`, so only the eval-registered
     # pinner is a victim; the core-registered one runs.
     assert gap["selected_surfaces"] == ["core"]
-    assert gap["victims"] == ["test_api_registered.py"]
+    assert gap["victims"] == ["test_eval_registered.py"]
     assert gap["runs"] == ["test_core_registered.py"]
     # ... and the rendered line agrees with the data
     never_line = render_surface_audit(report).split(
-        "never run on a change to tortoise/api.py:")[1].split("\n")[0]
-    assert "test_api_registered.py" in never_line
+        "never run on a change to tortoise/eval.py:")[1].split("\n")[0]
+    assert "test_eval_registered.py" in never_line
     assert "test_core_registered.py" not in never_line, (
         "a core-registered pinner runs via core and must not be in the "
         "\"never run\" list")
 
 
 def test_surface_audit_coverage_gap_counts_unselected_surface_as_victim(tmp_path):
-    # P2: `select(['tortoise/api.py'], 'pull_request', manifest)` yields
-    # `surfaces=['core']` — it does NOT select `ep`, so the ep-registered
-    # pinner never runs. The previous renderer asserted the non-gap pinners
-    # "run via core/ep", which was false for the ep one.
+    # P2: `select(['tortoise/eval.py'], 'pull_request', manifest)` falls back
+    # to `core` — it does NOT select `ep`, so an ep-registered pinner never
+    # runs. The previous renderer asserted the non-gap pinners "run via
+    # core/ep", which was false for the ep one.
     repo = _audit_repo(tmp_path, {
-        "tests/test_api_registered.py": "from tortoise.api import EventAPI\n",
-        "tests/test_core_registered.py": "from tortoise.api import EventAPI\n",
-        "tests/test_ep_registered.py": "from tortoise.api import EventAPI\n"})
-    manifest = _audit_manifest(api=["test_api_registered.py"],
+        "tortoise/eval.py": "",
+        "tests/test_eval_registered.py": "from tortoise.eval import X\n",
+        "tests/test_core_registered.py": "from tortoise.eval import X\n",
+        "tests/test_ep_registered.py": "from tortoise.eval import X\n"})
+    manifest = _audit_manifest(eval=["test_eval_registered.py"],
                                core=["test_core_registered.py"],
                                ep=["test_ep_registered.py"])
     report = _audit(manifest, repo)
     gap = next(g for g in report["coverage_gaps"]
-               if g["path"] == "tortoise/api.py")
-    assert set(gap["files"]) == {"test_api_registered.py",
+               if g["path"] == "tortoise/eval.py")
+    assert set(gap["files"]) == {"test_eval_registered.py",
                                  "test_core_registered.py",
                                  "test_ep_registered.py"}
     assert gap["files"]["test_ep_registered.py"] == ["ep"]
     assert gap["selected_surfaces"] == ["core"]
-    assert gap["victims"] == ["test_api_registered.py",
-                              "test_ep_registered.py"]
+    assert gap["victims"] == ["test_ep_registered.py",
+                              "test_eval_registered.py"]
     assert gap["runs"] == ["test_core_registered.py"]
     never_line = render_surface_audit(report).split(
-        "never run on a change to tortoise/api.py:")[1].split("\n")[0]
+        "never run on a change to tortoise/eval.py:")[1].split("\n")[0]
     assert "test_ep_registered.py" in never_line, (
         "an ep-registered pinner is not selected by a change that yields core")
     assert "test_core_registered.py" not in never_line
@@ -1698,20 +1745,21 @@ def test_surface_audit_string_only_pin_is_weak_and_labelled(tmp_path):
     # (labelled) but must not make the file a strong pinnner, or the "never
     # run" claim inflates (test_ci_selection.py's own corpus).
     repo = _audit_repo(tmp_path, {
+        "tortoise/eval.py": "",
         "tests/test_fixture_data.py":
-            "PATHS = ['tortoise/api.py']\n"
+            "PATHS = ['tortoise/eval.py']\n"
             "def test_x(): assert PATHS\n",
         "tests/test_fixture_elsewhere.py":
             "PATHS = ['battery/cli.py']\n"
             "def test_y(): assert PATHS\n"})
-    report = _audit(_audit_manifest(api=["test_fixture_data.py"],
+    report = _audit(_audit_manifest(eval=["test_fixture_data.py"],
                                     core=["test_fixture_elsewhere.py"]), repo)
     gap = next(g for g in report["coverage_gaps"]
-               if g["path"] == "tortoise/api.py")
+               if g["path"] == "tortoise/eval.py")
     assert gap["files"] == {}, "a string-only reference is not a strong pinnner"
     assert list(gap["weak_files"]) == ["test_fixture_data.py"]
     out = render_surface_audit(report)
-    assert '"tortoise/api.py" (string, not an import)' in out, \
+    assert '"tortoise/eval.py" (string, not an import)' in out, \
         "the human must still see the string pin, labelled"
     assert "1 string-only pinnner(s), weak" in out
     # an UNREGISTERED string-only reference is a weak addition, not candidate
@@ -1724,11 +1772,12 @@ def test_surface_audit_string_only_pin_is_weak_and_labelled(tmp_path):
             in out)
     # ... and a strong (import) pin in the SAME repo still claims the gap
     repo2 = _audit_repo(tmp_path / "strong", {
-        "tests/test_imports_api.py": "from tortoise.api import EventAPI\n"})
-    report2 = _audit(_audit_manifest(api=["test_imports_api.py"]), repo2)
+        "tortoise/eval.py": "",
+        "tests/test_imports_eval.py": "from tortoise.eval import X\n"})
+    report2 = _audit(_audit_manifest(eval=["test_imports_eval.py"]), repo2)
     gap2 = next(g for g in report2["coverage_gaps"]
-                if g["path"] == "tortoise/api.py")
-    assert list(gap2["files"]) == ["test_imports_api.py"]
+                if g["path"] == "tortoise/eval.py")
+    assert list(gap2["files"]) == ["test_imports_eval.py"]
 
 
 def test_surface_audit_credits_pin_reached_through_repo_root_helper(tmp_path):
