@@ -468,7 +468,13 @@ async def _lifespan(app):
         # driver-disabled case is covered by construction. Spawned only when
         # the sweep config validates (fail-closed default keeps TestClient and
         # misconfigured deploys quiet) and not explicitly disabled for tests.
-        global _WATCHER
+        global _WATCHER, _WATCHER_START_ERROR
+        # #2877: recompute watcher liveness per app instance. Without the
+        # reset, a prior lifespan's start failure (or a stale thread) would
+        # leak into /health on TestClient/app reuse — reporting a dead watcher
+        # as running, or a running one as failed.
+        _WATCHER = None
+        _WATCHER_START_ERROR = None
         try:
             cfg = _backup_config_safe()
             # #2922: EVERY reason the watcher does not start must be stated on
@@ -607,6 +613,11 @@ async def _lifespan(app):
             # have surfaced #2790 (no sweep for 33 days, no drill ever recorded).
             # Loud, with a traceback, so a dead watcher can never be invisible again.
             _logger.error("backup watcher could not start: %s", exc, exc_info=True)
+            # #2877: and not invisible to /health either. This marker is set
+            # ONLY here, so _backup_watcher_health() can distinguish "wanted
+            # but failed to start" (degraded) from the legitimate disabled
+            # states (ok).
+            _WATCHER_START_ERROR = str(exc)[:200]
         # #432 Task 7: event retention — boot purge + interval task. Best-effort
         # and non-fatal (like the pre-warm): a purge failure never blocks bind.
         # Per-team graphs get purged by the SDK lazy hook too (embedded/stdio);
@@ -1613,6 +1624,46 @@ def _probe_control_plane() -> None:
 _READY_PROBE_TIMEOUT_S = 6.0
 
 
+def _backup_watcher_health() -> dict:
+    """#2877: backup-watcher liveness for /health.
+
+    The watcher is the hosted durability monitor for #305/R2 backups, and
+    #2851/#2922 showed it can be completely dead while the process serves
+    normally. ``_WATCHER is None`` is ambiguous — it is the state after a
+    FAILED start *and* the fail-closed default when the sweep is off
+    (TestClient/embedded) or the test-only kill switch is set. The
+    ``_WATCHER_START_ERROR`` marker, set only from the start-failure handler,
+    is the one signal that separates those.
+
+    States:
+      * ``running``  — thread alive (the healthy case).
+      * ``failed``   — wanted but ``_WATCHER_START_ERROR`` was recorded.
+      * ``stopped``  — started, but its watchdog-backed thread is no longer
+        alive (a dead monitor that must not read as healthy).
+      * ``disabled`` — no config / kill switch: legitimate, stays ``ok``.
+
+    Mirrors /health's ``db`` block: a sub-dict carrying ``ok``, folded into
+    ``status`` by the caller. Never raises and never 5xxes — a dead monitor
+    must not kill a live process's liveness probe (#338).
+    """
+    try:
+        watcher = _WATCHER
+        if watcher is not None:
+            thread = getattr(watcher, "_thread", None)
+            if thread is not None and thread.is_alive():
+                return {"state": "running", "ok": True, "error": None}
+            return {
+                "state": "stopped",
+                "ok": False,
+                "error": "watcher thread is not alive",
+            }
+        if _WATCHER_START_ERROR is not None:
+            return {"state": "failed", "ok": False, "error": _WATCHER_START_ERROR}
+        return {"state": "disabled", "ok": True, "error": None}
+    except Exception as exc:  # liveness must answer, always
+        return {"state": "unknown", "ok": False, "error": str(exc)[:200]}
+
+
 @app.get("/health")
 async def health():
     """Liveness + deep DB check — process up and serving. NEVER gates on the DB.
@@ -1628,6 +1679,12 @@ async def health():
     immediately without any graph-touching request. The handler never raises
     and never 5xxes: a dead DB must not kill the process — deploy/backup
     drivers gate on /health/ready, which still fails closed.
+
+    Watcher check (#2877): a dead/never-started backup watcher is the SAME
+    shape of silent durability failure, so it rides along in ``backup_watcher``
+    and flips ``status`` to "degraded" under the identical rule. A disabled
+    sweep (no config / kill switch) stays ``ok`` — only "wanted but failed"
+    degrades.
     """
     import asyncio
     try:
@@ -1636,7 +1693,12 @@ async def health():
         db = await asyncio.to_thread(_probe_db)
     except Exception as exc:
         db = {"ok": False, "latency_ms": 0.0, "error": str(exc)[:200]}
-    return {"status": "ok" if db["ok"] else "degraded", "db": db}
+    watcher = _backup_watcher_health()
+    return {
+        "status": "ok" if (db.get("ok") and watcher["ok"]) else "degraded",
+        "db": db,
+        "backup_watcher": watcher,
+    }
 
 
 @app.get("/health/ready")
@@ -20099,6 +20161,13 @@ async def backups_restore(body: BackupRestoreRequest, request: Request, team: di
 # not true).
 
 _WATCHER: WatcherThread | None = None  # WatcherThread imported in _lifespan  # noqa: F821
+# #2877: why the watcher is not running. `_WATCHER is None` ALONE cannot tell a
+# dead monitor from a deliberately-disabled one — it is also the fail-closed
+# default (no/invalid backup config) and the `BACKUP_WATCHER_DISABLED=1` kill
+# switch. Set only from the watcher-start `except` in `_lifespan`; cleared when
+# the watcher starts cleanly, so the one signal it carries is "wanted but
+# failed". Read by `_backup_watcher_health()` for /health.
+_WATCHER_START_ERROR: str | None = None
 _DRIVER_HEARTBEAT_KEY = "ops/driver-heartbeat.json"
 _LAST_DRILL_AT: float = 0.0  # in-memory drill cooldown (single-instance, resets on restart)
 _DRILL_COOLDOWN_S = 3600
@@ -20484,6 +20553,7 @@ async def backups_status(request: Request):
                 "storage_error": str(e), "per_team": {}, "no_teams": False}
     lock_block = _lock_status_block(cfg)
     watcher = _WATCHER
+    watcher_health = _backup_watcher_health()
     now = datetime.now(UTC)
     watcher_status = watcher._watcher._last_status if watcher else {}
     hb = {}
@@ -20579,7 +20649,11 @@ async def backups_status(request: Request):
         "last_sweep": last_sweep,
         "last_drill": last_drill,
         "watcher": {
-            "running": bool(watcher and watcher._thread and watcher._thread.is_alive()),
+            # #2877: one source of truth for "running" (the /health signal), so
+            # this surface can never disagree with the liveness probe.
+            "running": watcher_health["state"] == "running",
+            "state": watcher_health["state"],
+            "error": watcher_health["error"],
             "last_poll_at": hb.get("last_poll_at"),
             "age_minutes": watcher_age_min,
             "r2_ok": hb.get("r2_ok"),

@@ -23,6 +23,9 @@ surfaces:
   # registration as the boot guards above, for the same reason: the file it
   # guards is tortoise/hosted_api.py, which selects the `api` surface.
   - test_health_ready_nonblocking.py
+  # #2877: a dead/never-started backup watcher must surface in /health, not just
+  # a boot log. Dual-registered with `core` (same rationale as the boot guards).
+  - test_backup_watcher_health.py
   - test_delivery_tenancy.py  # C6 #2115: delivery-shape tenancy + session_recording per-graph override
   - test_onboarding_email_http.py
   - test_sentry.py
@@ -284,6 +287,10 @@ surfaces:
   - test_backup_multigraph_e2e.py
   - test_backup_sweep.py
   - test_backup_watcher.py
+  # #2877: DB-free guards that a dead backup watcher degrades /health (the
+  # file it guards, tortoise/hosted_api.py, selects the `api` surface, so it is
+  # dual-registered `api`+`core` for the same reason as test_boot_regressions.py).
+  - test_backup_watcher_health.py
   - test_bfs_audit.py
   - test_boot_regressions.py
   - test_health_ready_nonblocking.py  # #2988: /health/ready off-loop + bounded probes
