@@ -596,7 +596,12 @@ class _EntityHandlers:
         returning (matched, matched) so the sweep's folded == 0 warn
         condition ≡ today's matched == 0 (the legacy query keeps its
         ``RETURN o.id LIMIT 1`` — matched ≤ 1 per fold, exactly the pre-CAS
-        count; a multi-node dup-name match folds every bound node but the
+        count; the shared name branch prepends `WITH o ORDER BY ... LIMIT 1` BEFORE the
+        body, so EXACTLY ONE carrier is folded (#2977 code review, P2 — the
+        earlier "folds every bound node" text was true only before the
+        `_fold_object_match_and_apply` extraction, and a future reader who
+        trusted it would "restore" the fold-all amplification). Pinned by
+        `test_fold_object_superseded_name_fallback_folds_exactly_one`.
         LIMIT caps the reported row). Replay MUST stay blind last-wins:
         incarnation-reuse shapes (delete→recreate→re-supersede — two fold
         lines for one name belonging to DIFFERENT incarnations) resolve
@@ -702,7 +707,19 @@ class _EntityHandlers:
                 # two carriers can share `createdAt`, which would make the pick
                 # scan-order dependent — the same false-success class the
                 # `skip_terminal` filter exists to remove.
-                "WITH o ORDER BY o.createdAt DESC, o.id LIMIT 1 " + body,
+                #
+                # `coalesce(..., '')` makes NULL sort LAST (#2977 code review,
+                # P2). FalkorDB sorts NULL FIRST under DESC (measured), and the
+                # stub lane never writes `createdAt` (`_event_plain_merge`,
+                # entities.py:964-968: `ON CREATE SET o.id=$id,
+                # o.objectKind='other'`). So a bare `o.createdAt DESC` picked
+                # the OLDEST/unknown carrier over the newest one — contradicting
+                # both this comment and the tests asserting the newest carrier
+                # is folded. Measured: with carriers `{id-stub: no createdAt}`
+                # and `{id-canon: createdAt='2026-03-01'}`, plain DESC returned
+                # `id-stub`; the coalesced form returns `id-canon`.
+                "WITH o ORDER BY coalesce(o.createdAt,'') DESC, o.id "
+                "LIMIT 1 " + body,
                 params={"name": name, "skip": skip_terminal,
                         **common_params})
             folded, matched = _classify(result, cas=cas)

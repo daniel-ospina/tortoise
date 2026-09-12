@@ -1174,7 +1174,8 @@ class FalkorProjection(
             return self._upsert_source(
                 ev, merge_run_id=ev.pop("_merge_run_id", None))
 
-    def _flush_object_folds(self, folds, recreate, strict: bool = False) -> int:
+    def _flush_object_folds(self, folds, recreate,
+                            strict: bool = False) -> tuple[int, int]:
         """#2977: the single implementation of Object fold ORDERING (D-12), the
         re-creation SURVIVOR rule, the anchor derivation, and per-fold error
         isolation. Called by rebuild_all's sweep and by apply_replay so the two
@@ -1232,6 +1233,10 @@ class FalkorProjection(
         last_by_id: dict[str, int] = {}
         first_by_name: dict[str, int] = {}
         last_by_name: dict[str, int] = {}
+        # Counted so `apply_replay`'s `applied` can exclude folds the survivor
+        # rule dropped: they did no work, so counting them inflated the reported
+        # replay total (#2977 code review, P2).
+        _survivor_skipped = 0
         for _s, _ev in recreate:
             # Seed an anchor ONLY for a registration that actually CREATED a
             # node. `_upsert_object` early-returns without raising when
@@ -1270,11 +1275,40 @@ class FalkorProjection(
             # "never raised" contract.
             _k_id = ev.get("id") if isinstance(ev.get("id"), str) else None
             _k_name = ev.get("name") if isinstance(ev.get("name"), str) else None
-            _first = min(first_by_id.get(_k_id, _INF),
-                         first_by_name.get(_k_name, _INF))
-            _last = max(last_by_id.get(_k_id, -1),
-                        last_by_name.get(_k_name, -1))
+            # ── WHICH KEY IS THE IDENTITY (#2977 code review, P1) ────────────
+            # The NAME, because `_upsert_object` is "MERGE Object by name
+            # (content-hash dedup)" (projection/entities.py:498) — `id` is a
+            # derived cache of the name, not the key. Preferring the name is
+            # not cosmetic; it is the difference between two shapes this rule
+            # must NOT conflate:
+            #
+            #   OR(U1,X) -> RT(U1,X) -> OR(U2,X)   X WAS re-registered
+            #       name anchor: 0 < 1 < 2  -> drop the fold  (X stays live) OK
+            #
+            #   OR(U1,X) -> RT(U1,X) -> OR(U1,Y)   X was NEVER re-registered
+            #       name anchor: 0 < 1 < 0  -> apply the fold (X retracted) OK
+            #
+            # The second shape is PRODUCTION-REACHABLE through the public
+            # `EventAPI.add_object(..., id=...)` explicit-id override
+            # (api.py:256-269), and `max(last_by_id, last_by_name)` got it
+            # WRONG: `max(last_by_id['U1']=2, last_by_name['X']=0)` chose the
+            # stale id anchor, read the seq-2 registration of the DIFFERENT
+            # name `Y` as a replacement of `X`, dropped the fold, and RESURRECTED
+            # X on all four replay engines — #2977's own defect direction.
+            # Measured before the fix: live `[('U1','Y','live')]` vs replay
+            # `[('U1','X','live'), ('U1','Y','live')]`.
+            #
+            # Falling back to the id anchors ONLY when the fold carries no name
+            # keeps the keyless legacy/hand-written shape working without
+            # letting a reused id speak for a name it does not identify.
+            if _k_name is not None:
+                _first = first_by_name.get(_k_name, _INF)
+                _last = last_by_name.get(_k_name, -1)
+            else:
+                _first = first_by_id.get(_k_id, _INF)
+                _last = last_by_id.get(_k_id, -1)
             if _first < _seq < _last:
+                _survivor_skipped += 1
                 continue  # the pre-fold incarnation was replaced
             try:
                 if _kind == "retract":
@@ -1311,7 +1345,7 @@ class FalkorProjection(
                 logger.warning("replay: Object fold failed (seq=%s kind=%s "
                                "event_id=%s)", _seq, _kind,
                                ev.get("event_id"), exc_info=True)
-        return torn
+        return torn, _survivor_skipped
 
     def apply_replay(self, events, strict: bool = False) -> tuple[int, int, int]:
         """#2977: replay a journal, deferring BOTH Object fold families to the
@@ -1372,9 +1406,15 @@ class FalkorProjection(
                 apply_torn += 1
                 logger.warning("replay: event failed (type=%s event_id=%s)",
                                t, ev.get("event_id"), exc_info=True)
-        fold_torn = self._flush_object_folds(object_folds, _recreate,
-                                            strict=strict)
-        applied += len(object_folds) - fold_torn
+        fold_torn, _survivor_skipped = self._flush_object_folds(
+            object_folds, _recreate, strict=strict)
+        # #2977 code review (P2): exclude the folds the survivor rule DID NOT
+        # APPLY. They did no work, so `len(object_folds) - fold_torn` reported
+        # work that never happened — journal `[OR, RT, OR]` returned
+        # `(3, 0, 0)` while only 2 events touched the graph, and
+        # `recover_from_log` then announced "replayed 3 events". The tuple ORDER
+        # was always correct; only the accounting was off.
+        applied += len(object_folds) - fold_torn - _survivor_skipped
         return applied, apply_torn, fold_torn
 
     def rebuild(self, log) -> None:
@@ -1779,6 +1819,10 @@ class FalkorProjection(
         # return dict carries no torn count. Silently swallowing a fold failure
         # would let a migration that LOST a supersession report success.
         # Preserve the contract.
+        # Strict on this path (D-14): a torn Object fold must FAIL the rebuild
+        # rather than silently leave the graph half-folded. The survivor-skip
+        # count is discarded here — `rebuild_all` has no replay counter to
+        # credit it to.
         self._flush_object_folds(object_folds, _recreate, strict=True)
 
         # ── Pass 1b fold sweep (points): cross-family re-stamp survivors ──

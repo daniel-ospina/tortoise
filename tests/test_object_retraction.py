@@ -747,26 +747,29 @@ def test_anchor_ignores_a_registration_that_created_no_node(tmp_path):
 
 
 def test_survivor_anchor_cross_key_disagreement_is_documented(tmp_path):
-    """PINS an acknowledged ambiguity in the `max(by_id, by_name)` anchor
-    (cycle 5, Reviewer #4). When a fold's `id` and `name` resolve to DIFFERENT
-    registrations, the max across keys can drop a fold whose id-target was
-    never re-created:
+    """PINS the name-preferred anchor rule on the CROSS-KEY shape.
 
         OR(iA, NA)@0,  RT(iA, NB)@1,  OR(iB, NB)@2
-        -> max(by_id['iA']=0, by_name['NB']=2) = 2  =>  the seq-1 fold is DROPPED
-           and iA/NA stays `live`, though its own id was never re-created.
 
-    The `max` is NOT wrong for the case it was introduced for —
-    `OR(U1,X) -> Retract(U1,X) -> OR(U2,X)`, where an ID-FIRST lookup finds the
-    stale anchor, the fold is wrongly kept, and its name fallback then stamps
-    the re-created LIVE node `retracted` (verified live, cycle 3). Both shapes
-    route through the same two lines; changing one flips the other, so the
-    behaviour is PINNED rather than silently adjusted.
+    The retraction's `id` and `name` resolve to DIFFERENT registrations. This
+    test previously pinned the OPPOSITE outcome (iA stayed `live`), because the
+    anchor was `max(last_by_id, last_by_name)`.
 
-    Reachability is low: production never emits a retraction whose id and name
-    come from different nodes — `_delete_entity` reads both from ONE
-    `MATCH (o:Object {id:$id}) RETURN o.name`. A hand-written or legacy journal
-    can produce it. Filed alongside follow-up (g) as the family's known edge.
+    **THE RULE CHANGED DELIBERATELY (#2977 code review, P1), not as a side
+    effect.** `max` across keys let a reused `id` speak for a name it does not
+    identify: `OR(U1,X) -> RT(U1,X) -> OR(U1,Y)` read the seq-2 registration of
+    the DIFFERENT name `Y` as a replacement of `X`, dropped the retraction, and
+    RESURRECTED X on all four replay engines. That shape is
+    PRODUCTION-REACHABLE via the public `EventAPI.add_object(..., id=...)`
+    explicit-id override (api.py:256-269) — see
+    `test_reused_id_under_new_name_does_not_resurrect_the_old_name`.
+
+    Object identity is the NAME (`_upsert_object` MERGEs by name), so the
+    anchor is now the name when the fold carries one, falling back to the id
+    anchors only for a keyless fold. On THIS shape the name is `NB`, whose
+    first registration is the seq-2 one: `2 < 1 < 2` is false, so the seq-1
+    fold APPLIES — consistent with the #2164 pinned boundary that a fold
+    emitted before its target's first registration still applies.
     """
     events = tmp_path / "events"; events.mkdir(exist_ok=True)
     log = EventLog(str(events / "events.jsonl"))
@@ -778,16 +781,59 @@ def test_survivor_anchor_cross_key_disagreement_is_documented(tmp_path):
     log.append({"type": "ObjectRegistered", "id": "iB", "name": "NB"})
     proj = _drive("rebuild_all", tmp_path, events, "iA")
     try:
-        # PINNED CURRENT BEHAVIOUR: the cross-key max drops the seq-1 fold, so
-        # iA stays live. If this assertion starts failing, the anchor rule
-        # changed — decide deliberately and update Surface Map row 6 + (g).
+        # The name anchor resolves to the seq-2 registration, which is AFTER
+        # the fold, so `first < seq < last` cannot hold and the fold applies.
+        # The retraction's match-by-id then finds iA (live, non-terminal).
         assert proj.g.query(
             "MATCH (o:Object {id:'iA'}) RETURN o.status"
-        ).result_set[0][0] == "live", (
-            "the cross-key max drops the seq-1 fold (documented ambiguity) — "
-            "a change here must be a deliberate decision, not a side effect")
+        ).result_set[0][0] == "retracted", (
+            "name-preferred anchor: `NB` first registers at seq 2, so the seq-1 "
+            "fold applies (pre-first-fold boundary, #2164). A change here must "
+            "be a deliberate decision — see this docstring and Surface Map row 6")
     finally:
         proj.close()
+
+
+def test_reused_id_under_new_name_does_not_resurrect_the_old_name(tmp_path):
+    """P1 REGRESSION (#2977 code review). The `max(last_by_id, last_by_name)`
+    anchor read a reused `id` as a replacement of a DIFFERENT name:
+
+        OR(U1, X)@0,  RT(U1, X)@1,  OR(U1, Y)@2
+
+    `_last = max(last_by_id['U1']=2, last_by_name['X']=0) = 2` => `0 < 1 < 2`
+    held, the seq-1 retraction was DROPPED, and `X` resurrected as `live` on
+    every replay engine — #2977's own defect direction, i.e. the exact bug this
+    whole change exists to fix, reintroduced on a shape the `max` could not
+    distinguish. `X` was NEVER re-registered; the seq-2 registration is a
+    different Object that merely reuses the id.
+
+    PRODUCTION-REACHABLE: `EventAPI.add_object(name, kind, id=...)` accepts an
+    explicit id (api.py:256-269), so the id/name 1:1 relation `_entity_name_id`
+    normally guarantees is not an invariant. Measured live before the fix:
+    live `[('U1','Y','live')]` vs all four replay engines
+    `[('U1','X','live'), ('U1','Y','live')]`.
+
+    The name is the identity (`_upsert_object` MERGEs by name), so the anchor
+    is name-preferred and X's last registration is seq 0 — `0 < 1 < 0` is
+    false, the fold applies, and X stays retracted.
+    """
+    events = tmp_path / "events"; events.mkdir(exist_ok=True)
+    log = EventLog(str(events / "events.jsonl"))
+    log.append({"type": "ObjectRegistered", "id": "U1", "name": "X"})
+    log.append({"type": "ObjectRetracted", "id": "U1", "name": "X", "ts": "T1"})
+    log.append({"type": "ObjectRegistered", "id": "U1", "name": "Y"})
+    for engine in ("rebuild_all", "rebuild", "recover_from_log"):
+        proj = _drive(engine, tmp_path, events, "U1")
+        try:
+            rows = proj.g.query(
+                "MATCH (o:Object) RETURN o.name, o.status ORDER BY o.name"
+            ).result_set
+            assert ["X", "retracted"] in [list(r) for r in rows], (
+                f"{engine}: X was never re-registered — the reused id 'U1' must "
+                f"not count as a replacement of the name 'X' (#2977 P1). "
+                f"Got {rows}")
+        finally:
+            proj.close()
 
 
 def test_delete_recreate_replays_live(tmp_path):
@@ -1048,12 +1094,17 @@ def test_fold_sweep_handles_2500_folds(tmp_path):
         (cycle 7; an earlier ~2.9 ms/fold figure was taken at 3000 folds on a
         smaller graph and understated the 10k case).
       - VERIFY-1 measured the flush at **23.45 s for 5000 folds**; the 10k form
-        measured **124 s**. `N` is now **2500**: IMPLEMENTATION found N=5000
-        failing at **60.4 s against the 60 s bound** when the test ran inside
-        the full suite (vs 23.45 s standalone), i.e. it was flaky under load.
-        The plan's own instruction is "prefer lowering N over raising the
-        bound", and N=2500 still detects an order-of-magnitude regression
-        (2500 folds at 10x ≈ 600 s).
+        measured **124 s**. `N` was lowered to **2500** after N=5000 failed at
+        **60.4 s against a 60 s bound** inside the full suite (vs 23.45 s
+        standalone) — flaky under load.
+      - **THE WALL-CLOCK BOUND IS GONE (#2977 code review).** It failed again at
+        N=2500 inside a full-suite run, because on a shared docker FalkorDB a
+        wall-clock bound measures every concurrent suite, not this sweep.
+        Lowering `N` a third time would only move the threshold. The assertion
+        is now the COUNT this test always claimed — exactly 2500 Cypher
+        round-trips for 2500 folds (see the body). `N` stays 2500 so the count
+        stays cheap; a hang backstop at 300 s remains, with its only job being
+        to fail eventually rather than never.
       - Memory is not the constraint (0.3 MB for 3000 folds + anchors).
 
     VERIFY-2 P1 (slot 2) — THE REMNANT IS NOW DELETED, and this is worth stating
@@ -1065,11 +1116,10 @@ def test_fold_sweep_handles_2500_folds(tmp_path):
     failure mode that made 11 review cycles necessary: a logged fix that never
     reached the body. The replacement above is one measurement for one N.
 
-    The 60 s bound sees a 2.5–3x margin at N=5000. It is deliberately loose (CI
-    variance) — it exists to catch an ORDER-OF-MAGNITUDE regression, e.g. an
-    accidental nested query per fold, not a 20% drift. A batch form
-    (`WHERE o.id IN $ids` after the survivor filter runs in Python) would cut F
-    round-trips to 1; not in scope for #2977.
+    A batch form (`WHERE o.id IN $ids` after the survivor filter runs in
+    Python) would cut F round-trips to 1; not in scope for #2977, and if it
+    lands the COUNT assertion must be updated deliberately rather than reverted
+    to a timing bound.
 
     CYCLE 5 — THE SETUP MUST NOT USE `_upsert_object`. That helper calls
     `compute_embedding(name)` unconditionally, so seeding 10k nodes this way is
@@ -1113,12 +1163,50 @@ def test_fold_sweep_handles_2500_folds(tmp_path):
                 "status: 'live'})",
                 params={"rows": [{"id": f"o{i}", "name": f"n{i}"}
                                   for i in range(start, min(start + BATCH, 2_500))]})
-        t0 = time.monotonic()
-        proj._flush_object_folds(folds, recreate)
-        elapsed = time.monotonic() - t0
-        assert elapsed < 60.0, (
-            f"fold sweep took {elapsed:.1f}s for 2.5k folds — an order-of-magnitude "
-            f"regression; consider batching")
+        # ── THE REAL INVARIANT IS COUNTED, NOT TIMED ─────────────────────────
+        # This test's whole claim is "ONE Cypher round-trip per surviving fold"
+        # — an O(n) check. It was previously asserted with a WALL-CLOCK bound,
+        # which is not that claim: on a shared docker FalkorDB it also measures
+        # every other suite running concurrently. It was recalibrated twice
+        # (N=10000 -> 5000 at 60.4s vs a 60s bound; then 5000 -> 2500) and still
+        # failed at N=2500 inside a full-suite run. Lowering N a third time
+        # would only move the threshold, so the bound is replaced by a COUNT.
+        #
+        # A round-trip count is deterministic and load-independent: a
+        # re-introduced nested query per fold makes it 2N, and a batch rewrite
+        # makes it 1 or N/BATCH — both caught exactly, with no flakiness. A
+        # generous wall-clock bound is RETAINED purely as a pathologically-hung
+        # backstop, where its only job is to fail eventually rather than never.
+        class _CountingGraph:
+            def __init__(self, inner):
+                self._inner = inner
+                self.n_queries = 0
+            def query(self, q, **kw):
+                self.n_queries += 1
+                return self._inner.query(q, **kw)
+
+        counting = _CountingGraph(proj.g)
+        proj.g = counting
+        try:
+            t0 = time.monotonic()
+            proj._flush_object_folds(folds, recreate)
+            elapsed = time.monotonic() - t0
+        finally:
+            proj.g = counting._inner
+
+        # ONE round-trip per surviving fold, and NO fold is survivor-dropped
+        # here (each name registers at its own even seq and never again), so
+        # N folds => exactly N queries.
+        assert counting.n_queries == 2_500, (
+            f"the sweep issued {counting.n_queries} Cypher round-trips for 2500 "
+            f"folds — expected exactly 2500 (one per surviving fold). A multiple "
+            f"of N means a query was re-introduced per fold (e.g. a nested "
+            f"lookup); 1 or N/batch means it was batched and THIS COUNT needs "
+            f"updating deliberately, not the batched form reverted.")
+        assert elapsed < 300.0, (
+            f"fold sweep HUNG: {elapsed:.1f}s for 2.5k folds at the correct "
+            f"round-trip count (2500). This is a hang backstop, not a perf "
+            f"gate — do NOT lower it; assert n_queries instead")
     finally:
         # `from_uri(DB)` targets the SHARED session graph (see the Lane note) —
         # leaving 10k :Object nodes behind would poison every later test in the
