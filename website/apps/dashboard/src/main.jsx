@@ -3,7 +3,7 @@ import { createRoot } from 'react-dom/client'
 import './index.css'
 // #1623: plan display data (build-time import of product/pricing.json).
 import { planOptions, STATUS_LABELS, TIER_LABELS } from './pricing.js'
-import { CANONICAL_MCP_URL, HARNESS_CAPTURE_INSTALL, HARNESS_CAPTURE_REASON, HARNESS_CAPTURE_STATUS_LABEL, HARNESS_CAPTURE_SUPPORT, HARNESS_CONTINUE_LABEL, HARNESS_COPY_LABEL, HARNESS_FAMILIES, HARNESS_INSTALL, HARNESS_INTRO, HARNESS_NAMES, HARNESS_OAUTH, HARNESS_ORDER, HARNESS_PERSIST, HARNESS_SELF_INSTALL, HARNESS_SKILLS, HARNESS_SKILLLESS, HARNESS_SKILLS_IN_PROMPT, HARNESS_SKILLS_IN_STEPS, HARNESS_STEPS, SKILLS_INSTALL_URL, UNIVERSAL_COMMAND, WORKFLOWS_PROMPT, harnessDisplayName, harnessFamilyOf, preferredSurface } from './harnesses.js'
+import { CANONICAL_MCP_URL, HARNESS_CAPTURE_INSTALL, HARNESS_CAPTURE_REASON, HARNESS_CAPTURE_STATUS_LABEL, HARNESS_CAPTURE_SUPPORT, HARNESS_CONTINUE_LABEL, HARNESS_COPY_LABEL, HARNESS_FAMILIES, HARNESS_INSTALL, HARNESS_INTRO, HARNESS_NAMES, HARNESS_OAUTH, HARNESS_ORDER, HARNESS_PERSIST, HARNESS_SELF_INSTALL, HARNESS_SKILLS, HARNESS_SKILLLESS, HARNESS_SKILLS_IN_PROMPT, HARNESS_SKILLS_IN_STEPS, HARNESS_STEPS, MCP_URL, SKILLS_INSTALL_URL, UNIVERSAL_COMMAND, WORKFLOWS_PROMPT, harnessDisplayName, harnessFamilyOf, preferredSurface } from './harnesses.js'
 // #1728 Slice 3 (Tasks 16-17): the SHARED 4-state capture-status derivation
 // (off → install-pending → waiting → active, probe-driven) — pure, node --test
 // unit-tested (captureStatus.test.js). #1927: the re-ask gate predicate was
@@ -929,7 +929,10 @@ function WizardBlock({ step, title, children }) {
 }
 
 function wizardPromptText(harness, step, key, mode) {
-  const url = 'https://api.premiselabs.co/mcp/'
+  // #2865: the keyed URL comes from harnesses.js — a third hardcoded copy
+  // here would re-create exactly the drift the MCP_URL/CANONICAL_MCP_URL
+  // split exists to prevent.
+  const url = MCP_URL
   const docs = 'Docs: https://tortoise.premiselabs.co/docs'
   const keyLine = mode === 'included' ? `Key: ${key}` : 'I\'ll give you the API key when you need it.'
   const twoStepNote = 'Tell me when to restart'
@@ -6586,7 +6589,7 @@ function claimIntentInFlight() {
                               <li>Pick the Organization you&apos;re onboarding.</li>
                             </ol>
                             <p className="wizard-note">
-                              The <code>tortoise_*</code> tools appear once you authorize. The authorization belongs to your Tortoise account, so it can be revoked any time from Settings → Connected apps in the dashboard.{web ? ' Claude connects from Anthropic\u2019s cloud — nothing is stored on a local machine.' : ''}
+                              The <code>tortoise_*</code> tools appear once you authorize. The authorization belongs to your Tortoise account — remove the Tortoise connector any time in {web ? 'claude.ai' : 'Claude Desktop'} → Settings → Connectors.{web ? ' Claude connects from Anthropic\u2019s cloud — nothing is stored on a local machine.' : ''}
                             </p>
                           </>
                         )
@@ -6769,8 +6772,9 @@ function claimIntentInFlight() {
                   ) : (
                     <div className="harness">
                       {/* #2865: the ONLY remaining body here is the mint-cap
-                          remedy (capNotice is set solely by a 402 from
-                          wizardMintDurableKey), so the pre-#2865 member arm —
+                          remedy (capNotice is reachable only for owner/admins
+                          — a 402 from the Keys-tab create/rotate or the
+                          wizard mint), so the pre-#2865 member arm —
                           "Only owners and admins can create API keys…" above a
                           paste row — is gone: members now reach the chooser
                           above and get the paste escape on a keyed leaf. */}

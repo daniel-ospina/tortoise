@@ -5,7 +5,7 @@
 // (claude / codex / codexDesktop / cursor / pi) register this slashed form
 // deliberately: it is a #984-era convention pinned by six assertions in
 // tests/test_harness_mcp_config.py. It is NOT the Claude connector URL.
-const MCP_URL = 'https://api.premiselabs.co/mcp/'
+export const MCP_URL = 'https://api.premiselabs.co/mcp/'
 
 // #2865 (lifted from #2864's plan, Task 2 Step 3): the CANONICAL CONNECTOR
 // URL — no trailing slash. This is the exact value of the OAuth resource
