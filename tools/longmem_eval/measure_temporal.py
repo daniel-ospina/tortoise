@@ -1055,6 +1055,136 @@ ARM_POOL_LIMIT: dict[str, int] = {
 #: The arm that supplies the baseline 2x2 (optionally overridden).
 BASELINE_ARM = "A-default"
 
+#: The #2976 promoted lever's arm id in ARM_TABLE ("the one measured lever").
+RERANK_ARM = "applied-rerank"
+
+
+def rerank_arm() -> dict:
+    """The pre-registered reranked arm row (the #2976 product lever)."""
+    for arm in ARM_TABLE:
+        if arm["id"] == RERANK_ARM:
+            return dict(arm)
+    raise KeyError(RERANK_ARM)  # pragma: no cover — arm table is module data
+
+
+def is_answerable_qid(
+    qid: str | None,
+    *,
+    abs_controls: tuple[str, ...] | None = None,
+) -> bool:
+    """The answerable denominator predicate: abstention-DESIGN questions are
+    excluded from the answerable-correct headline (refusing is correct).
+
+    ``abs_controls`` defaults to the module constant at CALL time (never a
+    def-time binding) so a test/patch of ``ABS_CONTROLS`` is honored — the
+    same late-binding discipline as ``load_scorer``'s seams."""
+    controls = ABS_CONTROLS if abs_controls is None else abs_controls
+    return not (qid in controls or str(qid or "").endswith("_abs"))
+
+
+def rerank_arm_measurement(
+    outcomes: list[dict], *,
+    baseline_outcomes: list[dict] | None = None,
+    abs_controls: tuple[str, ...] | None = None,
+) -> dict:
+    """Eval-lane measurement hook (issue #2976): the reranked arm's two
+    headline numbers on the 55-Q temporal subset — GOLD-EVIDENCE ADMISSION
+    and ANSWERABLE-CORRECT — plus the baseline delta when baseline outcomes
+    are supplied.
+
+    Pure over committed outcome rows (no run, no DB, no network): the same
+    rows the run emits (``measure_facts.gold_admitted_ids`` for admission,
+    the judge ``label`` for correctness). The answerable denominator holds
+    JUDGED rows only — non-bool labels (retrieval-only runs / missing judge
+    labels) are reported separately as ``unjudged_n``, never counted as
+    wrong. The abstention-DESIGN ``_abs`` controls are excluded from the
+    answerable denominator (their refusal is the correct answer), matching
+    ``classify_outcome``'s split. This is the hook the #2976 reranked arm is
+    read through; the arm itself runs via
+    ``run_one_arm(rerank_arm(), ...)`` / ``run_arms(arms=(rerank_arm(),))``
+    on the ``deterministic_subset`` rows.
+    """
+
+    controls = ABS_CONTROLS if abs_controls is None else abs_controls
+
+    def _summarize(rows: list[dict]) -> dict:
+        # Only JUDGED rows enter the answerable denominator: a non-bool label
+        # (a retrieval-only run, or a missing/tampered judge label) is NOT a
+        # wrong answer — counting it as one would deflate the headline the
+        # hook exists to report. Mirrors ``_totals`` / ``report`` shape gate.
+        answerable = [o for o in rows
+                      if isinstance(o.get("label"), bool)
+                      and is_answerable_qid(o.get("question_id"),
+                                            abs_controls=controls)]
+        # Gold admission is only READABLE where the facts gate ran: a row
+        # with no ``measure_facts`` (facts gate OFF — the plain run_main
+        # shape) is indistinguishable from "gold not admitted", so it is
+        # reported as unmeasured, never silently as a miss.
+        unmeasured = [o for o in rows
+                      if not isinstance(o.get("measure_facts"), dict)]
+        return {
+            "n": len(rows),
+            "unjudged_n": sum(1 for o in rows
+                              if not isinstance(o.get("label"), bool)),
+            "unmeasured_n": len(unmeasured),
+            "gold_admitted": sum(
+                1 for o in rows
+                if (o.get("measure_facts") or {}).get("gold_admitted_ids")),
+            "answerable_n": len(answerable),
+            "answerable_correct": sum(
+                1 for o in answerable if o.get("label") is True),
+        }
+
+    arm = _summarize(outcomes)
+    result: dict = {"arm": RERANK_ARM, **arm}
+    if baseline_outcomes is not None:
+        base = _summarize(baseline_outcomes)
+        result["baseline"] = base
+        result["delta"] = {
+            "gold_admitted": arm["gold_admitted"] - base["gold_admitted"],
+            "answerable_correct": (arm["answerable_correct"]
+                                   - base["answerable_correct"]),
+            # The gold-admission delta is only interpretable when the facts
+            # gate ran on BOTH arms; a facts-off baseline reads as 0 admitted
+            # and would inflate the delta by the full arm count.
+            "gold_admitted_interpretable": bool(
+                arm["unmeasured_n"] == 0 and base["unmeasured_n"] == 0),
+        }
+    return result
+
+
+def _run_outcomes(result: dict | None) -> list[dict]:
+    """Outcome rows from a ``run_main`` result, tolerating both the flat and
+    the ``report``-wrapped shapes (never a KeyError — an unknown shape reads
+    as an empty measurement, which the caller reports as such)."""
+    for candidate in (result or {}, (result or {}).get("report") or {}):
+        outs = candidate.get("outcomes")
+        if isinstance(outs, list):
+            return outs
+    return []
+
+
+def run_reranked_arm(
+    *, data, arm_dir, output,
+    split: str = "s", limit: int | None = None,
+    mock: bool = False, base_argv: tuple = (),
+) -> dict:
+    """Run the pre-registered reranked arm on the 55-Q temporal subset and
+    return its #2976 measurement (gold admission + answerable-correct).
+
+    Thin wrapper over ``run_one_arm`` (the committed driver — checkpoint,
+    watchdog, facts gate all reused), so the reranked arm is runnable
+    without hand-assembling the arm table. ``--limit`` should be applied by
+    the caller to the ``deterministic_subset`` materialization.
+    """
+    result = run_one_arm(
+        rerank_arm(), data=data, arm_dir=arm_dir, output=output,
+        split=split, limit=limit, mock=mock, base_argv=base_argv)
+    outcomes = _run_outcomes(result)
+    return {"arm": RERANK_ARM,
+            "measurement": rerank_arm_measurement(outcomes),
+            "outcome_count": len(outcomes)}
+
 
 def gold_undated(instance: dict) -> bool:
     """The derivable structural-absence signal (plan Task 3 sub-class iv):

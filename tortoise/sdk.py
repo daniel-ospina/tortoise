@@ -13095,7 +13095,9 @@ class TortoiseSDK:
             assembly caps — raising only the assemble cap changes nothing).
           * A7 rerank — ``TORTOISE_ASK_RERANK`` (default OFF, phase 2):
             cross-encoder + MMR port (tortoise/rerank.py), degrade-to-
-            current contract.
+            current contract + a context/token budget guard (#2976): a
+            reranked set over the 8000-token / 32 KiB caps is refused whole
+            (unreranked order), never silently truncated.
           * A8 evidence-package assembly (Slice A #2683, epic #2080) —
             ``TORTOISE_ASK_EVIDENCE_ASSEMBLY`` (default OFF, fail-safe):
             collapses a distilled point's own source raw chunks/turns into
@@ -13274,11 +13276,19 @@ class TortoiseSDK:
                     )
                 # A7 (#2070): cross-encoder + MMR rerank (env-gated, default
                 # OFF — phase 2). Degrade-to-current: any failure keeps the
-                # deduped pool untouched; the rerank never raises.
+                # deduped pool untouched; the rerank never raises. Budget
+                # guard (#2976): the measured lever costs ~6.6x context, so a
+                # reranked set that overruns the SAME 8000-token / 32 KiB caps
+                # ``assemble_context`` enforces is refused WHOLE — degrade to
+                # the unreranked order (declared in the stats), never a silent
+                # truncation of the reranked set.
                 from tortoise.rerank import ask_lane_rerank
                 deduped, _rerank_stats = ask_lane_rerank(
                     question, deduped, proj=self._get_proj(),
-                    top_k=caps["context_item_cap"])
+                    top_k=caps["context_item_cap"],
+                    max_context_tokens=caps["context_token_cap"],
+                    max_context_bytes=32768,
+                    question_date=question_date)
                 # A8 (Slice A #2683): package the evidence pool BEFORE the
                 # reader window fill — a distilled point's own source raw
                 # chunks/turns collapse to one package entry, cross-item

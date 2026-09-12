@@ -145,9 +145,17 @@ measurement justifies a change.
   nothing. Measurement-gated: defaults stay OFF until the runbook
   baseline justifies a raise.
 - **A7 `TORTOISE_ASK_RERANK` (default OFF):** gated phase-2 product
-  cross-encoder rerank (eval R6 port, `tortoise/rerank.py`). Truthy-only;
-  needs the `embeddings` extra. Degrades to untouched on any scorer
-  failure (never raises).
+  cross-encoder rerank (eval R6 port, `tortoise/rerank.py` — the ONE
+  implementation, re-exported by the eval lane). Truthy-only; needs the
+  `embeddings` extra. Degrades to untouched on any scorer failure (never
+  raises). Context/token budget guard (#2976): the measured lever costs
+  ~6.6× context, so a reranked set over the SAME 8000-token / 32 KiB caps
+  `assemble_context` enforces is refused WHOLE — the pool degrades to the
+  unreranked order with a declared `reranked-set-exceeds-context-budget`
+  reason (logged), never a silent truncation of the reranked set.
+  Pre-packaging note: the guard runs before the A8 evidence package, which
+  can only shrink the pool — so the guard is deliberately conservative (it
+  may over-refuse, never under-refuse).
 - **Vector leg (A2):** a documented runtime requirement for ask quality —
   the lexical-trio retrieval class needs the `embeddings` extra. NEVER
   enforced: a degraded lane keeps `retrieval_degraded=true` honestly (no
