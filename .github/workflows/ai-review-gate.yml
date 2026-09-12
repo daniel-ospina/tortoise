@@ -4,7 +4,10 @@ name: ai-review-gate
 # Branch protection requires the `ai-review-gate` status check on every PR to
 # main. It passes only when the PR body carries a FRESH, SIGNED AI-review
 # evidence marker produced by record-review.sh:
-#   review recorded: reviews/<PR>.json verdict=clean @ <full-sha> (<owner/repo>) sig=<hmac>
+#   review recorded: reviews/<PR>.json verdict=clean @ <full-sha>[ diff=<sha256-of-diff>] (<owner/repo>) sig=<hmac>
+# The optional `diff=` segment (issue #2982) is part of the SIGNED text, so
+# every regex here must accept it — a regex that does not rejects correctly
+# signed evidence without ever reaching the HMAC check (issue #3076).
 # The signature is HMAC-SHA256 over the marker text, keyed by the
 # AI_REVIEW_GATE_KEY repo secret (the agent machine holds the same key at
 # ~/.pi/agent/.ai-review-gate-key). A marker without a valid signature cannot
@@ -67,43 +70,38 @@ jobs:
           fetched="$(gh api "repos/${REPO_NAME}/pulls/${PR_NUMBER}" --jq .body 2>/dev/null || true)"
           [ -n "$fetched" ] && [ "$fetched" != "null" ] && body="$fetched"
 
-          # Fresh marker = one whose recorded FULL sha matches the current head,
-          # for this repo, correctly signed. Escape ERE metachars in the repo
-          # name before interpolating into the pattern.
+          # A marker is acceptable when its recorded FULL sha matches the
+          # current head, it names THIS repo, and it carries a valid HMAC.
+          # Escape ERE metachars in the repo name before interpolating.
           expected="${HEAD_SHA}"
           repo_esc="$(printf '%s' "$REPO_NAME" | sed 's/[.[\*^$()+?{|]/\\&/g')"
 
-          # Collect ALL candidate markers for this PR at this head sha and pass
-          # if ANY has a valid signature (robust to decoy lines and re-review
-          # accumulation).
-          candidates="$(printf '%s\n' "$body" \
-            | grep -E "^review recorded: reviews/${PR_NUMBER}\.json verdict=clean(-micro)? @ ${expected} \(${repo_esc}\) sig=[0-9a-f]{64}$" \
-            || true)"
+          # ── Accepted marker shapes (#3076) ───────────────────────────────
+          # record-review.sh signs the marker text and appends " sig=<hmac>".
+          # BOTH of these are signed, so BOTH must be accepted — the optional
+          # " diff=<64hex>" segment is inside the HMAC input:
+          #   … verdict=clean @ <40hex> (<owner/repo>) sig=<64hex>             (legacy)
+          #   … verdict=clean @ <40hex> diff=<64hex> (<owner/repo>) sig=<64hex> (#2982)
+          # A regex missing the optional diff= segment rejects every
+          # correctly-signed post-#2982 marker WITHOUT ever reaching the HMAC
+          # check. That was #3076: the gate fell through to the diagnostic
+          # branch and reported the misleading "not signed or not for <repo>",
+          # which trained operators/agents to merge with --admin.
+          #
+          # NOTE: diff= is covered by the signature and accepted here, but this
+          # gate does not yet match it against the PR's live diff — acceptance
+          # is still bound to the recorded @ <head> sha. The diff-keyed
+          # carry-forward arm (stale head accepted iff diff= equals the live
+          # diff hash) is issue #2982 / PR #3057, deliberately out of scope
+          # here so acceptance stays exactly as strong as it was per-head.
+          sha_ok_re="^review recorded: reviews/${PR_NUMBER}\.json verdict=clean(-micro)? @ ${expected}( diff=[0-9a-f]{64})? \(${repo_esc}\) sig=[0-9a-f]{64}$"
+
+          candidates="$(printf '%s\n' "$body" | grep -E "$sha_ok_re" || true)"
           candidates="$(printf '%s\n' "$candidates" | sed '/^$/d')"
 
-          if [ -z "$candidates" ]; then
-            latest="$(printf '%s\n' "$body" \
-              | grep -E "^review recorded: reviews/${PR_NUMBER}\.json verdict=clean(-micro)? @ " \
-              | tail -n 1 || true)"
-            if [ -z "$latest" ]; then
-              echo "::error::No AI review evidence found in PR #${PR_NUMBER} body."
-              echo "::error::The code-review gate requires a recorded AI review. Run:"
-              echo "::error::  record-review.sh ${PR_NUMBER} ${HEAD_SHA} clean ${REPO_NAME}"
-            else
-              latest_sha="$(printf '%s' "$latest" | sed -E 's/.*@ ([0-9a-f]{40}) .*/\1/')"
-              if [ "$latest_sha" = "$expected" ]; then
-                echo "::error::AI review evidence for the current head exists but is not signed or not for ${REPO_NAME}."
-                echo "::error::Re-record with a record-review.sh that has AI_REVIEW_GATE_KEY configured:"
-                echo "::error::  record-review.sh ${PR_NUMBER} ${HEAD_SHA} clean ${REPO_NAME}"
-              else
-                echo "::error::AI review evidence is stale: latest recorded ${latest_sha} — expected ${expected}."
-                echo "::error::Re-run the code-review skill after the latest push, then re-record:"
-                echo "::error::  record-review.sh ${PR_NUMBER} ${HEAD_SHA} clean ${REPO_NAME}"
-              fi
-            fi
-            exit 1
-          fi
-
+          # ── Verify the HMAC over the marker text, which INCLUDES diff= ────
+          # Pass if ANY candidate (decoy lines / accumulated re-reviews) has a
+          # valid signature.
           marker=""
           while IFS= read -r line; do
             [ -z "$line" ] && continue
@@ -115,9 +113,122 @@ jobs:
             fi
           done <<< "$candidates"
 
+          if [ -z "$marker" ] && [ -n "$candidates" ]; then
+            # Right shape, right head, right repo, signed — but no HMAC
+            # verifies. Either the recording key is not the repo secret, or
+            # the signed text differs from the text reconstructed here. Print
+            # sha256 prefixes of both candidate reconstructions (hashes only —
+            # no secret material) so the operator can tell WHICH, instead of
+            # guessing between "fix the key" and "fix the marker shape".
+            echo "::error::AI review marker HMAC mismatch — the signature of every well-formed evidence marker for the current head does not verify against AI_REVIEW_GATE_KEY."
+            while IFS= read -r line; do
+              [ -z "$line" ] && continue
+              text="${line% sig=*}"
+              text_sha="$(printf '%s' "$text" | openssl dgst -sha256 | awk '{print $NF}')"
+              echo "::error::  text-from-pr-body sha256=${text_sha:0:12}"
+              # The same fields WITHOUT the diff= segment — the legacy text an
+              # older record-review.sh would have signed. If the recorder's
+              # signed text hashes to THIS prefix, the two sides disagree on
+              # the marker shape, not on the key.
+              legacy_text="$(printf '%s' "$text" | sed -E 's/ diff=[0-9a-f]{64}( \(.*\))$/\1/')"
+              if [ "$legacy_text" != "$text" ]; then
+                legacy_sha="$(printf '%s' "$legacy_text" | openssl dgst -sha256 | awk '{print $NF}')"
+                echo "::error::  legacy-shape-image sha256=${legacy_sha:0:12}  (same fields, diff= segment removed)"
+              fi
+            done <<< "$candidates"
+            echo "::error::Compare on the recording machine: printf '%s' '<the exact signed marker text>' | openssl dgst -sha256"
+            echo "::error::Same text + different hash → the recording key is not AI_REVIEW_GATE_KEY. Different text → producer/gate marker-shape drift."
+            echo "::error::Re-record on the final head once resolved:"
+            echo "::error::  record-review.sh ${PR_NUMBER} ${HEAD_SHA} clean ${REPO_NAME}"
+            exit 1
+          fi
+
           if [ -z "$marker" ]; then
-            echo "::error::AI review marker signature mismatch — none of the markers for the current head verify."
-            echo "::error::Evidence was not produced by record-review.sh with the matching key. Re-run the code-review skill and re-record:"
+            # No acceptable marker. Classify WHY — the operator must not have
+            # to guess between "re-record", "fix the repo field", and "fix the
+            # key". Priority: unsigned → wrong repo → malformed → stale.
+            all_lines="$(printf '%s\n' "$body" \
+              | grep -E "^review recorded: reviews/${PR_NUMBER}\.json verdict=clean(-micro)? @ " || true)"
+            all_lines="$(printf '%s\n' "$all_lines" | sed '/^$/d')"
+
+            if [ -z "$all_lines" ]; then
+              echo "::error::No AI review evidence found in PR #${PR_NUMBER} body."
+              echo "::error::The code-review gate requires a recorded AI review. Run:"
+              echo "::error::  record-review.sh ${PR_NUMBER} ${HEAD_SHA} clean ${REPO_NAME}"
+              exit 1
+            fi
+
+            head_unsigned=""
+            head_wrong_repo=""
+            head_malformed=""
+            latest_sha=""
+            latest_raw=""
+            while IFS= read -r line; do
+              [ -z "$line" ] && continue
+              latest_raw="$line"
+              # Per-line sha. A line with NO well-formed 40-hex sha must not
+              # inherit the previous line's sha (it would then be attributed to
+              # the current head and misclassified).
+              line_sha=""
+              if [[ "$line" =~ @\ ([0-9a-f]{40}) ]]; then line_sha="${BASH_REMATCH[1]}"; fi
+              if [ -n "$line_sha" ]; then latest_sha="$line_sha"; fi
+              [ -n "$line_sha" ] && [ "$line_sha" = "$expected" ] || continue
+              # "Unsigned" means the line carries NO 'sig=' token at all. A line
+              # that HAS one but fails the canonical shape (trailing whitespace /
+              # CRLF / junk after the sig / a damaged delimiter / non-hex sig) is
+              # MALFORMED, not unsigned — reporting those as "unsigned" is the
+              # same misleading-diagnostic trap #3076 is about.
+              if [[ "$line" != *"sig="* ]]; then
+                if [ -z "$head_unsigned" ]; then head_unsigned="$line"; fi
+                continue
+              fi
+              # Extract the repo ONLY when the text matches the marker grammar
+              # (so a trailing parenthetical on a damaged line is not mistaken
+              # for the repo). Group 3 is the repo segment.
+              l_text="${line% sig=*}"
+              l_repo=""
+              if [[ "$l_text" =~ ^review\ recorded:\ reviews/[0-9]+\.json\ verdict=clean(-micro)?\ @\ [0-9a-f]{40}(\ diff=[0-9a-f]{64})?\ \(([^()]*)\)$ ]]; then
+                l_repo="${BASH_REMATCH[3]}"
+              fi
+              if [ -n "$l_repo" ] && [ "$l_repo" != "$REPO_NAME" ]; then
+                if [ -z "$head_wrong_repo" ]; then head_wrong_repo="$l_repo"; fi
+              else
+                if [ -z "$head_malformed" ]; then head_malformed="$line"; fi
+              fi
+            done <<< "$all_lines"
+
+            if [ -n "$head_unsigned" ]; then
+              echo "::error::AI review evidence for the current head is UNSIGNED — the marker carries no 'sig=<hmac>' segment, and the PR body is editable, so it cannot be trusted."
+              echo "::error::  marker=${head_unsigned}"
+              echo "::error::Re-record with a record-review.sh that has AI_REVIEW_GATE_KEY configured:"
+              echo "::error::  record-review.sh ${PR_NUMBER} ${HEAD_SHA} clean ${REPO_NAME}"
+              exit 1
+            fi
+            if [ -n "$head_wrong_repo" ]; then
+              echo "::error::AI review evidence for the current head exists but was recorded for '${head_wrong_repo}', not '${REPO_NAME}' — evidence is bound to the repo it was recorded for."
+              echo "::error::Re-record against this repo:"
+              echo "::error::  record-review.sh ${PR_NUMBER} ${HEAD_SHA} clean ${REPO_NAME}"
+              exit 1
+            fi
+            if [ -n "$head_malformed" ]; then
+              m_sha="$(printf '%s' "${head_malformed% sig=*}" | openssl dgst -sha256 | awk '{print $NF}')"
+              echo "::error::AI review evidence for the current head carries a signature but its marker text is not a shape this gate accepts — malformed marker (producer/gate contract drift, or a damaged line)."
+              echo "::error::  expected: review recorded: reviews/<PR>.json verdict=clean(-micro)? @ <40-hex-sha>[ diff=<64-hex>] (<owner/repo>) sig=<64-hex>"
+              echo "::error::  sha256=${m_sha:0:12}"
+              echo "::error::  marker=${head_malformed}"
+              echo "::error::Re-record on the final head:"
+              echo "::error::  record-review.sh ${PR_NUMBER} ${HEAD_SHA} clean ${REPO_NAME}"
+              exit 1
+            fi
+            if [ -z "$latest_sha" ]; then
+              echo "::error::AI review evidence in PR #${PR_NUMBER} carries no well-formed 40-hex recorded sha — it cannot be bound to this head."
+              echo "::error::  marker=${latest_raw}"
+              echo "::error::Re-record on the final head:"
+              echo "::error::  record-review.sh ${PR_NUMBER} ${HEAD_SHA} clean ${REPO_NAME}"
+              exit 1
+            fi
+            echo "::error::AI review evidence is stale: latest recorded ${latest_sha} — expected ${expected}."
+            echo "::error::Re-run the code-review skill after the latest push, then re-record:"
             echo "::error::  record-review.sh ${PR_NUMBER} ${HEAD_SHA} clean ${REPO_NAME}"
             exit 1
           fi
