@@ -20,17 +20,33 @@ import logging
 
 _logger = logging.getLogger(__name__)
 
-# Statuses excluded from recall_state's default OBJECT view (the #1350 fold
-# consumer). Mirrors the literal exclusion tuple in TortoiseSDK.recall_state
-# (sdk.py — "(o.get('status') or '') not in (superseded, deprecated,
-# archived, retracted)"). NOTE: this is NOT TortoiseSDK.STATE_EXCLUDED_STATUS
-# (a class attr missing 'archived' and used for the POINT pool) and NOT
-# search_engine.TERMINAL_EXCLUDED_STATUSES (adds 'outdated', which recall's
-# object view DOES surface). Keep in sync with the recall_state filter — a
-# supersession fold is only valid when a successor VISIBLE to that view
-# remains.
-_RECALL_OBJECT_EXCLUDED_STATUS = frozenset(
+# #2977: the canonical Object TERMINAL-status set. The Point family got this
+# treatment in #2490 (live.py is its single source); the Object family had only
+# the OBJECT-family literals (this one, assembly.py:1017, sdk.py:13869's inline
+# tuple) and no parity assertion at all.
+#
+# NOTE: `sdk.py STATE_EXCLUDED_STATUS` and `live.TERMINAL_EXCLUDED_STATUSES` are
+# POINT sets, not Object ones — do not fold them in here.
+OBJECT_TERMINAL_STATUSES = frozenset(
     {"superseded", "deprecated", "archived", "retracted"})
+
+# The recall view IS the canonical set (the #1350 fold consumer). The existing
+# name is kept as an ALIAS so recall_state can import it instead of duplicating
+# the literal. NOTE: still NOT TortoiseSDK.STATE_EXCLUDED_STATUS (a class attr
+# missing 'archived', used for the POINT pool) and NOT
+# search_engine.TERMINAL_EXCLUDED_STATUSES (adds 'outdated', which recall's
+# object view DOES surface). A supersession fold is only valid when a successor
+# VISIBLE to that view remains.
+_RECALL_OBJECT_EXCLUDED_STATUS = OBJECT_TERMINAL_STATUSES
+
+# The SEARCH view is deliberately NARROWER, and named so that the narrowing is a
+# recorded decision rather than an accident: the four search legs apply no
+# Object filter before #2977, and this plan adds `retracted` only. Widening to
+# the full canonical set would silently change visibility for
+# superseded/deprecated/archived across every object-search consumer — a
+# behaviour change outside this issue's target. The remaining gap is filed as a
+# follow-up in Task 7 (c).
+OBJECT_SEARCH_EXCLUDED_STATUS = frozenset({"retracted"})
 
 
 def _op_attr(op, name, default=None):

@@ -265,6 +265,33 @@ register_kind("evidence")  # used by file_decision (#133)
 # edge on a live point), NOT a stored status.
 POINT_STATUS_VALUES = frozenset({'draft', 'live', 'retracted', 'superseded', 'outdated', 'archived'})
 
+# #2977: the Object lifecycle is terminal-sticky (see the #1350 clobber guard at
+# projection/entities.py:522-524). Declared so a generic `status` write is
+# CHECKED against one list rather than silently accepted — the #2977 scope
+# flagged that `_update_entity` can already write `status='retracted'` with no
+# journal line and no `retractedAt` (the A8 loophole).
+#
+# NO STATIC DRIFT MECHANISM EXISTS, and this is recorded rather than papered
+# over. Two candidates were tried and empirically rejected:
+#   1. An AST walk. Zero hits — the writes live inside Cypher STRING literals
+#      (`"SET o.status='in_progress'"`), never in a Python assignment.
+#   2. A source-text regex over `SET <alias>.status='<lit>'` /
+#      `coalesce($st,'<lit>')`. It DOES find the real literals (`in_progress`
+#      entities.py:926, `completed` :932, `live` :513), BUT `.status` is a
+#      SHARED field name across labels, so the same scan also returns `active`
+#      (sdk.py:14690), `deleted` (:14668), `expired` (:15715), `outdated`
+#      (:14958) and `revoked` (:15667) — Subject/Source/Event/Document
+#      statuses with nothing to do with the Object vocabulary. It cannot be
+#      scoped to Objects textually.
+# Enforcement therefore lives where it genuinely does — the TWO RUNTIME GUARDS
+# (`_create_entity` and `_update_entity`). A new Object.status literal in an
+# unguarded replay writer would NOT be caught by any test today; filed as
+# follow-up (q) so the gap has an owner. Do not add a test that appears to
+# close it — both prior attempts were structurally blind.
+OBJECT_STATUS_VALUES = frozenset(
+    {"live", "in_progress", "completed", "superseded", "deprecated",
+     "archived", "retracted"})
+
 # ── #2199 decide-part calibration + baseline provenance ────────────────
 # Decision parts filed through the decide tooling (create_point / commit_ops /
 # mitigate_operator) are HUMAN-AUTHORED judgment — they carry no document
@@ -12463,11 +12490,22 @@ class TortoiseSDK:
         #     limit cut would silently shrink results when superseded/deprecated
         #     points dominate the pool. Points with no status are kept; only
         #     Point-label entities have status (operators are Points too).
-        if exclude_status and result_ids and graph_label == "Point":
+        # #2977: the Object lane is now admitted here too. `graph_label` is
+        # parameterised so the post-filter's query body reads the SAME label it
+        # was gated on — the body was hardcoded `MATCH (n:Point)`, so admitting
+        # Objects without changing it would have made the clause inert.
+        #
+        # The `try/except` pass-through wrapper is PRESERVED, and `sorted()` on
+        # both params is preserved: the ONLY functional edit is the label gate
+        # and the label interpolation. Dropping the wrapper would let a
+        # FalkorDB error propagate out of `tortoise_fts_query` / `recall_state`
+        # for Points as well as Objects — a production read-path regression
+        # outside this change's scope.
+        if exclude_status and result_ids and graph_label in ("Point", "Object"):
             try:
                 excluded = set(exclude_status)
                 status_rows = graph.query(
-                    "MATCH (n:Point) WHERE n.id IN $ids AND n.status IN $statuses "
+                    f"MATCH (n:{graph_label}) WHERE n.id IN $ids AND n.status IN $statuses "
                     "RETURN n.id",
                     params={"ids": result_ids, "statuses": sorted(excluded)},
                 ).result_set
@@ -14033,9 +14071,17 @@ class TortoiseSDK:
         # from the state view unless include_superseded brings them back).
         objects = [dict(r, entity_type="object") for r in object_results]
         if not include_superseded:
+            # #2977: import the canonical set instead of re-literalling it, so
+            # the vocabulary has ONE home. (The `include_superseded` re-admit
+            # inversion the scope flagged is closed upstream: every search leg
+            # now excludes `retracted` at the query level, so the branch above
+            # can no longer be reached with a retracted Object. Adding a second
+            # copy of the rule here that nothing can exercise would read as
+            # coverage without being any.)
+            from tortoise.commit_ops import _RECALL_OBJECT_EXCLUDED_STATUS
             objects = [o for o in objects
                        if (o.get("status") or "") not in
-                       ("superseded", "deprecated", "archived", "retracted")]
+                       _RECALL_OBJECT_EXCLUDED_STATUS]
 
         # UC1 state view: hide mitigation bookkeeping points (they are
         # surfaced ATTACHED to results as context, not standalone claims —
@@ -16031,6 +16077,40 @@ class TortoiseSDK:
         # into the event dict AFTER sanitize.
         if not _skip_sanitize:
             props = _sanitize_props(props, reject_id=True)
+        # #2977: enforce the Object status vocabulary at the LIVE CREATE funnel.
+        #
+        # Scope of this guard (stated precisely — it does NOT close every
+        # create-side lane):
+        #   * COVERED: `create_object(...)` / `create_entity(type='object')`,
+        #     i.e. every caller that reaches here. Today `**props` OVERRIDES
+        #     the `"status": "live"` literal, so `create_object(status=
+        #     'retracted')` mints a tombstone with no `retractedAt` AND journals
+        #     it — durable bad state.
+        #   * NOT covered, filed as follow-up (l):
+        #     (1) `EventAPI.add_object` emits ObjectRegistered through `_emit`
+        #         and never reaches `_create_entity`; `mining.py` emits
+        #         ObjectRegistered directly too.
+        #     (2) REPLAY does not pass through here at all — `apply()`
+        #         dispatches ObjectRegistered to `projection._upsert_object`, so
+        #         a hand-written/legacy journal line carrying
+        #         `status='retracted'` still replays into a tombstone without
+        #         `retractedAt`. That is the retrofit backlog (f).
+        #
+        # The guard is `props.get("status") is not None` — NOT `"status" in
+        # props`. An explicit `status=None` is a value the SDK accepts TODAY
+        # (the write path coalesces it to 'live'), so keying on presence would
+        # turn a working call into `ValueError: unknown Object status None`.
+        if label == "Object" and props.get("status") is not None:
+            if props["status"] == "retracted":
+                raise ValueError(
+                    "Object.status='retracted' must go through the delete lane "
+                    "(which journals ObjectRetracted and stamps retractedAt); "
+                    "creating an Object directly in that state would journal a "
+                    "tombstone with no retraction event (#2977).")
+            if props["status"] not in OBJECT_STATUS_VALUES:
+                raise ValueError(
+                    f"unknown Object status {props['status']!r}; "
+                    f"expected one of {sorted(OBJECT_STATUS_VALUES)}")
         if is_episodic is not None:
             props["is_episodic"] = is_episodic  # server-managed (explicit param only)
         proj = self._get_proj()
@@ -16083,9 +16163,12 @@ class TortoiseSDK:
         # byte-identity holds for the first canonical registration. Deletes
         # are NOT journaled (_delete_entity is a bare graph delete — the
         # journal vocabulary cannot represent deletion): a deleted canonical
-        # Object resurrects on the next rebuild, and delete→recreate mints a
-        # second "first registration" whose replay first-wins over the live
-        # incarnation (pinned as accepted by tests 14-15; #2296 scope hook).
+        # Object is JOURNALED as of #2977: `_delete_entity` emits
+        # `ObjectRetracted`, so a deleted Object replays as a `retracted`
+        # tombstone instead of resurrecting. A delete→recreate still mints a
+        # second "first registration"; the replay survivor rule (D-13) drops
+        # the pre-recreation retraction when a later registration exists, so
+        # the re-created Object stays `live` (pinned by tests 14-15).
         _journal_object_registration = False
         _journal_subject_registration = False
         # Truthy-name gate mirrors _upsert_object's persistence predicate (it
@@ -16121,11 +16204,12 @@ class TortoiseSDK:
         # is byte-identical). Subjects have no fold/sweep — the round-trip
         # byte-identity tests are the only guard. Accepted divergences mirror
         # the Object block's: re-mention prop mutations + pre-#2295-history
-        # re-mentions are live-only; deletes are NOT journaled (_delete_entity
-        # is a bare graph delete) — a deleted Subject resurrects on the next
-        # rebuild, and delete→recreate mints a second "first registration"
-        # whose replay first-wins (pinned as accepted by tests 9a/9b; #2296
-        # scope hook).
+        # re-mentions are live-only; deletes are NOT journaled for SUBJECTS
+        # (_delete_entity is a bare graph delete; #2977 added the lane for
+        # Objects only) — a deleted Subject resurrects on the next rebuild,
+        # and delete→recreate mints a second "first registration" whose
+        # replay first-wins (pinned as accepted by tests 9a/9b; #2296 scope
+        # hook).
         if (label == "Subject" and self._event_log_path
                 and event.get("name") and event.get("type") == "SubjectAdded"):
             try:
@@ -16303,6 +16387,54 @@ class TortoiseSDK:
         # canonical labels (Point/Subject/Object/Document/Source/Event).
         # Session/APIKey/Team/Tag nodes are intentionally NOT updated — legacy
         # matched them via id/eventId but no caller relies on it.
+        # #2977: resolve the label BEFORE validating. The six-label loop below
+        # runs every branch unconditionally and never reads which one matched,
+        # so a status check keyed on the loop variable fires for Points too.
+        # `'Object' IN labels(n)` (NOT labels(n)[0]) — a :Point:Object node
+        # returns ['Point','Object'], so [0] would resolve to Point and skip
+        # the Object guard (verified live).
+        #
+        # `AND NOT 'Point' IN labels(n)` is the POINT-LABEL PRECEDENCE rule:
+        # a :Point:Object node is governed by POINT_STATUS_VALUES (which allows
+        # `draft`/`outdated`, both ABSENT from OBJECT_STATUS_VALUES), so without
+        # this conjunct `update_entity(<point-object id>, status='draft')` — a
+        # previously working public call — would raise AFTER the Point branch
+        # already wrote.
+        #
+        # COST (measured, docker FalkorDB @20k nodes): this probe is UNLABELLED
+        # (`MATCH (n) WHERE ...`) because the shape it must catch is not
+        # guaranteed to carry any particular label, so it cannot use a
+        # :Object(id) index and scans — ~7.6 ms on every `update_entity` call
+        # that carries a `status`. Accepted: it runs only on status writes.
+        #
+        # CYCLE 6: match by `n.id` ONLY — NOT `n.id OR n.eventId`. Objects key
+        # on `id`; Events key on `eventId`. The `OR` form made an Event whose
+        # `eventId` collides with an unrelated Object's `id` match that Object
+        # and then reject the Event's legitimate status write.
+        if "status" in props:
+            _is_object = proj.g.query(
+                "MATCH (n) WHERE n.id = $id "
+                "  AND 'Object' IN labels(n) AND NOT 'Point' IN labels(n) "
+                "RETURN count(n) AS c",
+                params={"id": id_val},
+            ).result_set
+            # The `OBJECT_STATUS_VALUES` check must be NESTED inside the
+            # `is not None` guard, not a sibling of it — a sibling makes
+            # `update_entity(oid, status=None)`, a working call today, hit
+            # `None not in OBJECT_STATUS_VALUES` and raise.
+            if _is_object and _is_object[0][0]:
+                if props.get("status") is not None:
+                    if props["status"] == "retracted":
+                        raise ValueError(
+                            "Object.status='retracted' must go through the "
+                            "delete lane (which journals ObjectRetracted). The "
+                            "generic update path would write a tombstone with "
+                            "no retractedAt and no journal line, so it "
+                            "resurrects on the next rebuild (#2977).")
+                    if props["status"] not in OBJECT_STATUS_VALUES:
+                        raise ValueError(
+                            f"unknown Object status {props['status']!r}; "
+                            f"expected one of {sorted(OBJECT_STATUS_VALUES)}")
         # Per-label indexed writes (id OR eventId — original predicate; no url).
         # UNION cannot carry SET, so run each branch sequentially (#327).
         for label, prop in (("Point", "id"), ("Subject", "id"), ("Object", "id"),
@@ -16318,6 +16450,40 @@ class TortoiseSDK:
         # NOTE (issue #327): deletion covers only canonical entity labels —
         # Session/APIKey/Team/Tag nodes are intentionally NOT deleted (legacy
         # matched them by id/eventId; no caller relies on it).
+        #
+        # #2977: resolve the Object name and label membership BEFORE deleting.
+        # The emission below is keyed on THIS probe, never on "which loop arm
+        # deleted it": the Point arm runs first for a :Point:Object node, so an
+        # Object-arm-keyed emission silently never fires and the node
+        # resurrects from its surviving ObjectRegistered line (verified live).
+        _nm = None
+        # #2977 code review round 3 (P0): read EVERY name, not just the first.
+        # The delete arms below are `MATCH (n:{label} {id:$id}) DETACH DELETE n`
+        # — they remove EVERY node sharing the id — so taking only
+        # `_had_object[0][0]` made the journal LOSSY and this change's contract
+        # (plan Surface Map row 2: "one line per matched Object") false.
+        #
+        # The shape is PRODUCTION-REACHABLE with no raw Cypher:
+        # `tortoise/mining.py` `_reify_entities` calls
+        # `api.add_object(name, kind, id=self._object_id(name))`, and
+        # `_object_id` keys on the punctuation-STRIPPED canonical name — its own
+        # docstring records the collision `"Foo.Bar" == "FooBar"`. Two such
+        # names mint two live Objects sharing one id; `_delete_entity` then
+        # deletes both and journaled only one, so on replay the un-named sharer
+        # stayed `live` and reappeared in search/recall — #2977's own defect
+        # direction. (Before the name-preferred anchor + name-constrained id
+        # branch landed, the fold's bare id `MATCH` accidentally tombstoned
+        # every id-sharer and masked this; the constraint removed the
+        # accidental compensation and exposed the lossy journal.)
+        _had_object = proj.g.query(
+            "MATCH (o:Object {id:$id}) RETURN DISTINCT o.name",
+            params={"id": id_val}).result_set
+        # Falsy names are dropped: the anchor-seeding guard requires BOTH keys
+        # truthy (mirroring `_upsert_object`), so emitting `name=None` would
+        # create a fold that can never be survivor-matched.
+        _names = [r[0] for r in _had_object if r and r[0]] if _had_object else []
+        if _names:
+            _nm = _names[0]
         total = 0
         for label, prop in (("Point", "id"), ("Subject", "id"), ("Object", "id"),
                             ("Document", "id"), ("Source", "id"), ("Event", "eventId")):
@@ -16325,8 +16491,43 @@ class TortoiseSDK:
                 f"MATCH (n:{label} {{{prop}:$id}}) DETACH DELETE n RETURN count(n)",
                 params={"id": id_val},
             )
-            if r.result_set:
-                total += r.result_set[0][0]
+            n = (r.result_set[0][0] or 0) if r.result_set else 0
+            total += n
+            if n and label != "Object":
+                # D-9: five labels remain non-durable. The public delete_entity
+                # contract is now label-inconsistent — warn rather than stay
+                # silent. Class-wide fix: #2296.
+                #
+                # `if n` — a SUCCESSFUL removal. The earlier form
+                # `if not n and label != "Object"` fires on every arm that
+                # matched NOTHING: an Object delete emitted FIVE warnings
+                # claiming a Point/Subject/Document/Source/Event was removed, a
+                # Point delete emitted FOUR that never named the Point, and
+                # deleting a non-existent id emitted five for nothing. The
+                # signal was pure noise.
+                if self._get_event_log() is not None:
+                    _logger.warning(
+                        "delete_entity removed a %s (id=%s) with no journaled "
+                        "event — NOT durable across rebuild; see #2296",
+                        label, id_val)
+        if _had_object:
+            # Journal the removal so replay cannot resurrect the node from its
+            # surviving ObjectRegistered line. Emitted POST-delete (mirroring
+            # the ObjectRegistered lane) — a phantom retraction for a delete
+            # that never happened would replay as a tombstone for a node that
+            # was never live.
+            #
+            # ONE LINE PER MATCHED OBJECT (plan Surface Map row 2). The delete
+            # removed every id-sharer, so the journal must name every one of
+            # them or the unnamed sharers resurrect. `name=` supports the fold's
+            # id->name fallback: the _event_plain_merge stub lane mints random
+            # ulids (entities.py:887-897), so an id-only retraction orphans.
+            # When NO name is recoverable the single `name=None` line still
+            # records the id — the fold matches it by id via the keyless path.
+            # JSONL-only by design (D-7) — the ObjectRegistered precedent
+            # (#2194); NOT in _GRAPH_EVENT_TYPES.
+            for _name in (_names or [None]):
+                self._emit_event("ObjectRetracted", id=id_val, name=_name)
         return bool(total)
 
     def create_entity(self, type: str, name: str, *, is_episodic: bool | None = None,

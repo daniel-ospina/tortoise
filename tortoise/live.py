@@ -34,9 +34,12 @@ TERMINAL_EXCLUDED_STATUSES = frozenset(
     {"retracted", "superseded", "outdated", "archived", "deprecated"})
 
 
-def _terminal_excluded(clause: str) -> str:
-    """Cypher predicate: the node's status is NOT terminal AND its legacy
-    ``outdated`` flag is not true.
+def _terminal_excluded(clause: str,
+                       excluded=TERMINAL_EXCLUDED_STATUSES,
+                       *,
+                       include_outdated_flag: bool = True) -> str:
+    """Cypher predicate: the node's status is NOT terminal AND (unless
+    ``include_outdated_flag=False``) its legacy ``outdated`` flag is not true.
 
     ``clause`` is an alias-qualified status reference (``"n.status"``); the
     flag lives on the same alias (``"n.outdated"``). ``outdated=true`` is a
@@ -44,12 +47,34 @@ def _terminal_excluded(clause: str) -> str:
     leaves status untouched) so both must be excluded. Legacy nodes without a
     stored status are LIVE (the entity write path defaults
     ``coalesce($st, n.status, 'live')``), hence the NULL check.
+
+    #2977: Objects have no ``outdated`` concept, so the Object lanes pass
+    ``include_outdated_flag=False`` — otherwise an ``outdated=true`` OBJECT is
+    hidden even though no Object writer can set that flag. #2490: this is the
+    single composer used by the FOUR READ-SURFACE exclusion clauses.
+
+    Scope of that claim, stated because the wording overshot it twice: the
+    positive-direction TWIN (``_terminal_expression``, ``_alive_flag``,
+    ``is_terminal_status``) shares the same vocabulary and is NOT this
+    function; it takes no ``include_outdated_flag`` carve-out. And four further
+    EXCLUSION-direction compositions exist elsewhere (``sdk.py`` ep-dirty
+    sweep, ``sdk.py`` per-id re-mark, ``indexer/github_indexer.py``, ``sdk.py``
+    delete) — all four are ``MATCH (n:Point)``-GATED and can never be reached by
+    an ``:Object`` node, so they are registered for the vocabulary-drift class
+    only, NOT as Object-reachable sites. The one genuinely Object-reachable
+    divergent reader is the ``_ask_d8_decoration_unavailable`` reader — see
+    follow-up (j). So the accurate claim is: **this is the single composer used
+    by the four READ-SURFACE exclusion clauses — not the only exclusion
+    composition in the repo.**
     """
+    if not excluded:
+        return ""                      # audit/full-scan opt-in
     alias = clause.split(".", 1)[0] if "." in clause else clause
-    flag = f"{alias}.outdated"
-    chain = " AND ".join(f"{clause} <> '{s}'" for s in sorted(TERMINAL_EXCLUDED_STATUSES))
-    return (f"(({clause} IS NULL OR ({chain})) "
-            f"AND coalesce({flag}, false) = false)")
+    chain = " AND ".join(f"{clause} <> '{s}'" for s in sorted(excluded))
+    expr = f"(({clause} IS NULL OR ({chain}))"
+    if include_outdated_flag:
+        expr += f" AND coalesce({alias}.outdated, false) = false"
+    return expr + ")"
 
 
 # #2490 (terminal posterior freeze): a terminalized claim's posterior pins at

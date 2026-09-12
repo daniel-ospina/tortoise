@@ -42,6 +42,24 @@ def _is_real_source_url(url: str) -> bool:
     return url.startswith(("http://", "https://"))
 
 
+def _classify(result, cas: bool) -> tuple:
+    """Shared (folded, matched) classification for the Object folds.
+
+    Hoisted out of ``_fold_object_superseded`` (#2977) so the retraction fold
+    reuses it instead of defining a second copy of the same rule.
+
+    ``cas`` is REQUIRED: a defaulted False would silently blind the live #2242
+    compare-and-set path (``commit_ops.py:629-630``), where a present-but-
+    terminal node must classify as ``(0, N)``, not ``(1, 1)``.
+    """
+    rows = result.result_set or []
+    if cas:
+        # RETURN live per row: folded = rows actually flipped
+        return (sum(1 for r in rows if r and r[0]), len(rows))
+    # cas=False (blind legacy SET): every matched row folded
+    return (len(rows), len(rows))
+
+
 def _build_search_text(title, summary=None, topics=None) -> str:
     """#125: compute the Document FTS search surface.
 
@@ -545,7 +563,8 @@ class _EntityHandlers:
         )
 
     def _fold_object_superseded(self, ev: dict, *,
-                               cas: bool = False) -> tuple:
+                               cas: bool = False, anchored_ids=None,
+                               anchored_names=None) -> tuple:
         """#1350: fold an ObjectSuperseded event into Object.status.
 
         Projection-owned cache of the event stream (§11 'derived values may
@@ -578,7 +597,12 @@ class _EntityHandlers:
         returning (matched, matched) so the sweep's folded == 0 warn
         condition ≡ today's matched == 0 (the legacy query keeps its
         ``RETURN o.id LIMIT 1`` — matched ≤ 1 per fold, exactly the pre-CAS
-        count; a multi-node dup-name match folds every bound node but the
+        count; the shared name branch prepends `WITH o ORDER BY ... LIMIT 1` BEFORE the
+        body, so EXACTLY ONE carrier is folded (#2977 code review, P2 — the
+        earlier "folds every bound node" text was true only before the
+        `_fold_object_match_and_apply` extraction, and a future reader who
+        trusted it would "restore" the fold-all amplification). Pinned by
+        `test_fold_object_superseded_name_fallback_folds_exactly_one`.
         LIMIT caps the reported row). Replay MUST stay blind last-wins:
         incarnation-reuse shapes (delete→recreate→re-supersede — two fold
         lines for one name belonging to DIFFERENT incarnations) resolve
@@ -608,15 +632,6 @@ class _EntityHandlers:
         from tortoise.commit_ops import _RECALL_OBJECT_EXCLUDED_STATUS
         excluded = list(_RECALL_OBJECT_EXCLUDED_STATUS)
 
-        def _classify(result) -> tuple:
-            rows = result.result_set or []
-            if cas:
-                # RETURN live per row: folded = rows actually flipped
-                folded = sum(1 for r in rows if r and r[0])
-                return (folded, len(rows))
-            # cas=False (blind legacy SET): every matched row folded
-            return (len(rows), len(rows))
-
         if cas:
             # Engine-verified form (#2242 round-1 probe): FalkorDB rejects a
             # bare `NOT IN $param`; `NOT (o.status IN $excluded)` parses and
@@ -629,38 +644,192 @@ class _EntityHandlers:
                     "    o.supersededBy = CASE WHEN live THEN $sb "
                     "                          ELSE o.supersededBy END, "
                     "    o.supersededAt = CASE WHEN live THEN $sa "
-                    "                          ELSE o.supersededAt END "
+                    "                          ELSE o.supersededAt END, "
+                    # #2977 terminal hygiene: a bare `REMOVE` cannot be
+                    # `live`-conditional, so null it out instead.
+                    "    o.retractedAt  = CASE WHEN live THEN null "
+                    "                          ELSE o.retractedAt END "
                     "RETURN live")
         else:
             live = ("SET o.status='superseded', o.supersededBy=$sb, "
-                    "    o.supersededAt=$sa RETURN o.id LIMIT 1")
+                    "    o.supersededAt=$sa "
+                    "REMOVE o.retractedAt "          # #2977 terminal hygiene
+                    "RETURN o.id LIMIT 1")
         common_params = {"sb": supersedes_by, "sa": superseded_at}
         if cas:
             common_params["excluded"] = excluded
+        return self._fold_object_match_and_apply(
+            oid, name, live, common_params, cas=cas, skip_terminal=None,
+            anchored_ids=anchored_ids, anchored_names=anchored_names)
+
+    def _fold_object_match_and_apply(self, oid, name, body: str,
+                                     common_params: dict, *, cas: bool,
+                                     skip_terminal: str | None,
+                                     anchored_ids: frozenset | None = None,
+                                     anchored_names: frozenset | None = None) -> tuple:
+        """#2977: the SHARED match/fallback SELECTION rule for the Object folds.
+
+        Owns four things, all of which were live-verified defects when each fold
+        carried its own copy:
+          (i)   early return when neither key is present;
+          (ii)  SKIP the id branch when ``oid`` is None — never issue
+                ``{id: null}`` and rely on Cypher null-pattern semantics;
+          (iii) fall back to the name branch ONLY on genuine absence
+                (``matched == 0``). A present-but-terminal id node ``(0, N)`` is
+                a #2242 CAS loss and must NOT fall back (a fallback could fold a
+                dup-name carrier or re-claim a terminal target);
+          (iv)  the name branch is deterministic and single-row. Names are not
+                unique, so a bare ``MATCH {name}`` tombstones EVERY carrier
+                (verified live: ``matched == 2``); and a bare ``LIMIT 1`` is
+                scan-order dependent and may pick an ALREADY-retracted node,
+                reporting a clean ``(1, 1)`` while the LIVE node stays visible.
+
+        ``skip_terminal`` is the ONLY family-specific part of the selection rule
+        and is therefore a REQUIRED keyword PARAMETER (no default): the
+        retraction fold passes ``'retracted'``, the supersede fold passes
+        ``None``. A default would let a THIRD family (e.g. a future
+        ``ObjectDeprecated``) silently inherit the supersede family's semantics.
+
+        BOTH branches are IDENTITY-CONSTRAINED (review 2). The id branch
+        requires the name to agree when one is present; the name branch selects
+        exactly one carrier. Either branch alone tombstoning a set is the bug
+        that made replay disagree with live on the reused-id shape.
+
+        Cypher shape (verified live): FalkorDB REJECTS
+        ``WITH o WHERE … ORDER BY …``; ``WHERE`` must bind to its own ``WITH``
+        and ``ORDER BY`` must follow the bare ``WITH o``.
+        """
+        oid = oid if isinstance(oid, str) else None
+        name = name if isinstance(name, str) else None
+        if not oid and not name:
+            return (0, 0)
+        folded = matched = 0
         if oid:
+            # ── THE ID BRANCH MUST RESPECT THE NAME IDENTITY (P0, review 2) ──
+            # `_upsert_object` MERGEs by NAME, so `id` is a derived cache and a
+            # reused id is NOT the same Object. A bare
+            # `MATCH (o:Object {id:$id})` has no single-carrier restriction and
+            # `RETURN o.id` does not cap the `SET`, so it tombstoned EVERY node
+            # sharing that id — including an unrelated live Object that merely
+            # reused the id. Measured:
+            #
+            #   journal  OR(U1,X) -> RT(U1,X) -> OR(U1,Y)
+            #   live     [['U1','Y','live']]                 (only X was deleted)
+            #   replay   [['U1','X','retracted'], ['U1','Y','retracted']]  <-- Y BURIED
+            #
+            # Y is never retracted in the journal, yet was excluded from every
+            # read surface on all four replay engines. The supersede twin had
+            # the identical defect. (Before the name-preferred anchor landed the
+            # fold was DROPPED here, so the multi-node `SET` was unreachable on
+            # this shape — the anchor fix exposed it rather than causing it.)
+            #
+            # `AND ($name IS NULL OR o.name = $name)` fixes THIS branch: an id
+            # match must agree with the name it claims to identify. The keyless
+            # legacy fold (`$name IS NULL`) is unchanged, and a genuine id/name
+            # mismatch now falls through to the name branch, which already
+            # selects exactly one carrier.
+            #
+            # THIRD SHAPE — NOT COVERED HERE (review 3, P0). This constraint
+            # fixes the FOLD side only. The WRITER side was separately lossy:
+            # `_delete_entity` deletes every id-sharer but journaled only ONE
+            # name, so on replay the unnamed sharers were left `live`. Before
+            # this constraint the bare id `MATCH` tombstoned every sharer and
+            # ACCIDENTALLY masked that. Read `_delete_entity`'s emit loop
+            # (sdk.py:16495-16515) before concluding the pair is exhaustive —
+            # an earlier wording claimed it was, and that wording is exactly what
+            # would stop the next reader from looking there.
+            #
+            # NOTE a `LIMIT 1` on this branch is NOT a fix — inside a `MATCH` it
+            # caps only the rows RETURNed, never the rows the trailing `SET`
+            # applies to.
             result = self.g.query(
-                "MATCH (o:Object {id:$id}) " + live,
-                params={"id": oid, **common_params})
-            folded, matched = _classify(result)
-            if folded == 0 and matched == 0 and name:
-                # #2164 review (P2, ISSUE B): the id branch matched NOTHING
-                # — the event's id is not the key the node carries (a legacy
-                # id-less Object journaled with its SYNTHESIZED canonical
-                # id). Fall back to the name branch — the same name-keyed
-                # fold the live path uses. #2242: fallback ONLY on genuine
-                # absence (matched == 0) — a present-but-terminal id node
-                # (0, 1) is a CAS loss and must NOT fall back (a fallback
-                # could fold a dup-name carrier or re-claim a terminal
-                # target under a different name spelling).
-                result = self.g.query(
-                    "MATCH (o:Object {name:$name}) " + live,
-                    params={"name": name, **common_params})
-                folded, matched = _classify(result)
-            return (folded, matched)
-        result = self.g.query(
-            "MATCH (o:Object {name:$name}) " + live,
-            params={"name": name, **common_params})
-        return _classify(result)
+                "MATCH (o:Object {id:$id}) "
+                "WHERE ($name IS NULL OR o.name = $name) " + body,
+                params={"id": oid, "name": name, **common_params})
+            folded, matched = _classify(result, cas=cas)
+        if folded == 0 and matched == 0 and name:
+            # ── THE NAME BRANCH's ID-IDENTITY CONSTRAINT (review 4, P0) ──────
+            # The MIRROR of the id branch's name constraint above, and its
+            # absence buried a LIVE Object. When the fold's `id` is anchored
+            # NOWHERE but its `name` IS anchored (to a DIFFERENT incarnation),
+            # the name fallback must NOT fire: the fold names an id that was
+            # never registered, so it is an ORPHAN, not a retraction of whatever
+            # else happens to carry that name. Measured:
+            #
+            #   OR(ID1, SHARED), RT(ID2, SHARED)
+            #   -> the name branch tombstoned ID1/SHARED, which the journal
+            #      never retracted, and `applied` counted the fold as work done.
+            # Production-reachable: `_connect_issue_objects` MERGEs a second
+            # carrier of an existing name under a different id
+            # (`MERGE (o:Object {id:$oid}) SET o.name=$name`), and
+            # `update_entity(id, name=...)` renames a node on the public/MCP
+            # surface — both then produce a retraction whose id is anchored
+            # nowhere while the name belongs to another node.
+            #
+            # SAFE FOR THE STUB LANE, which is what the fallback exists for: a
+            # stub node minted by `_event_plain_merge` has NO ObjectRegistered
+            # line, so its name is NOT in `anchored_names` and the guard is
+            # inert — the fallback still folds, which is the whole point of it.
+            # `anchored_*` default to None (the LIVE CAS path passes neither),
+            # which preserves the legacy unconditional fallback for every
+            # non-replay caller.
+            if (oid is not None and anchored_ids is not None
+                    and anchored_names is not None
+                    and oid not in anchored_ids
+                    and name in anchored_names):
+                return (0, 0)
+            result = self.g.query(
+                "MATCH (o:Object {name:$name}) "
+                "WHERE ($skip IS NULL OR coalesce(o.status,'') <> $skip) "
+                # `o.id` is a DETERMINISTIC TIEBREAKER: names are not unique and
+                # two carriers can share `createdAt`, which would make the pick
+                # scan-order dependent — the same false-success class the
+                # `skip_terminal` filter exists to remove.
+                #
+                # `coalesce(..., '')` makes NULL sort LAST (#2977 code review,
+                # P2). FalkorDB sorts NULL FIRST under DESC (measured), and the
+                # stub lane never writes `createdAt` (`_event_plain_merge`,
+                # entities.py:964-968: `ON CREATE SET o.id=$id,
+                # o.objectKind='other'`). So a bare `o.createdAt DESC` picked
+                # the OLDEST/unknown carrier over the newest one — contradicting
+                # both this comment and the tests asserting the newest carrier
+                # is folded. Measured: with carriers `{id-stub: no createdAt}`
+                # and `{id-canon: createdAt='2026-03-01'}`, plain DESC returned
+                # `id-stub`; the coalesced form returns `id-canon`.
+                "WITH o ORDER BY coalesce(o.createdAt,'') DESC, o.id "
+                "LIMIT 1 " + body,
+                params={"name": name, "skip": skip_terminal,
+                        **common_params})
+            folded, matched = _classify(result, cas=cas)
+        return (folded, matched)
+
+    def _fold_object_retracted(self, ev: dict, *, anchored_ids=None,
+                               anchored_names=None) -> tuple:
+        """#2977: mark a deleted Object ``status='retracted'`` (tombstone).
+
+        The removal counterpart of ``_fold_object_superseded`` — without it the
+        Object's surviving ``ObjectRegistered`` line resurrects it on replay.
+
+        The name fallback is load-bearing: ``_event_plain_merge`` can mint a stub
+        Object with a RANDOM ulid (``entities.py:887-897``), so an id-only match
+        would orphan those retractions.
+
+        Clears the supersession lane's fields so a retracted node cannot carry a
+        contradictory ``supersededBy`` (read status-blind by
+        ``assembly.py:677-682``). Idempotent: ``retractedAt`` coalesces so a
+        re-fold keeps the FIRST stamp. Returns ``(folded, matched)``;
+        ``(0, 0)`` = no node (orphan — never a create).
+
+        Replay-only (no live caller) → no CAS variant.
+        """
+        return self._fold_object_match_and_apply(
+            ev.get("id"), ev.get("name"),
+            "SET o.status='retracted', "
+            "    o.retractedAt=coalesce(o.retractedAt, $ts) "
+            "REMOVE o.supersededBy, o.supersededAt "
+            "RETURN o.id",
+            {"ts": ev.get("ts")}, cas=False, skip_terminal="retracted",
+            anchored_ids=anchored_ids, anchored_names=anchored_names)
 
     def _upsert_document(self, ev: dict) -> None:
         """MERGE Document node."""
@@ -918,17 +1087,37 @@ class _EntityHandlers:
         # event. Aligns with the #1350 clobber doctrine (a re-mention cannot
         # reset superseded→live). Live Objects (status IS NULL or <>'superseded')
         # still fold normally.
+        # #2977: the guard also excludes `retracted`. WITHOUT this, a replayed
+        # connector lifecycle event silently UN-RETRACTS a deleted Object — the
+        # read surfaces then serve it as current again, undoing the whole
+        # point of the retraction lane on the one path that emits these events
+        # in production.
+        #
+        # DELIBERATELY NARROW (D-10): `<> 'retracted'` ONLY. `archived` and
+        # `deprecated` stay resettable by a reopen — widening to the whole
+        # `_RECALL_OBJECT_EXCLUDED_STATUS` tuple would change existing
+        # behaviour for two statuses nothing currently writes. Pinned in BOTH
+        # directions by `test_archived_object_still_folds_on_reopen` and
+        # `test_reopened_event_does_not_unretract`.
+        #
+        # This adds a hand-typed Object-status literal to the hardcoded
+        # event->status map that open issue #2729 exists to replace. #2977
+        # touches that map but cannot generalize it, so the predicate is
+        # recorded on #2729 and filed as owned fork (k).
+        _status_guard = ("(o.status IS NULL OR "
+                         "(o.status <> 'superseded' AND "
+                         "o.status <> 'retracted'))")
         if _obj_name and _wk in ("pm:cardCreated", "github.issue.open",
                                  "github.issue.reopened"):
             self.g.query(
                 "MATCH (o:Object {name:$n}) "
-                "WHERE (o.status IS NULL OR o.status <> 'superseded') "
+                f"WHERE {_status_guard} "
                 "SET o.status='in_progress'",
                 params={"n": _obj_name})
         elif _obj_name and _wk in ("pm:cardCompleted", "github.issue.closed"):
             self.g.query(
                 "MATCH (o:Object {name:$n}) "
-                "WHERE (o.status IS NULL OR o.status <> 'superseded') "
+                f"WHERE {_status_guard} "
                 "SET o.status='completed'",
                 params={"n": _obj_name})
         # Event -[:uses]-> Object (input entities, #122; #125 structured dicts)

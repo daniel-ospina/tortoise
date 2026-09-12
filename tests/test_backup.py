@@ -119,6 +119,15 @@ def test_restore_jsonl_fallback_when_rdb_empty(monkeypatch):
                 self.g = _G()
             def apply(self, ev):
                 pass
+            def apply_replay(self, events, strict: bool = False):
+                # #2977: restore() now routes through apply_replay.
+                # It returns a 3-TUPLE (applied, apply_torn, fold_torn) — the
+                # fake must match, or restore() raises on the unpack.
+                applied = 0
+                for ev in events:
+                    self.apply(ev)
+                    applied += 1
+                return applied, 0, 0
             def close(self):
                 pass
 

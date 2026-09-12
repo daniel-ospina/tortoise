@@ -140,11 +140,17 @@ def restore(backup_dir: str, db_path: str,
                     return {"events": count, "status": "ok", "restored_via": "rdb"}
             finally:
                 proj.close()
-        # JSONL replay fallback (no RDB, or RDB was empty)
+        # JSONL replay fallback (no RDB, or RDB was empty).
+        # #2977: `strict=True` PRESERVES the pre-change fail-loud contract —
+        # the loop this replaces (`for ev in ...: proj.apply(ev)`) has NO
+        # per-event guard, so a raising `apply()` propagates OUT of restore().
+        # `recover_from_log` genuinely IS fail-soft (its own try/except), so the
+        # default remains correct for THAT caller — only this one differs.
+        # Because strict=True re-raises, a torn fold SURFACES as an exception,
+        # not as a count: `restore()`'s dict shape is unchanged (no `torn` key).
         proj = FalkorProjection(db_path)
         try:
-            for ev in EventLog(events_path).read_all():
-                proj.apply(ev)
+            proj.apply_replay(EventLog(events_path).read_all(), strict=True)
         finally:
             proj.close()
 
