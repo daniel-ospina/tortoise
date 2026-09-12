@@ -138,49 +138,62 @@ def test_every_plane_probe_is_hard_bounded_and_fail_closed():
         "the superseded per-handler readiness bound is back — the bound belongs "
         "to HealthProbe (one reasoned place)"
     )
+    assert mod._READY_PROBE._timeout == PROBE_HARD_TIMEOUT, (
+        "the FalkorDB readiness probe should take the shared default bound"
+    )
     for name in ("_READY_PROBE", "_CONTROL_PLANE_PROBE"):
         probe = getattr(mod, name)
-        assert probe._timeout == PROBE_HARD_TIMEOUT, f"{name} overrides the shared bound"
+        assert probe._timeout > 0, f"{name} has no usable bound"
         assert probe._fresh_only is True, (
             f"{name} must be fresh_only=True — readiness is a FAIL-CLOSED gate and "
             "must never answer 200 from a verdict older than its read budget (#1384/#2850)"
         )
 
 
-def test_the_abandoned_worker_leak_is_bounded_by_construction():
-    """#2850 deliberately INVERTS #2988's bound-ordering invariant — pin the why.
+def test_each_plane_bound_sits_above_its_own_client_timeout():
+    """The #2988 layered-timeout invariant, expressed PER PLANE.
 
-    #2988 kept the per-handler ``wait_for`` bound STRICTLY ABOVE the
-    control-plane client timeout so the client timeout fired first and no
-    executor worker was left parked in a socket read. That is the right fix for
-    ``to_thread`` on the SHARED default pool, where each abandoned worker is
-    lost from a pool every other request depends on.
+    Abandoning a probe does not stop its thread — ``wait_for`` cancels the
+    awaitable, not the worker (CPython #87185), so the worker stays parked in
+    its socket read. The defence is ordering: keep the outer bound ABOVE the
+    probe client's own timeout, so the client times out first and the thread
+    returns by itself. If the outer bound can win that race, every timeout
+    strands a thread.
 
-    #2850 replaces that with a private single-slot daemon worker plus an
-    explicit ``max_supersedes`` cap, so abandoning an in-flight probe costs one
-    already-dedicated thread and can happen at most ``max_supersedes`` times for
-    the process LIFETIME — never once per check. The leak is therefore bounded
-    by CONSTRUCTION rather than by ordering, which is why the bound
-    (``PROBE_HARD_TIMEOUT``) may sit below the client timeout here.
+    #2850 initially INVERTED this (2s outer vs a 5s inner on the control plane)
+    and leaned on ``PROBE_MAX_SUPERSEDES`` instead. That rationale was
+    overstated: the supersede counter RESETS on any live completion, so it caps
+    a single wedge episode rather than the process lifetime. Both invariants
+    are now satisfied at once — each bound is above its own inner timeout, AND
+    the probe still runs on a dedicated coordinator rather than the shared
+    default pool.
 
-    If the ordering assumption is ever restored, or the supersede cap removed,
-    this test is the tripwire.
+    This test is the tripwire: raise a client timeout above its plane's bound
+    and it fails.
     """
     import inspect
 
-    from tortoise.monitoring import PROBE_HARD_TIMEOUT, PROBE_MAX_SUPERSEDES
+    import tortoise.hosted_api as mod
+    from tortoise.monitoring import PROBE_TIMEOUT
     from tortoise.supabase_control import SupabaseControlPlane
 
+    # Data plane: ``_probe_db`` self-bounds at PROBE_TIMEOUT.
+    assert mod._READY_PROBE._timeout > PROBE_TIMEOUT, (
+        f"the FalkorDB readiness bound ({mod._READY_PROBE._timeout}s) must exceed "
+        f"_probe_db's own bound ({PROBE_TIMEOUT}s) or the outer bound wins the race "
+        "and strands a worker thread per timeout (#2988)"
+    )
+
+    # Control plane: SupabaseControlPlane defaults to a 5.0s httpx timeout, and
+    # CONTROL_PLANE_HARD_TIMEOUT is sized against it.
     client_timeout = inspect.signature(SupabaseControlPlane.__init__).parameters["timeout"].default
-    assert PROBE_HARD_TIMEOUT < client_timeout, (
-        "this test documents why an outer bound BELOW the client timeout is safe "
-        f"here (bound={PROBE_HARD_TIMEOUT}, client={client_timeout}); if the bound "
-        "is now above it, the reasoning changed and this test is stale"
+    assert mod._CONTROL_PLANE_PROBE._timeout > client_timeout, (
+        f"the control-plane readiness bound ({mod._CONTROL_PLANE_PROBE._timeout}s) must "
+        f"exceed the SupabaseControlPlane client timeout ({client_timeout}s) for the same "
+        "reason — that is exactly what CONTROL_PLANE_HARD_TIMEOUT is sized against"
     )
-    assert PROBE_MAX_SUPERSEDES > 0, (
-        "the supersede cap is what bounds the abandoned workers — without it the "
-        "#2988 ordering invariant becomes load-bearing again"
-    )
+    # Still a safety net, well inside Fly's 15s /health budget.
+    assert mod._CONTROL_PLANE_PROBE._timeout < 15.0
 
 
 # ── the selfhost twin of the same defect ───────────────────────────────────

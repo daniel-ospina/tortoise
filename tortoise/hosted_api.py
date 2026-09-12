@@ -2206,6 +2206,12 @@ def _probe_control_plane() -> dict:
             "error": None}
 
 
+# The control plane's probe bound — deliberately ABOVE SupabaseControlPlane's
+# 5.0s httpx timeout. See the LAYERED TIMEOUT note below for why that ordering
+# is load-bearing rather than arbitrary.
+CONTROL_PLANE_HARD_TIMEOUT = 6.0
+
+
 # Separate coordinator instance from the FalkorDB one: the two planes fail
 # independently, and single-flighting them together would let a wedged DB
 # starve the control-plane check (and vice versa).
@@ -2213,7 +2219,28 @@ def _probe_control_plane() -> dict:
 # ``fresh_only=True``: readiness is a FAIL-CLOSED gate, so it must never answer
 # 200 from a verdict older than its own read budget (review P1). See the
 # ``_READY_PROBE`` note below.
-_CONTROL_PLANE_PROBE = HealthProbe(lambda: _probe_control_plane(), fresh_only=True)
+#
+# LAYERED TIMEOUT (the #2988 invariant, restored here PER-PLANE). The outer
+# bound MUST exceed this plane's own client timeout. ``HealthProbe.run()``
+# abandons a probe that outlives ``timeout`` — and abandoning it does NOT stop
+# the worker thread, which stays parked in its socket read (CPython #87185:
+# ``wait_for(to_thread(...))``'s worker "is never cancelled and continues
+# running forever despite the timeout error"; the Python docs likewise say
+# ``wait_for`` cancels the AWAITABLE, not the thread). If the outer bound can
+# win that race, every timeout strands a thread. So: 6.0s outer vs 5.0s inner
+# means the client times out on its own, the worker returns by itself, and the
+# coordinator's bound stays what it is meant to be — a safety net for a probe
+# that never self-bounds — rather than the thing that abandons the thread.
+#
+# This is why the two planes carry DIFFERENT bounds: the ordering is relative
+# to each plane's inner timeout (FalkorDB's ``_probe_db`` self-bounds at
+# ``PROBE_TIMEOUT`` = 1.5s, so the 2.0s ``PROBE_HARD_TIMEOUT`` default already
+# satisfies it), not a single global number.
+_CONTROL_PLANE_PROBE = HealthProbe(
+    lambda: _probe_control_plane(),
+    timeout=CONTROL_PLANE_HARD_TIMEOUT,
+    fresh_only=True,
+)
 
 
 # #2850 item 6: READINESS gets its own coordinator, distinct from the one the

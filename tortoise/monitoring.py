@@ -368,7 +368,16 @@ class HealthProbe:
        cannot grow the work in flight.
     3. **No per-check thread leak.** Exactly one daemon thread per in-flight
        probe; a wedged probe is superseded at most ``max_supersedes`` times
-       for the process lifetime, never once per check.
+       per WEDGE EPISODE, never once per check. NOT a process-lifetime cap:
+       the counter resets on any live completion (``self._supersedes = 0`` in
+       ``_run``, because a completion proves the wedge cleared), so a backend
+       that wedges, recovers and wedges again can strand up to
+       ``max_supersedes`` threads per episode. What keeps the steady state
+       bounded in practice is the caller's LAYERED TIMEOUT — keep ``timeout``
+       ABOVE the probe function's own client/socket timeout so the inner
+       timeout fires first and the worker returns by itself, making
+       abandonment the exception instead of the norm. Abandoning a probe does
+       not stop its thread (CPython #87185).
     4. **Honest staleness.** While a probe is wedged, the last *good* result
        stops being reported as live once it is older than ``stale_after``
        (or once a superseded probe has been in flight that long) — /health
