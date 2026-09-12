@@ -105,6 +105,7 @@ class RunConfig:
                  db_path: str | None = None, executor: str = "mock",
                  caller_factory: Callable | None = None,
                  emission_seam: Callable | None = None,
+                 truth_judge: Callable | None = None,
                  sessions: int = 1):
         self.config_dir = Path(config_dir) if config_dir else DEFAULT_CONFIG_DIR
         self.out_dir = Path(out_dir) if out_dir else DEFAULT_OUT_DIR
@@ -144,6 +145,15 @@ class RunConfig:
         #: (real mode only) stamp ``provenance.emission_seam = "hermetic"``
         #: so a fabricated log is never confusable with a live-spend one.
         self.emission_seam = emission_seam
+        #: #2740 truth-judge seam: the semantic comparator that turns the
+        #: arm's DECLARED envelope position into R3 `outcomes` / R5
+        #: `update_correct_direction` / R2 `coverage_subscore`. Injectable
+        #: for hermetic tests; ``None`` (default) keeps those fields gapped
+        #: so an unconfigured run honestly reports `insufficient_n` rather
+        #: than fabricating correctness. Production must pass a validated,
+        #: metered judge (battery/judge/) — never the mock judge, whose
+        #: verdicts are for validation only.
+        self.truth_judge = truth_judge
         #: Task 10 stream-mode: sessions > 1 runs each scenario across that
         #: many sequential sessions over the SAME per-scenario graph (no
         #: reset mid-stream; setup happens once per arm at arm-init). Each
@@ -1068,7 +1078,9 @@ def _build_scorer(config: RunConfig, thresholds: ThresholdsConfig) -> Scorer:
             scorers.append(resolve_scorer(spec))
         except ConfigError:
             from battery.runner.probe_scorer import resolve_probe_scorer
-            scorers.append(resolve_probe_scorer(spec, thresholds))
+            scorers.append(resolve_probe_scorer(
+                spec, thresholds, truth_judge=getattr(
+                    config, "truth_judge", None)))
     return _CompositeScorer(scorers)
 
 
