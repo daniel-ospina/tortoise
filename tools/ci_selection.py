@@ -808,12 +808,9 @@ def duration_issues(manifest: dict) -> list[str]:
 _AUDIT_NAMESPACE_ROOTS = frozenset({"tortoise", "tests"})
 
 # Mirror of select()'s per-file fallback branch: engine/config paths with no
-# SOURCE_PATTERNS entry select the `core` surface. #3221: the
-# TOOL_CORE_CARVEOUTS entry is mirrored too, so a tools/ path that now selects
-# `core` is not misreported as selection-irrelevant.
+# SOURCE_PATTERNS entry select the `core` surface.
 _AUDIT_CORE_FALLBACK = ("tortoise/", "graph-scripts/", "config/",
-                        "validation/", "packs/",
-                        *TOOL_CORE_CARVEOUTS)
+                        "validation/", "packs/")
 
 # Source trees worth naming in the uncovered report (tests/ is test-internal
 # scaffolding, not a selectable source surface).

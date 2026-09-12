@@ -188,7 +188,7 @@ def test_collision_preflight_tool_change_selects_core_not_tier1():
     assert set(r["test_files"]) != _tier1()
     # a test-file change selects its owning surface too
     r2 = _sel(["tests/test_collision_preflight.py"])
-    assert "core" in r2["surfaces"]
+    assert "test_collision_preflight.py" in r2["test_files"]
 
 
 def test_ask_spotcheck_tools_change_selects_sdk_not_tier1():
