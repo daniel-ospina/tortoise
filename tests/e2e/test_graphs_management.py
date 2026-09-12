@@ -342,14 +342,15 @@ def test_graphs_last_backup_column_per_graph(page: Page) -> None:
                      backups=backups)
     expect(page.locator("table thead")).to_contain_text("Last backup")
     rows = page.locator("table tbody tr")
-    # default-first: default, prod, dev.
+    # default-first, then custom sorted by NAME: default, dev, prod.
     expect(rows.nth(0)).to_contain_text("2 hr ago")      # newest default manifest
     expect(rows.nth(0)).not_to_contain_text("9 hr ago")  # older sibling loses
-    expect(rows.nth(1)).to_contain_text("5 hr ago")      # g_prod's own stamp
-    expect(rows.nth(2)).to_contain_text("—")             # g_dev: no backup
+    expect(rows.nth(1)).to_contain_text("—")             # g_dev: no backup
+    expect(rows.nth(2)).to_contain_text("5 hr ago")      # g_prod's own stamp
     # The unidentified legacy manifest must not leak onto any row.
     expect(rows.nth(0)).not_to_contain_text("1 hr ago")
     expect(rows.nth(1)).not_to_contain_text("1 hr ago")
+    expect(rows.nth(2)).not_to_contain_text("1 hr ago")
 
 
 def test_graphs_table_rows_default_first_with_actions(page: Page) -> None:
