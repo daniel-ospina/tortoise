@@ -128,6 +128,9 @@ for s in "${SKILLS[@]}"; do
         fi
       fi
     fi
+    # mktemp creates 0600; keep the payload readable like the pre-mktemp
+    # `curl -o` temp was (same reason the stamp temp gets chmod 0644 below).
+    chmod 0644 "$tmp" 2>/dev/null || true
     mv "$tmp" "$DEST/$s/SKILL.md"
     echo "  ✓ $s"
   else

@@ -322,8 +322,12 @@ def test_download_temp_is_not_clobbered_via_a_planted_symlink(tmp_path):
     proc = _run_installer(tmp_path, tmp_path / "home", harness="claude")
     assert proc.returncode == 0, proc.stderr
     assert victim.read_text(encoding="utf-8") == "important project readme\n"
-    installed = (skill_dir / "SKILL.md").read_text(encoding="utf-8")
-    assert "name: tortoise-decide" in installed
+    installed = skill_dir / "SKILL.md"
+    assert not installed.is_symlink()
+    assert "name: tortoise-decide" in installed.read_text(encoding="utf-8")
+    # mktemp's 0600 must not leak onto the installed payload
+    assert (installed.stat().st_mode & 0o777) == 0o644
+    assert not list(skill_dir.glob("SKILL.md.??????")), "temp file left behind"
 
 
 def test_stamp_write_is_reported_when_it_cannot_be_written(tmp_path):
