@@ -563,7 +563,8 @@ class _EntityHandlers:
         )
 
     def _fold_object_superseded(self, ev: dict, *,
-                               cas: bool = False) -> tuple:
+                               cas: bool = False, anchored_ids=None,
+                               anchored_names=None) -> tuple:
         """#1350: fold an ObjectSuperseded event into Object.status.
 
         Projection-owned cache of the event stream (§11 'derived values may
@@ -658,11 +659,14 @@ class _EntityHandlers:
         if cas:
             common_params["excluded"] = excluded
         return self._fold_object_match_and_apply(
-            oid, name, live, common_params, cas=cas, skip_terminal=None)
+            oid, name, live, common_params, cas=cas, skip_terminal=None,
+            anchored_ids=anchored_ids, anchored_names=anchored_names)
 
     def _fold_object_match_and_apply(self, oid, name, body: str,
                                      common_params: dict, *, cas: bool,
-                                     skip_terminal: str | None) -> tuple:
+                                     skip_terminal: str | None,
+                                     anchored_ids: frozenset | None = None,
+                                     anchored_names: frozenset | None = None) -> tuple:
         """#2977: the SHARED match/fallback SELECTION rule for the Object folds.
 
         Owns four things, all of which were live-verified defects when each fold
@@ -744,6 +748,36 @@ class _EntityHandlers:
                 params={"id": oid, "name": name, **common_params})
             folded, matched = _classify(result, cas=cas)
         if folded == 0 and matched == 0 and name:
+            # ── THE NAME BRANCH's ID-IDENTITY CONSTRAINT (review 4, P0) ──────
+            # The MIRROR of the id branch's name constraint above, and its
+            # absence buried a LIVE Object. When the fold's `id` is anchored
+            # NOWHERE but its `name` IS anchored (to a DIFFERENT incarnation),
+            # the name fallback must NOT fire: the fold names an id that was
+            # never registered, so it is an ORPHAN, not a retraction of whatever
+            # else happens to carry that name. Measured:
+            #
+            #   OR(ID1, SHARED), RT(ID2, SHARED)
+            #   -> the name branch tombstoned ID1/SHARED, which the journal
+            #      never retracted, and `applied` counted the fold as work done.
+            # Production-reachable: `_connect_issue_objects` MERGEs a second
+            # carrier of an existing name under a different id
+            # (`MERGE (o:Object {id:$oid}) SET o.name=$name`), and
+            # `update_entity(id, name=...)` renames a node on the public/MCP
+            # surface — both then produce a retraction whose id is anchored
+            # nowhere while the name belongs to another node.
+            #
+            # SAFE FOR THE STUB LANE, which is what the fallback exists for: a
+            # stub node minted by `_event_plain_merge` has NO ObjectRegistered
+            # line, so its name is NOT in `anchored_names` and the guard is
+            # inert — the fallback still folds, which is the whole point of it.
+            # `anchored_*` default to None (the LIVE CAS path passes neither),
+            # which preserves the legacy unconditional fallback for every
+            # non-replay caller.
+            if (oid is not None and anchored_ids is not None
+                    and anchored_names is not None
+                    and oid not in anchored_ids
+                    and name in anchored_names):
+                return (0, 0)
             result = self.g.query(
                 "MATCH (o:Object {name:$name}) "
                 "WHERE ($skip IS NULL OR coalesce(o.status,'') <> $skip) "
@@ -769,7 +803,8 @@ class _EntityHandlers:
             folded, matched = _classify(result, cas=cas)
         return (folded, matched)
 
-    def _fold_object_retracted(self, ev: dict) -> tuple:
+    def _fold_object_retracted(self, ev: dict, *, anchored_ids=None,
+                               anchored_names=None) -> tuple:
         """#2977: mark a deleted Object ``status='retracted'`` (tombstone).
 
         The removal counterpart of ``_fold_object_superseded`` — without it the
@@ -793,7 +828,8 @@ class _EntityHandlers:
             "    o.retractedAt=coalesce(o.retractedAt, $ts) "
             "REMOVE o.supersededBy, o.supersededAt "
             "RETURN o.id",
-            {"ts": ev.get("ts")}, cas=False, skip_terminal="retracted")
+            {"ts": ev.get("ts")}, cas=False, skip_terminal="retracted",
+            anchored_ids=anchored_ids, anchored_names=anchored_names)
 
     def _upsert_document(self, ev: dict) -> None:
         """MERGE Document node."""

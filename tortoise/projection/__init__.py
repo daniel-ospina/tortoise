@@ -1328,9 +1328,18 @@ class FalkorProjection(
             if _first < _seq < _last:
                 _survivor_skipped += 1
                 continue  # the pre-fold incarnation was replaced
+            # The anchors are handed to the folds so the NAME branch can apply
+            # the id-identity constraint its id-branch twin got in review 2
+            # (#2977 review 4, P0). They are built HERE, in the replay lane, so
+            # the live CAS path (which has no journal to anchor against) keeps
+            # the legacy unconditional name fallback.
+            _anchored_ids = frozenset(first_by_id) | frozenset(last_by_id)
+            _anchored_names = frozenset(first_by_name) | frozenset(last_by_name)
             try:
                 if _kind == "retract":
-                    _folded, _matched = self._fold_object_retracted(ev)
+                    _folded, _matched = self._fold_object_retracted(
+                        ev, anchored_ids=_anchored_ids,
+                        anchored_names=_anchored_names)
                     if _matched == 0:
                         # `(0, 0)` is NOT a reliable orphan signal on the
                         # retraction lane: the name branch filters out
@@ -1344,7 +1353,9 @@ class FalkorProjection(
                             "or pre-#2977 journal",
                             ev.get("event_id"), ev.get("id"), ev.get("name"))
                 else:
-                    _folded, _ = self._fold_object_superseded(ev)
+                    _folded, _ = self._fold_object_superseded(
+                        ev, anchored_ids=_anchored_ids,
+                        anchored_names=_anchored_names)
                     if _folded == 0:
                         logger.warning(
                             "rebuild: ObjectSuperseded fold matched no Object "
