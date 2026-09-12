@@ -267,7 +267,6 @@ class AlertStore:
             "detail": detail,
             "filed_at": self._clock().isoformat(),
             "issue_number": None,
-            "telegram_pushed": False,
         }
         created = self._storage.create_if_not_exists(key, json.dumps(placeholder).encode())
         if created:
@@ -383,10 +382,9 @@ class AlertStore:
                 logger.warning("incident filing failed for %s: %s — will adopt on next poll", kind, e)
         state["issue_number"] = issue_number
         state["detail"] = detail
-        # Provenance records who FILED this issue — never who happened to adopt
-        # it through the GH-search fallback. Stamping the adopter would let a
-        # non-owner that merely adopted someone else's open issue clear the
-        # incident on its own weaker evidence (#3127 round 2).
+        # Diagnostic only: which writer filed this issue. It is NOT an authority
+        # token — `resolve_incident` decides by KIND_OWNERS, never by this field
+        # (see its docstring for why the provenance exception was removed).
         if filed_here and writer != WRITER_UNSPECIFIED:
             state["writer"] = writer
         _write_json(self._storage, key, state)
@@ -418,13 +416,19 @@ class AlertStore:
         never be resolved by any surface (#3030).
 
         #3127 resolution authority: only the kind's OWNER (the writer whose
-        probes cover its recovery condition) may clear it — or a caller
-        clearing a sentinel that IT opened, whose own probe observed the
-        condition it is clearing. A caller with neither refuses: its evidence
-        does not cover the failing dependency, so the "recovery" may be false
-        and the owner re-files on its next run (one duplicate pair per cycle).
-        The sentinel is left intact. Declaring no writer keeps the historical
-        behaviour for callers outside the DR watcher/driver pair.
+        probes cover its recovery condition) may clear it. A caller that does
+        not own the kind refuses: its evidence does not cover the failing
+        dependency, so the "recovery" may be false and the owner re-files on its
+        next run (one duplicate pair per cycle). The sentinel is left intact.
+        Declaring no writer keeps the historical behaviour for callers outside
+        the DR watcher/driver pair.
+
+        There is deliberately NO provenance exception. Three review rounds
+        found three ways a self-asserted "filed by" note went wrong — stamped by
+        an adopter, surviving a placeholder that was never filed, outliving the
+        issue it described — each letting a non-owner clear a kind it has no
+        evidence about. Authority is decided by KIND_OWNERS alone; the `writer`
+        field is diagnostic only.
         """
         states = self._alias_states(kind, team_id)
         if not states:
@@ -432,14 +436,12 @@ class AlertStore:
         writer = self._writer if writer is None else writer
         if writer != WRITER_UNSPECIFIED:
             owner = kind_owner(kind)
-            if owner != WRITER_UNSPECIFIED and owner != writer \
-                    and not all(s.get("writer") == writer for _, s in states):
+            if owner != WRITER_UNSPECIFIED and owner != writer:
                 logger.warning(
                     "resolution refused: %s is owned by the %s but %s is clearing "
-                    "it (sentinel opened by: %s) — the caller's evidence does not "
-                    "cover this kind's recovery condition (#3127)",
+                    "it — that writer's probes do not cover this kind's recovery "
+                    "condition (#3127)",
                     kind, owner, writer,
-                    ", ".join(sorted({str(s.get("writer")) for _, s in states})),
                 )
                 return False
         numbers: list[int] = []

@@ -264,14 +264,14 @@ resolve_global() { # kind comment — close an open global incident (no-op if no
   # the driver's generic sweep-completed self-heal would close incidents the
   # driver never observed recovering.
   owner="$(kind_owner "$kind")"
+  # #3127: authority is decided by the owner map ALONE. There is deliberately no
+  # "but I opened it myself" exception — three review rounds found three ways a
+  # self-asserted filed-by note went wrong, each letting a non-owner clear a
+  # kind its probes never covered. A future call site for a watcher-owned kind
+  # must therefore NOT be routed through resolve_global.
   if [ "$owner" != "driver" ] && [ "$owner" != "unspecified" ]; then
-    # Provenance exception (#3127): the driver may always clear a sentinel it
-    # opened itself — its own probes observed the condition being cleared.
-    _w="$(printf '%s' "$(r2_get "$(alert_key "$kind" "global")")" | jq -r '.writer // empty' 2>/dev/null || true)"
-    if [ "$_w" != "driver" ]; then
-      log "self-heal: refusing to close ${kind} — it is owned by the ${owner}, whose probes cover its recovery condition"
-      return 0
-    fi
+    log "self-heal: refusing to close ${kind} — it is owned by the ${owner}, whose probes cover its recovery condition"
+    return 0
   fi
   num="$(gh_find_open "$kind" "global")"
   if [ -n "$num" ]; then gh_close "$num" "$comment" "$kind" "global"; fi

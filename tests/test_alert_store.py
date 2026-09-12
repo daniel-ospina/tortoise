@@ -666,20 +666,25 @@ def test_resolve_allowed_for_the_declared_owner():
         storage.download(_DRIVER_KEY)
 
 
-def test_resolve_allowed_for_a_sentinel_the_caller_itself_opened():
-    """A writer may always clear its OWN observation.
+def test_resolve_refuses_even_a_sentinel_the_caller_itself_opened():
+    """#3127: ownership decides, and there is no provenance exception.
 
-    Without this, the driver-disabled leg (where the watcher is the only
-    observer) would open R2_DOWN and strand it open forever, since no driver
-    run would ever come along to close it.
+    The "but I filed it myself" carve-out was removed after three review rounds
+    found three ways the self-asserted filed-by note went wrong — stamped by an
+    adopter, surviving a placeholder that was never filed, outliving the issue
+    it described — each letting a non-owner clear a kind it has no evidence
+    about. The accepted cost: with the driver disabled, a watcher-filed R2_DOWN
+    stays open until a driver run clears it. That is correct — if the driver is
+    off, the evidence that storage recovered does not exist.
     """
     ch = _FakeChannels()
     storage = MemoryStorage()
     _driver_sentinel(storage, 7, writer="watcher")
     store = _store(ch, storage, writer="watcher")
 
-    assert store.resolve_incident("R2_DOWN") is True
-    assert ch.closed == [7]
+    assert store.resolve_incident("R2_DOWN") is False
+    assert ch.closed == []
+    assert storage.download(_DRIVER_KEY), "the sentinel survives the refusal"
 
 
 def test_owned_kind_still_resolves_for_its_owner():
