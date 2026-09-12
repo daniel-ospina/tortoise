@@ -210,6 +210,20 @@ surfaces:
   # (it sits with the other battery-only entries above).
   - test_battery_provider_cost.py
   - test_battery_differential.py
+  # #3140 (landed here with #3221): guards
+  # `battery/runner/probe_scorer.py`'s `derive_envelope_truth` /
+  # `derive_judged_truth` — the #2740 truth-emission legs. That module is
+  # source-mapped to `battery` (SOURCE_PATTERNS), so a change to it selects
+  # THIS surface; registering the guard anywhere else would leave it unrun for
+  # the very file it guards (the #3153 hole), which is the failure this whole
+  # drift gate exists to prevent.
+  #
+  # Both main drift entries had to clear in ONE PR: a pull_request CI run
+  # evaluates the MERGE ref (PR head + current main), so a PR fixing only one
+  # entry still inherits the other and cannot produce a green
+  # `manifest-integrity` — the two are mutually blocking and cannot be
+  # serialised.
+  - test_battery_derive_truth_leg.py
   - test_battery_streams.py
   - test_battery_recall.py
   - test_battery_report.py
