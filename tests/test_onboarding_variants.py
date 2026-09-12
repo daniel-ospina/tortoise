@@ -16,7 +16,9 @@ these outlived the variants they were born with).
 """
 from __future__ import annotations
 
+import os
 import re
+import subprocess
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -110,6 +112,236 @@ def test_m8_installer_ships_tortoise_onboarding():
     assert "tortoise-onboarding" in installer
     assert re.search(r'name: tortoise-onboarding', installer) or True  # name-grep contract
     assert "SKILLS_VERSION=" in installer
+
+
+# ── installer ergonomics (#3): Pi verification + version stamp ─────────────
+
+INSTALLER_PUBLIC = (REPO_ROOT / "website" / "apps" / "dashboard" / "public"
+                    / "install-tortoise-skills.sh")
+INSTALLER_DIST = (REPO_ROOT / "website" / "apps" / "dashboard" / "dist"
+                  / "install-tortoise-skills.sh")
+
+
+def _installer_text() -> str:
+    return INSTALLER_PUBLIC.read_text(encoding="utf-8")
+
+
+def _declared_version() -> str:
+    m = re.search(r'^SKILLS_VERSION="([^"]+)"', _installer_text(), re.M)
+    assert m, "installer must declare SKILLS_VERSION"
+    return m.group(1)
+
+
+def _stub_curl_dir(tmp_path: Path) -> Path:
+    """A `curl` stub that writes a valid SKILL.md for any requested skill,
+    so the installer can be exercised with no network. Set
+    STUB_CURL_FAIL_SKILL=<name> to make that one download fail."""
+    bindir = tmp_path / "bin"
+    bindir.mkdir(exist_ok=True)
+    stub = bindir / "curl"
+    stub.write_text(
+        "#!/usr/bin/env bash\n"
+        "out=''; url=''\n"
+        "while [ $# -gt 0 ]; do\n"
+        "  case \"$1\" in\n"
+        "    -o) out=\"$2\"; shift 2 ;;\n"
+        "    -*) shift ;;\n"
+        "    *) url=\"$1\"; shift ;;\n"
+        "  esac\n"
+        "done\n"
+        "skill=\"${url##*/skills/}\"; skill=\"${skill%%/*}\"\n"
+        "[ \"${STUB_CURL_FAIL_SKILL:-}\" = \"$skill\" ] && exit 22\n"
+        "printf -- '---\\nname: %s\\ndescription: stub\\n---\\nbody\\n' \"$skill\" > \"$out\"\n",
+        encoding="utf-8",
+    )
+    stub.chmod(0o755)
+    return bindir
+
+
+def _run_installer(tmp_path: Path, home: Path, harness: str = "pi",
+                   fail_skill: str | None = None):
+    bindir = _stub_curl_dir(tmp_path)
+    env = dict(os.environ, HOME=str(home),
+               PATH=f"{bindir}{os.pathsep}{os.environ['PATH']}")
+    if fail_skill:
+        env["STUB_CURL_FAIL_SKILL"] = fail_skill
+    return subprocess.run(
+        ["bash", str(INSTALLER_PUBLIC), "--harness", harness],
+        cwd=tmp_path, env=env, text=True, capture_output=True,
+    )
+
+
+def test_installer_public_and_dist_mirrors_match():
+    """The committed dist/ build mirror matches the public/ source (the
+    served installer is the public one — a stale dist copy muddies which
+    bytes are live)."""
+    assert INSTALLER_DIST.exists(), f"dist installer missing: {INSTALLER_DIST}"
+    assert INSTALLER_DIST.read_text(encoding="utf-8") == _installer_text()
+
+
+def test_installer_pi_row_verifies_the_mcp_connection():
+    """#3 gap 1: the Pi row must not stop at 'scanned on startup' — it must
+    tell the user how to verify the MCP CONNECTION (tortoise_health) and give
+    the cold-host retry path (mcp_load)."""
+    m = re.search(r"\n    pi\)\n(.*?)\n\s*;;", _installer_text(), re.S)
+    assert m, "installer pi case arm not found"
+    pi_arm = m.group(1)
+    assert "tortoise_health" in pi_arm, "Pi row must name the verify tool"
+    assert "mcp_load tortoise" in pi_arm, "Pi row must give the cold-host retry"
+
+
+def test_installer_records_a_sidecar_version_stamp(tmp_path):
+    """#3 gap 2: the installed version is recorded in a SIDECAR, so the
+    installed SKILL.md bodies stay byte-identical to the served originals
+    (the `^name:` payload check and the canonical<->mirror parity test both
+    read those bodies)."""
+    home = tmp_path / "home"
+    home.mkdir()
+    proc = _run_installer(tmp_path, home)
+    assert proc.returncode == 0, proc.stderr
+    skills_dir = home / ".pi" / "agent" / "skills"
+    stamp = skills_dir / ".tortoise-skills-version"
+    assert stamp.exists(), "installer must write a version stamp"
+    text = stamp.read_text(encoding="utf-8")
+    assert f"skills_version={_declared_version()}" in text
+    assert "harness=pi" in text
+    assert "source=" in text
+    # content identity per skill, so a local edit is catchable across versions
+    for s in ("how-to-use-tortoise", "tortoise-decide",
+              "tortoise-file-finding", "tortoise-onboarding"):
+        assert f"sha256.{s}=" in text, f"stamp must record a digest for {s}"
+    # no timestamp: the stamp also lands in version-controlled project dirs
+    assert "installed_at" not in text
+    # sidecar choice: the installed bodies are the served bytes, unmutated
+    for s in ("how-to-use-tortoise", "tortoise-decide",
+              "tortoise-file-finding", "tortoise-onboarding"):
+        body = (skills_dir / s / "SKILL.md").read_text(encoding="utf-8")
+        assert body == f"---\nname: {s}\ndescription: stub\n---\nbody\n"
+        assert "tortoise-skills-version" not in body
+
+
+def test_installer_pi_success_output_prints_verification_and_stamp(tmp_path):
+    """The success output names the verify call and points at the stamp, so
+    the installed version is visible without diffing the product site."""
+    home = tmp_path / "home"
+    home.mkdir()
+    proc = _run_installer(tmp_path, home)
+    assert proc.returncode == 0, proc.stderr
+    assert "tortoise_health" in proc.stdout
+    assert "mcp_load tortoise" in proc.stdout
+    assert ".tortoise-skills-version" in proc.stdout
+
+
+def test_installer_warns_when_replacing_a_locally_edited_copy(tmp_path):
+    """Drift detection: a locally edited copy is reported before it is
+    overwritten, even at an unchanged version (content, not version, is the
+    signal)."""
+    home = tmp_path / "home"
+    home.mkdir()
+    assert _run_installer(tmp_path, home).returncode == 0
+    victim = (home / ".pi" / "agent" / "skills" / "tortoise-decide"
+              / "SKILL.md")
+    victim.write_text("---\nname: tortoise-decide\n---\nlocally edited\n",
+                      encoding="utf-8")
+    proc = _run_installer(tmp_path, home)
+    assert proc.returncode == 0, proc.stderr
+    assert "tortoise-decide" in proc.stderr
+    assert "edited locally" in proc.stderr
+
+
+def test_installer_warns_when_there_is_no_stamp(tmp_path):
+    """The issue's actual scenario: a stale copy installed by an OLDER
+    installer (no stamp at all) must be flagged before being replaced."""
+    home = tmp_path / "home"
+    home.mkdir()
+    assert _run_installer(tmp_path, home).returncode == 0
+    skills_dir = home / ".pi" / "agent" / "skills"
+    (skills_dir / ".tortoise-skills-version").unlink()
+    victim = skills_dir / "tortoise-decide" / "SKILL.md"
+    victim.write_text("---\nname: tortoise-decide\n---\nold copy\n",
+                      encoding="utf-8")
+    proc = _run_installer(tmp_path, home)
+    assert proc.returncode == 0, proc.stderr
+    assert "older/manual install" in proc.stderr
+
+
+def test_failed_install_does_not_write_a_version_stamp(tmp_path):
+    """A failed download must not leave a stamp claiming a version that was
+    not fully installed."""
+    home = tmp_path / "home"
+    home.mkdir()
+    proc = _run_installer(tmp_path, home, fail_skill="tortoise-onboarding")
+    assert proc.returncode != 0
+    assert not (home / ".pi" / "agent" / "skills"
+                / ".tortoise-skills-version").exists()
+
+
+def test_stamp_write_replaces_a_symlink_instead_of_writing_through_it(tmp_path):
+    """The installer runs inside an untrusted project clone for the project
+    harnesses; a planted `.tortoise-skills-version -> ../../README.md`
+    symlink must not turn the install into an arbitrary-file clobber."""
+    project = tmp_path
+    skills_dir = project / ".claude" / "skills"
+    skills_dir.mkdir(parents=True)
+    victim = project / "README.md"
+    victim.write_text("important project readme\n", encoding="utf-8")
+    stamp = skills_dir / ".tortoise-skills-version"
+    stamp.symlink_to(victim)
+    proc = _run_installer(tmp_path, tmp_path / "home", harness="claude")
+    assert proc.returncode == 0, proc.stderr
+    assert victim.read_text(encoding="utf-8") == "important project readme\n"
+    assert not stamp.is_symlink(), "the stamp write followed the symlink"
+    assert "skills_version=" in stamp.read_text(encoding="utf-8")
+
+
+def test_stamp_write_is_not_clobbered_via_a_planted_temp_symlink(tmp_path):
+    """The temp file used for the atomic stamp write must not be predictable:
+    a pre-planted `$STAMP.tmp -> ../../README.md` symlink must not become an
+    arbitrary-file clobber (mktemp gives an unpredictable name)."""
+    skills_dir = tmp_path / ".claude" / "skills"
+    skills_dir.mkdir(parents=True)
+    victim = tmp_path / "README.md"
+    victim.write_text("important project readme\n", encoding="utf-8")
+    (skills_dir / ".tortoise-skills-version.tmp").symlink_to(victim)
+    proc = _run_installer(tmp_path, tmp_path / "home", harness="claude")
+    assert proc.returncode == 0, proc.stderr
+    assert victim.read_text(encoding="utf-8") == "important project readme\n"
+    assert "skills_version=" in (skills_dir
+                                 / ".tortoise-skills-version").read_text()
+
+
+def test_download_temp_is_not_clobbered_via_a_planted_symlink(tmp_path):
+    """The per-skill download temp is mktemp-named too: a planted
+    `<skill>/SKILL.md.tmp -> ../../../README.md` must not make curl clobber an
+    arbitrary file in an untrusted project clone."""
+    skill_dir = tmp_path / ".claude" / "skills" / "tortoise-decide"
+    skill_dir.mkdir(parents=True)
+    victim = tmp_path / "README.md"
+    victim.write_text("important project readme\n", encoding="utf-8")
+    (skill_dir / "SKILL.md.tmp").symlink_to(victim)
+    proc = _run_installer(tmp_path, tmp_path / "home", harness="claude")
+    assert proc.returncode == 0, proc.stderr
+    assert victim.read_text(encoding="utf-8") == "important project readme\n"
+    installed = skill_dir / "SKILL.md"
+    assert not installed.is_symlink()
+    assert "name: tortoise-decide" in installed.read_text(encoding="utf-8")
+    # mktemp's 0600 must not leak onto the installed payload
+    assert (installed.stat().st_mode & 0o777) == 0o644
+    assert not list(skill_dir.glob("SKILL.md.??????")), "temp file left behind"
+
+
+def test_stamp_write_is_reported_when_it_cannot_be_written(tmp_path):
+    """A stamp path that cannot hold a file (a directory) must be reported as
+    a failure, not silently announced as written."""
+    home = tmp_path / "home"
+    home.mkdir()
+    skills_dir = home / ".pi" / "agent" / "skills"
+    skills_dir.mkdir(parents=True)
+    (skills_dir / ".tortoise-skills-version").mkdir()
+    proc = _run_installer(tmp_path, home)
+    assert proc.returncode == 0, proc.stderr
+    assert "could not write the version stamp" in proc.stderr
+    assert "version stamp:" not in proc.stdout
 
 
 def test_m8_no_live_reference_to_old_paths_outside_archive():
