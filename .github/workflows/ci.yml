@@ -34,6 +34,7 @@ jobs:
       python: ${{ steps.gate.outputs.python }}
       drift: ${{ steps.gate.outputs.drift }}
       driver_scripts: ${{ steps.gate.outputs.driver_scripts }}
+      ai_review_gate: ${{ steps.gate.outputs.ai_review_gate }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -207,6 +208,16 @@ jobs:
                          "tests/e2e/conftest.py"),
                   startswith("website/apps/dashboard/src/"),
                   startswith("website/apps/dashboard/dist/"),
+                  isfile(".github/workflows/ci.yml"),
+              ),
+              # ai-review-gate-tests (#2982): the signed-review merge gate's
+              # shell harness. Gated on the workflow, the harness, and ci.yml
+              # itself so a change to either side of the gate always exercises
+              # its evidence-acceptance logic. Security-relevant: a regression
+              # here silently accepts unsigned/stale evidence.
+              "ai_review_gate": any_file(
+                  isfile(".github/workflows/ai-review-gate.yml"),
+                  isfile(".github/scripts/ai-review-gate.test.sh"),
                   isfile(".github/workflows/ci.yml"),
               ),
           }
@@ -433,6 +444,32 @@ jobs:
       - uses: actions/checkout@v4
       - name: Backup driver state taxonomy (#2796)
         run: bash .github/scripts/registry-cron.test.sh
+
+  ai-review-gate-tests:
+    needs: changes
+    if: needs.changes.outputs.ai_review_gate == 'true'  # #2982: gate workflow/harness only
+    # #2982: the ai-review-gate's evidence-validation shell logic runs inline
+    # in the workflow (pull_request_target never checks out PR code). This
+    # harness extracts that run block and drives it with fabricated signed
+    # markers + a stubbed gh, covering sha-match, diff-match, backward compat,
+    # fail-closed-on-API-failure, signature-over-diff, PR/repo binding, and the
+    # PR-body source. It ALSO asserts the non-runtime invariants the required
+    # job depends on: no if:/needs:/continue-on-error:, trigger stays
+    # pull_request_target with no paths: filter, permissions keep
+    # pull-requests: read, and GH_TOKEN is declared. Self-contained, no
+    # network, no secrets.
+    #
+    # ⚠️ This job is NOT a required status check: a red harness does not block a
+    # merge, so a regression here can land and then silently make the REQUIRED
+    # `ai-review-gate` check pass without evaluating evidence. Tracked in #3091
+    # (add this job to branch protection, or move the harness into an
+    # always-run required job). The `if:` above is a complete per-surface guard:
+    # it fires on any change to the gate workflow, this harness, or ci.yml.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: AI review gate shell harness (#2982)
+        run: bash .github/scripts/ai-review-gate.test.sh
 
   entrypoint-guards:
     needs: changes
