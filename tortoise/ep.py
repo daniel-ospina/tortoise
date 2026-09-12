@@ -705,7 +705,9 @@ class TortoiseEP:
                 rows = self.g.query(
                     "MATCH (a:Point {id:$id})-[r:IMPL|NAND]-(b:Point) "
                     f"{where} "
-                    "AND b.is_operator = false "
+                    # #3139/#3154: index-independent non-operator predicate
+                    # (a bare `= false` is emptied by a GRAPH.COPY'd index).
+                    "AND (b.is_operator IS NULL OR b.is_operator = false) "
                     "AND b.op_type IS NULL "
                     "RETURN DISTINCT b.id",
                     params={"id": seed_id},
@@ -791,9 +793,10 @@ class TortoiseEP:
                     dir_rows = self.g.query(
                         "MATCH (a:Point)-[r:IMPL|NAND]-(b:Point) "
                         "WHERE " + " AND ".join(conds) + " "
-                        "AND a.is_operator = false "
+                        # #3139/#3154: index-independent non-operator form.
+                        "AND (a.is_operator IS NULL OR a.is_operator = false) "
                         "AND a.op_type IS NULL "
-                        "AND b.is_operator = false "
+                        "AND (b.is_operator IS NULL OR b.is_operator = false) "
                         "AND b.op_type IS NULL "
                         "RETURN DISTINCT a.id, b.id",
                         params={"ids": list(frontier)},
@@ -976,9 +979,12 @@ class TortoiseEP:
         # wins) — unsupported; creation paths must not duplicate edges.
         dir_rows = self.g.query(
             "MATCH (a:Point)-[r:IMPL|NAND]->(b:Point) "
-            "WHERE a.is_operator = false "
+            # #3139/#3154: index-independent non-operator form — a bare
+            # `= false` drops every direct-edge factor on a GRAPH.COPY'd
+            # graph (Batch 3 silently returns ∅).
+            "WHERE (a.is_operator IS NULL OR a.is_operator = false) "
             "AND a.op_type IS NULL "
-            "AND b.is_operator = false "
+            "AND (b.is_operator IS NULL OR b.is_operator = false) "
             "AND b.op_type IS NULL "
             "AND (a.id IN $ids OR b.id IN $ids) "
             f"{('AND ' + live_a + ' AND ' + live_b + ' ') if live_a else ''}"

@@ -92,6 +92,35 @@ class BudgetExceededError(RuntimeError):
         super().__init__(message)
 
 
+class DreamNoOpError(RuntimeError):
+    """Raised when a dream pass reports success while writing ZERO belief
+    state on a graph that has EP factors to propagate (#3139).
+
+    The silent-no-op failure class: the pass's operator/factor selection
+    came back empty and the confidence write-back never ran, yet the pass's
+    window contains derived-live operators or operator-less direct edges.
+    Every mode's result shape reports ``converged``/``converged_all: True``
+    and ``budget_used: 0`` in that state — indistinguishable from a
+    legitimately empty graph — so the pass fails loudly instead.
+
+    The known producer is a dropped boolean property index: ``GRAPH.COPY``
+    drops the ``false`` entries of an ``is_operator`` range index (#3154), so
+    ``X.is_operator = false`` filters yield ∅ over a populated graph. The
+    dream/EP path uses the index-independent predicate form; this error is
+    the fail-closed backstop for any future selection regression.
+
+    A legitimately empty pass (no EP factors in the window) is NOT an error:
+    it returns normally and records ``no_op_reason`` on the health surface
+    (``dream_health_check``).
+    """
+
+    def __init__(self, message: str, mode: str | None = None,
+                 eligible_factors: int | None = None):
+        self.mode = mode
+        self.eligible_factors = eligible_factors
+        super().__init__(message)
+
+
 class Phase2Error(ValueError):
     """Epic #902 A2 — Phase-2 write failure (post-validation, partial state
     may be committed). Carries the bundle's computed batch_id so the agent

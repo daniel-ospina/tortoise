@@ -81,10 +81,21 @@ class Dreamer:
         # flags stamped at or before it — never a newer process's marking).
         self._last_flush_skipped: bool = False
         self._last_run_ep_version: int = 0
+        # #3139: belief-state writes performed by the last pass — the single
+        # choke point is ``_ep_run_batch`` (the UNWIND confidence write-back).
+        # The SDK adapters read this to refuse a success-shaped pass that
+        # wrote zero belief state (the silent no-op).
+        self._last_belief_write_count: int = 0
+        # #3139: the full pass's reachable-affected set. ``dream_all`` returns
+        # a COUNT (``total_affected``) to keep the pinned I1 key-set, so the
+        # set is stashed here for the caller's dirty-root sweep — without it
+        # ``_dream_full`` swept an empty set and the backlog never cleared.
+        self._last_affected_claims: set[str] = set()
 
     def _snapshot_ep_epoch(self) -> None:
         """Capture the graph's current EP epoch as this pass's world-view."""
         self._last_flush_skipped = False
+        self._last_belief_write_count = 0
         try:
             self._last_run_ep_version = self._sdk._ep_epoch()
         except Exception:  # noqa: BLE001, RUF100
@@ -137,6 +148,7 @@ class Dreamer:
         """
         if not anchors:
             self._last_operator_count = 0
+            self._last_belief_write_count = 0
             return {"iterations": 0, "converged": True, "affected_claims": []}
         with self._lock:
             self._snapshot_ep_epoch()
@@ -230,6 +242,7 @@ class Dreamer:
         # dirty roots either — the newer write's markings stay).
         self._last_flush_skipped = bool(getattr(ep, "_flush_skipped", False))
         if self._last_flush_skipped:
+            self._last_belief_write_count = 0
             return iterations, converged, set(ep._last_affected)
         # Epic 903-C4 (#1242): DE2E-6b cost metric — the censored-update
         # counter is recorded per run (surfaced by the SDK adapters for the
@@ -250,6 +263,9 @@ class Dreamer:
             {"id": cid, "c": ep.compute_confidence(cid)["mean"]}
             for cid in affected
         ]
+        # #3139: record the belief-state write count for this pass (0 when
+        # EP found no factors) — the silent-no-op guard's primary signal.
+        self._last_belief_write_count = len(params_list)
         if params_list:
             if stamp_now:
                 proj.g.query(
@@ -370,6 +386,11 @@ class Dreamer:
             affected: set[str] = set()
             batches = 0
             converged_all = True
+            # #3139-review: aggregate the per-batch signals across the window
+            # (mirrors dream_all) — a later batch with no fresh factors must
+            # not erase an earlier batch's writes from the guard's view.
+            total_belief_writes = 0
+            any_flush_skipped = False
             for start in range(0, len(window), WINDOW_CLAIM_BATCH):
                 chunk = window[start:start + WINDOW_CLAIM_BATCH]
                 batches += 1
@@ -409,7 +430,15 @@ class Dreamer:
                     proj, seed_ids, max_hops, stamp=True,
                     warm_start=warm_start)
                 affected |= aff
+                total_belief_writes += getattr(
+                    self, "_last_belief_write_count", 0) or 0
+                any_flush_skipped = (
+                    any_flush_skipped or self._last_flush_skipped)
                 converged_all = converged_all and converged
+            # #3139-review: surface the pass-total signals for the SDK
+            # adapter's guard (the per-batch values are overwritten above).
+            self._last_belief_write_count = total_belief_writes
+            self._last_flush_skipped = any_flush_skipped
             # Operator-less window claims: trivial-stamp (window-scoped scan,
             # independent of the EP flush), gated on the pass converging — a
             # failed pass stamps nothing (W4 retention).
@@ -501,17 +530,33 @@ class Dreamer:
         """
         from .exceptions import BudgetExceededError
         self._snapshot_ep_epoch()
+        # #3139-review: this is the PASS-START epoch. Each chunk's dream()
+        # re-snapshots (dream.py), so the caller's dirty-root sweep must use
+        # THIS value, not the last chunk's — a concurrent write landing
+        # mid-pass (E1 in (E0, E_last)) must survive the sweep (#1163).
+        pass_ep_version = self._last_run_ep_version
+        any_flush_skipped = False
         proj = self._sdk._get_proj()
         rows = proj.g.query(
-            "MATCH (n:Point) WHERE n.is_operator = false "
+            # #3139/#3154: index-independent non-operator predicate. A bare
+            # `n.is_operator = false` is served by the boolean range index,
+            # and GRAPH.COPY drops the `false` entries from that index — so
+            # on a restored/imported graph the selector returns ZERO anchors
+            # while 1000+ claims are dirty, and this pass reported
+            # `converged_all: True` over an empty scan (the silent no-op).
+            "MATCH (n:Point) "
+            "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
             "RETURN n.id"
         ).result_set
         anchors = [r[0] for r in rows]
         if not anchors:
+            self._last_belief_write_count = 0
+            self._last_affected_claims = set()
             return {"batches": 0, "total_affected": 0, "converged_all": True,
                     "scanned_count": 0, "budget_used": 0}
 
         total_affected: set[str] = set()
+        total_belief_writes = 0
         converged_all = True
         batches = 0
         total_operators = 0
@@ -555,7 +600,21 @@ class Dreamer:
                                 warm_start=warm_start)
             batches += 1
             total_affected.update(result.get("affected_claims", []))
+            total_belief_writes += getattr(
+                self, "_last_belief_write_count", 0) or 0
+            any_flush_skipped = (
+                any_flush_skipped or self._last_flush_skipped)
             converged_all = converged_all and result.get("converged", False)
+        # #3139: surface the pass-total belief-state writes (the per-chunk
+        # value is overwritten by each chunk's dream() call) and the
+        # reachable-affected set for the caller's dirty-root sweep.
+        self._last_belief_write_count = total_belief_writes
+        self._last_affected_claims = set(total_affected)
+        # Restore the pass-start epoch + the ANY-chunk stale-run flag so the
+        # caller's sweep is guarded against the whole pass, not just the last
+        # chunk (#3139 review; #1163).
+        self._last_run_ep_version = pass_ep_version
+        self._last_flush_skipped = any_flush_skipped
         # Epic 903-C2 (#1240): dedicated graph-wide trivial-scan for
         # operator-less claims (independent of the EP flush; kept out of
         # total_affected per DE2E-1). Gated on BOTH stamp_dreamed_at AND
