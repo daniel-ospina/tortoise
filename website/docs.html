@@ -43,6 +43,7 @@
     h1 { font-family: var(--serif); font-size: 2rem; font-weight: 400; margin-bottom: 8px; }
     h2 { font-family: var(--serif); font-size: 1.4rem; font-weight: 400; margin: 40px 0 12px; color: var(--accent); }
     h3 { font-size: 1rem; margin: 24px 0 8px; }
+    h4 { font-size: .9rem; font-weight: 600; margin: 20px 0 6px; color: var(--text-dim); }
     p { margin-bottom: 12px; }
     a { color: var(--accent); }
     .lead { color: var(--text-dim); font-size: 1.1rem; margin-bottom: 32px; }
@@ -139,12 +140,13 @@
     <h2 id="quickstart">Quickstart (5 minutes)</h2>
     <div class="card">
       <h3>1. Create an account</h3>
-      <p>Sign up at <a href="/auth">tortoise.premiselabs.co/auth</a>. You'll get an API key in the in-app welcome card — copy it. It's shown once.</p>
+      <p>Sign up at <a href="/auth">tortoise.premiselabs.co/auth</a>. You'll get an API key in the in-app welcome card — copy it (it's shown once), then export it in your shell:</p>
+      <pre><code>export TORTOISE_API_KEY=YOUR_KEY</code></pre>
     </div>
     <div class="card">
       <h3>2. Write your first Point</h3>
       <pre><code>curl -X POST https://api.premiselabs.co/v1/points \
-  -H "Authorization: Bearer tt_YOUR_KEY" \
+  -H "Authorization: Bearer $TORTOISE_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"content": "the production port is 16379", "kind": "statement"}'</code></pre>
       <p>Response includes the Point's <code>id</code>.</p>
@@ -152,7 +154,7 @@
     <div class="card">
       <h3>3. Search</h3>
       <pre><code>curl "https://api.premiselabs.co/v1/search?q=port" \
-  -H "Authorization: Bearer tt_YOUR_KEY"</code></pre>
+  -H "Authorization: Bearer $TORTOISE_API_KEY"</code></pre>
       <p>Returns ranked results (FTS + vector + structural, RRF-fused).</p>
     </div>
     <div class="card">
@@ -161,39 +163,78 @@
     </div>
 
     <h2 id="mcp">Connect your agent (MCP)</h2>
-    <p>The fastest way to give an agent Tortoise memory is the <strong>MCP server</strong> — no code required. Your agent (Claude Code, Cursor, Claude Desktop, or any MCP client) reads and writes your Tortoise graph automatically.</p>
+    <p>The fastest way to give an agent Tortoise memory is the <strong>MCP server</strong> — no code required. Your agent (Claude Code, Cursor, Codex, Pi, Claude Desktop, or Claude Web — or any other MCP client) reads and writes your Tortoise graph automatically. (ChatGPT connects key-less over OAuth from the dashboard's ChatGPT tab — no config file, so it has no row below.)</p>
     <div class="card">
       <h3>Setup — hosted (no install)</h3>
-      <p>Add this to your MCP config (replace <code>tt_YOUR_KEY</code> with your API key):</p>
+      <p>The hosted server speaks Streamable HTTP at <code>https://api.premiselabs.co/mcp/</code>. Keep your API key in an environment variable — never paste a literal <code>tt_…</code> key into a file that can be committed. In client JSON config the transport value is <code>"http"</code> (the protocol's spec name is Streamable HTTP): Claude Code accepts <code>"streamable-http"</code> as an alias and Cursor's IDE may tolerate it, but Cursor's CLI can drop the whole config file and Pi ignores <code>type</code> — so <code>"http"</code> is the only universally safe value.</p>
+
+      <h4>Claude Code</h4>
+      <p>Add to <code>.mcp.json</code> in your project. Claude Code <strong>requires</strong> <code>"type": "http"</code> — a <code>url</code> entry with no <code>type</code> is read as a stdio server and skipped.</p>
       <pre><code>{
   "mcpServers": {
     "tortoise": {
-      "type": "streamable-http",
+      "type": "http",
       "url": "https://api.premiselabs.co/mcp/",
-      "headers": {
-        "Authorization": "Bearer tt_YOUR_KEY"
-      }
+      "headers": { "Authorization": "Bearer ${TORTOISE_API_KEY}" }
     }
   }
 }</code></pre>
-      <p>Paste into <code>.mcp.json</code> (Claude Code) or <code>.cursor/mcp.json</code> (Cursor). Restart your client. For <strong>Claude Desktop</strong>, add the server from <strong>Settings → Connectors → Add custom connector</strong> instead — <code>claude_desktop_config.json</code> only accepts local stdio servers, so a remote HTTP server placed there is silently ignored.</p>
-      <p class="callout">The hosted MCP server runs on our infrastructure over Streamable HTTP — no Python or <code>tortoise</code> install needed. Your client just needs network access to <code>https://api.premiselabs.co/mcp/</code>.</p>
+      <p>Export <code>TORTOISE_API_KEY</code> in your shell profile first. Project-scoped servers need a one-time approval on first use. Equivalent one-liner: <code>claude mcp add --transport http tortoise https://api.premiselabs.co/mcp/ --header "Authorization: Bearer $TORTOISE_API_KEY"</code></p>
+
+      <h4>Cursor — <code>.cursor/mcp.json</code></h4>
+      <p>Cursor expands <code>${env:…}</code> and infers the transport from <code>url</code>, so the entry carries <strong>no</strong> <code>type</code>.</p>
+      <pre><code>{
+  "mcpServers": {
+    "tortoise": {
+      "url": "https://api.premiselabs.co/mcp/",
+      "headers": { "Authorization": "Bearer ${env:TORTOISE_API_KEY}" }
+    }
+  }
+}</code></pre>
+
+      <h4>Pi — <code>.mcp.json</code></h4>
+      <p>Add to, or merge into, <code>.mcp.json</code> in your project. Pi's <code>mcp-client</code> expands plain <code>${…}</code> — no <code>env:</code> prefix — and infers the transport from <code>url</code>, so <code>type</code> is not needed (and is ignored if present).</p>
+      <pre><code>{
+  "mcpServers": {
+    "tortoise": {
+      "url": "https://api.premiselabs.co/mcp/",
+      "headers": { "Authorization": "Bearer ${TORTOISE_API_KEY}" }
+    }
+  }
+}</code></pre>
+
+      <h4>Codex CLI</h4>
+      <p>Codex manages its own config — run this in your terminal:</p>
+      <pre><code>export TORTOISE_API_KEY=YOUR_KEY
+codex mcp add tortoise --url https://api.premiselabs.co/mcp/ --bearer-token-env-var TORTOISE_API_KEY</code></pre>
+
+      <h4>Codex Desktop (no terminal)</h4>
+      <p>Codex Desktop shares <code>~/.codex/config.toml</code> with the CLI but does <em>not</em> read shell exports. Add an <code>[mcp_servers.tortoise]</code> block with <code>url = "https://api.premiselabs.co/mcp/"</code> and <code>bearer_token_env_var = "TORTOISE_API_KEY"</code>, and put that variable into the app's environment (<code>launchctl setenv</code> on macOS, <code>setx</code> on Windows) — or use the literal <code>http_headers</code> form on a shell-less machine (private file — never commit it).</p>
+
+      <h4>Claude Desktop</h4>
+      <p>Add the server from <strong>Settings → Connectors → Add custom connector</strong>: Server URL <code>https://api.premiselabs.co/mcp/</code>, request header <code>Authorization: Bearer YOUR_KEY</code>. Do <em>not</em> use <code>claude_desktop_config.json</code> — it only accepts local stdio servers, so a remote HTTP server placed there is silently ignored.</p>
+
+      <h4>Claude Web</h4>
+      <p>In claude.ai go to <strong>Settings → Connectors → Add custom connector</strong>, name it <code>Tortoise</code>, and use the Server URL above. Claude Web has no environment to read a variable from, so its request header holds the key literally: <code>Authorization: Bearer YOUR_KEY</code>. The key is held by Anthropic in your account — keep it private and revoke it from the dashboard if it leaks.</p>
+
+      <p class="callout">The hosted MCP server runs on our infrastructure — no Python or <code>tortoise</code> install needed. Your client just needs network access to <code>https://api.premiselabs.co/mcp/</code>.</p>
+      <p>After editing a config file, restart that client (Claude Code, Cursor, Pi, and both Codex surfaces). The Claude Desktop and Claude Web connectors are live immediately.</p>
     </div>
     <div class="card">
       <h3>Setup — self-hosted (stdio)</h3>
-      <p>Running Tortoise on your own infrastructure? Point the MCP client at a local process over stdio instead (see the <a href="/self-hosted">self-hosted guide</a>):</p>
+      <p>Running Tortoise on your own infrastructure? Point the MCP client at a local process over stdio instead (see the <a href="/self-hosted">self-hosted guide</a>). A stdio server gets its database from <code>TORTOISE_DB_URI</code> — do <em>not</em> set <code>TORTOISE_API_KEY</code> here: the stdio transport cannot carry auth tokens, and setting it disables every tool:</p>
       <pre><code>{
   "mcpServers": {
     "tortoise": {
       "command": "python3",
       "args": ["-m", "tortoise.mcp_server"],
       "env": {
-        "TORTOISE_API_KEY": "tt_YOUR_KEY",
-        "TORTOISE_API_URL": "https://api.premiselabs.co"
+        "TORTOISE_DB_URI": "docker://:falkordb@localhost:6379/tortoise"
       }
     }
   }
 }</code></pre>
+      <p>Cursor requires <code>"type": "stdio"</code> on stdio entries; Claude Code and Pi infer stdio from <code>command</code>. The block above is the durable sidecar path; stdio against an embedded database (with <code>TORTOISE_DB_URI</code> unset) is a single-writer, eval-only fallback — never a durable team setup.</p>
       <p class="callout">Need <code>python3</code> and <code>tortoise</code> installed where the client runs? <code>pip install tortoise-graph</code> — the MCP server ships with the package.</p>
     </div>
     <div class="card">

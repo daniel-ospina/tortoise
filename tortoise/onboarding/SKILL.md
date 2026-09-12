@@ -7,7 +7,7 @@ status: live
 tags: [tortoise, onboarding, mcp, harness, install, self-hosted, connect, onboarding-state, decide]
 summary: "The ONE live Tortoise onboarding script — reads onboarding state, self-adjudicates the harness, installs/connects (self-hosted: Docker-first, Compose + FalkorDB; embedded = eval-only fallback), verifies via tortoise_health, checkpoints harness-connected, and runs the generic MCP-tool decide protocol."
 created: 2026-09-02
-updated: 2026-09-04
+updated: 2026-09-12
 allowed-tools: read write bash
 ---
 
@@ -151,6 +151,18 @@ or `${TORTOISE_API_KEY}`); Desktop/Web configs stay literal-with-privacy-note
 the HOSTED connect — self-hosted agents apply the §3a delta to the same
 rows.
 
+**Transport `type` (canonical):** the hosted endpoint is Streamable HTTP.
+Where a client requires a `type`, use `"http"` — the protocol's spec name is
+Streamable HTTP, but `"streamable-http"` is only a Claude Code alias:
+Cursor's IDE may tolerate it while the Cursor CLI can drop the whole config
+file, and Pi ignores `type` entirely. Never teach `"streamable-http"`;
+`"http"` is the only universally safe value.
+Claude Code **requires** `"type": "http"` in a JSON `.mcp.json` entry (a
+`url` with no `type` is read as stdio and the server is skipped); Cursor and
+Pi infer the transport from `url` and carry **no** `type` — that is also the
+tested shape in `tortoise/__main__.py::_harness_mcp_config` and the
+dashboard wizard (`website/apps/dashboard/src/harnesses.js`).
+
 ### Claude Code (self-install)
 
 ```bash
@@ -175,7 +187,7 @@ config was written (`claude mcp list` shows `tortoise`).
 Create/merge `.cursor/mcp.json` in the project:
 
 ```json
-{ "mcpServers": { "tortoise": { "type": "http", "url": "https://api.premiselabs.co/mcp/", "headers": { "Authorization": "Bearer ${env:TORTOISE_API_KEY}" } } } }
+{ "mcpServers": { "tortoise": { "url": "https://api.premiselabs.co/mcp/", "headers": { "Authorization": "Bearer ${env:TORTOISE_API_KEY}" } } } }
 ```
 
 Set `TORTOISE_API_KEY` in your environment (Cursor settings or shell
@@ -218,7 +230,7 @@ Create/merge `.mcp.json` in the project (MERGE — never replace an existing
 `mcpServers` block):
 
 ```json
-{ "mcpServers": { "tortoise": { "type": "http", "url": "https://api.premiselabs.co/mcp/", "headers": { "Authorization": "Bearer ${TORTOISE_API_KEY}" } } } }
+{ "mcpServers": { "tortoise": { "url": "https://api.premiselabs.co/mcp/", "headers": { "Authorization": "Bearer ${TORTOISE_API_KEY}" } } } }
 ```
 
 Pi's mcp-client expands plain `${TORTOISE_API_KEY}` (no `env:` prefix).
