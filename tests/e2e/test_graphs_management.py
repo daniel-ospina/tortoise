@@ -129,6 +129,7 @@ def _wire_graphs_harness(page: Page, team_row: dict,
                          graph_mint_bodies: list | None = None,
                          key_authed: list | None = None,
                          rename_bodies: list | None = None,
+                         backups: list[dict] | None = None,
                          create_status: int = 201,
                          create_body: dict | None = None) -> None:
     """Layered API mock (keys-table style). team_row carries tier/max_graphs
@@ -144,6 +145,8 @@ def _wire_graphs_harness(page: Page, team_row: dict,
     graph_mint_bodies = graph_mint_bodies if graph_mint_bodies is not None else []
     key_authed = key_authed if key_authed is not None else []
     rename_bodies = rename_bodies if rename_bodies is not None else []
+    # #3136: per-graph backup manifests for the Last-backup column.
+    backups = backups if backups is not None else []
     user_id = "u-graphs2116"
     create_body = create_body if create_body is not None else {
         "graph": {**CUSTOM_B, "created_at": "2026-09-04T00:00:00.000Z"},
@@ -263,7 +266,7 @@ def _wire_graphs_harness(page: Page, team_row: dict,
                 return
             if path.endswith("/backups"):
                 route.fulfill(status=200, content_type="application/json",
-                              body=json.dumps({"backups": []}))
+                              body=json.dumps({"backups": backups}))
                 return
             if path.endswith("/v1/team") or path.endswith("/v1/team/"):
                 route.fulfill(status=200, content_type="application/json",
@@ -311,6 +314,42 @@ def _open_graphs_tab(page: Page, team_row: dict,
     # The graphs table is the active tab's <table> — one row per fixture row.
     expected_rows = len(graphs) if graphs is not None else 2
     expect(page.locator("table tbody tr")).to_have_count(expected_rows, timeout=15_000)
+
+
+def test_graphs_last_backup_column_per_graph(page: Page) -> None:
+    """#3136: backups are PER GRAPH — the Graphs table's Last-backup cell
+    shows each row's OWN newest manifest (relative label with an absolute
+    tooltip), '—' for a graph with no backup, and never a team-wide count.
+    The default row is a first-class key (legacy-flat manifests bucket to
+    'default'); an unidentified manifest (no graph_id) leaks onto no row."""
+    from datetime import UTC, datetime, timedelta
+    now = datetime.now(UTC)
+
+    def stamp(hours: int) -> str:
+        return (now - timedelta(hours=hours)).isoformat().replace("+00:00", "Z")
+
+    backups = [
+        {"backup_id": "t/default/a", "graph_id": "default", "created_at": stamp(2)},
+        # older sibling for the SAME graph must lose (explicit max, not order)
+        {"backup_id": "t/default/b", "graph_id": "default", "created_at": stamp(9)},
+        {"backup_id": "t/g_prod/a", "graph_id": "g_prod", "created_at": stamp(5)},
+        # legacy flat, no graph_id — the client must not guess a bucket
+        {"backup_id": "t/legacy", "created_at": stamp(1)},
+    ]
+    _open_graphs_tab(page, _team_row("team", None),
+                     graphs=[DEFAULT_ROW, CUSTOM_A, CUSTOM_B],
+                     graph_keys={"g_prod": [_GRAPH_KEY]},
+                     backups=backups)
+    expect(page.locator("table thead")).to_contain_text("Last backup")
+    rows = page.locator("table tbody tr")
+    # default-first: default, prod, dev.
+    expect(rows.nth(0)).to_contain_text("2 hr ago")      # newest default manifest
+    expect(rows.nth(0)).not_to_contain_text("9 hr ago")  # older sibling loses
+    expect(rows.nth(1)).to_contain_text("5 hr ago")      # g_prod's own stamp
+    expect(rows.nth(2)).to_contain_text("—")             # g_dev: no backup
+    # The unidentified legacy manifest must not leak onto any row.
+    expect(rows.nth(0)).not_to_contain_text("1 hr ago")
+    expect(rows.nth(1)).not_to_contain_text("1 hr ago")
 
 
 def test_graphs_table_rows_default_first_with_actions(page: Page) -> None:

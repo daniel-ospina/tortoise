@@ -11,6 +11,8 @@ import {
   graphMintBody,
   graphsMeter,
   isDefaultGraph,
+  lastBackupAtByGraph,
+  lastBackupCell,
   sortedGraphRows,
   sortedTrashRows,
   tierCreateLocked,
@@ -181,6 +183,97 @@ test('sortedTrashRows: empty + null-safe', () => {
 })
 
 // ── #2701 delete-modal type-to-confirm gate ──────────────────────────────
+// ── #3136 per-graph backup recency ───────────────────────────
+
+const NOW = Date.parse('2026-09-06T00:00:00Z')
+const AGO = (mins, gid) => ({ graph_id: gid, created_at: new Date(NOW - mins * 60000).toISOString() })
+
+// The helper must NOT trust array order — the newest-first guarantee is the
+// server's, and a reorder regression must not blank the column.
+test('lastBackupAtByGraph: newest wins regardless of array order', () => {
+  const old = AGO(120, 'g-a')
+  const newer = AGO(5, 'g-a')
+  const mid = AGO(60, 'g-a')
+  assert.equal(lastBackupAtByGraph([old, newer, mid]).get('g-a'), newer.created_at)
+  assert.equal(lastBackupAtByGraph([newer, mid, old]).get('g-a'), newer.created_at)
+  assert.equal(lastBackupAtByGraph([mid, old, newer]).get('g-a'), newer.created_at)
+})
+
+test('lastBackupAtByGraph: per-graph isolation; unidentified entries create no key', () => {
+  const list = [
+    AGO(30, 'g-a'), AGO(10, 'g-a'),
+    AGO(90, 'g-b'), AGO(20, 'g-b'),
+    { backup_id: 'backups/team/x', created_at: new Date(NOW - 60000).toISOString() }, // legacy flat, no graph_id
+  ]
+  const map = lastBackupAtByGraph(list)
+  assert.equal(map.size, 2)
+  assert.equal(map.get('g-a'), AGO(10, 'g-a').created_at)
+  assert.equal(map.get('g-b'), AGO(20, 'g-b').created_at)
+})
+
+test('lastBackupAtByGraph: default is a first-class key', () => {
+  const map = lastBackupAtByGraph([AGO(15, 'default')])
+  assert.equal(map.get('default'), AGO(15, 'default').created_at)
+})
+
+test('lastBackupAtByGraph: unreadable stamps are skipped, not fatal', () => {
+  // A graph whose ONLY stamp is unreadable is absent (→ cell 'none'); a
+  // graph with a bad + a good stamp keeps the good one.
+  const map = lastBackupAtByGraph([
+    { graph_id: 'g-bad', created_at: null },
+    { graph_id: 'g-bad', created_at: 'not-a-date' },
+    { graph_id: 'g-mix', created_at: 'nope' },
+    AGO(3, 'g-mix'),
+  ])
+  assert.equal(map.has('g-bad'), false)
+  assert.equal(map.get('g-mix'), AGO(3, 'g-mix').created_at)
+})
+
+test('lastBackupAtByGraph: empty/invalid input is null-safe', () => {
+  for (const input of [[], null, undefined, [{}, null]]) {
+    const map = lastBackupAtByGraph(input)
+    assert.ok(map instanceof Map)
+    assert.equal(map.size, 0)
+  }
+})
+
+test('lastBackupCell: loading never reads as "no backups"', () => {
+  const c = lastBackupCell({ graph_id: 'g-a' }, new Map(), 'loading', NOW)
+  assert.equal(c.state, 'loading')
+  assert.equal(c.label, '…')
+})
+
+test('lastBackupCell: error/denied disclose the failure, not "none"', () => {
+  for (const status of ['error', 'denied']) {
+    const c = lastBackupCell({ graph_id: 'g-a' }, new Map(), status, NOW)
+    assert.equal(c.state, 'error')
+    assert.equal(c.label, '—')
+    assert.match(c.title, /Couldn't load backups/)
+  }
+})
+
+test('lastBackupCell: ok + no entry for this graph → none with a truthful title', () => {
+  const c = lastBackupCell({ graph_id: 'g-a' }, new Map([['g-b', AGO(1, 'g-b').created_at]]), 'ok', NOW)
+  assert.equal(c.state, 'none')
+  assert.equal(c.label, '—')
+  assert.match(c.title, /No backups yet/)
+})
+
+test('lastBackupCell: ok + entry → relative label with the ISO echoed', () => {
+  const iso = AGO(2, 'g-a').created_at
+  const c = lastBackupCell({ graph_id: 'g-a' }, new Map([['g-a', iso]]), 'ok', NOW)
+  assert.equal(c.state, 'at')
+  assert.equal(c.iso, iso)
+  assert.equal(c.label, '2 min ago')
+})
+
+test('lastBackupCell: cross-graph no-bleed + null row are safe', () => {
+  const map = new Map([['g-b', AGO(1, 'g-b').created_at]])
+  assert.equal(lastBackupCell({ graph_id: 'g-a' }, map, 'ok', NOW).state, 'none')
+  assert.equal(lastBackupCell(null, map, 'ok', NOW).state, 'none')
+  assert.equal(lastBackupCell(undefined, map, 'loading', NOW).state, 'loading')
+})
+
 test('deleteTypedMatches: only the literal word "delete" passes', () => {
   assert.equal(deleteTypedMatches('delete'), true)
   assert.equal(deleteTypedMatches(' delete '), true)   // trim tolerated
