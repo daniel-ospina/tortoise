@@ -50,7 +50,13 @@ from urllib.parse import parse_qs, urlencode, urlparse  # noqa: F401
 
 # ── Protocol constants ──────────────────────────────────────────────────────
 
+# SCOPES_SUPPORTED is the *client-facing default* / PRM document scope set;
+# SCOPES_ACCEPTED is the superset the DCR + authorize gates must accept
+# (#2866). `offline_access` is accepted (Claude's connector requests it, and
+# the AS does mint refresh tokens) without becoming a default fallback or a
+# PRM-advertised scope. The superset relation is structural.
 SCOPES_SUPPORTED = ["mcp"]
+SCOPES_ACCEPTED = [*SCOPES_SUPPORTED, "offline_access"]
 ACCESS_TOKEN_TTL_S = int(os.environ.get("TORTOISE_OAUTH_ACCESS_TTL", "3600"))
 REFRESH_TOKEN_TTL_S = int(os.environ.get("TORTOISE_OAUTH_REFRESH_TTL",
                                           str(30 * 24 * 3600)))
@@ -340,9 +346,9 @@ def register_client(cp, body: dict) -> dict:
     if not isinstance(scope, str):
         raise OAuthError(400, "invalid_client_metadata", "scope must be a string.")
     requested = scope.split()
-    if any(s not in SCOPES_SUPPORTED for s in requested):
+    if any(s not in SCOPES_ACCEPTED for s in requested):
         raise OAuthError(400, "invalid_client_metadata",
-                         f"Unsupported scope. Supported: {SCOPES_SUPPORTED}")
+                         f"Unsupported scope. Supported: {SCOPES_ACCEPTED}")
 
     client_id = _new_token("ct_")
     client_secret = _new_token("cs_") if auth_method == "client_secret_post" else None
@@ -854,7 +860,7 @@ def authorization_server_metadata(base: str) -> dict:
         "grant_types_supported": ["authorization_code", "refresh_token"],
         "token_endpoint_auth_methods_supported": ["none", "client_secret_post"],
         "code_challenge_methods_supported": ["S256"],
-        "scopes_supported": SCOPES_SUPPORTED,
+        "scopes_supported": SCOPES_ACCEPTED,
     }
 
 

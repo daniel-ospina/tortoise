@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import hmac
 import inspect
+import ipaddress
 import json as _json
 import logging
 import math
@@ -24,7 +25,7 @@ import os
 import re
 import threading
 import time
-from collections import defaultdict
+from collections import OrderedDict, defaultdict
 from collections.abc import Hashable
 from contextlib import asynccontextmanager, suppress
 from datetime import UTC, datetime, timedelta
@@ -21805,11 +21806,285 @@ async def webhooks_stripe(request: Request):
 # closed 503 (OAuth is hosted-only); the well-known metadata endpoints still
 # serve (they describe the hosted AS; harmless static JSON).
 
-# DCR per-IP limiter (RFC 7591 registration is an unauthenticated write
-# surface — reuses the shared per-IP bucket primitive, 20/hr default).
-_OAUTH_DCR_BUCKETS: dict[str, list[float]] = defaultdict(list)
+# ── DCR capacity policy (#2866) ────────────────────────────────────────
+# RFC 7591 registration is an unauthenticated write surface. The limiter is
+# intentionally NOT the shared `_check_ip_bucket_rate_limit` primitive: that
+# primitive appends BEFORE its 429 check and prunes only *stale* buckets, so
+# an attacker-keyed fresh-key flood grows its store without bound and every
+# request scans the whole store once over `max_entries` (the primitive is left
+# byte-identical; the sibling filing tracks it). This limiter states its
+# capacity policy in concrete, falsifiable numbers:
+#
+#   per bucket (per client IP, or /64 for IPv6) ... 20/hr   (PER_HOUR)
+#   anonymous global aggregate ................... 600/hr   (ANON_AGGREGATE)
+#   trusted-CIDR aggregate ....................... 1200/hr  (TRUSTED_PER_HOUR)
+#   live-bucket store cap ........................ 256      (STORE_CAP)
+#   window ....................................... 3600 s
+#
+# Dimension membership: *trusted ⇒ per-CIDR aggregate only* (no per-key
+# bucket, no shared overflow, no anonymous aggregate) and *anonymous ⇒
+# per-key bucket (or shared overflow) AND the anonymous global aggregate*.
+# The trusted carve-out is evaluated BEFORE any per-key/overflow path, so the
+# exemption is reachable under an anonymous flood — otherwise a first-time
+# trusted IP is a "new key" and would be denied once STORE_CAP buckets are
+# live. STORE_CAP (256) < ANON_AGGREGATE (600) keeps the reject-new/overflow
+# branch live at shipped defaults.
+#
+# Bounded store, deterministic eviction (#2866 D3/D4): a bucket is *active*
+# iff it holds an in-window entry. Store order is last-charge (charged hits
+# `move_to_end`); reclaim therefore stops at the first active head, because
+# every later key was charged no earlier than the head. Reclaim runs ONLY on
+# the new-key-at-cap path, so a tracked key's charge stays O(1) and the store
+# can never evict an active key. If the cap is still full, the new key is
+# denied its own bucket and charged to one shared overflow bucket (bounded by
+# the derived overflow cap = PER_HOUR) AND the anonymous aggregate (D9).
+#
+# Derived ceiling: the distinct-new-anonymous-key rate is bounded by
+# STORE_CAP + PER_HOUR = 276/hr (256 live keys + 20 overflow charges) — a
+# burst/concurrent-live bound, not a bound tested at shipped scale.
+#
+# IPv6: the store key is the /IPV6_PREFIX network (default /64) of the
+# normalized address, so a single client cannot mint 2**64 buckets; a
+# malformed address keys as the single constant "anonymous" (never the raw
+# string, so a malformed-identity flood cannot occupy STORE_CAP buckets).
+# Out-of-range prefix falls back to 64 (clamping 0 -> 1 would collapse every
+# IPv6 address into one bucket). Malformed IP/CIDR never raise; a missing
+# client early-returns like the shared primitive.
+#
+# Accepted limitations (PR body carries the full list): in-process stores ⇒
+# real capacity is limit × machines and resets on restart (#1677 / #2853 own
+# oauth_clients row pruning — owner @daniel-ospina, date 2026-10-15); the
+# limiter runs before body parsing, so invalid-JSON / oversized POSTs DO
+# consume budget; the anonymous aggregate is a one-source DoS (trusted CIDRs
+# unaffected); the exemption's security rests on the Fly edge stripping
+# client `Fly-*` headers (assumption 12 — operator recipe + dated
+# re-verification issue referenced from the PR).
+_OAUTH_DCR_WINDOW_S = 3600
+_OAUTH_DCR_PER_HOUR_DEFAULT = 20
+_OAUTH_DCR_ANON_AGGREGATE_PER_HOUR_DEFAULT = 600
+_OAUTH_DCR_TRUSTED_PER_HOUR_DEFAULT = 1200
+_OAUTH_DCR_STORE_CAP_DEFAULT = 256
+_OAUTH_DCR_IPV6_PREFIX_DEFAULT = 64
+# Anthropic's published outbound/MCP egress range
+# (platform.claude.com/docs/en/api/ip-addresses; whois AP-2440). Comma-
+# separated; an EMPTY value means an empty trusted set (the documented lever
+# to disable the exemption) — never the default.
+_OAUTH_DCR_TRUSTED_CIDRS_DEFAULT = "160.79.104.0/21"
+# Singleton store keys for the aggregate dimensions (malformed client IPs
+# share the constant below, never a per-raw-string bucket).
+_OAUTH_DCR_ANON_KEY = "\x00anon"
+_OAUTH_DCR_OVERFLOW_KEY = "\x00overflow"
+_OAUTH_DCR_MALFORMED_KEY = "anonymous"
+
+_OAUTH_DCR_BUCKETS: OrderedDict[str, list[float]] = OrderedDict()
+_OAUTH_DCR_TRUSTED: OrderedDict[str, list[float]] = OrderedDict()
+_OAUTH_DCR_OVERFLOW: OrderedDict[str, list[float]] = OrderedDict()
+_OAUTH_DCR_ANON: OrderedDict[str, list[float]] = OrderedDict()
 _OAUTH_DCR_LOCK = asyncio.Lock()
-_OAUTH_DCR_MAX_PER_HOUR = int(os.environ.get("TORTOISE_OAUTH_DCR_PER_HOUR", "20"))
+
+
+def _dcr_prune_window(bucket: list[float], now: float, window_s: int) -> list[float]:
+    """In-window entries of `bucket` (pure; the primitive's window contract is
+    pinned against this by a parity test, D10)."""
+    return [t for t in bucket if now - t < window_s]
+
+
+def _dcr_retry_after_s(bucket: list[float], now: float, window_s: int) -> int:
+    """Seconds until the oldest in-window charge expires (ceil — the caller
+    guards against an empty bucket; int() would understate, see #1081 P4)."""
+    return math.ceil(bucket[0] + window_s - now)
+
+
+def _oauth_dcr_trusted_networks() -> list:
+    """Parse TORTOISE_OAUTH_DCR_TRUSTED_CIDRS AT CALL TIME (no cache — no
+    staleness foot-gun). Whitespace-trimmed, empty items skipped, a malformed
+    item skipped without aborting the list. Unset ⇒ default; empty ⇒ empty
+    set (fail closed — the disable lever); never `or DEFAULT` falsy-coalescing."""
+    raw = os.environ.get("TORTOISE_OAUTH_DCR_TRUSTED_CIDRS")
+    if raw is None:
+        raw = _OAUTH_DCR_TRUSTED_CIDRS_DEFAULT
+    nets: list = []
+    for item in raw.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        try:
+            nets.append(ipaddress.ip_network(item, strict=False))
+        except ValueError:
+            continue
+    return nets
+
+
+def _oauth_dcr_trusted_net(client_ip) -> object | None:
+    """The trusted network containing `client_ip`, else None. Matches on the
+    NORMALIZED address (so ::ffff:160.79.104.11 is trusted) and fails closed
+    on a malformed address/CIDR."""
+    ip = _normalize_mapped_ipv6(client_ip)
+    if not isinstance(ip, str):
+        return None
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return None
+    for net in _oauth_dcr_trusted_networks():
+        try:
+            if addr.version == net.version and addr in net:
+                return net
+        except TypeError:  # version mismatch — not trusted
+            continue
+    return None
+
+
+def _oauth_dcr_store_key(client_ip) -> str:
+    """Per-bucket store key: the /IPV6_PREFIX network for IPv6 (default /64),
+    the plain address for IPv4, the constant "anonymous" for a malformed
+    address (D6)."""
+    ip = _normalize_mapped_ipv6(client_ip)
+    if not isinstance(ip, str):
+        return _OAUTH_DCR_MALFORMED_KEY
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return _OAUTH_DCR_MALFORMED_KEY
+    if addr.version != 6:
+        return str(addr)
+    prefix = _int_env("TORTOISE_OAUTH_DCR_IPV6_PREFIX",
+                      _OAUTH_DCR_IPV6_PREFIX_DEFAULT)
+    if not 1 <= prefix <= 128:
+        prefix = _OAUTH_DCR_IPV6_PREFIX_DEFAULT
+    return str(ipaddress.ip_network(f"{addr}/{prefix}", strict=False))
+
+
+def _oauth_dcr_reclaim(store: OrderedDict, now: float, window_s: int,
+                       cap: int) -> None:
+    """Pop inactive LRU-head buckets until the store is below `cap` or the
+    head is active (D3/D4). By the last-charge ordering invariant an active
+    head implies every later key is active too, so this stops at the first
+    live bucket — it can never evict an active key. O(1) at the hot cap."""
+    while store and len(store) >= cap:
+        head_key = next(iter(store))
+        head = store[head_key]
+        if head and now - head[-1] < window_s:
+            break
+        del store[head_key]
+
+
+def _oauth_dcr_deny(retry_after: int) -> None:
+    raise HTTPException(
+        status_code=429,
+        detail=("Too many client registrations from this IP. "
+                "Please try again later."),
+        headers={"Retry-After": str(max(1, retry_after))},
+    )
+
+
+async def _check_oauth_dcr_rate_limit(request: Request) -> None:
+    """DCR capacity limiter — policy block above (#2866).
+
+    Reads every knob AT CALL TIME (testability; no import-time freeze) and
+    the four stores dynamically off the module globals (the test fixture
+    swaps them). Atomic across dimensions (D5): phase 1 evaluates all
+    dimensions — it may evict INACTIVE buckets, but never charges or
+    inserts — and phase 2 charges only if every dimension passed, so a 429
+    charges nothing and inserts nothing. Does NOT call `_charge_ip_bucket`
+    (it re-takes `_OAUTH_DCR_LOCK`; asyncio.Lock is non-reentrant).
+    """
+    if os.environ.get("RATE_LIMIT_DISABLED") == "1":
+        return
+    client = getattr(request.state, "client_ip", None)
+    if not client:
+        client = request.client.host if request.client else None
+    if not client:
+        return
+
+    now = time.time()
+    window_s = _OAUTH_DCR_WINDOW_S
+    per_hour = _int_env("TORTOISE_OAUTH_DCR_PER_HOUR",
+                        _OAUTH_DCR_PER_HOUR_DEFAULT)
+    anon_cap = _int_env("TORTOISE_OAUTH_DCR_ANON_AGGREGATE_PER_HOUR",
+                        _OAUTH_DCR_ANON_AGGREGATE_PER_HOUR_DEFAULT)
+    trusted_cap = _int_env("TORTOISE_OAUTH_DCR_TRUSTED_PER_HOUR",
+                           _OAUTH_DCR_TRUSTED_PER_HOUR_DEFAULT)
+    store_cap = _int_env("TORTOISE_OAUTH_DCR_STORE_CAP",
+                         _OAUTH_DCR_STORE_CAP_DEFAULT)
+
+    async with _OAUTH_DCR_LOCK:
+        # ── trusted carve-out (D2) — evaluated FIRST, before any per-key or
+        # overflow path so a first-time trusted IP can never be denied. ──
+        net = _oauth_dcr_trusted_net(client)
+        if net is not None:
+            tkey = str(net)
+            tcbucket = _OAUTH_DCR_TRUSTED.get(tkey)
+            if tcbucket is None:
+                tcbucket = []
+            else:
+                tcbucket[:] = _dcr_prune_window(tcbucket, now, window_s)
+            if trusted_cap <= 0:  # zero rule — deny, never index empty
+                _oauth_dcr_deny(window_s)
+            if len(tcbucket) >= trusted_cap:
+                _oauth_dcr_deny(_dcr_retry_after_s(tcbucket, now, window_s))
+            tcbucket.append(now)
+            _OAUTH_DCR_TRUSTED[tkey] = tcbucket
+            _OAUTH_DCR_TRUSTED.move_to_end(tkey)
+            return
+
+        # ── phase 1: evaluate every anonymous dimension (no charge/insert) ──
+        key = _oauth_dcr_store_key(client)
+        bucket = _OAUTH_DCR_BUCKETS.get(key)
+        on_overflow = False
+        if bucket is None:
+            _oauth_dcr_reclaim(_OAUTH_DCR_BUCKETS, now, window_s, store_cap)
+            if len(_OAUTH_DCR_BUCKETS) >= store_cap:
+                on_overflow = True  # cap full — no bucket of its own
+            else:
+                bucket = []  # inserted in phase 2 only
+        else:
+            bucket[:] = _dcr_prune_window(bucket, now, window_s)
+
+        overflow_bucket = None
+        if on_overflow:
+            overflow_bucket = _OAUTH_DCR_OVERFLOW.get(_OAUTH_DCR_OVERFLOW_KEY)
+            if overflow_bucket is None:
+                overflow_bucket = []
+            else:
+                overflow_bucket[:] = _dcr_prune_window(
+                    overflow_bucket, now, window_s)
+            if per_hour <= 0:
+                _oauth_dcr_deny(window_s)
+            if len(overflow_bucket) >= per_hour:  # derived cap = PER_HOUR
+                _oauth_dcr_deny(_dcr_retry_after_s(overflow_bucket, now,
+                                                   window_s))
+        else:
+            if per_hour <= 0:
+                _oauth_dcr_deny(window_s)
+            if len(bucket) >= per_hour:
+                _oauth_dcr_deny(_dcr_retry_after_s(bucket, now, window_s))
+
+        # D9: the anonymous aggregate covers per-key AND overflow charges —
+        # otherwise the stated "anonymous <= ANON_AGGREGATE/hr" bound is
+        # asserted but not enforced.
+        anon_bucket = _OAUTH_DCR_ANON.get(_OAUTH_DCR_ANON_KEY)
+        if anon_bucket is None:
+            anon_bucket = []
+        else:
+            anon_bucket[:] = _dcr_prune_window(anon_bucket, now, window_s)
+        if anon_cap <= 0:
+            _oauth_dcr_deny(window_s)
+        if len(anon_bucket) >= anon_cap:
+            _oauth_dcr_deny(_dcr_retry_after_s(anon_bucket, now, window_s))
+
+        # ── phase 2: every dimension passed — insert + charge ──
+        if on_overflow:
+            overflow_bucket.append(now)
+            _OAUTH_DCR_OVERFLOW[_OAUTH_DCR_OVERFLOW_KEY] = overflow_bucket
+            _OAUTH_DCR_OVERFLOW.move_to_end(_OAUTH_DCR_OVERFLOW_KEY)
+        else:
+            bucket.append(now)
+            _OAUTH_DCR_BUCKETS[key] = bucket
+            _OAUTH_DCR_BUCKETS.move_to_end(key)
+        anon_bucket.append(now)
+        _OAUTH_DCR_ANON[_OAUTH_DCR_ANON_KEY] = anon_bucket
+        _OAUTH_DCR_ANON.move_to_end(_OAUTH_DCR_ANON_KEY)
 
 
 def _oauth_control_plane() -> tuple:
@@ -22062,13 +22337,7 @@ async def oauth_dcr_register(request: Request):
     cp, enabled = _oauth_control_plane()
     if not enabled or cp is None:
         raise HTTPException(status_code=503, detail="OAuth not configured")
-    await _check_ip_bucket_rate_limit(
-        request, buckets=_OAUTH_DCR_BUCKETS, lock=_OAUTH_DCR_LOCK,
-        limit=_OAUTH_DCR_MAX_PER_HOUR, window_s=3600,
-        key=(getattr(request.state, "client_ip", None)
-             or (request.client.host if request.client else None)),
-        detail="Too many client registrations from this IP. Please try again later.",
-        retry_after_s=3600)
+    await _check_oauth_dcr_rate_limit(request)
     try:
         raw = await _read_capped_body(request, _BODY_MAX_BYTES, _BODY_413_DETAIL)
         body = _json.loads(raw)
