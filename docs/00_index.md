@@ -33,6 +33,7 @@ aboutObjects: tortoise
 | Agent-harness landscape — volunteering-memory end-state distribution targets (epic #2080) | `docs/research/2026-09-01-gbrain-learnings/platform-landscape.md` |
 | Embedder selection decision record (ADR-009, #1349) | `docs/adr/ADR-009-embedder-selection.md` |
 | Auth planes — sessions vs machine credentials (ADR-010, #2246) | `docs/adr/ADR-010-auth-planes-session-agent-key.md` |
+| OAuth 2.1 for remote MCP — discovery, PKCE flow, DCR capacity policy + trusted-CIDR exemption (#524/#2866) | `docs/oauth-mcp.md` |
 | #2246 dashboard session-only scope + verified plan (ADR-010) | `docs/scoping/2026-09-04-2246-dashboard-session-only.md` |
 | #2514 planted-operator (layer-2) corpus + grading scoping | `docs/scoping/2026-09-07-2514-operator-corpus.md` |
 | Hosted-vs-local embedding UX research (#1349) | `docs/research/2026-08-17-1349-embedder-selection/ux-research.md` |

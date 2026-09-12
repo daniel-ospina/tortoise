@@ -15,8 +15,11 @@ extractor/indexer, update the catalog reference.
 from __future__ import annotations
 
 import asyncio
+import contextvars
+import functools
 import hmac
 import inspect
+import ipaddress
 import json as _json
 import logging
 import math
@@ -24,8 +27,9 @@ import os
 import re
 import threading
 import time
-from collections import defaultdict
+from collections import OrderedDict, defaultdict
 from collections.abc import Hashable
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager, suppress
 from datetime import UTC, datetime, timedelta
 
@@ -135,6 +139,173 @@ _FALLBACK_KEEPALIVE: dict[str, TortoiseSDK] = {}
 # _make_sdk/_registry_anchor; the lock is never held across a per-request
 # fresh-SDK construction.
 _KEEPALIVE_LOCK = threading.Lock()
+
+# ── #3060: dedicated executors for long / stallable work ───────────────────
+# `asyncio.to_thread` (the house style — see `list_packs`) submits to the
+# loop's SHARED default executor, which is also where /health's DB probe and
+# the auth middleware's abuse hooks run. That is fine for short work. It is
+# NOT fine for the capture extraction: on a stalled provider it blocks for the
+# token-scaled deadline (~800s at a 16K budget, per attempt, retried), so
+# enough concurrent stalls would occupy every default worker
+# (min(32, cpu+4) — 6 on prod's 2 vCPU) and the /health probe would then
+# QUEUE behind them, miss Fly's 15s check timeout, and the machine would be
+# dropped exactly as in #3060 — with nothing blocking the event loop at all.
+# Long or stallable work therefore gets its OWN pool: it can only ever starve
+# itself, never the liveness path or auth.
+_CAPTURE_EXECUTOR = ThreadPoolExecutor(
+    # max(1, _int_env(...)): the executor is built at IMPORT time, so a
+    # malformed or zero/negative knob must degrade to the default — not raise
+    # `ValueError` and make `import tortoise.hosted_api` fail (a boot loop no
+    # deploy gate can fix).
+    max_workers=max(1, min(_int_env("TORTOISE_CAPTURE_WORKERS", 4), 8)),
+    thread_name_prefix="capture-extract")
+
+# #3060 review: a bounded pool with an UNBOUNDED queue is a new failure mode —
+# four stalled extractions park every worker (each up to the token-scaled
+# deadline, retried) and every later capture then waits forever while holding
+# its stored-window transcript (~MBs) on a 4GB VM, up to fly.toml's
+# hard_limit. Reject instead of enqueueing: at capacity the request fails fast
+# with 429 + Retry-After (the ask lane's quota 429 precedent,
+# `CODE_QUOTA_EXCEEDED` — its in-flight-limit 429 carries no Retry-After).
+# Counting is a plain locked int, NOT an asyncio.Semaphore — the latter binds
+# to the first event loop it waits on (mixins._LoopBoundMixin), which breaks
+# across the per-test loops.
+_CAPTURE_MAX_IN_FLIGHT = max(1, min(_int_env("TORTOISE_CAPTURE_IN_FLIGHT", 8), 16))
+_CAPTURE_IN_FLIGHT = 0
+_CAPTURE_IN_FLIGHT_LOCK = threading.Lock()
+
+# NOTE (merge of #2850 x #2988/#3060): the dedicated ``_HEALTH_PROBE_EXECUTOR``
+# and its ``_HEALTH_PROBE_BUDGET_S`` wall bound were REMOVED here. They existed
+# so ``/health`` could run ``_probe_db`` off the shared default pool with a
+# bounded wait; ``/health`` is now pure in-memory (it reads
+# ``_HEALTH_PROBE.snapshot()``) and does no I/O and no thread hand-off at all,
+# so the pool and the bound had no remaining caller. ``_submit_off_loop`` /
+# ``_run_off_loop`` BELOW are kept: the capture path still uses them to stay
+# off the shared default executor.
+
+
+def _submit_off_loop(executor: ThreadPoolExecutor, fn, /, *args, **kwargs):
+    """Submit blocking work to a DEDICATED executor, preserving contextvars.
+
+    Why not `asyncio.to_thread`: it ALWAYS uses the loop's shared default
+    executor, which is the starvation path #3060's review uncovered (see the
+    pool notes above). Why not a bare `run_in_executor`: it does NOT propagate
+    contextvars (cpython#78195 — the repo rule recorded at `list_packs`), and
+    the capture path depends on them: `_call_once` snapshots the caller's
+    context for the actor/usage ContextVars (extractor_v2.py:5066). Copying the
+    context in the CALLING thread and running under it in the worker is exactly
+    what `asyncio.to_thread` does internally (module: asyncio.to_thread).
+
+    Returns the CONCURRENT future. Callers needing a completion hook (the
+    in-flight accounting below) attach it there: a loop-side callback would
+    fire on cancellation while the worker is still parked.
+    """
+    ctx = contextvars.copy_context()
+    return executor.submit(ctx.run, functools.partial(fn, *args, **kwargs))
+
+
+async def _run_off_loop(executor: ThreadPoolExecutor, fn, /, *args, **kwargs):
+    """Await `_submit_off_loop` (see it for the contextvars rationale)."""
+    return await asyncio.wrap_future(_submit_off_loop(executor, fn, *args, **kwargs))
+
+
+def _capture_slot_decrement() -> None:
+    """Return one reserved capture slot (lock-guarded, clamped at zero).
+
+    The clamp is a safety net, NOT a licence: a decrement with nothing in
+    flight means the accounting leaked somewhere, which silently under-counts
+    and would admit more than `_CAPTURE_MAX_IN_FLIGHT` — so it is logged.
+    """
+    global _CAPTURE_IN_FLIGHT
+    with _CAPTURE_IN_FLIGHT_LOCK:
+        if _CAPTURE_IN_FLIGHT > 0:
+            _CAPTURE_IN_FLIGHT -= 1
+        else:
+            _logger.warning(
+                "capture slot decrement with nothing in flight — accounting "
+                "leak (#3060); the admission cap may under-count")
+
+
+class _CaptureSlot:
+    """One reserved capture slot (#3060).
+
+    Reserved at ADMISSION (before any state is written), so a concurrent burst
+    cannot all slip past a bare check and then queue without bound. Released
+    exactly once, by whichever comes last:
+
+    * the extraction's CONCURRENT future completing (`worker_done`) — for a
+      request that extracts. The request's own ``release()`` is a no-op once
+      the slot is handed off, so a cancelled request cannot free capacity
+      while its worker still occupies a pool thread (the shape of
+      `quota.run_ask_bounded`, quota.py:791-816); or
+    * the request's own teardown (`release()`) — for a replay / opt-out /
+      quota / provider-503 path that never extracts. Without that release the
+      reservation would leak and permanently burn capacity.
+    """
+
+    __slots__ = ("_done", "_handed_off")
+
+    def __init__(self) -> None:
+        self._done = False
+        self._handed_off = False
+
+    def hand_off(self) -> None:
+        """Transfer ownership to the extraction future (before any await)."""
+        self._handed_off = True
+
+    def release(self) -> None:
+        if self._done or self._handed_off:
+            return
+        self._done = True
+        _capture_slot_decrement()
+
+    def worker_done(self, _fut=None) -> None:
+        if self._done:
+            return
+        self._done = True
+        _capture_slot_decrement()
+
+
+def _reserve_capture_slot() -> _CaptureSlot:
+    """Reserve a capture slot, or fail fast with 429 at capacity (#3060).
+
+    Called at ADMISSION — before the impl writes anything. A 429 raised later
+    (after the Session MERGE) would leave ``capture_ok`` NULL, and the
+    advertised retry would then be served as a no-op REPLAY (200, 0 extracted)
+    — silent permanent data loss. Reserving (not just checking) is what bounds
+    the queue: a burst of simultaneous requests cannot all pass the gate and
+    then wait on the pool forever while holding their transcripts.
+    """
+    global _CAPTURE_IN_FLIGHT
+    with _CAPTURE_IN_FLIGHT_LOCK:
+        if _CAPTURE_IN_FLIGHT >= _CAPTURE_MAX_IN_FLIGHT:
+            raise HTTPException(
+                status_code=429,
+                detail=("capture capacity saturated — too many captures in "
+                        "flight; retry shortly"),
+                headers={"Retry-After": "30"})
+        _CAPTURE_IN_FLIGHT += 1
+    return _CaptureSlot()
+
+
+async def _run_capture_bounded(slot, fn, /, *args, **kwargs):
+    """Run one capture extraction on the capture pool, owning ``slot``.
+
+    The work runs off the event loop on the capture pool, with the caller's
+    contextvars copied in explicitly (`_submit_off_loop`'s rationale). The
+    slot is handed to the CONCURRENT future, not to the loop-side future the
+    caller awaits: cancelling the awaiting task (client disconnect, request
+    timeout) marks the loop-side future done immediately, so a callback
+    attached there would release the slot while the worker is still parked and
+    the cap would silently exceed itself. A synchronous submit failure leaves
+    ownership with the caller (no future, no callback), and the request's own
+    teardown releases it.
+    """
+    cfut = _submit_off_loop(_CAPTURE_EXECUTOR, fn, *args, **kwargs)
+    if slot is not None:
+        slot.hand_off()  # before any await: only the worker frees it now
+        cfut.add_done_callback(slot.worker_done)
+    return await asyncio.wrap_future(cfut)
 
 
 def _anchor_usable(anchor: TortoiseSDK, db_path: str) -> bool:
@@ -801,21 +972,16 @@ async def _lifespan(app):
                 from tortoise.backup_sweep import read_team_state
                 from tortoise.backup_watcher import BackupWatcher, WatcherThread
 
-                # #669 post-flip: the watcher's team enumeration must use the
-                # SAME seam as the sweep driver — Supabase teams in Supabase
-                # control-plane mode, the registry handle for selfhost. The
-                # raw registry handle would read an EMPTY graph post-flip
-                # (registry deleted) and file spurious staleness incidents
-                # (post-flip verification finding, #669).
-                from tortoise.supabase_control import (
-                    get_control_plane,
-                    is_supabase_enabled,
-                )
-                if is_supabase_enabled():
-                    team_source = get_control_plane()
-                else:
-                    reg_sdk = _registry_sdk()
-                    team_source = reg_sdk._get_registry()
+                # #669 post-flip: the watcher's team enumeration uses the SAME
+                # seam as the sweep driver — #2823 folded this last hand-rolled
+                # `is_supabase_enabled()` branch onto the shared
+                # `_control_plane_source()`, so no caller re-introduces the
+                # pre-#669 resolution (the raw registry handle reads an EMPTY
+                # graph post-flip — registry deleted — and files spurious
+                # staleness incidents; post-flip verification finding, #669).
+                from tortoise.supabase_control import is_supabase_enabled
+
+                team_source = _control_plane_source()
 
                 def _sweep_teams() -> list[str]:
                     from tortoise.backup_sweep import enumerate_teams
@@ -877,7 +1043,13 @@ async def _lifespan(app):
                 _WATCHER.start()
                 if not is_supabase_enabled():
                     try:
-                        _boot_gc_drill_graphs(reg_sdk._get_proj().db)
+                        # Registry lane only: the boot GC sweeps stale `_drill_*`
+                        # scratch graphs. The DATA-plane handle (#1366) is resolved
+                        # here rather than held above — `team_source` now comes from
+                        # the shared seam, and _make_sdk's process-lifetime
+                        # keepalive anchor keeps the embedded server alive
+                        # (#1475/#1607).
+                        _boot_gc_drill_graphs(_make_sdk(namespace=None)._get_proj().db)
                     except Exception as exc:
                         # #2922 review: a separate operation, so a separate
                         # message. Reporting a drill-graph GC failure as "the
@@ -2140,7 +2312,13 @@ async def health_ready():
     request, not just this one. A stalled probe now reads as not-ready (503),
     fail-closed, without ever blocking the loop.
     """
-    db_ok = False
+    # Data plane. Reuses /health's probe: itself hard-bounded (~1.5s) and it
+    # never raises, so a dead DB degrades the result instead of the process.
+    # #669 post-flip: NEVER a registry-namespaced probe — FalkorDB
+    # auto-creates the graph on select, so a registry-namespaced probe
+    # RECREATED the deleted registry_control_plane on every health check
+    # (post-flip verification finding, #669). ``_probe_db`` targets the
+    # default graph.
     try:
         # #669 post-flip: the FalkorDB data-plane probe must NOT open the
         # registry namespace — FalkorDB auto-creates the graph on select, so
@@ -7263,19 +7441,32 @@ async def capture_session(body: SessionRequest, request: Request, team: dict = D
     #1927: the session_recording OPT-OUT check is FIRST in the gate stack (before
     the provider 503 / quota 402) so disabled teams do no quota work at all; any
     non-2xx failure records ``session_capture_last_error_{harness}`` (the
-    dashboard failure sub-line reads this, NOT client state) and 2xx records
+    dashboard failure sub-line reads this, NOT client state) — except the #3060
+    capacity 429, a server condition — and 2xx records
     ``session_capture_receipt_{harness}`` (bare ``session_capture_receipt``
     for legacy no-harness hooks).
     """
     _require_scope(team, "graphs:write", "capture_session")
     try:
-        return await _capture_session_impl(body, request, team)
+        # #3060: reserve ADMISSION before ANY state is written. Reserving (not
+        # merely checking) bounds the queue under a concurrent burst, and a
+        # 429 here cannot leave a half-created Session behind.
+        slot = _reserve_capture_slot()
+        try:
+            return await _capture_session_impl(body, request, team, slot=slot)
+        finally:
+            slot.release()
     except HTTPException as e:
-        if e.status_code >= 400:
-            # Review PR #1827: a last-error state-write failure must never
-            # mask the intended 403/402/503 with a 500.
+        # #3060: a capacity 429 is a SERVER condition, not a team capture
+        # failure — recording it in the team-visible last-error slot (and
+        # clearing it on the retry, which then replays) would misreport
+        # capacity as a capture fault and mask a genuine prior error.
+        # Review PR #1827: a last-error state-write failure must never mask the
+        # intended 403/402/503 with a 500.
+        if e.status_code >= 400 and e.status_code != 429:
             try:
-                _record_capture_last_error(team["team_id"], body.harness, e.detail)
+                _record_capture_last_error(
+                    team["team_id"], body.harness, e.detail)
             except Exception:
                 logging.getLogger("tortoise.api").exception(
                     "capture last-error state write failed (non-fatal)")
@@ -7314,7 +7505,7 @@ _SWEEP_EVENT_DELETE_CYPHER = (
 
 
 async def _capture_session_impl(body: SessionRequest, request: Request | None,
-                                team: dict) -> dict:
+                                team: dict, slot: _CaptureSlot | None = None) -> dict:
     """The capture pipeline (gates + writes). Shared by the REST endpoint and
     the ``tortoise_session_capture`` MCP tool (mcp_server.py) so the two
     surfaces can never drift on gate order.
@@ -7682,7 +7873,11 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         # contract as v2 — no fabricated empty meta; extraction-stage failures
         # are structured, never raised (turn points have already landed).
         try:
-            extracted, meta = sdk._extract_session_llm(
+            # #3060: same invariant as the v2 branch below — this extractor is
+            # synchronous (model calls included), so it must never run on the
+            # event loop, and never on the shared default pool either.
+            extracted, meta = await _run_capture_bounded(
+                slot, sdk._extract_session_llm,
                 windowed, session_id, now)
         except ValueError as e:
             # no-key fail-closed (outer 503 gate normally catches this first;
@@ -7724,7 +7919,24 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
                             "not applied")
                 except Exception:  # noqa: BLE001, RUF100
                     pass
-            extracted, meta = sdk._extract_session_v2(
+            # #3060 (P0) — INVARIANT: no provider/model call may run on the
+            # event loop. The extraction below is SYNCHRONOUS, and on a stalled
+            # model call it blocks in `_call_once`'s `t.join(timeout=deadline_s)`
+            # (extractor_v2.py:5101) for up to the token-scaled deadline —
+            # `_scaled_deadline(600, max_tokens)` is ~819s at a 16K budget
+            # (extractor_v2.py:5162), per retry. Run straight from this
+            # `async def` handler it froze the SINGLE event loop: /health stopped
+            # answering, Fly marked the machine unhealthy, and the proxy dropped
+            # ALL traffic ("no known healthy instances for route tcp/443") — one
+            # slow model call took down the whole product, not just the capture.
+            # `to_thread`-style context propagation, but on the CAPTURE pool:
+            # a stalled extraction must not be able to starve /health's probe or
+            # auth out of the shared default executor (#3060). `_run_off_loop`
+            # copies the caller's contextvars into the worker, which is what
+            # `_call_once`'s own `copy_context()` snapshot depends on (#2185).
+            # See tests/test_capture_loop_responsiveness.py.
+            extracted, meta = await _run_capture_bounded(
+                slot, sdk._extract_session_v2,
                 windowed, session_id, now, master=tenant_master)
         except ValueError as e:
             raise HTTPException(status_code=503, detail=str(e)) from e
@@ -8391,7 +8603,8 @@ def _capture_last_error_key(harness: str | None) -> str | None:
 def _record_capture_last_error(team_id: str, harness: str | None,
                                detail: str | None) -> None:
     """Set (detail) or clear (None) the per-harness last-attempt failure key.
-    Called on every non-2xx (set) and every 2xx (cleared) capture attempt."""
+    Called on every non-2xx (set) EXCEPT the #3060 capacity 429 — a server
+    condition, not a team capture failure — and every 2xx (cleared)."""
     key = _capture_last_error_key(harness)
     if key is None:
         return
@@ -20220,13 +20433,11 @@ async def backups_list(team: dict = Depends(get_current_team_session_ungated)): 
                           and len(str(m.get("backup_id", "")).split("/")) == 2
                           and m.get("backup_id") not in (idx or {})]
             if unresolved:
-                from tortoise.supabase_control import (
-                    get_control_plane,
-                    is_supabase_enabled,
-                )
                 try:
-                    cp = (get_control_plane() if is_supabase_enabled()
-                          else _registry_sdk()._get_registry())
+                    # #2823: one shared dialect-aware seam — never a hand-rolled
+                    # `is_supabase_enabled()` branch (that per-caller drift is
+                    # what left the sweep enumerating the empty registry).
+                    cp = _control_plane_source()
                 except Exception as e:
                     _logger.warning("backups list cp unavailable: %s", e)
                     cp = None
@@ -20271,6 +20482,42 @@ def _registry_sdk() -> TortoiseSDK:
         time.sleep(PROBE_RETRY_DELAY)
         sdk._get_proj()  # ONE retry — same SDK; _proj stays None until success
     return sdk
+
+
+def _control_plane_source():
+    """Dialect-aware control-plane source for the backup/DR seam (#669/#2823).
+
+    Supabase lane: the ``SupabaseControlPlane`` (PostgREST adapter). Registry
+    lane (selfhost): the FalkorDB ``registry_control_plane`` graph handle.
+
+    #2823: this is the sanctioned way for the backup/DR OPERATORS to obtain
+    the control plane — every operator that hand-rolled the dialect branch
+    (sweep, purge, re-baseline, drill, scheduled drill, acl-reconcile,
+    `backups_list`, the watcher lifespan) now resolves it here, so the next
+    operator cannot re-introduce the defect per-endpoint (#2340).
+
+    Two older sites still resolve the same pair inline
+    (``backups_create``'s stamp seam, ``backups/restore``'s target resolver):
+    they HOLD the registry SDK as a request-scoped keepalive and close it in
+    their ``finally`` (#1475/#1607), so folding them needs that lifetime
+    preserved — tracked separately rather than risked here.
+
+    A Supabase-mode caller also never opens the registry namespace: the
+    pre-#2823 handlers passed ``_registry_sdk()._get_proj().db`` as the
+    data-plane handle. That projection is the registry namespace's own shell
+    (``registry_tortoise``), which it re-materializes; and ``_get_registry()``
+    — the pre-#2823 team source — runs ``CREATE INDEX`` against
+    ``registry_control_plane``, the graph the #669 flip DELETED. Both are
+    auto-recreate artifacts (#669 post-flip verification). The data-plane
+    handle (``_make_sdk(namespace=None)._get_proj().db`` — backup_sweep's
+    ``db``, the GRAPH.DELETE / ``select_graph`` target) is the one #669
+    mandates and the one that exists in BOTH lanes.
+    """
+    from tortoise.supabase_control import get_control_plane, is_supabase_enabled
+
+    if is_supabase_enabled():
+        return get_control_plane()
+    return _registry_sdk()._get_registry()
 
 
 # Per-team restore serialization: the swap (delete live → copy temp) must not
@@ -20662,8 +20909,10 @@ def _reconcile_acl_users_sync() -> dict:
         raise HTTPException(status_code=503, detail="Backup sweep disabled")
     from tortoise.backup_sweep import _sweep_graph_list, enumerate_eligible_teams
 
-    reg_sdk = _registry_sdk()
-    registry = reg_sdk._get_registry()
+    # #2823/#2340: dialect-aware control plane — the raw registry handle
+    # enumerates an EMPTY graph post-#669, so this returned {"teams": 0} (a
+    # silent no-op success) instead of rebuilding the post-restore ACLs.
+    registry = _control_plane_source()
     try:
         team_ids = enumerate_eligible_teams(registry)
     except RuntimeError as e:
@@ -20741,9 +20990,14 @@ async def backups_sweep(request: Request):
         raise HTTPException(status_code=503, detail="Backup sweep disabled")
     from tortoise.backup_sweep import run_backup_sweep
 
-    reg_sdk = _registry_sdk()
-    registry = reg_sdk._get_registry()
-    db = reg_sdk._get_proj().db
+    # #2823 (P0): the control plane resolves through the SHARED dialect-aware
+    # seam. `_registry_sdk()._get_registry()` is the pre-#669 resolution — the
+    # post-flip graph is DELETED, so the sweep enumerated 0 teams, reported a
+    # benign `no_teams`, and backed nothing up from the flip until now.
+    registry = _control_plane_source()
+    # #2823/#669: the DATA-plane handle (#1366) — the data-plane SDK, never
+    # the registry namespace (see _control_plane_source's docstring).
+    db = _make_sdk(namespace=None)._get_proj().db
     storage = _backup_storage()
     try:
         mirror = _backup_mirror_storage(cfg)
@@ -20754,7 +21008,14 @@ async def backups_sweep(request: Request):
     # In-flight guard: a concurrent sweep returns 202 (no queueing — the next
     # hourly run retries). This is what the driver's 202 branch keys on.
     if _SWEEP_INFLIGHT.locked():
-        return {"status": "already_running", "teams_backed_up": 0}
+        # #2823: the dialect rides the 202 too — a lock-held run is the one
+        # shape where an unresolved dialect would otherwise surface as `unknown`
+        # to every consumer of the sweep result (the source is already resolved
+        # above).
+        from tortoise.hosted_backup import source_dialect
+
+        return {"status": "already_running", "teams_backed_up": 0,
+                "source": source_dialect(registry)}
     async with _SWEEP_INFLIGHT:
         def lock_for(team_id: str):
             return _sweep_team_lock(team_id)
@@ -20800,9 +21061,13 @@ async def backups_purge(request: Request, body: dict | None = None):
     _check_internal(request)
     from tortoise.backup_sweep import run_graph_purge
 
-    reg_sdk = _registry_sdk()
-    registry = reg_sdk._get_registry()
-    db = reg_sdk._get_proj().db
+    # #2823/#2340: dialect-aware control plane. `run_graph_purge` enumerates
+    # teams through the same seam — off the raw registry handle it purged 0
+    # teams in Supabase mode (expired trash never erased).
+    registry = _control_plane_source()
+    # #2823/#669: the DATA-plane handle (#1366) — the data-plane SDK, never
+    # the registry namespace (see _control_plane_source's docstring).
+    db = _make_sdk(namespace=None)._get_proj().db
     storage = _backup_storage()
     grace_days = int((body or {}).get("grace_days")
                      or _TRASH_GRACE_DAYS)
@@ -20937,10 +21202,29 @@ async def backups_status(request: Request):
     last_sweep = {
         key: sweep_state.get(key)
         for key in ("last_sweep_at", "last_team_count", "graph_totals",
-                    "graph_failures", "graph_error_streaks")
+                    "graph_failures", "graph_error_streaks", "source",
+                    # #2823: the most recent run's dialect, which differs from
+                    # ``source`` only on a no-op run (whose roll-up preserves
+                    # the last REAL sweep's outcome fields + dialect).
+                    "last_run_source")
     }
     if not last_sweep.get("last_sweep_at"):
-        last_sweep = None  # sweep never ran — omit the block
+        # #2823 (code-review cycle 4): a deployment whose ONLY runs were no-ops
+        # has a dialect in ops/state.json but no `last_sweep_at` (see
+        # backup_sweep._noop_ops_state). Nulling the whole block there hid the
+        # lane on exactly the fresh / misconfigured deployment an operator is
+        # diagnosing — `_refuse_wrong_dialect` is deliberately one-directional,
+        # so a registry-dialect source on a Supabase deployment is NOT caught
+        # there. Keep the block when it can still name the lane; never
+        # fabricate the outcome fields (the driver reads
+        # `.last_sweep.last_sweep_at // empty`, so their absence stays
+        # meaningful).
+        dialect_only = {
+            key: last_sweep[key]
+            for key in ("source", "last_run_source")
+            if last_sweep.get(key)
+        }
+        last_sweep = dialect_only or None  # sweep never ran — omit the block
     driver_hb = {}
     try:
         parsed = _json.loads(storage.download(_DRIVER_HEARTBEAT_KEY))
@@ -21073,9 +21357,13 @@ async def backups_rebaseline(request: Request, body: dict):
         resolve_active_graph,
     )
 
-    reg_sdk = _registry_sdk()
-    registry = reg_sdk._get_registry()
-    db = reg_sdk._get_proj().db
+    # #2823/#2340: dialect-aware control plane — `resolve_active_graph`
+    # enumerates the team's graphs through this source; the raw registry handle
+    # 400s/409s ACTIVE Supabase-lane graphs.
+    registry = _control_plane_source()
+    # #2823/#669: the DATA-plane handle (#1366) — the data-plane SDK, never
+    # the registry namespace (see _control_plane_source's docstring).
+    db = _make_sdk(namespace=None)._get_proj().db
     storage = _backup_storage()
     try:
         row = resolve_active_graph(registry, team_id, graph_id)
@@ -21316,9 +21604,11 @@ async def backups_drill(request: Request, body: dict):
         raise HTTPException(status_code=429, detail="drill cooldown — ≥1h between drills")
     _LAST_DRILL_AT = _time.time()
 
-    reg_sdk = _registry_sdk()
-    registry = reg_sdk._get_registry()
-    db = reg_sdk._get_proj().db
+    # #2823/#2340: dialect-aware control plane (see re-baseline).
+    registry = _control_plane_source()
+    # #2823/#669: the DATA-plane handle (#1366) — the data-plane SDK, never
+    # the registry namespace (see _control_plane_source's docstring).
+    db = _make_sdk(namespace=None)._get_proj().db
     storage = _backup_storage()
     try:
         return await asyncio.to_thread(
@@ -21357,9 +21647,12 @@ async def backups_drill_scheduled(request: Request):
         raise HTTPException(status_code=429, detail="drill cooldown — ≥1h between drills")
     _LAST_DRILL_AT = _time.time()
 
-    reg_sdk = _registry_sdk()
-    registry = reg_sdk._get_registry()
-    db = reg_sdk._get_proj().db
+    # #2823/#2340: dialect-aware control plane — the scheduled drill resolves
+    # its candidate's active graph through this source.
+    registry = _control_plane_source()
+    # #2823/#669: the DATA-plane handle (#1366) — the data-plane SDK, never
+    # the registry namespace (see _control_plane_source's docstring).
+    db = _make_sdk(namespace=None)._get_proj().db
     storage = _backup_storage()
     alerts = _alert_store_from(cfg)
     try:
@@ -22204,11 +22497,320 @@ async def webhooks_stripe(request: Request):
 # closed 503 (OAuth is hosted-only); the well-known metadata endpoints still
 # serve (they describe the hosted AS; harmless static JSON).
 
-# DCR per-IP limiter (RFC 7591 registration is an unauthenticated write
-# surface — reuses the shared per-IP bucket primitive, 20/hr default).
-_OAUTH_DCR_BUCKETS: dict[str, list[float]] = defaultdict(list)
+# ── DCR capacity policy (#2866) ────────────────────────────────────────
+# RFC 7591 registration is an unauthenticated write surface. The limiter is
+# intentionally NOT the shared `_check_ip_bucket_rate_limit` primitive: that
+# primitive inserts the bucket (`defaultdict`) BEFORE its 429 check and prunes
+# only *stale* buckets, so an attacker-keyed fresh-key flood grows its store
+# without bound and every request scans the whole store once over
+# `max_entries` (the charge append itself happens after the check; the
+# unbounded growth and the O(n) scan are the defects). The primitive is left
+# byte-identical; the sibling filing tracks it). This limiter states its
+# capacity policy in concrete, falsifiable numbers:
+#
+#   per bucket (per client IP, or /64 for IPv6) ... 20/hr   (PER_HOUR)
+#   anonymous global aggregate ................... 600/hr   (ANON_AGGREGATE)
+#   trusted-CIDR aggregate ....................... 1200/hr  (TRUSTED_PER_HOUR)
+#   live-bucket store cap ........................ 256      (STORE_CAP)
+#   window ....................................... 3600 s
+#
+# Dimension membership: *trusted ⇒ per-CIDR aggregate only* (no per-key
+# bucket, no shared overflow, no anonymous aggregate) and *anonymous ⇒
+# per-key bucket (or shared overflow) AND the anonymous global aggregate*.
+# The trusted carve-out is evaluated BEFORE any per-key/overflow path, so the
+# exemption is reachable under an anonymous flood — otherwise a first-time
+# trusted IP is a "new key" and would be denied once STORE_CAP buckets are
+# live. STORE_CAP (256) < ANON_AGGREGATE (600) keeps the reject-new/overflow
+# branch live at shipped defaults.
+#
+# Bounded store, deterministic eviction (#2866 D3/D4): a bucket is *active*
+# iff it holds an in-window entry. Store order is last-charge (charged hits
+# `move_to_end`); reclaim therefore stops at the first active head, because
+# every later key was charged no earlier than the head. Reclaim runs ONLY on
+# the new-key-at-cap path, so a tracked key's charge stays O(1) and the store
+# can never evict an active key. If the cap is still full, the new key is
+# denied its own bucket and charged to one shared overflow bucket (bounded by
+# the derived overflow cap = PER_HOUR) AND the anonymous aggregate (D9).
+#
+# Derived ceiling: the distinct-new-anonymous-key rate is bounded by
+# STORE_CAP + PER_HOUR = 276/hr (256 live keys + 20 overflow charges) — a
+# burst/concurrent-live bound, not a bound tested at shipped scale.
+#
+# IPv6: the store key is the /IPV6_PREFIX network (default /64) of the
+# normalized address, so a single client cannot mint 2**64 buckets; a
+# malformed address keys as the single constant "anonymous" (never the raw
+# string, so a malformed-identity flood cannot occupy STORE_CAP buckets).
+# Out-of-range prefix falls back to 64 (clamping 0 -> 1 would collapse every
+# IPv6 address into one bucket). Malformed IP/CIDR never raise; a missing
+# client early-returns like the shared primitive.
+#
+# Accepted limitations (PR body carries the full list): in-process stores ⇒
+# real capacity is limit × machines and resets on restart (#1677 / #2853 own
+# oauth_clients row pruning — owner @daniel-ospina, date 2026-10-15); the
+# limiter runs before body parsing, so invalid-JSON / oversized POSTs DO
+# consume budget; the anonymous aggregate is a one-source DoS (trusted CIDRs
+# unaffected); the exemption's security rests on the Fly edge stripping
+# client `Fly-*` headers (assumption 12 — dated re-verification with an
+# operator recipe is #3126, owner @daniel-ospina, 2026-11-15). Sibling
+# filings from this work: #3124 (the shared per-IP primitive + the generic
+# middleware's store are still unbounded), #3125 (`_check_claim_rate_limit`
+# keys on the proxy IP), #3128 (authorize/consent forward an unvalidated
+# scope into the minted token), #3134 (dated measurement of real DCR volume —
+# the 600/1200 aggregates are not load-validated). #3036 already covers
+# oauth_* token-table retention/GC.
+#
+# CHARGING DOCTRINE DIVERGENCE (tracked, #1719 / #2051): this limiter charges
+# at CHECK time, like `_check_ip_bucket_rate_limit` without `defer_charge`,
+# not at the TERMINAL outcome the way #1719's `defer_charge=True` callers do.
+# Consequence: a control-plane 5xx from `register_client` still consumed the
+# caller's budget, so a post-recovery retry can meet a spurious 429 that masks
+# the underlying failure. That is the #2051 failure class, and #2051 does not
+# currently list DCR. Documented here rather than silently mirrored, per the
+# #2038 precedent (PR #2049 review) — see also the docs limitation in
+# docs/oauth-mcp.md. The phase-1/phase-2 seam already exists, so moving the
+# charge past `register_client` is the follow-up if #2051 is taken up.
+_OAUTH_DCR_WINDOW_S = 3600
+_OAUTH_DCR_PER_HOUR_DEFAULT = 20
+_OAUTH_DCR_ANON_AGGREGATE_PER_HOUR_DEFAULT = 600
+_OAUTH_DCR_TRUSTED_PER_HOUR_DEFAULT = 1200
+_OAUTH_DCR_STORE_CAP_DEFAULT = 256
+_OAUTH_DCR_IPV6_PREFIX_DEFAULT = 64
+# Anthropic's published outbound/MCP egress range
+# (platform.claude.com/docs/en/api/ip-addresses; whois AP-2440). Comma-
+# separated; an EMPTY value means an empty trusted set (the documented lever
+# to disable the exemption) — never the default.
+_OAUTH_DCR_TRUSTED_CIDRS_DEFAULT = "160.79.104.0/21"
+# Singleton store keys for the aggregate dimensions (malformed client IPs
+# share the constant below, never a per-raw-string bucket).
+_OAUTH_DCR_ANON_KEY = "\x00anon"
+_OAUTH_DCR_OVERFLOW_KEY = "\x00overflow"
+_OAUTH_DCR_MALFORMED_KEY = "anonymous"
+
+_OAUTH_DCR_BUCKETS: OrderedDict[str, list[float]] = OrderedDict()
+_OAUTH_DCR_TRUSTED: OrderedDict[str, list[float]] = OrderedDict()
+_OAUTH_DCR_OVERFLOW: OrderedDict[str, list[float]] = OrderedDict()
+_OAUTH_DCR_ANON: OrderedDict[str, list[float]] = OrderedDict()
 _OAUTH_DCR_LOCK = asyncio.Lock()
-_OAUTH_DCR_MAX_PER_HOUR = int(os.environ.get("TORTOISE_OAUTH_DCR_PER_HOUR", "20"))
+
+
+def _dcr_prune_window(bucket: list[float], now: float, window_s: int) -> list[float]:
+    """In-window entries of `bucket` (pure; the primitive's window contract is
+    pinned against this by a parity test, D10)."""
+    return [t for t in bucket if now - t < window_s]
+
+
+def _dcr_retry_after_s(bucket: list[float], now: float, window_s: int) -> int:
+    """Seconds until the oldest in-window charge expires (ceil — the caller
+    guards against an empty bucket; int() would understate, see #1081 P4)."""
+    return math.ceil(bucket[0] + window_s - now)
+
+
+def _oauth_dcr_trusted_networks() -> list:
+    """Parse TORTOISE_OAUTH_DCR_TRUSTED_CIDRS AT CALL TIME (no cache — no
+    staleness foot-gun). Whitespace-trimmed, empty items skipped, a malformed
+    item skipped without aborting the list. Unset ⇒ default; empty ⇒ empty
+    set (fail closed — the disable lever); never `or DEFAULT` falsy-coalescing."""
+    raw = os.environ.get("TORTOISE_OAUTH_DCR_TRUSTED_CIDRS")
+    if raw is None:
+        raw = _OAUTH_DCR_TRUSTED_CIDRS_DEFAULT
+    nets: list = []
+    for item in raw.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        try:
+            nets.append(ipaddress.ip_network(item, strict=False))
+        except ValueError:
+            continue
+    return nets
+
+
+def _oauth_dcr_normalized_addr(client_ip):
+    """`ipaddress` address for `client_ip`, normalizing ANY IPv4-mapped IPv6
+    spelling (or None for a malformed address).
+
+    `_normalize_mapped_ipv6` (shared primitive helper, byte-identical to
+    origin/main) matches the literal lowercase ``::ffff:`` prefix, so the
+    structural check here additionally covers ``::FFFF:1.2.3.4`` and
+    ``0:0:0:0:0:ffff:1.2.3.4``. Without it one IPv4 address could hold two
+    bucket identities (its own plus the shared ``::/64``) and a non-canonical
+    mapped client would collapse into ``::/64`` instead of being keyed — or
+    trusted — as the address it actually is.
+    """
+    ip = _normalize_mapped_ipv6(client_ip)
+    if not isinstance(ip, str):
+        return None
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return None
+    if isinstance(addr, ipaddress.IPv6Address) and addr.ipv4_mapped is not None:
+        return addr.ipv4_mapped
+    return addr
+
+
+def _oauth_dcr_trusted_net(client_ip) -> object | None:
+    """The trusted network containing `client_ip`, else None. Matches on the
+    NORMALIZED address (so every spelling of an IPv4-mapped trusted address is
+    trusted) and fails closed on a malformed address/CIDR."""
+    addr = _oauth_dcr_normalized_addr(client_ip)
+    if addr is None:
+        return None
+    for net in _oauth_dcr_trusted_networks():
+        try:
+            if addr.version == net.version and addr in net:
+                return net
+        except TypeError:  # version mismatch — not trusted
+            continue
+    return None
+
+
+def _oauth_dcr_store_key(client_ip) -> str:
+    """Per-bucket store key: the /IPV6_PREFIX network for IPv6 (default /64),
+    the plain address for IPv4, the constant "anonymous" for a malformed
+    address (D6)."""
+    addr = _oauth_dcr_normalized_addr(client_ip)
+    if addr is None:
+        return _OAUTH_DCR_MALFORMED_KEY
+    if addr.version != 6:
+        return str(addr)
+    prefix = _int_env("TORTOISE_OAUTH_DCR_IPV6_PREFIX",
+                      _OAUTH_DCR_IPV6_PREFIX_DEFAULT)
+    if not 1 <= prefix <= 128:
+        prefix = _OAUTH_DCR_IPV6_PREFIX_DEFAULT
+    return str(ipaddress.ip_network(f"{addr}/{prefix}", strict=False))
+
+
+def _oauth_dcr_reclaim(store: OrderedDict, now: float, window_s: int,
+                       cap: int) -> None:
+    """Pop inactive LRU-head buckets until the store is below `cap` or the
+    head is active (D3/D4). By the last-charge ordering invariant an active
+    head implies every later key is active too, so this stops at the first
+    live bucket — it can never evict an active key. O(1) at the hot cap."""
+    while store and len(store) >= cap:
+        head_key = next(iter(store))
+        head = store[head_key]
+        if head and now - head[-1] < window_s:
+            break
+        del store[head_key]
+
+
+def _oauth_dcr_deny(retry_after: int) -> None:
+    raise HTTPException(
+        status_code=429,
+        detail=("Too many client registrations from this IP. "
+                "Please try again later."),
+        headers={"Retry-After": str(max(1, retry_after))},
+    )
+
+
+async def _check_oauth_dcr_rate_limit(request: Request) -> None:
+    """DCR capacity limiter — policy block above (#2866).
+
+    Reads every knob AT CALL TIME (testability; no import-time freeze) and
+    the four stores dynamically off the module globals (the test fixture
+    swaps them). Atomic across dimensions (D5): phase 1 evaluates all
+    dimensions — it may evict INACTIVE buckets, but never charges or
+    inserts — and phase 2 charges only if every dimension passed, so a 429
+    charges nothing and inserts nothing. Does NOT call `_charge_ip_bucket`
+    (it re-takes `_OAUTH_DCR_LOCK`; asyncio.Lock is non-reentrant).
+    """
+    if os.environ.get("RATE_LIMIT_DISABLED") == "1":
+        return
+    client = getattr(request.state, "client_ip", None)
+    if not client:
+        client = request.client.host if request.client else None
+    if not client:
+        return
+
+    now = time.time()
+    window_s = _OAUTH_DCR_WINDOW_S
+    per_hour = _int_env("TORTOISE_OAUTH_DCR_PER_HOUR",
+                        _OAUTH_DCR_PER_HOUR_DEFAULT)
+    anon_cap = _int_env("TORTOISE_OAUTH_DCR_ANON_AGGREGATE_PER_HOUR",
+                        _OAUTH_DCR_ANON_AGGREGATE_PER_HOUR_DEFAULT)
+    trusted_cap = _int_env("TORTOISE_OAUTH_DCR_TRUSTED_PER_HOUR",
+                           _OAUTH_DCR_TRUSTED_PER_HOUR_DEFAULT)
+    store_cap = _int_env("TORTOISE_OAUTH_DCR_STORE_CAP",
+                         _OAUTH_DCR_STORE_CAP_DEFAULT)
+
+    async with _OAUTH_DCR_LOCK:
+        # ── trusted carve-out (D2) — evaluated FIRST, before any per-key or
+        # overflow path so a first-time trusted IP can never be denied. ──
+        net = _oauth_dcr_trusted_net(client)
+        if net is not None:
+            tkey = str(net)
+            tcbucket = _OAUTH_DCR_TRUSTED.get(tkey)
+            if tcbucket is None:
+                tcbucket = []
+            else:
+                tcbucket[:] = _dcr_prune_window(tcbucket, now, window_s)
+            if trusted_cap <= 0:  # zero rule — deny, never index empty
+                _oauth_dcr_deny(window_s)
+            if len(tcbucket) >= trusted_cap:
+                _oauth_dcr_deny(_dcr_retry_after_s(tcbucket, now, window_s))
+            tcbucket.append(now)
+            _OAUTH_DCR_TRUSTED[tkey] = tcbucket
+            _OAUTH_DCR_TRUSTED.move_to_end(tkey)
+            return
+
+        # ── phase 1: evaluate every anonymous dimension (no charge/insert) ──
+        key = _oauth_dcr_store_key(client)
+        bucket = _OAUTH_DCR_BUCKETS.get(key)
+        on_overflow = False
+        if bucket is None:
+            _oauth_dcr_reclaim(_OAUTH_DCR_BUCKETS, now, window_s, store_cap)
+            if len(_OAUTH_DCR_BUCKETS) >= store_cap:
+                on_overflow = True  # cap full — no bucket of its own
+            else:
+                bucket = []  # inserted in phase 2 only
+        else:
+            bucket[:] = _dcr_prune_window(bucket, now, window_s)
+
+        overflow_bucket = None
+        if on_overflow:
+            overflow_bucket = _OAUTH_DCR_OVERFLOW.get(_OAUTH_DCR_OVERFLOW_KEY)
+            if overflow_bucket is None:
+                overflow_bucket = []
+            else:
+                overflow_bucket[:] = _dcr_prune_window(
+                    overflow_bucket, now, window_s)
+            if per_hour <= 0:
+                _oauth_dcr_deny(window_s)
+            if len(overflow_bucket) >= per_hour:  # derived cap = PER_HOUR
+                _oauth_dcr_deny(_dcr_retry_after_s(overflow_bucket, now,
+                                                   window_s))
+        else:
+            if per_hour <= 0:
+                _oauth_dcr_deny(window_s)
+            if len(bucket) >= per_hour:
+                _oauth_dcr_deny(_dcr_retry_after_s(bucket, now, window_s))
+
+        # D9: the anonymous aggregate covers per-key AND overflow charges —
+        # otherwise the stated "anonymous <= ANON_AGGREGATE/hr" bound is
+        # asserted but not enforced.
+        anon_bucket = _OAUTH_DCR_ANON.get(_OAUTH_DCR_ANON_KEY)
+        if anon_bucket is None:
+            anon_bucket = []
+        else:
+            anon_bucket[:] = _dcr_prune_window(anon_bucket, now, window_s)
+        if anon_cap <= 0:
+            _oauth_dcr_deny(window_s)
+        if len(anon_bucket) >= anon_cap:
+            _oauth_dcr_deny(_dcr_retry_after_s(anon_bucket, now, window_s))
+
+        # ── phase 2: every dimension passed — insert + charge ──
+        if on_overflow:
+            overflow_bucket.append(now)
+            _OAUTH_DCR_OVERFLOW[_OAUTH_DCR_OVERFLOW_KEY] = overflow_bucket
+            _OAUTH_DCR_OVERFLOW.move_to_end(_OAUTH_DCR_OVERFLOW_KEY)
+        else:
+            bucket.append(now)
+            _OAUTH_DCR_BUCKETS[key] = bucket
+            _OAUTH_DCR_BUCKETS.move_to_end(key)
+        anon_bucket.append(now)
+        _OAUTH_DCR_ANON[_OAUTH_DCR_ANON_KEY] = anon_bucket
+        _OAUTH_DCR_ANON.move_to_end(_OAUTH_DCR_ANON_KEY)
 
 
 def _oauth_control_plane() -> tuple:
@@ -22401,6 +23003,7 @@ async def oauth_token(request: Request):
     """
     from tortoise.oauth import (
         OAuthError,
+        _log_and_capture,
         exchange_auth_code,
         refresh_grant,
     )
@@ -22426,6 +23029,10 @@ async def oauth_token(request: Request):
                              "grant_type must be authorization_code or refresh_token")
     except OAuthError as exc:
         return _oauth_error_response(exc)
+    except Exception as exc:            # last-resort bug detector, NOT a retry signal
+        _log_and_capture(exc, where="oauth/token boundary")
+        return _oauth_error_response(
+            OAuthError(500, "server_error", "Internal error processing the token request."))
     return out
 
 
@@ -22461,13 +23068,7 @@ async def oauth_dcr_register(request: Request):
     cp, enabled = _oauth_control_plane()
     if not enabled or cp is None:
         raise HTTPException(status_code=503, detail="OAuth not configured")
-    await _check_ip_bucket_rate_limit(
-        request, buckets=_OAUTH_DCR_BUCKETS, lock=_OAUTH_DCR_LOCK,
-        limit=_OAUTH_DCR_MAX_PER_HOUR, window_s=3600,
-        key=(getattr(request.state, "client_ip", None)
-             or (request.client.host if request.client else None)),
-        detail="Too many client registrations from this IP. Please try again later.",
-        retry_after_s=3600)
+    await _check_oauth_dcr_rate_limit(request)
     try:
         raw = await _read_capped_body(request, _BODY_MAX_BYTES, _BODY_413_DETAIL)
         body = _json.loads(raw)

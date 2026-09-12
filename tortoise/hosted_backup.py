@@ -795,6 +795,19 @@ def _is_supabase_source(source) -> bool:
     return first.name == "table"
 
 
+def source_dialect(source) -> str:
+    """#2823: the seam dialect actually resolved for this run.
+
+    ``"supabase"`` (PostgREST control plane) or ``"registry"`` (FalkorDB
+    ``registry_control_plane`` handle). Recorded on every sweep roll-up so
+    ``/v1/internal/backups/status`` answers *"which control plane did the sweep
+    enumerate?"* — the question that took 31 days to answer for #2823, because
+    a wrong-dialect read is indistinguishable from an empty deployment in the
+    run result.
+    """
+    return "supabase" if _is_supabase_source(source) else "registry"
+
+
 def _compose_backup_id(team_id: str, backup_id_ts: str,
                         graph_id: str | None = None) -> str:
     """#2313: the UNPREFIXED composite backup id stored in manifests.

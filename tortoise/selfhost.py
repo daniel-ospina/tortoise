@@ -45,6 +45,11 @@ ALLOWED_ORIGINS = os.environ.get(
 # group's tools to the agent (keeps the tool-selection surface under ~20).
 TOOL_GROUP = os.environ.get("TORTOISE_TOOL_GROUP")
 
+# #2988: wall bound for /health/ready's probe. A black-holed DB must be
+# REPORTED (503) rather than waited out — it is a safety net, not the mechanism
+# (see the ordering invariant on hosted_api._READY_PROBE_TIMEOUT_S).
+_READY_PROBE_TIMEOUT_S = 6.0
+
 
 def _auth_mode() -> str:
     """API key set → static; unset → none (localhost-bound eval)."""
@@ -236,11 +241,23 @@ async def health_ready():
     real DB (not a divergent default path). Exception details are logged
     server-side only (no internal info disclosure).
     """
-    try:
+    # #2988 — THE PROBE MUST NOT RUN ON THE EVENT LOOP. Building the SDK and
+    # touching the DB is synchronous I/O: run inline, one stalled socket froze
+    # every route in this process for as long as the socket waited, and
+    # publish-selfhost.yml curls this endpoint on every publish. /health above
+    # already dispatches its probe off-loop for the same reason; this handler
+    # was missed. Off-loop AND bounded, so a black-holed DB is reported (503)
+    # rather than waited out.
+    import asyncio
+
+    def _probe() -> None:
         from tortoise.sdk import TortoiseSDK  # lazy — liveness stays cheap
 
         sdk = TortoiseSDK(namespace="selfhost")
         sdk._get_proj()  # touch the DB (hosted_api release_command pattern)
+
+    try:
+        await asyncio.wait_for(asyncio.to_thread(_probe), timeout=_READY_PROBE_TIMEOUT_S)
         return JSONResponse({"status": "ready"})
     except Exception as exc:  # noqa: BLE001, RUF100
         _logger.warning("health/ready failed: %s", exc)
