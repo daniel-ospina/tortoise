@@ -14,9 +14,11 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 import sys
 import threading
 import time
+import zlib
 from collections import Counter
 from pathlib import Path
 
@@ -38,6 +40,24 @@ from tools.longmem_eval.run import (  # noqa: E402, RUF100
 )
 
 MINI = Path(__file__).parent / "fixtures" / "longmemeval_mini.json"
+
+# ── #3280: deterministic VECTOR-leg embedding ─────────────────────────────
+# Token-overlap hashing (crc32 -> fixed dim, L2-normalised). Stable across
+# processes, no model download — the same shape as
+# ``tests/longmem_eval/test_vector_arm.py::_fake_vec``.
+_TOKEN_RE = re.compile(r"[a-z0-9]+")
+_FAKE_DIM = 256
+
+
+def _fake_vec(text: str) -> list[float]:
+    dims: dict[str, float] = {}
+    for tok in _TOKEN_RE.findall((text or "").lower()):
+        dims[tok] = dims.get(tok, 0.0) + 1.0
+    vec = [0.0] * _FAKE_DIM
+    for tok, c in dims.items():
+        vec[zlib.crc32(tok.encode("utf-8")) % _FAKE_DIM] += c
+    norm = math.sqrt(sum(v * v for v in vec)) or 1.0
+    return [v / norm for v in vec]
 
 
 def _mini() -> list[dict]:
@@ -82,6 +102,33 @@ def _inject_fake(monkeypatch, scorer=None):
     get_scorer seam — the real ~90MB model NEVER enters CI (Gate 7)."""
     fake = scorer if scorer is not None else rerank.FakeScorer()
     monkeypatch.setattr(rerank, "get_scorer", lambda model=None: (fake, ""))
+
+
+class _FakeEmbedder:
+    """Deterministic token-overlap embedder for the VECTOR leg (#3280).
+
+    The module's autouse fixture pins ``EmbeddingModel.get -> None`` (sparse
+    TF-IDF) because the pool-SIZE pins are calibrated on that baseline. But a
+    sparse pool for ``longmemeval_mini`` q0 is 4 chunks from a SINGLE session
+    (``mini-s1``), which cannot exercise a per-session reorder. This injects a
+    deterministic multi-session-capable embedder through the same
+    ``EmbeddingModel.get`` seam the pin uses — no model download, no ~57s load
+    (Gate 7), and stable across processes.
+    """
+
+    def encode(self, texts, batch_size=32, **kwargs):
+        import numpy as np
+
+        return np.array([_fake_vec(t) for t in texts], dtype=np.float32)
+
+
+def _inject_fake_embedder(monkeypatch):
+    """Deterministic embedding path — makes the vector leg live and the
+    retrieved pool span >1 session, so a per-session cap can actually bind."""
+    from tortoise.embeddings import EmbeddingModel
+
+    monkeypatch.setattr(EmbeddingModel, "get", classmethod(
+        lambda cls, load_timeout=None: _FakeEmbedder()))
 
 
 def _trusted_audit() -> dict:
@@ -568,8 +615,31 @@ def test_retrieve_rerank_leg_mix_partition(tmp_path, monkeypatch):
 
 def test_retrieve_rerank_flags_stamped(tmp_path, monkeypatch):
     """reranked/mmr_promoted overlay flags land on selected hits (D6) — an
-    overlay metric, never a leg bucket."""
+    overlay metric, never a leg bucket.
+
+    #3280: this test previously asserted ``any(flags)`` on the module's default
+    SPARSE pool, where the assertion was **vacuous**. ``rerank.py`` sets
+    ``reranked`` only when MMR returns a NON-IDENTITY permutation, so
+    ``any(flags)`` means "the retrieval input order was not already
+    MMR-optimal". Sparse q0 is 4 chunks from a single session (``mini-s1``);
+    ``per_session_cap=2`` therefore selects the identity prefix ``[0, 1]``,
+    ``moved`` is legitimately 0, and ANY flag assertion holds trivially —
+    mutation-verified: deleting the ``h["reranked"] = True`` line still passed.
+
+    It had passed historically only because the RRF tie-break was then
+    thread-COMPLETION order, which shuffled the input often enough that MMR
+    sometimes reordered. ``b0093cede`` (#2952) fixed that real nondeterminism
+    and pinned the order — exposing that the test never actually exercised a
+    move. The product got more correct; the test is what must change.
+
+    So this now injects a deterministic fake embedder to make the vector leg
+    live, which gives the multi-session pool the assertion needs. The
+    precondition below is asserted explicitly so that if the leg mix (or the
+    autouse sparse pin) ever changes again, this fails LOUDLY instead of
+    silently reverting to a vacuous pass.
+    """
     _inject_fake(monkeypatch)
+    _inject_fake_embedder(monkeypatch)
     sdk = _fresh_sdk(tmp_path)
     q = _mini()[0]
     try:
@@ -577,10 +647,20 @@ def test_retrieve_rerank_flags_stamped(tmp_path, monkeypatch):
         ret = retrieve_for_question(sdk, q, ks=(5, 10, 20), top_k=20,
                                     rerank=True, rerank_pool=40,
                                     per_session_cap=2, mmr_lambda=0.7)
+        assert ret["rerank_pass"]["applied"] is True
         flags = [h.get("reranked", False) for h in ret["hits"]]
-        assert any(flags)                     # the mechanism moved something
         moved = ret["rerank_pass"]["moved"]
-        assert moved == sum(1 for f in flags if f)
+        # PRECONDITION: the pool must span >1 session, or the cap cannot bind
+        # and "the mechanism moved something" is unassertable. This is the
+        # guard that keeps the assertion below from going vacuous.
+        sessions = {h.get("session_id") for h in ret["hits"]}
+        assert len(sessions) > 1, (
+            "#3280: expectation pool is single-session — per_session_cap "
+            f"cannot bind, so the reorder assertion is vacuous (got {sessions})")
+        assert any(flags)                     # the mechanism moved something
+        assert moved == sum(1 for f in flags if f)   # flag/moved agree
+        # the overlay REORDERS the selected pool, it never drops below it
+        assert ret["rerank_pass"]["selected_count"] == len(ret["hits"])
         assert all(h["match_source"] for h in ret["hits"])  # provenance kept
     finally:
         sdk.close()
