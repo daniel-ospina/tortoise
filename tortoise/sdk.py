@@ -2470,41 +2470,15 @@ class TortoiseSDK:
                 f"{sorted(POINT_STATUS_VALUES)}"
             )
         if dedup:
-            ch = _content_hash(content)
-            # P1 #49: dedup by content_hash + pointKind (NOT context, which is no longer written)
-            existing = proj.g.query(
-                "MATCH (n:Point {content_hash:$ch}) "
-                "WHERE n.is_operator = false "
-                "AND n.pointKind = $kind "
-                "RETURN n.id",
-                params={"ch": ch, "kind": kind},
-            ).result_set
-            # A10 CONTENT+KIND FALLBACK SCAN (cycle-17/18): a mid-function
-            # crash inside create_point (between the node CREATE and the
-            # content_hash/props SET loop) leaves a live Point WITHOUT
-            # content_hash — the content-hash MATCH misses, and a second
-            # point would be a permanent duplicate no later submission can
-            # dedup (exactly-once violated, E2E-6.4). On the shared miss, the
-            # fallback matches stored content against the item's content,
-            # constrained to hash-less points of the same kind. Order pin:
-            # fallback runs FIRST on the miss; a fallback HIT is a dedup (no
-            # straddle warning); a fallback MISS runs the raw MATCH below for
-            # the pre-change straddle. Rebuild-durable: content+kind survive
-            # the #548 snapshot (the hash-less point's content is intact).
-            if not existing:
-                fallback = proj.g.query(
-                    "MATCH (n:Point) "
-                    "WHERE n.is_operator = false "
-                    "AND n.pointKind = $kind "
-                    "AND n.content_hash IS NULL "
-                    "AND n.content = $content "
-                    "RETURN n.id",
-                    params={"kind": kind, "content": content},
-                ).result_set
-                if fallback:
-                    existing = fallback
-            if existing:
-                pid = existing[0][0]
+            # P1 #49: dedup by content_hash + pointKind (NOT context, which is
+            # no longer written). The A10 hash-less content+kind fallback now
+            # rides the shared ``_find_point_by_content`` helper (#2892) so
+            # this lookup, the v2 capture seam, and ``_content_exists`` can
+            # never drift apart again — the fork is exactly what let the
+            # fallback go missing from ``_content_exists``.
+            existing_id = self._find_point_by_content(content, pointKind=kind)
+            if existing_id:
+                pid = existing_id
                 # Existing point already stores content_hash — don't re-write it
                 # (would make the `if props:` guard always truthy and bump
                 # updatedAt on every dedup hit, #80 review).
@@ -3884,6 +3858,16 @@ class TortoiseSDK:
                 #    the seam is the backstop).
                 resolved = exact_hit_id(canonical_by_hash, content)
                 dedup = DEDUP_CONTENT_HASH_HIT if resolved else DEDUP_NEW
+                # #2813: read the four E3 passthrough props OFF the payload
+                # point dict ONCE, before the write, so the SAME dict reaches
+                # both `create_point` (node persistence) and the response
+                # `props` superset. Before this fix the write dropped them and
+                # only the response carried them — the reply looked right while
+                # the node stored nothing (the extractor is shared with the
+                # eval lane, whose writer persisted them; the persistence
+                # writer was forked).
+                props = {k: v for k, v in pt.items()
+                         if k in _CAPTURE_PASSTHROUGH_PROPS}
                 if resolved is None:
                     # 2) graph-level content-hash resolution — the SAME
                     #    semantics create_point(dedup=True) would apply
@@ -3896,28 +3880,12 @@ class TortoiseSDK:
                     #    canonical's props/provenance stay untouched
                     #    (first-writer).  Never report a phantom id: the
                     #    response id is the id the graph actually holds.
+                    #    #2892: shared helper (create_point's own lookup).
                     kind = str(pt.get("pointKind", "statement"))
-                    hit = proj.g.query(
-                        "MATCH (n:Point {content_hash:$ch}) "
-                        "WHERE n.is_operator = false "
-                        "AND n.pointKind = $kind "
-                        "RETURN n.id",
-                        params={"ch": _content_hash(content), "kind": kind},
-                    ).result_set
-                    if not hit:
-                        # A10 fallback: a hash-less same-kind node with the
-                        # exact content (create_point's own fallback).
-                        hit = proj.g.query(
-                            "MATCH (n:Point) "
-                            "WHERE n.is_operator = false "
-                            "AND n.pointKind = $kind "
-                            "AND n.content_hash IS NULL "
-                            "AND n.content = $content "
-                            "RETURN n.id",
-                            params={"kind": kind, "content": content},
-                        ).result_set
-                    if hit:
-                        resolved = hit[0][0]
+                    hit_id = self._find_point_by_content(
+                        content, pointKind=kind)
+                    if hit_id:
+                        resolved = hit_id
                         dedup = DEDUP_CONTENT_HASH_HIT
                 if resolved is None:
                     resolved = pid
@@ -3929,6 +3897,10 @@ class TortoiseSDK:
                         # Source (mirrors the M2 EventAPI provenance;
                         # create_point wires the extractedFrom edge).
                         extractedFrom=f"session:{session_id}",
+                        # #2813: persist the E3 passthrough fields on the node
+                        # (quote/when/search_keys/source_turn_id) — the exact
+                        # fields the response whitelist below advertises.
+                        **props,
                     )
                 pid = resolved
                 if dedup == DEDUP_NEW:
@@ -3944,12 +3916,13 @@ class TortoiseSDK:
                     "MATCH (s:Session {id:$sid}), (p:Point {id:$pid}) "
                     "MERGE (s)-[:CONTAINS]->(p)",
                     params={"sid": session_id, "pid": pid})
-                # P1 #1529 (D8/E3): whitelisted props passthrough — E3's
-                # source_turn_id (arriving on the payload point dict) must
+                # P1 #1529 (D8/E3): the whitelisted props dict read above —
+                # E3's source_turn_id (arriving on the payload point dict) must
                 # never be dropped or rebuilt into a reduced {id, kind, text}
-                # shape.
-                props = {k: v for k, v in pt.items()
-                         if k in _CAPTURE_PASSTHROUGH_PROPS}
+                # shape. #2813: for a NEW point this is the SAME dict that was
+                # passed to create_point, so response and node can no longer
+                # diverge; a dedup hit already carries its props from the
+                # initial write (the seam never re-stamps a canonical).
                 extracted.append({
                     "id": pid, "kind": "statement", "text": content[:200],
                     "props": props, "dedup": dedup})
@@ -7477,27 +7450,10 @@ class TortoiseSDK:
             if isinstance(item.get("extractedFrom"), str) \
                     and item["extractedFrom"] in source_refs:
                 item["extractedFrom"] = refs[item["extractedFrom"]]
-            existed = proj.g.query(
-                "MATCH (n:Point {content_hash:$ch}) "
-                "WHERE n.is_operator = false "
-                "AND n.pointKind = $kind RETURN n.id",
-                params={"ch": _content_hash(content), "kind": kind},
-            ).result_set
-            # A10 CONTENT+KIND fallback (cycle-17/18): mirror create_point's
-            # hash-less sibling detection so the counter is honest (a
-            # fallback hit counts as deduped, never created).
-            if not existed:
-                fallback = proj.g.query(
-                    "MATCH (n:Point) "
-                    "WHERE n.is_operator = false "
-                    "AND n.pointKind = $kind "
-                    "AND n.content_hash IS NULL "
-                    "AND n.content = $content "
-                    "RETURN n.id",
-                    params={"kind": kind, "content": content},
-                ).result_set
-                if fallback:
-                    existed = fallback
+            # #2892: shared content+kind resolution (hash query THEN the A10
+            # hash-less fallback, mirroring create_point) so the dedup counter
+            # can never drift from the writer it predicts.
+            existed = self._find_point_by_content(content, pointKind=kind)
             point = self.create_point(kind, content, dedup=True, **item)
             pid = point["id"]
             if ref:
@@ -10842,33 +10798,100 @@ class TortoiseSDK:
 
     # ── P0 Group 3: Checkpoint, Diary, Status, Analyze, Ingest ────
 
+    def _find_point_by_content(self, content: str,
+                               pointKind: str | None = None,
+                               exclude_id: str | None = None) -> str | None:
+        """Resolve a Point id by content — content_hash first, then the A10
+        hash-less content+kind fallback. Returns None on no match.
+
+        The SINGLE source of truth for content-dedup resolution, shared by
+        ``create_point``, the v2 capture seam (``_extract_session_v2``),
+        ``ingest_bundle``'s points loop, and ``_content_exists``. #2892: those
+        were forked copies of the same query; the fork is exactly what let the
+        hash-less fallback go missing from ``_content_exists``, so after a
+        graph rebuild — where replay leaves every ``content_hash`` NULL —
+        ``checkpoint()``'s Tier-1 gate treated already-present content as new
+        and filed duplicates.
+
+        ``pointKind`` scopes the match (a duplicate observation must never
+        suppress a decision, #784); ``exclude_id`` excludes a specific point
+        (the dedup candidate itself — self-match guard, #784 review). Both
+        default to None (legacy any-kind behavior). The WHERE clause is the
+        canonical non-operator predicate — ``(n.is_operator IS NULL OR
+        n.is_operator = false) AND n.op_type IS NULL`` (parity with
+        ``summarize_structure`` / ``list_pointkinds`` / ``ep.py``
+        ``count_claims``, #943): the absence-or-false form matches the
+        explicit-false modern shape AND the legacy property-absent shape
+        (plain Points written before ``is_operator:false`` was stamped), and
+        the ``op_type IS NULL`` guard excludes LEGACY operators — which carry
+        ``op_type`` WITHOUT the ``is_operator`` property and would otherwise
+        be matched by the absence-or-false form, so the predicate never
+        resolves a dedup to an operator node.
+
+        Order pin (inherited from create_point): the hash query runs first;
+        the fallback runs on the miss and a fallback HIT is a normal dedup
+        (no straddle warning). Rebuild-durable: content+kind survive the #548
+        snapshot (the hash-less point's content is intact).
+        """
+        proj = self._get_proj()
+        # Canonical non-operator predicate (#943 parity): absence-or-false
+        # AND op_type IS NULL. The op_type guard excludes LEGACY operators
+        # (op_type set, is_operator property absent) that the bare
+        # absence-or-false form matches — resolving a dedup to an operator
+        # node would skip creating a legitimate point.
+        clauses = ["(n.is_operator IS NULL OR n.is_operator = false)",
+                   "n.op_type IS NULL"]
+        hash_params: dict = {"ch": _content_hash(content)}
+        if pointKind:
+            clauses.append("n.pointKind = $kind")
+            hash_params["kind"] = pointKind
+        if exclude_id:
+            clauses.append("n.id <> $exclude")
+            hash_params["exclude"] = exclude_id
+        rows = proj.g.query(
+            f"MATCH (n:Point {{content_hash:$ch}}) WHERE "
+            f"{' AND '.join(clauses)} RETURN n.id",
+            params=hash_params,
+        ).result_set
+        if rows:
+            return rows[0][0]
+        # A10 CONTENT+KIND FALLBACK SCAN (cycle-17/18): a mid-function crash
+        # inside create_point (between the node CREATE and the content_hash/
+        # props SET loop) or a JSONL rebuild leaves a live Point WITHOUT
+        # content_hash — the content-hash MATCH misses, and a second point
+        # would be a permanent duplicate no later submission can dedup
+        # (exactly-once violated, E2E-6.4). Rebuild-durable: content+kind
+        # survive the #548 snapshot (the hash-less point's content is intact).
+        fallback_clauses = [*clauses,
+                            "n.content_hash IS NULL", "n.content = $content"]
+        fallback_params: dict = {"content": content}
+        if pointKind:
+            fallback_params["kind"] = pointKind
+        if exclude_id:
+            fallback_params["exclude"] = exclude_id
+        frows = proj.g.query(
+            f"MATCH (n:Point) WHERE {' AND '.join(fallback_clauses)} "
+            "RETURN n.id",
+            params=fallback_params,
+        ).result_set
+        return frows[0][0] if frows else None
+
     def _content_exists(self, content: str,
                         pointKind: str | None = None,
                         exclude_id: str | None = None) -> str | None:
-        """Return point ID if a point with this content hash exists, else None.
+        """Return point ID if a point with this content exists, else None.
 
+        #2892: delegates to ``_find_point_by_content`` — the content-hash
+        match PLUS the hash-less content+kind fallback. Without the fallback a
+        rebuilt graph (every ``content_hash`` NULL) would make ``checkpoint()``
+        re-file already-present content as new duplicates.
         #784: optional pointKind scoping — a duplicate observation must never
         suppress a decision (DE2E-N11); ``exclude_id`` excludes a specific
         point (the dedup candidate itself — self-match guard, #784 review).
         Default None preserves the legacy any-kind behavior.
         """
-        ch = _content_hash(content)
-        proj = self._get_proj()
-        kind_clause = " AND n.pointKind = $kind" if pointKind else ""
-        exclude_clause = " AND n.id <> $exclude" if exclude_id else ""
-        params: dict = {"ch": ch}
-        if pointKind:
-            params["kind"] = pointKind
-        if exclude_id:
-            params["exclude"] = exclude_id
-        rows = proj.g.query(
-            f"MATCH (n:Point {{content_hash:$ch}}) "
-            "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
-            f"{kind_clause} {exclude_clause} "
-            "RETURN n.id",
-            params=params,
-        ).result_set
-        return rows[0][0] if rows else None
+        return self._find_point_by_content(content, pointKind=pointKind,
+                                           exclude_id=exclude_id)
 
     def checkpoint(self, items: list[dict], agent_name: str = "checkpoint",
                    threshold: float = 0.95) -> dict:
