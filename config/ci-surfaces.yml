@@ -202,6 +202,7 @@ surfaces:
   - test_battery_parity_migration.py
   - test_battery_parity_vector_guard.py  # #2985 retrieval capability gate (fake SDK; hermetic)
   - test_battery_price_basis.py
+  - test_battery_derive_truth_leg.py  # #3100 battery-only (imports battery/* only)
   - test_battery_probes.py
   # #2906: provider-reported cost (#2906) + the declared fallback basis
   # (#2874) pin battery/config/prices.py, battery/runner/model_calls.py,
@@ -286,10 +287,12 @@ surfaces:
   - test_backup_watcher.py
   - test_bfs_audit.py
   - test_boot_regressions.py
+  - test_collision_preflight.py
   - test_health_ready_nonblocking.py  # #2988: /health/ready off-loop + bounded probes
   - test_build_window_transcript.py
   - test_canary_classify.py
   - test_canonical.py
+  - test_capture_loop_responsiveness.py
   - test_capture_session.py
   - test_capture_session_supersession_e2e.py
   - test_restore_container_recovery.py
