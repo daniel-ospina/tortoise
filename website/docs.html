@@ -93,6 +93,7 @@
       <a href="#mcp">Connect your agent (MCP)</a>
       <a href="#api">API reference</a>
       <a href="#next">Next steps</a>
+      <a href="/faq">FAQ — design questions</a>
     </div>
 
     <h2 id="what">What is Tortoise?</h2>
@@ -102,14 +103,17 @@
     <h2 id="how">How it works</h2>
     <div class="card">
       <h3>The data model</h3>
-      <p>Everything is a <code>Point</code>: an atomic claim with an <code>id</code>, <code>content</code> (text), <code>pointKind</code>, and a <code>status</code>. The core kind vocabulary (ontology v3.4 §5) is: <code>statement</code>, <code>decision</code>, <code>vision</code>, <code>strategy</code>, <code>plan</code>, <code>goal</code>, <code>target</code>, <code>observation</code>, <code>hypothesis</code> — plus <code>evidence</code> and domain kinds registered by expansion packs.</p>
-      <p class="callout">The hosted API currently accepts a subset: <code>statement</code>, <code>decision</code>, <code>evidence</code>, <code>observation</code>, <code>hypothesis</code> (tracked in issue #7881). The graph and SDK accept the full vocabulary.</p>
+      <p>Everything is a <code>Point</code>: an atomic claim with an <code>id</code>, <code>content</code> (text), <code>pointKind</code>, and a <code>status</code>. The kind vocabulary is <code>statement</code> — the asserted belief — plus the write kinds <code>decision</code>, <code>vision</code>, <code>strategy</code>, <code>plan</code>, <code>goal</code>, <code>target</code>, <code>observation</code>, <code>hypothesis</code>, <code>humanApproval</code>, and any domain kinds registered by expansion packs. Canonical vocabulary: <a href="https://github.com/daniel-ospina/tortoise/blob/main/docs/ONTOLOGY.md">docs/ONTOLOGY.md</a> §4.1 and §5. (<code>evidence</code> is an additional kind the SDK registers for decision records. <code>event</code> exists only internally, as the kind on captured episodic turns — it is not a supported write kind: the REST point-create endpoint and the SDK's bundle validator reject it, while <code>create_point</code> only warns.)</p>
+      <p class="callout">The hosted API, the SDK and the graph draw on the same kind vocabulary, plus whatever your expansion packs register.</p>
       <ul>
         <li><code>status: draft</code> — created but not yet connected (not counted in confidence)</li>
-        <li><code>status: live</code> — promoted when its first edge is created (#131); participates in confidence computation</li>
-        <li><code>outdated</code> / <code>archived</code> — superseded or retired</li>
+        <li><code>status: live</code> — promoted when its first edge is created; participates in confidence computation</li>
+        <li><code>status: superseded</code> — replaced by a newer Point, which is linked to it, so the old claim is kept rather than deleted</li>
+        <li><code>status: retracted</code> — withdrawn with no replacement; kept as a tombstone</li>
+        <li><code>outdated</code> — a legacy server-managed flag, kept as a back-compat status value, set alongside supersession or an explicit invalidation</li>
+        <li><code>status: archived</code> — retired</li>
       </ul>
-      <p>A content hash (SHA-256 of <code>content</code>) is stored on every Point; creating the same content twice returns the existing Point (dedup) instead of duplicating.</p>
+      <p>A content hash (SHA-256 of <code>content</code>) is stored on every Point. With <code>dedup</code> enabled — the default over MCP — creating the same content twice returns the existing Point instead of duplicating it; the REST endpoint defaults <code>dedup</code> to false and will create a second Point.</p>
     </div>
     <div class="card">
       <h3>Edges (operators)</h3>
@@ -122,14 +126,14 @@
     </div>
     <div class="card">
       <h3>Confidence (EP)</h3>
-      <p>Each live Point carries a belief score. Tortoise computes it by solving the linear system</p>
-      <pre><code>(I − λM)g = a</code></pre>
-      <p>where <code>M</code> is the row-normalized adjacency of IMPL/NAND edges, <code>a</code> is a seed vector (1.0 for resolution-event Points, 0 otherwise), and <code>λ = 0.6</code> is the propagation dampening. The solution <code>g</code> is each Point's <code>grounding</code> — the steady-state belief given the graph's evidence. Adding a supporting edge raises a Point's score; adding a NAND edge lowers it. Grounding is computed via the SDK (<code>projection.compute_grounding()</code>); the hosted API exposes per-Point <code>confidence</code> values on search/read results.</p>
+      <p>Each live Point carries a belief score. Tortoise computes it with <strong>expectation propagation</strong>: evidence is passed back and forth along the IMPL/NAND edges until the values settle. Support pulls a Point's belief up; a NAND edge pulls it down. Both remain in the graph, so the disagreement stays visible instead of being resolved by deleting one side.</p>
+      <p>The result is a <em>distribution</em>, not a single number — a mean and a variance. A tight spread means the evidence has settled; a wide spread means the posterior is weakly determined — thin evidence, or evidence pulling in opposite directions — which is how a Point gets flagged as <strong>contested</strong>. The hosted API exposes the mean as <code>confidence</code> on search and read results.</p>
+      <p>Confidence is <em>derived</em>, never a stored verdict. Change the evidence — add a claim, supersede one, record a contradiction — and the affected scores recompute.</p>
     </div>
     <div class="card">
       <h3>Sessions &amp; provenance</h3>
       <p>Agent conversations are captured as <code>Session</code> nodes (with turn counts and metadata). Points created from a session are linked to it, so every insight traces back to the conversation that produced it. Listing sessions and their linked Points is a first-class API operation.</p>
-      <p class="callout">The ontology defines a richer episodic <code>Event</code> model (eventKind, startedAt/endedAt, produces/uses edges). The hosted API currently produces <code>:Session</code> nodes; alignment is tracked in issue #7882.</p>
+      <p class="callout">The ontology defines a richer episodic <code>Event</code> model (eventKind, startedAt/endedAt, produces/uses edges). The hosted API produces <code>:Session</code> nodes, and each capture commit also writes an <code>AgentSession</code> Event carrying the capture timestamp and the session summary.</p>
     </div>
     <div class="card">
       <h3>Search</h3>
@@ -234,6 +238,7 @@
     <h2 id="next">Next steps</h2>
     <ul>
       <li>Explore the <a href="https://app.premiselabs.co">dashboard</a> — manage keys and sessions</li>
+      <li>Read the <a href="/faq">FAQ</a> — why the graph stores relationships, how confidence is computed, and what happens when the graph is wrong</li>
       <li>Read the <a href="https://tortoise.premiselabs.co/">product story</a></li>
       <li>Questions? Email <a href="mailto:hello@premiselabs.co">hello@premiselabs.co</a></li>
     </ul>

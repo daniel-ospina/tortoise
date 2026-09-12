@@ -34,6 +34,7 @@
 /security/ /security 301
 /aviso-privacidad/  /aviso-privacidad  301
 /docs/     /docs     301
+/faq/      /faq      301
 /self-hosted/  /self-hosted  301
 /welcome/  /welcome  301
 /invite-accept/  /invite-accept  301
@@ -43,4 +44,5 @@
 
 # .html extension duplicates (non-auth only)
 /docs.html  /docs          301
+/faq.html   /faq           301
 /self-hosted.html  /self-hosted  301

@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>FAQ — Tortoise</title>
+  <meta name="description" content="Why Tortoise stores relationships instead of re-deriving them, how a confidence score is computed, what happens when the graph is wrong, and how this differs from plain retrieval over a large context window.">
+  <meta name="theme-color" content="#060b14">
+  <link rel="canonical" href="https://tortoise.premiselabs.co/faq">
+  <link rel="icon" type="image/png" href="/logo.png">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg: #060b14;
+      --surface: #0d1a2d;
+      --text: #cbd5e1;
+      --text-dim: #94a3b8;
+      --accent: #06b6d4;
+      --accent-glow: rgba(6, 182, 212, 0.35);
+      --green: #4ade80;
+      --gold: #f59e0b;
+      --border: #1e293b;
+      --mono: 'SF Mono', 'Cascadia Code', 'Fira Code', 'JetBrains Mono', monospace;
+      --serif: 'Georgia', 'Times New Roman', serif;
+    }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--serif);
+      font-size: 16px;
+      line-height: 1.75;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    .wrap { max-width: 720px; margin: 0 auto; padding: 2rem 1.25rem 4rem; }
+
+    .topbar { flex-wrap: wrap;
+      display: flex; justify-content: space-between; align-items: baseline; gap: 1rem;
+      margin-bottom: 2.5rem; font-family: var(--mono); font-size: 0.78rem;
+    }
+    .topbar a { color: var(--text-dim); text-decoration: none; }
+    .topbar a:hover { color: var(--accent); }
+    .topbar .host { color: var(--text-dim); }
+
+    .doc-type {
+      font-family: var(--mono); font-size: 0.72rem; text-transform: uppercase;
+      letter-spacing: 0.08em; color: var(--accent); margin-bottom: 0.6rem;
+    }
+
+    h1 {
+      font-family: var(--mono); font-size: 1.5rem; font-weight: 600;
+      color: var(--text); line-height: 1.35; letter-spacing: -0.01em;
+    }
+    .lede { color: var(--text-dim); font-size: 0.95rem; margin-top: 0.75rem; }
+
+    .toc {
+      margin: 1.75rem 0 2.75rem; background: var(--surface);
+      border: 1px solid var(--border); border-radius: 0.75rem; padding: 1rem 1.25rem;
+      font-family: var(--mono); font-size: 0.78rem;
+    }
+    .toc .toc-label {
+      display: block; font-size: 0.64rem; text-transform: uppercase;
+      letter-spacing: 0.08em; color: var(--text-dim); margin-bottom: 0.6rem;
+    }
+    .toc ol { margin: 0; padding-left: 1.3rem; }
+    .toc li { margin: 0.3rem 0; }
+    .toc a { color: var(--text); text-decoration: none; border-bottom: 1px solid rgba(100, 116, 139, 0.3); }
+    .toc a:hover { color: var(--accent); border-bottom-color: var(--accent); }
+
+    h2 {
+      font-family: var(--mono); font-size: 1.02rem; font-weight: 600; color: var(--accent);
+      margin: 2.75rem 0 0.9rem; padding-top: 1.1rem;
+      border-top: 1px solid rgba(30, 41, 59, 0.6);
+    }
+    h2:first-of-type { border-top: none; margin-top: 0; padding-top: 0; }
+
+    h3 {
+      font-family: var(--mono); font-size: 0.88rem; font-weight: 600; color: var(--text);
+      margin: 1.9rem 0 0.4rem; scroll-margin-top: 1.5rem;
+    }
+
+    p { margin: 0.7rem 0; }
+    strong { color: var(--text); font-weight: 600; }
+    em { color: var(--text); font-style: italic; }
+    a { color: var(--accent); text-decoration: none; border-bottom: 1px solid rgba(6, 182, 212, 0.25); }
+    a:hover { color: #22d3ee; border-bottom-color: var(--accent); }
+    code { font-family: var(--mono); font-size: 0.82em; color: #a5f3fc; }
+
+    ul, ol { margin: 0.8rem 0; padding-left: 1.35rem; }
+    li { margin: 0.4rem 0; }
+
+    .callout {
+      background: var(--surface); border: 1px solid var(--border);
+      border-left: 3px solid var(--accent); border-radius: 0.6rem;
+      padding: 1rem 1.25rem; margin: 1.4rem 0;
+    }
+    .callout p { margin: 0.25rem 0; font-size: 0.92rem; }
+
+    .open { border-left-color: var(--gold); }
+
+    footer {
+      margin-top: 3.5rem; padding-top: 1.25rem; border-top: 1px solid var(--border);
+      font-family: var(--mono); font-size: 0.76rem; color: var(--text-dim);
+    }
+    footer p { margin: 0.4rem 0; }
+    footer a { color: var(--text-dim); border-bottom: 1px solid rgba(100, 116, 139, 0.3); }
+    footer a:hover { color: var(--accent); border-bottom-color: var(--accent); }
+
+    @media (max-width: 480px) {
+      .wrap { padding: 1.5rem 1rem 3rem; }
+      h1 { font-size: 1.28rem; }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <nav class="topbar" aria-label="Site navigation">
+      <a href="/">← Back to product</a>
+      <a href="/docs">Docs</a>
+      <span class="host">tortoise.premiselabs.co</span>
+    </nav>
+
+    <header>
+      <p class="doc-type">FAQ</p>
+      <h1>Questions we get asked about the design</h1>
+      <p class="lede">Most of these are variations on one question: why store the relationships between claims instead of letting the model work them out each time it answers. Here is the reasoning, and where we haven't measured something we say so.</p>
+    </header>
+
+    <main>
+      <nav class="toc" aria-label="Questions">
+        <span class="toc-label">Why this design</span>
+        <ol>
+          <li><a href="#not-just-rag">Isn't this just RAG with extra steps?</a></li>
+          <li><a href="#query-time">Why not let the model work out contradictions at query time?</a></li>
+          <li><a href="#source-text">Do you replace my source text with extracted facts?</a></li>
+          <li><a href="#corrections">What happens when the graph is wrong?</a></li>
+          <li><a href="#contradiction">Does a contradiction delete the losing belief?</a></li>
+          <li><a href="#cost">Is a graph slower and more expensive than vector search?</a></li>
+          <li><a href="#scale">How does it scale?</a></li>
+          <li><a href="#different">How is this different from other memory systems?</a></li>
+        </ol>
+        <span class="toc-label" style="margin-top:1rem;">How belief works</span>
+        <ol>
+          <li><a href="#confidence">Is a confidence score a fixed verdict, or does it move?</a></li>
+          <li><a href="#variance">What does the variance on a confidence score mean?</a></li>
+          <li><a href="#ep">What is expectation propagation?</a></li>
+          <li><a href="#missed">What happens if extraction misses something?</a></li>
+        </ol>
+      </nav>
+
+      <h2>Why this design</h2>
+
+      <h3 id="not-just-rag">Isn't this just RAG with extra steps?</h3>
+      <p>Not quite, and the difference is specific.</p>
+      <p>Similarity search returns text that <em>resembles</em> your question. A correction rarely resembles the thing it corrects — it's shorter, worded differently, often a footnote on a later document. So the agreeing text outranks the disagreeing text, and a model reading only the top results never learns there was a disagreement. It doesn't fail at reasoning; the counter-evidence never arrived.</p>
+      <p>Tortoise keeps the source text and additionally indexes the one thing the text cannot contain: the relationships <em>between</em> pieces. &ldquo;These two conflict.&rdquo; &ldquo;This replaced that.&rdquo; That is a different retrieval signal, not an extra step on the same one.</p>
+
+      <h3 id="query-time">Why not let the model work out contradictions at query time?</h3>
+      <p>It can only judge what is in front of it. Deciding whether A contradicts B requires having both, and contradictions are the least likely pair to be retrieved together.</p>
+      <p>That is circular: you need to know the relationships to retrieve the right material, and you need the right material to discover the relationships. Recording a relationship when it is observable is what breaks the circle.</p>
+      <p>The model still makes every judgment call — what a conflict <em>means</em>, how much weight it deserves, and whether it matters for the question being asked. What it doesn't have to do is remember, on its own, that the conflict exists.</p>
+
+      <h3 id="source-text">Do you replace my source text with extracted facts?</h3>
+      <p>No, and this is the one we would most want you to hold us to. Your source stays, verbatim and authoritative. Extraction is a revisable index over unrewritten evidence — the source is never rewritten, and claims carry a quoted span of the text they came from. (That quote field is partially implemented today.)</p>
+      <p>An external study — <em>“Verbatim Chunks Beat Extracted Artifacts: A Controlled Ablation”</em> (arXiv 2601.00821v3) — held the retriever, reranker, answerer and judge fixed and swapped <em>only</em> the stored representation: verbatim source won by <strong>15.9 points on LoCoMo</strong> and <strong>22.0 points on LongMemEval-S</strong>, and a one-hop semantic graph did not close the gap. The gap tracks how far the stored representation departs from the source.</p>
+      <p>Read that study as the case for keeping the source layer, not as evidence that this graph works — it tested a one-hop semantic graph, not typed-relation propagation or contradiction surfacing. We keep both layers: verbatim source as the evidence layer, the graph as the reasoning layer over it.</p>
+
+      <h3 id="corrections">What happens when the graph is wrong?</h3>
+      <p>You correct it, and belief recomputes. Nothing is frozen.</p>
+      <ul>
+        <li>You can <strong>supersede</strong> a claim — the old one is retained and linked to its replacement rather than deleted, so &ldquo;what did we believe in March&rdquo; stays answerable.</li>
+        <li>You can <strong>retract</strong> a claim without replacing it.</li>
+        <li>You can <strong>contradict</strong> a claim, which lowers the belief in it without erasing the record of the disagreement.</li>
+      </ul>
+      <p>If you disagree with a confidence score, you don't argue with the system. You add evidence, and it moves.</p>
+
+      <h3 id="contradiction">Does a contradiction delete the losing belief?</h3>
+      <p>No. Both claims stay in the graph, with the tension recorded. That is the point of keeping a contradiction as a first-class relationship instead of overwriting one side.</p>
+      <p>A deleted belief leaves no trace of the disagreement, so a later reader sees a confident answer with no idea it was ever contested. A recorded contradiction stays visible, and keeps pulling on the confidence of the claims it connects — on both sides for a mutual contradiction, on the target only for a directed one — until it is genuinely resolved or superseded.</p>
+
+      <h3 id="cost">Is a graph slower and more expensive than vector search?</h3>
+      <p>Two different costs, and it depends on how often you read.</p>
+      <p>The expensive part of Tortoise is at write time: reading and judging incoming material to extract the relationships. That cost is linear in how much you ingest, and it does not get cheaper per item as you grow.</p>
+      <p>The read path is the opposite trade. Because the relationships are already recorded, working out a claim's belief needs only its neighbourhood, and the lookup itself is index-backed rather than a scan of the corpus. Retrieval runs in parallel across full-text, vector and structural strategies, against a pre-registered end-to-end target of 300&nbsp;ms p95. That target has <strong>not yet been certified</strong> on production-class hardware — measured p95 on a development box has been 345–460&nbsp;ms — so treat it as the bar we hold ourselves to, not a published result.</p>
+      <p>So: pay once at write, or re-derive on every read. Which is cheaper depends on how many questions you ask of the same material. Ingest a lot and ask twice, and the precomputation isn't worth it.</p>
+
+      <h3 id="scale">How does it scale?</h3>
+      <p>Honestly: the retrieval path has a benchmark harness with scaling arms for larger corpora, but we have not published corpus-scaling curves, and belief propagation at production scale is <strong>open work</strong>. We'd rather say that than quote a number we haven't earned.</p>
+      <p>What we can tell you concretely today:</p>
+      <ul>
+        <li>Adding a claim costs work proportional to how many things it connects to — not to the size of the store. Unrelated claims don't interact.</li>
+        <li>Belief is computed over a bounded neighbourhood around each claim, which is what keeps reads local. It also means the result is an approximation, and how far it diverges from a full computation at large scale is exactly what isn't yet measured.</li>
+        <li>The embedded single-process engine is for evaluation, not teams. Concurrent writers need the Docker or hosted path.</li>
+      </ul>
+      <div class="callout open">
+        <p><strong>In progress.</strong> A published capacity page — graph sizes, memory footprint per tier, and measured scaling behaviour — is being prepared. Until then we are not going to state limits we haven't tested.</p>
+      </div>
+
+      <h3 id="different">How is this different from other memory systems?</h3>
+      <p>The category has converged on graph retrieval. What is much less common is <strong>propagated confidence</strong> — a belief score that moves when the evidence around it moves, rather than a static field written once.</p>
+      <p>Across the systems we have surveyed, most have some form of graph, several have provenance, a few have contradiction, and very few propagate credence through the graph. We also publish a mechanism-named comparison — what each system actually does, not what it claims — with an explicit rule that we make no win claims on benchmarks we haven't run.</p>
+
+      <h2>How belief works</h2>
+
+      <h3 id="confidence">Is a confidence score a fixed verdict, or does it move?</h3>
+      <p>It moves. Confidence is <em>derived</em>: every claim's score is recomputed from the evidence attached to it, and the stored number is a cache of that computation rather than a ruling.</p>
+      <p>Add a supporting claim and it rises. Add a contradiction and it falls. Supersede the evidence it rested on and it recomputes without it. Nothing is stamped at write time and frozen.</p>
+
+      <h3 id="variance">What does the variance on a confidence score mean?</h3>
+      <p>A confidence score is a distribution, not a single number — so it carries a spread as well as a centre.</p>
+      <p>A tight spread means the evidence has settled. A wide spread means it has not — the posterior is weakly determined, which happens both when evidence is thin and when evidence pulls in opposite directions. That is how the system can flag a claim as <strong>contested</strong>, rather than just handing you a middling score and leaving you to guess whether it means &ldquo;weakly supported&rdquo; or &ldquo;actively disputed.&rdquo;</p>
+      <p>Contested claims are usually more interesting than low-scoring ones. A 0.5 that nobody disputes and a 0.5 that two strong sources are fighting over are different situations.</p>
+
+      <h3 id="ep">What is expectation propagation?</h3>
+      <p>It is how the belief score is actually computed. Each claim's confidence is worked out by passing evidence back and forth along the relationships that connect it — support pushes a claim up, contradiction pulls it down — until the numbers settle.</p>
+      <p>The alternative, and what a simpler system would do, is to reduce each claim to a single number at the moment it is written. That cannot represent uncertainty: it can tell you a claim scores 0.7, but not whether that 0.7 is solid or the net of a fight. Because expectation propagation keeps a distribution per claim, the system can distinguish those cases and update them properly when new evidence lands.</p>
+      <p>It also means contradiction is handled as a first-class force rather than as a missing record. Removing a contradicted claim and replacing it silently looks the same as never having recorded the contradiction — until you need to know why the belief changed.</p>
+
+      <h3 id="missed">What happens if extraction misses something?</h3>
+      <p>If a relationship is missed when it is observable, it is gone — no later search recovers it, because the relationship was never inside either document. That is a real loss and the main risk of this approach.</p>
+      <p>That is why the source text is kept verbatim and authoritative, and why the graph is positioned as an index over the evidence rather than a replacement for it. A missed relationship makes the graph incomplete; it does not make the underlying record wrong, and the raw material is still there to search directly.</p>
+    </main>
+
+    <footer>
+      <p>
+        <a href="/">Product</a> ·
+        <a href="/docs">Docs</a> ·
+        <a href="/self-hosted">Self-hosted</a> ·
+        <a href="/security">Security</a> ·
+        <a href="/license">License</a> ·
+        <a href="/privacy">Privacy</a>
+      </p>
+      <p>Premise Labs · Tortoise</p>
+    </footer>
+  </div>
+</body></html>
