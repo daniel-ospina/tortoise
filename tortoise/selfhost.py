@@ -21,9 +21,11 @@ Environment:
 """
 from __future__ import annotations
 
+import contextvars
 import logging
 import os
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -49,6 +51,74 @@ TOOL_GROUP = os.environ.get("TORTOISE_TOOL_GROUP")
 # REPORTED (503) rather than waited out — it is a safety net, not the mechanism
 # (see the ordering invariant on hosted_api._READY_PROBE_TIMEOUT_S).
 _READY_PROBE_TIMEOUT_S = 6.0
+
+# ── #3035 / #3287: each health probe gets its OWN pool ────────────────────────
+#
+# #2988 (PR #3009) moved the probes OFF the event loop. It did not give them a
+# pool of their own: ``asyncio.to_thread`` submits to the loop's DEFAULT
+# ThreadPoolExecutor, whose queue is UNBOUNDED — a submission never fails, it
+# just waits. So the probe does not have to hang to be slow, it only has to
+# QUEUE behind unrelated ``to_thread`` work in this process. And ``wait_for``
+# bounds the ANSWER, not the TRUTH: a starved readiness probe reports not_ready
+# while the DB is fine, which is a lie that fails the publish.
+#
+# Measured on main (both probes stubbed to ~0ms, DB healthy; one unrelated task
+# occupying the default executor's only worker): GET /health never answered
+# within 8s, and GET /health/ready returned a FALSE 503 after 6020ms with the
+# probe never having run. ``publish-selfhost.yml`` curls /health/ready on every
+# publish (a non-200 fails the publish) and polls /health for up to 60s.
+#
+# TWO pools, not one — because the two probes are NOT bounded alike, and a
+# liveness probe that shares a pool with an unbounded probe is not a liveness
+# probe (this issue's own premise):
+#
+#   /health      -> ``_LIVENESS_PROBE_EXECUTOR``. Its probe is ``probe_db``,
+#                   which is hard-bounded INTERNALLY: ``_probe_once`` runs the
+#                   ping in its own worker under ``PROBE_TIMEOUT`` (1.5s, plus a
+#                   single 0.1s transient retry) and abandons that worker
+#                   (``shutdown(wait=False)``). This pool's worker therefore
+#                   always comes back, so one would do; two costs nothing and
+#                   absorbs a concurrent poll.
+#
+#   /health/ready -> ``_READY_PROBE_EXECUTOR``. Its probe is ``sdk._get_proj()``
+#                   called DIRECTLY — the engine's real path, deliberately not
+#                   ``probe_db`` — and that has NO inner bound: it is bounded
+#                   only by the FalkorDB client's own socket timeouts (5s
+#                   connect / 10s read; none at all in the embedded lane). Two
+#                   concurrent readiness probes can therefore park BOTH of this
+#                   pool's workers until their sockets give up. That must not be
+#                   able to take /health down with it — hence two pools rather
+#                   than one pool of N. A shared pool is reproduced as a hang in
+#                   test_liveness_answers_while_readiness_workers_are_parked.
+#
+# Residual (pre-existing #2988, NOT introduced here): the client read timeout
+# (10s) exceeds ``_READY_PROBE_TIMEOUT_S`` (6.0s), so for a genuinely
+# black-holed DB the OUTER bound wins the race and leaves the readiness worker
+# parked until its socket times out. That is a latency cost on one endpoint and
+# a thread held past its answer — not a liveness risk, because liveness has its
+# own pool — and it needs an inner bound on ``_get_proj`` (the hosted twin keeps
+# the outer strictly above the inner for exactly this reason). Filed separately.
+#
+# Why not ``asyncio.to_thread``: it ALWAYS uses the shared default executor —
+# there is no way to pass a pool, which is the whole defect. Why not a bare
+# ``loop.run_in_executor(pool, ...)``: it does not propagate contextvars
+# (cpython#78195), and ``to_thread`` did — the SDK/projection layer reads them.
+_LIVENESS_PROBE_EXECUTOR = ThreadPoolExecutor(
+    max_workers=2, thread_name_prefix="selfhost-liveness-probe"
+)
+_READY_PROBE_EXECUTOR = ThreadPoolExecutor(
+    max_workers=2, thread_name_prefix="selfhost-ready-probe"
+)
+
+
+def _submit_probe(executor, fn):
+    """Submit a health probe to a DEDICATED pool, propagating contextvars.
+
+    ``executor`` is always one of the two module-level pools above — never the
+    loop's default executor (#3035), and never a pool shared between the
+    liveness and the readiness handler.
+    """
+    return executor.submit(contextvars.copy_context().run, fn)
 
 
 def _auth_mode() -> str:
@@ -210,6 +280,9 @@ async def health():
     500ing — visible immediately, no graph-touching request needed (#1381).
     Probes TortoiseSDK(namespace="selfhost") — the SAME connection the MCP
     tools resolve (mirrors /health/ready).
+
+    #3287: the probe runs on its OWN pool, so unrelated ``to_thread`` work can
+    never starve it (a queued probe used to hang this endpoint indefinitely).
     """
     import asyncio  # noqa: I001
     from tortoise.monitoring import probe_db  # lazy — liveness stays cheap
@@ -221,8 +294,11 @@ async def health():
         return probe_db(sdk)
 
     try:
-        # to_thread: a hung probe must not stall the event loop.
-        db = await asyncio.to_thread(_probe)
+        # OFF the event loop (#2988) and OFF the shared default executor
+        # (#3287): a hung probe must not stall the loop, and a busy loop must
+        # not starve the probe. Liveness has its OWN pool — see the module
+        # comment on why it must not share one with /health/ready.
+        db = await asyncio.wrap_future(_submit_probe(_LIVENESS_PROBE_EXECUTOR, _probe))
     except Exception as exc:  # noqa: BLE001, RUF100
         db = {"ok": False, "latency_ms": 0.0, "error": str(exc)[:200]}
     return JSONResponse(
@@ -248,6 +324,14 @@ async def health_ready():
     # already dispatches its probe off-loop for the same reason; this handler
     # was missed. Off-loop AND bounded, so a black-holed DB is reported (503)
     # rather than waited out.
+    #
+    # #3287 — off-loop is not enough: ``to_thread`` still used the loop's
+    # SHARED default executor, so unrelated work could queue the probe past
+    # ``_READY_PROBE_TIMEOUT_S`` and turn a healthy DB into a FALSE 503 —
+    # blocking the publish that curls this endpoint. The probe now runs on its
+    # own pool (_READY_PROBE_EXECUTOR); the bound stays, so a genuinely
+    # black-holed DB is still REPORTED rather than waited out. This pool is
+    # deliberately NOT the liveness pool — see the module comment.
     import asyncio
 
     def _probe() -> None:
@@ -257,7 +341,12 @@ async def health_ready():
         sdk._get_proj()  # touch the DB (hosted_api release_command pattern)
 
     try:
-        await asyncio.wait_for(asyncio.to_thread(_probe), timeout=_READY_PROBE_TIMEOUT_S)
+        # Dedicated pool (#3287): queueing behind unrelated work turned this
+        # endpoint into a FALSE 503 — a failing deploy gate for a healthy DB.
+        await asyncio.wait_for(
+            asyncio.wrap_future(_submit_probe(_READY_PROBE_EXECUTOR, _probe)),
+            timeout=_READY_PROBE_TIMEOUT_S,
+        )
         return JSONResponse({"status": "ready"})
     except Exception as exc:  # noqa: BLE001, RUF100
         _logger.warning("health/ready failed: %s", exc)

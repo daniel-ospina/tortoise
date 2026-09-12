@@ -198,7 +198,17 @@ def test_probe_bound_is_strictly_above_the_client_timeout():
 def test_selfhost_ready_does_not_probe_on_the_loop():
     """``tortoise/selfhost.py::health_ready`` had the identical bug: it built the
     SDK and touched the DB inline. ``publish-selfhost.yml`` curls this endpoint
-    on every publish, so it is the same outage vector in the other image."""
+    on every publish, so it is the same outage vector in the other image.
+
+    #3287 — the pin FLIPPED. It used to require ``asyncio.to_thread`` here,
+    because that was #2988's fix. ``to_thread`` is no longer acceptable on this
+    endpoint: it always submits to the event loop's SHARED default executor,
+    whose queue is unbounded, so unrelated work can queue the probe past
+    ``_READY_PROBE_TIMEOUT_S`` and make a HEALTHY DB report a false 503 — which
+    fails the publish. The endpoint must dispatch through the module's own
+    pool (``_submit_probe``) instead. Guarding the new shape here is what stops
+    a refactor quietly reintroducing the shared pool.
+    """
     node = _handler("health_ready", SELFHOST)
     offenders = [
         n.lineno
@@ -211,16 +221,29 @@ def test_selfhost_ready_does_not_probe_on_the_loop():
         f"selfhost health_ready calls DB-touching code directly at line(s) {offenders} — "
         "synchronous DB work on the event loop (#2988)"
     )
-    off_loop = {
-        arg.id
+    shared_pool = [
+        call.lineno
         for call in ast.walk(node)
         if isinstance(call, ast.Call)
         and isinstance(call.func, ast.Attribute)
         and call.func.attr == "to_thread"
-        for arg in call.args
-        if isinstance(arg, ast.Name)
-    }
-    assert off_loop, "selfhost health_ready dispatches nothing with asyncio.to_thread"
+    ]
+    assert not shared_pool, (
+        f"selfhost health_ready uses asyncio.to_thread at line(s) {shared_pool} — "
+        "to_thread submits to the loop's SHARED default executor, where unrelated "
+        "work starves the probe and a healthy DB reports a false 503 (#3287)"
+    )
+    dedicated = [
+        call
+        for call in ast.walk(node)
+        if isinstance(call, ast.Call)
+        and isinstance(call.func, ast.Name)
+        and call.func.id == "_submit_probe"
+    ]
+    assert dedicated, (
+        "selfhost health_ready dispatches nothing through the module's dedicated "
+        "probe pool (_submit_probe) — #3287"
+    )
 
 
 def test_selfhost_probe_is_bounded():
