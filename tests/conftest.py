@@ -881,6 +881,20 @@ def _packs_env_isolation(monkeypatch):
     domain_loader._PACKS_DIR = None
 
 
+@pytest.fixture(autouse=True)
+def _disable_embedder_autowarmup(monkeypatch):
+    """#2952: keep the engine-init embedder warm-up out of the test suite.
+
+    ``TortoiseSDK._get_proj`` starts a daemon warm-up thread (best-effort,
+    #2952 (B)). Unstubbed tests would otherwise trigger a real HF model load
+    in the background, and a failed load would emit WARNING noise into
+    ``caplog`` assertions. Tests that exercise the warm-up call it directly
+    (with a stubbed ``EmbeddingModel.get``).
+    """
+    monkeypatch.setenv("TORTOISE_EMBEDDER_WARMUP", "0")
+    yield
+
+
 @pytest.fixture
 def force_sparse_tfidf(monkeypatch):
     """#2573/#2772: pin the sparse TF-IDF fallback (no embedder) for the test.

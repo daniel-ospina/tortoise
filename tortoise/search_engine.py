@@ -341,6 +341,156 @@ def _trace_entry(leg: str, *, ran: bool, degraded: bool,
             "reason": reason, "count": count}
 
 
+# ── (C) #2952: declared degraded reads ──────────────────────────────────────
+# The leg trace records WHAT each leg did; a consumer that would otherwise
+# label the result "hybrid" needs an explicit DECLARATION that the vector
+# (semantic) leg did not contribute. ``declared_degraded_read`` derives that
+# marker from the trace; ``require_hybrid_read`` turns it into a fail-loud
+# refusal for real-lane measurement (#2985 / PR #3005 posture). Both are
+# additive and opt-in: default callers (leg_trace=None) see byte-identical
+# behavior and never pay for either.
+
+#: (C) #2952 — marker key identifying a declared vector-leg-unavailable read.
+VECTOR_LEG_UNAVAILABLE = "vector_leg_unavailable"
+
+
+def _vector_leg_healthy(entries: list[dict]) -> bool:
+    """True when at least one vector entry did run, undegraded (#2952)."""
+    return any(
+        e.get("leg") == "vector" and e.get("ran") and not e.get("degraded")
+        for e in entries)
+
+
+def _degraded_read_marker(reason: str, entries: list[dict]) -> dict:
+    """The single marker shape (one construction site, #2952).
+
+    ``vector_leg_unavailable`` / ``missing_legs`` are derived from the
+    trace: a results-bearing TF-IDF fallback is a keyword-only read even
+    when a healthy-but-empty vector entry is present, so the marker must not
+    claim the embedder was unavailable (review P2 fix).
+    """
+    available = not _vector_leg_healthy(entries)
+    return {
+        "degraded_read": True,
+        "hybrid": False,
+        VECTOR_LEG_UNAVAILABLE: available,
+        "missing_legs": ["vector"] if available else [],
+        "reason": reason,
+        "leg_trace": entries,
+    }
+
+
+def _results_bearing_fallback(entries: list[dict]) -> dict | None:
+    """The TF-IDF fallback entry when it actually produced the rows (#2952).
+
+    ``tortoise_fts_query`` runs the fallback only when EVERY primary leg
+    returned zero rows, so a fallback entry with ``count > 0`` proves the
+    returned rows are keyword-only — the read is NOT hybrid even if a
+    vector entry recorded a healthy-but-empty run. ``count == 0``
+    (``no_fallback_applicable``) returns no rows and is not disqualifying.
+    """
+    for e in entries:
+        if e.get("leg") == "fallback" and (e.get("count") or 0) > 0:
+            return e
+    return None
+
+
+def declared_degraded_read(leg_trace: list[dict] | None) -> dict | None:
+    """(C1) #2952 — explicit single-leg (vector-unavailable) declaration.
+
+    Returns the marker dict when the trace shows a TEXT read whose vector
+    leg did not run (``ran=False``) or ran degraded (``degraded=True`` — e.g.
+    ``no_embedder``, ``encode_failed``, ``breaker_open``, ``query_failed``,
+    ``index_missing``, ``no_embeddings``, ``timeout``), else ``None``.
+
+    Shape: ``{"degraded_read": True, "hybrid": False,
+    "vector_leg_unavailable": <bool — False for a keyword-only fallback whose
+    vector entry ran healthy-but-empty>, "missing_legs": <["vector"] | []>,
+    "reason": <leg-trace reason | "leg_absent" | "leg_trace_unavailable" |
+    "tfidf_fallback">, "leg_trace": [...]}``.
+
+    ``leg_trace=None`` returns ``None`` — an absent trace is not a
+    declaration (a caller that wants the fail-closed treatment calls
+    :func:`require_hybrid_read`, which refuses on it). A structural-only
+    trace (no text leg — no fts/vector/fallback entry; e.g. a ``query=None``
+    full scan) is a single-leg read BY DESIGN and also returns ``None``; an
+    EMPTY trace, by contrast, reports nothing and is declared
+    ``leg_trace_unavailable`` (fail closed). A fallback-only (TF-IDF) trace
+    reports a text leg whose vector leg is absent → ``leg_absent``.
+    """
+    if leg_trace is None:
+        return None
+    entries = [e for e in leg_trace if isinstance(e, dict)]
+    # Positive structural evidence only: a trace whose ONLY leg is the
+    # structural kind-scan is a single-leg read BY DESIGN (query=None full
+    # scan). An unknown/malformed leg vocabulary does NOT earn this escape
+    # hatch — it falls through and is declared (C1/C2 consistency, review P2).
+    if entries and all(e.get("leg") == "structural" for e in entries):
+        return None
+    # A results-bearing TF-IDF fallback is definitive proof the rows are
+    # keyword-only — checked BEFORE the healthy-vector early return (a
+    # healthy-but-empty vector entry must not launder a fallback read).
+    if _results_bearing_fallback(entries) is not None:
+        return _degraded_read_marker("tfidf_fallback", entries)
+    vecs = [e for e in entries if e.get("leg") == "vector"]
+    # ``recall_state(object_centric=True)`` appends one entry per query
+    # (Point + Object), so a single healthy vector entry proves the leg ran.
+    # NOTE: stricter than the #3005 battery submission gate (ran AND NOT
+    # degraded) — a degraded vector leg contributes no semantic results.
+    if _vector_leg_healthy(entries):
+        return None
+    vec = vecs[0] if vecs else None
+    if vec is not None:
+        reason = vec.get("reason") or "leg_absent"
+    elif entries:
+        # a text leg exists (fts/fallback) but no vector entry was recorded
+        reason = "leg_absent"
+    else:
+        reason = "leg_trace_unavailable"
+    return _degraded_read_marker(reason, entries)
+
+
+def require_hybrid_read(leg_trace: list[dict] | None,
+                        *, lane: str | None = None) -> dict:
+    """(C2) #2952 — fail-loud gate: refuse to label a single-leg read hybrid.
+
+    Capability for real-lane measurement (aligns with the #2985 / PR #3005
+    fail-loud pattern): returns ``{"hybrid": True, "vector_leg_unavailable":
+    False}`` only when at least one NOT-degraded vector entry RAN, and raises
+    :class:`~tortoise.exceptions.HybridReadUnavailableError` otherwise —
+    including for ``leg_trace=None`` / empty / structural-only traces (a
+    surface that cannot positively prove the vector leg fails closed).
+
+    This proves the VECTOR (semantic) leg specifically — the #2952 failure
+    class: at least one vector entry RAN and was NOT degraded (a
+    ``degraded=True`` vector leg contributed no semantic results, so the
+    read is keyword-only). This is deliberately STRICTER than the #3005
+    battery capability gate, which asks only whether the vector strategy was
+    SUBMITTED (``ran`` regardless of ``degraded``); a battery lane that
+    records a score should delegate to this predicate so the two gates can
+    never disagree on the same trace. It is not a both-legs health check
+    (the fts leg's own degrade is surfaced separately in the trace).
+
+    Opt-in only: nothing in the product calls this by default, so healthy-
+    path ranking and default result bytes are unchanged.
+    """
+    from .exceptions import HybridReadUnavailableError
+    if leg_trace is None:
+        marker = _degraded_read_marker("leg_trace_unavailable", [])
+    else:
+        entries = [e for e in leg_trace if isinstance(e, dict)]
+        declared = declared_degraded_read(leg_trace)
+        if declared is not None:
+            marker = declared
+        elif _vector_leg_healthy(entries):
+            return {"hybrid": True, VECTOR_LEG_UNAVAILABLE: False}
+        else:
+            # Positive proof required: an absent marker on a non-hybrid trace
+            # (e.g. structural-only) must NOT pass as hybrid.
+            marker = _degraded_read_marker("leg_absent", entries)
+    raise HybridReadUnavailableError(marker, lane=lane)
+
+
 def run_fts_query(
     graph, query: str, entity_type: str = "point", limit: int = 20,
     timeout_ms: int = 500, excluded_statuses: tuple | None = None,

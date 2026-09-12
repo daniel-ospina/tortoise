@@ -205,3 +205,33 @@ class AskTimeout(RuntimeError):
         self.source = source  # "server" (received 504 body) | "client"
         self.status_code = status_code
         super().__init__(message)
+
+
+class HybridReadUnavailableError(RuntimeError):
+    """(C) #2952 — a read that could not run its vector leg must not be
+    labelled a hybrid read.
+
+    Raised by ``tortoise.search_engine.require_hybrid_read`` when a
+    real-lane measurement (or any fail-loud consumer) asks a read surface to
+    prove it was hybrid and the vector (semantic) leg did not contribute a
+    healthy result — including when the surface cannot report its legs at
+    all. This is the product-side counterpart of the #2985 / PR #3005 battery
+    capability gate: an FTS-only score is a degraded, keyword-only surface
+    and must never be recorded as the product's hybrid retrieval.
+
+    ``marker`` is the ``declared_degraded_read`` dict (or the
+    ``leg_trace_unavailable`` variant); ``reason`` mirrors its reason.
+    """
+
+    def __init__(self, marker: dict | None, *, lane: str | None = None):
+        self.marker = dict(marker or {})
+        self.lane = lane
+        self.reason = self.marker.get("reason")
+        lane_part = f" on lane {lane!r}" if lane else ""
+        super().__init__(
+            f"hybrid read unavailable{lane_part}: the vector (semantic) leg "
+            f"did not contribute a healthy result (reason={self.reason!r}) — a "
+            f"single-leg (keyword-only) read is NOT the product's hybrid "
+            f"retrieval and must not be labelled hybrid (#2952). "
+            f"marker={self.marker!r}"
+        )
