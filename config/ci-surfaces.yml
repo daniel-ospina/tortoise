@@ -194,6 +194,7 @@ surfaces:
   - test_battery_parity_mabench_run.py
   - test_battery_parity_mabench_tortoise.py
   - test_battery_parity_migration.py
+  - test_battery_parity_vector_guard.py  # #2985 retrieval capability gate (fake SDK; hermetic)
   - test_battery_price_basis.py
   - test_battery_probes.py
   # #2906: provider-reported cost (#2906) + the declared fallback basis
@@ -217,6 +218,7 @@ surfaces:
   - test_battery_runner.py
   - test_battery_setup.py
   - test_battery_real_run_gate.py  # #2633 real-run vendor-key pre-flight gate (hermetic)
+  - test_battery_retrieval_preflight.py  # #2985: shared hybrid-retrieval preflight + arm gate + leg provenance (pins battery/arms, battery/runner, battery/parity + tortoise/embeddings.py → also eval)
   # #2916: 26 files that pin battery/ (arms, cli, config, enums, exceptions,
   # exposure, judge, probes, report, runner, testing) and NOTHING api-owned — no
   # api-pinned import, no api-pinned path string — yet were registered api-only,
@@ -397,6 +399,10 @@ surfaces:
   # this file pins the provider-cost surfacing on that adapter path — so a
   # model_adapters.py-only PR must run it (dual-registered with battery).
   - test_battery_provider_cost.py
+  # #2985: tortoise/sdk.py maps to core (no SOURCE_PATTERN) and this file pins
+  # the recall_state leg_trace threading the retrieval capability gate depends
+  # on — a sdk.py-only PR must run it (dual-registered with battery).
+  - test_battery_parity_vector_guard.py
   - test_monitoring.py
   - test_navigation.py
   - test_no_tests_imports_in_production.py
@@ -648,6 +654,7 @@ surfaces:
   - eval/write_path/test_write_path_benchmark.py
   - mini_beir/test_mini_beir.py
   - test_backfill_embeddings_force.py
+  - test_battery_retrieval_preflight.py  # #2985: pins tortoise/embeddings.py EmbeddingModel.get probe + recall_state leg_trace provenance (also battery)
   - test_calibrate_thresholds.py
   - test_embedder_probe.py
   - test_eval_extraction_health.py

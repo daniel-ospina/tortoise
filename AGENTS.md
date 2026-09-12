@@ -335,7 +335,9 @@ Public repository that houses:
 #### Python (Tortoise SDK)
 
 - Python 3.12+ (see `.python-version`). No build step — interpreted.
-- Install: `uv sync` (min uv 0.6.0). The committed `uv.lock` is the dev-environment source of truth; `uv lock --check` gates lockfile drift in CI.
+- Install (canonical dev env — includes the extras the real battery lanes need): `uv sync --extra embeddings --extra parity` (min uv 0.6.0). The committed `uv.lock` is the dev-environment source of truth; `uv lock --check` gates lockfile drift in CI.
+  - ⚠️ `uv sync` with an explicit `--extra` is EXACT: it SILENTLY REMOVES every extra you do NOT name (`uv sync --extra embeddings` drops `parity`/pyarrow — how a measurement run broke mid-investigation, #2985). Name every extra the lane needs in ONE command, or use `--all-extras`.
+  - Plain `uv sync` (no extras) yields a **KEYWORD-ONLY product**: `EmbeddingModel.get()` returns None, the dense retrieval leg is never submitted, and retrieval silently degrades to FTS-only. Real lanes fail closed on this via `battery/runner/retrieval_preflight.py::require_hybrid_retrieval` (#2985) — do not "fix" a refusal by dropping the extra.
 - Run commands/tests: `uv run <cmd>` — e.g. `uv run pytest tests/ -v`
 - `pip install -e .` remains the legacy/CI install path (python-ci.yml); uv is canonical for local dev.
 - Imports: prefer `from pathlib import Path` for path resolution — never hardcode absolute paths
