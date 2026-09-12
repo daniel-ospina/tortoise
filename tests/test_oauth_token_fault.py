@@ -446,3 +446,101 @@ def test_one_capture_per_abort(monkeypatch, second_fault):
     with pytest.raises(oauth.OAuthMintAborted):
         _mint(cp)
     assert len(calls) == 1          # counts, not presence — the panic case would be 3
+
+
+# ── Task 4: `exchange_auth_code` — consumed + attempted_consume ─────────────
+
+def _fail_consume(cp, **kw):
+    """The atomic-claim PATCH: matched by SHAPE (a PATCH whose select includes
+    code_challenge), never by a hand-written 11-column list — the exact drift three
+    review cycles flagged. `_restore_code`'s PATCH has a different 2-column select and
+    is never caught by this predicate."""
+    cp.fail_query(table="oauth_codes", method="PATCH",
+                  match=lambda t, m, sel, f: m == "PATCH" and bool(sel) and "code_challenge" in sel,
+                  **kw)
+
+
+def test_consume_patch_failure_uncommitted_is_retryable(fault_client):
+    tc, cp = fault_client
+    v = _seed_code(cp, "c1", client_id=_CLIENT_ID, redirect_uri=_REDIRECT)
+    _fail_consume(cp)                                # shape-matched, see the rule above
+    r1 = _post_code(tc, cp, "c1", v)
+    assert r1.status_code == 503 and r1.json()["error"] == "temporarily_unavailable"
+    assert cp.tables["oauth_codes"][0]["used_at"] is None       # observed unconsumed
+    assert _post_code(tc, cp, "c1", v).status_code == 200       # retry works
+
+
+def test_consume_patch_failure_committed_is_terminal_not_retryable(fault_client):
+    tc, cp = fault_client
+    v = _seed_code(cp, "c2", client_id=_CLIENT_ID, redirect_uri=_REDIRECT)
+    _fail_consume(cp, after_mutation=True)
+    r = _post_code(tc, cp, "c2", v)
+    assert r.status_code == 400 and r.json()["error"] == "invalid_grant"   # NOT 503
+
+
+def test_consume_state_unknown_is_terminal(fault_client):
+    tc, cp = fault_client
+    v = _seed_code(cp, "c3", client_id=_CLIENT_ID, redirect_uri=_REDIRECT)
+    _fail_consume(cp)                                                     # the claim PATCH
+    cp.fail_query(table="oauth_codes", method="GET",
+                  select=["used_at", "expires_at"], times=1)              # the observation
+    assert _post_code(tc, cp, "c3", v).json()["error"] == "invalid_grant"
+
+
+def test_client_auth_failure_during_outage_is_503_not_invalid_grant(fault_client):
+    tc, cp = fault_client
+    v = _seed_code(cp, "c4", client_id=_CLIENT_ID, redirect_uri=_REDIRECT)
+    cp.fail_query(table="oauth_clients", method="GET", times=1)     # pure read, pre-consume
+    r = _post_code(tc, cp, "c4", v)
+    assert r.status_code == 503
+    assert cp.tables["oauth_codes"][0]["used_at"] is None            # grant NOT burned
+
+
+def test_post_consume_team_read_failure_restores_the_code_and_retry_succeeds(fault_client):
+    """matrix row 3 — TODAY: 500, used_at stays set, retry → 400."""
+    tc, cp = fault_client
+    v = _seed_code(cp, "c5", client_id=_CLIENT_ID, redirect_uri=_REDIRECT)
+    cp.fail_query(table="teams", method="GET", times=1)
+    r1 = _post_code(tc, cp, "c5", v)
+    assert r1.status_code == 503 and r1.json()["error"] == "temporarily_unavailable"
+    assert cp.tables["oauth_codes"][0]["used_at"] is None
+    r2 = _post_code(tc, cp, "c5", v)
+    assert r2.status_code == 200 and "access_token" in r2.json()     # the Target's assertion
+
+
+@pytest.mark.parametrize("table", ["oauth_refresh_tokens", "oauth_access_tokens"])
+def test_mint_abort_recovered_true_is_503_and_the_code_redeems_on_retry(fault_client, table):
+    tc, cp = fault_client
+    v = _seed_code(cp, f"m-{table}", client_id=_CLIENT_ID, redirect_uri=_REDIRECT)
+    cp.fail_query(table=table, method="POST", times=1)
+    r1 = _post_code(tc, cp, f"m-{table}", v)
+    assert r1.status_code == 503 and r1.json()["error"] == "temporarily_unavailable"
+    assert _live(cp, "oauth_refresh_tokens") == [] and _live(cp, "oauth_access_tokens") == []
+    assert _post_code(tc, cp, f"m-{table}", v).status_code == 200
+
+
+def test_mint_abort_recovered_false_is_terminal_invalid_grant(fault_client):
+    tc, cp = fault_client
+    v = _seed_code(cp, "m-f", client_id=_CLIENT_ID, redirect_uri=_REDIRECT)
+    cp.fail_query(table="oauth_access_tokens", method="POST", times=1)
+    cp.fail_query(table="oauth_refresh_tokens", method="PATCH", times=1)
+    r = _post_code(tc, cp, "m-f", v)
+    assert r.status_code == 400 and r.json()["error"] == "invalid_grant"
+    assert cp.tables["oauth_codes"][0]["used_at"] is not None
+
+
+def test_mint_abort_with_cas_miss_is_terminal_and_leaves_used_at_set(fault_client):
+    tc, cp = fault_client
+    v = _seed_code(cp, "m-cas", client_id=_CLIENT_ID, redirect_uri=_REDIRECT)
+    cp.fail_query(table="oauth_access_tokens", method="POST", times=1)      # recovered=True
+    cp.fail_query(table="oauth_codes", method="PATCH",
+                  select=["used_at", "expires_at"], times=1)                # CAS restore fails
+    r = _post_code(tc, cp, "m-cas", v)
+    assert r.status_code == 400 and cp.tables["oauth_codes"][0]["used_at"] is not None
+
+
+def test_bad_pkce_never_re_arms_the_code(fault_client):
+    tc, cp = fault_client
+    _seed_code(cp, "p1", client_id=_CLIENT_ID, redirect_uri=_REDIRECT)
+    r = _post_code(tc, cp, "p1", verifier="wrong-verifier-wrong-verifier-wrong-verifier")
+    assert r.status_code == 400 and cp.tables["oauth_codes"][0]["used_at"] is not None

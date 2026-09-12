@@ -855,31 +855,65 @@ def exchange_auth_code(cp, body: dict, base: str) -> dict:
     resource (must map to the SAME team the code was bound to), then issues
     the access+refresh pair.
     """
-    client = _verify_client_auth(cp, body.get("client_id"), body)
-    code_row = _consume_code(cp, body.get("code", ""))
-    if code_row["client_id"] != client["id"]:
-        raise OAuthError(400, "invalid_grant",
-                         "Authorization code was issued to a different client.")
-    if body.get("redirect_uri") != code_row["redirect_uri"]:
-        raise OAuthError(400, "invalid_grant", "redirect_uri mismatch.")
-    if not _verify_pkce(body.get("code_verifier", ""),
-                        code_row["code_challenge"],
-                        code_row.get("code_challenge_method") or "S256"):
-        raise OAuthError(400, "invalid_grant", "PKCE verification failed.")
-    # RFC 8707: the resource at the token endpoint must resolve to the same
-    # team the authorization code was bound to (lenient when omitted — the
-    # mcp SDK always sends it, but a bare authorize→token pair is legal).
-    resource = body.get("resource")
-    if resource:
-        _, requested_team = parse_resource(base, resource)
-        if requested_team is not None and requested_team != code_row["team_id"]:
+    # #2863: the redemption is atomic-feel — a failure after the atomic claim
+    # either CAS-restores the code (so a retry provably works) or reports a
+    # terminal invalid_grant. Every signal is derived from an OBSERVED state;
+    # an unobservable state is never advertised as retryable.
+    consumed = False
+    attempted_consume = False
+    code_row: dict | None = None
+    try:
+        client = _verify_client_auth(cp, body.get("client_id"), body)   # pure read
+        attempted_consume = True
+        code_row = _consume_code(cp, body.get("code", ""))              # THE atomic gate
+        consumed = True
+        if code_row["client_id"] != client["id"]:
             raise OAuthError(400, "invalid_grant",
-                             "Resource indicator does not match the authorized team.")
-    _assert_team_usable(cp, code_row["team_id"])
-    scope = code_row.get("scope") or " ".join(SCOPES_SUPPORTED)
-    out = _issue_tokens(cp, client_id=client["id"], user_id=code_row["user_id"],
-                        team_id=code_row["team_id"], scope=scope,
-                        resource=code_row.get("resource"))
+                             "Authorization code was issued to a different client.")
+        if body.get("redirect_uri") != code_row["redirect_uri"]:
+            raise OAuthError(400, "invalid_grant", "redirect_uri mismatch.")
+        if not _verify_pkce(body.get("code_verifier", ""),
+                            code_row["code_challenge"],
+                            code_row.get("code_challenge_method") or "S256"):
+            raise OAuthError(400, "invalid_grant", "PKCE verification failed.")
+        # RFC 8707: the resource at the token endpoint must resolve to the same
+        # team the authorization code was bound to (lenient when omitted — the
+        # mcp SDK always sends it, but a bare authorize→token pair is legal).
+        resource = body.get("resource")
+        if resource:
+            _, requested_team = parse_resource(base, resource)
+            if requested_team is not None and requested_team != code_row["team_id"]:
+                raise OAuthError(400, "invalid_grant",
+                                 "Resource indicator does not match the authorized team.")
+        _assert_team_usable(cp, code_row["team_id"])
+        scope = code_row.get("scope") or " ".join(SCOPES_SUPPORTED)
+        out = _issue_tokens(cp, client_id=client["id"], user_id=code_row["user_id"],
+                            team_id=code_row["team_id"], scope=scope,
+                            resource=code_row.get("resource"))
+    except OAuthError:
+        raise                        # an intentional terminal signal — never re-arm
+    except OAuthMintAborted as exc:
+        logger.warning("oauth: auth-code mint aborted (recovered=%s)", exc.recovered)
+        if exc.recovered and _restore_code(cp, body.get("code", ""), code_row["used_at"]):
+            raise OAuthTemporarilyUnavailable() from None
+        raise OAuthError(400, "invalid_grant",
+                         "The authorization code could not be redeemed — re-run "
+                         "authorization.") from None
+    except Exception as exc:
+        _log_and_capture(exc, where="exchange_auth_code")
+        if consumed:
+            if _restore_code(cp, body.get("code", ""), code_row["used_at"]):
+                raise OAuthTemporarilyUnavailable() from None
+            raise OAuthError(400, "invalid_grant",
+                             "The authorization code could not be redeemed — re-run "
+                             "authorization.") from None
+        if not attempted_consume:
+            raise OAuthTemporarilyUnavailable() from None        # constructive-clean
+        if _consume_state(cp, body.get("code", "")) == "unconsumed":
+            raise OAuthTemporarilyUnavailable() from None
+        raise OAuthError(400, "invalid_grant",
+                         "The authorization code could not be redeemed — re-run "
+                         "authorization.") from None
     return {k: v for k, v in out.items() if not k.startswith("_")}
 
 
