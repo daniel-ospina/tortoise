@@ -101,6 +101,7 @@ surfaces:
   - test_mcp_telemetry.py
   - test_metering.py
   - test_oauth_mcp.py
+  - test_oauth_token_fault.py  # #2863: /oauth/token fault-injection suite (fake CP + local HTTPServer seam)
   - test_pricing_tiers.py
   - test_provisioning_edge_function.py
   - test_quota.py
