@@ -79,9 +79,14 @@ def _seed_graph(sdk: TortoiseSDK, *, include_repo_a: bool = True) -> None:
     )
     if obs_101 is not None:
         # EP-back the decision (review c70: the semantic stage counts only
-        # EP-confirmed claims — confidence_mean >= 0.5). The #101 prod failure
-        # supports keeping rotation -> IMPL edge -> confidence_mean = 1/1 = 1.0.
-        # Keeps the seeded E2E green in both FTS and TF-IDF fallback modes.
+        # EP-confirmed claims — confidence_mean >= 0.5). FIXTURE FIDELITY ONLY:
+        # the decision clears the relevance gate on the >= 2-shared-token floor
+        # (7 shared tokens with the query) in every retrieval mode, so this edge
+        # is NOT load-bearing for any assertion in this file — mutation-tested by
+        # deleting it, and the decision still reports has_ep=True at 0.75 (the
+        # same class of leak as #3276). The old `confidence_mean = 1/1 = 1.0`
+        # claim here was simply stale; nothing asserts the posterior, whose key
+        # is attached only when `ep` is present.
         sdk._get_proj().g.query(
             "MATCH (a:Point), (b:Point) WHERE a.id = $a AND b.id = $b "
             "CREATE (a)-[:IMPL]->(b)",
@@ -97,22 +102,74 @@ class TestIssueInsightE2E:
         _seed_graph(sdk)
         ms = _dispatch_sdk(monkeypatch, sdk)
 
+        # #3254: `limit=5` exceeds the fixture's gate-passing candidate count
+        # (exactly 3), so the decision is EMITTED regardless of rank — that is a
+        # structural invariant, not a mode- or rank-dependent one. It ranks 3rd
+        # of 3, so the shipped default limit=2 drops it entirely; asserting
+        # emission at the default would assert something the retriever does not
+        # promise. That the two cheapest unmeasured rows crowd out the
+        # "we already decided this" claim is a real semantic-stage bug: tracked
+        # by #3277 and pinned by the strict xfail test below, not smuggled in
+        # here.
+        result = ms.tortoise_issue_insight(
+            title="Should we keep JWT rotation for auth refresh tokens?",
+            repo="owner/a",
+            limit=5,
+        )
+
+        assert result["has_prior"] is True
+        assert result["no_prior_knowledge"] is False
+        # #3254: the EP-confirmed cross-session decision must be EMITTED, not sit
+        # at index 0. Candidate order is retrieved (and #3018 re-derived it), so
+        # an index-0 pin was an incidental-value assertion — the same stale-pin
+        # class as #3095.
+        #
+        # NO `confidence_mean` assertion here, deliberately (code review):
+        # (a) not a mutation-killer — deleting the seeded IMPL edge leaves the
+        # decision at has_ep=True / 0.75, so the discriminating variable is point
+        # KIND (#3276); and (b) mode-fragile — `issue_insight` attaches the key
+        # only when `ep` is present. Caveat, recorded so it is not lost: this
+        # leaves the payload-side attachment of `confidence_mean` UNCOVERED.
+        # TestIssueInsightRelevanceGate does NOT cover it — that class tests the
+        # gate's threshold on injected `ep` dicts, never a `data_points` row.
+        decisions = [dp for dp in result["data_points"] if dp["kind"] == "decision"]
+        assert [dp["content"] for dp in decisions] == [GRAPH_TOPIC]
+        # repo stage: prior-issue stats for owner/a only (no bleed from owner/b)
+        assert result["repo_stats"] == {"repo": "owner/a", "prior_issues": 2, "open": 1}
+        # `more_in_graph` is semantic_hits[0][:80], i.e. rank-0 dependent. Assert
+        # only on a token EVERY gate-passing candidate shares: "rotation" is in
+        # all three, whereas "JWT" is absent from `owner/a #101` (which has only
+        # "rotation"), so a re-rank that puts #101 first would red on "JWT".
+        assert "rotation" in result["more_in_graph"]
+        assert "graph hit" in result["insight"]
+
+    @pytest.mark.xfail(
+        strict=True,
+        reason="#3277: at the shipped default limit=2 the semantic stage emits "
+               "the two unmeasured observations and truncates the EP-confirmed "
+               "decision away. strict=True so this becomes a FAILURE the moment "
+               "#3277 is fixed — at which point delete this test and assert "
+               "emission at the default limit in the test above.",
+    )
+    def test_decision_is_emitted_at_the_shipped_default_limit(self, tmp_path, monkeypatch):
+        """The real contract: a caller at the DEFAULT limit still gets the
+        EP-confirmed "we already decided this" decision.
+
+        The #3254 de-pin correctly stopped pinning an index, but it also moved
+        the emission assertion off the shipped default — so "the default drops
+        the decision" would otherwise have become unasserted. This keeps that
+        contract visible as a tracked failure instead of a silent gap.
+        """
+        sdk = _sdk(tmp_path)
+        _seed_graph(sdk)
+        ms = _dispatch_sdk(monkeypatch, sdk)
+
         result = ms.tortoise_issue_insight(
             title="Should we keep JWT rotation for auth refresh tokens?",
             repo="owner/a",
         )
 
-        assert result["has_prior"] is True
-        assert result["no_prior_knowledge"] is False
-        # ≥1 live-derived data point, content from the graph (never hardcoded)
-        assert len(result["data_points"]) >= 1
-        assert result["data_points"][0]["content"] == GRAPH_TOPIC
-        assert result["data_points"][0]["kind"] == "decision"
-        # repo stage: prior-issue stats for owner/a only (no bleed from owner/b)
-        assert result["repo_stats"] == {"repo": "owner/a", "prior_issues": 2, "open": 1}
-        # pointer topic is live-derived from the top hit
-        assert "JWT rotation" in result["more_in_graph"]
-        assert "graph hit" in result["insight"]
+        assert GRAPH_TOPIC in [dp["content"] for dp in result["data_points"]]
 
     def test_repo_scope_does_not_bleed_across_repos(self, tmp_path, monkeypatch):
         sdk = _sdk(tmp_path)
