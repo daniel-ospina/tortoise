@@ -8,6 +8,14 @@ to RAG on factual F1), the comparison reruns on a recall-matched balanced
 subset; if that subset is <50% of the probes, the differential verdict is
 INCONCLUSIVE (a result object, not an exception — the pre-committed branch).
 
+Amendment (2026-09-12, #3327): the trigger's population is the
+retrieval-capable comparators {a1, a2, a2b, a3, a4} — a0 is EXCLUDED and
+retained as the trigger's positive control. The "ANY arm" wording above is
+preserved and read by purpose. Controlling decision:
+docs/research/2026-09-12-matched-recall-a0-control.md; contract rows
+§3.2.1/§7 of docs/benchmarks/comparison-systems.md. No trigger_population
+constant exists here yet — wiring is tracked by #3327.
+
 Result is immutable per run (the matched-recall outcome is recorded in
 profile.json and never re-interpreted post-hoc).
 """
@@ -19,6 +27,9 @@ from typing import Mapping, Protocol, Sequence  # noqa: UP035
 #: Factual top-K used for the recall match (plan §2 W2).
 TOP_K = 5
 #: Any arm within this F1 delta of the corpus-best is "matched".
+#: Amendment (2026-09-12, #3327): read over the trigger population
+#: {a1, a2, a2b, a3, a4} — a0 is EXCLUDED (see module docstring).
+#: Wiring is tracked by #3327; no trigger_population constant exists yet.
 F1_TOLERANCE = 0.10
 #: Balanced-subset floor — below this fraction of probes the verdict is
 #: INCONCLUSIVE (matching is not meaningful).
@@ -107,6 +118,14 @@ def match_recall(probes: Sequence[FactualProbe],
     of best keep all probes; the divergent arm is measured on the subset
     where arms agree). If the retained subset is < floor of the probes, the
     outcome is INCONCLUSIVE.
+
+    Amendment (2026-09-12, #3327): "ANY arm" reads over the trigger
+    population {a1, a2, a2b, a3, a4} — a0 is EXCLUDED and retained as the
+    trigger's positive control (decision:
+    docs/research/2026-09-12-matched-recall-a0-control.md; §3.2.1/§7 of
+    docs/benchmarks/comparison-systems.md). This implementation is
+    unchanged — it still keys off every arm in ``retrievers``; wiring the
+    population is tracked by #3327 (no ``trigger_population`` constant yet).
     """
     f1: dict[str, float] = {}
     for aid, retriever in retrievers.items():
