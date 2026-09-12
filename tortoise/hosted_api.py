@@ -57,6 +57,7 @@ from tortoise.hosted_backup import (
 )
 from tortoise.mcp_server import create_http_app
 from tortoise.monitoring import (  # #2850/2953 liveness-readiness decouple
+    PROBE_STALE_AFTER,
     HealthProbe,
     heartbeat_record,
     loop_heartbeat_info,
@@ -64,6 +65,8 @@ from tortoise.monitoring import (  # #2850/2953 liveness-readiness decouple
     run_on_daemon_worker,
     start_health_listener,
     start_stall_watchdog,
+    workload_enter,
+    workload_exit,
 )
 from tortoise.onboarding import state as _os  # #2001 (W5) canonical FLOW-state module
 from tortoise.projection import (
@@ -410,12 +413,28 @@ HEALTH_PROBE_REFRESH_S = 10.0
 
 
 def _health_probe_interval() -> float:
-    """Probe refresh period (``TORTOISE_HEALTH_PROBE_INTERVAL``, seconds)."""
+    """Probe refresh period (``TORTOISE_HEALTH_PROBE_INTERVAL``, seconds).
+
+    Clamped to half the probe staleness window (review P2): a period longer
+    than ``PROBE_STALE_AFTER`` makes a HEALTHY DB read as ``degraded`` between
+    refreshes, which then fails the deploy gate and gets misdiagnosed as a DB
+    outage. Half the window leaves a full refresh of margin.
+    """
     try:
         v = float(os.environ.get("TORTOISE_HEALTH_PROBE_INTERVAL") or HEALTH_PROBE_REFRESH_S)
     except (TypeError, ValueError):
         return HEALTH_PROBE_REFRESH_S
-    return v if v > 0 else HEALTH_PROBE_REFRESH_S
+    if v <= 0:
+        return HEALTH_PROBE_REFRESH_S
+    cap = PROBE_STALE_AFTER / 2.0
+    if v > cap:
+        _logger.warning(
+            "TORTOISE_HEALTH_PROBE_INTERVAL=%s exceeds half the probe "
+            "staleness window (%.0fs) — clamping to %.0fs; a longer period "
+            "would report a healthy DB as degraded and fail the deploy gate",
+            v, PROBE_STALE_AFTER, cap)
+        return cap
+    return v
 
 
 async def _health_probe_loop() -> None:
@@ -525,7 +544,9 @@ def _start_liveness(app) -> None:
     (proving it is scheduling before the watchdog exists to judge it), then
     the heartbeat task, then the listener, then the watchdog. Starting the
     watchdog before the heartbeat would let it fire on a loop that simply had
-    not ticked yet.
+    not ticked yet. The watchdog additionally refuses to judge until at least
+    one REAL tick has landed (``LOOP_STALL_EXIT_MIN_TICKS``), so the slow-
+    starting part of the startup half cannot be mistaken for a wedge.
     """
     loop = asyncio.get_running_loop()
     # A previous lifespan of the SAME app instance (in-process restart,
@@ -545,6 +566,10 @@ def _start_liveness(app) -> None:
     app.state._loop_heartbeat_task = loop.create_task(loop_heartbeat_task())
     app.state._healthz_server = start_health_listener()
     app.state._loop_watchdog_stop = threading.Event()
+    # DISABLED BY DEFAULT (#2850 review P0): with TORTOISE_LOOP_STALL_EXIT_S
+    # unset this returns None — the /healthz listener is the signal and the
+    # destructive action lives in the out-of-band watchdog. Enabling it here
+    # also requires 3 consecutive stale windows and an idle workload.
     app.state._loop_watchdog = start_stall_watchdog(
         stop_event=app.state._loop_watchdog_stop)
 
@@ -1397,6 +1422,45 @@ class McpPathCanonicalizerMiddleware:
 # Added LAST so it is the OUTERMOST middleware: the path is canonicalized before
 # any other middleware or router sees it, and before a redirect can be built.
 app.add_middleware(McpPathCanonicalizerMiddleware)
+
+
+class InFlightMiddleware:
+    """Count requests in flight for the opt-in loop-stall self-kill (#2850 P0).
+
+    The watchdog can see that the event loop stopped ticking but NOT why. This
+    app still runs synchronous work on the loop (LLM extraction, per-turn
+    FalkorDB queries), so a stale heartbeat is routinely "busy", not "wedged".
+    The self-kill must therefore refuse to fire while a request is in flight —
+    killing the process there would destroy the very request that is making
+    progress and turn ordinary provider latency into a restart loop.
+
+    Deliberately pure ASGI and OUTERMOST (registered last):
+      * it must increment BEFORE any middleware can short-circuit (a 429/404 is
+        still work in progress from the loop's point of view);
+      * no request/response wrapping, so it costs a lock acquire + a plain
+        increment on the hot path.
+
+    The decrement is in a ``finally`` so a raised handler cannot leak a slot and
+    permanently disarm the watchdog's idle predicate.
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":  # lifespan/websocket are not requests
+            await self.app(scope, receive, send)
+            return
+        workload_enter()
+        try:
+            await self.app(scope, receive, send)
+        finally:
+            workload_exit()
+
+
+app.add_middleware(InFlightMiddleware)
+
+
 # Internal auth key for Edge Function → API communication
 # Read lazily (not at import): tests and multi-app processes set
 # FASTAPI_INTERNAL_KEY after tortoise.hosted_api may already be imported,
@@ -1900,7 +1964,11 @@ def _probe_control_plane() -> dict:
 # Separate coordinator instance from the FalkorDB one: the two planes fail
 # independently, and single-flighting them together would let a wedged DB
 # starve the control-plane check (and vice versa).
-_CONTROL_PLANE_PROBE = HealthProbe(lambda: _probe_control_plane())
+#
+# ``fresh_only=True``: readiness is a FAIL-CLOSED gate, so it must never answer
+# 200 from a verdict older than its own read budget (review P1). See the
+# ``_READY_PROBE`` note below.
+_CONTROL_PLANE_PROBE = HealthProbe(lambda: _probe_control_plane(), fresh_only=True)
 
 
 # #2850 item 6: READINESS gets its own coordinator, distinct from the one the
@@ -1913,7 +1981,15 @@ _CONTROL_PLANE_PROBE = HealthProbe(lambda: _probe_control_plane())
 # work up. Safe to run concurrently with ``_HEALTH_PROBE``: the actual
 # ``_get_proj().g.query`` executes on the single shared probe worker
 # (monitoring._PROBE_WORKER), never concurrently.
-_READY_PROBE = HealthProbe(lambda: _probe_db())
+#
+# ``fresh_only=True`` (review P1): /health may serve "stale but honest"
+# last-known-good, but a readiness read must not. Without this flag a probe
+# that began after an outage could exhaust its 2s budget and ``run()`` would
+# return the coordinator's last completed ``{ok: True}`` — which stays within
+# ``stale_after`` (30s), so /health/ready answered 200 "connected" for ~5s
+# while the control plane (5s httpx timeout) or FalkorDB was already dead, and
+# deploy-hosted.yml asserts readiness LAST as its strongest post-deploy signal.
+_READY_PROBE = HealthProbe(lambda: _probe_db(), fresh_only=True)
 
 
 @app.get("/health")
@@ -1921,9 +1997,19 @@ async def health():
     """Liveness + deep DB check — process up and serving. NEVER gates on the DB.
 
     (cold-start fix, #338 follow-up): the previous DB-coupled /health caused
-    deploy failures on cold machines — Fly caps the http_check grace period at
-    60s, and a cold FalkorDB Cloud connection exceeds it. Liveness returns
-    immediately; DB readiness is `/health/ready`.
+    deploy failures on cold machines on a cold FalkorDB Cloud connection.
+    Liveness returns immediately; DB readiness is `/health/ready`.
+
+    ⚠ The frequently repeated claim that "Fly caps the http_check grace period
+    at 60s" is UNCONFIRMED and possibly undocumented. It is NOT supported by
+    Fly's public docs, and independent research could not find it in flyctl or
+    fly-go either — treat it as folklore, not a contract (`fly.toml` here
+    configures `grace_period = "180s"`). To verify: deploy a machine whose
+    check fails continuously past the configured grace period and observe
+    whether Fly restarts it at 60s (machine event log / `flyctl machine
+    status`) or honours the larger configured value. This note exists because
+    the assertion was previously stated as fact in this docstring while the
+    same claim in PR #3063's runbook had to be corrected (review P2).
 
     Deep check (#1384): a lightweight graph-DB probe (RETURN 1) rides along in
     `db`. A stopped FalkorDB (incident #1381 — NXDOMAIN with /health staying

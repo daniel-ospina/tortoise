@@ -60,7 +60,8 @@ _FALKORDB_VERSION_CACHE: dict[tuple, tuple[int, int, int] | None] = {}
 # check waits on the DB at all, so the read timeout no longer sits in the
 # liveness budget; it is now configurable for operators who need a tighter
 # loop-stall ceiling (pair a lower value with a lower
-# TORTOISE_LOOP_STALL_EXIT_S, see monitoring.start_stall_watchdog).
+# TORTOISE_LOOP_STALL_EXIT_S, see monitoring.start_stall_watchdog — note that
+# self-kill is OPT-IN and disabled by default).
 _DB_CONNECT_TIMEOUT_DEFAULT = 2.0
 _DB_SOCKET_TIMEOUT_DEFAULT = 10.0
 

@@ -441,15 +441,86 @@ class TestHealthProbe:
         assert result == {"ok": True, "latency_ms": 1.0, "error": None}
         assert probe.info()["in_flight"] is False
 
+    # ── #2850 review P1: readiness must not serve a pre-outage verdict ──
+
+    def test_fresh_only_fails_closed_when_the_budget_expires(self):
+        """The readiness fail-open the review caught.
+
+        Prime the coordinator with a completed ``ok: True``, then wedge the
+        probe. Without ``fresh_only`` the budget-expiry branch returned
+        ``_view_locked()`` — the pre-outage verdict, still inside the 30s
+        ``stale_after`` window — so /health/ready answered 200 "connected"
+        for seconds after the plane died.
+        """
+        import asyncio
+        import time
+
+        calls = {"n": 0}
+
+        def _fn():
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return {"ok": True, "latency_ms": 1.0, "error": None}
+            time.sleep(600)  # black-holed plane: never returns
+            return {"ok": True, "latency_ms": 1.0, "error": None}
+
+        probe = monitoring.HealthProbe(_fn, timeout=0.15, stale_after=30.0,
+                                       fresh_only=True)
+        assert asyncio.run(probe.run())["ok"] is True
+        second = asyncio.run(probe.run())
+        assert second["ok"] is False, (
+            "fresh_only served the completed pre-outage verdict")
+        assert "fail" in second["error"] or "old" in second["error"]
+
+    def test_fresh_only_wait_fails_closed_too(self):
+        import time
+
+        calls = {"n": 0}
+
+        def _fn():
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return {"ok": True, "latency_ms": 1.0, "error": None}
+            time.sleep(600)
+            return {"ok": True, "latency_ms": 1.0, "error": None}
+
+        probe = monitoring.HealthProbe(_fn, timeout=0.15, stale_after=30.0,
+                                       fresh_only=True)
+        assert probe.wait()["ok"] is True
+        assert probe.wait()["ok"] is False
+
+    def test_default_mode_still_serves_last_known_good(self):
+        """/health keeps the documented "stale but honest" fallback."""
+        import asyncio
+        import time
+
+        calls = {"n": 0}
+
+        def _fn():
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return {"ok": True, "latency_ms": 1.0, "error": None}
+            time.sleep(600)
+            return {"ok": True, "latency_ms": 1.0, "error": None}
+
+        probe = monitoring.HealthProbe(_fn, timeout=0.1, stale_after=30.0)
+        assert asyncio.run(probe.run())["ok"] is True
+        # NOT fresh_only: the last completed result is still inside
+        # stale_after, so /health is allowed to report it.
+        assert asyncio.run(probe.run())["ok"] is True
+
 
 @pytest.fixture(autouse=True)
 def _clean_heartbeat_and_listeners():
-    """#2850: the loop heartbeat and the ``/healthz`` listener are
-    process-global (the listener is process-lifetime BY DESIGN). Keep each
-    test starting from "never ticked" and leave no listener bound behind."""
+    """#2850: the loop heartbeat, the in-flight gauge and the ``/healthz``
+    listener are process-global (the listener is process-lifetime BY DESIGN).
+    Keep each test starting from "never ticked"/"no work in flight" and leave
+    no listener bound behind."""
     monitoring._reset_heartbeat()
+    monitoring._reset_workload()
     yield
     monitoring._reset_heartbeat()
+    monitoring._reset_workload()
     monitoring.stop_health_listener()
 
 
@@ -735,27 +806,207 @@ class TestHealthzListener:
             squatter.close()
 
 
+class TestHealthzHardening:
+    """#2850 review P1/P2: the unauthenticated liveness port must not become
+    the way the machine is exhausted, and must not leak the interpreter."""
+
+    @staticmethod
+    def _raw(port: int, request: bytes, *, read_timeout: float = 5.0) -> bytes:
+        import socket
+
+        with socket.create_connection(("127.0.0.1", port), timeout=read_timeout) as s:
+            s.settimeout(read_timeout)
+            s.sendall(request)
+            chunks = []
+            while True:
+                try:
+                    data = s.recv(4096)
+                except TimeoutError:
+                    break
+                if not data:
+                    break
+                chunks.append(data)
+            return b"".join(chunks)
+
+    def test_version_banner_does_not_disclose_python(self):
+        server = monitoring.start_health_listener(port=0, bind="127.0.0.1")
+        monitoring.heartbeat_record()
+        raw = self._raw(server.server_address[1],
+                        b"GET /healthz HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+        assert b"Server: tortoise-healthz" in raw, raw
+        assert b"Python/" not in raw, "the liveness port leaks the Python version"
+        assert raw.startswith(b"HTTP/1.1 200"), raw
+        assert b"Connection: close" in raw
+
+    def test_404_also_carries_the_fixed_banner(self):
+        server = monitoring.start_health_listener(port=0, bind="127.0.0.1")
+        raw = self._raw(server.server_address[1],
+                        b"GET /secrets HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+        assert raw.startswith(b"HTTP/1.1 404"), raw
+        assert b"Python/" not in raw
+
+    def test_request_body_is_rejected_without_being_read(self):
+        server = monitoring.start_health_listener(port=0, bind="127.0.0.1")
+        monitoring.heartbeat_record()
+        raw = self._raw(
+            server.server_address[1],
+            b"GET /healthz HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\n"
+            b"Connection: close\r\n\r\nhello")
+        assert raw.startswith(b"HTTP/1.1 413"), raw
+
+    def test_non_get_methods_are_405(self):
+        server = monitoring.start_health_listener(port=0, bind="127.0.0.1")
+        raw = self._raw(
+            server.server_address[1],
+            b"POST /healthz HTTP/1.1\r\nHost: x\r\nContent-Length: 0\r\n"
+            b"Connection: close\r\n\r\n")
+        assert raw.startswith(b"HTTP/1.1 405"), raw
+
+    def test_a_slow_connection_does_not_block_a_sibling_client(self):
+        """Slowloris resistance: a half-open request holds a thread but a real
+        check must still be answered promptly."""
+        import socket
+        import time
+
+        server = monitoring.start_health_listener(port=0, bind="127.0.0.1")
+        monitoring.heartbeat_record()
+        port = server.server_address[1]
+        slow = socket.create_connection(("127.0.0.1", port), timeout=5)
+        try:
+            # Handshake started, request never terminated.
+            slow.sendall(b"GET /healthz HTTP/1.1\r\nHost: x\r\n")
+            start = time.monotonic()
+            status, body = _http_get(port)
+            elapsed = time.monotonic() - start
+        finally:
+            slow.close()
+        assert status == 200, body
+        assert elapsed < 2.0, f"a sibling client waited {elapsed:.2f}s"
+
+    def test_saturated_listener_sheds_load_with_503(self, monkeypatch):
+        """The thread cap must answer 503 rather than spawn unbounded threads."""
+        import urllib.error
+        import urllib.request
+
+        monkeypatch.setattr(monitoring, "HEALTHZ_MAX_THREADS", 0)
+        server = monitoring.start_health_listener(port=0, bind="127.0.0.1")
+        monitoring.heartbeat_record()
+        try:
+            with urllib.request.urlopen(
+                    f"http://127.0.0.1:{server.server_address[1]}/healthz",
+                    timeout=5) as r:
+                status, body = r.status, r.read()
+        except urllib.error.HTTPError as e:
+            status, body = e.code, e.read()
+        assert status == 503, body
+        assert b"overloaded" in body
+
+    def test_default_port_env_typos_fall_back_instead_of_crashing_boot(self, monkeypatch):
+        """#2850 review P2: `http`/`-1`/`70000` used to raise ValueError and
+        OverflowError out of the UNGUARDED _start_liveness call and abort
+        lifespan.startup() — a typo crash-looped the machine at boot."""
+        for raw in ("http", "-1", "70000", "9090.5"):
+            monkeypatch.setenv("TORTOISE_HEALTHZ_PORT", raw)
+            assert monitoring.resolve_healthz_target() == (
+                monitoring.HEALTHZ_BIND, monitoring.HEALTHZ_PORT), raw
+        # Valid values (including the ephemeral 0 tests rely on) are honoured.
+        monkeypatch.setenv("TORTOISE_HEALTHZ_PORT", "0")
+        assert monitoring.resolve_healthz_target()[1] == 0
+        monkeypatch.setenv("TORTOISE_HEALTHZ_PORT", "8123")
+        assert monitoring.resolve_healthz_target()[1] == 8123
+        # An explicit out-of-range argument is also clamped, not raised.
+        assert monitoring.resolve_healthz_target(port=99999)[1] == monitoring.HEALTHZ_PORT
+
+    def test_non_oserror_bind_failure_is_still_contained(self, monkeypatch):
+        """The widened except: OverflowError/ValueError from a bind must be
+        logged and contained exactly like an OSError."""
+
+        class _Boom(monitoring._HealthzServer):
+            def __init__(self, *a, **k):
+                raise OverflowError("port out of range")
+
+        monkeypatch.setattr(monitoring, "_HealthzServer", _Boom)
+        monkeypatch.delenv("TORTOISE_HEALTHZ_REQUIRED", raising=False)
+        assert monitoring.start_health_listener(port=0, bind="127.0.0.1") is None
+
+    def test_required_accepts_truthy_spellings(self, monkeypatch):
+        """`required=true` must not silently do nothing (review P2)."""
+        import socket
+
+        for raw in ("1", "true", "TRUE", "yes", "on"):
+            monkeypatch.setenv("TORTOISE_HEALTHZ_REQUIRED", raw)
+            port = _free_port()
+            squatter = socket.socket()
+            squatter.bind(("0.0.0.0", port))
+            squatter.listen(1)
+            try:
+                with pytest.raises(RuntimeError, match="could not bind"):
+                    monitoring.start_health_listener(port=port, bind="0.0.0.0")
+            finally:
+                squatter.close()
+
+
 class TestStallWatchdog:
     """#2850 item 5: exit a genuinely hung process so the platform restarts it."""
 
-    def test_default_threshold_is_conservative_and_env_overridable(self, monkeypatch):
+    def test_default_threshold_is_conservative_and_env_overridable(
+            self, monkeypatch, caplog):
+        """#2850 review P0/P2: the self-kill is OFF by default and the enabled
+        floor is cross-validated against LOOP_STALE_AFTER."""
+        import logging
+
         monkeypatch.delenv("TORTOISE_LOOP_STALL_EXIT_S", raising=False)
-        assert monitoring._loop_stall_threshold() == monitoring.LOOP_STALL_EXIT_S
-        # Conservative by policy: it must sit far above a slow-but-legitimate
-        # request, or it becomes a restart loop.
-        assert monitoring.LOOP_STALL_EXIT_S >= 10.0
-        monkeypatch.setenv("TORTOISE_LOOP_STALL_EXIT_S", "7.5")
-        assert monitoring._loop_stall_threshold() == 7.5
+        assert monitoring.LOOP_STALL_EXIT_S == 0.0
+        assert monitoring._loop_stall_threshold() == 0.0
+
+        # An enabled but absurdly small value is clamped UP: a sub-second
+        # threshold turns a GC pause into a permanent crash loop, and a value
+        # at/below LOOP_STALE_AFTER would kill the process before /healthz
+        # could ever report. It must strictly exceed the report window.
+        floor = max(monitoring.LOOP_STALL_EXIT_FLOOR_S,
+                    monitoring.LOOP_STALE_AFTER * 2.0)
+        assert floor > monitoring.LOOP_STALE_AFTER
+        monkeypatch.setenv("TORTOISE_LOOP_STALL_EXIT_S", "0.5")
+        assert monitoring._loop_stall_threshold() == floor
+        monkeypatch.setenv("TORTOISE_LOOP_STALL_EXIT_S", "1")
+        assert monitoring._loop_stall_threshold() == floor
+
+        # A genuinely conservative value is honoured unchanged.
+        monkeypatch.setenv("TORTOISE_LOOP_STALL_EXIT_S", "600")
+        assert monitoring._loop_stall_threshold() == 600.0
+
+        # 0 is the documented disable; negative is a typo — disable it too, but
+        # LOUDLY (the pre-review code logged only at INFO and silently turned a
+        # `-30` typo into "no guard" with no signal).
         monkeypatch.setenv("TORTOISE_LOOP_STALL_EXIT_S", "0")
         assert monitoring._loop_stall_threshold() == 0
-        monkeypatch.setenv("TORTOISE_LOOP_STALL_EXIT_S", "banana")
-        assert monitoring._loop_stall_threshold() == monitoring.LOOP_STALL_EXIT_S
+        monkeypatch.setenv("TORTOISE_LOOP_STALL_EXIT_S", "-30")
+        with caplog.at_level(logging.WARNING, logger="tortoise.monitoring"):
+            assert monitoring._loop_stall_threshold() == 0
+        assert any(r.levelno >= logging.WARNING for r in caplog.records)
 
-    def test_zero_threshold_disables_the_watchdog(self):
+        monkeypatch.setenv("TORTOISE_LOOP_STALL_EXIT_S", "banana")
+        assert monitoring._loop_stall_threshold() == 0
+
+    def test_unset_or_zero_threshold_starts_no_killer_thread(self, monkeypatch):
+        monkeypatch.delenv("TORTOISE_LOOP_STALL_EXIT_S", raising=False)
+        assert monitoring.start_stall_watchdog(exit_fn=lambda *_: None) is None
         assert monitoring.start_stall_watchdog(
             threshold_s=0, exit_fn=lambda *_: None) is None
         assert monitoring.start_stall_watchdog(
             threshold_s=-5, exit_fn=lambda *_: None) is None
+
+    @staticmethod
+    def _arm(fired, stop, *, threshold=0.2, **kwargs):
+        """Arm a watchdog whose loop has demonstrably ticked twice and whose
+        workload is idle (the two non-age preconditions, #2850 review P2)."""
+        monitoring._reset_heartbeat()
+        monitoring._reset_workload()
+        monitoring.heartbeat_record()  # synthetic startup tick
+        monitoring.heartbeat_record()  # a real loop_heartbeat_task tick
+        kwargs.setdefault("poll_interval", 0.05)
+        return monitoring.start_stall_watchdog(
+            threshold, exit_fn=fired.append, stop_event=stop, **kwargs)
 
     def test_fires_when_the_loop_is_stale(self):
         import threading
@@ -763,9 +1014,7 @@ class TestStallWatchdog:
 
         fired: list = []
         stop = threading.Event()
-        monitoring._reset_heartbeat()
-        thread = monitoring.start_stall_watchdog(
-            0.3, exit_fn=fired.append, stop_event=stop, poll_interval=0.05)
+        thread = self._arm(fired, stop, consecutive_windows=1)
         assert thread is not None
         try:
             deadline = time.monotonic() + 5.0
@@ -774,7 +1023,115 @@ class TestStallWatchdog:
         finally:
             stop.set()
             thread.join(timeout=2)
-        assert fired == [1], "watchdog did not fire on a stale heartbeat"
+        assert fired == [1], "watchdog did not fire on a stale idle loop"
+
+    def test_requires_consecutive_stale_windows(self):
+        """#2850 review P2: a single stale sample must not exit the process."""
+        import threading
+        import time
+
+        fired: list = []
+        stop = threading.Event()
+        windows = 5
+        thread = self._arm(fired, stop, consecutive_windows=windows,
+                           poll_interval=0.08)
+        try:
+            time.sleep(0.25)  # ~3 windows in — not enough
+            assert fired == [], "watchdog fired before the hysteresis window"
+            deadline = time.monotonic() + 5.0
+            while not fired and time.monotonic() < deadline:
+                time.sleep(0.05)
+        finally:
+            stop.set()
+            thread.join(timeout=2)
+        assert fired == [1]
+
+    def test_in_flight_workload_vetoes_the_kill(self):
+        """#2850 review P0: the app legitimately blocks the loop for tens of
+        seconds doing synchronous work. It is not a wedge, and the process must
+        not be killed while a request is in flight.
+
+        This is the exact production shape: one request blocks the loop past
+        any heartbeat threshold while other tenants are waiting on that machine.
+        """
+        import threading
+        import time
+
+        fired: list = []
+        stop = threading.Event()
+        thread = self._arm(fired, stop, consecutive_windows=1)
+        monitoring.workload_enter()  # the blocking request is in flight
+        try:
+            time.sleep(0.6)  # ~3x the threshold, with the heartbeat frozen
+            assert fired == [], (
+                "watchdog killed the process while a request was in flight")
+        finally:
+            monitoring.workload_exit()
+            stop.set()
+            thread.join(timeout=2)
+
+    def test_sync_on_loop_block_far_longer_than_threshold_is_not_killed_by_default(
+            self, monkeypatch):
+        """#2850 review P0 regression: the shipped default must survive the
+        app's real (unbounded, synchronous) on-loop work.
+
+        ``_capture_session_impl`` calls the LLM extractor synchronously with a
+        60s HTTP timeout and can run thousands of synchronous DB round trips,
+        so one free-tier request can freeze the loop far past any plausible
+        threshold. Under the DEFAULT configuration the process must not die.
+        """
+        import asyncio
+        import threading
+        import time
+
+        monkeypatch.delenv("TORTOISE_LOOP_STALL_EXIT_S", raising=False)
+        fired: list = []
+
+        # (a) The default does not even arm a killer.
+        assert monitoring.start_stall_watchdog(exit_fn=fired.append) is None
+        assert monitoring._loop_stall_threshold() == 0.0
+
+        # (b) And if an operator DID arm one, in-flight work still vetoes it.
+        stop = threading.Event()
+        thread = self._arm(fired, stop, consecutive_windows=1)
+        monitoring.workload_enter()
+        try:
+            async def _sync_block():
+                time.sleep(0.7)  # synchronous: the event loop cannot tick
+
+            asyncio.run(_sync_block())
+            assert fired == [], "killed the process during legitimate on-loop work"
+        finally:
+            monitoring.workload_exit()
+            stop.set()
+            thread.join(timeout=2)
+
+    def test_does_not_judge_before_a_real_heartbeat_tick(self):
+        """#2850 review P2: the startup tick is synthetic. Until the real
+        ``loop_heartbeat_task`` has ticked, a slow BOOT (unbounded synchronous
+        DB work before the socket is bound) must not be mistaken for a wedge."""
+        import threading
+        import time
+
+        fired: list = []
+        stop = threading.Event()
+        monitoring._reset_heartbeat()
+        monitoring._reset_workload()
+        monitoring.heartbeat_record()  # ONLY the synthetic startup tick
+        thread = monitoring.start_stall_watchdog(
+            0.05, exit_fn=fired.append, stop_event=stop, poll_interval=0.02,
+            consecutive_windows=1)
+        try:
+            time.sleep(0.4)
+            assert fired == [], "watchdog judged a loop that never ticked"
+            monitoring.heartbeat_record()  # the real task finally ticks
+            deadline = time.monotonic() + 5.0
+            while not fired and time.monotonic() < deadline:
+                time.sleep(0.05)
+        finally:
+            stop.set()
+            thread.join(timeout=2)
+        assert fired == [1], "watchdog never armed after a real tick"
 
     def test_does_not_fire_on_a_healthy_loop(self):
         """#2850 item 5 — the required negative: a ticking loop must survive."""
