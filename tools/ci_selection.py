@@ -83,7 +83,14 @@ SHARED_MODULES = (
 SOURCE_PATTERNS = {
     "battery": ("battery/",),
     "onboarding": ("tortoise/onboarding/", "website/welcome.html",
-                   "website/self-hosted.html"),
+                   "website/self-hosted.html",
+                   # #3332: the public docs + FAQ surfaces are pinned by
+                   # test_website_docs_consistency.py, which lives in this
+                   # surface. Without these patterns a docs- or FAQ-only PR
+                   # selects NO surface, so the guard never runs — the exact
+                   # condition that let docs.html carry a wrong belief
+                   # mechanism for five weeks.
+                   "website/docs.html", "website/faq.html"),
     "ep": ("tortoise/decide.py", "tortoise/dream.py", "tortoise/analyze.py",
            "tortoise/ranking.py"),
     "sdk": ("tortoise/ids.py", "tortoise/models.py", "tortoise/crypto.py",
@@ -156,6 +163,25 @@ NON_PYTHON_PREFIXES = (
     "finance-accounting/", "menu-bar/", "ux/", "data/", "operations/",
     "capability/", "services/", "integrations/", "apps/", "spike/", "tools/",
     ".ci-checks/", "supabase/",
+)
+
+# website/ paths that ARE selection-relevant (#3332). The flat
+# NON_PYTHON_PREFIXES tuple above includes "website/", which swallowed every
+# website change before SOURCE_PATTERNS matching — so the existing
+# SOURCE_PATTERNS["onboarding"] entries for website/welcome.html and
+# website/self-hosted.html were DEAD CODE (a website-only change yielded
+# changed == [] -> tier-1 smoke, and the guard tests those patterns were meant
+# to select never ran). These paths are re-included by the filter expression
+# in select() so a public-surface change selects the surface that owns its
+# guard test (test_website_docs_consistency.py,
+# test_welcome_url_consolidation.py, test_website_static.py). NOT a wholesale
+# website/ removal: unrelated website changes (website/robots.txt, the
+# dashboard, blog sources) keep the old docs-only behavior.
+SITE_CARVEOUTS = (
+    "website/welcome.html",
+    "website/self-hosted.html",
+    "website/docs.html",
+    "website/faq.html",
 )
 
 # tools/ paths that ARE python-relevant for selection (#1349). The flat
@@ -299,11 +325,13 @@ def select(changed_files: list[str], event: str, manifest: dict) -> dict:
         return _full_selection(manifest, slow)
 
     tier1 = set(manifest.get("tier1", [])) - slow
-    # Filter out non-python-relevant paths, but RE-INCLUDE the tools carve-out
-    # paths so they reach SOURCE_PATTERNS (see TOOL_CARVEOUTS).
+    # Filter out non-python-relevant paths, but RE-INCLUDE the tools and site
+    # carve-out paths so they reach SOURCE_PATTERNS (see TOOL_CARVEOUTS and
+    # SITE_CARVEOUTS).
     changed = [c for c in changed_files
                if c and (not c.startswith(NON_PYTHON_PREFIXES)
-                         or c.startswith(TOOL_CARVEOUTS))]
+                         or c.startswith(TOOL_CARVEOUTS)
+                         or c.startswith(SITE_CARVEOUTS))]
     if not changed:
         # docs-only PR -> tier 1 (curated smoke) only; no slow/carve surface
         # is touched, so both diff-gated legs skip (#2147/#2148).

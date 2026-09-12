@@ -33,9 +33,50 @@ def _tier1() -> set:
 
 
 def test_docs_only_runs_tier1():
-    r = _sel(["docs/README.md", "website/welcome.html"])
+    # A markdown-only docs change stays the pure tier-1 smoke path.
+    r = _sel(["docs/README.md"])
     assert r["full"] is False
     assert r["surfaces"] == []
+    assert set(r["test_files"]) == _tier1()
+
+
+def test_public_site_surface_change_selects_onboarding_and_skips_slow():
+    """#3332: a public *site surface* change selects `onboarding`.
+
+    docs.html / faq.html / welcome.html / self-hosted.html each own a guard test
+    in the onboarding surface — most importantly
+    test_website_docs_consistency.py, which pins docs.html against faq.html and
+    against POINT_STATUS_VALUES in tortoise/sdk.py. Before #3332 all four were
+    filtered out by NON_PYTHON_PREFIXES (`website/`) *before* SOURCE_PATTERNS was
+    consulted, so changed == [] -> tier-1 smoke: those guard tests never ran, and
+    the SOURCE_PATTERNS["onboarding"] entries for welcome.html / self-hosted.html
+    were dead code.
+
+    The #2147/#2148 cost gates are unchanged — only the fast surface tests are
+    added; no slow leg, no carve-out leg.
+    """
+    for changed in (["website/docs.html"], ["website/faq.html"],
+                    ["website/welcome.html"], ["website/self-hosted.html"],
+                    ["docs/README.md", "website/self-hosted.html"]):
+        r = _sel(changed)
+        assert r["surfaces"] == ["onboarding"], changed
+        assert r["full"] is False
+        assert r["slow_run"] is False
+        assert r["carve_out_run"] is False
+        assert r["slow_selected"] == []
+        assert "test_website_docs_consistency.py" in r["test_files"], changed
+
+
+def test_unrelated_website_change_stays_tier1():
+    """SITE_CARVEOUTS is not a wholesale `website/` removal.
+
+    A website path that owns no guard test keeps the old docs-only behavior
+    (empty changed -> tier-1 smoke), so unrelated website edits do not drag the
+    onboarding surface in.
+    """
+    r = _sel(["website/robots.txt"])
+    assert r["surfaces"] == []
+    assert r["full"] is False
     assert set(r["test_files"]) == _tier1()
 
 
@@ -259,13 +300,16 @@ def test_diff_gate_keys_emitted_on_every_return_path():
 
 
 def test_docs_only_skips_slow_and_carve_out():
-    """#2147/#2148: docs/website-only PRs touch no slow/carve-out surface —
+    """#2147/#2148: docs-only PRs touch no slow/carve-out surface —
     both formerly-unconditional legs (the audit's F1/F2 cost drivers) skip;
-    the tier-1 smoke still runs in the fast job."""
-    for changed in (["docs/README.md"], ["website/welcome.html"],
+    the tier-1 smoke still runs in the fast job.
+
+    #3332: a public site surface additionally selects the *fast* onboarding
+    surface (see test_public_site_surface_change_selects_onboarding_and_skips_slow),
+    but the slow and carve-out legs still skip — which is what this test pins."""
+    for changed in (["docs/README.md"],
                     ["docs/README.md", "website/self-hosted.html"]):
         r = _sel(changed)
-        assert r["surfaces"] == []
         assert r["full"] is False
         assert r["slow_run"] is False
         assert r["carve_out_run"] is False

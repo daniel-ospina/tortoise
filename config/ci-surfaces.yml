@@ -235,6 +235,7 @@ surfaces:
   # api-owned source is imported or referenced.
   - test_battery_corpus_v11.py
   - test_battery_envelope_type.py
+  - test_battery_envelope_contract_2702.py  # #2702: TVDE envelope contract for bct/cal (hermetic) — was unregistered, so manifest-integrity was red on main
   - test_battery_ep_outcome.py
   - test_battery_executor_v1.py
   - test_battery_executor_v2.py
@@ -618,6 +619,7 @@ surfaces:
   - test_w7_publish.py
   - test_welcome_url_consolidation.py
   - test_website_static.py
+  - test_website_docs_consistency.py  # #3332: pins docs.html <-> faq.html (status vocab, ontology citation, confidence mechanism)
   sdk:
   - test_ask_regression_llm.py
   - test_ask_retrieval_levers.py
