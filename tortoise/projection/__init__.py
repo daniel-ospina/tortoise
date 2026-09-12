@@ -1153,6 +1153,145 @@ class FalkorProjection(
             return self._upsert_source(
                 ev, merge_run_id=ev.pop("_merge_run_id", None))
 
+    def _flush_object_folds(self, folds, recreate, strict: bool = False) -> int:
+        """#2977: the single implementation of Object fold ORDERING (D-12), the
+        re-creation SURVIVOR rule, the anchor derivation, and per-fold error
+        isolation. Called by rebuild_all's sweep and by apply_replay so the two
+        engines cannot drift.
+
+        ``folds`` is a list of ``(seq, ev, kind)`` with kind in {"supersede",
+        "retract"}; ``seq`` is the journal index (ts is NOT usable — it collides
+        within a ms and the JSONL carries no seq). Folds apply in
+        journal-append order: last-in-journal-order wins (D-12).
+
+        ``recreate`` is a list of ``(seq, ev)`` for every ObjectRegistered that
+        actually created a node. Anchors are derived HERE, not at the call
+        sites — a duplicated derivation is how the two engines drifted before.
+        An anchor is recorded under BOTH keys: the event's `id` and its `name`.
+        Object identity is the name (``_upsert_object`` MERGEs by name;
+        ``obj-<sha26(name)>`` is derived, and ``EventAPI.add_object`` mints a
+        fresh ulid when the caller passes none), so a single id for a name is
+        not reliable across incarnations.
+
+        SURVIVOR RULE — BOTH families (D-13). A fold is dropped when the target
+        it terminalized existed before the fold AND was re-created after it:
+        keep the FIRST and LAST registration seq per key and drop only when
+        ``first_reg < fold_seq < last_reg``.
+
+        Why not ``fold_seq <= max_registration_seq``: that rule DROPS a fold
+        emitted BEFORE its own object's first registration. The journal shape
+        ``[ObjectSuperseded@0, ObjectRegistered@1]`` is an EXISTING pinned
+        behaviour (#2164 round-2, the connector/journaled-producer lane) that
+        asserts it replays `superseded`; the naive form makes it `live`.
+
+        Why the MAXIMUM across both keys for ``last`` (not id-first): when a
+        name was registered under two different ids, an id-first lookup finds
+        the STALE id's early anchor, keeps the fold, then the fold's name
+        fallback stamps the re-created LIVE node. The MINIMUM across both keys
+        for ``first`` is the dual: a key whose first registration predates the
+        fold is evidence the target existed then.
+
+        Why supersessions are NOT exempt: a re-create with no intervening
+        delete is an ON MATCH and is NOT re-journaled, so the anchor stays put
+        and the fold correctly applies; a re-create AFTER a hard delete IS
+        re-journaled, so the anchor moves and the fold is correctly dropped.
+
+        Errors are isolated per fold unless ``strict``. ``rebuild_all`` and
+        ``rebuild()`` pass ``strict=True`` (both were fail-loud before this
+        change); ``recover_from_log`` uses the default fail-soft contract (it
+        has its own try/except and its own ``ok`` computation), and
+        ``backup.py``'s restore fallback passes ``strict=True`` to PRESERVE its
+        pre-change fail-loud behaviour.
+
+        Returns the FOLD tear count as a plain ``int`` — a ``torn`` COUNT is
+        meaningful only on the fail-soft path (``recover_from_log``), because
+        the ``strict=True`` paths RE-RAISE and so always return 0.
+        """
+        first_by_id: dict[str, int] = {}
+        last_by_id: dict[str, int] = {}
+        first_by_name: dict[str, int] = {}
+        last_by_name: dict[str, int] = {}
+        for _s, _ev in recreate:
+            # Seed an anchor ONLY for a registration that actually CREATED a
+            # node. `_upsert_object` early-returns without raising when
+            # `not oid or not name` (projection/entities.py:487-489), so a
+            # journal entry carrying an EMPTY name still lands in `_recreate`
+            # and would seed `last_by_name[""]`. Verified live: journal
+            # `[OR(U1,'X'), RT(U1,'X'), OR(U1,'')]` gave `_last = 2`, so the
+            # seq-1 retraction was DROPPED and the deleted Object resurrected
+            # as `live` — the exact #2977 failure direction. Requiring BOTH keys
+            # truthy mirrors `_upsert_object`'s own guard, so the anchor cannot
+            # outlive the node it is supposed to track.
+            if not (_ev.get("id") and _ev.get("name")):
+                continue
+            if isinstance(_ev.get("id"), str):
+                first_by_id.setdefault(_ev["id"], _s)
+                last_by_id[_ev["id"]] = _s
+            if isinstance(_ev.get("name"), str):
+                first_by_name.setdefault(_ev["name"], _s)
+                last_by_name[_ev["name"]] = _s
+
+        _INF = float("inf")
+        torn = 0
+        for _seq, ev, _kind in sorted(folds, key=lambda p: p[0]):
+            # D-13: drop ONLY when the target existed before the fold AND was
+            # re-created after it. `first < seq < last` — NOT `seq <= last`,
+            # which would drop folds emitted before their own object's first
+            # registration (#2164's pinned [OS, OR] shape).
+            #
+            # The LOOKUP KEYS are normalized to str-or-None, exactly as the
+            # registration side does with `isinstance(..., str)`. `ev.get("id")`
+            # on a legacy/hand-written fold can be a JSON object or list, and
+            # `first_by_id.get({"weird": 1})` raises `TypeError: unhashable
+            # type` BEFORE the per-fold `try` below — so the `except` that
+            # exists to isolate a bad fold never runs and the TypeError escapes
+            # even on `strict=False`, breaking `recover_from_log`'s documented
+            # "never raised" contract.
+            _k_id = ev.get("id") if isinstance(ev.get("id"), str) else None
+            _k_name = ev.get("name") if isinstance(ev.get("name"), str) else None
+            _first = min(first_by_id.get(_k_id, _INF),
+                         first_by_name.get(_k_name, _INF))
+            _last = max(last_by_id.get(_k_id, -1),
+                        last_by_name.get(_k_name, -1))
+            if _first < _seq < _last:
+                continue  # the pre-fold incarnation was replaced
+            try:
+                if _kind == "retract":
+                    _folded, _matched = self._fold_object_retracted(ev)
+                    if _matched == 0:
+                        # `(0, 0)` is NOT a reliable orphan signal on the
+                        # retraction lane: the name branch filters out
+                        # already-retracted carriers (`skip_terminal`), so a
+                        # re-fold of an existing-but-terminal node also returns
+                        # `(0, 0)` and lands here. Reachable on the stub lane.
+                        logger.warning(
+                            "replay: ObjectRetracted fold matched no Object "
+                            "(event_id=%s id=%r name=%r) — orphan retraction, "
+                            "stub-ulid id mismatch, already-terminal carrier, "
+                            "or pre-#2977 journal",
+                            ev.get("event_id"), ev.get("id"), ev.get("name"))
+                else:
+                    _folded, _ = self._fold_object_superseded(ev)
+                    if _folded == 0:
+                        logger.warning(
+                            "rebuild: ObjectSuperseded fold matched no Object "
+                            "(event_id=%s supersedes_by=%r) — object not "
+                            "re-created by any journaled event (pre-#2194 "
+                            "journal, unjournaled capture SDK, legacy "
+                            "unjournaled Object, or delete race)",
+                            ev.get("event_id"), ev.get("supersedes_by"))
+            except Exception:
+                # One bad fold must not abort the rest and leave the graph
+                # half-folded with no signal (matches recover_from_log's
+                # documented "caught and reported, never raised" contract).
+                if strict:
+                    raise
+                torn += 1
+                logger.warning("replay: Object fold failed (seq=%s kind=%s "
+                               "event_id=%s)", _seq, _kind,
+                               ev.get("event_id"), exc_info=True)
+        return torn
+
     def rebuild(self, log) -> None:
         self.g.query("MATCH (n) DETACH DELETE n")
         for ev in log.read_all():
@@ -1346,7 +1485,13 @@ class FalkorProjection(
                 # embedding, validFrom/To, extractedFrom, provenanceSource.
                 self._upsert_point_props(p)
 
-        supersede_folds: list = []  # ObjectSuperseded replays (pass-1b fold sweep)
+        # #2977: ONE list for BOTH Object fold families (replaces the former
+        # Object-only `supersede_folds`, which the shared flush now consumes).
+        # Do NOT keep a second list — the family left behind is
+        # append-but-never-consumed and silently no-ops on rebuild
+        # (ObjectSuperseded reverting to `live` is a direct #2164 regression).
+        object_folds: list[tuple[int, dict, str]] = []
+        _recreate: list[tuple[int, dict]] = []
         # #2488: ONE cross-family deferred list for point re-stamp folds —
         # PointSuperseded (#2423) + PointInvalidated (#2488) — carrying the
         # journal (enumerate) seq: the trailing sweep's survivor rule and
@@ -1436,6 +1581,10 @@ class FalkorProjection(
                 self._upsert_subject(ev)
             elif t == "ObjectRegistered":
                 self._upsert_object(ev)
+                # Anchor recorded AFTER the create succeeds — a registration that
+                # raised must not seed a survivor anchor and silently drop a
+                # legitimate retraction (same ordering as apply_replay).
+                _recreate.append((seq, ev))
             elif t == "ObjectSuperseded":
                 # #2164 pass-1b rebuild parity: apply() folds ObjectSuperseded
                 # into Object.status, but the rebuild chain had no branch — a
@@ -1454,7 +1603,12 @@ class FalkorProjection(
                 # run: the fold is an idempotent SET, so ordering vs its own
                 # registration is irrelevant and later re-creations are
                 # re-folded correctly.
-                supersede_folds.append(ev)
+                object_folds.append((seq, ev, "supersede"))
+            elif t == "ObjectRetracted":
+                # #2977: the removal counterpart. Without this branch the
+                # journaled retraction falls through and the Object's surviving
+                # ObjectRegistered line resurrects it as `live`.
+                object_folds.append((seq, ev, "retract"))
             elif t == "PointSuperseded":
                 # #2423 pass-1b rebuild parity: the POINT-side analog of
                 # #2164 (ObjectSuperseded above) — apply() has no supersede
@@ -1525,22 +1679,14 @@ class FalkorProjection(
         # superseded Object that is later re-created by a future event is
         # caught on the NEXT rebuild, but this rebuild's graph is honest
         # about what it could not fold.
-        for ev in supersede_folds:
-            # #2242: replay folds run under the DEFAULT cas=False (blind) —
-            # byte-identical to pre-CAS. The live-path CAS must not leak
-            # into replay: first-wins replay would regress incarnation-reuse
-            # shapes (delete→recreate→re-supersede resolves LAST-wins). The
-            # tuple return: folded == 0 ≡ today's matched == 0 (cas=False
-            # returns (matched, matched)).
-            folded, _ = self._fold_object_superseded(ev)
-            if folded == 0:
-                logger.warning(
-                    "rebuild: ObjectSuperseded fold matched no Object "
-                    "(event_id=%s supersedes_by=%r) — object not "
-                    "re-created by any journaled event (pre-#2194 journal, "
-                    "unjournaled capture SDK, legacy unjournaled Object, or "
-                    "delete race)",
-                    ev.get("event_id"), ev.get("supersedes_by"))
+        # ── Object deferred folds (#2164 + #2977) — ONE seq-ordered flush ────
+        # strict=True: this sweep was fail-LOUD before #2977 (a bare
+        # `for ev in supersede_folds:` with no try/except) and rebuild_all is
+        # the `python -m tortoise rebuild` CLI + migrate_db.py path, whose
+        # return dict carries no torn count. Silently swallowing a fold failure
+        # would let a migration that LOST a supersession report success.
+        # Preserve the contract.
+        self._flush_object_folds(object_folds, _recreate, strict=True)
 
         # ── Pass 1b fold sweep (points): cross-family re-stamp survivors ──
         # PointSuperseded replays (#2423 — status/validity/CORRECTS) +

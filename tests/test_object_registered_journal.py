@@ -321,15 +321,20 @@ class TestDeleteNonDurability:
             assert sdk._delete_entity(oid) is True, "node must be deleted"
             rows = _object_row(proj, "delete-me-A")
             assert not rows, "live node must be gone after delete"
-            # delete mints no journal line — rebuild replays the OR line and
-            # resurrects the deleted Object (accepted divergence, #2296 hook).
+            # #2977: the delete IS now journaled (ObjectRetracted), and the
+            # rebuild fold tombstones the node — so it must NOT come back live.
+            # The tombstone keeps the node queryable (status='retracted') rather
+            # than removing it, which is what makes replay agree with live
+            # without a second write path.
             proj.rebuild_all(str(events))
             rows = _object_row(proj, "delete-me-A", "status", "createdAt")
-            assert rows and rows[0][0] == "live", (
-                "deleted Object resurrects live on rebuild "
-                "(no delete tombstone in the journal vocabulary)")
+            assert rows and rows[0][0] == "retracted", (
+                "a deleted Object must replay as `retracted` (the journaled "
+                "ObjectRetracted tombstone), NOT resurrect as `live` — #2977. "
+                "If this is `live`, the fold did not run; do not weaken this "
+                "assertion back towards `live`.")
             assert rows[0][1] == journal[0]["createdAt"], (
-                "resurrected node carries the journaled createdAt")
+                "the tombstoned node carries the journaled createdAt")
         finally:
             sdk.close()
 
