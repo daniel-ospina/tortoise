@@ -37,27 +37,39 @@ from .live import (
 
 
 def _exclude_status_clause(alias: str,
-                           excluded=TERMINAL_EXCLUDED_STATUSES) -> str:
-    """Cypher WHERE fragment excluding the terminal statuses on ``alias``
-    plus the ``outdated=true`` legacy flag (invalidate_point writes the flag
-    without touching status). ``excluded=()`` produces the empty string
-    (no exclusion — the audit/full-scan opt-in).
+                           excluded=TERMINAL_EXCLUDED_STATUSES,
+                           *,
+                           include_outdated_flag: bool = True) -> str:
+    """Cypher WHERE fragment excluding ``excluded`` on ``alias`` (plus the
+    ``outdated=true`` legacy flag unless ``include_outdated_flag=False``).
+    ``excluded=()`` produces the empty string (the audit/full-scan opt-in).
 
-    #2490: DELEGATES to live.py's ``_terminal_excluded`` composition (single
-    source of truth for the terminal predicate). A non-default ``excluded``
-    (audit surfaces pass ``()``; the historical signature allowed a custom
-    vocab) falls back to the legacy inline ``<>``-chain composition over the
-    caller-provided values — the DEFAULT path never duplicates live.py.
+    #2490/#2977: this is a thin SHIM. It chooses the vocabulary and delegates;
+    it composes no Cypher of its own. The default path is byte-identical to the
+    previous implementation, so the four Point legs do not change.
     """
-    if excluded is not TERMINAL_EXCLUDED_STATUSES:
-        # Custom/empty vocab (audit opt-in or legacy callers) — inline
-        # composition over the caller's values, not the live.py vocabulary.
-        if not excluded:
-            return ""
-        chain = " AND ".join(f"{alias}.status <> '{s}'" for s in excluded)
-        return (f"(({alias}.status IS NULL OR ({chain})) "
-                f"AND coalesce({alias}.outdated, false) = false)")
-    return _terminal_excluded(f"{alias}.status")
+    return _terminal_excluded(f"{alias}.status", excluded,
+                              include_outdated_flag=include_outdated_flag)
+
+
+def _status_vocab_for(label: str) -> tuple[frozenset, bool]:
+    """#2977: the ONE place the family -> (excluded vocabulary, whether the
+    legacy ``outdated`` conjunct applies) decision lives. Objects have no
+    ``outdated`` concept, so they exclude only ``OBJECT_SEARCH_EXCLUDED_STATUS``
+    and skip the flag; Points use the canonical terminal set and keep it.
+
+    Every leg calls this; none re-states the mapping. The non-Point branch is a
+    FALLBACK, but the legs gate on ``label in ("Point", "Object")`` before
+    calling, so a future label added to those gates would silently inherit the
+    OBJECT vocabulary. If a third family is ever admitted, replace this with an
+    explicit mapping that raises on an unknown label rather than defaulting.
+    """
+    if label == "Point":
+        return TERMINAL_EXCLUDED_STATUSES, True
+    # Function-level import: commit_ops has no module-level tortoise imports, so
+    # there is no cycle (the same pattern entities.py uses).
+    from tortoise.commit_ops import OBJECT_SEARCH_EXCLUDED_STATUS
+    return OBJECT_SEARCH_EXCLUDED_STATUS, False
 
 
 # ── Circuit breaker (#249) ──────────────────────────────────────────────────
@@ -449,9 +461,10 @@ def run_fts_query(
         expansion_terms=expansion_terms)
     # #689/#1391: terminal-status Points must not leak into FTS results
     # (skipped when the caller opts in via include_terminal — audit/history).
-    if label == "Point":
+    if label in ("Point", "Object"):
+        _vocab, _flag = _status_vocab_for(label)
         status_filter = ("" if excluded_statuses == ()
-                         else f"WHERE {_exclude_status_clause('node', excluded_statuses or TERMINAL_EXCLUDED_STATUSES)} ")
+                         else f"WHERE {_exclude_status_clause('node', excluded_statuses or _vocab, include_outdated_flag=_flag)} ")
     else:
         status_filter = ""
     try:
@@ -578,9 +591,10 @@ def run_vector_query(
     # Docker/server mode → try index-accelerated vector search (#7777)
     if not is_embedded:
         # #689: retracted Points must not leak into vector results.
-        if label == "Point":
+        if label in ("Point", "Object"):
+            _vocab, _flag = _status_vocab_for(label)
             vec_status_filter = ("" if excluded_statuses == ()
-                                 else f"WHERE {_exclude_status_clause('node', excluded_statuses or TERMINAL_EXCLUDED_STATUSES)} ")
+                                 else f"WHERE {_exclude_status_clause('node', excluded_statuses or _vocab, include_outdated_flag=_flag)} ")
         else:
             vec_status_filter = ""
         try:
@@ -688,9 +702,10 @@ def run_vector_query(
         # vecf32-encoded too (a single plain-list node poisons the whole
         # MATCH — see _upsert_event / session indexers).
         # #689: retracted Points must not leak into vector results.
-        if label == "Point":
+        if label in ("Point", "Object"):
+            _vocab, _flag = _status_vocab_for(label)
             bf_status_clause = ("" if excluded_statuses == ()
-                                else f" AND {_exclude_status_clause('n', excluded_statuses or TERMINAL_EXCLUDED_STATUSES)}")
+                                else f" AND {_exclude_status_clause('n', excluded_statuses or _vocab, include_outdated_flag=_flag)}")
         else:
             bf_status_clause = ""
         cypher = (
@@ -822,9 +837,11 @@ def run_structural_query(
         # kind-less broad scan keeps main's early-return behavior — the
         # status clause must not become the sole condition that fires the
         # scan). include_terminal opts out for audit/history queries.
-        if excluded_statuses != () and label_str == "Point":
+        if excluded_statuses != () and label_str in ("Point", "Object"):
+            _vocab, _flag = _status_vocab_for(label_str)
             conditions.append(_exclude_status_clause(
-                "n", excluded_statuses or TERMINAL_EXCLUDED_STATUSES))
+                "n", excluded_statuses or _vocab,
+                include_outdated_flag=_flag))
         where_clause = " AND ".join(conditions)
         cypher = (
             f"MATCH (n:{label_str}) "
