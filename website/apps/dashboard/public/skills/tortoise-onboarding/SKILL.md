@@ -7,7 +7,7 @@ status: live
 tags: [tortoise, onboarding, mcp, harness, install, self-hosted, connect, onboarding-state, decide]
 summary: "The ONE live Tortoise onboarding script — reads onboarding state, self-adjudicates the harness, installs/connects (self-hosted: Docker-first, Compose + FalkorDB; embedded = eval-only fallback), verifies via tortoise_health, checkpoints harness-connected, and runs the generic MCP-tool decide protocol."
 created: 2026-09-02
-updated: 2026-09-04
+updated: 2026-09-12
 allowed-tools: read write bash
 ---
 
