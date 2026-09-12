@@ -2388,6 +2388,18 @@ class TortoiseSDK:
         props = _sanitize_props(props)
         # R2 (#1541) D3: search_keys is stored flat (see _flatten_search_keys_prop).
         _flatten_search_keys_prop(props)
+        # #3263: provenance is INFERRED from the write context, never demanded.
+        # A write that carries a session context has a derivable Source — the
+        # same `session:<id>` ref the capture path wires explicitly (#1350).
+        # Without this, every session-context write that did not hand-supply
+        # `extractedFrom` (the eval ingest paths, session_continuity, ...)
+        # landed as an orphan Point, leaving source-tier calibration
+        # unsatisfiable BY CONSTRUCTION (issues #3263/#3139). The inferred ref
+        # flows through the SAME `extractedFrom` prop path as an explicit one,
+        # so it is journaled on PointAdded and replayed by _upsert_point_edges
+        # (live == rebuild). An explicit `extractedFrom` always wins.
+        if not props.get("extractedFrom") and props.get("session_id"):
+            props["extractedFrom"] = f"session:{props['session_id']}"
         from datetime import datetime, timezone
         now = datetime.now(timezone.utc).isoformat()  # noqa: UP017
         proj = self._get_proj()
