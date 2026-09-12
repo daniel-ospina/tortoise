@@ -166,7 +166,7 @@
     <p>The fastest way to give an agent Tortoise memory is the <strong>MCP server</strong> — no code required. Your agent (Claude Code, Cursor, Codex, Pi, Claude Desktop, or Claude Web — or any other MCP client) reads and writes your Tortoise graph automatically. (ChatGPT connects key-less over OAuth from the dashboard's ChatGPT tab — no config file, so it has no row below.)</p>
     <div class="card">
       <h3>Setup — hosted (no install)</h3>
-      <p>The hosted server speaks Streamable HTTP at <code>https://api.premiselabs.co/mcp/</code>. Keep your API key in an environment variable — never paste a literal <code>tt_…</code> key into a file that can be committed. In JSON config the transport value is <code>"http"</code> (the protocol's name is Streamable HTTP); <code>"streamable-http"</code> is accepted only by Claude Code and is rejected by other clients, so never use it.</p>
+      <p>The hosted server speaks Streamable HTTP at <code>https://api.premiselabs.co/mcp/</code>. Keep your API key in an environment variable — never paste a literal <code>tt_…</code> key into a file that can be committed. In client JSON config the transport value is <code>"http"</code> (the protocol's spec name is Streamable HTTP): Claude Code accepts <code>"streamable-http"</code> as an alias and Cursor's IDE may tolerate it, but Cursor's CLI can drop the whole config file and Pi ignores <code>type</code> — so <code>"http"</code> is the only universally safe value.</p>
 
       <h4>Claude Code</h4>
       <p>Add to <code>.mcp.json</code> in your project. Claude Code <strong>requires</strong> <code>"type": "http"</code> — a <code>url</code> entry with no <code>type</code> is read as a stdio server and skipped.</p>
@@ -234,7 +234,7 @@ codex mcp add tortoise --url https://api.premiselabs.co/mcp/ --bearer-token-env-
     }
   }
 }</code></pre>
-      <p>Cursor requires <code>"type": "stdio"</code> on stdio entries; Claude Code and Pi infer stdio from <code>command</code>. Prefer the recommended Docker setup — its daemon speaks HTTP at <code>http://localhost:8000/mcp</code>, and stdio with an embedded database is a single-writer, eval-only fallback (never a durable team setup).</p>
+      <p>Cursor requires <code>"type": "stdio"</code> on stdio entries; Claude Code and Pi infer stdio from <code>command</code>. The block above is the durable sidecar path; stdio against an embedded database (with <code>TORTOISE_DB_URI</code> unset) is a single-writer, eval-only fallback — never a durable team setup.</p>
       <p class="callout">Need <code>python3</code> and <code>tortoise</code> installed where the client runs? <code>pip install tortoise-graph</code> — the MCP server ships with the package.</p>
     </div>
     <div class="card">
