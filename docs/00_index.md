@@ -21,6 +21,7 @@ aboutObjects: tortoise
 | Competitor analysis — 14 profiles incl. the four-epistemic-primitives matrix (Kumiho/Cognee/Mem0/HippoRAG/GraphRAG/Emergence/Letta) | `product/competition/_analysis.md` · `product/competition/_index.md` |
 | Auth architecture — standard patterns vs Tortoise (#1498/#1506); key-permission model + #2082 boundary (§6, epic #2083) | `docs/auth-architecture.md` |
 | Backup/DR runbook | `docs/ops/registry-backup-dr.md` |
+| Hosted platform infra runbook — incl. the out-of-band availability watchdog, self-healing + alert dedupe (#2850) | `docs/infra-runbook.md` (§6) |
 | CI timing measurement artifact (#1477) | `docs/ci-timing.md` |
 | CI audit — measured runner-cost/lane analysis, read-only (2026-09-02) | `docs/research/2026-09-02-ci-audit.md` |
 | Post-flip verification runbook (#669) | `docs/ops/669-post-flip-verification.md` |

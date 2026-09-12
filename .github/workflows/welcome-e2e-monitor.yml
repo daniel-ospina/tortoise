@@ -76,12 +76,29 @@ jobs:
         run: node --experimental-strip-types tests/test_tenant_provision_cors.mjs
       - name: Auto-file issue on failure (monitor signal — never blocks merges)
         if: failure()
-        run: |
-          # #2140: --fail-with-body so a failed issue create (403/429/etc.)
-          # fails the step loudly instead of silently skipping the file
-          # (curl -s exits 0 on HTTP errors — the deaf-monitor class).
-          curl --fail-with-body -sS -X POST \
-            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-            -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/repos/${{ github.repository }}/issues" \
-            -d '{"title":"live-signup-monitor: welcome-e2e failed (run ${{ github.run_id }})","body":"Monitor failure — run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}. This is the #801 live signup funnel monitor (schedule + on-merge). The smoke asserts POST /v1/signup/email → 200 and the auto sign-in (auth/v1/token?grant_type=password) → 200; failures are typically a real signup-funnel regression, an API 429 (over_email_send_rate_limit / over_request_rate_limit / over_request_rate_limit_ip), or a stale test vs the deployed page. Investigate or re-run; it is NOT a PR regression gate.","labels":["bug"]}'
+        # #2706/#2850: ONE issue per failing streak, never one per run. The old
+        # title embedded `run ${{ github.run_id }}`, so every failing run created a
+        # NEW issue — 59 open near-identical duplicates at the 2026-09-11
+        # census (#2231 → present, still accumulating until this lands — see
+        # #3014, which re-measures at cleanup time). The title is now
+        # STABLE and acts as the dedupe key: search for an open issue with it
+        # and COMMENT (with the run link) instead of creating another one.
+        # FORWARD-LOOKING ONLY: the pre-existing duplicates carry the OLD
+        # title and are deliberately NOT adopted by this search (adopting one at
+        # random would be worse than filing one clean tracker). They need a
+        # one-time bulk cleanup — filed as #3014.
+        # A failed search refuses to file (never duplicate) but fails the step
+        # loudly, so the monitor can never go silently deaf.
+        #
+        # The logic lives in .github/scripts/welcome-e2e-monitor.sh so it can be
+        # TESTED (.github/scripts/welcome-e2e-monitor.test.sh, run by the
+        # availability-watchdog CI lane). The #3064 round-2 review found the
+        # inline version deduped on TITLE ALONE — on this PUBLIC repo any
+        # external account could open an issue with our title and be adopted as
+        # the state carrier. The script carries the same author guard the
+        # availability watchdog uses (`author:app/github-actions` + a
+        # `user.type`/`user.login` re-check) and fails safe (a fresh machine
+        # issue) on a non-machine match.
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bash .github/scripts/welcome-e2e-monitor.sh
