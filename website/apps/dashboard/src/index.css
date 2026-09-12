@@ -574,21 +574,181 @@ button:focus-visible, select:focus-visible, a:focus-visible, input:focus-visible
 }
 
 /* #1643: onboarding wizard (post-key steps) */
-.wizard { margin-top: 1.25rem; border-top: 1px solid var(--border, #1e293b); padding-top: 1rem; }
-.wizard-progress { display: flex; gap: 6px; margin-bottom: 0.75rem; }
+/* #2912: welcome header — the stage is the h1 (the org drops to an eyebrow).
+   Previously the card opened with "<org> is set up", a receipt for step 0 that
+   said nothing about the current step, and the step's own heading lived inside
+   the card at body weight. */
+.welcome-head { margin-bottom: 1.4rem; }
+.welcome-eyebrow {
+  display: inline-block;
+  margin: 0 0 0.55rem;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+.welcome-title {
+  font-family: var(--serif, Georgia, serif);
+  font-weight: 400;
+  font-size: 30px;
+  line-height: 1.2;
+  color: var(--text);
+  margin: 0 0 0.55rem;
+}
+.welcome-lede {
+  margin: 0;
+  max-width: 54ch;
+  font-size: 14px;
+  line-height: 1.6;
+  color: var(--text-dim);
+}
+.wizard { margin-top: 1rem; border-top: 1px solid var(--border, #1e293b); padding-top: 1.1rem; }
+.wizard-progress { display: flex; gap: 6px; margin-bottom: 1.25rem; }
 .wizard-step { flex: 1; height: 4px; border-radius: 2px; background: rgba(255,255,255,0.1); }
 .wizard-step.active { background: var(--accent, #38bdf8); }
 .wizard-step.done { background: var(--green, #4ade80); }
+/* kept for the ARCHIVED legacy render (A0 rollback path) */
 .wizard-title { font-weight: 600; margin-bottom: 0.75rem; }
 .wizard-sub { font-size: 13px; }
 .harness-tabs { display: flex; gap: 6px; flex-wrap: wrap; }
 .harness-tab { padding: 6px 12px; font-size: 13px; background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.12); border-radius: 6px; color: var(--text, #e2e8f0); cursor: pointer; }
 .harness-tab.active { background: var(--accent, #38bdf8); color: #04121a; border-color: var(--accent, #38bdf8); }
-.key-pills { display: flex; gap: 0.5rem; margin-bottom: 1rem; }
+
+/* ── #2912: the connect step's two-level harness chooser + numbered blocks ──
+   The step is a stack of separated units with one heading scale:
+     h1 stage (welcome-title) → block title (wizard-block-title, numbered)
+     → caption (wizard-caption) → payload (wizard-prompt-card).
+   Before this the tab row, pills, captions, cards and nav all sat on ad-hoc
+   inline margins, so nothing communicated order or hierarchy. */
+/* #2912: the live owner/self connect body stacks numbered blocks with a fixed
+   rhythm. This is a NEW class on purpose — `className="harness"` is shared with
+   the member/capped branch and with the ARCHIVED A0-rollback render, which must
+   still reproduce its pre-#2912 layout byte-for-byte (the rollback flips
+   LEGACY_WIZARD_ARCHIVED and rebuilds from this CSS). */
+.harness-connect { display: flex; flex-direction: column; gap: 1.6rem; }
+/* the gap owns the spacing above the nav — `.wizard-nav`'s own margin-top would
+   add to it (PR-gate UX: one step, three different rhythms between branches) */
+.harness-connect > .wizard-nav, .connect-build > .wizard-nav { margin-top: 0; }
+.connect-build { display: flex; flex-direction: column; gap: 1.6rem; }
+.harness-chooser { display: flex; flex-direction: column; gap: 0.55rem; }
+.wizard-field-label {
+  margin: 0;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+.harness-families { display: flex; flex-wrap: wrap; gap: 8px; }
+.harness-family {
+  padding: 9px 18px;
+  border-radius: 999px;
+  border: 1px solid var(--border, #1e293b);
+  background: var(--surface, #0d1a2d);
+  color: var(--text, #e2e8f0);
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.harness-family:hover { background: var(--surface-hover, #12223d); border-color: var(--accent, #06b6d4); }
+.harness-family.active {
+  background: rgba(6, 182, 212, 0.12);
+  border-color: var(--accent, #06b6d4);
+  color: var(--accent, #06b6d4);
+}
+.harness-surfaces { display: flex; flex-wrap: wrap; gap: 8px; padding-left: 2px; }
+.harness-surface {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
+  padding: 7px 14px;
+  border-radius: 10px;
+  border: 1px solid var(--border, #1e293b);
+  background: transparent;
+  color: var(--text, #e2e8f0);
+  font-size: 13px;
+  font-weight: 500;
+  text-align: left;
+  cursor: pointer;
+}
+.harness-surface:hover { background: rgba(6, 182, 212, 0.06); border-color: var(--accent, #06b6d4); }
+.harness-surface.active { border-color: var(--accent, #06b6d4); background: rgba(6, 182, 212, 0.10); }
+.harness-surface-hint { font-size: 11px; font-weight: 400; color: var(--text-dim); }
+.harness-surface.active .harness-surface-hint { color: var(--accent, #06b6d4); opacity: 0.85; }
+/* `margin: 0` is load-bearing: the global `main section { margin-bottom: 32px }`
+   (0,0,2) out-specifies the `*` reset and would stack with the parent block
+   gap (`.harness-connect` / `.connect-build`), rendering 58px between numbered
+   blocks instead of 26px and pushing the nav 78px down (review cycle 3,
+   measured in Chromium). `.wizard-block` (0,1,0) beats the type-selector pair. */
+.wizard-block { margin: 0; border-top: 1px solid var(--border, #1e293b); padding-top: 1.15rem; }
+.wizard-block-title {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin: 0 0 0.75rem;
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.4;
+  color: var(--text, #e2e8f0);
+}
+.wizard-block-step {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: rgba(6, 182, 212, 0.14);
+  color: var(--accent, #06b6d4);
+  font-size: 12px;
+  font-weight: 700;
+}
+.wizard-block-body { display: flex; flex-direction: column; gap: 0.7rem; }
+.wizard-caption { margin: 0; font-size: 13px; line-height: 1.6; color: var(--text, #e2e8f0); }
+.wizard-note { margin: 0; font-size: 12px; line-height: 1.6; color: var(--text-dim); }
+.wizard-fields { margin: 0; padding-left: 1.15rem; display: flex; flex-direction: column; gap: 0.35rem; font-size: 13px; line-height: 1.5; color: var(--text-dim); }
+.key-row { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; margin: 0; }
+.wizard-prompt-card {
+  background: var(--bg-soft, #0d1a2d);
+  border: 1px solid var(--border, #1e293b);
+  border-radius: 10px;
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 0.7rem;
+}
+/* The long prompts (Claude Web/Desktop workflows ≈ 1000 chars) scroll INSIDE
+   the card, but the copy control must never scroll away with them — only the
+   <pre> is a scroll container. (#2912 review P1: a max-height on the card
+   clipped the Copy button off-screen on arrival.) */
+.wizard-prompt-text {
+  margin: 0;
+  max-height: 240px;
+  overflow: auto;
+  font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 12.5px;
+  line-height: 1.65;
+  color: var(--text, #e2e8f0);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+.wizard-prompt-actions { display: flex; justify-content: center; }
+.key-pills { display: flex; gap: 0.5rem; margin-bottom: 0; }
+/* #2912 (review cycle 2): the chooser pills set their background at (0,1,0),
+   which the global `button:hover` (0,1,1) overrode — hovering an UNPICKED pill
+   flipped it to solid accent under light text and read as selected. These
+   :hover rules restore a surface background. (`.key-pills button` is (0,1,1)
+   and declared later, so it never had that bug — its rule is deliberate hover
+   feedback.) */
+.key-pills button:hover { background: var(--surface-hover, #12223d); }
 .key-pills button { flex: 1; padding: 0.5rem 0.75rem; border: 1px solid var(--border,#1e293b); border-radius: 8px; background: var(--surface,#0d1a2d); cursor: pointer; text-align: left; display: flex; flex-direction: column; }
 .key-pills button.active { border-color: var(--accent,#06b6d4); background: rgba(6,182,212,0.08); }
-.key-pills button strong { font-size: 14px; color: var(--text,#e2e8f0); }
-.key-pills button span { font-size: 12px; color: var(--dim,#7d8ea3); }
+.key-pills button strong { font-size: 13px; color: var(--text,#e2e8f0); }
+.key-pills button span { font-size: 12px; color: var(--text-dim,#94a3b8); }
 /* #2361 review-r2 (a11y P1): fork-option had NO rule — it fell through to
    the global button color (#04121a) on the dark surface → ~1.09:1 invisible
    labels on the core choice UI. Fix + give .active a real highlight. */

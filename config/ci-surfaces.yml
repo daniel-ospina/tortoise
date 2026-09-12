@@ -18,6 +18,11 @@ surfaces:
   # when nothing else matched — so a PR that reintroduced the bug in that file
   # alone would otherwise never run the guard.
   - test_boot_regressions.py
+  # #2988: /health/ready must never block the event loop (a synchronous probe
+  # froze every route in production — /openapi.json included). Same dual
+  # registration as the boot guards above, for the same reason: the file it
+  # guards is tortoise/hosted_api.py, which selects the `api` surface.
+  - test_health_ready_nonblocking.py
   - test_delivery_tenancy.py  # C6 #2115: delivery-shape tenancy + session_recording per-graph override
   - test_onboarding_email_http.py
   - test_sentry.py
@@ -199,6 +204,7 @@ surfaces:
   - test_battery_parity_mabench_run.py
   - test_battery_parity_mabench_tortoise.py
   - test_battery_parity_migration.py
+  - test_battery_parity_vector_guard.py  # #2985 retrieval capability gate (fake SDK; hermetic)
   - test_battery_price_basis.py
   - test_battery_probes.py
   # #2906: provider-reported cost (#2906) + the declared fallback basis
@@ -222,6 +228,7 @@ surfaces:
   - test_battery_runner.py
   - test_battery_setup.py
   - test_battery_real_run_gate.py  # #2633 real-run vendor-key pre-flight gate (hermetic)
+  - test_battery_retrieval_preflight.py  # #2985: shared hybrid-retrieval preflight + arm gate + leg provenance (pins battery/arms, battery/runner, battery/parity + tortoise/embeddings.py → also eval)
   # #2916: 26 files that pin battery/ (arms, cli, config, enums, exceptions,
   # exposure, judge, probes, report, runner, testing) and NOTHING api-owned — no
   # api-pinned import, no api-pinned path string — yet were registered api-only,
@@ -274,6 +281,7 @@ surfaces:
   - test_backup_watcher.py
   - test_bfs_audit.py
   - test_boot_regressions.py
+  - test_health_ready_nonblocking.py  # #2988: /health/ready off-loop + bounded probes
   - test_build_window_transcript.py
   - test_canary_classify.py
   - test_canonical.py
@@ -406,6 +414,10 @@ surfaces:
   # this file pins the provider-cost surfacing on that adapter path — so a
   # model_adapters.py-only PR must run it (dual-registered with battery).
   - test_battery_provider_cost.py
+  # #2985: tortoise/sdk.py maps to core (no SOURCE_PATTERN) and this file pins
+  # the recall_state leg_trace threading the retrieval capability gate depends
+  # on — a sdk.py-only PR must run it (dual-registered with battery).
+  - test_battery_parity_vector_guard.py
   - test_monitoring.py
   - test_navigation.py
   - test_no_tests_imports_in_production.py
@@ -448,6 +460,7 @@ surfaces:
   - test_aggregative_facet_coverage.py  # #2521: aggregative-intent + facet coverage check (C5, docker-lane)
   - test_aggregative_intent.py          # #2521: hermetic detector + coverage-math table (C5)
   - test_retrieval.py
+  - test_retrieval_determinism_2952.py  # #2952: ranking determinism w.r.t. elapsed wall-clock (hermetic, no DB)
   - test_review_connections.py
   - test_round_trip_parity.py
   - test_run_protocol.py
@@ -463,7 +476,6 @@ surfaces:
   - test_skip_guard.py
   - test_slack_connector.py
   - test_sparse.py
-  - test_status_projection.py
   - test_status_projection.py
   - test_stop_writes.py
   - test_structural_leg_r4.py
@@ -539,6 +551,8 @@ surfaces:
   - test_kappa.py
   - test_ranking.py
   - test_ranking_w4b.py
+  - test_retrieval_determinism_2952.py  # #2952: ranking determinism (hermetic; also registered under core)
+  - test_2952_write_path_determinism.py  # #2952 defect 1: fresh-create write path must not skew fulltext/recall_state scores (docker-lane; DB)
   - test_recall_gaps_subgraph.py
   - test_recall_state.py
   - test_source_credibility.py
@@ -655,6 +669,7 @@ surfaces:
   - eval/write_path/test_write_path_benchmark.py
   - mini_beir/test_mini_beir.py
   - test_backfill_embeddings_force.py
+  - test_battery_retrieval_preflight.py  # #2985: pins tortoise/embeddings.py EmbeddingModel.get probe + recall_state leg_trace provenance (also battery)
   - test_calibrate_thresholds.py
   - test_embedder_probe.py
   - test_eval_extraction_health.py

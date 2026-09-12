@@ -114,7 +114,9 @@ def build_summary(*, arms: list[dict[str, Any]], exit_code: int,
                   sessions: int = 1,
                   l4_underpopulated: bool = False,
                   budget_stopped: bool = False,
-                  budget_skipped: list[str] | None = None) -> dict[str, Any]:
+                  budget_skipped: list[str] | None = None,
+                  retrieval_legs: list[str] | None = None,
+                  retrieval_degraded: bool = False) -> dict[str, Any]:
     """Assemble a schema-v1.1 run summary (per-arm + run-level). The
     run-level ``run.run_mode`` records the mode the runner RESOLVED at run
     end (mock iff every arm resolved mock; PR #2341 review round 2, P2) so
@@ -127,7 +129,15 @@ def build_summary(*, arms: list[dict[str, Any]], exit_code: int,
     L4 scenarios at sessions < 2). ``budget_stopped``/``budget_skipped``
     (review #2629 P1-1): the mid-run dollar cap tripped — stamped with the
     skipped unit ids so the stop is never a silent truncation. The CLI
-    report composes the run-level report_status from these."""
+    report composes the run-level report_status from these.
+
+    ``retrieval_legs`` / ``retrieval_degraded`` (#2985): the retrieval
+    conditions that produced the run's numbers — the union of legs the
+    retrieval-reading arms OBSERVED via the product's ``leg_trace`` (never
+    an availability guess) and whether any leg degraded or a real retrieval
+    arm was refused by the preflight. A run with no retrieval arm (mock/a0)
+    records no legs and is not degraded by construction.
+    """
     return {
         "schema_version": SCHEMA_VERSION,
         "arms": arms,
@@ -136,7 +146,9 @@ def build_summary(*, arms: list[dict[str, Any]], exit_code: int,
                 "sessions": sessions,
                 "l4_underpopulated": l4_underpopulated,
                 "budget_stopped": budget_stopped,
-                "budget_skipped": budget_skipped or []},
+                "budget_skipped": budget_skipped or [],
+                "retrieval_legs": list(retrieval_legs or []),
+                "retrieval_degraded": bool(retrieval_degraded)},
         "timestamps": timestamps,
     }
 
