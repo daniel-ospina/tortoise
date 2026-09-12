@@ -365,7 +365,7 @@ def _reserve_capture_slot(session_key: str | None = None) -> _CaptureSlot:
     return _CaptureSlot(session_key)
 
 
-async def _run_capture_bounded(slot, fn, /, *args, **kwargs):
+async def _run_capture_bounded(slot, fn, /, *args, on_abandon=None, **kwargs):
     """Run one capture extraction on the capture pool, owning ``slot``.
 
     The work runs off the event loop on the capture pool, with the caller's
@@ -377,12 +377,22 @@ async def _run_capture_bounded(slot, fn, /, *args, **kwargs):
     the cap would silently exceed itself. A synchronous submit failure leaves
     ownership with the caller (no future, no callback), and the request's own
     teardown releases it.
+
+    ``on_abandon`` (if given) runs when the awaiting task is CANCELLED — the
+    worker keeps running, but its result is discarded and the capture can
+    never finalize, so the caller records that the attempt was abandoned
+    (#3129). It is called before the cancellation propagates.
     """
     cfut = _submit_off_loop(_CAPTURE_EXECUTOR, fn, *args, **kwargs)
     if slot is not None:
         slot.hand_off()  # before any await: only the worker frees it now
         cfut.add_done_callback(slot.worker_done)
-    return await asyncio.wrap_future(cfut)
+    try:
+        return await asyncio.wrap_future(cfut)
+    except asyncio.CancelledError:
+        if on_abandon is not None:
+            on_abandon()
+        raise
 
 
 def _anchor_usable(anchor: TortoiseSDK, db_path: str) -> bool:
@@ -7119,6 +7129,47 @@ _SWEEP_EVENT_DELETE_CYPHER = (
 )
 
 
+def _capture_abandoned_marker(proj, session_id: str, lane: str):
+    """#3129 (reviewer P1): mark an ABANDONED capture attempt as failed.
+
+    Returns a zero-arg callback for `_run_capture_bounded(on_abandon=...)`: it
+    runs when the request is CANCELLED while the extraction is still running
+    (client timeout / disconnect / task cancel), and writes
+    `capture_ok=false` + the lane on the Session.
+
+    Why it is needed: `capture_ok` is written only at the very END of a
+    successful capture, so an abandoned attempt left the Session at
+    `capture_ok = NULL` — which the replay rule treats as "legacy, presumed
+    captured" — and the next same-session request was served 200 + a success
+    receipt with 0 turns extracted, permanently (reviewer-measured end-to-end;
+    the in-flight admission gate cannot cover it, because by then the worker is
+    gone). Marking it failed routes that retry into the EXISTING #2335
+    TRUE-retry lane, which re-extracts on the convergent v2 ids.
+
+    Deliberately scoped to CANCELLATION, not to failures: a capture that RAISES
+    (`RuntimeError` → 500/503) keeps its documented NULL→legacy-replay shape
+    (test_hosted_api.py::TestSessionActorStamp2600 raise-shape (ii): a re-POST
+    of a raise-shaped session must not re-extract, so the Session keeps its
+    original actor and no second actor's events are minted).
+
+    Best-effort, like the finalize write it mirrors: a graph hiccup is logged,
+    never raised into an already-cancelled request.
+    """
+
+    def _mark() -> None:
+        try:
+            proj.g.query(
+                "MATCH (s:Session {id:$sid}) "
+                "SET s.capture_ok=false, s.capture_extractor=$extractor",
+                params={"sid": session_id, "extractor": lane})
+        except Exception:  # pragma: no cover - graph hiccup
+            _logger.exception(
+                "abandoned-capture marker write failed (session %s) — a later "
+                "same-session retry would legacy-replay (#3129)", session_id)
+
+    return _mark
+
+
 async def _capture_session_impl(body: SessionRequest, request: Request | None,
                                 team: dict, slot: _CaptureSlot) -> dict:
     """The capture pipeline (gates + writes). Shared by the REST endpoint and
@@ -7493,7 +7544,8 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
             # event loop, and never on the shared default pool either.
             extracted, meta = await _run_capture_bounded(
                 slot, sdk._extract_session_llm,
-                windowed, session_id, now)
+                windowed, session_id, now, on_abandon=_capture_abandoned_marker(
+                    proj, session_id, "m2"))
         except ValueError as e:
             # no-key fail-closed (outer 503 gate normally catches this first;
             # belt-and-braces so an inner/outer drift never 500s, #1468).
@@ -7552,7 +7604,8 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
             # See tests/test_capture_loop_responsiveness.py.
             extracted, meta = await _run_capture_bounded(
                 slot, sdk._extract_session_v2,
-                windowed, session_id, now, master=tenant_master)
+                windowed, session_id, now, master=tenant_master,
+                on_abandon=_capture_abandoned_marker(proj, session_id, "v2"))
         except ValueError as e:
             raise HTTPException(status_code=503, detail=str(e)) from e
 

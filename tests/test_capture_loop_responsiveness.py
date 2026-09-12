@@ -873,6 +873,113 @@ def test_in_flight_session_key_outlives_the_extraction(client, monkeypatch):
     assert ha_mod._CAPTURE_SESSIONS == {}, ha_mod._CAPTURE_SESSIONS
 
 
+def test_cancelled_capture_keeps_the_key_and_leaves_a_retryable_attempt(
+        client, monkeypatch):
+    """#3129 (reviewer P1 + P2): an ABANDONED capture must not become a replay.
+
+    Two contracts, both reachable only by cancelling a session-bearing capture:
+
+    1. **Both sides** (P2) — the in-flight key is released only when the worker
+       AND the request teardown are done. A mutant that popped the key from the
+       request side alone left this whole file green (reviewer-measured 12/12),
+       because no other test cancelled a session-bearing capture.
+    2. **No replay of an unfinalized attempt** (P1) — the worker kept running
+       after the cancellation, but the impl coroutine was gone, so `capture_ok`
+       was never written and the session stayed NULL — which the replay rule
+       reads as "legacy, presumed captured". The next same-session request was
+       then served 200 + a success receipt with 0 turns extracted, permanently
+       (reviewer-measured end-to-end via the retry's own response). The
+       abandonment marker (`_capture_abandoned_marker`, wired through
+       `_run_capture_bounded(on_abandon=...)`) makes it a FAILED attempt
+       instead, so that retry takes the #2335 TRUE-retry lane.
+
+       Deliberately NOT extended to failures: a raise-shaped capture keeps its
+       documented NULL→legacy-replay shape
+       (test_hosted_api.py::TestSessionActorStamp2600 raise-shape (ii)), so a
+       re-POST never re-extracts a failed session under another actor's key.
+
+       This asserts the STATE that decides the lane (`capture_ok=False` +
+       `capture_extractor=v2`), not a second full capture: the retry lane's own
+       behaviour is already pinned by the hosted twin
+       (test_hosted_api.py::test_capture_true_retry_failed_session_reattempts),
+       and driving a real re-extraction here would pull the embedding model in
+       and test the extractor, not this guard.
+    """
+    import tortoise.hosted_api as ha_mod
+    from tortoise.hosted_api import app
+
+    entered = threading.Event()
+    release = threading.Event()
+
+    def _stalled(_self, windowed, session_id, now, **kw):
+        entered.set()
+        release.wait(timeout=30)
+        return [], {}
+
+    monkeypatch.setattr(TortoiseSDK, "_extract_session_v2", _stalled)
+    payload = {"conversation": _CONV, "session_id": "s-cancel-3129",
+               "harness": _HARNESS}
+    key = "team-001:default:s-cancel-3129"
+
+    async def _run():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport,
+                                     base_url="http://test") as ac:
+            task = asyncio.create_task(ac.post("/v1/sessions", json=payload))
+            for _ in range(200):
+                if entered.is_set():
+                    break
+                await asyncio.sleep(0.05)
+            assert entered.is_set(), "the capture never reached the extraction"
+            task.cancel()  # client goes away mid-extraction
+            with suppress(asyncio.CancelledError):
+                await task
+            await asyncio.sleep(0.2)  # let the cancellation settle
+            held_after_cancel = list(ha_mod._CAPTURE_SESSIONS)
+            try:
+                while_parked = await asyncio.wait_for(
+                    ac.post("/v1/sessions", json=payload), timeout=10.0)
+            except TimeoutError:
+                while_parked = None
+            release.set()  # the worker finishes now
+            for _ in range(400):
+                if not ha_mod._CAPTURE_SESSIONS:
+                    break
+                await asyncio.sleep(0.05)
+            return held_after_cancel, while_parked, list(ha_mod._CAPTURE_SESSIONS)
+
+    held, while_parked, drained = asyncio.run(_run())
+
+    assert held == [key], (
+        f"the in-flight session key was released by the REQUEST teardown while "
+        f"the worker was still running (registry={held!r}, expected {[key]!r}) "
+        f"— a same-session request is then admitted and replayed for a capture "
+        f"that has not finished (#3129)")
+    assert while_parked is not None and while_parked.status_code == 409, (
+        f"a same-session request while the abandoned capture's worker was still "
+        f"parked returned "
+        f"{getattr(while_parked, 'status_code', 'a timeout')} — it must be "
+        f"refused at admission, not queued (#3129)")
+    assert drained == [], drained
+    rows = ha_mod._make_sdk(namespace=TEST_TEAM_ID)._get_proj().g.query(
+        "MATCH (s:Session {id:$sid}) RETURN s.capture_ok, s.capture_extractor",
+        params={"sid": "s-cancel-3129"}).result_set
+    assert rows, "the capture never merged its Session row"
+    capture_ok, lane = rows[0][0], rows[0][1]
+    assert capture_ok is False, (
+        f"an ABANDONED capture left the session at capture_ok={capture_ok!r} — "
+        f"a NULL there is read by the replay rule as \"legacy, presumed "
+        f"captured\", so the next same-session request gets 200 + a success "
+        f"receipt with 0 turns extracted, permanently (#3129)")
+    assert lane == "v2", (
+        f"the abandoned attempt recorded lane {lane!r} — the #2335 TRUE-retry "
+        f"gate requires a v2 prior, and stamping the wrong lane either strands "
+        f"the session (m2) or re-runs the non-convergent lane #2473 exists to "
+        f"prevent (#3129)")
+    assert ha_mod._CAPTURE_IN_FLIGHT == 0, ha_mod._CAPTURE_IN_FLIGHT
+    assert ha_mod._CAPTURE_SESSIONS == {}, ha_mod._CAPTURE_SESSIONS
+
+
 def test_in_flight_session_keys_are_scoped_to_their_tenant():
     """#3129 (reviewer finding): the in-flight key is per-TENANT.
 
