@@ -294,6 +294,36 @@ def test_stamp_write_replaces_a_symlink_instead_of_writing_through_it(tmp_path):
     assert "skills_version=" in stamp.read_text(encoding="utf-8")
 
 
+def test_stamp_write_is_not_clobbered_via_a_planted_temp_symlink(tmp_path):
+    """The temp file used for the atomic stamp write must not be predictable:
+    a pre-planted `$STAMP.tmp -> ../../README.md` symlink must not become an
+    arbitrary-file clobber (mktemp gives an unpredictable name)."""
+    skills_dir = tmp_path / ".claude" / "skills"
+    skills_dir.mkdir(parents=True)
+    victim = tmp_path / "README.md"
+    victim.write_text("important project readme\n", encoding="utf-8")
+    (skills_dir / ".tortoise-skills-version.tmp").symlink_to(victim)
+    proc = _run_installer(tmp_path, tmp_path / "home", harness="claude")
+    assert proc.returncode == 0, proc.stderr
+    assert victim.read_text(encoding="utf-8") == "important project readme\n"
+    assert "skills_version=" in (skills_dir
+                                 / ".tortoise-skills-version").read_text()
+
+
+def test_stamp_write_is_reported_when_it_cannot_be_written(tmp_path):
+    """A stamp path that cannot hold a file (a directory) must be reported as
+    a failure, not silently announced as written."""
+    home = tmp_path / "home"
+    home.mkdir()
+    skills_dir = home / ".pi" / "agent" / "skills"
+    skills_dir.mkdir(parents=True)
+    (skills_dir / ".tortoise-skills-version").mkdir()
+    proc = _run_installer(tmp_path, home)
+    assert proc.returncode == 0, proc.stderr
+    assert "could not write the version stamp" in proc.stderr
+    assert "version stamp:" not in proc.stdout
+
+
 def test_m8_no_live_reference_to_old_paths_outside_archive():
     """Sweep: live code paths never point at the retired prompt/staging
     pipeline (docs/epics + historical research docs are exempt; prose
