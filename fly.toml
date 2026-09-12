@@ -79,8 +79,10 @@ primary_region = "iad"
   #
   # NOTE: [[services.*_checks]] has NO `port` key — a service check always rides
   # the service's internal_port (8000 here). It cannot be pointed at 9090. The
-  # 9090/healthz signal is the top-level [checks] section below, which never
-  # affects routing.
+  # 9090/healthz signal is a top-level [checks] entry, which is NOT in this PR:
+  # it is deferred to a follow-up PR (see the DEFERRED block below and
+  # docs/infra-runbook.md §6.0 for the merge-order precondition). A top-level
+  # check never affects routing, but it DOES gate flyctl's deploy health wait.
   #
   # timeout=5s against a 15s interval (was 15s/15s — a 1:1 ratio with zero
   # headroom, so a hung probe consumed its whole period). A kernel accept is
@@ -93,30 +95,47 @@ primary_region = "iad"
     timeout = "5s"
     grace_period = "180s"
 
-# ── Non-routing liveness check (#2850, P0) ───────────────────────────────────
-# THIS CHECK DOES NOT AFFECT REQUEST ROUTING. Top-level [checks] are an
-# independent alerting/paging signal only; the proxy ignores them when deciding
-# where to send traffic. It exists so a STALLED EVENT LOOP is VISIBLE to an
-# operator even though a stall can no longer take the app offline.
+# ── DEFERRED to a follow-up: non-routing loop-liveness check (#2850) ─────────
+# The top-level [checks.loop_liveness] entry is NOT in this PR. It is deferred
+# to a follow-up PR that MUST merge and deploy only AFTER #3062
+# (fix/2850-health-liveness-decouple) is deployed and the 9090 listener is
+# verified bound on 0.0.0.0 inside the machine:
 #
-# It points at the app's dedicated health listener on port 9090, path /healthz
-# (interface contract: bound to 0.0.0.0; 200 when the loop is progressing, 503
-# when it has stalled). Top-level checks REQUIRE `port`, and Fly requires that
-# port be bound on 0.0.0.0 — a loopback-only (127.0.0.1) listener makes this
-# check fail permanently. Open questions (bind address, auth, whether it blocks
-# deploys) are tracked in docs/infra-runbook.md §6.9.
+#     fly ssh console -a tortoise-y4mjjq -C "ss -ltn | grep ':9090'"
+#     # expect 0.0.0.0:9090, then a token-less 200 from /healthz
 #
-# grace_period matches the routing check: the 9090 listener shares the ~85s app
-# boot, so checking earlier would flap on every cold start.
-[checks]
-  [checks.loop_liveness]
-    type = "http"
-    method = "get"
-    path = "/healthz"
-    port = 9090
-    interval = "15s"
-    timeout = "5s"
-    grace_period = "180s"
+# Why it is split out: flyctl's deploy health wait counts top-level checks
+# (WaitForHealthchecksToPass counts len(cfg.Checks) plus service checks and
+# requires every reported check to pass — no informational/readiness filter),
+# and .github/workflows/deploy-hosted.yml auto-deploys whenever fly.toml
+# changes. Shipping this check before its 9090 listener exists would fail every
+# deploy after --wait-timeout and repeatedly roll the sole production machine.
+# The TCP routing check and the lifecycle keys above are the actual #2850 fix
+# and carry zero deploy-gate risk, so they merge independently. See
+# docs/infra-runbook.md §6.0 (merge order) and §6.4 (deferred check).
+#
+# Restore the block below VERBATIM in the follow-up PR, once the precondition
+# above holds:
+#
+# [checks]
+#   [checks.loop_liveness]
+#     type = "http"
+#     method = "get"
+#     path = "/healthz"
+#     port = 9090
+#     interval = "15s"
+#     timeout = "5s"
+#     grace_period = "180s"
+#
+# (Original rationale, for the follow-up: this check does not affect request
+# routing — the proxy ignores top-level checks when choosing where to send
+# traffic. It exists so a STALLED EVENT LOOP is visible to an operator even
+# though a stall can no longer take the app offline. It points at
+# the app's dedicated 9090 /healthz listener (200 progressing / 503 stalled).
+# Top-level checks REQUIRE `port`, and Fly requires that port be bound on
+# 0.0.0.0 — a loopback-only 127.0.0.1 listener makes the check fail
+# permanently. grace_period matches the routing check because the 9090 listener
+# shares the ~85s app boot.)
 
 [[vm]]
   cpu_kind = "shared"
