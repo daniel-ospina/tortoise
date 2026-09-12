@@ -16,32 +16,43 @@ the browser-session JWT verification is stubbed via hosted_api.verify_session_jw
 """
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import os
 import secrets
 import tempfile
+from collections import OrderedDict
 from contextlib import asynccontextmanager
 
+import httpx
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from starlette.applications import Starlette
+from starlette.requests import Request
 from starlette.routing import Mount
 
 os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")
 os.environ.setdefault("RATE_LIMIT_DISABLED", "1")
 
-from tortoise.hosted_api import app, verify_session_jwt  # noqa: E402, F401, I001, RUF100
+from tests._http_fixtures import patched_tortoise_sdk
+from tests.fake_control_plane import FakeControlPlane  # noqa: E402, RUF100
+from tortoise import hosted_api as _ha_mod  # noqa: E402, RUF100
+from tortoise.hosted_api import (  # noqa: E402, F401, I001, RUF100
+    RateLimitMiddleware,
+    app,
+    verify_session_jwt,
+)
 from tortoise.mcp_server import create_http_app  # noqa: E402, RUF100
 from tortoise.oauth import (  # noqa: E402, RUF100
     ACCESS_TOKEN_PREFIX,
+    SCOPES_ACCEPTED,
+    SCOPES_SUPPORTED,
     _sha256,
     mcp_resource_url,
     team_resource_url,
 )
-
-from tests._http_fixtures import patched_tortoise_sdk
-from tests.fake_control_plane import FakeControlPlane  # noqa: E402, RUF100
 
 # #1719 (Task 3): team_memberships.user_id is a uuid column — real JWT
 # subjects are UUIDs; non-UUID user_id literals are prod-impossible.
@@ -1437,3 +1448,670 @@ class TestMcpBoundary:
         assert hits, "no PointAdded GraphEvent journaled"
         newest = hits[-1]
         assert newest.get("actor_user_id") == _U1, newest
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# #2866 — DCR capacity policy: bounded store, stated caps, CIDR exemption
+# ═══════════════════════════════════════════════════════════════════════════
+# Legs (a)–(y) of docs/plans/2026-09-11-2866-dcr-capacity-policy.md §5. Every
+# knob override uses monkeypatch.setenv (function-scoped, auto-restored) so
+# no bound masks another and no override leaks into a later leg. The window
+# is pinned with a fake clock (monkeypatch.setattr(hosted_api.time, ...)) for
+# the aging/ordering legs.
+
+_DCR_TRUSTED = "160.79.104.11"      # inside the default 160.79.104.0/21
+_DCR_TRUSTED_ALT = "160.79.104.12"  # same /21, distinct address
+_DCR_UNTRUSTED = "203.0.113.7"
+_DCR_CUSTOM_NET = "198.51.100.0/24"
+
+
+def _dcr_reset() -> None:
+    """Swap in fresh stores + a fresh lock by module-global lookup.
+
+    The limiter reads the four stores dynamically off the module globals (no
+    default-argument capture, no import-time alias), so a rebind here is
+    picked up on the next call. The fresh lock also keeps the concurrency
+    legs' ``asyncio.run`` loop from inheriting a lock already bound to the
+    TestClient portal loop.
+    """
+    _ha_mod._OAUTH_DCR_BUCKETS = OrderedDict()
+    _ha_mod._OAUTH_DCR_TRUSTED = OrderedDict()
+    _ha_mod._OAUTH_DCR_OVERFLOW = OrderedDict()
+    _ha_mod._OAUTH_DCR_ANON = OrderedDict()
+    _ha_mod._OAUTH_DCR_LOCK = asyncio.Lock()
+
+
+def _dcr_post(tc, ip=None, headers=None, **body_overrides):
+    body = {"client_name": "dcr-leg", "redirect_uris": [REDIRECT]}
+    body.update(body_overrides)
+    hdrs = dict(headers or {})
+    if ip is not None:
+        hdrs["Fly-Client-IP"] = ip
+    return tc.post("/register", json=body, headers=hdrs)
+
+
+def _find_rate_limit_middleware():
+    """The live generic RateLimitMiddleware instance (Starlette builds the
+    middleware stack lazily on the first ASGI call)."""
+    node = getattr(app, "middleware_stack", None)
+    while node is not None:
+        if isinstance(node, RateLimitMiddleware):
+            return node
+        node = getattr(node, "app", None)
+    return None
+
+
+class _CountingStore(OrderedDict):
+    """OrderedDict that counts every iteration entry point (#2866 leg f)."""
+
+    def __init__(self):
+        super().__init__()
+        self.iterations = 0
+
+    def reset(self):
+        self.iterations = 0
+
+    def __iter__(self):
+        self.iterations += 1
+        return super().__iter__()
+
+    def items(self):
+        self.iterations += 1
+        return super().items()
+
+    def keys(self):
+        self.iterations += 1
+        return super().keys()
+
+    def values(self):
+        self.iterations += 1
+        return super().values()
+
+    def __reversed__(self):
+        self.iterations += 1
+        return super().__reversed__()
+
+    def copy(self):
+        self.iterations += 1
+        return super().copy()
+
+
+class TestDcrCapacityPolicy:
+    """#2866 — the DCR limiter's stated capacity policy."""
+
+    @pytest.fixture(autouse=True)
+    def _dcr_policy(self, api_client, monkeypatch):
+        """Function-scoped isolation (class scope would raise ScopeMismatch,
+        since it must depend on the function-scoped api_client).
+
+        Load-bearing: Starlette builds the middleware stack lazily on the
+        first ASGI call. ``TestClient(app).__enter__`` (inside api_client)
+        triggers that build while RATE_LIMIT_DISABLED=1 is still set
+        (tests/conftest.py:22 + this module's setdefault), so the generic
+        RateLimitMiddleware is constructed disabled and STAYS disabled after
+        the flag is deleted below. If an earlier test deleted the flag before
+        the session's first app call, that build is unrecoverable — fail
+        loudly rather than silently breaking the flood legs.
+        """
+        tc, _cp = api_client
+        tc.get("/health")  # belt-and-suspenders rebuild check (not the mechanism)
+        mw = _find_rate_limit_middleware()
+        assert mw is not None, "generic RateLimitMiddleware not found on the stack"
+        assert mw._disabled is True, (
+            "generic RateLimitMiddleware was NOT built with RATE_LIMIT_DISABLED=1 "
+            "— the DCR flood legs would trip it. The app's first ASGI call "
+            "happened after some test deleted the flag.")
+        monkeypatch.setenv("TORTOISE_TRUST_FLY_CLIENT_IP", "1")
+        monkeypatch.delenv("RATE_LIMIT_DISABLED", raising=False)
+        _dcr_reset()
+
+    # ── (a) anonymous per-key 429 + Retry-After ─────────────────────────
+    def test_a_anonymous_per_key_429(self, api_client, monkeypatch):
+        tc, _ = api_client
+        monkeypatch.setenv("TORTOISE_OAUTH_DCR_PER_HOUR", "2")
+        monkeypatch.setenv("TORTOISE_OAUTH_DCR_ANON_AGGREGATE_PER_HOUR", "1000")
+        assert _dcr_post(tc, ip=_DCR_UNTRUSTED).status_code == 201
+        assert _dcr_post(tc, ip=_DCR_UNTRUSTED).status_code == 201
+        r = _dcr_post(tc, ip=_DCR_UNTRUSTED)
+        assert r.status_code == 429, r.text
+        assert int(r.headers["Retry-After"]) >= 1
+
+    # ── (b) fresh-key flood: bounded store + overflow binds ─────────────
+    def test_b_fresh_key_flood_bounded_store_and_overflow(self, api_client,
+                                                          monkeypatch):
+        tc, _ = api_client
+        monkeypatch.setenv("TORTOISE_OAUTH_DCR_STORE_CAP", "8")
+        monkeypatch.setenv("TORTOISE_OAUTH_DCR_PER_HOUR", "2")
+        monkeypatch.setenv("TORTOISE_OAUTH_DCR_ANON_AGGREGATE_PER_HOUR",
+                           "1000000")
+        for i in range(8):
+            assert _dcr_post(tc, ip=f"198.51.100.{i}").status_code == 201
+        assert len(_ha_mod._OAUTH_DCR_BUCKETS) == 8
+        # the store is full: new keys are served by the shared overflow bucket
+        # until its derived cap (= PER_HOUR) binds.
+        assert _dcr_post(tc, ip="198.51.100.200").status_code == 201
+        assert _dcr_post(tc, ip="198.51.100.201").status_code == 201
+        r = _dcr_post(tc, ip="198.51.100.202")
+        assert r.status_code == 429, r.text
+        assert "Retry-After" in r.headers
+        # a genuine non-exempt new IP still 429s while the store is full
+        assert _dcr_post(tc, ip="198.51.100.203").status_code == 429
+        assert len(_ha_mod._OAUTH_DCR_BUCKETS) <= 8
+
+    # ── (c) a tracked key's 429 is not reset by fresh keys ──────────────
+    def test_c_tracked_key_429_not_reset_by_fresh_keys(self, api_client,
+                                                       monkeypatch):
+        tc, _ = api_client
+        monkeypatch.setenv("TORTOISE_OAUTH_DCR_PER_HOUR", "1")
+        monkeypatch.setenv("TORTOISE_OAUTH_DCR_STORE_CAP", "2")
+        monkeypatch.setenv("TORTOISE_OAUTH_DCR_ANON_AGGREGATE_PER_HOUR",
+                           "1000000")
+        assert _dcr_post(tc, ip="192.0.2.10").status_code == 201
+        assert _dcr_post(tc, ip="192.0.2.10").status_code == 429
+        for i in range(6):
+            _dcr_post(tc, ip=f"192.0.2.{100 + i}")
+        assert _dcr_post(tc, ip="192.0.2.10").status_code == 429
+
+    # ── (d) ordering invariant: reclaim stops at the first active head ──
+    def test_d_ordering_invariant_reclaims_only_inactive_lru(self, api_client,
+                                                             monkeypatch):
+        tc, _ = api_client
+        now = [1_800_000_000.0]
+        monkeypatch.setattr(_ha_mod.time, "time", lambda: now[0])
+        monkeypatch.setenv("TORTOISE_OAUTH_DCR_STORE_CAP", "2")
+        monkeypatch.setenv("TORTOISE_OAUTH_DCR_PER_HOUR", "5")
+        monkeypatch.setenv("TORTOISE_OAUTH_DCR_ANON_AGGREGATE_PER_HOUR",
+                           "1000000")
+        assert _dcr_post(tc, ip="192.0.2.1").status_code == 201  # A
+        assert _dcr_post(tc, ip="192.0.2.2").status_code == 201  # B (store full)
+        now[0] += 3500
+        assert _dcr_post(tc, ip="192.0.2.1").status_code == 201  # A recharged → MRU
+        now[0] += 101  # t=3601: B's only charge has aged out, A's has not
+        assert _dcr_post(tc, ip="192.0.2.3").status_code == 201  # C
+        buckets = _ha_mod._OAUTH_DCR_BUCKETS
+        assert "192.0.2.3" in buckets, "new key must get a bucket, not overflow"
+        assert "192.0.2.2" not in buckets, "inactive LRU head must be reclaimed"
+        assert "192.0.2.1" in buckets, "an active key must never be evicted"
+
+    # ── (e) aged buckets are reclaimed; a recharged key survives ────────
+    def test_e_aged_buckets_reclaimed(self, api_client, monkeypatch):
+        tc, _ = api_client
+        now = [1_800_000_000.0]
+        monkeypatch.setattr(_ha_mod.time, "time", lambda: now[0])
+        monkeypatch.setenv("TORTOISE_OAUTH_DCR_STORE_CAP", "2")
+        monkeypatch.setenv("TORTOISE_OAUTH_DCR_PER_HOUR", "5")
+        monkeypatch.setenv("TORTOISE_OAUTH_DCR_ANON_AGGREGATE_PER_HOUR",
+                           "1000000")
+        assert _dcr_post(tc, ip="192.0.2.1").status_code == 201
+        assert _dcr_post(tc, ip="192.0.2.2").status_code == 201
+        now[0] += 3700
+        assert _dcr_post(tc, ip="192.0.2.1").status_code == 201  # A recharged
+        now[0] += 1
+        assert _dcr_post(tc, ip="192.0.2.3").status_code == 201  # reclaims B
+        buckets = _ha_mod._OAUTH_DCR_BUCKETS
+        assert "192.0.2.2" not in buckets
+        assert "192.0.2.1" in buckets, "the recharged key survives the reclaim"
+        assert "192.0.2.3" in buckets
+        # every remaining head is aged out: reclaim makes room again
+        now[0] += 5000
+        assert _dcr_post(tc, ip="192.0.2.4").status_code == 201
+        buckets = _ha_mod._OAUTH_DCR_BUCKETS
+        assert "192.0.2.1" not in buckets
+        assert "192.0.2.4" in buckets
+
+    # ── (f) lookups are not O(n) at store-cap scale ─────────────────────
+    def test_f_lookups_not_on_at_store_cap_scale(self, api_client, monkeypatch):
+        tc, _ = api_client
+        now = [1_800_000_001.0]
+        monkeypatch.setattr(_ha_mod.time, "time", lambda: now[0])
+        monkeypatch.setenv("TORTOISE_OAUTH_DCR_PER_HOUR", "50")
+        monkeypatch.setenv("TORTOISE_OAUTH_DCR_ANON_AGGREGATE_PER_HOUR",
+                           "1000000")
+        counting = _CountingStore()
+        for i in range(10_001):
+            counting[f"10.{i // 256}.{i % 256}.1"] = [now[0] - 1.0]
+        counting["10.0.0.1"] = [now[0] - 1.0]  # tracked key
+        counting.reset()
+        _ha_mod._OAUTH_DCR_BUCKETS = counting
+        assert _dcr_post(tc, ip="10.0.0.1").status_code == 201
+        assert counting.iterations == 0, (
+            "a tracked key's charge must not iterate the store "
+            f"(saw {counting.iterations})")
+        # a new key at an all-live cap inspects at most the LRU head
+        counting2 = _CountingStore()
+        for i in range(8):
+            counting2[f"10.1.{i}.1"] = [now[0]]
+        counting2.reset()
+        _ha_mod._OAUTH_DCR_BUCKETS = counting2
+        monkeypatch.setenv("TORTOISE_OAUTH_DCR_STORE_CAP", "8")
+        assert _dcr_post(tc, ip="10.9.9.9").status_code == 201
+        assert counting2.iterations <= 1, (
+            f"reclaim inspected {counting2.iterations} heads at an all-live cap")
+
+    # ── (g) IPv6 /64 collapse + recharge keeps the key usable/MRU ───────
+    def test_g_ipv6_64_collapse_and_recharge(self, api_client, monkeypatch):
+        tc, _ = api_client
+        monkeypatch.setenv("TORTOISE_OAUTH_DCR_PER_HOUR", "5")
+        monkeypatch.setenv("TORTOISE_OAUTH_DCR_ANON_AGGREGATE_PER_HOUR",
+                           "1000000")
+        assert _dcr_post(tc, ip="2001:db8:aaaa:1::1").status_code == 201
+        assert _dcr_post(tc, ip="2001:db8:aaaa:1::2").status_code == 201
+        buckets = _ha_mod._OAUTH_DCR_BUCKETS
+        assert list(buckets) == ["2001:db8:aaaa:1::/64"], list(buckets)
+        assert len(buckets["2001:db8:aaaa:1::/64"]) == 2
+        # a further charged hit from the same /64 must not KeyError and must
+        # move the key to the MRU end (last-charge ordering)
+        assert _dcr_post(tc, ip="2001:db8:bbbb::1").status_code == 201
+        assert _dcr_post(tc, ip="2001:db8:aaaa:1::3").status_code == 201
+        assert list(buckets)[-1] == "2001:db8:aaaa:1::/64"
+        assert len(buckets["2001:db8:aaaa:1::/64"]) == 3
+
+    # ── (h) IPv4-mapped IPv6 is normalized BEFORE match/keying ──────────
+    def test_h_mapped_ipv6_normalized_before_match(self, api_client, monkeypatch):
+        tc, _ = api_client
+        monkeypatch.setenv("TORTOISE_OAUTH_DCR_ANON_AGGREGATE_PER_HOUR",
+                           "1000000")
+        assert _ha_mod._oauth_dcr_store_key("::ffff:1.2.3.4") == "1.2.3.4"
+        assert _dcr_post(tc, ip="::ffff:160.79.104.11").status_code == 201
+        assert not _ha_mod._OAUTH_DCR_BUCKETS, "trusted ⇒ no per-key bucket"
+        assert len(_ha_mod._OAUTH_DCR_TRUSTED["160.79.104.0/21"]) == 1
+        assert _dcr_post(tc, ip="::ffff:1.2.3.4").status_code == 201
+        assert list(_ha_mod._OAUTH_DCR_BUCKETS) == ["1.2.3.4"], \
+            "mapped IPv4 must key as the IPv4 address, not as ::/64"
+
+    # ── (i) the trusted carve-out is REACHABLE ──────────────────────────
+    def test_i_trusted_carve_out_reachable(self, api_client, monkeypatch):
+        tc, _ = api_client
+        monkeypatch.setenv("TORTOISE_OAUTH_DCR_TRUSTED_PER_HOUR", "2")
+        monkeypatch.setenv("TORTOISE_OAUTH_DCR_PER_HOUR", "1")
+        monkeypatch.setenv("TORTOISE_OAUTH_DCR_ANON_AGGREGATE_PER_HOUR",
+                           "1000000")
+        # A first-time trusted IP is an UNTRACKED key — a design that charges
+        # trusted traffic to the per-key/overflow path 429s the second
+        # request here (PER_HOUR=1). Discriminates by construction.
+        assert _dcr_post(tc, ip=_DCR_TRUSTED).status_code == 201
+        assert _dcr_post(tc, ip=_DCR_TRUSTED).status_code == 201
+        assert not _ha_mod._OAUTH_DCR_BUCKETS
+        assert not _ha_mod._OAUTH_DCR_ANON.get(_ha_mod._OAUTH_DCR_ANON_KEY)
+        # ...then the trusted aggregate binds (one CIDR = one bucket)
+        r = _dcr_post(tc, ip=_DCR_TRUSTED_ALT)
+        assert r.status_code == 429, r.text
+        assert "Retry-After" in r.headers
+
+    # ── (j) flag unset ⇒ a spoofed Fly-Client-IP is NOT exempt ──────────
+    def test_j_flag_unset_spoofed_header_not_exempt(self, api_client,
+                                                    monkeypatch):
+        tc, _ = api_client
+        monkeypatch.delenv("TORTOISE_TRUST_FLY_CLIENT_IP", raising=False)
+        monkeypatch.setenv("TORTOISE_OAUTH_DCR_ANON_AGGREGATE_PER_HOUR",
+                           "1000000")
+        assert _dcr_post(tc, ip=_DCR_TRUSTED).status_code == 201
+        assert not _ha_mod._OAUTH_DCR_TRUSTED
+        # ClientIPMiddleware fell back to request.client.host ("testclient")
+        assert _ha_mod._OAUTH_DCR_MALFORMED_KEY in _ha_mod._OAUTH_DCR_BUCKETS
+
+    # ── (k) flag set + no Fly header ⇒ a spoofed XFF is NOT exempt ──────
+    def test_k_flag_set_xff_not_trusted(self, api_client, monkeypatch):
+        tc, _ = api_client
+        monkeypatch.setenv("TORTOISE_OAUTH_DCR_ANON_AGGREGATE_PER_HOUR",
+                           "1000000")
+        # XFF is set to an address INSIDE the trusted range, so an impl that
+        # wrongly read XFF would exempt it.
+        assert _dcr_post(tc, headers={"X-Forwarded-For": _DCR_TRUSTED}
+                         ).status_code == 201
+        assert not _ha_mod._OAUTH_DCR_TRUSTED
+        assert _ha_mod._OAUTH_DCR_MALFORMED_KEY in _ha_mod._OAUTH_DCR_BUCKETS
+
+    # ── (l) the anonymous aggregate binds across distinct keys ──────────
+    def test_l_anonymous_aggregate_binds_across_keys(self, api_client,
+                                                    monkeypatch):
+        tc, _ = api_client
+        monkeypatch.setenv("TORTOISE_OAUTH_DCR_ANON_AGGREGATE_PER_HOUR", "3")
+        monkeypatch.setenv("TORTOISE_OAUTH_DCR_PER_HOUR", "10")
+        for i in range(3):
+            assert _dcr_post(tc, ip=f"203.0.113.{i}").status_code == 201
+        r = _dcr_post(tc, ip="203.0.113.99")
+        assert r.status_code == 429, r.text
+        assert len(_ha_mod._OAUTH_DCR_ANON[_ha_mod._OAUTH_DCR_ANON_KEY]) == 3
+        assert "203.0.113.99" not in _ha_mod._OAUTH_DCR_BUCKETS
+
+    # ── (m) atomicity both directions + overflow charges the aggregate ──
+    def test_m_atomicity_and_overflow_charges_aggregate(self, api_client,
+                                                        monkeypatch):
+        tc, _ = api_client
+        monkeypatch.setenv("TORTOISE_OAUTH_DCR_PER_HOUR", "10")
+        # direction 1: a 429 charges nothing and inserts nothing
+        monkeypatch.setenv("TORTOISE_OAUTH_DCR_ANON_AGGREGATE_PER_HOUR", "1")
+        assert _dcr_post(tc, ip="203.0.113.1").status_code == 201
+        assert _dcr_post(tc, ip="203.0.113.2").status_code == 429
+        assert "203.0.113.2" not in _ha_mod._OAUTH_DCR_BUCKETS
+        assert len(_ha_mod._OAUTH_DCR_ANON[_ha_mod._OAUTH_DCR_ANON_KEY]) == 1
+        # direction 2 (D9): an overflow charge hits overflow AND the aggregate
+        _dcr_reset()
+        monkeypatch.setenv("TORTOISE_OAUTH_DCR_STORE_CAP", "0")
+        monkeypatch.setenv("TORTOISE_OAUTH_DCR_PER_HOUR", "1")
+        monkeypatch.setenv("TORTOISE_OAUTH_DCR_ANON_AGGREGATE_PER_HOUR", "50")
+        assert _dcr_post(tc, ip="203.0.113.3").status_code == 201
+        assert not _ha_mod._OAUTH_DCR_BUCKETS
+        assert len(_ha_mod._OAUTH_DCR_OVERFLOW[
+            _ha_mod._OAUTH_DCR_OVERFLOW_KEY]) == 1
+        assert len(_ha_mod._OAUTH_DCR_ANON[_ha_mod._OAUTH_DCR_ANON_KEY]) == 1
+
+    # ── (n) malformed inputs fail closed, never 500 ─────────────────────
+    def test_n_malformed_inputs_fail_closed(self, api_client, monkeypatch):
+        tc, _ = api_client
+        monkeypatch.setenv("TORTOISE_OAUTH_DCR_ANON_AGGREGATE_PER_HOUR",
+                           "1000000")
+        # malformed client IP → the single constant key, no 500
+        assert _dcr_post(tc, ip="not-an-ip").status_code == 201
+        assert _ha_mod._OAUTH_DCR_MALFORMED_KEY in _ha_mod._OAUTH_DCR_BUCKETS
+        # a mixed CIDR list keeps the valid entry and skips the malformed one
+        monkeypatch.setenv("TORTOISE_OAUTH_DCR_TRUSTED_CIDRS",
+                           "not-a-cidr, 160.79.104.0/21 ,, also-bad")
+        assert _dcr_post(tc, ip=_DCR_TRUSTED).status_code == 201
+        assert list(_ha_mod._OAUTH_DCR_TRUSTED) == ["160.79.104.0/21"]
+        # out-of-range prefixes fall back to 64 — never clamp to 0/1 (which
+        # would collapse EVERY IPv6 address into one bucket)
+        for bad in ("0", "129", "-1", "abc", "64x"):
+            _dcr_reset()
+            monkeypatch.setenv("TORTOISE_OAUTH_DCR_IPV6_PREFIX", bad)
+            assert _dcr_post(tc, ip="2001:db8:aaaa:1::1").status_code == 201
+            assert _dcr_post(tc, ip="2001:db8:aaaa:2::1").status_code == 201
+            keys = list(_ha_mod._OAUTH_DCR_BUCKETS)
+            assert len(keys) == 2, (bad, keys)
+
+    def test_n2_missing_client_early_returns(self, api_client):
+        """request.client is None ⇒ early-return like the shared primitive:
+        no AttributeError/500, no charge, no bucket (#2866 D6)."""
+        _dcr_reset()
+        req = Request({"type": "http", "method": "POST", "path": "/register",
+                       "headers": [], "query_string": b""})
+        asyncio.run(_ha_mod._check_oauth_dcr_rate_limit(req))
+        assert not _ha_mod._OAUTH_DCR_BUCKETS
+        assert not _ha_mod._OAUTH_DCR_ANON
+        assert not _ha_mod._OAUTH_DCR_TRUSTED
+
+    # ── (o1) the zero rule denies the FIRST request, per dimension ──────
+    def test_o1_zero_rate_knobs_deny_first_request(self, api_client,
+                                                   monkeypatch):
+        tc, _ = api_client
+        # per-key dimension
+        monkeypatch.setenv("TORTOISE_OAUTH_DCR_PER_HOUR", "0")
+        r = _dcr_post(tc, ip="203.0.113.1")
+        assert r.status_code == 429, r.text
+        assert r.headers["Retry-After"] == "3600"
+        assert not _ha_mod._OAUTH_DCR_BUCKETS
+        # anonymous-aggregate dimension (per-key must pass first)
+        _dcr_reset()
+        monkeypatch.setenv("TORTOISE_OAUTH_DCR_PER_HOUR", "10")
+        monkeypatch.setenv("TORTOISE_OAUTH_DCR_ANON_AGGREGATE_PER_HOUR", "0")
+        r = _dcr_post(tc, ip="203.0.113.2")
+        assert r.status_code == 429, r.text
+        assert r.headers["Retry-After"] == "3600"
+        assert not _ha_mod._OAUTH_DCR_BUCKETS, "a 429 must not insert a bucket"
+        assert not _ha_mod._OAUTH_DCR_ANON.get(_ha_mod._OAUTH_DCR_ANON_KEY)
+        # trusted-aggregate dimension
+        _dcr_reset()
+        monkeypatch.setenv("TORTOISE_OAUTH_DCR_TRUSTED_PER_HOUR", "0")
+        r = _dcr_post(tc, ip=_DCR_TRUSTED)
+        assert r.status_code == 429, r.text
+        assert r.headers["Retry-After"] == "3600"
+        assert not _ha_mod._OAUTH_DCR_TRUSTED
+
+    # ── (o2) PER_HOUR=1 → 201 then 429 ─────────────────────────────────
+    def test_o2_per_hour_one(self, api_client, monkeypatch):
+        tc, _ = api_client
+        monkeypatch.setenv("TORTOISE_OAUTH_DCR_PER_HOUR", "1")
+        monkeypatch.setenv("TORTOISE_OAUTH_DCR_ANON_AGGREGATE_PER_HOUR", "1000")
+        assert _dcr_post(tc, ip="203.0.113.5").status_code == 201
+        assert _dcr_post(tc, ip="203.0.113.5").status_code == 429
+
+    # ── (o3) STORE_CAP=0 → served by overflow, then its cap binds ───────
+    def test_o3_store_cap_zero_uses_overflow(self, api_client, monkeypatch):
+        tc, _ = api_client
+        monkeypatch.setenv("TORTOISE_OAUTH_DCR_STORE_CAP", "0")
+        monkeypatch.setenv("TORTOISE_OAUTH_DCR_ANON_AGGREGATE_PER_HOUR",
+                           "1000000")
+        assert _dcr_post(tc, ip="203.0.113.1").status_code == 201
+        assert not _ha_mod._OAUTH_DCR_BUCKETS
+        assert len(_ha_mod._OAUTH_DCR_OVERFLOW[
+            _ha_mod._OAUTH_DCR_OVERFLOW_KEY]) == 1
+        for i in range(2, 21):  # overflow charges 2..20 (= derived cap)
+            assert _dcr_post(tc, ip=f"203.0.113.{i}").status_code == 201
+        r = _dcr_post(tc, ip="203.0.113.21")
+        assert r.status_code == 429, r.text
+        assert not _ha_mod._OAUTH_DCR_BUCKETS
+
+    # ── (p) scope vectors + AS metadata + offline_access round trip ─────
+    def test_p_dcr_scope_vectors(self, api_client, session_user, monkeypatch):
+        tc, _ = api_client
+        assert SCOPES_SUPPORTED == ["mcp"]
+        assert set(SCOPES_SUPPORTED) <= set(SCOPES_ACCEPTED)
+        assert "offline_access" in SCOPES_ACCEPTED
+        # AS metadata advertises the ACCEPTED superset; the PRM document keeps
+        # the client-facing default set.
+        as_meta = tc.get("/.well-known/oauth-authorization-server").json()
+        assert as_meta["scopes_supported"] == SCOPES_ACCEPTED
+        prm = tc.get("/.well-known/oauth-protected-resource").json()
+        assert prm["scopes_supported"] == SCOPES_SUPPORTED
+        for scope in (None, "mcp", "mcp offline_access", "offline_access"):
+            body = {"client_name": "scope-vector", "redirect_uris": [REDIRECT]}
+            if scope is not None:
+                body["scope"] = scope
+            r = tc.post("/register", json=body)
+            assert r.status_code == 201, (scope, r.text)
+        r = tc.post("/register", json={"client_name": "bad",
+                                        "redirect_uris": [REDIRECT],
+                                        "scope": "admin"})
+        assert r.status_code == 400
+        assert r.json()["error"] == "invalid_client_metadata"
+        assert "offline_access" in r.json()["error_description"]
+        # the offline_access round trip mints a refresh token that works
+        session_user(_U1)
+        reg = tc.post("/register", json={
+            "client_name": "offline",
+            "redirect_uris": [REDIRECT],
+            "scope": "mcp offline_access"}).json()
+        verifier, challenge = _pkce()
+        r = tc.post("/oauth/consent", json={
+            "client_id": reg["client_id"], "redirect_uri": REDIRECT,
+            "response_type": "code", "code_challenge": challenge,
+            "code_challenge_method": "S256", "state": "st-1",
+            "scope": "mcp offline_access", "resource": None},
+            headers={"Authorization": "Bearer fake-session-jwt"})
+        assert r.status_code == 200, r.text
+        tok = _exchange(tc, client_id=reg["client_id"], code=r.json()["code"],
+                        verifier=verifier)
+        assert tok.status_code == 200, tok.text
+        assert tok.json()["refresh_token"].startswith("ort_")
+        rr = tc.post("/oauth/token", data={
+            "grant_type": "refresh_token",
+            "refresh_token": tok.json()["refresh_token"],
+            "client_id": reg["client_id"]})
+        assert rr.status_code == 200, rr.text
+
+    # ── (q) RATE_LIMIT_DISABLED opts out ────────────────────────────────
+    def test_q_rate_limit_disabled_is_a_no_op(self, api_client, monkeypatch):
+        tc, _ = api_client
+        monkeypatch.setenv("RATE_LIMIT_DISABLED", "1")
+        monkeypatch.setenv("TORTOISE_OAUTH_DCR_PER_HOUR", "0")
+        assert _dcr_post(tc, ip="203.0.113.1").status_code == 201
+        assert not _ha_mod._OAUTH_DCR_BUCKETS
+        assert not _ha_mod._OAUTH_DCR_ANON
+
+    # ── (r) default constants pin the stated policy ─────────────────────
+    def test_r_defaults_pin_the_stated_policy(self):
+        assert _ha_mod._OAUTH_DCR_PER_HOUR_DEFAULT == 20
+        assert _ha_mod._OAUTH_DCR_ANON_AGGREGATE_PER_HOUR_DEFAULT == 600
+        assert _ha_mod._OAUTH_DCR_TRUSTED_PER_HOUR_DEFAULT == 1200
+        assert _ha_mod._OAUTH_DCR_STORE_CAP_DEFAULT == 256
+        assert _ha_mod._OAUTH_DCR_IPV6_PREFIX_DEFAULT == 64
+        assert _ha_mod._OAUTH_DCR_WINDOW_S == 3600
+        assert _ha_mod._OAUTH_DCR_TRUSTED_CIDRS_DEFAULT == "160.79.104.0/21"
+        # the cap must stay below the anonymous aggregate or the
+        # reject-new/overflow branch is dead at shipped defaults
+        assert (_ha_mod._OAUTH_DCR_STORE_CAP_DEFAULT
+                < _ha_mod._OAUTH_DCR_ANON_AGGREGATE_PER_HOUR_DEFAULT)
+        # derived distinct-new-anonymous-key ceiling (STORE_CAP + PER_HOUR)
+        assert (_ha_mod._OAUTH_DCR_STORE_CAP_DEFAULT
+                + _ha_mod._OAUTH_DCR_PER_HOUR_DEFAULT) == 276
+        # unset env yields exactly the stated defaults (call-time reads)
+        for name, attr in (
+            ("TORTOISE_OAUTH_DCR_PER_HOUR", "_OAUTH_DCR_PER_HOUR_DEFAULT"),
+            ("TORTOISE_OAUTH_DCR_ANON_AGGREGATE_PER_HOUR",
+             "_OAUTH_DCR_ANON_AGGREGATE_PER_HOUR_DEFAULT"),
+            ("TORTOISE_OAUTH_DCR_TRUSTED_PER_HOUR",
+             "_OAUTH_DCR_TRUSTED_PER_HOUR_DEFAULT"),
+            ("TORTOISE_OAUTH_DCR_STORE_CAP", "_OAUTH_DCR_STORE_CAP_DEFAULT"),
+        ):
+            assert os.environ.get(name) is None, f"{name} leaked into this test"
+            assert getattr(_ha_mod, attr) == int(
+                _ha_mod._int_env(name, getattr(_ha_mod, attr)))
+
+    # ── (s) registry-mode 503 precedes the limiter (no charge) ──────────
+    def test_s_registry_503_precedes_limiter(self, api_client, monkeypatch):
+        _dcr_reset()
+        monkeypatch.setenv("TORTOISE_CONTROL_PLANE", "registry")
+        monkeypatch.delenv("SUPABASE_URL", raising=False)
+        monkeypatch.delenv("SUPABASE_SERVICE_ROLE_KEY", raising=False)
+        with tempfile.TemporaryDirectory() as tmpdir, \
+                patched_tortoise_sdk(os.path.join(tmpdir, "r.db")), \
+                TestClient(app) as tc:
+            r = tc.post("/register", json={"client_name": "x",
+                                            "redirect_uris": [REDIRECT]})
+            assert r.status_code == 503
+        assert not _ha_mod._OAUTH_DCR_BUCKETS
+        assert not _ha_mod._OAUTH_DCR_ANON
+
+    # ── (t) parity: the DCR window helpers vs the shared primitive ──────
+    def test_t_window_helper_parity_with_primitive(self, monkeypatch):
+        now = 1_800_000_000.0
+        monkeypatch.setattr(_ha_mod.time, "time", lambda: now)
+        rows = (
+            [0.0],                       # just charged
+            [3600.0],                    # exactly at the boundary → pruned
+            [3599.5],                    # just inside
+            [0.0, 3599.75],              # two in-window entries
+            [3600.0, 3700.0],            # everything pruned
+            [3599.6666667, 100.0],       # non-integer remainder
+            [0.0, 1800.0, 3599.9],       # three in-window entries
+        )
+        for row in rows:
+            store = {"9.9.9.9": [now - age for age in row]}
+            req = Request({"type": "http", "method": "POST", "path": "/x",
+                           "headers": [], "query_string": b"",
+                           "client": ("9.9.9.9", 1234)})
+            pruned = _ha_mod._dcr_prune_window(list(store["9.9.9.9"]), now,
+                                               _ha_mod._OAUTH_DCR_WINDOW_S)
+            try:
+                asyncio.run(_ha_mod._check_ip_bucket_rate_limit(
+                    req, buckets=store, lock=asyncio.Lock(), limit=1,
+                    window_s=_ha_mod._OAUTH_DCR_WINDOW_S, detail="parity",
+                    retry_after_s=None, defer_charge=True))
+                denied = False
+            except HTTPException as exc:
+                denied = True
+                assert exc.status_code == 429
+                assert exc.headers["Retry-After"] == str(
+                    _ha_mod._dcr_retry_after_s(pruned, now,
+                                               _ha_mod._OAUTH_DCR_WINDOW_S))
+            assert denied == bool(pruned), (row, denied, pruned)
+            assert store["9.9.9.9"] == pruned, (row, store["9.9.9.9"], pruned)
+
+    # ── (u) concurrency: atomicity under interleaving ───────────────────
+    @staticmethod
+    def _burst(ips):
+        async def _run():
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(transport=transport,
+                                         base_url="http://test") as ac:
+                return await asyncio.gather(*[
+                    ac.post("/register",
+                            json={"client_name": "burst",
+                                  "redirect_uris": [REDIRECT]},
+                            headers={"Fly-Client-IP": ip})
+                    for ip in ips])
+        return asyncio.run(_run())
+
+    def test_u1_concurrent_same_key_single_winner(self, api_client, monkeypatch):
+        monkeypatch.setenv("TORTOISE_OAUTH_DCR_PER_HOUR", "1")
+        monkeypatch.setenv("TORTOISE_OAUTH_DCR_ANON_AGGREGATE_PER_HOUR",
+                           "1000000")
+        results = self._burst(["203.0.113.77"] * 6)
+        codes = sorted(r.status_code for r in results)
+        assert codes == [201] + [429] * 5, codes
+        assert len(_ha_mod._OAUTH_DCR_BUCKETS["203.0.113.77"]) == 1
+
+    def test_u2_concurrent_distinct_keys_respect_cap(self, api_client,
+                                                     monkeypatch):
+        monkeypatch.setenv("TORTOISE_OAUTH_DCR_STORE_CAP", "1")
+        monkeypatch.setenv("TORTOISE_OAUTH_DCR_PER_HOUR", "20")
+        monkeypatch.setenv("TORTOISE_OAUTH_DCR_ANON_AGGREGATE_PER_HOUR",
+                           "1000000")
+        results = self._burst([f"203.0.113.{i}" for i in range(1, 5)])
+        assert all(r.status_code == 201 for r in results), [
+            r.text for r in results]
+        assert len(_ha_mod._OAUTH_DCR_BUCKETS) <= 1
+
+    # ── (v) a repeat charge on a tracked key consumes the aggregate ─────
+    def test_v_repeat_charge_consumes_aggregate(self, api_client, monkeypatch):
+        tc, _ = api_client
+        monkeypatch.setenv("TORTOISE_OAUTH_DCR_ANON_AGGREGATE_PER_HOUR", "3")
+        monkeypatch.setenv("TORTOISE_OAUTH_DCR_PER_HOUR", "10")
+        for _ in range(3):
+            assert _dcr_post(tc, ip="203.0.113.9").status_code == 201
+        assert _dcr_post(tc, ip="203.0.113.9").status_code == 429
+        assert len(_ha_mod._OAUTH_DCR_ANON[_ha_mod._OAUTH_DCR_ANON_KEY]) == 3
+
+    # ── (w) trusted traffic does not consume the anonymous aggregate ────
+    def test_w_trusted_does_not_consume_anonymous_aggregate(self, api_client,
+                                                            monkeypatch):
+        tc, _ = api_client
+        monkeypatch.setenv("TORTOISE_OAUTH_DCR_ANON_AGGREGATE_PER_HOUR", "1")
+        monkeypatch.setenv("TORTOISE_OAUTH_DCR_TRUSTED_PER_HOUR", "100")
+        assert _dcr_post(tc, ip=_DCR_TRUSTED).status_code == 201
+        assert not _ha_mod._OAUTH_DCR_ANON.get(_ha_mod._OAUTH_DCR_ANON_KEY)
+        assert _dcr_post(tc, ip="203.0.113.4").status_code == 201
+
+    # ── (x) TRUSTED_CIDRS is a live knob (no cache, no falsy-coalesce) ──
+    def test_x_trusted_cidrs_is_a_live_knob(self, api_client, monkeypatch):
+        tc, _ = api_client
+        monkeypatch.setenv("TORTOISE_OAUTH_DCR_ANON_AGGREGATE_PER_HOUR",
+                           "1000000")
+        monkeypatch.setenv("TORTOISE_OAUTH_DCR_PER_HOUR", "1")
+        monkeypatch.setenv("TORTOISE_OAUTH_DCR_TRUSTED_CIDRS", _DCR_CUSTOM_NET)
+        # an address inside the DEFAULT range is no longer exempt (so an
+        # `or DEFAULT` read would fail this assertion)
+        assert _dcr_post(tc, ip=_DCR_TRUSTED).status_code == 201
+        assert _DCR_TRUSTED in _ha_mod._OAUTH_DCR_BUCKETS
+        assert not _ha_mod._OAUTH_DCR_TRUSTED
+        assert _dcr_post(tc, ip=_DCR_TRUSTED).status_code == 429
+        # an address in the CUSTOM range is exempt
+        assert _dcr_post(tc, ip="198.51.100.5").status_code == 201
+        assert _DCR_CUSTOM_NET in _ha_mod._OAUTH_DCR_TRUSTED
+        # an EMPTY value disables the exemption (the fail-closed lever)
+        _dcr_reset()
+        monkeypatch.setenv("TORTOISE_OAUTH_DCR_TRUSTED_CIDRS", "")
+        assert _dcr_post(tc, ip=_DCR_TRUSTED).status_code == 201
+        assert _DCR_TRUSTED in _ha_mod._OAUTH_DCR_BUCKETS
+        assert not _ha_mod._OAUTH_DCR_TRUSTED
+
+    # ── (y) IPV6_PREFIX is a live knob ──────────────────────────────────
+    def test_y_ipv6_prefix_is_a_live_knob(self, api_client, monkeypatch):
+        tc, _ = api_client
+        monkeypatch.setenv("TORTOISE_OAUTH_DCR_ANON_AGGREGATE_PER_HOUR",
+                           "1000000")
+        a, b = "2001:db8:aaaa:1::1", "2001:db8:aaaa:2::1"
+        # shipped default /64 → the pair is distinct
+        assert _dcr_post(tc, ip=a).status_code == 201
+        assert _dcr_post(tc, ip=b).status_code == 201
+        assert len(_ha_mod._OAUTH_DCR_BUCKETS) == 2
+        # /48 → the pair collapses (a difference in the 3rd hextet would
+        # collapse under neither prefix, which is why the 4th is used)
+        _dcr_reset()
+        monkeypatch.setenv("TORTOISE_OAUTH_DCR_IPV6_PREFIX", "48")
+        assert _dcr_post(tc, ip=a).status_code == 201
+        assert _dcr_post(tc, ip=b).status_code == 201
+        keys = list(_ha_mod._OAUTH_DCR_BUCKETS)
+        assert keys == ["2001:db8:aaaa::/48"], keys
+        assert len(_ha_mod._OAUTH_DCR_BUCKETS[keys[0]]) == 2
