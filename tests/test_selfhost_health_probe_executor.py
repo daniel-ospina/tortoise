@@ -61,6 +61,42 @@ THREAD_PREFIXES = {
     "_READY_PROBE_EXECUTOR": "selfhost-ready-probe",
 }
 
+#: pool -> the FEWEST workers it may have.
+#:
+#: Liveness 2: its probe is inner-bounded (``monitoring.PROBE_TIMEOUT``), so a
+#: worker always comes back; two absorbs an overlapping poll.
+#:
+#: Readiness 6: this pool must not be NARROWER than the shared default executor
+#: it replaced — ``min(32, cpu+4)`` = 6 on the 2-vCPU hosted box. Isolation is
+#: the fix; shrinking the pool is not. At 2, three concurrent ``/health/ready``
+#: requests queue the third, which then spends its whole
+#: ``_READY_PROBE_TIMEOUT_S`` waiting for a worker and reports a false 503 for a
+#: healthy DB — the defect this change exists to remove, re-entered through
+#: readiness fan-in. Exercised by
+#: ``test_readiness_fan_in_does_not_produce_a_false_503``.
+POOL_MIN_WORKERS = {
+    "_LIVENESS_PROBE_EXECUTOR": 2,
+    "_READY_PROBE_EXECUTOR": 6,
+}
+
+
+def _prod_max_workers(pool: str) -> int:
+    """The pool's real ``max_workers``, read from the source under test.
+
+    The fixture must mirror PRODUCTION's width, not invent its own: a fixture
+    that hardcodes 2 would make the behavioural tests validate the fixture and
+    let a too-narrow production pool pass. Falls back to the pinned minimum on
+    pre-fix code, where the pool does not exist.
+    """
+    try:
+        ctor = _module_assign(pool).value
+    except AssertionError:
+        return POOL_MIN_WORKERS[pool]
+    if not isinstance(ctor, ast.Call) or getattr(ctor.func, "id", None) != "ThreadPoolExecutor":
+        return POOL_MIN_WORKERS[pool]
+    value = next((kw.value for kw in ctor.keywords if kw.arg == "max_workers"), None)
+    return value.value if isinstance(value, ast.Constant) and isinstance(value.value, int) else POOL_MIN_WORKERS[pool]
+
 
 # ── AST helpers ────────────────────────────────────────────────────────────
 
@@ -131,8 +167,13 @@ def test_probe_pool_is_module_level_sized_and_named(pool):
     assert not (
         isinstance(kwargs["max_workers"], ast.Constant) and kwargs["max_workers"].value is None
     ), f"{pool} with max_workers=None is the default (shared, cpu-derived) sizing"
-    assert isinstance(kwargs["max_workers"], ast.Constant) and kwargs["max_workers"].value >= 2, (
-        f"{pool} must hold two concurrent probes (a poll overlapping the deploy gate)"
+    assert isinstance(kwargs["max_workers"], ast.Constant) and isinstance(
+        kwargs["max_workers"].value, int
+    ), f"{pool} must pin an integer max_workers"
+    assert kwargs["max_workers"].value >= POOL_MIN_WORKERS[pool], (
+        f"{pool} has max_workers={kwargs['max_workers'].value}, below the required "
+        f"{POOL_MIN_WORKERS[pool]} — a pool narrower than the shared default executor "
+        "it replaced converts readiness fan-in into a queue-timeout false 503"
     )
     assert "thread_name_prefix" in kwargs, (
         f"{pool} is unnamed — invisible in a thread dump, so a starved or wedged "
@@ -159,8 +200,19 @@ def test_liveness_and_readiness_do_not_share_a_pool():
     ``test_health_ready_nonblocking.py``'s outer>inner bound pin.)
     """
     distinct = set()
+    constructions = {}
     for handler, pool in POOLS.items():
         node = _handler(handler)
+        # The pin must guard the RESOURCE, not the spelling of its name:
+        # ``_READY_PROBE_EXECUTOR = _LIVENESS_PROBE_EXECUTOR`` keeps two distinct
+        # names while sharing one pool, and the handler-level assertions below
+        # would not notice. Each pool must be its own construction.
+        ctor = _module_assign(pool).value
+        assert isinstance(ctor, ast.Call) and getattr(ctor.func, "id", None) == "ThreadPoolExecutor", (
+            f"{pool} is not its own ThreadPoolExecutor construction — aliasing one pool "
+            "under two names reintroduces the shared-pool defect this split exists to fix"
+        )
+        constructions[pool] = ctor
         submits = list(_calls(_walk_own_body(node), func_name="_submit_probe"))
         assert len(submits) == 1, f"selfhost {handler} must dispatch exactly one probe"
         args = submits[0].args
@@ -179,6 +231,9 @@ def test_liveness_and_readiness_do_not_share_a_pool():
             "handlers must not share a pool"
         )
     assert distinct == set(POOLS.values()), "the handlers do not use two distinct pools"
+    assert len({id(c) for c in constructions.values()}) == len(constructions), (
+        "the two probe pools are the same AST node — they must be separate objects"
+    )
 
 
 def test_submit_probe_targets_the_given_pool_only():
@@ -309,8 +364,12 @@ def selfhost(monkeypatch, tmp_path):
 
     pools = {}
     for pool_name in POOLS.values():
+        # Production's real width, read from the source — never a fixture-local
+        # guess, which would let a too-narrow production pool pass the
+        # behavioural tests (see ``test_readiness_fan_in_does_not_produce_a_false_503``).
         pool = concurrent.futures.ThreadPoolExecutor(
-            max_workers=2, thread_name_prefix=THREAD_PREFIXES[pool_name]
+            max_workers=_prod_max_workers(pool_name),
+            thread_name_prefix=THREAD_PREFIXES[pool_name],
         )
         pools[pool_name] = pool
         # raising=False: on the PRE-FIX code these attributes do not exist, and the
@@ -388,23 +447,28 @@ def test_health_answers_on_its_own_pool_while_the_default_pool_is_saturated(
 
     async def scenario():
         async with _Saturated(), _client(selfhost) as ac:
+            # Warm the process first: the FIRST request in a process pays a
+            # one-time startup cost (measured ~1.6 s here, independent of this
+            # change), which would otherwise be charged to the endpoint and make
+            # a correct implementation look starved.
+            await ac.get("/health")
             started = time.perf_counter()
-            r = await asyncio.wait_for(ac.get("/health"), timeout=3.0)
+            r = await asyncio.wait_for(ac.get("/health"), timeout=8.0)
             return r, time.perf_counter() - started
 
     r, elapsed = asyncio.run(scenario())
 
     assert r.status_code == 200, r.text
     assert r.json()["status"] == "ok"
-    assert len(seen) == 1, (
-        "the /health DB probe did not run exactly once — a short-circuiting "
+    assert len(seen) == 2, (
+        "the /health DB probe did not run once per request — a short-circuiting "
         "liveness handler must not be able to pass this test"
     )
-    assert seen[0].startswith("selfhost-liveness-probe"), (
-        f"the probe ran on thread {seen[0]!r}, not the dedicated liveness pool — "
-        "it is still riding a shared executor (#3035)"
+    assert all(t.startswith("selfhost-liveness-probe") for t in seen), (
+        f"probes ran on threads {seen}, not the dedicated liveness pool — "
+        "they are still riding a shared executor (#3035)"
     )
-    assert elapsed < 3.0, (
+    assert elapsed < 8.0, (
         f"/health took {elapsed:.2f}s while the default executor was saturated — "
         "the probe is queueing behind unrelated work (#3287)"
     )
@@ -421,8 +485,9 @@ def test_ready_does_not_lie_while_the_default_pool_is_saturated(selfhost, monkey
 
     async def scenario():
         async with _Saturated(), _client(selfhost) as ac:
+            await ac.get("/health/ready")  # warm-up: pay startup cost unmeasured
             started = time.perf_counter()
-            r = await asyncio.wait_for(ac.get("/health/ready"), timeout=3.0)
+            r = await asyncio.wait_for(ac.get("/health/ready"), timeout=8.0)
             return r, time.perf_counter() - started
 
     r, elapsed = asyncio.run(scenario())
@@ -433,11 +498,58 @@ def test_ready_does_not_lie_while_the_default_pool_is_saturated(selfhost, monkey
         "starved probe is a false not-ready that fails the publish (#3287)"
     )
     assert r.json()["status"] == "ready"
-    assert len(seen) == 1, "the readiness probe did not run exactly once"
-    assert seen[0].startswith("selfhost-ready-probe"), (
-        f"the readiness probe ran on thread {seen[0]!r}, not the dedicated readiness pool"
+    assert len(seen) == 2, "the readiness probe did not run once per request"
+    assert all(t.startswith("selfhost-ready-probe") for t in seen), (
+        f"readiness probes ran on threads {seen}, not the dedicated readiness pool"
     )
-    assert elapsed < 3.0, f"/health/ready took {elapsed:.2f}s while starved (#3287)"
+    assert elapsed < 8.0, f"/health/ready took {elapsed:.2f}s while starved (#3287)"
+
+
+def test_readiness_fan_in_does_not_produce_a_false_503(selfhost, monkeypatch):
+    """The readiness pool must not be NARROWER than the executor it replaced.
+
+    ``/health/ready``'s worker parks for the whole of ``_get_proj()`` (no inner
+    bound — see the module comment in selfhost.py), and the OUTER
+    ``_READY_PROBE_TIMEOUT_S`` cancels the await WITHOUT freeing it. So a pool of
+    width W serves only W concurrent probes: request W+1 waits for a worker,
+    burns its entire bound queueing, and is answered 503 for a HEALTHY database —
+    exactly the false not-ready this change removes, re-entered through readiness
+    fan-in rather than through unrelated load. The pre-fix shared executor was
+    ``min(32, cpu+4)`` (6 on the 2-vCPU hosted box); a 2-worker pool silently
+    gives 4 of those back.
+
+    Arithmetic: probe 0.5 s held, bound 1.2 s, SIX concurrent requests. At width
+    >= 6 every probe starts at t=0 and finishes at 0.5 s < 1.2 s. At width 2 the
+    last two start at t=1.0 s and cannot answer before 1.5 s, past the bound.
+    Margins are ~2.4x on both sides, so this is not a knife-edge race.
+    """
+    held = 0.5
+    bound = 1.2
+    concurrent_requests = 6
+    monkeypatch.setattr(selfhost, "_READY_PROBE_TIMEOUT_S", bound)
+    monkeypatch.setattr(_StubSDK, "_get_proj", lambda self: time.sleep(held))
+
+    async def scenario():
+        async with _client(selfhost) as ac:
+            # Warm-up: the first request in a process pays a one-time startup
+            # cost, which would otherwise be charged to the six measured
+            # requests and could time them out for reasons unrelated to width.
+            await ac.get("/health/ready")
+            results = await asyncio.gather(
+                *(ac.get("/health/ready") for _ in range(concurrent_requests))
+            )
+            return results
+
+    results = asyncio.run(scenario())
+    codes = [r.status_code for r in results]
+
+    assert codes == [200] * concurrent_requests, (
+        f"{codes.count(503)} of {concurrent_requests} concurrent /health/ready requests "
+        f"returned 503 for a HEALTHY database (probe held {held}s, bound {bound}s, "
+        f"pool max_workers={_prod_max_workers('_READY_PROBE_EXECUTOR')}) — the pool is "
+        "too narrow: queued requests time out before a worker ever runs their probe, "
+        "and publish-selfhost.yml fails the release on that false 503"
+    )
 
 
 def test_liveness_answers_while_readiness_workers_are_parked(selfhost, monkeypatch):
@@ -484,8 +596,9 @@ def test_liveness_answers_while_readiness_workers_are_parked(selfhost, monkeypat
 
 
 def test_readiness_pool_actually_has_two_usable_workers(selfhost, monkeypatch):
-    """Both readiness workers must be usable concurrently. A single-slot pool
-    would serialise the deploy gate's probe behind any other readiness poll."""
+    """At least two readiness workers must be usable concurrently (the pool is
+    wider — see ``POOL_MIN_WORKERS``). A single-slot pool would serialise the
+    deploy gate's probe behind any other readiness poll."""
     entered = threading.Event()
     release = threading.Event()
     threads: list[str] = []
@@ -533,26 +646,53 @@ def test_readiness_pool_actually_has_two_usable_workers(selfhost, monkeypatch):
 
 def test_hung_db_still_fails_closed_within_the_bound(selfhost, monkeypatch):
     """#2988's guarantee must survive the new dispatch: a black-holed DB is
-    REPORTED (503) within the bound, never waited out."""
+    REPORTED (503) within the bound, never waited out.
+
+    Asserted SEMANTICALLY rather than on a tight wall-clock margin: the answer
+    must arrive while the probe is still parked. A clock margin is not a safe
+    proxy here — this test can run first in a process, where one-time startup
+    costs a large multiple of the 0.2 s bound (measured 1.81 s) with no bearing
+    on the bound, so a tight ceiling fails a correct implementation.
+    """
+    dispatched = []
     release = threading.Event()
     monkeypatch.setattr(selfhost, "_READY_PROBE_TIMEOUT_S", 0.2)
-    monkeypatch.setattr(_StubSDK, "_get_proj", lambda self: release.wait(30))
+
+    def _hang(self):
+        dispatched.append(threading.current_thread().name)
+        release.wait(30)
+
+    monkeypatch.setattr(_StubSDK, "_get_proj", _hang)
 
     async def scenario():
         async with _client(selfhost) as ac:
+            await ac.get("/health/ready")  # warm-up: pay startup cost unmeasured
             started = time.perf_counter()
             try:
                 r = await ac.get("/health/ready")
+                # TWO probes dispatched (warm-up + measured) and the hang still
+                # in force => the measured request answered without its probe
+                # having completed.
+                answered_while_hung = len(dispatched) == 2 and not release.is_set()
             finally:
                 release.set()
-            return r, time.perf_counter() - started
+            return r, time.perf_counter() - started, answered_while_hung
 
-    r, elapsed = asyncio.run(scenario())
+    r, elapsed, answered_while_hung = asyncio.run(scenario())
 
     assert r.status_code == 503, r.text
     assert r.json()["status"] == "not_ready"
-    assert elapsed < 1.5, (
-        f"the endpoint waited {elapsed:.2f}s for a hung probe — the bound is not applied"
+    assert len(dispatched) == 2, (
+        f"the readiness probe was dispatched {len(dispatched)} time(s), expected once per "
+        "request — a handler that skips the probe must not be able to pass this test"
+    )
+    assert answered_while_hung, (
+        "the endpoint did not answer until the probe finished: the 0.2 s bound was "
+        "not applied, so a black-holed DB is waited out (#2988)"
+    )
+    assert elapsed < 8.0, (
+        f"the endpoint waited {elapsed:.2f}s for a hung probe — the answer must arrive "
+        "promptly, not after the 30 s hang"
     )
 
 
