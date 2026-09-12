@@ -175,7 +175,7 @@ config was written (`claude mcp list` shows `tortoise`).
 Create/merge `.cursor/mcp.json` in the project:
 
 ```json
-{ "mcpServers": { "tortoise": { "type": "http", "url": "https://api.premiselabs.co/mcp/", "headers": { "Authorization": "Bearer ${env:TORTOISE_API_KEY}" } } } }
+{ "mcpServers": { "tortoise": { "url": "https://api.premiselabs.co/mcp/", "headers": { "Authorization": "Bearer ${env:TORTOISE_API_KEY}" } } } }
 ```
 
 Set `TORTOISE_API_KEY` in your environment (Cursor settings or shell
@@ -234,7 +234,7 @@ entry — even one that only lives in the home/base config — run the collision
 protocol below BEFORE writing):
 
 ```json
-{ "mcpServers": { "tortoise": { "type": "http", "url": "https://api.premiselabs.co/mcp/", "headers": { "Authorization": "Bearer ${TORTOISE_API_KEY}" } } } }
+{ "mcpServers": { "tortoise": { "url": "https://api.premiselabs.co/mcp/", "headers": { "Authorization": "Bearer ${TORTOISE_API_KEY}" } } } }
 ```
 
 Pi's mcp-client expands plain `${TORTOISE_API_KEY}` (no `env:` prefix).
