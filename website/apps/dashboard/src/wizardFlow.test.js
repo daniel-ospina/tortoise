@@ -40,6 +40,25 @@ test('fork options are self + build + unsure (#2407) with Organization-aware cop
   assert.ok(!/workspace/i.test(copy))
 })
 
+// #3218: reported copy defects on the fork card.
+test('#3218: fork copy is first-person, names the SDK on the build branch, and never contradicts itself', () => {
+  const [self, build, unsure] = WIZARD_FORK_OPTIONS
+  assert.equal(self.label, 'For my internal setup', 'the self option reads in the first person')
+  assert.match(build.description, /Tortoise SDK/,
+    'the build branch ends in an SDK call (connect-build step 2) — the description must name it')
+  assert.match(build.description, /capability catalog/,
+    'the catalog promise stays (the registry-backed list still renders)')
+  // #2407 semantics: ONLY 'unsure' leaves fork NULL, so only it may promise a
+  // later answer. A description that says "you pick once" AND "any time" read
+  // as one self-contradicting sentence (the reported defect).
+  assert.match(unsure.description, /any time/i, 'the deferral path names the later answer')
+  assert.doesNotMatch(unsure.description, /pick once|once per/i,
+    'the set-once consequence belongs on the step sub, not on the deferral option')
+  // the step sub keeps the TRUE set-once fact (server: 409 fork_already_set)
+  assert.match(WIZARD_STEPS[1].sub, /once per Organization/i,
+    'the step states the set-once consequence — it is the only place it can be said')
+})
+
 test('offline fallback mirrors the 3 canonical catalog module names (W8 #2004 endpoint contract)', () => {
   assert.deepEqual(BUILD_CATALOG_PLACEHOLDER.map((m) => m.name), [
     'Session recorder', 'Session extractor', 'Document indexer',
