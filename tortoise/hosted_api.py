@@ -21809,9 +21809,11 @@ async def webhooks_stripe(request: Request):
 # ── DCR capacity policy (#2866) ────────────────────────────────────────
 # RFC 7591 registration is an unauthenticated write surface. The limiter is
 # intentionally NOT the shared `_check_ip_bucket_rate_limit` primitive: that
-# primitive appends BEFORE its 429 check and prunes only *stale* buckets, so
-# an attacker-keyed fresh-key flood grows its store without bound and every
-# request scans the whole store once over `max_entries` (the primitive is left
+# primitive inserts the bucket (`defaultdict`) BEFORE its 429 check and prunes
+# only *stale* buckets, so an attacker-keyed fresh-key flood grows its store
+# without bound and every request scans the whole store once over
+# `max_entries` (the charge append itself happens after the check; the
+# unbounded growth and the O(n) scan are the defects). The primitive is left
 # byte-identical; the sibling filing tracks it). This limiter states its
 # capacity policy in concrete, falsifiable numbers:
 #
@@ -21932,16 +21934,36 @@ def _oauth_dcr_trusted_networks() -> list:
     return nets
 
 
-def _oauth_dcr_trusted_net(client_ip) -> object | None:
-    """The trusted network containing `client_ip`, else None. Matches on the
-    NORMALIZED address (so ::ffff:160.79.104.11 is trusted) and fails closed
-    on a malformed address/CIDR."""
+def _oauth_dcr_normalized_addr(client_ip):
+    """`ipaddress` address for `client_ip`, normalizing ANY IPv4-mapped IPv6
+    spelling (or None for a malformed address).
+
+    `_normalize_mapped_ipv6` (shared primitive helper, byte-identical to
+    origin/main) matches the literal lowercase ``::ffff:`` prefix, so the
+    structural check here additionally covers ``::FFFF:1.2.3.4`` and
+    ``0:0:0:0:0:ffff:1.2.3.4``. Without it one IPv4 address could hold two
+    bucket identities (its own plus the shared ``::/64``) and a non-canonical
+    mapped client would collapse into ``::/64`` instead of being keyed — or
+    trusted — as the address it actually is.
+    """
     ip = _normalize_mapped_ipv6(client_ip)
     if not isinstance(ip, str):
         return None
     try:
         addr = ipaddress.ip_address(ip)
     except ValueError:
+        return None
+    if isinstance(addr, ipaddress.IPv6Address) and addr.ipv4_mapped is not None:
+        return addr.ipv4_mapped
+    return addr
+
+
+def _oauth_dcr_trusted_net(client_ip) -> object | None:
+    """The trusted network containing `client_ip`, else None. Matches on the
+    NORMALIZED address (so every spelling of an IPv4-mapped trusted address is
+    trusted) and fails closed on a malformed address/CIDR."""
+    addr = _oauth_dcr_normalized_addr(client_ip)
+    if addr is None:
         return None
     for net in _oauth_dcr_trusted_networks():
         try:
@@ -21956,12 +21978,8 @@ def _oauth_dcr_store_key(client_ip) -> str:
     """Per-bucket store key: the /IPV6_PREFIX network for IPv6 (default /64),
     the plain address for IPv4, the constant "anonymous" for a malformed
     address (D6)."""
-    ip = _normalize_mapped_ipv6(client_ip)
-    if not isinstance(ip, str):
-        return _OAUTH_DCR_MALFORMED_KEY
-    try:
-        addr = ipaddress.ip_address(ip)
-    except ValueError:
+    addr = _oauth_dcr_normalized_addr(client_ip)
+    if addr is None:
         return _OAUTH_DCR_MALFORMED_KEY
     if addr.version != 6:
         return str(addr)

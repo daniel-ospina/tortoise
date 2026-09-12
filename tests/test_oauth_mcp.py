@@ -1712,9 +1712,18 @@ class TestDcrCapacityPolicy:
         monkeypatch.setenv("TORTOISE_OAUTH_DCR_ANON_AGGREGATE_PER_HOUR",
                            "1000000")
         assert _ha_mod._oauth_dcr_store_key("::ffff:1.2.3.4") == "1.2.3.4"
+        # non-canonical mapped spellings must resolve to the SAME key, or one
+        # IPv4 address holds two bucket identities (its own + the shared /64)
+        for spelling in ("::FFFF:1.2.3.4", "0:0:0:0:0:ffff:1.2.3.4",
+                         "::ffff:0102:0304"):
+            assert _ha_mod._oauth_dcr_store_key(spelling) == "1.2.3.4", spelling
+            assert _ha_mod._oauth_dcr_trusted_net(spelling) is None, spelling
         assert _dcr_post(tc, ip="::ffff:160.79.104.11").status_code == 201
         assert not _ha_mod._OAUTH_DCR_BUCKETS, "trusted ⇒ no per-key bucket"
         assert len(_ha_mod._OAUTH_DCR_TRUSTED["160.79.104.0/21"]) == 1
+        # ...and every spelling of a trusted address is exempt too
+        for spelling in ("::FFFF:160.79.104.11", "0:0:0:0:0:ffff:160.79.104.11"):
+            assert _ha_mod._oauth_dcr_trusted_net(spelling) is not None, spelling
         assert _dcr_post(tc, ip="::ffff:1.2.3.4").status_code == 201
         assert list(_ha_mod._OAUTH_DCR_BUCKETS) == ["1.2.3.4"], \
             "mapped IPv4 must key as the IPv4 address, not as ::/64"
