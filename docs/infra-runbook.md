@@ -323,7 +323,13 @@ before the run declares DOWN, so a single transient blip cannot fire an alarm.
 4. The **first** line of the body is a state block:
    `<!-- watchdog-state kind=down first_failure_ts=… down_runs=… last_down_ts=… last_comment_ts=… cap_notified_ts=… restarts=… -->`.
    It drives the cooldown/velocity limits — do not hand-edit it. `restarts=`
-   records restart **attempts** (a failed attempt still counts).
+   records restart **attempts** (a failed attempt still counts). The sustained
+   window is additionally clamped to the issue's GitHub-assigned `created_at`,
+   so editing `first_failure_ts` can delay a restart but never make one happen
+   earlier than `SUSTAINED_DOWN_MINUTES` after the issue was created. The
+   watchdog only ever adopts/mutates an issue authored by the GitHub Actions
+   bot (`author:app/github-actions`); a look-alike issue from any other account
+   is ignored and a fresh machine issue is filed (see §6.8).
 
 **One incident = one issue.** Repeats comment with an incremented count; the
 issue is closed automatically with a `Recovered` comment when a probe answers
@@ -463,14 +469,31 @@ your shell environment. `gh workflow run` cannot pass them inline.
   TOTAL egress failure: a failure affecting only the probe's own host (its DNS
   zone, a Cloudflare/ASN block on the runner IP) leaves the control green and
   still reads as DOWN.
-- **The dedupe search is a loose `in:title` term match**, not an exact phrase:
-  any open issue sharing the marker's terms (`monitor` + `PROD` + `DOWN`) would
-  be adopted as the incident. Keep unrelated issues' titles clear of those words.
-- **Truth is derived from the incident body**, which is human-editable. Values
-  are sanitised (scalars and the restart ledger) and a stale clock (no failing
-  run within `STALE_RESET_MINUTES`, default 45) restarts the sustained window
-  **without** clearing the restart ledger, but a hand-edited field can still
-  make the watchdog more conservative or less so within the configured caps.
+- **The dedupe search is a loose `in:title` term match**, not an exact phrase,
+  **and it is constrained to a machine author**: it searches
+  `author:app/github-actions` and re-checks the returned item's
+  `user.type == "Bot"` before using its number. On a public repo an unrelated
+  account can open an issue sharing the marker's terms (`monitor` + `PROD` +
+  `DOWN`), but it is **never** adopted, patched, commented on or closed — the
+  watchdog treats it as "no incident" and files its own fresh issue. Because
+  the author is GitHub-assigned and cannot be chosen or forged by the issue
+  creator, a look-alike filed by any other account is never a match.
+- **Truth is derived from the incident body**, which is human-editable, **plus
+  a server-side anchor the body cannot forge.** The sustained window is clamped
+  to the incident issue's GitHub-assigned `created_at`, so a hand-edited
+  `first_failure_ts` (or a missing/`0` `last_down_ts`, which now trips the
+  stale-clock reset instead of being read as "just now") can **delay** a
+  restart, but cannot authorise one before the issue has actually existed for
+  `SUSTAINED_DOWN_MINUTES`. Scalars and the restart ledger are sanitised, and a
+  stale clock (no failing run within `STALE_RESET_MINUTES`, default 45)
+  restarts the sustained window **without** clearing the restart ledger.
+- **The cooldown and the hourly cap are still read from the body's
+  `restarts=` ledger**, so their integrity rests on the bot-only write access
+  to the incident issue — a human edit to `restarts=` can weaken them. That is
+  why the ledger is **fail-closed**: a `restarts=` value that is present but
+  not fully parseable (`abc`, a >12-digit stamp) makes the run refuse to
+  restart outright rather than silently dropping the unreadable entry. Prefer
+  the `MAX_RESTARTS_PER_HOUR=0` kill switch over editing the ledger.
 - **A failed state write is fatal** (the run fails) because the body is the
   only cooldown/cap memory — expect a RED run whose log says the state write
   failed, with no restart. The same applies to a failed body READ (never

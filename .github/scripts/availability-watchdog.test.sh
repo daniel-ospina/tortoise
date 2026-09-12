@@ -48,6 +48,16 @@
 #   Hygiene
 #    32. public body: credentials in PROBE_URL are redacted
 #    33. the watchdog-state block round-trips through the issue body
+#   Hardening (review findings on #3064 — each of these FAILS on the pre-fix
+#   code and passes only with the fix)
+#    60. the dedupe search carries the machine-author constraint
+#    61. a forged HUMAN-authored look-alike incident is never adopted (P1)
+#    62. the sustained window is clamped to the server-side created_at (P2)
+#    63. an unusable server-side anchor fails closed (P2)
+#    64. an omitted last_down_ts is UNKNOWN, not 'just now' (P2)
+#    65. a >300-char token never leaks as a PREFIX (redact BEFORE truncate, P2)
+#    66. a Fly-SHAPED token of unknown value is redacted too (P2)
+#   44b/c/d. a corrupt `restarts=` ledger fails closed (P2 — refused, not dropped)
 #
 # Fixtures are simulated; the real watchdog is the script under test.
 
@@ -196,7 +206,21 @@ case "$path" in
   */issues/*)
     if [ "$method" = "GET" ]; then
       [ "${STUB_GET_BODY_FAIL:-0}" = "1" ] && { echo "gh: body read failed" >&2; exit 1; }
-      if [ -f "$STUB_TMP/issue.json" ]; then cat "$STUB_TMP/issue.json"; else printf '{"body":""}'; fi
+      if [ -f "$STUB_TMP/issue.json" ]; then
+        # GitHub ALWAYS returns a server-side created_at. Emulate it: fixtures
+        # may set STUB_ISSUE_CREATED_AT explicitly (ISO-8601 or `epoch:<n>`);
+        # otherwise derive it from the state block's first_failure_ts so the
+        # legacy fixtures keep their meaning. Set STUB_ISSUE_CREATED_AT to a
+        # non-timestamp (e.g. "not-a-timestamp") to exercise the fail-closed
+        # "no usable anchor" path.
+        if [ -n "${STUB_ISSUE_CREATED_AT:-}" ]; then
+          jq -c --arg c "$STUB_ISSUE_CREATED_AT" '. + {created_at:$c}' "$STUB_TMP/issue.json"
+        else
+          jq -c 'if ((.created_at // "") != "") then .
+                 else . + {created_at: ("epoch:" + (try (((.body // "") | capture("first_failure_ts=(?<ts>[0-9]+)").ts)) catch "0"))} end' \
+            "$STUB_TMP/issue.json" 2>/dev/null || cat "$STUB_TMP/issue.json"
+        fi
+      else printf '{"body":""}'; fi
     else
       [ "${STUB_PATCH_FAIL:-0}" = "1" ] && { echo "gh: patch failed" >&2; exit 1; }
       # Every state write is appended (compact) — a recovery run PATCHes the
@@ -218,7 +242,11 @@ case "${1:-} ${2:-}" in
   "machine list") [ "${STUB_FLY_LIST_FAIL:-0}" = "1" ] && { echo "fly: api down" >&2; exit 1; }
                   printf '%s' "${STUB_FLY_MACHINES:-$DEFAULT_MACHINES_JSON}" ;;
   "machine restart") if [ "${STUB_FLY_RESTART_FAIL:-0}" = "1" ]; then
-                    if [ "${STUB_FLY_LEAK:-0}" = "1" ]; then
+                    if [ "${STUB_FLY_LEAK_SHAPE:-0}" = "1" ]; then
+                      # A Fly-shaped macaroon the caller does NOT hold the value
+                      # of: only SHAPE redaction can catch it.
+                      echo "Error: unauthorized: token FlyV1 fm2_lJAbCdEf$(printf 'x%.0s' {1..400}) rejected" >&2
+                    elif [ "${STUB_FLY_LEAK:-0}" = "1" ]; then
                       echo "Error: unauthorized: token ${FLY_API_TOKEN:-leaked} rejected" >&2
                     else
                       echo "fly: restart failed" >&2
@@ -255,6 +283,7 @@ reset_case() {
   unset STUB_PROBE_CODES STUB_PROBE_BODY STUB_PROBE_TIME STUB_SEARCH_JSON \
         STUB_SEARCH_FAIL STUB_SEARCH_MARKER STUB_CREATE_FAIL STUB_NEW_ISSUE \
         STUB_FLY_MACHINES STUB_FLY_LIST_FAIL STUB_FLY_RESTART_FAIL STUB_FLY_LEAK \
+        STUB_FLY_LEAK_SHAPE STUB_ISSUE_CREATED_AT \
         STUB_TELEGRAM_FAIL STUB_COMMENT_FAIL STUB_GET_BODY_FAIL \
         STUB_CONTROL_CODES \
         PROBE_URL FLY_API_TOKEN TELEGRAM_BOT_TOKEN \
@@ -303,15 +332,19 @@ run_watchdog_no_flyctl() { # -> RC, OUT, OUT_STDOUT (PATH without flyctl)
 
 first_chars_stub() { printf '%s' "$1" | head -c 200 || true; }
 
-# seed an existing open incident in the stub's issue store
-seed_issue() { # <kind> <first_failure_ts> <down_runs> <last_comment_ts> <restarts> [number]
+# seed an existing open incident in the stub's issue store.
+seed_issue() { # <kind> <first_failure_ts> <down_runs> <last_comment_ts> <restarts> [number] [last_down_ts]
   # The real writer emits restarts as ts,ts — normalize any space-separated
   # input so a fixture cannot silently seed a DIFFERENT state than production.
-  local restarts
+  # last_down_ts defaults to a run 1 min ago (the realistic "previous run")
+  # rather than being omitted: an omitted/0 last_down_ts is UNKNOWN, not "just
+  # now", and now trips the stale-clock reset (fail closed) — see parse_state.
+  local restarts last_down
   restarts="$(printf '%s' "$5" | tr ' ' ',')"
-  jq -n --arg b "<!-- watchdog-state kind=$1 first_failure_ts=$2 down_runs=$3 last_comment_ts=$4 restarts=$restarts -->" \
+  last_down="${7:-$((NOW - 60))}"
+  jq -n --arg b "<!-- watchdog-state kind=$1 first_failure_ts=$2 down_runs=$3 last_down_ts=$last_down last_comment_ts=$4 cap_notified_ts=0 restarts=$restarts -->" \
     '{body:$b}' > "$STUB_TMP/issue.json"
-  STUB_SEARCH_JSON="{\"items\":[{\"number\":${6:-42},\"title\":\"[monitor] PROD DOWN — seeded\"}]}"
+  STUB_SEARCH_JSON="$(search_json "${6:-42}" "[monitor] PROD DOWN — seeded")"
   export STUB_SEARCH_JSON
   # Only the seeded KIND matches the search (jq @uri encodes spaces as %20).
   if [ "$1" = "down" ]; then
@@ -319,6 +352,16 @@ seed_issue() { # <kind> <first_failure_ts> <down_runs> <last_comment_ts> <restar
   else
     export STUB_SEARCH_MARKER='PROD%20DEGRADED'
   fi
+}
+
+# A search result item as PRODUCTION would return it: authored by the GitHub
+# Actions bot. The watchdog rejects any non-machine match, so every fixture
+# that expects adoption MUST carry this author. Use a different author
+# deliberately in the hijack tests.
+search_json() { # <number> [title] [login] [type]
+  local n="${1:-42}" t="${2:-seeded}" l="${3:-github-actions[bot]}" ty="${4:-Bot}"
+  printf '{"items":[{"number":%s,"title":"%s","user":{"login":"%s","type":"%s"}}]}' \
+    "$n" "$t" "$l" "$ty"
 }
 
 num_lines() { # <file>
@@ -538,7 +581,7 @@ run_watchdog
 assert_eq "$(count_calls 'FLYCTL machine restart')" "1" "cross-run: run 1 restarts"
 # Feed run 1's written state back as run 2's issue (5 minutes later).
 jq -n --arg b "$(patched_body)" '{body:$b}' > "$STUB_TMP/issue.json"
-STUB_SEARCH_JSON='{"items":[{"number":42,"title":"seeded"}]}'
+STUB_SEARCH_JSON="$(search_json 42)"
 export STUB_SEARCH_JSON
 export STUB_SEARCH_MARKER='PROD%20DOWN'
 export WATCHDOG_NOW_EPOCH="$((NOW + 300))"
@@ -604,7 +647,7 @@ seed_issue down "$((NOW - 7200))" 20 0 "$((NOW - 1500)) $((NOW - 1300))"
 # cap_notified_ts is part of the state block; seed a RECENT notification.
 printf '%s' "{\"body\":\"<!-- watchdog-state kind=down first_failure_ts=$((NOW - 7200)) down_runs=20 last_down_ts=$((NOW - 60)) last_comment_ts=$((NOW - 60)) cap_notified_ts=$((NOW - 300)) restarts=$((NOW - 1500)),$((NOW - 1300)) -->\"}" > "$STUB_TMP/issue.json"
 export STUB_SEARCH_MARKER='PROD%20DOWN'
-export STUB_SEARCH_JSON='{"items":[{"number":42,"title":"seeded"}]}'
+export STUB_SEARCH_JSON="$(search_json 42)"
 export STUB_PROBE_CODES="000"
 export FLY_API_TOKEN="fly-token"
 export TELEGRAM_BOT_TOKEN="tg-token"
@@ -643,7 +686,7 @@ reset_case
 seed_issue down "$((NOW - 2592000))" 99 "$((NOW - 5184000))" ""   # 30 days ago
 printf '%s' "{\"body\":\"<!-- watchdog-state kind=down first_failure_ts=$((NOW - 2592000)) down_runs=99 last_down_ts=$((NOW - 2592000)) last_comment_ts=0 cap_notified_ts=0 restarts= -->\"}" > "$STUB_TMP/issue.json"
 export STUB_SEARCH_MARKER='PROD%20DOWN'
-export STUB_SEARCH_JSON='{"items":[{"number":42,"title":"seeded"}]}'
+export STUB_SEARCH_JSON="$(search_json 42)"
 export STUB_PROBE_CODES="000"
 export FLY_API_TOKEN="fly-token"
 run_watchdog
@@ -656,7 +699,7 @@ assert_contains "$(patched_body)" "waits 10 min" "stale clock → the body expla
 reset_case
 printf '%s' '{"body":"<!-- watchdog-state kind=down first_failure_ts=1800000000 down_runs=08 last_down_ts=0 last_comment_ts=0 cap_notified_ts=0 restarts= -->"}' > "$STUB_TMP/issue.json"
 export STUB_SEARCH_MARKER='PROD%20DOWN'
-export STUB_SEARCH_JSON='{"items":[{"number":42,"title":"seeded"}]}'
+export STUB_SEARCH_JSON="$(search_json 42)"
 export STUB_PROBE_CODES="000"
 run_watchdog
 assert_eq "$RC" "1" "down_runs=08 (octal) → a normal DOWN run, not a crash"
@@ -693,7 +736,7 @@ assert_contains "$OUT" "could not close" "recovery close fails → says exactly 
 reset_case
 printf '%s' "{\"body\":\"<!-- watchdog-state kind=down first_failure_ts=$((NOW + 86400)) down_runs=5 last_down_ts=$((NOW + 86400)) last_comment_ts=0 cap_notified_ts=0 restarts= -->\"}" > "$STUB_TMP/issue.json"
 export STUB_SEARCH_MARKER='PROD%20DOWN'
-export STUB_SEARCH_JSON='{"items":[{"number":42,"title":"seeded"}]}'
+export STUB_SEARCH_JSON="$(search_json 42)"
 export STUB_PROBE_CODES="000"
 export FLY_API_TOKEN="fly-token"
 run_watchdog
@@ -717,7 +760,7 @@ reset_case
 export STUB_PROBE_CODES="000"
 run_watchdog
 jq -n --arg b "$(patched_body)" '{body:$b}' > "$STUB_TMP/issue.json"
-STUB_SEARCH_JSON='{"items":[{"number":42,"title":"seeded"}]}'
+STUB_SEARCH_JSON="$(search_json 42)"
 export STUB_SEARCH_JSON
 export STUB_SEARCH_MARKER='PROD%20DOWN'
 run_watchdog
@@ -748,7 +791,7 @@ assert_contains "$(patched_body)" "?<redacted>" "the query string is redacted"
 reset_case
 printf '%s' "{\"body\":\"<!-- watchdog-state kind=down first_failure_ts=$((NOW - 3000)) down_runs=5 last_down_ts=$((NOW - 3000)) last_comment_ts=0 cap_notified_ts=0 restarts=$((NOW - 2400)),$((NOW - 2100)) -->\"}" > "$STUB_TMP/issue.json"
 export STUB_SEARCH_MARKER='PROD%20DOWN'
-export STUB_SEARCH_JSON='{"items":[{"number":42,"title":"seeded"}]}'
+export STUB_SEARCH_JSON="$(search_json 42)"
 export STUB_PROBE_CODES="000"
 export FLY_API_TOKEN="fly-token"
 run_watchdog
@@ -767,7 +810,7 @@ export WATCHDOG_NOW_EPOCH="$NOW"
 reset_case
 printf '%s' "{\"body\":\"<!-- watchdog-state kind=down first_failure_ts=$((NOW - 3000)) down_runs=5 last_down_ts=$((NOW - 3000)) last_comment_ts=0 cap_notified_ts=0 restarts= -->\"}" > "$STUB_TMP/issue.json"
 export STUB_SEARCH_MARKER='PROD%20DOWN'
-export STUB_SEARCH_JSON='{"items":[{"number":42,"title":"seeded"}]}'
+export STUB_SEARCH_JSON="$(search_json 42)"
 export STUB_PROBE_CODES="000"
 export FLY_API_TOKEN="fly-token"
 run_watchdog
@@ -780,10 +823,13 @@ assert_eq "$(count_calls 'FLYCTL machine restart')" "1" "stale reset → the NEX
 export WATCHDOG_NOW_EPOCH="$NOW"
 
 # ── 44: a malformed restart ledger must not crash or bypass the arithmetic ──
+# `0008` is NOT corruption — to_int normalises it to the (ancient) stamp 8, so
+# it is preserved, not dropped, and the restart is allowed. That is the
+# contrast case for the fail-CLOSED cases below.
 reset_case
 printf '%s' "{\"body\":\"<!-- watchdog-state kind=down first_failure_ts=$((NOW - 3600)) down_runs=5 last_down_ts=$((NOW - 60)) last_comment_ts=0 cap_notified_ts=0 restarts=0008 -->\"}" > "$STUB_TMP/issue.json"
 export STUB_SEARCH_MARKER='PROD%20DOWN'
-export STUB_SEARCH_JSON='{"items":[{"number":42,"title":"seeded"}]}'
+export STUB_SEARCH_JSON="$(search_json 42)"
 export STUB_PROBE_CODES="000"
 export FLY_API_TOKEN="fly-token"
 run_watchdog
@@ -791,16 +837,46 @@ assert_eq "$RC" "1" "restarts=0008 (octal) → a normal DOWN run, not a silent s
 assert_not_contains "$OUT" "value too great for base" "restarts=0008 → no arithmetic abort"
 assert_eq "$(count_calls 'FLYCTL machine restart')" "1" "restarts=0008 → normalized to an ANCIENT stamp (outside the hour) → restart allowed"
 
+# 44b: an entry to_int REJECTS (>12 digits) used to be silently DROPPED, which
+# can only WEAKEN the rate limit. It must now fail CLOSED: refuse to act.
 reset_case
 printf '%s' "{\"body\":\"<!-- watchdog-state kind=down first_failure_ts=$((NOW - 3600)) down_runs=5 last_down_ts=$((NOW - 60)) last_comment_ts=0 cap_notified_ts=0 restarts=99999999999999999999 -->\"}" > "$STUB_TMP/issue.json"
 export STUB_SEARCH_MARKER='PROD%20DOWN'
-export STUB_SEARCH_JSON='{"items":[{"number":42,"title":"seeded"}]}'
+export STUB_SEARCH_JSON="$(search_json 42)"
 export STUB_PROBE_CODES="000"
 export FLY_API_TOKEN="fly-token"
 run_watchdog
-assert_eq "$RC" "1" "a >12-digit ledger entry → a normal DOWN run"
-assert_not_contains "$OUT" "integer expression expected" "a >12-digit entry → no arithmetic error (it is DROPPED, not compared)"
-assert_contains "$(patched_body)" "restarts=$NOW" "a >12-digit entry → the garbage is purged from the rewritten ledger"
+assert_eq "$RC" "1" "a >12-digit ledger entry → a normal DOWN run (never a crash)"
+assert_not_contains "$OUT" "integer expression expected" "a >12-digit entry → no arithmetic error"
+assert_eq "$(count_calls 'FLYCTL machine restart')" "0" "a >12-digit entry → FAIL CLOSED: zero restarts (it is refused, never dropped)"
+assert_contains "$OUT" "not fully parseable" "a >12-digit entry → says exactly why"
+assert_contains "$OUT" "WEAKEN" "a >12-digit entry → names the fail-open risk it refuses"
+assert_eq "$(count_calls 'GH PATCH')" "0" "a >12-digit entry → refuses before any state write (no silent purge-and-restart)"
+
+# 44c: `restarts=abc` captures as EMPTY under the old permissive regex, which
+# read as "no restarts" — the fail-open direction. Refuse instead.
+reset_case
+printf '%s' "{\"body\":\"<!-- watchdog-state kind=down first_failure_ts=$((NOW - 3600)) down_runs=5 last_down_ts=$((NOW - 60)) last_comment_ts=0 cap_notified_ts=0 restarts=abc -->\"}" > "$STUB_TMP/issue.json"
+export STUB_SEARCH_MARKER='PROD%20DOWN'
+export STUB_SEARCH_JSON="$(search_json 42)"
+export STUB_PROBE_CODES="000"
+export FLY_API_TOKEN="fly-token"
+run_watchdog
+assert_eq "$RC" "1" "restarts=abc → a normal DOWN run"
+assert_eq "$(count_calls 'FLYCTL machine restart')" "0" "restarts=abc → FAIL CLOSED: zero restarts (never read as 'no restarts')"
+assert_contains "$OUT" "not fully parseable" "restarts=abc → says exactly why"
+
+# 44d: a MIXED ledger (one valid stamp, one unparseable) must not be partially
+# honoured — the unparseable entry could be the cooldown stamp.
+reset_case
+printf '%s' "{\"body\":\"<!-- watchdog-state kind=down first_failure_ts=$((NOW - 3600)) down_runs=5 last_down_ts=$((NOW - 60)) last_comment_ts=0 cap_notified_ts=0 restarts=$((NOW - 1500)),zzz -->\"}" > "$STUB_TMP/issue.json"
+export STUB_SEARCH_MARKER='PROD%20DOWN'
+export STUB_SEARCH_JSON="$(search_json 42)"
+export STUB_PROBE_CODES="000"
+export FLY_API_TOKEN="fly-token"
+run_watchdog
+assert_eq "$(count_calls 'FLYCTL machine restart')" "0" "a mixed valid+garbage ledger → FAIL CLOSED (no restart from the valid half)"
+assert_contains "$OUT" "not fully parseable" "a mixed ledger → says exactly why"
 
 # ── 45: unreadable incident state is NOT 'no state' (never erase the ledger) ─
 reset_case
@@ -893,7 +969,7 @@ assert_not_contains "$(patched_body)" "fly-token-secret" "the public body never 
 reset_case
 seed_issue down "$((NOW - 7200))" 20 0 "$((NOW - 1500)) $((NOW - 1300))"
 export STUB_SEARCH_MARKER='PROD%20DOWN'
-export STUB_SEARCH_JSON='{"items":[{"number":42,"title":"seeded"}]}'
+export STUB_SEARCH_JSON="$(search_json 42)"
 export STUB_PROBE_CODES="000"
 export FLY_API_TOKEN="fly-token"
 export TELEGRAM_BOT_TOKEN="tg-token"
@@ -910,7 +986,7 @@ assert_eq "$(count_calls 'CURL telegram')" "0" "cap escalation with a failed wri
 reset_case
 printf '%s' "{\"body\":\"<!-- watchdog-state kind=down first_failure_ts=$((NOW - 3600)) down_runs=5 last_down_ts=$((NOW - 60)) last_comment_ts=0 cap_notified_ts=0 restarts=$((NOW + 86400)) -->\"}" > "$STUB_TMP/issue.json"
 export STUB_SEARCH_MARKER='PROD%20DOWN'
-export STUB_SEARCH_JSON='{"items":[{"number":42,"title":"seeded"}]}'
+export STUB_SEARCH_JSON="$(search_json 42)"
 export STUB_PROBE_CODES="000"
 export FLY_API_TOKEN="fly-token"
 run_watchdog
@@ -922,7 +998,7 @@ assert_contains "$(patched_body)" "restarts=$NOW" "a future ledger stamp → rew
 reset_case
 printf '%s' '{"body":"<!-- watchdog-state kind=down first_failure_ts=1800000000 down_runs=3 last_down_ts=0 last_comment_ts=0 cap_notified_ts=0 restarts= -->"}' > "$STUB_TMP/issue.json"
 export STUB_SEARCH_MARKER='DRILL%20DOWN'
-export STUB_SEARCH_JSON='{"items":[{"number":777,"title":"[monitor] DRILL DOWN — staged"}]}'
+export STUB_SEARCH_JSON="$(search_json 777 '[monitor] DRILL DOWN — staged')"
 export STUB_PROBE_CODES="200"
 export PROBE_URL="https://staging.example.test/v1/teams"
 run_watchdog
@@ -1011,7 +1087,7 @@ assert_contains "$OUT" "could not close" "a failed close → says exactly why"
 reset_case
 printf '%s' "{\"body\":\"<!-- watchdog-state kind=down first_failure_ts=$((NOW - 7200)) down_runs=20 last_down_ts=$((NOW - 60)) last_comment_ts=0 cap_notified_ts=$((NOW + 86400)) restarts=$((NOW - 1500)),$((NOW - 1300)) -->\"}" > "$STUB_TMP/issue.json"
 export STUB_SEARCH_MARKER='PROD%20DOWN'
-export STUB_SEARCH_JSON='{"items":[{"number":42,"title":"seeded"}]}'
+export STUB_SEARCH_JSON="$(search_json 42)"
 export STUB_PROBE_CODES="000"
 export FLY_API_TOKEN="fly-token"
 export TELEGRAM_BOT_TOKEN="tg-token"
@@ -1019,6 +1095,103 @@ export TELEGRAM_CHAT_ID="12345"
 run_watchdog
 assert_eq "$(count_calls 'CURL telegram')" "1" "a FUTURE cap stamp → clamped → the cap escalation still pages (never muted)"
 assert_contains "$(patched_body)" "cap_notified_ts=$NOW" "a future cap stamp → rewritten clamped"
+
+# ── 60: the dedupe search is constrained to the machine author ───────────
+# PUBLIC repo: "an open issue with our title" is not ours to adopt.
+reset_case
+export STUB_PROBE_CODES="000"
+run_watchdog
+assert_eq "$(count_calls 'GH-Q.*author%3Aapp%2Fgithub-actions')" "1" "the dedupe search carries the author:app/github-actions constraint"
+
+# ── 61: a forged HUMAN-authored look-alike incident is never adopted (P1) ──
+# Anyone can open an issue with the watchdog's title and a forged state block:
+# an ancient clock + down_runs=999 would authorise a restart on the FIRST
+# observed failing run, and a forged `restarts=` ledger would defeat the
+# cooldown AND the hourly cap. It must be ignored entirely.
+reset_case
+printf '%s' "{\"body\":\"<!-- watchdog-state kind=down first_failure_ts=$((NOW - 86400)) down_runs=999 last_down_ts=$((NOW - 60)) last_comment_ts=0 cap_notified_ts=0 restarts= -->\"}" > "$STUB_TMP/issue.json"
+export STUB_SEARCH_JSON="$(search_json 666 '[monitor] PROD DOWN — forged' 'attacker' 'User')"
+export STUB_SEARCH_MARKER='PROD%20DOWN'
+export STUB_PROBE_CODES="000"
+export FLY_API_TOKEN="fly-token"
+run_watchdog
+assert_eq "$(count_calls 'FLYCTL machine restart')" "0" "a human-authored look-alike → NO restart (the forged clock/cap is never adopted)"
+assert_eq "$(count_calls 'GH POST .*/issues$')" "1" "a human-authored look-alike → a FRESH machine issue is filed instead"
+assert_eq "$(count_calls 'GH GET repos/.*/issues/666')" "0" "a human-authored look-alike → its body is never read"
+assert_eq "$(count_calls 'GH PATCH repos/.*/issues/666')" "0" "a human-authored look-alike → never PATCHed with machine state"
+assert_contains "$OUT" "NONE was authored by" "a human-authored look-alike → logged loudly"
+
+# ── 62: the sustained window is clamped to the server-side created_at (P2) ─
+# A MACHINE issue can still carry a hand-edited/forged ancient clock. The
+# issue's created_at is GitHub-assigned and immutable, so it bounds the window.
+reset_case
+printf '%s' "{\"body\":\"<!-- watchdog-state kind=down first_failure_ts=$((NOW - 86400)) down_runs=999 last_down_ts=$((NOW - 60)) last_comment_ts=0 cap_notified_ts=0 restarts= -->\"}" > "$STUB_TMP/issue.json"
+export STUB_ISSUE_CREATED_AT="epoch:$((NOW - 120))"
+export STUB_SEARCH_JSON="$(search_json 42)"
+export STUB_SEARCH_MARKER='PROD%20DOWN'
+export STUB_PROBE_CODES="000"
+export FLY_API_TOKEN="fly-token"
+run_watchdog
+assert_eq "$(count_calls 'FLYCTL machine restart')" "0" "a forged ancient first_failure_ts → clamped to created_at → NO restart"
+assert_contains "$OUT" "clamping the sustained clock" "the server-side clamp is logged"
+assert_contains "$(patched_body)" "first_failure_ts=$((NOW - 120))" "the clamped clock is what is persisted"
+assert_contains "$(patched_body)" "waits 10 min" "the body explains the fresh sustained window"
+
+# ── 63: an unusable server-side anchor fails closed ──────────────────────
+reset_case
+printf '%s' "{\"body\":\"<!-- watchdog-state kind=down first_failure_ts=$((NOW - 86400)) down_runs=999 last_down_ts=$((NOW - 60)) last_comment_ts=0 cap_notified_ts=0 restarts= -->\"}" > "$STUB_TMP/issue.json"
+export STUB_ISSUE_CREATED_AT="not-a-timestamp"
+export STUB_SEARCH_JSON="$(search_json 42)"
+export STUB_SEARCH_MARKER='PROD%20DOWN'
+export STUB_PROBE_CODES="000"
+export FLY_API_TOKEN="fly-token"
+run_watchdog
+assert_eq "$(count_calls 'FLYCTL machine restart')" "0" "an unusable created_at → NO restart (fail closed, never trust the body clock)"
+assert_contains "$OUT" "no usable server-side created_at" "an unusable created_at → says exactly why"
+
+# ── 64: an OMITTED last_down_ts is UNKNOWN, not 'just now' (P2) ─────────
+# Defaulting it to `now` made the stale-clock guard unreachable for a body that
+# simply omitted the field — an ancient first_failure_ts then satisfied the
+# sustained window on the FIRST observed failing run.
+reset_case
+printf '%s' "{\"body\":\"<!-- watchdog-state kind=down first_failure_ts=$((NOW - 86400)) down_runs=999 last_comment_ts=0 cap_notified_ts=0 restarts= -->\"}" > "$STUB_TMP/issue.json"
+export STUB_SEARCH_JSON="$(search_json 42)"
+export STUB_SEARCH_MARKER='PROD%20DOWN'
+export STUB_PROBE_CODES="000"
+export FLY_API_TOKEN="fly-token"
+run_watchdog
+assert_eq "$(count_calls 'FLYCTL machine restart')" "0" "an omitted last_down_ts → UNKNOWN → stale reset → NO restart"
+assert_contains "$OUT" "stale incident" "an omitted last_down_ts → the stale clock is logged"
+
+# ── 65: a LONG token must not leak as a PREFIX (redact BEFORE truncate) ──
+# The old order truncated captured flyctl output to 200 chars FIRST, splitting
+# a >300-char token so the literal-value match no longer matched the survivor.
+reset_case
+seed_issue down "$((NOW - 1200))" 3 0 ""
+LONG_TOKEN="fly-live-$(printf 'a%.0s' {1..400})"
+export FLY_API_TOKEN="$LONG_TOKEN"
+export STUB_PROBE_CODES="000"
+export STUB_FLY_RESTART_FAIL=1
+export STUB_FLY_LEAK=1
+run_watchdog
+assert_contains "$OUT" "automatic restart failed" "long token → the restart failure is escalated"
+assert_not_contains "$(comments_all)" "${LONG_TOKEN:0:150}" "a >300-char token → NO partial token in the PUBLIC comment"
+assert_not_contains "$(patched_body)" "${LONG_TOKEN:0:150}" "a >300-char token → NO partial token in the PUBLIC body"
+assert_not_contains "$OUT" "${LONG_TOKEN:0:150}" "a >300-char token → NO partial token in the PUBLIC log"
+assert_contains "$(comments_all)" "<redacted>" "a >300-char token → the redaction marker is what is published"
+
+# ── 66: a Fly-SHAPED token we do not hold the value of is redacted too ──
+reset_case
+seed_issue down "$((NOW - 1200))" 3 0 ""
+export FLY_API_TOKEN="some-other-token"
+export STUB_PROBE_CODES="000"
+export STUB_FLY_RESTART_FAIL=1
+export STUB_FLY_LEAK_SHAPE=1
+run_watchdog
+assert_not_contains "$(comments_all)" "fm2_lJ" "a Fly-shaped token (unknown value) → shape-redacted from the comment"
+assert_not_contains "$OUT" "fm2_lJ" "a Fly-shaped token → shape-redacted from the log"
+assert_not_contains "$(patched_body)" "fm2_lJ" "a Fly-shaped token → shape-redacted from the body"
+assert_contains "$(comments_all)" "<redacted>" "a Fly-shaped token → redaction marker present"
 
 echo
 if [ "$FAIL" -eq 0 ]; then

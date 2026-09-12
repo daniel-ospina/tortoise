@@ -88,10 +88,21 @@
 #     <!-- watchdog-state kind=… first_failure_ts=… down_runs=… \
 #          last_down_ts=… last_comment_ts=… cap_notified_ts=… restarts=ts,ts -->
 #   The title is the dedupe key — the script searches for an open issue whose
-#   title contains the marker before filing. The body is HUMAN-EDITABLE, so
-#   every parsed value is bounded/validated (to_int) and a stale clock
-#   (no failing run within STALE_RESET_MINUTES) restarts the sustained window
-#   instead of trusting it.
+#   title contains the marker before filing, CONSTRAINED TO A MACHINE AUTHOR
+#   (`author:app/github-actions` + a `user.type == "Bot"` re-check). On a PUBLIC
+#   repo anyone can open an issue with our title and a forged state block;
+#   adopting it would hand an attacker the sustained clock and the restart
+#   ledger (a restart storm). A non-machine match is NEVER adopted, patched or
+#   closed — it is treated as "no incident" and a fresh machine issue is filed.
+#   The body is HUMAN-EDITABLE, so every parsed value is bounded/validated
+#   (to_int), a stale clock (no failing run within STALE_RESET_MINUTES)
+#   restarts the sustained window instead of trusting it, and the sustained
+#   window is additionally CLAMPED to the issue's server-side `created_at`
+#   (immutable, not body-editable) so no body edit can authorise a restart
+#   before the incident has actually existed that long. The restart ledger is
+#   FAIL-CLOSED: a `restarts=` value that is present but not fully parseable
+#   refuses to act rather than silently dropping an entry (dropping could only
+#   WEAKEN the cooldown/cap).
 #
 # SAFETY PROPERTIES
 #   * No token is ever hard-coded; the Fly token comes from a repository
@@ -114,9 +125,18 @@
 #     PUBLICATION BOUNDARY (create_issue / update_issue_body / comment_issue /
 #     page) so it scrubs the probe URL (credentials + query string), the Fly
 #     token and the Telegram token from every public body/comment/page/log
-#     line — including text echoed back by flyctl. stdout is DATA only (all
-#     logging is on stderr) so a log line can never corrupt a captured helper
-#     return.
+#     line — including text echoed back by flyctl. Captured command output goes
+#     through scrub_output(), which REDACTES FIRST and ONLY THEN truncates:
+#     truncating first splits a long token, after which the literal-value match
+#     no longer matches the surviving prefix and a PARTIAL production token is
+#     published. redact_text() also scrubs BY SHAPE (Fly `FlyV1 …` macaroons,
+#     `id:secret` Telegram tokens) so a partial whose full value we do not hold
+#     is still caught. stdout is DATA only (all logging is on stderr) so a log
+#     line can never corrupt a captured helper return.
+#   * Only a MACHINE-authored issue is ever adopted or mutated: the dedupe
+#     search carries `author:app/github-actions` AND the returned item's
+#     `user.type`/`user.login` is re-checked before its number is used, so no
+#     public account can seed or hijack the incident state (see STATE above).
 #   * Every notification is gated on a DURABLE record: the restart attempt and
 #     the cap/INCONCLUSIVE escalation stamps are written BEFORE the side effect,
 #     and a routine comment is published only after the body (which carries the
@@ -271,6 +291,38 @@ fmt_iso() {
   printf 'epoch:%s' "$1"
 }
 
+# ISO-8601 (GitHub's server-side timestamps) -> epoch, or "" when unparseable.
+# The `epoch:<n>` form is accepted so this round-trips fmt_iso's own fallback
+# (and works on a platform with neither GNU nor BSD date). A "" return is the
+# fail-closed direction: the sustained-window anchor is then treated as
+# unusable and the window is restarted, never trusted.
+iso_to_epoch() { # <iso|epoch:n> -> epoch or ""
+  local iso="$1" e
+  [ -n "$iso" ] || { printf ''; return 0; }
+  case "$iso" in
+    epoch:*)
+      # Only the numeric fallback form fmt_iso emits is accepted; anything else
+      # is an unusable anchor (fail closed, not a trusted clock).
+      e="${iso#epoch:}"
+      case "$e" in
+        ''|*[!0-9]*) printf ''; return 0 ;;
+      esac
+      printf '%s' "$e"; return 0 ;;
+  esac
+  e="$(date -u -d "$iso" +%s 2>/dev/null || true)"
+  if [ -z "$e" ]; then
+    # BSD date is strict about the literal 'Z'; try both spellings.
+    e="$(date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$iso" +%s 2>/dev/null || true)"
+  fi
+  if [ -z "$e" ]; then
+    e="$(date -u -j -f "%Y-%m-%dT%H:%M:%S" "${iso%Z}" +%s 2>/dev/null || true)"
+  fi
+  case "$e" in
+    ''|*[!0-9]*) printf ''; return 0 ;;
+  esac
+  printf '%s' "$e"
+}
+
 # bash arithmetic is DECIMAL-BY-SURPRISE: $((08)) is invalid octal and aborts
 # the shell. The state block lives in a human-editable issue body, so every
 # parsed integer is normalized here (leading zeros stripped, absurd lengths
@@ -305,19 +357,40 @@ redact_url() {
 
 # Scrub anything secret out of text that ends up in a public issue body, a
 # comment, or an Actions log: the raw probe URL, query-string credentials, the
-# Fly token and the Telegram bot token.
+# Fly token and the Telegram bot token — by VALUE and, belt-and-braces, by
+# SHAPE. The shape pass is what catches a token we do not hold the value of (a
+# token from another environment, or a PARTIAL already split by truncation) and
+# it is why redaction must happen at the CAPTURE site, not only at the
+# publication boundary.
 redact_text() {
   local t="$1"
   if [ -n "$FLY_API_TOKEN" ]; then t="${t//$FLY_API_TOKEN/<redacted>}"; fi
   if [ -n "$TELEGRAM_BOT_TOKEN" ]; then t="${t//$TELEGRAM_BOT_TOKEN/<redacted>}"; fi
   if [ -n "$PROBE_URL" ]; then t="${t//$PROBE_URL/$(redact_url "$PROBE_URL")}"; fi
-  printf '%s' "$t" | sed -E 's#([?&](token|key|secret|sig|signature|api_key|apikey|access_token)=)[^&"[:space:]]*#\1<redacted>#g'
+  printf '%s' "$t" | sed -E \
+    -e 's#([?&](token|key|secret|sig|signature|api_key|apikey|access_token)=)[^&"[:space:]]*#\1<redacted>#g' \
+    -e 's#FlyV1[[:space:]]+[A-Za-z0-9_=+/.,-]+#<redacted>#g' \
+    -e 's#[0-9]{6,12}:[A-Za-z0-9_-]{30,}#<redacted>#g'
 }
 
 # head -c closes the pipe early → SIGPIPE (exit 141) on the writer, which under
 # `set -e` would abort an assignment. `|| true` keeps the truncation total.
 first_chars() { # <text> <max>
   printf '%s' "$1" | head -c "$2" || true
+}
+
+# Capture-then-publish helper for COMMAND OUTPUT we are about to put in a
+# public body/comment/log. The ORDER is the whole point: REDACT FIRST, THEN
+# truncate. `first_chars` alone publishes the first N chars of a secret when N
+# splits it — redact_text's literal-value match then no longer matches the
+# surviving PREFIX, so a partial production token would be published (issue
+# body, comment, and Actions log all at once). `tr` runs AFTER redaction so a
+# line-wrapped secret is still matched whole.
+scrub_output() { # <text> <max>
+  local t
+  t="$(redact_text "$1")"
+  t="$(printf '%s' "$t" | tr '\n' ' ' || true)"
+  first_chars "$t" "$2"
 }
 
 # ── verdict classification ──────────────────────────────────────────────────
@@ -362,7 +435,7 @@ probe() {
     timing="${timing#* }"
     [ "$timing" != "$code" ] || timing="?"
     PROBE_CODE="$code"
-    err_body="$(first_chars "$(tr '\n' ' ' < "$err_file" || true)" 300)"
+    err_body="$(scrub_output "$(cat "$err_file" 2>/dev/null || true)" 300)"
     PROBE_EVIDENCE="${PROBE_EVIDENCE}attempt ${attempt}/${PROBE_ATTEMPTS}: http_code=${code} elapsed=${timing}s"
     [ -n "$err_body" ] && PROBE_EVIDENCE="${PROBE_EVIDENCE} curl=\"${err_body}\""
     PROBE_EVIDENCE="${PROBE_EVIDENCE}"$'\n'
@@ -376,7 +449,7 @@ probe() {
       # The app answered — capture what it said (a public error body only; the
       # probe carries no credentials, so there is nothing secret to leak).
       if [ -s "$body_file" ]; then
-        PROBE_EVIDENCE="${PROBE_EVIDENCE}response body (first 200 chars): $(first_chars "$(tr '\n' ' ' < "$body_file" || true)" 200)"$'\n'
+        PROBE_EVIDENCE="${PROBE_EVIDENCE}response body (first 200 chars): $(scrub_output "$(cat "$body_file" 2>/dev/null || true)" 200)"$'\n'
       fi
       PROBE_VERDICT="UNEXPECTED"
       return 0
@@ -423,29 +496,51 @@ urlencode() { printf '%s' "$1" | jq -sRr @uri; }
 # when the search itself failed or answered something unparseable. ERR must
 # NEVER be treated as "none" — that is the duplicate-spam direction. The caller
 # refuses to file on anything non-numeric.
+#
+# SECURITY (PUBLIC repo): the repo is public, so "an open issue whose title
+# matches" is NOT ours to adopt. Any account can open an issue with our title
+# and a FORGED state block, and adopting it would hand them the sustained clock
+# and the restart ledger — `down_runs=999` bypasses SUSTAINED_MIN_RUNS and a
+# forged `restarts=` bypasses the cooldown AND the hourly cap (a restart storm
+# that makes an outage worse). So the search carries `author:app/github-actions`
+# AND the returned item's author is re-checked below (`.user.type == "Bot"` /
+# `.user.login == "github-actions[bot]"`); a non-machine match is treated as
+# "no incident" (a fresh machine issue is filed) and is NEVER adopted, patched,
+# commented on or closed.
 search_open_alert() { # <marker>
-  local q enc out n
+  local q enc out n total
   # TITLE-ONLY dedupe key (no `label:` filter): a renamed/deleted label would
   # silently empty the search and turn the monitor back into a duplicate-issue
   # spammer (#2706 class). The label is applied when FILING, not when searching.
-  q="repo:${REPO} is:issue is:open in:title \"$1\""
+  # The author qualifier is the load-bearing security constraint (see above).
+  q="repo:${REPO} is:issue is:open in:title author:app/github-actions \"$1\""
   enc="$(urlencode "$q")"
   # NB: the query MUST go in the URL path — `gh api -f q=…` switches the method
   # to POST and 404s on this endpoint (tenant-provision-monitor, #1133).
   if ! out="$(gh api "search/issues?q=${enc}&per_page=5" 2>"$RUN_TMP/search.err")"; then
-    warn "GitHub issue search failed: $(first_chars "$(tr '\n' ' ' < "$RUN_TMP/search.err" || true)" 200)"
+    warn "GitHub issue search failed: $(scrub_output "$(cat "$RUN_TMP/search.err" 2>/dev/null || true)" 200)"
     printf '__ERR__'
     return 0
   fi
   # "no open incident" (an empty item list) is NOT a failure — only an
   # unparseable answer is. Conflating the two makes the watchdog refuse to file
   # on every first outage (the search result for a fresh incident is empty).
-  if ! n="$(printf '%s' "$out" | jq -r '.items[0].number // empty' 2>/dev/null)"; then
+  if ! n="$(printf '%s' "$out" | jq -r '[.items[]? | select((.user.type // "") == "Bot" or (.user.login // "") == "github-actions[bot]")][0].number // empty' 2>/dev/null)"; then
     warn "GitHub issue search returned an unparseable body"
     printf '__ERR__'
     return 0
   fi
   if [ -z "$n" ]; then
+    # Distinguish "nothing matched" from "something matched but was NOT ours":
+    # the latter is the hijack attempt this guard exists for, and it is worth a
+    # loud line (we still file a fresh machine issue).
+    total="$(printf '%s' "$out" | jq -r '.items | length' 2>/dev/null || true)"
+    case "$total" in
+      ''|*[!0-9]*) total=0 ;;
+    esac
+    if [ "$total" -gt 0 ]; then
+      warn "issue search matched ${total} open issue(s) but NONE was authored by the GitHub Actions bot — ignoring them (a forged look-alike is never adopted) and filing a fresh machine issue"
+    fi
     printf ''
     return 0
   fi
@@ -462,8 +557,16 @@ get_issue_body() { # <n> -> the body, or __ERR__ when the read failed
   # (down_runs reset to 1, restarts cleared) — the read-side twin of the
   # write-side bug that write-then-act fixes. Return a sentinel and let the
   # caller fail closed, like search_open_alert does.
+  #
+  # SEAM: the caller reads the issue's SERVER-SIDE created_at from
+  # $RUN_TMP/issue.created_at (see the sustained-window clamp in main). It is
+  # deliberately NOT returned on stdout: stdout carries the body / __ERR__ only,
+  # and this helper is called inside `$( )` where a global assignment would not
+  # survive anyway. The file is truncated FIRST so a failed re-read can never
+  # leave a stale anchor behind.
+  : > "$RUN_TMP/issue.created_at"
   if ! out="$(gh api "repos/${REPO}/issues/$1" 2>"$RUN_TMP/body.err")"; then
-    warn "could not read the body of #$1: $(first_chars "$(tr '\n' ' ' < "$RUN_TMP/body.err" || true)" 200)"
+    warn "could not read the body of #$1: $(scrub_output "$(cat "$RUN_TMP/body.err" 2>/dev/null || true)" 200)"
     printf '__ERR__'
     return 0
   fi
@@ -472,6 +575,7 @@ get_issue_body() { # <n> -> the body, or __ERR__ when the read failed
     printf '__ERR__'
     return 0
   fi
+  printf '%s' "$out" | jq -r '.created_at // ""' > "$RUN_TMP/issue.created_at" 2>/dev/null || : > "$RUN_TMP/issue.created_at"
   printf '%s' "$body"
 }
 
@@ -483,7 +587,7 @@ create_issue() { # <title> <body> -> number ("" on failure)
   payload="$(jq -n --arg t "$(redact_text "$1")" --arg b "$(redact_text "$2")" --arg l "$ALERT_LABEL" \
     '{title:$t, body:$b, labels:[$l]}')"
   if ! out="$(printf '%s' "$payload" | gh api "repos/${REPO}/issues" --method POST --input - 2>"$RUN_TMP/create.err")"; then
-    fail "issue create failed: $(first_chars "$(tr '\n' ' ' < "$RUN_TMP/create.err" || true)" 300)"
+    fail "issue create failed: $(scrub_output "$(cat "$RUN_TMP/create.err" 2>/dev/null || true)" 300)"
     printf ''
     return 0
   fi
@@ -497,11 +601,15 @@ create_issue() { # <title> <body> -> number ("" on failure)
 # The issue body is the ONLY durable state store, so its write is
 # AUTHORITATIVE: a failed update returns 1 and the caller decides (the restart
 # path aborts rather than restarting without a durable cooldown/cap record).
+# INVARIANT (security): the target number must have come from search_open_alert
+# (machine-author verified) or create_issue (authored by our own token, i.e.
+# the Actions app) — a PATCH here writes machine state into the issue, so it
+# must NEVER be pointed at a human/attacker-authored look-alike.
 update_issue_body() { # <n> <body> -> 0 ok / 1 failed
   local payload
   payload="$(jq -n --arg b "$(redact_text "$2")" '{body:$b}')"
   if ! printf '%s' "$payload" | gh api "repos/${REPO}/issues/$1" --method PATCH --input - >/dev/null 2>"$RUN_TMP/patch.err"; then
-    warn "issue body update failed for #$1: $(first_chars "$(tr '\n' ' ' < "$RUN_TMP/patch.err" || true)" 200)"
+    warn "issue body update failed for #$1: $(scrub_output "$(cat "$RUN_TMP/patch.err" 2>/dev/null || true)" 200)"
     return 1
   fi
   return 0
@@ -543,7 +651,7 @@ page() { # <text>
       "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
       --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
       --data-urlencode "text=$text" 2>&1)"; then
-    warn "telegram page failed (non-fatal): $(first_chars "${err//$TELEGRAM_BOT_TOKEN/<redacted>}" 200)"
+    warn "telegram page failed (non-fatal): $(scrub_output "$err" 200)"
   fi
   return 0
 }
@@ -555,6 +663,11 @@ STATE_LAST_DOWN_TS="0"
 STATE_LAST_COMMENT_TS="0"
 STATE_CAP_NOTIFIED_TS="0"
 STATE_RESTARTS=""
+# Set by parse_state when `restarts=` is PRESENT but not fully parseable. The
+# restart gate refuses to act on it (fail closed) — dropping an entry could
+# only WEAKEN the cooldown/cap.
+STATE_RESTARTS_INVALID="0"
+STATE_RESTARTS_RAW=""
 
 parse_state() { # <body>
   local body="$1"
@@ -570,27 +683,51 @@ parse_state() { # <body>
     | sed -n 's/.*watchdog-state[^>]*last_comment_ts=\([0-9][0-9]*\).*/\1/p' | head -1 || true)" "0")"
   STATE_CAP_NOTIFIED_TS="$(to_int "$(printf '%s' "$body" \
     | sed -n 's/.*watchdog-state[^>]*cap_notified_ts=\([0-9][0-9]*\).*/\1/p' | head -1 || true)" "0")"
-  STATE_RESTARTS="$(printf '%s' "$body" \
-    | sed -n 's/.*watchdog-state[^>]*restarts=\([0-9, ]*\).*/\1/p' | head -1 | tr ',' ' ' || true)"
-  STATE_RESTARTS="$(printf '%s' "$STATE_RESTARTS" | tr -s ' ' | sed -E 's/^ +//; s/ +$//')"
-  case "$STATE_RESTARTS" in *[!0-9[:space:]]*) STATE_RESTARTS="" ;; esac
+  STATE_RESTARTS=""
+  STATE_RESTARTS_INVALID="0"
+  STATE_RESTARTS_RAW=""
+  # ── the restart ledger: FAIL CLOSED ────────────────────────────────────────
+  # Every other state read in this script fails closed (get_issue_body /
+  # search_open_alert return __ERR__ and the caller exits 1). This one used to
+  # do the OPPOSITE: a permissive capture plus a `continue` on any entry
+  # `to_int` rejected meant an unparseable entry was silently DROPPED. Dropping
+  # a cooldown stamp can only weaken the rate limit (the entry vanishes and
+  # decide_restart may return `go` sooner) — that is fail-open, and this is the
+  # field an attacker/human edit would target. So: parse the WHOLE value
+  # strictly; anything not fully parseable sets STATE_RESTARTS_INVALID and the
+  # restart gate refuses to act.
+  STATE_RESTARTS_RAW="$(printf '%s' "$body" \
+    | sed -n 's/.*watchdog-state[^>]*restarts=\([^>]*\).*/\1/p' | head -1 || true)"
+  STATE_RESTARTS_RAW="$(printf '%s' "$STATE_RESTARTS_RAW" \
+    | tr ',' ' ' | tr -s '[:space:]' ' ' | sed -E 's/^[[:space:]-]+//; s/[[:space:]-]+$//')"
   # The ledger needs the SAME normalizer as the scalar fields, for the same
   # human-editable-body reasons: `restarts=…,0008` is bash OCTAL (the
   # substitution inside decide_restart aborts the shell, and with `set -e` the
   # run dies BEFORE any state write), a >12-digit entry makes `[ ts -gt last ]`
   # error so `last` stays 0 and the COOLDOWN IS SKIPPED, and a future
   # millisecond epoch yields a negative elapsed time → cooldown forever (an
-  # inert self-heal with no escalation). Drop what cannot be trusted, clamp a
-  # future stamp to now.
+  # inert self-heal with no escalation). Clamp a future stamp to now; REJECT
+  # (do not drop) anything the normalizer refuses.
   local raw_ts clean_ts cnow ledger=""
   cnow="$(now_epoch)"
-  for raw_ts in $STATE_RESTARTS; do
-    clean_ts="$(to_int "$raw_ts" "")"
-    if [ -z "$clean_ts" ]; then continue; fi
-    if [ "$clean_ts" -gt "$cnow" ]; then clean_ts="$cnow"; fi
-    ledger="${ledger:+$ledger }$clean_ts"
-  done
-  STATE_RESTARTS="$ledger"
+  if [ -n "$STATE_RESTARTS_RAW" ]; then
+    case "$STATE_RESTARTS_RAW" in
+      *[!0-9[:space:]]*) STATE_RESTARTS_INVALID="1" ;;
+    esac
+    if [ "$STATE_RESTARTS_INVALID" = "0" ]; then
+      for raw_ts in $STATE_RESTARTS_RAW; do
+        clean_ts="$(to_int "$raw_ts" "")"
+        if [ -z "$clean_ts" ]; then
+          # >12 digits (to_int's own bound): unparseable, not droppable.
+          STATE_RESTARTS_INVALID="1"
+          break
+        fi
+        if [ "$clean_ts" -gt "$cnow" ]; then clean_ts="$cnow"; fi
+        ledger="${ledger:+$ledger }$clean_ts"
+      done
+      if [ "$STATE_RESTARTS_INVALID" = "0" ]; then STATE_RESTARTS="$ledger"; fi
+    fi
+  fi
   # Bound the ledger: keep only the last 24 attempts (a year of incidents at
   # the cap would otherwise grow the state block without limit).
   local kept="" ts n=0
@@ -603,12 +740,18 @@ parse_state() { # <body>
     n=$((n + 1))
   done
   STATE_RESTARTS="$(printf '%s' "$kept" | sed -E 's/ +$//')"
-  # Absent first_failure_ts / last_down_ts → this run is the FIRST failure (the
-  # conservative direction: never let a missing clock authorise a restart).
+  # Absent first_failure_ts → this run is the FIRST failure (the conservative
+  # direction: never let a missing clock authorise a restart).
   # NB: explicit `if` — a trailing `[ … ] && x` would make this function return
   # 1 whenever the state IS present, and `set -e` would kill the caller.
   if [ -z "$STATE_FIRST_FAILURE_TS" ]; then STATE_FIRST_FAILURE_TS="$cnow"; fi
-  if [ "$STATE_LAST_DOWN_TS" = "0" ]; then STATE_LAST_DOWN_TS="$cnow"; fi
+  # Absent/0 last_down_ts is left at 0 — an UNKNOWN last failing run, NOT "just
+  # now". Defaulting it to now made the stale-clock guard unreachable for a
+  # body that simply omitted the field (an ancient first_failure_ts with no
+  # last_down_ts then satisfied the sustained window on the FIRST observed
+  # failing run). 0 trips the stale branch in main, which restarts the window —
+  # the fail-closed direction. A machine body always carries a real stamp, so
+  # this only fires on a hand-edited/legacy body.
   # A clock in the FUTURE (clock skew, or a hand-edited body) would print
   # negative durations AND lock the sustained gate forever (now - ff < 0), i.e.
   # an inert self-heal with no escalation — the worse failure mode. Clamp it.
@@ -723,7 +866,7 @@ do_restart() {
     return 2
   fi
   if ! out="$(flyctl machine list --app "$FLY_APP" --json 2>"$RUN_TMP/fly.err")"; then
-    reason="$(first_chars "$(tr '\n' ' ' < "$RUN_TMP/fly.err" || true)" 200)"
+    reason="$(scrub_output "$(cat "$RUN_TMP/fly.err" 2>/dev/null || true)" 200)"
     printf 'flyctl machine list failed: %s' "$reason"
     return 2
   fi
@@ -738,7 +881,7 @@ do_restart() {
   fi
   for id in $ids; do
     if ! flyctl machine restart "$id" --app "$FLY_APP" >/dev/null 2>>"$RUN_TMP/fly.err"; then
-      reason="$(first_chars "$(tr '\n' ' ' < "$RUN_TMP/fly.err" || true)" 200)"
+      reason="$(scrub_output "$(cat "$RUN_TMP/fly.err" 2>/dev/null || true)" 200)"
       printf 'flyctl machine restart %s failed: %s' "$id" "$reason"
       return 2
     fi
@@ -943,6 +1086,30 @@ The service failed ${STATE_DOWN_RUNS} probe run(s), starting $(fmt_iso "$STATE_F
     fi
     parse_state "$body_loop"
     progress="repeat"
+    # ── server-side anchor for the sustained window ─────────────────────────
+    # SUSTAINED_DOWN_MINUTES used to gate solely on the body's
+    # first_failure_ts, which the body itself carries. The issue's created_at
+    # is set by GitHub and is NOT body-editable, so clamping the sustained
+    # clock to it makes the window unforgeable from below: no body edit (and no
+    # look-alike issue) can authorise a restart before the incident has
+    # actually existed for SUSTAINED_DOWN_MINUTES. Belt-and-braces with the
+    # machine-author search constraint.
+    local created_ts
+    created_ts="$(iso_to_epoch "$(cat "$RUN_TMP/issue.created_at" 2>/dev/null || true)")"
+    if [ -z "$created_ts" ]; then
+      # Production ALWAYS returns created_at; absent/unparseable means we have
+      # no unforgeable anchor, so do not trust the body's clock — restart the
+      # window (fail closed).
+      log "incident #${issue} has no usable server-side created_at — restarting the sustained window (fail closed)"
+      STATE_FIRST_FAILURE_TS="$now"
+    else
+      # A clock in the future (skew) would lock the sustained gate forever.
+      if [ "$created_ts" -gt "$now" ]; then created_ts="$now"; fi
+      if [ "$STATE_FIRST_FAILURE_TS" -lt "$created_ts" ]; then
+        log "incident #${issue}: first_failure_ts precedes its created_at — clamping the sustained clock to the server-side created_at"
+        STATE_FIRST_FAILURE_TS="$created_ts"
+      fi
+    fi
     # Stale-clock guard: if no failing run has been recorded recently, this
     # incident is NOT continuous (a human reopened it, a close failed after
     # recovery, or the issue sat open) — restart the sustained window instead
@@ -984,6 +1151,19 @@ The service failed ${STATE_DOWN_RUNS} probe run(s), starting $(fmt_iso "$STATE_F
   transition_kind="repeat"
 
   if [ "$restart_mode" = "DOWN" ]; then
+    # FAIL CLOSED on an unparseable restart ledger BEFORE anything else — not
+    # after the egress control, so a runner-side network failure cannot mask a
+    # corrupt ledger (and the run never rewrites the body with the corrupt
+    # ledger silently discarded). `restarts=` is the only cooldown/cap memory;
+    # if we cannot read it whole we cannot prove a restart is allowed, and
+    # silently treating it as "no restarts" is exactly the fail-OPEN direction
+    # that turns into a restart storm. Refuse to act (like an unreadable issue
+    # body) and fail the run loudly — the open incident remains the standing
+    # alert.
+    if [ "$STATE_RESTARTS_INVALID" = "1" ]; then
+      fail "the restart ledger in incident #${issue} is present but not fully parseable ('$(scrub_output "$STATE_RESTARTS_RAW" 120)') — refusing to restart: a dropped entry could only WEAKEN the cooldown/hourly cap. Fix the \`restarts=\` field in the issue body (ts,ts or empty) and the next run resumes."
+      exit 1
+    fi
     # Runner-side egress control: a DOWN verdict from a runner that cannot
     # reach the internet says nothing about the app, and a restart is the
     # disruptive action here — do not take it on an untrustworthy verdict.

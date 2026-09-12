@@ -88,11 +88,13 @@ jobs:
       # and the string comparison against DEFAULT_PROBE_URL is the ONLY thing
       # distinguishing a drill from production.
       PROBE_URL: ${{ inputs.probe_url }}
-      # Fly app + token. FLY_API_TOKEN is the established name (deploy-hosted.yml).
+      # Fly app. FLY_API_TOKEN is the established name (deploy-hosted.yml) and
+      # is passed at STEP level (see the probe step) — NOT here: a job-level
+      # env is exported to EVERY step, including actions/checkout and the
+      # third-party setup-flyctl action, which is exactly what this avoids.
       # ABSENT IS OK: the watchdog skips the restart leg with a loud log line
       # and a comment on the incident naming the secret to create.
       FLY_APP: tortoise-y4mjjq
-      FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
       # Optional paging channel — reuses the secrets the DR driver already uses.
       # Absent → the page is skipped with a log line.
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
@@ -115,16 +117,25 @@ jobs:
       COMMENT_THROTTLE_MINUTES: '15'
     steps:
       - uses: actions/checkout@v4
-      # Skipped entirely when FLY_API_TOKEN is absent — flyctl is then missing
-      # in PATH and the script's restart leg degrades gracefully (it says so in
-      # the log and on the incident).
-      # continue-on-error: this step serves ONLY the self-healing leg. Without
-      # it, a broken/unavailable setup-flyctl would abort the job BEFORE the
-      # probe step — i.e. a self-healing dependency would silence the ALERTING
-      # leg (the exact "deaf monitor" class this workflow exists to avoid).
+      # Installs flyctl for the self-healing restart leg. It runs
+      # unconditionally — a step `if:` can no longer read the token (it moved to
+      # the probe step, which is the whole point), and this action does NOT need
+      # the token to install the binary. continue-on-error: without it a
+      # broken/unavailable setup-flyctl would abort the job BEFORE the probe
+      # step — i.e. a self-healing dependency would silence the ALERTING leg
+      # (the exact "deaf monitor" class this workflow exists to avoid).
+      # PINNED to a full commit SHA (v1 / master head at the time of writing):
+      # a mutable branch would let the action's owner change the code that runs
+      # next to the Fly token.
       - name: Install flyctl (needed only by the self-healing restart leg)
-        if: env.FLY_API_TOKEN != ''
         continue-on-error: true
-        uses: superfly/flyctl-actions/setup-flyctl@master
+        timeout-minutes: 3
+        uses: superfly/flyctl-actions/setup-flyctl@ed8efb33836e8b2096c7fd3ba1c8afe303ebbff1
       - name: Probe the public endpoint (self-heal + deduplicated alert)
+        env:
+          # STEP-level: the token is exported ONLY to the step that runs the
+          # watchdog (which needs it for `flyctl machine restart`). At job
+          # level it would also be handed to actions/checkout and to the
+          # third-party setup-flyctl action.
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
         run: bash .github/scripts/availability-watchdog.sh
