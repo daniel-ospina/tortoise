@@ -1110,11 +1110,11 @@ def _build_cli_extractor_model(*, spec: str | None,
     built the SAME way the factory does (``_session_worker_spec_tuning``
     resolves the registry entry's real wire id + expressible tuning; the
     unset case stays UNCAPPED, matching the session_workers=1 owner
-    decision). NOTE: the live ``ingest_haystack_v2`` on main currently
-    shadows the parallel factory path with a sequential copy (pre-existing
-    duplicate, tracked separately — #1744), so workers fall back to the
-    shared ``extractor_model``; the fingerprint-vs-served guard remains the
-    safety invariant and records the serving config either way. A spec'd
+    decision). #1744 deleted the shadowing sequential duplicate, so
+    ``session_workers > 1`` now actually runs the parallel worker-factory
+    path and the workers serve the per-worker models this build
+    fingerprints; the fingerprint-vs-served guard remains the safety
+    invariant and records the serving config. A spec'd
     run therefore fingerprints identically across a session-workers toggle
     only when the router resolves a SINGLE lane
     matching the registry adapter (the same effective config — resume
@@ -1281,11 +1281,10 @@ def _build_fingerprint(*, reader_model: str, judge_model: str,
     member fingerprint; multi-lane wrappers are shape-prefixed routing:/rotating:)
     — never an address-bearing repr. SESSION_WORKERS: ``--session-workers
     > 1`` requests per-worker models via the ingest_v2 ``model_factory``
-    (note: the live ``ingest_haystack_v2`` on main currently shadows the
-    parallel factory path with a sequential copy — pre-existing duplicate,
-    tracked separately (#1744) — so workers fall back to the shared
-    ``extractor_model``; the fingerprint-vs-served guard remains the safety
-    invariant and records the serving config either way).
+    (since #1744 the live ``ingest_haystack_v2`` runs the parallel factory
+    path — the shadowing sequential duplicate is deleted — so workers serve
+    the per-worker models this config fingerprints; the fingerprint-vs-served
+    guard remains the safety invariant).
     ``_build_cli_extractor_model`` builds the fingerprinted model and
     run_main threads the resolved spec + tuning into the factory so the
     workers serve EXACTLY what the fingerprint records (a spec'd run
@@ -2979,9 +2978,10 @@ def gc_in_window(gc_events: list, si: int) -> bool:
 
 class _PerSessionCensus:
     """Task 3 per-session census — interleaves with ingest via the shared
-    query-wrapper seam (retrieve.install_gate_fault_proxy; the #1744
-    dual-copy caveat: the replay runs with ``session_workers=1`` sequential,
-    so the shared live copy is the one exercised). Detects session
+    query-wrapper seam (retrieve.install_gate_fault_proxy; the census needs
+    per-session interleaving, so the replay runs ``session_workers=1`` — the
+    batched parallel path writes every session's raw leg up front and would
+    blur the session boundary). Detects session
     boundaries by the deterministic id pattern ``lme:{qid}:s{si}`` in write
     params; after each session's Phase A (raw turn/chunk) batch and Phase C
     (payload) batch, runs a per-session census (read-verified — a partial
@@ -3837,17 +3837,14 @@ def run_evaluation(
                                     chunk_turns=chunk_turns,
                                     # Pilot #1549: session-parallel extraction
                                     # within a question (the LLM phase is the
-                                    # wall-clock dominant cost). NOTE: the live
-                                    # ingest_haystack_v2 on main shadows the
-                                    # parallel worker-factory path with a
-                                    # sequential copy (pre-existing duplicate,
-                                    # tracked separately — #1744), so workers
-                                    # currently fall back to the shared
-                                    # extractor_model — which is exactly what
-                                    # the fingerprint records. The per-session
-                                    # census replay forces ``session_workers=1``
-                                    # for deterministic measurement (#1744
-                                    # caveat).
+                                    # wall-clock dominant cost). #1744 deleted
+                                    # the shadowing duplicate, so the workers
+                                    # now actually serve the per-worker factory
+                                    # models this run fingerprints. The
+                                    # per-session census replay forces
+                                    # ``session_workers=1`` — the batched
+                                    # parallel path would blur the session
+                                    # boundary the census measures.
                                     session_workers=(
                                         1 if per_session_census
                                         else session_workers),
@@ -6008,9 +6005,8 @@ def _run_main(parser: argparse.ArgumentParser, args,
     # is reusable after close(), so no double-close hazard with the
     # fingerprint guard's served model. (Per-worker model_factory models are
     # built inside ingest_v2.py's worker threads when the parallel path is
-    # live — out of run.py's reach and out of PR scope; on main the
-    # sequential copy shadows that path (pre-existing duplicate, tracked
-    # separately), so the shared extractor_model extracts instead.)
+    # live — out of run.py's reach and out of PR scope; since #1744 that
+    # path is live whenever ``session_workers > 1``.)
     try:
         # M2 (#1523): the pre-flight gate runs AFTER reader/judge/extractor_model
         # are built and BEFORE anything in the question loop starts. --mock skips
