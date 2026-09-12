@@ -615,6 +615,7 @@ surfaces:
   - test_sdk_dedup.py
   - test_search_engine_recency.py
   - test_temporal_constraint.py
+  - test_temporal_leg_2976.py  # #2976: temporal retrieval leg — detector shapes, anchor co-presence + date spread, additive-fusion no-op (hermetic, no DB)
   - test_sdk_ep.py
   - test_sdk_group3.py
   - test_sdk_legacy_coverage.py
