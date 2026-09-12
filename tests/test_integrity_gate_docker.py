@@ -14,8 +14,8 @@ Isolation (plan cycle2-P2-25): every test uses a UNIQUE graph namespace
 deliberately injected leftover state cannot contaminate another test's
 fresh-namespace ratio=1.000 assumption.
 
-Env-lane note: every test here is docker-lane (the module ``pytestmark``
-gate above), so the autouse ``_reset_proxy`` fixture additionally pins the
+Env-lane note: every test here is docker-lane (the module-level
+``pytestmark`` gate below), so the autouse ``_reset_proxy`` fixture additionally pins the
 RESOLVED lane URI into TORTOISE_DB_URI — the run helpers hand ``db_uri=``
 to run_evaluation while the assertion-side ``TortoiseSDK(namespace=...)``
 reads the env, and with the env set-but-empty (CI tier-2 exports

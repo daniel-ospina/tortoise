@@ -655,6 +655,11 @@ surfaces:
   - test_lme_ingest_v2_supersession.py
   - test_load_test.py
   - test_pair_label_runner.py
+  # #2815: the URI-census guard also covers the eval lane's URI reads
+  # (`tools/longmem_eval/run.py`, `tests/eval/retrieval/*`), which map to THIS
+  # surface — registered under `core` alone the guard would not run for the
+  # files it most needs to police.
+  - test_uri_env_mutations_declared.py
 tier1:
 - test_cli_serve.py
 - test_config.py

@@ -72,19 +72,25 @@ def _db_uri() -> str:
 
 @pytest.fixture
 def docker_lane(monkeypatch) -> str:
-    """Put the whole test on ONE store: the resolved lane URI (#2815).
+    """Pin the whole test to ONE store: the resolved lane URI (#2815).
 
     The docker-lane tests hand ``db_uri=`` to run_evaluation, but every
     assertion-side ``TortoiseSDK(namespace=...)`` (and its ``_get_proj()``)
-    resolves TORTOISE_DB_URI from the ENV. With the env set-but-empty — CI's
-    tier-2 leg exports ``TORTOISE_DB_URI=""`` — the run went to the resolved
-    server while the assertions read the embedded store, so ``_marker_rows``
-    returned 0 rows and the cache tests failed with ``len([]) == 0``
-    (CI run 34529580649). The outcome is lane-dependent in exactly the way
-    the epic #1647 contract forbids: "empty means unset" must resolve to ONE
-    store, never two. Pinning the resolved URI into the env for the test
-    duration keeps both sides on it; ``monkeypatch`` auto-restores at
-    teardown (#2084 pop-without-restore class).
+    resolves TORTOISE_DB_URI from the ENV — so the run and the assertions must
+    be pointed at the same store explicitly. That is this fixture's job in the
+    docker lane, which is the only lane this module reaches: the module-level
+    gate above skips the whole file on a URI-less leg (the tier-2
+    two-store failure the original rationale below describes — CI run
+    34529580649 — is therefore pre-empted, not fixed here).
+
+    Historical rationale (kept for the failure it documents): with the env
+    set-but-empty — CI's tier-2 leg exports ``TORTOISE_DB_URI=""`` — the run
+    went to the resolved server while the assertions read the embedded store,
+    so ``_marker_rows`` returned 0 rows and the cache tests failed with
+    ``len([]) == 0``. The outcome is lane-dependent in exactly the way the epic
+    #1647 contract forbids: "empty means unset" must resolve to ONE store,
+    never two. ``monkeypatch`` auto-restores at teardown (#2084
+    pop-without-restore class).
     """
     uri = _db_uri()
     monkeypatch.setenv("TORTOISE_DB_URI", uri)
