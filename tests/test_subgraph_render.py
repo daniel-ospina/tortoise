@@ -341,6 +341,44 @@ def test_unparseable_and_sentinel_dates_render_date_unknown():
 _UNDATED_SENTINEL_GUARD = "1970-01-01T00:00:00Z"
 
 
+def test_producer_slash_date_normalises_to_iso_in_provenance():
+    # P0 regression (#3011): the only producer of ``createdAt`` — both ingest
+    # legs, from ``haystack_dates[si]`` — emits ``2023/05/20 (Sat) 03:29``.
+    # Measured on the frozen dataset: 23,867/23,867 values match
+    # ``^\d{4}/\d{2}/\d{2}`` and zero match ISO. A parser that only accepted
+    # ISO rendered every point ``(date unknown)`` and silently dropped the
+    # date signal from arms B/C — invalidating the H5 temporal falsification.
+    sg = _sg((_ANCHOR,), content={_ANCHOR: "text"})
+    result = render_arm_b(
+        sg,
+        haystack_session_ids=_SESSIONS,
+        points_by_id={_ANCHOR: {"createdAt": "2023/05/20 (Sat) 03:29"}},
+    )
+    assert "(2023-05-20)" in result.text
+    assert "date unknown" not in result.text
+
+
+def test_producer_slash_date_accepted_for_valid_from():
+    sg = _sg((_ANCHOR,), content={_ANCHOR: "text"})
+    result = render_arm_b(
+        sg,
+        haystack_session_ids=_SESSIONS,
+        points_by_id={_ANCHOR: {"validFrom": "2024/02/03 (Sat) 09:00"}},
+    )
+    assert "(2024-02-03)" in result.text
+
+
+def test_garbage_and_sentinel_slash_like_values_stay_date_unknown():
+    for value in ("", _UNDATED_SENTINEL_GUARD, "early May", "not-a-date", "2023", "20/05/2023"):
+        sg = _sg((_ANCHOR,), content={_ANCHOR: "text"})
+        result = render_arm_b(
+            sg,
+            haystack_session_ids=_SESSIONS,
+            points_by_id={_ANCHOR: {"createdAt": value}},
+        )
+        assert "(date unknown)" in result.text, value
+
+
 def test_valid_from_wins_over_created_at():
     sg = _sg((_ANCHOR,), content={_ANCHOR: "text"})
     result = render_arm_b(

@@ -40,7 +40,8 @@ seed entry       ``build_subgraph`` → ``_fetch_seeds``)
 B/C render       ``tortoise/subgraph_render.py`` (whole module)
 B/C builder      ``tools/longmem_eval/context_assembly_arms.py`` →
 (arms B/C)       ``build_context_arm`` (**B/C branches only** — the arm-A
-                 branch is excluded, see below), ``turns_by_point``
+                 branch is excluded, see below), ``turns_by_point``, plus
+                 every module-level binding and class method those reach
 seed             ``tools/longmem_eval/retrieve.py`` → ``vector_search``
 seed backends    ``tortoise/search_engine.py`` → ``run_vector_query``,
                  ``run_fts_query`` (the frozen BM25 fallback)
@@ -49,15 +50,37 @@ confidence       ``tools/longmem_eval/ep_activation.py`` →
 dependency)
 ===============  ====================================================
 
-The B/C builder is scanned by **entry point**, never whole-module: the
-metrics layer in the same file legitimately names the gold-evidence artifact
-for metrics 5/9, so a file-level scan would be a false positive. Arm A's and
-arm D's branches of ``build_context_arm`` are **deliberately out of scope**
-(see ``CODE_PATHS[...].branch_exclusions``): arm A is the gold-verbatim
-oracle ceiling and reads ``answer_session_ids`` by design (spec §3), and arm
-D is the no-context control that calls the legacy lane renderer. Only the
-B/C branches are in scope. :func:`scan_code_paths` reports both the scanned
-functions and the excluded regions, so the coverage claim is auditable.
+The B/C builder is scanned by **entry point** (``build_context_arm``,
+``turns_by_point``) **plus a module-scope reference closure**. The driver is
+the highest-risk file — it holds the whole dataset row (``qctx.raw``) — and a
+gold reference can sit in a module-level statement or a class body that the
+B/C branch reaches without ever appearing inside those two functions. So the
+closure additionally scans:
+
+* every **module-level binding a scanned function references** — catching
+  ``_STRIP = ("has_answer", "lme_session_index")`` used inside the B/C branch
+  — plus the calls and further bindings inside that binding (transitively);
+* every **method of a module-level class reached through an instance
+  receiver** (``helper = Helper(); helper.strip(props)``; ``self.strip()``
+  inside a class method; and, as a scan-safe over-approximation, any
+  ``x.method()`` whose ``method`` exactly one module-level class defines),
+  including class-level bindings those methods read via ``self``.
+
+Scanning stays **reachability-bounded**, which is why the driver is not
+scanned with a literal whole-module ``("*",)``: the metrics/runner layer in
+the same file legitimately names the gold-evidence artifact for metrics 5/9,
+so a whole-module pass reports ~90 legitimate references and would need a
+large, edit-fragile exclusion list (a concurrently-added ``MIN_GOLD_TOKENS``
+import or an arm-A helper named ``_render_gold_blocks_under_budget`` would
+break it). The reference closure reaches exactly the same code the B/C
+branch can reach, and nothing else. Arm A's and arm D's branches of
+``build_context_arm`` are **deliberately out of scope** (see
+``CODE_PATHS[...].branch_exclusions``): arm A is the gold-verbatim oracle
+ceiling and reads ``answer_session_ids`` by design (spec §3), and arm D is
+the no-context control that calls the legacy lane renderer. Only the B/C
+branches are in scope. :func:`scan_code_paths` reports the scanned functions
+(including the module-level binding scopes) and the excluded regions, so the
+coverage claim is auditable.
 
 Three detection channels per scanned function:
 
@@ -98,6 +121,11 @@ responsibility of the §10.1 gold-field perturbation run and human review:
   ``"has_" + part`` never resolves, because locals are not tracked;
 * a join/format whose arguments are not literals
   (``"_".join(parts)``, ``template.format(name)``);
+* an **unreferenced** module-level binding or an unreachable class method in
+  a by-entry-point module (dead or import-time-side-effect-only code); the
+  file's *reachable* scope is what is scanned, not every top-level statement;
+* an instance method reached through a receiver the guard cannot type, when
+  **more than one** module-level class defines the same attribute name;
 * ``exec`` / ``eval`` / ``compile`` of assembler text,
   ``getattr(props, name)`` / ``props.__dict__`` reflection, and opening the
   gold artifact through a computed path;
@@ -384,6 +412,67 @@ def _module_functions(tree: ast.Module) -> dict[str, ast.AST]:
                 if isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef)):
                     funcs[f"{node.name}.{sub.name}"] = sub
     return funcs
+
+
+def _module_classes(tree: ast.Module) -> frozenset[str]:
+    """Names of every module-level class (instance-method receiver typing)."""
+    return frozenset(node.name for node in tree.body if isinstance(node, ast.ClassDef))
+
+
+def _module_bindings(
+    tree: ast.Module,
+) -> tuple[
+    dict[str, ast.AST],
+    dict[tuple[str, str], ast.AST],
+    dict[str, list[ast.AST]],
+]:
+    """Module-level and class-level assignments, keyed by name.
+
+    The driver's B/C path is scanned by entry point, so a gold constant that
+    lives *outside* ``build_context_arm`` — ``_STRIP = ("has_answer", …)`` at
+    module level, or a class attribute read via ``self`` — is invisible to a
+    naive call-graph walk. The reference closure resolves a scanned function's
+    ``Name``/``self.attr`` references through these maps.
+
+    The third map is the **companion statements**: every module-level
+    statement that references a name. It closes the post-definition mutation
+    pattern ``_CONFIG = {}`` … ``_CONFIG["strip"] = "has_answer"``, where the
+    gold value sits in a statement *after* the binding's own value node.
+    """
+    bindings: dict[str, ast.AST] = {}
+    class_bindings: dict[tuple[str, str], ast.AST] = {}
+    for node in tree.body:
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    bindings[target.id] = node.value
+        elif (
+            isinstance(node, ast.AnnAssign)
+            and isinstance(node.target, ast.Name)
+            and node.value is not None
+        ):
+            bindings[node.target.id] = node.value
+        elif isinstance(node, ast.ClassDef):
+            for sub in node.body:
+                if isinstance(sub, ast.Assign):
+                    for target in sub.targets:
+                        if isinstance(target, ast.Name):
+                            class_bindings[(node.name, target.id)] = sub.value
+                elif (
+                    isinstance(sub, ast.AnnAssign)
+                    and isinstance(sub.target, ast.Name)
+                    and sub.value is not None
+                ):
+                    class_bindings[(node.name, sub.target.id)] = sub.value
+
+    companions: dict[str, list[ast.AST]] = {}
+    for node in tree.body:
+        if not isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign, ast.Expr)):
+            continue
+        for child in ast.walk(node):
+            if isinstance(child, ast.Name):
+                companions.setdefault(child.id, []).append(node)
+    return bindings, class_bindings, companions
 
 
 def _resolve_module_path(module: str | None, level: int, current: str) -> str | None:
@@ -712,6 +801,84 @@ def _comments(source: str) -> list[tuple[int, str]]:
     return out
 
 
+def _check_node(
+    child: ast.AST,
+    *,
+    code_path: str,
+    function: str,
+    docstrings: set[int],
+    findings: list[LeakFinding],
+) -> None:
+    """Apply the identifier + constant-string channels to one AST node.
+
+    Split out of :func:`_scan_tree` so a module-level binding's *value* node
+    can be checked on its own (the binding closure scans the value, not just
+    its children).
+    """
+    if isinstance(child, ast.alias):
+        # Check BOTH the module/import name and the alias — an aliased
+        # gold import (``... import load_gold_evidence_claims as g``)
+        # must not evade the scan.
+        for imported_name in (child.name, child.asname):
+            _check_identifier(
+                imported_name,
+                code_path=code_path,
+                function=function,
+                line=getattr(child, "lineno", 1),
+                findings=findings,
+            )
+        return
+
+    if isinstance(child, ast.Name):
+        _check_identifier(
+            child.id,
+            code_path=code_path,
+            function=function,
+            line=child.lineno,
+            findings=findings,
+        )
+    elif isinstance(child, ast.Attribute):
+        _check_identifier(
+            child.attr,
+            code_path=code_path,
+            function=function,
+            line=child.lineno,
+            findings=findings,
+        )
+    elif isinstance(child, ast.keyword):
+        _check_identifier(
+            child.arg,
+            code_path=code_path,
+            function=function,
+            line=child.lineno,
+            findings=findings,
+        )
+    elif (
+        isinstance(child, ast.Constant)
+        and isinstance(child.value, (str, bytes))
+        and id(child) not in docstrings
+    ):
+        literal = _constant_str(child)
+        if literal is not None:
+            _check_string(
+                literal,
+                code_path=code_path,
+                function=function,
+                line=child.lineno,
+                findings=findings,
+            )
+
+    resolved = _resolvable_string(child)
+    if resolved is not None:
+        _check_string(
+            resolved,
+            code_path=code_path,
+            function=function,
+            line=getattr(child, "lineno", 1),
+            findings=findings,
+        )
+
+
 def _scan_tree(
     node: ast.AST,
     *,
@@ -805,66 +972,13 @@ def _scan_tree(
             )
             continue
 
-        if isinstance(child, ast.alias):
-            # Check BOTH the module/import name and the alias — an aliased
-            # gold import (``... import load_gold_evidence_claims as g``)
-            # must not evade the scan.
-            for imported_name in (child.name, child.asname):
-                _check_identifier(
-                    imported_name,
-                    code_path=code_path,
-                    function=function,
-                    line=getattr(child, "lineno", 1),
-                    findings=findings,
-                )
-        elif isinstance(child, ast.Name):
-            _check_identifier(
-                child.id,
-                code_path=code_path,
-                function=function,
-                line=child.lineno,
-                findings=findings,
-            )
-        elif isinstance(child, ast.Attribute):
-            _check_identifier(
-                child.attr,
-                code_path=code_path,
-                function=function,
-                line=child.lineno,
-                findings=findings,
-            )
-        elif isinstance(child, ast.keyword):
-            _check_identifier(
-                child.arg,
-                code_path=code_path,
-                function=function,
-                line=child.lineno,
-                findings=findings,
-            )
-        elif (
-            isinstance(child, ast.Constant)
-            and isinstance(child.value, (str, bytes))
-            and id(child) not in docstrings
-        ):
-            literal = _constant_str(child)
-            if literal is not None:
-                _check_string(
-                    literal,
-                    code_path=code_path,
-                    function=function,
-                    line=child.lineno,
-                    findings=findings,
-                )
-
-        resolved = _resolvable_string(child)
-        if resolved is not None:
-            _check_string(
-                resolved,
-                code_path=code_path,
-                function=function,
-                line=getattr(child, "lineno", 1),
-                findings=findings,
-            )
+        _check_node(
+            child,
+            code_path=code_path,
+            function=function,
+            docstrings=docstrings,
+            findings=findings,
+        )
 
         _scan_tree(
             child,
@@ -945,12 +1059,17 @@ class _Module:
     imports: dict[str, tuple[str, str | None]]
     docstrings: set[int]
     comments: list[tuple[int, str]]
+    bindings: dict[str, ast.AST]
+    class_bindings: dict[tuple[str, str], ast.AST]
+    companions: dict[str, list[ast.AST]]
+    classes: frozenset[str]
 
 
 def _load(path: str, cache: dict[str, _Module]) -> _Module:
     if path not in cache:
         source = _read(path)
         tree = ast.parse(source)
+        bindings, class_bindings, companions = _module_bindings(tree)
         cache[path] = _Module(
             path=path,
             source=source,
@@ -959,15 +1078,154 @@ def _load(path: str, cache: dict[str, _Module]) -> _Module:
             imports=_import_table(tree, path),
             docstrings=_docstring_ids(tree),
             comments=_comments(source),
+            bindings=bindings,
+            class_bindings=class_bindings,
+            companions=companions,
+            classes=_module_classes(tree),
         )
     return cache[path]
+
+
+def _class_of(value: ast.AST | None, classes: frozenset[str]) -> str | None:
+    """The module-level class a value expression constructs, if any."""
+    if value is None:
+        return None
+    if isinstance(value, ast.Call) and isinstance(value.func, ast.Name):
+        return value.func.id if value.func.id in classes else None
+    if isinstance(value, ast.Name) and value.id in classes:
+        return value.id
+    return None
+
+
+def _annotation_class(annotation: ast.AST | None, classes: frozenset[str]) -> str | None:
+    """The module-level class an annotation names (``x: Helper`` / ``Helper | None``)."""
+    if annotation is None:
+        return None
+    if isinstance(annotation, ast.Name) and annotation.id in classes:
+        return annotation.id
+    if isinstance(annotation, ast.BinOp) and isinstance(annotation.op, ast.BitOr):
+        return _annotation_class(annotation.left, classes) or _annotation_class(
+            annotation.right, classes
+        )
+    return None
+
+
+def _local_class_binding(scope: ast.AST | None, module: _Module, name: str) -> str | None:
+    """The module-level class a local name is bound to inside ``scope``.
+
+    Handles ``helper = Helper()``, ``helper = Helper``, ``helper: Helper = …``
+    and a parameter annotated ``helper: Helper`` — the receiver in the driver's
+    ``helper.strip(props)`` pattern. Unresolvable receivers fall back to
+    :func:`_call_target`'s unique-defining-class rule.
+    """
+    if scope is None or not module.classes:
+        return None
+    for node in ast.walk(scope):
+        if isinstance(node, ast.Assign):
+            cls = _class_of(node.value, module.classes)
+            if cls and any(
+                isinstance(target, ast.Name) and target.id == name for target in node.targets
+            ):
+                return cls
+        elif isinstance(node, ast.AnnAssign):
+            if not (isinstance(node.target, ast.Name) and node.target.id == name):
+                continue
+            cls = _class_of(node.value, module.classes) or _annotation_class(
+                node.annotation, module.classes
+            )
+            if cls:
+                return cls
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            for arg in (
+                *getattr(node.args, "posonlyargs", []),
+                *node.args.args,
+                *node.args.kwonlyargs,
+            ):
+                if arg.arg == name:
+                    cls = _annotation_class(arg.annotation, module.classes)
+                    if cls:
+                        return cls
+    return None
+
+
+def _iter_scanned_refs(
+    node: ast.AST,
+    function: str,
+    branch_exclusions: tuple[BranchExclusion, ...],
+) -> Iterator[tuple[str, str, str | None]]:
+    """``("name", id, None)`` / ``("attr", base, attr)`` refs in the scanned region.
+
+    Mirrors :func:`_iter_scanned_calls`: excluded branch subtrees are not
+    descended into, so a binding referenced only from arm A/D is not pulled
+    into the closure.
+    """
+    for child in ast.iter_child_nodes(node):
+        if _is_excluded_if(child, function, branch_exclusions):
+            continue
+        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            yield from _iter_scanned_refs(child, child.name, branch_exclusions)
+            continue
+        if isinstance(child, ast.Name):
+            yield ("name", child.id, None)
+        elif isinstance(child, ast.Attribute) and isinstance(child.value, ast.Name):
+            yield ("attr", child.value.id, child.attr)
+        yield from _iter_scanned_refs(child, function, branch_exclusions)
+
+
+def _resolve_binding_keys(
+    ref: tuple[str, str, str | None],
+    module: _Module,
+    class_name: str | None,
+) -> list[str]:
+    """Module/class binding keys a scanned reference can reach."""
+    kind, base, attr = ref
+    if kind == "name":
+        return [base] if base in module.bindings else []
+    if attr is None:
+        return []
+    if base == "self" and class_name and (class_name, attr) in module.class_bindings:
+        return [f"{class_name}.{attr}"]
+    if base in module.classes and (base, attr) in module.class_bindings:
+        return [f"{base}.{attr}"]
+    return []
+
+
+def _binding_nodes(module: _Module, key: str) -> list[ast.AST]:
+    """Value + companion statements for a module-level or ``Class.attr`` key.
+
+    The companions are every module-level statement that references the key,
+    so a post-definition mutation (``_CONFIG["strip"] = "has_answer"``) is
+    scanned alongside the binding's own value.
+    """
+    out: list[ast.AST] = []
+    if key in module.bindings:
+        out.append(module.bindings[key])
+        out.extend(module.companions.get(key, ()))
+    elif "." in key:
+        class_name, attr = key.split(".", 1)
+        node = module.class_bindings.get((class_name, attr))
+        if node is not None:
+            out.append(node)
+    return out
 
 
 def _call_target(
     call: ast.Call,
     module: _Module,
+    *,
+    class_name: str | None = None,
+    scope: ast.AST | None = None,
 ) -> tuple[str, str] | None:
-    """Resolve a call to ``(repo-relative module path, function name)``."""
+    """Resolve a call to ``(repo-relative module path, function name)``.
+
+    Follows module-level functions and imported functions/modules, and — the
+    #3011 P2 fix — **instance/class methods**: ``self.method()`` inside a class
+    method, and ``obj.method()`` where ``obj`` is locally bound to (or
+    annotated as) a module-level class. A call on an attribute name exactly
+    one module-level class defines is also followed, so a helper reached
+    through a receiver the guard cannot type is still scanned; that is an
+    over-approximation, and scanning more is always safe here.
+    """
     func = call.func
     if isinstance(func, ast.Name):
         if func.id in module.funcs:
@@ -977,17 +1235,35 @@ def _call_target(
             return (target_path, symbol) if symbol else None
         return None
 
-    if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name):
-        base, attr = func.value.id, func.attr
-        if f"{base}.{attr}" in module.funcs:
-            return (module.path, f"{base}.{attr}")
-        if base in module.imports:
-            target_path, symbol = module.imports[base]
-            if symbol is None:
-                return (target_path, attr)
-            submodule = _submodule_path(target_path, symbol)
-            if submodule is not None:
-                return (submodule, attr)
+    if isinstance(func, ast.Attribute):
+        attr = func.attr
+        base_node = func.value
+        target_class: str | None = None
+        if isinstance(base_node, ast.Name):
+            base = base_node.id
+            if f"{base}.{attr}" in module.funcs:
+                return (module.path, f"{base}.{attr}")
+            if base in module.imports:
+                target_path, symbol = module.imports[base]
+                if symbol is None:
+                    return (target_path, attr)
+                submodule = _submodule_path(target_path, symbol)
+                if submodule is not None:
+                    return (submodule, attr)
+            if base == "self" and class_name:
+                target_class = class_name
+            elif base in module.classes:
+                target_class = base
+            else:
+                target_class = _local_class_binding(scope, module, base)
+        else:
+            # ``Helper().method()`` — a class instance built inline.
+            target_class = _class_of(base_node, module.classes)
+        if target_class and f"{target_class}.{attr}" in module.funcs:
+            return (module.path, f"{target_class}.{attr}")
+        candidates = [cls for cls in sorted(module.classes) if f"{cls}.{attr}" in module.funcs]
+        if len(candidates) == 1:
+            return (module.path, f"{candidates[0]}.{attr}")
         return None
     return None
 
@@ -1033,10 +1309,17 @@ def _scan_function(
 def scan_code_paths() -> ScanReport:
     """Walk the real call graph of the four named code paths; return findings.
 
-    Only repo-internal module-level functions are followed (methods such as
-    ``graph.query`` / ``sdk.dream`` / ``logger.warning`` are not), so the
+    Only repo-internal module-level functions and class methods are followed
+    (``graph.query`` / ``sdk.dream`` / ``logger.warning`` are not), so the
     closure is exactly the seed/traversal/ranking/render surface plus the
-    pure helpers those functions call.
+    pure helpers and module-level bindings those functions reach.
+
+    For the by-entry-point driver the walk is augmented with a **module-scope
+    reference closure**: every module-level binding a scanned function
+    references, and every class method reached through an instance receiver,
+    is scanned too (see the module docstring). That is why
+    ``context_assembly_arms.py`` shows up in ``visited`` with ``<module
+    binding>`` entries alongside its functions.
     """
     cache: dict[str, _Module] = {}
     findings: list[LeakFinding] = []
@@ -1070,6 +1353,81 @@ def scan_code_paths() -> ScanReport:
 
     def _is_excluded_target(target: tuple[str, str]) -> bool:
         return target[1] in excluded_functions_by_module.get(target[0], frozenset())
+
+    #: Module-level / class-level bindings reached by the closure, and the
+    #: queue that drains them. A binding key is a plain module name or
+    #: ``Class.attr`` for a class attribute read through ``self``/``Class``.
+    #: Whole-module code paths already scan their module scope, so for them the
+    #: queue only follows the *calls* inside a binding (never re-reports it).
+    whole_module_paths = frozenset(
+        code_path.path for code_path in CODE_PATHS if code_path.entry_points == ("*",)
+    )
+    binding_queue: list[tuple[str, str]] = []
+    scanned_bindings: set[tuple[str, str]] = set()
+
+    def _follow_calls(
+        module: _Module,
+        node: ast.AST,
+        function: str,
+        exclusions: tuple[BranchExclusion, ...],
+        class_name: str | None,
+    ) -> None:
+        """Follow a scanned scope's calls and enqueue its binding references."""
+        for call in _iter_scanned_calls(node, function, exclusions):
+            target = _call_target(call, module, class_name=class_name, scope=node)
+            if target and target not in scanned and not _is_excluded_target(target):
+                frontier.append(target)
+        for ref in _iter_scanned_refs(node, function, exclusions):
+            for binding_key in _resolve_binding_keys(ref, module, class_name):
+                token = (module.path, binding_key)
+                if token not in scanned_bindings:
+                    scanned_bindings.add(token)
+                    binding_queue.append(token)
+
+    def _drain_bindings() -> None:
+        """Scan every reached module-level/class-level binding value.
+
+        This is what closes the driver's module-scope hole: ``_STRIP =
+        ("has_answer", …)`` lives outside ``build_context_arm`` but is
+        referenced *inside* its B/C branch, so the constant is scanned even
+        though the function-only walk never saw it.
+        """
+        while binding_queue:
+            binding_path, binding_key = binding_queue.pop()
+            binding_module = _load(binding_path, cache)
+            binding_nodes = _binding_nodes(binding_module, binding_key)
+            if not binding_nodes:
+                continue
+            scan_here = binding_module.path not in whole_module_paths
+            if scan_here:
+                visited.append(f"{binding_module.path}::{binding_key} (module binding)")
+            for binding_node in binding_nodes:
+                if scan_here:
+                    _check_node(
+                        binding_node,
+                        code_path=binding_module.path,
+                        function=f"<binding {binding_key}>",
+                        docstrings=binding_module.docstrings,
+                        findings=findings,
+                    )
+                    _scan_tree(
+                        binding_node,
+                        source=binding_module.source,
+                        code_path=binding_module.path,
+                        docstrings=binding_module.docstrings,
+                        comments=binding_module.comments,
+                        findings=findings,
+                        function=f"<binding {binding_key}>",
+                        restrict_to=None,
+                        branch_exclusions=(),
+                    )
+                _follow_calls(
+                    binding_module,
+                    binding_node,
+                    f"<binding {binding_key}>",
+                    (),
+                    binding_key.rsplit(".", 1)[0] if "." in binding_key else None,
+                )
 
     frontier: list[tuple[str, str | None]] = []
     for code_path in CODE_PATHS:
@@ -1140,10 +1498,14 @@ def scan_code_paths() -> ScanReport:
                 scanned.add(key)
                 visited.append(f"{module.path}::{func_name}")
                 _scan_function(module, node, func_name, findings, exclusions)
-                for call in _iter_scanned_calls(node, func_name, exclusions):
-                    target = _call_target(call, module)
-                    if target and target not in scanned and not _is_excluded_target(target):
-                        frontier.append(target)
+                _follow_calls(
+                    module,
+                    node,
+                    func_name,
+                    exclusions,
+                    func_name.rsplit(".", 1)[0] if "." in func_name else None,
+                )
+            _drain_bindings()
             continue
 
         node = module.funcs.get(name)
@@ -1164,10 +1526,14 @@ def scan_code_paths() -> ScanReport:
         scanned.add(key)
         visited.append(f"{module.path}::{name}")
         _scan_function(module, node, name, findings, exclusions)
-        for call in _iter_scanned_calls(node, name, exclusions):
-            target = _call_target(call, module)
-            if target and target not in scanned and not _is_excluded_target(target):
-                frontier.append(target)
+        _follow_calls(
+            module,
+            node,
+            name,
+            exclusions,
+            name.rsplit(".", 1)[0] if "." in name else None,
+        )
+        _drain_bindings()
 
     seen: set[tuple] = set()
     unique: list[LeakFinding] = []

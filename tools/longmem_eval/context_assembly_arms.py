@@ -33,7 +33,14 @@ Controls (§5) enforced here
 * **Fresh graph namespace per question** — the driver builds one SDK per
   question through ``sdk_factory`` and records the namespace.
 * **Matched context budget** — every arm is capped at the same
-  ``max_words`` and the per-arm word *distribution* is reported (metric 2).
+  ``max_words``, measured on the **final rendered text** in whitespace words
+  via ``int(len(text.split()) * 1.1)`` (§5), and the per-arm word
+  *distribution* is reported (metric 2). Arm A drops whole trailing gold
+  **session blocks** (:func:`_render_gold_blocks_under_budget`); B/C reserve
+  the driver-prepended ``Current Date:`` header's own budget and then rely on
+  ``subgraph_render``'s whole-line truncation. No evidence arm is ever handed
+  more than ``max_words`` budget units (the shared header is non-negotiable
+  scaffolding, so a cap below the header's own budget floors at the header).
 * ``measure_temporal.assert_reader_constancy`` is called over the four
   methodology blocks before any report is written.
 
@@ -92,6 +99,7 @@ from tools.longmem_eval.gold_evidence_claims import (
     ARTIFACT_PATH as GOLD_ARTIFACT_PATH,
 )
 from tools.longmem_eval.gold_evidence_claims import (
+    MIN_GOLD_TOKENS,
     STOPWORDS,
     tokenize,
 )
@@ -275,6 +283,11 @@ def _words(text: str) -> int:
     return len(text.split())
 
 
+def _date_header(question_date: str | None) -> str:
+    """The shared ``Current Date:`` header line ("" when the date is falsy)."""
+    return f"Current Date: {question_date}" if question_date else ""
+
+
 def _with_date_header(text: str, question_date: str | None) -> str:
     """Prepend the shared ``Current Date:`` header (B/C only — see module doc).
 
@@ -282,9 +295,41 @@ def _with_date_header(text: str, question_date: str | None) -> str:
     driver supplies the identical header here. A falsy date leaves the text
     byte-identical (mirrors ``render_context``).
     """
-    if not question_date:
+    header = _date_header(question_date)
+    if not header:
         return text
-    return f"Current Date: {question_date}\n\n{text}"
+    return f"{header}\n\n{text}"
+
+
+def _render_gold_blocks_under_budget(
+    hits: Sequence[Mapping[str, Any]],
+    *,
+    question_date: str | None,
+    max_words: int,
+) -> str:
+    """Arm-A renderer: the ``render_context`` block shape under the §5 cap.
+
+    Byte-identical to ``render_context(hits, question_date=question_date)``
+    while that fits the budget: the ``Current Date:`` header, then one block
+    per gold session, ``"\\n\\n"``-joined. Each block is produced by
+    ``render_context([hit])``, so the shared block renderer stays the single
+    implementation and no private helper is reached into.
+
+    Truncation drops **whole trailing session blocks** — never a mid-line
+    chop and never a partial block — until
+    ``int(len(text.split()) * 1.1) <= max_words``. The header is scaffolding
+    (§5), so it is never dropped; when it alone exceeds a degenerate cap the
+    result floors at the header. Because a gold session is exactly one block,
+    dropping "from the end" is dropping whole sessions: the retained text is
+    always a prefix of the gold-session sequence.
+    """
+    blocks = [render_context([dict(hit)]) for hit in hits]
+    header = _date_header(question_date)
+    parts = ([header] if header else []) + blocks
+    fixed = 1 if header else 0
+    while len(parts) > fixed and _budget_words("\n\n".join(parts)) > max_words:
+        parts.pop()
+    return "\n\n".join(parts)
 
 
 def _reader_prompt_source_text() -> str:
@@ -457,7 +502,11 @@ def build_context_arm(
                     qctx.haystack_dates[index]
                     if index < len(qctx.haystack_dates) else ""),
             })
-        text = render_context(hits, question_date=qctx.question_date)
+        # §5 matched budget: the cap binds the FINAL rendered text and is
+        # applied by dropping whole trailing gold session blocks, so A is
+        # handed no more than any B/C render can be.
+        text = _render_gold_blocks_under_budget(
+            hits, question_date=qctx.question_date, max_words=max_words)
         return ArmContext(
             arm=arm, text=text, word_count=_words(text),
             budget_words=_budget_words(text), context_source="gold-verbatim",
@@ -478,10 +527,21 @@ def build_context_arm(
 
     if arm in ("B", "C"):
         sg = build_subgraph(sdk, qctx.question_text, namespace=namespace)
+        # §5 matched budget: the cap binds the FINAL rendered text for every
+        # arm. ``render_arm_b``/``render_arm_c`` truncate on whole lines over
+        # the body, but the driver prepends the shared header AFTER that, so
+        # reserve the header's own budget here. The extra ``- 1`` absorbs the
+        # ``int()`` truncation of the summed word counts
+        # (``int((h+b)*1.1) <= int(h*1.1) + int(b*1.1) + 1``), making
+        # ``budget_words(final) <= max_words`` hold by construction.
+        header = _date_header(qctx.question_date)
+        body_max_words = max_words
+        if header:
+            body_max_words = max(0, max_words - _budget_words(header) - 1)
         common: dict[str, Any] = {
             "haystack_session_ids": qctx.haystack_session_ids,
             "session_dates": qctx.session_dates,
-            "max_words": max_words,
+            "max_words": body_max_words,
             "points_by_id": sg.point_props,
         }
         if arm == "B":
@@ -542,16 +602,37 @@ def claim_matches_point(
 
     A claim flagged ``trivial: true`` is **never** matched. Otherwise the
     frozen :func:`~tools.longmem_eval.gold_evidence_claims.tokenize` is
-    applied to both texts and the content-token **sets** are compared:
-    ``len(tokens(g) ∩ tokens(p)) / len(tokens(g)) >= threshold``.
+    applied to both texts and the ratio
+
+    ``|tokens(g) ∩ tokens(p)| / |tokens(g)| >= threshold``
+
+    is evaluated with **LIST** cardinality: ``|tokens(g)|`` is
+    ``len(tokenize(g))`` — duplicates counted — exactly the value the
+    artifact records in its ``tokens`` field and compares against
+    ``MIN_GOLD_TOKENS``, so the trivial threshold and the denominator are the
+    same number by construction. The numerator counts **distinct** shared
+    content tokens (set intersection).
+
+    This is the cardinality the frozen tokenizer's own docstring names
+    (``gold_evidence_claims.tokenize``: "``len(tokenize(g))`` is the literal
+    ``|tokens(g)|`` the frozen rule names for both the ``MIN_GOLD_TOKENS``
+    test and the metric-5 denominator"). The set cardinality previously used
+    here was the divergence.
+
+    Triviality is belt-and-braces: the recorded flag is honoured, and a
+    claim whose live token count is below ``MIN_GOLD_TOKENS`` is refused even
+    if its flag is missing or wrong — so a sub-threshold claim can never be
+    matched, whichever way the artifact's ``trivial`` field is populated.
     """
     if claim.get("trivial"):
         return False
-    gold = set(tokenize(str(claim.get("claim") or "")))
-    if not gold:
+    gold = tokenize(str(claim.get("claim") or ""))
+    # List length is the denominator; the same list length decides the frozen
+    # trivial threshold, so the two can never disagree.
+    if len(gold) < MIN_GOLD_TOKENS:
         return False
     point = set(tokenize(str(point_content or "")))
-    return (len(gold & point) / len(gold)) >= threshold
+    return (len(set(gold) & point) / len(gold)) >= threshold
 
 
 def answer_bearing_point_ids(
@@ -1316,9 +1397,27 @@ def build_manifest(
                 "questions need it, the driver prepends the identical header "
                 "to B/C (see _with_date_header)."),
             "metric5_denominator": (
-                "|tokens(g)| is the cardinality of the content-token SET "
-                "(spec §4: 'the resulting content-token sets are compared'); "
-                "trivial claims never match."),
+                "|tokens(g)| is the LIST cardinality len(tokenize(g)) — "
+                "duplicates counted, exactly the artifact's `tokens` field "
+                "and the MIN_GOLD_TOKENS test — so the metric-5 denominator "
+                "and the trivial threshold are the same number by "
+                "construction. The numerator is the DISTINCT shared "
+                "content-token count (set intersection); the phrase 'the "
+                "resulting content-token sets are compared' in spec §4 "
+                "governs the intersection, not the denominator. Claims "
+                "flagged trivial (or carrying < MIN_GOLD_TOKENS live "
+                "tokens) never match. This aligns with "
+                "gold_evidence_claims.tokenize's frozen docstring."),
+            "context_budget_enforcement": (
+                "§5's cap is enforced on the FINAL rendered text in "
+                "whitespace words (int(len(text.split()) * 1.1)) for all "
+                "four arms. Arm A drops whole trailing gold session "
+                "blocks; B/C reserve the driver-prepended 'Current Date:' "
+                "header's budget (plus one unit for int() truncation of the "
+                "summed counts) before subgraph_render applies its own "
+                "whole-line truncation. The header is non-negotiable "
+                "scaffolding, so a cap below the header's own budget floors "
+                "at the header."),
             "metric2_unit": (
                 "context words = len(text.split()); context_tokens = "
                 "int(len*1.1) is the §5 budget unit (both recorded)."),

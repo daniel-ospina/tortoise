@@ -17,6 +17,7 @@ Covered (per the Track E1 brief):
 """
 from __future__ import annotations
 
+import functools
 import json
 import re
 import sys
@@ -436,3 +437,201 @@ def test_main_rejects_a_non_list_instances_file(tmp_path: Path, capsys):
     assert gec.main(["--instances", str(instances), "--out", str(out)]) == 2
     assert not out.exists()
     assert "list" in capsys.readouterr().err
+
+
+# ── frozen-artifact structural invariants (regression: #3011 P2) ───────────
+#
+# The committed artifact must be *derived from* the frozen LongMemEval-S
+# dataset, never from a hand-edited slice of it. A slice that had dropped a
+# non-gold session silently shifted ``gpt4_76048e76``'s gold session from
+# haystack index 20 to 19 and shipped three claims citing a non-gold,
+# ``has_answer``-less session. These tests close that hole at two levels:
+#
+#   * ``_FROZEN_GOLD_SESSIONS`` — a hermetic, inline snapshot of the frozen
+#     dataset's gold structure (CI has no 277 MB dataset): every cited
+#     ``source_turn_id`` must name a session in ``answer_session_ids`` and a
+#     turn that actually carries ``has_answer: true``;
+#   * a dataset-backed rebuild asserting the committed bytes and sha256 are
+#     exactly what the committed builder produces from the frozen dataset,
+#     idempotently across two runs (skipped when the dataset is not cached,
+#     matching ``tests/test_dataset_audit.py``).
+
+#: Frozen gold-session index for the #2578 55-Q analysis subset, derived from
+#: ``~/.cache/tortoise-longmemeval/longmemeval_s_cleaned.json`` via the
+#: committed selectors (``measure_temporal.deterministic_subset`` +
+#: ``dedup_instance_sessions``): ``qid -> {position in haystack_session_ids of
+#: each answer_session_ids entry: turn indices carrying has_answer: true}``.
+#: Keys are exactly the ``answer_session_ids`` positions, so a key miss is a
+#: reference to a non-gold session; an empty tuple is a gold session whose
+#: turns carry no ``has_answer`` mark (four exist — they must never be cited).
+_FROZEN_GOLD_SESSIONS: dict[str, dict[int, tuple[int, ...]]] = {
+    "gpt4_59149c77": {4: (0,), 27: (6,)},
+    "gpt4_fa19884c": {17: (8,), 36: (0,)},
+    "gpt4_4929293a": {16: (0,), 27: (0,)},
+    "gpt4_1d4ab0c9": {13: (0,), 30: (0,)},
+    "0db4c65d": {29: (0,), 39: (0,)},
+    "gpt4_1916e0ea": {4: (6,), 17: (0,)},
+    "gpt4_7a0daae1": {9: (6,), 12: (0,)},
+    "gpt4_1e4a8aeb": {2: (0,), 40: (0,)},
+    "gpt4_4fc4f797": {21: (10,), 35: (0,)},
+    "4dfccbf7": {35: (4,), 38: (8,)},
+    "gpt4_61e13b3c": {31: (0,), 44: (0,)},
+    "gpt4_4ef30696": {2: (0,), 39: (0,)},
+    "gpt4_8e165409": {3: (0,), 30: (8,)},
+    "gpt4_74aed68e": {2: (0,), 32: (0,)},
+    "gpt4_21adecb5": {24: (0,), 37: (0,)},
+    "gpt4_98f46fc6": {6: (0,), 13: (6,)},
+    "gpt4_68e94287": {13: (0,), 21: (0,)},
+    "gpt4_e414231e": {1: (0,), 24: (0,)},
+    "gpt4_2487a7cb": {20: (2,), 40: (10,)},
+    "gpt4_76048e76": {18: (0,), 20: (0,)},
+    "gpt4_2312f94c": {7: (0,), 19: (0,)},
+    "08f4fc43": {23: (0,), 27: (0,)},
+    "2c63a862": {31: (8,), 41: (0,)},
+    "gpt4_385a5000": {10: (0,), 47: (0,)},
+    "2a1811e2": {17: (0,), 25: (0,)},
+    "gpt4_0b2f1d21": {12: (0,), 41: (0,)},
+    "f0853d11": {18: (0,), 22: (0,)},
+    "gpt4_6ed717ea": {14: (0,), 20: (0,)},
+    "gpt4_70e84552": {10: (0,), 40: (0,)},
+    "a3838d2b": {12: (0,), 24: (0,), 30: (0,), 33: (0,), 35: (0,), 37: (0,)},
+    "gpt4_93159ced": {0: (4, 10), 23: (2,)},
+    "gpt4_2d58bcd6": {4: (0,), 43: (0,)},
+    "gpt4_65aabe59": {19: (0, 4), 36: (4,)},
+    "gpt4_483dd43c": {19: (0,), 39: (0,)},
+    "dcfa8644": {15: (0,), 35: (0,)},
+    "gpt4_b4a80587": {11: (2,), 25: (0,)},
+    "gpt4_8c8961ae": {5: (0,), 19: (10,)},
+    "gpt4_d9af6064": {39: (0,), 41: (0,)},
+    "gpt4_7de946e7": {27: (6,), 39: (0,)},
+    "gpt4_d31cdae3": {20: (10,), 28: (0,)},
+    "gpt4_cd90e484": {33: (4,), 38: (0,)},
+    "gpt4_88806d6e": {9: (0,), 41: (0,)},
+    "gpt4_93f6379c": {3: (0,), 14: (), 36: (0,)},
+    "gpt4_78cf46a3": {34: (0,), 44: (6,)},
+    "gpt4_0a05b494": {7: (2,), 36: (2,)},
+    "gpt4_1a1dc16d": {32: (0,), 40: (6,)},
+    "gpt4_2f584639": {9: (2,), 18: (0,)},
+    "gpt4_213fd887": {7: (0,), 16: (2,)},
+    "gpt4_5438fa52": {3: (0,), 24: (4,)},
+    "gpt4_c27434e8": {18: (0,), 27: (0,)},
+    "gpt4_fe651585": {40: (0,), 46: (8,)},
+    "8c18457d": {9: (4, 10), 30: (0,)},
+    "gpt4_93159ced_abs": {9: (), 29: ()},
+    "gpt4_c27434e8_abs": {0: (0,), 37: ()},
+    "gpt4_fe651585_abs": {2: (), 8: (0,)},
+}
+
+_FROZEN_DATASET = (Path.home() / ".cache" / "tortoise-longmemeval"
+                   / "longmemeval_s_cleaned.json")
+
+#: The committed artifact path, resolved from this test file (repo root is two
+#: levels up from ``tests/longmem_eval/``).
+_ARTIFACT_PATH = Path(__file__).resolve().parents[2] / gec.ARTIFACT_PATH
+
+_TURN_ID_RE = re.compile(r"^lme:.+:s(\d+):t(\d+)$")
+
+
+def _committed_artifact() -> dict:
+    return json.loads(_ARTIFACT_PATH.read_text(encoding="utf-8"))
+
+
+def _source_turn_index(source_turn_id: str) -> tuple[int, int]:
+    """``lme:<qid>:s<si>:t<ti>`` -> ``(si, ti)``."""
+    match = _TURN_ID_RE.match(source_turn_id)
+    assert match, source_turn_id
+    return int(match.group(1)), int(match.group(2))
+
+
+def _require_frozen_dataset() -> None:
+    if not _FROZEN_DATASET.is_file():
+        pytest.skip("frozen LongMemEval-S dataset not cached (CI)")
+
+
+@functools.lru_cache(maxsize=1)
+def _canonical_artifact_inputs() -> tuple[dict, ...]:
+    """The committed producer's input: the #2578 55-Q census subset joined to
+    the frozen dataset, with the pre-registered session dedup applied.
+
+    Cached: parsing the 277 MB frozen dataset once per test would dominate
+    this file's runtime. Callers treat the rows as read-only."""
+    from tools.longmem_eval import measure_temporal as mt
+
+    cache = json.loads(_FROZEN_DATASET.read_text(encoding="utf-8"))
+    by_qid = {row["question_id"]: row for row in cache}
+    rows = [by_qid[r["qid"]]
+            for r in mt.deterministic_subset(mt.load_census()["rows"])]
+    return tuple(mt.dedup_instance_sessions(row) for row in rows)
+
+
+def test_committed_artifact_covers_the_frozen_55_question_subset():
+    assert set(_committed_artifact()) == set(_FROZEN_GOLD_SESSIONS)
+
+
+def test_committed_artifact_source_turns_all_carry_has_answer():
+    """Every cited turn is a turn of a gold session marked ``has_answer``."""
+    for qid, claims in _committed_artifact().items():
+        for claim in claims:
+            if claim["source_turn_id"] == "gold_answer":
+                continue
+            si, ti = _source_turn_index(claim["source_turn_id"])
+            gold = _FROZEN_GOLD_SESSIONS[qid]
+            assert si in gold, (qid, claim["source_turn_id"])
+            assert ti in gold[si], (qid, claim["source_turn_id"])
+
+
+def test_committed_artifact_never_references_a_session_outside_gold_set():
+    """Explicit second invariant: every cited session is a member of
+    ``answer_session_ids``. ``_FROZEN_GOLD_SESSIONS``' keys are exactly the
+    ``answer_session_ids`` positions, so a key miss is a reference to a
+    session outside the gold set.
+    """
+    for qid, claims in _committed_artifact().items():
+        referenced = {
+            _source_turn_index(c["source_turn_id"])[0]
+            for c in claims if c["source_turn_id"] != "gold_answer"}
+        assert referenced <= set(_FROZEN_GOLD_SESSIONS[qid]), qid
+
+
+def test_frozen_gold_index_matches_the_cached_dataset():
+    """The inline snapshot cannot go stale silently: re-derive it from the
+    frozen dataset when present."""
+    _require_frozen_dataset()
+    derived: dict[str, dict[int, tuple[int, ...]]] = {}
+    for row in _canonical_artifact_inputs():
+        gold = set(row["answer_session_ids"])
+        derived[row["question_id"]] = {
+            i: tuple(t for t, turn in enumerate(row["haystack_sessions"][i])
+                     if turn.get("has_answer"))
+            for i, sid in enumerate(row["haystack_session_ids"])
+            if sid in gold}
+    assert derived == _FROZEN_GOLD_SESSIONS
+
+
+def test_committed_artifact_rebuilds_byte_identically_from_frozen_dataset(
+        tmp_path: Path):
+    """The committed artifact's bytes and sha256 are exactly the committed
+    builder's output from the frozen dataset — and the build is idempotent
+    (two runs, identical bytes and identical digest)."""
+    _require_frozen_dataset()
+    rows = _canonical_artifact_inputs()
+    instances = tmp_path / "instances.json"
+    instances.write_text(json.dumps(list(rows)), encoding="utf-8")
+
+    outs = [tmp_path / f"rebuild{i}.json" for i in (1, 2)]
+    for out in outs:
+        assert gec.main(["--instances", str(instances), "--out", str(out)]) == 0
+
+    # idempotence: identical bytes and identical sha256 across the two runs
+    assert outs[0].read_bytes() == outs[1].read_bytes()
+    digest = gec.artifact_sha256(outs[0])
+    assert digest == gec.artifact_sha256(outs[1])
+    sha1 = (tmp_path / "rebuild1.json.sha256").read_text(encoding="utf-8")
+    assert sha1.split()[0] == digest
+
+    # the frozen artifact is exactly the builder output, and its recorded
+    # sha256 is the digest of those bytes (spec §9.5 provenance chain)
+    assert outs[0].read_bytes() == _ARTIFACT_PATH.read_bytes()
+    sha_path = _ARTIFACT_PATH.with_name(_ARTIFACT_PATH.name + ".sha256")
+    assert sha_path.read_text(encoding="utf-8").split()[0] == digest
+    assert gec.artifact_sha256(_ARTIFACT_PATH) == digest

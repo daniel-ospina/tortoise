@@ -37,6 +37,7 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 import tools.longmem_eval.context_assembly_arms as caa  # noqa: E402
+from tools.longmem_eval import gold_evidence_claims as gec  # noqa: E402
 from tools.longmem_eval import leakage_guard as lg  # noqa: E402
 from tortoise.reader import (  # noqa: E402
     LLMReader,
@@ -295,6 +296,50 @@ def test_arm_a_does_not_use_the_retrieval_lane(monkeypatch):
     assert "I'm flying to Lisbon on 6 May." in ctx.text
 
 
+def _row_many_gold_sessions(*, n: int = 4, words: int = 30,
+                            qdate: str = "2026-07-10") -> dict:
+    """``n`` gold sessions, each one turn of ``words`` unique tokens.
+
+    Session ``i`` carries the token family ``s{i}w0 … s{i}w{words-1}`` so
+    whole-block retention can be distinguished from a mid-block cut.
+    """
+    sids = [f"gsid-{i}" for i in range(n)]
+    sessions = [
+        [{"role": "user",
+          "content": " ".join(f"s{i}w{j}" for j in range(words))}]
+        for i in range(n)
+    ]
+    return {
+        "question_id": "q1",
+        "question_type": "multi-session",
+        "question": "What do the sessions say?",
+        "answer": "alpha beta gamma",
+        "question_date": qdate,
+        "haystack_session_ids": list(sids),
+        "haystack_dates": [f"2023-01-0{i + 1}" for i in range(n)],
+        "haystack_sessions": sessions,
+        "answer_session_ids": list(sids),
+    }
+
+
+def _expected_gold_hits(row: dict) -> list[dict]:
+    """The spec's arm-A hit shape, built independently of the runner."""
+    hits: list[dict] = []
+    for i, (sid, session) in enumerate(zip(
+            row["haystack_session_ids"], row["haystack_sessions"], strict=True)):
+        transcript = "\n".join(
+            f"{str(turn.get('role') or 'unknown').title()}: "
+            f"{turn.get('content') or ''}" for turn in session)
+        hits.append({
+            "id": f"lme:{row['question_id']}:s{i}",
+            "content": transcript,
+            "session_id": str(sid),
+            "lme_session_index": i,
+            "session_date": row["haystack_dates"][i],
+        })
+    return hits
+
+
 def test_arm_a_raises_on_an_unresolvable_gold_session(monkeypatch):
     _patch_render_seams(monkeypatch)
     row = _row()
@@ -302,6 +347,93 @@ def test_arm_a_raises_on_an_unresolvable_gold_session(monkeypatch):
     with pytest.raises(ValueError, match="not resolvable"):
         caa.build_context_arm(
             "A", caa.load_question_context(row), sdk=object())
+
+
+# ── P0: arm A is capped at the SAME §5 budget as B/C ─────────────────────
+
+
+def test_arm_a_under_the_cap_is_byte_identical_to_render_context(monkeypatch):
+    """Below the cap, the block-preserving renderer changes nothing."""
+    _patch_render_seams(monkeypatch)
+    row = _row_many_gold_sessions()
+    qctx = caa.load_question_context(row)
+    ctx = caa.build_context_arm(
+        "A", qctx, sdk=object(), max_words=caa.DEFAULT_MAX_WORDS)
+    assert ctx.text == render_context(
+        _expected_gold_hits(row), question_date=row["question_date"])
+    assert ctx.budget_words <= caa.DEFAULT_MAX_WORDS
+
+
+def test_arm_a_drops_whole_trailing_session_blocks_at_the_cap(monkeypatch):
+    """P0: arm A is truncated at ``max_words`` by whole session blocks."""
+    _patch_render_seams(monkeypatch)
+    row = _row_many_gold_sessions(n=4, words=30)
+    qctx = caa.load_question_context(row)
+    full = caa.build_context_arm("A", qctx, sdk=object(), max_words=10**6)
+    capped = caa.build_context_arm("A", qctx, sdk=object(), max_words=120)
+
+    # The cap binds (the untruncated render does NOT fit) and holds after it.
+    assert full.budget_words > 120
+    assert capped.budget_words <= 120
+    assert capped.budget_words == int(
+        len(capped.text.split()) * 1.1)
+
+    # Truncation is a whole-block prefix: the capped text is exactly the first
+    # m blocks of the full text, so no block was cut mid-line.
+    full_parts = full.text.split("\n\n")
+    capped_parts = capped.text.split("\n\n")
+    assert 0 < len(capped_parts) < len(full_parts)
+    assert full_parts[:len(capped_parts)] == capped_parts
+
+    # Every retained gold session is intact; every dropped one is fully gone.
+    for i in range(4):
+        if f"s{i}w0" in capped.text:
+            assert all(f"s{i}w{j}" in capped.text for j in range(30)), i
+        else:
+            assert all(f"s{i}w{j}" not in capped.text for j in range(30)), i
+    # Retained sessions are a prefix of the gold order (trailing drops only).
+    retained = [i for i in range(4) if f"s{i}w0" in capped.text]
+    assert retained == list(range(len(retained)))
+
+
+def test_all_four_arms_share_one_final_text_budget(monkeypatch):
+    """§5: the cap is measured on the final text and binds every arm."""
+    _patch_render_seams(monkeypatch)
+    qctx = caa.load_question_context(_row_many_gold_sessions(n=3, words=25))
+    for cap in (60, 120, 200):
+        for arm in caa.ARMS:
+            ctx = caa.build_context_arm(arm, qctx, sdk=object(), max_words=cap)
+            assert ctx.budget_words <= cap, (arm, cap, ctx.budget_words)
+
+
+def test_b_c_reserve_the_header_budget_so_the_final_text_fits(monkeypatch):
+    """A naive pre-header budget overshoots; the reserved budget does not."""
+    from tortoise.subgraph_render import render_arm_b
+    _patch_render_seams(monkeypatch)
+    qctx = caa.load_question_context(_row())
+    sg = _sg()
+    full = caa.build_context_arm("B", qctx, sdk=object(), max_words=10**6)
+    cap = full.budget_words - 1
+    assert full.budget_words == cap + 1
+
+    capped = caa.build_context_arm("B", qctx, sdk=object(), max_words=cap)
+    assert capped.budget_words <= cap
+
+    # The same cap handed straight to the renderer (the pre-header budget the
+    # fix removes) leaves the final text one unit over: the regression guard.
+    naive = render_arm_b(
+        sg, haystack_session_ids=qctx.haystack_session_ids,
+        max_words=cap, points_by_id=sg.point_props)
+    naive_final = caa._with_date_header(naive.text, qctx.question_date)
+    assert caa._budget_words(naive_final) > cap
+
+
+def test_arm_a_truncation_never_drops_the_date_header(monkeypatch):
+    _patch_render_seams(monkeypatch)
+    row = _row_many_gold_sessions(n=3, words=40)
+    ctx = caa.build_context_arm(
+        "A", caa.load_question_context(row), sdk=object(), max_words=1)
+    assert ctx.text == f"Current Date: {row['question_date']}"
 
 
 def test_arm_b_uses_subgraph_and_excludes_raw_turn_text(monkeypatch):
@@ -433,6 +565,27 @@ def test_manifest_records_seeds_serializer_and_permutation_provenance():
     assert "Task directive" not in arm_a_note
 
 
+def test_manifest_documents_the_metric5_and_budget_resolutions():
+    reader = types.SimpleNamespace(model_spec="r", model_id="r")
+    judge = types.SimpleNamespace(model_spec="j", model_id="j")
+    manifest = caa.build_manifest(
+        arms=caa.ARMS, gold_path="g", gold_sha="s",
+        max_words=caa.DEFAULT_MAX_WORDS, reader=reader, judge=judge)
+    resolved = manifest["resolved_ambiguities"]
+    # P2: the cardinality is stated, and it is the LIST one the tokenizer
+    # docstring and the artifact's ``tokens`` field use.
+    note = resolved["metric5_denominator"]
+    assert "LIST" in note
+    assert "len(tokenize(g))" in note
+    assert "MIN_GOLD_TOKENS" in note
+    assert "gold_evidence_claims.tokenize" in note
+    # P0: the budget resolution says the cap binds the FINAL text, all arms.
+    budget = resolved["context_budget_enforcement"]
+    assert "FINAL" in budget
+    assert "blocks" in budget
+    assert "header" in budget
+
+
 def test_manifest_defaults_repo_head_sha_and_embedder_model():
     reader = types.SimpleNamespace(model_spec="r", model_id="r")
     judge = types.SimpleNamespace(model_spec="j", model_id="j")
@@ -520,6 +673,69 @@ def test_metric5_threshold_boundary_exactly_080_matches():
 def test_metric5_all_stopword_claim_never_matches():
     claim = {"claim": "the of and", "tokens": 0, "trivial": True}
     assert caa.claim_matches_point(claim, "the of and") is False
+
+
+def test_metric5_denominator_uses_list_cardinality(monkeypatch):
+    """P2: the denominator is ``len(tokenize(g))`` (list), not the set size.
+
+    Worked example: gold ``|tokens(g)|`` is 9 (the token ``days`` repeats →
+    set size 8). 7 shared distinct tokens give 7/9 = 0.778 (NO match) under
+    list cardinality but 7/8 = 0.875 (match) under set cardinality.
+    """
+    claim = {
+        "claim": "30 days. 31 days (including the last day) is also "
+                 "acceptable.",
+        "trivial": False,
+    }
+    claim["tokens"] = len(gec.tokenize(claim["claim"]))
+    point = "30 days 31 days including last day also extra"
+    assert claim["tokens"] == 9
+    assert len(set(gec.tokenize(claim["claim"]))) == 8
+    assert caa.claim_matches_point(claim, point) is False
+    # One more shared token clears 0.80 on the list denominator (8/9 = 0.889).
+    assert caa.claim_matches_point(claim, point + " acceptable") is True
+
+
+def test_metric5_denominator_equals_the_artifact_token_field():
+    """The denominator and the ``tokens`` field that drives ``trivial`` agree."""
+    for text in (
+        "30 days. 31 days (including the last day) is also acceptable.",
+        "alpha beta gamma delta",
+    ):
+        tokens = gec.tokenize(text)
+        claim = {"claim": text, "tokens": len(tokens),
+                 "trivial": len(tokens) < gec.MIN_GOLD_TOKENS}
+        # The artifact's ``tokens`` value IS the list denominator, so the
+        # self-match ratio is (#distinct) / (recorded tokens).
+        assert claim["tokens"] == len(tokens) >= gec.MIN_GOLD_TOKENS
+        assert caa.claim_matches_point(claim, text) is (
+            len(set(tokens)) / len(tokens) >= 0.80)
+
+
+def test_metric5_duplicate_heavy_claim_is_not_auto_matched():
+    """List cardinality is conservative: repetition inflates the denominator.
+
+    ``"cat cat cat dog"`` has 4 recorded tokens but only 2 distinct ones, so
+    a point containing every distinct token scores 2/4 = 0.50, not 1.00. A
+    set denominator would shrink to 2 and auto-match — the exact
+    tiny-denominator degeneracy ``MIN_GOLD_TOKENS`` exists to close, and the
+    reason the denominator must stay the recorded list length.
+    """
+    text = "cat cat cat dog"
+    tokens = gec.tokenize(text)
+    assert len(tokens) == 4 and len(set(tokens)) == 2
+    claim = {"claim": text, "tokens": len(tokens), "trivial": False}
+    assert caa.claim_matches_point(claim, text) is False
+
+
+def test_metric5_subthreshold_claim_never_matches_even_with_a_wrong_flag():
+    """The trivial threshold is enforced on live tokens, not only the flag."""
+    claim = {"claim": "Lisbon May", "tokens": 2, "trivial": False}
+    # Every token is present (set ratio 1.0) — still refused: 2 < MIN_GOLD_TOKENS.
+    assert caa.claim_matches_point(claim, "Lisbon May offsite plans") is False
+    assert caa.claim_matches_point(
+        {"claim": "Lisbon May", "tokens": 2, "trivial": True},
+        "Lisbon May offsite plans") is False
 
 
 def test_metric5_needs_at_least_one_answer_bearing_point():

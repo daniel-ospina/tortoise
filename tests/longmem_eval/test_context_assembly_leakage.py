@@ -443,6 +443,137 @@ def test_guard_reports_no_stale_scope():
     assert not any(f.kind == "scope" for f in report.findings)
 
 
+# ── P2 regression: module-scope reference + instance-method closure ────────
+#
+# The driver is scanned by entry point, so module-level statements and class
+# bodies used to be invisible: a gold constant defined *outside*
+# ``build_context_arm`` but read inside its B/C branch, and an instance-method
+# helper reached through ``helper.method()``, both evaded the guard. Each
+# regression injects its evasion against the REAL driver source — served
+# hermetically through the ``lg._read`` seam, never written to disk — and
+# asserts the guard now reports a finding.
+
+_DRIVER_PATH = "tools/longmem_eval/context_assembly_arms.py"
+_BC_BRANCH_ANCHOR = '    if arm in ("B", "C"):'
+_ARM_A_ANCHOR = '    if arm == "A":'
+
+
+def _real_driver_source() -> str:
+    return lg._read(_DRIVER_PATH)
+
+
+def _scan_with_driver_source(monkeypatch, source: str) -> lg.ScanReport:
+    """Run ``scan_code_paths`` with ``source`` standing in for the driver."""
+    real_read = lg._read
+
+    def fake_read(path: str) -> str:
+        return source if path == _DRIVER_PATH else real_read(path)
+
+    monkeypatch.setattr(lg, "_read", fake_read)
+    return lg.scan_code_paths()
+
+
+def _inject_in_bc_branch(source: str, block: str) -> str:
+    assert _BC_BRANCH_ANCHOR in source, "B/C branch anchor moved — update this test"
+    return source.replace(_BC_BRANCH_ANCHOR, f"{_BC_BRANCH_ANCHOR}\n{block}", 1)
+
+
+def test_driver_source_seam_is_non_vacuous(monkeypatch):
+    """The unmodified driver source is clean through the injection seam."""
+    report = _scan_with_driver_source(monkeypatch, _real_driver_source())
+    assert report.clean, [str(f) for f in report.findings]
+    assert any(entry.startswith(_DRIVER_PATH) for entry in report.visited)
+
+
+def test_module_binding_closure_reaches_module_level_constants():
+    """P2: the closure scans module-level bindings the B/C path references."""
+    visited = set(lg.scan_code_paths().visited)
+    assert f"{_DRIVER_PATH}::_TURN_ID_RE (module binding)" in visited
+    assert f"{_DRIVER_PATH}::DEFAULT_MAX_WORDS (module binding)" in visited
+
+
+def test_module_level_constant_used_in_bc_branch_is_caught(monkeypatch):
+    """P2 evasion (b): ``_STRIP = ("has_answer", …)`` read by B/C is caught."""
+    source = _real_driver_source() + '\n\n_STRIP = ("has_answer", "lme_session_index")\n'
+    injected = _inject_in_bc_branch(source, "        _ = _STRIP")
+    report = _scan_with_driver_source(monkeypatch, injected)
+    assert report.findings, "a module-level gold constant read by the B/C branch evaded the guard"
+    assert any(
+        f.code_path == _DRIVER_PATH and f.function == "<binding _STRIP>" for f in report.findings
+    ), [str(f) for f in report.findings]
+    assert any(f.kind == "string" for f in report.findings)
+
+
+def test_instance_method_helper_on_module_class_is_caught(monkeypatch):
+    """P2 evasion (a): a gold read in ``helper.method()`` on a module class."""
+    helper = (
+        "\n\nclass _Scrubber:\n"
+        '    """Instance-method helper reached only from the B/C branch."""\n'
+        "\n"
+        "    def scrub(self, props):\n"
+        '        return {k: v for k, v in props.items() if k != "has_answer"}\n'
+    )
+    injected = _inject_in_bc_branch(
+        _real_driver_source() + helper, "        _Scrubber().scrub(qctx.raw)"
+    )
+    report = _scan_with_driver_source(monkeypatch, injected)
+    assert any("_Scrubber.scrub" in entry for entry in report.visited), (
+        "the instance-method helper was not followed from the B/C branch"
+    )
+    assert any(f.function == "_Scrubber.scrub" for f in report.findings), [
+        str(f) for f in report.findings
+    ]
+
+
+def test_instance_method_class_constant_read_via_self_is_caught(monkeypatch):
+    """P2: a class-level constant read through ``self`` is part of the closure."""
+    helper = (
+        "\n\nclass _Scrubber:\n"
+        '    _KEYS = ("has_answer", "lme_session_index")\n'
+        "\n"
+        "    def scrub(self, props):\n"
+        "        return {k: v for k, v in props.items() if k not in self._KEYS}\n"
+    )
+    injected = _inject_in_bc_branch(
+        _real_driver_source() + helper, "        _Scrubber().scrub(qctx.raw)"
+    )
+    report = _scan_with_driver_source(monkeypatch, injected)
+    assert any("_Scrubber._KEYS" in entry for entry in report.visited)
+    assert any(f.kind == "string" for f in report.findings), [str(f) for f in report.findings]
+
+
+def test_module_binding_post_definition_mutation_is_caught(monkeypatch):
+    """P2: a gold value written into a module binding *after* its definition.
+
+    ``_CONFIG = {}`` then ``_CONFIG["strip"] = "has_answer"`` — the gold value
+    sits in a statement after the binding's own value node, and is caught via
+    the companion-statement set.
+    """
+    source = _real_driver_source() + '\n\n_CONFIG = {}\n_CONFIG["strip"] = "has_answer"\n'
+    injected = _inject_in_bc_branch(source, '        _ = _CONFIG["strip"]')
+    report = _scan_with_driver_source(monkeypatch, injected)
+    assert any(f.function == "<binding _CONFIG>" for f in report.findings), [
+        str(f) for f in report.findings
+    ]
+    assert any(f.kind == "string" for f in report.findings)
+
+
+def test_arm_a_exclusion_still_applies_under_the_module_scope_closure(monkeypatch):
+    """P2 guardrail: scanning module scope must not un-exclude arm A.
+
+    A gold constant referenced **only** from the arm-A branch stays out of
+    scope — the carve-out is by name and still applies — while the arm-A and
+    arm-D exclusions remain reported in ``ScanReport.excluded``.
+    """
+    source = _real_driver_source() + '\n\n_LEGACY_GOLD_FIELD = "answer_session_ids"\n'
+    assert _ARM_A_ANCHOR in source, "arm-A anchor moved — update this test"
+    injected = source.replace(_ARM_A_ANCHOR, f"{_ARM_A_ANCHOR}\n        _ = _LEGACY_GOLD_FIELD", 1)
+    report = _scan_with_driver_source(monkeypatch, injected)
+    assert report.clean, [str(f) for f in report.findings]
+    assert any("arm == 'A'" in entry for entry in report.excluded)
+    assert any("arm == 'D'" in entry for entry in report.excluded)
+
+
 # ══════════════════════════════════════════════════════════════════════════
 # CHECK 2 — gold-field perturbation (§10.1, hermetic)
 # ══════════════════════════════════════════════════════════════════════════

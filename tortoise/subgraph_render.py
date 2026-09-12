@@ -73,8 +73,10 @@ _UNDATED_SENTINEL = "1970-01-01T00:00:00Z"
 #: Turn node id suffix, e.g. ``lme:<qid>:s<si>:t<ti>``; ``<ti>`` is 0-based.
 _TURN_SUFFIX_RE = re.compile(r":t(\d+)$")
 
-#: Leading ISO 8601 calendar date (``YYYY-MM-DD``).
-_ISO_DATE_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})")
+#: Leading calendar date in either the ingest producer's real format
+#: (``YYYY/MM/DD``, e.g. ``2023/05/20 (Sat) 03:29``) or ISO 8601
+#: (``YYYY-MM-DD``). Both are normalised to ``YYYY-MM-DD``.
+_CALENDAR_DATE_RE = re.compile(r"^(\d{4})[-/](\d{2})[-/](\d{2})")
 
 #: Reserved edge classes — spec §3 admits these ahead of the per-anchor cap
 #: and places them at the head of the anchor's rendered block.
@@ -158,16 +160,23 @@ def _turn_ordinal(point_id: Any, props: Mapping[str, Any]) -> int | None:
 def _parse_date(value: Any) -> str | None:
     """Return the ``YYYY-MM-DD`` calendar date, or ``None`` when unparseable.
 
-    The undated sentinel, a missing value and a non-ISO value are all
-    ``None`` → the caller renders ``(date unknown)``.
+    Accepts the ingest producer's real ``createdAt`` format
+    (``2023/05/20 (Sat) 03:29`` → ``2023-05-20``, #3011) alongside ISO 8601
+    (``2023-05-20`` or ``2023-05-20T00:00:00Z`` → ``2023-05-20``). The
+    undated sentinel, a missing value and an unparseable value are all
+    ``None`` → the caller renders ``(date unknown)``; no date is ever
+    fabricated.
     """
     if value is None:
         return None
     text = str(value).strip()
     if not text or text == _UNDATED_SENTINEL:
         return None
-    match = _ISO_DATE_RE.match(text)
-    return match.group(1) if match else None
+    match = _CALENDAR_DATE_RE.match(text)
+    if match is None:
+        return None
+    year, month, day = match.groups()
+    return f"{year}-{month}-{day}"
 
 
 def _render_date(props: Mapping[str, Any]) -> str:
