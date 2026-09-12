@@ -884,22 +884,187 @@ class TestHealthzHardening:
         assert elapsed < 2.0, f"a sibling client waited {elapsed:.2f}s"
 
     def test_saturated_listener_sheds_load_with_503(self, monkeypatch):
-        """The thread cap must answer 503 rather than spawn unbounded threads."""
-        import urllib.error
-        import urllib.request
+        """The thread cap must answer 503 rather than spawn unbounded threads.
 
-        monkeypatch.setattr(monitoring, "HEALTHZ_MAX_THREADS", 0)
+        Round-2 review: the pre-fix version set ``HEALTHZ_MAX_THREADS=0``, so
+        EVERY connection took the reject branch and no slot was ever ACQUIRED
+        — it could not observe a semaphore leak, the failure mode it appeared
+        to guard. With cap=2 this asserts, in order:
+
+        1. more than ``cap`` SEQUENTIAL requests all return 200 (proves slots
+           are RELEASED, not leaked — a leak starts 503-ing after ``cap``);
+        2. ``cap`` concurrently-held partial requests saturate the listener;
+        3. every probe issued while saturated gets a DELIVERED 503 (round-2
+           fix: unread request bytes used to make the close an RST, so the
+           first probe saw 503 and later ones ``ConnectionResetError``);
+        4. closing the held requests releases the slots and 200 comes back.
+        """
+        import socket
+        import time
+
+        monkeypatch.setattr(monitoring, "HEALTHZ_MAX_THREADS", 2)
+        cap = monitoring.HEALTHZ_MAX_THREADS
+        server = monitoring.start_health_listener(port=0, bind="127.0.0.1")
+        port = server.server_address[1]
+        monitoring.heartbeat_record()
+
+        # (1) cap*2+1 SEQUENTIAL checks must ALL be 200. Any leaked slot would
+        # turn these into 503s well before the loop ends.
+        for i in range(2 * cap + 1):
+            status, body = _http_get(port)
+            assert status == 200, (i, status, body)
+
+        # (2) Pin every slot with a partial request: the handler thread blocks
+        # reading the request line, so it never releases while held.
+        held = []
+        try:
+            for _ in range(cap):
+                s = socket.create_connection(("127.0.0.1", port), timeout=5)
+                s.sendall(b"GET /healthz HTTP/1.1\r\nHost: x\r\n")
+                held.append(s)
+
+            # (3) Saturated: each probe must get a DELIVERED 503. Poll until
+            # the accept loop has handed both held sockets to threads (they
+            # hold for the 5s total deadline, so there is ample window), then
+            # require a run of clean 503s.
+            deadline = time.monotonic() + 3.0
+            status, body = None, b""
+            while time.monotonic() < deadline:
+                status, body = _http_get(port)
+                if status == 503:
+                    break
+                time.sleep(0.02)
+            assert status == 503, (status, body)
+            for i in range(3):
+                status, body = _http_get(port)
+                assert status == 503, (
+                    f"probe {i} after the first shed got {status} not 503 "
+                    f"(an RST would have raised before reaching this assert): "
+                    f"{body!r}")
+                assert b"overloaded" in body, body
+        finally:
+            for s in held:
+                s.close()
+
+        # (4) Slots return: the listener recovers.
+        deadline = time.monotonic() + 5.0
+        status, body = None, b""
+        while time.monotonic() < deadline:
+            status, body = _http_get(port)
+            if status == 200:
+                break
+            time.sleep(0.05)
+        assert status == 200, body
+
+    @staticmethod
+    def _socketpair():
+        import socket
+
+        left, right = socket.socketpair()
+        left.settimeout(5)
+        return left, right
+
+    def test_reject_path_drains_the_unread_request_before_closing(self):
+        """Round-2 review (a): the 503 is written and then the socket is
+        closed while the request bytes are STILL QUEUED — the kernel answers
+        that close with RST instead of FIN, an RST discards the client's
+        receive buffer, and the 503 is LOST (the deploy lane saw "first probe
+        503, every later probe ConnectionResetError").
+
+        macOS did not reproduce the RST in this suite, so this asserts the
+        MECHANISM deterministically with a socketpair: the request is in the
+        rejected socket's receive queue, and after the reject the queue must be
+        EMPTY (``MSG_DONTWAIT`` → ``BlockingIOError``), while the peer still
+        reads an intact 503. Without the drain the queued request is still
+        there and this fails.
+        """
+        left, right = self._socketpair()
+        try:
+            left.sendall(b"GET /healthz HTTP/1.1\r\nHost: x\r\n"
+                         b"Connection: close\r\n\r\n")
+            monitoring._HealthzServer._reject_overloaded(right)
+
+            left.settimeout(2)
+            head = left.recv(4096)
+            assert head.startswith(b"HTTP/1.1 503"), head
+            assert b"overloaded" in head, head
+
+            right.settimeout(0)  # non-blocking probe of the receive queue
+            with pytest.raises(BlockingIOError):
+                right.recv(1)
+        finally:
+            left.close()
+            right.close()
+
+    def test_drain_unread_is_bounded_in_bytes_and_time(self):
+        """Round-2 review: the drain must not itself become the slowloris it
+        exists to prevent — bounded on BOTH axes (byte cap, total deadline)."""
+        import time
+
+        # Byte cap: 4096 queued, cap 1024 → at most 1024 consumed.
+        left, right = self._socketpair()
+        try:
+            left.sendall(b"x" * 4096)
+            monitoring._drain_unread(right, 1.0, 1024)
+            right.settimeout(0)
+            remaining = right.recv(65536)
+            assert len(remaining) >= 4096 - 1024, (
+                f"drain consumed more than the cap: {len(remaining)} left")
+        finally:
+            left.close()
+            right.close()
+
+        # Time bound: nothing queued and the peer stays open → the drain must
+        # return at its own deadline, not block for the handler timeout.
+        left, right = self._socketpair()
+        try:
+            start = time.monotonic()
+            monitoring._drain_unread(right, 0.15, 8192)
+            elapsed = time.monotonic() - start
+        finally:
+            left.close()
+            right.close()
+        assert 0.05 < elapsed < 1.0, f"drain took {elapsed:.2f}s"
+
+    def test_a_trickling_client_is_cut_off_by_the_total_deadline(self, monkeypatch):
+        """Round-2 review (b): ``timeout`` is PER-RECV, so a client sending one
+        byte every few seconds never trips it and holds a handler thread
+        FOREVER. With ``HEALTHZ_MAX_THREADS=8`` a trickle can pin every slot and
+        make the liveness signal permanently dark — the worst outcome for the
+        endpoint that must never go dark. The total deadline must close it."""
+        import socket
+        import time
+
+        monkeypatch.setattr(monitoring._HealthzHandler, "total_timeout", 0.3)
         server = monitoring.start_health_listener(port=0, bind="127.0.0.1")
         monitoring.heartbeat_record()
+        port = server.server_address[1]
+        s = socket.create_connection(("127.0.0.1", port), timeout=5)
+        start = time.monotonic()
+        closed = False
         try:
-            with urllib.request.urlopen(
-                    f"http://127.0.0.1:{server.server_address[1]}/healthz",
-                    timeout=5) as r:
-                status, body = r.status, r.read()
-        except urllib.error.HTTPError as e:
-            status, body = e.code, e.read()
-        assert status == 503, body
-        assert b"overloaded" in body
+            while time.monotonic() - start < 4.0:
+                try:
+                    s.sendall(b"G")  # one byte, never a complete request line
+                except OSError:
+                    closed = True
+                    break
+                time.sleep(0.05)
+                try:
+                    s.settimeout(0.05)
+                    if s.recv(1) == b"":
+                        closed = True
+                        break
+                except TimeoutError:
+                    continue
+                except OSError:
+                    closed = True
+                    break
+        finally:
+            s.close()
+        elapsed = time.monotonic() - start
+        assert closed, "the total deadline never closed a trickling connection"
+        assert elapsed < 2.5, f"trickle held the handler for {elapsed:.2f}s"
 
     def test_default_port_env_typos_fall_back_instead_of_crashing_boot(self, monkeypatch):
         """#2850 review P2: `http`/`-1`/`70000` used to raise ValueError and
@@ -987,6 +1152,29 @@ class TestStallWatchdog:
 
         monkeypatch.setenv("TORTOISE_LOOP_STALL_EXIT_S", "banana")
         assert monitoring._loop_stall_threshold() == 0
+
+    def test_non_finite_threshold_disables_instead_of_arming(self, monkeypatch,
+                                                             caplog):
+        """Round-2 review P2: ``float()`` ACCEPTS nan/inf and neither is
+        caught by the 0/negative guards (``nan == 0`` and ``nan < 0`` are both
+        False). A nan threshold armed the killer while ``age <= nan`` stayed
+        False forever, so a healthy ticking loop read as permanently stale and
+        the process restart-looped every ~6s from boot — the round-1 P0 back
+        through the validation door. Both forms must DISABLE, loudly, and must
+        start no killer thread.
+        """
+        import logging
+
+        for raw in ("nan", "NaN", "inf", "Infinity", "-inf"):
+            caplog.clear()
+            monkeypatch.setenv("TORTOISE_LOOP_STALL_EXIT_S", raw)
+            with caplog.at_level(logging.ERROR, logger="tortoise.monitoring"):
+                threshold = monitoring._loop_stall_threshold()
+            assert threshold == 0.0, (raw, threshold)
+            assert any(r.levelno >= logging.ERROR for r in caplog.records), raw
+            assert monitoring.start_stall_watchdog(
+                exit_fn=lambda *_: None) is None, (
+                f"{raw!r} armed a killer thread")
 
     def test_unset_or_zero_threshold_starts_no_killer_thread(self, monkeypatch):
         monkeypatch.delenv("TORTOISE_LOOP_STALL_EXIT_S", raising=False)

@@ -10,8 +10,10 @@ import concurrent.futures
 import contextlib
 import json
 import logging
+import math
 import os
 import queue
+import socket
 import socketserver
 import threading
 import time
@@ -701,6 +703,15 @@ HEALTHZ_BIND = "0.0.0.0"
 #: that must survive overload). A liveness check is a few hundred bytes; 5s is
 #: generous and still bounded.
 HEALTHZ_HANDLER_TIMEOUT_S = 5.0
+#: How long (TOTAL wall clock) a rejected socket is drained for before it is
+#: closed, and the byte ceiling on that drain. Closing a socket that still has
+#: the unread request in its receive queue makes the kernel send RST instead of
+#: FIN, which can discard a reply that was already written — the round-2 review
+#: observation (the first overload probe saw 503, every subsequent one saw
+#: ``ConnectionResetError``). A bounded drain buys a clean close without
+#: letting a trickle turn the drain itself into the slowloris it prevents.
+HEALTHZ_REJECT_DRAIN_TIMEOUT_S = 0.2
+HEALTHZ_REJECT_DRAIN_MAX_BYTES = 8192
 #: Max concurrent healthz handler threads. The whole point of this listener is
 #: that it keeps answering when the app is overloaded, so it must bound its own
 #: work: a saturated listener answers 503 (the platform sees an unhealthy
@@ -711,12 +722,45 @@ HEALTHZ_MAX_THREADS = 8
 HEALTHZ_REQUEST_QUEUE_SIZE = 5
 
 
+def _drain_unread(sock, timeout: float, max_bytes: int) -> None:
+    """Consume a bounded amount of an unread request so ``close`` sends FIN.
+
+    Closing a socket that still has data in its receive queue makes the kernel
+    send RST instead of FIN, which can discard a reply that was already written
+    — the round-2 review failure (a 503 that the client saw as
+    ``ConnectionResetError``). Draining first buys a clean close.
+
+    Bounded on BOTH axes — total wall clock (``timeout``) and bytes
+    (``max_bytes``) — so a client trickling one byte at a time cannot turn the
+    drain into the slowloris it exists to avoid. Best-effort: every failure is
+    swallowed and the caller still closes. ``socket.timeout`` is an ``OSError``
+    subclass, so one except covers it.
+    """
+    deadline = time.monotonic() + timeout
+    remaining = max_bytes
+    while remaining > 0:
+        left = deadline - time.monotonic()
+        if left <= 0:
+            return
+        try:
+            sock.settimeout(left)
+            chunk = sock.recv(min(remaining, 1024))
+        except OSError:
+            return
+        if not chunk:
+            return
+        remaining -= len(chunk)
+
+
 class _HealthzHandler(BaseHTTPRequestHandler):
     """Liveness only: one in-memory heartbeat read, HTTP 200 or 503.
 
     Hardened because this port is unauthenticated and must never become the
     way the machine is exhausted (review P1/P2):
-      * ``timeout`` bounds a slow/partial request (slowloris);
+      * ``timeout`` bounds a single recv of a slow/partial request, AND a total
+        deadline (see ``setup``) bounds the WHOLE request — the per-recv
+        timeout alone cannot stop a client trickling one byte at a time
+        (review round 2);
       * ``protocol_version = HTTP/1.1`` + ``Connection: close`` on every reply
         (no keep-alive thread pinning);
       * request bodies are rejected unread — a liveness GET has none;
@@ -729,7 +773,52 @@ class _HealthzHandler(BaseHTTPRequestHandler):
     server_version = "tortoise-healthz"
     sys_version = ""
     protocol_version = "HTTP/1.1"
+    #: PER-RECV socket timeout (slow/partial request).
     timeout = HEALTHZ_HANDLER_TIMEOUT_S
+    #: TOTAL deadline for one connection (round-2 review). ``timeout`` above is
+    #: applied to each ``recv``, so a client trickling one byte at a time never
+    #: trips it and pins a handler thread forever. This is the whole-request
+    #: bound enforced by ``setup``.
+    total_timeout = HEALTHZ_HANDLER_TIMEOUT_S
+
+    def setup(self):
+        super().setup()
+        # Review round 2: ``timeout`` above is a PER-RECV timeout, so a client
+        # that sends one byte every few seconds never trips it and holds a
+        # handler thread FOREVER. With ``HEALTHZ_MAX_THREADS=8`` a trickle can
+        # pin every slot permanently and make the liveness signal go dark — the
+        # worst possible outcome for the one endpoint that must never go dark.
+        # Enforce a TOTAL deadline instead: a one-shot timer shuts the socket
+        # down, which unblocks the reader and lets the handler (and its slot)
+        # exit. ``finish`` always cancels it. The timer inherits this handler
+        # thread's daemon flag, so it can never keep the process alive.
+        timer = threading.Timer(self.total_timeout, self._expire_connection)
+        timer.daemon = True
+        self._deadline_timer = timer
+        timer.start()
+
+    def _expire_connection(self) -> None:
+        """Total-deadline enforcement: unblock the handler so it can exit."""
+        with contextlib.suppress(OSError):
+            self.connection.shutdown(socket.SHUT_RDWR)
+
+    def finish(self) -> None:
+        timer = getattr(self, "_deadline_timer", None)
+        if timer is not None:
+            timer.cancel()
+        with contextlib.suppress(OSError):
+            super().finish()
+
+    def handle_one_request(self) -> None:
+        # A client cut off by the TOTAL deadline (``setup``) can have its 4xx
+        # reply land on a socket that is already shut down. That is a normal
+        # outcome of shedding an abusive connection, not a server error, and
+        # ``socketserver`` would otherwise print a traceback for it — same
+        # policy as ``_send``. Suppress only socket-teardown errors, never a
+        # bare OSError.
+        with contextlib.suppress(BrokenPipeError, ConnectionResetError,
+                                 ConnectionAbortedError):
+            super().handle_one_request()
 
     def _send(self, status: int, payload: dict) -> None:
         body = json.dumps(payload).encode()
@@ -758,6 +847,11 @@ class _HealthzHandler(BaseHTTPRequestHandler):
             # Never read the body: reading an attacker-sized body is the
             # resource the listener must not spend. Close instead.
             self._send(413, {"status": "body-not-allowed"})
+            # Deliver the 413 cleanly: a bounded drain (never the whole body)
+            # is what stops the close from becoming an RST that eats the
+            # reply. See HEALTHZ_REJECT_DRAIN_*.
+            _drain_unread(self.connection, HEALTHZ_REJECT_DRAIN_TIMEOUT_S,
+                          HEALTHZ_REJECT_DRAIN_MAX_BYTES)
             return
         if self.path.split("?", 1)[0] != "/healthz":
             self._send(404, {"status": "not-found"})
@@ -846,6 +940,11 @@ class _HealthzServer(ThreadingHTTPServer):
         with contextlib.suppress(OSError):
             request.settimeout(HEALTHZ_HANDLER_TIMEOUT_S)
             request.sendall(response)
+        # Review round 2: drain the unread request BEFORE the caller closes,
+        # or the kernel sends RST and the 503 is LOST — the exact failure
+        # observed (first probe 503, every later probe ConnectionResetError).
+        _drain_unread(request, HEALTHZ_REJECT_DRAIN_TIMEOUT_S,
+                      HEALTHZ_REJECT_DRAIN_MAX_BYTES)
 
 
 _HEALTHZ_LOCK = threading.Lock()
@@ -1006,12 +1105,41 @@ def stop_health_listener(server: ThreadingHTTPServer | None = None) -> None:
 #     least one REAL heartbeat tick, so a slow boot can never be mistaken for a
 #     wedge. See ``start_stall_watchdog``.
 #
+# CONTRACT OF THE IDLE GATE (round-2 review P2) — read before enabling. The
+# gate is fed by an ASGI in-flight gauge that is incremented for the WHOLE
+# lifetime of a request, and an ASGI call does not return until the response
+# has finished. This app serves a LONG-LIVED SSE stream on the canonical MCP
+# endpoint (``GET /mcp`` with ``Accept: text/event-stream`` via
+# mcp/server/streamable_http.py + sse_starlette), so ANY connected MCP client
+# pins the gauge >= 1 for as long as it stays connected — the idle predicate
+# may then NEVER become true and self-kill never fires. Two consequences to
+# state plainly rather than discover later:
+#   * the gate ERRORS TOWARD NOT KILLING, so this is a contract/honesty
+#     problem, not a safety one; but
+#   * the wedge this escape hatch targets (thousands of synchronous on-loop
+#     queries from one request) is ITSELF an in-flight request, so the gate
+#     VETOES it by construction.
+# The in-process self-kill therefore cannot be relied on as wedge detection at
+# all: the mechanism that actually handles a wedge is the OUT-OF-BAND watchdog
+# (PR #3064), which is not stuck behind the same loop and does not share this
+# gauge. Enabling ``TORTOISE_LOOP_STALL_EXIT_S`` buys a GC-pause/hard-hang
+# backstop for the no-MCP-client case ONLY.
+# A safe refinement (NOT implemented here — premature optimisation of a path
+# that is off by default) would be to exclude streaming responses from the
+# gauge: the SSE response's ``http.response.start`` fires once at stream open,
+# so a gauge release could be driven by a wrapper that ties the in-flight
+# window to the request BODY/route work rather than to connection close. That
+# needs its own design + tests; do not bolt it on.
+#
 # The DURABLE fix is offloading those synchronous calls off the loop; until
 # that lands, any age-only kill is unsafe.
 #
 #   * ``TORTOISE_LOOP_STALL_EXIT_S=0`` (or unset) disables the self-kill, which
 #     is the shipped default. A NEGATIVE value also disables it, but logs at
-#     WARNING because it is indistinguishable from a typo.
+#     WARNING because it is indistinguishable from a typo. A NON-FINITE value
+#     (``nan``/``inf``) also disables it, but logs at ERROR — ``float()``
+#     accepts both and a ``nan`` threshold would otherwise arm a killer that
+#     restart-loops a healthy process (round-2 review P2).
 #   * when enabled, the threshold is clamped UP to
 #     ``max(LOOP_STALL_EXIT_FLOOR_S, 2 * LOOP_STALE_AFTER)`` so the process can
 #     never die before /healthz has had a chance to report.
@@ -1063,18 +1191,38 @@ def _reset_workload() -> None:
 
 
 def workload_is_idle() -> bool:
-    """Default idle predicate for the watchdog: no request in flight."""
+    """Default idle predicate for the watchdog: no request in flight.
+
+    NOTE (round-2 review P2): this is NOT equivalent to "the loop is not
+    wedged". The gauge counts a request for its whole ASGI lifetime, so a
+    connected MCP client streaming SSE on ``GET /mcp`` holds this ``False``
+    indefinitely, and the synchronous on-loop wedge the self-kill targets is
+    itself an in-flight request. See the CONTRACT OF THE IDLE GATE note above
+    ``LOOP_STALL_EXIT_S``. It errs toward NOT killing, which is the safe
+    direction; wedge detection belongs to the out-of-band watchdog (#3064).
+    """
     return workload_in_flight() == 0
 
 
 def _loop_stall_threshold() -> float:
     """Resolve the self-kill threshold, validating it (review P2).
 
-    Returns ``0`` (disabled) for unset/blank/0, for a non-numeric value, and
-    for a negative value. An ENABLED threshold is clamped up to the safe floor
-    because ``STALL_EXIT_S <= STALE_AFTER`` would kill the process before
-    /healthz could ever report the stall, and a sub-second value would turn a
-    GC pause into a permanent crash loop.
+    Returns ``0`` (disabled) for unset/blank/0, for a non-numeric value, for a
+    NON-FINITE value (``nan``/``inf``), and for a negative value. An ENABLED
+    threshold is clamped up to the safe floor because ``STALL_EXIT_S <=
+    STALE_AFTER`` would kill the process before /healthz could ever report the
+    stall, and a sub-second value would turn a GC pause into a permanent crash
+    loop.
+
+    ``nan``/``inf`` are rejected rather than forwarded (round-2 review P2):
+    ``float()`` accepts both, and neither is caught by the 0/negative guards
+    (``nan == 0`` and ``nan < 0`` are both False). A ``nan`` threshold arms the
+    killer while making ``age <= threshold_s`` False forever, so a healthy
+    ticking loop reads as permanently stale and the process exits via
+    ``os._exit(1)`` every ~6s from boot — the exact restart loop the round-1 P0
+    removed, back through the validation door. ``inf`` wedges the same path in
+    reverse (never fires, but silently claims a guard that cannot act). Both
+    DISABLE.
     """
     raw = os.environ.get("TORTOISE_LOOP_STALL_EXIT_S")
     if raw is None or not str(raw).strip():
@@ -1084,6 +1232,12 @@ def _loop_stall_threshold() -> float:
     except (TypeError, ValueError):
         logger.warning("TORTOISE_LOOP_STALL_EXIT_S=%r is not a number — the "
                        "in-process self-kill stays disabled", raw)
+        return 0.0
+    if not math.isfinite(value):
+        logger.error("TORTOISE_LOOP_STALL_EXIT_S=%r is not finite — the "
+                     "in-process self-kill is DISABLED. A nan/inf threshold "
+                     "arms a watchdog whose staleness comparison can never "
+                     "succeed, restart-looping a healthy process", raw)
         return 0.0
     if value == 0:
         return 0.0

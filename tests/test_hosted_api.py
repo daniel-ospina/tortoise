@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import os
 import tempfile
+import threading
 from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
@@ -279,10 +280,17 @@ def _reset_health_probe(monkeypatch):
     ha_mod._HEALTH_PROBE.reset()
     ha_mod._READY_PROBE.reset()
     ha_mod._CONTROL_PLANE_PROBE.reset()
+    # Round-2 review: reset the process-global SDK CACHE too, not just the
+    # coordinators. A probe worker left over from a previous test can rebuild
+    # ``_probe_sdk`` with the previous env key after this fixture has run, which
+    # is what made ``test_probe_connection_is_reused_not_rebuilt_per_call``
+    # count 2 builds (green in the docker lane, red in the embedded lane).
+    ha_mod._probe_sdk_reset()
     yield
     ha_mod._HEALTH_PROBE.reset()
     ha_mod._READY_PROBE.reset()
     ha_mod._CONTROL_PLANE_PROBE.reset()
+    ha_mod._probe_sdk_reset()
 
 
 def _force_probe_refresh(ha_mod, timeout: float = 10.0) -> dict:
@@ -518,6 +526,43 @@ class TestHealthEndpoints:
                 ha_mod.InFlightMiddleware(_boom)({"type": "http"}, None, None))
         assert monitoring.workload_in_flight() == 0, "in-flight slot leaked"
 
+    def test_in_flight_gauge_is_wired_into_the_real_app(self, client, monkeypatch):
+        """#2850 round-2 review: the class-level test above proves
+        ``InFlightMiddleware`` WORKS, not that it is INSTALLED. Deleting
+        ``app.add_middleware(InFlightMiddleware)`` would leave every other test
+        green while the watchdog's idle predicate silently read 0 forever — and
+        the kill would then fire mid-request, which is the P0 this whole issue
+        exists to remove.
+        """
+        import tortoise.hosted_api as ha_mod
+        import tortoise.monitoring as monitoring
+
+        # (a) registered, and OUTERMOST. Starlette's add_middleware INSERTS at
+        # index 0, so the LAST-registered middleware is first in the list.
+        classes = [m.cls for m in ha_mod.app.user_middleware]
+        assert ha_mod.InFlightMiddleware in classes, (
+            "InFlightMiddleware is not installed — the idle gate always reads 0")
+        assert classes[0] is ha_mod.InFlightMiddleware, (
+            f"the gauge must wrap everything (registered last): {classes!r}")
+
+        # (b) a REAL request through the module-level app: the gauge is >= 1
+        # WHILE the handler runs, and released afterwards. ``/health`` is read
+        # from memory only, so spying on this seam does not perturb timing.
+        seen = {}
+        real = ha_mod.loop_heartbeat_info
+
+        def _spy():
+            seen["during"] = monitoring.workload_in_flight()
+            return real()
+
+        monkeypatch.setattr(ha_mod, "loop_heartbeat_info", _spy)
+        assert monitoring.workload_in_flight() == 0
+        r = client.get("/health")
+        assert r.status_code == 200
+        assert seen.get("during", 0) >= 1, (
+            "the wired gauge did not count a real request in flight")
+        assert monitoring.workload_in_flight() == 0, "in-flight slot leaked"
+
     def test_health_probe_interval_is_clamped_below_the_stale_window(self, monkeypatch):
         """A refresh period above PROBE_STALE_AFTER reports a HEALTHY DB as
         degraded and then fails the deploy gate (review P2)."""
@@ -531,33 +576,88 @@ class TestHealthEndpoints:
         monkeypatch.setenv("TORTOISE_HEALTH_PROBE_INTERVAL", "-3")
         assert _REAL_HEALTH_PROBE_INTERVAL() == ha_mod.HEALTH_PROBE_REFRESH_S
 
+    def test_non_finite_health_probe_interval_falls_back_to_default(
+            self, monkeypatch, caplog):
+        """Round-2 review P2: ``float()`` accepts ``nan``/``inf`` and neither
+        is caught by ``v <= 0`` (``nan <= 0`` is False) nor by the ``v > cap``
+        clamp (``nan > cap`` is False). A nan period flows into
+        ``asyncio.sleep(nan)``, which returns almost immediately — the refresher
+        becomes a busy loop hammering the DB probe and the event loop; an
+        infinite period means the probe never refreshes, so a healthy DB reads
+        stale forever. Both must fall back to the default, at ERROR.
+        """
+        import logging
+
+        import tortoise.hosted_api as ha_mod
+
+        for raw in ("nan", "NaN", "inf", "Infinity", "-inf"):
+            caplog.clear()
+            monkeypatch.setenv("TORTOISE_HEALTH_PROBE_INTERVAL", raw)
+            with caplog.at_level(logging.ERROR, logger="tortoise.hosted_api"):
+                period = _REAL_HEALTH_PROBE_INTERVAL()
+            assert period == ha_mod.HEALTH_PROBE_REFRESH_S, (raw, period)
+            assert any(r.levelno >= logging.ERROR for r in caplog.records), raw
+
     def test_probe_connection_is_reused_not_rebuilt_per_call(self, monkeypatch):
         """The probe must own ONE bounded DB connection, not build+leak a
-        fresh SDK on every check (the connection half of the #2850 leak)."""
+        fresh SDK on every check (the connection half of the #2850 leak).
+
+        Round-2 review: the old form asserted ``calls["n"] == 1`` and raced a
+        PROCESS-GLOBAL SDK cache — a leftover probe thread from a previous test
+        can rebuild ``_probe_sdk`` (computing the PREVIOUS env key before our
+        ``monkeypatch.setenv`` lands) after our reset, making the count 2 (green
+        in the docker lane, red in the embedded one). ``HealthProbe.reset()``
+        nulls its ``_worker`` handle, so the leftover thread cannot be joined.
+        Fixed by counting only the builds made on THIS test's thread, and by
+        pinning ``_probe_sdk_key`` so no thread can compute a mismatching key.
+        The autouse fixture also resets the SDK cache, not just the probe
+        coordinators.
+        """
         from unittest.mock import MagicMock
 
         import tortoise.hosted_api as ha_mod
 
-        calls = {"n": 0}
+        own_thread = threading.current_thread().name
+        calls = {"all": 0, "own": 0}
 
         def _factory(*, namespace=None, graph_name=None):
-            calls["n"] += 1
+            # Only builds made by THIS test's two ``_probe_db()`` calls count.
+            # Leftover ``tortoise-health-probe`` threads from earlier tests
+            # share the process-global cache (and cannot be joined —
+            # ``HealthProbe.reset()`` drops its ``_worker`` handle), so
+            # counting them is what made the old assertion flaky.
+            calls["all"] += 1
+            if threading.current_thread().name == own_thread:
+                calls["own"] += 1
             sdk = MagicMock()
             sdk._get_proj.return_value.g.query.return_value = MagicMock()
             return sdk
 
         monkeypatch.setattr(ha_mod, "_make_sdk", _factory)
         monkeypatch.setenv("TORTOISE_DB_PATH", "/tmp/tortoise-probe-reuse-test.db")
+        # Also pin the cache key so a leftover thread cannot churn the cache
+        # with a pre-setenv key while we hold the two handles we compare.
+        monkeypatch.setattr(ha_mod, "_probe_sdk_key",
+                            lambda: ("pinned", "reuse-test"))
+
         ha_mod._probe_sdk_reset()
         try:
             first = ha_mod._probe_db()
+            first_sdk = ha_mod._PROBE_SDK_CACHE["sdk"]
+            assert first_sdk is not None
             second = ha_mod._probe_db()
+            second_sdk = ha_mod._PROBE_SDK_CACHE["sdk"]
         finally:
             ha_mod._probe_sdk_reset()
 
         assert first["ok"] is True and second["ok"] is True
-        assert calls["n"] == 1, (
-            f"probe rebuilt the SDK {calls['n']}x — connection not reused")
+        assert first_sdk is second_sdk, (
+            "the probe rebuilt its connection between two consecutive checks")
+        # Our TWO checks may build at most ONE SDK (a per-call rebuild needs 2).
+        # Zero is possible when a still-running probe from an earlier test won
+        # the race and warmed the cache first — that does not weaken the point.
+        assert calls["own"] <= 1, (
+            f"the two checks built the SDK {calls['own']}x — not reused")
 
     def test_health_security_returns_posture(self, client):
         r = client.get("/health/security")
