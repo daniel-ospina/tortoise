@@ -285,6 +285,13 @@ surfaces:
   - test_restore_container_recovery.py
   - test_session_attribution.py
   - test_ci_selection.py
+  # #3221: guard for tools/collision_preflight.py (the #3061 pre-dispatch
+  # collision check). Registered under `core`, and the tool is wired to the
+  # same surface from the selector's core-fallback branch
+  # (TOOL_CORE_CARVEOUTS) — `core` is only added when nothing else matched, so
+  # without that wiring a preflight-only change would select no surface at all
+  # and this guard would never run for the file it guards (#3153 hole).
+  - test_collision_preflight.py
   - test_connector_loader.py
   - test_connector_secrets.py
   - test_connector_sources.py
