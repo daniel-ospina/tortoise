@@ -104,42 +104,59 @@ def test_ingest_fingerprint_stable_same_inputs():
     invocations (deterministic — no repr/address)."""
     fp1 = runner.ingest_cache_fingerprint(
         question=_q(), extractor_model=_StableModel("deepseek"),
-        code_hash="c" * 64, prompt_digest="p" * 16, chunk_turns=2)
+        code_hash="c" * 64, prompt_digest="p" * 16, chunk_turns=2,
+        session_workers=1)
     fp2 = runner.ingest_cache_fingerprint(
         question=_q(), extractor_model=_StableModel("deepseek"),
-        code_hash="c" * 64, prompt_digest="p" * 16, chunk_turns=2)
+        code_hash="c" * 64, prompt_digest="p" * 16, chunk_turns=2,
+        session_workers=1)
     assert fp1 == fp2
     assert fp1 != "0" * 64
 
 
 def test_ingest_fingerprint_sensitive_to_every_input(tmp_path):
     """(a) fingerprint invalidation: each dimension (extractor code version,
-    extraction model, prompt, question id/content, chunk_turns) changes the
-    hash — any extractor change auto-invalidates cached ingests."""
+    extraction model, prompt, question id/content, chunk_turns,
+    session_workers) changes the hash — any extractor change auto-invalidates
+    cached ingests. #1744 (review P1): ``session_workers`` changes graph
+    content (batched phase order drops cross-session consolidation), so a
+    sw=1 cache must not be reused for a sw>1 ingest."""
     base = runner.ingest_cache_fingerprint(
         question=_q(), extractor_model=_StableModel("deepseek"),
-        code_hash="c" * 64, prompt_digest="p" * 16, chunk_turns=2)
+        code_hash="c" * 64, prompt_digest="p" * 16, chunk_turns=2,
+        session_workers=1)
     assert runner.ingest_cache_fingerprint(
         question=_q(), extractor_model=_StableModel("other"),
-        code_hash="c" * 64, prompt_digest="p" * 16, chunk_turns=2) != base
+        code_hash="c" * 64, prompt_digest="p" * 16, chunk_turns=2,
+        session_workers=1) != base
     assert runner.ingest_cache_fingerprint(
         question=_q(), extractor_model=_StableModel("deepseek"),
-        code_hash="d" * 64, prompt_digest="p" * 16, chunk_turns=2) != base
+        code_hash="d" * 64, prompt_digest="p" * 16, chunk_turns=2,
+        session_workers=1) != base
     assert runner.ingest_cache_fingerprint(
         question=_q(), extractor_model=_StableModel("deepseek"),
-        code_hash="c" * 64, prompt_digest="q" * 16, chunk_turns=2) != base
+        code_hash="c" * 64, prompt_digest="q" * 16, chunk_turns=2,
+        session_workers=1) != base
     assert runner.ingest_cache_fingerprint(
         question=_q("fq-2"), extractor_model=_StableModel("deepseek"),
-        code_hash="c" * 64, prompt_digest="p" * 16, chunk_turns=2) != base
+        code_hash="c" * 64, prompt_digest="p" * 16, chunk_turns=2,
+        session_workers=1) != base
     changed = _q()
     changed["haystack_sessions"][0].append(
         {"role": "user", "content": "a content revision"})
     assert runner.ingest_cache_fingerprint(
         question=changed, extractor_model=_StableModel("deepseek"),
-        code_hash="c" * 64, prompt_digest="p" * 16, chunk_turns=2) != base
+        code_hash="c" * 64, prompt_digest="p" * 16, chunk_turns=2,
+        session_workers=1) != base
     assert runner.ingest_cache_fingerprint(
         question=_q(), extractor_model=_StableModel("deepseek"),
-        code_hash="c" * 64, prompt_digest="p" * 16, chunk_turns=4) != base
+        code_hash="c" * 64, prompt_digest="p" * 16, chunk_turns=4,
+        session_workers=1) != base
+    # #1744 (review P1): the session-parallel toggle rides the digest
+    assert runner.ingest_cache_fingerprint(
+        question=_q(), extractor_model=_StableModel("deepseek"),
+        code_hash="c" * 64, prompt_digest="p" * 16, chunk_turns=2,
+        session_workers=4) != base
 
 
 def test_ingest_code_fingerprint_content_hash(tmp_path):
@@ -346,7 +363,8 @@ def test_cache_miss_ingests_writes_marker_and_persists(monkeypatch, tmp_path):
             question=next(x for x in _mini() if x["question_id"] == qid),
             extractor_model=_StableModel("mock"),
             code_hash=runner.ingest_code_fingerprint(),
-            prompt_digest=runner.extractor_prompt_digest(), chunk_turns=2)
+            prompt_digest=runner.extractor_prompt_digest(), chunk_turns=2,
+            session_workers=1)
         # the graph is still there AFTER the run (persisted as the cache)
         sdk = TortoiseSDK(namespace=ns)
         try:
