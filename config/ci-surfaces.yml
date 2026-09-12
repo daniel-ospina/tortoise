@@ -292,8 +292,9 @@ surfaces:
   # entry, so that per-file fallback is the only route by which `core` (and
   # therefore this guard) is selected; without the wiring the change would
   # select no surface at all and this guard would never run for the file it
-  # guards (#3153 hole). `core` is the minimum-cost surface that selects the
-  # guard, but the selection also carries its slow / carve-out legs.
+  # guards (#3153 hole). `core` is the only surface route that selects the
+  # guard (its only registered home), but it is also the largest surface, so
+  # the change pulls the whole core set and carries its slow / carve-out legs.
   - test_collision_preflight.py
   - test_connector_loader.py
   - test_connector_secrets.py
