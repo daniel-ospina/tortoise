@@ -419,10 +419,25 @@ def _health_probe_interval() -> float:
     than ``PROBE_STALE_AFTER`` makes a HEALTHY DB read as ``degraded`` between
     refreshes, which then fails the deploy gate and gets misdiagnosed as a DB
     outage. Half the window leaves a full refresh of margin.
+
+    NON-FINITE values are rejected and fall back to the default (round-2
+    review P2): ``float()`` accepts ``nan``/``inf`` and neither is caught by
+    the ``v <= 0`` guard (``nan <= 0`` is False) nor by the ``v > cap`` clamp
+    (``nan > cap`` is False). ``nan`` flows into ``asyncio.sleep(nan)``, which
+    returns almost immediately — a busy loop hammering the DB probe and the
+    event loop. ``inf`` means the probe never refreshes, so a healthy DB reads
+    stale forever. Both DISABLE (fall back to ``HEALTH_PROBE_REFRESH_S``).
     """
     try:
         v = float(os.environ.get("TORTOISE_HEALTH_PROBE_INTERVAL") or HEALTH_PROBE_REFRESH_S)
     except (TypeError, ValueError):
+        return HEALTH_PROBE_REFRESH_S
+    if not math.isfinite(v):
+        _logger.error(
+            "TORTOISE_HEALTH_PROBE_INTERVAL=%s is not finite — falling back "
+            "to the default %.0fs; a nan period busy-loops the probe and an "
+            "infinite one leaves a healthy DB reading stale forever",
+            v, HEALTH_PROBE_REFRESH_S)
         return HEALTH_PROBE_REFRESH_S
     if v <= 0:
         return HEALTH_PROBE_REFRESH_S
@@ -1419,8 +1434,12 @@ class McpPathCanonicalizerMiddleware:
         await self.app(scope, receive, send)
 
 
-# Added LAST so it is the OUTERMOST middleware: the path is canonicalized before
-# any other middleware or router sees it, and before a redirect can be built.
+# Added LAST of the PATH-MUTATING middleware so it is the OUTERMOST one that
+# rewrites the scope: the path is canonicalized before any other path-mutating
+# middleware or the router sees it, and before a redirect can be built. (The
+# transparent in-flight gauge, ``InFlightMiddleware``, is registered after this
+# one and so wraps it from the outside; it never touches scope["path"], so it
+# cannot affect canonicalization order.)
 app.add_middleware(McpPathCanonicalizerMiddleware)
 
 
