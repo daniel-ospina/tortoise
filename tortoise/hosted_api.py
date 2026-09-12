@@ -1585,6 +1585,34 @@ def _probe_db() -> dict:
     return probe_db(sdk)
 
 
+def _probe_control_plane() -> None:
+    """Minimal control-plane probe — a 1-row teams read exercises the PostgREST
+    path without depending on any tenant data.
+
+    #2988: this is a SYNCHRONOUS HTTP call. Callers must run it off the event
+    loop (``asyncio.to_thread``); done on the loop, one black-holed socket
+    froze every route in the process.
+    """
+    from tortoise.supabase_control import get_control_plane
+
+    get_control_plane().query("teams", select=["id"], limit=1)
+
+
+# #2988: wall bound for the readiness probes.
+#
+# ORDERING INVARIANT — the bound must be STRICTLY ABOVE the probe client's own
+# timeout ("SupabaseControlPlane" defaults to 5.0s; "probe_db" self-bounds at
+# ~1.6s). ``asyncio.wait_for`` cancels the AWAIT, not the worker thread: when
+# the outer bound wins the race it returns while the thread is still in its
+# socket read, so each timed-out request leaks an executor worker until that
+# read finishes. Keeping the outer bound above the inner one means the client
+# timeout normally fires first, the thread returns on its own, and this bound
+# stays what it is meant to be — a safety net for a probe that never
+# self-bounds. It is NOT an executor-occupancy bound; the shared default
+# executor is tracked separately on #2988.
+_READY_PROBE_TIMEOUT_S = 6.0
+
+
 @app.get("/health")
 async def health():
     """Liveness + deep DB check — process up and serving. NEVER gates on the DB.
@@ -1620,28 +1648,42 @@ async def health_ready():
     ready=false (503) unless both answer. Registry mode: FalkorDB only
     (today's behavior — selfhost has no second plane). Fail-closed: not-ready
     is a 503, never a 200.
+
+    #2988 — THE PROBES MUST NEVER TOUCH THE EVENT LOOP. Both planes are probed
+    with SYNCHRONOUS network I/O, so both run in ``asyncio.to_thread`` under a
+    wall bound, exactly like ``/health``'s probe (#1384). Done inline, a
+    stalled ``RETURN 1`` or a black-holed PostgREST read froze every route in
+    the process — ``/openapi.json`` included — for as long as the socket
+    waited. Measured in production 2026-09-11: 15 minutes in which every route
+    timed out while ``/proc/loadavg`` was 0.01 and the DB answered PING in
+    0.38s, i.e. an idle process blocked on I/O with the loop held. Because
+    every deploy curls this endpoint, that made readiness a self-inflicted
+    outage vector. Regression guard: tests/test_health_ready_nonblocking.py.
+
     """
-    db_ok = False
+    # Data plane. Reuses /health's probe: itself hard-bounded (~1.5s) and it
+    # never raises, so a dead DB degrades the result instead of the process.
+    # #669 post-flip: NEVER a registry-namespaced probe — FalkorDB
+    # auto-creates the graph on select, so a registry-namespaced probe
+    # RECREATED the deleted registry_control_plane on every health check
+    # (post-flip verification finding, #669). ``_probe_db`` targets the
+    # default graph.
     try:
-        # #669 post-flip: the FalkorDB data-plane probe must NOT open the
-        # registry namespace — FalkorDB auto-creates the graph on select, so
-        # a registry-namespaced probe RECREATED the deleted
-        # registry_control_plane on every health check (post-flip
-        # verification finding, #669). Probe the data plane via the default
-        # graph (never the registry namespace).
-        sdk = _make_sdk(namespace=None)
-        sdk._get_proj().g.query("RETURN 1")
-        db_ok = True
-    except Exception:
-        pass
+        db = await asyncio.wait_for(asyncio.to_thread(_probe_db), timeout=_READY_PROBE_TIMEOUT_S)
+        db_ok = bool(db.get("ok"))
+    except Exception:  # incl. asyncio.TimeoutError — not-ready, never a hang
+        db_ok = False
     if not db_ok:
         raise HTTPException(status_code=503, detail="Database unreachable")
-    from tortoise.supabase_control import get_control_plane, is_supabase_enabled
+
+    from tortoise.supabase_control import is_supabase_enabled
+
     if is_supabase_enabled():
         try:
-            # Minimal control-plane probe — a 1-row teams read exercises the
-            # PostgREST path without depending on any tenant data.
-            get_control_plane().query("teams", select=["id"], limit=1)
+            await asyncio.wait_for(
+                asyncio.to_thread(_probe_control_plane),
+                timeout=_READY_PROBE_TIMEOUT_S,
+            )
         except Exception:
             raise HTTPException(status_code=503, detail="Control plane unreachable")  # noqa: B904
         return {"status": "ok", "db": "connected", "control_plane": "connected"}
