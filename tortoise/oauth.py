@@ -39,18 +39,33 @@ fail closed with 503 via hosted_api; ``tt_`` keys keep working unchanged.
 from __future__ import annotations
 
 import base64
+import contextlib
 import hashlib
 import ipaddress
 import json
+import logging
 import os
 import re  # noqa: F401
 import secrets
 from datetime import datetime, timedelta, timezone
 from urllib.parse import parse_qs, urlencode, urlparse  # noqa: F401
 
+logger = logging.getLogger("tortoise.oauth")
+
 # ── Protocol constants ──────────────────────────────────────────────────────
 
+# SCOPES_SUPPORTED is the *client-facing default* / PRM document scope set;
+# SCOPES_ACCEPTED is the superset the DCR gate accepts and the AS metadata
+# advertises (#2866). `offline_access` is accepted (Claude's connector
+# requests it, and the AS does mint refresh tokens unconditionally) without
+# becoming a default fallback or a PRM-advertised scope. The superset
+# relation is structural. NOTE: scope enforcement is DCR-only today —
+# `validate_authorize_params` takes no `scope` parameter, so the
+# authorize/consent path forwards an unvalidated scope into the minted token
+# (pre-existing, filed as #3128). Do not read this constant as an authorize
+# gate.
 SCOPES_SUPPORTED = ["mcp"]
+SCOPES_ACCEPTED = [*SCOPES_SUPPORTED, "offline_access"]
 ACCESS_TOKEN_TTL_S = int(os.environ.get("TORTOISE_OAUTH_ACCESS_TTL", "3600"))
 REFRESH_TOKEN_TTL_S = int(os.environ.get("TORTOISE_OAUTH_REFRESH_TTL",
                                           str(30 * 24 * 3600)))
@@ -74,6 +89,10 @@ class OAuthError(Exception):
     ``status`` is the HTTP status (400/401/403); ``error`` is the RFC error
     code (invalid_request / invalid_grant / unauthorized_client / ...);
     ``error_description`` is a human-readable, client-safe explanation.
+
+    #2863: ``status`` may also be 500 (the /oauth/token last-resort boundary)
+    or 503 (``OAuthTemporarilyUnavailable``) — both still render through the
+    same RFC 6749 §5.2 body producer, ``_oauth_error_response``.
     """
 
     def __init__(self, status: int, error: str, error_description: str):
@@ -84,6 +103,56 @@ class OAuthError(Exception):
 
     def body(self) -> dict:
         return {"error": self.error, "error_description": self.error_description}
+
+
+# Transient-failure contract (#2863). /oauth/token's consumer (mcp 1.29.0) parses the
+# RFC 6749 §5.2 body, so it must NOT reuse `hosted_api._control_plane_unavailable()`'s
+# FastAPI {"detail": {"error_code": ...}} shape. Same STATUS (503), different driver:
+# that is deliberate, and the endpoint test pins the status parity. §8.5 permits the
+# extra error code; §5.2's charset admits "_".
+
+
+class OAuthMintAborted(Exception):
+    """Internal (#2863): `_issue_tokens` failed after possibly writing.
+    `recovered` is True iff an observation confirmed the mint left no live minted row
+    (and, on the rotation path, left the previous refresh token unclaimed). Never
+    escapes `oauth.py` — callers map it to a typed `OAuthError`."""
+
+    def __init__(self, recovered: bool, cause: str = ""):
+        super().__init__(cause or "token mint aborted")
+        self.recovered = recovered
+
+
+class OAuthTemporarilyUnavailable(OAuthError):
+    """503 `temporarily_unavailable` — raised ONLY when the grant is established
+    still-usable: by observation where a write may have landed, or constructively
+    where no write was attempted. Never on an unobserved write state."""
+
+    def __init__(self, error_description: str = "Temporary control-plane failure — retry."):
+        super().__init__(503, "temporarily_unavailable", error_description)
+
+
+def _log_and_capture(exc: BaseException, *, where: str) -> None:
+    """One WARNING + at most one Sentry capture for a conversion path. Must never raise.
+
+    OWNER TABLE (I4 — never capture twice for one request):
+      lane 2 of `_issue_tokens`        → the single capture of the TRIGGERING exception
+      lane 1 loser rollback (capture=True)  → the single capture for the loser path
+                                               (nothing else captures there)
+      lane 2 rollback/observation (capture=False) → log only (lane 2 captured the trigger)
+      lane 3 prev-access revoke        → log only (non-decision-bearing hygiene)
+      the two correction-#8 revokes    → each the single capture for its terminal path
+      `exchange_auth_code` / `refresh_grant` pre-consume/pre-mint `except Exception`
+                                       → this call IS the single capture for that path
+      `oauth_token` boundary           → this call IS the single capture for that path
+    """
+    with contextlib.suppress(Exception):  # logging never breaks the response
+        logger.warning("oauth: %s failed: %s", where, exc, exc_info=True)
+    try:
+        from tortoise.sentry import capture_exception as _capture
+        _capture(exc, tags={"component": "oauth", "where": where})
+    except Exception:
+        pass
 
 
 # ── Small helpers ───────────────────────────────────────────────────────────
@@ -340,9 +409,9 @@ def register_client(cp, body: dict) -> dict:
     if not isinstance(scope, str):
         raise OAuthError(400, "invalid_client_metadata", "scope must be a string.")
     requested = scope.split()
-    if any(s not in SCOPES_SUPPORTED for s in requested):
+    if any(s not in SCOPES_ACCEPTED for s in requested):
         raise OAuthError(400, "invalid_client_metadata",
-                         f"Unsupported scope. Supported: {SCOPES_SUPPORTED}")
+                         f"Unsupported scope. Supported: {SCOPES_ACCEPTED}")
 
     client_id = _new_token("ct_")
     client_secret = _new_token("cs_") if auth_method == "client_secret_post" else None
@@ -505,6 +574,106 @@ def issue_auth_code(cp, *, client_id: str, user_id: str, base: str,
     return code, team_id
 
 
+def _consume_state(cp, code: str) -> str:
+    """READ-ONLY observation of a code's redemption state (#2863).
+
+    "unconsumed" iff the row exists, is unclaimed and unexpired (a retry provably
+    works); "consumed" for any other observed state (non-NULL `used_at`, no row,
+    expired); "unknown" on any failure of the read OR its predicate.
+
+    Performs NO write — this is what separates it from the withdrawn v4/v5 re-arm
+    helpers, which cleared `used_at` and could clobber a concurrent claim.
+    """
+    try:
+        rows = cp.query("oauth_codes", select=["used_at", "expires_at"],
+                        filters=[("code_hash", "eq", _sha256(code))])
+        if not rows or rows[0].get("used_at") is not None:
+            return "consumed"
+        expires = _parse_ts(rows[0].get("expires_at"))
+        if expires is None or expires < _now():
+            return "consumed"
+        return "unconsumed"
+    except Exception as exc:
+        logger.warning("oauth: consume-state observation failed: %s", exc)
+        return "unknown"
+
+
+def _restore_code(cp, code: str, expected) -> bool:
+    """CAS re-arm (#2863): clear `used_at` ONLY if it still holds the value this
+    request wrote, and only while the code is still redeemable.
+
+    True iff the re-arm is confirmed observable. Any raise / empty result / None
+    expectation ⇒ False (terminal) — never a retryable signal on unobserved state.
+    The expiry filter mirrors `_consume_state`: the failure path can spend ~20 s
+    before the re-arm, so a near-TTL code must not be re-armed into a 503 whose retry
+    then returns expired `invalid_grant`.
+    """
+    if expected is None:
+        return False
+    try:
+        rows = cp.query("oauth_codes", method="PATCH",
+                        select=["used_at", "expires_at"],
+                        filters=[("code_hash", "eq", _sha256(code)),
+                                 ("used_at", "eq", expected),
+                                 ("expires_at", "gt", _now_iso())],
+                        json_body={"used_at": None})
+        return bool(rows)
+    except Exception as exc:
+        logger.warning("oauth: code re-arm failed: %s", exc)
+        return False
+
+
+def _rollback_minted(cp, minted: list[tuple[str, str]], now: str, *, capture: bool) -> None:
+    """Idempotent soft-revoke by id of every row this request may have written.
+
+    A PATCH filtered by `id` is a VERIFIED no-op on a missing row in both seams
+    (real: `Prefer: return=minimal` → `[]`; fake: `select is None` → `[]`), so zero
+    affected rows is the EXPECTED SUCCESS for a write that never committed — this
+    function must never raise on an empty result. Each row is attempted in its own
+    try/except. `capture=True` is for lane 1 (nothing else captures on that path);
+    lane 2 passes False because it already captured the trigger (I4). At most ONE
+    capture is emitted per call: the loser path may fail on both rows (refresh +
+    access), and I4 permits exactly one Sentry event for that request — the
+    subsequent row failures are logged only.
+    """
+    captured = False
+    for table, row_id in minted:
+        try:
+            cp.query(table, method="PATCH", filters=[("id", "eq", row_id)],
+                     json_body={"revoked_at": now})
+        except Exception as exc:
+            if capture and not captured:
+                captured = True
+                _log_and_capture(exc, where=f"loser rollback {table}")
+            else:
+                logger.warning("oauth: mint rollback failed for %s/%s: %s", table, row_id, exc)
+
+
+def _mint_observably_clean(cp, minted: list[tuple[str, str]]) -> bool:
+    """True iff no minted row is live. Any raise → False (terminal, never fail-open)."""
+    try:
+        for table, row_id in minted:
+            rows = cp.query(table, select=["id"],
+                            filters=[("id", "eq", row_id), ("revoked_at", "is", None)])
+            if rows:
+                return False
+        return True
+    except Exception as exc:
+        logger.warning("oauth: mint observation failed: %s", exc)
+        return False
+
+
+def _prev_refresh_unclaimed(cp, prev_refresh: dict) -> bool:
+    """True iff the presented refresh token is still unrevoked. Any raise → False."""
+    try:
+        rows = cp.query("oauth_refresh_tokens", select=["revoked_at"],
+                        filters=[("id", "eq", prev_refresh["id"])])
+        return bool(rows) and rows[0].get("revoked_at") is None
+    except Exception as exc:
+        logger.warning("oauth: prev-refresh observation failed: %s", exc)
+        return False
+
+
 def _consume_code(cp, code: str) -> dict:
     """Single-use auth-code redemption (RFC 6749 §4.1.2).
 
@@ -616,51 +785,73 @@ def _issue_tokens(cp, *, client_id: str, user_id: str, team_id: str,
     refresh_id = secrets.token_urlsafe(16)
     access_id = secrets.token_urlsafe(16)
     now = _now_iso()
-    cp.query("oauth_refresh_tokens", method="POST", json_body={
-        "id": refresh_id,
-        "token_hash": _sha256(refresh),
-        "client_id": client_id,
-        "user_id": user_id,
-        "team_id": team_id,
-        "scope": scope,
-        "expires_at": _expires_iso(REFRESH_TOKEN_TTL_S),
-        "revoked_at": None,
-        "rotated_from": prev_refresh["id"] if prev_refresh is not None else None,
-        "created_at": now,
-    })
-    cp.query("oauth_access_tokens", method="POST", json_body={
-        "id": access_id,
-        "token_hash": _sha256(access),
-        "client_id": client_id,
-        "user_id": user_id,
-        "team_id": team_id,
-        "scope": scope,
-        "expires_at": _expires_iso(ACCESS_TOKEN_TTL_S),
-        "revoked_at": None,
-        "refresh_token_id": refresh_id,
-        "created_at": now,
-    })
-    if prev_refresh is not None:
-        claimed = cp.query("oauth_refresh_tokens", method="PATCH",
-                           select=["id"],
-                           filters=[("id", "eq", prev_refresh["id"]),
-                                    ("revoked_at", "is", None)],
-                           json_body={"revoked_at": _now_iso()})
-        if not claimed:
-            # A concurrent worker already rotated this grant — roll back the
-            # orphan pair so only the winner's tokens survive.
-            cp.query("oauth_refresh_tokens", method="PATCH",
-                     filters=[("id", "eq", refresh_id)],
-                     json_body={"revoked_at": now})
+    # #2863: appended BEFORE the POST, so a commit-then-lost POST still gets its
+    # rollback (the row exists even though the response never arrived).
+    minted: list[tuple[str, str]] = []
+    try:
+        minted.append(("oauth_refresh_tokens", refresh_id))
+        cp.query("oauth_refresh_tokens", method="POST", json_body={
+            "id": refresh_id,
+            "token_hash": _sha256(refresh),
+            "client_id": client_id,
+            "user_id": user_id,
+            "team_id": team_id,
+            "scope": scope,
+            "expires_at": _expires_iso(REFRESH_TOKEN_TTL_S),
+            "revoked_at": None,
+            "rotated_from": prev_refresh["id"] if prev_refresh is not None else None,
+            "created_at": now,
+        })
+        minted.append(("oauth_access_tokens", access_id))
+        cp.query("oauth_access_tokens", method="POST", json_body={
+            "id": access_id,
+            "token_hash": _sha256(access),
+            "client_id": client_id,
+            "user_id": user_id,
+            "team_id": team_id,
+            "scope": scope,
+            "expires_at": _expires_iso(ACCESS_TOKEN_TTL_S),
+            "revoked_at": None,
+            "refresh_token_id": refresh_id,
+            "created_at": now,
+        })
+        if prev_refresh is not None:
+            claimed = cp.query("oauth_refresh_tokens", method="PATCH",
+                               select=["id"],
+                               filters=[("id", "eq", prev_refresh["id"]),
+                                        ("revoked_at", "is", None)],
+                               json_body={"revoked_at": _now_iso()})
+            if not claimed:
+                # A concurrent worker already rotated this grant — roll back the
+                # orphan pair so only the winner's tokens survive (lane 1: the
+                # INTENTIONAL signal). `_rollback_minted` is contractually
+                # non-raising (per-row try/except + a raise-proof `_log_and_capture`),
+                # so this cannot spill into lane 2 and convert the pinned
+                # `invalid_grant` into an `OAuthMintAborted`.
+                _rollback_minted(cp, minted, now, capture=True)
+                raise OAuthError(400, "invalid_grant",
+                                 "Refresh token already revoked (rotated or invalidated).")
+    except OAuthError:
+        raise                                              # lane 1 — intentional signal
+    except Exception as exc:
+        # lane 2 — the SINGLE capture of the triggering exception (I4).
+        _log_and_capture(exc, where="_issue_tokens")
+        try:
+            _rollback_minted(cp, minted, now, capture=False)   # lane 2 already captured
+            recovered = _mint_observably_clean(cp, minted)
+            if recovered and prev_refresh is not None:
+                recovered = _prev_refresh_unclaimed(cp, prev_refresh)
+        except Exception as inner:                          # structural no-leak guarantee
+            logger.warning("oauth: mint compensation raised: %s", inner)
+            recovered = False
+        raise OAuthMintAborted(recovered) from exc
+    if prev_access_id:                                      # lane 3 — outside the handler
+        try:
             cp.query("oauth_access_tokens", method="PATCH",
-                     filters=[("id", "eq", access_id)],
+                     filters=[("id", "eq", prev_access_id)],
                      json_body={"revoked_at": now})
-            raise OAuthError(400, "invalid_grant",
-                             "Refresh token already revoked (rotated or invalidated).")
-    if prev_access_id:
-        cp.query("oauth_access_tokens", method="PATCH",
-                 filters=[("id", "eq", prev_access_id)],
-                 json_body={"revoked_at": now})
+        except Exception as exc:
+            logger.warning("oauth: prev-access revoke failed: %s", exc)
     return {
         "access_token": access,
         "token_type": "Bearer",
@@ -679,31 +870,65 @@ def exchange_auth_code(cp, body: dict, base: str) -> dict:
     resource (must map to the SAME team the code was bound to), then issues
     the access+refresh pair.
     """
-    client = _verify_client_auth(cp, body.get("client_id"), body)
-    code_row = _consume_code(cp, body.get("code", ""))
-    if code_row["client_id"] != client["id"]:
-        raise OAuthError(400, "invalid_grant",
-                         "Authorization code was issued to a different client.")
-    if body.get("redirect_uri") != code_row["redirect_uri"]:
-        raise OAuthError(400, "invalid_grant", "redirect_uri mismatch.")
-    if not _verify_pkce(body.get("code_verifier", ""),
-                        code_row["code_challenge"],
-                        code_row.get("code_challenge_method") or "S256"):
-        raise OAuthError(400, "invalid_grant", "PKCE verification failed.")
-    # RFC 8707: the resource at the token endpoint must resolve to the same
-    # team the authorization code was bound to (lenient when omitted — the
-    # mcp SDK always sends it, but a bare authorize→token pair is legal).
-    resource = body.get("resource")
-    if resource:
-        _, requested_team = parse_resource(base, resource)
-        if requested_team is not None and requested_team != code_row["team_id"]:
+    # #2863: the redemption is atomic-feel — a failure after the atomic claim
+    # either CAS-restores the code (so a retry provably works) or reports a
+    # terminal invalid_grant. Every signal is derived from an OBSERVED state;
+    # an unobservable state is never advertised as retryable.
+    consumed = False
+    attempted_consume = False
+    code_row: dict | None = None
+    try:
+        client = _verify_client_auth(cp, body.get("client_id"), body)   # pure read
+        attempted_consume = True
+        code_row = _consume_code(cp, body.get("code", ""))              # THE atomic gate
+        consumed = True
+        if code_row["client_id"] != client["id"]:
             raise OAuthError(400, "invalid_grant",
-                             "Resource indicator does not match the authorized team.")
-    _assert_team_usable(cp, code_row["team_id"])
-    scope = code_row.get("scope") or " ".join(SCOPES_SUPPORTED)
-    out = _issue_tokens(cp, client_id=client["id"], user_id=code_row["user_id"],
-                        team_id=code_row["team_id"], scope=scope,
-                        resource=code_row.get("resource"))
+                             "Authorization code was issued to a different client.")
+        if body.get("redirect_uri") != code_row["redirect_uri"]:
+            raise OAuthError(400, "invalid_grant", "redirect_uri mismatch.")
+        if not _verify_pkce(body.get("code_verifier", ""),
+                            code_row["code_challenge"],
+                            code_row.get("code_challenge_method") or "S256"):
+            raise OAuthError(400, "invalid_grant", "PKCE verification failed.")
+        # RFC 8707: the resource at the token endpoint must resolve to the same
+        # team the authorization code was bound to (lenient when omitted — the
+        # mcp SDK always sends it, but a bare authorize→token pair is legal).
+        resource = body.get("resource")
+        if resource:
+            _, requested_team = parse_resource(base, resource)
+            if requested_team is not None and requested_team != code_row["team_id"]:
+                raise OAuthError(400, "invalid_grant",
+                                 "Resource indicator does not match the authorized team.")
+        _assert_team_usable(cp, code_row["team_id"])
+        scope = code_row.get("scope") or " ".join(SCOPES_SUPPORTED)
+        out = _issue_tokens(cp, client_id=client["id"], user_id=code_row["user_id"],
+                            team_id=code_row["team_id"], scope=scope,
+                            resource=code_row.get("resource"))
+    except OAuthError:
+        raise                        # an intentional terminal signal — never re-arm
+    except OAuthMintAborted as exc:
+        logger.warning("oauth: auth-code mint aborted (recovered=%s)", exc.recovered)
+        if exc.recovered and _restore_code(cp, body.get("code", ""), code_row["used_at"]):
+            raise OAuthTemporarilyUnavailable() from None
+        raise OAuthError(400, "invalid_grant",
+                         "The authorization code could not be redeemed — re-run "
+                         "authorization.") from None
+    except Exception as exc:
+        _log_and_capture(exc, where="exchange_auth_code")
+        if consumed:
+            if _restore_code(cp, body.get("code", ""), code_row["used_at"]):
+                raise OAuthTemporarilyUnavailable() from None
+            raise OAuthError(400, "invalid_grant",
+                             "The authorization code could not be redeemed — re-run "
+                             "authorization.") from None
+        if not attempted_consume:
+            raise OAuthTemporarilyUnavailable() from None        # constructive-clean
+        if _consume_state(cp, body.get("code", "")) == "unconsumed":
+            raise OAuthTemporarilyUnavailable() from None
+        raise OAuthError(400, "invalid_grant",
+                         "The authorization code could not be redeemed — re-run "
+                         "authorization.") from None
     return {k: v for k, v in out.items() if not k.startswith("_")}
 
 
@@ -723,52 +948,79 @@ def refresh_grant(cp, body: dict, base: str) -> dict:
     a fresh pair. Team suspension revokes the whole (user, team) family;
     a lapsed membership revokes the presented token.
     """
-    client = _verify_client_auth(cp, body.get("client_id"), body)
-    refresh_token = body.get("refresh_token", "")
-    rows = cp.query("oauth_refresh_tokens", select=[
-        "id", "token_hash", "client_id", "user_id", "team_id", "scope",
-        "expires_at", "revoked_at",
-    ], filters=[("token_hash", "eq", _sha256(refresh_token))])
-    if not rows:
-        raise OAuthError(400, "invalid_grant", "Invalid refresh token.")
-    row = rows[0]
-    if row.get("revoked_at") is not None:
-        raise OAuthError(400, "invalid_grant",
-                         "Refresh token already revoked (rotated or invalidated).")
-    if row["client_id"] != client["id"]:
-        raise OAuthError(401, "unauthorized_client",
-                         "Refresh token was issued to a different client.")
-    if _parse_ts(row.get("expires_at")) is None or _parse_ts(row["expires_at"]) < _now():
-        raise OAuthError(400, "invalid_grant", "Refresh token expired.")
-    resource = body.get("resource")
-    if resource:
-        _, requested_team = parse_resource(base, resource)
-        if requested_team is not None and requested_team != row["team_id"]:
-            raise OAuthError(400, "invalid_grant",
-                             "Resource indicator does not match the token's team.")
-    # D5: suspension → revoke the whole (user, team) family, then reject.
+    # #2863: wrap every pre-mint read (the FIRST one is `_verify_client_auth` →
+    # `oauth_clients`; a wrap starting at the refresh-token SELECT leaves it
+    # leaking), and un-mask the two revokes that used to swallow a terminal
+    # OAuthError into a bare 500.
     try:
-        _assert_team_usable(cp, row["team_id"])
+        client = _verify_client_auth(cp, body.get("client_id"), body)
+        refresh_token = body.get("refresh_token", "")
+        rows = cp.query("oauth_refresh_tokens", select=[
+            "id", "token_hash", "client_id", "user_id", "team_id", "scope",
+            "expires_at", "revoked_at",
+        ], filters=[("token_hash", "eq", _sha256(refresh_token))])
+        if not rows:
+            raise OAuthError(400, "invalid_grant", "Invalid refresh token.")
+        row = rows[0]
+        if row.get("revoked_at") is not None:
+            raise OAuthError(400, "invalid_grant",
+                             "Refresh token already revoked (rotated or invalidated).")
+        if row["client_id"] != client["id"]:
+            raise OAuthError(401, "unauthorized_client",
+                             "Refresh token was issued to a different client.")
+        if _parse_ts(row.get("expires_at")) is None or _parse_ts(row["expires_at"]) < _now():
+            raise OAuthError(400, "invalid_grant", "Refresh token expired.")
+        resource = body.get("resource")
+        if resource:
+            _, requested_team = parse_resource(base, resource)
+            if requested_team is not None and requested_team != row["team_id"]:
+                raise OAuthError(400, "invalid_grant",
+                                 "Resource indicator does not match the token's team.")
+        # D5: suspension → revoke the whole (user, team) family, then reject.
+        try:
+            _assert_team_usable(cp, row["team_id"])
+        except OAuthTemporarilyUnavailable:
+            raise        # a transient signal must NEVER trigger family revocation
+        except OAuthError:
+            try:
+                _revoke_team_family(cp, row["user_id"], row["team_id"])
+            except Exception as exc:  # correction #8: the single capture for this path
+                _log_and_capture(exc, where="family revoke")
+            raise
+        # Lapsed membership → revoke this token (the grant dies with the seat).
+        from tortoise.supabase_control import membership_for_user_team
+        if membership_for_user_team(cp, row["user_id"], row["team_id"]) is None:
+            try:
+                cp.query("oauth_refresh_tokens", method="PATCH",
+                         filters=[("id", "eq", row["id"])],
+                         json_body={"revoked_at": _now_iso()})
+            except Exception as exc:  # correction #8: the single capture for this path
+                _log_and_capture(exc, where="membership revoke")
+            raise OAuthError(403, "invalid_grant",
+                             "Membership in the team has ended — the grant was revoked.")
+        prev_access = cp.query("oauth_access_tokens",
+                               select=["id"],
+                               filters=[("refresh_token_id", "eq", row["id"]),
+                                        ("revoked_at", "is", None)])
     except OAuthError:
-        _revoke_team_family(cp, row["user_id"], row["team_id"])
         raise
-    # Lapsed membership → revoke this token (the grant dies with the seat).
-    from tortoise.supabase_control import membership_for_user_team
-    if membership_for_user_team(cp, row["user_id"], row["team_id"]) is None:
-        cp.query("oauth_refresh_tokens", method="PATCH",
-                 filters=[("id", "eq", row["id"])],
-                 json_body={"revoked_at": _now_iso()})
-        raise OAuthError(403, "invalid_grant",
-                         "Membership in the team has ended — the grant was revoked.")
-    prev_access = cp.query("oauth_access_tokens",
-                           select=["id"],
-                           filters=[("refresh_token_id", "eq", row["id"]),
-                                    ("revoked_at", "is", None)])
-    out = _issue_tokens(cp, client_id=row["client_id"], user_id=row["user_id"],
-                        team_id=row["team_id"], scope=row.get("scope")
-                        or " ".join(SCOPES_SUPPORTED), resource=resource,
-                        prev_refresh=row,
-                        prev_access_id=prev_access[0]["id"] if prev_access else None)
+    except Exception as exc:
+        _log_and_capture(exc, where="refresh_grant pre-mint")
+        raise OAuthTemporarilyUnavailable(
+            "Temporary control-plane failure before token rotation — retry.") from None
+    try:
+        out = _issue_tokens(cp, client_id=row["client_id"], user_id=row["user_id"],
+                            team_id=row["team_id"], scope=row.get("scope")
+                            or " ".join(SCOPES_SUPPORTED), resource=resource,
+                            prev_refresh=row,
+                            prev_access_id=prev_access[0]["id"] if prev_access else None)
+    except OAuthMintAborted as exc:
+        logger.warning("oauth: refresh mint aborted (recovered=%s)", exc.recovered)   # I4: log-only
+        if exc.recovered:
+            raise OAuthTemporarilyUnavailable() from None
+        raise OAuthError(400, "invalid_grant",
+                         "The refresh token could not be rotated — re-run "
+                         "authorization.") from None
     return {k: v for k, v in out.items() if not k.startswith("_")}
 
 
@@ -854,7 +1106,7 @@ def authorization_server_metadata(base: str) -> dict:
         "grant_types_supported": ["authorization_code", "refresh_token"],
         "token_endpoint_auth_methods_supported": ["none", "client_secret_post"],
         "code_challenge_methods_supported": ["S256"],
-        "scopes_supported": SCOPES_SUPPORTED,
+        "scopes_supported": SCOPES_ACCEPTED,
     }
 
 

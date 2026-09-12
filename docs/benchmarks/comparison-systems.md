@@ -162,7 +162,8 @@ row, not optional**. Contract constants live in
 | Field | Contract (matcher.py) | Meaning |
 |---|---|---|
 | `f1_by_arm` | top-K factual retrieval F1 per arm, K=5 (`TOP_K`) | per-arm factual retrieval on the recall probe subset, measured **before** the battery runs |
-| tolerance | `F1_TOLERANCE` = 0.10 | any arm ≥ 0.10 F1 short of the corpus-best factual retrieval fires the trigger |
+| `trigger_population` ⚠️ **amended 2026-09-12 (#3327)** | the retrieval-capable comparators `{a1, a2, a2b, a3, a4}` — contract text; **no constant yet** in `matcher.py` (which holds `TOP_K`, `F1_TOLERANCE`, `SUBSET_FLOOR`); wiring tracked by #3327 | the arms the divergent trigger is defined over. `a0` (no-memory control) is **excluded** — **not a participant**: it is retained as the trigger's **positive control** and as a published profile row annotated *recall-confounded*. Reason: a0's recall is 0.0 by construction, so an a0-inclusive trigger fires on every run and makes every differential run INCONCLUSIVE |
+| tolerance | `F1_TOLERANCE` = 0.10 | any arm ≥ 0.10 F1 short of the corpus-best factual retrieval fires the trigger — *“any arm” is now read as `trigger_population` (amended 2026-09-12, #3327; original wording preserved — see §7)* |
 | `trigger_fired` | symmetric trigger | ≥ 1 arm out of match → rerun on a recall-matched balanced subset |
 | `subset_pct` | `SUBSET_FLOOR` = 0.50 | rerun subset < 50% of probes ⇒ matching is not meaningful |
 | `outcome` | `matched` \| `inconclusive` | immutable per run — never re-interpreted post-hoc |
@@ -324,6 +325,7 @@ row's citation, not optional extras.
 | Date | Change | Reason | Divergence record |
 |---|---|---|---|
 | 2026-09-08 | Added reserved agent-reasoning-battery row contract (#2523): §0 status row, §2 battery metric-semantics rows, §3.1 reserved PENDING row, §3.2 reserved-row block (family rows + matched-recall rule + verdict look-up + vocabulary pointer), §5 receipts pending row, §10 checklist rows. Vendor rows renumbered §3.2 → §3.3. | Pre-register the battery differentiation-profile row shape before #1416 verdict receipts exist (issue #2523 O/I/T) — no post-hoc metric sculpting at fill time. | Additive; no published number changed; no row filled. Fills gated on #1416 receipts (annotated update per §7). |
+| 2026-09-12 | **Amended §3.2.1**: added the `trigger_population` contract row — `trigger_population` = `{a1, a2, a2b, a3, a4}` (retrieval-capable comparators); `a0` excluded from the trigger, retained as its positive control and as a published profile row annotated *recall-confounded*. The prior §3.2.1 wording ("any arm ≥ 0.10 F1 short … fires the trigger") is **annotated, not rewritten**: the original text is preserved above and the `tolerance` row now carries an inline "amended 2026-09-12, #3327" marker. | Record the trigger-population decision (#3327; research brief `docs/research/2026-09-12-matched-recall-a0-control.md`, confidence 0.85) as a pre-registered amendment declared **before any comparator leg runs**. An a0-inclusive trigger fires on every run (a0 recall is 0.0 by construction, `battery/arms/a0_plain.py:26-27`), making every differential run INCONCLUSIVE and leaving a four-verdict contract able to express exactly one verdict. | Additive contract-clarification; **no published number changed**; no row filled; no run executed (declared ex ante). |
 
 ## 8. Publishing bad numbers on purpose
 

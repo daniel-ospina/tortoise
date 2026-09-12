@@ -3,7 +3,7 @@ import { createRoot } from 'react-dom/client'
 import './index.css'
 // #1623: plan display data (build-time import of product/pricing.json).
 import { planOptions, STATUS_LABELS, TIER_LABELS } from './pricing.js'
-import { HARNESS_CAPTURE_INSTALL, HARNESS_CAPTURE_REASON, HARNESS_CAPTURE_STATUS_LABEL, HARNESS_CAPTURE_SUPPORT, HARNESS_CONTINUE_LABEL, HARNESS_COPY_LABEL, HARNESS_FAMILIES, HARNESS_INSTALL, HARNESS_INTRO, HARNESS_NAMES, HARNESS_OAUTH, HARNESS_ORDER, HARNESS_PERSIST, HARNESS_SELF_INSTALL, HARNESS_SKILLS, HARNESS_SKILLLESS, HARNESS_SKILLS_IN_PROMPT, HARNESS_SKILLS_IN_STEPS, HARNESS_STEPS, SKILLS_INSTALL_URL, UNIVERSAL_COMMAND, WORKFLOWS_PROMPT, harnessDisplayName, harnessFamilyOf, preferredSurface } from './harnesses.js'
+import { CANONICAL_MCP_URL, HARNESS_CAPTURE_INSTALL, HARNESS_CAPTURE_REASON, HARNESS_CAPTURE_STATUS_LABEL, HARNESS_CAPTURE_SUPPORT, HARNESS_CONTINUE_LABEL, HARNESS_COPY_LABEL, HARNESS_FAMILIES, HARNESS_INSTALL, HARNESS_INTRO, HARNESS_NAMES, HARNESS_OAUTH, HARNESS_ORDER, HARNESS_PERSIST, HARNESS_SELF_INSTALL, HARNESS_SKILLS, HARNESS_SKILLLESS, HARNESS_SKILLS_IN_PROMPT, HARNESS_SKILLS_IN_STEPS, HARNESS_STEPS, MCP_URL, SKILLS_INSTALL_URL, UNIVERSAL_COMMAND, WORKFLOWS_PROMPT, harnessDisplayName, harnessFamilyOf, preferredSurface } from './harnesses.js'
 // #1728 Slice 3 (Tasks 16-17): the SHARED 4-state capture-status derivation
 // (off → install-pending → waiting → active, probe-driven) — pure, node --test
 // unit-tested (captureStatus.test.js). #1927: the re-ask gate predicate was
@@ -929,7 +929,10 @@ function WizardBlock({ step, title, children }) {
 }
 
 function wizardPromptText(harness, step, key, mode) {
-  const url = 'https://api.premiselabs.co/mcp/'
+  // #2865: the keyed URL comes from harnesses.js — a third hardcoded copy
+  // here would re-create exactly the drift the MCP_URL/CANONICAL_MCP_URL
+  // split exists to prevent.
+  const url = MCP_URL
   const docs = 'Docs: https://tortoise.premiselabs.co/docs'
   const keyLine = mode === 'included' ? `Key: ${key}` : 'I\'ll give you the API key when you need it.'
   const twoStepNote = 'Tell me when to restart'
@@ -6069,12 +6072,6 @@ function claimIntentInFlight() {
   // token and the Copy button is pushed off-screen at 390px.
   const wizardKeyCodeStyle = { flex: 1, minWidth: 0, overflowWrap: 'anywhere', wordBreak: 'break-all', padding: '0.4rem 0.6rem', background: 'var(--surface,#0d1a2d)', border: '1px solid var(--border,#1e293b)', borderRadius: 6, fontSize: 13 }
 
-  // #2827 (round-2 P2): the connector request-header literal is ONE breakable
-  // token on the Claude Desktop/Web tabs. It used to be split across two
-  // <code> elements joined by `=` — wrong punctuation (`:` is what the
-  // connector field expects) and impossible to copy in one gesture.
-  const wizardHeaderCodeStyle = { minWidth: 0, overflowWrap: 'anywhere', wordBreak: 'break-all' }
-
   // #2710: the connect step's no-key affordance. The copy already promised
   // "Create an API key to see the setup prompt." but shipped no button, so an
   // owner/admin with no in-memory key hit a dead end (the prompt cards are
@@ -6082,6 +6079,9 @@ function claimIntentInFlight() {
   // Never-expiring mint the build fork uses (mintKey with NO expires_in → the
   // key never expires, matching the step's own hint and the Never-only embed
   // contract #2426 decision 2). The paste row covers "I already have one".
+  // #2865: the mint is owner/admin-only (POST /v1/team/keys is
+  // _require_owner_admin), so members get the paste row alone — their keyed-leaf
+  // no-key branch never offers a button that would 403.
   const wizardNoKeyAffordance = (
     <>
       <p className="dim small">Create an API key to see the setup prompt.</p>
@@ -6212,6 +6212,14 @@ function claimIntentInFlight() {
                       // mint one.
                       if (isBuildFork && harnessKey) {
                         return <p className="welcome-lede">Copy your key and call the Tortoise SDK from your app.</p>
+                      }
+                      // #2865: the two Claude connector leaves are key-less OAuth
+                      // (HARNESS_OAUTH), so every key-centric arm below would
+                      // promise a credential their surface never asks for. The
+                      // build fork keeps its own SDK body (no chooser renders
+                      // there), so this arm is scoped to the connector step.
+                      if (!isBuildFork && HARNESS_OAUTH.includes(wizardHarness)) {
+                        return <p className="welcome-lede">Add Tortoise as a custom connector — Claude signs in to Tortoise, so no API key is needed.</p>
                       }
                       if (!isOwnerAdmin) {
                         return <p className="welcome-lede">{isBuildFork
@@ -6472,7 +6480,7 @@ function claimIntentInFlight() {
                         </div>
                       </div>
                     </div>
-                  ) : (isOwnerAdmin && !capNotice ? (
+                  ) : (!capNotice ? (
                     (() => {
                       // #2912: two-level chooser — the FAMILY (Claude/Codex/
                       // Cursor/Pi) then the SURFACE (Claude Code/Desktop/Web;
@@ -6511,6 +6519,10 @@ function claimIntentInFlight() {
                       // step count has to match the parts the user actually
                       // performs (key → set up → restart/verify, or
                       // key → connector → prompt).
+                      // #2865: a key-less OAuth leaf (the two Claude connectors)
+                      // renders its recipe with no credential step at all — and
+                      // keeps #3218's numbered prompt block on top of it.
+                      const wizardKeyless = HARNESS_OAUTH.includes(wizardHarness)
                       let procedureTitle = `Set up ${displayName}`
                       let procedure = null
                       let procedureTailTitle = ''
@@ -6544,13 +6556,16 @@ function claimIntentInFlight() {
                             <WizardPromptCard text={wizardPromptText(wizardConnectHarness, 1, harnessKey, wizardKeyMode)} label="Copy prompt" />
                           </>
                         )
-                      } else if (wizardHarness === 'claude-desktop' || wizardHarness === 'claude-web') {
-                        // #2710: the manual connector flows used to render a
-                        // `YOUR_API_KEY` placeholder with a Copy button that
-                        // wrote an empty string. The key now lives in step 1
-                        // (always, for these harnesses); step 2 pastes the
-                        // header value into the connector and the prompt into
-                        // the chat.
+                      } else if (wizardKeyless) {
+                        // #2865: Claude Desktop/Web connect over OAuth. This
+                        // replaces the old key recipe entirely — the old branch
+                        // rendered `Authorization: Bearer <key>` plus a beta
+                        // caveat that diverted users whose account lacks
+                        // Anthropic's "Request headers" field, which is exactly
+                        // the population #2865 exists for. The shape is lifted
+                        // from the shipped chatgpt recipe (server URL → sign-in →
+                        // Authorize → org chooser) and needs NO key, so it
+                        // renders for members as well as owner/admins.
                         const web = wizardHarness === 'claude-web'
                         procedureTitle = `Add the ${displayName} connector`
                         procedure = (
@@ -6560,14 +6575,21 @@ function claimIntentInFlight() {
                             </p>
                             <ul className="wizard-fields">
                               <li>Name: <strong>Tortoise</strong></li>
-                              <li>Server URL: <code>https://api.premiselabs.co/mcp/</code></li>
-                              <li>Request headers{web ? ' (advanced)' : ''}: <code style={wizardHeaderCodeStyle}>{'Authorization: Bearer ' + harnessKey}</code></li>
+                              <li>Server URL: <code>{CANONICAL_MCP_URL}</code>
+                                <button type="button" className="ghost small" style={{ marginLeft: '0.5rem' }}
+                                  onClick={() => navigator.clipboard?.writeText(CANONICAL_MCP_URL)}>Copy URL</button>
+                              </li>
                             </ul>
-                            <div>
-                              <button type="button" className="ghost small" onClick={() => navigator.clipboard?.writeText(`Authorization: Bearer ${harnessKey}`)}>Copy header value</button>
-                            </div>
+                            <p className="wizard-caption">
+                              Leave <strong>Request headers</strong> empty — no API key is needed.
+                            </p>
+                            <ol className="wizard-fields">
+                              <li>{web ? 'Claude' : 'Claude Desktop'} opens Tortoise&apos;s sign-in page on the first connection — sign in.</li>
+                              <li>Click <strong>Authorize</strong>.</li>
+                              <li>Pick the Organization you&apos;re onboarding.</li>
+                            </ol>
                             <p className="wizard-note">
-                              Note: <strong>Request headers</strong> is still rolling out in Anthropic&apos;s beta and may not appear for every account. If Request headers isn&apos;t available on your account yet, use the Claude Code surface instead — that path works on every account.{web ? ' Claude connects from Anthropic\u2019s cloud, so your key is stored by Anthropic — keep the chat and the key private.' : ''}
+                              The <code>tortoise_*</code> tools appear once you authorize. The authorization belongs to your Tortoise account — remove the Tortoise connector any time in {web ? 'claude.ai' : 'Claude Desktop'} → Settings → Connectors.{web ? ' Claude connects from Anthropic\u2019s cloud — nothing is stored on a local machine.' : ''}
                             </p>
                           </>
                         )
@@ -6579,7 +6601,9 @@ function claimIntentInFlight() {
                         procedureTail = (
                           <>
                             <p className="wizard-caption">Start a new chat and paste this prompt:</p>
-                            <WizardPromptCard text={wizardWorkflowsText(harnessKey, wizardKeyMode)} label="Copy the workflows prompt" />
+                            {/* #2865: composed KEY-LESS — a connector surface
+                                never carries a key. */}
+                            <WizardPromptCard text={wizardWorkflowsText('', 'included')} label="Copy the workflows prompt" />
                           </>
                         )
                       }
@@ -6625,7 +6649,25 @@ function claimIntentInFlight() {
                               an empty "1 Get your API key" would promise an
                               action that does not exist there; with no key there
                               is no procedure block to show either. */}
-                          {wizardConnectHarness === 'codexDesktop' ? (
+                          {wizardKeyless ? (
+                            /* #2865: a key-less OAuth leaf renders NO "1 Get
+                               your API key" block — its recipe needs no
+                               credential, so that step would promise an action
+                               that does not exist on these surfaces. #3218's
+                               numbered prompt block stays: the leaf's step
+                               count still matches its two parts
+                               (connector → prompt). */
+                            <>
+                              <WizardBlock step={1} title={procedureTitle}>
+                                {procedure}
+                              </WizardBlock>
+                              {procedureTail && (
+                                <WizardBlock step={2} title={procedureTailTitle}>
+                                  {procedureTail}
+                                </WizardBlock>
+                              )}
+                            </>
+                          ) : wizardConnectHarness === 'codexDesktop' ? (
                             <WizardBlock step={1} title={harnessKey ? procedureTitle : 'Get your API key'}>
                               {harnessKey ? (
                                 <>
@@ -6681,7 +6723,12 @@ function claimIntentInFlight() {
                                     <p className="wizard-note">{KEY_VISIBILITY_NOTE}</p>
                                   </>
                                 ) : (
-                                  wizardNoKeyAffordance
+                                  /* #2865: only an owner/admin can mint
+                                     (POST /v1/team/keys is owner/admin-gated).
+                                     A member on a keyed leaf keeps the paste
+                                     escape they have today — never a mint CTA
+                                     that would 403. */
+                                  isOwnerAdmin ? wizardNoKeyAffordance : wizardPasteRow
                                 )}
                               </WizardBlock>
 
@@ -6712,7 +6759,9 @@ function claimIntentInFlight() {
                             <div className="wizard-nav-actions">
                               {wizardConnectError && <p className="error" role="alert" style={{ margin: '0 0.5rem 0 0', fontSize: 13 }}>{wizardConnectError}</p>}
                               <button type="button" className="btn-primary" onClick={wizardHarnessContinue} disabled={wizardConnectBusy}>
-                                {wizardConnectBusy ? 'Saving…' : (['pi','cursor','claude-desktop','claude-web'].includes(wizardHarness) ? 'Done — Continue to dashboard' : "I've set it up — Continue →")}
+                                {wizardConnectBusy ? 'Saving…' : (wizardKeyless
+                                  ? (HARNESS_CONTINUE_LABEL[wizardHarness] || "I've connected it — Continue →")
+                                  : (['pi','cursor'].includes(wizardHarness) ? 'Done — Continue to dashboard' : "I've set it up — Continue →"))}
                               </button>
                               <button type="button" className="ghost" onClick={() => { setWizardPaused(true); setWizardStep(3) }}>Skip for now</button>
                             </div>
@@ -6722,10 +6771,16 @@ function claimIntentInFlight() {
                     })()
                   ) : (
                     <div className="harness">
+                      {/* #2865: the ONLY remaining body here is the mint-cap
+                          remedy (capNotice is set only by the Keys-tab
+                          create/rotate 402s, both owner/admin-only — the
+                          wizard mint's 402 sets wizardDurableError, not
+                          this), so the pre-#2865 member arm —
+                          "Only owners and admins can create API keys…" above a
+                          paste row — is gone: members now reach the chooser
+                          above and get the paste escape on a keyed leaf. */}
                       <p className="dim" style={{ margin: '0.9rem 0 0', lineHeight: 1.6 }}>
-                        {!isOwnerAdmin
-                          ? 'Only owners and admins can create API keys in this dashboard. Paste an API key below from your agent or an owner/admin.'
-                          : capNotice}
+                        {capNotice}
                       </p>
                       {wizardPasteRow}
                       <div className="wizard-nav" style={{ marginTop: '0.75rem' }}>

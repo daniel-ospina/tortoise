@@ -7,7 +7,8 @@ deployed surface:
   E2E-7  host isolation — premiselabs.co /blog* → 301 tortoise host;
          /blogpost /blog-extra NOT redirected
   E2E-11 /blog/feed.xml + /blog/sitemap.xml valid XML (published-only)
-  E2E-12 /admin/* → 302 /auth (no session; no content leaked)
+  E2E-12 /admin/* → 302 /auth?next=<path> (no session; no content leaked;
+         #3080 return-to so login comes BACK to the console)
   E2E-8  agent API rejects bad actors (401 no/invalid key; no anonymous write)
   E2E-14 sanitized SSR (no <script> in rendered post bodies)
   robots.txt lists the blog sitemap
@@ -33,6 +34,7 @@ import contextlib
 import os
 import uuid
 import xml.etree.ElementTree as ET
+from urllib.parse import parse_qs, urlparse
 
 import pytest
 import requests
@@ -137,13 +139,35 @@ def test_robots_txt_lists_blog_sitemap() -> None:
 
 
 def test_admin_gate_redirects_unauthenticated() -> None:
-    """E2E-12: /admin/* without a session → 302 /auth; no content returned."""
+    """E2E-12 + #3080: /admin/* without a session → 302 /auth?next=<path>.
+
+    The return-to is load-bearing: without it the post-login redirect always
+    landed on the app root, so /admin was unreachable by navigation.
+    """
     r = SESSION.get(f"{TORTISE}/admin/blog", timeout=20, allow_redirects=False)
     assert r.status_code == 302
-    assert "/auth" in r.headers.get("location", "")
+    loc = r.headers.get("location", "")
+    assert "/auth" in loc
+    # #3080: the bounce must carry an allowlisted return-to.
+    assert "next=" in loc, f"return-to missing from bounce: {loc}"
+    nxt = parse_qs(urlparse(loc).query).get("next", [""])[0]
+    assert nxt == "/admin/blog", f"unexpected return-to: {nxt!r}"
+    # Open-redirect guard: a path, never an absolute or protocol-relative URL.
+    assert nxt.startswith("/") and not nxt.startswith("//"), f"unsafe return-to: {nxt!r}"
     # No admin content in the redirect target body
-    a = SESSION.get(r.headers["location"], timeout=20)
+    a = SESSION.get(loc, timeout=20)
     assert "Review queue" not in a.text
+
+
+def test_admin_gate_return_to_is_scoped_to_admin() -> None:
+    """#3080: the return-to allowlist only ever yields a same-origin /admin path."""
+    for path in ("/admin", "/admin/", "/admin/blog", "/admin/assets/x.js"):
+        r = SESSION.get(f"{TORTISE}{path}", timeout=20, allow_redirects=False)
+        assert r.status_code == 302, f"{path} → {r.status_code}"
+        loc = r.headers.get("location", "")
+        nxt = parse_qs(urlparse(loc).query).get("next", [""])[0]
+        assert nxt.startswith("/admin"), f"{path} → unsafe return-to {nxt!r}"
+        assert not nxt.startswith("//"), f"{path} → protocol-relative {nxt!r}"
 
 
 def test_agent_api_rejects_bad_actors() -> None:

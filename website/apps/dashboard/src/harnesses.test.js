@@ -10,7 +10,7 @@ import {
   HARNESS_COPY_LABEL, HARNESS_CONTINUE_LABEL,
   HARNESS_CAPTURE_INSTALL, HARNESS_CAPTURE_REASON,
   HARNESS_CAPTURE_STATUS_LABEL, HARNESS_CAPTURE_SUPPORT,
-  HARNESS_OAUTH,
+  HARNESS_OAUTH, CANONICAL_MCP_URL,
   HARNESS_FAMILIES, HARNESS_FAMILY_IDS, harnessFamilyOf, preferredSurface,
   harnessDisplayName,
 } from './harnesses.js'
@@ -26,9 +26,11 @@ test('DE2E-5: the 7-harness vocabulary — self-install (4) + teach-human (3, in
   assert.equal(overlap.length, 0, 'self-install and teach-human are disjoint')
   assert.deepEqual(HARNESS_SELF_INSTALL.sort(), ['claude', 'codex', 'cursor', 'pi'].sort())
   // #1701: chatgpt joins the teach-human vocabulary (no local shell/cloud —
-  // the HUMAN completes the connector steps) AND is the OAuth-only harness.
+  // the HUMAN completes the connector steps) AND is an OAuth-only harness.
+  // #2865: the two Claude connector leaves join it — their recipe is key-less
+  // OAuth now, so HARNESS_OAUTH is the vocabulary the live connect step reads.
   assert.deepEqual(HARNESS_TEACH_HUMAN.sort(), ['claude-desktop', 'claude-web', 'chatgpt'].sort())
-  assert.deepEqual(HARNESS_OAUTH, ['chatgpt'])
+  assert.deepEqual(HARNESS_OAUTH, ['claude-desktop', 'claude-web', 'chatgpt'])
   assert.equal(HARNESS_OAUTH.filter((h) => HARNESS_SELF_INSTALL.includes(h)).length, 0,
     'OAuth harnesses are never self-install (no key-mint surface)')
   assert.equal(HARNESS_OAUTH.filter((h) => !HARNESS_TEACH_HUMAN.includes(h)).length, 0,
@@ -149,16 +151,31 @@ test('DE2E-5: 4 self-install harnesses carry a config-write command + skill inst
 })
 
 test('DE2E-5: teach-human harnesses carry exact manual steps + verify handoff (Claude Desktop/Web)', () => {
+  // #2865: both Claude connector surfaces are key-less OAuth — no `Authorization`
+  // request header, no API key, and the canonical NO-slash connector URL that
+  // matches the server's RFC 8707 resource indicator (#2864).
   const desktop = UNIVERSAL_COMMAND['claude-desktop'](KEY)
   assert.match(desktop, /Connectors/, 'desktop: Connectors UI named')
   assert.match(desktop, /Server URL/, 'desktop: server URL field')
-  assert.match(desktop, /Authorization/, 'desktop: request-header field')
+  assert.match(desktop, /https:\/\/api\.premiselabs\.co\/mcp[^\/]/, 'desktop: canonical connector URL (no slash)')
+  assert.match(desktop, /Authorize/, 'desktop: OAuth Authorize step')
   assert.match(desktop, /tortoise_health/, 'desktop: agent verifies')
+  assert.ok(!desktop.includes('Authorization'), 'desktop: no Bearer recipe (that is the blocker)')
+  assert.match(desktop, /Leave Request headers empty/, 'desktop: the field is named only to say it stays empty')
+  assert.ok(!/beta/i.test(desktop), 'desktop: no beta caveat')
+  assert.ok(!desktop.includes(KEY), 'desktop: never embeds the key')
   const web = UNIVERSAL_COMMAND['claude-web'](KEY)
   assert.match(web, /Connectors/, 'web: connector steps')
   assert.match(web, /Server URL/, 'web: server URL step')
+  assert.match(web, /https:\/\/api\.premiselabs\.co\/mcp[^\/]/, 'web: canonical connector URL (no slash)')
+  assert.match(web, /Authorize/, 'web: OAuth Authorize step')
   assert.match(web, /tortoise_health/, 'web: agent verifies')
   assert.match(web, /harness-connected/, 'web: checkpoint handoff (dashboard Continue)')
+  assert.ok(!web.includes('Authorization'), 'web: no Bearer recipe')
+  assert.ok(!web.includes(KEY), 'web: never embeds the key')
+  // #2865: the Continue label tells the truth on a manual connector surface.
+  assert.equal(HARNESS_CONTINUE_LABEL['claude-desktop'], "I've connected it — Continue →")
+  assert.equal(HARNESS_CONTINUE_LABEL['claude-web'], "I've connected it — Continue →")
 })
 
 test('#1701 DE2E-5: chatgpt is the key-less OAuth harness — OAuth connector steps + skills-as-prompt copy', () => {
@@ -191,6 +208,13 @@ test('#1701 DE2E-5: chatgpt is the key-less OAuth harness — OAuth connector st
   assert.ok(!cmd.includes(KEY), 'chatgpt copy must never embed the test key')
   assert.ok(!cmd.includes('tortoise_health'), 'chatgpt copy verifies IN CHAT — never tortoise_health')
   assert.ok(!cmd.includes('api.premiselabs.co/mcp/'), 'chatgpt copy must not use the slash URL form')
+  // #2865: ONE canonical connector constant — chatgpt, claude-desktop and
+  // claude-web all carry the no-slash form (the keyed MCP_URL stays slashed).
+  assert.equal(CANONICAL_MCP_URL, 'https://api.premiselabs.co/mcp')
+  for (const h of ['chatgpt', 'claude-desktop', 'claude-web']) {
+    assert.ok(UNIVERSAL_COMMAND[h](KEY).includes(CANONICAL_MCP_URL),
+      `${h}: connector copy carries the canonical no-slash URL`)
+  }
   assert.equal(HARNESS_COPY_LABEL.chatgpt, 'Copy prompt')
   assert.equal(HARNESS_CONTINUE_LABEL.chatgpt, "I've connected it — Continue →")
   assert.ok(HARNESS_INTRO.chatgpt && HARNESS_INTRO.chatgpt.includes('paste the prompt'), 'chatgpt intro points at the chat paste')
