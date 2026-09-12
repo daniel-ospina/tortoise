@@ -1394,9 +1394,9 @@ class FalkorProjection(
         references always resolve regardless of filename sort order.
 
         GAP-19: Full event-type coverage — replays all EventRecorded, SubjectAdded,
-        ObjectRegistered, DocumentCreated, SourceCreated, ConfidenceChanged,
-        PointRevised events, not just PointAdded/OperatorAdded/PointRetracted/
-        PointsMerged.
+        ObjectRegistered, ObjectRetracted (#2977), DocumentCreated,
+        SourceCreated, ConfidenceChanged, PointRevised events, not just
+        PointAdded/OperatorAdded/PointRetracted/PointsMerged.
 
         #330 parity guarantee: for logs where SourceCreated precedes the
         PointAdded events that extract from that source (the canonical ingest
@@ -1763,8 +1763,12 @@ class FalkorProjection(
         # capture SDK is built with an event_log_path, so the residual
         # 0-row sources are: pre-#2194 journals (no backfill), an
         # unjournaled capture SDK / legacy raw producers (they apply without
-        # journaling), and delete races (a deleted Object's registration
-        # line — deletes leave no tombstone). The fold is idempotent — a
+        # journaling). Object DELETES are no longer in this list as of
+        # #2977: `_delete_entity` journals `ObjectRetracted`, so a deleted
+        # Object replays as a tombstone rather than resurrecting from its
+        # surviving registration line. The object sweep below is seq-ordered
+        # (D-12) so a retraction and a later re-registration cannot reorder.
+        # The fold is idempotent — a
         # superseded Object that is later re-created by a future event is
         # caught on the NEXT rebuild, but this rebuild's graph is honest
         # about what it could not fold.

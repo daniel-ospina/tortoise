@@ -291,11 +291,21 @@ class TestStubAdoption:
             sdk.close()
 
 
-# ── Tests 14-15 (green-pins, post-review): delete non-durability ──────────
+# ── Tests 14-15 (#2977): delete durability for Objects ───────────────────
 
 
-class TestDeleteNonDurability:
-    """Green-pins for the plan-accepted delete asymmetry (#2194 code review).
+class TestDeleteDurability:
+    """#2977: Object deletion IS durable.
+
+    `_delete_entity` now journals `ObjectRetracted`, and the replay fold
+    tombstones the node instead of letting its surviving `ObjectRegistered`
+    line resurrect it. These two tests were GREEN-PINS for the opposite
+    (accepted non-durability); they now assert the fix, and test 14 goes red
+    if the fold stops running.
+
+    STILL non-durable, and left with the #2296 hook: Subject, Document,
+    Source and Event — plus a DIRECT `_delete_entity(point_id)` (the `delete()`
+    label route gives Points a PointRetracted lane; the direct call does not).
 
     _delete_entity is a bare DETACH DELETE — the journal vocabulary has no
     Object-delete event, so a deleted canonical Object's ObjectRegistered line
@@ -328,13 +338,15 @@ class TestDeleteNonDurability:
             # without a second write path.
             proj.rebuild_all(str(events))
             rows = _object_row(proj, "delete-me-A", "status", "createdAt")
-            assert rows and rows[0][0] == "retracted", (
-                "a deleted Object must replay as `retracted` (the journaled "
-                "ObjectRetracted tombstone), NOT resurrect as `live` — #2977. "
+            # EXACT, two columns — `_object_row` builds
+            # `RETURN o.status, o.createdAt`, so a one-column form can never
+            # pass. And NOT `assert not rows or ...`: accepting absence would be
+            # blind to a DISTINCT regression (the Object not restored at all).
+            assert rows == [["retracted", journal[0]["createdAt"]]], (
+                "a deleted Object must replay as a TOMBSTONE carrying the "
+                "journaled createdAt — never absent and never live (#2977). "
                 "If this is `live`, the fold did not run; do not weaken this "
                 "assertion back towards `live`.")
-            assert rows[0][1] == journal[0]["createdAt"], (
-                "the tombstoned node carries the journaled createdAt")
         finally:
             sdk.close()
 
@@ -360,10 +372,15 @@ class TestDeleteNonDurability:
             assert live_rows and live_rows[0][0] == ors[1]["createdAt"], (
                 "live node carries the SECOND registration's createdAt")
             proj.rebuild_all(str(events))
-            rows = _object_row(proj, "delete-me-B", "createdAt")
-            assert rows and rows[0][0] == ors[0]["createdAt"], (
-                "replay first-wins the FIRST registration's createdAt — "
-                "accepted delete→recreate divergence (#2296 hook)")
+            # #2977: query the STATUS column first — the survivor rule must NOT
+            # bury a re-created Object under the pre-recreation retraction.
+            rows = _object_row(proj, "delete-me-B", "status", "createdAt")
+            assert rows[0][0] == "live", (
+                "a re-created Object must not be buried by the pre-recreation "
+                "retraction (#2977 survivor rule)")
+            assert rows[0][1] == ors[0]["createdAt"], (
+                "replay still first-wins the FIRST registration's createdAt "
+                "(accepted live/replay divergence, scope A10)")
         finally:
             sdk.close()
 
