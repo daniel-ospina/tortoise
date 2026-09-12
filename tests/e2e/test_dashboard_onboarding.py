@@ -722,18 +722,19 @@ def test_owner_connect_mint_failure_is_visible(page: Page) -> None:
     ("Claude Desktop", "Open Claude Desktop → Settings → Connectors"),
     ("Claude Web", "Open claude.ai → Settings → Connectors"),
 ])
-def test_owner_no_key_affordance_on_manual_harness_surfaces(page: Page, surface: str, sync_text: str) -> None:
-    """#2710 (code-review P1): the two MANUAL Claude surfaces must not dead-end.
+def test_manual_harness_surfaces_are_keyless_oauth(page: Page, surface: str, sync_text: str) -> None:
+    """#2865: the two MANUAL Claude surfaces are KEY-LESS OAuth, for every role.
 
-    Pre-fix they kept a `YOUR_API_KEY` placeholder in the config block plus a
-    Copy button whose handler wrote `harnessKey` — an empty string with no key —
-    so an owner/admin on those surfaces had no mint CTA, no paste escape, and a
-    Copy control that silently clobbered the clipboard.
+    This test replaces `test_owner_no_key_affordance_on_manual_harness_surfaces`,
+    whose `#2710`/`#2912` contract required the opposite: that these surfaces
+    show a visible `Create an API key` mint CTA and render ONLY the key block
+    until a key lands. #2864 made the hosted `/mcp` endpoint advertise OAuth
+    discovery (RFC 9728), so these surfaces connect by sign-in and never ask for
+    a credential — the old contract pinned the behaviour this change removes.
 
-    #2912: these are now level-2 surfaces under the Claude family, and the
-    no-key state renders ONLY step 1 (the key block) — the connector lead-in is
-    step 2 and stays absent until a key lands, which is what proves the
-    key-first order rather than a caption above an empty slot."""
+    The guarantee that replaces it: no key row, no `Bearer` recipe, no beta
+    caveat, and the Continue affordance reachable WITHOUT a key.
+    """
     _seed_cookie(page, "u-manual-" + surface.split()[-1].lower())
     _wire(page, role="owner", key_rows=[DURABLE_ROW])
     _walk_to_connect(page)
@@ -742,24 +743,30 @@ def test_owner_no_key_affordance_on_manual_harness_surfaces(page: Page, surface:
     surface_btn = page.get_by_role("button", name=re.compile(re.escape(surface)))
     surface_btn.click()
     expect(surface_btn).to_have_class(re.compile(r"\bactive\b"), timeout=10_000)
-    # The no-key state offers the SAME in-flow path as the agent-driven surfaces …
-    expect(page.get_by_role("button", name="Create an API key")).to_be_visible(timeout=5_000)
-    assert "YOUR_API_KEY" not in page.locator("body").inner_text(), \
+
+    body = page.locator("body").inner_text()
+    # (a) No mint CTA and no key row on a key-less surface.
+    assert page.get_by_role("button", name="Create an API key").count() == 0, \
+        f"{surface}: a key-less OAuth surface must not offer a mint CTA"
+    assert "YOUR_API_KEY" not in body, \
         f"{surface}: the placeholder key must not render"
     assert page.locator("code", has_text="…").count() == 0, \
         f"{surface}: no fake '…' key row"
-    assert page.locator(".wizard-prompt-card").count() == 0, \
-        f"{surface}: the config block must not render before a key exists"
-    assert sync_text not in page.locator("body").inner_text(), \
-        f"{surface}: the config lead-in must not dangle above the affordance"
-    # … and the paste escape lands a real key, after which step 2 renders.
-    page.get_by_role("button", name="I already have a key — paste it instead").click()
-    page.get_by_label("Paste an API key").fill(PASTED_KEY)
-    page.get_by_role("button", name="Use this key").click()
-    expect(page.locator("body")).to_contain_text(sync_text, timeout=5_000)
-    expect(page.locator("code", has_text=PASTED_KEY).first).to_be_visible(timeout=5_000)
-    assert "YOUR_API_KEY" not in page.locator("body").inner_text(), \
-        f"{surface}: the placeholder must be replaced by the real key"
+    # (b) No bearer recipe and no beta 'Request headers' caveat.
+    assert "Bearer" not in body, \
+        f"{surface}: the OAuth surface must not show an Authorization: Bearer recipe"
+    assert "Request headers" not in body or "Leave Request headers empty" in body, \
+        f"{surface}: the only 'Request headers' mention must be the OAuth 'leave it empty' step"
+    # (c) The sign-in / Authorize step is present.
+    assert "sign-in" in body or "sign in" in body, \
+        f"{surface}: the OAuth recipe must state the sign-in step"
+    assert "Authorize" in body or "Add custom connector" in body, \
+        f"{surface}: the OAuth recipe must state the connector/Authorize step"
+    # (d) Continue is reachable WITHOUT a key — the old no-dead-end guarantee.
+    continue_btn = page.get_by_role(
+        "button", name=re.compile(r"I've connected it — Continue"))
+    expect(continue_btn).to_be_visible(timeout=5_000)
+    expect(continue_btn).to_be_enabled()
 
 
 def test_codex_desktop_hides_the_key_mode_pills(page: Page) -> None:
