@@ -7,7 +7,7 @@ status: live
 tags: [tortoise, onboarding, mcp, harness, install, self-hosted, connect, onboarding-state, decide]
 summary: "The ONE live Tortoise onboarding script — reads onboarding state, self-adjudicates the harness, installs/connects (self-hosted: Docker-first, Compose + FalkorDB; embedded = eval-only fallback), verifies via tortoise_health, checkpoints harness-connected, and runs the generic MCP-tool decide protocol."
 created: 2026-09-02
-updated: 2026-09-04
+updated: 2026-09-12
 allowed-tools: read write bash
 ---
 
@@ -75,7 +75,7 @@ harness-chooser UI** — you adjudicate from the table, then follow YOUR row.
 | 1 | **Claude Code** | self-install (config-write) | run shell commands; write project files |
 | 2 | **Cursor** | self-install (config-write) | write project files |
 | 3 | **Codex** | self-install (config-write) | run shell commands; write project files |
-| 4 | **Pi** | self-install (config-write) | write project files |
+| 4 | **Pi** | self-install (config-write) | run shell commands; write project files |
 | 5 | **Claude Desktop** | teach-human | **no local filesystem** — guide the human |
 | 6 | **Claude Web** | teach-human | **no local filesystem, no shell** — guide the human |
 
@@ -214,14 +214,55 @@ prompt for approval — `tortoise_health` and the read tools are safe to allow.
 
 ### Pi (self-install)
 
-Create/merge `.mcp.json` in the project (MERGE — never replace an existing
-`mcpServers` block):
+Pi is a config-write harness, but the config is only half the story: the key
+comes from the **launching shell's** environment, and the config file is found
+by walking **up from the current directory**. Both have silent failure modes.
+Follow these four steps in order — each one is load-bearing, the first two are
+yours to execute, step 3 is a handoff to the user, and step 4 is the check.
+
+**1. Export the key to your shell profile.** Pi expands `${VAR}` from
+`process.env` **at process start**, so a missing export produces
+`Authorization: Bearer ` and a 401 — not a config error:
+
+```bash
+echo 'export TORTOISE_API_KEY=<key>' >> ~/.zshrc   # or ~/.bashrc
+```
+
+**2. Create/merge `.mcp.json` in the project** (MERGE — never replace an
+existing `mcpServers` block):
 
 ```json
 { "mcpServers": { "tortoise": { "type": "http", "url": "https://api.premiselabs.co/mcp/", "headers": { "Authorization": "Bearer ${TORTOISE_API_KEY}" } } } }
 ```
 
 Pi's mcp-client expands plain `${TORTOISE_API_KEY}` (no `env:` prefix).
+
+> **Resolution order — a project `.mcp.json` SHADOWS the home config.** Pi
+> walks up from the current directory (to the git top-level) and takes the
+> FIRST `.mcp.json` it finds, falling back to `~/.pi/agent/.mcp.json`
+> (`resolveMcpJsonPath`, agent-infra #104). Writing only
+> `~/.pi/agent/.mcp.json` is therefore a silent no-op inside any repo that
+> has its own `.mcp.json` — write the PROJECT file.
+
+**3. Restart Pi from a NEW shell** (hand this to the user — the running Pi
+process cannot restart itself). Not `/reload`, and not a restart of an
+already-open terminal: expansion reads the **launching shell's** env, so a
+reload (or a restart that reuses the old process env) silently keeps the
+stale or absent value. Tell the user: quit Pi, open a new terminal, and start
+Pi again from it.
+
+**4. Verify in that new session** — call `tortoise_health` (§4); it must name
+the organization you expect. The pre-restart session cannot verify: its MCP
+client was built before the export.
+
+> ⛔ **The env var — not the config file — decides which organization you
+> connect to.** A Pi process launched with a stale `TORTOISE_API_KEY` connects
+> to the *previous* org and returns data from the wrong graph with no error.
+> Observed live 2026-09-12: an old key reached namespace
+> `7a3b5403935f865c27d3fb1751` (9,019 entities) instead of the configured
+> `3326a01ea34ae595d84de5d8f9` (3,033 entities). If `tortoise_health` reports
+> an org you did not expect, the process env is stale — relaunch from a new
+> shell; editing `.mcp.json` will not help.
 
 ### Claude Desktop (teach-human)
 
