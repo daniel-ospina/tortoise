@@ -1951,3 +1951,86 @@ def test_rebuild_all_stays_fail_loud(tmp_path, monkeypatch):
     with pytest.raises(RuntimeError):
         proj.rebuild_all(str(events))
     proj.close()
+
+
+def test_delete_of_two_id_sharing_objects_is_lossless_end_to_end(tmp_path):
+    """P0 REGRESSION (#2977 review 3) — END TO END through the real writer.
+
+    `_delete_entity` deletes EVERY node sharing an id but journaled only the
+    FIRST row's name, so the other sharers resurrected on replay:
+
+        OR(id, "Foo.Bar")@0,  OR(id, "FooBar")@1,  RT(id, "Foo.Bar")@2
+        live   : []                       (both deleted)
+        replay : Foo.Bar retracted, FooBar LIVE   <-- resurrects
+
+    PRODUCTION-REACHABLE WITH NO RAW CYPHER: `tortoise/mining.py`'s
+    `_reify_entities` calls `api.add_object(name, kind, id=self._object_id(name))`
+    and `_object_id` keys on the punctuation-STRIPPED canonical name — its own
+    docstring records `"Foo.Bar" == "FooBar"`. Any two extracted names differing
+    only in punctuation mint two live Objects sharing one id.
+
+    The plan's own contract (Surface Map row 2) is "one line
+    `{type:"ObjectRetracted", id, name}` per matched Object", so the fix makes
+    the JOURNAL lossless rather than narrowing the delete's live semantics.
+
+    THIS TEST DRIVES THE REAL DELETE — an earlier version hand-wrote both journal
+    lines, which meant it passed even with the writer still lossy, i.e. it could
+    not fail for the reason it exists. Both assertions below are load-bearing:
+    the first pins the emission COUNT, the second pins that replay then agrees
+    with live.
+    """
+    import copy
+    events = tmp_path / "events"; events.mkdir(exist_ok=True)
+    sdk = TortoiseSDK(str(tmp_path / "shared.db"),
+                      event_log_path=str(events / "events.jsonl"))
+    try:
+        proj = sdk._get_proj()
+        # The PRODUCTION writer the reviewer named, not raw Cypher: `mining.py`'s
+        # `_reify_entities` calls
+        # `api.add_object(name, kind, id=self._object_id(name))`, and
+        # `_object_id` keys on the punctuation-STRIPPED canonical name. Raw
+        # Cypher would NOT work here — it journals nothing, so `rebuild_all`
+        # would have no registration line to resurrect and the retractions would
+        # be orphans, making the test pass for the wrong reason.
+        oid = "obj_collision"
+        from tortoise.api import EventAPI
+        api = EventAPI(sdk._get_event_log(), initiated_by="user",
+                       projection=proj)
+        for nm in ("Foo.Bar", "FooBar"):
+            api.add_object(nm, "other", id=oid)
+        registered = [e for e in EventLog(str(events / "events.jsonl")).read_all()
+                      if e.get("type") == "ObjectRegistered"]
+        assert sorted(e.get("name") for e in registered) == ["Foo.Bar", "FooBar"], (
+            f"the collision must be JOURNALED as two registrations: {registered}")
+        # Snapshot what LIVE looks like after the delete, to diff replay against.
+        assert sdk._delete_entity(oid) is True
+        live_rows = [list(r) for r in proj.g.query(
+            "MATCH (o:Object {id:$id}) RETURN o.name, o.status",
+            params={"id": oid}).result_set]
+        assert live_rows == [], f"live delete removed both: {live_rows}"
+
+        # (1) THE WRITER: one line per MATCHED OBJECT (Surface Map row 2).
+        retracted = [e for e in EventLog(str(events / "events.jsonl")).read_all()
+                     if e.get("type") == "ObjectRetracted"]
+        names = sorted(e.get("name") for e in retracted)
+        assert names == ["Foo.Bar", "FooBar"], (
+            "the delete removed BOTH id-sharers, so the journal must NAME both "
+            "— a single line leaves the unnamed sharer live on replay and it "
+            f"reappears in search/recall (#2977 review-3 P0). Got {names}")
+
+        # (2) THE CONSEQUENCE: replay must not resurrect either.
+        sdk._get_proj().rebuild_all(str(events))
+        replay_rows = [list(r) for r in proj.g.query(
+            "MATCH (o:Object {id:$id}) RETURN o.name, o.status",
+            params={"id": oid}).result_set]
+        replay_names = sorted(r[0] for r in replay_rows)
+        assert replay_names == ["Foo.Bar", "FooBar"], (
+            f"both were journaled retracted, so both must be restored as "
+            f"tombstones. Got {replay_rows}")
+        assert not [r for r in replay_rows if r[1] == "live"], (
+            "neither id-sharer may replay `live` — both were deleted live "
+            f"(#2977 review-3 P0). Got {replay_rows}")
+    finally:
+        sdk.close()
+
+

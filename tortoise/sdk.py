@@ -16457,11 +16457,33 @@ class TortoiseSDK:
         # Object-arm-keyed emission silently never fires and the node
         # resurrects from its surviving ObjectRegistered line (verified live).
         _nm = None
+        # #2977 code review round 3 (P0): read EVERY name, not just the first.
+        # The delete arms below are `MATCH (n:{label} {id:$id}) DETACH DELETE n`
+        # — they remove EVERY node sharing the id — so taking only
+        # `_had_object[0][0]` made the journal LOSSY and this change's contract
+        # (plan Surface Map row 2: "one line per matched Object") false.
+        #
+        # The shape is PRODUCTION-REACHABLE with no raw Cypher:
+        # `tortoise/mining.py` `_reify_entities` calls
+        # `api.add_object(name, kind, id=self._object_id(name))`, and
+        # `_object_id` keys on the punctuation-STRIPPED canonical name — its own
+        # docstring records the collision `"Foo.Bar" == "FooBar"`. Two such
+        # names mint two live Objects sharing one id; `_delete_entity` then
+        # deletes both and journaled only one, so on replay the un-named sharer
+        # stayed `live` and reappeared in search/recall — #2977's own defect
+        # direction. (Before the name-preferred anchor + name-constrained id
+        # branch landed, the fold's bare id `MATCH` accidentally tombstoned
+        # every id-sharer and masked this; the constraint removed the
+        # accidental compensation and exposed the lossy journal.)
         _had_object = proj.g.query(
-            "MATCH (o:Object {id:$id}) RETURN o.name",
+            "MATCH (o:Object {id:$id}) RETURN DISTINCT o.name",
             params={"id": id_val}).result_set
-        if _had_object:
-            _nm = _had_object[0][0]
+        # Falsy names are dropped: the anchor-seeding guard requires BOTH keys
+        # truthy (mirroring `_upsert_object`), so emitting `name=None` would
+        # create a fold that can never be survivor-matched.
+        _names = [r[0] for r in _had_object if r and r[0]] if _had_object else []
+        if _names:
+            _nm = _names[0]
         total = 0
         for label, prop in (("Point", "id"), ("Subject", "id"), ("Object", "id"),
                             ("Document", "id"), ("Source", "id"), ("Event", "eventId")):
@@ -16493,12 +16515,19 @@ class TortoiseSDK:
             # surviving ObjectRegistered line. Emitted POST-delete (mirroring
             # the ObjectRegistered lane) — a phantom retraction for a delete
             # that never happened would replay as a tombstone for a node that
-            # was never live. `name=_nm` supports the fold's id->name fallback:
-            # the _event_plain_merge stub lane mints random ulids
-            # (entities.py:887-897), so an id-only retraction orphans.
+            # was never live.
+            #
+            # ONE LINE PER MATCHED OBJECT (plan Surface Map row 2). The delete
+            # removed every id-sharer, so the journal must name every one of
+            # them or the unnamed sharers resurrect. `name=` supports the fold's
+            # id->name fallback: the _event_plain_merge stub lane mints random
+            # ulids (entities.py:887-897), so an id-only retraction orphans.
+            # When NO name is recoverable the single `name=None` line still
+            # records the id — the fold matches it by id via the keyless path.
             # JSONL-only by design (D-7) — the ObjectRegistered precedent
             # (#2194); NOT in _GRAPH_EVENT_TYPES.
-            self._emit_event("ObjectRetracted", id=id_val, name=_nm)
+            for _name in (_names or [None]):
+                self._emit_event("ObjectRetracted", id=id_val, name=_name)
         return bool(total)
 
     def create_entity(self, type: str, name: str, *, is_episodic: bool | None = None,
