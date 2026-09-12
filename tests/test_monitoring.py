@@ -193,31 +193,125 @@ class TestProbeDb:
     def test_default_budget_is_shared_across_the_two_phases(self, monkeypatch):
         """#3143 review: with NO explicit setup allowance (the /health shape)
         the cold-start and the query SHARE PROBE_TIMEOUT — the caller's total
-        wait stays inside the pre-#3143 single bound (#1384), never 2x it."""
-        monkeypatch.setattr(monitoring, "PROBE_TIMEOUT", 2.0)
+        wait stays inside the pre-#3143 single bound (#1384), never 2x it.
+
+        Asserts the QUERY's own dwell (the remaining budget), not a raw wall
+        clock: shared → ~0.8s inside the query; a per-phase budget (the
+        regression) → the full timeout. Wider margin than a total-elapsed
+        assertion, which the repo has been burned by under parallel load
+        (#1565 flake history).
+        """
+        monkeypatch.setattr(monitoring, "PROBE_TIMEOUT", 3.0)
         calls = {"query": 0}
+        entered = {}
 
         class SlowSetupSlowQuery:
             def _get_proj(self):
-                time.sleep(1.2)  # succeeds, but eats most of the budget
+                time.sleep(2.2)  # succeeds, but eats most of the budget
                 proj = MagicMock()
 
                 def _q(*args, **kwargs):
                     calls["query"] += 1
-                    time.sleep(3.0)  # would blow the remaining budget
+                    entered["t"] = time.monotonic()
+                    time.sleep(5.0)  # would blow the remaining budget
                     return MagicMock(result_set=[[1]])
 
                 proj.g.query.side_effect = _q
                 return proj
 
-        start = time.monotonic()
         result = monitoring.probe_db(SlowSetupSlowQuery())
-        elapsed = time.monotonic() - start
+        returned = time.monotonic()
         assert calls["query"] == 1  # setup succeeded → phase 2 was reached
         assert result["ok"] is False
         assert "timeout" in result["error"]
-        # Shared budget ≈ 2.0s total; a per-phase budget (the regression) ≈ 3.2s.
-        assert elapsed < 2.7, f"probe exceeded the shared budget: {elapsed:.2f}s"
+        # Shared budget → the query may spend only the ~0.8s left; a per-phase
+        # budget would let it run the full 3.0s.
+        dwell = returned - entered["t"]
+        assert dwell < 2.0, f"query was given a fresh budget, not the remainder: {dwell:.2f}s"
+
+    def test_transient_retry_is_bounded_by_the_same_deadline(self, monkeypatch):
+        """#3143 review: the #1565 retry must NOT re-arm a fresh cold-start
+        allowance. The documented bound is ONE deadline of
+        ``setup_timeout + timeout`` for the whole call (retry included).
+
+        Deterministic: stubs ``_probe_once`` and asserts the retry's SHAPE
+        (combined, remaining-budgeted) rather than timing real sleeps.
+        """
+        monkeypatch.setattr(monitoring, "PROBE_TIMEOUT", 1.0)
+        monkeypatch.setattr(monitoring, "PROBE_RETRY_DELAY", 0.0)
+        seen = []
+
+        def fake_probe_once(sdk, timeout=None, setup_timeout=None):
+            seen.append((timeout, setup_timeout))
+            return False, "transient", True
+
+        monkeypatch.setattr(monitoring, "_probe_once", fake_probe_once)
+        result = monitoring.probe_db(object(), setup_timeout=2.0)
+        assert result["ok"] is False
+        assert len(seen) == 2  # retried once
+        assert seen[0] == (None, 2.0)  # explicit allowance on attempt 1
+        # Retry rides the remaining deadline in COMBINED shape — never a second
+        # 2s cold-start allowance (which would double the documented bound).
+        assert seen[1][1] is None
+        assert 0 < seen[1][0] <= 3.0
+
+
+class TestProbeSetupTimeoutResolution:
+    """#3143 review: the operator knob is read at CALL time and is tolerant.
+
+    An import-time read would be frozen before ``mcp_server._load_dotenv()``
+    runs (so a repo-root `.env` value would be silently ignored), and an
+    unguarded ``float()`` would brick ``import tortoise.sdk`` on a blank or
+    malformed value (the shipped `.env.example` line is blank-valued).
+    """
+
+    def test_unset_env_uses_default(self, monkeypatch):
+        monkeypatch.delenv("TORTOISE_PROBE_SETUP_TIMEOUT", raising=False)
+        assert monitoring.probe_setup_timeout() == monitoring.PROBE_SETUP_TIMEOUT
+
+    def test_env_override_resolved_at_call_time(self, monkeypatch):
+        monkeypatch.setenv("TORTOISE_PROBE_SETUP_TIMEOUT", "42.5")
+        assert monitoring.probe_setup_timeout() == 42.5
+
+    @pytest.mark.parametrize("raw", [
+        "",       # the documented blank form
+        "   ",
+        "abc",    # non-numeric
+        "20s",
+        "0",      # would be an instant permanent timeout
+        "-5",
+        "nan",
+        "inf",
+        "1e12",   # above the clamp
+    ])
+    def test_bad_env_falls_back_to_default_never_raises(self, monkeypatch, raw):
+        monkeypatch.setenv("TORTOISE_PROBE_SETUP_TIMEOUT", raw)
+        assert monitoring.probe_setup_timeout() == monitoring.PROBE_SETUP_TIMEOUT
+
+    def test_mcp_tortoise_health_honors_env_override(self, monkeypatch):
+        """The `.env` knob must actually reach the tool (call-time read),
+        which the old import-time constant did not."""
+        from tortoise import mcp_server
+        from tortoise.mcp_auth import _transport_mode
+
+        captured = {}
+        real_metrics = monitoring.metrics
+
+        def spy_metrics(*args, **kwargs):
+            captured.update(kwargs)
+            return real_metrics(*args, **kwargs)
+
+        monkeypatch.setattr(monitoring, "metrics", spy_metrics)
+        monkeypatch.setenv("TORTOISE_PROBE_SETUP_TIMEOUT", "7")
+        monkeypatch.setattr(mcp_server, "_get_team_sdk",
+                            lambda: FakeSDK(db_ok=True, graph_size=3))
+        token = _transport_mode.set("http")
+        try:
+            result = mcp_server.tortoise_health()
+        finally:
+            _transport_mode.reset(token)
+        assert result["status"] == "ok", result
+        assert captured["probe_setup_timeout"] == 7.0
 
 
 class TestMetricsFunction:

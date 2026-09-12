@@ -5,15 +5,19 @@ Binds 127.0.0.1 by default (not 0.0.0.0).
 """
 from __future__ import annotations  # noqa: I001
 
+import json
+import logging
+import math
 import os
 import time
-import json
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
 from prometheus_client import Counter, Histogram, generate_latest
 
 # Auth functions imported lazily (in _Handler.do_GET) to avoid
 # triggering TORTOISE_SECRET_PEPPER requirement at module import time (#67).
+
+_log = logging.getLogger(__name__)
 
 _start = time.monotonic()
 _last_ingest: float | None = None
@@ -37,12 +41,50 @@ PROBE_TIMEOUT = 1.5
 # Bounding (1)+(2) with PROBE_TIMEOUT made a large, fully-reachable graph time
 # out during SETUP and report ``db.ok=false`` / ``status=degraded`` /
 # ``graph_size=0`` — the onboarding gate lie (#2202's symptom class). This is
-# the cold-start allowance. It is opt-in: the platform liveness gate (/health,
-# selfhost /health, the standalone serve_health server) keeps the tight 1.5s
-# bound for BOTH phases (it is a fast-degrade gate, #1384), while the on-demand
-# MCP health tool — whose only job is to answer "is the served graph
-# reachable?" — passes it. Both phases stay bounded, so no handler can hang.
-PROBE_SETUP_TIMEOUT = float(os.environ.get("TORTOISE_PROBE_SETUP_TIMEOUT", "20.0"))
+# the default cold-start allowance. It is opt-in: the platform liveness gate
+# (/health, selfhost /health, the standalone serve_health server) keeps the
+# tight 1.5s bound for BOTH phases (it is a fast-degrade gate, #1384), while
+# the on-demand MCP health tool — whose only job is to answer "is the served
+# graph reachable?" — passes it. Both phases stay bounded (the worker is
+# abandoned on overrun); the caller is never blocked past its budget.
+PROBE_SETUP_TIMEOUT = 20.0
+
+#: Upper clamp for the operator override — a value above this is rejected in
+#: favour of the default (a health probe must not be able to pin a caller for
+#: minutes on a typo).
+PROBE_SETUP_TIMEOUT_MAX = 300.0
+
+
+def probe_setup_timeout() -> float:
+    """Resolve the #3143 cold-start allowance for the MCP health tool.
+
+    Read at CALL time, not import time, for two reasons:
+
+    * ``mcp_server._load_dotenv()`` runs AFTER ``tortoise.monitoring`` is
+      imported (monitoring is imported at ``tortoise.sdk`` module scope), so an
+      import-time read would silently ignore ``TORTOISE_PROBE_SETUP_TIMEOUT``
+      set in the repo-root ``.env`` — the very surface ``.env.example``
+      documents the knob on.
+    * A malformed value must never brick ``import tortoise.sdk`` (and with it
+      the CLI, MCP server and daemon). Blank, non-numeric, non-finite,
+      non-positive and above-clamp values all fall back to the default, the
+      repo's existing tolerant env convention (``rerank._env_float``).
+    """
+    raw = (os.environ.get("TORTOISE_PROBE_SETUP_TIMEOUT") or "").strip()
+    if not raw:
+        return PROBE_SETUP_TIMEOUT
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        _log.warning("TORTOISE_PROBE_SETUP_TIMEOUT=%r is not a number — "
+                     "using %ss", raw, PROBE_SETUP_TIMEOUT)
+        return PROBE_SETUP_TIMEOUT
+    if not math.isfinite(value) or not 0 < value <= PROBE_SETUP_TIMEOUT_MAX:
+        _log.warning("TORTOISE_PROBE_SETUP_TIMEOUT=%r is outside "
+                     "(0, %s] — using %ss", raw, PROBE_SETUP_TIMEOUT_MAX,
+                     PROBE_SETUP_TIMEOUT)
+        return PROBE_SETUP_TIMEOUT
+    return value
 
 # #1565: ONE bounded retry on a TRANSIENT connect failure only (an embedded
 # redislite server momentarily starting / momentarily unreachable under
@@ -188,7 +230,9 @@ def probe_db(sdk, timeout=None, setup_timeout=None) -> dict:
     endpoints use (the SDK's projection — registry/shared or default graph
     depending on caller), hard-bounded by a 1.5s worker-thread timeout: the
     redis client's own socket_connect_timeout is 5s, far too slow for a
-    health poll, so a dead URI would otherwise hang the handler.
+    health poll, so a dead URI would otherwise hang the handler. (Callers that
+    pass the #3143 ``setup_timeout`` get that allowance ON TOP for the
+    projection cold-start — see below.)
 
     #1565: a single TRANSIENT connection-level failure (embedded redislite
     # server mid-startup / momentarily unreachable under parallel load —
@@ -208,12 +252,24 @@ def probe_db(sdk, timeout=None, setup_timeout=None) -> dict:
     fast-degrade bound (#1384). Only callers that opt in (the MCP
     ``tortoise_health`` tool) pay a separate allowance for a large graph's
     cold-start instead of being reported unreachable for it.
+
+    The WHOLE call — including the #1565 transient retry below — is bounded by
+    ONE caller deadline of ``setup_timeout + timeout`` (or just ``timeout``
+    when nothing is passed). The retry runs inside the remaining time and never
+    re-arms a fresh cold-start allowance.
     """
     start = time.monotonic()
+    attempt_timeout = PROBE_TIMEOUT if timeout is None else timeout
+    total_budget = (attempt_timeout if setup_timeout is None
+                    else setup_timeout + attempt_timeout)
     ok, error, transient = _probe_once(sdk, timeout, setup_timeout)
     if not ok and transient:
-        time.sleep(PROBE_RETRY_DELAY)
-        ok, error, _ = _probe_once(sdk, timeout, setup_timeout)
+        remaining = total_budget - (time.monotonic() - start) - PROBE_RETRY_DELAY
+        if remaining > 0:
+            time.sleep(PROBE_RETRY_DELAY)
+            # Combined shape on purpose: the retry gets what the deadline has
+            # LEFT, split across both phases — not a second allowance.
+            ok, error, _ = _probe_once(sdk, timeout=remaining, setup_timeout=None)
     return {
         "ok": ok,
         "latency_ms": round((time.monotonic() - start) * 1000, 1),
@@ -263,7 +319,8 @@ def metrics(sdk=None, probe_timeout=None,
     #3143: ``probe_setup_timeout`` is the projection-cold-start allowance
     threaded to ``probe_db``. It is the MCP health tool's seam: the platform
     liveness gate passes nothing (tight 1.5s, fail-fast), while
-    ``tortoise_health`` passes ``PROBE_SETUP_TIMEOUT`` so a reachable graph
+    ``tortoise_health`` passes its call-time-resolved allowance
+    (``probe_setup_timeout()``) so a reachable graph
     whose cold-start exceeds 1.5s is reported ``ok`` with its real
     ``graph_size`` instead of ``degraded``/0.
     """

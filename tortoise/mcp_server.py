@@ -1893,7 +1893,11 @@ def tortoise_health() -> dict:
     the request-scoped team SDK over HTTP (selfhost daemon: the team_selfhost
     graph, the SAME namespace /health probes; hosted: the calling team's
     graph on the SAME FalkorDB server /health deep-checks) and the base SDK
-    over stdio — so tool and /health can never disagree about DB reachability.
+    over stdio — so the tool probes the SAME graph and namespace as /health
+    and can never disagree about a DEAD DB. (Their cold-start budgets differ
+    by design since #3143 — see below — so the two may legitimately disagree
+    when the graph is reachable but its cold-start exceeds /health's
+    fast-degrade bound.)
     The pre-#2202 code probed monitoring's module-global handle, which ONLY
     the stdio entrypoint (main()) registers: on the HTTP daemon/hosted
     surfaces it stayed None and every call reported degraded/no_sdk_registered
@@ -1908,14 +1912,17 @@ def tortoise_health() -> dict:
     missing). That cost scales with graph size, so a large, fully-reachable
     org (9,019 entities) timed out during setup and reported
     ``degraded``/``graph_size 0`` while ``tortoise_status`` worked. The tool
-    now passes ``PROBE_SETUP_TIMEOUT`` for the cold-start it always pays —
-    it builds a request-scoped SDK per call — while the platform liveness
-    gate keeps the tight fast-degrade bound."""
+    now passes the cold-start allowance it always pays for — it builds a
+    request-scoped SDK per call — while the platform liveness gate keeps the
+    tight fast-degrade bound. The allowance is resolved at CALL time
+    (``monitoring.probe_setup_timeout()``) so ``TORTOISE_PROBE_SETUP_TIMEOUT``
+    set in the repo-root ``.env`` — loaded after this module imports
+    ``tortoise.monitoring`` — is honoured instead of frozen at import."""
     # #236: route through _safe() so every tool is gated (defense-in-depth;
     # reachable only post-auth over HTTP).
     return _safe(lambda: monitoring.metrics(
         sdk=_get_team_sdk(),
-        probe_setup_timeout=monitoring.PROBE_SETUP_TIMEOUT,
+        probe_setup_timeout=monitoring.probe_setup_timeout(),
     ))
 
 
