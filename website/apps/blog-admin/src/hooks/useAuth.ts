@@ -20,6 +20,23 @@ interface AuthState {
 
 const INITIAL: AuthState = { loading: true, session: null, isAdmin: false };
 
+/**
+ * #3080: carry the current console path to /auth so sign-in returns HERE.
+ *
+ * The server gate does the same (`functions/admin/[[path]].ts`). Without it,
+ * every SPA-initiated re-login landed on the app root and the console stayed
+ * unreachable — the same defect one layer in. The value is a path under /admin,
+ * which /auth re-validates against its own allowlist before navigating.
+ */
+function authUrlWithReturn(): string {
+  // PATHNAME only — parity with the server gate's returnToPath(), which also
+  // drops the query. /auth rejects a `next` containing ':' or '\\' anywhere, so
+  // sending pathname+search would silently drop the return-to for any admin URL
+  // carrying such a query (e.g. ?t=12:00) and re-login would land on the app
+  // root — the #3080 symptom again.
+  return `${AUTH_URL}?next=${encodeURIComponent(window.location.pathname)}`;
+}
+
 export function useAuth(): AuthState {
   const [state, setState] = useState<AuthState>(INITIAL);
 
@@ -32,7 +49,7 @@ export function useAuth(): AuthState {
         if (cancelled) return;
 
         if (!data.session) {
-          window.location.replace(AUTH_URL);
+          window.location.replace(authUrlWithReturn());
           setState({ loading: false, session: null, isAdmin: false });
           return;
         }
@@ -47,12 +64,14 @@ export function useAuth(): AuthState {
 
         if (!isAdmin) {
           // Valid session but not an admin — do not leak the admin surface.
-          window.location.replace(AUTH_URL);
+          // Terminal, not a loop: the server gate answers a non-admin with a
+          // 403 page rather than bouncing them again.
+          window.location.replace(authUrlWithReturn());
         }
         setState({ loading: false, session: data.session, isAdmin });
       } catch {
         if (!cancelled) {
-          window.location.replace(AUTH_URL);
+          window.location.replace(authUrlWithReturn());
           setState({ loading: false, session: null, isAdmin: false });
         }
       }
@@ -63,7 +82,7 @@ export function useAuth(): AuthState {
     const { data: sub } = supabase.auth.onAuthStateChange((_event, session) => {
       if (cancelled) return;
       if (!session) {
-        window.location.replace(AUTH_URL);
+        window.location.replace(authUrlWithReturn());
         setState({ loading: false, session: null, isAdmin: false });
       } else {
         // Session refreshed/restored — re-run the admin gate.
