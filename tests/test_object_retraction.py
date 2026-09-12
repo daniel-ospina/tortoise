@@ -1402,3 +1402,408 @@ def test_reopened_event_does_not_unretract(tmp_path):
                 "subject": "s"})
     rows = proj.g.query("MATCH (o:Object {id:$id}) RETURN o.status", params={"id": oid}).result_set
     assert rows[0][0] == "retracted"
+
+
+
+
+
+# `_drive`, `EventLog`, `recover_from_log` and `restore` are all imported or
+# defined in the FILE HEADER (cycle 8) so tasks 3-8 can call them. Do not
+# re-import or re-define them here — a second `def _drive` silently shadows the
+# first and the two drift.
+
+
+def _build_journal(tmp_path, script):
+    """Drive the LIVE lane for create/delete; append fold events straight to the
+    JSONL (they are journal INPUT, and the live supersede path does not journal)."""
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    events = tmp_path / "events"; events.mkdir(exist_ok=True)
+    sdk = TortoiseSDK(str(tmp_path / "build.db"),
+                      event_log_path=str(events / "events.jsonl"))
+    log = EventLog(str(events / "events.jsonl"))
+    oid = _entity_name_id("Object", "PHX")
+    for step in script.split(","):
+        if step == "create":
+            sdk.create_entity("object", "PHX", objectKind="core:other", is_episodic=False)
+        elif step == "delete":
+            sdk._delete_entity(oid)
+        elif step == "supersede":
+            log.append({"type": "ObjectSuperseded", "id": oid, "name": "PHX",
+                        "supersedes_by": "OTHER", "ts": "2026-09-11T00:00:00Z"})
+        elif step == "retract":
+            log.append({"type": "ObjectRetracted", "id": oid, "name": "PHX",
+                        "ts": "2026-09-11T00:00:00Z"})
+    sdk.close()
+    return events, oid
+
+
+@pytest.mark.parametrize("engine", ["rebuild_all", "recover_from_log", "rebuild", "backup_restore"])
+@pytest.mark.parametrize("script,expected", [
+    ("create,delete", "retracted"),
+    ("create,delete,create", "live"),
+    ("create,supersede,retract", "retracted"),   # D-12: last wins
+    ("create,retract,supersede", "superseded"),  # D-12: last wins  <-- discriminating
+    # CYCLE 5 (Reviewer #4): delete THEN supersede is REACHABLE —
+    # `commit_ops.apply_supersessions` journals an ObjectSuperseded even when
+    # its CAS fold matches nothing (the delete-race branch the flush's own
+    # warning names), and raw/legacy producers can emit the line directly. The
+    # anchor stays at seq 0 (the only ObjectRegistered), so BOTH folds apply and
+    # the final status is `superseded` — which the narrow
+    # OBJECT_SEARCH_EXCLUDED_STATUS={retracted} then serves as SEARCH-VISIBLE.
+    # That is a real acceptance gap for a DELETED object, pinned here and filed
+    # under follow-up (c); the retraction evidence (retractedAt) is cleared by
+    # the two-sided terminal hygiene, so the tombstone is indistinguishable from
+    # a legitimate supersession. Do NOT change the row without reading (c).
+    ("create,delete,supersede", "superseded"),
+    # CYCLE 6 (Reviewer #2): the RETRACTION twin of `create,supersede,create`.
+    # `_build_journal`'s `retract` appends the line WITHOUT deleting, so the
+    # re-create is an ON MATCH that is NOT re-journalled — the journal is
+    # `[OR@0, RT@1]`, `first < 1 < last` is false, and the fold APPLIES →
+    # `retracted`, while the LIVE lane (no delete happened) is `live`. A
+    # replay-vs-live divergence on a SYNTHETIC shape (reachable from a
+    # hand-written/legacy producer, or the `apply_supersessions`-style lane),
+    # recorded here and filed alongside (e). Do NOT "fix" it by exempting the
+    # id branch — that would re-break the cycle-3 stale-id case.
+    ("create,retract,create", "retracted"),
+    # D-13: a re-create with NO intervening delete is an ON MATCH and is NOT
+    # re-journaled, so the anchor stays at seq 0 and the supersede fold APPLIES.
+    # Measured live: `superseded`.
+    ("create,supersede,create", "superseded"),
+    # D-13: a re-create AFTER a hard delete IS re-journaled (TWO
+    # ObjectRegistered lines), the anchor moves, and BOTH folds drop.
+    # Measured live: `live`. An exempt-the-supersede-lane variant produced
+    # `superseded` here — a replay-vs-live divergence this row exists to catch.
+    ("create,supersede,delete,create", "live"),
+])
+def test_all_replay_engines_agree(tmp_path, engine, script, expected):
+    events, oid = _build_journal(tmp_path / engine, script)
+    proj = _drive(engine, tmp_path / engine, events, oid)
+    try:
+        rows = proj.g.query(
+            "MATCH (o:Object {id:$id}) RETURN o.status, o.retractedAt, o.supersededBy",
+            params={"id": oid}).result_set
+        assert rows and rows[0][0] == expected, \
+            f"{engine} on {script}: got {rows}, want {expected}"
+        # Terminal-status hygiene: the loser lane's fields must be cleared.
+        if expected == "superseded":
+            assert rows[0][1] is None, "a superseded Object must not carry retractedAt"
+        if expected == "retracted":
+            assert rows[0][2] is None, "a retracted Object must not carry supersededBy"
+    finally:
+        proj.close()
+
+
+def test_deleted_then_superseded_object_is_search_visible_documented(tmp_path):
+    """PINS an acceptance gap (cycle 5, Reviewer #4).
+
+    `create,delete,supersede` is reachable: `commit_ops.apply_supersessions`
+    journals an `ObjectSuperseded` even when its CAS fold matches nothing (the
+    delete-race branch `_flush_object_folds`'s own warning names), and raw or
+    legacy producers can emit the line directly. The survivor anchor stays at
+    seq 0 (the only `ObjectRegistered`), so both folds apply and the final
+    status is `superseded` — which `OBJECT_SEARCH_EXCLUDED_STATUS = {retracted}`
+    then serves as SEARCH-VISIBLE.
+
+    This does NOT contradict D-12 (last-in-journal-order wins) or D-10 (the
+    search view is deliberately narrow), and `superseded` Objects are
+    search-visible by pre-existing design (`test_superseded_object_visibility_
+    unchanged`). It IS a gap against #2977's own acceptance indicator ("a
+    retracted Object is non-current on every read surface"), and the two-sided
+    terminal hygiene clears `retractedAt`, so the tombstone becomes
+    indistinguishable from a legitimate supersession. Filed under (c); this
+    test exists so the behaviour is RECORDED rather than discovered later.
+    """
+    events, oid = _build_journal(tmp_path / "ds", "create,delete,supersede")
+    proj = _drive("rebuild_all", tmp_path / "ds", events, oid)
+    try:
+        assert proj.g.query(
+            "MATCH (o:Object {id:$id}) RETURN o.status, o.retractedAt",
+            params={"id": oid}).result_set[0] == ["superseded", None]
+        from tortoise.search_engine import run_fts_query
+        # NOTE: `tortoise_fts_query` is a TortoiseSDK METHOD (sdk.py:11777) —
+        # `_drive` returns a projection, so the module-level `run_fts_query`
+        # (search_engine.py:344) is the correct call here.
+        hits = run_fts_query(proj.g, "PHX", "object")
+        assert hits, (
+            "PINNED GAP: a DELETED-then-superseded Object is search-visible "
+            "because search excludes `retracted` only. Closing this is (c), "
+            "not #2977 — update this test if (c) lands")
+    finally:
+        proj.close()
+
+
+def test_precedence_is_journal_order_not_fixed_sweep_order(tmp_path):
+    """Explicit D-12 pin: the SAME two events in the OPPOSITE order must give
+    opposite results. Two fixed-order sweeps would give one answer for both."""
+    ev_a, oid = _build_journal(tmp_path / "ja", "create,retract,supersede")
+    ev_b, _ = _build_journal(tmp_path / "jb", "create,supersede,retract")
+    a = _drive("rebuild_all", tmp_path / "a", ev_a, oid)
+    b = _drive("rebuild_all", tmp_path / "b", ev_b, oid)
+    try:
+        q = "MATCH (o:Object {id:$id}) RETURN o.status"
+        assert a.g.query(q, params={"id": oid}).result_set[0][0] == "superseded"
+        assert b.g.query(q, params={"id": oid}).result_set[0][0] == "retracted"
+    finally:
+        a.close(); b.close()
+
+
+def test_orphan_retraction_warns_on_every_engine(tmp_path, caplog):
+    """A journal whose only line is ObjectRetracted must create nothing AND warn.
+
+    `require_recovery=False`: replay correctly yields ZERO nodes here, and
+    recover_from_log reports recovered=False for exactly that reason.
+    `caplog.clear()` per engine: without it, engine 1's record satisfies the
+    assertion for engines 2 and 3, so the per-engine claim was untested for two
+    of three.
+    """
+    events = tmp_path / "events"; events.mkdir(exist_ok=True)
+    EventLog(str(events / "events.jsonl")).append(
+        {"type": "ObjectRetracted", "id": "obj-ghost", "name": "ghost"})
+    for engine in ("rebuild_all", "recover_from_log", "rebuild", "backup_restore"):
+        caplog.clear()
+        with caplog.at_level("WARNING"):
+            proj = _drive(engine, tmp_path / engine, events, "obj-ghost",
+                          require_recovery=False)
+        try:
+            assert proj.g.query("MATCH (o:Object) RETURN count(o)").result_set[0][0] == 0, \
+                f"{engine} must not invent a node from an orphan retraction"
+            assert any("ObjectRetracted" in r.getMessage() for r in caplog.records), \
+                f"{engine} must warn on a 0-row retraction fold"
+        finally:
+            proj.close()
+
+
+def test_rebuild_all_is_idempotent(tmp_path):
+    events, oid = _build_journal(tmp_path / "i", "create,delete,create")
+    proj = _drive("rebuild_all", tmp_path / "i", events, oid)
+    try:
+        first = proj.g.query("MATCH (o:Object {id:$id}) RETURN o.status, o.createdAt",
+                             params={"id": oid}).result_set
+        # `first == second` alone is blind: if the survivor rule wrongly dropped
+        # the node, BOTH queries return [] and [] == [] passes — the test would
+        # be vacuous in exactly the regression it exists to catch (cycle 5).
+        assert first, "the re-created Object must exist before idempotency is compared"
+        assert first[0][0] == "live"
+        proj.rebuild_all(str(events))
+        second = proj.g.query("MATCH (o:Object {id:$id}) RETURN o.status, o.createdAt",
+                              params={"id": oid}).result_set
+        assert first == second, "rebuild_all must be idempotent"
+    finally:
+        proj.close()
+
+
+def test_inmemory_fold_is_object_blind(tmp_path):
+    """PINS a documented non-goal (cycle 6, Reviewer #5). `python -m tortoise
+    rebuild` falls back to `fold(events)` when FalkorDB is unavailable
+    (`__main__.py:53-69`); `_apply_one` (`projection/__init__.py:460`) handles
+    only Point types and silently returns for everything else, so an
+    `ObjectRetracted` line is DROPPED and a deleted Object resurrects on that
+    path — the exact #2164 shape.
+
+    #2977 does not fix it: `fold` returns `points: dict[str, dict]`, a
+    Points-only model with no Object to fold into. Pinned so it cannot be
+    mistaken for covered; see the Architecture section and the Goal's scope.
+    """
+    from tortoise.projection import fold
+    points = fold([
+        {"type": "ObjectRegistered", "id": "o1", "name": "n1"},
+        {"type": "ObjectRetracted", "id": "o1", "name": "n1", "ts": "T"},
+    ])
+    assert points == {}, (
+        "the in-memory fold is Object-BLIND by design — if Objects ever enter "
+        "this model, delete the non-goal entry and wire the fold")
+
+
+def test_stub_ulid_recreate_is_a_known_limitation(tmp_path):
+    """Documents (does NOT celebrate) the Task 3 anchor limitation: an Object
+    created ONLY by EventRecorded's name-MERGE stub is not survivor-anchored,
+    so delete→re-create on that lane replays `retracted` while live is `live`.
+    Filed as Task 7 follow-up (e). If this test starts failing because the
+    limitation was fixed, delete it and close (e)."""
+    events = tmp_path / "events"; events.mkdir(exist_ok=True)
+    log = EventLog(str(events / "events.jsonl"))
+    # `eventId` is REQUIRED: `_upsert_event` starts `eid = inner.get("id") or
+    # inner.get("eventId")` (entities.py:790) and returns immediately when it is
+    # falsy, so an EventRecorded line with neither key creates NO Event and NO
+    # name-MERGE stub — verified live in cycle 5: `MATCH (o:Object)` returns []
+    # and the assertion below can never pass.
+    log.append({"type": "EventRecorded", "eventId": "e1", "object": "STUB",
+                "objectKind": "core:other", "summary": "s1",
+                "eventType": "external", "ts": "T1"})
+    log.append({"type": "ObjectRetracted", "name": "STUB", "ts": "T2"})
+    log.append({"type": "EventRecorded", "eventId": "e2", "object": "STUB",
+                "objectKind": "core:other", "summary": "s2",
+                "eventType": "external", "ts": "T3"})
+    proj = _drive("rebuild_all", tmp_path, events, None)
+    try:
+        got = proj.g.query(
+            "MATCH (o:Object {name:'STUB'}) RETURN o.status").result_set
+        assert got == [["retracted"]], (
+            "expected the DOCUMENTED limitation (the stub IS created, the "
+            "re-creation anchor is not); if this changed, update the Task 3 "
+            "'Known limitation' note and close follow-up (e)")
+    finally:
+        proj.close()
+
+def test_connector_recreate_after_retraction_matches_live(tmp_path, monkeypatch):
+    """CYCLE 6 (Reviewer #4, EMPIRICAL): the REACHABLE production shape for the
+    survivor-anchor limitation is MIXED, not the pure-EventRecorded shape
+    `test_stub_ulid_recreate_is_a_known_limitation` covers.
+
+    Journal: `ObjectRegistered(A, ISSUE) -> ObjectRetracted(A, ISSUE) ->
+    EventRecorded(github.issue.reopened, object=ISSUE)`.
+    Measured: live `in_progress` (the connector re-creates the work item after
+    the delete), replay `retracted`. That is LIVE DATA BURIED — the inverse of
+    #2977's own defect direction — on the very lane Task 6 exists for.
+
+    This test asserts the DIVERGENCE explicitly (so it is recorded and cannot
+    regress silently) and will be INVERTED to `replay == live` by follow-up (e).
+    """
+    events = tmp_path / "events"; events.mkdir(exist_ok=True)
+    sdk = TortoiseSDK(str(tmp_path / "crec.db"),
+                      event_log_path=str(events / "events.jsonl"))
+    proj = sdk._get_proj()
+    sdk.create_entity("object", "ISSUE", objectKind="core:other", is_episodic=False)
+    oid = _entity_name_id("Object", "ISSUE")
+    sdk._delete_entity(oid)
+    proj.apply({"type": "EventRecorded", "eventId": "e1",
+                "eventKind": "github.issue.reopened", "object": "ISSUE",
+                "objectKind": "core:other", "summary": "reopened"})
+    assert proj.g.query("MATCH (o:Object {name:'ISSUE'}) RETURN o.status"
+                        ).result_set[0][0] == "in_progress", "live baseline"
+
+    replay = _drive("rebuild_all", tmp_path / "crec", events, oid)
+    try:
+        got = replay.g.query("MATCH (o:Object {name:'ISSUE'}) RETURN o.status"
+                             ).result_set
+        assert got == [["retracted"]], (
+            "PINNED DIVERGENCE: a connector re-creation after a retraction is "
+            "BURIED on replay (live is `in_progress`). Follow-up (e) inverts "
+            "this test; if it fails because that landed, invert it and close (e)")
+    finally:
+        replay.close()
+
+
+def test_update_entity_terminal_statuses_are_not_durable(tmp_path):
+    """CYCLE 6 (Reviewer #4, EMPIRICAL) — PINS a gap filed as follow-up (n).
+
+    The guard rejects `retracted` only. `superseded`/`deprecated`/`archived` —
+    all members of the plan's OWN `OBJECT_TERMINAL_STATUSES` — still pass
+    through the generic path with no journal line and no lane fields, so
+    `rebuild_all` resurrects the Object as `live` while `recall_state` hides it.
+    Reachable from the public MCP surface (`mcp_server.py:2383`).
+
+    This test asserts the CURRENT behaviour so it is recorded; inverting it to
+    `pytest.raises(ValueError)` is the fix for (n).
+    """
+    events = tmp_path / "events"; events.mkdir()
+    sdk = TortoiseSDK(str(tmp_path / "term.db"),
+                      event_log_path=str(events / "events.jsonl"))
+    proj = sdk._get_proj()
+    sdk.create_entity("object", "term", objectKind="core:other", is_episodic=False)
+    oid = _entity_name_id("Object", "term")
+    sdk.update_entity(oid, status="superseded")     # (n): should raise
+    assert proj.g.query("MATCH (o:Object {id:$id}) RETURN o.status",
+                        params={"id": oid}).result_set[0][0] == "superseded"
+    assert [ln for ln in _jsonl(events) if ln.get("type") == "ObjectSuperseded"] == [], \
+        "no supersession was journaled — the write is not durable"
+    proj.rebuild_all(str(events))
+    assert proj.g.query("MATCH (o:Object {id:$id}) RETURN o.status",
+                        params={"id": oid}).result_set[0][0] == "live", \
+        "PINNED GAP (n): the resurrected Object contradicts the pre-rebuild read"
+
+
+def test_name_lane_refold_of_retracted_carrier_is_not_reported_as_orphan(tmp_path):
+    """CYCLE 6 (Reviewer #4) — PINS the `(0,0)` ambiguity filed as follow-up (o).
+
+    The retraction lane's name branch filters out already-retracted carriers, so
+    a re-fold against an EXISTING but already-terminal node returns `(0,0)` —
+    indistinguishable from a true orphan — and the flush logs the orphan
+    warning. Verified live. Reachable on the stub lane. The node EXISTS, so the
+    warning misleads; `_fold_object_match_and_apply` needs a third signal to
+    separate the two, which is (o).
+    """
+    sdk = TortoiseSDK(str(tmp_path / "o.db"))
+    proj = sdk._get_proj()
+    proj.g.query("CREATE (:Object {id:'X', name:'NM', status:'retracted', "
+                 "retractedAt:'T0'})")
+    assert proj._fold_object_retracted(
+        {"id": "Y", "name": "NM", "ts": "T1"}) == (0, 0), \
+        "the name branch skips the already-retracted carrier → (0,0)"
+    assert proj.g.query(
+        "MATCH (o:Object) RETURN count(o)").result_set[0][0] == 1, \
+        "the node EXISTS — so `(0,0)` here is NOT an orphan (o)"
+
+
+def test_live_delete_then_recreate_is_live(tmp_path):
+    """The LIVE counterpart of the matrix's `create,delete,create` row: proves
+    replay agrees with live rather than agreeing with itself."""
+    events = tmp_path / "events"; events.mkdir(exist_ok=True)
+    sdk = TortoiseSDK(str(tmp_path / "live.db"),
+                      event_log_path=str(events / "events.jsonl"))
+    oid = _entity_name_id("Object", "PHX")
+    sdk.create_entity("object", "PHX", objectKind="core:other", is_episodic=False)
+    sdk._delete_entity(oid)
+    sdk.create_entity("object", "PHX", objectKind="core:other", is_episodic=False)
+    assert sdk._get_proj().g.query(
+        "MATCH (o:Object {id:$id}) RETURN o.status", params={"id": oid}
+    ).result_set[0][0] == "live"
+
+
+def test_live_supersede_then_recreate_is_superseded(tmp_path):
+    """D-13 ground truth #1, measured live: with NO intervening delete the
+    re-create is an ON MATCH which never re-journals, so the supersede folds.
+    (Empirically the journal holds ONE ObjectRegistered.)"""
+    events = tmp_path / "events"; events.mkdir(exist_ok=True)
+    sdk = TortoiseSDK(str(tmp_path / "live2.db"),
+                      event_log_path=str(events / "events.jsonl"))
+    proj = sdk._get_proj()
+    sdk.create_entity("object", "SUP", objectKind="core:other", is_episodic=False)
+    proj._fold_object_superseded({"name": "SUP", "supersedes_by": "OTHER", "ts": "T1"})
+    sdk.create_entity("object", "SUP", objectKind="core:other", is_episodic=False)
+    assert proj.g.query(
+        "MATCH (o:Object {name:'SUP'}) RETURN o.status"
+    ).result_set[0][0] == "superseded"
+    ors = [l for l in _jsonl(events) if l.get("type") == "ObjectRegistered"]
+    assert len(ors) == 1, (
+        "the ON MATCH re-create must NOT re-journal — this is WHY the anchor "
+        "stays put and the supersede fold still applies")
+
+
+def test_live_supersede_delete_recreate_is_live(tmp_path):
+    """D-13 ground truth #2, measured live: with an intervening hard delete the
+    re-create IS re-journaled, so both folds are survivor-dropped and replay
+    lands `live`. An exempt-the-supersede-lane rule FAILS this."""
+    events = tmp_path / "events"; events.mkdir(exist_ok=True)
+    sdk = TortoiseSDK(str(tmp_path / "live3.db"),
+                      event_log_path=str(events / "events.jsonl"))
+    proj = sdk._get_proj()
+    sdk.create_entity("object", "SUP2", objectKind="core:other", is_episodic=False)
+    proj._fold_object_superseded({"name": "SUP2", "supersedes_by": "OTHER", "ts": "T1"})
+    sdk._delete_entity(_entity_name_id("Object", "SUP2"))
+    sdk.create_entity("object", "SUP2", objectKind="core:other", is_episodic=False)
+    assert proj.g.query(
+        "MATCH (o:Object {name:'SUP2'}) RETURN o.status"
+    ).result_set[0][0] == "live"
+    ors = [l for l in _jsonl(events) if l.get("type") == "ObjectRegistered"]
+    assert len(ors) == 2, (
+        "the post-delete re-create IS re-journaled — this is WHY the anchor "
+        "moves and both folds are dropped")
+
+
+def test_rebuild_all_stays_fail_loud(tmp_path, monkeypatch):
+    """EMPIRICAL (cycle 4): routing the sweep through a default-strict flush
+    silently converted rebuild_all from fail-loud to fail-soft — a migration
+    that lost a supersession would report success."""
+    events, oid = _build_journal(tmp_path / "fl", "create,supersede")
+    from tortoise.projection import FalkorProjection
+    proj = FalkorProjection(str(tmp_path / "fl" / "fl.db"))
+    proj.g.query("MATCH (n) DETACH DELETE n")
+
+    def _boom(_ev, **_kw):
+        raise RuntimeError("injected fold failure")
+
+    monkeypatch.setattr(proj, "_fold_object_superseded", _boom)
+    with pytest.raises(RuntimeError):
+        proj.rebuild_all(str(events))
+    proj.close()

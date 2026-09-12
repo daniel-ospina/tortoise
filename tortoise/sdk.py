@@ -16163,9 +16163,12 @@ class TortoiseSDK:
         # byte-identity holds for the first canonical registration. Deletes
         # are NOT journaled (_delete_entity is a bare graph delete — the
         # journal vocabulary cannot represent deletion): a deleted canonical
-        # Object resurrects on the next rebuild, and delete→recreate mints a
-        # second "first registration" whose replay first-wins over the live
-        # incarnation (pinned as accepted by tests 14-15; #2296 scope hook).
+        # Object is JOURNALED as of #2977: `_delete_entity` emits
+        # `ObjectRetracted`, so a deleted Object replays as a `retracted`
+        # tombstone instead of resurrecting. A delete→recreate still mints a
+        # second "first registration"; the replay survivor rule (D-13) drops
+        # the pre-recreation retraction when a later registration exists, so
+        # the re-created Object stays `live` (pinned by tests 14-15).
         _journal_object_registration = False
         _journal_subject_registration = False
         # Truthy-name gate mirrors _upsert_object's persistence predicate (it
@@ -16201,11 +16204,12 @@ class TortoiseSDK:
         # is byte-identical). Subjects have no fold/sweep — the round-trip
         # byte-identity tests are the only guard. Accepted divergences mirror
         # the Object block's: re-mention prop mutations + pre-#2295-history
-        # re-mentions are live-only; deletes are NOT journaled (_delete_entity
-        # is a bare graph delete) — a deleted Subject resurrects on the next
-        # rebuild, and delete→recreate mints a second "first registration"
-        # whose replay first-wins (pinned as accepted by tests 9a/9b; #2296
-        # scope hook).
+        # re-mentions are live-only; deletes are NOT journaled for SUBJECTS
+        # (_delete_entity is a bare graph delete; #2977 added the lane for
+        # Objects only) — a deleted Subject resurrects on the next rebuild,
+        # and delete→recreate mints a second "first registration" whose
+        # replay first-wins (pinned as accepted by tests 9a/9b; #2296 scope
+        # hook).
         if (label == "Subject" and self._event_log_path
                 and event.get("name") and event.get("type") == "SubjectAdded"):
             try:
