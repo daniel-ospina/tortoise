@@ -85,12 +85,18 @@ if [ -f "$STAMP" ]; then
 fi
 
 # Cross-platform digest (macOS ships shasum, GNU userland ships sha256sum).
+# Empty when neither exists — the stamp then records the version only, rather
+# than advertising content identity it cannot compute.
+if command -v sha256sum >/dev/null 2>&1; then SHA_TOOL="sha256sum"
+elif command -v shasum >/dev/null 2>&1; then SHA_TOOL="shasum"
+else SHA_TOOL=""; fi
+
 sha256_of() {
-  if command -v sha256sum >/dev/null 2>&1; then
-    sha256sum "$1" | cut -d' ' -f1
-  else
-    shasum -a 256 "$1" | cut -d' ' -f1
-  fi
+  case "$SHA_TOOL" in
+    sha256sum) sha256sum "$1" | cut -d' ' -f1 ;;
+    shasum)    shasum -a 256 "$1" | cut -d' ' -f1 ;;
+    *)         return 1 ;;
+  esac
 }
 
 for s in "${SKILLS[@]}"; do
@@ -103,19 +109,21 @@ for s in "${SKILLS[@]}"; do
     # even across a version bump. With no recorded digest (an older or manual
     # install) fall back to comparing against the incoming file.
     if [ -f "$DEST/$s/SKILL.md" ]; then
-      recorded=""
-      if [ -f "$STAMP" ]; then
-        recorded="$(awk -F= -v k="sha256.$s" '$1 == k {print $2; exit}' "$STAMP" 2>/dev/null || true)"
-      fi
       cmp_rc=0
       cmp -s "$DEST/$s/SKILL.md" "$tmp" 2>/dev/null || cmp_rc=$?
-      if [ -n "$recorded" ]; then
-        disk_hash="$(sha256_of "$DEST/$s/SKILL.md" 2>/dev/null || true)"
-        if [ "$disk_hash" != "$recorded" ]; then
-          echo "  ⚠ $s — installed copy was edited locally; overwriting" >&2
+      if [ "$cmp_rc" -eq 0 ]; then
+        : # already identical to the incoming file — nothing can be lost
+      else
+        recorded=""
+        if [ -f "$STAMP" ]; then
+          recorded="$(awk -F= -v k="sha256.$s" '$1 == k {print $2; exit}' "$STAMP" 2>/dev/null || true)"
         fi
-      elif [ "$cmp_rc" -eq 1 ]; then
-        echo "  ⚠ $s — replacing a differing on-disk copy from an older/manual install" >&2
+        disk_hash="$(sha256_of "$DEST/$s/SKILL.md" 2>/dev/null || true)"
+        if [ -n "$recorded" ] && [ -n "$disk_hash" ] && [ "$disk_hash" != "$recorded" ]; then
+          echo "  ⚠ $s — installed copy was edited locally; overwriting" >&2
+        elif [ -z "$recorded" ]; then
+          echo "  ⚠ $s — replacing a differing on-disk copy from an older/manual install" >&2
+        fi
       fi
     fi
     mv "$tmp" "$DEST/$s/SKILL.md"
@@ -193,13 +201,16 @@ done
 if [ ${#missing[@]} -eq 0 ]; then
   # Version stamp (#3): sidecar manifest, written only after every skill
   # verified — a failed install never claims a version it did not place.
-  # Written to a temp file then `mv`d into place: `mv` REPLACES a symlink
-  # instead of writing through it (a project may ship
-  # .claude/skills/.tortoise-skills-version -> ../../README.md), and the write
-  # is atomic, so an interrupted run cannot leave a truncated stamp.
-  stamp_tmp="$STAMP.tmp"
+  # Written to a mktemp-created temp file then `mv`d into place: `mv` REPLACES
+  # a symlink instead of writing through it, the write is atomic (an
+  # interrupted run cannot leave a truncated stamp), and the unpredictable
+  # mktemp name also defeats a pre-planted `$STAMP.tmp` symlink/hardlink.
+  stamp_tmp=""
   stamp_ok=0
-  if {
+  if [ ! -d "$STAMP" ]; then
+    stamp_tmp="$(mktemp "${STAMP}.XXXXXX" 2>/dev/null || true)"
+  fi
+  if [ -n "$stamp_tmp" ] && {
     printf '%s\n' \
       "# Tortoise skills install manifest — written by install-tortoise-skills.sh." \
       "# Do not edit by hand; re-run the installer to refresh this stamp." \
@@ -207,13 +218,16 @@ if [ ${#missing[@]} -eq 0 ]; then
       "harness=$HARNESS" \
       "source=$SKILLS_BASE" \
       "skills=${SKILLS[*]}"
-    for s in "${SKILLS[@]}"; do
-      printf 'sha256.%s=%s\n' "$s" "$(sha256_of "$DEST/$s/SKILL.md")"
-    done
+    if [ -n "$SHA_TOOL" ]; then
+      for s in "${SKILLS[@]}"; do
+        printf 'sha256.%s=%s\n' "$s" "$(sha256_of "$DEST/$s/SKILL.md")"
+      done
+    fi
   } > "$stamp_tmp" 2>/dev/null; then
-    mv -f "$stamp_tmp" "$STAMP" && stamp_ok=1
+    if mv -f "$stamp_tmp" "$STAMP" 2>/dev/null; then stamp_tmp=""; fi
+    if [ -f "$STAMP" ] && [ ! -L "$STAMP" ]; then stamp_ok=1; fi
   fi
-  rm -f "$stamp_tmp"
+  [ -n "$stamp_tmp" ] && rm -f "$stamp_tmp" || true
   echo ""
   echo "✅ Tortoise skills installed to $DEST"
   echo "   ${SKILLS[*]} (${SKILLS_VERSION})"
