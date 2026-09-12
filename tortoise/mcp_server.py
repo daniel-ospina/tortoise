@@ -1893,11 +1893,13 @@ def tortoise_health() -> dict:
     the request-scoped team SDK over HTTP (selfhost daemon: the team_selfhost
     graph, the SAME namespace /health probes; hosted: the calling team's
     graph on the SAME FalkorDB server /health deep-checks) and the base SDK
-    over stdio — so the tool probes the SAME graph and namespace as /health
-    and can never disagree about a DEAD DB. (Their cold-start budgets differ
-    by design since #3143 — see below — so the two may legitimately disagree
-    when the graph is reachable but its cold-start exceeds /health's
-    fast-degrade bound.)
+    over stdio — so a live probe here reaches the same verdict as /health's
+    live probe about a DEAD DB (for /health's own cached-verdict staleness
+    window see #3062). Their budgets differ by design since #3143 — see below
+    — so the two may legitimately disagree when the graph is reachable but its
+    cold-start PLUS query exceed /health's single shared fast-degrade budget:
+    this tool gives the reachability query a fresh PROBE_TIMEOUT, /health
+    spends one budget across both phases.
     The pre-#2202 code probed monitoring's module-global handle, which ONLY
     the stdio entrypoint (main()) registers: on the HTTP daemon/hosted
     surfaces it stayed None and every call reported degraded/no_sdk_registered

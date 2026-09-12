@@ -17,7 +17,7 @@ from prometheus_client import Counter, Histogram, generate_latest
 # Auth functions imported lazily (in _Handler.do_GET) to avoid
 # triggering TORTOISE_SECRET_PEPPER requirement at module import time (#67).
 
-_log = logging.getLogger(__name__)
+logger = logging.getLogger(__name__)
 
 _start = time.monotonic()
 _last_ingest: float | None = None
@@ -49,9 +49,19 @@ PROBE_TIMEOUT = 1.5
 # abandoned on overrun); the caller is never blocked past its budget.
 PROBE_SETUP_TIMEOUT = 20.0
 
-#: Upper clamp for the operator override — a value above this is rejected in
-#: favour of the default (a health probe must not be able to pin a caller for
-#: minutes on a typo).
+#: Accepted range for the operator override. Out-of-range values are rejected
+#: in favour of the default (with a warning), never clamped and never honoured:
+#:
+#: * below PROBE_TIMEOUT an "allowance" is strictly worse than passing nothing
+#:   — it is too short to cover a real cold-start, so it can only turn a
+#:   REACHABLE graph into ``degraded``/``graph_size=0`` (the exact #3143
+#:   symptom), silently, because the value reads as "valid".
+#: * above the max, a typo (``3000``) would pin an on-demand tool call for tens
+#:   of minutes.
+#:
+#: Both bounds are inclusive: ``1.5`` is accepted (same budget as the platform
+#: liveness gate, so it degrades exactly like the default /health shape).
+PROBE_SETUP_TIMEOUT_MIN = PROBE_TIMEOUT
 PROBE_SETUP_TIMEOUT_MAX = 300.0
 
 
@@ -66,9 +76,14 @@ def probe_setup_timeout() -> float:
       set in the repo-root ``.env`` — the very surface ``.env.example``
       documents the knob on.
     * A malformed value must never brick ``import tortoise.sdk`` (and with it
-      the CLI, MCP server and daemon). Blank, non-numeric, non-finite,
-      non-positive and above-clamp values all fall back to the default, the
-      repo's existing tolerant env convention (``rerank._env_float``).
+      the CLI, MCP server and daemon). Blank/unset SILENTLY uses the default
+      (the shipped ``.env.example`` line is blank-valued, so warning on it
+      would warn on every default deployment); non-numeric, non-finite and
+      out-of-range values fall back to the default WITH a warning — the repo's
+      existing tolerant env convention (``rerank._env_float``).
+      The accepted range is ``[PROBE_SETUP_TIMEOUT_MIN, PROBE_SETUP_TIMEOUT_MAX]``
+      — see the constants above for why sub-PROBE_TIMEOUT values are rejected
+      rather than honoured.
     """
     raw = (os.environ.get("TORTOISE_PROBE_SETUP_TIMEOUT") or "").strip()
     if not raw:
@@ -76,13 +91,14 @@ def probe_setup_timeout() -> float:
     try:
         value = float(raw)
     except (TypeError, ValueError):
-        _log.warning("TORTOISE_PROBE_SETUP_TIMEOUT=%r is not a number — "
-                     "using %ss", raw, PROBE_SETUP_TIMEOUT)
+        logger.warning("TORTOISE_PROBE_SETUP_TIMEOUT=%r is not a number — "
+                       "using %ss", raw, PROBE_SETUP_TIMEOUT)
         return PROBE_SETUP_TIMEOUT
-    if not math.isfinite(value) or not 0 < value <= PROBE_SETUP_TIMEOUT_MAX:
-        _log.warning("TORTOISE_PROBE_SETUP_TIMEOUT=%r is outside "
-                     "(0, %s] — using %ss", raw, PROBE_SETUP_TIMEOUT_MAX,
-                     PROBE_SETUP_TIMEOUT)
+    if not math.isfinite(value) or not (
+            PROBE_SETUP_TIMEOUT_MIN <= value <= PROBE_SETUP_TIMEOUT_MAX):
+        logger.warning("TORTOISE_PROBE_SETUP_TIMEOUT=%r is outside "
+                       "[%s, %s] — using %ss", raw, PROBE_SETUP_TIMEOUT_MIN,
+                       PROBE_SETUP_TIMEOUT_MAX, PROBE_SETUP_TIMEOUT)
         return PROBE_SETUP_TIMEOUT
     return value
 
@@ -223,16 +239,16 @@ def _probe_once(sdk, timeout=None,
         executor.shutdown(wait=False)
 
 
-def probe_db(sdk, timeout=None, setup_timeout=None) -> dict:
+def probe_db(sdk, setup_timeout=None) -> dict:
     """Deep-check graph-DB connectivity through an SDK's projection.
 
     Runs a trivial ``RETURN 1`` on the SAME connection graph-touching
     endpoints use (the SDK's projection — registry/shared or default graph
-    depending on caller), hard-bounded by a 1.5s worker-thread timeout: the
-    redis client's own socket_connect_timeout is 5s, far too slow for a
-    health poll, so a dead URI would otherwise hang the handler. (Callers that
-    pass the #3143 ``setup_timeout`` get that allowance ON TOP for the
-    projection cold-start — see below.)
+    depending on caller), hard-bounded by a worker-thread timeout of
+    ``PROBE_TIMEOUT`` (1.5s): the redis client's own socket_connect_timeout is
+    5s, far too slow for a health poll, so a dead URI would otherwise hang the
+    handler. (Callers that pass the #3143 ``setup_timeout`` get that allowance
+    ON TOP for the projection cold-start — see below.)
 
     #1565: a single TRANSIENT connection-level failure (embedded redislite
     # server mid-startup / momentarily unreachable under parallel load —
@@ -248,21 +264,22 @@ def probe_db(sdk, timeout=None, setup_timeout=None) -> dict:
 
     #3143: ``setup_timeout`` is the projection-cold-start allowance (see
     ``_probe_once``). When it is not given, the cold-start and the query SHARE
-    the single ``timeout`` budget, so the platform liveness gate keeps its tight
-    fast-degrade bound (#1384). Only callers that opt in (the MCP
+    the single ``PROBE_TIMEOUT`` budget, so the platform liveness gate keeps
+    its tight fast-degrade bound (#1384). Only callers that opt in (the MCP
     ``tortoise_health`` tool) pay a separate allowance for a large graph's
     cold-start instead of being reported unreachable for it.
 
     The WHOLE call — including the #1565 transient retry below — is bounded by
-    ONE caller deadline of ``setup_timeout + timeout`` (or just ``timeout``
-    when nothing is passed). The retry runs inside the remaining time and never
-    re-arms a fresh cold-start allowance.
+    ONE caller deadline of ``setup_timeout + PROBE_TIMEOUT`` (or just
+    ``PROBE_TIMEOUT`` when nothing is passed). The retry runs inside the
+    remaining time and never re-arms a fresh cold-start allowance.
     """
     start = time.monotonic()
-    attempt_timeout = PROBE_TIMEOUT if timeout is None else timeout
+    # Resolve at CALL time so the module-global stays monkeypatchable.
+    attempt_timeout = PROBE_TIMEOUT
     total_budget = (attempt_timeout if setup_timeout is None
                     else setup_timeout + attempt_timeout)
-    ok, error, transient = _probe_once(sdk, timeout, setup_timeout)
+    ok, error, transient = _probe_once(sdk, setup_timeout=setup_timeout)
     if not ok and transient:
         remaining = total_budget - (time.monotonic() - start) - PROBE_RETRY_DELAY
         if remaining > 0:
@@ -286,8 +303,7 @@ def _counter_val(counter) -> int:
     return 0
 
 
-def metrics(sdk=None, probe_timeout=None,
-            probe_setup_timeout=None) -> dict:
+def metrics(sdk=None, probe_setup_timeout=None) -> dict:
     """Return {status, db, falkordb, graph_size, last_ingest, errors, uptime}.
 
     ``db`` is the deep-check result ({ok, latency_ms, error}) added by
@@ -314,7 +330,11 @@ def metrics(sdk=None, probe_timeout=None,
     a dead/hung DB must degrade fast (the bounded RETURN-1 probe, ~1.5s) and
     never drag an extra unbounded taxonomy round-trip onto the health call,
     and its failure must not inflate the very ``errors`` field this response
-    reports. A degraded report carries graph_size 0 with the probe error.
+    reports. A degraded report carries graph_size 0 with the probe error. The
+    count itself (``taxonomy()``) carries NO budget of its own — it is safe
+    only because it runs after a successful ``RETURN 1`` (a reachable server
+    answers label counts promptly), so the MCP tool's total latency is
+    ``probe_setup_timeout + PROBE_TIMEOUT`` PLUS that round-trip.
 
     #3143: ``probe_setup_timeout`` is the projection-cold-start allowance
     threaded to ``probe_db``. It is the MCP health tool's seam: the platform
@@ -328,7 +348,7 @@ def metrics(sdk=None, probe_timeout=None,
     if target is None:
         db = {"ok": None, "latency_ms": 0.0, "error": "no_sdk_registered"}
     else:
-        db = probe_db(target, probe_timeout, probe_setup_timeout)
+        db = probe_db(target, setup_timeout=probe_setup_timeout)
     if db["ok"] is True:
         status = "ok"
     elif db["ok"] is False:

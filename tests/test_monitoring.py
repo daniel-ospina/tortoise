@@ -36,11 +36,17 @@ class SlowColdStartSDK:
     def __init__(self, delay=0.2, graph_size=10):
         self._delay = delay
         self._graph_size = graph_size
+        self.query_calls = 0  # proof the reachability query was reached
 
     def _get_proj(self):
         time.sleep(self._delay)  # cold-start cost, NOT a reachability signal
         proj = MagicMock()
-        proj.g.query.return_value = MagicMock(result_set=[[1]])
+
+        def _q(*args, **kwargs):
+            self.query_calls += 1
+            return MagicMock(result_set=[[1]])
+
+        proj.g.query.side_effect = _q
         return proj
 
     def taxonomy(self):
@@ -232,10 +238,13 @@ class TestProbeDb:
     def test_transient_retry_is_bounded_by_the_same_deadline(self, monkeypatch):
         """#3143 review: the #1565 retry must NOT re-arm a fresh cold-start
         allowance. The documented bound is ONE deadline of
-        ``setup_timeout + timeout`` for the whole call (retry included).
+        ``setup_timeout + PROBE_TIMEOUT`` for the whole call (retry included).
 
-        Deterministic: stubs ``_probe_once`` and asserts the retry's SHAPE
-        (combined, remaining-budgeted) rather than timing real sleeps.
+        The stub CONSUMES 2.5s on attempt 1, so the retry's budget must
+        visibly SHRINK (≈0.5s of the 3.0s deadline). Without that, a
+        regression handing the retry either a fresh ``attempt_timeout`` (1.0s)
+        or the whole ``total_budget`` (3.0s) would satisfy any loose range —
+        the exact defect this test exists to catch.
         """
         monkeypatch.setattr(monitoring, "PROBE_TIMEOUT", 1.0)
         monkeypatch.setattr(monitoring, "PROBE_RETRY_DELAY", 0.0)
@@ -243,6 +252,8 @@ class TestProbeDb:
 
         def fake_probe_once(sdk, timeout=None, setup_timeout=None):
             seen.append((timeout, setup_timeout))
+            if len(seen) == 1:
+                time.sleep(2.5)  # a real attempt consumes its deadline
             return False, "transient", True
 
         monkeypatch.setattr(monitoring, "_probe_once", fake_probe_once)
@@ -253,7 +264,29 @@ class TestProbeDb:
         # Retry rides the remaining deadline in COMBINED shape — never a second
         # 2s cold-start allowance (which would double the documented bound).
         assert seen[1][1] is None
-        assert 0 < seen[1][0] <= 3.0
+        # ~3.0s deadline − ~2.5s consumed → ~0.5s left. A fresh 1.0s or 3.0s
+        # allowance would fail this.
+        assert 0 < seen[1][0] < 0.9, seen[1][0]
+
+    def test_exhausted_deadline_never_retries(self, monkeypatch):
+        """#3143 review: when attempt 1 already spent the whole deadline the
+        retry must NOT fire. A negative/zero remainder would otherwise be
+        passed as the worker timeout, replacing the REAL transient error with
+        a bogus synthesized 'probe timeout after -0.1s'."""
+        monkeypatch.setattr(monitoring, "PROBE_TIMEOUT", 1.0)
+        monkeypatch.setattr(monitoring, "PROBE_RETRY_DELAY", 0.0)
+        seen = []
+
+        def fake_probe_once(sdk, timeout=None, setup_timeout=None):
+            seen.append((timeout, setup_timeout))
+            time.sleep(1.2)  # overruns the 1.0s whole-call deadline
+            return False, "connection refused", True
+
+        monkeypatch.setattr(monitoring, "_probe_once", fake_probe_once)
+        result = monitoring.probe_db(object(), setup_timeout=0.0)
+        assert len(seen) == 1, seen  # no retry past the deadline
+        assert result["ok"] is False
+        assert result["error"] == "connection refused"  # the real error, not a fake timeout
 
 
 class TestProbeSetupTimeoutResolution:
@@ -273,6 +306,14 @@ class TestProbeSetupTimeoutResolution:
         monkeypatch.setenv("TORTOISE_PROBE_SETUP_TIMEOUT", "42.5")
         assert monitoring.probe_setup_timeout() == 42.5
 
+    @pytest.mark.parametrize("raw,expected", [
+        ("1.5", 1.5),     # inclusive lower bound — same budget as /health
+        ("300", 300.0),   # inclusive upper bound
+    ])
+    def test_env_bounds_are_inclusive(self, monkeypatch, raw, expected):
+        monkeypatch.setenv("TORTOISE_PROBE_SETUP_TIMEOUT", raw)
+        assert monitoring.probe_setup_timeout() == expected
+
     @pytest.mark.parametrize("raw", [
         "",       # the documented blank form
         "   ",
@@ -282,7 +323,10 @@ class TestProbeSetupTimeoutResolution:
         "-5",
         "nan",
         "inf",
-        "1e12",   # above the clamp
+        "0.1",    # below PROBE_TIMEOUT: can only false-degrade a reachable graph
+        "1e-9",   # …and this reads as "valid" without the low clamp
+        "300.001",  # above the clamp
+        "1e12",
     ])
     def test_bad_env_falls_back_to_default_never_raises(self, monkeypatch, raw):
         monkeypatch.setenv("TORTOISE_PROBE_SETUP_TIMEOUT", raw)
@@ -435,11 +479,37 @@ class TestProbeSetupBudget:
     def test_platform_liveness_budget_still_times_out_on_a_slow_cold_start(
             self, monkeypatch):
         """Unchanged platform behavior: a cold-start that overruns
-        PROBE_TIMEOUT still reports a bounded timeout, never a hang."""
+        PROBE_TIMEOUT still reports a bounded timeout, never a hang. The
+        message names the SETUP phase (the cold-start is what overran) and the
+        reachability query is never reached — there is no second budget."""
         monkeypatch.setattr(monitoring, "PROBE_TIMEOUT", 0.05)
-        result = monitoring.probe_db(SlowColdStartSDK(delay=0.2))
+        sdk = SlowColdStartSDK(delay=0.2)
+        result = monitoring.probe_db(sdk)
         assert result["ok"] is False
-        assert "timeout" in result["error"]
+        assert "setup timeout" in result["error"], result["error"]
+        assert sdk.query_calls == 0
+
+    def test_metrics_default_shape_forwards_no_allowance(self, monkeypatch):
+        """#3143 review: every platform /health surface reaches the probe
+        through ``metrics()`` and passes NO allowance, so the #1384
+        fast-degrade contract holds. A refactor that had ``metrics()`` resolve
+        the allowance itself (the natural 'make all callers benefit' change)
+        would give /health a multi-second cold-start; this pins the explicit
+        ``setup_timeout=None`` it forwards AND the resulting degraded status."""
+        monkeypatch.setattr(monitoring, "PROBE_TIMEOUT", 0.05)
+        forwarded = {}
+        real_probe_db = monitoring.probe_db
+
+        def spy_probe_db(target, setup_timeout=None):
+            forwarded["setup_timeout"] = setup_timeout
+            return real_probe_db(target, setup_timeout=setup_timeout)
+
+        monkeypatch.setattr(monitoring, "probe_db", spy_probe_db)
+        result = monitoring.metrics(sdk=SlowColdStartSDK(delay=0.2))
+        assert forwarded["setup_timeout"] is None, forwarded
+        assert result["status"] == "degraded"
+        assert "setup timeout" in result["db"]["error"]
+        assert result["graph_size"] == 0  # no taxonomy round-trip on a failed probe
 
     def test_deep_setup_budget_reports_a_reachable_large_graph_ok(
             self, monkeypatch):
@@ -457,11 +527,17 @@ class TestProbeSetupBudget:
 
     def test_mcp_tortoise_health_uses_the_deep_setup_budget(self, monkeypatch):
         """The fix is only real if the tool onboarding actually calls opts
-        into the setup allowance — assert it at the MCP tool boundary."""
+        into the setup allowance — assert it at the MCP tool boundary.
+
+        Hermetic: pin the knob (the tool resolves it at CALL time, so an
+        ambient `.env`/shell value below the 0.2s cold-start would fail this
+        on correct code).
+        """
         from tortoise import mcp_server
         from tortoise.mcp_auth import _transport_mode
 
         monkeypatch.setattr(monitoring, "PROBE_TIMEOUT", 0.05)
+        monkeypatch.setenv("TORTOISE_PROBE_SETUP_TIMEOUT", "20")
         monkeypatch.setattr(
             mcp_server, "_get_team_sdk",
             lambda: SlowColdStartSDK(delay=0.2, graph_size=9019))
@@ -479,8 +555,18 @@ class TestProbeSetupBudgetIntegration:
     """#3143 at the REAL-projection layer — the issue's integration surface.
 
     The pure-unit class above uses a stub; this one forces the #3143 shape on a
-    real FalkorProjection (real `RETURN 1`, real `taxonomy()` counts) so the
-    fix is proven on the code path the MCP tool actually runs.
+    real FalkorProjection: real connect + `_ensure_indexes()` cold-start, real
+    `RETURN 1`, real `taxonomy()` label counts. Only the cold-start TIMING is
+    approximated (a sleep) — the measured real cost is graph-size dependent
+    (~28 sequential round trips; 229ms on a 3,000-node server graph vs 0.7ms
+    for `RETURN 1`), which a unit test cannot reproduce without a large graph.
+
+    This class also PINS the deliberate divergence the fix creates on a
+    reachable-but-slow graph: `/health` (tight shared budget) says degraded for
+    the #1384 fast-degrade contract, while the on-demand `tortoise_health`
+    tool says ok. That is the intended new contract, not an accident — the
+    issue's "health and /health agree" indicator is satisfied on the *verdict
+    about the graph* (reachable, real graph_size), not on the latency policy.
     """
 
     def test_real_projection_slow_cold_start_ok_with_real_graph_size(
@@ -501,12 +587,15 @@ class TestProbeSetupBudgetIntegration:
 
         tight = monitoring.probe_db(sdk)  # platform liveness shape — unchanged
         assert tight["ok"] is False
-        assert "timeout" in tight["error"]
+        assert "setup timeout" in tight["error"]
 
         result = monitoring.metrics(
             sdk=sdk, probe_setup_timeout=monitoring.PROBE_SETUP_TIMEOUT)
         assert result["status"] == "ok", result
         assert result["db"]["ok"] is True
+        # The REAL taxonomy count, not a stub attribute — and this is the
+        # unbudgeted round-trip documented on monitoring.metrics().
+        assert real_size > 0
         assert result["graph_size"] == real_size
 
 
