@@ -277,6 +277,7 @@ surfaces:
   - test_backup_watcher.py
   - test_bfs_audit.py
   - test_boot_regressions.py
+  - test_collision_preflight.py
   - test_health_ready_nonblocking.py  # #2988: /health/ready off-loop + bounded probes
   - test_build_window_transcript.py
   - test_canary_classify.py
