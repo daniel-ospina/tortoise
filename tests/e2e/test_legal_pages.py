@@ -8,7 +8,7 @@ Covers plan checks #1-#10 (T7 of docs/plans/2026-08-08-657-legal-pages-plan.md):
   #3  /license + /dpa 200 (both REQUIRED — G-gate ③/⑨ LOCKED)
   #4  footer legal links on product/welcome/signup/signin/self-hosted
       (BASE_URL half unconditional; TORTISE_HOST half gated on TORTISE_HOST_CHECK)
-  #5  company-host copies of the 12 tortoise-only pages 301 → the exact
+  #5  company-host copies of the 14 tortoise-only pages 301 → the exact
       tortoise host URL (canonical consolidation, 2026-08-17); tortoise-host
       copies 200 (gated)
   #6  middleware root rewrites — tortoise.* → product marker,

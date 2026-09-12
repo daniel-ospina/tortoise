@@ -1,8 +1,10 @@
 """Cross-page consistency guards for the public documentation surfaces (#3332).
 
-Pins the facts that `website/docs.html` and `website/faq.html` both assert, so they
-cannot silently drift apart again.
-
+Pins the facts the two public pages share — the Point status vocabulary, the
+ontology citation, and how `confidence` is computed — so they cannot silently
+drift apart again. The status vocabulary is asserted in full on `docs.html`
+(the page that documents the lifecycle); `faq.html` is held to "all six or none",
+since it does not document statuses at all.
 #3332 was exactly this failure. `docs.html` had carried, for five weeks and through
 every PR that touched it:
 
@@ -74,21 +76,34 @@ def test_sdk_status_vocabulary_is_what_the_pins_below_assume() -> None:
 
 
 def test_docs_lists_every_canonical_point_status() -> None:
-    """docs.html must not ship a partial status vocabulary again.
+    """No public page may ship a partial Point status vocabulary.
 
-    Accepts either rendering used on the page: the lifecycle list uses
+    `docs.html` documents the lifecycle, so it must carry all six. `faq.html`
+    does not document statuses at all — it is only required to stay internally
+    consistent if it ever starts to.
+
+    Accepts either rendering the page uses: the lifecycle list uses
     ``status: <name>`` and the legacy-flag footnote uses ``<code><name></code>``.
     """
-    html = _read(DOCS)
-    missing = [
-        s
-        for s in sorted(_canonical_statuses())
-        if f"status: {s}" not in html and f"<code>{s}</code>" not in html
-    ]
-    assert not missing, (
-        f"website/docs.html omits canonical Point status(es): {missing}. "
-        f"Canonical set comes from POINT_STATUS_VALUES in tortoise/sdk.py."
-    )
+    canonical = _canonical_statuses()
+    for page in (DOCS, FAQ):
+        html = _read(page)
+        present = {
+            s
+            for s in canonical
+            if f"status: {s}" in html or f"<code>{s}</code>" in html
+        }
+        assert present in (set(), canonical), (
+            f"{page.name} lists some but not all canonical Point statuses "
+            f"({sorted(present)}). Canonical set: POINT_STATUS_VALUES in "
+            f"tortoise/sdk.py. Either list all six or none — a partial list is "
+            f"the #3332 defect."
+        )
+        if page == DOCS:
+            assert present == canonical, (
+                f"website/docs.html omits canonical Point status(es): "
+                f"{sorted(canonical - present)}."
+            )
 
 
 # ── The belief mechanism (the #3332 headline defect) ─────────────────────────
@@ -197,19 +212,39 @@ def test_faq_toc_anchors_all_resolve() -> None:
 def test_faq_internal_links_point_at_real_pages() -> None:
     """A relative link on the FAQ must resolve to a file that exists.
 
-    Catches a renamed or removed sibling page, and a typo'd route — the FAQ links out
-    to /docs, /self-hosted, /security, /tos, /dpa, /privacy and /license.
+    Catches a renamed or removed sibling page, and a typo'd route — the FAQ links
+    out to /docs, /self-hosted, /security, /tos, /dpa, /privacy and /license.
+    Fragment-bearing links are matched too (the fragment is split off and the path
+    resolved), so a `/#anchor` form cannot slip through unchecked.
     """
     html = _read(FAQ)
     missing: list[str] = []
-    for href in sorted(set(re.findall(r'href="(/[^"#]*)"', html))):
-        if href in ("/", ""):
+    for href in sorted(set(re.findall(r'href="(/[^"]*)"', html))):
+        path = href.split("#", 1)[0]
+        if path in ("", "/"):
             continue
-        candidate = WEBSITE / (href.lstrip("/") or "index")
+        candidate = WEBSITE / path.lstrip("/")
         if candidate.is_file() or candidate.with_suffix(".html").is_file():
             continue
         missing.append(href)
     assert not missing, (
         f"website/faq.html links to route(s) with no page: {missing}. "
         f"Add the page, fix the link, or route it through website/_redirects."
+    )
+
+
+def test_faq_avoids_root_relative_fragment_links() -> None:
+    """A bare `/#anchor` link breaks on the company host — use the canonical URL.
+
+    On `tortoise.premiselabs.co` the middleware rewrites `/` to `product.html`,
+    which carries `id="pricing-section"`. On `premiselabs.co` `/` is `index.html`,
+    which has no pricing content at all — so the bare root-fragment form silently
+    lands on a page with a dangling anchor. The sibling E2E test pins
+    `PRICING_PAGE_URL` for exactly this reason; this guard keeps the FAQ honest.
+    """
+    root_fragments = re.findall(r'href="/#([^"]+)"', _read(FAQ))
+    assert not root_fragments, (
+        f"website/faq.html uses the bare root-fragment form {root_fragments}, which "
+        f"breaks on premiselabs.co. Use the absolute canonical "
+        f"https://tortoise.premiselabs.co/#<anchor> instead."
     )

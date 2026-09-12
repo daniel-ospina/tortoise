@@ -20,7 +20,7 @@ auth pages, dashboard, and billing. Written 2026-08-14 from the current
 | Host | Serves | Deployment |
 | --- | --- | --- |
 | `premiselabs.co` | Company page (`website/index.html`) | Cloudflare Pages project `premise-labs` |
-| `tortoise.premiselabs.co` | Product page (`website/product.html` at `/`), docs, auth (`/auth`), welcome, invite-accept, legal | Cloudflare Pages project `premise-labs` (same project, host-routed) |
+| `tortoise.premiselabs.co` | Product page (`website/product.html` at `/`), docs, FAQ (`/faq`), auth (`/auth`), welcome, invite-accept, legal | Cloudflare Pages project `premise-labs` (same project, host-routed) |
 | `app.premiselabs.co` | Dashboard (React SPA, `website/apps/dashboard`) | Cloudflare Pages project `tortoise-dashboard` (separate) |
 | `api.premiselabs.co` | Hosted API (FastAPI, `tortoise/hosted_api.py`) | Fly.io app `tortoise-y4mjjq` |
 
@@ -189,7 +189,7 @@ dashboard.
 | --- | --- | --- |
 | `website/robots.txt` | both premise-labs hosts | Google **cross-submission**: lists all four sitemap locations; each sitemap contains only same-host URLs (protocol requirement) |
 | `website/sitemap-company.xml` | `premiselabs.co` | single URL (`/`) — company page |
-| `website/sitemap-product.xml` | `tortoise.premiselabs.co` | `/`, `/docs`, `/faq`, `/signup`, `/signin`, `/self-hosted`, `/security`, 5 legal pages |
+| `website/sitemap-product.xml` | `tortoise.premiselabs.co` | `/`, `/docs`, `/faq`, `/auth`, `/self-hosted`, `/security`, 5 legal pages (note: `/signup` and `/signin` are NOT in this sitemap — `/signin` 301s to `/auth`, and `/auth` is the indexed entry point) |
 | `website/_redirects` | both premise-labs hosts | trailing-slash 301s → extensionless canonicals; `/index.html → /`; `.html` dedupe for non-auth pages |
 | `website/apps/dashboard/public/{robots.txt,sitemap.xml}` | `app.premiselabs.co` | Vite copies `public/` → `dist/`; mirrored in committed `dist/` so a no-rebuild deploy still serves them |
 
@@ -207,7 +207,7 @@ Rules:
   `docs/plans/2026-08-08-657-legal-pages-plan.md` G-gate ③/⑨; the CI
   verify-legal poll + `tests/e2e/test_legal_pages.py` + `test_welcome_page.py`
   were updated to the new contract in the same change).
-- **Canonical tags:** all indexable pages carry `<link rel="canonical">` — `index.html` → `https://premiselabs.co/`, `product.html` → `https://tortoise.premiselabs.co/` (served at `/`), plus docs/self-hosted/signin/signup. Legal pages already had them.
+- **Canonical tags:** all indexable pages carry `<link rel="canonical">` — `index.html` → `https://premiselabs.co/`, `product.html` → `https://tortoise.premiselabs.co/` (served at `/`), plus docs/faq/self-hosted/auth. Legal pages already had them.
 - **Auth-gated pages** (`welcome.html`, `invite-accept.html`) are `noindex,nofollow` and excluded from sitemaps. Signin/signup stay indexable (legit entry points). Keep `.html` auth URLs as-is — OAuth `redirectTo` and invite emails reference them directly.
 - **Middleware** (runs before `_redirects`) 301s `/product`, `/product.html`, `/index.html` → `/` on the tortoise host (dedupe of the root rewrite); the company host keeps the 404 for `/product*`.
 - **Search Console submission:** add all four sitemap URLs from robots.txt as separate properties (one per host).

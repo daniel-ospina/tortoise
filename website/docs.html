@@ -78,6 +78,7 @@
     <nav>
       <a href="https://tortoise.premiselabs.co/">Product</a>
       <a href="/docs" class="active">Docs</a>
+      <a href="/faq">FAQ</a>
     </nav>
     <a class="login" href="/auth?mode=login">Login</a>
   </div>
@@ -101,6 +102,14 @@
     <p>It is used via a REST API or an MCP server (see below). An organization account gets an isolated graph; all writes carry provenance back to the source session.</p>
 
     <h2 id="how">How it works</h2>
+    <!-- Maintainer note: this page is the full technical account. The canonical
+         sources are docs/ONTOLOGY.md (kinds, statuses, edges) and the EP engine
+         in tortoise/ep.py (how `confidence` is computed — sdk.get_confidence()
+         reads it back). The FAQ page (/faq) deliberately answers objections only
+         and defers here for mechanism, so update this page first and let /faq
+         follow. tests/test_website_docs_consistency.py fails if the two disagree
+         on the Point status vocabulary, the ontology citation, or the confidence
+         mechanism. -->
     <div class="card">
       <h3>The data model</h3>
       <p>Everything is a <code>Point</code>: an atomic claim with an <code>id</code>, <code>content</code> (text), <code>pointKind</code>, and a <code>status</code>. The kind vocabulary is <code>statement</code> — the asserted belief — plus the write kinds <code>decision</code>, <code>vision</code>, <code>strategy</code>, <code>plan</code>, <code>goal</code>, <code>target</code>, <code>observation</code>, <code>hypothesis</code>, <code>humanApproval</code>, and any domain kinds registered by expansion packs. Canonical vocabulary: <a href="https://github.com/daniel-ospina/tortoise/blob/main/docs/ONTOLOGY.md">docs/ONTOLOGY.md</a> §4.1 and §5. (<code>evidence</code> is an additional kind the SDK registers for decision records. <code>event</code> exists only internally, as the kind on captured episodic turns — it is not a supported write kind: the REST point-create endpoint and the SDK's bundle validator reject it, while <code>create_point</code> only warns.)</p>
