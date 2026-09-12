@@ -5,6 +5,7 @@ Binds 127.0.0.1 by default (not 0.0.0.0).
 """
 from __future__ import annotations  # noqa: I001
 
+import os
 import time
 import json
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -22,6 +23,26 @@ _sdk = None  # set by register()
 # #1381 — NXDOMAIN with /health staying ok) must flip /health to degraded
 # within a sub-second-to-1.5s window, never hang the handler.
 PROBE_TIMEOUT = 1.5
+
+# #3143: the probe has TWO phases and only the second is a reachability signal.
+#
+#   (1) projection cold-start — ``sdk._get_proj()``: connect + the FalkorDB
+#       version probe + ``_ensure_indexes()``. That is ~28 sequential round
+#       trips, and when an index is missing it BUILDS the index over the whole
+#       graph — cost that scales with graph size and server load. It is paid in
+#       full on every call that starts from a fresh SDK, which is exactly what
+#       mcp_server.tortoise_health does (request-scoped team SDK per call).
+#   (2) the ``RETURN 1`` reachability query — sub-millisecond.
+#
+# Bounding (1)+(2) with PROBE_TIMEOUT made a large, fully-reachable graph time
+# out during SETUP and report ``db.ok=false`` / ``status=degraded`` /
+# ``graph_size=0`` — the onboarding gate lie (#2202's symptom class). This is
+# the cold-start allowance. It is opt-in: the platform liveness gate (/health,
+# selfhost /health, the standalone serve_health server) keeps the tight 1.5s
+# bound for BOTH phases (it is a fast-degrade gate, #1384), while the on-demand
+# MCP health tool — whose only job is to answer "is the served graph
+# reachable?" — passes it. Both phases stay bounded, so no handler can hang.
+PROBE_SETUP_TIMEOUT = float(os.environ.get("TORTOISE_PROBE_SETUP_TIMEOUT", "20.0"))
 
 # #1565: ONE bounded retry on a TRANSIENT connect failure only (an embedded
 # redislite server momentarily starting / momentarily unreachable under
@@ -79,36 +100,88 @@ def _is_transient_connect_error(exc: BaseException) -> bool:
     return type(exc).__name__ == "ConnectionError"
 
 
-def _probe_once(sdk) -> tuple[bool, str | None, bool]:
-    """Execute ONE bounded ``RETURN 1`` probe in a worker thread.
+def _probe_once(sdk, timeout=None,
+                setup_timeout=None) -> tuple[bool, str | None, bool]:
+    """Execute ONE bounded probe in a worker thread.
 
     Returns ``(ok, error, transient)`` — ``transient`` is True only when the
     failure was a connection-level error that a single retry could clear,
     never a timeout (a hung DB stays hung).
+
+    #3143: the two phases are bounded separately. ``setup_timeout`` bounds the
+    projection cold-start (``sdk._get_proj()`` — connect + ``_ensure_indexes()``,
+    see PROBE_SETUP_TIMEOUT); ``timeout`` bounds the ``RETURN 1`` query itself,
+    which is the only phase that is a reachability signal. Both resolve
+    ``PROBE_TIMEOUT`` at CALL time (not as frozen default args) so the
+    module-global stays monkeypatchable.
+
+    When ``setup_timeout`` is NOT given (the platform-liveness shape) the two
+    phases SHARE the single ``timeout`` budget, so the caller's total wait is
+    still ≤ ``timeout`` exactly as before #3143 (the `/health` fast-degrade
+    contract, #1384). Only callers that pass an explicit ``setup_timeout`` opt
+    into a separate cold-start allowance, and their total can then reach
+    ``setup_timeout + timeout``.
+
+    Both phases run in the worker (the attribute lookups live inside the
+    submitted callables), so a malformed SDK raises INSIDE the future and is
+    classified here — this function keeps its never-raise contract. A phase
+    that overruns is abandoned (``shutdown(wait=False)``), and a TIMEOUT is
+    never retried by ``probe_db``.
     """
     import concurrent.futures
 
-    def _ping() -> None:
-        proj = sdk._get_proj()
-        proj.g.query("RETURN 1")
+    if timeout is None:
+        timeout = PROBE_TIMEOUT
+    combined = setup_timeout is None
+    if combined:
+        setup_timeout = timeout
+    start = time.monotonic()
+
+    def _setup():
+        # The lookup is INSIDE the worker: a missing/broken `_get_proj` must
+        # surface as a classified probe failure, never as a raised AttributeError
+        # on the caller thread (probe_db never raises).
+        return sdk._get_proj()
+
+    def _query(proj):
+        # Same for `proj.g.query` — the lookup is the worker's.
+        return proj.g.query("RETURN 1")
 
     executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-    future = executor.submit(_ping)
     try:
-        future.result(timeout=PROBE_TIMEOUT)
-        return True, None, False
-    except concurrent.futures.TimeoutError:
-        # NOT retried — a slow/hung DB would just hang again.
-        return False, f"probe timeout after {PROBE_TIMEOUT}s", False
-    except Exception as e:  # noqa: BLE001, RUF100
-        return False, str(e)[:200], _is_transient_connect_error(e)
+        setup = executor.submit(_setup)
+        try:
+            proj = setup.result(timeout=setup_timeout)
+        except concurrent.futures.TimeoutError:
+            return False, f"probe setup timeout after {setup_timeout}s", False
+        except Exception as e:  # noqa: BLE001, RUF100
+            return False, str(e)[:200], _is_transient_connect_error(e)
+
+        if combined:
+            # The query may spend only what the cold-start left of the single
+            # budget — the total caller wait stays ≤ timeout.
+            query_budget = timeout - (time.monotonic() - start)
+            if query_budget <= 0:
+                return False, f"probe timeout after {timeout}s", False
+        else:
+            query_budget = timeout
+
+        ping = executor.submit(_query, proj)
+        try:
+            ping.result(timeout=query_budget)
+            return True, None, False
+        except concurrent.futures.TimeoutError:
+            # NOT retried — a slow/hung DB would just hang again.
+            return False, f"probe timeout after {timeout}s", False
+        except Exception as e:  # noqa: BLE001, RUF100
+            return False, str(e)[:200], _is_transient_connect_error(e)
     finally:
         # wait=False: the worker thread may still be blocked on a dead
         # socket — the handler must not wait for it (#1384).
         executor.shutdown(wait=False)
 
 
-def probe_db(sdk) -> dict:
+def probe_db(sdk, timeout=None, setup_timeout=None) -> dict:
     """Deep-check graph-DB connectivity through an SDK's projection.
 
     Runs a trivial ``RETURN 1`` on the SAME connection graph-touching
@@ -128,12 +201,19 @@ def probe_db(sdk) -> dict:
     Returns ``{"ok": bool, "latency_ms": float, "error": str|None}`` —
     NEVER raises, so /health can report ``status: degraded`` instead of
     crashing the process.
+
+    #3143: ``setup_timeout`` is the projection-cold-start allowance (see
+    ``_probe_once``). When it is not given, the cold-start and the query SHARE
+    the single ``timeout`` budget, so the platform liveness gate keeps its tight
+    fast-degrade bound (#1384). Only callers that opt in (the MCP
+    ``tortoise_health`` tool) pay a separate allowance for a large graph's
+    cold-start instead of being reported unreachable for it.
     """
     start = time.monotonic()
-    ok, error, transient = _probe_once(sdk)
+    ok, error, transient = _probe_once(sdk, timeout, setup_timeout)
     if not ok and transient:
         time.sleep(PROBE_RETRY_DELAY)
-        ok, error, _ = _probe_once(sdk)
+        ok, error, _ = _probe_once(sdk, timeout, setup_timeout)
     return {
         "ok": ok,
         "latency_ms": round((time.monotonic() - start) * 1000, 1),
@@ -150,7 +230,8 @@ def _counter_val(counter) -> int:
     return 0
 
 
-def metrics(sdk=None) -> dict:
+def metrics(sdk=None, probe_timeout=None,
+            probe_setup_timeout=None) -> dict:
     """Return {status, db, falkordb, graph_size, last_ingest, errors, uptime}.
 
     ``db`` is the deep-check result ({ok, latency_ms, error}) added by
@@ -178,12 +259,19 @@ def metrics(sdk=None) -> dict:
     never drag an extra unbounded taxonomy round-trip onto the health call,
     and its failure must not inflate the very ``errors`` field this response
     reports. A degraded report carries graph_size 0 with the probe error.
+
+    #3143: ``probe_setup_timeout`` is the projection-cold-start allowance
+    threaded to ``probe_db``. It is the MCP health tool's seam: the platform
+    liveness gate passes nothing (tight 1.5s, fail-fast), while
+    ``tortoise_health`` passes ``PROBE_SETUP_TIMEOUT`` so a reachable graph
+    whose cold-start exceeds 1.5s is reported ``ok`` with its real
+    ``graph_size`` instead of ``degraded``/0.
     """
     target = sdk if sdk is not None else _sdk
     if target is None:
         db = {"ok": None, "latency_ms": 0.0, "error": "no_sdk_registered"}
     else:
-        db = probe_db(target)
+        db = probe_db(target, probe_timeout, probe_setup_timeout)
     if db["ok"] is True:
         status = "ok"
     elif db["ok"] is False:

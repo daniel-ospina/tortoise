@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json  # noqa: F401
+import time
 from unittest.mock import MagicMock
 
 import pytest
@@ -18,6 +19,26 @@ class FakeSDK:
     def _get_proj(self):
         if not self._db_ok:
             raise RuntimeError("connection refused")
+        proj = MagicMock()
+        proj.g.query.return_value = MagicMock(result_set=[[1]])
+        return proj
+
+    def taxonomy(self):
+        return {"Point": self._graph_size, "Event": 0}
+
+
+class SlowColdStartSDK:
+    """A REACHABLE graph whose projection cold-start is slow — the shape of
+    the #3143 9,019-entity org: `_get_proj()` pays connect + the version probe
+    + `_ensure_indexes()` (~28 round trips, plus an O(graph) index build when
+    an index is missing), and the cost scales with graph size, while the
+    `RETURN 1` reachability query itself is sub-millisecond."""
+    def __init__(self, delay=0.2, graph_size=10):
+        self._delay = delay
+        self._graph_size = graph_size
+
+    def _get_proj(self):
+        time.sleep(self._delay)  # cold-start cost, NOT a reachability signal
         proj = MagicMock()
         proj.g.query.return_value = MagicMock(result_set=[[1]])
         return proj
@@ -141,6 +162,63 @@ class TestProbeDb:
         assert "timeout" in result["error"]
         assert result["latency_ms"] < 2000
 
+    def test_malformed_sdk_never_raises(self):
+        """#3143 review: keep the never-raise contract for a malformed SDK.
+        The `_get_proj`/`proj.g` lookups run in the WORKER, so an
+        AttributeError is a classified degraded result — never an exception on
+        the caller thread (which would crash /health's handler)."""
+        class NoProjAttr:
+            pass
+
+        result = monitoring.probe_db(NoProjAttr())
+        assert result["ok"] is False
+        assert "_get_proj" in result["error"]
+
+        class NoneProj:
+            def _get_proj(self):
+                return None
+
+        result = monitoring.probe_db(NoneProj())
+        assert result["ok"] is False
+        assert "attribute" in result["error"]
+
+        class ProjWithoutGraph:
+            def _get_proj(self):
+                return object()
+
+        result = monitoring.probe_db(ProjWithoutGraph())
+        assert result["ok"] is False
+        assert "attribute" in result["error"]
+
+    def test_default_budget_is_shared_across_the_two_phases(self, monkeypatch):
+        """#3143 review: with NO explicit setup allowance (the /health shape)
+        the cold-start and the query SHARE PROBE_TIMEOUT — the caller's total
+        wait stays inside the pre-#3143 single bound (#1384), never 2x it."""
+        monkeypatch.setattr(monitoring, "PROBE_TIMEOUT", 2.0)
+        calls = {"query": 0}
+
+        class SlowSetupSlowQuery:
+            def _get_proj(self):
+                time.sleep(1.2)  # succeeds, but eats most of the budget
+                proj = MagicMock()
+
+                def _q(*args, **kwargs):
+                    calls["query"] += 1
+                    time.sleep(3.0)  # would blow the remaining budget
+                    return MagicMock(result_set=[[1]])
+
+                proj.g.query.side_effect = _q
+                return proj
+
+        start = time.monotonic()
+        result = monitoring.probe_db(SlowSetupSlowQuery())
+        elapsed = time.monotonic() - start
+        assert calls["query"] == 1  # setup succeeded → phase 2 was reached
+        assert result["ok"] is False
+        assert "timeout" in result["error"]
+        # Shared budget ≈ 2.0s total; a per-phase budget (the regression) ≈ 3.2s.
+        assert elapsed < 2.7, f"probe exceeded the shared budget: {elapsed:.2f}s"
+
 
 class TestMetricsFunction:
     """metrics() function tests."""
@@ -245,6 +323,97 @@ class TestMetricsExplicitSdkArg:
         assert result["status"] == "degraded"
         assert calls["taxonomy"] == 0
         assert result["graph_size"] == 0
+
+
+class TestProbeSetupBudget:
+    """#3143: the probe's cost is the projection cold-start, not `RETURN 1`.
+
+    `_probe_once` used to bound ``sdk._get_proj()`` AND ``RETURN 1`` with the
+    same 1.5s liveness budget. The cold-start is not a reachability signal —
+    it is connect + `_ensure_indexes()` and, on a large graph, an index build
+    over the whole graph — so a fully-reachable big graph timed out during
+    setup and was reported ``db.ok=false`` / ``status=degraded`` /
+    ``graph_size=0``: the onboarding gate lie. The platform liveness gate
+    keeps the tight bound (a fast-degrade gate, #1384); the on-demand MCP
+    health tool gets an explicit setup allowance.
+    """
+
+    def test_platform_liveness_budget_still_times_out_on_a_slow_cold_start(
+            self, monkeypatch):
+        """Unchanged platform behavior: a cold-start that overruns
+        PROBE_TIMEOUT still reports a bounded timeout, never a hang."""
+        monkeypatch.setattr(monitoring, "PROBE_TIMEOUT", 0.05)
+        result = monitoring.probe_db(SlowColdStartSDK(delay=0.2))
+        assert result["ok"] is False
+        assert "timeout" in result["error"]
+
+    def test_deep_setup_budget_reports_a_reachable_large_graph_ok(
+            self, monkeypatch):
+        """#3143 regression: with the MCP tool's setup allowance, a graph
+        whose projection cold-start exceeds PROBE_TIMEOUT is reported
+        reachable with its REAL graph_size — not degraded/0."""
+        monkeypatch.setattr(monitoring, "PROBE_TIMEOUT", 0.05)
+        result = monitoring.metrics(
+            sdk=SlowColdStartSDK(delay=0.2, graph_size=9019),
+            probe_setup_timeout=monitoring.PROBE_SETUP_TIMEOUT,
+        )
+        assert result["status"] == "ok", result
+        assert result["db"]["ok"] is True
+        assert result["graph_size"] == 9019
+
+    def test_mcp_tortoise_health_uses_the_deep_setup_budget(self, monkeypatch):
+        """The fix is only real if the tool onboarding actually calls opts
+        into the setup allowance — assert it at the MCP tool boundary."""
+        from tortoise import mcp_server
+        from tortoise.mcp_auth import _transport_mode
+
+        monkeypatch.setattr(monitoring, "PROBE_TIMEOUT", 0.05)
+        monkeypatch.setattr(
+            mcp_server, "_get_team_sdk",
+            lambda: SlowColdStartSDK(delay=0.2, graph_size=9019))
+        token = _transport_mode.set("http")
+        try:
+            result = mcp_server.tortoise_health()
+        finally:
+            _transport_mode.reset(token)
+        assert result["status"] == "ok", result
+        assert result["db"]["ok"] is True
+        assert result["graph_size"] == 9019
+
+
+class TestProbeSetupBudgetIntegration:
+    """#3143 at the REAL-projection layer — the issue's integration surface.
+
+    The pure-unit class above uses a stub; this one forces the #3143 shape on a
+    real FalkorProjection (real `RETURN 1`, real `taxonomy()` counts) so the
+    fix is proven on the code path the MCP tool actually runs.
+    """
+
+    def test_real_projection_slow_cold_start_ok_with_real_graph_size(
+            self, sdk_factory, monkeypatch):
+        sdk = sdk_factory()
+        proj = sdk._get_proj()
+        proj.g.query("MERGE (p:Point {id:'3143-p1'}) SET p.pointKind='fact'")
+        real_size = sum(sdk.taxonomy().values())
+        assert real_size > 0
+
+        # The cold-start overruns the liveness budget; the graph answers fine.
+        def slow_cold_start():
+            time.sleep(0.2)
+            return proj
+
+        monkeypatch.setattr(sdk, "_get_proj", slow_cold_start, raising=False)
+        monkeypatch.setattr(monitoring, "PROBE_TIMEOUT", 0.05)
+
+        tight = monitoring.probe_db(sdk)  # platform liveness shape — unchanged
+        assert tight["ok"] is False
+        assert "timeout" in tight["error"]
+
+        result = monitoring.metrics(
+            sdk=sdk, probe_setup_timeout=monitoring.PROBE_SETUP_TIMEOUT)
+        assert result["status"] == "ok", result
+        assert result["db"]["ok"] is True
+        assert result["graph_size"] == real_size
 
 
 class TestRecordFunctions:

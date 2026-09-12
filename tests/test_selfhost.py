@@ -268,10 +268,11 @@ class TestHealthTruthMCP:
         tc = _client_for_env(monkeypatch, tmp_path, TORTOISE_API_KEY="k")
         import tortoise.monitoring as mon
 
-        def _boom_probe(sdk):
+        def _boom_probe(sdk, *args, **kwargs):
             # probe_db's contract is never-raise: a dead DB is a FAILED probe
             # result, not an exception. Return the degraded shape both /health
-            # and metrics() turn into status="degraded".
+            # and metrics() turn into status="degraded". (#3143 widened the
+            # signature with optional budget args — the stub accepts them.)
             return {"ok": False, "latency_ms": 0.0, "error": "NXDOMAIN"}
 
         # probe_db is imported lazily from tortoise.monitoring inside both

@@ -1899,10 +1899,24 @@ def tortoise_health() -> dict:
     surfaces it stayed None and every call reported degraded/no_sdk_registered
     while /health (fresh SDK probe) said ok — the first call every onboarding
     script makes lied. graph_size likewise counts the SERVED graph, never an
-    empty unregistered handle."""
+    empty unregistered handle.
+
+    #3143 (health-truthful): the probe's 1.5s budget was written to bound the
+    sub-millisecond ``RETURN 1`` reachability query, but it also bounded the
+    projection cold-start (``_get_proj()``: connect + ``_ensure_indexes()`` —
+    ~28 round trips, and an index build over the whole graph when one is
+    missing). That cost scales with graph size, so a large, fully-reachable
+    org (9,019 entities) timed out during setup and reported
+    ``degraded``/``graph_size 0`` while ``tortoise_status`` worked. The tool
+    now passes ``PROBE_SETUP_TIMEOUT`` for the cold-start it always pays —
+    it builds a request-scoped SDK per call — while the platform liveness
+    gate keeps the tight fast-degrade bound."""
     # #236: route through _safe() so every tool is gated (defense-in-depth;
     # reachable only post-auth over HTTP).
-    return _safe(lambda: monitoring.metrics(sdk=_get_team_sdk()))
+    return _safe(lambda: monitoring.metrics(
+        sdk=_get_team_sdk(),
+        probe_setup_timeout=monitoring.PROBE_SETUP_TIMEOUT,
+    ))
 
 
 def tortoise_session_context() -> dict:
