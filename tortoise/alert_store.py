@@ -383,23 +383,24 @@ class AlertStore:
                 logger.warning("incident filing failed for %s: %s — will adopt on next poll", kind, e)
         state["issue_number"] = issue_number
         state["detail"] = detail
-        # Provenance records who FILED this issue. Adopting someone else's issue
-        # through the GH-search fallback must NOT claim it: that would let a
-        # non-owner clear a kind on its own weaker evidence (#3127 round 2). A
-        # sentinel with no issue number stays ours — we opened it and nobody
-        # else holds an issue for it, so we may still clear it ourselves.
-        if writer != WRITER_UNSPECIFIED and (filed_here or issue_number is None):
+        # Provenance records who FILED this issue — never who happened to adopt
+        # it through the GH-search fallback. Stamping the adopter would let a
+        # non-owner that merely adopted someone else's open issue clear the
+        # incident on its own weaker evidence (#3127 round 2).
+        if filed_here and writer != WRITER_UNSPECIFIED:
             state["writer"] = writer
         _write_json(self._storage, key, state)
-        # The announcement is gated on the PERSISTED flag, never on who filed.
-        # In the create-then-die window the filer creates the issue and dies
-        # before pushing; the adopter finds that issue via search and must then
-        # announce it. Gating on `filed_here` left the incident filed but never
-        # shown to a human, with nothing retrying (round 3 P1).
-        if issue_number is not None and not state.get("telegram_pushed"):
+        # Announce whenever this call ends up holding the issue number. The
+        # ANNOUNCEMENT STATE MACHINE (a persisted `telegram_pushed` flag with
+        # resume-on-adoption) is deliberately NOT here: review rounds 3 and 4
+        # each found P1s inside it — a flag that suppressed a genuine
+        # recurrence, a gate that left an incident filed but never shown, a
+        # clause that let an adopter claim provenance, and a hard-coded flag in
+        # bash that marked an outage as announced. Until that is designed on its
+        # own terms (issue #3295), prefer the failure that pages: an adopted
+        # issue can be announced twice — noise — rather than not at all.
+        if issue_number is not None:
             self._push_with_pending(key, self._telegram_text(kind, team_id, detail, issue_number))
-            state["telegram_pushed"] = True
-            _write_json(self._storage, key, state)
         return True
 
     def resolve_incident(

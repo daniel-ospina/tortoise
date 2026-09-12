@@ -321,10 +321,10 @@ file_alert() { # kind title body dedup_id
       # telegram_pushed records that the announcement happened, so the store
       # does not re-announce an issue this driver already showed a human.
       _w=""; [ "$filed" = "1" ] && _w=',"writer":"driver"'
-      printf '{"kind":"%s","issue_number":%s,"filed_at":"%s"%s,"telegram_pushed":true}' "$kind" "$num" "$(date -u +%FT%TZ)" "$_w" > "$tmp"
+      printf '{"kind":"%s","issue_number":%s,"filed_at":"%s"%s}' "$kind" "$num" "$(date -u +%FT%TZ)" "$_w" > "$tmp"
       aws s3api put-object --endpoint-url "$R2_ENDPOINT" --bucket "$R2_BUCKET" \
         --key "$key" --body "$tmp" >/dev/null 2>&1 || true
-      [ "$filed" = "1" ] && telegram "🚨 DR alert: ${kind} — issue #${num}"
+      telegram "🚨 DR alert: ${kind} — issue #${num}"
     fi
   else
     # 412 — the object exists, so a prior creator won the create-once race.
@@ -356,10 +356,10 @@ file_alert() { # kind title body dedup_id
     fi
     if [ -n "$num" ]; then
       _w=""; [ "$filed" = "1" ] && _w=',"writer":"driver"'
-      printf '{"kind":"%s","issue_number":%s,"filed_at":"%s"%s,"telegram_pushed":true}' "$kind" "$num" "$(date -u +%FT%TZ)" "$_w" > "$tmp"
+      printf '{"kind":"%s","issue_number":%s,"filed_at":"%s"%s}' "$kind" "$num" "$(date -u +%FT%TZ)" "$_w" > "$tmp"
       aws s3api put-object --endpoint-url "$R2_ENDPOINT" --bucket "$R2_BUCKET" \
         --key "$key" --body "$tmp" >/dev/null 2>&1 || true
-      [ "$filed" = "1" ] && telegram "🚨 DR alert: ${kind} — issue #${num}"
+      telegram "🚨 DR alert: ${kind} — issue #${num}"
     fi
   fi
   rm -f "$tmp"
