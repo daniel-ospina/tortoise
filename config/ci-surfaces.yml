@@ -480,6 +480,7 @@ surfaces:
   - test_search_engine.py
   - test_search_engine_gaps.py
   - test_search_engine_nameerror.py
+  - test_2952_degraded_read.py   # #2952 (B)+(C): embedder warm-up + declared single-leg reads (docker-lane)
   - test_search_promoted_fields.py
   - test_search_sessions_temporal.py
   - test_secret_store.py   # #2318: managed backup-key store + rotation (embedded)
@@ -673,6 +674,7 @@ surfaces:
   - bench/test_degradation_chain.py
   - bench/test_roundrobin.py
   - bench/test_smoke_embedded.py
+  - test_2952_degraded_read.py  # #2952: embeddings.py selects the eval surface — dual-registered so the (B) warm-up is covered there too
   - eval/retrieval/test_1348.py
   - eval/retrieval/test_bootstrap.py
   - eval/retrieval/test_gate_1349.py
@@ -811,6 +813,7 @@ carve_out:
 push_extra: []
 durations:
   test_2199_decide_calibration.py: 8.5
+  test_2952_degraded_read.py: 70.0   # #2952 (B)+(C): docker-lane warm-up/degraded-read suite
   test_calibration.py: 52.1
   test_battery_setup.py: 26.0
   test_main_guards.py: 19.5

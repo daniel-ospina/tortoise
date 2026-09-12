@@ -1983,6 +1983,17 @@ class TortoiseSDK:
                 self._proj = FalkorProjection.from_uri(self._db_uri, graph_name=graph_name)
             else:
                 self._proj = FalkorProjection(self._db_path, graph_name=graph_name)
+            # (B) #2952: explicit embedder warm-up at ENGINE INIT —
+            # best-effort, non-fatal, and non-blocking (daemon thread) so a
+            # load failure surfaces ONCE here instead of masquerading as a
+            # per-query _FAIL_COOLDOWN_S gap. The outcome is declared via
+            # EmbeddingModel.status() and retrieval_legs(); the cooldown
+            # itself is unchanged (never sticky-off).
+            try:
+                from .embeddings import EmbeddingModel
+                EmbeddingModel.start_warm_up()
+            except Exception:  # noqa: BLE001, RUF100 — warm-up is never fatal
+                pass
         return self._proj
 
     def _get_event_log(self):
@@ -13978,7 +13989,10 @@ class TortoiseSDK:
             default None is byte-identical behavior. When ``object_centric``
             is True both the Point and Object reads append to the list (an
             entry per query), so consumers should test which entries RAN
-            rather than assume one entry per leg.
+            rather than assume one entry per leg. #2952: combine with
+            :func:`tortoise.search_engine.declared_degraded_read` (declare the
+            single-leg read) or :func:`tortoise.search_engine.require_hybrid_read`
+            (fail loud) — see also :meth:`retrieval_legs`.
         """
         from .ranking import StateRanker
 
@@ -14107,6 +14121,67 @@ class TortoiseSDK:
         except Exception as e:  # noqa: BLE001, RUF100 — fail-open
             _logger.warning("W4 enrichment failed (recall_state): %s", e)
         return out
+
+    def retrieval_legs(
+        self,
+        query: str,
+        *,
+        kind: str | None = None,
+        limit: int = 10,
+        lane: str | None = None,
+        require_hybrid: bool = False,
+    ) -> dict:
+        """(C) #2952 — probe the hybrid read surface and DECLARE its legs.
+
+        Runs ONE ``recall_state`` call with the observational ``leg_trace``
+        contract (the same call shape ``recall_state`` uses — single source)
+        and returns the declared state::
+
+            {"legs": [...], "declared_degraded_read": <marker|None>,
+             "hybrid": bool, "embedder": <EmbeddingModel.status()>}
+
+        ``declared_degraded_read`` is the explicit
+        ``vector_leg_unavailable`` marker when the vector leg did not run
+        healthy (``hybrid`` is then False), never a silent keyword-only
+        read. When ``require_hybrid=True`` a single-leg read raises
+        ``HybridReadUnavailableError`` instead of returning — the fail-loud
+        capability a real-lane measurement uses to REFUSE to label a
+        keyword-only read as the product's hybrid retrieval (#2985 / PR
+        #3005 posture).
+
+        ``require_hybrid`` defaults to False: the probe is observational and
+        never changes retrieval, matching the product's default behavior.
+        Note the probe runs at the production 500ms collective cap: a
+        ``reason == "timeout"`` marker means the vector leg was SLOW, not
+        absent — a measurement that must distinguish the two should re-probe.
+        """
+        from .embeddings import EmbeddingModel
+        from .exceptions import HybridReadUnavailableError
+        from .search_engine import declared_degraded_read, require_hybrid_read
+        leg_trace: list[dict] = []
+        self.recall_state(query, kind=kind, limit=limit, leg_trace=leg_trace)
+        # ``declared_degraded_read`` is the C1 DECLARATION (None for a
+        # structural-only read by design); ``hybrid`` comes from the one
+        # gate predicate so it can never disagree with
+        # ``require_hybrid=True``. The refusal reason is reported separately
+        # so the two fields keep their own contracts (review P1, #2952).
+        marker = declared_degraded_read(leg_trace)
+        refusal_reason: str | None = None
+        try:
+            require_hybrid_read(leg_trace or None, lane=lane)
+            hybrid = True
+        except HybridReadUnavailableError as exc:
+            if require_hybrid:
+                raise
+            hybrid = False
+            refusal_reason = exc.reason
+        return {
+            "legs": leg_trace,
+            "declared_degraded_read": marker,
+            "hybrid": hybrid,
+            "hybrid_refusal_reason": refusal_reason,
+            "embedder": EmbeddingModel.status(),
+        }
 
     # ── Phase-1 volunteering-memory delivery (#2103) ─────────────────────
     # Issue #2103 (epic #2080, S9): ONE canonical pipeline (tortoise/volunteer.py

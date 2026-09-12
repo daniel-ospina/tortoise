@@ -61,6 +61,14 @@ class EmbeddingModel:
     # window. Pre-warmed at startup in hosted.
     _FAIL_COOLDOWN_S = 60.0  # negative cache: skip retry for 60s after a failed load
     _last_failed_at: float | None = None
+    # (B) #2952 explicit warm-up state — see warm_up()/start_warm_up()/status().
+    _WARM_UP_LOCK = threading.Lock()
+    _warm_up_thread: threading.Thread | None = None
+    _warm_up_started = False
+    _last_error: str | None = None
+    #: Why the last load attempt failed: "not_installed" (designed absence —
+    #: INFO) vs "load_failed"/"load_timeout" (real degrade — WARNING).
+    _last_failure_kind: str | None = None
 
     @classmethod
     def get(cls, load_timeout: float | None = None) -> "EmbeddingModel | None":  # noqa: UP037
@@ -92,6 +100,17 @@ class EmbeddingModel:
         if cls._instance is None:
             with cls._lock:
                 if cls._instance is None:
+                    # #2952 (B) P1 review fix: re-check the negative cache
+                    # INSIDE the lock. A caller that passed the outer check
+                    # before a concurrent load (engine-init warm-up!) recorded
+                    # its failure would otherwise start a SECOND full load,
+                    # defeating the once-only warm-up and double-blocking the
+                    # first query. The failure timestamp is written under this
+                    # same lock, so the re-check is race-safe.
+                    now_locked = time.monotonic()
+                    if cls._last_failed_at is not None and \
+                            (now_locked - cls._last_failed_at) < cls._FAIL_COOLDOWN_S:
+                        return None
                     cls._instance = cls(load_timeout=timeout)
         model = cls._instance._model if (cls._instance and cls._instance._model) else None
         if model is None and cls._instance is not None:
@@ -103,7 +122,131 @@ class EmbeddingModel:
                 cls._instance = None
                 cls._model = None
                 cls._last_failed_at = time.monotonic()
+        if model is not None:
+            # #2952: a healthy model clears the prior failure state so
+            # status() never reports a stale failure_kind next to
+            # available=True (P2 review fix).
+            cls._last_failure_kind = None
+            cls._last_error = None
         return model
+
+    @classmethod
+    def warm_up(cls, *, load_timeout: float | None = None) -> bool:
+        """(B) #2952 — explicitly probe/load the embedder ONCE at init.
+
+        Best-effort and non-fatal: returns True when the model is available,
+        False when the vector leg cannot run. NEVER raises. The point is to
+        surface a load failure *at init* (one clear WARNING) instead of
+        letting it masquerade as a per-query ``_FAIL_COOLDOWN_S`` gap — the
+        cooldown itself is unchanged (the model is still retried on a later
+        ``get()`` call; this is not sticky-off).
+
+        The failure is declared, not silent: ``status()`` reports the state
+        and ``tortoise.search_engine.declared_degraded_read(leg_trace)`` marks
+        the resulting single-leg reads.
+        """
+        try:
+            model = cls.get(load_timeout=load_timeout)
+        except Exception as exc:  # noqa: BLE001, RUF100 — warm-up is non-fatal
+            cls._last_error = f"{type(exc).__name__}: {exc}"
+            logger.warning(
+                "embedder warm-up raised — the vector leg is unavailable and "
+                "single-leg (keyword-only) reads must be declared (#2952): %s",
+                exc, exc_info=True,
+            )
+            return False
+        if model is None:
+            kind = cls._last_failure_kind or "model_unavailable"
+            cls._last_error = kind
+            if kind == "not_installed":
+                # Designed zero-dependency path (embeddings extra absent) —
+                # INFO, matching the loader's own contract; not a new degrade.
+                logger.info(
+                    "embedder warm-up: sentence-transformers not installed "
+                    "(designed) — vector leg unavailable; keyword-only reads "
+                    "must be declared (#2952)."
+                )
+            else:
+                logger.warning(
+                    "embedder warm-up FAILED (%s) — the vector leg will not "
+                    "run until a later retry succeeds; a keyword-only read is "
+                    "NOT hybrid retrieval and must be declared (#2952).",
+                    kind,
+                )
+            return False
+        cls._last_error = None
+        cls._last_failure_kind = None
+        return True
+
+    @classmethod
+    def start_warm_up(cls, *, load_timeout: float | None = None
+                      ) -> threading.Thread | None:
+        """(B) #2952 — non-blocking, once-per-process warm-up for engine init.
+
+        Spawns a daemon thread that calls :meth:`warm_up` so client/engine
+        init never blocks on the ~57s cold BAAI/bge-small-en-v1.5 load while
+        still surfacing the outcome once (the same posture as the hosted
+        ``_lifespan`` pre-warm, #545). Idempotent: repeated calls after the
+        first return the existing thread (or None when it already finished).
+
+        Opt out with ``TORTOISE_EMBEDDER_WARMUP=0`` (tests disable it — a
+        background load would race explicit embedder stubs). Returns None
+        when disabled or already started.
+        """
+        import os
+        if os.environ.get("TORTOISE_EMBEDDER_WARMUP", "1").strip().lower() \
+                in ("0", "false", "no", "off"):
+            return None
+        with cls._WARM_UP_LOCK:
+            if cls._warm_up_started:
+                t = cls._warm_up_thread
+                return t if (t is not None and t.is_alive()) else None
+            cls._warm_up_started = True
+            thread = threading.Thread(
+                target=cls._warm_up_worker, args=(load_timeout,),
+                name="tortoise-embedder-warmup", daemon=True,
+            )
+            cls._warm_up_thread = thread
+            thread.start()
+            return thread
+
+    @classmethod
+    def _warm_up_worker(cls, load_timeout: float | None) -> None:
+        """Daemon-thread body — never lets a warm-up failure escape."""
+        try:
+            cls.warm_up(load_timeout=load_timeout)
+        except Exception:  # noqa: BLE001, RUF100 — a daemon thread must not raise
+            logger.debug("embedder warm-up worker failed", exc_info=True)
+
+    @classmethod
+    def status(cls) -> dict:
+        """(C) #2952 — the DECLARED embedder availability state.
+
+        A read surface that could not run its vector leg can report this
+        instead of silently presenting a keyword-only result as hybrid:
+        ``{"model", "available", "state" ∈ ready|cooldown|unavailable,
+        "last_error", "cooldown_remaining_s"}``. Read-only, no side effects.
+        """
+        instance = cls._instance
+        model = instance._model if instance is not None else None
+        remaining = 0.0
+        if cls._last_failed_at is not None:
+            remaining = max(
+                0.0, cls._FAIL_COOLDOWN_S - (time.monotonic() - cls._last_failed_at))
+        if model is not None:
+            state = "ready"
+        elif remaining > 0.0:
+            state = "cooldown"
+        else:
+            state = "unavailable"
+        return {
+            "model": EMBEDDING_MODEL,
+            "available": model is not None,
+            "state": state,
+            "last_error": cls._last_error,
+            "failure_kind": cls._last_failure_kind,
+            "cooldown_remaining_s": round(remaining, 3),
+        }
 
     @classmethod
     def _reset(cls) -> None:
@@ -112,6 +255,11 @@ class EmbeddingModel:
             cls._instance = None
             cls._model = None
             cls._last_failed_at = None
+        with cls._WARM_UP_LOCK:
+            cls._warm_up_thread = None
+            cls._warm_up_started = False
+            cls._last_error = None
+            cls._last_failure_kind = None
 
     def __init__(self, load_timeout: float | None = None):
         timeout = load_timeout if load_timeout is not None else self._LOAD_TIMEOUT_S
@@ -122,9 +270,25 @@ class EmbeddingModel:
                 from sentence_transformers import SentenceTransformer
                 result["model"] = SentenceTransformer(
                     EMBEDDING_MODEL, revision=EMBEDDING_MODEL_REVISION)
-            except ImportError:
-                # Designed zero-dependency path — INFO, no traceback noise.
-                logger.info("sentence-transformers not installed — embeddings degrade")
+            except ImportError as e:
+                # Distinct the DESIGNED absence (package not installed — INFO)
+                # from an import-time failure inside an installed dependency
+                # chain (real degrade — WARNING) (#2952 P2 review fix).
+                import importlib.util
+                try:
+                    spec = importlib.util.find_spec("sentence_transformers")
+                except Exception:  # noqa: BLE001, RUF100 — a probe must never
+                    spec = object()  # raise; treat unknown as a real failure
+                if spec is None:
+                    # Designed zero-dependency path — INFO, no traceback noise.
+                    logger.info("sentence-transformers not installed — embeddings degrade")
+                    type(self)._last_failure_kind = "not_installed"
+                else:
+                    logger.warning(
+                        "sentence-transformers import failed — embeddings "
+                        "degrade: %s", e, exc_info=True,
+                    )
+                    type(self)._last_failure_kind = "load_failed"
                 result["model"] = None
             except Exception as e:  # noqa: BLE001, RUF100
                 # #880: a load failure (e.g. LocalEntryNotFoundError when the
@@ -134,6 +298,7 @@ class EmbeddingModel:
                     "sentence-transformers unavailable — embeddings degrade: %s",
                     e, exc_info=True,
                 )
+                type(self)._last_failure_kind = "load_failed"
                 result["model"] = None
 
         t = threading.Thread(target=_load, daemon=True)
@@ -150,6 +315,7 @@ class EmbeddingModel:
                 "(retries on next get() call).",
                 self._LOAD_TIMEOUT_S,
             )
+            type(self)._last_failure_kind = "load_timeout"
             self._model = None
             return
         self._model = result["model"]
