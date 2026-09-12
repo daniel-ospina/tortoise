@@ -241,56 +241,82 @@ class TestDocsPageAndSkillConfig:
     DOCS = REPO_ROOT / "website" / "docs.html"
     SKILL = REPO_ROOT / "tortoise" / "onboarding" / "SKILL.md"
 
+    # Per-harness headings in the docs #mcp section. Rows are pinned by
+    # heading (not a bare "Codex"/"Pi" substring) so deleting a row fails.
+    ROW_HEADINGS = ("<h4>Claude Code</h4>", "<h4>Cursor", "<h4>Pi",
+                    "<h4>Codex CLI</h4>", "<h4>Claude Desktop</h4>",
+                    "<h4>Claude Web</h4>")
+
     def _mcp_section(self) -> str:
         text = self.DOCS.read_text(encoding="utf-8")
-        start = text.index('<h2 id="mcp">')
-        end = text.index('<h2 id="api">')
+        start = text.find('<h2 id="mcp">')
+        assert start != -1, "docs.html lost its #mcp section anchor"
+        end = text.find('<h2 id="api">', start)
+        assert end != -1, "docs.html lost its #api section anchor"
+        assert end > start, "docs.html #api now precedes #mcp — slice would be empty"
         return text[start:end]
+
+    def _row(self, section: str, start_heading: str, end_heading: str) -> str:
+        assert start_heading in section, f"docs #mcp row missing: {start_heading}"
+        assert end_heading in section, f"docs #mcp row missing: {end_heading}"
+        return section.split(start_heading, 1)[1].split(end_heading, 1)[0]
+
+    @staticmethod
+    def _json_block(fragment: str) -> dict:
+        m = re.search(r"<pre><code>(\{.*?\})</code></pre>", fragment, re.S)
+        assert m, f"no JSON config block found in: {fragment[:80]!r}"
+        cfg = json.loads(m.group(1))["mcpServers"]["tortoise"]
+        assert "tt_" not in json.dumps(cfg), f"literal key in config block: {cfg}"
+        return cfg
 
     # ── docs page (#mcp) ───────────────────────────────────────────────
 
     def test_docs_mcp_section_has_no_literal_key(self):
         section = self._mcp_section()
         assert "tt_YOUR_KEY" not in section
-        # no header/config snippet ships a literal-looking tt_ key
+        # no config snippet ships a literal-looking tt_ key
         assert '"Authorization": "Bearer tt_' not in section
 
     def test_docs_mcp_section_has_no_streamable_type(self):
         # The prose may WARN about the alias; no config value may use it.
         assert '"type": "streamable-http"' not in self._mcp_section()
 
-    def test_docs_mcp_section_lists_pi_and_codex(self):
+    def test_docs_mcp_section_lists_all_harnesses(self):
         section = self._mcp_section()
-        assert "Codex" in section, "docs #mcp must cover Codex (#3145)"
-        assert "Pi" in section, "docs #mcp must cover Pi (#3145)"
+        for heading in self.ROW_HEADINGS:
+            assert heading in section, f"docs #mcp must cover {heading} (#3145)"
+        # pin the Codex command, not just the word "Codex"
+        assert "codex mcp add tortoise --url" in section
 
     def test_docs_hosted_json_blocks_use_env_indirection_and_canonical_type(self):
         section = self._mcp_section()
-        configs = []
-        for raw in re.findall(r"<pre><code>(\{.*?\})</code></pre>", section, re.S):
-            try:
-                cfg = json.loads(raw)
-            except json.JSONDecodeError:
-                continue
-            server = cfg.get("mcpServers", {}).get("tortoise")
-            if server and "url" in server:
-                configs.append(server)
-        assert configs, "no hosted MCP JSON block found in the docs #mcp section"
-        # every committable hosted block keeps the key in an env var
-        for server in configs:
-            header = server["headers"]["Authorization"]
-            assert "tt_" not in header, f"literal key in hosted block: {server}"
-            assert "${" in header, f"hosted block is not env-indirected: {server}"
-        # exactly one block carries a type, and it is the canonical "http"
-        typed = [s for s in configs if "type" in s]
-        assert len(typed) == 1, f"expected exactly one typed block, got {typed}"
-        assert typed[0]["type"] == "http"
-        assert typed[0]["headers"]["Authorization"] == "Bearer ${TORTOISE_API_KEY}"
-        # Cursor uses ${env:...}; Cursor + Pi omit `type`
-        cursor = [s for s in configs if "${env:TORTOISE_API_KEY}" in s["headers"]["Authorization"]]
-        assert len(cursor) == 1 and "type" not in cursor[0]
-        pi = [s for s in configs if s["headers"]["Authorization"] == "Bearer ${TORTOISE_API_KEY}" and "type" not in s]
-        assert len(pi) == 1, "Pi hosted block (plain ${VAR}, no type) missing"
+        # Identify each block by heading slice — Claude Code and Pi share the
+        # same plain ${VAR} header token, so a header search is ambiguous.
+        claude = self._row(section, "<h4>Claude Code</h4>", "<h4>Cursor")
+        cursor = self._row(section, "<h4>Cursor", "<h4>Pi")
+        pi = self._row(section, "<h4>Pi", "<h4>Codex CLI</h4>")
+        claude_cfg = self._json_block(claude)
+        cursor_cfg = self._json_block(cursor)
+        pi_cfg = self._json_block(pi)
+        assert claude_cfg["type"] == "http"
+        assert claude_cfg["headers"]["Authorization"] == "Bearer ${TORTOISE_API_KEY}"
+        assert "type" not in cursor_cfg, "Cursor remote config must omit `type`"
+        assert cursor_cfg["headers"]["Authorization"] == "Bearer ${env:TORTOISE_API_KEY}"
+        assert "type" not in pi_cfg, "Pi remote config must omit `type`"
+        assert pi_cfg["headers"]["Authorization"] == "Bearer ${TORTOISE_API_KEY}"
+
+    def test_docs_stdio_block_carries_no_api_key(self):
+        # #702 class: TORTOISE_API_KEY disables the stdio transport, and the
+        # server needs TORTOISE_DB_URI — the docs block must not set the key.
+        section = self._mcp_section()
+        stdio = self._row(
+            section,
+            "<h3>Setup — self-hosted (stdio)</h3>",
+            "<h3>What your agent can do</h3>",
+        )
+        env = self._json_block(stdio)["env"]
+        assert "TORTOISE_API_KEY" not in env, "stdio config must not set TORTOISE_API_KEY (#702)"
+        assert "TORTOISE_DB_URI" in env, "stdio config must set TORTOISE_DB_URI"
 
     # ── onboarding skill (canonical) ───────────────────────────────────
 
@@ -301,10 +327,12 @@ class TestDocsPageAndSkillConfig:
 
     def test_skill_cursor_and_pi_rows_omit_type(self):
         skill = self.SKILL.read_text(encoding="utf-8")
-        cursor_row = skill.split("### Cursor (self-install)", 1)[1].split("### Codex CLI", 1)[0]
-        pi_row = skill.split("### Pi (self-install)", 1)[1].split("### Claude Desktop", 1)[0]
-        assert '"type"' not in cursor_row, "Cursor remote config must omit `type`"
-        assert '"type"' not in pi_row, "Pi remote config must omit `type`"
+        for start_h, end_h in (("### Cursor (self-install)", "### Codex CLI"),
+                               ("### Pi (self-install)", "### Claude Desktop")):
+            assert start_h in skill, f"skill row heading missing: {start_h}"
+            assert end_h in skill, f"skill row heading missing: {end_h}"
+            row = skill.split(start_h, 1)[1].split(end_h, 1)[0]
+            assert '"type"' not in row, f"{start_h}: remote config must omit `type`"
 
     # ── cross-surface agreement (issue #3145 verification checklist) ───
 
