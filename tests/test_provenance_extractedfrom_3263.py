@@ -427,8 +427,74 @@ def test_reingest_does_not_warn_about_provenance(prov, caplog):
     with caplog.at_level(logging.WARNING):
         sdk.ingest(bundle)
     noise = [r.getMessage() for r in caplog.records
-             if "extractedFrom not applied" in r.getMessage()]
+             if "not applied" in r.getMessage()]
     assert noise == [], f"spurious provenance warning on re-ingest: {noise}"
+
+
+def test_reingest_with_empty_ref_list_does_not_warn(prov, caplog):
+    """An explicit ``[]`` means "no provenance" (the bundle contract certifies
+    it). The first gate keyed on ``is not None``, so it still warned on every
+    idempotent re-ingest — the caller supplied NO ref, yet was told to "pass
+    the ref on the FIRST write"."""
+    sdk, _events = prov
+    bundle = {
+        "points": [{"ref": "p1", "kind": "claim", "content": "no prov re",
+                    "extractedFrom": []}],
+        "sources": [], "connections": [],
+    }
+    sdk.ingest(bundle)
+    with caplog.at_level(logging.WARNING):
+        sdk.ingest(bundle)
+    noise = [r.getMessage() for r in caplog.records
+             if "not applied" in r.getMessage()]
+    assert noise == [], f"spurious warning for an explicit empty ref list: {noise}"
+
+
+def test_dedup_hit_with_a_CHANGED_ref_warns(prov, caplog):
+    """The gate checked only "does ANY edge exist", so a DIFFERENT ref was
+    treated as present and silently discarded — the caller believes the Point
+    was relinked when it was not. Silent provenance drops are the exact class
+    this change set exists to remove.
+    """
+    sdk, _events = prov
+    content = "changed ref claim"
+    first = sdk.create_point("statement", content,
+                             extractedFrom="session:sess-OLD", dedup=True)
+    with caplog.at_level(logging.WARNING):
+        second = sdk.create_point("statement", content,
+                                  extractedFrom="session:sess-NEW", dedup=True)
+    assert second["id"] == first["id"], "guard: this must be a dedup hit"
+    hits = [r.getMessage() for r in caplog.records
+            if "not applied" in r.getMessage()]
+    assert hits, "a changed ref on a dedup hit must not be dropped silently"
+    assert "sess-NEW" in hits[0], f"warning must name the dropped ref: {hits[0]}"
+
+
+def test_create_point_rejects_non_string_extractedfrom_prewrite(prov):
+    """A non-string scalar reached the fan-out's ``list(source_ref)``, raising
+    TypeError AFTER the Point was CREATEd but BEFORE PointAdded was journaled —
+    leaving an orphan that a rebuild would drop (live != rebuild). It must fail
+    closed BEFORE the write.
+    """
+    sdk, _events = prov
+    before = sdk._get_proj().g.query(
+        "MATCH (n:Point) RETURN count(n)").result_set[0][0]
+    for bad in (123, 1.5, ["ok", None], [None]):
+        with pytest.raises(ValueError, match="extractedFrom"):
+            sdk.create_point("statement", f"bad ref {bad!r}",
+                             extractedFrom=bad)
+    after = sdk._get_proj().g.query(
+        "MATCH (n:Point) RETURN count(n)").result_set[0][0]
+    assert after == before, "a rejected Point was still written (orphan)"
+
+
+def test_create_point_treats_blank_ref_as_absent(prov):
+    """An empty/blank string is explicit "none", not an error — so session
+    inference still applies and nothing is invented."""
+    sdk, _events = prov
+    p = sdk.create_point("statement", "blank ref claim",
+                         extractedFrom="   ", session_id="sess-blank")
+    assert _sources_of(sdk._get_proj(), p["id"]) == {"session:sess-blank"}
 
 
 def test_dedup_hit_without_the_edge_DOES_warn(prov, caplog):
@@ -441,7 +507,7 @@ def test_dedup_hit_without_the_edge_DOES_warn(prov, caplog):
         sdk.create_point("statement", content, session_id="sess-w",
                          dedup=True)
     hits = [r.getMessage() for r in caplog.records
-            if "extractedFrom not applied" in r.getMessage()]
+            if "not applied" in r.getMessage()]
     assert hits, "missing-edge dedup skip must warn"
 
 

@@ -228,12 +228,15 @@ class _EntityHandlers:
         )
         # Ontology v2.1: also store extractedFrom as property for query convenience.
         # #3263: many-to-many — the EDGES are authoritative (see
-        # _upsert_point_edges); the scalar prop is a query convenience for the
-        # single-source case (99%). With several sources we store the array
-        # (FalkorDB supports array props) rather than silently keeping only one
-        # and misreporting the point as single-sourced. Note an array is NOT
-        # equality-matchable (`WHERE n.extractedFrom = 'x'` will not hit it) —
-        # callers needing that must traverse the edge.
+        # _upsert_point_edges). This scalar/array prop is a query convenience
+        # ONLY, and its rule is: a STRING when a single string was passed
+        # (including the inference path), and an ARRAY whenever a SEQUENCE was
+        # passed — even a one-element one, which is NOT collapsed. Arrays are
+        # not equality-matchable (`WHERE n.extractedFrom = '<url>'` will not hit
+        # them), so exact-match callers must pass the scalar or traverse the
+        # edge. (Wording aligned with sdk.py `list_drafts` and ONTOLOGY v3.11;
+        # an earlier version of this comment said "the single-source case",
+        # which wrongly implied one-element sequences collapse.)
         source_ref = p.get("extractedFrom")
         if source_ref:
             self.g.query("MATCH (n:Point {id:$id}) SET n.extractedFrom = $ref", params={"id": p["id"], "ref": source_ref})

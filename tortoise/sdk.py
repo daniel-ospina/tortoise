@@ -2405,6 +2405,39 @@ class TortoiseSDK:
         # source is worse than none (design contract #3), so we skip and say so
         # rather than fabricate.
         _session_id = props.get("session_id")
+        # #3263 (cycle-4 P2): validate the ref SHAPE before any write. A
+        # non-string scalar (123) previously reached _link_source, whose
+        # fan-out does list(source_ref) — raising TypeError AFTER the Point was
+        # CREATEd but BEFORE PointAdded was journaled, so the graph gained an
+        # orphan that a rebuild would drop (live != rebuild). Fail closed here,
+        # pre-write, matching the bundle Phase-1 contract.
+        _ef_in = props.get("extractedFrom")
+        if _ef_in is not None:
+            if isinstance(_ef_in, str):
+                if not _ef_in.strip():
+                    # explicit "no provenance" == absent (the bundle contract
+                    # allows an empty list for the same reason), so session
+                    # inference may still apply below.
+                    props.pop("extractedFrom", None)
+            elif isinstance(_ef_in, (list, tuple)):
+                _clean = [r for r in _ef_in
+                          if isinstance(r, str) and r.strip()]
+                if len(_clean) != len(_ef_in):
+                    raise ValueError(
+                        "create_point: extractedFrom must be a non-empty "
+                        f"string or a list of non-empty strings (got {_ef_in!r})"
+                    )
+                if _clean:
+                    props["extractedFrom"] = _clean
+                else:
+                    props.pop("extractedFrom", None)
+            else:
+                raise ValueError(
+                    "create_point: extractedFrom must be a non-empty string "
+                    f"or a list of non-empty strings (got {_ef_in!r}); a "
+                    "non-string scalar would mint a corrupt Source, and raised "
+                    "after the write would leave an un-journaled Point (#3263)"
+                )
         if not props.get("extractedFrom"):
             # #3263: branch on TYPE, not truthiness. The contract is "a
             # non-empty string can name a Source", so anything else that is
@@ -2561,28 +2594,41 @@ class TortoiseSDK:
                 # exist yet — tracked separately (#3292).
                 _dropped_ef = props.pop("extractedFrom", None)
                 if _dropped_ef is not None:
-                    # #3263 (re-review P2): warn only when provenance is
-                    # ACTUALLY missing. On the advertised idempotent re-ingest
-                    # path (ingest always calls create_point(dedup=True, …)) the
-                    # dedup hit legitimately re-supplies the same ref and the
-                    # Point already carries the edge — warning there both floods
-                    # the log on every re-ingest and asserts the opposite of the
-                    # graph state. Stay silent when the invariant holds.
-                    _has_edge = bool(proj.g.query(
-                        "MATCH (p:Point {id:$id})-[:extractedFrom]->(:Source) "
-                        "RETURN count(*)",
-                        params={"id": pid}).result_set[0][0])
-                    if not _has_edge:
-                        _logger.warning(
-                            "create_point dedup hit on %s: extractedFrom not "
-                            "applied — the Point has NO Source edge, and "
-                            "update_point cannot wire one (the value is not "
-                            "replayed, so applying it would diverge live from "
-                            "rebuild). Retrofitting provenance onto an existing "
-                            "Point needs a journaled path (#3292); pass the ref "
-                            "on the FIRST write, or re-create the Point",
-                            pid,
-                        )
+                    # #3263 (re-review P2): decide per REF, not per call. Two
+                    # coarse predicates were wrong: `is not None` also matched
+                    # an explicit empty list (so a caller who supplied NO ref
+                    # got a warning on every idempotent re-ingest), and "any
+                    # edge exists" treated a CHANGED ref as present — silently
+                    # discarding the new one. Normalise to the supplied non-empty
+                    # refs, then warn only for those genuinely absent from the
+                    # Point's edges. No refs supplied => nothing to report.
+                    _supplied = (
+                        [_dropped_ef] if isinstance(_dropped_ef, str)
+                        else [r for r in _dropped_ef if r]
+                    )
+                    if _supplied:
+                        _present = {
+                            row[0] for row in proj.g.query(
+                                "MATCH (p:Point {id:$id})-[:extractedFrom]->"
+                                "(s:Source) WHERE s.url IN $refs "
+                                "RETURN DISTINCT s.url",
+                                params={"id": pid,
+                                        "refs": _supplied}).result_set
+                        }
+                        _missing = [r for r in _supplied
+                                    if r not in _present]
+                        if _missing:
+                            _logger.warning(
+                                "create_point dedup hit on %s: extractedFrom %r "
+                                "not applied — those refs are absent from the "
+                                "Point's Source edges, and update_point cannot "
+                                "wire one (the value is not replayed, so "
+                                "applying it would diverge live from rebuild). "
+                                "Retrofitting provenance onto an existing "
+                                "Point needs a journaled path (#3292); pass the "
+                                "ref on the FIRST write, or re-create the Point",
+                                pid, _missing,
+                            )
                 if props:
                     # Only touch the existing point when the caller passed
                     # other props — a pure dedup hit (no props) must not bump
