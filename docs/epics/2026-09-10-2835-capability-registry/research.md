@@ -16,6 +16,10 @@ aboutObjects: tortoise-hosted-platform
 > **Inputs:** `00-align.md` (constraint-level routing), `agent-infra#688` (consumer), the live `agent-infra/skills` tree, a live FalkorDB ingest.
 
 ---
+> **📎 SUPERSEDED IN PART (2026-09-13).** This brief's *internal* findings still hold, but its **framing did not survive**: the epic is not justified by duplicate avoidance, and three of the four gate questions this brief produced were withdrawn.
+> The **external prior-art scan** that replaced the framing is in [`prior-art-scan.md`](./prior-art-scan.md), and the resulting reframe is recorded on epic #2835. Read that file before acting on this brief's recommendations.
+
+---
 > **⚠️ READ THIS FIRST — R1, THE KILL-SWITCH, IS NOT CLEARED: RE-RUN REQUIRED (NOT A CLEAN PASS OR FAIL).**
 
 **Neither lever is established, and the one thing that works is the mechanism behind indicator 3.** Align's constraint 1 gives each lever a pre-registered criterion keyed to **the labelled separations**: (i) the rationale edge is retrievable as a first-class sourced record *for those separations*, and (ii) composed pack/kind retrieval beats the ranked-queue baseline *on the structural subset*. **Neither test was run.** What ran was (i) a probe on an arbitrary, unlabelled pair — which worked — and (ii) a bare `objectKind='skill'` filter plus the FTS-leg comparison. Substituting an easier test for the pre-registered one is the move constraint 1 forbids (*"a criterion declared after the measurement is not a kill-switch"*), and this brief does not get to make it. **Both levers are `NOT ESTABLISHED` — not `PASS`, not `FAILED`.**
