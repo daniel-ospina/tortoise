@@ -222,6 +222,20 @@ TOOL_CARVEOUTS = (
     # lands in the unknown-path fail-closed branch -> FULL matrix + both
     # legs — the heaviest but safest gate for the file that owns gating.
     "tools/ci_selection.py",
+    # #3261: the pre-dispatch collision check (#3061) owns
+    # tests/test_collision_preflight.py. Without this carve-out a
+    # preflight-only change is swallowed by the flat "tools/" prefix,
+    # `changed` comes back empty, and select() takes the docs-only path
+    # (surfaces=[] -> tier-1 smoke) — so the file's own guard test never
+    # runs on the PR that changes it. The assumption that such a change
+    # already "falls back to core" was never true: the early docs-only
+    # return bypasses the `if not matched: matched.add("core")` fallback
+    # entirely.
+    # No SOURCE_PATTERNS entry matches it, so like tools/ci_selection.py
+    # it lands in the unknown-path branch -> FULL matrix (fail closed).
+    # A narrower TOOL_CORE_CARVEOUTS mapping is possible but not needed:
+    # a collision-check change is rare and fail-closed is the safe default.
+    "tools/collision_preflight.py",
 )
 
 

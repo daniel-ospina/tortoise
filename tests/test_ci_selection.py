@@ -266,6 +266,22 @@ def test_ask_spotcheck_tools_change_selects_sdk_not_tier1():
     assert "sdk" in r["surfaces"]
 
 
+def test_collision_preflight_tool_change_fails_closed_to_full():
+    # #3261: tools/collision_preflight.py owns tests/test_collision_preflight.py.
+    # Before its TOOL_CARVEOUTS entry the flat "tools/" prefix swallowed the
+    # path: `changed` came back empty, so select() took the docs-only return
+    # (surfaces=[], tier-1 smoke only) and the tool's own guard test never ran
+    # on the PR that changed the tool. The early docs-only return bypasses the
+    # `if not matched: matched.add("core")` fallback, so the pre-#3261 note
+    # claiming such a change "falls back to core" was never true.
+    # No SOURCE_PATTERNS entry matches the path, so it takes the unknown-path
+    # branch -> full matrix (fail closed), exactly like tools/ci_selection.py.
+    r = _sel(["tools/collision_preflight.py"])
+    assert r["full"] is True
+    assert r["test_files"] == "ALL"
+    assert "core" in r["surfaces"]
+
+
 def test_backfill_script_only_change_selects_eval():
     # graph-scripts/backfill_embeddings.py is a SOURCE_PATTERNS["eval"]
     # path — a backfill-only PR selects the eval surface (its test,
@@ -1914,3 +1930,19 @@ def test_surface_audit_tolerates_null_surface_value(tmp_path):
     assert report["duplicates"] == {}
     # the renderer must survive it too
     assert "api" in render_surface_audit(report)
+
+
+def test_real_manifest_has_no_duplicate_entries():
+    # #3381: two files were each registered twice — one entry added by two
+    # different PRs fixing the same drift independently. A duplicate entry is
+    # invisible to select() (the surface's member set dedupes) and surfaced
+    # only as a warning from `--integrity`, so pin its absence here where CI
+    # will actually see it.
+    m = load_manifest()
+    dupes = {}
+    for surface, entries in m["surfaces"].items():
+        entries = entries or []
+        seen = sorted({e for e in entries if entries.count(e) > 1})
+        if seen:
+            dupes[surface] = seen
+    assert dupes == {}, f"duplicate manifest entries: {dupes}"
