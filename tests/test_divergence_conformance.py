@@ -290,9 +290,8 @@ def test_d4_bulk_wipe_graph_guard(leg, tmp_path):
 def test_d5_range_index_identical(leg, tmp_path):
     """D5 — the point_props range set (id, pointKind, content_hash) is created
     identically on BOTH engines; is_operator is deliberately absent from the
-    D5 range set on both (the #522 regression guard — verified _ensure_indexes
-    L1214-1224; docker's is_operator RANGE presence comes from the D6
-    composite's leftmost prefix, asserted in test_d6)."""
+    D5 range set on BOTH lanes (#522 embedded, #3154 docker/server — no engine
+    gets a boolean index)."""
     proj = _projection(leg, tmp_path, "d5.db")
     try:
         idx = _range_indexes(proj)
@@ -300,50 +299,51 @@ def test_d5_range_index_identical(leg, tmp_path):
         for f in ("id", "pointKind", "content_hash"):
             assert "RANGE" in point.get(f, []), \
                 f"Point.{f} must be RANGE-indexed on {leg}: {point}"
-        if leg == "embedded":
-            assert "is_operator" not in point, \
-                f"embedded must not index is_operator at all: {point}"
+        # #3154: is_operator is absent on BOTH lanes — no engine gets a
+        # boolean index (see the D6 test).
+        assert "is_operator" not in point, \
+            f"{leg} must not index the boolean property (#3154): {point}"
     finally:
         _drop_own_graph(proj)
         proj.close()
 
 
-# ── D6: freshness composite index — MODE-SPLIT (L1244-1257) ───────────────
+# ── D6: freshness index — UNIFORM, never a boolean property (#3154) ──────
 
 
-def test_d6_freshness_composite_mode_split(leg, tmp_path):
-    """D6 — the REAL docker index divergence: server creates the composite
-    (is_operator, lastDreamedAt); embedded gets the plain (lastDreamedAt)
-    only — a composite containing is_operator is #522-unsafe on redislite
-    (stale bool type table across reopen silently zeroes `= false` lookups)."""
+def test_d6_freshness_index_excludes_boolean_property(leg, tmp_path):
+    """D6 — the freshness index is the PLAIN lastDreamedAt index on BOTH
+    lanes and the boolean property is never indexed anywhere.
+
+    #3154 retired the docker-only (is_operator, lastDreamedAt) composite:
+    GRAPH.COPY drops the `false` postings of a copied boolean RANGE index,
+    so a copy whose index set carries is_operator in its SDK-created position
+    read 0 for `is_operator = false`, and the copy destination could not
+    rebuild it (the #522 hazard, now verified on docker/server too).
+    """
     proj = _projection(leg, tmp_path, "d6.db")
     try:
         rows = proj.g.query("CALL db.indexes()").result_set
         point_rows = [r for r in rows if r[0] == "Point"]
-        if leg == "embedded":
-            assert any("lastDreamedAt" in str(r[1]) for r in point_rows), \
-                f"embedded must create the plain lastDreamedAt index: {rows}"
-            assert not any("is_operator" in str(r[1]) for r in point_rows), \
-                f"embedded must NOT create an is_operator composite: {rows}"
-        else:
-            composite = [
-                r for r in point_rows
-                if "is_operator" in str(r[1]) and "lastDreamedAt" in str(r[1])
-            ]
-            assert composite, \
-                f"server must create the (is_operator, lastDreamedAt) composite: {rows}"
+        assert any("lastDreamedAt" in str(r[1]) for r in point_rows), \
+            f"{leg} must create the plain lastDreamedAt index: {rows}"
+        assert not any("is_operator" in str(r[1]) for r in point_rows), \
+            f"{leg} must NOT index the boolean property (#3154): {rows}"
     finally:
         _drop_own_graph(proj)
         proj.close()
 
 
-# ── D7: embedded repair sweep (L1308) — embedded-only code path ───────────
+# ── D7: boolean-index purge (L1308) — now runs on BOTH lanes (#3154) ──────
 
 
-def test_d7_embedded_repair_sweep(leg, tmp_path):
-    """D7 — the repair sweep (drops every Point index containing is_operator,
-    the #522 crash-reopen fix) runs ONLY on embedded reopen; on server the
-    composite is CORRECT and must survive re-init untouched."""
+def test_d7_boolean_index_purge(leg, tmp_path):
+    """D7 — the boolean-index purge (drops every Point index containing
+    is_operator) was the embedded-only #522 crash-reopen fix; #3154 extended
+    it to docker/server, where GRAPH.COPY can copy a boolean index without its
+    `false` postings when the source's index set carries it, leaving the copy
+    destination unable to rebuild it. Both lanes must drop a
+    seeded legacy index on reopen and keep the lastDreamedAt staleness index."""
     if leg == "embedded":
         db_path = str(tmp_path / "d7.db")
         # Seed the PRE-#522 stale state: a standalone is_operator RANGE index
@@ -364,24 +364,28 @@ def test_d7_embedded_repair_sweep(leg, tmp_path):
         finally:
             p2.close()
         return
-    # Server leg — the composite survives re-init (the sweep never runs).
+    # Server leg — #3154: the purge runs here too. Seed the legacy
+    # single-property boolean index and confirm a reopen drops it (a legacy
+    # or copy-destination graph must not keep a boolean index: `= false`)
+    # would otherwise read 0 forever).
     proj = FalkorProjection(host="localhost", port=6379, password="falkordb",
                             graph_name="test_d7_sweep")
     try:
         proj.g.query("MATCH (n) DETACH DELETE n")
         proj._ensure_indexes()
+        proj.g.query("CREATE INDEX FOR (n:Point) ON (n.is_operator)")
         proj.close()
         proj = None  # reopen below
         proj2 = FalkorProjection(host="localhost", port=6379, password="falkordb",
                                  graph_name="test_d7_sweep")
         try:
             rows = proj2.g.query("CALL db.indexes()").result_set
-            composite = [
-                r for r in rows if r[0] == "Point"
-                and "is_operator" in str(r[1]) and "lastDreamedAt" in str(r[1])
-            ]
-            assert composite, \
-                f"server must KEEP the composite across re-init: {rows}"
+            point_rows = [r for r in rows if r[0] == "Point"]
+            stale = [r for r in point_rows if "is_operator" in str(r[1])]
+            assert not stale, \
+                f"server must drop the legacy is_operator index on reopen (#3154): {stale}"
+            assert any("lastDreamedAt" in str(r[1]) for r in point_rows), \
+                f"server must keep the lastDreamedAt staleness index: {rows}"
         finally:
             _drop_own_graph(proj2)  # review P2-1: fixed-name graph, not journaled
             proj2.close()
