@@ -338,6 +338,80 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertIn("[local branches]", out)
         self.assertIn("keyword(s): florfenicol", out)
 
+    def test_generic_keyword_pair_does_not_collide_3325(self):
+        # LIVE REGRESSION (#3325): issue #3214's real title contains BOTH
+        # "graph" and "delete", so it cleared the >= 2 gate against the
+        # unrelated graphs-management PR #2704 and branch
+        # `feat/2701-graphs-rename-delete`, fabricating a COLLISION that
+        # blocked a legitimate dispatch. The gate counts DISTINCTIVE terms
+        # only, so a generic pair must not collide on a branch, worktree or PR.
+        title = ("fix(tests): unscoped wipe_server guard has a TOCTOU window "
+                 "(peer graph minted between the protection snapshot and the delete)")
+        self.gh_fixtures(
+            issue=self.issue_payload(title=title),
+            open_prs=[{
+                "number": 3354,
+                "title": "fix(infra): race-safe GRAPH.DELETE — stop poisoning "
+                         "the shared FalkorDB AOF (#2961)",
+                "body": "", "headRefName": "fix/2961-graph-delete-race",
+            }],
+            closed_prs=[{
+                "number": 2704,
+                "title": "feat(graphs): rename graphs (pencil) + type-to-confirm "
+                         "delete (#2701)",
+                "body": "", "headRefName": "feat/2701-graphs-rename-delete",
+            }],
+        )
+        self.add_worktree("feat-2701-graphs-rename-delete",
+                          branch="feat/2701-graphs-rename-delete")
+        _git(self.repo, "branch", "fix/2961-graph-delete-race")
+        rc, out = self.run_tool(issue=3214)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("VERDICT: CLEAN", out)
+        self.assertNotIn("COLLISION", out)
+        self.assertNotIn("do NOT dispatch", out)
+        # Transparency: the excluded generic terms are named in the report, so
+        # a suppressed match is never silent.
+        self.assertIn("generic term(s) excluded from the gate", out)
+        self.assertIn("graph", out)
+        self.assertIn("delete", out)
+
+    def test_distinctive_terms_still_collide_for_the_same_title(self):
+        # SENSITIVITY GUARD for #3325: the SAME #3214 title still yields a
+        # COLLISION when a branch carries its DISTINCTIVE terms (toctou/window/
+        # guard) instead of the generic graph+delete pair. The keyword dial is
+        # not disabled — only the cross-cutting tier stops counting.
+        title = ("fix(tests): unscoped wipe_server guard has a TOCTOU window "
+                 "(peer graph minted between the protection snapshot and the delete)")
+        self.gh_fixtures(issue=self.issue_payload(title=title))
+        _git(self.repo, "branch", "fix/toctou-window-guard")
+        rc, out = self.run_tool(issue=3214)
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION (keyword-only)", out)
+        self.assertIn("[local branches]", out)
+        self.assertIn("keyword(s):", out)
+
+    def test_generic_only_title_is_clean_not_incomplete(self):
+        # #3325 latent: a title whose every term is generic yields no keywords.
+        # That is an EVALUATED, empty keyword dimension — not an unqueryable
+        # surface — so it must read CLEAN, never INCOMPLETE. A wider stoplist
+        # made this reachable ("fix graph delete error"), and conflating it with
+        # a missing title would turn a clean run into exit 2.
+        self.gh_fixtures(issue=self.issue_payload(title="fix graph delete error"))
+        rc, out = self.run_tool()
+        self.assertEqual(rc, 0, out)
+        self.assertIn("VERDICT: CLEAN", out)
+        self.assertNotIn("INCOMPLETE", out)
+        self.assertIn("0 distinctive keyword(s)", out)
+        self.assertIn("excluded:", out)
+
+        # ... and a NUMBER hit under that generic-only title is still a hit.
+        _git(self.repo, "branch", "fix/3061-generic-title")
+        rc, out = self.run_tool()
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        self.assertIn("matched issue-number (3061)", out)
+
     def test_worktree_structural_token_is_not_a_collision(self):
         # Title contains "worktree"; the worktree lives under a `.worktrees/`
         # parent. The structural directory token must not fabricate a hit.
