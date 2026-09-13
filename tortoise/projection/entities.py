@@ -786,9 +786,27 @@ class _EntityHandlers:
             # What separates them is that the legacy fold's id is the DERIVED id
             # FOR ITS OWN NAME (`obj-<sha26(name)>`), i.e. a canonical id that
             # merely predates the registration's id shape. An orphan's id is
-            # arbitrary with respect to the name it carries. So the guard fires
-            # only when the derived id does NOT match — the id demonstrably
-            # belongs to something else.
+            # usually arbitrary with respect to the name it carries. So the
+            # guard fires only when the derived id does NOT match.
+            #
+            # ⚠️ THIS DISCRIMINATOR IS NOT SOUND, and the earlier wording here
+            # claimed it was ("the id demonstrably belongs to something else" —
+            # false: a derived id appearing in no `ObjectRegistered` proves
+            # nothing about identity). Measured residual hole, filed as #3389:
+            #
+            #     OR(ARBITRARY_ID, SHARED), RT(_entity_name_id("SHARED"), SHARED)
+            #     -> the guard short-circuits on `_derived_matches`, and the
+            #        LIVE SHARED/ARBITRARY_ID is BURIED.
+            #
+            # Production-reachable: `_connect_issue_objects` does
+            # `MERGE (o:Object {id:$oid}) SET o.name=$name` with
+            # `oid = item.get("id")`, and session transcripts routinely quote
+            # canonical `obj-<hash>` ids, so a second carrier of an existing
+            # name can legitimately carry a derived-LOOKING id. 6 review cycles
+            # each found the next hole in this rule; the root cause is the
+            # WRITER (a second carrier minted with no journal line), not fold
+            # selection — the same lesson cycle 3 taught. A sound fix belongs in
+            # `_connect_issue_objects`/`_delete_entity`, not here.
             _derived_matches = False
             try:
                 from tortoise.sdk import _entity_name_id
