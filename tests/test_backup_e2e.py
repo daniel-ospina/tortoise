@@ -76,7 +76,11 @@ def test_backup_restore_e2e():
         # ── Step 2: Backup — verify files copied + BGSAVE ─────────
         backup_dir = os.path.join(tmpdir, "backups", "manual")
 
-        with patch("tortoise.backup._bgsave") as mock_bgsave:
+        # `_bgsave`'s RETURN VALUE is recorded in the manifest (#2974), so the
+        # mock must yield a serialisable value — a bare MagicMock reaches
+        # json.dumps and aborts the backup with "Object of type MagicMock is
+        # not JSON serializable". Use the real success shape (`-> str`).
+        with patch("tortoise.backup._bgsave", return_value="ok") as mock_bgsave:
             target = backup(
                 db_path=db_path,
                 events_path=events_path,
@@ -95,6 +99,9 @@ def test_backup_restore_e2e():
         assert manifest["db"] == "tortoise.db"
         assert manifest["events"] == "events.jsonl"
         assert "backed_up_at" in manifest
+        # #2974: the snapshot outcome is recorded so a silent no-op is
+        # impossible — this is the contract the bare mock was violating.
+        assert manifest["bgsave"] == "ok"
 
         # Verify backed-up events.jsonl has same content (JSON-parse for
         # robustness against key-ordering differences)
