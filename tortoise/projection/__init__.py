@@ -80,6 +80,50 @@ _DB_TIMEOUT_MAX_S = 60.0
 #: for the health-probe interval). Below the floor we fall back to the default.
 _DB_TIMEOUT_MIN_S = 0.05
 
+#: #3350: explicit, bounded retry policy for the EMBEDDED client.
+#:
+#: redis-py 8's client DEFAULT is ``Retry(ExponentialWithJitterBackoff(
+#: base=DEFAULT_RETRY_BASE, cap=DEFAULT_RETRY_CAP), retries=10)`` — TEN
+#: retries after the first attempt. Two consequences, both bad here:
+#:
+#:  * a read timeout costs ``11 x socket_timeout`` PLUS up to ~75s of
+#:    exponential jitter backoff, so ONE wedged embedded daemon parks
+#:    whatever thread is running the query for ~59s (measured, SIGSTOPped
+#:    daemon, before this constant existed) — and after
+#:    ``TORTOISE_FALKORDB_SOCKET_TIMEOUT_S`` was wired in (#3350) the
+#:    DEFAULT 10s read timeout would have made that ~115s;
+#:  * it makes the bound UN-KNOWABLE from outside: setting
+#:    ``TORTOISE_FALKORDB_SOCKET_TIMEOUT_S=t`` still waited ~11t, so the
+#:    knob an operator lowers to tighten the loop-stall ceiling did not
+#:    tighten what actually parked the thread.
+#:
+#: ONE retry keeps the transient-blip recovery (a single reconnect) while
+#: capping the multiplier at 2, so the embedded lane's worst case is
+#: statically ``(1 + _EMBEDDED_RETRY_COUNT) * socket_timeout + backoff``
+#: rather than a dependency default that can change under us. That is the
+#: property ``monitoring``'s layered-timeout doctrine needs ("make the inner
+#: call bounded so the worker frees itself"). The HOST branch is deliberately
+#: untouched — its retry policy is not what #3350 is about.
+_EMBEDDED_RETRY_COUNT = 1
+_EMBEDDED_RETRY_BASE = 0.1
+_EMBEDDED_RETRY_CAP = 1.0
+
+
+def _embedded_retry():
+    """Bounded retry policy for the embedded client (#3350).
+
+    See ``_EMBEDDED_RETRY_COUNT`` for why this exists. Built per call rather
+    than shared so no state is aliased across clients.
+    """
+    from redis.backoff import ExponentialWithJitterBackoff
+    from redis.retry import Retry as _Retry
+
+    return _Retry(
+        backoff=ExponentialWithJitterBackoff(
+            base=_EMBEDDED_RETRY_BASE, cap=_EMBEDDED_RETRY_CAP),
+        retries=_EMBEDDED_RETRY_COUNT,
+    )
+
 
 def _socket_timeouts() -> tuple[float, float]:
     """``(socket_connect_timeout, socket_timeout)`` from env, with defaults.
@@ -937,12 +981,41 @@ class FalkorProjection(
             aof_dir = (
                 os.path.basename(os.path.abspath(path)) + "-appendonlydir"
             ) if (path != ":memory:" and aof_enabled) else None
+            # #3350: the embedded client was built with NO socket timeouts of
+            # OUR choosing, so every blocking call on it was bounded only by
+            # redis-py's own implicit connection default (5s) — invisible to
+            # operators, and multiplied by the client's retry policy.
+            # Measured against a SIGSTOPped embedded daemon: one `RETURN 1`
+            # blocked ~59s, outliving the /health probe's 1.5s outer bound by
+            # ~40x and parking the probe worker that whole time (#3350).
+            # `TORTOISE_FALKORDB_SOCKET_TIMEOUT_S` — the knob monitoring.py's
+            # budgets are documented in terms of, and the one an operator
+            # lowers to tighten the loop-stall ceiling — had no effect on this
+            # lane at all. Wire the SAME resolved READ timeout the host branch
+            # uses (redis-py's UnixDomainSocketConnection applies
+            # `socket_timeout` to the socket after connect, which is the leg a
+            # wedged daemon parks on) and pair it with `_embedded_retry()` so
+            # the worst case is a knowable `2 x socket_timeout`, not an
+            # 11x-multiplied dependency default.
+            #
+            # NOT passed here: `socket_connect_timeout`. redis-py 8's
+            # ConnectionPool does not forward it for a unix-domain socket
+            # (verified: `Redis(unix_socket_path=..., socket_connect_timeout=
+            # 1.5)` leaves `conn.socket_connect_timeout` at redis-py's own 5s
+            # default), so passing it would be a bound that looks wired but
+            # is not — the trap this change exists to remove. Its own 5s
+            # default still applies, and a local UDS connect cannot be the
+            # black hole: the read leg is. (Operators wanting that leg too
+            # need a custom connection class — filed separately.)
+            read_to = _socket_timeouts()[1]
             self.db = FalkorDB(
                 path,
                 serverconfig=(
                     {"appendonly": "yes", "appenddirname": aof_dir}
                     if (path != ":memory:" and aof_enabled) else None
                 ),
+                socket_timeout=read_to,
+                retry=_embedded_retry(),
             )
         elif host is not None:
             # Docker FalkorDB
