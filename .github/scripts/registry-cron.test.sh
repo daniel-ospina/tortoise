@@ -73,6 +73,10 @@
 #  59. the driver's OWNERSHIP refusal in `resolve_global` is pinned (#3127): a
 #      watcher-owned kind is refused (no search, no close); a driver-owned
 #      kind resolves normally
+#  60. `alert_key` canonicalizes the EMPTY (subject-less) id ONLY: a real
+#      subject literally named `global`/`_` keeps its own single key and is
+#      never an alias set — the round-7 P2 that otherwise gave one real team
+#      two create-once points across bash and AlertStore (#2844)
 #
 # Fixtures are simulated; the real driver defers nothing.
 
@@ -1030,6 +1034,41 @@ assert_contains "$(run_resolve WATCHER_DOWN)" "FIND" "59. a driver-owned kind se
 assert_contains "$(run_resolve WATCHER_DOWN)" "CLOSE" "59. a driver-owned kind closes the incident"
 assert_not_contains "$(run_resolve WATCHER_DOWN)" "refusing to close" "59. the driver-owned path does not refuse"
 rm -f "$RESOLVE_EXT" "$RESOLVE_LOG"
+
+# ── 60. a REAL subject named `global` is not the platform (subject-less) alias
+# #2844 round-7 P2: `alert_key` canonicalized a NON-EMPTY subject literally
+# named `global` to `_.json`, while AlertStore._keys kept `global.json` for that
+# same subject — so a team actually named `global` got two create-once points
+# (two sentinels, two issues for one condition). Canonicalization is for the
+# EMPTY id only; the legacy `global` spelling stays a READ/DELETE alias of the
+# EMPTY id alone. Extracted from the SHIPPING script, never a copy, so
+# re-widening either function fails here.
+reset_case
+KEY_EXT="$(mktemp)"
+sed -n '/^alert_key()/,/^}/p; /^alert_keys_all()/,/^}/p' "$DRIVER" > "$KEY_EXT"
+run_keys() { # fn id — the real alert_key/alert_keys_all from the shipping driver
+  (
+    # shellcheck disable=SC1090
+    . "$KEY_EXT"
+    "$1" STALE "$2"
+  )
+}
+assert_eq "$(run_keys alert_key "")" "ops/alerts/STALE/_.json" \
+  "60. the EMPTY (platform) id canonicalizes to _.json"
+assert_eq "$(run_keys alert_key global)" "ops/alerts/STALE/global.json" \
+  "60. a REAL subject named global keeps its OWN key, not the platform alias"
+_keys_empty="$(run_keys alert_keys_all "")"
+assert_contains "$_keys_empty" "ops/alerts/STALE/_.json" \
+  "60. the platform id lists the canonical spelling"
+assert_contains "$_keys_empty" "ops/alerts/STALE/global.json" \
+  "60. the platform id still lists the legacy global.json alias (read/delete)"
+assert_eq "$(printf '%s\n' "$_keys_empty" | wc -l | tr -d ' ')" "2" \
+  "60. the platform id has exactly two spellings"
+assert_eq "$(run_keys alert_keys_all global)" "ops/alerts/STALE/global.json" \
+  "60. a REAL subject named global is never an alias set"
+assert_eq "$(run_keys alert_keys_all _)" "ops/alerts/STALE/_.json" \
+  "60. a REAL subject named _ is never an alias set"
+rm -f "$KEY_EXT"
 
 echo ""
 echo "registry-cron.test.sh: $PASS passed, $FAIL failed"

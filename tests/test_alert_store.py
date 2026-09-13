@@ -390,8 +390,8 @@ def test_platform_incident_key_contract():
     The fix is a string agreement between two languages: the bash driver's
     `alert_key()` and this store's `_key()` MUST produce the same object name,
     or the condition silently regains two create-once points. Both sides pin
-    their own literal (this test; `registry-cron.test.sh` cases 29/57/58), so a
-    rename on either side fails loudly instead of drifting back into two pens.
+    their own literal (this test; `registry-cron.test.sh` cases 29/57/58/60), so
+    a rename on either side fails loudly instead of drifting back into two pens.
     """
     store = _store(_FakeChannels())
     assert store._key("R2_DOWN", "") == _CANONICAL_KEY
@@ -400,6 +400,15 @@ def test_platform_incident_key_contract():
     # the platform sentinel (#2375).
     assert store._keys("STALE", "team_a") == ("ops/alerts/STALE/team_a.json",)
     assert store._key("STALE", "team_a") == "ops/alerts/STALE/team_a.json"
+    # #2844 (round-7 P2): a REAL subject literally named `global` (or `_`) is
+    # not the subject-less platform incident. It keeps its OWN single key and is
+    # never an alias SET: aliasing it to the platform spelling would give one
+    # condition two create-once points (bash `alert_key` -> `_.json` vs this
+    # store -> `global.json`), consuming two sentinels and filing two issues.
+    assert store._keys("STALE", "global") == ("ops/alerts/STALE/global.json",)
+    assert store._key("STALE", "global") == "ops/alerts/STALE/global.json"
+    assert store._keys("STALE", "_") == ("ops/alerts/STALE/_.json",)
+    assert store._key("STALE", "_") == "ops/alerts/STALE/_.json"
 
 
 def _driver_sentinel(storage, issue_number, writer=None):

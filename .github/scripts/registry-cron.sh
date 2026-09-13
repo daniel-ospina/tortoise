@@ -172,16 +172,25 @@ kind_owner() { # kind -> the writer whose probes cover this kind's recovery (#31
 }
 alert_key() { # kind id -> the canonical dedup key for this incident
   local kind="$1" id="${2:-}"
-  # `global` is this driver's pre-#2844 spelling of a subject-less incident;
-  # both spellings now canonicalize to `_` (the AlertStore's spelling), so the
-  # two writers share ONE create-once point.
-  if [ -z "$id" ] || [ "$id" = "global" ]; then id="_"; fi
+  # #2844 (round-7 P2): canonicalization is for the EMPTY — subject-less — id
+  # ONLY. `global` is this driver's pre-#2844 spelling of that same
+  # subject-less incident, so it survives below as a legacy READ/DELETE alias
+  # (see alert_keys_all), but it is NOT canonicalized here: a real subject
+  # literally named `global` would then write `_.json` while the AlertStore's
+  # `_keys()` keeps `global.json` for it — two create-once points for ONE
+  # condition, the exact defect this PR exists to fix. Every PLATFORM call site
+  # therefore passes `""`, never the literal "global".
+  if [ -z "$id" ]; then id="_"; fi
   printf 'ops/alerts/%s/%s.json\n' "$kind" "$id"
 }
 alert_keys_all() { # kind id -> the canonical key + every legacy spelling
   local kind="$1" id="${2:-}"
   alert_key "$kind" "$id"
-  if [ -z "$id" ] || [ "$id" = "global" ] || [ "$id" = "_" ]; then
+  # #2844: `global.json` is the pre-#2844 spelling of a SUBJECT-LESS incident,
+  # so it is a legacy alias of the EMPTY id only. A real subject literally named
+  # `global` (or `_`) owns its own single key outright — it is never an alias
+  # set, and must not drag `global.json` in as a sibling spelling.
+  if [ -z "$id" ]; then
     printf 'ops/alerts/%s/global.json\n' "$kind"
   fi
 }
@@ -201,11 +210,15 @@ gh_find_open() { # kind id(subject) -> first open issue number whose TITLE subje
   # and vice versa (the bare team subject is a PREFIX of the per-graph
   # subject); recovery then closes the WRONG issue and orphans its dedup
   # object (silent-loss cross-talk — the server side is subject-scoped since
-  # #2313; the driver must match). Global alerts (id="global") keep the
-  # kind-only match (their titles carry prose, not the id).
+  # #2313; the driver must match). SUBJECT-LESS incidents (id="") keep the
+  # kind-only match (their titles carry prose, not the id); every platform call
+  # site passes `""` since #2844. `global` is the pre-#2844 spelling of that
+  # subject-less incident but is NOT aliased here — a real subject literally
+  # named `global` must match on its own TITLE, or it could adopt (and later
+  # close) an unrelated platform incident.
   [ -n "$GH_TOKEN" ] || return 0
   local kind="$1" id="${2:-}"
-  if [ "$id" = "global" ] || [ -z "$id" ]; then
+  if [ -z "$id" ]; then
     curl -sS -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
       "https://api.github.com/search/issues?q=repo:${REPO}+is:issue+is:open+label:%22dr:backup%22+in:title+%22%5BDR%5D+$kind%22" \
       | jq -r '.items[0].number // empty' 2>/dev/null || true
@@ -273,8 +286,8 @@ resolve_global() { # kind comment — close an open global incident (no-op if no
     log "self-heal: refusing to close ${kind} — it is owned by the ${owner}, whose probes cover its recovery condition"
     return 0
   fi
-  num="$(gh_find_open "$kind" "global")"
-  if [ -n "$num" ]; then gh_close "$num" "$comment" "$kind" "global"; fi
+  num="$(gh_find_open "$kind" "")"
+  if [ -n "$num" ]; then gh_close "$num" "$comment" "$kind" ""; fi
 }
 telegram() { # text
   [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ] \
@@ -390,7 +403,7 @@ if ! aws s3api head-bucket --endpoint-url "$R2_ENDPOINT" --bucket "$R2_BUCKET" >
   R2_OK=0
   log "R2 preflight failed — filing R2_DOWN"
   file_alert R2_DOWN "[DR] R2_DOWN — backup storage unreachable" \
-    "R2 preflight (head-bucket) failed from the driver. Runbook: docs/ops/registry-backup-dr.md" "global"
+    "R2 preflight (head-bucket) failed from the driver. Runbook: docs/ops/registry-backup-dr.md" ""
 fi
 
 if [ "$R2_OK" = "1" ]; then
@@ -520,7 +533,7 @@ fi
 if [ "$R2_OK" = "1" ] && [ "$R2_LIST_OK" != "1" ]; then
   log "R2 preflight passed but the pool listing failed — storage is only partially reachable; filing R2_DOWN"
   file_alert R2_DOWN "[DR] R2_DOWN — backup storage not listable" \
-    "head-bucket succeeded but one or more list-objects-v2 calls failed (R2_LIST_OK=0). The pool cannot be measured, so archive freshness and coverage cannot be verified. Check the R2 access key's ListObjects permission." "global"
+    "head-bucket succeeded but one or more list-objects-v2 calls failed (R2_LIST_OK=0). The pool cannot be measured, so archive freshness and coverage cannot be verified. Check the R2 access key's ListObjects permission." ""
 fi
 
 # ── 1. pre-flight status ────────────────────────────────────────────────────
@@ -541,7 +554,7 @@ if [ -z "$STATUS" ]; then
   # let a 31-day outage hide behind 40 green runs.
   log "app unreachable — filing APP_DOWN"
   file_alert APP_DOWN "[DR] APP_DOWN — app unreachable" \
-    "The hosted API did not answer /status. Runbook: docs/ops/registry-backup-dr.md" "global"
+    "The hosted API did not answer /status. Runbook: docs/ops/registry-backup-dr.md" ""
   finish
 fi
 
@@ -568,7 +581,7 @@ if [ "$ENABLED" = "unknown" ]; then
   # deliberate pause.
   log "unparseable /status (no boolean .enabled) — filing SWEEP_NO_COVERAGE (job red)"
   file_alert SWEEP_NO_COVERAGE "[DR] SWEEP_NO_COVERAGE — /status unclassifiable" \
-    "GET /status returned 200 but carried no boolean .enabled field (schema drift, or a non-JSON body). The driver fails CLOSED rather than reading an unknown shape as a deliberate pause. Check the app version and the /status contract." "global"
+    "GET /status returned 200 but carried no boolean .enabled field (schema drift, or a non-JSON body). The driver fails CLOSED rather than reading an unknown shape as a deliberate pause. Check the app version and the /status contract." ""
   fail "unparseable /status — no boolean .enabled field"
   exit 1
 fi
@@ -579,7 +592,7 @@ if [ "$ENABLED" != "true" ]; then
   if [ -n "$CONFIG_ERR" ]; then
     log "kill-switch is NOT an operator decision — config_error is set; filing SWEEP_CONFIG_ERROR (job red)"
     file_alert SWEEP_CONFIG_ERROR "[DR] SWEEP_CONFIG_ERROR — backups off, config broken" \
-      "enabled=false with config_error: ${CONFIG_ERR_SAFE}. The sweep flag says 'run' but load_config() raised, so nothing can be written. Fix the Fly secret/config (runbook: docs/ops/registry-backup-dr.md §REGISTRY_STREAM_KEY), then re-run." "global"
+      "enabled=false with config_error: ${CONFIG_ERR_SAFE}. The sweep flag says 'run' but load_config() raised, so nothing can be written. Fix the Fly secret/config (runbook: docs/ops/registry-backup-dr.md §REGISTRY_STREAM_KEY), then re-run." ""
     fail "sweep disabled by a configuration error: ${CONFIG_ERR_SAFE}"
     exit 1
   fi
@@ -587,14 +600,14 @@ if [ "$ENABLED" != "true" ]; then
   resolve_global SWEEP_CONFIG_ERROR "Resolved — load_config() no longer raises."
   if [ -n "$STORAGE_ERR" ]; then
     log "status reports a storage error — filing R2_DOWN (not a kill-switch)"
-    file_alert R2_DOWN "[DR] R2_DOWN — app storage unavailable" "status.storage_error: $STORAGE_ERR_SAFE" "global"
+    file_alert R2_DOWN "[DR] R2_DOWN — app storage unavailable" "status.storage_error: $STORAGE_ERR_SAFE" ""
     fail "backups disabled by a storage error: ${STORAGE_ERR_SAFE}"
     exit 1
   fi
   if [ "$POOL_STALE" = "1" ]; then
     log "kill-switch while the R2 pool is stale (oldest > ${DRIVER_DOWN_MIN}m) — filing SWEEP_OFF_STALE (job red)"
     file_alert SWEEP_OFF_STALE "[DR] SWEEP_OFF_STALE — backups off and the pool is stale" \
-      "enabled=false with no config_error, but the direct-R2 leg found a default archive older than ${DRIVER_DOWN_MIN}m (or a team with none at all) among ${R2_TEAM_COUNT} team prefix(es). An intentional pause must not let the pool decay unnoticed: re-enable backups or declare a bounded pause." "global"
+      "enabled=false with no config_error, but the direct-R2 leg found a default archive older than ${DRIVER_DOWN_MIN}m (or a team with none at all) among ${R2_TEAM_COUNT} team prefix(es). An intentional pause must not let the pool decay unnoticed: re-enable backups or declare a bounded pause." ""
     fail "backups disabled while the R2 pool is stale (> ${DRIVER_DOWN_MIN}m)"
     exit 1
   fi
@@ -605,7 +618,7 @@ if [ "$ENABLED" != "true" ]; then
   if [ "$R2_LIST_OK" != "1" ]; then
     log "kill-switch off and the R2 pool cannot be measured — a deliberate pause cannot be confirmed; filing SWEEP_OFF_STALE (job red)"
     file_alert SWEEP_OFF_STALE "[DR] SWEEP_OFF_STALE — backups off, pool unverifiable" \
-      "enabled=false with no config_error, but the R2 pool listing failed (R2_OK=${R2_OK}, R2_LIST_OK=0): pool freshness cannot be established, so this is NOT a confirmed deliberate pause. Check the R2 access key's ListObjects permission." "global"
+      "enabled=false with no config_error, but the R2 pool listing failed (R2_OK=${R2_OK}, R2_LIST_OK=0): pool freshness cannot be established, so this is NOT a confirmed deliberate pause. Check the R2 access key's ListObjects permission." ""
     fail "backups disabled and the R2 pool cannot be measured"
     exit 1
   fi
@@ -626,7 +639,7 @@ fi
 # surface it here too. §6 must not self-heal it while it is set.
 if [ -n "$STORAGE_ERR" ]; then
   log "status reports a storage error while enabled — filing R2_DOWN (job red)"
-  file_alert R2_DOWN "[DR] R2_DOWN — app storage unavailable" "status.storage_error: $STORAGE_ERR_SAFE" "global"
+  file_alert R2_DOWN "[DR] R2_DOWN — app storage unavailable" "status.storage_error: $STORAGE_ERR_SAFE" ""
 fi
 
 # ── 2. watcher supervision (WATCHER_DOWN when the daemon is dead) ────────────
@@ -648,7 +661,7 @@ if [ "$WATCHER_MEASURED" = "1" ]; then
     WATCHER_STALE=1
     log "watcher heartbeat stale (running=$WATCHER_RUNNING age=${WATCHER_AGE}m) — filing WATCHER_DOWN"
     file_alert WATCHER_DOWN "[DR] WATCHER_DOWN — staleness daemon dead" \
-      "The in-process watcher is not reporting (running=$WATCHER_RUNNING, age=${WATCHER_AGE}m). Check app logs." "global"
+      "The in-process watcher is not reporting (running=$WATCHER_RUNNING, age=${WATCHER_AGE}m). Check app logs." ""
   fi
 else
   log "watcher block missing/malformed in /status — cannot assess the watcher; leaving WATCHER_DOWN unchanged"
@@ -695,7 +708,7 @@ case "$RUN_STATUS" in
       if [ "$last_age_min" -gt "$DRIVER_DOWN_MIN" ]; then
         log "sweep lock held but the last real sweep was ${last_age_min}m ago (> ${DRIVER_DOWN_MIN}m) — filing SWEEP_NO_COVERAGE (job red)"
         file_alert SWEEP_NO_COVERAGE "[DR] SWEEP_NO_COVERAGE — sweep lock stuck" \
-          "the app reported already_running (lock held) and last_sweep.last_sweep_at is ${last_age_min}m old (> ${DRIVER_DOWN_MIN}m). The lock appears stuck; backups are NOT running. Check the app's sweep lock." "global"
+          "the app reported already_running (lock held) and last_sweep.last_sweep_at is ${last_age_min}m old (> ${DRIVER_DOWN_MIN}m). The lock appears stuck; backups are NOT running. Check the app's sweep lock." ""
         NO_COVERAGE=1
       else
         log "sweep lock held; last real sweep ${last_age_min}m ago — healthy"
@@ -706,7 +719,7 @@ case "$RUN_STATUS" in
       # silently — the exact #2790 class this PR exists to close.
       log "sweep lock held, no usable last_sweep_at, and the pool is not measured-empty (R2_LIST_OK=${R2_LIST_OK}, ${R2_TEAM_COUNT} prefix(es)) — filing SWEEP_NO_COVERAGE (job red)"
       file_alert SWEEP_NO_COVERAGE "[DR] SWEEP_NO_COVERAGE — sweep lock unverifiable" \
-        "the app reported already_running (lock held) but /status carries no usable last_sweep.last_sweep_at (the sweep never completed, or ops/state.json is missing), and the R2 pool is NOT measured-empty (R2_LIST_OK=${R2_LIST_OK}, ${R2_TEAM_COUNT} team prefix(es)). The lock state cannot be verified — backups may not be running. Check the app's sweep lock and the R2 access key's ListObjects permission." "global"
+        "the app reported already_running (lock held) but /status carries no usable last_sweep.last_sweep_at (the sweep never completed, or ops/state.json is missing), and the R2 pool is NOT measured-empty (R2_LIST_OK=${R2_LIST_OK}, ${R2_TEAM_COUNT} team prefix(es)). The lock state cannot be verified — backups may not be running. Check the app's sweep lock and the R2 access key's ListObjects permission." ""
       NO_COVERAGE=1
     else
       log "sweep lock held; no usable last_sweep_at and the pool is measured empty — leaving silent"
@@ -728,12 +741,12 @@ case "$RUN_STATUS" in
       # Unknown ≠ empty (review R5): the pool could hold teams we cannot see.
       log "sweep backed up 0 teams (status=$RUN_STATUS_SAFE) and the R2 pool could NOT be measured — filing SWEEP_NO_COVERAGE (job red)"
       file_alert SWEEP_NO_COVERAGE "[DR] SWEEP_NO_COVERAGE — enabled, 0 teams, pool unmeasurable" \
-        "sweep status=${RUN_STATUS_SAFE} and the R2 pool listing failed (unknown is not empty), so coverage cannot be confirmed. The sweep is enabled but may be backing up nothing (#2823). Check the R2 access key's ListObjects permission and re-run." "global"
+        "sweep status=${RUN_STATUS_SAFE} and the R2 pool listing failed (unknown is not empty), so coverage cannot be confirmed. The sweep is enabled but may be backing up nothing (#2823). Check the R2 access key's ListObjects permission and re-run." ""
       NO_COVERAGE=1
     elif [ "${R2_TEAM_COUNT:-0}" -gt 0 ]; then
       log "sweep backed up 0 teams but the R2 pool holds ${R2_TEAM_COUNT} team prefix(es) — filing SWEEP_NO_COVERAGE (job red)"
       file_alert SWEEP_NO_COVERAGE "[DR] SWEEP_NO_COVERAGE — enabled but 0 teams backed up" \
-        "sweep status=${RUN_STATUS_SAFE} but the R2 pool holds ${R2_TEAM_COUNT} team prefix(es); last_sweep=${LAST_SWEEP_SAFE}. The sweep is enabled yet backed up 0 teams (#2823) — backups are NOT running." "global"
+        "sweep status=${RUN_STATUS_SAFE} but the R2 pool holds ${R2_TEAM_COUNT} team prefix(es); last_sweep=${LAST_SWEEP_SAFE}. The sweep is enabled yet backed up 0 teams (#2823) — backups are NOT running." ""
       NO_COVERAGE=1
     else
       log "sweep found 0 teams and the R2 pool is empty — chronic pre-beta state, no incident"
@@ -745,7 +758,7 @@ case "$RUN_STATUS" in
     # envelope applies only to the enumerated-empty statuses above).
     log "sweep did not back up (status=$RUN_STATUS_SAFE) — filing SWEEP_NO_COVERAGE (job red)"
     file_alert SWEEP_NO_COVERAGE "[DR] SWEEP_NO_COVERAGE — enabled but the sweep backed up nothing" \
-      "sweep status=${RUN_STATUS_SAFE} (raw: $(redact_truncate "$RUN" 300)). The sweep is enabled but backed up no team — backups are NOT running." "global"
+      "sweep status=${RUN_STATUS_SAFE} (raw: $(redact_truncate "$RUN" 300)). The sweep is enabled but backed up no team — backups are NOT running." ""
     NO_COVERAGE=1
     ;;
 esac
