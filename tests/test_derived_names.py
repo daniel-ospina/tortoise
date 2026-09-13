@@ -218,6 +218,14 @@ _ROUTED_FROM_URI_SITES: dict[str, list[str]] = {
     # module availability probe (construct + RETURN 1 + close, no DETACH)
     "test_indexes.py": [r"from_uri\(_uri\)"],
     "test_search_engine_gaps.py": [r"from_uri\(_uri\)"],
+    # #3154: module live-FalkorDB availability probe over candidate URIs
+    # (construct + RETURN 1 + close, never DETACHs) and the per-test `db`
+    # fixture. Both resolve to test-prefixed graphs only — every name comes
+    # from _name() -> test_graphcopy3154_<stem>_<uuid>.
+    "test_graphcopy_boolean_index_3154.py": [
+        r"from_uri\(_uri\)",
+        r"from_uri\(_uri\(\)\)",
+    ],
     "test_session_capture_e2e.py": [r"from_uri\(os\.environ\[.TORTOISE_DB_URI.\]\)"],
     "test_ingest.py": [
         # module availability probe (env pre-set to a test-prefixed URI)

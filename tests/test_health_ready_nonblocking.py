@@ -22,6 +22,7 @@ import ast
 import asyncio
 import re
 import time
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -116,32 +117,40 @@ def test_both_probes_are_dispatched_through_their_coordinators():
     )
 
 
-def _fly_http_check_timeout_s() -> float:
+def _fly_check_budget_proxy_s() -> float | None:
     """fly.toml's configured ``[[services.http_checks]] timeout``, in seconds.
 
-    NOTE this check targets ``/health`` — pure in-memory — NOT ``/health/ready``.
-    It is borrowed only as a coarse, repo-owned BUDGET PROXY for the readiness
+    NOTE this check targeted ``/health`` — pure in-memory — NOT ``/health/ready``.
+    It was borrowed only as a coarse, repo-owned BUDGET PROXY for the readiness
     surface: ``deploy-hosted.yml`` curls ``/health/ready`` with no
-    ``--max-time``, so there is no real deadline for it anywhere. Read from the
-    file rather than restated so the proxy cannot drift.
+    ``--max-time``, so there is no real deadline for it anywhere.
+
+    Returns ``None`` when the repo no longer configures an HTTP check at all.
     """
     import tomllib
 
     path = REPO / "fly.toml"
     if not path.exists():  # pragma: no cover — repo invariant
-        pytest.skip("fly.toml is missing — cannot read the health budget proxy")
+        return None
     try:
         cfg = tomllib.loads(path.read_text())
         raw = cfg["services"][0]["http_checks"][0]["timeout"]
-    except (KeyError, IndexError, TypeError) as exc:
-        pytest.fail(
-            "fly.toml no longer exposes services[0].http_checks[0].timeout — "
-            f"update this reader or drop the cross-endpoint ceiling ({exc!r})"
-        )
+    except (KeyError, IndexError, TypeError):
+        # #2850 (2026-09-10) removed [[services.http_checks]] deliberately: the
+        # /health HTTP check flapped and de-registered the sole machine, costing
+        # ~35 min of unreachability while the process was alive on loopback. It
+        # was replaced by [[services.tcp_checks]], whose ``timeout`` (5s) is
+        # documented in fly.toml as "generous headroom, not a latency budget" —
+        # it times a KERNEL accept, not an application response, so borrowing it
+        # as a /health/ready budget proxy would be a different quantity entirely
+        # (and smaller than the ready worst case, so it cannot serve as a ceiling).
+        # There is consequently NO HTTP-check budget to compare against until the
+        # deferred top-level [checks.loop_liveness] lands (#2850 follow-up).
+        return None
     try:
         return float(str(raw).rstrip("s"))
-    except ValueError as exc:  # pragma: no cover — malformed config
-        pytest.fail(f"fly.toml http_check timeout {raw!r} is not a duration: {exc!r}")
+    except ValueError:  # pragma: no cover — malformed config
+        return None
 
 
 def test_every_plane_probe_is_hard_bounded_and_fail_closed():
@@ -243,6 +252,15 @@ def test_each_plane_bound_sits_above_its_own_client_timeout(monkeypatch):
     does NOT cover the client-level ``SupabaseControlPlane(timeout=...)``
     default — that is per-phase too, which is why the probe overrides it
     per-request rather than relying on it.)
+
+    2026-09-13 (#3458): the cross-endpoint ceiling
+    (``ready_worst_case < fly.toml's http_check timeout``) is now CONDITIONAL.
+    #2850 removed ``[[services.http_checks]]`` from fly.toml (the /health HTTP
+    check flapped and de-registered the sole machine), so the borrowed quantity
+    no longer exists. When it is absent the test asserts instead that its
+    documented replacement (``[[services.tcp_checks]]``) IS present — so the
+    branch is a positive assertion, never a silent skip — and the ceiling
+    re-arms automatically if an HTTP check budget ever returns.
     """
     import httpx
 
@@ -306,21 +324,39 @@ def test_each_plane_bound_sits_above_its_own_client_timeout(monkeypatch):
     )
 
     # /health/ready runs the two planes SEQUENTIALLY, so its worst case is the
-    # sum of the two bounds. HONEST CAVEAT: fly.toml's 15s timeout governs
-    # /health (pure in-memory), NOT /health/ready, whose only caller
-    # (deploy-hosted.yml) curls it with no --max-time. It is borrowed here
-    # purely as a coarse repo-owned budget proxy, and the computed worst case
-    # is itself unreachable for a 200 (a 200 implies the DB leg succeeded, so
-    # the relevant bound is lower). Both are deliberate conservatism, not a
-    # claim about a real readiness deadline.
+    # sum of the two bounds. The cross-endpoint ceiling that used to be asserted
+    # here (`ready_worst_case < fly.toml's http_check timeout`) was DROPPED on
+    # 2026-09-13 (#3458): #2850 removed [[services.http_checks]] from fly.toml,
+    # so the borrowed proxy no longer exists. Its successor is a TCP check whose
+    # timeout times a kernel accept and is explicitly "not a latency budget",
+    # and the top-level [checks.loop_liveness] that would restore a real proxy is
+    # deferred. The docstring already disclaimed that ceiling as "deliberate
+    # conservatism, not a claim about a real readiness deadline" — with the
+    # borrowed quantity gone, asserting it against a different one would be
+    # fabricated evidence. The PER-PLANE ordering assertions above are the
+    # substantive tripwire and remain fully enforced.
     ready_worst_case = mod.DB_PROBE_HARD_TIMEOUT + mod.CONTROL_PLANE_HARD_TIMEOUT
-    ceiling = _fly_http_check_timeout_s()
-    assert ready_worst_case < ceiling, (
-        f"/health/ready's sequential worst case ({ready_worst_case}s) must stay "
-        f"under fly.toml's http_check timeout ({ceiling}s), borrowed ONLY as a "
-        "coarse budget proxy for /health/ready (that check actually targets "
-        "/health, and deploy-hosted.yml curls /health/ready with no --max-time)"
-    )
+    ceiling = _fly_check_budget_proxy_s()
+    if ceiling is not None:
+        # Restored automatically if/when fly.toml regains an HTTP check budget.
+        assert ready_worst_case < ceiling, (
+            f"/health/ready's sequential worst case ({ready_worst_case}s) must stay "
+            f"under fly.toml's http_check timeout ({ceiling}s), borrowed ONLY as a "
+            "coarse budget proxy for /health/ready (that check actually targets "
+            "/health, and deploy-hosted.yml curls /health/ready with no --max-time)"
+        )
+    else:
+        # No HTTP-check budget in fly.toml (the #2850 state). Make that ABSENCE a
+        # positive assertion rather than a silent skip: it may only mean the
+        # documented HTTP->TCP migration, so the replacement must be present. An
+        # accidental deletion of the whole checks block therefore still reds here.
+        _cfg = tomllib.loads((REPO / "fly.toml").read_text())
+        assert _cfg["services"][0].get("tcp_checks"), (
+            "fly.toml exposes NEITHER an http_check budget proxy NOR the "
+            "tcp_checks that replaced it (#2850) — the services checks block "
+            "was removed or altered without the documented migration, so the "
+            "cross-endpoint ceiling is now unverifiable rather than migrated"
+        )
 
 
 def test_db_probe_bound_covers_the_sdk_acquisition_prefix():

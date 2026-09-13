@@ -199,6 +199,20 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     #    the test input); the subprocess session tests pass env through
     #    subprocess env= and never mutate this process's environment ────────
     "test_tripwire.py": [r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"'],
+    # ── #3458 main-red reconciliation (2026-09-13): these two sites were
+    #    introduced by #3414 and #3056 and red'd every PR until declared.
+    #    DELIBERATE_URI in both cases — the env control IS the test input.
+    # #3414: module-level live-FalkorDB probe (set + try/finally restore)
+    # PLUS an autouse per-test isolated-graph fixture (set/restore); never
+    # leaves a mutation behind.
+    "test_3276_has_ep_measured.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])'],
+    # #3056/#2974: the BGSAVE tests deliberately point the endpoint at a
+    # URI (never the embedded defaults) — fixture-param monkeypatch, so
+    # pytest auto-undoes every mutation at teardown. The trailing
+    # `setenv\(\s*$` branch covers the multi-line call at :209 where the
+    # URI literal sits on the following line.
+    "test_backup.py": [r'monkeypatch\.(?:delenv|setenv)\(\s*"TORTOISE_DB_URI"',
+                       r'monkeypatch\.setenv\(\s*$'],
 }
 
 # Carve-out TEST-MODULE stems (Task 5 wires these into TEST_NO_REDIRECT_STEMS;
