@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import math
 import re
 import time
 import tomllib
@@ -126,26 +127,42 @@ def _fly_check_budget_proxy_s() -> float | None:
     ``--max-time``, so there is no real deadline for it anywhere.
 
     Returns ``None`` ONLY when fly.toml genuinely configures no ``http_checks``
-    at all (the deliberate #2850 migration). EVERY other unreadable state — a
-    missing file, an unparsable ``timeout``, a malformed value — RAISES.
+    at all (the deliberate #2850 migration). EVERY other state that leaves the
+    budget configured-but-unusable RAISES.
 
     Collapsing those into ``None`` would silently disarm the ceiling: the
     caller's ``else`` branch passes whenever ``tcp_checks`` is present, so
     "budget absent" and "budget unreadable" must never share a return value.
-    A typo like ``timeout = "15x"`` has to FAIL LOUDLY, not quietly skip the
-    assertion this test exists to make.
+    A typo like ``timeout = "15x"`` — or a non-finite ``inf``, which would make
+    ``ready_worst_case < ceiling`` trivially true — has to FAIL LOUDLY rather
+    than quietly skip the assertion this test exists to make.
     """
     path = REPO / "fly.toml"
     assert path.exists(), (
         f"fly.toml is missing at {path} — cannot read the health budget proxy"
     )
     try:
-        services = tomllib.loads(path.read_text())["services"][0]
+        services = tomllib.loads(path.read_text())["services"]
     except (KeyError, IndexError, TypeError) as exc:
         raise AssertionError(
-            f"fly.toml has no readable services[0] block ({exc!r}) — the "
+            f"fly.toml has no readable services block ({exc!r}) — the "
             "cross-endpoint ceiling cannot be evaluated"
         ) from exc
+    # This proxy reads ``services[0]``. If fly.toml ever grows a second
+    # [[services]] block carrying the http_checks budget, services[0] would
+    # have none, the guard below would return None, and the caller's else
+    # branch (which only asks services[0] for tcp_checks) would pass — the
+    # same silent disarm, reached a different way. Pin the single-service
+    # assumption so an unexpected shape fails loudly instead.
+    assert isinstance(services, list) and len(services) == 1, (
+        "fly.toml must define exactly ONE [[services]] block for the "
+        f"cross-endpoint budget proxy to be meaningful; found {services!r}"
+    )
+    svc = services[0]
+    assert isinstance(svc, dict), (
+        f"fly.toml services[0] is not a table ({svc!r}) — the cross-endpoint "
+        "ceiling cannot be evaluated"
+    )
     # #2850 (2026-09-10) removed [[services.http_checks]] deliberately: the
     # /health HTTP check flapped and de-registered the sole machine, costing
     # ~35 min of unreachability while the process was alive on loopback. It
@@ -156,23 +173,32 @@ def _fly_check_budget_proxy_s() -> float | None:
     # (and smaller than the ready worst case, so it cannot serve as a ceiling).
     # There is consequently NO HTTP-check budget to compare against until the
     # deferred top-level [checks.loop_liveness] lands (#2850 follow-up).
-    if "http_checks" not in services:
+    if "http_checks" not in svc:
         return None
     try:
-        raw = services["http_checks"][0]["timeout"]
+        raw = svc["http_checks"][0]["timeout"]
     except (KeyError, IndexError, TypeError) as exc:
         raise AssertionError(
             "fly.toml configures http_checks but its [0].timeout is unreadable "
-            f"({services['http_checks']!r}) — the cross-endpoint ceiling is "
+            f"({svc['http_checks']!r}) — the cross-endpoint ceiling is "
             "being silently disarmed; fix the reader or the config"
         ) from exc
     try:
-        return float(str(raw).rstrip("s"))
+        value = float(str(raw).rstrip("s"))
     except ValueError as exc:
         raise AssertionError(
             f"fly.toml http_check timeout {raw!r} is not a duration ({exc!r}) — "
             "the cross-endpoint ceiling is being silently disarmed"
         ) from exc
+    # A non-finite budget is WORSE than a malformed one: ``ready_worst_case <
+    # inf`` is trivially true, so the ceiling would pass while bounding nothing.
+    # ``nan`` happens to fail loudly on the comparison, but reject both rather
+    # than depend on which side of the operator it lands.
+    assert math.isfinite(value), (
+        f"fly.toml http_check timeout {raw!r} parses to a non-finite value "
+        f"({value!r}) — the cross-endpoint ceiling would be silently disarmed"
+    )
+    return value
 
 
 def test_every_plane_probe_is_hard_bounded_and_fail_closed():
@@ -352,11 +378,13 @@ def test_each_plane_bound_sits_above_its_own_client_timeout(monkeypatch):
     # so the borrowed proxy no longer exists. Its successor is a TCP check whose
     # timeout times a kernel accept and is explicitly "not a latency budget",
     # and the top-level [checks.loop_liveness] that would restore a real proxy is
-    # deferred. The docstring already disclaimed that ceiling as "deliberate
-    # conservatism, not a claim about a real readiness deadline" — with the
-    # borrowed quantity gone, asserting it against a different one would be
-    # fabricated evidence. The PER-PLANE ordering assertions above are the
-    # substantive tripwire and remain fully enforced.
+    # deferred. The inline caveat that sat on the removed assertion already
+    # disclaimed that ceiling as "deliberate conservatism, not a claim about a
+    # real readiness deadline" (it was a body comment, not a docstring, and it
+    # went with the assertion) — with the borrowed quantity gone, asserting it
+    # against a different one would be fabricated evidence. The PER-PLANE
+    # ordering assertions above are the substantive tripwire and remain fully
+    # enforced.
     ready_worst_case = mod.DB_PROBE_HARD_TIMEOUT + mod.CONTROL_PLANE_HARD_TIMEOUT
     ceiling = _fly_check_budget_proxy_s()
     if ceiling is not None:

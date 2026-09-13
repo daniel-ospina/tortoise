@@ -201,7 +201,8 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     "test_tripwire.py": [r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"'],
     # ── #3458 main-red reconciliation (2026-09-13): these two sites were
     #    introduced by #3414 and #3056 and red'd every PR until declared.
-    #    DELIBERATE_URI in both cases — the env control IS the test input.
+    #    Both are deliberate, but NOT both DELIBERATE_URI — see the per-entry
+    #    notes below (test_backup.py's :282 delenv is the embedded-lane case).
     # #3414: module-level live-FalkorDB probe (set + try/finally restore)
     # PLUS an autouse per-test isolated-graph fixture (set/restore); never
     # leaves a mutation behind.
