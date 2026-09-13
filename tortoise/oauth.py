@@ -242,8 +242,8 @@ def _is_loopback(hostname: str) -> bool:
 #     (`urllib.parse._UNSAFE_URL_BYTES_TO_REMOVE`) exactly as a browser does, and
 #     for the remaining bytes no browser moves the authority boundary either.
 #     The precise treatment is position-dependent (stripped / refused /
-#     percent-encoded — `docs/oauth-mcp.md` states it accurately), which is why
-#     this comment deliberately does NOT try to characterise it per position:
+#     percent-encoded — `docs/oauth-mcp.md` carries the per-position detail),
+#     which is why this comment deliberately does NOT try to characterise it:
 #     three review rounds each caught an over-specific claim here. The only
 #     load-bearing point is that the boundary does not move. They are refused
 #     anyway, as defence in depth: no legitimate redirect URI contains a control

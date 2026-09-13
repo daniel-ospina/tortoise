@@ -57,8 +57,8 @@ needs no client_id paste.
    two parsers disagree about the host, and the code is delivered by navigating
    the browser to the raw string. Control characters are refused too, as defence
    in depth rather than because they are differential — `urlsplit` strips
-   `\t`/`\r`/`\n` just as a browser does, and a browser refuses or
-   percent-encodes the others.
+   `\t`/`\r`/`\n` just as a browser does, and a browser refuses, percent-encodes,
+   or (at the input's leading/trailing edge) strips the others.
 3. The branded consent page (D2 — one custom HTML page reusing the
    signup/signin pattern) signs the user in via supabase-js and confirms.
    The browser session JWT is verified server-side with the **existing JWKS
