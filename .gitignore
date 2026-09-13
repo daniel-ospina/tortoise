@@ -71,4 +71,12 @@ review-artifacts/
 # files are gitignored; the directory convention (.gitkeep) is committed.
 data/kind_index/*
 !data/kind_index/.gitkeep
+
+# #2943: the durable pre-wipe snapshot sidecar. `rebuild_all` writes it next to
+# the event log it was given, and `tortoise rebuild --dir` defaults to "." — so
+# it can land in a working tree. It holds graph-only Point contents and :Batch
+# markers, which must never reach git history. It is transient (written before
+# the wipe, removed after a completed replay).
+.tortoise-prewipe-snapshot.json
+.tortoise-prewipe-*.tmp
 .venv
