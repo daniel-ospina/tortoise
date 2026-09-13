@@ -88,6 +88,10 @@ class AlertStore:
 
     # ── helpers ─────────────────────────────────────────────────────────────
     def _key(self, kind: str, team_id: str) -> str:
+        # NOTE: the subject is used verbatim (only an EMPTY one becomes "_"), so
+        # the literal subject "global" is a DIFFERENT object from the platform
+        # "_" — the restore-drill path files exactly that, and a resolver asked to
+        # clear a `global` object must pass "global", not "" (cycle-3 review P2).
         safe = team_id or "_"
         return f"{DEDUP_PREFIX}{kind}/{safe}.json"
 
@@ -202,13 +206,23 @@ class AlertStore:
         few thousand graphs that adds minutes to a request held under the sweep
         lock. Returns the raw key segments.
 
-        Key-shape caveat (review, cycle 2): the platform subject is stored as
-        ``"_"`` by this store's ``_key()``, but a caller that passes the literal
-        subject ``"global"`` gets a ``global.json`` object — the restore-drill
-        path files exactly that. So both spellings can appear here, and a matcher
-        must accept either for a platform/global subject. The sweep's four kinds
-        are only ever filed with ``team_id=""`` (→ ``"_"``), so this does not
-        affect them today.
+        It returns dedup-KEY segments, of which there are three shapes (#3030
+        cycle-3 review): a live incident (a truthy ``issue_number``), a
+        **placeholder** (filing was deferred on a failed search — no issue yet),
+        and a **tombstone** (a successful close whose delete failed —
+        ``resolve_failed_at`` set, no ``issue_number``). All three are "open" for
+        the purpose of resolution: clearing a placeholder or tombstone is exactly
+        what a caller wants, and ``resolve_incident`` handles all three. A caller
+        that reports what it cleared should not call these "incidents closed" —
+        only the live shape closes an issue.
+
+        Key-shape caveat: a platform subject is stored as ``"_"`` by ``_key()``,
+        but a caller that passes the literal subject ``"global"`` gets a
+        ``global.json`` object — the restore-drill path files exactly that. Both
+        spellings can therefore appear here, and a matcher must accept either for
+        a platform subject (and then RESOLVE THE SPELLING IT MATCHED: the two are
+        different objects). The sweep's four kinds are only ever filed with
+        ``team_id=""`` (→ ``"_"``), so this does not affect them today.
 
         Fails SAFE: a listing error returns the empty set, so nothing is resolved
         on a read the caller could not perform.

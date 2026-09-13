@@ -716,3 +716,90 @@ def test_alert_failure_does_not_lose_the_poll_or_the_heartbeat():
     # fabricated WATCHER_DOWN.
     assert ch.issues == {}
     assert json.loads(storage.download(HEARTBEAT_KEY))["r2_ok"] is True
+
+
+# ── cycle-3 review: universe shrink across surfaces ─────────────────────────
+
+
+def test_universe_shrink_closes_the_absent_team_kinds_without_churn():
+    """A team whose seam entry and R2 prefix disappear closes its STALE incident on
+    the shrink poll — and a lingering `ops/teams/{team}/state.json` keeps
+    BACKUP_SET_MISSING open WITHOUT the resolve/re-open churn that would flip the
+    Telegram ✅/🚨 every poll (cycle-3 review P2).
+
+    The lingering state file IS the condition that kind reports (state without
+    archives), so staying open is correct; what matters is that repeated polls do
+    not re-file/re-announce it.
+    """
+    ch = _Channels()
+    storage = MemoryStorage()
+    _seed_archive(storage, "team_a", 200)          # stale → STALE
+    _seed_state(storage, "team_a")                 # → keeps BACKUP_SET_MISSING
+    w = _watcher(storage, ch)
+
+    w.poll()   # team present, stale
+    assert any("STALE" in t for t in ch.issues.values()), ch.issues
+
+    # The universe disappears from the seam AND from R2, but the state file stays.
+    w._teams = lambda: []
+    for k in list(storage.list("backups/team_a/")):
+        storage.delete(k)
+
+    w.poll()
+    titles = sorted(ch.issues.values())
+    assert not any("STALE" in t for t in titles), titles
+    assert titles == ["[DR] BACKUP_SET_MISSING — team_a"], titles
+
+    # Second shrink poll: the same single issue, no resolve-then-reopen churn.
+    w.poll()
+    assert sorted(ch.issues.values()) == titles, ch.issues
+    assert len(ch.issues) == 1, ch.issues
+
+
+def test_no_teams_leg_uses_the_previous_surface_snapshot():
+    """The `no_teams` leg resolves the PREVIOUS team surface — the caller snapshots
+    it before overwriting `_last_status`; without the snapshot the leg reads the
+    current (empty) surface and is a no-op."""
+    ch = _Channels()
+    storage = MemoryStorage()
+    _seed_archive(storage, "team_a", 200)
+    _seed_state(storage, "team_a")
+    w = _watcher(storage, ch)
+    w.poll()
+    assert any("STALE" in t for t in ch.issues.values()), ch.issues
+
+    w._teams = lambda: []
+    for k in [k for k in storage.list("") if k.startswith("backups/team_a/")]:
+        storage.delete(k)
+    storage.delete("ops/teams/team_a/state.json")   # fully gone from every surface
+    w.poll()
+    assert not ch.issues, f"the previous surface's incidents must close: {ch.issues}"
+
+
+def test_no_teams_shrink_does_not_resolve_then_reopen_a_backup_set_missing_team():
+    """The exclusion's purpose, pinned directly and non-vacuously: a team the shrink
+    leg would resolve (it is in the PREVIOUS surface) whose BACKUP_SET_MISSING is
+    still open (an earlier close failed) must not be resolved and immediately
+    re-opened in the SAME poll — that is a ✅-then-🚨 Telegram flip with a fresh
+    issue on every poll.
+
+    Mutation-checked: re-adding BACKUP_SET_MISSING to the shrink tuple makes this
+    test fail (the ✅ push appears); without it, the open leg is a dedup no-op.
+    """
+    ch = _Channels()
+    storage = MemoryStorage()
+    _seed_state(storage, "team_a")              # state, never any archives
+    w = _watcher(storage, ch, teams=())
+    # The incident is already open in the WATCHER's own store — e.g. its close
+    # failed on an earlier poll. (Seeding through `_store(ch)` would write to a
+    # different MemoryStorage and make this test vacuous — verified by mutation.)
+    assert w._alerts.open_incident("BACKUP_SET_MISSING", "team_a") is True
+    number = max(ch.issues)
+    w._last_status = {"per_team": {"team_a": "stale"}}   # and it was on the surface
+
+    for _ in range(3):                          # repeated polls = the flip surface
+        w.poll()
+
+    assert not [t for t in ch.telegram if "resolved" in t], ch.telegram
+    assert max(ch.issues) == number, "the incident must not be re-filed (flip)"
+    assert list(ch.issues.values()) == ["[DR] BACKUP_SET_MISSING — team_a"], ch.issues

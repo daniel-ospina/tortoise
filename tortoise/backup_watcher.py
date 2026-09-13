@@ -619,11 +619,13 @@ class BackupWatcher:
         heartbeat — so a broken alert path fabricated a *different*, false
         incident (WATCHER_DOWN) and masked the real R2 fault.
 
-        The block is best-effort: a leg that fails aborts the remaining legs for
-        THIS poll (logged with its traceback, and with the audit trail that the
-        poll's other work still completed), and the next poll re-evaluates every
-        leg — the lifecycle is dedup-backed and idempotent. That is the deliberate
-        trade for never losing the heartbeat.
+        The block is best-effort AND per-leg contained: a leg that fails is logged
+        with its (op, kind, subject) and the remaining legs still run (see
+        ``_alert_leg``). The outer guard below is therefore only reachable for a
+        structural defect in the status dict, not for an ordinary store failure.
+        If a leg fails, the next poll re-evaluates it — the lifecycle is
+        dedup-backed and idempotent. That is the deliberate trade for never losing
+        the heartbeat.
         """
         try:
             for team, state in status["per_team"].items():
@@ -644,6 +646,16 @@ class BackupWatcher:
                 # `self._last_status` here saw the CURRENT, empty surface, so the
                 # leg was a no-op and a fully-removed team's incidents never
                 # closed.
+                #
+                # BACKUP_SET_MISSING is deliberately EXCLUDED (cycle-3 review P2,
+                # corrected): a team whose `ops/teams/{team}/state.json` lingers is
+                # still reported in `status["backup_set_missing"]`, so resolving it
+                # here would be undone by the open leg below in the SAME poll — a
+                # ✅/🚨 Telegram flip every poll. A lingering state file with no
+                # archives is exactly what that kind reports, so it stays open; it
+                # closes only while the team is still enumerable (the team-surface
+                # resolve leg below), and once the team is fully removed the incident
+                # needs a manual close — see the runbook residual.
                 for team in sorted(prev_per_team or {}):
                     for kind in ("STALE", "NEVER_BACKED_UP", "METADATA_LOST"):
                         self._alert_leg("resolve_incident", kind, team)

@@ -422,7 +422,7 @@ Every backup + DR operator (sweep, purge, re-baseline, drill, scheduled drill, a
 | BACKUP_SET_MISSING | state exists but no archives (bulk delete/erroneous prune) | Investigate R2; restore from a retained archive if possible |
 | DRIVER_DOWN | driver heartbeat stale (> 4h) — workflow disabled/dead | Re-enable the workflow; GH 60-day auto-disable |
 | R2_DOWN | R2 unreachable or not listable (driver-side signal: `head-bucket` failed, or it passed but `list-objects-v2` failed so the pool is unverifiable) | Check R2 creds/billing/bucket policy and the access key's `ListObjects` permission |
-| ALERTER_DOWN | daemon's GitHub PAT dead (`gh_ok: false`) | **NOT EMITTED — no writer exists.** `gh_ok` is not on `/status`, so the driver has nothing to read; the condition currently surfaces only as a red workflow run. See "Kinds with no writer" below (tracked by #3033) |
+| ALERTER_DOWN | daemon's GitHub PAT dead (`gh_ok: false`) | **NOT EMITTED — no writer exists.** `gh_ok` is not on `/status`, so the driver has nothing to read; the condition currently surfaces only as a red workflow run. See "Kinds with no writer" below (deferred: #3033; the writer is tracked as **#3412**) |
 | APP_DOWN | app unreachable from the driver | Fly health; cold-start OOM (#545) |
 | WATCHER_DOWN | watcher heartbeat stale (daemon dead) | Check app logs; restart |
 | SWEEP_CONFIG_ERROR | `enabled:false` **with** a non-null `config_error` — the sweep flag says "run" but `load_config()` raised (e.g. missing `REGISTRY_STREAM_KEY`). The pre-#2796 driver exited 0 here. Error text is redacted before filing | Fix the Fly secret/config (`§REGISTRY_STREAM_KEY`); the next healthy run self-heals |
@@ -432,9 +432,9 @@ Every backup + DR operator (sweep, purge, re-baseline, drill, scheduled drill, a
 | ENUM_DELTA | the team enumeration went `>0 → 0` between runs (#669) — a wiped enumeration source, i.e. the #2823 silent-degradation class | **Investigate before trusting any green run**: the same 0 that makes the sweep look idle is the incident. Suppressible during the registry flip via `TORTOISE_SUPPRESS_ENUM_DELTA=1`. **Auto-resolves** on the next conclusive run that enumerates ≥1 team (the guard only fires on the `>0 → 0` transition, so a fixed source clears it) |
 | GRAPH_NAME_RESOLUTION_FAIL | every enumerated team failed graph-name resolution (`resolution` results) — the control plane died between enumeration and the per-team phase (#669) | Check the control-plane read (`/status` → `last_sweep.source`, `graph_failures`). **Auto-resolves** on the next conclusive run in which at least one team's graph resolved |
 | LIVENESS_NO_WORK | driver ran but did nothing (sweep skipped + reconcile empty) | **NOT EMITTED — superseded, not wired.** The enabled-but-0-teams case is SWEEP_NO_COVERAGE (#2796); this kind was never emitted by any surface. See "Kinds with no writer" below (tracked by #3033) |
-| SIZE_GUARD_ABORT | team graph > 100k nodes — dump aborted | Investigate graph growth; raise limit deliberately |
+| SIZE_GUARD_ABORT | team graph > 100k nodes — dump aborted | Investigate graph growth; raise limit deliberately. Closes via **re-baseline** (or a manual close) |
 | DATA_LOSS_CANDIDATE | a team's node count dropped >50% (or >0→0) | **Manual close only** — verify + re-baseline or restore |
-| P0_GUARD_FAIL | a dump named the wrong graph or was empty — objects deleted | Investigate the sweep. **Auto-resolves** on the next conclusive sweep in which that graph's dump passes the guard (the kind had no resolver before #3030, so it stayed open forever) |
+| P0_GUARD_FAIL | a dump's manifest did not name the graph it was taken from — objects deleted. ⚠️ **the producer is currently unreachable (#3423): its check compares the manifest against the value it passed in**, so treat an open incident as operator-raised, not sweep-raised | Investigate the sweep. **Auto-resolves** on the next conclusive sweep in which that graph's dump passes the guard (the kind had no resolver before #3030, so it stayed open forever) |
 | RESTORE_DRILL_FAILED | the #2317 scheduled monthly drill failed or breached the ≤15-min RTO (subject `global`; detail carries team/archive/duration) | Investigate the drill record (`ops/drills/last.json`); re-drill after fixing the restore path; auto-resolves on the next successful/no-candidates scheduled run |
 
 ### How incidents CLOSE
@@ -454,10 +454,12 @@ surface and stayed open forever (the live case was #2821).
    ⚠️ **Clearing requires POSITIVE EVIDENCE, never the mere absence of an
    emission** (review P0 on the first #3030 cut — it closed live alerts):
    * a **global** guard clears only on a run that actually **looked** — at least
-     one team result carrying a graph map. A 0-team or lock-busy run is exactly
-     what `ENUM_DELTA` reports; clearing it there would silence the #2823
-     silent-degradation class and it could never re-fire (the same run's
-     ops-state write resets the `>0 → 0` transition it keys on).
+     one team result carrying a graph map. A 0-team or a resolution-failed run is
+     exactly what `ENUM_DELTA`/`GRAPH_NAME_RESOLUTION_FAIL` report; clearing there
+     would silence the #2823 silent-degradation class and it could never re-fire
+     (the same run's ops-state write resets the `>0 → 0` transition it keys on).
+     (A **lock-busy** run is excluded for the same reason — its team results carry
+     `error` and no graph map.)
    * **`P0_GUARD_FAIL`** clears only for a graph whose dump demonstrably **ran and
      passed the guard** — the predicate is the result's `p0_checked` flag, not its
      status name. `aborted_size_guard` and a pre-dump `error` return *before* the
@@ -472,7 +474,7 @@ surface and stayed open forever (the live case was #2821).
 2. **Recovery-side clear** — the driver's self-heal legs (above).
 3. **Manual close only** — `DATA_LOSS_CANDIDATE` (a >50% node drop needs a human
 verdict: verify + re-baseline, or restore). `SIZE_GUARD_ABORT` closes through
-**re-baseline** (`POST /v1/internal/backups/rebaseline` resolves it together with
+**re-baseline** (`POST /v1/internal/backups/re-baseline` resolves it together with
 `DATA_LOSS_CANDIDATE`). Any kind added here must name the verification the
 operator performs.
 
@@ -480,9 +482,14 @@ A closed incident's dedup object is **deleted**, so a **recurrence files a new
 issue** — that is the contract (`delete-to-resolve`), and the driver adopts a
 still-open issue only when the object's recorded issue is verifiably open. On the
 app side, a failed **close** makes `resolve_incident` **raise**: nothing is
-announced and nothing is deleted, and the subject stays pending for the next
-poll. The driver's `gh_close` mirrors it — a non-2xx PATCH keeps the dedup object
-and marks the run red, so the next hourly run retries.
+announced and nothing is deleted. Every leg that iterates (the watcher's polls,
+the sweep's resolver) retries it next run. **Two app-side paths have no automatic
+retry** — re-baseline and the monthly drill — so their responses carry
+`incidents_unresolved` when a close failed: re-run the action once GitHub
+recovers, or close the issue by hand. Nothing pages a human about a close failure
+(no `ALERTER_DOWN` writer yet — #3412). The driver's `gh_close` mirrors the
+ordering — a non-2xx PATCH keeps the dedup object and marks the run red, so the
+next hourly run retries.
 
 Two residuals are known and tracked, not silently absorbed:
 
@@ -491,8 +498,19 @@ Two residuals are known and tracked, not silently absorbed:
   via the trash/restore flow) until #3410 lands the open-set reconciliation.
 * A dedup object whose recorded issue was closed **out of band** (by hand) is not
   re-verified on the app side, so that incident can stay silent until the object
-  is cleared — tracked as #3411, not a documented guarantee. (Closed by the driver
-  or the app itself? Both now delete the object only after a confirmed close.)
+  is cleared — tracked as #3411, not a documented guarantee. Both writers delete
+  the object only after a confirmed close, but neither re-checks a recorded issue
+  it did not close itself.
+* `BACKUP_SET_MISSING` is resolvable only while the team is enumerable (it closes
+  from the team surface). A team fully removed — no `ops/teams/{team}/state.json`
+  — takes its incident off every walk, so a still-open one needs a manual close;
+  same class as #3410. While the state file lingers it stays open **without
+  churn** (the shrink poll deliberately does not resolve it and then re-open it).
+* The app requires the audit **comment** to land before closing (a failed comment
+  raises and blocks the close, retried next run); the driver treats a failed
+  comment as best-effort and closes anyway. Deliberate asymmetry: the app is the
+  alerting authority and keeps the full audit trail; the driver exists to make
+  the outage visible and prefers a clean close.
 
 ### Kinds with no writer (`ALERTER_DOWN`, `LIVENESS_NO_WORK`)
 

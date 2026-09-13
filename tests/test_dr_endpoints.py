@@ -4,6 +4,7 @@ heartbeat / simulate / re-baseline / drill)."""
 from __future__ import annotations
 
 import base64
+import contextlib
 import json
 import os
 import tempfile
@@ -130,6 +131,10 @@ def _seed_team(team_id: str = "team_x", nodes: int = 2) -> None:
     reg.query("MATCH (t:Team {id:$id}) DELETE t", params={"id": team_id})
     reg.query("CREATE (t:Team {id:$id, tier:'pro'})", params={"id": team_id})
     g = sdk._get_proj().db.select_graph(f"team_{team_id}")
+    # #2878: the fixture DB is shared across tests, so a graph left by an earlier
+    # test inflates node_count and breaks the sweep count assertions. Clear it.
+    with contextlib.suppress(Exception):
+        g.query("MATCH (n) DETACH DELETE n")
     for i in range(nodes):
         g.query(
             "CREATE (p:Point {id:$id, content:$c, pointKind:'claim'})",
@@ -383,7 +388,8 @@ class TestDrSweep:
     def test_sweep_survives_a_resolve_failure(self, client, dr_env, mem_storage,
                                               monkeypatch):
         """A failing close must never fail the sweep request (the incident simply
-        stays open for the next run) nor lose the other resolutions."""
+        stays open for the next run) nor lose the other resolutions — and it must
+        be REPORTED as unresolved rather than silently vanishing (cycle-3)."""
         _seed_team("team_x", nodes=2)
         fake = _FakeAlerts(
             open_subjects={"ENUM_DELTA": {"_"}, "P0_GUARD_FAIL": {"team_x"}},
@@ -394,6 +400,22 @@ class TestDrSweep:
         r = client.post("/v1/internal/backups/sweep", headers=INTERNAL_HEADERS)
         assert r.status_code == 200, r.text
         assert r.json()["incidents_resolved"] == ["P0_GUARD_FAIL/team_x"]
+        assert r.json()["incidents_unresolved"] == ["ENUM_DELTA"]
+
+    def test_sweep_resolves_a_platform_incident_filed_under_the_global_spelling(
+            self, client, dr_env, mem_storage, monkeypatch):
+        """Cycle-3 review P2: the platform subject has two spellings in the store
+        (`_` and a literal `global`), so a matcher that accepts `global` MUST also
+        resolve `global` — passing "" would read `_.json` and clear nothing, which
+        is what the first version of this branch did."""
+        _seed_team("team_x", nodes=2)
+        fake = _FakeAlerts(open_subjects={"ENUM_DELTA": {"global"}})
+        monkeypatch.setattr(ha_mod, "_alert_store_from", lambda cfg: fake)
+
+        r = client.post("/v1/internal/backups/sweep", headers=INTERNAL_HEADERS)
+        assert r.status_code == 200, r.text
+        assert ("resolve", "ENUM_DELTA", "global") in fake.calls
+        assert r.json()["incidents_resolved"] == ["ENUM_DELTA/global"]
 
     def test_sweep_backs_up_seeded_team(self, client, dr_env, mem_storage):
         _seed_team("team_x", nodes=2)

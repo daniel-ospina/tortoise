@@ -20579,29 +20579,40 @@ async def backups_sweep(request: Request):
 
         candidates = sweep_resolutions(result)
         resolved: list[str] = []
+        failed: list[str] = []
         open_cache: dict[str, set[str]] = {}
         for kind, subject in candidates:
             try:
                 if kind not in open_cache:
                     open_cache[kind] = await asyncio.to_thread(alerts.open_subjects, kind)
-                # The platform subject has two spellings in the store: `_` (what
+                # A platform subject has two spellings in the store: `_` (what
                 # `_key()` writes for an empty subject) and a literal `global`
-                # (the restore-drill path files that one). Accept either for a
-                # platform candidate so a future kind filed under `global` still
-                # resolves instead of silently never closing (cycle-2 review P2).
-                if not (
-                    (subject or "_") in open_cache[kind]
-                    or (not subject and "global" in open_cache[kind])
-                ):
+                # (the restore-drill path files that one). Accept either — and
+                # resolve the spelling that MATCHED: they are different objects,
+                # so passing `""` for a `global`-spelled incident would read
+                # `_.json` and silently clear nothing (cycle-3 review).
+                target = subject
+                if not subject and "global" in open_cache[kind]:
+                    target = "global"
+                if (target or "_") not in open_cache[kind]:
                     continue
-                if await asyncio.to_thread(alerts.resolve_incident, kind, subject):
-                    resolved.append(f"{kind}/{subject}" if subject else kind)
+                if await asyncio.to_thread(alerts.resolve_incident, kind, target):
+                    resolved.append(f"{kind}/{target}" if target else kind)
             except Exception as e:
+                # The close raised (a failed close leaves the incident open). Do
+                # not report it as resolved; surface it so the run does not read
+                # as a clean sweep when a guard incident is still open.
+                failed.append(f"{kind}/{subject}" if subject else kind)
                 _logger.warning(
                     "incident resolve failed for %s/%s: %s", kind, subject or "global", e
                 )
+        # `incidents_resolved` means "dedup objects CLEARED", which includes
+        # placeholders and tombstones — not necessarily issues closed (cycle-3
+        # review). `incidents_unresolved` is the honest counterpart.
         if resolved:
             result["incidents_resolved"] = resolved
+        if failed:
+            result["incidents_unresolved"] = failed
         return result
 
 
@@ -20950,16 +20961,27 @@ async def backups_rebaseline(request: Request, body: dict):
     # close instead of returning silently — an unguarded call here would 500 the
     # re-baseline AFTER the operator's verdict was persisted, and the caller would
     # reasonably retry a state write that already happened).
+    #
+    # But NOTHING else resolves these two kinds, so a failed close leaves the
+    # incident open with no retry — the response and the log must say so rather
+    # than implying a poll will retry (cycle-3 review P1). The outcome is reported
+    # per kind so the operator can re-run re-baseline after GitHub recovers.
+    incidents_failed: list[str] = []
     for kind in ("DATA_LOSS_CANDIDATE", "SIZE_GUARD_ABORT"):
         try:
             alerts.resolve_incident(kind, subject)
         except Exception:
+            incidents_failed.append(f"{kind}/{subject}")
             _logger.warning(
-                "%s resolve failed on re-baseline of %s — the incident stays open "
-                "for the next poll", kind, subject, exc_info=True,
+                "%s resolve failed on re-baseline of %s — the incident is STILL OPEN "
+                "and only another re-baseline (or a manual close) clears it; re-run "
+                "once the GitHub API recovers", kind, subject, exc_info=True,
             )
-    return {"status": "rebaselined", "team_id": team_id,
-            "graph_id": graph_id, "node_count": count}
+    out = {"status": "rebaselined", "team_id": team_id,
+           "graph_id": graph_id, "node_count": count}
+    if incidents_failed:
+        out["incidents_unresolved"] = incidents_failed
+    return out
 
 
 def _drill_record(
