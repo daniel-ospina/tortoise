@@ -125,32 +125,54 @@ def _fly_check_budget_proxy_s() -> float | None:
     surface: ``deploy-hosted.yml`` curls ``/health/ready`` with no
     ``--max-time``, so there is no real deadline for it anywhere.
 
-    Returns ``None`` when the repo no longer configures an HTTP check at all.
-    """
-    import tomllib
+    Returns ``None`` ONLY when fly.toml genuinely configures no ``http_checks``
+    at all (the deliberate #2850 migration). EVERY other unreadable state — a
+    missing file, an unparsable ``timeout``, a malformed value — RAISES.
 
+    Collapsing those into ``None`` would silently disarm the ceiling: the
+    caller's ``else`` branch passes whenever ``tcp_checks`` is present, so
+    "budget absent" and "budget unreadable" must never share a return value.
+    A typo like ``timeout = "15x"`` has to FAIL LOUDLY, not quietly skip the
+    assertion this test exists to make.
+    """
     path = REPO / "fly.toml"
-    if not path.exists():  # pragma: no cover — repo invariant
+    assert path.exists(), (
+        f"fly.toml is missing at {path} — cannot read the health budget proxy"
+    )
+    try:
+        services = tomllib.loads(path.read_text())["services"][0]
+    except (KeyError, IndexError, TypeError) as exc:
+        raise AssertionError(
+            f"fly.toml has no readable services[0] block ({exc!r}) — the "
+            "cross-endpoint ceiling cannot be evaluated"
+        ) from exc
+    # #2850 (2026-09-10) removed [[services.http_checks]] deliberately: the
+    # /health HTTP check flapped and de-registered the sole machine, costing
+    # ~35 min of unreachability while the process was alive on loopback. It
+    # was replaced by [[services.tcp_checks]], whose ``timeout`` (5s) is
+    # documented in fly.toml as "generous headroom, not a latency budget" —
+    # it times a KERNEL accept, not an application response, so borrowing it
+    # as a /health/ready budget proxy would be a different quantity entirely
+    # (and smaller than the ready worst case, so it cannot serve as a ceiling).
+    # There is consequently NO HTTP-check budget to compare against until the
+    # deferred top-level [checks.loop_liveness] lands (#2850 follow-up).
+    if "http_checks" not in services:
         return None
     try:
-        cfg = tomllib.loads(path.read_text())
-        raw = cfg["services"][0]["http_checks"][0]["timeout"]
-    except (KeyError, IndexError, TypeError):
-        # #2850 (2026-09-10) removed [[services.http_checks]] deliberately: the
-        # /health HTTP check flapped and de-registered the sole machine, costing
-        # ~35 min of unreachability while the process was alive on loopback. It
-        # was replaced by [[services.tcp_checks]], whose ``timeout`` (5s) is
-        # documented in fly.toml as "generous headroom, not a latency budget" —
-        # it times a KERNEL accept, not an application response, so borrowing it
-        # as a /health/ready budget proxy would be a different quantity entirely
-        # (and smaller than the ready worst case, so it cannot serve as a ceiling).
-        # There is consequently NO HTTP-check budget to compare against until the
-        # deferred top-level [checks.loop_liveness] lands (#2850 follow-up).
-        return None
+        raw = services["http_checks"][0]["timeout"]
+    except (KeyError, IndexError, TypeError) as exc:
+        raise AssertionError(
+            "fly.toml configures http_checks but its [0].timeout is unreadable "
+            f"({services['http_checks']!r}) — the cross-endpoint ceiling is "
+            "being silently disarmed; fix the reader or the config"
+        ) from exc
     try:
         return float(str(raw).rstrip("s"))
-    except ValueError:  # pragma: no cover — malformed config
-        return None
+    except ValueError as exc:
+        raise AssertionError(
+            f"fly.toml http_check timeout {raw!r} is not a duration ({exc!r}) — "
+            "the cross-endpoint ceiling is being silently disarmed"
+        ) from exc
 
 
 def test_every_plane_probe_is_hard_bounded_and_fail_closed():
@@ -348,14 +370,22 @@ def test_each_plane_bound_sits_above_its_own_client_timeout(monkeypatch):
     else:
         # No HTTP-check budget in fly.toml (the #2850 state). Make that ABSENCE a
         # positive assertion rather than a silent skip: it may only mean the
-        # documented HTTP->TCP migration, so the replacement must be present. An
-        # accidental deletion of the whole checks block therefore still reds here.
+        # documented HTTP->TCP migration, so the replacement must be present, and
+        # deleting the whole checks block still reds here. NOTE this branch does
+        # NOT bound the readiness SUM — the per-plane assertions above bound each
+        # phase, not ``DB_PROBE_HARD_TIMEOUT + CONTROL_PLANE_HARD_TIMEOUT``. So
+        # ``ready_worst_case`` is currently pinned per-plane only, and the sum
+        # becomes bounded again when the deferred top-level
+        # ``[checks.loop_liveness]`` lands (#2850 follow-up). Stated plainly
+        # rather than implying this branch is an equivalent substitute.
+        # ``_fly_check_budget_proxy_s`` has already raised if fly.toml is
+        # missing or exposes an unreadable http_check, so re-reading here is
+        # safe and only answers "is the documented replacement present?".
         _cfg = tomllib.loads((REPO / "fly.toml").read_text())
         assert _cfg["services"][0].get("tcp_checks"), (
             "fly.toml exposes NEITHER an http_check budget proxy NOR the "
             "tcp_checks that replaced it (#2850) — the services checks block "
-            "was removed or altered without the documented migration, so the "
-            "cross-endpoint ceiling is now unverifiable rather than migrated"
+            "was removed or altered without the documented migration"
         )
 
 
