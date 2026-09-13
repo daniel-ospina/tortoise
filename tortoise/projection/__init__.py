@@ -2435,10 +2435,18 @@ class FalkorProjection(
         # ordering unindexed.
         for _stmt in ("DROP INDEX ON :Point(is_operator)",
                       "DROP INDEX ON :Point(is_operator, lastDreamedAt)"):
-            try:  # noqa: SIM105
+            try:
                 self.g.query(_stmt)
-            except Exception:
-                pass  # no such index — the healthy case
+            except Exception as _e:
+                # Only "no such index" is the healthy case. Swallowing every
+                # failure would treat a genuine drop error as "nothing to
+                # drop", leaving a poisoned index in place with no diagnostic
+                # — the silent-failure class #3154 exists to close (#3154
+                # review P2).
+                if "no such index" not in str(_e).lower():
+                    logger.warning(
+                        "#3154: DROP INDEX %s failed: %s", _stmt, _e,
+                    )
 
         # ── lastDreamedAt freshness index (epic 903-C2, #1240) ──
         # Powers the stale-first scheduler's staleness ranking

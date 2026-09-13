@@ -18,6 +18,7 @@ non-embedded gate).
 from __future__ import annotations
 
 import os
+import threading
 import uuid
 
 import pytest
@@ -188,14 +189,18 @@ def test_graph_copy_preserves_boolean_false_entries(db):
 
 
 def test_restore_swap_preserves_boolean_false_entries(db):
-    """The real restore path (dump → temp → verify → delete live →
+    """INVARIANT PIN (not a #3154 regression test — see below).
+
+    The real restore path (dump → temp → verify → delete live →
     GRAPH.COPY temp→live) must not silently degrade the boolean predicate.
 
     The temp graph is built by ``restore_graph`` from the logical dump and so
     carries NO index schema — the swap therefore cannot carry a boolean index
-    today. This test pins that end-to-end invariant; the compensating audit
-    (``_audit_copied_boolean_indexes``) is exercised directly by the other
-    tests in this file.
+    today, so this test PASSES on pre-fix code and does not discriminate the
+    bug. It is kept as an end-to-end invariant pin on the restore flow; the
+    corruption itself is covered by
+    ``test_audit_helper_repairs_a_corrupted_copy`` (which does fail pre-fix).
+    Do not mistake this test for corruption coverage (#3154 review P2).
     """
     from tortoise.hosted_backup import _restore_into_temp_verify_swap, dump_graph
     from tortoise.projection import FalkorProjection
@@ -227,6 +232,94 @@ def test_restore_swap_preserves_boolean_false_entries(db):
     _assert_healthy(proj2.g, tag="after post-restore index rebuild")
     proj2.close()
     proj.close()
+
+
+def test_audit_never_false_raises_under_concurrent_writes(db):
+    """The drop-verification must be PRESENCE-based, never a count comparison.
+
+    ``= false`` and ``NOT is_operator`` are two SEPARATE non-atomic queries, so
+    a concurrent non-operator write landing between them desynchronises the
+    counts in a way that is indistinguishable from a corrupt index. Pre-fix
+    this raised on a graph that had NO index at all — measured 35 spurious
+    raises in 40 audits while a writer ran — and the raise happens AFTER the
+    live graph has been swapped, so a SUCCESSFUL restore/import was reported
+    to the caller as a destructive failure (restore → 503, import → 422 +
+    quarantine) blaming a non-existent index.
+
+    Presence-based detection reads the index catalogue, which no concurrent
+    write can desynchronise: with no boolean index present the audit must
+    return False every time, and never raise.
+    """
+    from tortoise.hosted_backup import _audit_copied_boolean_indexes
+
+    graph_db, created = db
+    name = _name("audit_race")
+    created.append(name)
+    g = graph_db.select_graph(name)
+    _seed_points(g)  # fresh graph: NO boolean index
+
+    stop = threading.Event()
+    errors: list[BaseException] = []
+
+    def _writer() -> None:
+        i = 0
+        while not stop.is_set():
+            try:
+                g.query(
+                    "CREATE (n:Point {id:$id, content:'race', "
+                    "is_operator:false})",
+                    params={"id": f"race_{i}"},
+                )
+            except Exception:  # graph torn down at teardown
+                return
+            i += 1
+
+    t = threading.Thread(target=_writer, daemon=True)
+    t.start()
+    try:
+        for _ in range(40):
+            try:
+                assert _audit_copied_boolean_indexes(
+                    g, graph_name=name, stage="race",
+                ) is False
+            except BaseException as e:  # recorded for the assert below
+                errors.append(e)
+    finally:
+        stop.set()
+        t.join(timeout=5)
+
+    assert not errors, (
+        "presence-based audit must not raise when no boolean index exists "
+        f"(got {len(errors)}/40): {errors[:2]}"
+    )
+
+
+def test_audit_raises_when_a_boolean_index_cannot_be_dropped(db, monkeypatch):
+    """The failure signal must be 'the index is STILL THERE', not 'counts
+    disagree'. Forcing the drop to be a no-op while an index is present must
+    raise; a surviving corrupt index returns ZERO rows for every
+    ``is_operator = false`` predicate, which is the whole hazard."""
+    from tortoise import hosted_backup
+
+    graph_db, created = db
+    name = _name("audit_survive")
+    created.append(name)
+    g = graph_db.select_graph(name)
+    _seed_points(g)
+    g.query("CREATE INDEX ON :Point(is_operator)")  # presence signal
+
+    real = g.query
+
+    def _no_op_drop(q, *a, **kw):
+        if str(q).upper().startswith("DROP INDEX"):
+            return real("RETURN 1")
+        return real(q, *a, **kw)
+
+    monkeypatch.setattr(g, "query", _no_op_drop)
+    with pytest.raises(RuntimeError, match="survived"):
+        hosted_backup._audit_copied_boolean_indexes(
+            g, graph_name=name, stage="survive",
+        )
 
 
 def test_audit_helper_repairs_a_corrupted_copy(db):

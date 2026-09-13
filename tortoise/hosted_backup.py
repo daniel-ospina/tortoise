@@ -1010,6 +1010,13 @@ def _audit_copied_boolean_indexes(
     succeeding is itself the presence signal (an absent index raises "no
     such index" in O(1)).
 
+    A boolean index is DETECTED BY PRESENCE (`CALL db.indexes()`), not by
+    comparing two predicate counts: those counts come from separate
+    non-atomic queries, so a concurrent non-operator write landing between
+    them is indistinguishable from corruption (measured: 35/40 false
+    "corruption" raises on a graph with NO index while a writer ran). The
+    count probe is retained for diagnostics only and gates nothing.
+
     Dropping is the only repair. A copy destination that carries an index set
     rebuilds the boolean index CORRUPT: after ``DROP INDEX``, a fresh
     ``CREATE INDEX`` on ``is_operator`` still reads 0 for `= false` (measured
@@ -1025,7 +1032,23 @@ def _audit_copied_boolean_indexes(
     drop — a caller must not report a successful copy that silently degrades
     belief state. Never raises when ``raise_on_failure`` is False.
     """
+    def _index_has_is_operator() -> bool:
+        """Is there a ``:Point`` index whose field list includes
+        ``is_operator``?  PRESENCE, read from the index catalogue — not a
+        predicate count."""
+        rows = g.query("CALL db.indexes()").result_set
+        return any(
+            row and row[0] == "Point" and "is_operator" in str(row[1])
+            for row in rows
+        )
+
     def _probe() -> tuple[int, int]:
+        """Diagnostic only — NEVER gates the repair. Two separate count()
+        queries are not atomic, so a concurrent non-operator write landing
+        between them desynchronises them indistinguishably from corruption
+        (measured: 35/40 false "corruption" raises on a graph with NO index
+        while a writer ran). Hence presence-based detection above/below, and
+        this is used solely to describe what was found."""
         indexed = int(g.query(
             "MATCH (n:Point) WHERE n.is_operator = false RETURN count(n)"
         ).result_set[0][0])
@@ -1034,49 +1057,78 @@ def _audit_copied_boolean_indexes(
         ).result_set[0][0])
         return indexed, truth
 
+    def _drop_boolean_indexes() -> bool:
+        """Unconditionally drop every known boolean-index form. Returns True
+        when a DROP actually removed something.
+
+        Only "no such index" is swallowed: treating EVERY failure as
+        "absent" silently skips the repair on a genuine drop error, which is
+        the silent-failure class #3154 exists to close.
+        """
+        dropped = False
+        for stmt in ("DROP INDEX ON :Point(is_operator)",
+                     "DROP INDEX ON :Point(is_operator, lastDreamedAt)"):
+            try:
+                g.query(stmt)
+                dropped = True
+            except Exception as e:
+                if "no such index" not in str(e).lower():
+                    logger.warning(
+                        "#3154: DROP INDEX failed on %s after %s (%s): %s",
+                        graph_name, stage, stmt, e,
+                    )
+                # else: absent — the healthy case (O(1), no startup penalty)
+        return dropped
+
+    # Presence FIRST, so nothing below depends on a racy count comparison.
     try:
-        indexed, truth = _probe()
-    except Exception as e:  # graph gone / unsupported label — never mask
+        if not _index_has_is_operator():
+            return False
+    except Exception as e:
         logger.warning(
-            "#3154: could not probe boolean predicates on %s after %s: %s",
+            "#3154: could not enumerate indexes on %s after %s: %s",
             graph_name, stage, e,
         )
         return False
 
-    # Unconditional, presence-based drop: a poisoned index whose counts happen
-    # to agree (no `false` rows at copy time) must not survive — it silently
-    # swallows every later non-operator write. `present` records that a DROP
-    # actually removed something; the healthy case raises "no such index".
-    present = False
-    for stmt in ("DROP INDEX ON :Point(is_operator)",
-                 "DROP INDEX ON :Point(is_operator, lastDreamedAt)"):
-        try:
-            g.query(stmt)
-            present = True
-        except Exception:
-            pass  # no such index form — try the other
-
+    indexed = truth = None
     try:
-        indexed2, truth2 = _probe()
+        indexed, truth = _probe()
+    except Exception as e:
+        # A probe failure must not suppress the drop (it gates nothing now).
+        logger.warning(
+            "#3154: could not probe boolean predicates on %s after %s: %s",
+            graph_name, stage, e,
+        )
+
+    present = _drop_boolean_indexes()
+
+    # PRESENCE-based verification: the repair is "the index is GONE", not
+    # "two counts agree". A surviving index is the failure, whatever the
+    # counts say.
+    try:
+        still_present = _index_has_is_operator()
     except Exception as e:
         logger.warning(
-            "#3154: re-probe failed on %s after %s: %s", graph_name, stage, e,
+            "#3154: could not re-check indexes on %s after %s: %s",
+            graph_name, stage, e,
         )
         return present
 
-    if indexed2 != truth2:
+    if still_present:
         msg = (
-            f"#3154: boolean index on {graph_name} is still corrupt after the "
-            f"{stage} copy ({indexed2} rows via `= false` vs {truth2} ground "
-            "truth) and could not be repaired — refusing to report a "
-            "successful copy that silently degrades EP/calibration state"
+            f"#3154: a boolean is_operator index on {graph_name} survived the "
+            f"{stage} copy's repair and could not be dropped — refusing to "
+            "report a successful copy that silently degrades EP/calibration "
+            "state (a surviving corrupt index returns ZERO rows for every "
+            "`is_operator = false` predicate)"
         )
         if raise_on_failure:
             raise RuntimeError(msg)
         logger.error("%s (raise_on_failure=False)", msg)
         return present
 
-    if indexed != truth:
+    if indexed is not None and indexed != truth:
         logger.error(
             "#3154: GRAPH.COPY dropped the `false` entries of the boolean "
             "is_operator index on %s (%s) — `= false` read %d rows instead of "
