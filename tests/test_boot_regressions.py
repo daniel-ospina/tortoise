@@ -138,9 +138,9 @@ def _redact(uri: str) -> str:
         ),
         ("docker://user:p@ss@host:7687/g#frag", "docker://:***@host:7687/g#frag"),
         # Same class as '/': a delimiter inside the password must not end the mask.
-        # The canonical Python helper leaks these (pre-existing there) because its
-        # authority region stops at '?'/'#'; the entrypoint's single-bare-URI rule
-        # masks to the last '@' anywhere, so it fails safe and masks MORE.
+        # #2983 closed the matching gap in the canonical Python helper (its
+        # authority region used to stop at '?'/'#'); the entrypoint's rule masks to
+        # the last '@' anywhere and the two now agree on these shapes.
         (
             "rediss://user:S3n?tinel@host.cloud:1234",
             "rediss://:***@host.cloud:1234",
@@ -185,6 +185,12 @@ _BARE_URI_CORPUS = [
     "rediss://tortoise:hunter2@r-example.host.cloud:50317",
     "rediss://user:S3n/tinel@host.cloud:1234",
     "rediss://user:S3n@tinel@host.cloud:1234",
+    "rediss://user:S3n?tinel@host.cloud:1234",
+    "rediss://user:S3n#tinel@host.cloud:1234",
+    "rediss://user:p@ss?word@host.cloud:1234",
+    "rediss://user:p://w@host.cloud:1234",
+    "rediss://user:S3n@tinel://w@host.cloud:1234/db",
+    "rediss://user:S3n?tinel://w@host.cloud:1234/db",
     "rediss://user:p%40ss%3Aword@host.cloud:1234",
     "docker://user@host:6379/db",
     "docker://:@127.0.0.1:59997/tenant-alpha",
@@ -205,10 +211,11 @@ def test_shell_redactor_agrees_with_the_canonical_python_masker():
     as equivalent and was not.
 
     Scope: parity holds over the corpus below, which enumerates the bare-URI
-    shapes the entrypoint can receive. Two deliberate, documented asymmetries:
-    the canonical helper also masks every `scheme://` occurrence inside a longer
-    message, and it stops its authority region at `?`/`#` (so it leaks a password
-    containing those, a pre-existing gap this shell rule does not share).
+    shapes the entrypoint can receive. One deliberate, documented asymmetry:
+    the canonical helper additionally masks every `scheme://` occurrence inside
+    a longer message; the shell helper is `^`-anchored and does not, by design.
+    Both now fail closed on a '?'/'#', a bare '://', or an '@' inside a
+    password (#2983).
     """
     from tortoise.__main__ import _mask_uri_userinfo
 
