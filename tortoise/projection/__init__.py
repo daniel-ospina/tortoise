@@ -464,7 +464,41 @@ def _journal_append_product(graph_name: str) -> None:
     P1-1: the parent dir exists only after _redislite_hygiene's session
     fixture — makedirs BEFORE every append so module-import/collect-only
     appends cannot FileNotFoundError). Absent env var → no-op, never fail
-    (the specified fallback)."""
+    (the specified fallback).
+
+    Failure policy (#3214): a WRITE failure is not hygiene bookkeeping — the
+    journal is the OWNERSHIP CONTRACT, so a minted graph that cannot be
+    journaled is UNOWNED: a live peer's scope=None sweep finds no record of
+    it and may delete it (the cross-session flake #3074 exists to stop). The
+    old policy (a silent no-op logged at DEBUG) hid that state for the whole
+    session, so an OSError now RAISES: the session stops at the first mint
+    whose ownership could not be recorded instead of letting the shared
+    server accumulate graphs a peer sweep may destroy.
+
+    NOT fail-closed, and not claimed to be: raising neither removes nor
+    protects the graph, so a caller that already created its graph holds an
+    UNOWNED one and must deal with it itself. The two sdk.py call sites do:
+      * the registry append (``_get_registry``) runs BEFORE the handle is
+        cached and BEFORE ``_ensure_registry_indexes`` writes, and
+        ``select_graph`` is client-side (no server call) — a raise there
+        mints nothing and leaves no half-initialized registry behind;
+      * the team-mint append (``team_create``) runs AFTER the team graph's
+        TeamMeta CREATE, and its failure path DROPS that graph (best-effort —
+        if the drop fails too the graph survives and is WARNING-logged)
+        before re-raising; ``team_create``'s own handler rolls the registry
+        Team node back.
+    The other call sites are MIXED, which is why this is a per-caller
+    contract and not a property of the function: some hosted mint lanes drop
+    the graph on failure (``provision_tenant``, ``register_user``'s provision
+    lane) and some do not (``register_user``'s first lane,
+    ``_eager_provision_org_graph``) — those propagate the raise with the
+    graph left in place. The projection redirect / from_uri seams append
+    BEFORE the projection (and so the graph) is materialized, so a raise
+    there mints nothing. The ordering behind all of them (CREATE before the
+    ownership line) is the real fix and is tracked in #3390.
+
+    The two no-op gates above (absent path, not a test session) are
+    unchanged, so production mints never reach the raise."""
     path = _journal_file_path()
     if not path:
         return
@@ -478,10 +512,18 @@ def _journal_append_product(graph_name: str) -> None:
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "a") as fh:
             fh.write(graph_name + "\n")
-    except Exception:
-        # never fail a construction over journaling (cycle-8 P2-3 spirit)
-        logging.getLogger(__name__).debug(
-            "journal append skipped for %r (%r)", graph_name, path)
+    except OSError as e:
+        # #3214: see the docstring — the journal write is the ownership
+        # contract, so an unjournalable mint stops the session instead of
+        # silently producing a graph no sweep can attribute to a session.
+        raise RuntimeError(
+            f"session journal append failed for {graph_name!r} ({path!r}): "
+            f"{e!r} — the graph is minted but UNOWNED: a live peer's "
+            f"scope=None sweep has no record of it and may delete it "
+            f"(#3214). Stopping at the first mint whose ownership could "
+            f"not be recorded; a caller that already created the graph "
+            f"must drop it (see #3390 for the write-ahead fix)."
+        ) from e
 
 
 # ── Mixins ────────────────────────────────────────────────────────────────
