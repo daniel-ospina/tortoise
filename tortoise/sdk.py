@@ -14648,16 +14648,20 @@ class TortoiseSDK:
                 "CREATE (:TeamMeta {name:$name, created:$now})",
                 {"name": name, "now": now},
                 org_id=tid, fork=init_fork, compact=init_compact)
+            # #3390 WRITE-AHEAD: journal the intended team_{name} graph
+            # BEFORE the TeamMeta CREATE that materializes it. The old order
+            # (CREATE then journal) left an UNOWNED graph whenever the
+            # process died in the gap — no live peer could attribute it, so a
+            # scope=None sweep could DETACH it and a journal rebuild diverged
+            # from live (live != rebuild). Journal-first makes an unjournaled
+            # graph impossible by construction; a journaled-but-never-created
+            # name is harmless (the sweep's GRAPH.DELETE on an absent graph is
+            # the is_missing_graph_error success family). No rollback removes
+            # the line — it is the ownership tombstone that guarantees cleanup.
+            # No-op outside test sessions (journal env absent).
+            from tortoise.projection import journal_mint_write_ahead
+            journal_mint_write_ahead(graph_name)
             team_graph.query(_init_q, params=_init_p)
-            # #1686: journal the minted team_{name} graph IMMEDIATELY after
-            # the TeamMeta CREATE succeeds (and before _graph_create, whose
-            # failure rolls back only the registry Team node — the graph is
-            # already minted; journaling before it captures the orphan). The
-            # session-end sweep drops journaled names, so team_* graphs no
-            # longer accumulate on the docker. No-op outside test sessions
-            # (journal env absent).
-            from tortoise.projection import _journal_append_product
-            _journal_append_product(graph_name)
             # Graph node (team→graph 1:N, product ontology): the default graph
             self._graph_create(tid, "default", kind="default", namespace=graph_name)
             # #1748: the owner Membership for the session user — INSIDE the
