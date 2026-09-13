@@ -19896,19 +19896,26 @@ def _legacy_bucket_map(rows: list[dict], legacy: list[dict]) -> dict[str, str]:
             if str(m.get("graph_name") or "") in ns_to_gid}
 
 
-def _incident_subject(inc: dict) -> str:
-    """#2313: alert-store subject for a sweep incident.
+# #3030: the sweep-emitted guard kinds a conclusive clear run resolves, and the
+# subject rule that keys them, are both owned by ``tortoise.backup_sweep``
+# (``sweep_resolutions`` / ``graph_subject`` / ``incident_subject``) — nothing
+# sweep-domain is duplicated here.
 
-    Default-graph and team-level incidents keep the bare team subject (the
-    pre-#2313 alert surface). Custom-graph incidents use the per-graph
-    subject "{team}:{gid}" — the SAME key the watcher uses — so re-baseline
-    and the watcher can open/resolve coherently.
-    """
-    gid = inc.get("graph_id")
-    tid = inc.get("team_id", "")
-    if gid and gid != "default":
-        return f"{tid}:{gid}"
-    return tid
+
+def _graph_subject(team_id: str, graph_id: str) -> str:
+    """Alert-store subject for one graph (#2313) — thin alias for
+    ``backup_sweep.graph_subject``, keeping this module's call sites stable."""
+    from tortoise.backup_sweep import graph_subject
+
+    return graph_subject(team_id, graph_id)
+
+
+def _incident_subject(inc: dict) -> str:
+    """#2313: alert-store subject for a sweep incident — thin alias for
+    ``backup_sweep.incident_subject``."""
+    from tortoise.backup_sweep import incident_subject
+
+    return incident_subject(inc)
 
 
 @app.get("/backups")
@@ -20564,6 +20571,25 @@ async def backups_sweep(request: Request):
                 alerts_failed.append(inc.get("kind"))
         if alerts_failed:
             result["alerts_failed"] = alerts_failed
+
+        # ── #3030: producer-side resolution for the sweep's guard kinds. ──
+        # The sweep is the authority on its own guards: a conclusive run that did
+        # NOT emit a kind IS the "condition cleared" evidence, closed through the
+        # same delete-to-resolve lifecycle the watcher uses. `sweep_resolutions`
+        # owns the decision (a degraded run clears nothing); this performs it.
+        from tortoise.backup_sweep import sweep_resolutions
+
+        resolved: list[str] = []
+        for kind, subject in sweep_resolutions(result):
+            try:
+                if await asyncio.to_thread(alerts.resolve_incident, kind, subject):
+                    resolved.append(f"{kind}/{subject}" if subject else kind)
+            except Exception as e:
+                _logger.warning(
+                    "incident resolve failed for %s/%s: %s", kind, subject or "global", e
+                )
+        if resolved:
+            result["incidents_resolved"] = resolved
         return result
 
 

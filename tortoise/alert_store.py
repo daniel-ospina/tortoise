@@ -157,7 +157,18 @@ class AlertStore:
             if hits:
                 issue_number = hits[0]
         except Exception as e:
-            logger.warning("incident search failed for %s: %s", kind, e)
+            # #3029 fail-closed: a FAILED search is not an empty search. Filing
+            # here would create a duplicate issue for an incident that may
+            # already be tracked (the search is the only dedup left when the
+            # create-once object is a placeholder). Leave the placeholder in
+            # place — it carries no issue_number, so the next poll re-enters this
+            # branch and retries; nothing is lost, only delayed.
+            logger.warning(
+                "incident search failed for %s: %s — filing deferred "
+                "(a failed search is not 'no incident')", kind, e,
+            )
+            _write_json(self._storage, key, state)
+            return False
         if issue_number is None:
             try:
                 issue_number = self._file(

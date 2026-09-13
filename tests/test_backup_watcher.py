@@ -622,3 +622,61 @@ def test_watcher_transient_manifest_read_failure_no_fabricated_stale():
     # fresh (0.5 h < 90 min) — NOT stale, no incident
     assert status["per_team"]["team_a"] == "ok"
     assert not any("STALE" in t for t in list(ch.issues.values()))
+
+
+# ── #3031: a broken alerter must never fabricate WATCHER_DOWN ────────────────
+
+
+def test_alert_path_failure_still_writes_the_heartbeat():
+    """#3031: the alert store shares the R2 storage, so the degraded condition
+    R2_DOWN reports is exactly what makes `open_incident` raise. Uncontained,
+    that exception escaped the poll and skipped the heartbeat — and the DR driver
+    then filed WATCHER_DOWN against a watcher that was alive, masking the real
+    R2 fault.
+
+    The fixture seeds a STALE team, so the alert legs DO run: `open_incident` is
+    the first leg that fires (never resolving), and it raises here.
+    """
+    ch = _Channels()
+    storage = MemoryStorage()
+    _seed_archive(storage, "team_a", 200)   # stale → the alert legs fire
+    _seed_state(storage, "team_a")
+    w = _watcher(storage, ch)
+
+    calls: list[tuple[str, str]] = []
+
+    def _boom(kind, team_id="", detail=None):
+        calls.append(("open", f"{kind}/{team_id}"))
+        raise RuntimeError("R2 read outage while filing the incident")
+
+    w._alerts.open_incident = _boom  # type: ignore[method-assign]
+    status = w.poll()
+
+    # The failure was actually reached (no vacuous pass: the leg ran and raised).
+    assert calls == [("open", "STALE/team_a")], calls
+    hb = json.loads(storage.download(HEARTBEAT_KEY))
+    assert hb["last_poll_at"], "the heartbeat must be written despite the alert failure"
+    assert status["per_team"]["team_a"] == "stale"
+    assert ch.issues == {}, "nothing could be filed — the store is down"
+
+
+def test_alert_store_failure_does_not_skip_the_other_legs():
+    """A failure while resolving a leg must not stop the poll: the reminder of
+    the block is re-evaluated on the next poll (dedup-backed, idempotent), and
+    the heartbeat still lands."""
+    ch = _Channels()
+    storage = MemoryStorage()
+    _seed_archive(storage, "team_a", 200)
+    _seed_state(storage, "team_a")
+    w = _watcher(storage, ch)
+
+    def _boom(kind, team_id="", detail=None):
+        raise RuntimeError("alert store down")
+
+    w._alerts.open_incident = _boom  # type: ignore[method-assign]
+    w.poll()
+    # No incident could be filed (the store is down) — but the poll completed and
+    # the heartbeat is fresh, so the failure is visible as itself, not as a
+    # fabricated WATCHER_DOWN.
+    assert ch.issues == {}
+    assert json.loads(storage.download(HEARTBEAT_KEY))["r2_ok"] is True

@@ -330,7 +330,10 @@ class BackupWatcher:
         # ── R2 read (the only external read the daemon makes). ──
         try:
             r2_teams = _team_prefixes(self._storage)
-            state = _read_json(self._storage, "ops/state.json")
+            # (The `ops/state.json` read that used to sit here was dead — the
+            # name was never read, and only escaped ruff because the alert
+            # loops below rebound it. #3031 moved those loops into
+            # `_drive_alerts`, which is what exposed it.)
             heartbeat = self._heartbeat_reader()
             driver_ts: datetime | None = None
             try:
@@ -493,6 +496,49 @@ class BackupWatcher:
 
         # ── Drive the alert store (no graph writes anywhere here). ──
         if not status.get("unknown") and not status.get("in_grace"):
+            self._drive_alerts(status, r2_ok)
+
+        # ── Heartbeat + pending-push retries (R2 writes — safe to skip when down). ──
+        try:
+            self._storage.upload(
+                HEARTBEAT_KEY,
+                json.dumps(
+                    {
+                        "last_poll_at": now.isoformat(),
+                        "r2_ok": r2_ok,
+                        "status": status.get("per_team", {}),
+                    }
+                ).encode(),
+                content_type="application/json",
+            )
+        except Exception as e:
+            logger.warning("heartbeat write failed: %s", e)
+        try:
+            self._alerts.retry_pending()
+        except Exception as e:
+            logger.warning("pending-push retry failed: %s", e)
+
+        self._check_memory()
+        return status
+
+    def _drive_alerts(self, status: dict[str, Any], r2_ok: bool | None) -> None:
+        """#3031: drive the alert store — fail-soft, never at the heartbeat's expense.
+
+        The heartbeat written right after this call is the watcher's OWN
+        liveness evidence: the DR driver files WATCHER_DOWN when it goes stale.
+        The alerts share the same R2 store, so the degraded condition that
+        R2_DOWN exists to report is exactly the one that makes
+        ``open_incident``/``resolve_incident`` raise (``_read_json`` re-raises a
+        read ``RuntimeError``; ``create_if_not_exists`` re-raises anything that
+        is neither 412 nor an accepted fallback). Uncontained, that exception
+        escaped ``_poll_inner``, was swallowed by ``poll()``, and skipped the
+        heartbeat — so a broken alert path fabricated a *different*, false
+        incident (WATCHER_DOWN) and masked the real R2 fault.
+
+        Each leg is therefore contained and logged; the lifecycle is
+        dedup-backed and idempotent, so the next poll re-evaluates.
+        """
+        try:
             for team, state in status["per_team"].items():
                 if state == "never":
                     self._alerts.open_incident("NEVER_BACKED_UP", team)
@@ -535,33 +581,19 @@ class BackupWatcher:
                 if team not in status.get("backup_set_missing", []):
                     self._alerts.resolve_incident("BACKUP_SET_MISSING", team)
             # R2_DOWN: emit while degraded-from-known-good, resolve when healthy.
+            # No separate guard here: this is the LAST leg of the block, so the
+            # outer `except` above already contains it — and the next poll
+            # re-evaluates every leg (the lifecycle is dedup-backed and
+            # idempotent).
             if r2_ok is False:
                 self._alerts.open_incident("R2_DOWN")
             else:
                 self._alerts.resolve_incident("R2_DOWN")
-
-        # ── Heartbeat + pending-push retries (R2 writes — safe to skip when down). ──
-        try:
-            self._storage.upload(
-                HEARTBEAT_KEY,
-                json.dumps(
-                    {
-                        "last_poll_at": now.isoformat(),
-                        "r2_ok": r2_ok,
-                        "status": status.get("per_team", {}),
-                    }
-                ).encode(),
-                content_type="application/json",
+        except Exception as e:
+            logger.warning(
+                "alert store legs failed: %s — heartbeat unaffected (a broken "
+                "alerter must never fabricate WATCHER_DOWN)", e,
             )
-        except Exception as e:
-            logger.warning("heartbeat write failed: %s", e)
-        try:
-            self._alerts.retry_pending()
-        except Exception as e:
-            logger.warning("pending-push retry failed: %s", e)
-
-        self._check_memory()
-        return status
 
     def _check_memory(self) -> None:
         """Process-RSS trend guard: if RSS grows beyond 50 MB over baseline,

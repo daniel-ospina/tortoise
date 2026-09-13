@@ -422,21 +422,68 @@ Every backup + DR operator (sweep, purge, re-baseline, drill, scheduled drill, a
 | BACKUP_SET_MISSING | state exists but no archives (bulk delete/erroneous prune) | Investigate R2; restore from a retained archive if possible |
 | DRIVER_DOWN | driver heartbeat stale (> 4h) — workflow disabled/dead | Re-enable the workflow; GH 60-day auto-disable |
 | R2_DOWN | R2 unreachable or not listable (driver-side signal: `head-bucket` failed, or it passed but `list-objects-v2` failed so the pool is unverifiable) | Check R2 creds/billing/bucket policy and the access key's `ListObjects` permission |
-| ALERTER_DOWN | daemon's GitHub PAT dead (`gh_ok: false`) | Rotate `DR_ISSUES_PAT` |
+| ALERTER_DOWN | daemon's GitHub PAT dead (`gh_ok: false`) | **NOT EMITTED — no writer exists.** `gh_ok` is not on `/status`, so the driver has nothing to read; the condition currently surfaces only as a red workflow run. See "Kinds with no writer" below (tracked by #3033) |
 | APP_DOWN | app unreachable from the driver | Fly health; cold-start OOM (#545) |
 | WATCHER_DOWN | watcher heartbeat stale (daemon dead) | Check app logs; restart |
 | SWEEP_CONFIG_ERROR | `enabled:false` **with** a non-null `config_error` — the sweep flag says "run" but `load_config()` raised (e.g. missing `REGISTRY_STREAM_KEY`). The pre-#2796 driver exited 0 here. Error text is redacted before filing | Fix the Fly secret/config (`§REGISTRY_STREAM_KEY`); the next healthy run self-heals |
 | SWEEP_OFF_STALE | `enabled:false`, no config/storage error, and the pool is not **measured fresh**: a `backups/{team}/default/` archive older than `BACKUP_DRIVER_DOWN_THRESHOLD_MIN` (240m), a team prefix with no default archive at all, or a failed listing | Re-enable backups or declare a bounded pause; investigate why the flag is off. If a listing failed, check the R2 access key's `ListObjects` permission |
-| SWEEP_NO_COVERAGE | `enabled:true` but the sweep backed up 0 teams (the #2823 empty-enumeration class: `no_teams`/`no_work`/`no_eligible_teams`/`enum_failed`/`error`), **or** the R2 pool could not be measured, **or** `/status` was unclassifiable, **or** a held sweep lock outlived `BACKUP_DRIVER_DOWN_THRESHOLD_MIN` (or cannot be verified) | Inspect `last_sweep` on `/status`; the sweep enumerates 0 teams → #2823 / #2340 control-plane resolution |
-| LIVENESS_NO_WORK | driver ran but did nothing (sweep skipped + reconcile empty) — reserved kind, **not yet emitted by the driver**; the enabled-but-0-teams case is now SWEEP_NO_COVERAGE (#2796) | Verify teams exist; otherwise expected pre-beta |
+| SWEEP_NO_COVERAGE | `enabled:true` but the sweep backed up 0 teams (the #2823 empty-enumeration class: `no_teams`/`no_work`/`no_eligible_teams`/`enum_failed`/`error`), **or** the R2 pool could not be measured, **or** `/status` was unclassifiable, **or** a held sweep lock outlived `BACKUP_DRIVER_DOWN_THRESHOLD_MIN` (or cannot be verified) | Inspect `last_sweep` on `/status`; the sweep enumerates 0 teams → #2823 / #2340 control-plane resolution. **Auto-resolves** on the next run whose pool is measured fresh and whose sweep backed up ≥1 team |
+| NO_ELIGIBLE_TEAMS | team sweep enabled but the control plane enumerated **0 eligible (Pro) teams** (#655) | Almost always a control-plane/dialect problem, not an empty deployment — check `last_sweep.source` and the enumeration source (#2823/#2340). **Auto-resolves** when a conclusive sweep enumerates ≥1 team |
+| ENUM_DELTA | the team enumeration went `>0 → 0` between runs (#669) — a wiped enumeration source, i.e. the #2823 silent-degradation class | **Investigate before trusting any green run**: the same 0 that makes the sweep look idle is the incident. Suppressible during the registry flip via `TORTOISE_SUPPRESS_ENUM_DELTA=1`. **Auto-resolves** on the next conclusive run that enumerates ≥1 team (the guard only fires on the `>0 → 0` transition, so a fixed source clears it) |
+| GRAPH_NAME_RESOLUTION_FAIL | every enumerated team failed graph-name resolution (`resolution` results) — the control plane died between enumeration and the per-team phase (#669) | Check the control-plane read (`/status` → `last_sweep.source`, `graph_failures`). **Auto-resolves** on the next conclusive run in which at least one team's graph resolved |
+| LIVENESS_NO_WORK | driver ran but did nothing (sweep skipped + reconcile empty) | **NOT EMITTED — superseded, not wired.** The enabled-but-0-teams case is SWEEP_NO_COVERAGE (#2796); this kind was never emitted by any surface. See "Kinds with no writer" below (tracked by #3033) |
 | SIZE_GUARD_ABORT | team graph > 100k nodes — dump aborted | Investigate graph growth; raise limit deliberately |
 | DATA_LOSS_CANDIDATE | a team's node count dropped >50% (or >0→0) | **Manual close only** — verify + re-baseline or restore |
-| P0_GUARD_FAIL | a dump named the wrong graph or was empty — objects deleted | Investigate the sweep; alert auto-consolidates |
+| P0_GUARD_FAIL | a dump named the wrong graph or was empty — objects deleted | Investigate the sweep. **Auto-resolves** on the next conclusive sweep in which that graph's dump passes the guard (the kind had no resolver before #3030, so it stayed open forever) |
 | RESTORE_DRILL_FAILED | the #2317 scheduled monthly drill failed or breached the ≤15-min RTO (subject `global`; detail carries team/archive/duration) | Investigate the drill record (`ops/drills/last.json`); re-drill after fixing the restore path; auto-resolves on the next successful/no-candidates scheduled run |
+
+### How incidents CLOSE
+
+Every kind must have a resolution path, or it is alert rot — an alert that can
+never close destroys the signal value of every other alert on the same label.
+Three paths exist:
+
+1. **Producer-side clear** (`AlertStore.resolve_incident` → close the issue, push
+the resolved Telegram, delete the dedup object). The watcher drives this for the
+absence kinds (`STALE`, `NEVER_BACKED_UP`, `METADATA_LOST`, `BACKUP_SET_MISSING`,
+`R2_DOWN`, `DRIVER_DOWN`); the sweep endpoint drives it for **its own guards**
+(`P0_GUARD_FAIL`, `NO_ELIGIBLE_TEAMS`, `ENUM_DELTA`,
+`GRAPH_NAME_RESOLUTION_FAIL`) — a conclusive sweep run that does **not** re-emit a
+kind is the "condition cleared" evidence (#3030; before it, these four had no
+resolver on any surface and stayed open forever — the live case was #2821).
+A **degraded** run (`enum_failed`) clears nothing: it cannot tell "no teams" from
+"could not look". The driver self-heals `APP_DOWN`/`WATCHER_DOWN`/`SWEEP_CONFIG_ERROR`/
+`SWEEP_OFF_STALE`/`SWEEP_NO_COVERAGE` on a healthy run (`.github/scripts/registry-cron.sh`).
+2. **Recovery-side clear** — the driver's self-heal legs (above).
+3. **Manual close only** — currently `DATA_LOSS_CANDIDATE` (a >50% node drop needs
+a human verdict: verify + re-baseline, or restore). Any kind added here must name
+the verification the operator performs.
+
+A closed incident's dedup object is **deleted**, so a **recurrence files a new
+issue** — that is the contract (`delete-to-resolve`), and the driver adopts a
+still-open issue only when the object's recorded issue is verifiably open.
+
+### Kinds with no writer (`ALERTER_DOWN`, `LIVENESS_NO_WORK`)
+
+> **#3033 — the taxonomy above and the emitted taxonomy must match exactly.**
+> These two kinds are documented and unit-tested as if they were real alert
+> surfaces, but **no code in either language emits them**, so an operator reading
+> the triage table believes a condition will page when it will not.
+
+| Kind | Why there is no writer | Disposition |
+|---|---|---|
+| `ALERTER_DOWN` | The #596 plan (§3.8) specified it as *"`/status` reports `gh_ok:false` (daemon PAT dead)"* — but `/status` has **no `gh_ok` field** and no app-side GitHub-health tracking exists, so the driver has nothing to read. The real failure mode is visible as a **red workflow run** plus a stale `DRIVER_DOWN` / `SWEEP_NO_COVERAGE` signal | Implement only with a real app-side health signal (a new `/status` field); until then it stays unemitted and is excluded from the kind-completeness test |
+| `LIVENESS_NO_WORK` | Superseded by `SWEEP_NO_COVERAGE` (#2796) for the enabled-but-0-teams case; no surface ever emitted it | Kept only as a reserved name; excluded from the kind-completeness test |
+
+Both are listed in the table above (with a **NOT EMITTED** triage cell) so an
+operator is never sent to rotate a credential for an alert that cannot fire. The
+drift is caught mechanically: `tests/test_alert_store.py::test_documented_kinds_have_a_writer`
+parses this table and scans the emitters — a documented kind with no writer fails
+the suite unless it appears in this section.
 
 ## Restore / drill
 - **Drill endpoint:** `POST /v1/internal/backups/drill` `{team_id, backup_key}` — internal-key only; restores into `_drill_*` scratch (live-phase binds scratch; registry end-stamp skipped; ≥1h cooldown). Zero production writes — asserted server-side. The archive's key shape names its graph; the target resolves through the ACTIVE-graph seam — **drilling a deleted/quarantined graph's archive is refused (409)** (#2313 tombstone guard, #2304). #2317: every drill records pass/fail + measured restore time (`duration_s` / `rto_s` / `within_rto`) to `ops/drills/last.json` (surfaced on `/status` → `last_drill`) — restore time is measured against the committed ≤15-min RTO, not assumed.
-- **Scheduled drill (#2317):** `POST /v1/internal/backups/drill-scheduled` (no body) — the monthly, unattended leg driven by `.github/workflows/registry-drill-cron.yml` (`23 4 1 * *`). The app auto-selects the OLDEST eligible NESTED archive across teams (`backup_sweep.list_drill_candidates` — 5-segment per-graph pools only; legacy flat 4-segment artifacts are operator-drill territory), skips candidates whose graph is no longer ACTIVE (tombstone guard), drills the first eligible one through the same core as the manual endpoint (cooldown + boot-GC backstop shared), and records the outcome. Failure or an RTO breach opens a deduplicated **RESTORE_DRILL_FAILED** incident (GH issue + Telegram via the app's own secrets — the workflow carries only the internal key, no R2/PAT creds); success and the `no_candidates` state resolve it. The wrapper `.github/scripts/registry-drill-scheduled.sh` makes the job green/red (429 cooldown and `no_candidates` are benign exits — the chronic 0-archive state is the existing LIVENESS_NO_WORK/NEVER_BACKED_UP alarm's job). Manual drills never file incidents (an operator is present).
+- **Scheduled drill (#2317):** `POST /v1/internal/backups/drill-scheduled` (no body) — the monthly, unattended leg driven by `.github/workflows/registry-drill-cron.yml` (`23 4 1 * *`). The app auto-selects the OLDEST eligible NESTED archive across teams (`backup_sweep.list_drill_candidates` — 5-segment per-graph pools only; legacy flat 4-segment artifacts are operator-drill territory), skips candidates whose graph is no longer ACTIVE (tombstone guard), drills the first eligible one through the same core as the manual endpoint (cooldown + boot-GC backstop shared), and records the outcome. Failure or an RTO breach opens a deduplicated **RESTORE_DRILL_FAILED** incident (GH issue + Telegram via the app's own secrets — the workflow carries only the internal key, no R2/PAT creds); success and the `no_candidates` state resolve it. The wrapper `.github/scripts/registry-drill-scheduled.sh` makes the job green/red (429 cooldown and `no_candidates` are benign exits — the chronic 0-archive state is the existing `NEVER_BACKED_UP` / `SWEEP_NO_COVERAGE` alarm's job; `LIVENESS_NO_WORK` is a writer-less reserved name, see "Kinds with no writer"). Manual drills never file incidents (an operator is present).
 - **ACL rebuild after full-platform restore:** a DR into a fresh FalkorDB server restores graph DATA from R2 — per-graph ACL server users do NOT live in the graph namespace. Run `POST /v1/internal/backups/acl-reconcile` (internal key) to replay the idempotent `create_acl_user` upsert for every active custom graph of every eligible team (default graphs ride the team-scoped ACL; tombstoned graphs never touched).
 - **Production restore (`drill:false`) is NOT in scope (501)** — restore-and-rotate machinery retired with the registry (#669).
 - **Rollout drill:** operator-invoked (documented commands in the drill workflow) or via the scheduled endpoint (`workflow_dispatch` against a seeded archive — the CI/schedule acceptance). Requires ≥1 team archive; in the chronic 0-teams state run against a seeded scratch graph or defer with a recorded reason (the drill record shows `no_candidates`). **Re-drill after any restore-path code change, R2 layout change, or key rotation.**

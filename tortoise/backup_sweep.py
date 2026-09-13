@@ -1373,6 +1373,79 @@ def run_backup_sweep(
     }
 
 
+#: #3030: sweep-emitted guard kinds that a CONCLUSIVE clear run resolves. The
+#: sweep is the authority on its own guards — a run that completed and did not
+#: emit a kind IS the "condition cleared" evidence (delete-to-resolve).
+SWEEP_RESOLVABLE_GLOBAL_KINDS = (
+    "ENUM_DELTA",
+    "NO_ELIGIBLE_TEAMS",
+    "GRAPH_NAME_RESOLUTION_FAIL",
+)
+
+
+def graph_subject(team_id: str, graph_id: str = "") -> str:
+    """The alert-store subject for one graph (#2313): the bare team for the
+    default graph, ``"{team}:{gid}"`` otherwise — the SAME key the watcher and
+    re-baseline use, so open/resolve stay coherent across surfaces."""
+    if not graph_id or graph_id == "default":
+        return team_id
+    return f"{team_id}:{graph_id}"
+
+
+def incident_subject(inc: dict[str, Any]) -> str:
+    """#2313: alert-store subject for a sweep incident.
+
+    Default-graph and team-level incidents keep the bare team subject (the
+    pre-#2313 alert surface). Custom-graph incidents use the per-graph subject
+    ``"{team}:{gid}"`` — the SAME key the watcher uses — so re-baseline and the
+    watcher can open/resolve coherently.
+    """
+    return graph_subject(inc.get("team_id", ""), inc.get("graph_id") or "")
+
+
+def sweep_resolutions(result: dict[str, Any]) -> list[tuple[str, str]]:
+    """The (kind, subject) incidents a CONCLUSIVE sweep run proves CLEARED (#3030).
+
+    Four kinds are emitted by the sweep but had NO resolver on any surface, so
+    once filed they stayed open forever — alert rot, the exact failure mode this
+    channel exists to avoid (live instance: #2821 ``[DR] ENUM_DELTA``, whose own
+    cause #2823 was fixed while the alert could not close).
+
+    The sweep is the authority on its own guards: a run that completed and did
+    NOT emit a kind IS the "condition cleared" evidence, so the caller closes it
+    through the same delete-to-resolve lifecycle the watcher uses.
+
+    A DEGRADED run resolves nothing: ``enum_failed`` cannot distinguish "no
+    teams" from "could not look", and clearing a guard there would silently
+    normalise the very blindness the guard exists to catch. ``already_running``
+    (a 202 lock-held pass) never runs this code, and is excluded defensively.
+
+    P0_GUARD_FAIL is per-graph: it is cleared for every graph this run processed
+    without tripping the guard. A team whose result carries no graph map
+    (resolution/error) proves nothing about its graphs and is skipped.
+    """
+    if result.get("status") in ("enum_failed", "error", "already_running"):
+        return []
+    emitted = {
+        (inc.get("kind"), incident_subject(inc))
+        for inc in result.get("incidents", [])
+    }
+    cleared: list[tuple[str, str]] = [
+        (kind, "")
+        for kind in SWEEP_RESOLVABLE_GLOBAL_KINDS
+        if (kind, "") not in emitted
+    ]
+    for team_id, team_res in (result.get("results") or {}).items():
+        graphs = team_res.get("graphs") if isinstance(team_res, dict) else None
+        if not isinstance(graphs, dict):
+            continue
+        for gid in graphs:
+            subject = graph_subject(team_id, gid)
+            if ("P0_GUARD_FAIL", subject) not in emitted:
+                cleared.append(("P0_GUARD_FAIL", subject))
+    return cleared
+
+
 # ── #2304 trash purge (delete = quarantine → 7-day grace → erasure) ──────────
 # Owner Option C: tombstoned custom graphs are recoverable (trash restore) for
 # a disclosed grace window, then PHYSICALLY erased: the data-plane namespace

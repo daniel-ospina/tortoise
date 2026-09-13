@@ -19,6 +19,8 @@ class _FakeChannels:
         self.search_calls: list[str] = []
         self.fail_file = False
         self.fail_push = False
+        self.fail_search = False
+        self.search_impl = None
         self._next = 1
 
     def file_issue(self, title, body):
@@ -35,6 +37,8 @@ class _FakeChannels:
             self.comments.append((number, comment))
 
     def search_open(self, kind, team_id=""):
+        if self.fail_search:  # #3029: a transport/rate-limit failure
+            raise RuntimeError("search: rate limit exceeded")
         self.search_calls.append((kind, team_id))
         return [
             n for n, t in self.issues.items()
@@ -203,10 +207,8 @@ def test_all_alert_kinds_push_telegram_on_open():
         "BACKUP_SET_MISSING",
         "DRIVER_DOWN",
         "R2_DOWN",
-        "ALERTER_DOWN",
         "APP_DOWN",
         "WATCHER_DOWN",
-        "LIVENESS_NO_WORK",
         "SIZE_GUARD_ABORT",
         "DATA_LOSS_CANDIDATE",
     ]
@@ -368,3 +370,127 @@ def test_search_fallback_is_subject_scoped():
     assert ch.closed == [2]
     store.resolve_incident("STALE", "team_a")
     assert ch.closed == [2, 1]
+
+
+# ── #3029 fail-closed search ─────────────────────────────────────────────────
+
+
+def test_search_failure_defers_filing_fail_closed():
+    """#3029: a FAILED search is not an EMPTY search.
+
+    The search is the only dedup left when the create-once object is a
+    placeholder, so filing on a failed search risks a duplicate. Filing is
+    deferred instead: the placeholder keeps ``issue_number: null`` and the next
+    poll re-enters the same branch and retries.
+    """
+    ch = _FakeChannels()
+    storage = MemoryStorage()
+
+    ch.fail_search = True
+    store = _store(ch, storage)
+
+    assert store.open_incident("STALE") is False
+    assert ch.issues == {}, "a failed search must never file"
+    state = json.loads(storage.download("ops/alerts/STALE/_.json"))
+    assert state["issue_number"] is None, "the placeholder must survive for the retry"
+
+    # Next poll: the search is healthy again and finds nothing → we file.
+    ch.fail_search = False
+    assert store.open_incident("STALE") is True
+    assert len(ch.issues) == 1
+
+
+def test_search_failure_does_not_lose_an_already_filed_incident():
+    """A filed incident is adopted from the object, never re-filed — and a
+    failing search cannot make the object look missing."""
+    ch = _FakeChannels()
+    storage = MemoryStorage()
+    store = _store(ch, storage)
+    assert store.open_incident("STALE") is True
+    filed = len(ch.issues)
+
+    ch.fail_search = True
+    assert store.open_incident("STALE") is False
+    assert len(ch.issues) == filed, "no duplicate on a failed search"
+    assert store.resolve_incident("STALE") is True
+    assert ch.closed, "resolution still works while the search is down"
+
+
+# ── #3033: the documented taxonomy must match the emitted one ─────────────────
+
+
+_ALERT_SOURCES = ("tortoise/alert_store.py", "tortoise/backup_watcher.py",
+                  "tortoise/backup_sweep.py", "tortoise/hosted_api.py")
+_DRIVER = ".github/scripts/registry-cron.sh"
+_DEAD_KINDS = {"ALERTER_DOWN", "LIVENESS_NO_WORK"}
+
+
+def _documented_kinds() -> set[str]:
+    """Kinds in the runbook's triage table (first column, ALL_CAPS tokens)."""
+    import re
+    from pathlib import Path
+
+    doc = (Path(__file__).resolve().parent.parent
+           / "docs/ops/registry-backup-dr.md").read_text()
+    table = doc.split("## Alert taxonomy + triage", 1)[1].split("### How incidents CLOSE", 1)[0]
+    return {m.group(1) for m in re.finditer(r"^\|\s*([A-Z][A-Z0-9_]{3,})\s*\|", table, re.M)}
+
+
+def _emittable_kinds() -> set[str]:
+    """Kinds any producer can actually open/resolve — scanned from the emitters.
+
+    Deliberately mechanical: a kind that exists only in a doc or a test must not
+    count as "monitored".
+    """
+    import re
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    kinds: set[str] = set()
+    for rel in _ALERT_SOURCES:
+        text = (root / rel).read_text()
+        kinds |= set(re.findall(r'(?:open_incident|resolve_incident)\(\s*"([A-Z][A-Z0-9_]+)"', text))
+        kinds |= set(re.findall(r'"kind":\s*"([A-Z][A-Z0-9_]+)"', text))
+        # Kinds named by a module constant (e.g. `_DRILL_FAILED_KIND`), which the
+        # call-site scan cannot see.
+        kinds |= set(re.findall(r'_KIND\s*=\s*"([A-Z][A-Z0-9_]+)"', text))
+    driver = (root / _DRIVER).read_text()
+    kinds |= set(re.findall(r'\bfile_alert\s+([A-Z][A-Z0-9_]+)\s', driver))
+    kinds |= set(re.findall(r'\bresolve_global\s+([A-Z][A-Z0-9_]+)\s', driver))
+    return kinds
+
+
+def test_documented_kinds_have_a_writer():
+    """#3033: every kind in the runbook's triage table must have a writer.
+
+    A documented-but-unemittable kind is corrosive: the operator believes a
+    condition will page when it cannot, and the test suite gains a green
+    assertion with no production referent.
+    """
+    documented = _documented_kinds()
+    emittable = _emittable_kinds()
+    assert "STALE" in documented and "STALE" in emittable, "the scan itself must work"
+    offenders = sorted(documented - emittable - _DEAD_KINDS)
+    assert not offenders, (
+        f"documented but never emitted: {offenders} — give them a writer or move "
+        "them to the 'Kinds with no writer' section"
+    )
+
+
+def test_dead_kinds_are_documented_as_dead():
+    """#3033: the two unemittable kinds must be marked NOT EMITTED, not left
+    looking live in the triage table."""
+    from pathlib import Path
+
+    doc = (Path(__file__).resolve().parent.parent
+           / "docs/ops/registry-backup-dr.md").read_text()
+    dead_section = doc.split("### Kinds with no writer", 1)
+    assert len(dead_section) == 2, "the 'Kinds with no writer' section must exist"
+    body = dead_section[1]
+    for kind in _DEAD_KINDS:
+        assert f"`{kind}`" in body, f"{kind} must be listed as writer-less"
+    table = doc.split("## Alert taxonomy + triage", 1)[1].split("### How incidents CLOSE", 1)[0]
+    for kind in _DEAD_KINDS:
+        row = [ln for ln in table.splitlines() if ln.startswith(f"| {kind} |")]
+        assert row, f"{kind} must keep a triage row"
+        assert "NOT EMITTED" in row[0], f"{kind}'s triage cell must say NOT EMITTED"
