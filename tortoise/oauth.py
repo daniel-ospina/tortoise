@@ -239,9 +239,12 @@ def _is_loopback(hostname: str) -> bool:
 #
 #   * C0 controls (0x00-0x1F) and DEL are NOT a differential, and this comment
 #     claimed they were until review falsified it. `urlsplit` strips \t \r \n
-#     too (`urllib.parse._UNSAFE_URL_BYTES_TO_REMOVE`), and a browser either
-#     refuses the URL outright (NUL, VT, FF, 0x1F) or percent-encodes DEL — none
-#     of which moves the authority boundary. They are refused anyway, as defence
+#     too (`urllib.parse._UNSAFE_URL_BYTES_TO_REMOVE`), and a browser REFUSES
+#     these bytes in the host position and strips or percent-encodes them
+#     elsewhere — none of which moves the authority boundary. (Position matters,
+#     so keep the claim general: DEL in the host is refused, DEL in a path
+#     becomes `%7F`, NUL in userinfo becomes `%00`. The only load-bearing point
+#     is that the boundary does not move.) They are refused anyway, as defence
 #     in depth: no legitimate redirect URI contains a control character, so the
 #     conservative direction costs nothing real. It does mean a URI registered
 #     before this gate existed stops matching — deliberate, and pinned by

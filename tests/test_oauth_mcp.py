@@ -816,11 +816,14 @@ class TestRedirectUriMatches:
         browser to the RAW string, so the old predicate validated it as loopback
         and then handed the authorization code to the attacker.
 
-        NOTE the assertions below fall into two groups and only the first proves
-        the guard: the backslash cases are genuine parser differentials, while
-        the control characters are refused as defence in depth — `urlsplit`
-        strips \\t \\r \\n just as a browser does, so they are NOT differentials
-        (review round 2 falsified the earlier comment that said they were).
+        NOTE on which assertions carry the teeth, because two review rounds got
+        this wrong. The EXACT-MATCH cases below, and the userinfo-identical
+        port-only pair, are what actually fail when the byte gate is removed.
+        The relaxed-path backslash cases do NOT: they are refused by the
+        userinfo comparison anyway, since the crafted value carries
+        `evil.example:8443\` as its userinfo. The control-character cases are
+        defence in depth, not differentials — `urlsplit` strips \t \r \n just as
+        a browser does, so they were never the bug.
         """
         from tortoise.oauth import _redirect_uri_matches as m
         attack = "http://evil.example:8443\\@127.0.0.1/callback"
@@ -836,10 +839,13 @@ class TestRedirectUriMatches:
         assert not m(attack, attack)
         assert not m("http://evil.example\\@localhost/callback",
                      "http://evil.example\\@localhost/callback")
-        # Same backslash, userinfo equal on both sides — so the userinfo
-        # comparison cannot be what refuses it; only the byte gate can.
-        assert not m("http://evil.example:8443@127.0.0.1/callback",
-                     "http://evil.example:8443\\@127.0.0.1/callback")
+        # Genuinely userinfo-IDENTICAL on both sides (the backslash sits in the
+        # userinfo in both, so `urlsplit` reports the same username/password) and
+        # differing ONLY by port — so the userinfo comparison cannot be what
+        # refuses it; only the byte gate can. Verified by mutation: this pair
+        # returns True with the gate removed, False with it in place.
+        assert not m("http://evil.example:8443\\@127.0.0.1:1/callback",
+                     "http://evil.example:8443\\@127.0.0.1:2/callback")
         # A backslash anywhere is refused, including on the registered side.
         assert not m("http://localhost\\cb", "http://localhost:3118\\cb")
         # Defence in depth (NOT differentials — see the docstring above).
