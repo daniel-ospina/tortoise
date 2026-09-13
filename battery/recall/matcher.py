@@ -13,8 +13,11 @@ retrieval-capable comparators {a1, a2, a2b, a3, a4} — a0 is EXCLUDED and
 retained as the trigger's positive control. The "ANY arm" wording above is
 preserved and read by purpose. Controlling decision:
 docs/research/2026-09-12-matched-recall-a0-control.md; contract rows
-§3.2.1/§7 of docs/benchmarks/comparison-systems.md. No trigger_population
-constant exists here yet — wiring is tracked by #3327.
+§3.2.1/§7 of docs/benchmarks/comparison-systems.md. The population is the
+``TRIGGER_POPULATION`` constant below; the pre-pass is WIRED into the run
+path (#3327) by ``battery/recall/prepass.py`` (per-arm retriever) and
+``battery/runner/run.py`` (probes from the scenario corpus -> recall.json ->
+profile.json.matched_recall).
 
 Result is immutable per run (the matched-recall outcome is recorded in
 profile.json and never re-interpreted post-hoc).
@@ -22,7 +25,7 @@ profile.json and never re-interpreted post-hoc).
 from __future__ import annotations
 
 from dataclasses import dataclass, field  # noqa: F401
-from typing import Mapping, Protocol, Sequence  # noqa: UP035
+from typing import Any, Mapping, Protocol, Sequence  # noqa: UP035
 
 #: Factual top-K used for the recall match (plan §2 W2).
 TOP_K = 5
@@ -34,6 +37,25 @@ F1_TOLERANCE = 0.10
 #: Balanced-subset floor — below this fraction of probes the verdict is
 #: INCONCLUSIVE (matching is not meaningful).
 SUBSET_FLOOR = 0.50
+#: The arms the symmetric trigger is defined over (#3327 decision,
+#: 2026-09-12): the RETRIEVAL-CAPABLE comparators. ``a0`` is EXCLUDED and
+#: retained as the trigger's positive control plus a published profile row
+#: annotated *recall-confounded*. Basis: a0's recall is 0.0 by construction
+#: (``battery/arms/a0_plain.py:26-27``), so an a0-inclusive trigger fires on
+#: every run and makes every differential run INCONCLUSIVE — which would
+#: leave a pre-committed four-verdict contract able to express exactly one
+#: verdict. Decision: docs/research/2026-09-12-matched-recall-a0-control.md;
+#: contract rows §3.2.1/§7 of docs/benchmarks/comparison-systems.md.
+TRIGGER_POPULATION: tuple[str, ...] = ("a1", "a2", "a2b", "a3", "a4")
+#: Controls retained in the output block (present-and-flagged, never
+#: silently dropped) but taken OUT of the trigger computation.
+EXCLUDED_CONTROLS: tuple[str, ...] = ("a0",)
+#: The exclusion reason carried next to a0's row (checksum of the decision).
+EXCLUDED_CONTROL_REASON = (
+    "recall-confounded: no-memory control, retrieval recall 0.0 by "
+    "construction (a0_plain.py:26-27); retained as the trigger's positive "
+    "control and as a published profile row, EXCLUDED from "
+    "trigger_population (#3327 decision, 2026-09-12)")
 
 
 @dataclass(frozen=True)
@@ -72,7 +94,15 @@ class Retriever(Protocol):
 
 
 def default_probes() -> list[FactualProbe]:
-    """Self-contained factual probe subset (small, domain-neutral)."""
+    """HERMETIC TEST FIXTURE ONLY — NOT the production probe source.
+
+    Generic world facts ("capital of France") that no arm's scenario-corpus
+    memory contains. #3327 decision (.3): the pre-registration measures
+    probes "on the scenario corpus" (01-align.md:56), so using these in the
+    run path would mean the trigger can never legitimately fire. The
+    production source is ``scenario_probes`` (the run's own corpus). Kept
+    for matcher unit tests + the a0 positive-control fixture.
+    """
     return [
         FactualProbe("f1", "What is the capital of France?", "Paris"),
         FactualProbe("f2", "Which planet is known as the Red Planet?", "Mars"),
@@ -83,6 +113,37 @@ def default_probes() -> list[FactualProbe]:
         FactualProbe("f7", "How many continents are there?", "seven"),
         FactualProbe("f8", "What is the boiling point of water in Celsius?", "100"),
     ]
+
+
+def scenario_probes(scenarios: Sequence[Any], *,
+                    limit: int | None = None) -> list[FactualProbe]:
+    """Build the factual probe subset FROM THE SCENARIO CORPUS (#3327.3).
+
+    01-align.md:56 measures probes "on the scenario corpus" — the probes
+    must land on content an arm's memory actually holds, or the trigger can
+    never legitimately fire. Probe question = the scenario's authored
+    ``question``; gold = the scenario's sealed gold text, read HERE on the
+    harness side only (the arm receives the question, never the gold — the
+    sealed-gold boundary is preserved). Scenarios lacking a question or a
+    gold answer are SKIPPED (counted by the caller, never fabricated into a
+    probe). Order is corpus order and deterministic; ``limit`` caps the
+    subset for cost.
+    """
+    probes: list[FactualProbe] = []
+    for sc in scenarios:
+        sid = str(getattr(sc, "id", "") or "")
+        question = str(getattr(sc, "question", "") or "").strip()
+        if not sid or not question:
+            continue
+        golds_fn = getattr(sc, "golds", None)
+        golds = golds_fn() if callable(golds_fn) else ()
+        gold = " ".join(str(g).strip() for g in golds if str(g).strip())
+        if not gold:
+            continue
+        probes.append(FactualProbe(id=sid, question=question, gold=gold))
+        if limit is not None and len(probes) >= limit:
+            break
+    return probes
 
 
 def _f1_at_k(retrieved: Sequence[str], gold: str, k: int = TOP_K) -> float:
@@ -110,7 +171,9 @@ def match_recall(probes: Sequence[FactualProbe],
                  retrievers: dict[str, Retriever],
                  *, top_k: int = TOP_K,
                  tolerance: float = F1_TOLERANCE,
-                 subset_floor: float = SUBSET_FLOOR) -> RecallResult:
+                 subset_floor: float = SUBSET_FLOOR,
+                 population: Sequence[str] = TRIGGER_POPULATION,
+                 ) -> RecallResult:
     """Compute the matched-recall outcome for one run.
 
     Symmetric trigger: ANY arm ≥ tolerance below the corpus-best factual
@@ -123,11 +186,22 @@ def match_recall(probes: Sequence[FactualProbe],
     population {a1, a2, a2b, a3, a4} — a0 is EXCLUDED and retained as the
     trigger's positive control (decision:
     docs/research/2026-09-12-matched-recall-a0-control.md; §3.2.1/§7 of
-    docs/benchmarks/comparison-systems.md). This implementation is
-    unchanged — it still keys off every arm in ``retrievers``; wiring the
-    population is tracked by #3327 (no ``trigger_population`` constant yet).
+    docs/benchmarks/comparison-systems.md). Every retriever passed in is
+    still MEASURED (its F1 stays in ``f1_by_arm``, so a0's row is published
+    and flagged rather than dropped) but only the trigger population
+    participates in the divergence computation. A control-only probe set
+    raises ``ValueError`` — a vacuous "matched" over no compared arm would
+    be a false pass. Outcome is a RESULT OBJECT, never an exception; the
+    INCONCLUSIVE consequence is the persisted ``outcome`` value plus the
+    run's exit code (#1413 indicator 1).
     """
     f1: dict[str, float] = {}
+    if not probes:
+        raise ValueError(
+            "matched-recall probe set is empty — no probe was sourced from "
+            "the scenario corpus, so no recall can be matched (#3327.3); "
+            "the caller must omit the block rather than publish a vacuous "
+            "outcome")
     for aid, retriever in retrievers.items():
         hits = sum(
             1 for p in probes
@@ -135,15 +209,21 @@ def match_recall(probes: Sequence[FactualProbe],
                         p.gold, top_k) > 0.0)
         f1[aid] = hits / len(probes) if probes else 0.0
 
-    best = max(f1.values())
-    trigger_fired = any(best - v > tolerance for v in f1.values())
+    population_now = tuple(a for a in retrievers if a in population)
+    if not population_now:
+        raise ValueError(
+            f"matched-recall trigger population is empty — none of "
+            f"{sorted(retrievers)} is in {tuple(population)}; a control-only "
+            f"probe set can not express the relative trigger (#3327)")
+    best = max(f1[a] for a in population_now)
+    trigger_fired = any(best - f1[a] > tolerance for a in population_now)
 
     if not trigger_fired:
         return RecallResult(f1_by_arm=f1, trigger_fired=False,
                             subset_pct=1.0, outcome="matched")
 
-    divergent = [aid for aid, v in f1.items() if best - v > tolerance]
-    best_arm = max(f1, key=f1.get)
+    divergent = [a for a in population_now if best - f1[a] > tolerance]
+    best_arm = max(population_now, key=lambda a: f1[a])
     kept = [
         p for p in probes
         if _f1_at_k(retrievers[best_arm].retrieve_factual(
