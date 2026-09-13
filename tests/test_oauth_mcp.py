@@ -50,6 +50,7 @@ from tortoise.oauth import (  # noqa: E402, RUF100
     SCOPES_ACCEPTED,
     SCOPES_SUPPORTED,
     _sha256,
+    _valid_redirect_uri,
     mcp_resource_url,
     team_resource_url,
 )
@@ -104,7 +105,7 @@ def _pkce() -> tuple[str, str]:
 
 
 def _consent(tc, *, client_id: str, redirect_uri: str, challenge: str,
-             state: str = "st-123", resource: str | None = None):
+             state: str = "st-123", resource: str | None = None) -> httpx.Response:
     """POST /oauth/consent without asserting — the caller asserts the
     outcome, so negative cases reuse the same request shape."""
     return tc.post("/oauth/consent", json={
@@ -593,11 +594,16 @@ class TestLoopbackPortAgnostic:
         assert body["token_type"] == "Bearer"
         # The code is bound to the PRESENTED uri, so the token step's exact
         # comparison (RFC 6749 §4.1.3) is satisfied without being loosened.
-        assert cp.tables["oauth_codes"][0]["redirect_uri"] == presented
+        assert cp.tables["oauth_codes"][-1]["redirect_uri"] == presented
 
     def test_authorize_page_accepts_ephemeral_port(self, api_client):
         """The GET /oauth/authorize leg must also accept it (it validates
-        through the same helper). On rejection it redirects with ``error=``."""
+        through the same helper). On rejection it redirects with ``error=``.
+
+        Also asserts the presented URI actually reached the rendered page's
+        embedded PARAMS — that embedding is what `redirectBack` later navigates
+        to, so a validation pass that silently dropped it would still fail the
+        real journey."""
         tc, _ = api_client
         reg = _register_client(tc, redirect_uris=[self.PORTLESS])
         r = tc.get("/oauth/authorize", params={
@@ -609,6 +615,57 @@ class TestLoopbackPortAgnostic:
             follow_redirects=False)
         assert r.status_code == 200, r.text
         assert "error=" not in r.headers.get("location", "")
+        assert "localhost:3118" in r.text
+
+    def test_authorize_page_rejects_different_path(self, api_client):
+        """GET-level negative control, mirroring the consent-side one."""
+        tc, _ = api_client
+        reg = _register_client(tc, redirect_uris=[self.PORTLESS])
+        r = tc.get("/oauth/authorize", params={
+            "client_id": reg["client_id"],
+            "redirect_uri": "http://localhost:3118/evil",
+            "response_type": "code", "state": "st-1",
+            "code_challenge": "x" * 43,
+            "code_challenge_method": "S256"},
+            follow_redirects=False)
+        assert "error=" in r.headers.get("location", "") or r.status_code == 400
+
+    def test_error_is_relayed_to_ephemeral_listener(self, api_client):
+        """REVIEW P2 — the invalid-params error path has its OWN open-redirect
+        guard, which used strict membership. A client that registered a PORTLESS
+        loopback URI therefore got a JSON 400 where its ephemeral listener was
+        waiting for a redirect, so the CLI could never surface the error. The
+        guard now uses the same matcher — and is still an open-redirect guard,
+        because the matcher refuses parse-differential input.
+        """
+        tc, _ = api_client
+        reg = _register_client(tc, redirect_uris=[self.PORTLESS])
+        # response_type=token is invalid -> validate_authorize_params raises.
+        r = tc.get("/oauth/authorize", params={
+            "client_id": reg["client_id"],
+            "redirect_uri": "http://localhost:3118/callback",
+            "response_type": "token", "state": "st-1",
+            "code_challenge": "x" * 43,
+            "code_challenge_method": "S256"},
+            follow_redirects=False)
+        assert r.status_code in (302, 303, 307), r.text
+        loc = r.headers["location"]
+        assert loc.startswith("http://localhost:3118/callback")
+        assert "error=invalid_request" in loc
+
+    def test_error_path_does_not_echo_parser_differential(self, api_client):
+        """The error relay must not become a DIRECT open redirect: a
+        differential URI is refused by the matcher, so we return JSON rather
+        than a Location header pointing at the attacker."""
+        tc, _ = api_client
+        reg = _register_client(tc, redirect_uris=[self.PORTLESS])
+        r = tc.get("/oauth/authorize", params={
+            "client_id": reg["client_id"],
+            "redirect_uri": "http://evil.example:8443\\@localhost/callback",
+            "response_type": "token", "state": "st-1"},
+            follow_redirects=False)
+        assert r.status_code == 400, r.text
+        assert "evil.example" not in r.headers.get("location", "")
 
     def test_different_path_still_rejected(self, api_client, session_user):
         """Negative control: the port is ignored, the PATH is not."""
@@ -689,15 +746,29 @@ class TestRedirectUriMatches:
         assert not m("http://localhost/cb#a", "http://localhost:3118/cb#b")
         assert m("http://localhost/cb?x=1", "http://localhost:3118/cb?x=1")
 
-    def test_non_string_and_malformed_inputs_are_safe(self):
-        """``redirect_uri`` is typed ``str | None`` at the call site — the
-        helper must never raise on it."""
+    def test_non_string_inputs_never_raise(self):
+        """``redirect_uri`` is typed ``str | None`` at the call site, but a
+        corrupt row can hold anything — the helper must never raise.
+
+        ``123`` is the case where the isinstance guard is the ONLY protection
+        (``urlparse(None)`` does not raise — its ``.hostname`` is None, caught by
+        the hostname guard instead), so it is pinned separately from ``None``.
+        """
         from tortoise.oauth import _redirect_uri_matches as m
-        assert not m("http://localhost/cb", None)  # type: ignore[arg-type]
-        assert not m(None, "http://localhost/cb")  # type: ignore[arg-type]
+        assert not m("http://localhost/cb", None)
+        assert not m(None, "http://localhost/cb")
+        assert not m("http://localhost/cb", 123)  # isinstance is the only guard
         assert not m("http://localhost/cb", "")
         assert not m("", "http://localhost:3118/cb")
         assert not m("http://localhost/cb", "not a url")
+
+    def test_unparseable_input_returns_false(self):
+        """Actually exercises the ``except ValueError`` branch — an unbalanced
+        IPv6 bracket is one of the few inputs ``urlparse`` rejects outright.
+        (``"not a url"`` does NOT: it parses as a relative reference.)"""
+        from tortoise.oauth import _redirect_uri_matches as m
+        assert not m("http://localhost/cb", "http://[::1/cb")
+        assert not m("http://[::1/cb", "http://localhost/cb")
 
     def test_hostless_uri_only_matches_itself(self):
         """A hostless URI cannot be REGISTERED — `_valid_redirect_uri` requires
@@ -709,6 +780,96 @@ class TestRedirectUriMatches:
         assert m("http:///cb", "http:///cb")         # exact match, as before
         assert not m("http:///cb", "http:///other")  # no host → no relaxation
         assert not m("http:///cb", "http://localhost:1/cb")
+
+    def test_uppercase_host_and_scheme_relax(self):
+        """RFC 3986 §3.2.2 — the host is case-insensitive, so an uppercase
+        form must not defeat the relaxation."""
+        from tortoise.oauth import _redirect_uri_matches as m
+        assert m("http://LOCALHOST/cb", "http://localhost:3118/cb")
+        assert m("HTTP://localhost/cb", "http://localhost:3118/cb")
+
+    def test_userinfo_must_match_exactly(self):
+        """Userinfo is compared, so a crafted userinfo cannot ride a loopback
+        registration. (`urlparse` takes the host after the LAST ``@``, so without
+        this check `http://evil@localhost/cb` would resolve to loopback.)"""
+        from tortoise.oauth import _redirect_uri_matches as m
+        assert not m("http://localhost/cb", "http://evil@localhost:3118/cb")
+        assert not m("http://evil@localhost/cb", "http://localhost:3118/cb")
+        assert m("http://a@localhost/cb", "http://a@localhost:3118/cb")
+
+    def test_port_values_are_not_validated(self):
+        """Pinned deliberately: the matcher compares only that the port is
+        IGNORED, never that it is sane. ``urlparse`` raises on ``:abc`` only if
+        ``.port`` is touched, which this code never does, and a browser refuses
+        to navigate such a URL at all — so an insane port cannot become an
+        exfiltration path. Documented here so it is a known boundary."""
+        from tortoise.oauth import _redirect_uri_matches as m
+        assert m("http://localhost/cb", "http://localhost:0/cb")
+        assert m("http://localhost/cb", "http://localhost:abc/cb")
+        assert m("http://localhost/cb", "http://localhost:99999/cb")
+
+    def test_parser_differential_inputs_never_match(self):
+        """REVIEW P0 — Python's `urlsplit` and the browser's WHATWG parser end
+        the authority at different places for a raw backslash, so
+        `http://evil.example\\@localhost/cb` is host `localhost` to us and
+        `evil.example` to the browser. The code is delivered by navigating the
+        browser to the raw string, so the old predicate validated it as loopback
+        and then handed the authorization code to the attacker. Confirmed fixed
+        here; the registration-side rejection is covered by
+        `TestRedirectUriParserDifferential`."""
+        from tortoise.oauth import _redirect_uri_matches as m
+        attack = "http://evil.example:8443\\@127.0.0.1/callback"
+        assert not m("http://127.0.0.1/callback", attack)
+        assert not m("http://127.0.0.1/callback",
+                     "http://evil.example:8443\\@localhost/callback")
+        assert not m("http://localhost/callback",
+                     "http://evil.example\\@localhost:3118/callback")
+        # C0 controls / DEL are stripped by the browser but kept by urlsplit.
+        assert not m("http://localhost/cb", "http://localhost\t:3118/cb")
+        assert not m("http://localhost/cb", "http://local\x00host:3118/cb")
+        assert not m("http://localhost/cb", "http://localhost\x7f:3118/cb")
+        # A backslash anywhere is refused, including on the registered side.
+        assert not m("http://localhost\\cb", "http://localhost:3118\\cb")
+
+
+class TestRedirectUriParserDifferential:
+    """REVIEW P0 — a parse-differential redirect_uri must be refused at
+    REGISTRATION as well as at validation, or the same string can re-enter via
+    a client row created earlier."""
+
+    ATTACK = "http://evil.example:8443\\@127.0.0.1/callback"
+
+    def test_registration_rejects_backslash_authority(self, api_client):
+        tc, _ = api_client
+        r = tc.post("/register", json={
+            "client_name": "differential",
+            "redirect_uris": [self.ATTACK],
+            "grant_types": ["authorization_code"],
+            "response_types": ["code"],
+            "token_endpoint_auth_method": "none",
+        })
+        assert r.status_code == 400, r.text
+        assert _valid_redirect_uri(self.ATTACK) is False
+
+    def test_registration_rejects_control_characters(self, api_client):
+        tc, _ = api_client
+        r = tc.post("/register", json={
+            "client_name": "differential",
+            "redirect_uris": ["http://localhost\t/cb"],
+            "grant_types": ["authorization_code"],
+            "response_types": ["code"],
+            "token_endpoint_auth_method": "none",
+        })
+        assert r.status_code == 400, r.text
+
+    def test_valid_loopback_and_https_still_register(self, api_client):
+        """The guard must not over-reject: ordinary URIs still register."""
+        tc, _ = api_client
+        for uri in ("http://localhost/callback", "http://127.0.0.1:8765/callback",
+                    "http://[::1]/callback", "https://app.example.com/callback"):
+            assert _valid_redirect_uri(uri) is True, uri
+        assert _register_client(
+            tc, redirect_uris=["http://localhost/callback"])["client_id"]
 
 
 class TestConsentPreview:

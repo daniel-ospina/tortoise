@@ -23020,10 +23020,23 @@ async def oauth_authorize(request: Request):
         # Invalid authorize params → RFC 6749 §4.1.2.1 error to the browser.
         # Open-redirect guard: only redirect when the redirect_uri is
         # REGISTERED for the client — never echo an unvalidated param.
-        from tortoise.oauth import get_client
+        #
+        # #2846 review P2: this must use the SAME matcher as validation, or a
+        # native client that registered a PORTLESS loopback URI never receives
+        # the error on its ephemeral listener — the strict membership test
+        # fails, so we return JSON where the client is waiting for a redirect.
+        # Using the relaxed matcher here is safe ONLY because
+        # `_redirect_uri_matches` also refuses parse-differential input: this is
+        # the one place the raw request param is echoed into a Location header,
+        # so relaxing the match without that guard would BE the open redirect.
+        from tortoise.oauth import _redirect_uri_matches, get_client
         client = get_client(cp, params["client_id"]) if params["client_id"] else None
+        registered_uris = (client.get("redirect_uris") or []) if client else []
+        if not isinstance(registered_uris, (list, tuple)):
+            registered_uris = [registered_uris]
         if (params["redirect_uri"] and client is not None
-                and params["redirect_uri"] in (client.get("redirect_uris") or [])):
+                and any(_redirect_uri_matches(u, params["redirect_uri"])
+                        for u in registered_uris)):
             from urllib.parse import urlencode
             sep = "&" if "?" in params["redirect_uri"] else "?"
             return RedirectResponse(

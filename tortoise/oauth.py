@@ -224,9 +224,36 @@ def _is_loopback(hostname: str) -> bool:
         return False
 
 
+# Characters Python's `urlsplit` and the browser's WHATWG URL parser disagree
+# about. The authorization code is delivered by NAVIGATING THE BROWSER to the
+# raw `redirect_uri` (see `redirectBack` in the consent page), so the browser's
+# parse — never ours — is what decides where the code actually goes. A URI the
+# two can disagree about must therefore never be matched, registered, or echoed.
+#
+#   * `\`  — WHATWG ends the authority at a backslash for special schemes
+#            (http/https); `urlsplit` does not. So
+#            `http://evil.example\@localhost/cb` has host `localhost` to us and
+#            `evil.example` to the browser: validated as loopback, then
+#            navigated off-device carrying the code. Review P0, reproduced in
+#            Chromium — the attacker's listener received `?code=...`, and PKCE
+#            does not help because the attacker authored the authorize request
+#            and therefore holds the verifier.
+#   * C0 controls (0x00-0x1F) and DEL — stripped by the browser, kept by
+#            `urlsplit`.
+def _has_parser_differential(uri: str) -> bool:
+    """True when the AS and the user agent can disagree about this URI."""
+    return any(ch == "\\" or ord(ch) < 0x20 or ord(ch) == 0x7F for ch in uri)
+
+
 def _valid_redirect_uri(uri: str) -> bool:
     """A registration-acceptable redirect URI: https, or http only when the
-    host is loopback (RFC 8252 native-app pattern used by MCP clients)."""
+    host is loopback (RFC 8252 native-app pattern used by MCP clients).
+
+    Parse-differential inputs are refused here too, so a URI the browser would
+    read differently can never be registered in the first place.
+    """
+    if _has_parser_differential(uri):
+        return False
     try:
         parsed = urlparse(uri)
     except ValueError:
@@ -238,7 +265,8 @@ def _valid_redirect_uri(uri: str) -> bool:
     return False
 
 
-def _redirect_uri_matches(registered: str, presented: str) -> bool:
+def _redirect_uri_matches(registered: str | None,
+                          presented: str | None) -> bool:
     """#2846 — does ``presented`` match a registered ``redirect_uri``?
 
     RFC 8252 §7.3: for loopback redirect URIs the authorization server MUST
@@ -248,16 +276,27 @@ def _redirect_uri_matches(registered: str, presented: str) -> bool:
 
     The relaxation is deliberately narrow:
 
-    * both values must be ``http`` loopback URIs (``_is_loopback`` — the same
-      predicate registration validates with, so the two can never disagree);
-    * scheme, host and path must still match exactly (host case-insensitively);
+    * BOTH values must be loopback hosts (``_is_loopback`` — the same predicate
+      ``_valid_redirect_uri`` uses) carrying the SAME scheme. Nothing requires
+      ``http``: the relaxation keys on loopback, so an ``https``-on-loopback
+      pair relaxes as well.
+    * scheme, host, path, params, query and fragment must still match exactly
+      (host per RFC 3986 §3.2.2 and scheme per §3.1, case-insensitively).
+    * the userinfo component must match exactly, so ``http://evil@localhost/cb``
+      never satisfies a registration for ``http://localhost/cb``.
     * anything else — including every non-loopback URI — keeps the original
       exact-string rule, so the hosted security posture is unchanged.
 
     Host is NOT relaxed: ``localhost`` and ``127.0.0.1`` are distinct hosts,
     even though both are loopback. Only the port varies.
+
+    Inputs where Python's and the browser's parsers can disagree are refused
+    outright see ``_has_parser_differential`` — this function's own parse is
+    never the one that decides where the code actually goes.
     """
     if not isinstance(registered, str) or not isinstance(presented, str):
+        return False
+    if _has_parser_differential(registered) or _has_parser_differential(presented):
         return False
     if registered == presented:
         return True
@@ -273,6 +312,8 @@ def _redirect_uri_matches(registered: str, presented: str) -> bool:
     return (
         reg.scheme.lower() == pre.scheme.lower()
         and reg.hostname.lower() == pre.hostname.lower()
+        and reg.username == pre.username
+        and reg.password == pre.password
         and reg.path == pre.path
         and reg.params == pre.params
         and reg.query == pre.query
@@ -527,8 +568,17 @@ def validate_authorize_params(cp, *, client_id: str, redirect_uri: str | None,
                          "Only response_type=code is supported.")
     # #2846: loopback ports are ignored (RFC 8252 §7.3); every other redirect
     # keeps the exact-string rule. See `_redirect_uri_matches`.
+    #
+    # A non-list `redirect_uris` can only come from a legacy/hand-corrupted row
+    # (`register_client` requires a list and the column is jsonb). Normalize it
+    # to a single-element list so a bare string stays ONE uri: iterating the
+    # string directly would compare character by character and silently stop
+    # matching it at all.
+    registered_uris = client.get("redirect_uris") or []
+    if not isinstance(registered_uris, (list, tuple)):
+        registered_uris = [registered_uris]
     if not any(_redirect_uri_matches(u, redirect_uri)
-               for u in (client.get("redirect_uris") or [])):
+               for u in registered_uris):
         raise OAuthError(400, "invalid_request",
                          "redirect_uri is not registered for this client.")
     if not code_challenge or not _valid_pkce(code_challenge):
