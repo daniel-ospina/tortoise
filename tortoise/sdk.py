@@ -2398,8 +2398,23 @@ class TortoiseSDK:
         # flows through the SAME `extractedFrom` prop path as an explicit one,
         # so it is journaled on PointAdded and replayed by _upsert_point_edges
         # (live == rebuild). An explicit `extractedFrom` always wins.
-        if not props.get("extractedFrom") and props.get("session_id"):
-            props["extractedFrom"] = f"session:{props['session_id']}"
+        #
+        # #3263 (review P2): only a non-empty SCALAR session id can name a
+        # Source. A non-scalar would stringify into a bogus ref
+        # (`session:['s1', 's2']`) and mint a corrupt Source — an invented
+        # source is worse than none (design contract #3), so we skip and say so
+        # rather than fabricate.
+        _session_id = props.get("session_id")
+        if not props.get("extractedFrom"):
+            if isinstance(_session_id, str) and _session_id.strip():
+                props["extractedFrom"] = f"session:{_session_id}"
+            elif _session_id:
+                _logger.warning(
+                    "create_point: non-scalar session_id=%r — provenance not "
+                    "inferred (pass extractedFrom explicitly); refusing to mint "
+                    "an invented Source (#3263)",
+                    _session_id,
+                )
         from datetime import datetime, timezone
         now = datetime.now(timezone.utc).isoformat()  # noqa: UP017
         proj = self._get_proj()
@@ -2525,6 +2540,27 @@ class TortoiseSDK:
                     _logger.warning(
                         "credibility=%r ignored — point %s already exists and dedup=True",
                         credibility, pid)
+                # #3263 (review P1): `extractedFrom` must NOT ride the
+                # update_point prop path on a dedup hit. update_point writes the
+                # node property but never calls _link_source, so the Point would
+                # end up carrying `extractedFrom` with NO `:Source` edge — still
+                # an orphan — and `list_drafts` reads that prop, so it would
+                # report provenance that does not exist as an edge. It is not
+                # replayed either (_revise_point restores content/embedding
+                # only), so the rebuilt graph drops the prop entirely and
+                # live != rebuild for the very property this path introduced.
+                # The Point already exists: if it was created with a session
+                # context it already carries the edge. Retrofitting provenance
+                # onto an existing Point needs a journaled path, which does not
+                # exist yet — tracked separately (#3340).
+                if props.pop("extractedFrom", None) is not None:
+                    _logger.debug(
+                        "create_point dedup hit on %s: extractedFrom not applied "
+                        "— update_point cannot wire the Source edge and the value "
+                        "is not replayed, so applying it would diverge live from "
+                        "rebuild (#3263)",
+                        pid,
+                    )
                 if props:
                     # Only touch the existing point when the caller passed
                     # other props — a pure dedup hit (no props) must not bump

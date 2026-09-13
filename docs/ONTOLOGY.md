@@ -230,7 +230,7 @@ Per-type edges (chosen over single polymorphic edge — FalkorDB matrix-per-type
 
 | Predicate | From → To | Direction | Cardinality | Standard alignment | Meaning |
 |-----------|-----------|-----------|-------------|--------------------|---------|
-| `extractedFrom` | Point → Source | unidirectional | many→1 | `pav:retrievedFrom` (inverse) | This claim was extracted from this source. One source backs many Points. |
+| `extractedFrom` | Point → Source | unidirectional | many→many | `pav:retrievedFrom` (inverse) | This claim was extracted from this source. One source backs many Points, **and one Point may be backed by several sources** (amended v3.7, #3263: the edge is written per source — a claim extracted from several sessions carries one `extractedFrom` edge each; there is no upper bound). |
 
 ### §3.4 Source → Entity (Provenance)
 

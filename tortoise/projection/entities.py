@@ -226,7 +226,14 @@ class _EntityHandlers:
             "MERGE (n:Point {id:$id}) SET " + ", ".join(set_clauses),
             params=params,
         )
-        # Ontology v2.1: also store extractedFrom as property for query convenience
+        # Ontology v2.1: also store extractedFrom as property for query convenience.
+        # #3263: many-to-many — the EDGES are authoritative (see
+        # _upsert_point_edges); the scalar prop is a query convenience for the
+        # single-source case (99%). With several sources we store the array
+        # (FalkorDB supports array props) rather than silently keeping only one
+        # and misreporting the point as single-sourced. Note an array is NOT
+        # equality-matchable (`WHERE n.extractedFrom = 'x'` will not hit it) —
+        # callers needing that must traverse the edge.
         source_ref = p.get("extractedFrom")
         if source_ref:
             self.g.query("MATCH (n:Point {id:$id}) SET n.extractedFrom = $ref", params={"id": p["id"], "ref": source_ref})
@@ -244,7 +251,9 @@ class _EntityHandlers:
         rebuild_all() pass 2 (#330) — same role as _upsert_point_props for
         node properties.
         """
-        # Ontology v2.1: link Point → Source via extractedFrom edge
+        # Ontology v2.1: link Point → Source via extractedFrom edge.
+        # #3263: many-to-many — one edge per source. _link_source fans a list
+        # out to N edges (ontology §3.3 amended to many→many).
         source_ref = p.get("extractedFrom")
         if source_ref:
             self._link_source(p["id"], source_ref)
