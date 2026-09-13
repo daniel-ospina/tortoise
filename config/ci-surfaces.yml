@@ -284,6 +284,7 @@ surfaces:
   # groupings above.
   - test_battery_derive_truth_leg.py
   core:
+  - test_lifecycle_guards.py        # #2498: shared lifecycle guard — also runs on a tortoise/live.py-only change (terminal vocabulary pin)
   - test_about_edges.py
   - test_about_event_untangle.py
   - test_action_endpoints_dual_auth.py
@@ -583,6 +584,7 @@ surfaces:
   - test_ep_selector.py
   - test_pointsuperseded_rebuild.py
   - test_pointinvalidated_rebuild.py
+  - test_lifecycle_guards.py        # #2498: shared supersede/retract/invalidate terminal+operator guard (status x transition matrix)
   - test_provenance_extractedfrom_3263.py  # #3263: extractedFrom inferred from the write context + live==rebuild parity (docker-lane)
   - test_weights_mitigation.py
   - test_ep_sources.py

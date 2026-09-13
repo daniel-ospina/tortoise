@@ -1810,9 +1810,10 @@ class FalkorProjection(
         # is never live-truth, so keep the LAST supersede survivor per old
         # id (the earlier fold's CORRECTS S1→A would ghost beside the final
         # S2→A). PointInvalidated folds ALL survive the id filter and are
-        # NOT canonicalized — double-invalidate is live-legal (no terminal
-        # guard; outdated is a flag), so every survivor is live-truth and
-        # must fold (distinct corrected_by → 2 CORRECTS, acceptance b).
+        # NOT canonicalized — #2498: the SDK now REJECTS the repeat (the
+        # outdated=true flag is terminal), but a raw/legacy producer can still
+        # journal it, so every survivor folds (distinct corrected_by → 2
+        # CORRECTS, acceptance b).
         # Chains A→B→C have distinct old ids — each link folds independently.
         supersede_last: dict[str, tuple[int, dict]] = {}
         invalidate_survivors: list[tuple[int, dict]] = []

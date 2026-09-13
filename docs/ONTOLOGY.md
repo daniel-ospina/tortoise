@@ -375,7 +375,7 @@ About edges: `aboutSubject`, `aboutObject`, `aboutEvent`, `aboutPoint`, `aboutDo
 | `pointKind` | string | ✅ | — | ✅ | Classification tag — extraction writes `statement` (option B); decision/vision/strategy/plan/goal/target/observation/hypothesis/humanApproval/event are legacy write kinds (§5) + pack pointKinds |
 | `is_operator` | bool | — | — | ✅ | true for operator Points |
 | `op_type` | string | — | — | ✅ | IMPL / NAND (operator Points only) |
-| `status` | string | — | `pav:status` | ✅ | Lifecycle: draft, live, retracted, superseded, outdated, archived (#432). **challenged is a derived condition** (presence of a NAND operator edge on a live point), not a stored status (§5). draft inert for computation; retracted/superseded/archived are terminal |
+| `status` | string | — | `pav:status` | ✅ | Lifecycle: draft, live, retracted, superseded, outdated, archived (#432). **challenged is a derived condition** (presence of a NAND operator edge on a live point), not a stored status (§5). draft inert for computation; retracted/superseded/outdated/archived are terminal, and the legacy `outdated=true` flag is terminal too (#2498) |
 | `confidence` | float 0..1 | — | — | ⚠️ | EP posterior mean, computed by propagation |
 | `c_cal` | float 0..1 | — | — | ❌ | Calibrated confidence — calibrated counterpart to the EP posterior `confidence` (registered #909 §4.3 #11; written by the calibrated pipeline, slice 5+) |
 | `quote` | string ≤200 | — | — | ⚠️ | Provenance quote — the source text this claim was drawn from; payload-level metadata today (SDK extraction path / EventAPI `provenance()` payloads — extractor.py, api.py), stored Point property per #909 §4.3 #11 (secret-scanned) |
@@ -615,7 +615,7 @@ degraded_reason    timeout | assembly_error | breaker_open      # degradations o
 | `live` | active | `create_operator` (auto-promote source), `update_point` (status='live') | `retracted`, `superseded` | Full EP participation |
 | `retracted` | terminal | `retract_point`, `EventAPI.retract_point` | *(none)* | Tombstone — stays in graph, `get_point` returns, `query`/`paginated_query` exclude by default |
 | `superseded` | terminal | `supersede_point` (sets alongside `outdated:true`) | *(none)* | Structural replacement via CORRECTS edge + **restatement-scoped edge disposition** (#2421 — semantic edges triaged per-edge, not bulk-transferred) |
-| `outdated` | legacy flag | `invalidate_point`, `supersede_point` (legacy flag) | `retracted` | Back-compat boolean; co-exists with `status` |
+| `outdated` | terminal (legacy flag) | `invalidate_point`, `supersede_point` (legacy flag) | *(none)* | Back-compat boolean; co-exists with `status`. Terminal on every read surface and for every lifecycle transition (#2498) — the pre-#2498 `→ retracted` allowance let a dead claim be re-terminalized |
 | `archived` | terminal (reserved) | *(no v1 SDK write path)* | *(none)* | Reserved for future lifecycle operations |
 
 > **`challenged` is NOT a state** — it is a DERIVED condition emerging from the presence of a NAND operator edge on a live point, queryable as such:
