@@ -27,6 +27,7 @@ from .cross_lens import DEFAULT_THRESHOLD
 from .ids import ulid
 from .live import TERMINAL_EXCLUDED_STATUSES  # EP terminal vocabulary (shared)
 from .live import decay_clause, _terminal_excluded  # #2490 vacuity decay + terminal predicate
+from .live import is_terminal_status  # #2498 shared terminal predicate (Python mirror)
 from .embedded_lifecycle import atexit_fast_close  # #1371: registers the batch flush
 from .retrieval import DEFAULT_POOL_SIZE, resolve_pool_size
 from . import monitoring
@@ -717,7 +718,11 @@ _ALLOWED_TRANSITIONS: dict[str, frozenset[str]] = {
     "live": frozenset({"retracted", "superseded"}),    # via retract_point / supersede_point
     "retracted": frozenset(),                            # terminal
     "superseded": frozenset(),                           # terminal
-    "outdated": frozenset({"retracted"}),               # outdated stays a flag; retract allowed
+    # #2498: `outdated` is TERMINAL for the shared lifecycle guard
+    # (`live.TERMINAL_EXCLUDED_STATUSES` + the legacy `outdated=true` flag),
+    # so it has no outgoing transition. The pre-#2498 `{"retracted"}` entry
+    # diverged from the guard — a dead claim could be re-terminalized.
+    "outdated": frozenset(),
     "archived": frozenset(),                             # terminal (reserved — no v1 write path)
 }
 
@@ -4418,19 +4423,77 @@ class TortoiseSDK:
 
     # ── Invalidate / Supersede (#6999 GAP-12) ────────────────────
 
+    def _assert_lifecycle_guard(self, point_id: str, *, method: str,
+                                role: str = "point",
+                                missing_ok: bool = False) -> dict | None:
+        """Single authoritative terminal/operator guard for point lifecycle
+        transitions (#2498).
+
+        ``supersede_point`` / ``retract_point`` / ``invalidate_point`` all
+        terminalize a claim, but each carried its OWN guard and they drifted:
+        the first two hardcoded the 3-status subset
+        ``("retracted", "superseded", "archived")`` (so a point whose status
+        is ``outdated``/``deprecated``, or whose legacy ``outdated=true`` flag
+        is set, passed the guard and could be terminalized a second time),
+        and ``invalidate_point`` had no guard at all (it flagged an OPERATOR
+        node outdated and re-stamped already-terminal points).
+
+        The predicate is the SHARED vocabulary — ``live.is_terminal_status``,
+        the Python mirror of the Cypher terminal predicate the read surfaces
+        and EP already use: ``status in live.TERMINAL_EXCLUDED_STATUSES``
+        (= retracted, superseded, outdated, archived, deprecated) OR the
+        legacy ``outdated=true`` flag. Never a locally hardcoded subset.
+
+        Returns ``{"id", "status", "outdated"}`` for a legal input. Raises
+        ``ValueError`` for a missing point (unless ``missing_ok``, used by
+        ``invalidate_point``'s retry-friendly contract — then returns
+        ``None``), an operator node, or an already-terminal claim.
+        """
+        row = self._get_proj().g.query(
+            "MATCH (n:Point {id:$id}) "
+            "RETURN n.is_operator, n.status, coalesce(n.outdated, false)",
+            params={"id": point_id},
+        ).result_set
+        if not row:
+            if missing_ok:
+                return None
+            raise ValueError(f"No point {point_id!r}")
+        is_op, status, outdated = bool(row[0][0]), row[0][1], bool(row[0][2])
+        if is_op:
+            raise ValueError(
+                f"Point {point_id!r} is an operator — {method} is for "
+                f"statement points")
+        if is_terminal_status(status, outdated):
+            marker = ("outdated" if outdated
+                      and status not in TERMINAL_EXCLUDED_STATUSES
+                      else (status or "live"))
+            raise ValueError(
+                f"Point {point_id!r} is already terminal ({marker}) — "
+                f"{method} cannot terminalize a dead {role}")
+        return {"id": point_id, "status": status, "outdated": outdated}
+
     def invalidate_point(self, id: str, corrected_by_id: str) -> dict:
         """Mark a Point outdated, linked to its replacement via CORRECTS edge.
 
-        Validation contract (#330) — all checks run BEFORE any write so a
-        failure can never leave a partial graph state:
+        Validation contract (#330/#2498) — all checks run BEFORE any write so
+        a failure can never leave a partial graph state:
         - id == corrected_by_id → ValueError (a self-CORRECTS edge poisons
           traversal/credibility chains).
         - old point missing (never existed or already deleted) →
           {"invalidated": False} with no writes (retry-friendly).
-        - corrected_by point missing → ValueError (structural failure: would
-          orphan an outdated point with no replacement).
-        Re-invalidating a point that still EXISTS re-asserts (returns True,
-        MERGE keeps a single CORRECTS edge).
+        - old point is an OPERATOR or already terminal (shared terminal
+          vocabulary: status in TERMINAL_EXCLUDED_STATUSES OR the legacy
+          outdated=true flag) → ValueError via the single shared lifecycle
+          guard, #2498 — an operator has no place in a CORRECTS chain, and a
+          dead claim must not be re-stamped / re-edged.
+        - corrected_by point missing, an OPERATOR, or already terminal →
+          ValueError (structural failure: would orphan an outdated point, or
+          wire a CORRECTS edge from an operator / a dead claim).
+        Because ``outdated=true`` is itself terminal, repeating an invalidate
+        now raises (#2498) instead of re-asserting: the old #330 "re-assert"
+        contract let a dead claim's ``expiredAt`` move forward and minted one
+        CORRECTS edge per distinct corrector onto a node every read surface
+        already excludes.
         """
         from datetime import datetime, timezone
         proj = self._get_proj()
@@ -4438,20 +4501,20 @@ class TortoiseSDK:
             raise ValueError(
                 f"invalidate_point: corrected_by cannot be the point itself ({id!r})"
             )
-        old_exists = proj.g.query(
-            "MATCH (n:Point {id:$id}) RETURN count(n) > 0", params={"id": id},
-        ).result_set[0][0]
-        if not old_exists:
+        # #2498: the shared lifecycle guard replaces the pre-#2498
+        # existence-only probe. `missing_ok` preserves the retry-friendly
+        # missing-id contract (#330) while rejecting operator/terminal input.
+        if self._assert_lifecycle_guard(
+                id, method="invalidation", role="source",
+                missing_ok=True) is None:
             return {"invalidated": False, "id": id, "corrected_by": corrected_by_id}
-        new_exists = proj.g.query(
-            "MATCH (n:Point {id:$id}) RETURN count(n) > 0",
-            params={"id": corrected_by_id},
-        ).result_set[0][0]
-        if not new_exists:
-            raise ValueError(
-                f"invalidate_point: corrected_by point {corrected_by_id!r} does not "
-                f"exist — refusing to orphan outdated point {id!r}"
-            )
+        # #2498: guard the CORRECTOR leg too — `supersede_point` guards BOTH
+        # endpoints and `supersede(..., transfer_edges=False)` routes here, so
+        # an unguarded corrector let `(operator|terminal)-[:CORRECTS]->(point)`
+        # through on one leg and not the other. A missing corrector still
+        # raises (structural failure — would orphan an outdated point).
+        self._assert_lifecycle_guard(
+            corrected_by_id, method="invalidation", role="corrector")
         now = datetime.now(timezone.utc).isoformat()  # noqa: UP017
 
         # #2488 (rebuild-parity fix): kwargs-style PointInvalidated emission —
@@ -4460,7 +4523,10 @@ class TortoiseSDK:
         # ev.get("ts") (fallback clock), and a drift from the live SET clock
         # breaks exact-stamp rebuild parity. Crash after emit/before write is
         # convergent: re-run revalidates + re-emits; duplicate events fold
-        # idempotently; double-invalidate is already legal.
+        # idempotently. #2498: double-invalidate is NO LONGER legal (the shared
+        # lifecycle guard treats the outdated=true flag as terminal), so a
+        # crash-replay after the write raises — the fold replay is what stays
+        # idempotent.
         self._emit_event(
             "PointInvalidated",
             id=id, corrected_by=corrected_by_id,
@@ -4511,7 +4577,7 @@ class TortoiseSDK:
 
         Returns {invalidated, id, corrected_by} (+ edges_transferred when
         transfer_edges=True). Raises ValueError on missing/self/terminal input
-        (the underlying point-level guards, unchanged).
+        (both legs now route through the ONE shared lifecycle guard, #2498).
         """
         if transfer_edges:
             return self.supersede_point(old_id, new_id)
@@ -4543,22 +4609,14 @@ class TortoiseSDK:
         proj = self._get_proj()
         now = datetime.now(timezone.utc).isoformat()  # noqa: UP017
 
-        # #432: transition guard — old point must exist, be a statement (not
-        # an operator), and not already be terminal (mirrors the retract
-        # guard; supersede is already multi-query so the read is cheap).
-        guard = proj.g.query(
-            "MATCH (n:Point {id:$id}) RETURN n.is_operator, n.status",
-            params={"id": old_id},
-        ).result_set
-        if not guard:
-            raise ValueError(f"No point {old_id!r}")
-        is_op, cur = guard[0][0], guard[0][1]
-        if is_op:
-            raise ValueError(
-                f"Point {old_id!r} is an operator — supersession is for statement points")
-        if cur in ("retracted", "superseded", "archived"):
-            raise ValueError(
-                f"Point {old_id!r} is already terminal ({cur!r}) — supersession is terminal")
+        # #432/#2498: the SHARED transition guard — old point must exist, be
+        # a statement (not an operator), and not already be terminal. The
+        # pre-#2498 body hardcoded a 3-status subset, so an `outdated` /
+        # `deprecated` status or the legacy `outdated=true` flag slipped
+        # through and a dead claim could be re-superseded — transferring
+        # edges off a terminal node.
+        self._assert_lifecycle_guard(old_id, method="supersession",
+                                     role="source")
 
         # P1 (Qwen review): validate the NEW point too — it must exist, be a
         # statement, not be terminal, and differ from the old point. A missing /
@@ -4566,20 +4624,11 @@ class TortoiseSDK:
         # replacement (phantom PointSuperseded).
         if old_id == new_id:
             raise ValueError("supersede_point: old_id and new_id must differ")
-        new_guard = proj.g.query(
-            "MATCH (n:Point {id:$id}) RETURN n.is_operator, n.status",
-            params={"id": new_id},
-        ).result_set
-        if not new_guard:
-            raise ValueError(f"No point {new_id!r}")
-        n_is_op, n_cur = new_guard[0][0], new_guard[0][1]
-        if n_is_op:
-            raise ValueError(
-                f"Point {new_id!r} is an operator — supersession target must be a statement")
-        if n_cur in ("retracted", "superseded", "archived"):
-            raise ValueError(
-                f"Point {new_id!r} is already terminal ({n_cur!r}) — cannot supersede into it")
-
+        # #2498: the SAME shared guard for the successor — a terminal (or
+        # operator) target would terminalize the old point with no valid
+        # replacement (phantom PointSuperseded).
+        self._assert_lifecycle_guard(new_id, method="supersession",
+                                     role="target")
         # 0. #329: collect + validate ALL edge types BEFORE any mutation.
         #    The edge types are interpolated into query structure (no params
         #    possible) — an unvalidated type (e.g. from a crafted edge) is a
@@ -4956,7 +5005,8 @@ class TortoiseSDK:
         path.
 
         Raises ValueError if the point is missing, is an operator node, or is
-        already terminal (retracted/superseded/archived).
+        already terminal (the shared terminal vocabulary: a status in
+        live.TERMINAL_EXCLUDED_STATUSES OR the legacy outdated=true flag).
         """
         from datetime import datetime, timezone
         proj = self._get_proj()
@@ -4964,31 +5014,25 @@ class TortoiseSDK:
         # before the guard produced phantom PointRetracted events on the
         # NORMAL invalid-input path (missing / operator / terminal), which
         # poll consumers would see as retractions that never happened.
-        row = proj.g.query(
-            "MATCH (n:Point {id:$id}) RETURN n.is_operator, n.status",
-            params={"id": id}).result_set
-        if not row:
-            raise ValueError(f"No point {id!r}")
-        is_op, cur = row[0][0], row[0][1]
-        if is_op:
-            raise ValueError(
-                f"Point {id!r} is an operator — retraction is for statement points")
-        if cur in ("retracted", "superseded", "archived"):
-            raise ValueError(
-                f"Point {id!r} is already terminal ({cur!r}) — retraction is terminal")
+        # #432/#2498: the SHARED transition guard (see
+        # _assert_lifecycle_guard) — the pre-#2498 body hardcoded the same
+        # 3-status subset as supersede_point.
+        self._assert_lifecycle_guard(id, method="retraction")
         # #432 Task 3: durable PointRetracted event (append-before-mutation;
         # only after the input contract validates).
         self._emit_event("PointRetracted", {"id": id}, id=id)
         # P1 (Qwen review): CAS the SET — the WHERE re-checks terminal state so
-        # a concurrent retract/supersede can't both pass validation and have a
-        # terminal overwrite (retracted overwriting superseded, or vice versa).
+        # a concurrent retract/supersede/invalidate can't both pass validation
+        # and have a terminal overwrite. #2498: the CAS now uses the SAME
+        # shared vocabulary as the guard and the read path — the generic
+        # `_terminal_excluded` predicate also rejects the legacy
+        # `outdated=true` flag, not just a hardcoded status subset.
         r = proj.g.query(
             "MATCH (n:Point {id:$id}) "
-            "WHERE (n.status IS NULL OR NOT (n.status IN $terminal)) "
+            f"WHERE {_terminal_excluded('n.status')} "
             "SET n.status = 'retracted', n.updatedAt = $now, "
             f"{decay_clause('n')} RETURN properties(n)",
-            params={"id": id, "now": datetime.now(timezone.utc).isoformat(),  # noqa: UP017
-                    "terminal": ["retracted", "superseded", "archived"]})
+            params={"id": id, "now": datetime.now(timezone.utc).isoformat()})  # noqa: UP017
         if not r.result_set:
             raise ValueError(
                 f"Point {id!r} is already terminal — retraction is terminal")
@@ -5183,7 +5227,8 @@ class TortoiseSDK:
                 and point.get("temporal_reviewed") == "merge"):
             for tgt in temporal_targets:
                 trow = proj.g.query(
-                    "MATCH (n:Point {id:$id}) RETURN n.status",
+                    "MATCH (n:Point {id:$id}) RETURN n.status, "
+                    "coalesce(n.outdated, false)",
                     params={"id": tgt},
                 ).result_set
                 if not trow:
@@ -5196,7 +5241,10 @@ class TortoiseSDK:
                         "exists — skipping the wire", tgt, point_id)
                     continue
                 tstatus = trow[0][0] or "live"
-                if tstatus == "live":
+                # #2498: the SHARED terminal predicate — a flag-outdated
+                # target is terminal too, so it must not be NAND-wired or
+                # (temporal_replacement) sent to supersede_point.
+                if not is_terminal_status(tstatus, bool(trow[0][1])):
                     live_targets.append(tgt)
                 else:
                     _logger.warning(

@@ -1694,8 +1694,9 @@ def tortoise_retract_point(id: str) -> dict:
 
     Terminal state transition; default query/list surfaces exclude retracted
     points (opt-in via include_retracted). Raises ValueError if the point is
-    missing, is an operator, or is already terminal (retracted/superseded/
-    archived).
+    missing, is an operator, or is already terminal (the shared terminal
+    vocabulary: status in live.TERMINAL_EXCLUDED_STATUSES OR the legacy
+    outdated=true flag).
     """
     return _safe(_quota_gated(_get_team_sdk().retract_point, "points"), id)
 
