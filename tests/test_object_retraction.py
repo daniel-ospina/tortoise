@@ -1,19 +1,23 @@
 # tests/test_object_retraction.py
 import json
 import shutil
+
 import pytest
-from tortoise.log import EventLog     # CYCLE 7: hoisted here from Task 8.
-                                     # `EventLog` and `_drive` are used by
-                                     # tests in EVERY task, so they must be
-                                     # defined with the file, not at the end
-                                     # (an implementer working task-by-task
-                                     # hit `NameError` at Task 3 Step 4, whose
-                                     # Expected says PASS). tortoise/event_log.py
-                                     # does NOT exist — the module is
-                                     # `tortoise.log`.
-from tortoise.consistency import recover_from_log
+
 from tortoise.backup import restore
-from tortoise.sdk import TortoiseSDK, _entity_name_id   # _entity_name_id is MODULE-LEVEL
+
+# `EventLog` and `_drive` are used by
+# tests in EVERY task, so they must be
+# defined with the file, not at the end
+# (an implementer working task-by-task
+# hit `NameError` at Task 3 Step 4, whose
+# Expected says PASS). tortoise/event_log.py
+# does NOT exist — the module is
+# `tortoise.log`.
+from tortoise.consistency import recover_from_log
+from tortoise.log import EventLog  # CYCLE 7: hoisted here from Task 8.
+from tortoise.sdk import TortoiseSDK, _entity_name_id  # _entity_name_id is MODULE-LEVEL
+
 
 # NOTE (cycle 8): `_drive` is DEFINED BELOW, in this header, and is NOT
 # re-defined anywhere else. Cycles 7 and 8 both found the plan claiming it was
@@ -43,7 +47,8 @@ def _drive(engine, tmp_path, events, oid, *, require_recovery: bool = True):
     elif engine == "rebuild":
         proj.rebuild(EventLog(str(events / "events.jsonl")))
     elif engine == "backup_restore":
-        bk = tmp_path / "bk"; bk.mkdir(exist_ok=True)
+        bk = tmp_path / "bk"
+        bk.mkdir(exist_ok=True)
         # NOTE: the key is "db", not "db_file" — restore() reads
         # manifest.get("db", "tortoise.db") (backup.py:82). A wrong key is
         # silently ignored (the default coincidentally matches), so this
@@ -56,7 +61,9 @@ def _drive(engine, tmp_path, events, oid, *, require_recovery: bool = True):
     return proj
                                                         # (tortoise/sdk.py:1343; precedent
                                                         # tests/test_object_registered_journal.py:25)
-from tortoise.projection.entities import _classify      # must be importable — currently a closure
+from tortoise.projection.entities import (  # noqa: E402 — must follow the harness setup above
+    _classify,
+)
 
 # NOTE: `json` is needed by Task 2's `_jsonl` and Task 8's backup manifest;
 # `shutil` by Task 8's backup-restore fixture. Both were missing from an
@@ -296,34 +303,38 @@ def test_fold_object_retracted_skips_null_id_branch(tmp_path):
 
 def _jsonl(events_dir):
     p = events_dir / "events.jsonl"
-    return [json.loads(l) for l in p.read_text().splitlines() if l.strip()] if p.exists() else []
+    return ([json.loads(line) for line in p.read_text().splitlines()
+             if line.strip()] if p.exists() else [])
 
 
 def test_delete_journals_one_retraction(tmp_path):
-    events = tmp_path / "events"; events.mkdir()
+    events = tmp_path / "events"
+    events.mkdir()
     sdk = TortoiseSDK(str(tmp_path / "t4.db"), event_log_path=str(events / "events.jsonl"))
     sdk.create_entity("object", "del-obj", objectKind="core:other", is_episodic=False)
     oid = _entity_name_id("Object", "del-obj")
     assert sdk._delete_entity(oid) is True
-    retr = [l for l in _jsonl(events) if l.get("type") == "ObjectRetracted"]
+    retr = [_l for _l in _jsonl(events) if _l.get("type") == "ObjectRetracted"]
     assert len(retr) == 1 and retr[0]["id"] == oid and retr[0]["name"] == "del-obj"
 
 
 def test_double_delete_emits_once(tmp_path):
-    events = tmp_path / "events"; events.mkdir()
+    events = tmp_path / "events"
+    events.mkdir()
     sdk = TortoiseSDK(str(tmp_path / "t4b.db"), event_log_path=str(events / "events.jsonl"))
     sdk.create_entity("object", "twice", objectKind="core:other", is_episodic=False)
     oid = _entity_name_id("Object", "twice")
     assert sdk._delete_entity(oid) is True
     assert sdk._delete_entity(oid) is False, "second delete must report no rows"
-    assert len([l for l in _jsonl(events) if l.get("type") == "ObjectRetracted"]) == 1
+    assert len([_l for _l in _jsonl(events) if _l.get("type") == "ObjectRetracted"]) == 1
 
 
 def test_delete_of_absent_id_emits_nothing(tmp_path):
-    events = tmp_path / "events"; events.mkdir()
+    events = tmp_path / "events"
+    events.mkdir()
     sdk = TortoiseSDK(str(tmp_path / "t5.db"), event_log_path=str(events / "events.jsonl"))
     assert sdk._delete_entity("obj-nope") is False
-    assert [l for l in _jsonl(events) if l.get("type") == "ObjectRetracted"] == []
+    assert [_l for _l in _jsonl(events) if _l.get("type") == "ObjectRetracted"] == []
 
 
 def test_delete_of_point_warns_about_non_durability(tmp_path, caplog):
@@ -331,7 +342,8 @@ def test_delete_of_point_warns_about_non_durability(tmp_path, caplog):
     previously never asserted: a non-Object delete with a journal configured must
     WARN (the contract is now label-inconsistent), and must NOT warn when no
     journal is configured (nothing is being lost)."""
-    events = tmp_path / "events"; events.mkdir(exist_ok=True)
+    events = tmp_path / "events"
+    events.mkdir(exist_ok=True)
     sdk = TortoiseSDK(str(tmp_path / "t6e.db"), event_log_path=str(events / "events.jsonl"))
     pid = sdk.create_point("statement", "pw")["id"]
     with caplog.at_level("WARNING"):
@@ -348,13 +360,14 @@ def test_delete_of_point_warns_about_non_durability(tmp_path, caplog):
 
 
 def test_delete_of_point_does_not_emit_object_retracted(tmp_path):
-    events = tmp_path / "events"; events.mkdir()
+    events = tmp_path / "events"
+    events.mkdir()
     sdk = TortoiseSDK(str(tmp_path / "t6.db"), event_log_path=str(events / "events.jsonl"))
     # create_point(...) returns an OrderedDict (verified live), NOT an id string —
     # passing the dict makes _delete_entity return False without deleting.
     pid = sdk.create_point("statement", "p")["id"]
     assert sdk._delete_entity(pid) is True
-    assert [l for l in _jsonl(events) if l.get("type") == "ObjectRetracted"] == []
+    assert [_l for _l in _jsonl(events) if _l.get("type") == "ObjectRetracted"] == []
 
 
 def test_delete_of_object_emits_zero_non_durability_warnings(tmp_path, caplog):
@@ -371,7 +384,8 @@ def test_delete_of_object_emits_zero_non_durability_warnings(tmp_path, caplog):
     regression-visible; the sibling test above pins the POSITIVE (Point warns)
     and the no-journal negative, neither of which catches the inversion.
     """
-    events = tmp_path / "events"; events.mkdir(exist_ok=True)
+    events = tmp_path / "events"
+    events.mkdir(exist_ok=True)
     sdk = TortoiseSDK(str(tmp_path / "t6e2.db"), event_log_path=str(events / "events.jsonl"))
     oid = sdk.create_object("wd-object", objectKind="core:other")["id"]
     with caplog.at_level("WARNING"):
@@ -447,14 +461,15 @@ def test_delete_point_object_multilabel_emits_one_retraction(tmp_path):
     `test_multilabel_point_object_delete_is_still_not_durable` below. Filed as
     follow-up (r).
     """
-    events = tmp_path / "events"; events.mkdir()
+    events = tmp_path / "events"
+    events.mkdir()
     sdk = TortoiseSDK(str(tmp_path / "t6i.db"),
                       event_log_path=str(events / "events.jsonl"))
     proj = sdk._get_proj()
     proj.g.query(
         "CREATE (:Point:Object {id:'ml2', name:'ML2', status:'live'})")
     assert sdk._delete_entity("ml2") is True
-    rets = [l for l in _jsonl(events) if l.get("type") == "ObjectRetracted"]
+    rets = [_l for _l in _jsonl(events) if _l.get("type") == "ObjectRetracted"]
     assert len(rets) == 1, (
         f"a :Point:Object delete must emit exactly ONE ObjectRetracted "
         f"(got {len(rets)}) — the Point arm runs first, so an Object-arm-keyed "
@@ -481,7 +496,8 @@ def test_multilabel_point_object_delete_is_still_not_durable(tmp_path):
     class. Filed as follow-up (r); fix directions: emit the Point-side terminal
     event too, fold by `id` across labels, or journal the label add.
     """
-    events = tmp_path / "events"; events.mkdir()
+    events = tmp_path / "events"
+    events.mkdir()
     sdk = TortoiseSDK(str(tmp_path / "t6i2.db"),
                       event_log_path=str(events / "events.jsonl"))
     proj = sdk._get_proj()
@@ -496,9 +512,9 @@ def test_multilabel_point_object_delete_is_still_not_durable(tmp_path):
     p = sdk.create_point("observation", "multilabel claim", status="live")
     pid = p["id"]
     proj.g.query("MATCH (n:Point {id:$id}) SET n:Object", params={"id": pid})
-    assert ["Object"] == [l for l in proj.g.query(
+    assert [_l for _l in proj.g.query(
         "MATCH (n {id:$id}) RETURN labels(n)", params={"id": pid}
-    ).result_set[0][0] if l == "Object"], "precondition: :Object is present live"
+    ).result_set[0][0] if _l == "Object"] == ["Object"], "precondition: :Object is present live"
     assert sdk._delete_entity(pid) is True
     proj.rebuild_all(str(events))
     rows = proj.g.query("MATCH (o:Object) RETURN count(o)").result_set
@@ -572,8 +588,9 @@ def test_hosted_api_create_object_rejects_unknown_status_with_422(tmp_path):
     limits dict — exactly as `tests/test_hosted_api.py` does.
     """
     from fastapi.testclient import TestClient
-    from tortoise.hosted_api import app, get_current_team
+
     from tests.test_hosted_api import TEST_TEAM
+    from tortoise.hosted_api import app, get_current_team
 
     app.dependency_overrides[get_current_team] = lambda: TEST_TEAM
     try:
@@ -616,7 +633,8 @@ def test_retraction_append_failure_warns(tmp_path, monkeypatch, caplog):
     """Pins the partial-failure contract: graph delete succeeds, journal append
     fails. _emit_event swallows the raise (sdk.py:2340-2352), so the delete still
     returns True and the Object is live-deleted but NOT durable."""
-    events = tmp_path / "events"; events.mkdir()
+    events = tmp_path / "events"
+    events.mkdir()
     sdk = TortoiseSDK(str(tmp_path / "t6b.db"), event_log_path=str(events / "events.jsonl"))
     sdk.create_entity("object", "lost", objectKind="core:other", is_episodic=False)
     from tortoise.log import EventLog
@@ -629,11 +647,12 @@ def test_retraction_append_failure_warns(tmp_path, monkeypatch, caplog):
     msgs = [r.getMessage() for r in caplog.records]
     assert any("ObjectRetracted" in m and "append" in m.lower() for m in msgs), \
         ("a swallowed journal-append failure must be logged with a message that "
-         "names the cause; got: %r" % (msgs,))
+         f"names the cause; got: {msgs!r}")
 
 
 def test_deleted_object_not_resurrected_on_rebuild(tmp_path):
-    events = tmp_path / "events"; events.mkdir()
+    events = tmp_path / "events"
+    events.mkdir()
     sdk = TortoiseSDK(str(tmp_path / "t7.db"), event_log_path=str(events / "events.jsonl"))
     proj = sdk._get_proj()
     sdk.create_entity("object", "gone", objectKind="core:other", is_episodic=False)
@@ -678,7 +697,8 @@ def test_live_delete_and_replayed_tombstone_diverge_by_design(tmp_path):
     VERIFIED LIVE: live → 0 Objects, 0 `aboutObject` edges; replay → 1 Object
     and 1 `aboutObject` edge, reconstructed from the Point snapshot.
     """
-    events = tmp_path / "events"; events.mkdir(exist_ok=True)
+    events = tmp_path / "events"
+    events.mkdir(exist_ok=True)
     sdk = TortoiseSDK(str(tmp_path / "t7b.db"), event_log_path=str(events / "events.jsonl"))
     proj = sdk._get_proj()
     sdk.create_entity("object", "EDGEY", objectKind="core:other", is_episodic=False)
@@ -731,7 +751,8 @@ def test_anchor_ignores_a_registration_that_created_no_node(tmp_path):
     buried a legitimate retraction — the exact #2977 failure direction. The
     anchor now requires BOTH keys truthy (mirroring `_upsert_object`'s guard).
     """
-    events = tmp_path / "events"; events.mkdir(exist_ok=True)
+    events = tmp_path / "events"
+    events.mkdir(exist_ok=True)
     log = EventLog(str(events / "events.jsonl"))
     log.append({"type": "ObjectRegistered", "id": "U1", "name": "X"})
     log.append({"type": "ObjectRetracted", "id": "U1", "name": "X", "ts": "T1"})
@@ -784,7 +805,8 @@ def test_survivor_anchor_cross_key_disagreement_is_documented(tmp_path):
 
     Reachability: NONE from production writers.
     """
-    events = tmp_path / "events"; events.mkdir(exist_ok=True)
+    events = tmp_path / "events"
+    events.mkdir(exist_ok=True)
     log = EventLog(str(events / "events.jsonl"))
     # OR(iA, NA)@0 — an Object whose NAME is NA
     log.append({"type": "ObjectRegistered", "id": "iA", "name": "NA"})
@@ -822,7 +844,8 @@ def test_reused_id_does_not_multi_tombstone_the_supersede_lane(tmp_path):
     two families pass different `skip_terminal` values and a fix applied to one
     body but not the shared selection rule would only show up here.
     """
-    events = tmp_path / "events"; events.mkdir(exist_ok=True)
+    events = tmp_path / "events"
+    events.mkdir(exist_ok=True)
     log = EventLog(str(events / "events.jsonl"))
     log.append({"type": "ObjectRegistered", "id": "U1", "name": "X"})
     log.append({"type": "ObjectSuperseded", "id": "U1", "name": "X",
@@ -864,7 +887,8 @@ def test_reused_id_under_new_name_does_not_resurrect_the_old_name(tmp_path):
     is name-preferred and X's last registration is seq 0 — `0 < 1 < 0` is
     false, the fold applies, and X stays retracted.
     """
-    events = tmp_path / "events"; events.mkdir(exist_ok=True)
+    events = tmp_path / "events"
+    events.mkdir(exist_ok=True)
     log = EventLog(str(events / "events.jsonl"))
     log.append({"type": "ObjectRegistered", "id": "U1", "name": "X"})
     log.append({"type": "ObjectRetracted", "id": "U1", "name": "X", "ts": "T1"})
@@ -893,7 +917,8 @@ def test_reused_id_under_new_name_does_not_resurrect_the_old_name(tmp_path):
 
 
 def test_delete_recreate_replays_live(tmp_path):
-    events = tmp_path / "events"; events.mkdir()
+    events = tmp_path / "events"
+    events.mkdir()
     sdk = TortoiseSDK(str(tmp_path / "t8.db"), event_log_path=str(events / "events.jsonl"))
     proj = sdk._get_proj()
     sdk.create_entity("object", "phoenix", objectKind="core:other", is_episodic=False)
@@ -910,7 +935,8 @@ def test_delete_recreate_replays_live(tmp_path):
 
 def test_delete_recreate_replays_live_via_recover_from_log(tmp_path):
     """Exercise the PRODUCTION lane, not apply_replay directly."""
-    events = tmp_path / "events"; events.mkdir()
+    events = tmp_path / "events"
+    events.mkdir()
     sdk = TortoiseSDK(str(tmp_path / "t9.db"), event_log_path=str(events / "events.jsonl"))
     proj = sdk._get_proj()
     sdk.create_entity("object", "phoenix2", objectKind="core:other", is_episodic=False)
@@ -938,7 +964,8 @@ def test_rebuild_retracts_deleted_object(tmp_path):
     """D-14: `rebuild(log)` is a real replay surface (**11** in-repo callers — see
     D-14; VERIFY-2 P2-1 corrected this stale `10`) and
     MUST NOT resurrect. Verified live pre-fix: rebuild(log) → status='live'."""
-    events = tmp_path / "events"; events.mkdir()
+    events = tmp_path / "events"
+    events.mkdir()
     sdk = TortoiseSDK(str(tmp_path / "t9b.db"), event_log_path=str(events / "events.jsonl"))
     proj = sdk._get_proj()
     sdk.create_entity("object", "gone", objectKind="core:other", is_episodic=False)
@@ -961,7 +988,8 @@ def test_rebuild_stays_fail_loud(tmp_path, monkeypatch):
     Asserts the POST-STATE too: a bare `pytest.raises` is satisfied by an
     exception while the graph is left silently wrong (verified live: the node
     remains `status='live'` with the retraction fold lost)."""
-    events = tmp_path / "events"; events.mkdir(exist_ok=True)
+    events = tmp_path / "events"
+    events.mkdir(exist_ok=True)
     sdk = TortoiseSDK(str(tmp_path / "t9c.db"), event_log_path=str(events / "events.jsonl"))
     proj = sdk._get_proj()
     sdk.create_entity("object", "boom", objectKind="core:other", is_episodic=False)
@@ -993,7 +1021,8 @@ def test_apply_replay_fold_failure_is_isolated(tmp_path, monkeypatch):
     """Non-strict: one bad fold must not abort the rest, and must not escape
     recover_from_log's documented "caught and reported, never raised" contract.
     Verified live pre-fix: a raise on fold #1 of 2 left BOTH unfolded."""
-    events = tmp_path / "events"; events.mkdir()
+    events = tmp_path / "events"
+    events.mkdir()
     sdk = TortoiseSDK(str(tmp_path / "t9d.db"), event_log_path=str(events / "events.jsonl"))
     proj = sdk._get_proj()
     for nm in ("f1", "f2", "f3"):
@@ -1042,12 +1071,14 @@ def test_backup_restore_raises_on_a_torn_fold(tmp_path, monkeypatch):
     matter which folds failed. Under fail-loud that is no longer possible —
     a torn fold cannot be reported as ok because it cannot be reported at all.)
     """
-    events = tmp_path / "events"; events.mkdir(exist_ok=True)
+    events = tmp_path / "events"
+    events.mkdir(exist_ok=True)
     sdk = TortoiseSDK(str(tmp_path / "rb.db"), event_log_path=str(events / "events.jsonl"))
     oid = _entity_name_id("Object", "rb")
     sdk.create_entity("object", "rb", objectKind="core:other", is_episodic=False)
     sdk._delete_entity(oid)
-    bk = tmp_path / "bk"; bk.mkdir()
+    bk = tmp_path / "bk"
+    bk.mkdir()
     # manifest key is "db" (backup.py:82 reads manifest.get("db", ...))
     (bk / "manifest.json").write_text(
         json.dumps({"db": "tortoise.db", "events": 0}))
@@ -1073,7 +1104,8 @@ def test_recover_from_log_torn_retraction_is_not_reported_recovered(tmp_path, mo
     ... (1 skipped)'}` — a RESURRECTED Object reported as successful recovery,
     contradicting the issue's own acceptance indicator. `ok` must require
     torn == 0."""
-    events = tmp_path / "events"; events.mkdir(exist_ok=True)
+    events = tmp_path / "events"
+    events.mkdir(exist_ok=True)
     sdk = TortoiseSDK(str(tmp_path / "rc.db"), event_log_path=str(events / "events.jsonl"))
     oid = _entity_name_id("Object", "rc")
     sdk.create_entity("object", "rc", objectKind="core:other", is_episodic=False)
@@ -1101,7 +1133,8 @@ def test_recover_from_log_tolerates_a_torn_trailing_line(tmp_path):
     `FalkorProjection._recover_or_raise` (projection/__init__.py:985) then RAISES
     — an embedded DB damaged only in its final byte refuses to open.
     """
-    events = tmp_path / "events"; events.mkdir(exist_ok=True)
+    events = tmp_path / "events"
+    events.mkdir(exist_ok=True)
     sdk = TortoiseSDK(str(tmp_path / "pt.db"),
                       event_log_path=str(events / "events.jsonl"))
     sdk.create_entity("object", "pt", objectKind="core:other", is_episodic=False)
@@ -1135,7 +1168,8 @@ def test_recover_from_log_tolerates_a_per_event_apply_failure(tmp_path):
     `TypeError` in `_upsert_event`, and the pre-change code returned
     `{'recovered': True, 'reason': '… (1 skipped)'}`.
     """
-    events = tmp_path / "events"; events.mkdir(exist_ok=True)
+    events = tmp_path / "events"
+    events.mkdir(exist_ok=True)
     sdk = TortoiseSDK(str(tmp_path / "pe.db"),
                       event_log_path=str(events / "events.jsonl"))
     sdk.create_entity("object", "pe", objectKind="core:other", is_episodic=False)
@@ -1204,6 +1238,7 @@ def test_fold_sweep_handles_2500_folds(tmp_path):
     create Objects by raw `CREATE`.
     """
     import time
+
     from tortoise.projection import FalkorProjection
     # This is the ONE test that BYPASSES the class-level test redirect (epic
     # #1647 D-1=A): `from_uri` lands on the SHARED session graph rather than a
@@ -1477,26 +1512,28 @@ def test_object_visibility_vocabularies_are_declared_views():
     explicit VALUE assertions, and `assembly.py`'s divergent set is IMPORTED
     and pinned as a NAMED divergence so aligning it is a deliberate, RED edit.
     """
-    from tortoise.commit_ops import (OBJECT_TERMINAL_STATUSES,
-                                     _RECALL_OBJECT_EXCLUDED_STATUS,
-                                     OBJECT_SEARCH_EXCLUDED_STATUS)
-    from tortoise.sdk import OBJECT_STATUS_VALUES
     import tortoise.assembly as _assembly
+    from tortoise.commit_ops import (
+        _RECALL_OBJECT_EXCLUDED_STATUS,
+        OBJECT_SEARCH_EXCLUDED_STATUS,
+        OBJECT_TERMINAL_STATUSES,
+    )
+    from tortoise.sdk import OBJECT_STATUS_VALUES
 
     # Values, not identities: a re-literalised alias must not slip through.
-    assert OBJECT_TERMINAL_STATUSES == frozenset(
-        {"superseded", "deprecated", "archived", "retracted"})
+    assert frozenset(
+        {"superseded", "deprecated", "archived", "retracted"}) == OBJECT_TERMINAL_STATUSES
     assert _RECALL_OBJECT_EXCLUDED_STATUS == OBJECT_TERMINAL_STATUSES
     # The search view is a strict, DELIBERATE subset — pinned BY VALUE, so
     # growing the canonical set cannot silently widen search visibility.
-    assert OBJECT_SEARCH_EXCLUDED_STATUS == frozenset({"retracted"})
+    assert frozenset({"retracted"}) == OBJECT_SEARCH_EXCLUDED_STATUS
     assert OBJECT_SEARCH_EXCLUDED_STATUS < OBJECT_TERMINAL_STATUSES
     # Every canonical status must be writable by some legitimate writer.
     assert OBJECT_TERMINAL_STATUSES <= OBJECT_STATUS_VALUES
     # assembly.py:1017's divergence is NAMED, not described in a comment:
     # changing either set breaks this line. Tracked in #2901; filed as (d).
-    assert _assembly._RECALL_OBJECT_EXCLUDED_STATUSES == (
-        OBJECT_TERMINAL_STATUSES | {"outdated"}), (
+    assert (
+        OBJECT_TERMINAL_STATUSES | {"outdated"}) == _assembly._RECALL_OBJECT_EXCLUDED_STATUSES, (
         "assembly's Object set diverged — decide deliberately, then update "
         "this assertion and the #2901/(d) deferral together")
 
@@ -1577,7 +1614,8 @@ def _build_journal(tmp_path, script):
     """Drive the LIVE lane for create/delete; append fold events straight to the
     JSONL (they are journal INPUT, and the live supersede path does not journal)."""
     tmp_path.mkdir(parents=True, exist_ok=True)
-    events = tmp_path / "events"; events.mkdir(exist_ok=True)
+    events = tmp_path / "events"
+    events.mkdir(exist_ok=True)
     sdk = TortoiseSDK(str(tmp_path / "build.db"),
                       event_log_path=str(events / "events.jsonl"))
     log = EventLog(str(events / "events.jsonl"))
@@ -1704,7 +1742,8 @@ def test_precedence_is_journal_order_not_fixed_sweep_order(tmp_path):
         assert a.g.query(q, params={"id": oid}).result_set[0][0] == "superseded"
         assert b.g.query(q, params={"id": oid}).result_set[0][0] == "retracted"
     finally:
-        a.close(); b.close()
+        a.close()
+        b.close()
 
 
 def test_orphan_retraction_warns_on_every_engine(tmp_path, caplog):
@@ -1716,7 +1755,8 @@ def test_orphan_retraction_warns_on_every_engine(tmp_path, caplog):
     assertion for engines 2 and 3, so the per-engine claim was untested for two
     of three.
     """
-    events = tmp_path / "events"; events.mkdir(exist_ok=True)
+    events = tmp_path / "events"
+    events.mkdir(exist_ok=True)
     EventLog(str(events / "events.jsonl")).append(
         {"type": "ObjectRetracted", "id": "obj-ghost", "name": "ghost"})
     for engine in ("rebuild_all", "recover_from_log", "rebuild", "backup_restore"):
@@ -1780,7 +1820,8 @@ def test_stub_ulid_recreate_is_a_known_limitation(tmp_path):
     so delete→re-create on that lane replays `retracted` while live is `live`.
     Filed as Task 7 follow-up (e). If this test starts failing because the
     limitation was fixed, delete it and close (e)."""
-    events = tmp_path / "events"; events.mkdir(exist_ok=True)
+    events = tmp_path / "events"
+    events.mkdir(exist_ok=True)
     log = EventLog(str(events / "events.jsonl"))
     # `eventId` is REQUIRED: `_upsert_event` starts `eid = inner.get("id") or
     # inner.get("eventId")` (entities.py:790) and returns immediately when it is
@@ -1819,7 +1860,8 @@ def test_connector_recreate_after_retraction_matches_live(tmp_path, monkeypatch)
     This test asserts the DIVERGENCE explicitly (so it is recorded and cannot
     regress silently) and will be INVERTED to `replay == live` by follow-up (e).
     """
-    events = tmp_path / "events"; events.mkdir(exist_ok=True)
+    events = tmp_path / "events"
+    events.mkdir(exist_ok=True)
     sdk = TortoiseSDK(str(tmp_path / "crec.db"),
                       event_log_path=str(events / "events.jsonl"))
     proj = sdk._get_proj()
@@ -1856,7 +1898,8 @@ def test_update_entity_terminal_statuses_are_not_durable(tmp_path):
     This test asserts the CURRENT behaviour so it is recorded; inverting it to
     `pytest.raises(ValueError)` is the fix for (n).
     """
-    events = tmp_path / "events"; events.mkdir()
+    events = tmp_path / "events"
+    events.mkdir()
     sdk = TortoiseSDK(str(tmp_path / "term.db"),
                       event_log_path=str(events / "events.jsonl"))
     proj = sdk._get_proj()
@@ -1898,7 +1941,8 @@ def test_name_lane_refold_of_retracted_carrier_is_not_reported_as_orphan(tmp_pat
 def test_live_delete_then_recreate_is_live(tmp_path):
     """The LIVE counterpart of the matrix's `create,delete,create` row: proves
     replay agrees with live rather than agreeing with itself."""
-    events = tmp_path / "events"; events.mkdir(exist_ok=True)
+    events = tmp_path / "events"
+    events.mkdir(exist_ok=True)
     sdk = TortoiseSDK(str(tmp_path / "live.db"),
                       event_log_path=str(events / "events.jsonl"))
     oid = _entity_name_id("Object", "PHX")
@@ -1914,7 +1958,8 @@ def test_live_supersede_then_recreate_is_superseded(tmp_path):
     """D-13 ground truth #1, measured live: with NO intervening delete the
     re-create is an ON MATCH which never re-journals, so the supersede folds.
     (Empirically the journal holds ONE ObjectRegistered.)"""
-    events = tmp_path / "events"; events.mkdir(exist_ok=True)
+    events = tmp_path / "events"
+    events.mkdir(exist_ok=True)
     sdk = TortoiseSDK(str(tmp_path / "live2.db"),
                       event_log_path=str(events / "events.jsonl"))
     proj = sdk._get_proj()
@@ -1924,7 +1969,7 @@ def test_live_supersede_then_recreate_is_superseded(tmp_path):
     assert proj.g.query(
         "MATCH (o:Object {name:'SUP'}) RETURN o.status"
     ).result_set[0][0] == "superseded"
-    ors = [l for l in _jsonl(events) if l.get("type") == "ObjectRegistered"]
+    ors = [_l for _l in _jsonl(events) if _l.get("type") == "ObjectRegistered"]
     assert len(ors) == 1, (
         "the ON MATCH re-create must NOT re-journal — this is WHY the anchor "
         "stays put and the supersede fold still applies")
@@ -1934,7 +1979,8 @@ def test_live_supersede_delete_recreate_is_live(tmp_path):
     """D-13 ground truth #2, measured live: with an intervening hard delete the
     re-create IS re-journaled, so both folds are survivor-dropped and replay
     lands `live`. An exempt-the-supersede-lane rule FAILS this."""
-    events = tmp_path / "events"; events.mkdir(exist_ok=True)
+    events = tmp_path / "events"
+    events.mkdir(exist_ok=True)
     sdk = TortoiseSDK(str(tmp_path / "live3.db"),
                       event_log_path=str(events / "events.jsonl"))
     proj = sdk._get_proj()
@@ -1945,7 +1991,7 @@ def test_live_supersede_delete_recreate_is_live(tmp_path):
     assert proj.g.query(
         "MATCH (o:Object {name:'SUP2'}) RETURN o.status"
     ).result_set[0][0] == "live"
-    ors = [l for l in _jsonl(events) if l.get("type") == "ObjectRegistered"]
+    ors = [_l for _l in _jsonl(events) if _l.get("type") == "ObjectRegistered"]
     assert len(ors) == 2, (
         "the post-delete re-create IS re-journaled — this is WHY the anchor "
         "moves and both folds are dropped")
@@ -1955,7 +2001,7 @@ def test_rebuild_all_stays_fail_loud(tmp_path, monkeypatch):
     """EMPIRICAL (cycle 4): routing the sweep through a default-strict flush
     silently converted rebuild_all from fail-loud to fail-soft — a migration
     that lost a supersession would report success."""
-    events, oid = _build_journal(tmp_path / "fl", "create,supersede")
+    events, _oid = _build_journal(tmp_path / "fl", "create,supersede")
     from tortoise.projection import FalkorProjection
     proj = FalkorProjection(str(tmp_path / "fl" / "fl.db"))
     proj.g.query("MATCH (n) DETACH DELETE n")
@@ -1995,8 +2041,8 @@ def test_delete_of_two_id_sharing_objects_is_lossless_end_to_end(tmp_path):
     the first pins the emission COUNT, the second pins that replay then agrees
     with live.
     """
-    import copy
-    events = tmp_path / "events"; events.mkdir(exist_ok=True)
+    events = tmp_path / "events"
+    events.mkdir(exist_ok=True)
     sdk = TortoiseSDK(str(tmp_path / "shared.db"),
                       event_log_path=str(events / "events.jsonl"))
     try:
@@ -2069,7 +2115,8 @@ def test_unanchored_id_retraction_is_orphaned_but_a_rename_is_not_covered(tmp_pa
     and "fix" it by widening the guard — which would be wrong, since the id is
     genuinely anchored and the real gap is the unjournaled rename.
     """
-    events = tmp_path / "events"; events.mkdir(exist_ok=True)
+    events = tmp_path / "events"
+    events.mkdir(exist_ok=True)
     log = EventLog(str(events / "events.jsonl"))
     # The registration names the OLD name; the retraction names the NEW one.
     log.append({"type": "ObjectRegistered", "id": "OID", "name": "OLDPHX"})
@@ -2111,7 +2158,8 @@ def test_retraction_whose_id_is_anchored_nowhere_does_not_bury_the_name(tmp_path
     minted by `_event_plain_merge` has NO ObjectRegistered line, so its name is
     not anchored and the fallback still folds.
     """
-    events = tmp_path / "events"; events.mkdir(exist_ok=True)
+    events = tmp_path / "events"
+    events.mkdir(exist_ok=True)
     log = EventLog(str(events / "events.jsonl"))
     log.append({"type": "ObjectRegistered", "id": "ID1", "name": "SHARED"})
     log.append({"type": "ObjectRetracted", "id": "ID2", "name": "SHARED",
@@ -2138,7 +2186,8 @@ def test_stub_lane_fallback_still_folds_after_the_id_identity_guard(tmp_path):
     "always refuse the fallback" and every stub retraction would silently
     become a no-op.
     """
-    events = tmp_path / "events"; events.mkdir(exist_ok=True)
+    events = tmp_path / "events"
+    events.mkdir(exist_ok=True)
     sdk = TortoiseSDK(str(tmp_path / "stub.db"),
                       event_log_path=str(events / "events.jsonl"))
     try:
@@ -2198,7 +2247,8 @@ def test_derived_looking_id_orphan_buries_the_name_known_limitation(tmp_path):
     `test_rebuild_all_legacy_idless_object_fold_survives`.
     """
     from tortoise.sdk import _entity_name_id
-    events = tmp_path / "events"; events.mkdir(exist_ok=True)
+    events = tmp_path / "events"
+    events.mkdir(exist_ok=True)
     log = EventLog(str(events / "events.jsonl"))
     log.append({"type": "ObjectRegistered", "id": "ARBITRARY_ID",
                 "name": "SHARED"})
