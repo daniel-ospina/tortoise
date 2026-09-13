@@ -79,9 +79,14 @@ def _seed_graph(sdk: TortoiseSDK, *, include_repo_a: bool = True) -> None:
     )
     if obs_101 is not None:
         # EP-back the decision (review c70: the semantic stage counts only
-        # EP-confirmed claims — confidence_mean >= 0.5). The #101 prod failure
-        # supports keeping rotation -> IMPL edge -> confidence_mean = 1/1 = 1.0.
-        # Keeps the seeded E2E green in both FTS and TF-IDF fallback modes.
+        # EP-confirmed claims — confidence_mean >= 0.5). FIXTURE FIDELITY ONLY:
+        # the decision clears the relevance gate on the >= 2-shared-token floor
+        # (7 shared tokens with the query) in every retrieval mode, so this edge
+        # is NOT load-bearing for any assertion in this file — mutation-tested by
+        # deleting it, and the decision still reports has_ep=True at 0.75 (the
+        # same class of leak as #3276). The old `confidence_mean = 1/1 = 1.0`
+        # claim here was simply stale; nothing asserts the posterior, whose key
+        # is attached only when `ep` is present.
         sdk._get_proj().g.query(
             "MATCH (a:Point), (b:Point) WHERE a.id = $a AND b.id = $b "
             "CREATE (a)-[:IMPL]->(b)",
@@ -97,21 +102,49 @@ class TestIssueInsightE2E:
         _seed_graph(sdk)
         ms = _dispatch_sdk(monkeypatch, sdk)
 
+        # #3254: `limit=5` exceeds the fixture's gate-passing candidate count
+        # (exactly 3), so the decision is EMITTED regardless of rank — that is a
+        # structural invariant, not a mode- or rank-dependent one.
+        #
+        # The shipped default `limit=2` is deliberately NOT asserted here. It is
+        # MODE-DEPENDENT, which cost a full CI cycle to learn: in the degraded /
+        # TF-IDF lane the two unmeasured observations rank above the decision and
+        # an `xfail(strict=True)` on "the default truncates it" held, but in the
+        # `test (b)` lane the decision IS emitted at `limit=2` and that strict
+        # xfail XPASSed into a FAILURE. A behaviour that differs by retrieval
+        # mode cannot be pinned either way in a lane-agnostic suite — so this
+        # asserts only what is true in every mode, and the default-limit shape is
+        # left to #3277.
         result = ms.tortoise_issue_insight(
             title="Should we keep JWT rotation for auth refresh tokens?",
             repo="owner/a",
+            limit=5,
         )
 
         assert result["has_prior"] is True
         assert result["no_prior_knowledge"] is False
-        # ≥1 live-derived data point, content from the graph (never hardcoded)
-        assert len(result["data_points"]) >= 1
-        assert result["data_points"][0]["content"] == GRAPH_TOPIC
-        assert result["data_points"][0]["kind"] == "decision"
+        # #3254: the EP-confirmed cross-session decision must be EMITTED, not sit
+        # at index 0. Candidate order is retrieved (and #3018 re-derived it), so
+        # an index-0 pin was an incidental-value assertion — the same stale-pin
+        # class as #3095.
+        #
+        # NO `confidence_mean` assertion here, deliberately (code review):
+        # (a) not a mutation-killer — deleting the seeded IMPL edge leaves the
+        # decision at has_ep=True / 0.75, so the discriminating variable is point
+        # KIND (#3276); and (b) mode-fragile — `issue_insight` attaches the key
+        # only when `ep` is present. Caveat, recorded so it is not lost: this
+        # leaves the payload-side attachment of `confidence_mean` UNCOVERED.
+        # TestIssueInsightRelevanceGate does NOT cover it — that class tests the
+        # gate's threshold on injected `ep` dicts, never a `data_points` row.
+        decisions = [dp for dp in result["data_points"] if dp["kind"] == "decision"]
+        assert [dp["content"] for dp in decisions] == [GRAPH_TOPIC]
         # repo stage: prior-issue stats for owner/a only (no bleed from owner/b)
         assert result["repo_stats"] == {"repo": "owner/a", "prior_issues": 2, "open": 1}
-        # pointer topic is live-derived from the top hit
-        assert "JWT rotation" in result["more_in_graph"]
+        # `more_in_graph` is semantic_hits[0][:80], i.e. rank-0 dependent. Assert
+        # only on a token EVERY gate-passing candidate shares: "rotation" is in
+        # all three, whereas "JWT" is absent from `owner/a #101` (which has only
+        # "rotation"), so a re-rank that puts #101 first would red on "JWT".
+        assert "rotation" in result["more_in_graph"]
         assert "graph hit" in result["insight"]
 
     def test_repo_scope_does_not_bleed_across_repos(self, tmp_path, monkeypatch):

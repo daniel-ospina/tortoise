@@ -393,7 +393,8 @@ def test_welcome_mode_provisions_and_reveals_key_once(page: Page) -> None:
     # exactly one reveal, and the connect step renders welcomeKey with no
     # further reveal (ADR-010 single-consumption). If a future delivery
     # change makes the 201 body primary, this pin fails loudly.
-    page.get_by_role("button", name="Use it for your own agents").click()
+    # #3218: the self-fork option is first-person now ('For my internal setup').
+    page.get_by_role("button", name="For my internal setup").click()
     expect(page.locator("body")).to_contain_text("Connect your agent", timeout=15_000)
     expect(page.locator("body")).to_contain_text("tt_welcome_key_1234567890abcdef", timeout=15_000)
     assert reveal_calls["n"] == 1, \
@@ -540,12 +541,12 @@ def test_welcome_mode_fork_503_stays_and_recovers(page: Page) -> None:
     expect(page.locator("body")).to_contain_text("Choose how you'll use Tortoise", timeout=20_000)
     # 503 on the fork checkpoint: STAY on the fork step, surface the inline
     # error, recover the buttons — no advance, no strand.
-    page.get_by_role("button", name="Use it for your own agents").click()
+    page.get_by_role("button", name="For my internal setup").click()
     expect(page.locator("body")).to_contain_text("The graph is temporarily unavailable — try again in a moment.", timeout=10_000)
     expect(page.locator("body")).not_to_contain_text("Connect your agent")
-    expect(page.get_by_role("button", name="Use it for your own agents")).to_be_enabled(timeout=5_000)
+    expect(page.get_by_role("button", name="For my internal setup")).to_be_enabled(timeout=5_000)
     # Retry against the 2xx: the fork persists and the wizard advances.
-    page.get_by_role("button", name="Use it for your own agents").click()
+    page.get_by_role("button", name="For my internal setup").click()
     expect(page.locator("body")).to_contain_text("Connect your agent", timeout=15_000)
     assert checkpoint_calls["n"] == 2, f"exactly one 503 + one 2xx checkpoint write, got {checkpoint_calls['n']}"
 

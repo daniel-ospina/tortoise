@@ -45,6 +45,19 @@ ALLOWED_ORIGINS = os.environ.get(
 # group's tools to the agent (keeps the tool-selection surface under ~20).
 TOOL_GROUP = os.environ.get("TORTOISE_TOOL_GROUP")
 
+# #2988: wall bound for /health/ready's probe. A black-holed DB must be
+# REPORTED (503) rather than waited out — it is a safety net, not the mechanism.
+# NOTE this path does NOT share the hosted layered-timeout ALIGNMENT: the probe
+# below is ``asyncio.wait_for(to_thread(lambda: ..._get_proj()), 6.0)``, which
+# wraps a probe with NO inner bound of its own, and ``to_thread`` runs on the
+# SHARED default executor, whose thread is NON-daemon and is JOINED at loop
+# shutdown — so a DB call that outlives 6.0s leaves a worker that keeps blocking
+# process exit (a hang class the hosted HealthProbe path avoids with its own
+# daemon worker). ``hosted_api._READY_PROBE_TIMEOUT_S`` was superseded by the
+# hosted ``_READY_PROBE`` / ``CONTROL_PLANE_HARD_TIMEOUT`` bounds; this constant
+# is the self-host path's own independent backstop.
+_READY_PROBE_TIMEOUT_S = 6.0
+
 
 def _auth_mode() -> str:
     """API key set → static; unset → none (localhost-bound eval)."""
@@ -236,11 +249,23 @@ async def health_ready():
     real DB (not a divergent default path). Exception details are logged
     server-side only (no internal info disclosure).
     """
-    try:
+    # #2988 — THE PROBE MUST NOT RUN ON THE EVENT LOOP. Building the SDK and
+    # touching the DB is synchronous I/O: run inline, one stalled socket froze
+    # every route in this process for as long as the socket waited, and
+    # publish-selfhost.yml curls this endpoint on every publish. /health above
+    # already dispatches its probe off-loop for the same reason; this handler
+    # was missed. Off-loop AND bounded, so a black-holed DB is reported (503)
+    # rather than waited out.
+    import asyncio
+
+    def _probe() -> None:
         from tortoise.sdk import TortoiseSDK  # lazy — liveness stays cheap
 
         sdk = TortoiseSDK(namespace="selfhost")
         sdk._get_proj()  # touch the DB (hosted_api release_command pattern)
+
+    try:
+        await asyncio.wait_for(asyncio.to_thread(_probe), timeout=_READY_PROBE_TIMEOUT_S)
         return JSONResponse({"status": "ready"})
     except Exception as exc:  # noqa: BLE001, RUF100
         _logger.warning("health/ready failed: %s", exc)
