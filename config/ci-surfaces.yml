@@ -644,6 +644,7 @@ surfaces:
   - test_w7_publish.py
   - test_welcome_url_consolidation.py
   - test_website_static.py
+  - test_website_docs_consistency.py  # #3332: checks each public page against its canonical source (status vocab, EP mechanism, ontology link)
   sdk:
   - test_ask_regression_llm.py
   - test_ask_retrieval_levers.py
