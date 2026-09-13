@@ -2166,3 +2166,52 @@ def test_stub_lane_fallback_still_folds_after_the_id_identity_guard(tmp_path):
             f"{rows}")
     finally:
         sdk.close()
+
+
+def test_derived_looking_id_orphan_buries_the_name_known_limitation(tmp_path):
+    """**KNOWN LIMITATION — PINNED, NOT FIXED (#3389).** Recorded so the residual
+    hole is visible and cannot be mistaken for correct behaviour or for coverage.
+
+        OR(ARBITRARY_ID, SHARED)@0,
+        RT(_entity_name_id("Object","SHARED"), SHARED)@1
+        -> SHARED/ARBITRARY_ID is BURIED   (this test pins exactly that)
+
+    THE DISCRIMINATOR IN `_fold_object_match_and_apply` IS UNSOUND. Its
+    `not _derived_matches` condition spares #2164's legacy synthesized-id fold,
+    but a derived-LOOKING id proves nothing about identity, so an orphan carrying
+    one short-circuits the guard. Production-reachable through
+    `_connect_issue_objects`, which mints a second carrier of an existing name
+    under a different id and journals NOTHING — session transcripts routinely
+    quote canonical `obj-<hash>` ids, so the coincidence is natural, not only
+    adversarial.
+
+    **WHY THIS IS PINNED RATHER THAN FIXED HERE.** This is the sixth consecutive
+    review cycle in which a change to this rule created the next hole. The root
+    cause is the WRITER (an unjournaled second carrier), not fold selection —
+    the same lesson cycle 3 taught, where the fix belonged in `_delete_entity`
+    rather than in the fold. #3389 scopes the fix there and says explicitly not
+    to patch the fold again.
+
+    If this assertion starts FAILING, someone fixed the writer — invert it
+    deliberately and close #3389. Do not "fix" it towards `live` by widening or
+    removing the guard: that reinstates the #2164 legacy-fold break pinned by
+    `test_rebuild_all_legacy_idless_object_fold_survives`.
+    """
+    from tortoise.sdk import _entity_name_id
+    events = tmp_path / "events"; events.mkdir(exist_ok=True)
+    log = EventLog(str(events / "events.jsonl"))
+    log.append({"type": "ObjectRegistered", "id": "ARBITRARY_ID",
+                "name": "SHARED"})
+    log.append({"type": "ObjectRetracted",
+                "id": _entity_name_id("Object", "SHARED"), "name": "SHARED",
+                "ts": "T1"})
+    proj = _drive("rebuild_all", tmp_path, events, "ARBITRARY_ID")
+    try:
+        rows = {r[0]: r[1] for r in proj.g.query(
+            "MATCH (o:Object) RETURN o.name, o.status").result_set}
+        assert rows.get("SHARED") == "retracted", (
+            "KNOWN LIMITATION (#3389): a derived-looking id on a retraction "
+            "buries the name-sharing live Object. This test PINS the defect so "
+            f"it stays visible. Got {rows}")
+    finally:
+        proj.close()
