@@ -44,6 +44,21 @@ needs no client_id paste.
 2. Client opens `/oauth/authorize` with `response_type=code`,
    `code_challenge` (PKCE, S256 only), `redirect_uri`, and an optional
    RFC 8707 `resource`.
+
+   **`redirect_uri` matching (#2846).** For **loopback** redirect URIs the port
+   is ignored when matching the registered value (RFC 8252 §7.3 — a native
+   client binds an ephemeral port at request time and cannot know it at
+   registration; Claude Code CLI depends on this). Scheme, host, path, params,
+   query, fragment and userinfo must still match exactly, and every **non-loopback**
+   URI keeps strict exact-string matching. Host is never relaxed:
+   `localhost` and `127.0.0.1` are different hosts. A URI containing a raw
+   backslash is refused at registration **and** at validation: WHATWG ends the
+   authority at a backslash for special schemes but `urlsplit` does not, so the
+   two parsers disagree about the host, and the code is delivered by navigating
+   the browser to the raw string. Control characters are refused too, as defence
+   in depth rather than because they are differential — `urlsplit` strips
+   `\t`/`\r`/`\n` just as a browser does, and a browser refuses, percent-encodes,
+   or (at the input's leading/trailing edge) strips the others.
 3. The branded consent page (D2 — one custom HTML page reusing the
    signup/signin pattern) signs the user in via supabase-js and confirms.
    The browser session JWT is verified server-side with the **existing JWKS

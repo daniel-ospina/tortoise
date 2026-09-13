@@ -174,6 +174,24 @@ _CAPTURE_EXECUTOR = ThreadPoolExecutor(
 _CAPTURE_MAX_IN_FLIGHT = max(1, min(_int_env("TORTOISE_CAPTURE_IN_FLIGHT", 8), 16))
 _CAPTURE_IN_FLIGHT = 0
 _CAPTURE_IN_FLIGHT_LOCK = threading.Lock()
+# #3129: session ids with a capture IN FLIGHT. `capture_ok` is written only at
+# the very END of a successful capture, so once the extraction moved off the
+# event loop (#3060) a second request for the same session_id could be served
+# while the first was parked: it read `capture_ok = NULL`, the replay branch
+# treated NULL as "presumed captured" (#2335 legacy semantics), and it answered
+# 200 + a success receipt with 0 turns extracted — for a capture whose only
+# real attempt then FAILED. Silent data loss, and the client is actively told
+# to retry by the `Retry-After` the capacity gate advertises. Refusing at
+# ADMISSION closes it without touching the replay semantics for a session that
+# is genuinely finished. Bounded by _CAPTURE_IN_FLIGHT (one key per in-flight
+# capture).
+_CAPTURE_SESSIONS: dict[str, int] = {}
+# The detail string is the carve-out key for the team-visible last-error state
+# (both surfaces): an in-flight refusal is a SERVER concurrency condition, not
+# a team capture failure — same rationale as the capacity 429. A shared
+# constant so the raise site and the two carve-outs cannot drift.
+_CAPTURE_SESSION_IN_FLIGHT_DETAIL = (
+    "a capture for this session_id is already in flight — retry shortly")
 
 # NOTE (merge of #2850 x #2988/#3060): the dedicated ``_HEALTH_PROBE_EXECUTOR``
 # and its ``_HEALTH_PROBE_BUDGET_S`` wall bound were REMOVED here. They existed
@@ -211,7 +229,7 @@ async def _run_off_loop(executor: ThreadPoolExecutor, fn, /, *args, **kwargs):
 
 
 def _capture_slot_decrement() -> None:
-    """Return one reserved capture slot (lock-guarded, clamped at zero).
+    """Return one reserved capture slot (capacity only — see _capture_session_release).
 
     The clamp is a safety net, NOT a licence: a decrement with nothing in
     flight means the accounting leaked somewhere, which silently under-counts
@@ -242,33 +260,130 @@ class _CaptureSlot:
     * the request's own teardown (`release()`) — for a replay / opt-out /
       quota / provider-503 path that never extracts. Without that release the
       reservation would leak and permanently burn capacity.
+
+    #3129: the same slot also owns the request's in-flight SESSION key, but on a
+    LATER release point — the key outlives the extraction, because the capture
+    is not finished when the extraction returns (`capture_ok` is written after
+    the event mint, audit and receipt). Releasing the key with the worker alone
+    left a residual window (reviewer-measured) in which a concurrent
+    same-session request was admitted and replayed a 200 for a capture that was
+    still finishing. The key therefore needs BOTH sides: the worker reporting,
+    and the request's own teardown.
     """
 
-    __slots__ = ("_done", "_handed_off")
+    __slots__ = (
+        "_cleanup_done",
+        "_done",
+        "_handed_off",
+        "_release_lock",
+        "_request_done",
+        "_session_key",
+        "_session_released",
+    )
 
-    def __init__(self) -> None:
+    def __init__(self, session_key: str | None = None) -> None:
         self._done = False
         self._handed_off = False
+        self._session_key = session_key
+        # Nothing to release, so both sides are trivially satisfied.
+        self._session_released = session_key is None
+        self._request_done = False
+        # #3129: False while an abandonment-marker write is in flight.
+        self._cleanup_done = True
+        # #3129 review (cycle 4): the release decision below now has THREE
+        # concurrent callers on three threads — the event loop (`release`), the
+        # capture-pool thread (`worker_done`) and the marker thread
+        # (`_cleanup_finished`). Its check-then-act was non-atomic, so two
+        # threads could both pass the guards and both pop: a stale second pop
+        # removes a FRESHLY reserved entry for the same key — i.e. disarms the
+        # admission guard for a new in-flight capture (reviewer demonstrated it
+        # by forcing preemption at the assignment).
+        self._release_lock = threading.Lock()
 
     def hand_off(self) -> None:
         """Transfer ownership to the extraction future (before any await)."""
         self._handed_off = True
 
     def release(self) -> None:
-        if self._done or self._handed_off:
+        """Request-side teardown — runs even when the request is cancelled."""
+        if self._request_done:
             return
-        self._done = True
-        _capture_slot_decrement()
+        self._request_done = True
+        if not self._handed_off and not self._done:
+            # No worker will report: this request owns the capacity too.
+            self._done = True
+            _capture_slot_decrement()
+        self._release_session()
 
     def worker_done(self, _fut=None) -> None:
-        if self._done:
-            return
-        self._done = True
-        _capture_slot_decrement()
+        if not self._done:
+            self._done = True
+            _capture_slot_decrement()
+        self._release_session()
+
+    def hold_until(self, cfut) -> None:
+        """Keep the session key until this concurrent future lands (#3129).
+
+        Used for the abandonment-marker write: if the key were released first,
+        a same-session retry could be admitted and served the NULL→replay
+        payload the marker exists to prevent.
+        """
+        self._cleanup_done = False
+        cfut.add_done_callback(self._cleanup_finished)
+
+    def _cleanup_finished(self, _fut=None) -> None:
+        self._cleanup_done = True
+        self._release_session()
+
+    def _release_session(self) -> None:
+        """Pop the session key once BOTH the worker and the request are done.
+
+        A handed-off slot waits for its worker — a hung extraction keeps the
+        session refused (it genuinely IS still being captured); a non-extracting
+        path releases on the request's own teardown. A pending marker write
+        holds it too.
+
+        The decision is taken under `_release_lock` and the pop happens OUTSIDE
+        it: two threads passing the guards would both call
+        `_capture_session_release`, and the stale second pop could delete a key
+        a NEW capture for the same session had just registered (#3129 cycle-4
+        review).
+        """
+        with self._release_lock:
+            if self._session_released:
+                return
+            if not self._cleanup_done:
+                return
+            if self._handed_off and not (self._done and self._request_done):
+                return
+            self._session_released = True
+        _capture_session_release(self._session_key)
 
 
-def _reserve_capture_slot() -> _CaptureSlot:
-    """Reserve a capture slot, or fail fast with 429 at capacity (#3060).
+def _capture_session_release(session_key: str | None) -> None:
+    """Drop one in-flight session key (lock-guarded, idempotent)."""
+    if session_key is None:
+        return
+    with _CAPTURE_IN_FLIGHT_LOCK:
+        _CAPTURE_SESSIONS.pop(session_key, None)
+
+
+def _capture_session_key(team: dict, session_id: str | None) -> str | None:
+    """Scope an in-flight session key to its tenant (and graph) — #3129.
+
+    Session ids are CLIENT-chosen (often a generic harness name), so a bare
+    session_id would let one tenant's in-flight capture refuse another tenant's
+    unrelated capture of the same name (reviewer-measured 409). The admission
+    COUNTER stays global (it bounds a server resource); only this key is scoped.
+    """
+    if not session_id:
+        return None
+    return (f"{team.get('team_id')}:"
+            f"{team.get('graph_id') or 'default'}:{session_id}")
+
+
+def _reserve_capture_slot(session_key: str | None = None) -> _CaptureSlot:
+    """Reserve a capture slot, or fail fast at capacity / on a duplicate.
 
     Called at ADMISSION — before the impl writes anything. A 429 raised later
     (after the Session MERGE) would leave ``capture_ok`` NULL, and the
@@ -276,8 +391,14 @@ def _reserve_capture_slot() -> _CaptureSlot:
     — silent permanent data loss. Reserving (not just checking) is what bounds
     the queue: a burst of simultaneous requests cannot all pass the gate and
     then wait on the pool forever while holding their transcripts.
+
+    #3129: the same reasoning for a SECOND request carrying a ``session_id``
+    that is already being captured — it is refused (409) here, before any
+    write, instead of racing the first capture's `capture_ok` write. The
+    caller passes an already tenant-scoped key (`_capture_session_key`).
     """
     global _CAPTURE_IN_FLIGHT
+    session_key = session_key or None
     with _CAPTURE_IN_FLIGHT_LOCK:
         if _CAPTURE_IN_FLIGHT >= _CAPTURE_MAX_IN_FLIGHT:
             raise HTTPException(
@@ -285,8 +406,15 @@ def _reserve_capture_slot() -> _CaptureSlot:
                 detail=("capture capacity saturated — too many captures in "
                         "flight; retry shortly"),
                 headers={"Retry-After": "30"})
+        if session_key in _CAPTURE_SESSIONS:
+            raise HTTPException(
+                status_code=409,
+                detail=_CAPTURE_SESSION_IN_FLIGHT_DETAIL,
+                headers={"Retry-After": "30"})
+        if session_key is not None:
+            _CAPTURE_SESSIONS[session_key] = 1
         _CAPTURE_IN_FLIGHT += 1
-    return _CaptureSlot()
+    return _CaptureSlot(session_key)
 
 
 async def _run_capture_bounded(slot, fn, /, *args, **kwargs):
@@ -301,6 +429,11 @@ async def _run_capture_bounded(slot, fn, /, *args, **kwargs):
     the cap would silently exceed itself. A synchronous submit failure leaves
     ownership with the caller (no future, no callback), and the request's own
     teardown releases it.
+
+    A cancellation is handled a level up, at the endpoint: it must cover the
+    WHOLE attempt (this worker await, then the post-extraction audit/abuse
+    awaits), and the marker it writes must land while the session key is still
+    held (#3129).
     """
     cfut = _submit_off_loop(_CAPTURE_EXECUTOR, fn, *args, **kwargs)
     if slot is not None:
@@ -7575,7 +7708,8 @@ async def capture_session(body: SessionRequest, request: Request, team: dict = D
     the provider 503 / quota 402) so disabled teams do no quota work at all; any
     non-2xx failure records ``session_capture_last_error_{harness}`` (the
     dashboard failure sub-line reads this, NOT client state) — except the #3060
-    capacity 429, a server condition — and 2xx records
+    capacity 429 and the #3129 in-flight 409, which are server conditions — and
+    2xx records
     ``session_capture_receipt_{harness}`` (bare ``session_capture_receipt``
     for legacy no-harness hooks).
     """
@@ -7584,9 +7718,31 @@ async def capture_session(body: SessionRequest, request: Request, team: dict = D
         # #3060: reserve ADMISSION before ANY state is written. Reserving (not
         # merely checking) bounds the queue under a concurrent burst, and a
         # 429 here cannot leave a half-created Session behind.
-        slot = _reserve_capture_slot()
+        slot = _reserve_capture_slot(_capture_session_key(team, body.session_id))
+        # #3129: the impl records whether an ATTEMPT started and whether it
+        # FINALIZED (recorded its outcome). If the request is cancelled between
+        # the two, the Session would be left at `capture_ok=NULL`, which the
+        # replay rule reads as "presumed captured" — a later same-session retry
+        # would then be served 200 + a receipt with 0 turns extracted, forever.
+        _state: dict = {}
         try:
-            return await _capture_session_impl(body, request, team, slot=slot)
+            return await _capture_session_impl(body, request, team, slot=slot,
+                                               state=_state)
+        except asyncio.CancelledError:
+            if _state.get("attempted") and not _state.get("finalized"):
+                # Off the loop (a dead graph socket would otherwise stall the
+                # liveness path), with the session key HELD until it lands:
+                # `hold_until` gates `slot.release()` in the finally below, so
+                # no same-session retry can slip into the NULL→replay rule
+                # while this write is pending.
+                try:
+                    slot.hold_until(_submit_off_loop(
+                        _CAPTURE_MARKER_EXECUTOR, _capture_abandoned_marker,
+                        _state.get("proj"), body.session_id,
+                        _state.get("lane") or _capture_lane()))
+                except Exception:  # pragma: no cover - pool shut down
+                    _logger.exception("abandoned-capture marker submit failed")
+            raise
         finally:
             slot.release()
     except HTTPException as e:
@@ -7594,9 +7750,13 @@ async def capture_session(body: SessionRequest, request: Request, team: dict = D
         # failure — recording it in the team-visible last-error slot (and
         # clearing it on the retry, which then replays) would misreport
         # capacity as a capture fault and mask a genuine prior error.
+        # #3129: the same for the in-flight 409 — a concurrency condition on
+        # the server side; the retry this advertises is the ping that will
+        # succeed once the first capture finishes.
         # Review PR #1827: a last-error state-write failure must never mask the
         # intended 403/402/503 with a 500.
-        if e.status_code >= 400 and e.status_code != 429:
+        if (e.status_code >= 400 and e.status_code != 429
+                and e.detail != _CAPTURE_SESSION_IN_FLIGHT_DETAIL):
             try:
                 _record_capture_last_error(
                     team["team_id"], body.harness, e.detail)
@@ -7637,8 +7797,91 @@ _SWEEP_EVENT_DELETE_CYPHER = (
 )
 
 
+# #3129 review round 2 (P2): the abandoned-capture marker's graph write runs
+# from a TEARDOWN path (the request is already cancelled) and is not bounded by
+# the graph-side timeout alone — the projection's socket_timeout is 10s, and on
+# the event loop that is the #3060 shape (Fly's /health check times out at 15s).
+# It therefore runs OFF-loop, on its OWN single-worker pool: the capture pool
+# may be full of parked extractions, and queueing the marker behind them would
+# hold the session's in-flight key for the whole stall. The caller keeps that
+# key until this future lands (`_CaptureSlot.hold_until`), so a same-session
+# retry cannot reach the NULL→replay rule while the write is pending.
+_CAPTURE_MARKER_EXECUTOR = ThreadPoolExecutor(
+    max_workers=1, thread_name_prefix="capture-marker")
+# Graph-side bound for that write. The engine takes MILLISECONDS and rejects a
+# float ("Timeout argument must be a positive integer" — verified against the
+# embedded engine).
+_CAPTURE_ABANDON_MARKER_TIMEOUT_MS = 2000
+
+
+def _capture_lane() -> str:
+    """The extraction lane this request runs (single source of truth)."""
+    return "m2" if os.environ.get("TORTOISE_SESSION_EXTRACTOR") == "m2" else "v2"
+
+
+def _capture_abandoned_marker(proj, session_id: str, lane: str) -> None:
+    """#3129 (reviewer P1): mark a capture attempt that was ABANDONED as failed.
+
+    Called when the request is CANCELLED anywhere inside the attempt — the
+    worker await, or the post-extraction audit/abuse awaits (client timeout,
+    disconnect, task cancel). Writes `capture_ok=false` + the lane on the
+    Session.
+
+    Why it is needed: `capture_ok` is written only at the very END of a
+    successful capture, so an abandoned attempt left the Session at
+    `capture_ok = NULL` — which the replay rule treats as "legacy, presumed
+    captured" — and the next same-session request was served 200 + a success
+    receipt with 0 turns extracted, permanently (reviewer-measured end-to-end;
+    the in-flight admission gate cannot cover it, because by then the worker is
+    gone). Marking it failed routes that retry into the EXISTING #2335
+    TRUE-retry lane, which re-extracts on the convergent v2 ids.
+
+    SCOPE — the retry is closed on the **v2 lane only**, and only for IN-PROCESS
+    cancellation:
+
+    * the TRUE-retry gate requires BOTH the prior lane AND the retrying request
+      to be v2 (`prior_capture_extractor == "v2"` **and** the request's
+      `TORTOISE_SESSION_EXTRACTOR != "m2"`, #2473), so an abandoned **m2**
+      capture re-POSTed still replays, and so does an abandoned v2 capture
+      re-POSTed after the deployment's lane was switched to m2. Both are the
+      documented, deliberate consequence of #2473: re-running m2 over a failed
+      attempt mints duplicate ULIDs, which is the hole that gate closed. The
+      marker records the correct lane rather than pretending otherwise (pinned
+      by test_cancelled_m2_capture_records_the_m2_lane).
+    * a cancellation that never reaches Python leaves the NULL too — a SIGKILL
+      (deploy/restart) executes no cleanup. Closing that needs a write-ahead
+      attempt sentinel on the Session; filed as a residual (see the PR body).
+
+    Deliberately scoped to CANCELLATION, not to failures: a capture that RAISES
+    (`RuntimeError` → 500/503) keeps its documented NULL→legacy-replay shape
+    (test_hosted_api.py::TestSessionActorStamp2600 raise-shape (ii): a re-POST
+    of a raise-shaped session must not re-extract, so the Session keeps its
+    original actor and no second actor's events are minted).
+
+    The caller invokes this — on `_CAPTURE_MARKER_EXECUTOR`, never on the event
+    loop — and holds the session's in-flight key until it lands, so a
+    same-session retry cannot reach the NULL→replay rule while the write is
+    pending. The write is a single indexed SET by session id, bounded at 2s
+    graph-side. Best-effort — a failure is logged, never raised into an
+    already-cancelled request.
+    """
+    if proj is None or not session_id:
+        return
+    try:
+        proj.g.query(
+            "MATCH (s:Session {id:$sid}) "
+            "SET s.capture_ok=false, s.capture_extractor=$extractor",
+            params={"sid": session_id, "extractor": lane},
+            timeout=_CAPTURE_ABANDON_MARKER_TIMEOUT_MS)
+    except Exception:  # pragma: no cover - graph hiccup
+        _logger.exception(
+            "abandoned-capture marker write failed (session %s) — a later "
+            "same-session retry would legacy-replay (#3129)", session_id)
+
+
 async def _capture_session_impl(body: SessionRequest, request: Request | None,
-                                team: dict, slot: _CaptureSlot | None = None) -> dict:
+                                team: dict, slot: _CaptureSlot,
+                                state: dict | None = None) -> dict:
     """The capture pipeline (gates + writes). Shared by the REST endpoint and
     the ``tortoise_session_capture`` MCP tool (mcp_server.py) so the two
     surfaces can never drift on gate order.
@@ -8002,6 +8245,10 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         extraction_warnings = [
             "session already captured (same session_id) — no new extraction"]
     elif os.environ.get("TORTOISE_SESSION_EXTRACTOR") == "m2":
+        if state is not None:
+            state["attempted"] = True
+            state["proj"] = proj
+            state["lane"] = "m2"
         # P1 #1529 (D5): the M2 branch returns the SAME (extracted, meta)
         # contract as v2 — no fabricated empty meta; extraction-stage failures
         # are structured, never raised (turn points have already landed).
@@ -8017,6 +8264,10 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
             # belt-and-braces so an inner/outer drift never 500s, #1468).
             raise HTTPException(status_code=503, detail=str(e)) from e
     else:
+        if state is not None:
+            state["attempted"] = True
+            state["proj"] = proj
+            state["lane"] = "v2"
         try:
             # #2031: hosted extraction compiles the vocabulary from the
             # tenant's pack view (shared catalog + THIS team's custom packs,
@@ -8654,6 +8905,10 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         except Exception as exc:  # pragma: no cover - graph hiccup
             extraction_warnings.append(
                 f"capture_ok state write failed: {type(exc).__name__}")
+        if state is not None:
+            # #3129: the outcome is recorded — an abandonment from here on can
+            # no longer leave the NULL→replay shape (nothing below suspends).
+            state["finalized"] = True
     # W5 Phase E (#2104, S11): disclosure marker DATA on the capture
     # receipt — ``surfaced`` uses the §3.2.2 marker vocabulary (one entry
     # per memory item THIS capture added; N = len = the disclosure count,
@@ -8736,8 +8991,9 @@ def _capture_last_error_key(harness: str | None) -> str | None:
 def _record_capture_last_error(team_id: str, harness: str | None,
                                detail: str | None) -> None:
     """Set (detail) or clear (None) the per-harness last-attempt failure key.
-    Called on every non-2xx (set) EXCEPT the #3060 capacity 429 — a server
-    condition, not a team capture failure — and every 2xx (cleared)."""
+    Called on every non-2xx (set) EXCEPT the #3060 capacity 429 and the #3129
+    in-flight 409 — server conditions, not team capture failures — and every
+    2xx (cleared)."""
     key = _capture_last_error_key(harness)
     if key is None:
         return
@@ -14259,7 +14515,10 @@ async def _quarantine_import(
     """Record a rejected import: audit event + quarantine ledger prop.
 
     Best-effort by design — a control-plane blip must never mask the 422
-    (mirrors the #669 P3 metadata contract). The live graph is NEVER touched.
+    (mirrors the #669 P3 metadata contract). This helper itself never touches
+    the live graph; note that #3154's post-swap boolean-index audit raises
+    AFTER the swap, so at that call site the live graph may already have been
+    replaced (the verified temp + pre-restore copies are preserved).
     """
     try:
         await _async_audit(
@@ -14654,9 +14913,12 @@ async def import_team(team_id: str, request: Request,
                 )
                 raise HTTPException(status_code=422, detail=f"Import rejected: {e}")  # noqa: B904
             except RuntimeError as e:
-                # Server-side swap failure — verified temp graph intact, live
-                # graph untouched or recoverable; still quarantined (a failed
-                # import attempt is recorded; the ledger makes re-import converge).
+                # Server-side swap failure — verified temp graph intact, and
+                # the live graph is untouched for pre-swap failures / the
+                # pre-restore copy is recoverable for post-swap failures
+                # (#3154's post-swap boolean-index audit raises after the
+                # swap); still quarantined (a failed import attempt is
+                # recorded; the ledger makes re-import converge).
                 await _quarantine_import(
                     request, team_id, user, sha256=sha, reason=str(e)
                 )
@@ -23034,10 +23296,23 @@ async def oauth_authorize(request: Request):
         # Invalid authorize params → RFC 6749 §4.1.2.1 error to the browser.
         # Open-redirect guard: only redirect when the redirect_uri is
         # REGISTERED for the client — never echo an unvalidated param.
-        from tortoise.oauth import get_client
+        #
+        # #2846 review P2: this must use the SAME matcher as validation, or a
+        # native client that registered a PORTLESS loopback URI never receives
+        # the error on its ephemeral listener — the strict membership test
+        # fails, so we return JSON where the client is waiting for a redirect.
+        # Using the relaxed matcher here is safe ONLY because
+        # `_redirect_uri_matches` also refuses parse-differential input: this is
+        # the one place the raw request param is echoed into a Location header,
+        # so relaxing the match without that guard would BE the open redirect.
+        from tortoise.oauth import _redirect_uri_matches, get_client
         client = get_client(cp, params["client_id"]) if params["client_id"] else None
+        registered_uris = (client.get("redirect_uris") or []) if client else []
+        if not isinstance(registered_uris, (list, tuple)):
+            registered_uris = [registered_uris]
         if (params["redirect_uri"] and client is not None
-                and params["redirect_uri"] in (client.get("redirect_uris") or [])):
+                and any(_redirect_uri_matches(u, params["redirect_uri"])
+                        for u in registered_uris)):
             from urllib.parse import urlencode
             sep = "&" if "?" in params["redirect_uri"] else "?"
             return RedirectResponse(

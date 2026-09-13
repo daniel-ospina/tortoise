@@ -16,7 +16,10 @@ Pipeline (per team graph):
   restore_backup: download → sha256 verify vs manifest → decrypt → load into temp
                   graph → verify node+edge counts against the AUTHENTICATED payload
                   → empty-backup-over-live guard → pre-restore safety copy of the
-                  live graph → delete live → GRAPH.COPY temp → live → cleanup.
+                  live graph → delete live → GRAPH.COPY temp → live → boolean-index
+                  audit (#3154 — GRAPH.COPY can drop the `false` postings of a
+                  copied boolean index)
+                  → cleanup.
                   Any verification failure leaves the live graph untouched; a swap
                   failure leaves the verified temp + pre-restore copies recoverable.
   prune_backups:  keep N daily + M weekly (newest-first).
@@ -976,6 +979,194 @@ def list_backups(storage: BackupStorage, team_id: str,
     return out
 
 
+def _audit_copied_boolean_indexes(
+    g,
+    *,
+    graph_name: str,
+    stage: str,
+    raise_on_failure: bool = True,
+) -> bool:
+    """#3154: verify + repair boolean predicates after a ``GRAPH.COPY``.
+
+    FalkorDB's ``GRAPH.COPY`` can copy a boolean RANGE index on
+    ``Point.is_operator`` without its ``false`` posting entries — observed on
+    docker FalkorDB 4.20.4 when the source's index set carries the boolean
+    index in its SDK-created position (a composite-ONLY source copies
+    healthy). The destination's index then has no entry for ``false``, so
+    ``n.is_operator = false`` matches ZERO rows on such a copy while
+    ``NOT n.is_operator`` and ``n.is_operator = true`` stay correct and
+    ``typeof(n.is_operator)`` still reports Boolean (the DATA is intact — the
+    index is corrupt). The restore/import swap (``temp → live``) and the
+    pre-restore safety copy are both GRAPH.COPYs, so an un-audited copy
+    can silently degrade EP anchor selection, the calibration gate and dedup on
+    the restored graph.
+
+    The repair is PRESENCE-based, never count-based: a copy destination can
+    hold a poisoned boolean index while the counts happen to agree — a graph
+    with no ``false`` rows at copy time hides the lost postings, and the
+    NEXT non-operator write then reads 0 (verified: 5 ``true`` nodes + a
+    boolean index copied, then one ``false`` node created → `= false` 0 vs
+    `NOT` 1). Any boolean index found is therefore dropped, and the DROP
+    succeeding is itself the presence signal (an absent index raises "no
+    such index" in O(1)).
+
+    A boolean index is DETECTED BY PRESENCE (`CALL db.indexes()`), not by
+    comparing two predicate counts: those counts come from separate
+    non-atomic queries, so a concurrent non-operator write landing between
+    them is indistinguishable from corruption (measured: 35/40 false
+    "corruption" raises on a graph with NO index while a writer ran). The
+    count probe is retained for diagnostics only and gates nothing.
+
+    Dropping is the only repair. A copy destination that carries an index set
+    rebuilds the boolean index CORRUPT: after ``DROP INDEX``, a fresh
+    ``CREATE INDEX`` on ``is_operator`` still reads 0 for `= false` (measured
+    on docker FalkorDB 4.20.4 — the single index, the ``(is_operator,
+    lastDreamedAt)`` composite, and a copy of an already-sanitized source all
+    reproduce it). A graph built from scratch with no indexes is healthy,
+    which is why the logical-dump restore path is safe today. This mirrors
+    #522's embedded policy: the full label scan for `= false` is correct, and
+    ``_ensure_indexes`` no longer creates the index on any backend.
+
+    Returns ``True`` when a boolean index was present and dropped. Raises
+    ``RuntimeError`` when the predicates are still inconsistent after the
+    drop — a caller must not report a successful copy that silently degrades
+    belief state. Never raises when ``raise_on_failure`` is False.
+    """
+    def _index_has_is_operator() -> bool:
+        """Is there a ``:Point`` index whose field list includes
+        ``is_operator``?  PRESENCE, read from the index catalogue — not a
+        predicate count.
+
+        Matched by EXACT field name, never by substring: ``row[1]`` is the
+        list of indexed field names, and ``"is_operator" in str(row[1])``
+        would also match an unrelated property such as ``is_operator_flag``.
+        That false positive is never cleared by the drop (which only targets
+        the two known boolean-index forms), so the re-check would report
+        "still present" and raise — the same post-swap user-visible failure
+        as the count race this function replaced (#3154 review P2).
+        """
+        rows = g.query("CALL db.indexes()").result_set
+        for row in rows:
+            if not row or row[0] != "Point":
+                continue
+            fields = row[1]
+            if isinstance(fields, str):
+                # Defensive: a stringified field list is tokenised, not
+                # substring-matched, so `is_operator_flag` cannot match.
+                fields = [
+                    f.strip().strip("[]'\"")
+                    for f in fields.strip("[]").split(",")
+                ]
+            if any(str(f) == "is_operator" for f in (fields or ())):
+                return True
+        return False
+
+    def _probe() -> tuple[int, int]:
+        """Diagnostic only — NEVER gates the repair. Two separate count()
+        queries are not atomic, so a concurrent non-operator write landing
+        between them desynchronises them indistinguishably from corruption
+        (measured: 35/40 false "corruption" raises on a graph with NO index
+        while a writer ran). Hence presence-based detection above/below, and
+        this is used solely to describe what was found."""
+        indexed = int(g.query(
+            "MATCH (n:Point) WHERE n.is_operator = false RETURN count(n)"
+        ).result_set[0][0])
+        truth = int(g.query(
+            "MATCH (n:Point) WHERE NOT n.is_operator RETURN count(n)"
+        ).result_set[0][0])
+        return indexed, truth
+
+    def _drop_boolean_indexes() -> bool:
+        """Unconditionally drop every known boolean-index form. Returns True
+        when a DROP actually removed something.
+
+        Only "no such index" is swallowed: treating EVERY failure as
+        "absent" silently skips the repair on a genuine drop error, which is
+        the silent-failure class #3154 exists to close.
+        """
+        dropped = False
+        for stmt in ("DROP INDEX ON :Point(is_operator)",
+                     "DROP INDEX ON :Point(is_operator, lastDreamedAt)"):
+            try:
+                g.query(stmt)
+                dropped = True
+            except Exception as e:
+                if "no such index" not in str(e).lower():
+                    logger.warning(
+                        "#3154: DROP INDEX failed on %s after %s (%s): %s",
+                        graph_name, stage, stmt, e,
+                    )
+                # else: absent — the healthy case (O(1), no startup penalty)
+        return dropped
+
+    # Presence FIRST, so nothing below depends on a racy count comparison.
+    try:
+        if not _index_has_is_operator():
+            return False
+    except Exception as e:
+        logger.warning(
+            "#3154: could not enumerate indexes on %s after %s: %s",
+            graph_name, stage, e,
+        )
+        return False
+
+    indexed = truth = None
+    try:
+        indexed, truth = _probe()
+    except Exception as e:
+        # A probe failure must not suppress the drop (it gates nothing now).
+        logger.warning(
+            "#3154: could not probe boolean predicates on %s after %s: %s",
+            graph_name, stage, e,
+        )
+
+    present = _drop_boolean_indexes()
+
+    # PRESENCE-based verification: the repair is "the index is GONE", not
+    # "two counts agree". A surviving index is the failure, whatever the
+    # counts say.
+    try:
+        still_present = _index_has_is_operator()
+    except Exception as e:
+        logger.warning(
+            "#3154: could not re-check indexes on %s after %s: %s",
+            graph_name, stage, e,
+        )
+        return present
+
+    if still_present:
+        msg = (
+            f"#3154: a boolean is_operator index on {graph_name} survived the "
+            f"{stage} copy's repair and could not be dropped — refusing to "
+            "report a successful copy that silently degrades EP/calibration "
+            "state (a surviving corrupt index returns ZERO rows for every "
+            "`is_operator = false` predicate)"
+        )
+        if raise_on_failure:
+            raise RuntimeError(msg)
+        logger.error("%s (raise_on_failure=False)", msg)
+        return present
+
+    if indexed is not None and indexed != truth:
+        logger.error(
+            "#3154: GRAPH.COPY dropped the `false` entries of the boolean "
+            "is_operator index on %s (%s) — `= false` read %d rows instead of "
+            "%d. Dropped the corrupt index: `= false` predicates now use the "
+            "correct label scan (perf cost, not a correctness cost).",
+            graph_name, stage, indexed, truth,
+        )
+    elif present:
+        logger.warning(
+            "#3154: dropped a boolean is_operator index on %s (%s) after the "
+            "copy. The counts agreed, so the index may have been healthy — "
+            "but a copied boolean index is not trustworthy (a graph with no "
+            "`false` rows hides the lost postings). No engine indexes the "
+            "property; `= false` now uses the correct label scan.",
+            graph_name, stage,
+        )
+    return present
+
+
 def _restore_into_temp_verify_swap(
     db,
     payload: dict,
@@ -1136,6 +1327,14 @@ def _restore_into_temp_verify_swap(
         try:
             live_g.copy(pre_name)
             pre_g = db.select_graph(pre_name)
+            # #3154: a boolean index corrupted by this copy would silently
+            # break `= false` predicates on the DR fallback copy. Repair and
+            # log loudly, but never abort an otherwise-healthy restore over
+            # a best-effort safety copy.
+            _audit_copied_boolean_indexes(
+                pre_g, graph_name=pre_name,
+                stage="pre-restore safety copy", raise_on_failure=False,
+            )
         except Exception as e:
             logger.warning("pre-restore copy failed (continuing): %s", e)
 
@@ -1158,6 +1357,21 @@ def _restore_into_temp_verify_swap(
         raise RuntimeError(
             f"Restore swap failed — verified temp graph {temp_name} intact: {e}"
         ) from e
+    # #3154: audit the swapped graph BEFORE declaring success — GRAPH.COPY is
+    # the corrupting step, and a silently dead `n.is_operator = false` on the
+    # live graph disables EP/calibration/dedup without any error. A failure
+    # here leaves the verified temp and pre-restore copies intact.
+    try:
+        _audit_copied_boolean_indexes(
+            db.select_graph(live_name), graph_name=live_name, stage="restore swap"
+        )
+    except RuntimeError:
+        logger.exception(
+            "#3154: boolean-index audit failed after the swap for %s — "
+            "verified temp graph %s and pre-restore copy %s left intact",
+            live_name, temp_name, pre_name,
+        )
+        raise
     # Success: remove the transient staging + pre-restore copies
     for g in (temp_g, pre_g):
         if g is not None:
