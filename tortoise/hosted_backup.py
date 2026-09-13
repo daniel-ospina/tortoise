@@ -1035,12 +1035,31 @@ def _audit_copied_boolean_indexes(
     def _index_has_is_operator() -> bool:
         """Is there a ``:Point`` index whose field list includes
         ``is_operator``?  PRESENCE, read from the index catalogue — not a
-        predicate count."""
+        predicate count.
+
+        Matched by EXACT field name, never by substring: ``row[1]`` is the
+        list of indexed field names, and ``"is_operator" in str(row[1])``
+        would also match an unrelated property such as ``is_operator_flag``.
+        That false positive is never cleared by the drop (which only targets
+        the two known boolean-index forms), so the re-check would report
+        "still present" and raise — the same post-swap user-visible failure
+        as the count race this function replaced (#3154 review P2).
+        """
         rows = g.query("CALL db.indexes()").result_set
-        return any(
-            row and row[0] == "Point" and "is_operator" in str(row[1])
-            for row in rows
-        )
+        for row in rows:
+            if not row or row[0] != "Point":
+                continue
+            fields = row[1]
+            if isinstance(fields, str):
+                # Defensive: a stringified field list is tokenised, not
+                # substring-matched, so `is_operator_flag` cannot match.
+                fields = [
+                    f.strip().strip("[]'\"")
+                    for f in fields.strip("[]").split(",")
+                ]
+            if any(str(f) == "is_operator" for f in (fields or ())):
+                return True
+        return False
 
     def _probe() -> tuple[int, int]:
         """Diagnostic only — NEVER gates the repair. Two separate count()

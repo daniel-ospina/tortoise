@@ -294,6 +294,41 @@ def test_audit_never_false_raises_under_concurrent_writes(db):
     )
 
 
+def test_audit_does_not_false_positive_on_a_similar_property_name(db):
+    """Presence must match the field name EXACTLY.
+
+    ``"is_operator" in str(row[1])`` also matches an unrelated indexed
+    property such as ``is_operator_flag``. That false positive is never
+    cleared by the drop (which only targets the two known boolean-index
+    forms), so the post-drop re-check reported "still present" and raised —
+    after the live graph had already been swapped, i.e. the same
+    successful-restore-reported-as-failure outcome the count race caused.
+    """
+    from tortoise.hosted_backup import _audit_copied_boolean_indexes
+
+    graph_db, created = db
+    name = _name("audit_falsepos")
+    created.append(name)
+    g = graph_db.select_graph(name)
+    _seed_points(g)
+    # An indexed property whose name merely CONTAINS "is_operator".
+    g.query("CREATE (n:Point {id:'flag', is_operator_flag:1})")
+    g.query("CREATE INDEX ON :Point(is_operator_flag)")
+
+    assert _audit_copied_boolean_indexes(
+        g, graph_name=name, stage="falsepos",
+    ) is False, "a similar property name must not read as a boolean index"
+    # And the unrelated index is left alone (not dropped by the sweep).
+    fields = [
+        row[1] for row in g.query("CALL db.indexes()").result_set
+        if row and row[0] == "Point"
+    ]
+    assert any(
+        any(str(f) == "is_operator_flag" for f in (fl or ()))
+        for fl in fields
+    ), f"the unrelated index was dropped: {fields}"
+
+
 def test_audit_raises_when_a_boolean_index_cannot_be_dropped(db, monkeypatch):
     """The failure signal must be 'the index is STILL THERE', not 'counts
     disagree'. Forcing the drop to be a no-op while an index is present must
