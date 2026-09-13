@@ -31,11 +31,25 @@ from pathlib import Path  # noqa: F401
 
 #: Pinned dataset versions (locked at implementation — the runner refuses
 #: to run on mismatch; plan E2E-4.1).
+#:
+#: ``memoryagentbench_tortoise`` (#2985/#3005 P1) is the retrieved-context
+#: TORTOISE lane of the ``memoryagentbench`` benchmark: the SAME pinned
+#: dataset/version, registered under its own key so the parity CLI actually
+#: DISPATCHES it. Without the entry the lane's registry entry
+#: (``executors.EXECUTORS["memoryagentbench_tortoise"]``) was unreachable —
+#: the CLI loop iterates THIS mapping — and its capability gate + provenance
+#: were inert outside tests that monkeypatched ``EXECUTORS``. The parity
+#: record therefore carries TWO cells for the benchmark: the full-context
+#: baseline under ``memoryagentbench`` and the retrieved-context arm under
+#: ``memoryagentbench_tortoise`` (the record is keyed by the pinned id, and
+#: each cell carries its own ``lane``); this is deliberate, never a silent
+#: collision.
 PINNED_VERSIONS: dict[str, str] = {
     "longmemeval": "longmemeval-2025.3",
     "locomo": "locomo-v1",
     "memoryarena": "memoryarena-hf-rev-2026.02",
     "memoryagentbench": "memoryagentbench-2025.4",
+    "memoryagentbench_tortoise": "memoryagentbench-2025.4",
 }
 
 class VersionMismatchError(Exception):

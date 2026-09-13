@@ -244,8 +244,10 @@ class TestDoctorPath:
 
     def test_mask_uri_userinfo_all_schemes_and_delimiters(self):
         """#720 P2 conf 68: the mask applies to every scheme:// pattern
-        (docker/redis/rediss/bolt/etc) and never touches query/fragment
-        delimiters — an '@' in a query value must not swallow the host."""
+        (docker/redis/rediss/bolt/etc) and never touches a query/fragment
+        delimiter that genuinely starts one — an '@' in a query value does
+        not swallow the host UNLESS that would risk masking less (see
+        #2983 fail-closed cases below)."""
         from tortoise.__main__ import _mask_uri_userinfo
 
         assert _mask_uri_userinfo("bolt://user:sup3rsekrit@host:7687/g") == \
@@ -273,6 +275,105 @@ class TestDoctorPath:
         # urlsplit raises on unmatched '[' — the mask still hides the
         # credential instead of leaking it (and never raises in a handler)
         assert _mask_uri_userinfo("docker://user:pw@[abc") == "docker://:***@[abc"
+
+    def test_mask_uri_userinfo_delimiter_inside_password_fails_closed(self):
+        """#2983: a literal '?'/'#' inside a password (RFC-invalid — it
+        should be %3F/%23 — but copy-pasteable) must not truncate the
+        authority region before the '@' and re-emit the credential.
+        When an '@' follows the earliest '?'/'#', that delimiter is itself
+        inside the userinfo, so the mask consumes to the LAST '@' of the
+        full authority, mirroring entrypoint.sh::_redact_uri."""
+        from tortoise.__main__ import _mask_uri_userinfo
+
+        # Both repro shapes from the issue re-emitted the password verbatim.
+        assert _mask_uri_userinfo("rediss://user:S3n?tinel@host.cloud:1234") == \
+            "rediss://:***@host.cloud:1234"
+        assert _mask_uri_userinfo("rediss://user:S3n#tinel@host.cloud:1234") == \
+            "rediss://:***@host.cloud:1234"
+        # An '@' BEFORE the delimiter is password material too: the old code
+        # stopped at the '?' and leaked the '?word@host' tail.
+        assert _mask_uri_userinfo("rediss://user:p@ss?word@host:1234") == \
+            "rediss://:***@host:1234"
+        assert _mask_uri_userinfo("rediss://user:p#ss#word@host:1234") == \
+            "rediss://:***@host:1234"
+        # both delimiters, plus an extra '@' inside the credential
+        assert _mask_uri_userinfo("rediss://user:p?ss#w@rd@host:1234/g") == \
+            "rediss://:***@host:1234/g"
+        # trailing delimiter at the end of the password
+        assert _mask_uri_userinfo("rediss://user:S3n?@host:1234") == \
+            "rediss://:***@host:1234"
+        # '://' inside the password must not register as a second URI: the
+        # old next-scheme boundary truncated before the '@' and leaked the
+        # credential prefix (found by the #2983 verifier).
+        assert _mask_uri_userinfo("rediss://user:p://w@host:1234") == \
+            "rediss://:***@host:1234"
+        assert _mask_uri_userinfo("rediss://user:S3n://tinel@host.cloud:1234/db") == \
+            "rediss://:***@host.cloud:1234/db"
+        assert _mask_uri_userinfo("rediss://user:S3n?tinel://w@host.cloud:1234/db") == \
+            "rediss://:***@host.cloud:1234/db"
+        # '@' AND '://' inside the password together: the '@' must not make
+        # the inner '://' look like a second URI whose scheme is the leaked
+        # password tail.
+        assert _mask_uri_userinfo("rediss://user:S3n@tinel://w@host.cloud:1234/db") == \
+            "rediss://:***@host.cloud:1234/db"
+        assert _mask_uri_userinfo("rediss://user:S3n?x@tinel://@host.cloud:1234/db") == \
+            "rediss://:***@host.cloud:1234/db"
+        # embedded in prose — RELATIVE_PATH_ERROR carries the raw URI
+        prose = ("Relative DB path 'rediss://user:S3n?tinel@host:1234/g' "
+                 "rejected. Use (1) the canonical path")
+        assert _mask_uri_userinfo(prose) == \
+            ("Relative DB path 'rediss://:***@host:1234/g' rejected. "
+             "Use (1) the canonical path")
+        # A delimiter with NO '@' after it still starts a real
+        # query/fragment and stays byte-identical (well-formed path).
+        assert _mask_uri_userinfo("redis://:pw@db.example.com:6379/0?ssl=true") == \
+            "redis://:***@db.example.com:6379/0?ssl=true"
+        # Fail-closed over-reach, documented deliberately: an '@' in a
+        # GENUINE query is syntactically indistinguishable from a '?' in a
+        # password, so the mask consumes to the last '@' (masks more,
+        # never leaks; diagnosability loss only).
+        assert _mask_uri_userinfo("redis://:pw@host:6379/0?u=a@b") == \
+            "redis://:***@b"
+        # Same reason, a second URI whose predecessor has no userinfo is
+        # merged into one masked line rather than risking a split that
+        # leaves half a credential visible.
+        assert _mask_uri_userinfo(
+            "rediss://host1:1/db and rediss://u:p@host2:2/db") == \
+            "rediss://:***@host2:2/db"
+
+    def test_mask_uri_userinfo_fuzz_never_emits_password_material(self):
+        """#2983: exhaustive fuzz over passwords containing '?'/'#'/'@'/'/'.
+
+        The marker pair 'S3n'/'tinel' is asserted separately from the whole
+        password so the check stays honest for degenerate one-character
+        passwords (a lone '@' is unavoidably present as the mask separator).
+        """
+        from tortoise.__main__ import _mask_uri_userinfo
+
+        specials = ["?", "#", "@", "/", ":", "=", "&", "%40", "%3F", "%23",
+                    "://", "://w", "a://"]
+        passwords: list[str] = []
+        for a in specials:
+            passwords.append(f"S3n{a}tinel")
+            passwords.append(f"S3n{a}{a}tinel")
+            for b in specials:
+                passwords.append(f"S3n{a}tinel{b}")
+                passwords.append(f"S3n{a}{b}tinel")
+        passwords += [
+            "?S3ntinel", "#S3ntinel", "@S3ntinel", "/S3ntinel",
+            "S3ntinel?", "S3ntinel#", "S3ntinel@", "S3ntinel/",
+            "??S3n", "##S3n", "@@S3n", "//S3n", "S3n", "S3n?", "S3n#",
+        ]
+        for pw in passwords:
+            for uri in (
+                f"rediss://user:{pw}@host.cloud:1234/db",
+                f"docker://:{pw}@127.0.0.1:7687/tortoise",
+                f"bolt://user:{pw}@[::1]:7687/g",
+            ):
+                masked = _mask_uri_userinfo(uri)
+                assert "S3n" not in masked, f"marker leaked: {uri!r} -> {masked!r}"
+                assert "tinel" not in masked, f"marker leaked: {uri!r} -> {masked!r}"
+                assert pw not in masked, f"password leaked: {uri!r} -> {masked!r}"
 
     def test_doctor_db_uri_probe_uses_uri_graph_name(self, clear_db_env, monkeypatch, capsys):
         """#720 P2 conf 62: the Step 2 probe must select the graph from the

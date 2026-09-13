@@ -3032,8 +3032,9 @@ def _maybe_onboarding_auto_complete() -> None:
 # Claude Web (and every harness with an MCP surface) files sessions through
 # this tool. It calls the SAME capture pipeline as POST /v1/sessions
 # (hosted_api._capture_session_impl) so the two surfaces can never drift on
-# gate order: session_recording opt-out 409 FIRST → empty 422 → provider 503 →
-# quota 402. Stdio/self-host returns an honest "requires hosted mode" error —
+# gate order: admission 429 (#3060) → session_recording opt-out 409 → empty
+# 422 → provider 503 → quota 402. Stdio/self-host returns an honest "requires
+# hosted mode" error —
 # there is deliberately NO local fallback that bypasses the capture pipeline
 # (a prompt-injection exfiltration surface must not exist).
 
@@ -3051,8 +3052,8 @@ def tortoise_session_capture(conversation: list[dict],
     (turn cap) -> 422 (empty/blank transcript) -> 402 (quota). Returns the
     capture result (a memory_write_v1 envelope, #2104) on success, or an
     honest error dict on failure (the per-harness last-error state key is
-    recorded on non-2xx, cleared on 2xx — same receipt semantics as the
-    REST path).
+    recorded on non-2xx EXCEPT the #3060 capacity 429 — a server condition —
+    and cleared on 2xx; same receipt semantics as the REST path).
     """
     from tortoise.mcp_auth import (  # noqa: I001
         SELFHOST_TEAM_ID,
@@ -3086,9 +3087,16 @@ def tortoise_session_capture(conversation: list[dict],
         model = sanitize_attribution_field(model, max_length=128)
 
     from tortoise.hosted_api import (
+        _CAPTURE_MARKER_EXECUTOR,
+        _CAPTURE_SESSION_IN_FLIGHT_DETAIL,
         SessionRequest,
+        _capture_abandoned_marker,
+        _capture_lane,
         _capture_session_impl,
+        _capture_session_key,
         _record_capture_last_error,
+        _reserve_capture_slot,
+        _submit_off_loop,
     )
     limits = _current_team_limits.get() or {}
     team = {"team_id": team_id, "tier": limits.get("tier", "free"),
@@ -3119,11 +3127,54 @@ def tortoise_session_capture(conversation: list[dict],
         return {"error": f"invalid capture payload: {e}", "status": 422}
     try:
         import asyncio
-        return asyncio.run(_capture_session_impl(body, None, team))
+        # #3060: the SAME admission reservation as the REST endpoint. This
+        # surface shares `_CAPTURE_EXECUTOR`, so without reserving here the cap
+        # would not bind MCP captures at all — they would queue unboundedly
+        # behind a stalled pool, the exact failure mode the cap closes
+        # (reviewer measurement: cap=2, 4 concurrent extractions). #3129:
+        # the session_id goes with it, so a duplicate in-flight capture of the
+        # same session is refused on this surface too (scoped to this tenant).
+        slot = _reserve_capture_slot(_capture_session_key(team, session_id))
+        # #3129: parity with the REST endpoint — a cancellation between the
+        # attempt starting and its outcome being recorded would leave the
+        # Session at `capture_ok=NULL`, which the replay rule reads as
+        # "presumed captured" (see hosted_api._capture_abandoned_marker).
+        _state: dict = {}
+        try:
+            return asyncio.run(_capture_session_impl(body, None, team,
+                                                     slot=slot,
+                                                     state=_state))
+        except asyncio.CancelledError:
+            # #3129: DEFENSIVE — parity with the REST endpoint, but not
+            # reachable under the current dispatch: this tool is a SYNC
+            # FastMCP callable, and fastmcp runs sync callables via
+            # `anyio.to_thread.run_sync` with the default
+            # `abandon_on_cancel=False`, so the inner `asyncio.run` loop is
+            # never cancelled and no CancelledError reaches here (cycle-4
+            # review). Kept because the cost is nil and a future async tool or
+            # a cancellation-capable dispatcher would need it — see the
+            # residual sentinel issue for real MCP abandonment coverage.
+            if _state.get("attempted") and not _state.get("finalized"):
+                # Off-loop, key held until it lands (see the REST endpoint and
+                # hosted_api._CaptureSlot.hold_until).
+                try:
+                    slot.hold_until(_submit_off_loop(
+                        _CAPTURE_MARKER_EXECUTOR, _capture_abandoned_marker,
+                        _state.get("proj"), session_id,
+                        _state.get("lane") or _capture_lane()))
+                except Exception:  # pragma: no cover - pool shut down
+                    _log.exception("abandoned-capture marker submit failed")
+            raise
+        finally:
+            slot.release()
     except Exception as e:
         status = getattr(e, "status_code", 500)
         detail = getattr(e, "detail", str(e))
-        if status >= 400:
+        # #3060: the capacity 429 is a SERVER condition, not a team capture
+        # failure — never paint it on the dashboard (REST does the same).
+        # #3129: likewise the in-flight 409.
+        if (status >= 400 and status != 429
+                and detail != _CAPTURE_SESSION_IN_FLIGHT_DETAIL):
             with contextlib.suppress(Exception):
                 _record_capture_last_error(team_id, harness, str(detail))
         return {"error": str(detail), "status": status}
@@ -3260,8 +3311,16 @@ def create_http_app(*, allowed_origins: list[str] | None = None,
                     _registry_sdk=None,
                     auth_mode: Literal["tenant", "static", "none"] = "tenant",
                     api_key: str | None = None,
-                    tool_group: str | None = None) -> Any:
+                    tool_group: str | None = None,
+                    emit_oauth_challenge: bool = False) -> Any:
     """Configured Streamable HTTP app for the hosted platform (#236).
+
+    IMPORTANT: ``emit_oauth_challenge`` defaults to **False** on purpose. Leave
+    it alone unless this app is served alongside a real authorization server
+    (i.e. ``hosted_api``). A challenge emitted where no
+    ``/.well-known/oauth-protected-resource`` route exists points the client at a
+    404 — strictly worse than the bare 401. Only ``tortoise/hosted_api.py``
+    passes True.
 
     Mounted at /mcp on the existing FastAPI app. Auth + rate limiting +
     security headers + body-size caps live INSIDE this app's middleware
@@ -3301,7 +3360,12 @@ def create_http_app(*, allowed_origins: list[str] | None = None,
         group_mw = Middleware(ToolGroupMiddleware, tool_group=tool_group)
     if auth_mode == "tenant":
         from tortoise.mcp_auth import TeamResolutionMiddleware
-        auth_mw = Middleware(TeamResolutionMiddleware, registry_sdk=_registry_sdk)
+        # #2864: only the HOSTED app passes emit_oauth_challenge=True. Tenant-mode
+        # self-host (`tortoise serve --http`, this function's default) has no
+        # authorization server and registers no /.well-known/* routes, so a
+        # challenge there would point the client at a 404.
+        auth_mw = Middleware(TeamResolutionMiddleware, registry_sdk=_registry_sdk,
+                             emit_challenge=emit_oauth_challenge)
     elif auth_mode == "static":
         from tortoise.mcp_auth import StaticKeyMiddleware
         auth_mw = Middleware(StaticKeyMiddleware, api_key=api_key)

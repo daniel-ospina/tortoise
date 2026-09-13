@@ -7,15 +7,20 @@ The done step exits WITHOUT patching onboarding_complete (accept-and-drop).
 
 #2710 / #2711 / #2755 / #2756 (2026-09-09 connect-step fixes) brought this spec
 to the SHIPPED post-#2698 UI and added the owner/admin connect branch:
-  - the connect step has 6 harness tabs (ChatGPT is key-less OAuth and is
-    filtered OUT of the wizard tab row), NOT the pre-#2698 7;
+  - the connect step has 4 harness FAMILIES (Claude / Codex / Cursor / Pi)
+    with a second-level SURFACE row (#2912): Claude → Code / Desktop / Web,
+    Codex → CLI / Desktop. ChatGPT is key-less OAuth and is filtered OUT of
+    the wizard chooser (#2698);
   - the dead pre-#2698 "Copy setup" button is gone — setup content is a
     WizardPromptCard with its own Copy control;
   - an owner/admin who lands on the connect step with no in-memory key gets an
     in-flow mint CTA (never-expiring) + a paste escape, and leaving the wizard
     must NOT pop the shared key-create modal (either exit path);
-  - members still get ONLY the paste escape (the known, separately-owned UX
-    gap — asserted here so a future fix is a deliberate change);
+  - #2865: the connect chooser is no longer owner/admin-only — a member with
+    no key reaches the key-less OAuth Claude Desktop/Web leaves (asserted in
+    `test_member_without_key_reaches_keyless_claude_connectors`); on a KEYED
+    leaf a member still gets the paste escape only (never the mint CTA, which
+    would 403 server-side);
   - the shown-once key row must not overflow at any phone width;
   - WizardPromptCard must not nest interactive elements, and a drag-select
     inside it must not overwrite the clipboard;
@@ -69,9 +74,12 @@ def _local_preview_servers() -> None:
     """#2744: fail fast (one clear error) when :8788/:8790 are not serving."""
     _preflight_local_servers()
 
-# #2698: ChatGPT is key-less OAuth — deliberately NOT a wizard harness tab.
-WIZARD_HARNESS_TABS = ["Claude Code", "Claude Desktop", "Claude Web",
-                       "Codex", "Cursor", "Pi"]
+# #2698: ChatGPT is key-less OAuth — deliberately NOT a wizard harness choice.
+# #2912: level 1 = the harness family, level 2 = the surface (only Claude and
+# Codex have one).
+WIZARD_HARNESS_FAMILIES = ["Claude", "Codex", "Cursor", "Pi"]
+WIZARD_CLAUDE_SURFACES = ["Claude Code", "Claude Desktop", "Claude Web"]
+WIZARD_CODEX_SURFACES = ["Codex CLI", "Codex Desktop"]
 
 MINTED_KEY = "tt_minted_0123456789abcdef0123456789abcdef"
 # #2711: a realistic worst case for the unbreakable token (72 chars, no
@@ -267,10 +275,11 @@ def _walk_to_fork(page: Page) -> None:
     expect(page.locator("body")).to_contain_text("Continue setup", timeout=20_000)
     page.get_by_role("button", name="Continue setup").click()
     # STEP 0: create/join org — an account that already holds an org sees a
-    # read-only summary (never a second mint, #2323) and advances. #2364
-    # round-1: the org-holder step title branches to 'Your Organization' —
-    # the 'Create your Organization' title must never re-show on an
-    # org-holder resume/re-entry (step-mapping is W9/#2005).
+    # read-only summary (never a second mint, #2323) and advances. #2912: the
+    # header h1 names the stage — 'Your Organization' for this read-only state.
+    # #2364 round-1 (kept through the merge): the org-holder step must never
+    # re-read the org-create title, wherever it renders.
+    expect(page.locator(".welcome-title")).to_have_text("Your Organization", timeout=10_000)
     expect(page.locator("body")).not_to_contain_text("Create your Organization", timeout=10_000)
     expect(page.locator("body")).to_contain_text("You're set up in", timeout=5_000)
     page.get_by_role("button", name="Continue →").click()
@@ -282,7 +291,8 @@ def _walk_to_connect(page: Page) -> None:
     """The shared prefix of every journey: re-entry → step 0 → fork SELF →
     connect. The account already holds an org (_wire's team_row)."""
     _walk_to_fork(page)
-    page.get_by_role("button", name="Use it for your own agents").click()
+    # #3218: the self-fork option is first-person now.
+    page.get_by_role("button", name="For my internal setup").click()
     expect(page.locator("body")).to_contain_text("Connect your agent", timeout=10_000)
 
 
@@ -329,7 +339,7 @@ def _expect_left_wizard(page: Page) -> None:
     must not be an instantaneous snapshot."""
     expect(page.locator(".wizard-prompt-card")).to_have_count(0, timeout=15_000)
     expect(page.get_by_text("You're all set")).to_have_count(0, timeout=15_000)
-    expect(page.locator(".harness-tab")).to_have_count(0, timeout=15_000)
+    expect(page.locator(".harness-family")).to_have_count(0, timeout=15_000)
     expect(page.locator("[data-tab=keys]")).to_be_visible(timeout=15_000)
     page.wait_for_timeout(400)  # bounded: one settle tick after the mount
 
@@ -343,34 +353,49 @@ def test_first_timer_wizard_human_steps(page: Page) -> None:
     empty). The done step exits WITHOUT patching onboarding_complete
     (accept-and-drop: the node's fork-aware gate owns completion).
 
-    #2710: this journey is the MEMBER row (no role) — members get the paste
-    escape ONLY (no harness tabs, no prompt cards, and NOT the owner/admin
-    mint CTA, which would 403 server-side). The owner/admin connect branch is
-    covered separately below."""
+    #2710/#2865: this journey is the MEMBER row (no role). #2865 removed the
+    owner/admin-only gate on the connect chooser, so a member now REACHES the
+    harness families; the member's key-LESS OAuth journey is asserted in
+    `test_member_without_key_reaches_keyless_claude_connectors`. This journey
+    lands on the DEFAULT leaf (Claude Code, a KEYED leaf), where a member still
+    gets the paste escape ONLY — never the owner/admin mint CTA, which would
+    403 server-side."""
     _seed_cookie(page, "u-onb")
     cap = _wire(page, key_rows=[DURABLE_ROW])
     _walk_to_connect(page)
-    # MEMBER: no harness tabs (the known, separately-owned "members get no
-    # setup instructions" gap) — only the paste escape.
-    assert page.locator(".harness-tab").count() == 0, \
-        "members must not see harness tabs (owner/admin-only surface)"
+    # #2865: the chooser is no longer owner/admin-only — a member reaches the 4
+    # harness families (the OAuth leaves need no mint).
+    assert page.locator(".harness-family").count() == 4, \
+        "members must reach the harness chooser (#2865 removed the role gate)"
+    # #2912 (test-review P2): the member LEDE, measured rather than inferred.
+    # The default Claude Code leaf is KEYED, so the member paste lede stays.
+    # "Pick which harness to connect." would be a lie here, and the string the
+    # issue reported as vague must not come back.
+    expect(page.locator(".welcome-lede")).to_have_text(
+        "Paste an API key to connect your agent.", timeout=10_000)
+    assert "Pick which harness to connect" not in page.locator(".welcome-lede").inner_text()
+    assert "Connect Tortoise to your Organization" not in page.locator(".welcome-head").inner_text()
     # The mint CTA is owner/admin render-gated (POST /v1/team/keys is
-    # _require_owner_admin server-side) — a member must never see a 403 button.
+    # _require_owner_admin server-side) — a member must never see a 403 button,
+    # and on a KEYED leaf gets the paste row directly instead.
     assert page.get_by_role("button", name="Create an API key").count() == 0, \
         "members must not see the owner/admin mint CTA"
     expect(page.get_by_role("button", name="Use this key")).to_be_visible(timeout=5_000)
     page.get_by_label("Paste an API key").fill(PASTED_KEY)
     page.get_by_role("button", name="Use this key").click()
-    # The pasted durable key is accepted (row-truth match) → the wizard can
-    # advance. No prompt card renders for a member (the documented gap: the
-    # member path has no setup instructions at all).
-    expect(page.get_by_role("button", name="Continue to dashboard")).to_be_visible(timeout=5_000)
-    assert page.locator(".wizard-prompt-card").count() == 0, \
-        "a member must get NO setup prompt card (no harness instructions)"
+    # The pasted durable key is accepted (row-truth match) → the keyed leaf now
+    # renders its setup prompt (procedure step 2) and the wizard can advance.
+    expect(page.locator(".wizard-prompt-card").first).to_be_visible(timeout=5_000)
+    expect(page.get_by_role("button", name="I've set it up — Continue →")).to_be_visible(timeout=5_000)
     page.get_by_role("button", name="Skip for now").click()
     # STEP 3: done — agent takes over; NO onboarding_complete PATCH (the
     # node's gate owns completion; accept-and-drop).
-    expect(page.locator("body")).to_contain_text("You're all set", timeout=10_000)
+    # #2912 (PR-gate UX): skipping = the PAUSED state, so the <h1> names that
+    # state. It used to read "You're all set" — the opposite — directly above
+    # the "isn't connected yet" body.
+    expect(page.locator(".welcome-title")).to_have_text(
+        "Setup paused — your agent is not connected yet", timeout=10_000)
+    expect(page.locator("body")).to_contain_text("your agent isn't connected yet", timeout=10_000)
     # the done step's exit (wizardComplete) — scoped: the header carries a
     # same-named 'Open my dashboard →' escape.
     page.locator(".wizard-actions").get_by_role("button", name="Open my dashboard →").click()
@@ -392,27 +417,46 @@ def test_owner_connect_step_mints_never_expiring_key_in_flow(page: Page) -> None
     Pre-fix: the step showed the dead sentence "Create an API key to see the
     setup prompt." with no control, pill clicks were no-ops, and the queued
     auto-open modal then popped a stray "Create new API key" (30-day default)
-    on the dashboard after exit. Now: the shipped 6 harness tabs render, the
-    mint CTA mints a NEVER-expiring key (the connect step's own Never-only
-    contract), the prompt card renders, the step's OWN advance writes the
-    harness-connected checkpoint, and the HEADER exit leaks no modal."""
+    on the dashboard after exit. Now: the shipped two-level harness chooser
+    renders, the mint CTA mints a NEVER-expiring key (the connect step's own
+    Never-only contract), the prompt card renders, the step's OWN advance writes
+    the harness-connected checkpoint, and the HEADER exit leaks no modal."""
     _seed_cookie(page, "u-owner")
     cap = _wire(page, role="owner")
     _walk_to_connect(page)
 
-    # #2698 shipped tab row: 6 tabs, ChatGPT (key-less OAuth) filtered out.
-    tab_names = page.locator(".harness-tab").all_inner_texts()
-    assert tab_names == WIZARD_HARNESS_TABS, f"connect-step tab row drifted: {tab_names}"
-    assert "ChatGPT" not in tab_names, "ChatGPT is not a wizard harness tab (#2698)"
+    # #2698/#2912 shipped chooser: 4 families at the top level, ChatGPT
+    # (key-less OAuth) filtered out.
+    family_names = page.locator(".harness-family").all_inner_texts()
+    assert family_names == WIZARD_HARNESS_FAMILIES, f"connect-step family row drifted: {family_names}"
+    # Level 2: Claude expands to its three surfaces; the default is Claude Code.
+    surface_names = page.locator(".harness-surface").all_inner_texts()
+    assert [s.split("\n")[0] for s in surface_names] == WIZARD_CLAUDE_SURFACES, \
+        f"the Claude family must offer its three surfaces: {surface_names}"
+
+    # #2912: KEY FIRST — the key block is step 1 and the procedure is step 2,
+    # so the setup prompt is never offered before a key exists. With no key the
+    # procedure block is NOT rendered at all (a "2 Copy the setup prompt"
+    # heading promised a prompt that did not exist — the reported defect 2).
+    expect(page.locator(".wizard-block-title")).to_have_count(1)
+    assert page.locator(".wizard-block-title").all_inner_texts()[0].endswith("Get your API key")
+    assert "Copy the setup prompt" not in page.locator(".wizard-block-title").all_inner_texts()[0]
+    assert page.locator(".wizard-prompt-card").count() == 0, \
+        "no prompt card may render before a key exists"
 
     # The promised path exists: the sentence AND its affordance.
     expect(page.locator("body")).to_contain_text("Create an API key to see the setup prompt.")
     expect(page.get_by_role("button", name="Create an API key")).to_be_visible()
-    # Pill clicks are display-mode toggles — assert the CLICK DID ITS JOB (the
-    # mode actually switched) rather than a dialog count that cannot change
-    # inside the wizard tree (test-review P2: that assertion was vacuous).
+
+    _mint_from_connect(page)
+    # #2912: the key-mode pills live in the KEY block, so they appear only once
+    # a key exists (there is nothing to include/separate before that). Pill
+    # clicks are display-mode toggles — assert the CLICK DID ITS JOB (the mode
+    # actually switched) rather than a dialog count that cannot change inside
+    # the wizard tree (test-review P2: that assertion was vacuous).
     separate_pill = page.get_by_role("button", name="Key separate from prompt")
     included_pill = page.get_by_role("button", name="Key included in prompt")
+    expect(separate_pill).to_be_visible(timeout=5_000)
     separate_pill.click()
     assert "active" in (separate_pill.get_attribute("class") or ""), \
         "the 'separate' pill must become the selected mode (pure toggle, no modal)"
@@ -421,8 +465,6 @@ def test_owner_connect_step_mints_never_expiring_key_in_flow(page: Page) -> None
     # "easiest" path); both pill states are pure toggles.
     included_pill.click()
     assert "active" in (included_pill.get_attribute("class") or "")
-
-    _mint_from_connect(page)
     # The wizard mint is Never-only: no expires_in on the wire.
     assert len(cap["mint"]) == 1, f"expected ONE wizard mint, got {cap['mint']}"
     body = cap["mint"][0]
@@ -460,7 +502,9 @@ def test_owner_wizard_complete_exit_after_mint_is_modal_free(page: Page) -> None
     _walk_to_connect(page)
     _mint_from_connect(page)
     page.get_by_role("button", name="Skip for now").click()
-    expect(page.locator("body")).to_contain_text("You're all set", timeout=10_000)
+    # #2912 (PR-gate UX): skipped → paused, and the heading says so.
+    expect(page.locator(".welcome-title")).to_have_text(
+        "Setup paused — your agent is not connected yet", timeout=10_000)
     page.locator(".wizard-actions").get_by_role("button", name="Open my dashboard →").click(timeout=15_000)
     _expect_left_wizard(page)
     assert page.locator("[role=dialog]").count() == 0, \
@@ -680,62 +724,143 @@ def test_owner_connect_mint_failure_is_visible(page: Page) -> None:
     assert page.locator(".wizard-prompt-card").count() == 0
 
 
-@pytest.mark.parametrize("tab,sync_text", [
+@pytest.mark.parametrize("surface,sync_text", [
     ("Claude Desktop", "Open Claude Desktop → Settings → Connectors"),
     ("Claude Web", "Open claude.ai → Settings → Connectors"),
 ])
-def test_owner_no_key_affordance_on_manual_harness_tabs(page: Page, tab: str, sync_text: str) -> None:
-    """#2710 (code-review P1): the two MANUAL harness tabs must not dead-end.
+def test_manual_harness_surfaces_are_keyless_oauth(page: Page, surface: str, sync_text: str) -> None:
+    """#2865: the two MANUAL Claude surfaces are KEY-LESS OAuth, for every role.
 
-    Pre-fix they kept a `YOUR_API_KEY` placeholder in the config block plus a
-    Copy button whose handler wrote `harnessKey` — an empty string with no key —
-    so an owner/admin on those tabs had no mint CTA, no paste escape, and a Copy
-    control that silently clobbered the clipboard.
+    This test replaces `test_owner_no_key_affordance_on_manual_harness_surfaces`,
+    whose `#2710`/`#2912` contract required the opposite: that these surfaces
+    show a visible `Create an API key` mint CTA and render ONLY the key block
+    until a key lands. #2864 made the hosted `/mcp` endpoint advertise OAuth
+    discovery (RFC 9728), so these surfaces connect by sign-in and never ask for
+    a credential — the old contract pinned the behaviour this change removes.
 
-    The no-key state shows ONLY the affordance (the tab's own lead-in sentence is
-    gated with the block it introduces), so the tab switch is synchronised on the
-    tab button's `active` class — a tab-unique signal — and the tab-unique
-    lead-in is asserted AFTER the key lands, which proves the manual block really
-    rendered in key mode."""
-    _seed_cookie(page, "u-manual-" + tab.split()[-1].lower())
+    The guarantee that replaces it: no key row, no `Bearer` recipe, no beta
+    caveat, and the Continue affordance reachable WITHOUT a key.
+    """
+    _seed_cookie(page, "u-manual-" + surface.split()[-1].lower())
     _wire(page, role="owner", key_rows=[DURABLE_ROW])
     _walk_to_connect(page)
-    tab_btn = page.get_by_role("button", name=tab, exact=True)
-    tab_btn.click()
-    expect(tab_btn).to_have_class(re.compile(r"\bactive\b"), timeout=10_000)
-    # The no-key state offers the SAME in-flow path as the agent-driven tabs …
-    expect(page.get_by_role("button", name="Create an API key")).to_be_visible(timeout=5_000)
-    assert "YOUR_API_KEY" not in page.locator("body").inner_text(), \
-        f"{tab}: the placeholder key must not render"
+    # Level 1 → level 2: Claude is already the active family; pick the surface.
+    page.get_by_role("button", name="Claude", exact=True).click()
+    surface_btn = page.get_by_role("button", name=re.compile(re.escape(surface)))
+    surface_btn.click()
+    expect(surface_btn).to_have_class(re.compile(r"\bactive\b"), timeout=10_000)
+
+    body = page.locator("body").inner_text()
+    # (a) No mint CTA and no key row on a key-less surface.
+    assert page.get_by_role("button", name="Create an API key").count() == 0, \
+        f"{surface}: a key-less OAuth surface must not offer a mint CTA"
+    assert "YOUR_API_KEY" not in body, \
+        f"{surface}: the placeholder key must not render"
     assert page.locator("code", has_text="…").count() == 0, \
-        f"{tab}: no fake '…' key row"
-    assert page.locator(".wizard-prompt-card").count() == 0, \
-        f"{tab}: the config block must not render before a key exists"
-    assert sync_text not in page.locator("body").inner_text(), \
-        f"{tab}: the config lead-in must not dangle above the affordance"
-    # … and the paste escape lands a real key, after which the manual block renders.
-    page.get_by_role("button", name="I already have a key — paste it instead").click()
-    page.get_by_label("Paste an API key").fill(PASTED_KEY)
-    page.get_by_role("button", name="Use this key").click()
-    expect(page.locator("body")).to_contain_text(sync_text, timeout=5_000)
-    expect(page.locator("code", has_text=PASTED_KEY)).to_be_visible(timeout=5_000)
-    assert "YOUR_API_KEY" not in page.locator("body").inner_text(), \
-        f"{tab}: the placeholder must be replaced by the real key"
+        f"{surface}: no fake '…' key row"
+    # (b) No bearer recipe and no beta 'Request headers' caveat.
+    assert "Bearer" not in body, \
+        f"{surface}: the OAuth surface must not show an Authorization: Bearer recipe"
+    assert "Request headers" not in body or "Leave Request headers empty" in body, \
+        f"{surface}: the only 'Request headers' mention must be the OAuth 'leave it empty' step"
+    # (c) The sign-in / Authorize step is present.
+    assert "sign-in" in body or "sign in" in body, \
+        f"{surface}: the OAuth recipe must state the sign-in step"
+    assert "Authorize" in body or "Add custom connector" in body, \
+        f"{surface}: the OAuth recipe must state the connector/Authorize step"
+    # (d) Continue is reachable WITHOUT a key — the old no-dead-end guarantee.
+    continue_btn = page.get_by_role(
+        "button", name=re.compile(r"I've connected it — Continue"))
+    expect(continue_btn).to_be_visible(timeout=5_000)
+    expect(continue_btn).to_be_enabled()
+
+
+@pytest.mark.parametrize("surface,connector_lead", [
+    ("Claude Desktop", "Open Claude Desktop → Settings → Connectors"),
+    ("Claude Web", "Open claude.ai → Settings → Connectors"),
+])
+def test_member_without_key_reaches_keyless_claude_connectors(
+        page: Page, surface: str, connector_lead: str) -> None:
+    """#2865 Indicator: a NON-owner, NON-admin member HOLDING NO API KEY selects
+    Claude Desktop / Claude Web in the live wizard and is shown a sign-in /
+    Authorize path with no key row and no beta caveat, and can Continue — no
+    key, no mint.
+
+    This is the row the issue's Indicator actually names. The sibling
+    `test_manual_harness_surfaces_are_keyless_oauth` covers an OWNER/admin, so
+    on its own it proves the recipe renders but NOT that the `isOwnerAdmin`
+    gate stopped hiding these tabs from members — pre-#2865 a member was sent
+    past the harness chooser to a paste-a-key row, so an OAuth connect (which
+    needs no mint) was unreachable. `role="member"` + no `key_rows` is the
+    non-admin, key-less subject.
+    """
+    _seed_cookie(page, "u-member-" + surface.split()[-1].lower())
+    # role="member" (NOT owner/admin) AND no key rows: a member holds no key
+    # and cannot mint one (POST /v1/team/keys is _require_owner_admin).
+    cap = _wire(page, role="member")
+    _walk_to_connect(page)
+
+    # (a) The chooser itself is reachable for a member — the #2865 gate change.
+    expect(page.locator(".harness-family")).to_have_count(4, timeout=10_000)
+    expect(page.get_by_role("button", name="Claude", exact=True)).to_be_visible(timeout=5_000)
+
+    # Level 1 → level 2: Claude is already the active family; pick the surface.
+    surface_btn = page.get_by_role("button", name=re.compile(re.escape(surface)))
+    surface_btn.click()
+    expect(surface_btn).to_have_class(re.compile(r"\bactive\b"), timeout=10_000)
+    body = page.locator("body").inner_text()
+
+    # (b) NO key affordance of any kind on the key-less OAuth leaf.
+    assert page.get_by_role("button", name="Create an API key").count() == 0, \
+        f"{surface}: a member must not see the owner/admin mint CTA"
+    assert "Use this key" not in body, \
+        f"{surface}: a key-less OAuth leaf must not offer the paste escape"
+    assert "Your API key" not in body, f"{surface}: no key row on a key-less leaf"
+    # (c) No credential recipe and no beta 'Request headers' caveat survive.
+    assert "Bearer" not in body, \
+        f"{surface}: must not show an Authorization: Bearer recipe"
+    assert "rolling out in Anthropic" not in body, \
+        f"{surface}: the beta Request-headers caveat must be gone"
+    assert "use the Claude Code surface instead" not in body, \
+        f"{surface}: the divert-to-Claude-Code escape hatch must be gone"
+    # (d) The OAuth recipe: connector URL → sign-in → Authorize → org.
+    assert connector_lead in body, f"{surface}: the connector lead-in must render"
+    assert "https://api.premiselabs.co/mcp" in body, \
+        f"{surface}: the canonical connector URL must render"
+    assert "sign-in" in body or "sign in" in body, \
+        f"{surface}: the OAuth recipe must state the sign-in step"
+    assert "Authorize" in body, f"{surface}: the OAuth recipe must state the Authorize step"
+    assert "Pick the Organization" in body, \
+        f"{surface}: the OAuth recipe must state the org chooser step"
+    # (e) Continue is reachable and ENABLED without a key — the guarantee that
+    # replaces the pre-#2865 owner-only no-dead-end tripwire.
+    continue_btn = page.get_by_role(
+        "button", name=re.compile(r"I've connected it — Continue"))
+    expect(continue_btn).to_be_visible(timeout=5_000)
+    expect(continue_btn).to_be_enabled()
+    continue_btn.click()
+    # … and a member's key-less advance writes the harness-connected checkpoint
+    # and lands on the done step (no key was ever needed).
+    expect(page.locator(".harness-families")).to_have_count(0, timeout=10_000)
+    _wait_until(lambda: any(c.get("step") == "harness-connected" for c in cap["checkpoint"]),
+                message="the harness-connected checkpoint after a key-less connect")
+    expect(page.locator(".wizard-actions").get_by_role(
+        "button", name="Open my dashboard →")).to_be_visible(timeout=10_000)
 
 
 def test_codex_desktop_hides_the_key_mode_pills(page: Page) -> None:
-    """#2756 (code-review P1): the Codex Desktop surface embeds the key in the
-    config block by construction, so the "Key separate from prompt" promise
-    cannot be honored there — the pills AND the separate key row must be gone on
-    that surface, and both must come back on the CLI surface."""
+    """#2756/#2912: the Codex Desktop surface embeds the key in the config block
+    by construction, so the "Key separate from prompt" promise cannot be honored
+    there — the pills AND the separate key row must be gone on that surface, and
+    both must come back on the CLI surface."""
     _seed_cookie(page, "u-codex-mode")
     _wire(page, role="owner")
     _walk_to_connect(page)
     _mint_from_connect(page)
     pills = page.get_by_role("button", name=re.compile("Key (included in|separate from) prompt"))
-    group = page.get_by_role("group", name="Codex setup surface")
+    group = page.get_by_role("group", name="Codex surface")
     page.get_by_role("button", name="Codex", exact=True).click()
-    expect(group).to_be_visible(timeout=10_000)  # sync: the Codex surface rendered
+    expect(group).to_be_visible(timeout=10_000)  # sync: the Codex surface row rendered
     expect(pills).to_have_count(2, timeout=5_000)
     # "separate" on the CLI surface shows the separate key row and keeps the key
     # OUT of the prompt card.
@@ -743,23 +868,23 @@ def test_codex_desktop_hides_the_key_mode_pills(page: Page) -> None:
     expect(page.locator("code", has_text=MINTED_KEY)).to_be_visible(timeout=5_000)
     # Desktop: the pills and the separate row go away; the key lives in the
     # config block instead.
-    page.get_by_role("button", name="Desktop (no terminal)").click()
-    expect(group.get_by_role("button", name="Desktop (no terminal)")).to_have_attribute("aria-pressed", "true")
+    group.get_by_role("button", name="Codex Desktop").click()
+    expect(group.get_by_role("button", name="Codex Desktop")).to_have_attribute("aria-pressed", "true")
     expect(pills).to_have_count(0, timeout=5_000)
     assert page.locator("code", has_text=MINTED_KEY).count() == 0, \
         "the separate key row must not sit beside a key-embedding Desktop block"
     expect(page.locator(".wizard-prompt-card").first).to_contain_text(MINTED_KEY, timeout=5_000)
     # … and back to CLI.
-    page.get_by_role("button", name="CLI (terminal)").click()
+    group.get_by_role("button", name="Codex CLI").click()
     expect(pills).to_have_count(2, timeout=5_000)
 
 
-def test_codex_desktop_toggle_reaches_config_toml_instructions(page: Page) -> None:
-    """#2756: Codex has two surfaces (CLI needs a terminal; Desktop does not).
-    Selecting the Codex tab must offer the surface toggle, and Desktop must
-    reach the ~/.codex/config.toml instructions — pre-fix the toggle's state
-    and the `codexDesktop` copy in harnesses.js were dead, so a Desktop user
-    got the CLI command.
+def test_codex_desktop_surface_reaches_config_toml_instructions(page: Page) -> None:
+    """#2756/#2912: Codex has two surfaces (CLI needs a terminal; Desktop does
+    not). The Codex family must offer them as a level-2 surface row, and Desktop
+    must reach the ~/.codex/config.toml instructions — pre-fix the toggle's
+    state and the `codexDesktop` copy in harnesses.js were dead, so a Desktop
+    user got the CLI command.
 
     The assertion pins UNIVERSAL_COMMAND.codexDesktop's distinctive stanza
     (`[mcp_servers.tortoise]`), not just the intro sentence that shares the
@@ -769,29 +894,102 @@ def test_codex_desktop_toggle_reaches_config_toml_instructions(page: Page) -> No
     _walk_to_connect(page)
     _mint_from_connect(page)
     page.get_by_role("button", name="Codex", exact=True).click()
-    group = page.get_by_role("group", name="Codex setup surface")
+    group = page.get_by_role("group", name="Codex surface")
     expect(group).to_be_visible(timeout=5_000)
-    expect(page.get_by_role("button", name="Desktop (no terminal)")).to_be_visible()
+    assert group.locator(".harness-surface").all_inner_texts()[0].startswith("Codex CLI"), \
+        "Codex CLI is the default surface (terminal path)"
     # CLI (default) is the terminal path — no config.toml, no TOML stanza.
     cli_text = page.locator(".wizard-prompt-card").first.inner_text()
     assert "config.toml" not in cli_text, \
         "the Codex CLI variant must not claim the Desktop config file"
     assert "[mcp_servers.tortoise]" not in cli_text, \
         "the Codex CLI variant must not render the Desktop TOML block"
-    page.get_by_role("button", name="Desktop (no terminal)").click()
+    group.get_by_role("button", name="Codex Desktop").click()
     card = page.locator(".wizard-prompt-card").first
     expect(card).to_contain_text("~/.codex/config.toml", timeout=5_000)
     assert "[mcp_servers.tortoise]" in card.inner_text(), \
         "the Desktop variant must render UNIVERSAL_COMMAND.codexDesktop (the TOML block)"
     # The Desktop copy control uses the harness's own label (HARNESS_COPY_LABEL).
     expect(card.get_by_role("button", name="Copy instructions")).to_be_visible()
-    # The toggle is reversible and scoped to the Codex tab.
-    page.get_by_role("button", name="CLI (terminal)").click()
+    # The surface choice is reversible and scoped to the Codex family.
+    group.get_by_role("button", name="Codex CLI").click()
     assert "config.toml" not in page.locator(".wizard-prompt-card").first.inner_text(), \
         "switching back to CLI must restore the terminal instructions"
     page.get_by_role("button", name="Pi", exact=True).click()
-    assert page.get_by_role("group", name="Codex setup surface").count() == 0, \
-        "the Codex surface toggle must not leak onto other harness tabs"
+    assert page.locator(".harness-surfaces").count() == 0, \
+        "the surface row must not leak onto single-choice families (Pi)"
+
+
+def test_3218_multi_part_procedures_render_a_numbered_step_three(page: Page) -> None:
+    """#3218: Pi's connect procedure has two user-visible parts (set up, then
+    restart + verify) and Claude Web/Desktop's has two (add the connector,
+    then hand Claude the workflows). Each part is its own numbered block — the
+    second one used to be a bare caption inside block 2, so the circles said
+    (1, 2) while the user had three things to do.
+
+    #2865 interaction: Claude Web/Desktop are now key-less OAuth, so their
+    KEY block is gone — the two user-visible parts are (1) add the connector
+    and (2) the workflows prompt. #3218's invariant is preserved (the prompt
+    hand-off is its own numbered block, not a caption buried in block 1); only
+    the count drops from #3218's keyed three to the key-less two."""
+    _seed_cookie(page, "u-3218")
+    _wire(page, role="owner")
+    _walk_to_connect(page)
+    _mint_from_connect(page)
+
+    # Pi: 1 key → 2 Set up Pi → 3 Restart Pi and verify
+    page.get_by_role("button", name="Pi", exact=True).click()
+    titles = page.locator(".wizard-block-title").all_inner_texts()
+    assert len(titles) == 3, f"Pi must render three numbered blocks, got {titles}"
+    assert titles[0].endswith("Get your API key"), titles
+    assert titles[1].endswith("Set up Pi"), titles
+    assert titles[2].endswith("Restart Pi and verify"), titles
+
+    # Claude Web: #2865 made this leaf key-less OAuth, so there is no key
+    # block — 1 Add the Claude Web connector → 2 the workflows prompt.
+    page.get_by_role("button", name="Claude", exact=True).click()
+    page.get_by_role("button", name="Claude Web").click()
+    titles = page.locator(".wizard-block-title").all_inner_texts()
+    assert len(titles) == 2, \
+        f"key-less Claude Web must render two numbered blocks, got {titles}"
+    assert titles[0].endswith("Add the Claude Web connector"), titles
+    assert titles[1].endswith("Give Claude the Tortoise workflows"), titles
+
+    # Claude Code is a single-prompt flow — the circles stay (1, 2).
+    page.get_by_role("button", name="Claude Code").click()
+    titles = page.locator(".wizard-block-title").all_inner_texts()
+    assert len(titles) == 2, f"Claude Code stays at two numbered blocks, got {titles}"
+    assert titles[1].endswith("Set up Claude Code"), titles
+
+
+def test_3218_key_row_states_the_visibility_window(page: Page) -> None:
+    """#3218: the key surfaces no longer say "(shown once)" — they state the real
+    window (visible while on this step) and the recovery path (create one from
+    the API Keys page; rotating replaces it).
+
+    The note must render in the DEFAULT 'included' mode too: that mode hides the
+    separate key row, and a note gated on the row would leave the commonest
+    connect path with no cue at all (review cycle 1, P1)."""
+    _seed_cookie(page, "u-3218-key")
+    _wire(page, role="owner")
+    _walk_to_connect(page)
+    _mint_from_connect(page)
+    # DEFAULT mode: no separate key row, but the note must still be on screen.
+    assert page.locator(".key-row").count() == 0, \
+        "the default 'included' mode hides the separate key row"
+    note = page.locator(".wizard-note", has_text="Visible while you're on this step")
+    expect(note).to_be_visible(timeout=5_000)
+    note_text = note.inner_text()
+    assert "API Keys page" in note_text, note_text
+    assert "rotating replaces this key" in note_text, note_text
+    # Switching to 'separate' shows the row; the note must NOT be duplicated.
+    page.get_by_role("button", name="Key separate from prompt").click()
+    row = page.locator(".key-row")
+    expect(row).to_contain_text("Your API key:", timeout=5_000)
+    assert "shown once" not in row.inner_text(), \
+        "the row must not claim 'shown once'"
+    assert page.locator(".wizard-note", has_text="Visible while you're on this step").count() == 1, \
+        "exactly ONE visibility note may render (not one per key surface)"
 
 
 def test_first_timer_wizard_build_fork_marks_catalog(page: Page) -> None:
@@ -813,9 +1011,11 @@ def test_first_timer_wizard_build_fork_marks_catalog(page: Page) -> None:
     _goto_local_dashboard(page)
     expect(page.locator("body")).to_contain_text("Continue setup", timeout=20_000)
     page.get_by_role("button", name="Continue setup").click()
-    # STEP 0: create/join org (orientation removed per epic #2534). #2364
-    # round-1: the org-holder step title branches to 'Your Organization' —
-    # never 'Create your Organization' on resume/re-entry (#2323 read-only).
+    # STEP 0: create/join org (orientation removed per epic #2534). #2912: the
+    # org-holding read-only summary shows the stage h1 'Your Organization'.
+    # #2364 round-1 (kept through the merge): never 'Create your Organization'
+    # on resume/re-entry (#2323 read-only).
+    expect(page.locator(".welcome-title")).to_have_text("Your Organization", timeout=10_000)
     expect(page.locator("body")).not_to_contain_text("Create your Organization", timeout=10_000)
     expect(page.locator("body")).to_contain_text("You're set up in", timeout=5_000)
     page.get_by_role("button", name="Continue →").click()
