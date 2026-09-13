@@ -105,11 +105,16 @@
     <!-- Maintainer note: this page is the full technical account. The canonical
          sources are docs/ONTOLOGY.md (kinds, statuses, edges) and the EP engine
          in tortoise/ep.py (how `confidence` is computed — sdk.get_confidence()
-         reads it back). The FAQ page (/faq) deliberately answers objections only
-         and defers here for mechanism, so update this page first and let /faq
-         follow. tests/test_website_docs_consistency.py fails if the two disagree
-         on the Point status vocabulary, the ontology citation, or the confidence
-         mechanism. -->
+         reads it back). The FAQ page (/faq) answers objections only and defers
+         here for mechanism, so update this page first and let /faq follow.
+         tests/test_website_docs_consistency.py checks each page against its
+         canonical source independently (not against the other page):
+         docs.html must list all six statuses from POINT_STATUS_VALUES in
+         tortoise/sdk.py, while /faq may list none; and it fails if either page
+         pins an ontology version inline, drops the docs/ONTOLOGY.md link, omits
+         expectation propagation, or revives the retired linear-system
+         description of confidence (that test holds the forbidden-strings list,
+         which is why this note does not spell them out). -->
     <div class="card">
       <h3>The data model</h3>
       <p>Everything is a <code>Point</code>: an atomic claim with an <code>id</code>, <code>content</code> (text), <code>pointKind</code>, and a <code>status</code>. The kind vocabulary is <code>statement</code> — the asserted belief — plus the write kinds <code>decision</code>, <code>vision</code>, <code>strategy</code>, <code>plan</code>, <code>goal</code>, <code>target</code>, <code>observation</code>, <code>hypothesis</code>, <code>humanApproval</code>, and any domain kinds registered by expansion packs. Canonical vocabulary: <a href="https://github.com/daniel-ospina/tortoise/blob/main/docs/ONTOLOGY.md">docs/ONTOLOGY.md</a> §4.1 and §5. (<code>evidence</code> is an additional kind the SDK registers for decision records. <code>event</code> exists only internally, as the kind on captured episodic turns — it is not a supported write kind: the REST point-create endpoint and the SDK's bundle validator reject it, while <code>create_point</code> only warns.)</p>

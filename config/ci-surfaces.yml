@@ -234,7 +234,6 @@ surfaces:
   # api-owned source is imported or referenced.
   - test_battery_corpus_v11.py
   - test_battery_envelope_type.py
-  - test_battery_envelope_contract_2702.py  # #2702: TVDE envelope contract for bct/cal (hermetic) — was unregistered, so manifest-integrity was red on main
   - test_battery_ep_outcome.py
   - test_battery_executor_v1.py
   - test_battery_executor_v2.py

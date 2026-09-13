@@ -18,7 +18,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from tools.ci_selection import (  # noqa: I001
-    load_manifest, select, integrity, slow_file_issues,  # noqa: F401
+    SOURCE_PATTERNS, load_manifest, select, integrity, slow_file_issues,  # noqa: F401
     unlisted_tests, register_tests, register, classify_test_file,  # noqa: F401
     surface_audit, render_surface_audit,
 )
@@ -43,20 +43,21 @@ def test_docs_only_runs_tier1():
 def test_public_site_surface_change_selects_onboarding_and_skips_slow():
     """#3332: a public *site surface* change selects `onboarding`.
 
-    docs.html / faq.html / welcome.html / self-hosted.html each own a guard test
-    in the onboarding surface — most importantly
-    test_website_docs_consistency.py, which pins docs.html against faq.html and
-    against POINT_STATUS_VALUES in tortoise/sdk.py. Before #3332 all four were
-    filtered out by NON_PYTHON_PREFIXES (`website/`) *before* SOURCE_PATTERNS was
-    consulted, so changed == [] -> tier-1 smoke: those guard tests never ran, and
-    the SOURCE_PATTERNS["onboarding"] entries for welcome.html / self-hosted.html
-    were dead code.
+    Each path listed in SOURCE_PATTERNS is a file some guard test in the
+    onboarding surface reads — most importantly test_website_docs_consistency.py
+    (pins docs.html against faq.html and against POINT_STATUS_VALUES in
+    tortoise/sdk.py) and test_website_static.py (pins product.html's pricing
+    surface). Before #3332 every `website/` path was filtered out by
+    NON_PYTHON_PREFIXES *before* SOURCE_PATTERNS was consulted, so
+    changed == [] -> tier-1 smoke: those guard tests never ran for the files
+    they guard.
 
     The #2147/#2148 cost gates are unchanged — only the fast surface tests are
     added; no slow leg, no carve-out leg.
     """
     for changed in (["website/docs.html"], ["website/faq.html"],
                     ["website/welcome.html"], ["website/self-hosted.html"],
+                    ["website/product.html"],
                     ["docs/README.md", "website/self-hosted.html"]):
         r = _sel(changed)
         assert r["surfaces"] == ["onboarding"], changed
@@ -65,6 +66,38 @@ def test_public_site_surface_change_selects_onboarding_and_skips_slow():
         assert r["carve_out_run"] is False
         assert r["slow_selected"] == []
         assert "test_website_docs_consistency.py" in r["test_files"], changed
+
+
+def test_every_source_pattern_is_selectable():
+    """The ratchet: every SOURCE_PATTERNS entry must actually reach `select()`.
+
+    This is the invariant whose absence let the same bug ship twice — #1349 for
+    `tools/` (patched with the TOOL_CARVEOUTS mirror) and #3332 for `website/`
+    (where the SOURCE_PATTERNS entries for welcome.html and self-hosted.html
+    were dead on arrival, and a hand-maintained mirror caught only 4 of the
+    paths). A pattern that a NON_PYTHON_PREFIXES prefix would filter out must be
+    re-included by `select()`'s `_selection_relevant` rule. Derived from
+    SOURCE_PATTERNS rather than enumerated, so a future entry cannot be added
+    and silently not run — prior review (#2994) rejected an enumerated guard for
+    exactly this reason.
+    """
+    m = load_manifest()
+    assert "onboarding" in m["surfaces"]
+    dead = []
+    for surface, pats in SOURCE_PATTERNS.items():
+        if surface == "core":
+            continue
+        for pat in pats:
+            if pat.endswith("/"):
+                continue  # directory prefixes are exercised via their members
+            r = _sel([pat])
+            if not r["surfaces"]:
+                dead.append((surface, pat))
+    assert not dead, (
+        f"SOURCE_PATTERNS entries that select NO surface (dead on arrival — the "
+        f"path is filtered by NON_PYTHON_PREFIXES before SOURCE_PATTERNS is "
+        f"consulted, so no guard test for that file ever runs): {dead}"
+    )
 
 
 def test_unrelated_website_change_stays_tier1():

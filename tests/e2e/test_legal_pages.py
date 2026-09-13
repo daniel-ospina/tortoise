@@ -6,8 +6,10 @@ Covers plan checks #1-#10 (T7 of docs/plans/2026-08-08-657-legal-pages-plan.md):
   #2  /tos 200 + negation-safe block + eligibility + carve-outs + dollar guard
       (== 1, the "$5M" AUG) + fees keywords + Pricing Page hyperlink
   #3  /license + /dpa 200 (both REQUIRED — G-gate ③/⑨ LOCKED)
-  #4  footer legal links on product/welcome/signup/signin/self-hosted
-      (BASE_URL half unconditional; TORTISE_HOST half gated on TORTISE_HOST_CHECK)
+  #4  footer legal links on welcome/auth/signup/signin/self-hosted/faq
+      (the FOOTER_PAGES tuple; BASE_URL half unconditional, TORTISE_HOST half
+      gated on TORTISE_HOST_CHECK; product.html's footer is covered by the
+      tortoise-host half only)
   #5  company-host copies of the 14 tortoise-only pages 301 → the exact
       tortoise host URL (canonical consolidation, 2026-08-17); tortoise-host
       copies 200 (gated)
@@ -570,8 +572,8 @@ def test_license_and_dpa_serve_200(page: Page) -> None:
 
 def test_footer_legal_links_on_all_site_pages(page: Page) -> None:
     """UNCONDITIONAL half: the five legal/security links are present in the
-    FOOTER element on product.html, welcome.html, signup.html, signin.html,
-    self-hosted.html (G-gate ⑨ link set: Privacy · Terms · License · DPA ·
+    FOOTER element on every page in FOOTER_PAGES (welcome, auth, signup, signin,
+    self-hosted, faq) (G-gate ⑨ link set: Privacy · Terms · License · DPA ·
     Security — all five ship, no conditional). Scoped to the footer element
     via a real locator (footer, .legal-footer, .footer) — not page-wide
     substring checks (reviewer P3-5a)."""
