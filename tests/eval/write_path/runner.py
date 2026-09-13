@@ -282,10 +282,18 @@ SESSION_TURN_QUERY = (
 # on some paths — the id pattern is the reliable turn/claim discriminator.
 def _turn_id_pattern(session_id: str) -> str:
     return re.compile(rf"^{re.escape(session_id)}_t\d+$")
+# The single projection every consumer of _row_to_point must share.  Keep it a
+# named constant: a duplicated copy in another module silently drops a column the
+# moment this one grows (harness cell_points did exactly that when is_operator
+# landed — p.id..p.is_operator is TEN columns, and a 9-column copy raises
+# "ValueError: not enough values to unpack (expected 10, got 9)").
+MEMORY_ROW_COLUMNS = (
+    "p.id, p.content, p.eventId, p.extractedFrom, p.status, "
+    "p.confidence, p.lastDreamedAt, p.pointKind, p.is_episodic, p.is_operator"
+)
 MEMORY_ROW_QUERY = (
     "MATCH (p:Point) WHERE p.eventId IN $eids "
-    "RETURN p.id, p.content, p.eventId, p.extractedFrom, p.status, "
-    "p.confidence, p.lastDreamedAt, p.pointKind, p.is_episodic, p.is_operator"
+    f"RETURN {MEMORY_ROW_COLUMNS}"
 )
 OPERATOR_EDGE_QUERY = (
     "MATCH (a:Point)-[r]->(b:Point) "
