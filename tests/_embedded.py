@@ -400,6 +400,12 @@ def _journal_append(name: str) -> None:
     wiring tests drive the REAL file journal). The product-side writer
     (tortoise.projection._journal_append_product) covers product seams
     (redirect/from_uri); in a normal session both write the same file.
+
+    Failure policy (#3214): the journal write is the OWNERSHIP CONTRACT — a
+    minted graph that cannot be journaled is UNOWNED, invisible to every live
+    peer's scope=None sweep, which may therefore delete it. An OSError
+    therefore RAISES (it used to be a silent no-op at DEBUG) so the session
+    stops at the first unowned mint; the no-journal-path no-op is unchanged.
     """
     _JOURNAL.append(name)
     path = _journal_file()
@@ -410,9 +416,24 @@ def _journal_append(name: str) -> None:
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "a") as fh:
             fh.write(name + "\n")
-    except OSError:
-        logging.getLogger(__name__).debug(
-            "journal append skipped for %r (%r)", name, path)
+    except OSError as e:
+        # #3214: the journal write is the OWNERSHIP CONTRACT, not hygiene
+        # bookkeeping. A minted graph that cannot be journaled is UNOWNED:
+        # every live peer's scope=None sweep finds no record of it and may
+        # delete it — the cross-session flake #3074 exists to stop. The old
+        # policy (a silent no-op logged at DEBUG) left that state invisible
+        # for the whole session. This RAISES so the session stops at the first
+        # unowned mint instead of letting the shared server accumulate graphs
+        # a peer sweep may destroy. "Treat as protected" is NOT an option: a
+        # peer's only ownership channel IS this file, and this write is what
+        # failed — there is nothing cross-process to fall back to (in-process,
+        # the session may always sweep its own graphs).
+        raise RuntimeError(
+            f"session journal append failed for {name!r} ({path!r}): {e!r} — "
+            f"the graph is minted but UNOWNED: a live peer's scope=None "
+            f"sweep has no record of it and may delete it (#3214). Refusing "
+            f"to continue with an unprotected graph."
+        ) from e
 
 
 def _created_since_last_wipe() -> set[str]:
@@ -477,9 +498,28 @@ def _live_peer_session_graphs() -> set[str]:
     contribute nothing, which is correct (an embedded DB is not on the
     server).
     """
+    # #3214: the one-shot form of the ownership primitive. ``wipe_server``
+    # uses the two halves directly — the marker scan ONCE, then the journal
+    # reads per graph — because the journal CONTENTS are the only part of
+    # ownership a peer can change inside its deletion loop.
+    return _peer_journaled_graphs(_live_peer_journal_files())
+
+
+def _live_peer_journal_files() -> list[str]:
+    """Journal file paths of the LIVE peer sessions (the EXPENSIVE half).
+
+    #3214: split out of ``_live_peer_session_graphs`` so ``wipe_server`` can
+    pay the marker scan ONCE and then re-read only the cheap journal FILES
+    immediately before each delete. ``active_suite_markers`` is the costly
+    part — a directory scan plus a per-marker pid/start-time liveness probe
+    (which shells out), so calling the composition per graph is not an
+    option. The live-session SET is also stable across a deletion loop, and a
+    peer that starts DURING enumeration is still picked up because
+    ``wipe_server`` resolves this AFTER ``list_graphs()``.
+    """
     from tortoise.embedded_reaper import ACTIVE_SUITES_DIR, active_suite_markers
     ours = os.environ.get("TORTOISE_TEST_SESSION", "")
-    owned: set[str] = set()
+    paths: list[str] = []
     for marker in active_suite_markers():
         token = marker.get("token") or ""
         if "-" not in token:
@@ -487,8 +527,20 @@ def _live_peer_session_graphs() -> set[str]:
         nonce = token.split("-", 1)[1]
         if not nonce or nonce == ours:
             continue  # our own session — its graphs are ours to sweep
-        owned.update(_read_journal_file(
-            os.path.join(ACTIVE_SUITES_DIR, f"{nonce}.graphs.jsonl")))
+        paths.append(os.path.join(ACTIVE_SUITES_DIR,
+                                  f"{nonce}.graphs.jsonl"))
+    return paths
+
+
+def _peer_journaled_graphs(paths: list[str]) -> set[str]:
+    """The union of the given (live-peer) journal files' graph names.
+
+    The CHEAP half: re-run per graph inside the deletion loop, so the
+    protection cannot be stale by the length of the loop (#3214).
+    """
+    owned: set[str] = set()
+    for path in paths:
+        owned.update(_read_journal_file(path))
     return owned
 
 
@@ -505,8 +557,11 @@ def wipe_server(proj, scope: set[str] | None = None, drop: bool = False) -> None
     concurrent session's live graphs. scope=None is the server-global sweep,
     reserved for the session-end/last-suite-standing sweep ONLY — and since
     #3074 it also SPARES every graph journaled by a LIVE PEER session
-    (``_live_peer_session_graphs``), so no caller can destroy a concurrently
-    running session's graphs by accident.
+    (``_live_peer_journal_files`` + ``_peer_journaled_graphs``), so no caller
+    can destroy a concurrently running session's graphs by accident. #3214:
+    the peer journals are re-read immediately before EACH graph's DETACH
+    (not snapshotted once up front), because the journal is a file another
+    process appends to — see the note at the loop.
 
     drop=True (cycle-4 P1-9): after DETACH, GRAPH.DELETE the wiped names via
     graph.delete() so server GRAPH.LIST stays bounded (E2E-7). Per-test
@@ -524,11 +579,18 @@ def wipe_server(proj, scope: set[str] | None = None, drop: bool = False) -> None
     # #3074: the scope=None sweep is the ONLY path that names no graphs up
     # front, so it is the ONLY one that can land on a live peer's graph.
     # An explicit scope is journal-derived (the caller's own session).
-    protected = _live_peer_session_graphs() if scope is None else set()
+    is_global = scope is None
     failures: list[tuple[str, Exception]] = []
     dropped: list[str] = []
     default_graph = _uri_default_graph_name()
-    for g in proj.db.list_graphs() or []:
+    # #3214: enumerate FIRST, then resolve the live peers' journals. The old
+    # order snapshotted the protected set BEFORE enumerating, so a peer graph
+    # minted in that gap was visible to the loop yet already outside the
+    # snapshot — and swept. Resolving after enumeration also picks up a peer
+    # session that started while we were listing.
+    graphs = list(proj.db.list_graphs() or [])
+    peer_journals = _live_peer_journal_files() if is_global else []
+    for g in graphs:
         if scope is not None and g not in scope:
             continue  # cycle-3 P1-7: per-test wipes touch only the session's set
         # Cycle-8 P1-1: per-test scopes NEVER DETACH the shared URI-default
@@ -540,8 +602,17 @@ def wipe_server(proj, scope: set[str] | None = None, drop: bool = False) -> None
             continue
         if not g.startswith(("test_", "tortoise_test")):
             continue  # fail-closed: never wipe a non-test graph
-        if g in protected:
-            continue  # #3074: a live PEER session still owns this graph
+        # #3074/#3214: re-read the live peers' journals IMMEDIATELY before
+        # this graph's DETACH. The up-front snapshot's window was
+        # enumerate→delete for EVERY graph; re-reading per graph narrows it to
+        # re-read→delete for ONE. (The marker scan itself runs once above —
+        # the journal CONTENTS are the only part of ownership a peer can
+        # change inside the loop.) Still NOT atomic — see #3214 for the
+        # residual: ownership lives in a local file written by another
+        # process, and the delete is a server command on a different channel,
+        # with no conditional/transactional delete spanning the two.
+        if peer_journals and g in _peer_journaled_graphs(peer_journals):
+            continue  # a live PEER session owns this graph
         try:
             proj.db.select_graph(g).query("MATCH (n) DETACH DELETE n")
         except Exception as e:  # P2-7: collect + re-raise, never pass silently

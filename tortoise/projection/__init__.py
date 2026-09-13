@@ -375,7 +375,19 @@ def _journal_append_product(graph_name: str) -> None:
     P1-1: the parent dir exists only after _redislite_hygiene's session
     fixture — makedirs BEFORE every append so module-import/collect-only
     appends cannot FileNotFoundError). Absent env var → no-op, never fail
-    (the specified fallback)."""
+    (the specified fallback).
+
+    Failure policy (#3214): a WRITE failure is not hygiene bookkeeping — the
+    journal is the OWNERSHIP CONTRACT, so a minted graph that cannot be
+    journaled is UNOWNED: a live peer's scope=None sweep finds no record of
+    it and may delete it (the cross-session flake #3074 exists to stop). The
+    old policy (a silent no-op logged at DEBUG) hid that state for the whole
+    session, so an OSError now RAISES. Caller contract: sdk.py's team mint
+    calls this INSIDE its rollback-protected try, so a raise rolls the
+    registry Team node back — the correct fail-closed outcome for a
+    transaction that could not durably record its effect. The two no-op
+    gates above (absent path, not a test session) are unchanged, so
+    production mints never reach the raise."""
     path = _journal_file_path()
     if not path:
         return
@@ -389,10 +401,16 @@ def _journal_append_product(graph_name: str) -> None:
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "a") as fh:
             fh.write(graph_name + "\n")
-    except Exception:
-        # never fail a construction over journaling (cycle-8 P2-3 spirit)
-        logging.getLogger(__name__).debug(
-            "journal append skipped for %r (%r)", graph_name, path)
+    except OSError as e:
+        # #3214: see the docstring — the journal write is the ownership
+        # contract, so an unjournalable mint stops the session instead of
+        # silently producing a graph no sweep can attribute to a session.
+        raise RuntimeError(
+            f"session journal append failed for {graph_name!r} ({path!r}): "
+            f"{e!r} — the graph is minted but UNOWNED: a live peer's "
+            f"scope=None sweep has no record of it and may delete it "
+            f"(#3214). Refusing to continue with an unprotected graph."
+        ) from e
 
 
 # ── Mixins ────────────────────────────────────────────────────────────────
