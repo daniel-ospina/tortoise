@@ -20,7 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from tools.ci_selection import (  # noqa: I001
     SOURCE_PATTERNS, load_manifest, select, integrity, slow_file_issues,  # noqa: F401
     unlisted_tests, register_tests, register, classify_test_file,  # noqa: F401
-    surface_audit, render_surface_audit,
+    surface_audit, render_surface_audit, duplicate_entries,
 )
 
 
@@ -264,6 +264,22 @@ def test_ask_spotcheck_tools_change_selects_sdk_not_tier1():
     # a test-file change selects its owning surface too
     r = _sel(["tests/test_ask_spotcheck_judge.py"])
     assert "sdk" in r["surfaces"]
+
+
+def test_collision_preflight_tool_change_fails_closed_to_full():
+    # #3261: tools/collision_preflight.py owns tests/test_collision_preflight.py.
+    # Before its TOOL_CARVEOUTS entry the flat "tools/" prefix swallowed the
+    # path: `changed` came back empty, so select() took the docs-only return
+    # (surfaces=[], tier-1 smoke only) and the tool's own guard test never ran
+    # on the PR that changed the tool. The early docs-only return bypasses the
+    # `if not matched: matched.add("core")` fallback, so the pre-#3261 note
+    # claiming such a change "falls back to core" was never true.
+    # No SOURCE_PATTERNS entry matches the path, so it takes the unknown-path
+    # branch -> full matrix (fail closed), exactly like tools/ci_selection.py.
+    r = _sel(["tools/collision_preflight.py"])
+    assert r["full"] is True
+    assert r["test_files"] == "ALL"
+    assert "core" in r["surfaces"]
 
 
 def test_backfill_script_only_change_selects_eval():
@@ -1914,3 +1930,16 @@ def test_surface_audit_tolerates_null_surface_value(tmp_path):
     assert report["duplicates"] == {}
     # the renderer must survive it too
     assert "api" in render_surface_audit(report)
+
+
+def test_real_manifest_has_no_duplicate_entries():
+    # #3381: two files were each registered twice — one entry added by two
+    # different PRs fixing the same drift independently. A same-surface
+    # duplicate is invisible to select() (surfaces are unioned) and reported
+    # non-fatally by `--integrity` and `--surface-audit` — never as a gate
+    # failure — so pin its absence here where CI will actually see it.
+    # Call the production detector rather than reimplementing it, so this pin
+    # cannot drift from the real semantics (e.g. cross-surface dual
+    # registration is deliberate and must stay allowed).
+    dupes = duplicate_entries(load_manifest())
+    assert dupes == [], f"duplicate manifest entries: {dupes}"
