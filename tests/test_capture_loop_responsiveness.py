@@ -1169,6 +1169,73 @@ def test_cancelled_capture_keeps_the_key_and_leaves_a_retryable_attempt(
     assert ha_mod._CAPTURE_SESSIONS == {}, ha_mod._CAPTURE_SESSIONS
 
 
+def test_cancelled_m2_capture_records_the_m2_lane(client, monkeypatch):
+    """#3129 (cycle-4 review): the marker records the ACTUAL lane, m2 included.
+
+    The abandonment marker closes the retry hole on the v2 lane only: the
+    #2335 TRUE-retry gate requires `prior_capture_extractor == "v2"` (#2473),
+    so an abandoned m2 capture still replays on the next same-session POST.
+    That is deliberate — re-running m2 over a failed attempt mints duplicate
+    ULIDs, the hole #2473 closed. This pins the STATE the marker must leave
+    (False + `m2`), i.e. that the fix does not falsely advertise v2 for an m2
+    attempt (which would send the retry into the non-convergent re-run).
+    """
+    import tortoise.hosted_api as ha_mod
+    from tortoise.hosted_api import app
+
+    entered = threading.Event()
+    release = threading.Event()
+
+    def _stalled_m2(_self, windowed, session_id, now, **kw):
+        entered.set()
+        release.wait(timeout=30)
+        return [], {}
+
+    monkeypatch.setenv("TORTOISE_SESSION_EXTRACTOR", "m2")
+    monkeypatch.setattr(TortoiseSDK, "_extract_session_llm", _stalled_m2)
+    payload = {"conversation": _CONV, "session_id": "s-m2-cancel-3129",
+               "harness": _HARNESS}
+    key = "team-001:default:s-m2-cancel-3129"
+
+    async def _run():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport,
+                                     base_url="http://test") as ac:
+            task = asyncio.create_task(ac.post("/v1/sessions", json=payload))
+            for _ in range(200):
+                if entered.is_set():
+                    break
+                await asyncio.sleep(0.05)
+            assert entered.is_set(), "the m2 capture never reached the extraction"
+            held = list(ha_mod._CAPTURE_SESSIONS)
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
+            release.set()
+            for _ in range(400):
+                if not ha_mod._CAPTURE_SESSIONS:
+                    break
+                await asyncio.sleep(0.05)
+            return held, list(ha_mod._CAPTURE_SESSIONS)
+
+    held, drained = asyncio.run(_run())
+    assert held == [key], held
+    assert drained == [], drained
+
+    rows = ha_mod._make_sdk(namespace=TEST_TEAM_ID)._get_proj().g.query(
+        "MATCH (s:Session {id:$sid}) RETURN s.capture_ok, s.capture_extractor",
+        params={"sid": "s-m2-cancel-3129"}).result_set
+    assert rows, "the m2 capture never merged its Session row"
+    capture_ok, lane = rows[0][0], rows[0][1]
+    assert capture_ok is False, (
+        f"an abandoned m2 capture left capture_ok={capture_ok!r} — a NULL there "
+        f"is the legacy-replay shape (#3129)")
+    assert lane == "m2", (
+        f"an abandoned m2 capture was stamped lane={lane!r} — stamping 'v2' "
+        f"would route the retry into a NON-CONVERGENT re-extraction (duplicate "
+        f"ULID claims, the hole #2473 closed) (#3129)")
+
+
 def test_in_flight_session_keys_are_scoped_to_their_tenant():
     """#3129 (reviewer finding): the in-flight key is per-TENANT.
 

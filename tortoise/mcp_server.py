@@ -3145,6 +3145,15 @@ def tortoise_session_capture(conversation: list[dict],
                                                      slot=slot,
                                                      state=_state))
         except asyncio.CancelledError:
+            # #3129: DEFENSIVE — parity with the REST endpoint, but not
+            # reachable under the current dispatch: this tool is a SYNC
+            # FastMCP callable, and fastmcp runs sync callables via
+            # `anyio.to_thread.run_sync` with the default
+            # `abandon_on_cancel=False`, so the inner `asyncio.run` loop is
+            # never cancelled and no CancelledError reaches here (cycle-4
+            # review). Kept because the cost is nil and a future async tool or
+            # a cancellation-capable dispatcher would need it — see the
+            # residual sentinel issue for real MCP abandonment coverage.
             if _state.get("attempted") and not _state.get("finalized"):
                 # Off-loop, key held until it lands (see the REST endpoint and
                 # hosted_api._CaptureSlot.hold_until).

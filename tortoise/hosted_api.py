@@ -260,6 +260,7 @@ class _CaptureSlot:
         "_cleanup_done",
         "_done",
         "_handed_off",
+        "_release_lock",
         "_request_done",
         "_session_key",
         "_session_released",
@@ -274,6 +275,15 @@ class _CaptureSlot:
         self._request_done = False
         # #3129: False while an abandonment-marker write is in flight.
         self._cleanup_done = True
+        # #3129 review (cycle 4): the release decision below now has THREE
+        # concurrent callers on three threads — the event loop (`release`), the
+        # capture-pool thread (`worker_done`) and the marker thread
+        # (`_cleanup_finished`). Its check-then-act was non-atomic, so two
+        # threads could both pass the guards and both pop: a stale second pop
+        # removes a FRESHLY reserved entry for the same key — i.e. disarms the
+        # admission guard for a new in-flight capture (reviewer demonstrated it
+        # by forcing preemption at the assignment).
+        self._release_lock = threading.Lock()
 
     def hand_off(self) -> None:
         """Transfer ownership to the extraction future (before any await)."""
@@ -317,14 +327,21 @@ class _CaptureSlot:
         session refused (it genuinely IS still being captured); a non-extracting
         path releases on the request's own teardown. A pending marker write
         holds it too.
+
+        The decision is taken under `_release_lock` and the pop happens OUTSIDE
+        it: two threads passing the guards would both call
+        `_capture_session_release`, and the stale second pop could delete a key
+        a NEW capture for the same session had just registered (#3129 cycle-4
+        review).
         """
-        if self._session_released:
-            return
-        if not self._cleanup_done:
-            return
-        if self._handed_off and not (self._done and self._request_done):
-            return
-        self._session_released = True
+        with self._release_lock:
+            if self._session_released:
+                return
+            if not self._cleanup_done:
+                return
+            if self._handed_off and not (self._done and self._request_done):
+                return
+            self._session_released = True
         _capture_session_release(self._session_key)
 
 
@@ -7204,6 +7221,20 @@ def _capture_abandoned_marker(proj, session_id: str, lane: str) -> None:
     the in-flight admission gate cannot cover it, because by then the worker is
     gone). Marking it failed routes that retry into the EXISTING #2335
     TRUE-retry lane, which re-extracts on the convergent v2 ids.
+
+    SCOPE — the retry is closed on the **v2 lane only**, and only for IN-PROCESS
+    cancellation:
+
+    * the TRUE-retry gate requires `prior_capture_extractor == "v2"` (#2473),
+      so an abandoned **m2** capture (`capture_ok=false, capture_extractor=m2`)
+      subsequent re-POST still replays. That is the documented, deliberate
+      m2 behaviour: re-running m2 over a failed attempt mints duplicate ULIDs,
+      which is the hole #2473 closed. The marker records the correct lane
+      rather than pretending otherwise (pinned by
+      test_cancelled_m2_capture_records_the_m2_lane).
+    * a cancellation that never reaches Python leaves the NULL too — a SIGKILL
+      (deploy/restart) executes no cleanup. Closing that needs a write-ahead
+      attempt sentinel on the Session; filed as a residual (see the PR body).
 
     Deliberately scoped to CANCELLATION, not to failures: a capture that RAISES
     (`RuntimeError` → 500/503) keeps its documented NULL→legacy-replay shape
