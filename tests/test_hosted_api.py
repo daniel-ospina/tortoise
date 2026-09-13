@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import os
 import tempfile
+import threading
 from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
@@ -31,6 +32,15 @@ from tortoise.hosted_api import (  # noqa: I001
     ForwardedProtoMiddleware,
 )
 from tortoise.sdk import TortoiseSDK
+
+# The autouse ``_reset_health_probe`` fixture replaces
+# ``hosted_api._health_probe_interval`` with a near-infinite lambda for EVERY
+# test in this module (so the background refresher cannot overwrite a test's
+# patched verdict). Clamp assertions must use the REAL resolver, captured here
+# before any fixture runs.
+import tortoise.hosted_api as _ha_mod
+
+_REAL_HEALTH_PROBE_INTERVAL = _ha_mod._health_probe_interval
 
 
 # ── Test constants ───────────────────────────────────────────────────────────
@@ -253,6 +263,54 @@ def llm_extraction_provider(monkeypatch):
 # Health Endpoints
 # ═══════════════════════════════════════════════════════════════════════════════
 
+@pytest.fixture(autouse=True)
+def _reset_health_probe(monkeypatch):
+    """#2850: /health and /health/ready share a module-level single-flight probe
+    coordinator. The hang tests below deliberately wedge it; without this
+    reset the wedge would leak into every later test in this file.
+
+    The background refresher is also stretched to a near-infinite interval for
+    the module: it would otherwise re-probe behind a test's back and overwrite
+    a deliberately patched verdict. The refresher's own behavior is covered by
+    ``test_health_probe_loop_refreshes_the_coordinator``.
+    """
+    import tortoise.hosted_api as ha_mod
+
+    monkeypatch.setattr(ha_mod, "_health_probe_interval", lambda: 3600.0)
+    ha_mod._HEALTH_PROBE.reset()
+    ha_mod._READY_PROBE.reset()
+    ha_mod._CONTROL_PLANE_PROBE.reset()
+    # Round-2 review: reset the process-global SDK CACHE too, not just the
+    # coordinators. A probe worker left over from a previous test can rebuild
+    # ``_probe_sdk`` with the previous env key after this fixture has run, which
+    # is what made ``test_probe_connection_is_reused_not_rebuilt_per_call``
+    # count 2 builds (green in the docker lane, red in the embedded lane).
+    ha_mod._probe_sdk_reset()
+    yield
+    ha_mod._HEALTH_PROBE.reset()
+    ha_mod._READY_PROBE.reset()
+    ha_mod._CONTROL_PLANE_PROBE.reset()
+    ha_mod._probe_sdk_reset()
+
+
+def _force_probe_refresh(ha_mod, timeout: float = 10.0) -> dict:
+    """Make /health's in-memory verdict deterministic for a test (#2850).
+
+    ``/health`` is now PURE IN-MEMORY — it never runs the probe itself, so
+    monkeypatching ``_probe_db`` and immediately GETting ``/health`` would race
+    the background refresher (and could report a verdict produced by the
+    unpatched probe). Reset the single-flight coordinator and run it once
+    synchronously so the next ``/health`` reports exactly this result.
+
+    This is the seam that replaced request-driven probing: the request path no
+    longer does I/O, so a test that wants a specific DB verdict has to state it
+    (patch ``_probe_db``) and then force the refresh.
+    """
+    probe = ha_mod._HEALTH_PROBE
+    probe.reset()
+    return probe.wait(timeout)
+
+
 class TestHealthEndpoints:
     """GET /health and GET /health/security."""
 
@@ -260,6 +318,11 @@ class TestHealthEndpoints:
         """Liveness — process up. Deep DB check (#1384) rides along in `db`
         but never gates liveness (the DB gate is /health/ready, #338 follow-up
         — a DB-coupled /health caused cold-start deploy failures)."""
+        import tortoise.hosted_api as ha_mod
+
+        # #2850: /health reads memory only; force the refresher's first
+        # completed verdict so the assertion is not racing it.
+        _force_probe_refresh(ha_mod)
         r = client.get("/health")
         assert r.status_code == 200
         body = r.json()
@@ -277,6 +340,7 @@ class TestHealthEndpoints:
             lambda: {"ok": False, "latency_ms": 12.3,
                      "error": "ConnectionError: NXDOMAIN"},
         )
+        _force_probe_refresh(ha_mod)
         r = client.get("/health")
         assert r.status_code == 200
         body = r.json()
@@ -292,6 +356,7 @@ class TestHealthEndpoints:
             raise RuntimeError("probe exploded")
 
         monkeypatch.setattr(ha_mod, "_probe_db", _boom)
+        _force_probe_refresh(ha_mod)
         r = client.get("/health")
         assert r.status_code == 200
         body = r.json()
@@ -305,6 +370,316 @@ class TestHealthEndpoints:
         assert r.status_code == 200
         assert r.json() == {"status": "ok", "db": "connected"}
 
+    # ── #2850 P0: liveness must survive a black-holed FalkorDB ──────────
+
+    def test_health_returns_bounded_when_probe_hangs_forever(self, client, monkeypatch):
+        """The 2026-09-10 incident: a stalled FalkorDB made Fly's http_check
+        (15s) fail while the process was still serving. A probe that NEVER
+        returns must not stop /health from answering — the handler reads the
+        hard-bounded coordinator, never the shared asyncio default executor."""
+        import threading
+        import time
+
+        import tortoise.hosted_api as ha_mod
+
+        started = threading.Event()
+
+        def _hang():
+            started.set()
+            time.sleep(600)  # black-holed connect: never returns
+            return {"ok": True, "latency_ms": 0.0, "error": None}
+
+        monkeypatch.setattr(ha_mod, "_probe_db", _hang)
+        monkeypatch.setattr(ha_mod._HEALTH_PROBE, "_timeout", 0.3)
+        # #2850: /health reads memory only — start the (hanging) probe through
+        # the coordinator so the assertion races nothing.
+        _force_probe_refresh(ha_mod, timeout=0.1)
+
+        start = time.monotonic()
+        r = client.get("/health")
+        elapsed = time.monotonic() - start
+
+        assert r.status_code == 200
+        assert elapsed < 5.0, f"/health took {elapsed:.2f}s with a hung probe"
+        assert started.is_set()
+        body = r.json()
+        assert body["status"] == "degraded"
+        assert body["db"]["ok"] is False
+        # The stall is observable — not a fossil "ok".
+        assert body["probe"]["in_flight"] is True
+
+    def test_health_repeated_hung_checks_do_not_accumulate(self, client, monkeypatch):
+        """A 15s-interval checker hitting a wedged DB must not spawn a probe
+        thread per check: concurrent/repeated reads coalesce onto the one
+        in-flight probe."""
+        import threading
+        import time
+
+        import tortoise.hosted_api as ha_mod
+
+        calls = {"n": 0}
+
+        def _hang():
+            calls["n"] += 1
+            time.sleep(600)
+            return {"ok": True, "latency_ms": 0.0, "error": None}
+
+        monkeypatch.setattr(ha_mod, "_probe_db", _hang)
+        monkeypatch.setattr(ha_mod._HEALTH_PROBE, "_timeout", 0.05)
+        _force_probe_refresh(ha_mod, timeout=0.05)
+
+        before = sum(1 for t in threading.enumerate() if t.is_alive())
+        for _ in range(6):
+            r = client.get("/health")
+            assert r.status_code == 200
+        after = sum(1 for t in threading.enumerate() if t.is_alive())
+
+        assert calls["n"] == 1, f"probe ran {calls['n']}x — reads were not coalesced"
+        assert after - before <= 1, f"{after - before} probe threads accumulated"
+
+    def test_health_ready_fails_closed_when_probe_hangs(self, client, monkeypatch):
+        """Readiness stays fail-closed (503) — but DROPPING the old unbounded
+        on-loop ``_get_proj().g.query()`` means a hung DB can no longer block
+        the event loop for every other request. Readiness reads its OWN
+        coordinator (``_READY_PROBE``), so it probes LIVE rather than joining
+        the liveness refresher's in-flight probe."""
+        import time
+
+        import tortoise.hosted_api as ha_mod
+
+        def _hang():
+            time.sleep(600)
+            return {"ok": True, "latency_ms": 0.0, "error": None}
+
+        monkeypatch.setattr(ha_mod, "_probe_db", _hang)
+        monkeypatch.setattr(ha_mod._READY_PROBE, "_timeout", 0.2)
+
+        r = client.get("/health/ready")
+        assert r.status_code == 503
+
+    def test_health_ready_never_serves_a_pre_outage_verdict(self, client, monkeypatch):
+        """#2850 review P1: readiness must not answer 200 from a completed probe.
+
+        Readiness records ``{ok: True}``; the plane then dies; the next probe
+        cannot finish before ``run()``'s deadline. Pre-fix, ``run()`` returned
+        ``_view_locked()`` — the stale completed verdict, still inside the 30s
+        ``stale_after`` window — so /health/ready answered 200 "connected" for
+        ~5s while the plane was dead (which matters because deploy-hosted.yml
+        asserts readiness LAST). The autouse ``_reset_health_probe`` fixture
+        resets the coordinators before every test, which is why priming has to
+        happen INSIDE the test and the old suite missed this.
+        """
+        import time
+
+        import tortoise.hosted_api as ha_mod
+
+        # Prime the readiness coordinator with a completed OK.
+        monkeypatch.setattr(
+            ha_mod, "_probe_db",
+            lambda: {"ok": True, "latency_ms": 0.5, "error": None})
+        ha_mod._READY_PROBE.reset()
+        assert ha_mod._READY_PROBE.wait(timeout=2.0)["ok"] is True
+
+        # The plane dies and the probe wedges; the read budget expires.
+        def _hang():
+            time.sleep(600)
+            return {"ok": True, "latency_ms": 0.0, "error": None}
+
+        monkeypatch.setattr(ha_mod, "_probe_db", _hang)
+        monkeypatch.setattr(ha_mod._READY_PROBE, "_timeout", 0.2)
+
+        r = client.get("/health/ready")
+        assert r.status_code == 503, (
+            "readiness answered from a completed pre-outage probe")
+
+    def test_in_flight_gauge_tracks_requests_and_releases(self):
+        """#2850 review P0: the watchdog's idle gate is fed by this gauge.
+
+        Two halves: a request is counted WHILE it is in flight (so a loop
+        blocked serving it is never mistaken for a wedge), and the slot is
+        released exactly once, including on an exception — a leaked count
+        would permanently disarm the kill.
+        """
+        import asyncio
+
+        import tortoise.hosted_api as ha_mod
+        import tortoise.monitoring as monitoring
+
+        seen = {}
+
+        async def _inner(scope, receive, send):
+            seen["during"] = monitoring.workload_in_flight()
+
+        async def _drive():
+            await ha_mod.InFlightMiddleware(_inner)({"type": "http"}, None, None)
+
+        assert monitoring.workload_in_flight() == 0
+        asyncio.run(_drive())
+        assert seen["during"] == 1
+        assert monitoring.workload_in_flight() == 0
+
+        async def _boom(scope, receive, send):
+            raise RuntimeError("handler exploded")
+
+        with pytest.raises(RuntimeError):
+            asyncio.run(
+                ha_mod.InFlightMiddleware(_boom)({"type": "http"}, None, None))
+        assert monitoring.workload_in_flight() == 0, "in-flight slot leaked"
+
+    def test_in_flight_gauge_is_wired_into_the_real_app(self, client, monkeypatch):
+        """#2850 round-2 review: the class-level test above proves
+        ``InFlightMiddleware`` WORKS, not that it is INSTALLED. Deleting
+        ``app.add_middleware(InFlightMiddleware)`` would leave every other test
+        green while the watchdog's idle predicate silently read 0 forever — and
+        the kill would then fire mid-request, which is the P0 this whole issue
+        exists to remove.
+        """
+        import tortoise.hosted_api as ha_mod
+        import tortoise.monitoring as monitoring
+
+        # (a) registered, and OUTERMOST. Starlette's add_middleware INSERTS at
+        # index 0, so the LAST-registered middleware is first in the list.
+        classes = [m.cls for m in ha_mod.app.user_middleware]
+        assert ha_mod.InFlightMiddleware in classes, (
+            "InFlightMiddleware is not installed — the idle gate always reads 0")
+        assert classes[0] is ha_mod.InFlightMiddleware, (
+            f"the gauge must wrap everything (registered last): {classes!r}")
+
+        # (b) a REAL request through the module-level app: the gauge is >= 1
+        # WHILE the handler runs, and released afterwards. ``/health`` is read
+        # from memory only, so spying on this seam does not perturb timing.
+        seen = {}
+        real = ha_mod.loop_heartbeat_info
+
+        def _spy():
+            seen["during"] = monitoring.workload_in_flight()
+            return real()
+
+        monkeypatch.setattr(ha_mod, "loop_heartbeat_info", _spy)
+        assert monitoring.workload_in_flight() == 0
+        r = client.get("/health")
+        assert r.status_code == 200
+        assert seen.get("during", 0) >= 1, (
+            "the wired gauge did not count a real request in flight")
+        assert monitoring.workload_in_flight() == 0, "in-flight slot leaked"
+
+    def test_health_probe_interval_is_clamped_below_the_stale_window(self, monkeypatch):
+        """A refresh period above PROBE_STALE_AFTER reports a HEALTHY DB as
+        degraded and then fails the deploy gate (review P2)."""
+        import tortoise.hosted_api as ha_mod
+        from tortoise.monitoring import PROBE_STALE_AFTER
+
+        monkeypatch.setenv("TORTOISE_HEALTH_PROBE_INTERVAL", "3600")
+        assert _REAL_HEALTH_PROBE_INTERVAL() <= PROBE_STALE_AFTER / 2.0
+        monkeypatch.setenv("TORTOISE_HEALTH_PROBE_INTERVAL", "5")
+        assert _REAL_HEALTH_PROBE_INTERVAL() == 5.0
+        monkeypatch.setenv("TORTOISE_HEALTH_PROBE_INTERVAL", "-3")
+        assert _REAL_HEALTH_PROBE_INTERVAL() == ha_mod.HEALTH_PROBE_REFRESH_S
+
+    def test_non_finite_health_probe_interval_falls_back_to_default(
+            self, monkeypatch, caplog):
+        """Round-2 review P2: ``float()`` accepts ``nan``/``inf`` and neither
+        is caught by ``v <= 0`` (``nan <= 0`` is False) nor by the ``v > cap``
+        clamp (``nan > cap`` is False). A nan period flows into
+        ``asyncio.sleep(nan)``, which returns almost immediately — the refresher
+        becomes a busy loop hammering the DB probe and the event loop; an
+        infinite period means the probe never refreshes, so a healthy DB reads
+        stale forever. Both must fall back to the default, at ERROR.
+        """
+        import logging
+
+        import tortoise.hosted_api as ha_mod
+
+        for raw in ("nan", "NaN", "inf", "Infinity", "-inf"):
+            caplog.clear()
+            monkeypatch.setenv("TORTOISE_HEALTH_PROBE_INTERVAL", raw)
+            with caplog.at_level(logging.ERROR, logger="tortoise.hosted_api"):
+                period = _REAL_HEALTH_PROBE_INTERVAL()
+            assert period == ha_mod.HEALTH_PROBE_REFRESH_S, (raw, period)
+            assert any(r.levelno >= logging.ERROR for r in caplog.records), raw
+
+    def test_sub_floor_health_probe_interval_falls_back_to_default(
+            self, monkeypatch, caplog):
+        """Round-3 review P2: a finite but tiny period busy-loops the probe
+        exactly as ``nan`` did — ``1e-9`` is ~50 generations/s, each spawning a
+        daemon thread and issuing a DB round trip. The upper clamp was
+        one-sided; a floor is required too."""
+        import logging
+
+        import tortoise.hosted_api as ha_mod
+
+        for raw in ("1e-9", "0.001", "0.49"):
+            caplog.clear()
+            monkeypatch.setenv("TORTOISE_HEALTH_PROBE_INTERVAL", raw)
+            with caplog.at_level(logging.WARNING, logger="tortoise.hosted_api"):
+                period = _REAL_HEALTH_PROBE_INTERVAL()
+            assert period == ha_mod.HEALTH_PROBE_REFRESH_S, (raw, period)
+            assert any(r.levelno >= logging.WARNING for r in caplog.records), raw
+        # At/above the floor is honoured.
+        monkeypatch.setenv("TORTOISE_HEALTH_PROBE_INTERVAL", "0.5")
+        assert _REAL_HEALTH_PROBE_INTERVAL() == 0.5
+
+    def test_probe_connection_is_reused_not_rebuilt_per_call(self, monkeypatch):
+        """The probe must own ONE bounded DB connection, not build+leak a
+        fresh SDK on every check (the connection half of the #2850 leak).
+
+        Round-2 review: the old form asserted ``calls["n"] == 1`` and raced a
+        PROCESS-GLOBAL SDK cache — a leftover probe thread from a previous test
+        can rebuild ``_probe_sdk`` (computing the PREVIOUS env key before our
+        ``monkeypatch.setenv`` lands) after our reset, making the count 2 (green
+        in the docker lane, red in the embedded one). ``HealthProbe.reset()``
+        nulls its ``_worker`` handle, so the leftover thread cannot be joined.
+        Fixed by counting only the builds made on THIS test's thread, and by
+        pinning ``_probe_sdk_key`` so no thread can compute a mismatching key.
+        The autouse fixture also resets the SDK cache, not just the probe
+        coordinators.
+        """
+        from unittest.mock import MagicMock
+
+        import tortoise.hosted_api as ha_mod
+
+        own_thread = threading.current_thread().name
+        calls = {"all": 0, "own": 0}
+
+        def _factory(*, namespace=None, graph_name=None):
+            # Only builds made by THIS test's two ``_probe_db()`` calls count.
+            # Leftover ``tortoise-health-probe`` threads from earlier tests
+            # share the process-global cache (and cannot be joined —
+            # ``HealthProbe.reset()`` drops its ``_worker`` handle), so
+            # counting them is what made the old assertion flaky.
+            calls["all"] += 1
+            if threading.current_thread().name == own_thread:
+                calls["own"] += 1
+            sdk = MagicMock()
+            sdk._get_proj.return_value.g.query.return_value = MagicMock()
+            return sdk
+
+        monkeypatch.setattr(ha_mod, "_make_sdk", _factory)
+        monkeypatch.setenv("TORTOISE_DB_PATH", "/tmp/tortoise-probe-reuse-test.db")
+        # Also pin the cache key so a leftover thread cannot churn the cache
+        # with a pre-setenv key while we hold the two handles we compare.
+        monkeypatch.setattr(ha_mod, "_probe_sdk_key",
+                            lambda: ("pinned", "reuse-test"))
+
+        ha_mod._probe_sdk_reset()
+        try:
+            first = ha_mod._probe_db()
+            first_sdk = ha_mod._PROBE_SDK_CACHE["sdk"]
+            assert first_sdk is not None
+            second = ha_mod._probe_db()
+            second_sdk = ha_mod._PROBE_SDK_CACHE["sdk"]
+        finally:
+            ha_mod._probe_sdk_reset()
+
+        assert first["ok"] is True and second["ok"] is True
+        assert first_sdk is second_sdk, (
+            "the probe rebuilt its connection between two consecutive checks")
+        # Our TWO checks may build at most ONE SDK (a per-call rebuild needs 2).
+        # Zero is possible when a still-running probe from an earlier test won
+        # the race and warmed the cache first — that does not weaken the point.
+        assert calls["own"] <= 1, (
+            f"the two checks built the SDK {calls['own']}x — not reused")
+
     def test_health_security_returns_posture(self, client):
         r = client.get("/health/security")
         assert r.status_code == 200
@@ -314,6 +689,223 @@ class TestHealthEndpoints:
         assert body["hashing"] == "pbkdf2_hmac_sha256"
         assert "api_auth_enforced" in body
         assert isinstance(body["api_auth_enforced"], bool)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# #2850 / #2953 — liveness/readiness decouple + bind-before-boot-sweeps
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+def _free_tcp_port() -> int:
+    import socket
+
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+class TestLivenessDecouple:
+    """#2850: the "am I alive?" answer must not share fate with the work."""
+
+    def test_health_returns_instantly_with_a_saturated_shared_executor(self, monkeypatch):
+        """THE regression test for the 2026-09-10 outage.
+
+        ``/health`` used to be ``await asyncio.to_thread(_probe_db)`` — a
+        submission to the event loop's DEFAULT ThreadPoolExecutor, shared with
+        ~89 other ``to_thread`` call sites whose queue wait has NO timeout.
+        Fill that pool with blocked DB calls and the pre-fix handler could not
+        answer at all. The handler must now return from pure in-memory state,
+        so a saturated pool is irrelevant to it.
+        """
+        import asyncio
+        import concurrent.futures
+        import threading
+        import time
+
+        import tortoise.hosted_api as ha_mod
+
+        async def _run() -> tuple[float, dict]:
+            loop = asyncio.get_running_loop()
+            pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+            loop.set_default_executor(pool)
+            gate = threading.Event()
+            # 8 submissions onto a 1-worker pool: 1 runs, 7 queue forever.
+            for _ in range(8):
+                loop.run_in_executor(None, gate.wait, 30)
+            await asyncio.sleep(0.05)
+            started = time.monotonic()
+            try:
+                body = await ha_mod.health()
+            finally:
+                gate.set()
+                pool.shutdown(wait=False)
+            return time.monotonic() - started, body
+
+        elapsed, body = asyncio.run(_run())
+        assert elapsed < 0.5, (
+            f"/health took {elapsed:.2f}s behind a saturated shared executor — "
+            "the handler is still doing a thread hand-off")
+        assert body["status"] in ("ok", "degraded")
+        assert "db" in body
+
+    def test_health_probe_loop_refreshes_the_coordinator(self, monkeypatch):
+        """The refresher is what keeps /health's memory honest — if it dies or
+        stops, the DB verdict freezes (and goes stale → degraded). Run it for a
+        couple of short cycles and prove it lands a fresh verdict with no
+        request at all."""
+        import asyncio
+        import contextlib
+
+        import tortoise.hosted_api as ha_mod
+
+        calls = {"n": 0}
+
+        def _probe():
+            calls["n"] += 1
+            return {"ok": True, "latency_ms": 0.5, "error": None}
+
+        monkeypatch.setattr(ha_mod, "_probe_db", _probe)
+        monkeypatch.setattr(ha_mod, "_health_probe_interval", lambda: 0.05)
+        ha_mod._HEALTH_PROBE.reset()
+
+        async def _run():
+            task = asyncio.get_running_loop().create_task(ha_mod._health_probe_loop())
+            await asyncio.sleep(0.4)
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+        asyncio.run(_run())
+        assert calls["n"] >= 1, "the refresher never probed"
+        view = ha_mod._HEALTH_PROBE.snapshot()
+        assert view["ok"] is True, view
+
+    def test_health_probe_refresh_budget_tracks_the_resolved_interval(
+            self, monkeypatch):
+        """Round-4 review P2: the ``/health`` self-heal gate must equal the
+        refresher's RESOLVED period, not the hardcoded ``HEALTH_PROBE_REFRESH_S``
+        (10s). With an operator period in 0.5-15s, a frozen 10s gate let
+        ``/health`` start a duplicate DB probe once per cycle while the
+        refresher was still healthy."""
+        import tortoise.hosted_api as ha_mod
+
+        monkeypatch.setattr(ha_mod, "_health_probe_interval", lambda: 12.5)
+        assert ha_mod._HEALTH_PROBE._refresh_budget_now() == 12.5, (
+            "the /health self-heal gate is frozen at the hardcoded default, "
+            "not the resolved refresher period")
+
+    def test_health_shape_is_backwards_compatible(self, client):
+        """The dashboard and the deploy workflow read this shape; the #2850
+        fields are additive and status stays 200 either way."""
+        r = client.get("/health")
+        assert r.status_code == 200
+        body = r.json()
+        assert set(body) >= {"status", "db"}
+        assert body["status"] in ("ok", "degraded")
+        assert set(body["db"]) >= {"ok", "latency_ms", "error"}
+        assert "loop_stale_ms" in body
+
+    def test_health_reports_a_live_loop_heartbeat(self, client):
+        """The lifespan arms the heartbeat, so a serving app reports a fresh
+        loop (the whole point of the /healthz signal)."""
+        import tortoise.monitoring as monitoring
+
+        body = client.get("/health").json()
+        assert body["loop_stale_ms"] is not None
+        assert body["loop_stale_ms"] < monitoring.LOOP_STALE_AFTER * 1000
+
+    def test_lifespan_starts_the_dedicated_healthz_listener(self, client):
+        """#2850 item 4: the app start-up must bind the dedicated port, and it
+        must answer 200 while the loop is healthy."""
+        import urllib.request
+
+        import tortoise.hosted_api as ha_mod
+
+        server = getattr(ha_mod.app.state, "_healthz_server", None)
+        assert server is not None, "lifespan did not start the /healthz listener"
+        port = server.server_address[1]
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/healthz", timeout=5) as r:
+            assert r.status == 200
+            payload = r.read()
+        assert b"\"status\": \"ok\"" in payload or b'"status":"ok"' in payload
+
+
+class TestBootOrder:
+    """#2953: uvicorn binds the listening socket only AFTER
+    ``lifespan.startup()`` returns, so nothing in the startup half may await
+    real work — the boot sweeps used to."""
+
+    def test_port_accepts_connections_while_boot_sweeps_block(self, monkeypatch):
+        """The regression test for #2953.
+
+        Patch the event sweep to block on an event. Pre-fix, ``_lifespan``
+        awaited it during startup, so ``loop.create_server`` was never reached
+        and the machine accepted NOTHING for the sweep's whole duration (every
+        deploy and restart). Post-fix the sweep runs as a background task: the
+        socket is already bound while the sweep is still blocked inside.
+        """
+        import socket
+        import threading
+        import time
+
+        import uvicorn
+        from fastapi import FastAPI
+
+        import tortoise.hosted_api as ha_mod
+
+        entered = threading.Event()
+        release = threading.Event()
+
+        def _blocking_sweep() -> None:
+            entered.set()
+            release.wait(60)
+
+        monkeypatch.setattr(ha_mod, "_sweep_events", _blocking_sweep)
+        monkeypatch.setattr(ha_mod, "_purge_deleted_teams", lambda: None)
+        monkeypatch.setenv("TORTOISE_LOOP_STALL_EXIT_S", "0")
+        monkeypatch.setenv("TORTOISE_HEALTHZ_PORT", str(_free_tcp_port()))
+
+        # A bare app wired to the REAL lifespan: this test is about startup
+        # ordering, not about any route.
+        app_under_test = FastAPI(lifespan=ha_mod._lifespan)
+        server = uvicorn.Server(uvicorn.Config(
+            app_under_test, host="127.0.0.1", port=0, log_level="error"))
+        thread = threading.Thread(target=server.run, daemon=True)
+        thread.start()
+        try:
+            port = None
+            deadline = time.monotonic() + 30.0
+            while time.monotonic() < deadline:
+                if server.started and server.servers:
+                    port = server.servers[0].sockets[0].getsockname()[1]
+                    break
+                time.sleep(0.05)
+            assert port is not None, "server never started"
+            with socket.create_connection(("127.0.0.1", port), timeout=2.0):
+                pass  # bound AND accepting while the sweep is still blocked
+            # The listener the lifespan started is on app_under_test.state.
+            assert app_under_test.state._healthz_server is not None
+            wait_until = time.monotonic() + 5.0
+            while not entered.is_set() and time.monotonic() < wait_until:
+                time.sleep(0.02)
+            assert entered.is_set(), (
+                "the boot sweep never ran — the assertion above is vacuous")
+            assert not release.is_set(), (
+                "the sweep finished before we connected — cannot distinguish "
+                "blocking startup from a background task")
+        finally:
+            # Shut down WITHOUT releasing the sweep: the lifecycle must not
+            # wait for a blocked sweep thread (cancellation is delivered at the
+            # await, the abandoned worker keeps running as a daemon).
+            server.should_exit = True
+            thread.join(timeout=20)
+            shutdown_was_prompt = not thread.is_alive()
+            release.set()
+            import tortoise.monitoring as monitoring
+
+            monitoring.stop_health_listener(
+                getattr(app_under_test.state, "_healthz_server", None))
+        assert shutdown_was_prompt, "shutdown hung on the blocked boot sweep"
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -627,15 +1219,38 @@ class TestPointsCreate:
         assert body["content"] == "hello world"
         assert body["kind"] == "statement"
 
-    def test_create_point_enqueues_dream(self, client):
-        """#85: create_point triggers the per-tenant dream queue."""
+    def test_create_point_enqueues_dream(self, client, monkeypatch):
+        """#85: create_point triggers the per-tenant dream queue.
+
+        #2850: this used to read ``_DREAM_QUEUES`` from the TEST thread right
+        after the request while the worker's debounce (``_DREAM_DEBOUNCE_S``)
+        drains and evicts that same queue on the LOOP thread. The assertion
+        only passes when the response is delivered inside that window, and the
+        window is lost deterministically once boot maintenance shares the GIL
+        with the worker's blocking ``sdk.dream()`` — which is now the normal
+        case, because the #2953 boot sweeps no longer run before the bind.
+        Spy on the enqueue instead: the call site is what this test is about,
+        it is recorded synchronously inside the request, and it pins the
+        PAYLOAD (the new point's id as the dirty root) — so the assertion no
+        longer depends on cross-thread timing and covers strictly more.
+        """
         import tortoise.hosted_api as ha
+
+        calls: list[tuple[str, list[str]]] = []
+        real_enqueue = ha._enqueue_dream
+
+        def _spy(team_id, dirty_roots, **kwargs):
+            calls.append((team_id, list(dirty_roots)))
+            return real_enqueue(team_id, dirty_roots, **kwargs)
+
+        monkeypatch.setattr(ha, "_enqueue_dream", _spy)
         # Fresh queue state for this test.
         ha._DREAM_QUEUES.pop(TEST_TEAM_ID, None)
         r = client.post("/v1/points", json={"content": "dream trigger"})
         assert r.status_code == 200, r.text
-        assert TEST_TEAM_ID in ha._DREAM_QUEUES
-        assert not ha._DREAM_QUEUES[TEST_TEAM_ID].empty()
+        assert [c[0] for c in calls] == [TEST_TEAM_ID]
+        assert calls[0][1] == [r.json()["id"]], \
+            "the created point must be the enqueued dirty root"
 
     def test_create_point_with_explicit_kind(self, client):
         r = client.post(
