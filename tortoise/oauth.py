@@ -239,16 +239,17 @@ def _is_loopback(hostname: str) -> bool:
 #
 #   * C0 controls (0x00-0x1F) and DEL are NOT a differential, and this comment
 #     claimed they were until review falsified it. `urlsplit` strips \t \r \n
-#     too (`urllib.parse._UNSAFE_URL_BYTES_TO_REMOVE`), and a browser REFUSES
-#     these bytes in the host position and strips or percent-encodes them
-#     elsewhere — none of which moves the authority boundary. (Position matters,
-#     so keep the claim general: DEL in the host is refused, DEL in a path
-#     becomes `%7F`, NUL in userinfo becomes `%00`. The only load-bearing point
-#     is that the boundary does not move.) They are refused anyway, as defence
-#     in depth: no legitimate redirect URI contains a control character, so the
-#     conservative direction costs nothing real. It does mean a URI registered
-#     before this gate existed stops matching — deliberate, and pinned by
-#     `test_differential_uris_are_refused_even_on_exact_match`.
+#     (`urllib.parse._UNSAFE_URL_BYTES_TO_REMOVE`) exactly as a browser does, and
+#     for the remaining bytes no browser moves the authority boundary either.
+#     The precise treatment is position-dependent (stripped / refused /
+#     percent-encoded — `docs/oauth-mcp.md` states it accurately), which is why
+#     this comment deliberately does NOT try to characterise it per position:
+#     three review rounds each caught an over-specific claim here. The only
+#     load-bearing point is that the boundary does not move. They are refused
+#     anyway, as defence in depth: no legitimate redirect URI contains a control
+#     character, so the conservative direction costs nothing real. It does mean a
+#     URI registered before this gate existed stops matching — deliberate, and
+#     pinned by `test_differential_uris_are_refused_even_on_exact_match`.
 #
 # Refusing the bytes outright is preferred to modelling WHATWG: a whitelist of
 # "URIs both parsers agree on" cannot be kept correct, and fail-closed is the
@@ -256,10 +257,11 @@ def _is_loopback(hostname: str) -> bool:
 def _unsafe_redirect_uri_bytes(uri: str) -> bool:
     """True when a redirect URI holds bytes we refuse to reason about.
 
-    Conservative by design: ``\\`` is a real parser differential between
-    ``urlsplit`` and the browser, the control characters are
-    belt-and-suspenders. See the comment above — do not describe this as a
-    precise differential detector, which is what the previous wording got wrong.
+    Conservative by design: a raw backslash is a real parser differential
+    between ``urlsplit`` and the browser, the control characters are
+    belt-and-suspenders. See the comment above — this is a fail-closed byte
+    filter, NOT a precise differential detector, which is what earlier wording
+    in this PR wrongly claimed.
     """
     return any(ch == "\\" or ord(ch) < 0x20 or ord(ch) == 0x7F for ch in uri)
 

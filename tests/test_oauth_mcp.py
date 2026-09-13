@@ -809,47 +809,50 @@ class TestRedirectUriMatches:
         assert m("http://localhost/cb", "http://localhost:99999/cb")
 
     def test_unsafe_bytes_never_match(self):
-        """REVIEW P0 — Python's `urlsplit` and the browser's WHATWG parser end
-        the authority at different places for a raw backslash, so
-        `http://evil.example\\@localhost/cb` is host `localhost` to us and
+        r"""REVIEW P0 — a raw backslash moves the authority boundary between
+        Python's `urlsplit` and the browser's WHATWG parser, so
+        `http://evil.example\@localhost/cb` is host `localhost` to us and
         `evil.example` to the browser. The code is delivered by navigating the
-        browser to the RAW string, so the old predicate validated it as loopback
-        and then handed the authorization code to the attacker.
+        browser to the RAW string, so the pre-fix predicate validated that URI as
+        loopback and then handed the authorization code to the attacker.
 
-        NOTE on which assertions carry the teeth, because two review rounds got
-        this wrong. The EXACT-MATCH cases below, and the userinfo-identical
-        port-only pair, are what actually fail when the byte gate is removed.
-        The relaxed-path backslash cases do NOT: they are refused by the
-        userinfo comparison anyway, since the crafted value carries
-        `evil.example:8443\` as its userinfo. The control-character cases are
-        defence in depth, not differentials — `urlsplit` strips \t \r \n just as
-        a browser does, so they were never the bug.
+        The assertions are grouped by WHY they fail, because two review rounds
+        misattributed that. In particular the control characters are NOT
+        differentials: `urlsplit` strips tab/CR/LF exactly as a browser does, so
+        tab is refused by this gate only because the gate is broader than the
+        differential — not because the two parsers disagree.
         """
         from tortoise.oauth import _redirect_uri_matches as m
         attack = "http://evil.example:8443\\@127.0.0.1/callback"
-        assert not m("http://127.0.0.1/callback", attack)
-        assert not m("http://127.0.0.1/callback",
-                     "http://evil.example:8443\\@localhost/callback")
-        assert not m("http://localhost/callback",
-                     "http://evil.example\\@localhost:3118/callback")
-        # The load-bearing case: the EXACT-match short-circuit must also be
-        # gated, or a differential string already in a client row bypasses the
-        # guard entirely. With the guard removed this returns True (verified by
-        # mutation), which is why it is asserted rather than assumed.
+
+        # ── Group 1: enforced by the byte gate ALONE ──────────────────────
+        # Each of these is mutation-verified to FAIL when
+        # `_unsafe_redirect_uri_bytes` is removed from `_redirect_uri_matches`.
+        #
+        # The exact-match short-circuit must also be gated, or a differential
+        # string already sitting in a client row bypasses the guard entirely.
         assert not m(attack, attack)
         assert not m("http://evil.example\\@localhost/callback",
                      "http://evil.example\\@localhost/callback")
-        # Genuinely userinfo-IDENTICAL on both sides (the backslash sits in the
-        # userinfo in both, so `urlsplit` reports the same username/password) and
-        # differing ONLY by port — so the userinfo comparison cannot be what
-        # refuses it; only the byte gate can. Verified by mutation: this pair
-        # returns True with the gate removed, False with it in place.
+        # Userinfo identical on both sides and differing ONLY by port, so
+        # nothing but the byte gate can refuse this pair.
         assert not m("http://evil.example:8443\\@127.0.0.1:1/callback",
                      "http://evil.example:8443\\@127.0.0.1:2/callback")
-        # A backslash anywhere is refused, including on the registered side.
-        assert not m("http://localhost\\cb", "http://localhost:3118\\cb")
-        # Defence in depth (NOT differentials — see the docstring above).
+        # Tab: both sides parse to the same loopback host, so again only the
+        # byte gate can refuse it.
         assert not m("http://localhost/cb", "http://localhost\t:3118/cb")
+
+        # ── Group 2: behaviour pins, NOT gate isolation ────────────────────
+        # These stay False with the gate removed — they are refused by the
+        # loopback predicate (the parsed host is not a loopback host) or by the
+        # userinfo comparison. Kept because they pin the boundary, not because
+        # they prove the guard.
+        assert not m("http://127.0.0.1/callback", attack)
+        assert not m("http://localhost/callback",
+                     "http://evil.example\\@localhost:3118/callback")
+        # The backslash lands in the REGISTERED host, so `_is_loopback` rejects
+        # it before any comparison.
+        assert not m("http://localhost\\cb", "http://localhost:3118\\cb")
         assert not m("http://localhost/cb", "http://local\x00host:3118/cb")
         assert not m("http://localhost/cb", "http://localhost\x7f:3118/cb")
 

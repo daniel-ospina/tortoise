@@ -48,8 +48,8 @@ needs no client_id paste.
    **`redirect_uri` matching (#2846).** For **loopback** redirect URIs the port
    is ignored when matching the registered value (RFC 8252 §7.3 — a native
    client binds an ephemeral port at request time and cannot know it at
-   registration; Claude Code CLI depends on this). Scheme, host, path, query,
-   fragment and userinfo must still match exactly, and every **non-loopback**
+   registration; Claude Code CLI depends on this). Scheme, host, path, params,
+   query, fragment and userinfo must still match exactly, and every **non-loopback**
    URI keeps strict exact-string matching. Host is never relaxed:
    `localhost` and `127.0.0.1` are different hosts. A URI containing a raw
    backslash is refused at registration **and** at validation: WHATWG ends the
