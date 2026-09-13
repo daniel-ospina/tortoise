@@ -469,15 +469,19 @@ class TestInvalidateSupersede:
         assert len(corrected) == 1, "CORRECTS edge duplicated on re-supersede"
 
     def test_invalidate_idempotent_corrects_edge(self, sdk):
-        # #330: re-invalidating the same pair must not duplicate CORRECTS, and
-        # the second call re-asserts (both points still exist -> True) without
-        # creating extra edges.
+        # #330: re-invalidating the same pair must not duplicate CORRECTS.
+        # #2498: the repeat is now an ILLEGAL transition — the shared lifecycle
+        # guard treats the `outdated=true` flag invalidate just wrote as
+        # terminal, so the second call raises instead of re-asserting. The old
+        # #330 re-assert moved `expiredAt` forward and MERGEd one CORRECTS edge
+        # per distinct corrector onto a node every read surface already
+        # excludes. The first call's CORRECTS edge stays unique.
         old = _make_point(sdk, content="old")
         new = _make_point(sdk, content="new")
         r1 = sdk.invalidate_point(old["id"], new["id"])
         assert r1["invalidated"] is True
-        r2 = sdk.invalidate_point(old["id"], new["id"])
-        assert r2["invalidated"] is True  # present endpoints -> re-assert
+        with pytest.raises(ValueError, match="already terminal"):
+            sdk.invalidate_point(old["id"], new["id"])
         corrected = sdk.traverse(new["id"], "CORRECTS", direction="outgoing")
         assert len(corrected) == 1, "CORRECTS edge duplicated on re-invalidate"
 

@@ -22,7 +22,7 @@ import threading
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Protocol, runtime_checkable
+from typing import NamedTuple, Protocol, runtime_checkable
 
 logger = logging.getLogger(__name__)
 
@@ -79,6 +79,50 @@ _DB_TIMEOUT_MAX_S = 60.0
 #: (fail-closed, so not #2850, but the same "finite but absurd" class floored
 #: for the health-probe interval). Below the floor we fall back to the default.
 _DB_TIMEOUT_MIN_S = 0.05
+
+#: #3350: explicit, bounded retry policy for the EMBEDDED client.
+#:
+#: redis-py 8's client DEFAULT is ``Retry(ExponentialWithJitterBackoff(
+#: base=DEFAULT_RETRY_BASE, cap=DEFAULT_RETRY_CAP), retries=10)`` — TEN
+#: retries after the first attempt. Two consequences, both bad here:
+#:
+#:  * a read timeout costs ``11 x socket_timeout`` PLUS up to ~75s of
+#:    exponential jitter backoff, so ONE wedged embedded daemon parks
+#:    whatever thread is running the query for ~59s (measured, SIGSTOPped
+#:    daemon, before this constant existed) — and after
+#:    ``TORTOISE_FALKORDB_SOCKET_TIMEOUT_S`` was wired in (#3350) the
+#:    DEFAULT 10s read timeout would have made that ~115s;
+#:  * it makes the bound UN-KNOWABLE from outside: setting
+#:    ``TORTOISE_FALKORDB_SOCKET_TIMEOUT_S=t`` still waited ~11t, so the
+#:    knob an operator lowers to tighten the loop-stall ceiling did not
+#:    tighten what actually parked the thread.
+#:
+#: ONE retry keeps the transient-blip recovery (a single reconnect) while
+#: capping the multiplier at 2, so the embedded lane's worst case is
+#: statically ``(1 + _EMBEDDED_RETRY_COUNT) * socket_timeout + backoff``
+#: rather than a dependency default that can change under us. That is the
+#: property ``monitoring``'s layered-timeout doctrine needs ("make the inner
+#: call bounded so the worker frees itself"). The HOST branch is deliberately
+#: untouched — its retry policy is not what #3350 is about.
+_EMBEDDED_RETRY_COUNT = 1
+_EMBEDDED_RETRY_BASE = 0.1
+_EMBEDDED_RETRY_CAP = 1.0
+
+
+def _embedded_retry():
+    """Bounded retry policy for the embedded client (#3350).
+
+    See ``_EMBEDDED_RETRY_COUNT`` for why this exists. Built per call rather
+    than shared so no state is aliased across clients.
+    """
+    from redis.backoff import ExponentialWithJitterBackoff
+    from redis.retry import Retry as _Retry
+
+    return _Retry(
+        backoff=ExponentialWithJitterBackoff(
+            base=_EMBEDDED_RETRY_BASE, cap=_EMBEDDED_RETRY_CAP),
+        retries=_EMBEDDED_RETRY_COUNT,
+    )
 
 
 def _socket_timeouts() -> tuple[float, float]:
@@ -701,6 +745,45 @@ def _validate_uri_scheme(scheme: str) -> str:
     return scheme
 
 
+class DbEndpoint(NamedTuple):
+    """Resolved FalkorDB server endpoint (the canonical URI → client kwargs)."""
+
+    host: str
+    port: int
+    username: str | None
+    password: str | None
+    graph_name: str
+    ssl: bool
+
+
+def resolve_db_endpoint(uri: str, graph_name: str | None = None) -> DbEndpoint:
+    """Parse a connection URI into FalkorDB client endpoint parameters.
+
+    THE canonical URI → endpoint derivation (#2974): ``FalkorProjection.
+    from_uri`` (every product connection) and ``tortoise.backup._bgsave`` (the
+    backup snapshot) both call this, so a backup can never dial a different
+    instance than the product it is backing up. Before this existed the same
+    parse was inlined in ``from_uri`` and independently re-implemented by
+    callers — one of which hardcoded an embedded ``localhost:16379``.
+
+    ``graph_name`` overrides the URI-path-derived name (multi-tenant
+    isolation, #7886); when None the URI path is used (default "tortoise").
+    Unsupported schemes raise ValueError via ``_validate_uri_scheme``.
+    """
+    from urllib.parse import urlparse
+    parsed = urlparse(uri)
+    _validate_uri_scheme(parsed.scheme)
+    return DbEndpoint(
+        host=parsed.hostname or "localhost",
+        port=parsed.port or 16379,
+        username=parsed.username or None,
+        password=parsed.password or None,
+        graph_name=(graph_name if graph_name is not None
+                    else (parsed.path.lstrip('/') or "tortoise")),
+        ssl=(parsed.scheme == "rediss"),
+    )
+
+
 # ── FalkorProjection ──────────────────────────────────────────────────────
 
 
@@ -937,12 +1020,41 @@ class FalkorProjection(
             aof_dir = (
                 os.path.basename(os.path.abspath(path)) + "-appendonlydir"
             ) if (path != ":memory:" and aof_enabled) else None
+            # #3350: the embedded client was built with NO socket timeouts of
+            # OUR choosing, so every blocking call on it was bounded only by
+            # redis-py's own implicit connection default (5s) — invisible to
+            # operators, and multiplied by the client's retry policy.
+            # Measured against a SIGSTOPped embedded daemon: one `RETURN 1`
+            # blocked ~59s, outliving the /health probe's 1.5s outer bound by
+            # ~40x and parking the probe worker that whole time (#3350).
+            # `TORTOISE_FALKORDB_SOCKET_TIMEOUT_S` — the knob monitoring.py's
+            # budgets are documented in terms of, and the one an operator
+            # lowers to tighten the loop-stall ceiling — had no effect on this
+            # lane at all. Wire the SAME resolved READ timeout the host branch
+            # uses (redis-py's UnixDomainSocketConnection applies
+            # `socket_timeout` to the socket after connect, which is the leg a
+            # wedged daemon parks on) and pair it with `_embedded_retry()` so
+            # the worst case is a knowable `2 x socket_timeout`, not an
+            # 11x-multiplied dependency default.
+            #
+            # NOT passed here: `socket_connect_timeout`. redis-py 8's
+            # ConnectionPool does not forward it for a unix-domain socket
+            # (verified: `Redis(unix_socket_path=..., socket_connect_timeout=
+            # 1.5)` leaves `conn.socket_connect_timeout` at redis-py's own 5s
+            # default), so passing it would be a bound that looks wired but
+            # is not — the trap this change exists to remove. Its own 5s
+            # default still applies, and a local UDS connect cannot be the
+            # black hole: the read leg is. (Operators wanting that leg too
+            # need a custom connection class — filed separately.)
+            read_to = _socket_timeouts()[1]
             self.db = FalkorDB(
                 path,
                 serverconfig=(
                     {"appendonly": "yes", "appenddirname": aof_dir}
                     if (path != ":memory:" and aof_enabled) else None
                 ),
+                socket_timeout=read_to,
+                retry=_embedded_retry(),
             )
         elif host is not None:
             # Docker FalkorDB
@@ -1137,13 +1249,8 @@ class FalkorProjection(
 
         Unsupported schemes raise ValueError with an actionable message.
         """
-        from urllib.parse import urlparse
-        parsed = urlparse(uri)
-        _validate_uri_scheme(parsed.scheme)
-        username = parsed.username or None
-        password = parsed.password or None
-        if graph_name is None:
-            graph_name = parsed.path.lstrip('/') or "tortoise"
+        endpoint = resolve_db_endpoint(uri, graph_name)
+        graph_name = endpoint.graph_name
         # Epic #1647 (cycle-4 P2-2 / cycle-6 P2-13 / cycle-7 P2-9 / #1686): in
         # a TEST SESSION with a calling test frame (TORTOISE_TEST_MODE=1 AND
         # _resolve_caller_stem() is not None — the SAME predicate as the
@@ -1162,12 +1269,12 @@ class FalkorProjection(
         if os.environ.get("TORTOISE_TEST_MODE") == "1" \
                 and _resolve_caller_stem() is not None:
             _journal_append_product(graph_name)
-        return cls(host=parsed.hostname or "localhost",
-                   port=parsed.port or 16379,
-                   username=username,
-                   password=password,
+        return cls(host=endpoint.host,
+                   port=endpoint.port,
+                   username=endpoint.username,
+                   password=endpoint.password,
                    graph_name=graph_name,
-                   ssl=(parsed.scheme == "rediss"))
+                   ssl=endpoint.ssl)
 
     def _norm(self, ev: dict) -> dict:
         """Normalize event shape — tolerates API (flat) and script (nested point)."""
@@ -1703,9 +1810,10 @@ class FalkorProjection(
         # is never live-truth, so keep the LAST supersede survivor per old
         # id (the earlier fold's CORRECTS S1→A would ghost beside the final
         # S2→A). PointInvalidated folds ALL survive the id filter and are
-        # NOT canonicalized — double-invalidate is live-legal (no terminal
-        # guard; outdated is a flag), so every survivor is live-truth and
-        # must fold (distinct corrected_by → 2 CORRECTS, acceptance b).
+        # NOT canonicalized — #2498: the SDK now REJECTS the repeat (the
+        # outdated=true flag is terminal), but a raw/legacy producer can still
+        # journal it, so every survivor folds (distinct corrected_by → 2
+        # CORRECTS, acceptance b).
         # Chains A→B→C have distinct old ids — each link folds independently.
         supersede_last: dict[str, tuple[int, dict]] = {}
         invalidate_survivors: list[tuple[int, dict]] = []
