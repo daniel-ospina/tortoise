@@ -33,7 +33,7 @@ import time  # noqa: F401
 from datetime import datetime, timezone
 from typing import Any, Callable  # noqa: UP035
 
-from .alert_store import AlertStore
+from .alert_store import AlertStore, CloseCooldown
 
 logger = logging.getLogger(__name__)
 
@@ -580,7 +580,7 @@ class BackupWatcher:
                 "(retried next poll)"
             )
 
-    def _alert_leg(self, op: str, kind: str, subject: str = "") -> None:
+    def _alert_leg(self, op: str, kind: str, subject: str = "") -> bool:
         """One alert-store leg, contained AND attributed (#3031 cycle-2 review P2).
 
         Contained per leg rather than per block, for two reasons:
@@ -592,17 +592,37 @@ class BackupWatcher:
           unchanged: the next poll re-evaluates every leg, and the lifecycle is
           dedup-backed and idempotent.
 
+        Returns True when the leg SUCCEEDED. Callers that iterate a shrunken
+        universe need that signal to keep a failed subject pending instead of
+        retiring it (a swallowed failure + a retired subject is a permanent
+        orphan — the defect the graph path had and the team path shared).
+        `CloseCooldown` is logged at INFO without a traceback: it means "still
+        open, backing off" rather than "something broke".
+
         The heartbeat written just after this block is the watcher's own liveness
         evidence, so no leg may ever escape into `poll()` — an escaped exception
         is what fabricated the false WATCHER_DOWN this change removes.
         """
+        if op not in ("open_incident", "resolve_incident"):
+            # A typo'd op would raise AttributeError into the catch-all below and
+            # silently disable EVERY leg while the heartbeat stayed healthy
+            # (final-cycle review P2). Fail loudly instead — the bot/daemon
+            # watchdogs surface a crash, a green-but-deaf alerter does not.
+            raise ValueError(f"unknown alert leg op: {op!r}")
         try:
             getattr(self._alerts, op)(kind, subject)
+            return True
+        except CloseCooldown as cool:
+            logger.info(
+                "alert leg cooling down: %s(%s, %r) — %s", op, kind, subject, cool,
+            )
+            return False
         except Exception:
             logger.exception(
                 "alert leg failed: %s(%s, %r) — heartbeat unaffected, "
                 "re-evaluated next poll", op, kind, subject,
             )
+            return False
 
     def _drive_alerts(self, status: dict[str, Any], r2_ok: bool | None,
                       *, prev_per_team: dict[str, str] | None = None) -> None:
@@ -639,13 +659,22 @@ class BackupWatcher:
                     self._alert_leg("resolve_incident", "STALE", team)
                     self._alert_leg("resolve_incident", "NEVER_BACKED_UP", team)
                     self._alert_leg("resolve_incident", "METADATA_LOST", team)
-            if status.get("no_teams"):
+            if status.get("no_teams") and r2_ok is True:
                 # Resolve the per-team incidents of the last-known surface. The
                 # snapshot is taken by the caller BEFORE it overwrites
                 # `_last_status` (cycle-2 review P2) — reading
                 # `self._last_status` here saw the CURRENT, empty surface, so the
                 # leg was a no-op and a fully-removed team's incidents never
                 # closed.
+                #
+                # `r2_ok is True` is REQUIRED (final-cycle review P1): the poll sets
+                # `no_teams` whenever the seam provider AND the R2 listing are both
+                # empty — and `compute_status` substitutes `r2_teams = teams` on a
+                # FAILED R2 read, so an R2 outage coinciding with a control-plane
+                # enumeration failure reads as "no_teams" and this leg would close
+                # every live team incident and re-file it on recovery (fabricated
+                # false recovery — the class the per-graph `graph_surface_confirmed`
+                # gate already prevents).
                 #
                 # BACKUP_SET_MISSING is deliberately EXCLUDED (cycle-3 review P2,
                 # corrected): a team whose `ops/teams/{team}/state.json` lingers is
@@ -656,12 +685,32 @@ class BackupWatcher:
                 # closes only while the team is still enumerable (the team-surface
                 # resolve leg below), and once the team is fully removed the incident
                 # needs a manual close — see the runbook residual.
-                for team in sorted(prev_per_team or {}):
+                #
+                # A team whose resolve FAILED stays pending (final-cycle review P1):
+                # `prev_per_team` is a one-shot snapshot, so without carrying the
+                # failure forward the subject would never be retried and the
+                # incident would be orphaned forever (the defect the graph path
+                # already had fixed).
+                pending = set(getattr(self, "_pending_team_resolves", set()))
+                pending -= set(status.get("per_team", {}))   # reappeared → resolved
+                for team in sorted(set(prev_per_team or {}) | pending):
+                    ok = True
                     for kind in ("STALE", "NEVER_BACKED_UP", "METADATA_LOST"):
-                        self._alert_leg("resolve_incident", kind, team)
+                        if not self._alert_leg("resolve_incident", kind, team):
+                            ok = False
+                    if ok:
+                        pending.discard(team)
+                    else:
+                        pending.add(team)
+                self._pending_team_resolves = pending
             if status.get("driver_down"):
                 self._alert_leg("open_incident", "DRIVER_DOWN")
-            else:
+            elif r2_ok is not False:
+                # Resolving requires HAVING READ the heartbeat: on an R2 read
+                # failure the heartbeat is never read (`driver_ts=None`), so
+                # `driver_down` is False out of ignorance, not out of evidence.
+                # Resolving there would clear a real DRIVER_DOWN and re-file it on
+                # recovery (final-cycle review P2).
                 self._alert_leg("resolve_incident", "DRIVER_DOWN")
             for key, state in status.get("per_graph", {}).items():
                 if state == "never":
@@ -679,8 +728,12 @@ class BackupWatcher:
                     self._alert_leg("resolve_incident", "BACKUP_SET_MISSING", key)
             for team in status.get("backup_set_missing", []):
                 self._alert_leg("open_incident", "BACKUP_SET_MISSING", team)
-            # BACKUP_SET_MISSING resolves when the team's archives reappear.
-            for team in status.get("per_team", {}):
+            # BACKUP_SET_MISSING resolves when the team's archives reappear — but
+            # only from a poll that actually READ the R2 surface (final-cycle
+            # review P2: `state_teams`/`r2_teams` are recomputed from the seam
+            # provider on a failed read, so an unverified poll must not "resolve"
+            # anything).
+            for team in status.get("per_team", {}) if r2_ok is not False else ():
                 if team not in status.get("backup_set_missing", []):
                     self._alert_leg("resolve_incident", "BACKUP_SET_MISSING", team)
             # R2_DOWN: emit while degraded-from-known-good, resolve when healthy.

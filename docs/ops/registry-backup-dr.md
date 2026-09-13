@@ -482,12 +482,19 @@ A closed incident's dedup object is **deleted**, so a **recurrence files a new
 issue** — that is the contract (`delete-to-resolve`), and the driver adopts a
 still-open issue only when the object's recorded issue is verifiably open. On the
 app side, a failed **close** makes `resolve_incident` **raise**: nothing is
-announced and nothing is deleted. Every leg that iterates (the watcher's polls,
-the sweep's resolver) retries it next run. **Two app-side paths have no automatic
-retry** — re-baseline and the monthly drill — so their responses carry
+announced and nothing is deleted, and the failure is recorded on the dedup object
+so the next attempt **backs off for 60 minutes** (`close_cooldown_min`). That bound
+matters: the close posts its audit comment *before* the state PATCH, so an
+unbounded retry would re-post the comment and spend GitHub's write budget every
+poll for as long as the incident is stuck. Every leg that iterates (the watcher's
+polls, the sweep's resolver) retries it — the watcher keeps a subject whose close
+failed **pending** across polls, for teams and graphs alike, so a transient close
+failure cannot orphan an incident. **Two app-side paths have no automatic retry**
+— re-baseline and the monthly drill — so their responses carry
 `incidents_unresolved` when a close failed: re-run the action once GitHub
 recovers, or close the issue by hand. Nothing pages a human about a close failure
-(no `ALERTER_DOWN` writer yet — #3412). The driver's `gh_close` mirrors the
+(no `ALERTER_DOWN` writer yet — #3412; the cooldown also means the retry is quiet,
+so watch the logs/`incidents_unresolved`). The driver's `gh_close` mirrors the
 ordering — a non-2xx PATCH keeps the dedup object and marks the run red, so the
 next hourly run retries.
 

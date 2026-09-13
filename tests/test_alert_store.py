@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC
 
 import pytest
 
@@ -609,3 +610,69 @@ def test_a_failed_delete_after_a_successful_close_does_not_swallow_the_recurrenc
     # A recurrence therefore re-files instead of being adopted by a closed issue.
     assert store.open_incident("STALE", "team_a") is True
     assert len(ch.issues) == 2
+
+
+# ── final-cycle review P1: bounded retry after a failed close ───────────────
+
+
+def _clocked_store(channels, storage, clock: list):
+    return AlertStore(
+        storage,
+        file_issue=channels.file_issue,
+        close_issue=channels.close_issue,
+        search_open=channels.search_open,
+        push_telegram=channels.push_telegram,
+        repo="daniel-ospina/tortoise",
+        assignee="daniel-ospina",
+        now=lambda: clock[0],
+        close_cooldown_min=60.0,
+    )
+
+
+def test_a_failed_close_is_not_retried_until_the_cooldown_expires():
+    """Final-cycle review P1: without a backoff, a permanently failing close is
+    retried every poll — two GitHub writes each, plus a duplicate audit comment
+    (the comment POST precedes the state PATCH) — with no cap. The failure is
+    recorded and the next attempt is skipped until the window passes, and the
+    skip RAISES `CloseCooldown` so callers keep the subject pending."""
+    from datetime import datetime, timedelta
+
+    from tortoise.alert_store import CloseCooldown
+
+    ch = _FakeChannels()
+    storage = MemoryStorage()
+    clock = [datetime(2026, 9, 13, 12, 0, 0, tzinfo=UTC)]
+    store = _clocked_store(ch, storage, clock)
+    assert store.open_incident("STALE", "team_a") is True
+    ch.fail_close = True
+    closes = {"n": 0}
+    real_close = ch.close_issue
+
+    def _counting_close(number, comment=None):
+        closes["n"] += 1
+        return real_close(number, comment)
+
+    store._close = _counting_close
+
+    with pytest.raises(RuntimeError):
+        store.resolve_incident("STALE", "team_a")
+    assert closes["n"] == 1
+
+    # Inside the window: skipped, and the close is NOT attempted again.
+    with pytest.raises(CloseCooldown):
+        store.resolve_incident("STALE", "team_a")
+    assert closes["n"] == 1, "the cooldown must not re-attempt the close"
+
+    # Past the window: attempted again.
+    clock[0] = clock[0] + timedelta(minutes=61)
+    with pytest.raises(RuntimeError):
+        store.resolve_incident("STALE", "team_a")
+    assert closes["n"] == 2
+
+    # A successful close clears the incident (delete-to-resolve), and the
+    # recorded failure goes with the object.
+    ch.fail_close = False
+    clock[0] = clock[0] + timedelta(minutes=61)
+    assert store.resolve_incident("STALE", "team_a") is True
+    with pytest.raises(KeyError):
+        storage.download("ops/alerts/STALE/team_a.json")

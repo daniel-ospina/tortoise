@@ -379,7 +379,10 @@ class TestDrSweep:
         assert body["status"] == "backed_up"
         assert ("resolve", "ENUM_DELTA", "") in fake.calls
         assert ("resolve", "P0_GUARD_FAIL", "team_x") in fake.calls
-        # Not open → no resolve call (and no per-graph read: exactly one LIST/kind).
+        # Not open → no resolve call. (This line would hold even without the
+        # open-set check — no candidate is generated for `team_x:gone`; the
+        # open-set check itself is pinned by SWEEP_NO_COVERAGE / NO_ELIGIBLE_TEAMS
+        # never appearing in `incidents_resolved` below.)
         assert ("resolve", "P0_GUARD_FAIL", "team_x:gone") not in fake.calls
         assert ("resolve", "SWEEP_NO_COVERAGE", "") not in fake.calls
         assert ("open_subjects", "ENUM_DELTA", "") in fake.calls
@@ -416,6 +419,20 @@ class TestDrSweep:
         assert r.status_code == 200, r.text
         assert ("resolve", "ENUM_DELTA", "global") in fake.calls
         assert r.json()["incidents_resolved"] == ["ENUM_DELTA/global"]
+
+    def test_sweep_reports_a_listing_outage_instead_of_reading_clean(
+            self, client, dr_env, mem_storage, monkeypatch):
+        """Final-cycle review P2: `open_subjects` fails safe (empty set), which made
+        an R2 LIST outage indistinguishable from "nothing was open" — the endpoint
+        now lists strictly and reports the candidates it could not verify."""
+        _seed_team("team_x", nodes=2)
+        fake = _FakeAlerts(open_subjects={"ENUM_DELTA": {"_"}},
+                           fail_listing_kinds={"ENUM_DELTA"})
+        monkeypatch.setattr(ha_mod, "_alert_store_from", lambda cfg: fake)
+
+        r = client.post("/v1/internal/backups/sweep", headers=INTERNAL_HEADERS)
+        assert r.status_code == 200, r.text
+        assert r.json().get("incidents_unresolved") == ["ENUM_DELTA"]
 
     def test_sweep_backs_up_seeded_team(self, client, dr_env, mem_storage):
         _seed_team("team_x", nodes=2)
@@ -1363,17 +1380,21 @@ class _FakeAlerts:
     Pass ``{"KIND": {"subject", ...}}`` to declare open incidents.
     """
 
-    def __init__(self, open_subjects=None, fail_resolve_kinds=()):
+    def __init__(self, open_subjects=None, fail_resolve_kinds=(),
+                 fail_listing_kinds=()):
         self.calls: list = []
         self._open = dict(open_subjects or {})
         self._fail_resolve = set(fail_resolve_kinds)
+        self.fail_listing_kinds = set(fail_listing_kinds)
 
     def open_incident(self, kind, team_id="", detail=None):
         self.calls.append(("open", kind, team_id, dict(detail or {})))
         return True
 
-    def open_subjects(self, kind):
+    def open_subjects(self, kind, *, strict=False):
         self.calls.append(("open_subjects", kind, ""))
+        if strict and kind in getattr(self, "fail_listing_kinds", set()):
+            raise RuntimeError("R2 listing outage")
         return set(self._open.get(kind, set()))
 
     def resolve_incident(self, kind, team_id=""):

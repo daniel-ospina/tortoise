@@ -57,6 +57,28 @@ def _write_json(storage, key: str, data: dict[str, Any]) -> None:
     storage.upload(key, json.dumps(data, indent=2).encode("utf-8"), content_type="application/json")
 
 
+def _parse_iso(value: Any) -> datetime | None:
+    """Best-effort ISO parse — a corrupt/missing timestamp never raises (it simply
+    means "no cooldown recorded")."""
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except (ValueError, TypeError):
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)  # noqa: UP017
+
+
+class CloseCooldown(RuntimeError):
+    """Raised when a close is skipped because a recent attempt for the same
+    incident failed (bounded-retry backoff, final-cycle review P1).
+
+    Not an error condition: the incident is simply still open and the caller must
+    keep treating the subject as unresolved. It exists as a distinct type so the
+    containment layers can log it at INFO without a traceback.
+    """
+
+
 class AlertStore:
     """Per-incident alert lifecycle over a BackupStorage (R2 create-once)."""
 
@@ -71,6 +93,7 @@ class AlertStore:
         repo: str,
         assignee: str | None = None,
         now: datetime | None = None,
+        close_cooldown_min: float = 60.0,
     ) -> None:
         self._storage = storage
         self._file = file_issue
@@ -80,6 +103,12 @@ class AlertStore:
         self._repo = repo
         self._assignee = assignee
         self._now = now or (lambda: datetime.now(timezone.utc))  # noqa: UP017
+        # Backoff after a failed close (final-cycle review P1: a permanently
+        # failing close would otherwise be retried every poll — 2 GitHub writes
+        # each, plus a duplicate audit comment because the comment POST precedes
+        # the state PATCH — with no cap. One attempt per window bounds both the
+        # comment spam and the write burst).
+        self._close_cooldown_min = close_cooldown_min
 
     def _clock(self) -> datetime:
         """Current time — evaluated per call so time-based suppression expires
@@ -175,10 +204,10 @@ class AlertStore:
             # logs; wiring a deferred-filing signal into `/status` + an
             # ALERTER_DOWN writer is the tracked follow-up.
             logger.error(
-                "incident search failed for %s/%s: %s — filing DEFERRED "
+                "incident search failed for %s/%s (%s): %s — filing DEFERRED "
                 "(a failed search is not 'no incident'; the whole alert path is "
                 "deaf until the search recovers)",
-                kind, team_id or "global", e,
+                kind, team_id or "global", type(e).__name__, e,
             )
             _write_json(self._storage, key, state)
             return False
@@ -198,7 +227,7 @@ class AlertStore:
             _write_json(self._storage, key, state)
         return True
 
-    def open_subjects(self, kind: str) -> set[str]:
+    def open_subjects(self, kind: str, *, strict: bool = False) -> set[str]:
         """The subjects with an OPEN dedup object for ``kind`` (#3030 review).
 
         One LIST instead of an R2 read per candidate: the sweep endpoint must not
@@ -225,7 +254,10 @@ class AlertStore:
         ``team_id=""`` (→ ``"_"``), so this does not affect them today.
 
         Fails SAFE: a listing error returns the empty set, so nothing is resolved
-        on a read the caller could not perform.
+        on a read the caller could not perform. With ``strict=True`` it re-raises
+        instead, for a caller that must distinguish "nothing open" from "could not
+        look" in its own report (the sweep endpoint does — a silent empty set made
+        an R2 LIST outage read as a clean run).
         """
         prefix = f"{DEDUP_PREFIX}{kind}/"
         try:
@@ -234,6 +266,8 @@ class AlertStore:
             logger.warning(
                 "open_subjects(%s) list failed: %s — resolving nothing this run", kind, e
             )
+            if strict:
+                raise
             return set()
         return {
             k[len(prefix):-len(".json")]
@@ -266,13 +300,37 @@ class AlertStore:
             return False
         number = state.get("issue_number")
         if number:
+            # Bounded retry (final-cycle review P1): skip the attempt while a
+            # recent failure is cooling down. Raise the dedicated type so callers
+            # keep the subject PENDING (a plain False would read as "nothing open"
+            # and retire it).
+            failed_at = _parse_iso(state.get("close_failed_at"))
+            if failed_at is not None:
+                age_min = (self._clock() - failed_at).total_seconds() / 60.0
+                if age_min < self._close_cooldown_min:
+                    raise CloseCooldown(
+                        f"{kind} #{number}: last close attempt failed "
+                        f"{age_min:.0f} min ago — retrying after "
+                        f"{self._close_cooldown_min:.0f} min"
+                        + (f" ({team_id})" if team_id else "")
+                    )
             try:
                 self._close(int(number), "Resolved — condition cleared.")
             except Exception as e:
+                # Record the failure so the next attempts back off, then re-raise:
+                # nothing is announced and the object is kept, so the incident
+                # stays OPEN and is retried (after the cooldown).
+                state["close_failed_at"] = self._clock().isoformat()
+                state["close_failures"] = int(state.get("close_failures") or 0) + 1
+                try:
+                    _write_json(self._storage, key, state)
+                except Exception:
+                    logger.exception("could not record a close failure for %s", key)
                 logger.warning(
                     "issue close failed for %s #%s: %s — leaving the incident OPEN "
-                    "(no resolution announced, object kept) so the next poll retries",
-                    kind, number, e,
+                    "(no resolution announced, object kept); retrying after "
+                    "%.0f min",
+                    kind, number, e, self._close_cooldown_min,
                 )
                 raise
             self._push_with_pending(

@@ -723,13 +723,13 @@ def test_alert_failure_does_not_lose_the_poll_or_the_heartbeat():
 
 def test_universe_shrink_closes_the_absent_team_kinds_without_churn():
     """A team whose seam entry and R2 prefix disappear closes its STALE incident on
-    the shrink poll — and a lingering `ops/teams/{team}/state.json` keeps
-    BACKUP_SET_MISSING open WITHOUT the resolve/re-open churn that would flip the
-    Telegram ✅/🚨 every poll (cycle-3 review P2).
+    the shrink poll, and a lingering `ops/teams/{team}/state.json` keeps
+    BACKUP_SET_MISSING open.
 
-    The lingering state file IS the condition that kind reports (state without
-    archives), so staying open is correct; what matters is that repeated polls do
-    not re-file/re-announce it.
+    NOTE: this test does NOT defend the shrink leg's BACKUP_SET_MISSING exclusion —
+    the kind is not yet open when the leg runs, so re-adding it to the tuple still
+    passes (verified by mutation). The exclusion is pinned by
+    `test_no_teams_shrink_does_not_resolve_then_reopen_a_backup_set_missing_team`.
     """
     ch = _Channels()
     storage = MemoryStorage()
@@ -803,3 +803,44 @@ def test_no_teams_shrink_does_not_resolve_then_reopen_a_backup_set_missing_team(
     assert not [t for t in ch.telegram if "resolved" in t], ch.telegram
     assert max(ch.issues) == number, "the incident must not be re-filed (flip)"
     assert list(ch.issues.values()) == ["[DR] BACKUP_SET_MISSING — team_a"], ch.issues
+
+
+def test_a_failed_team_resolve_is_carried_pending_and_retried():
+    """Final-cycle review P1: `prev_per_team` is a ONE-SHOT snapshot, so a team
+    whose close failed on the shrink poll would never be revisited — the same
+    permanent-orphan defect the graph path fixed with its `pending` set. The
+    failure must be carried in `_pending_team_resolves` and retried once the
+    close cooldown allows it.
+    """
+    ch = _Channels()
+    storage = MemoryStorage()
+    clock = [FIXED]
+    w = _watcher(storage, ch, teams=(), now_fn=lambda: clock[0])
+    assert w._alerts.open_incident("STALE", "team_a") is True
+    assert w._alerts.open_incident("NEVER_BACKED_UP", "team_a") is True
+    assert w._alerts.open_incident("METADATA_LOST", "team_a") is True
+    w._last_status = {"per_team": {"team_a": "stale"}}
+
+    attempts = {"n": 0}
+
+    def _flaky(kind, team_id=""):
+        attempts["n"] += 1
+        raise RuntimeError("github 403")
+
+    w._alerts.resolve_incident = _flaky  # type: ignore[method-assign]
+
+    w.poll()
+    first = attempts["n"]
+    assert first >= 3, "the shrink poll must attempt the team's kinds"
+    assert "team_a" in w._pending_team_resolves, "the failure must be carried"
+
+    # Next poll (still cooling down / still failing): retried, not forgotten.
+    clock[0] = clock[0] + timedelta(minutes=5)
+    w.poll()
+    assert attempts["n"] > first, "the pending team must be retried"
+    assert "team_a" in w._pending_team_resolves
+
+    # Recovery: the resolves succeed and the team leaves the pending set.
+    w._alerts.resolve_incident = lambda kind, team_id="": True  # type: ignore[method-assign]
+    w.poll()
+    assert "team_a" not in w._pending_team_resolves

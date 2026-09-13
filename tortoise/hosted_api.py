@@ -20584,24 +20584,32 @@ async def backups_sweep(request: Request):
         for kind, subject in candidates:
             try:
                 if kind not in open_cache:
-                    open_cache[kind] = await asyncio.to_thread(alerts.open_subjects, kind)
+                    # strict: a failed LIST must not be indistinguishable from
+                    # "nothing open" (it would make an R2 outage read as a clean
+                    # sweep — final-cycle review P2). The raise lands below.
+                    open_cache[kind] = await asyncio.to_thread(
+                        alerts.open_subjects, kind, strict=True
+                    )
                 # A platform subject has two spellings in the store: `_` (what
                 # `_key()` writes for an empty subject) and a literal `global`
-                # (the restore-drill path files that one). Accept either — and
-                # resolve the spelling that MATCHED: they are different objects,
-                # so passing `""` for a `global`-spelled incident would read
-                # `_.json` and silently clear nothing (cycle-3 review).
-                target = subject
-                if not subject and "global" in open_cache[kind]:
-                    target = "global"
-                if (target or "_") not in open_cache[kind]:
+                # (the restore-drill path files that one). They are DIFFERENT
+                # objects, so match whichever is open and resolve BOTH when both
+                # are (resolving only the matched one left the other open forever
+                # — cycle-3/4 review).
+                spellings = [subject] if subject else ["", "global"]
+                targets = [
+                    t for t in spellings
+                    if (t or "_") in open_cache[kind]
+                ]
+                if not targets:
                     continue
-                if await asyncio.to_thread(alerts.resolve_incident, kind, target):
-                    resolved.append(f"{kind}/{target}" if target else kind)
+                for target in targets:
+                    if await asyncio.to_thread(alerts.resolve_incident, kind, target):
+                        resolved.append(f"{kind}/{target}" if target else kind)
             except Exception as e:
-                # The close raised (a failed close leaves the incident open). Do
-                # not report it as resolved; surface it so the run does not read
-                # as a clean sweep when a guard incident is still open.
+                # A raised close (incident still open) OR a failed listing. Do not
+                # report it as resolved; surface it so the run does not read as a
+                # clean sweep.
                 failed.append(f"{kind}/{subject}" if subject else kind)
                 _logger.warning(
                     "incident resolve failed for %s/%s: %s", kind, subject or "global", e
@@ -21285,13 +21293,20 @@ async def backups_drill_scheduled(request: Request):
         except Exception:
             _logger.warning("RESTORE_DRILL_FAILED open failed (RTO-breach path)", exc_info=True)
     else:
-        # success (or no eligible archive) closes any open incident
+        # success (or no eligible archive) closes any open incident. A failed
+        # close has NO retry until the next monthly drill, so report it in the
+        # response (final-cycle review P2 — the runbook claimed this field).
         try:
             await asyncio.to_thread(
                 alerts.resolve_incident, _DRILL_FAILED_KIND, "global"
             )
         except Exception:
-            _logger.warning("RESTORE_DRILL_FAILED resolve failed", exc_info=True)
+            result["incidents_unresolved"] = [f"{_DRILL_FAILED_KIND}/global"]
+            _logger.warning(
+                "RESTORE_DRILL_FAILED resolve failed — the incident is STILL OPEN "
+                "and only another drill (or a manual close) clears it",
+                exc_info=True,
+            )
     return result
 
 

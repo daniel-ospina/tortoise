@@ -170,7 +170,12 @@ r2_put_once() { # key body_file -> 0 created, 1 already exists, 2 UNRESOLVED (lo
   # could overwrite a concurrent writer's object and reset its issue_number to
   # null — the duplicate-risk class #3029 removes. Report unresolved instead.
   if r2_head "$1"; then return 1; fi
-  fail "r2_put_once: could not create nor confirm $1 — conditional write rejected and the HEAD-check could not confirm absence. Dedup is unverified; refusing a blind put."
+  # Include the (truncated) AWS cause: "conditional write rejected" alone cannot
+  # distinguish an aws CLI that lacks --if-none-match (where this runner files
+  # NOTHING and is red every hour) from broken creds or a transient network
+  # fault — each needs a different operator action (final-cycle review P2).
+  cause="$(printf '%s' "${out:-}" | tr '\n' ' ' | cut -c1-200)"
+  fail "r2_put_once: could not create nor confirm $1 — conditional write rejected (${cause:-no output}) and the HEAD-check could not confirm absence. Dedup is unverified; refusing a blind put."
   return 2
 }
 r2_get() { # key -> body (empty on failure)
