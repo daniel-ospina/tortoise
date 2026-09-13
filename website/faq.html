@@ -262,11 +262,11 @@
       <h2>Using Tortoise</h2>
 
       <h3 id="pricing">What does it cost?</h3>
-      <p>Pricing is stated on the <a href="https://tortoise.premiselabs.co/#pricing-section">product page</a>. Self-hosting is also a real option if you would rather run it yourself than pay per request (see <a href="/self-hosted">self-hosted</a>) — the source is public and the licence is <a href="/license">source-available rather than open source</a>, with production use free below the $5M revenue threshold.</p>
+      <p>Pricing is stated on the <a href="https://tortoise.premiselabs.co/#pricing-section">product page</a> — metered write operations, with reads free at every tier. Self-hosting is also a real option if you would rather run it yourself than pay per write (see <a href="/self-hosted">self-hosted</a>): the source is public and the licence is <a href="/license">source-available rather than open source</a>, with production use free for organisations at or below the $5M revenue threshold.</p>
       <p>We are not going to restate a price here, because a copy of a price is exactly the kind of thing that goes stale without anyone noticing. The product page is the single place it is stated.</p>
 
       <h3 id="export">Can I export my graph, and what if I stop using it?</h3>
-      <p>Yes, on both paths. Self-hosted, the CLI writes a versioned encrypted export artifact (<code>tortoise export</code>), and the graph lives in your own database anyway. On the hosted service, a team owner can export the full graph — every point with its properties, every relationship, entities and events — as JSON; it is owner-only, rate-limited and audit-logged.</p>
+      <p>Yes, on both paths. Self-hosted, the CLI writes a versioned encrypted export artifact (<code>tortoise export</code>), and the graph lives in your own database anyway. On the hosted service, a team owner can export the graph — every point with its properties, every relationship, and entity nodes, plus the recent event log (the newest 5,000 events within the 30-day window) — as JSON; it is owner-only, rate-limited and audit-logged.</p>
       <p>What happens to your data after you stop using the service — retention, deletion, termination — is governed by the <a href="/tos">Terms of Service</a> and the <a href="/dpa">DPA</a>. Those documents govern that question; this page does not, and will not attempt to.</p>
 
       <h3 id="data-access">Who can read my data?</h3>

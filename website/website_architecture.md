@@ -45,7 +45,7 @@ Host routing lives in `website/functions/_middleware.ts`:
 | --- | --- | --- |
 | Company | `website/index.html` | Premise Labs brand page, waitlist form |
 | Product | `website/product.html` | Tortoise marketing: features, pricing (Free/Solo/Pro/Team), self-hosted section |
-| Self-hosted | `website/self-hosted.html` | Self-hosted setup guide at `/self-hosted` (install, MCP config, export); guarded by `test_website_static.py` |
+| Self-hosted | `website/self-hosted.html` | Self-hosted setup guide at `/self-hosted` (install, daemon, onboarding, MCP connect, role memory); guarded by `test_harness_mcp_config.py`, crawled by `tests/e2e/test_legal_pages.py` |
 | Blog | `website/functions/blog/[[path]].ts` (SSR at `/blog` + `/blog/:slug`) · `sitemap.xml.ts` (`/blog/sitemap.xml`) · `feed.xml.ts` (`/blog/feed.xml`) · `api/posts.ts` (agent publish/edit, `/blog/api/posts`) · `website/blog/` (favicon, og-image) | Tortoise blog: server-rendered markdown posts (Supabase `blog_posts`), agent-published with review queue, PostHog + consent |
 | Docs | `website/docs.html` | Static docs: what/how/quickstart/MCP/API |
 | FAQ | `website/faq.html` | Design-objection FAQ at `/faq`: why relationships are stored, how EP confidence is computed, and pointers to pricing/legal for the commercial questions. Defers mechanism detail to `/docs` rather than restating it |

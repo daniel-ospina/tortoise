@@ -88,9 +88,10 @@ SOURCE_PATTERNS = {
                    "website/signin.html", "website/privacy.html",
                    # #3332: the public pages that own a guard test in this surface.
                    # docs.html + faq.html -> test_website_docs_consistency.py;
-                   # product.html -> test_website_static.py;
+                   # product.html + welcome.html -> test_website_static.py;
                    # index.html + privacy.html -> test_waitlist_form.py;
-                   # signup.html + signin.html -> test_signup_form_safety.py.
+                   # signup.html + signin.html -> test_signup_form_safety.py;
+                   # self-hosted.html -> test_harness_mcp_config.py.
                    # Listing a path is what makes a change to it select this
                    # surface at all — otherwise its guard test never runs.
                    "website/docs.html", "website/faq.html"),
