@@ -773,10 +773,37 @@ class _EntityHandlers:
             # `anchored_*` default to None (the LIVE CAS path passes neither),
             # which preserves the legacy unconditional fallback for every
             # non-replay caller.
+            # AND THE DISCRIMINATOR THAT MAKES IT SAFE — without it the guard
+            # BLOCKS a legitimate fallback. `test_status_projection`'s
+            # `test_rebuild_all_legacy_idless_object_fold_survives` (#2164 issue
+            # B) journals a legacy registration under a pre-canonical id
+            # (`github-issue-<name>-7`) while the fold carries the SYNTHESIZED
+            # canonical id. That fold's id is anchored NOWHERE and its name IS
+            # anchored — indistinguishable from the orphan below by the
+            # conditions above alone — yet it MUST fold; it is the same Object,
+            # reached through the name fallback the legacy line depends on.
+            #
+            # What separates them is that the legacy fold's id is the DERIVED id
+            # FOR ITS OWN NAME (`obj-<sha26(name)>`), i.e. a canonical id that
+            # merely predates the registration's id shape. An orphan's id is
+            # arbitrary with respect to the name it carries. So the guard fires
+            # only when the derived id does NOT match — the id demonstrably
+            # belongs to something else.
+            _derived_matches = False
+            try:
+                from tortoise.sdk import _entity_name_id
+                _derived_matches = (_entity_name_id("Object", name) == oid)
+            except Exception:
+                # Cannot resolve the derived id → do NOT suppress. Failing open
+                # here preserves the pre-guard behaviour, which is the safer
+                # default for a durability lane: a mis-fired guard silently
+                # RESURRECTS a deleted Object.
+                _derived_matches = True
             if (oid is not None and anchored_ids is not None
                     and anchored_names is not None
                     and oid not in anchored_ids
-                    and name in anchored_names):
+                    and name in anchored_names
+                    and not _derived_matches):
                 return (0, 0)
             result = self.g.query(
                 "MATCH (o:Object {name:$name}) "
