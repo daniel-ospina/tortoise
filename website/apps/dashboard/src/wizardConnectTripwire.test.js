@@ -25,7 +25,11 @@ import { dirname, join } from 'node:path'
 const here = dirname(fileURLToPath(import.meta.url))
 const mainJsx = readFileSync(join(here, 'main.jsx'), 'utf8')
 
-function stripComments(src) {
+// Strips ALL /* */ block comments + whole-line //. Unlike the shared
+// stripComments (./testSupport.js) it is NOT quote-aware and does NOT remove
+// INLINE/trailing // — so the claim below is scoped to whole-line comments
+// only. Unification onto the shared helper is tracked by issue #3102.
+function stripBlockAndWholeLineComments(src) {
   return src
     .replace(/\/\*[\s\S]*?\*\//g, '')
     .split('\n')
@@ -39,12 +43,15 @@ function slice(startMarker, endMarker, label) {
   const end = mainJsx.indexOf(endMarker, start + 1)
   assert.notEqual(end, -1, `${label}: end marker not found (${endMarker}) — refusing a slice to EOF`)
   assert.ok(end > start, `${label}: end marker precedes start`)
-  return stripComments(mainJsx.slice(start, end))
+  return stripBlockAndWholeLineComments(mainJsx.slice(start, end))
 }
 
 // The whole connect step (affordance consts + chooser + numbered blocks).
-// Comments are stripped (inside slice()) so an explanatory comment can never
-// satisfy — or break — a code assertion.
+// Whole-line comments are stripped (inside slice()) so an explanatory
+// whole-line comment can never satisfy — or break — a code assertion. NOTE:
+// an INLINE/trailing // comment survives this stripper (see the helper), so
+// this file's negatives remain defeatable by a trailing comment — tracked by
+// issue #3102.
 const connectStep = () =>
   slice('const wizardPasteRow = (', '{wizardStep === 3 && (', 'connect step')
 
@@ -196,7 +203,7 @@ test('#2710: every wizard exit path clears the shared modal (per-path, not a glo
   // reformatting. Runs on the COMMENT-STRIPPED source like every other check
   // (cycle-3 finding: a commented-out clear satisfied the raw-text version).
   assert.match(
-    stripComments(mainJsx),
+    stripBlockAndWholeLineComments(mainJsx),
     /window\.history\.replaceState\(\{\}, '', '#\/' \+ tab\)[\s\S]{0,200}?setWelcomeMode\(false\)[\s\S]{0,200}?setKeyModalOpen\(false\)/,
     'the wizard header exit must clear keyModalOpen (#2710 stray-modal leak)',
   )
@@ -204,7 +211,7 @@ test('#2710: every wizard exit path clears the shared modal (per-path, not a glo
   // `setKeyModalOpen(true)` in main.jsx is the API-Keys tab's "+ New key"
   // button (the deleted auto-open effect was the original leak site, which sat
   // ABOVE the connect-step slice).
-  const strippedJsx = stripComments(mainJsx)
+  const strippedJsx = stripBlockAndWholeLineComments(mainJsx)
   const queued = [...strippedJsx.matchAll(/setKeyModalOpen\(true\)/g)]
   assert.equal(queued.length, 1,
     'exactly ONE setKeyModalOpen(true) call site may exist (the keys-tab + New key button)')
@@ -311,7 +318,7 @@ test('#2912: the connect step renders a family→surface chooser wired to the le
   // the derivation is now an identity — the old parallel boolean is gone
   assert.match(mainJsx, /const wizardConnectHarness = wizardHarness\n/,
     'wizardConnectHarness is the leaf (no second surface state)')
-  assert.doesNotMatch(stripComments(mainJsx), /wizardCodexDesktop/,
+  assert.doesNotMatch(stripBlockAndWholeLineComments(mainJsx), /wizardCodexDesktop/,
     'the parallel Codex Desktop boolean state must be gone')
   // every codexDesktop payload still renders
   assert.match(owner, /\{HARNESS_INTRO\.codexDesktop\}/,
@@ -327,7 +334,7 @@ test('#2912: the connect step renders a family→surface chooser wired to the le
 // body reads "Only owners and admins can create API keys." The lede must never
 // promise them a key — so the role/cap check has to run BEFORE the build fork.
 test('#2912: the step-2 lede asks what each branch actually does', () => {
-  const src = stripComments(mainJsx)
+  const src = stripBlockAndWholeLineComments(mainJsx)
   const i = src.indexOf('if (wizardStep === 2) {')
   assert.ok(i > -1, 'the step-2 lede fork exists')
   const lede = src.slice(i, i + 2200)
@@ -372,7 +379,12 @@ test('#2912: the org eyebrow renders only when an org exists AND its name is kno
 // #2912 (PR-gate delta review): three follow-ups that a code-shape assertion
 // can pin cheaply. Each one was a real regression/finding in this commit.
 test('#2912: the Codex Desktop block keeps the "shown once" advisory', () => {
-  const src = stripComments(mainJsx)
+  const src = stripBlockAndWholeLineComments(mainJsx)
+  // Anchor must match main.jsx's ACTUAL branch shape. The pre-rebase branch
+  // pinned "{wizardConnectHarness === 'codexDesktop' ? (" — that string does
+  // not occur in main.jsx (grep -c = 0), so indexOf returned -1 and this
+  // assertion would fail. main.jsx spells the Desktop arm as an else-arm of
+  // the harness ternary: ") : wizardConnectHarness === 'codexDesktop' ? (".
   const i = src.indexOf(") : wizardConnectHarness === 'codexDesktop' ? (")
   assert.ok(i > -1, 'the single-block Desktop branch exists')
   const desktop = src.slice(i, src.indexOf(') : (', i))
@@ -390,13 +402,13 @@ test('#2912: the step announcement re-renders when the paused state is resolved'
   // the step-3 landing refresh can flip effectivelyPaused (serverHarnessConnected)
   // without changing wizardStep — without this dep the announcement kept saying
   // "Setup paused…" while the <h1> already said "You're all set".
-  assert.match(stripComments(mainJsx),
+  assert.match(stripBlockAndWholeLineComments(mainJsx),
     /\}, \[wizardStep, welcomeMode, authed, wizardPaused, effectivelyPaused\]\)/,
     'effectivelyPaused must be in the step-announcement deps')
 })
 
 test('#2912: the build-fork blocks own their rhythm (no inline margins stacking on the gap)', () => {
-  const src = stripComments(mainJsx)
+  const src = stripBlockAndWholeLineComments(mainJsx)
   const i = src.indexOf('<div className="connect-build">')
   assert.ok(i > -1, 'the build-fork container exists')
   const build = src.slice(i, src.indexOf(') : (!capNotice ? (', i))
@@ -461,7 +473,7 @@ test('#3218: the key surfaces state the visibility window + the recovery path, n
     'the build-fork caption is short — the note owns the window + recovery text')
   assert.doesNotMatch(connect, /Your API key is visible while you&apos;re on this step/,
     'the build fork must not restate the note\u2019s opening clause (review cycle 1, P2)')
-  assert.equal((stripComments(mainJsx).match(/KEY_VISIBILITY_NOTE/g) || []).length, 4,
+  assert.equal((stripBlockAndWholeLineComments(mainJsx).match(/KEY_VISIBILITY_NOTE/g) || []).length, 4,
     'one definition + three renders (shared key block, Codex Desktop block, build fork)')
   // #3218 (a11y): the circle ordinal is aria-hidden, so the heading's
   // accessible name must carry it — otherwise a screen reader hears three
@@ -561,7 +573,11 @@ test('#2865: the live connect step makes the two Claude leaves key-less OAuth', 
 })
 
 test('#2865: the two Claude tabs are no longer hidden from members', () => {
-  const src = stripComments(mainJsx)
+  // This call site came in from main (#3218-era drift) under the OLD local
+  // helper name `stripComments`; #3012 renamed that divergent sibling to
+  // stripBlockAndWholeLineComments, so the name must follow or this throws a
+  // ReferenceError (it is not imported from ./testSupport.js either).
+  const src = stripBlockAndWholeLineComments(mainJsx)
   // the old gate was `isOwnerAdmin && !capNotice` — role-only, which sent every
   // member to a paste-a-key row and made an OAuth connect unreachable.
   assert.doesNotMatch(src, /\)\s*:\s*\(isOwnerAdmin && !capNotice \? \(/,
