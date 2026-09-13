@@ -253,20 +253,56 @@ WORKFLOW_DIR = REPO_ROOT / ".github" / "workflows"
 CI_TIMING_WORKFLOW = WORKFLOW_DIR / "ci-timing.yml"
 
 # A python segment embedded in a shell body: `python3 - <<'EOF' … EOF` (heredoc;
-# optionally prefixed, e.g. inside `$( … )`) and `python3 -c '…'` (inline, may
-# span lines). Matched against the YAML-parsed run body — i.e. AFTER the block
-# scalar has stripped its indentation, exactly what the runner materialises.
+# optionally prefixed, e.g. inside `$( … )`) and `python[3] -c '…'` / `-c "…"`
+# (inline, may span lines). Matched against the YAML-parsed run body — i.e.
+# AFTER the block scalar has stripped its indentation, exactly what the runner
+# materialises.
+#
+# #3400 P2-4 (#3409 review): the first cut of this pattern only matched
+# single-quoted `-c` whose closing quote was followed by `)`, `>>`, `|` or EOL —
+# so the live double-quoted uses (`TMPD=$(python3 -c "import tempfile;…")`)
+# and `;` / `&&` / `<` terminators escaped it entirely, and the guard's claim
+# (``*.yml``) did not match its reach. The pattern is now quote-agnostic with a
+# backreference to the opening delimiter, and needs no terminator lookahead.
 _HEREDOC_RE = re.compile(r"python3?[^\n]*<<-?'?(\w+)'?\n(.*?)\n\s*\1\s*$", re.S | re.M)
-_INLINE_C_RE = re.compile(r"python3 -c '(.*?)'(?=\s*(?:\)|>>|\||$))", re.S)
+_INLINE_C_RE = re.compile(
+    r"(?<![\w.-])python[0-9.]*\s+-c\s+(?P<quote>['\"])"
+    r"(?P<body>(?:\\.|(?!(?P=quote)).)*)(?P=quote)",
+    re.S,
+)
+
+
+def _workflow_files() -> list[Path]:
+    """Every YAML file that can carry an embedded python `run:` block.
+
+    #3400 P2-4 (#3409 review): workflows are not the only place a `run:` step
+    lives — composite actions (`.github/actions/**/action.yml|yaml`) carry them
+    too, and workflows may be `.yaml` as well as `.yml`. The guard's reach must
+    match its claim, so both are globbed.
+    """
+    files = sorted(WORKFLOW_DIR.glob("*.yml")) + sorted(WORKFLOW_DIR.glob("*.yaml"))
+    actions_dir = REPO_ROOT / ".github" / "actions"
+    if actions_dir.is_dir():
+        files += sorted(actions_dir.rglob("action.yml"))
+        files += sorted(actions_dir.rglob("action.yaml"))
+    return files
 
 
 def _run_blocks(workflow_path: Path) -> list[tuple[str, str]]:
-    """(step name, run body) for every `run:` step in a workflow."""
+    """(step name, run body) for every `run:` step in a workflow OR a
+    composite action (`.github/actions/**/action.yml`)."""
     wf = yaml.safe_load(workflow_path.read_text())
+    if not isinstance(wf, dict):
+        return []
     blocks: list[tuple[str, str]] = []
-    for job in wf.get("jobs", {}).values():
-        for step in job.get("steps", []):
-            if "run" in step:
+    # composite actions put their steps under runs.steps, not jobs.*.steps
+    run_groups = [wf.get("runs", {})] if "runs" in wf else []
+    run_groups += list(wf.get("jobs", {}).values())
+    for group in run_groups:
+        if not isinstance(group, dict):
+            continue
+        for step in group.get("steps", []) or []:
+            if isinstance(step, dict) and "run" in step:
                 blocks.append((step.get("name") or "(unnamed)", step["run"]))
     return blocks
 
@@ -274,7 +310,9 @@ def _run_blocks(workflow_path: Path) -> list[tuple[str, str]]:
 def _embedded_python(script: str) -> list[tuple[str, str]]:
     """(kind, python source) for every python segment embedded in a shell body."""
     out = [("heredoc", m.group(2)) for m in _HEREDOC_RE.finditer(script)]
-    out += [("inline -c", m.group(1)) for m in _INLINE_C_RE.finditer(script)]
+    # NOTE: named group — `_INLINE_C_RE`'s group 1 is the QUOTE delimiter, so
+    # an index-based `group(1)` silently yields `'` / `"` instead of the body.
+    out += [("inline -c", m.group("body")) for m in _INLINE_C_RE.finditer(script)]
     return out
 
 
@@ -333,19 +371,44 @@ def test_pick_run_none_when_all_ineligible(tmp_path: Path, monkeypatch: pytest.M
     assert ci_timing.pick_run("daniel-ospina/tortoise") is None
 
 
-def test_pick_run_warns_instead_of_raising_on_api_failure(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+def test_pick_run_propagates_api_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # behaviour parity with the pre-fix inline shell: an API failure warned and
-    # continued (this workflow is measurement-only, never a gate)
+    # #3400 P2-3: an API failure must NOT be swallowed. Pre-refactor the inline
+    # shell ran under `bash -e`, so a failing `gh api` failed the find step.
+    # Swallowing it exited 0 with `run_id=`, which let `measure` commit a
+    # synthetic null row into docs/ci-timing.json on a transient 5xx.
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     gh = bin_dir / "gh"
     gh.write_text("#!/bin/sh\necho boom >&2\nexit 2\n")
     gh.chmod(0o755)
     monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
-    assert ci_timing.pick_run("daniel-ospina/tortoise") is None
-    assert "::warning::gh api run-list failed" in capsys.readouterr().err
+    with pytest.raises(subprocess.CalledProcessError):
+        ci_timing.pick_run("daniel-ospina/tortoise")
+
+
+def test_pick_run_cli_fails_closed_on_api_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # #3400 P2-3: the `find` step's contract is `run_id=<id>` on success and a
+    # non-zero exit on API failure — never `run_id=` (which reads as "no run
+    # found" and feeds a synthetic null history row).
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    gh = bin_dir / "gh"
+    gh.write_text("#!/bin/sh\necho boom >&2\nexit 2\n")
+    gh.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
+    proc = subprocess.run(
+        [sys.executable, str(REPO_ROOT / "tools" / "ci_timing.py"),
+         "--pick-run", "--repo", "daniel-ospina/tortoise"],
+        capture_output=True, text=True, cwd=tmp_path,
+    )
+    assert proc.returncode == 1, f"expected fail-closed, got {proc.returncode}"
+    assert "::error::gh api run-list failed" in proc.stderr
+    assert proc.stdout == ""
+    assert list(tmp_path.glob("ci-timing.*")) == []
 
 
 def test_pick_run_cli_prints_only_the_id_and_writes_no_artifact(
@@ -380,14 +443,15 @@ def test_pick_run_cli_empty_when_none_eligible(
 def test_workflow_embedded_python_is_column_zero_after_yaml_dedent() -> None:
     """Class guard for F8/#3400.
 
-    Every python segment embedded in every workflow must compile as the runner
-    sees it — i.e. after the YAML block scalar strips the block's indentation.
-    The pre-fix ci-timing.yml embedded a multi-line `python3 -c` whose python
-    lines kept 2 spaces after the dedent → `IndentationError: unexpected indent`
-    → exit 1 → the artifact steps were skipped on all three weekly runs.
+    Every python segment embedded in every workflow (and composite action) must
+    compile as the runner sees it — i.e. after the YAML block scalar strips the
+    block's indentation. The pre-fix ci-timing.yml embedded a multi-line
+    `python3 -c` whose python lines kept 2 spaces after the dedent →
+    `IndentationError: unexpected indent` → exit 1 → the artifact steps were
+    skipped on all three weekly runs.
     """
     failures: list[str] = []
-    for wf_path in sorted(WORKFLOW_DIR.glob("*.yml")):
+    for wf_path in _workflow_files():
         for step_name, script in _run_blocks(wf_path):
             for kind, source in _embedded_python(script):
                 try:
@@ -411,6 +475,83 @@ def test_ci_timing_workflow_embeds_no_inline_python() -> None:
     for step_name, script in _run_blocks(CI_TIMING_WORKFLOW):
         assert _embedded_python(script) == [], f"{step_name} embeds inline python"
     assert "python3 tools/ci_timing.py --pick-run" in _find_step_body()
+
+
+# ── #3400 P2-4: the embedded-python guard's reach must match its claim ────
+
+def test_inline_c_guard_matches_both_quote_styles_and_terminators() -> None:
+    """#3400 P2-4 (#3409 review): the first cut only matched single-quoted
+    `-c` closed by `)`/`>>`/`|`/EOL. Six live double-quoted uses
+    (`TMPD=$(python3 -c "…")`) and `;`/`&&`/`<` terminators escaped it."""
+    must_match = [
+        'python3 -c "import tempfile;print(tempfile.gettempdir())"',
+        "python3 -c 'import sys; print(sys.path)'",
+        'TMPD=$(python3 -c "import tempfile;print(tempfile.gettempdir())")',
+        'echo "x=$(echo $S | python3 -c \'import json,sys; print(json.load(sys.stdin))\')"',
+        "python3 -c 'print(1)' && echo ok",
+        "python3 -c 'print(1)' ; echo ok",
+        "python3 -c 'print(1)' < /dev/null",
+        "python3 -c 'print(1)' | wc -l",
+        "python3 -c 'print(1)' >> out.txt",
+        "python3 -c 'print(1)'",
+        'python3 -c "print(1)"',
+        "python3.12 -c 'print(1)'",
+    ]
+    for script in must_match:
+        assert _embedded_python(script), f"guard missed an embedded python segment: {script!r}"
+    # a plain shell string must NOT be misread as embedded python
+    assert _embedded_python("echo python3 -c is documented here") == []
+
+
+def test_inline_c_guard_handles_escaped_quotes() -> None:
+    """A `\\'` inside a single-quoted body must not terminate the match."""
+    segs = _embedded_python(r"python3 -c 'print(\'a\')'")
+    assert len(segs) == 1
+    assert segs[0][1] == "print(\\'a\\')"
+
+
+def test_class_guard_reds_an_indented_embedded_block(tmp_path: Path) -> None:
+    """The guard has teeth: an indented embedded block must produce a failure."""
+    wf = tmp_path / "wf.yml"
+    wf.write_text(
+        "jobs:\n  j:\n    steps:\n      - name: broken\n        run: |\n"
+        "          python3 -c '\n            import sys\n            print(sys.path)\n          '\n"
+    )
+    failures: list[str] = []
+    for step_name, script in _run_blocks(wf):
+        for kind, source in _embedded_python(script):
+            try:
+                compile(source, "x", "exec")
+            except SyntaxError as exc:
+                failures.append(f"{step_name} [{kind}]: {exc.msg}")
+    assert failures, "guard failed to catch an indented embedded python block"
+
+
+def test_workflow_files_globs_yaml_and_composite_actions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#3400 P2-4: `*.yaml` workflows and composite `action.yml` are in reach."""
+    wfs = tmp_path / ".github" / "workflows"
+    wfs.mkdir(parents=True)
+    (wfs / "a.yml").write_text("jobs: {}\n")
+    (wfs / "b.yaml").write_text("jobs: {}\n")
+    act = tmp_path / ".github" / "actions" / "my-act"
+    act.mkdir(parents=True)
+    (act / "action.yml").write_text(
+        "runs:\n  using: composite\n  steps:\n    - name: s1\n      run: echo hi\n")
+    monkeypatch.setattr(sys.modules[__name__], "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(sys.modules[__name__], "WORKFLOW_DIR", wfs)
+    names = [p.name for p in _workflow_files()]
+    assert "a.yml" in names and "b.yaml" in names and "action.yml" in names, names
+
+
+def test_run_blocks_reads_composite_action_steps(tmp_path: Path) -> None:
+    """#3400 P2-4: a composite action keeps its steps under `runs.steps`."""
+    p = tmp_path / "action.yml"
+    p.write_text("runs:\n  using: composite\n  steps:\n    - name: s1\n      run: |\n        echo hi\n")
+    blocks = _run_blocks(p)
+    assert len(blocks) == 1, blocks
+    assert blocks[0][0] == "s1" and "echo hi" in blocks[0][1]
 
 
 def test_find_step_writes_run_id_to_github_output(

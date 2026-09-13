@@ -97,14 +97,18 @@ def pick_run(repo: str, per_page: int = PICK_RUN_PER_PAGE) -> str | None:
     failed, the dependent artifact steps were skipped, and the measurement loop
     never ran green (#3400 / audit F8). A function under unit test cannot be
     broken by YAML indentation.
+
+    #3400 P2-3 (#3409 review): an API failure PROPAGATES (`CalledProcessError`)
+    and the CLI exits 1. The refactor originally swallowed it and returned None
+    while its docstring claimed "behaviour parity with the old inline shell" —
+    that claim was false. Pre-refactor `RUN_ID=$(python3 -c ...)` ran under the
+    runner's `bash -e`, so a failing `gh api` failed the step. The swallowed
+    version instead exited 0 and wrote `run_id=`, so a transient 5xx let
+    `measure` succeed and commit a synthetic null row (`run_id: null`, zeroed
+    counts) into docs/ci-timing.json, degrading the flake signal it exists to
+    provide. The failure is restored: no sample is better than a fabricated one.
     """
-    try:
-        data = gh_api(repo, pick_run_query(repo, per_page))
-    except subprocess.CalledProcessError as exc:
-        # Behaviour parity with the old inline shell: an API failure is not fatal
-        # (measurement-only workflow) — warn and let the step report "none found".
-        print(f"::warning::gh api run-list failed: {exc}", file=sys.stderr)
-        return None
+    data = gh_api(repo, pick_run_query(repo, per_page))
     for run in data.get("workflow_runs", []):
         if run.get("conclusion") in ELIGIBLE_CONCLUSIONS:
             return str(run["id"])
@@ -335,7 +339,14 @@ def main() -> int:
     args = ap.parse_args()
 
     if args.pick_run:
-        picked = pick_run(args.repo)
+        # #3400 P2-3: fail closed. A transient API error must not degrade into
+        # `run_id=` (which would let `measure` commit a synthetic null row).
+        try:
+            picked = pick_run(args.repo)
+        except subprocess.CalledProcessError as exc:
+            print(f"::error::gh api run-list failed while sampling a run: {exc}",
+                  file=sys.stderr)
+            return 1
         if picked:
             print(picked)
         return 0

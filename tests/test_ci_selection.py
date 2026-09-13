@@ -15,6 +15,8 @@ import sys
 import tempfile
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from tools.ci_selection import (  # noqa: I001
@@ -637,15 +639,21 @@ def test_real_workflow_halves_are_consistent():
     # (space-joined matrix_* outputs) —
     # the #1266 discipline runs against the derivation. Verify the derived
     # halves carry every fast file exactly once and tilt is bounded.
-    # #3400: the tilt invariant is now DURATION, not count. The full-matrix
-    # halves are packed by measured weight (LPT), so a correct split is
-    # duration-balanced while carrying very different file counts — the real
-    # pool splits 185/315 at 26.3m/26.3m (one 855s file + ~130 sub-second
-    # files on one side). The old `abs(count_a - count_b) <= 3` assertion
-    # encoded the duration-blind parity split this issue exists to remove.
+    # #3400: the PRIMARY tilt invariant is DURATION — the full-matrix halves
+    # are packed by measured weight (LPT), so a heavy file dumped entirely on
+    # one half is caught even when the counts look even.
+    # #3400 P1-2/P1-4 (#3407 review): the count axis is RETAINED as a SECONDARY
+    # bound. The original change replaced `abs(count_a - count_b) <= 3` with the
+    # duration-only check and made the count check an `elif`, so it was skipped
+    # entirely once durations existed — which excused the real 185/315 split as
+    # "a legitimate duration pack" when it was in fact a placement degeneracy
+    # (123 zero-weight files piled onto one half by `ta += 0.0`; a ~0s file
+    # adds no weight, so duration balance is blind to it). Both axes are now
+    # asserted against the real pool.
     from tools.ci_selection import (TESTS_DIR, push_legs,  # noqa: I001
                                     workflow_halves_issues,
-                                    HALF_DURATION_IMBALANCE_RATIO)
+                                    HALF_DURATION_IMBALANCE_RATIO,
+                                    HALF_COUNT_IMBALANCE_RATIO)
     m = load_manifest()
     legs = push_legs(m)
     halves = {"a": set(legs["half_a"]), "b": set(legs["half_b"])}
@@ -658,6 +666,11 @@ def test_real_workflow_halves_are_consistent():
         f"duration tilt beyond {HALF_DURATION_IMBALANCE_RATIO}x: "
         f"{ {h: round(w / 60, 1) for h, w in weights.items()} } min "
         f"(ratio {ratio:.2f}x)")
+    counts = {h: len(fs) for h, fs in halves.items()}
+    count_ratio = max(counts.values()) / min(counts.values())
+    assert count_ratio <= HALF_COUNT_IMBALANCE_RATIO, (
+        f"count tilt beyond {HALF_COUNT_IMBALANCE_RATIO}x: {counts} "
+        f"(ratio {count_ratio:.3f}x)")
     # every fast file rides exactly one half (no coverage hole, no double-run)
     assert not (halves["a"] & halves["b"]), "leg overlap"
 
@@ -778,8 +791,14 @@ def test_full_matrix_split_is_duration_balanced():
     """#3400: the full-matrix (push) halves are packed by measured duration.
 
     Four heavy files + many 2s files: parity can cluster the heavies on one
-    half; LPT must not.  The assertion is the *duration* ratio, not a count
-    ratio — the correct duration split of the real pool is 185/315 files.
+    half; LPT must not. Duration is the PRIMARY axis asserted here.
+
+    #3400 P1-1/P1-4 (#3407 review): this docstring used to claim "the correct
+    duration split of the real pool is 185/315 files". That was FALSE — the
+    185/315 tilt was a placement degeneracy (123 zero-weight files piled onto
+    one half by `ta += 0.0`), not a legitimate duration pack. The correct
+    split of the real pool is count-balanced AND duration-balanced; the count
+    bound is asserted in test_real_pool_split_is_count_and_duration_balanced.
     """
     from tools.ci_selection import HALF_DURATION_IMBALANCE_RATIO, push_legs
     heavy = {"test_h0.py": 850.0, "test_h1.py": 700.0,
@@ -877,6 +896,295 @@ def test_duration_coverage_guard_backwards_compatible():
     assert duration_coverage_issues(
         {"surfaces": {}, "tier1": [], "slow_files": [],
          "durations": {"x.py": 1.0}}) == []
+
+
+# ── #3400 P1 (#3407 review): placement degeneracy + the retained count axis ──
+
+
+def test_zero_weight_files_are_not_piled_on_one_half():
+    """#3400 P1-1 (#3407 review): the placement degeneracy.
+
+    123 of the real pool's 498 weights are `0.0`. `ta += 0.0` left the running
+    total unmoved, so `ta <= tb` stayed true and EVERY zero-weight file landed
+    on the same half — deterministically. The real 185/315 split was THIS bug,
+    not "a legitimate duration pack".
+    """
+    from tools.ci_selection import split_fast_gate
+    names = [f"test_z{i:03d}" for i in range(60)]
+    files = [f"tests/{n}.py" for n in names]
+    # the real shape: a few heavy files + a mass of zero-weight files
+    durations = {f"{n}.py": 0.0 for n in names}
+    durations["test_z000.py"] = 30.0
+    a, b = split_fast_gate(files, durations)
+    za = sum(1 for f in a if durations[f[len("tests/"):]] == 0.0)
+    zb = sum(1 for f in b if durations[f[len("tests/"):]] == 0.0)
+    assert za and zb, f"zero-weight files piled onto one half: a={za} b={zb}"
+    ratio = max(za, zb) / min(za, zb)
+    assert ratio < 2.0, f"zero-weight placement skewed: a={za} b={zb} ({ratio:.2f}x)"
+
+
+def test_all_zero_weights_split_evenly():
+    """The fully degenerate map (`durations` all 0.0) still splits evenly.
+
+    Pre-fix this put all 60 files on half (a): `ta` never moved, so
+    `ta <= tb` held for every iteration.
+    """
+    from tools.ci_selection import split_fast_gate
+    names = [f"test_z{i:03d}" for i in range(60)]
+    files = [f"tests/{n}.py" for n in names]
+    a, b = split_fast_gate(files, {f"{n}.py": 0.0 for n in names})
+    assert len(a) == 30 and len(b) == 30, f"all-zero map tilted: a={len(a)} b={len(b)}"
+
+
+def test_zero_weight_file_placed_like_an_absent_key():
+    """A `0.0` weight and a missing key must be placed identically."""
+    from tools.ci_selection import split_fast_gate
+    files = [f"tests/test_{c}.py" for c in "abcd"]
+    zero = split_fast_gate(files, {f"test_{c}.py": 0.0 for c in "abcd"})
+    absent = split_fast_gate(files, {})
+    assert zero == absent
+
+
+def test_real_pool_split_is_count_and_duration_balanced():
+    """#3400 P1-1/P1-4 on the REAL pool: BOTH axes must hold.
+
+    Pre-fix the real pool split 185/315 (count ratio 1.70x) at a 1.00x duration
+    ratio — the count axis was the only tell, and it had been deleted.
+    """
+    from tools.ci_selection import (push_legs, load_manifest,  # noqa: I001
+                                    HALF_DURATION_IMBALANCE_RATIO,
+                                    HALF_COUNT_IMBALANCE_RATIO)
+    m = load_manifest()
+    legs = push_legs(m)
+    halves = ("half_a", "half_b")
+    counts = {h: len(legs[h]) for h in halves}
+    count_ratio = max(counts.values()) / min(counts.values())
+    assert count_ratio <= HALF_COUNT_IMBALANCE_RATIO, (
+        f"real pool count ratio {count_ratio:.3f}x {counts} — the zero-weight "
+        f"placement degeneracy is back")
+    weights = {h: sum(m["durations"].get(f + ".py", 2.0) for f in legs[h])
+               for h in halves}
+    duration_ratio = max(weights.values()) / min(weights.values())
+    assert duration_ratio <= HALF_DURATION_IMBALANCE_RATIO, (
+        f"real pool duration ratio {duration_ratio:.3f}x")
+    # the raw duration balance must be untouched by the placement fix
+    assert abs(duration_ratio - 1.0) < 0.05, (
+        f"duration balance regressed: {duration_ratio:.3f}x")
+
+
+def test_halves_count_imbalance_flagged_even_with_durations():
+    """#3400 P1-2 (#3407 review): the count axis must bite with a durations map.
+
+    The `elif` skipped the count check entirely once durations existed, so a
+    zero-weight pile-up was invisible when the weights happened to balance.
+    This fixture is duration-balanced (30s vs 30s) and count-tilted (11 vs 1).
+    """
+    from tools.ci_selection import workflow_halves_issues
+    zeros = [f"test_z{i:03d}" for i in range(10)]
+    halves = {"a": ["test_big", *zeros], "b": ["test_other"]}
+    m = _duration_manifest({"test_big.py": 30.0, "test_other.py": 30.0}, tiny_count=0)
+    m["surfaces"]["core"] = ["test_big.py", "test_other.py"] + [f"{z}.py" for z in zeros]
+    m["durations"] = {"test_big.py": 30.0, "test_other.py": 30.0,
+                      **{f"{z}.py": 0.0 for z in zeros}}
+    issues = workflow_halves_issues(m, halves)
+    assert any("count-imbalanced" in i for i in issues), issues
+    assert not any("duration-imbalanced" in i for i in issues), issues
+
+
+def test_halves_count_imbalance_ratio_boundary():
+    """#3400 P1-2: the secondary count bound is inclusive at its threshold."""
+    from tools.ci_selection import HALF_COUNT_IMBALANCE_RATIO, workflow_halves_issues
+    names = [f"test_z{i:03d}" for i in range(12)]
+    m = _duration_manifest({}, tiny_count=0)
+    m["surfaces"]["core"] = [f"{x}.py" for x in names]
+    m["durations"] = {f"{x}.py": 10.0 for x in names}
+    # 5 vs 6 files (1.20x) with 50s vs 60s weights (1.20x) — both inside the bound
+    ok = {"a": names[:5], "b": names[5:11]}
+    assert not any("count-imbalanced" in i for i in workflow_halves_issues(m, ok))
+    # 3 vs 4 files (1.33x) — beyond it
+    bad = {"a": names[:3], "b": names[3:7]}
+    assert any("count-imbalanced" in i for i in workflow_halves_issues(m, bad))
+    assert HALF_COUNT_IMBALANCE_RATIO > 1
+
+
+# ── #3400 P1-3/P2-1/P2-2: mass-aware coverage + the junit extractor ─────────
+
+
+def test_duration_coverage_mass_floor_reds_an_all_zero_map():
+    """#3400 P1-3: a map of zeros satisfies PRESENCE but carries no MASS.
+
+    Before the fix every `0.0` counted as "covered", so a junit refresh that
+    wrote zeros everywhere would clear the 90% key-presence floor with an empty
+    mass — and a zero weight is LESS conservative than a missing key (both
+    pack at DEFAULT_FAST_WEIGHT, but zero asserts the file is free).
+    """
+    from tools.ci_selection import duration_coverage_issues
+    files = [f"test_cov_{i:03d}.py" for i in range(100)]
+    m = {"surfaces": {"core": files}, "tier1": [], "slow_files": [],
+         "durations": {f: 0.0 for f in files}}
+    issues = duration_coverage_issues(m)
+    assert issues, "an all-zero map must fire"
+    assert any("mass-coverage" in i for i in issues), issues
+    # presence is 100% — that is exactly the hole the mass floor closes
+    assert not any("coverage" in i and "below the 90% floor" in i for i in issues), issues
+    # the zero-valued entries are surfaced separately
+    assert any("test_cov_000.py" in i for i in issues), issues
+
+
+def test_duration_coverage_mass_floor_boundary():
+    """#3400 P1-3: the mass floor is inclusive at the documented threshold."""
+    from tools.ci_selection import DURATION_MASS_COVERAGE_MIN, duration_coverage_issues
+    files = [f"test_cov_{i:03d}.py" for i in range(100)]
+    n_ok = int(DURATION_MASS_COVERAGE_MIN * 100)
+    base = {"surfaces": {"core": files}, "tier1": [], "slow_files": []}
+    at = {**base, "durations": {**{f: 2.0 for f in files[:n_ok]},
+                                **{f: 0.0 for f in files[n_ok:]}}}
+    below = {**base, "durations": {**{f: 2.0 for f in files[:n_ok - 1]},
+                                   **{f: 0.0 for f in files[n_ok - 1:]}}}
+    assert duration_coverage_issues(at) == [], duration_coverage_issues(at)
+    assert any("mass-coverage" in i for i in duration_coverage_issues(below))
+
+
+def test_duration_coverage_message_points_at_the_junit_extractor():
+    """#3400 P2-1: remediation must name a tool that CAN produce this map.
+
+    The message used to say `tools/ci_timing.py` — which derives per-file time
+    from `--durations=15` (≤15 tests per job) and keys by BASENAME, so it
+    cannot produce 498 `tests/`-relative entries. The data source that can is
+    the junit.xml inside every `pytest-log-*` artifact.
+    """
+    import tools.ci_selection as cs
+    files = [f"test_cov_{i:03d}.py" for i in range(100)]
+    m = {"surfaces": {"core": files}, "tier1": [], "slow_files": [],
+         "durations": {f: 2.0 for f in files[:10]}}
+    issues = cs.duration_coverage_issues(m)
+    assert issues
+    assert any("ci_durations_from_junit.py" in i for i in issues), issues
+    assert not any("ci_timing.py" in i for i in issues), issues
+    assert (cs.REPO / "tools" / "ci_durations_from_junit.py").exists()
+
+
+_JUNIT_SAMPLE = """<?xml version="1.0" encoding="utf-8"?>
+<testsuites><testsuite name="pytest" tests="4">
+<testcase classname="tests.test_alpha" name="t1" file="tests/test_alpha.py" time="12.34" />
+<testcase classname="tests.test_alpha" name="t2" file="tests/test_alpha.py" time="0.02" />
+<testcase classname="tests.bench.test_beta" name="t3" file="tests/bench/test_beta.py" time="1.4" />
+<testcase classname="" name="tests.test_skipped" file="tests/test_skipped.py" time="0.000"><skipped message="collection skipped">nope</skipped></testcase>
+</testsuite></testsuites>
+"""
+
+
+def _write_junit(tmp_path: Path, rel: str, content: str = _JUNIT_SAMPLE) -> Path:
+    p = tmp_path / rel
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(content)
+    return p
+
+
+def test_junit_extractor_keys_are_tests_relative(tmp_path: Path) -> None:
+    """#3400 P2-1: `tests/`-relative keys (basename-keyed sources lose the dir)."""
+    import tools.ci_durations_from_junit as J
+    p = _write_junit(tmp_path, "junit.xml")
+    ws = J.weights(J.extract([p]))
+    # one decimal
+    assert ws["test_alpha.py"] == pytest.approx(12.4)
+    # the directory survives — this is what `--durations` basename keys lose
+    assert ws["bench/test_beta.py"] == pytest.approx(1.4)
+    assert "test_beta.py" not in ws
+
+
+def test_junit_extractor_marks_zero_executed_files_as_default_weight(tmp_path: Path) -> None:
+    """#3400 P2-2: a file whose tests all SKIPPED is unmeasured, not free.
+
+    `0.0` would assert the file costs nothing; the run simply never paid for
+    it. Real examples in the measured run: test_crash_recovery_e2e,
+    test_event_log.
+    """
+    import tools.ci_durations_from_junit as J
+    p = _write_junit(tmp_path, "junit.xml")
+    agg = J.extract([p])
+    assert agg["test_skipped.py"]["executed"] == 0
+    assert agg["test_alpha.py"]["executed"] == 2
+    assert J.low_confidence(agg) == {"test_skipped.py"}
+    ws = J.weights(agg)
+    assert ws["test_skipped.py"] == J.DEFAULT_FAST_WEIGHT
+    assert ws["test_skipped.py"] != 0.0
+    # a failing/errored testcase still EXECUTED
+    failed = """<?xml version="1.0"?><testsuites><testsuite name="pytest">
+<testcase classname="tests.test_f" name="t" file="tests/test_f.py" time="3.0"><failure message="boom"/></testcase>
+<testcase classname="tests.test_f" name="t2" file="tests/test_f.py" time="1.0"><error message="e"/></testcase>
+</testsuite></testsuites>"""
+    agg2 = J.extract([_write_junit(tmp_path, "junit2.xml", failed)])
+    assert agg2["test_f.py"]["executed"] == 2
+    assert J.low_confidence(agg2) == set()
+
+
+def test_junit_extractor_discovers_artifact_dirs_recursively(tmp_path: Path) -> None:
+    """An artifact dir holds one junit.xml per `pytest-log-*` artifact."""
+    import tools.ci_durations_from_junit as J
+    _write_junit(tmp_path, "logs/pytest-log-test-a/junit.xml")
+    _write_junit(tmp_path, "logs/pytest-log-test-b/junit.xml")
+    found = J.discover([tmp_path / "logs"])
+    assert len(found) == 2 and all(p.name == "junit.xml" for p in found)
+    ws = J.weights(J.extract(found))
+    assert set(ws) == {"test_alpha.py", "bench/test_beta.py", "test_skipped.py"}
+    # two parallel jobs → the same file's wall times aggregate
+    assert ws["test_alpha.py"] == pytest.approx(24.7)
+
+
+def test_junit_extractor_render_is_sorted_yaml(tmp_path: Path) -> None:
+    import tools.ci_durations_from_junit as J
+    p = _write_junit(tmp_path, "junit.xml")
+    agg = J.extract([p])
+    out = J.render(J.weights(agg), J.low_confidence(agg))
+    # strip ONLY the trailing newline — `.strip()` would eat the first line's
+    # YAML indent and the sortedness assertion would then be vacuous
+    lines = out.rstrip("\n").splitlines()
+    assert lines == sorted(lines), lines
+    assert any("test_skipped.py: 2.0" in ln for ln in lines), lines
+    assert any("no executed testcases" in ln for ln in lines), lines
+    # paste-compatible with the manifest's 2-space `durations:` block
+    assert all(ln.startswith("  ") for ln in lines)
+
+
+def test_junit_extractor_cli_writes_the_map(tmp_path: Path) -> None:
+    import tools.ci_durations_from_junit as J
+    p = _write_junit(tmp_path, "logs/pytest-log-test-a/junit.xml")
+    out = tmp_path / "durations.yml"
+    rc = J.main([str(p.parent), "--out", str(out), "--summary"])
+    assert rc == 0
+    body = out.read_text()
+    assert "test_alpha.py: 12.4" in body
+    assert "bench/test_beta.py: 1.4" in body
+
+
+def test_junit_extractor_cli_fails_without_junit(tmp_path: Path) -> None:
+    import tools.ci_durations_from_junit as J
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    assert J.main([str(empty)]) == 1
+
+
+def test_committed_durations_carry_no_low_confidence_zeros():
+    """#3400 P2-2: the 2 all-skipped files are committed at DEFAULT_FAST_WEIGHT."""
+    import tools.ci_durations_from_junit as J
+    d = load_manifest()["durations"]
+    assert d["test_crash_recovery_e2e.py"] == J.DEFAULT_FAST_WEIGHT
+    assert d["test_event_log.py"] == J.DEFAULT_FAST_WEIGHT
+    zeros = {k for k, v in d.items() if v == 0}
+    assert "test_crash_recovery_e2e.py" not in zeros
+    assert "test_event_log.py" not in zeros
+    # every remaining zero is a genuine sub-0.05s measurement
+    assert len(zeros) == 121, sorted(zeros)[:5]
+
+
+def test_committed_durations_match_the_extractor_shape():
+    """#3400 P2-1: the committed map is 498 entries, one decimal, no stray keys."""
+    d = load_manifest()["durations"]
+    assert len(d) == 498
+    assert all(round(v, 1) == v for v in d.values())
+    assert all(".py" in k for k in d)
+    assert not any(k.startswith("tests/") for k in d), "keys must be tests/-relative"
 
 
 # ── #1668: the P2 flip's workflow-wiring pins (epic #1647 Task 6) ─────────

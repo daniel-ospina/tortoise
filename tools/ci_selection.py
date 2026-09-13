@@ -54,13 +54,23 @@ WORKFLOW = REPO / ".github" / "workflows" / "python-ci.yml"
 # #1266: the test (a)/(b) halves must stay count-balanced within this delta.
 # A tilt beyond it means someone added files to one half without rebalancing
 # (the exact drift that pushed half (a) over the watchdog cap).
-# #3400: this is now the FALLBACK invariant, used only when the manifest
-# carries no `durations` map at all. Once measured durations exist the
-# balance invariant is DURATION (below) — LPT packs by weight, and a correct
-# pack can legitimately carry very different file counts (the real pool
-# splits 185/315 while both halves weigh 26.3m: one 855s file on one side,
-# ~130 sub-second files on the other).
+# #3400: this ±3 delta is the FALLBACK invariant, used only when the manifest
+# carries no `durations` map at all. Once measured durations exist the PRIMARY
+# invariant is duration (below) — see HALF_COUNT_IMBALANCE_RATIO for the
+# secondary count bound that is retained alongside it.
 HALF_IMBALANCE_TOLERANCE = 3
+
+# #3400 P1-2 (#3407 review): with a `durations` map the primary axis is
+# DURATION, but the count axis must NOT be discarded. The original change
+# made the ±3 count check an `elif`, so it was skipped entirely whenever a
+# durations map existed — and nothing noticed that a placement degeneracy had
+# piled 123 zero-weight files onto one half (185/315 = 1.70x) while BOTH
+# halves weighed exactly 26.26m. A ~0s file contributes no weight, so
+# duration balance is structurally blind to a count tilt; the axes are
+# complementary, not alternatives. This ratio is the secondary bound.
+# Calibrated against the real 500-file pool: the correct mass-aware pack
+# lands at ~1.02x, so 1.25 leaves run-to-run headroom while redding 1.70x.
+HALF_COUNT_IMBALANCE_RATIO = 1.25
 
 # #3400: with measured durations, the halves must stay DURATION-balanced
 # within this ratio. Index parity left main at a=12.7m vs b=39.8m (3.14x);
@@ -79,6 +89,19 @@ DEFAULT_FAST_WEIGHT = 2.0
 # durations is not failed) and bites once the map is populated: 90% leaves
 # ~50 files of headroom on the current 500-file pool (actual: 99.6%).
 DURATION_COVERAGE_MIN = 0.90
+
+# #3400 P1-3 (#3407 review): DURATION_COVERAGE_MIN above counts key PRESENCE,
+# and presence is satisfiable by a map of zeros — even though a `0.0` weight
+# is LESS informative than a missing key (both pack at DEFAULT_FAST_WEIGHT,
+# but a zero asserts "this file is free"). A junit refresh that wrote 0.0 for
+# every entry would clear the presence floor with an empty mass. Floor the
+# POSITIVE-mass coverage as a second, independent axis so that cannot happen.
+# Calibrated on the real pool: 377/501 fast files carry weight > 0 (0.752)
+# after the 2 all-skipped files pack at DEFAULT_FAST_WEIGHT — the remaining
+# 121 zeros are genuine sub-0.05s measurements, which is why this floor is
+# NOT the 90% presence floor. An all-zero map scores 0.0 and reds; 0.60 keeps
+# ~15pp of headroom over the observed shape while catching a mass collapse.
+DURATION_MASS_COVERAGE_MIN = 0.60
 
 # bash/heredoc-safe newline (the pi bash wrapper mangles raw \n in heredocs)
 NL = chr(10)
@@ -786,13 +809,17 @@ def workflow_halves_issues(manifest: dict, halves: dict[str, list[str]],
                 issues.append(f"half entry {f} is in BOTH halves (double-run, #1266)")
             seen.add(f)
     counts = {h: len(fs) for h, fs in halves.items()}
-    # #3400: the balance invariant is DURATION once measured weights exist.
-    # LPT packs by weight, so a heavy file dumped entirely on one half is
-    # caught even when the counts look even — and a correct duration pack may
-    # legitimately carry very different counts (185 vs 315 on the real pool).
-    # The ±3 count check would red that correct split, so it now applies only
-    # to manifests with no durations map at all (e.g. the small test
-    # fixtures, or a repo that has not adopted durations).
+    # #3400: the PRIMARY balance invariant is DURATION once measured weights
+    # exist — LPT packs by weight, so a heavy file dumped entirely on one half
+    # is caught even when the counts look even.
+    #
+    # #3400 P1-2 (#3407 review): the COUNT axis is retained as a secondary
+    # bound instead of being discarded. The previous `elif` skipped the ±3
+    # count check entirely whenever a durations map existed, so nothing
+    # noticed that the zero-weight placement degeneracy had piled 123 files
+    # onto one half (185/315 = 1.70x) while both halves weighed 26.26m. A
+    # ~0s file contributes no weight, so duration balance is structurally
+    # blind to a count tilt — the two axes catch different bugs.
     durations = manifest.get("durations") or {}
     if durations:
         weights = {h: sum(durations.get(f if f.endswith(".py") else f + ".py",
@@ -807,6 +834,14 @@ def workflow_halves_issues(manifest: dict, halves: dict[str, list[str]],
                 f"(ratio {hi / lo:.2f}x, tolerance "
                 f"{HALF_DURATION_IMBALANCE_RATIO:.2f}x) — rebalance the "
                 f"durations map (#3400)")
+        clo, chi = min(counts.values()), max(counts.values())
+        if clo > 0 and chi / clo > HALF_COUNT_IMBALANCE_RATIO:
+            issues.append(
+                f"matrix halves count-imbalanced: a={counts.get('a', 0)} vs "
+                f"b={counts.get('b', 0)} (ratio {chi / clo:.2f}x, tolerance "
+                f"{HALF_COUNT_IMBALANCE_RATIO:.2f}x) — duration balance is "
+                f"blind to a tilt of files that measure ~0s; check the "
+                f"durations map for zero/absent weights (#3400)")
     elif abs(counts.get("a", 0) - counts.get("b", 0)) > HALF_IMBALANCE_TOLERANCE:
         issues.append(
             f"matrix halves imbalanced: a={counts.get('a', 0)} vs "
@@ -837,13 +872,25 @@ def split_fast_gate(files, durations: dict, default_weight: float = DEFAULT_FAST
     """#1473: LPT greedy pack of the selected fast-gate files across halves
     a/b by measured duration — deterministic (ties -> a; assignment order).
     Raises ValueError on non-list input (guards the 'ALL' full-mode string).
+
+    #3400 P1-1 (#3407 review): placement uses a POSITIVE placement weight
+    (`w if w > 0 else default_weight`). A raw `0.0` is a missing measurement,
+    not free work — `ta += 0.0` left the running total unmoved, so `ta <= tb`
+    stayed true and EVERY zero-weight file landed on the same half,
+    deterministically. On the real pool that piled 123 files (24.7% of the
+    pool) onto half (b) and tilted the split 185/315 while the duration ratio
+    still read a healthy 1.00 (a ~0s file adds no weight). The balance ratio
+    check in workflow_halves_issues keeps using the RAW map, so duration
+    balance is unchanged and only the count skew disappears.
     """
     if not isinstance(files, list):
         raise ValueError(f"split_fast_gate expects a list, got {type(files).__name__}")
     weighted = []
     for f in files:
         name = f[len("tests/"):] if f.startswith("tests/") else f
-        weighted.append((name, durations.get(name, default_weight)))
+        raw = durations.get(name, default_weight)
+        # a zero weight is an unmeasured file; give it real placement mass
+        weighted.append((name, raw if raw > 0 else default_weight))
     a, b = [], []
     ta = tb = 0.0
     for name, w in sorted(weighted, key=lambda x: (-x[1], x[0])):
@@ -874,15 +921,30 @@ def duration_issues(manifest: dict) -> list[str]:
 
 
 def duration_coverage_issues(manifest: dict,
-                             threshold: float = DURATION_COVERAGE_MIN) -> list[str]:
+                             threshold: float = DURATION_COVERAGE_MIN,
+                             mass_threshold: float = DURATION_MASS_COVERAGE_MIN
+                             ) -> list[str]:
     """#3400: the `durations` map must cover (almost) the whole fast pool.
 
-    A fast file with no measured duration is packed at DEFAULT_FAST_WEIGHT,
-    so a mostly-empty map silently turns `split_fast_gate` back into a
-    count-based pack — the exact rot that left 15 weights for 519 fast files
-    (#1266/#1473) and left the push halves duration-blind. Fail-closed once
-    the map is populated; an ABSENT or EMPTY map is NOT a failure, so a repo
-    that has not adopted durations is never hard-failed by this guard.
+    Two independent axes, because key PRESENCE alone is satisfiable by a map
+    of zeros:
+
+      * PRESENCE (`threshold`) — a fast file with no key at all is packed at
+        DEFAULT_FAST_WEIGHT, so a mostly-empty map silently turns
+        `split_fast_gate` back into a count-based pack (the rot that left 15
+        weights for 519 fast files — #1266/#1473).
+      * MASS (`mass_threshold`) — #3400 P1-3 (#3407 review): counting key
+        presence let a `0.0` pass as "covered", even though a zero weight is
+        LESS conservative than a missing key (both pack at
+        DEFAULT_FAST_WEIGHT, but zero asserts the file is free). A map
+        produced by an automated junit refresh is exactly a zero-heavy map,
+        so this is the shape the future produces. Only entries with
+        `weight > 0` count toward the floor; zero-valued entries are surfaced
+        separately, so "populated from junit" cannot satisfy the floor with an
+        empty mass.
+
+    Fail-closed once the map is populated; an ABSENT or EMPTY map is NOT a
+    failure, so a repo that has not adopted durations is never hard-failed.
     """
     durations = manifest.get("durations") or {}
     if not durations:
@@ -891,18 +953,36 @@ def duration_coverage_issues(manifest: dict,
     if not fast:
         return []
     missing = sorted(f for f in fast if f not in durations)
-    coverage = (len(fast) - len(missing)) / len(fast)
+    # A key that is ABSENT and a key that is PRESENT-BUT-ZERO are different
+    # failures (unmeasured vs measured-as-free) and are reported separately.
+    zero_valued = sorted(f for f in fast
+                         if f in durations and not durations[f] > 0)
+    present = len(fast) - len(missing)
+    positive = present - len(zero_valued)
+    coverage = present / len(fast)
+    mass = positive / len(fast)
+    issues: list[str] = []
     if coverage < threshold:
-        return [
+        issues.append(
             f"durations coverage {coverage:.1%} "
-            f"({len(fast) - len(missing)}/{len(fast)} fast files) is below the "
+            f"({present}/{len(fast)} fast files) is below the "
             f"{threshold:.0%} floor — {len(missing)} file(s) pack at the flat "
             f"{DEFAULT_FAST_WEIGHT}s default, so the push split is effectively "
             f"count-based (#3400). Refresh config/ci-surfaces.yml `durations` "
-            f"from tools/ci_timing.py / the CI junit artifacts. Example: "
-            f"{missing[:5]}"
-        ]
-    return []
+            f"from the CI junit artifacts with "
+            f"tools/ci_durations_from_junit.py. Example: {missing[:5]}"
+        )
+    if mass < mass_threshold:
+        issues.append(
+            f"durations mass-coverage {mass:.1%} ({positive}/{len(fast)} fast "
+            f"files carry weight > 0) is below the {mass_threshold:.0%} floor — "
+            f"{len(zero_valued)} entr(y/ies) read 0.0, which is less "
+            f"informative than a missing key (both pack at "
+            f"{DEFAULT_FAST_WEIGHT}s). A zero-heavy map satisfies presence but "
+            f"carries no duration signal (#3400). Zero-valued: "
+            f"{zero_valued[:5]}"
+        )
+    return issues
 
 
 # ── #2938: surface audit (report-only, non-blocking) ─────────────────────

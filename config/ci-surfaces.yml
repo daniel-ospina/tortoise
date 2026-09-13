@@ -223,6 +223,10 @@ surfaces:
   - test_battery_differential.py
   - test_battery_streams.py
   - test_battery_recall.py
+  # #3327/#3439 main-side drift unblock: merged on main (the matched-recall
+  # pre-pass wiring test) but never added to selection, so the --integrity
+  # drift gate reds every PR. Hermetic, imports battery.* — belongs here.
+  - test_battery_recall_wiring.py
   - test_battery_report.py
   - test_battery_arms_real.py
   - test_battery_cli.py
@@ -1265,7 +1269,7 @@ durations:
   test_connector_loader.py: 0.0
   test_connector_secrets.py: 0.0
   test_coverage_loop_rules.py: 0.0
-  test_crash_recovery_e2e.py: 0.0
+  test_crash_recovery_e2e.py: 2.0  # #3400 P2-2: 0 executed testcases in the measured run (all skipped) — NOT a measured 0s. Packed at DEFAULT_FAST_WEIGHT; see tools/ci_durations_from_junit.py
   test_crypto.py: 0.0
   test_dataset_audit.py: 0.0
   test_deploy_workflow.py: 0.0
@@ -1274,7 +1278,7 @@ durations:
   test_entity_stage.py: 0.0
   test_ep_nary_falsification.py: 0.0
   test_epic903_mcp.py: 0.0
-  test_event_log.py: 0.0
+  test_event_log.py: 2.0  # #3400 P2-2: 0 executed testcases in the measured run (shared_state absent — collection skipped) — NOT a measured 0s
   test_evidence_assembly.py: 0.0
   test_fake_control_plane.py: 0.0
   test_falkordb_compat.py: 0.0
