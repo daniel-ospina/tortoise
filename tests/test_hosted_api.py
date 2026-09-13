@@ -3847,6 +3847,12 @@ class TestProxyProtoRedirect:
         from starlette.responses import PlainTextResponse
         from starlette.routing import Mount, Route
 
+        # NOTE (#2864): this mini-app deliberately omits
+        # McpPathCanonicalizerMiddleware. On the real app `/mcp` no longer
+        # redirects at all; these tests now exercise ForwardedProtoMiddleware
+        # GENERICALLY — for any other trailing-slash redirect the app emits.
+        # Do not "fix" a 307 failure here by adding the canonicalizer: the
+        # 307 is the fixture's point.
         sub = Starlette(routes=[Route("/", lambda _r: PlainTextResponse("root ok"))])
         app = Starlette(routes=[Mount("/mcp", app=sub)])
         app.add_middleware(ForwardedProtoMiddleware)

@@ -372,7 +372,7 @@ def test_welcome_mode_provisions_and_reveals_key_once(page: Page) -> None:
     _goto_local_dashboard(page)
     # #2323 (Option B): teamless first-timer → welcome card (orientation
     # removed per epic #2534), no key anywhere yet.
-    expect(page.locator("body")).to_contain_text("Welcome to Tortoise", timeout=20_000)
+    expect(page.locator("body")).to_contain_text("Create your Organization", timeout=20_000)
     expect(page.locator("body")).not_to_contain_text("tt_welcome_key_1234567890abcdef")
     # Orientation removed — directly on org-create step (was Step 1).
     expect(page.locator("body")).to_contain_text("Create your Organization", timeout=10_000)
@@ -393,7 +393,8 @@ def test_welcome_mode_provisions_and_reveals_key_once(page: Page) -> None:
     # exactly one reveal, and the connect step renders welcomeKey with no
     # further reveal (ADR-010 single-consumption). If a future delivery
     # change makes the 201 body primary, this pin fails loudly.
-    page.get_by_role("button", name="Use it for your own agents").click()
+    # #3218: the self-fork option is first-person now ('For my internal setup').
+    page.get_by_role("button", name="For my internal setup").click()
     expect(page.locator("body")).to_contain_text("Connect your agent", timeout=15_000)
     expect(page.locator("body")).to_contain_text("tt_welcome_key_1234567890abcdef", timeout=15_000)
     assert reveal_calls["n"] == 1, \
@@ -530,7 +531,7 @@ def test_welcome_mode_fork_503_stays_and_recovers(page: Page) -> None:
 
     page.route("**/*", handle)
     _goto_local_dashboard(page)
-    expect(page.locator("body")).to_contain_text("Welcome to Tortoise", timeout=20_000)
+    expect(page.locator("body")).to_contain_text("Create your Organization", timeout=20_000)
     # #2744/#2534: the orientation step was removed — the first-timer welcome
     # card renders the org-create form DIRECTLY (no `Continue →`; the stale
     # click timed out and stranded these specs).
@@ -540,12 +541,12 @@ def test_welcome_mode_fork_503_stays_and_recovers(page: Page) -> None:
     expect(page.locator("body")).to_contain_text("Choose how you'll use Tortoise", timeout=20_000)
     # 503 on the fork checkpoint: STAY on the fork step, surface the inline
     # error, recover the buttons — no advance, no strand.
-    page.get_by_role("button", name="Use it for your own agents").click()
+    page.get_by_role("button", name="For my internal setup").click()
     expect(page.locator("body")).to_contain_text("The graph is temporarily unavailable — try again in a moment.", timeout=10_000)
     expect(page.locator("body")).not_to_contain_text("Connect your agent")
-    expect(page.get_by_role("button", name="Use it for your own agents")).to_be_enabled(timeout=5_000)
+    expect(page.get_by_role("button", name="For my internal setup")).to_be_enabled(timeout=5_000)
     # Retry against the 2xx: the fork persists and the wizard advances.
-    page.get_by_role("button", name="Use it for your own agents").click()
+    page.get_by_role("button", name="For my internal setup").click()
     expect(page.locator("body")).to_contain_text("Connect your agent", timeout=15_000)
     assert checkpoint_calls["n"] == 2, f"exactly one 503 + one 2xx checkpoint write, got {checkpoint_calls['n']}"
 
@@ -590,7 +591,7 @@ def test_welcome_mode_provision_failure_shows_error_card(page: Page) -> None:
     # #2323: provisioning fires on the org-create SUBMIT (mount no longer
     # provisions) — the 500 surfaces the inline step-1 error; the busy flags
     # reset so the submit button recovers and a retry is possible.
-    expect(page.locator("body")).to_contain_text("Welcome to Tortoise", timeout=20_000)
+    expect(page.locator("body")).to_contain_text("Create your Organization", timeout=20_000)
     # #2744/#2534: no orientation step — org-create renders directly.
     expect(page.locator("body")).to_contain_text("Create your Organization", timeout=10_000)
     page.get_by_label("Organization name").fill("acme")
@@ -646,7 +647,7 @@ def test_welcome_mode_provision_401_clears_session_and_redirects(page: Page) -> 
     _goto_local_dashboard(page)
     # #2323: the stale-session 401 now surfaces on the org-create SUBMIT
     # (mount no longer provisions). Drive to it, then expect the /auth bounce.
-    expect(page.locator("body")).to_contain_text("Welcome to Tortoise", timeout=20_000)
+    expect(page.locator("body")).to_contain_text("Create your Organization", timeout=20_000)
     # #2744/#2534: no orientation step — org-create renders directly.
     expect(page.locator("body")).to_contain_text("Create your Organization", timeout=10_000)
     page.get_by_label("Organization name").fill("acme")

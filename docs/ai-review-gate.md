@@ -27,7 +27,12 @@ green.
   ```
 
   The second form is emitted when the PR diff can be fetched from the REST
-  API. Its `diff=` field is inside the signed text, so the HMAC covers it.
+  API. The `diff=<sha256>` segment is optional (added producer-side by #2982)
+  and is part of the SIGNED text — it records the sha256 of the PR's three-dot
+  diff, so a review stays tied to the reviewed artifact rather than only the
+  commit sha. The gate must accept BOTH shapes: a regex that omits the optional
+  segment rejects every correctly-signed post-#2982 marker before the HMAC
+  check is ever reached (#3076).
 
   > **Producer dependency.** The `diff=` form ships in the producer half of
   > #2982 (`record-review.sh` in agent-infra, PR #767). Until that producer is
@@ -128,3 +133,19 @@ skill and re-record at the new head. If it moves only because the branch was
 updated against `main` — whether by a merge commit or by a rebase plus
 `--force-with-lease` — the three-dot diff is unchanged and the recorded
 evidence remains valid.
+
+## When the gate goes red
+
+The gate distinguishes the failure causes in its `::error::` output, so the fix
+is unambiguous:
+
+| Message says | Cause | Fix |
+|---|---|---|
+| `No AI review evidence found` | no marker in the PR body | run `record-review.sh` |
+| `is UNSIGNED` | marker has no ` sig=<hmac>` segment at all | re-record with a key configured |
+| `was recorded for '<other>', not …` | marker is bound to a different repo | re-record for this repo |
+| `HMAC mismatch` | key or signed text differs; prints `sha256` prefixes of the text it checked | compare the prefix with the recording machine, then re-record |
+| `is stale` | marker is for another head sha, and its `diff=` is absent, could not be hashed live, or no longer matches | re-run the review, re-record at the new head |
+| `live diff hash could not be computed` | the REST diff fetch failed; a `diff=` marker fails closed rather than carrying forward | re-run the job once the API is reachable — the evidence may still be valid |
+| `carries no well-formed 40-hex recorded sha` | marker's `@` field is not a full sha | re-record with a full 40-char head sha |
+| `malformed marker` | signed, but the line shape drifted from what this gate accepts | update the gate/producer together |

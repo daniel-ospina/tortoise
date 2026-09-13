@@ -281,14 +281,14 @@ if ! grep -qF "diff=$DH " "$T/body-e"; then
 else
     STUB_DIFF_FILE="$DIFF_FILE" run_gate "$T/body-e"
     assert_rc 1 "(e) gate fails"
-    assert_contains "(e) reports a signature mismatch" "signature mismatch"
+    assert_contains "(e) reports an HMAC mismatch (#3076 wording)" "HMAC mismatch"
 fi
 
 echo "── (f) unsigned marker → never passes ─────────────────────────"
 printf 'review recorded: reviews/%s.json verdict=clean @ %s (%s)\n' "$PR_NUMBER" "$HEAD" "$REPO_NAME" > "$T/body-f"
 STUB_DIFF_FILE="$DIFF_FILE" run_gate "$T/body-f"
 assert_rc 1 "(f) unsigned marker fails"
-assert_contains "(f) explains it is not signed" "not signed"
+assert_contains "(f) explains it is not signed (#3076 wording)" "is UNSIGNED"
 
 echo "── (g) PR-body source: REST fetch vs env-var fallback ─────────"
 # g1: only the REST body carries the marker → the gate consumed the REST fetch.

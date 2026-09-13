@@ -29,19 +29,44 @@ export const WIZARD_STEPS = Object.freeze([
   {
     id: 'fork',
     label: "Choose how you'll use Tortoise",
-    sub: 'This tells your agent what to set up. You pick once per organization.',
+    // #3218: "you pick once per organization" stays — the fork IS set-once
+    // (state.py _SEMANTICS['fork'] = SET_ONCE; a changed value is a 409
+    // fork_already_set). Only the `unsure` answer leaves fork NULL, so the
+    // "answer any time" affordance belongs on THAT option, never here.
+    sub: 'This tells your agent what to set up — you choose once per Organization.',
   },
   {
     id: 'connect',
     label: 'Connect your agent',
-    sub: 'Connect Tortoise to your Organization.',
+    // #2912: the old sub ("Connect Tortoise to your Organization.") restated the
+    // label instead of saying what the step ASKS. The step is a harness pick.
+    sub: 'Pick which harness to connect.',
   },
   {
     id: 'done',
     label: "You're all set",
-    sub: 'Your agent takes over from here. Open Settings → Setup guide to follow what happens next.',
+    // #2912 (PR-gate UX): the step-3 body already ends with "Open Settings →
+    // Setup guide to follow what happens next" — the header sub used to repeat
+    // that sentence verbatim inside one viewport.
+    sub: 'Your agent takes over from here.',
   },
 ])
+
+// #2912 (PR-gate UX P1): the wizard header and the sr-only step announcement
+// must name the stage the SAME way. Two contexts override the step's own
+// label:
+//   - step 0 on an org-holding account is a read-only summary ("Your
+//     Organization"), not an invitation to create one;
+//   - the paused reconnect's whole point is that the agent is NOT connected,
+//     so rendering "You're all set" as the page <h1> directly above the lede
+//     "You're set up, but your agent isn't connected yet" contradicted itself.
+// Pure + exported so it is unit-tested (wizardFlow.test.js) instead of pinned
+// by a source-text grep.
+export function wizardStageLabel(step, { hasOrg = false, paused = false } = {}) {
+  if (step === 3 && paused) return 'Setup paused — your agent is not connected yet'
+  if (step === 0 && hasOrg) return 'Your Organization'
+  return WIZARD_STEPS[step]?.label ?? ''
+}
 
 // The fork card (epic plan P4 / I-4): presentation fork, once per org,
 // nudge-not-force — NEVER a billing gate. Fork SEMANTICS are W2-owned;
@@ -54,18 +79,25 @@ export const WIZARD_STEPS = Object.freeze([
 export const WIZARD_FORK_OPTIONS = Object.freeze([
   {
     id: 'self',
-    label: 'Use it for your own agents',
-    description: 'Your agent files decisions and findings to your organization memory graph.',
+    label: 'For my internal setup',
+    description: 'Your agent files decisions and findings to your Organization memory graph.',
   },
   {
     id: 'build',
     label: 'Build an application on top',
-    description: 'You get the capability catalog — the indexers and extractors you can build with.',
+    // #3218: the build branch's step 2 is "Call the SDK" (main.jsx
+    // connect-build) — the description has to name the SDK, not just the
+    // capability catalog, or the copy promises a catalog and delivers an API.
+    description: 'You get the Tortoise SDK and the capability catalog — the indexers and extractors you can build with.',
   },
   {
     id: 'unsure',
     label: 'Not sure yet — decide later',
-    description: 'Skip the choice — you pick once per organization, any time from the Setup guide.',
+    // #3218: 'unsure' is the ONLY path that does not consume the set-once
+    // fork (it writes fork_unsure_at; fork stays NULL) — so the deferral
+    // affordance is stated here and the set-once consequence is stated on the
+    // step sub, instead of one sentence asserting both.
+    description: 'Skip for now — nothing is locked in. Answer any time from Settings → Setup guide.',
   },
 ])
 

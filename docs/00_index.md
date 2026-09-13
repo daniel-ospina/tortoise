@@ -5,6 +5,8 @@ domain: operations
 doc_status: live
 created: 2026-08-08
 ownedBy: epistemic-team
+aboutSubjects: epistemic-team
+aboutObjects: tortoise
 ---
 
 # Documentation Index
@@ -14,6 +16,9 @@ ownedBy: epistemic-team
 | Ask answer surface (`POST /v1/ask` / SDK `ask()` / MCP `tortoise_ask`, #1987) | `docs/product/answer-surface.md` |
 | Ask pre-ship gate runbook + #2069 routing/cost record (#1987/#2069) | `docs/runbook/1987-ask-abstention-check.md` |
 | Temporal measurement runbook + gate output (2×2 attribution + widening ablation, #2578) | `docs/runbook/2578-temporal-measurement.md` |
+| Temporal retrieval diagnosis + oracle ceiling (42/52 = 81%, #2976/#2978) — evidence | `docs/runbook/2578-oracle-ceiling.jsonl` · `docs/research/2026-09-11-subgraph-retrieval-research.md` |
+| **A/B/C context-assembly pre-registration** — verbatim vs epistemic subgraph vs union (#2976/#2978/#2683) | `docs/experiments/2026-09-11-abc-context-assembly-experiment.md` |
+| Competitor analysis — 14 profiles incl. the four-epistemic-primitives matrix (Kumiho/Cognee/Mem0/HippoRAG/GraphRAG/Emergence/Letta) | `product/competition/_analysis.md` · `product/competition/_index.md` |
 | Auth architecture — standard patterns vs Tortoise (#1498/#1506); key-permission model + #2082 boundary (§6, epic #2083) | `docs/auth-architecture.md` |
 | Backup/DR runbook | `docs/ops/registry-backup-dr.md` |
 | CI timing measurement artifact (#1477) | `docs/ci-timing.md` |
@@ -28,6 +33,7 @@ ownedBy: epistemic-team
 | Agent-harness landscape — volunteering-memory end-state distribution targets (epic #2080) | `docs/research/2026-09-01-gbrain-learnings/platform-landscape.md` |
 | Embedder selection decision record (ADR-009, #1349) | `docs/adr/ADR-009-embedder-selection.md` |
 | Auth planes — sessions vs machine credentials (ADR-010, #2246) | `docs/adr/ADR-010-auth-planes-session-agent-key.md` |
+| OAuth 2.1 for remote MCP — discovery, PKCE flow, DCR capacity policy + trusted-CIDR exemption (#524/#2866) | `docs/oauth-mcp.md` |
 | #2246 dashboard session-only scope + verified plan (ADR-010) | `docs/scoping/2026-09-04-2246-dashboard-session-only.md` |
 | #2514 planted-operator (layer-2) corpus + grading scoping | `docs/scoping/2026-09-07-2514-operator-corpus.md` |
 | Hosted-vs-local embedding UX research (#1349) | `docs/research/2026-08-17-1349-embedder-selection/ux-research.md` |

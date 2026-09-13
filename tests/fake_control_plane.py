@@ -57,6 +57,14 @@ def _assert_uuid_fidelity(table: str, filters: list[tuple[str, str, object]] | N
             ) from None
 
 
+# #2863: module-level registry of every control plane a `fail_query` was installed
+# on. The autouse `_no_silent_faults` guard in the OAuth fault suite reads it to
+# fail a test whose injector never fired (a stale matcher is a silent green test) —
+# including bare `FakeControlPlane()` instances a test built itself, not just the
+# fixture's.
+_FAULT_CPS: list = []
+
+
 class FakeControlPlane:
     def __init__(self, tables: dict[str, list[dict]] | None = None,
                  *, missing_columns: dict[str, set[str]] | None = None,
@@ -83,6 +91,8 @@ class FakeControlPlane:
         # partial unique index is the READ-COMMITTED backstop; the fake must
         # be atomic under the two-tab threading test).
         self._identity_lock = threading.Lock()
+        # #2863: fault injectors, consumed in order (see fail_query/_take_fault).
+        self._faults: list[dict] = []
 
     def seed(self, table: str, rows: list[dict]) -> "FakeControlPlane":  # noqa: UP037
         self.tables.setdefault(table, []).extend(rows)
@@ -568,10 +578,71 @@ class FakeControlPlane:
              "key_id": key_id,
              "created_at": datetime.now(timezone.utc).isoformat()})  # noqa: UP017
 
+    def fail_query(self, *, table=None, method=None, select=None, filters=None,
+                   match=None, times: int = 1, after_mutation: bool = False,
+                   exc: Exception | None = None) -> None:
+        """Install a fault injector (#2863). The first unexhausted injector whose
+        predicate accepts the call fires. Provide either the simple attribute matches
+        or (preferred) ``match=fn(table, method, select, filters) -> bool`` — a callable
+        does NOT go stale when a production select list changes (two review cycles were
+        lost to hand-written select literals that never matched). ``after_mutation=True``
+        applies the write THEN raises — the commit-then-lost-response case a plain
+        raise-on-N cannot express."""
+        self._faults.append({
+            "table": table, "method": method, "select": select, "filters": filters,
+            "match": match, "consumed": False,
+            "times": times, "after_mutation": after_mutation,
+            "exc": exc or RuntimeError("Supabase unreachable (simulated)"),
+        })
+        _FAULT_CPS.append(self)          # module-level registry: the guard's only view
+                                         # of a bare `FakeControlPlane()` built by a test
+
+    def unfired_faults(self) -> list[dict]:
+        """Injectors that did not do what the test intended — either never fired, or
+        fired fewer times than `times` asked for. A test MUST fail on these; a stale
+        matcher is otherwise a silent green test."""
+        return [f for f in self._faults if not f["consumed"] or f["times"] > 0]
+
+    def _take_fault(self, table, method, select, filters):
+        for fault in self._faults:
+            if fault["times"] <= 0:
+                continue
+            # The table filter applies INDEPENDENTLY of `match` — otherwise a
+            # shape-scoped injector would also fire on the other token table
+            # (the rollback and lane 3 are both select-less PATCHes).
+            if fault["table"] is not None and fault["table"] != table:
+                continue
+            if (fault["match"] is not None
+                    and not fault["match"](table, method, select, filters)):
+                continue
+            if fault["method"] is not None and fault["method"] != method:
+                continue
+            if fault["select"] is not None and list(fault["select"]) != list(select or []):
+                continue
+            if fault["filters"] is not None and list(fault["filters"]) != list(filters or []):
+                continue
+            fault["times"] -= 1
+            fault["consumed"] = True
+            return fault
+        return None
+
     def query(self, table: str, *, select: list[str] | None = None,
               filters: list[tuple[str, str, object]] | None = None,
               method: str = "GET", json_body: dict | None = None,
               order: str | None = None, limit: int | None = None) -> list[dict]:
+        fault = self._take_fault(table, method, select, filters)
+        if fault is not None and not fault["after_mutation"]:
+            raise fault["exc"]
+        result = self._query_impl(table, select=select, filters=filters, method=method,
+                                  json_body=json_body, order=order, limit=limit)
+        if fault is not None:
+            raise fault["exc"]
+        return result
+
+    def _query_impl(self, table: str, *, select: list[str] | None = None,
+                    filters: list[tuple[str, str, object]] | None = None,
+                    method: str = "GET", json_body: dict | None = None,
+                    order: str | None = None, limit: int | None = None) -> list[dict]:
         self.query_count += 1
         # #1719 (Task 3): fidelity check BEFORE method dispatch — GET builds
         # filters in the loop below, but PATCH/DELETE flow through _matches;

@@ -3,9 +3,14 @@
 // webhook. Writes the master list into Supabase ONLY — teams +
 // team_memberships + api_keys in ONE atomic transaction via the
 // provision_team SECURITY DEFINER RPC (migration 0010, #669 plan Task 2 /
-// #770), then seeds the team's demo knowledge graph via the FastAPI data
-// plane (/internal/demo — FalkorDB knowledge graphs stay untouched; the
-// control_plane registry graph is NEVER written here: E2E-1).
+// #770), then seeds the team's REAL starter graph via the FastAPI data
+// plane (/internal/starter-seed — #2360 re-spec: the signing-up user as a
+// Subject + their Organization as a Subject, connected memberOf; the old
+// demo sample auto-seed is GONE — sample content is never auto-seeded
+// into a fresh org, so the Overview digest never counts fake demo points
+// as the user's own filings). FalkorDB knowledge graphs stay
+// untouched by the registry; the control_plane registry graph is NEVER
+// written here (E2E-1).
 //
 // ── CALLER AUTH (#802) ─────────────────────────────────────────────────
 // The function MUST be deployed with verify_jwt=false (--no-verify-jwt):
@@ -499,41 +504,58 @@ Deno.serve(async (req: Request) => {
       return json({ error: "Provisioning failed. Please try again." }, 502, corsOrigin);
     }
 
-    // ── Fix #7854: Trigger demo graph seeding ──────────────────────────
-    // Data plane ONLY: /internal/demo writes the team's knowledge graph
-    // (FalkorDB, graph team_{team_id} — created on first write). It never
-    // touches the control_plane registry graph (E2E-1: zero registry
-    // writes). The old /internal/provision call is GONE — it wrote the
-    // registry (Team/APIKey/Membership nodes), which the plan moves to
-    // Supabase entirely. AbortSignal.timeout bounds the await so a slow
-    // demo seed can never blow the hook deadline mid-retry (code-review P2,
-    // PR #847 — the RPC has already committed at this point; the hook
+    // ── #2360: REAL starter seed (supersedes the demo auto-seed) ──────
+    // Data plane ONLY: /internal/starter-seed files the team's REAL starter
+    // graph (FalkorDB, graph team_{team_id} — created on first write): the
+    // signing-up user as a naturalPerson Subject + their Organization as an
+    // organization Subject, connected memberOf (canonical two-anchor seed,
+    // tortoise/onboarding/seed.py). The old demo auto-seed wrote
+    // 12 fake demo Points + a _demo_sentinel into every fresh org — sample
+    // content the Overview digest counted as the user's own activity
+    // (#2360). Identity data here is the VERIFIED caller's own: org_name =
+    // the user-confirmed org name, person_name = the user's auth display
+    // name when present (never silently email-derived — the interactive W3
+    // seed completes the person anchor with a user-confirmed name when no
+    // display name exists). Never touches the control_plane registry graph
+    // (E2E-1: zero registry writes). AbortSignal.timeout bounds the await so
+    // a slow seed can never blow the hook deadline mid-retry (code-review
+    // P2, PR #847 — the RPC has already committed at this point; the hook
     // redelivers the whole request, and deterministic team_id makes that a
     // harmless no-op).
     // #1860 (P3-1): bind the response — a non-2xx body used to resolve
     // "successfully" (the old .catch() only handled transport/abort), so a
-    // failed seed left the first-timer's graph silently missing demo data.
-    const demoRes = await fetch(`${fastApiUrl}/internal/demo`, {
+    // failed seed left the first-timer's graph silently missing starter
+    // data.
+    const starterBody: Record<string, string> = {
+      team_id: teamId,
+      org_name: safeName,
+      person_user_id: user_id,
+      person_email: email,
+    };
+    if (typeof display_name === "string" && display_name.trim()) {
+      starterBody.person_name = display_name.trim();
+    }
+    const starterRes = await fetch(`${fastApiUrl}/internal/starter-seed`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         "Authorization": `Bearer ${fastApiKey}`,
       },
-      body: JSON.stringify({ team_id: teamId }),
+      body: JSON.stringify(starterBody),
       signal: AbortSignal.timeout(10_000),
     }).catch((e) => {
-      console.error("Demo seed failed:", e);
+      console.error("Starter seed failed:", e);
       return null;
     });
-    if (demoRes && !demoRes.ok) {
+    if (starterRes && !starterRes.ok) {
       // HTTP error (4xx/5xx) — the provision RPC already committed, so the
-      // team exists but its graph lacks demo data. Log loudly (incl. the
-      // error body, which also drains the connection back to the pool); do
-      // NOT fail the whole provisioning (the user can still be onboarded).
-      const demoErrBody = await demoRes.text().catch(() => "");
+      // team exists but its graph lacks the starter seed. Log loudly (incl.
+      // the error body, which also drains the connection back to the pool);
+      // do NOT fail the whole provisioning (the user can still be onboarded).
+      const starterErrBody = await starterRes.text().catch(() => "");
       console.error(
-        "Demo seed failed: /internal/demo returned " + demoRes.status +
-          (demoErrBody ? ": " + demoErrBody : "")
+        "Starter seed failed: /internal/starter-seed returned " + starterRes.status +
+          (starterErrBody ? ": " + starterErrBody : "")
       );
     }
 
