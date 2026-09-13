@@ -846,6 +846,25 @@ class TestDrRebaseline:
         state = json.loads(mem_storage.download("ops/teams/team_x/state.json"))
         assert state["node_count"] == 3
 
+    def test_rebaseline_survives_a_resolve_failure(self, client, dr_env, mem_storage,
+                                                    monkeypatch):
+        """Cycle-2 review P2: `resolve_incident` RAISES on a failed close, and the
+        state write has already succeeded by then — a raise out of the endpoint
+        would 500 a request whose effect was persisted, inviting the operator to
+        retry a write that already happened."""
+        _seed_team("team_x", nodes=3)
+        fake = _FakeAlerts(open_subjects={"DATA_LOSS_CANDIDATE": {"team_x"}},
+                           fail_resolve_kinds={"DATA_LOSS_CANDIDATE", "SIZE_GUARD_ABORT"})
+        monkeypatch.setattr(ha_mod, "_alert_store_from", lambda cfg: fake)
+
+        r = client.post(
+            "/v1/internal/backups/re-baseline", headers=INTERNAL_HEADERS,
+            json={"team_id": "team_x"},
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()["status"] == "rebaselined"
+        assert json.loads(mem_storage.download("ops/teams/team_x/state.json"))["node_count"] == 3
+
 
 class TestDrDrill:
     def test_drill_requires_params(self, client, dr_env, mem_storage):

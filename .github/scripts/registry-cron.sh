@@ -255,12 +255,27 @@ gh_issue_open() { # number -> 0 when OPEN or unknown; 1 when confirmed closed OR
 }
 gh_close() { # number comment kind id
   [ -n "$GH_TOKEN" ] || return 0
-  local kind="${3:-}" id="${4:-}"
+  local kind="${3:-}" id="${4:-}" code=""
   curl -sS -X POST -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
     "https://api.github.com/repos/${REPO}/issues/$1/comments" \
     -d "$(jq -nc --arg b "$2" '{body:$b}')" >/dev/null 2>&1 || true
-  curl -sS -X PATCH -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
-    "https://api.github.com/repos/${REPO}/issues/$1" -d '{"state":"closed"}' >/dev/null 2>&1 || true
+  # The close must SUCCEED before we drop the dedup object (#3029/#3031 class,
+  # cycle-2 review P1 — this is the shell twin of the Python fix in
+  # alert_store.resolve_incident). Deleting on a failed PATCH leaves the object
+  # gone while the issue stays OPEN: the next run re-creates the object, adopts
+  # the still-open issue and pages again — and `resolve_global` has already set
+  # the run green, so the false all-clear is invisible. On a non-2xx the object
+  # is KEPT and the failure is LOUD so the next hourly run retries.
+  code="$(curl -sS -o /dev/null -w '%{http_code}' -X PATCH \
+    -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
+    "https://api.github.com/repos/${REPO}/issues/$1" -d '{"state":"closed"}' 2>/dev/null)" || code=""
+  case "$code" in
+    2*) : ;;
+    *)
+      LOUD=1
+      fail "gh_close: closing issue #$1 returned HTTP ${code:-<no response>} — keeping the dedup object so the next run retries (the issue is still OPEN)"
+      return 1 ;;
+  esac
   # delete-to-resolve: drop the R2 dedup object so a RECURRENCE is a new
   # incident. Without this, file_alert's 412 branch would adopt the stale
   # object and silently swallow the recurrence (the #2796 class).
@@ -286,7 +301,10 @@ resolve_global() { # kind comment — close an open global incident (no-op if no
     LOUD=1
     return 0
   fi
-  if [ -n "$num" ]; then gh_close "$num" "$comment" "$kind" "global"; fi
+  # `|| true`: the failure is already LOUD (and the object kept), so it must not
+  # abort the whole run under `set -e` — the remaining legs and the /status exit
+  # code still need to evaluate.
+  if [ -n "$num" ]; then gh_close "$num" "$comment" "$kind" "global" || true; fi
 }
 telegram() { # text
   [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ] \

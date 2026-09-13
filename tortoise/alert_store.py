@@ -200,7 +200,15 @@ class AlertStore:
         One LIST instead of an R2 read per candidate: the sweep endpoint must not
         issue a GET per graph per run just to discover that nothing is open — at a
         few thousand graphs that adds minutes to a request held under the sweep
-        lock. Returns the raw key segments (``"_"`` is the platform subject).
+        lock. Returns the raw key segments.
+
+        Key-shape caveat (review, cycle 2): the platform subject is stored as
+        ``"_"`` by this store's ``_key()``, but a caller that passes the literal
+        subject ``"global"`` gets a ``global.json`` object — the restore-drill
+        path files exactly that. So both spellings can appear here, and a matcher
+        must accept either for a platform/global subject. The sweep's four kinds
+        are only ever filed with ``team_id=""`` (→ ``"_"``), so this does not
+        affect them today.
 
         Fails SAFE: a listing error returns the empty set, so nothing is resolved
         on a read the caller could not perform.
@@ -220,15 +228,23 @@ class AlertStore:
         }
 
     def resolve_incident(self, kind: str, team_id: str = "") -> bool:
-        """Close + delete-to-resolve. True if an incident was open.
+        """Close + delete-to-resolve. True if an incident was open, False if not.
 
         Ordering matters (#3029/#3031 review): the issue close must SUCCEED before
         we announce a resolution and delete the dedup object. A swallowed close
         failure would push "✅ DR resolved", delete the object, and leave the issue
         open — so the next poll re-files, adopts the still-open issue, and pushes
         "🚨 DR alert" again: a ✅/🚨 flip every poll and a false all-clear in the
-        channel whose whole job is truthfulness. On a close failure nothing is
-        deleted and no resolution is announced; the caller retries next poll.
+        channel whose whole job is truthfulness.
+
+        So a failed close **RAISES** (cycle-2 review P1): nothing is announced and
+        nothing is deleted, and the caller must treat the subject as still open.
+        A raise is not a `False` return — `False` unambiguously means "nothing was
+        open", the ordinary case, which must NOT be confused with failure (a
+        caller that retried on every falsy return would spin forever). Callers
+        that iterate a shrunken universe therefore keep a subject whose close
+        RAISED pending for the next poll (see
+        ``backup_watcher._resolve_vanished_graphs``).
         """
         key = self._key(kind, team_id)
         state = _read_json(self._storage, key)
@@ -244,11 +260,32 @@ class AlertStore:
                     "(no resolution announced, object kept) so the next poll retries",
                     kind, number, e,
                 )
-                return False
+                raise
             self._push_with_pending(
                 key, f"✅ DR resolved: {kind}" + (f" ({team_id})" if team_id else "") + f" — issue #{number}"
             )
-        self._storage.delete(key)
+        try:
+            self._storage.delete(key)
+        except Exception as e:
+            # The close succeeded but the object survived carrying a live
+            # issue_number. Left as-is, the next recurrence would be adopted by
+            # an issue that is already CLOSED and silently swallowed (the
+            # #2796/#2844 class). Clear the number so a recurrence re-files, and
+            # report loudly rather than pretending the resolution was clean.
+            state.pop("issue_number", None)
+            state["resolve_failed_at"] = self._clock().isoformat()
+            try:
+                _write_json(self._storage, key, state)
+            except Exception:
+                logger.exception(
+                    "could not delete NOR rewrite %s after a successful close — a "
+                    "recurrence may be adopted by the already-closed issue #%s",
+                    key, number,
+                )
+            logger.error(
+                "dedup object %s could not be deleted after closing #%s: %s — "
+                "cleared its issue_number so a recurrence re-files", key, number, e,
+            )
         return True
 
     def _push_with_pending(self, key: str, text: str) -> None:

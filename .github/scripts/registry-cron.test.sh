@@ -255,7 +255,9 @@ case "$url" in
           # emit honours -o/-w: gh_issue_open asks for the code first, then the body.
           emit "{\"state\":\"${GH_ISSUE_STATE:-open}\"}" "${STUB_ISSUE_CODE:-200}"
         else
-          printf '{}'
+          # PATCH (close). emit honours -w so gh_close's new HTTP-code check works;
+          # STUB_GH_CLOSE_CODE simulates a rate-limit/5xx close failure.
+          cbody='{}'; emit "$cbody" "${STUB_GH_CLOSE_CODE:-200}"
         fi ;;
       */issues) printf '{"number":%s}' "${GH_NEW_ISSUE:-900}" ;;
       *) printf '{}' ;;
@@ -302,6 +304,7 @@ reset_case() {
         STUB_RECONCILE_CODE STUB_412 STUB_APP_DOWN STUB_R2_DOWN STUB_GET_BODY \
         SIMULATE_APP_DOWN STUB_GH_SEARCH_FAIL STUB_GH_SEARCH_BODY \
         STUB_NO_IFNONEMATCH STUB_HEAD_EXISTS STUB_PUT_FAIL STUB_PUT_412_SUBSTRING \
+        STUB_GH_CLOSE_CODE \
         STUB_LIST_FAIL STUB_LIST_FAIL_TEAM STUB_FLAT_FAIL STUB_INDEX_FAIL GH_ISSUE_STATE STUB_ISSUE_CODE \
         GH_SEARCH_JSON GH_NEW_ISSUE R2_TEAMS R2_DEFAULT_LIST R2_FLAT_LIST \
         R2_DEFAULT_LIST_Z R2_DEFAULT_LIST_A \
@@ -648,6 +651,23 @@ run_driver
 assert_eq "$RC" 0 "29. healthy run exits 0"
 assert_match "$(cat "$LOG")" "AWS delete-object key=ops/alerts/APP_DOWN/global.json" "29. the driver dedup object is deleted on resolve"
 assert_match "$(cat "$LOG")" "AWS delete-object key=ops/alerts/APP_DOWN/_.json" "29. the server-side dedup object is deleted too"
+
+# ── 29b. a FAILED close keeps the dedup object (cycle-2 review P1) ─────────
+# The shell twin of the Python P0: deleting the object on a failed PATCH leaves
+# the object gone while the issue stays OPEN, so the next run re-creates it,
+# adopts the still-open issue and pages again — while the run reports green.
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_STATUS_BODY="$(status_body true null null)"
+export STUB_SWEEP_BODY='{"status":"backed_up","teams_backed_up":1}'
+export GH_ISSUE_APP_DOWN=99
+export STUB_GH_CLOSE_CODE=500
+run_driver
+assert_eq "$RC" 1 "29b. a failed self-heal close exits RED (1), not a silent green"
+assert_match "$OUT" "closing issue #99 returned HTTP 500" "29b. the failed close is LOUD"
+assert_not_match "$(cat "$LOG")" "AWS delete-object key=ops/alerts/APP_DOWN/global.json" "29b. the driver dedup object is KEPT"
+assert_not_match "$(cat "$LOG")" "AWS delete-object key=ops/alerts/APP_DOWN/_.json" "29b. the server-side dedup object is KEPT"
 
 # ── 30. missing .watcher block neither files nor self-heals WATCHER_DOWN ────
 reset_case

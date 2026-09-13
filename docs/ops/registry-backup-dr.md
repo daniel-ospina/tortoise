@@ -459,8 +459,10 @@ surface and stayed open forever (the live case was #2821).
      silent-degradation class and it could never re-fire (the same run's
      ops-state write resets the `>0 → 0` transition it keys on).
    * **`P0_GUARD_FAIL`** clears only for a graph whose dump demonstrably **ran and
-     passed the guard**. A graph whose result is `error` (pre-dump failure) or
-     `aborted_size_guard` returned *before* the guard, so its incident stays open.
+     passed the guard** — the predicate is the result's `p0_checked` flag, not its
+     status name. `aborted_size_guard` and a pre-dump `error` return *before* the
+     guard and carry no flag, so their incident stays open; a **post-guard**
+     mirror failure returns `error` *with* the flag, and that one is cleared.
    * a **blind** run (`enum_failed`/`error`/`already_running`) clears nothing; a
      **`degraded`** run *did* look, so it clears the global guards it did not
      re-emit while leaving the P0 incidents of its failed graphs open.
@@ -468,26 +470,29 @@ surface and stayed open forever (the live case was #2821).
      per kind — never a read per graph, which at a few thousand graphs would add
      minutes under the sweep lock).
 2. **Recovery-side clear** — the driver's self-heal legs (above).
-3. **Manual close only** — currently `DATA_LOSS_CANDIDATE` (a >50% node drop needs
-a human verdict: verify + re-baseline, or restore). Any kind added here must name
-the verification the operator performs.
+3. **Manual close only** — `DATA_LOSS_CANDIDATE` (a >50% node drop needs a human
+verdict: verify + re-baseline, or restore). `SIZE_GUARD_ABORT` closes through
+**re-baseline** (`POST /v1/internal/backups/rebaseline` resolves it together with
+`DATA_LOSS_CANDIDATE`). Any kind added here must name the verification the
+operator performs.
 
 A closed incident's dedup object is **deleted**, so a **recurrence files a new
 issue** — that is the contract (`delete-to-resolve`), and the driver adopts a
-still-open issue only when the object's recorded issue is verifiably open.
+still-open issue only when the object's recorded issue is verifiably open. On the
+app side, a failed **close** makes `resolve_incident` **raise**: nothing is
+announced and nothing is deleted, and the subject stays pending for the next
+poll. The driver's `gh_close` mirrors it — a non-2xx PATCH keeps the dedup object
+and marks the run red, so the next hourly run retries.
 
 Two residuals are known and tracked, not silently absorbed:
 
 * A graph **tombstoned/deleted after** its `P0_GUARD_FAIL` fired is no longer in
   the run's graph map, so the resolver never revisits it — close it manually (or
-  via the trash/restore flow) until the resolver learns to reconcile the open
-  incident set against the current graph map.
-* If the issue **close** itself fails, the app leaves the incident open and
-  announces nothing (no "✅ resolved", no object deletion) and retries next poll —
-  a false all-clear is worse than a late one. A dedup object whose recorded issue
-  was closed **out of band** (by hand, or by the driver) is not re-verified on the
-  app side, so that incident can stay silent until the object is cleared; this is
-  a tracked follow-up, not a documented guarantee.
+  via the trash/restore flow) until #3410 lands the open-set reconciliation.
+* A dedup object whose recorded issue was closed **out of band** (by hand) is not
+  re-verified on the app side, so that incident can stay silent until the object
+  is cleared — tracked as #3411, not a documented guarantee. (Closed by the driver
+  or the app itself? Both now delete the object only after a confirmed close.)
 
 ### Kinds with no writer (`ALERTER_DOWN`, `LIVENESS_NO_WORK`)
 

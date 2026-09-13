@@ -20584,7 +20584,15 @@ async def backups_sweep(request: Request):
             try:
                 if kind not in open_cache:
                     open_cache[kind] = await asyncio.to_thread(alerts.open_subjects, kind)
-                if (subject or "_") not in open_cache[kind]:
+                # The platform subject has two spellings in the store: `_` (what
+                # `_key()` writes for an empty subject) and a literal `global`
+                # (the restore-drill path files that one). Accept either for a
+                # platform candidate so a future kind filed under `global` still
+                # resolves instead of silently never closing (cycle-2 review P2).
+                if not (
+                    (subject or "_") in open_cache[kind]
+                    or (not subject and "global" in open_cache[kind])
+                ):
                     continue
                 if await asyncio.to_thread(alerts.resolve_incident, kind, subject):
                     resolved.append(f"{kind}/{subject}" if subject else kind)
@@ -20937,8 +20945,19 @@ async def backups_rebaseline(request: Request, body: dict):
         _write_json(storage, f"ops/teams/{team_id}/state.json", state)
     subject = f"{team_id}:{graph_id}" if graph_id != "default" else team_id
     alerts = _alert_store_from(_backup_config_safe())
-    alerts.resolve_incident("DATA_LOSS_CANDIDATE", subject)
-    alerts.resolve_incident("SIZE_GUARD_ABORT", subject)
+    # The state write above already succeeded, so a resolve failure must NOT fail
+    # the request (cycle-2 review P2: `resolve_incident` now RAISES on a failed
+    # close instead of returning silently — an unguarded call here would 500 the
+    # re-baseline AFTER the operator's verdict was persisted, and the caller would
+    # reasonably retry a state write that already happened).
+    for kind in ("DATA_LOSS_CANDIDATE", "SIZE_GUARD_ABORT"):
+        try:
+            alerts.resolve_incident(kind, subject)
+        except Exception:
+            _logger.warning(
+                "%s resolve failed on re-baseline of %s — the incident stays open "
+                "for the next poll", kind, subject, exc_info=True,
+            )
     return {"status": "rebaselined", "team_id": team_id,
             "graph_id": graph_id, "node_count": count}
 

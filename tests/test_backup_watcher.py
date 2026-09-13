@@ -680,9 +680,19 @@ def test_vanished_graph_resolution_failure_is_contained():
     w.poll()
 
     assert json.loads(storage.download(HEARTBEAT_KEY))["last_poll_at"]
-    # The failure aborted the pass, so the vanished key is still pending a retry
-    # rather than having been silently dropped.
+    # `resolve_incident` RAISES on a failed close (a `False` return only means
+    # "nothing open"), and the failed key is kept so the next poll's `prev - cur`
+    # diff re-includes it. Retiring it would document a retry that never happens.
     assert "team_a:vanished" in w._last_graph_keys
+    attempts = {"n": 0}
+
+    def _count(kind, team_id=""):
+        attempts["n"] += 1
+        raise RuntimeError("alert store still down")
+
+    w._alerts.resolve_incident = _count  # type: ignore[method-assign]
+    w.poll()
+    assert attempts["n"] > 0, "the pending key must be retried on the next poll"
 
 
 def test_alert_failure_does_not_lose_the_poll_or_the_heartbeat():

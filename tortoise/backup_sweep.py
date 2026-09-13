@@ -1429,10 +1429,13 @@ def sweep_resolutions(result: dict[str, Any]) -> list[tuple[str, str]]:
       only on the ``>0 → 0`` transition, which the same run's ops-state write
       resets).
     * **`P0_GUARD_FAIL`** is per-graph and cleared only for graphs whose dump
-      demonstrably RAN the guard and passed it (``p0_checked``). A graph whose
-      result is ``error`` (pre-dump failure) or ``aborted_size_guard`` returned
-      BEFORE the guard, so its P0 incident must stay open.
-    * A **degraded** run (``enum_failed``/``error``/``already_running``)
+      demonstrably RAN the guard and passed it (``p0_checked`` — the flag is set
+      only by the post-guard returns). A result that returned earlier —
+      ``aborted_size_guard``, a pre-dump ``error`` — carries no ``p0_checked``,
+      so its P0 incident must stay open. Note the predicate is the FLAG, not the
+      status name: a post-guard mirror failure returns ``status="error"`` *with*
+      ``p0_checked``, and that graph's incident IS cleared.
+    * A **blind** run (``enum_failed``/``error``/``already_running``)
       resolves nothing: it cannot distinguish "no teams" from "could not look".
 
     The caller intersects this with the currently OPEN incidents (#3030 review:

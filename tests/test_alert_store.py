@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-import pytest  # noqa: F401
+import pytest
 
 from tortoise.alert_store import AlertStore
 from tortoise.hosted_backup import MemoryStorage
@@ -472,6 +472,11 @@ def _emittable_kinds() -> set[str]:
     for rel in _ALERT_SOURCES:
         text = (root / rel).read_text()
         kinds |= set(re.findall(r'(?:open_incident|resolve_incident)\(\s*"([A-Z][A-Z0-9_]+)"', text))
+        # The watcher's per-leg containment helper takes the op as a string
+        # (`_alert_leg("open_incident", "STALE", key)`) — the call-site pattern
+        # above cannot see it, so a refactor into that helper must not silently
+        # read as "this kind lost its writer".
+        kinds |= set(re.findall(r'_alert_leg\(\s*"(?:open|resolve)_incident",\s*"([A-Z][A-Z0-9_]+)"', text))
         kinds |= set(re.findall(r'"kind":\s*"([A-Z][A-Z0-9_]+)"', text))
         # Kinds named by a module constant (e.g. `_DRILL_FAILED_KIND`), which the
         # call-site scan cannot see.
@@ -527,8 +532,11 @@ def test_dead_kinds_are_documented_as_dead():
 
 def test_open_subjects_lists_open_incidents_without_a_read_per_candidate():
     """One LIST per kind, so the sweep endpoint never issues an R2 read per graph.
-    The platform subject is stored as `_` (the legacy `global` alias is NOT
-    returned — it is the driver's id, not a key shape this store writes)."""
+
+    Both platform spellings can appear: `_` (what `_key()` writes for an empty
+    subject — the sweep's four kinds) and a literal `global` (the restore-drill
+    path files that one). A caller matching a platform candidate must accept
+    either; the sweep endpoint now does."""
     ch = _FakeChannels()
     storage = MemoryStorage()
     store = _store(ch, storage)
@@ -570,8 +578,34 @@ def test_resolve_failure_leaves_the_incident_open_and_announces_nothing():
 
     ch.fail_close = True
 
-    assert store.resolve_incident("STALE", "team_a") is False
+    with pytest.raises(RuntimeError):
+        store.resolve_incident("STALE", "team_a")   # RAISES: False ≠ failure
     assert storage.download("ops/alerts/STALE/team_a.json"), "the object must survive"
     assert len(ch.telegram) == telegram_before, "no false 'resolved' announcement"
     # The incident is still tracked, so a recurrence is not re-filed either.
     assert store.open_incident("STALE", "team_a") is False
+
+
+def test_a_failed_delete_after_a_successful_close_does_not_swallow_the_recurrence():
+    """Cycle-2 review P1: the close succeeded, so the issue is CLOSED — if the
+    dedup object then survives carrying that issue_number, the next recurrence is
+    adopted by the closed issue and silently swallowed (#2796/#2844 class). The
+    object is tombstoned (issue_number cleared) so a recurrence re-files."""
+    ch = _FakeChannels()
+    storage = MemoryStorage()
+    store = _store(ch, storage)
+    assert store.open_incident("STALE", "team_a") is True
+    number = max(ch.issues)
+
+    def _delete_boom(key):
+        raise RuntimeError("R2 delete outage")
+
+    storage.delete = _delete_boom  # type: ignore[method-assign]
+
+    assert store.resolve_incident("STALE", "team_a") is True   # the close DID happen
+    assert number in ch.closed
+    tombstones = json.loads(storage.download("ops/alerts/STALE/team_a.json"))
+    assert not tombstones.get("issue_number"), "the stale issue_number must be cleared"
+    # A recurrence therefore re-files instead of being adopted by a closed issue.
+    assert store.open_incident("STALE", "team_a") is True
+    assert len(ch.issues) == 2

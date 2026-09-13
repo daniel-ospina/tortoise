@@ -2634,15 +2634,21 @@ def test_sweep_resolutions_keeps_kinds_this_run_re_emitted():
     """A guard that fires again must stay open — resolution is never blanket."""
     from tortoise.backup_sweep import sweep_resolutions
 
+    # A `degraded` run (it looked; one graph failed the guard) — the only shape
+    # that can both re-emit P0_GUARD_FAIL and carry enumeration evidence. A
+    # `no_teams` run has `results == {}` by construction, and a `p0_guard_failed`
+    # result never carries `p0_checked` (the guard returns before it is set).
     result = {
-        "status": "no_teams",
+        "status": "degraded",
         "incidents": [
             {"kind": "ENUM_DELTA", "team_id": "", "detail": {"previous": 3, "now": 0}},
             {"kind": "P0_GUARD_FAIL", "team_id": "team_a", "graph_id": "default",
              "detail": {}},
         ],
-        "results": {"team_a": {"graphs": {"default": {"status": "p0_guard_failed",
-                                                      "p0_checked": True}}}},
+        "results": {"team_a": {"graphs": {
+            "default": {"status": "p0_guard_failed"},
+            "g_ok": {"status": "backed_up", "p0_checked": True},
+        }}},
     }
     cleared = sweep_resolutions(result)
     assert ("ENUM_DELTA", "") not in cleared
@@ -2652,6 +2658,7 @@ def test_sweep_resolutions_keeps_kinds_this_run_re_emitted():
     # "degraded" (looked, some graphs failed) and "enum_failed" (could not look)
     # is exactly what a blanket "degraded clears nothing" rule would get wrong.
     assert ("NO_ELIGIBLE_TEAMS", "") in cleared
+    assert ("P0_GUARD_FAIL", "team_a:g_ok") in cleared
 
 
 def test_sweep_resolutions_clears_nothing_on_a_blind_run():
@@ -2661,3 +2668,10 @@ def test_sweep_resolutions_clears_nothing_on_a_blind_run():
 
     assert sweep_resolutions({"status": "enum_failed", "incidents": [], "results": {}}) == []
     assert sweep_resolutions({"status": "already_running"}) == []
+    # The shape that ONLY the status guard excludes: a blind run that somehow
+    # carries enumeration evidence (empty `results` alone already fails the
+    # `looked` predicate, so the assertions above passed even without the guard).
+    blind_with_evidence = {"status": "enum_failed", "incidents": [], "results": {
+        "team_a": {"graphs": {"default": {"status": "backed_up", "p0_checked": True}}},
+    }}
+    assert sweep_resolutions(blind_with_evidence) == []
