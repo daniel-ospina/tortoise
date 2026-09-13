@@ -411,6 +411,40 @@ def test_platform_incident_key_contract():
     assert store._key("STALE", "_") == "ops/alerts/STALE/_.json"
 
 
+def test_real_subject_named_global_never_cross_adopts_a_platform_incident():
+    """A real subject `global` and the subject-less platform incident stay apart.
+
+    #2844 (round-7 P2): the two writers must agree on the KEY, but that
+    agreement must not be bought by merging two DIFFERENT incidents. A real
+    subject literally named `global` and the subject-less platform incident are
+    distinct: neither may adopt the other's sentinel, or recovery closes the
+    wrong issue while one condition silently loses its incident.
+    """
+    # A real subject's sentinel (it carries its subject) must not be adopted by
+    # the platform incident — that would swallow the real team's issue #42.
+    real = MemoryStorage()
+    real.upload(
+        "ops/alerts/R2_DOWN/global.json",
+        json.dumps({"kind": "R2_DOWN", "team_id": "global", "issue_number": 42}).encode(),
+    )
+    ch = _FakeChannels()
+    store = _store(ch, storage=real)
+    assert store.open_incident("R2_DOWN", "") is True
+    assert list(ch.issues.values()) == ["[DR] R2_DOWN"]
+
+    # …and the mirror: the real subject must not adopt the platform sentinel
+    # (which predates the `team_id` field, so it carries none).
+    platform = MemoryStorage()
+    platform.upload(
+        "ops/alerts/R2_DOWN/_.json",
+        json.dumps({"kind": "R2_DOWN", "issue_number": 77}).encode(),
+    )
+    ch2 = _FakeChannels()
+    store2 = _store(ch2, storage=platform)
+    assert store2.open_incident("R2_DOWN", "global") is True
+    assert list(ch2.issues.values()) == ["[DR] R2_DOWN — global"]
+
+
 def _driver_sentinel(storage, issue_number, writer=None):
     """Seed the R2 object the bash DR driver's `file_alert` writes.
 
