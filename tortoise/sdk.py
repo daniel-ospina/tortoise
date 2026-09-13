@@ -9417,6 +9417,7 @@ class TortoiseSDK:
         with issue in (contradictory, stale, contested) — a single edge may
         carry multiple issues (one entry each, deduped).
         """
+        from .search_engine import ep_measured_cypher  # #3276 canonical predicate
         edges = self._epistemic_edges()
         if not edges:
             return []
@@ -9449,7 +9450,10 @@ class TortoiseSDK:
         # Contested claims: high posterior variance (stored EP params only —
         # an unmeasured uniform prior is NOT contested) OR an incoming NAND
         # operator edge on a LIVE point (the derived `challenged` condition,
-        # ontology §5).
+        # ontology §5). #3276: "stored EP params" is the canonical measured
+        # predicate — a #2199 baseline prior alone is prior-only (unmeasured),
+        # so a low-credibility baseline can no longer read contested here
+        # while annotate_ep_batch reads it unmeasured.
         # #2490: terminal claims are EXCLUDED from the variance scan — they
         # decay to vacuity (v=1/12 > threshold) at the terminalizing write and
         # must surface as "stale" (above), never "contested". Deliberate
@@ -9462,7 +9466,7 @@ class TortoiseSDK:
             "MATCH (n:Point) "
             "WHERE n.is_operator = false "
             f"  AND {_terminal_excluded('n.status')} "
-            "  AND (n.posterior_alpha IS NOT NULL OR n.ep_alpha IS NOT NULL) "
+            f"  AND {ep_measured_cypher('n')} "
             "  AND (n.posterior_beta IS NOT NULL OR n.ep_beta IS NOT NULL) "
             "WITH n, coalesce(n.posterior_alpha, n.ep_alpha, 1.0) AS a, "
             "     coalesce(n.posterior_beta, n.ep_beta, 1.0) AS b "
@@ -12261,16 +12265,21 @@ class TortoiseSDK:
         """#1196 review c70 — semantic-stage relevance gate.
 
         A hit counts as "relates to this issue" when it is EP-confirmed
-        (has_ep AND confidence_mean >= 0.5 — the 'we already decided this'
-        signal) OR it shares >= 2 tokens with the query text. has_ep is
-        required post-#2206 because an unmeasured point reads the neutral
-        Beta(1,1) mean 0.5 — a bare >= 0.5 floor would count every
-        never-measured hit as "confirmed". The token floor protects the
-        TF-IDF fallback path (ep=None) from single-token coincidences and
-        keeps unmeasured FTS hits out unless they show real lexical overlap.
+        (measured AND confidence_mean >= 0.5 — the 'we already decided this'
+        signal) OR it shares >= 2 tokens with the query text. A measurement
+        flag is required post-#2206 because an unmeasured point reads the
+        neutral Beta(1,1) mean 0.5 — a bare >= 0.5 floor would count every
+        never-measured hit as "confirmed". #3276: ``has_ep`` now means EP
+        MEASURED, so a #2199 auto-baselined decide part (prior mean 0.75 but
+        no EP run) no longer clears the gate; ``measured`` is preferred when
+        the caller supplies it, with ``has_ep`` as the honest fallback. The
+        token floor protects the TF-IDF fallback path (ep=None) from
+        single-token coincidences and keeps unmeasured FTS hits out unless
+        they show real lexical overlap.
         """
         ep = hit.get("ep")
-        if ep is not None and ep.get("has_ep") and ep.get("confidence_mean") is not None \
+        measured = ep is not None and ep.get("measured", ep.get("has_ep"))
+        if measured and ep.get("confidence_mean") is not None \
                 and ep["confidence_mean"] >= self._ISSUE_INSIGHT_MIN_EP_CONFIDENCE:
             return True
         q_tokens = set(self._ISSUE_INSIGHT_TOKEN_RE.findall(query_text.lower()))

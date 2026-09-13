@@ -582,6 +582,7 @@ surfaces:
   - test_gmm_proofs.py
   - test_issue94_annotate_ep_batch.py
   - test_2206_confidence_surfaces.py  # #2206: cross-surface confidence agreement (docker-lane)
+  - test_3276_has_ep_measured.py  # #3276: has_ep == EP measured; a #2199 baseline prior is prior-only (docker-lane)
   - test_kappa.py
   - test_ranking.py
   - test_ranking_w4b.py
