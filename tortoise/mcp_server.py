@@ -1893,16 +1893,39 @@ def tortoise_health() -> dict:
     the request-scoped team SDK over HTTP (selfhost daemon: the team_selfhost
     graph, the SAME namespace /health probes; hosted: the calling team's
     graph on the SAME FalkorDB server /health deep-checks) and the base SDK
-    over stdio — so tool and /health can never disagree about DB reachability.
+    over stdio — so a live probe here reaches the same verdict as /health's
+    live probe about a DEAD DB (for /health's own cached-verdict staleness
+    window see #3062). Their budgets differ by design since #3143 — see below
+    — so the two may legitimately disagree when the graph is reachable but its
+    cold-start PLUS query exceed /health's single shared fast-degrade budget:
+    this tool gives the reachability query a fresh PROBE_TIMEOUT, /health
+    spends one budget across both phases.
     The pre-#2202 code probed monitoring's module-global handle, which ONLY
     the stdio entrypoint (main()) registers: on the HTTP daemon/hosted
     surfaces it stayed None and every call reported degraded/no_sdk_registered
     while /health (fresh SDK probe) said ok — the first call every onboarding
     script makes lied. graph_size likewise counts the SERVED graph, never an
-    empty unregistered handle."""
+    empty unregistered handle.
+
+    #3143 (health-truthful): the probe's 1.5s budget was written to bound the
+    sub-millisecond ``RETURN 1`` reachability query, but it also bounded the
+    projection cold-start (``_get_proj()``: connect + ``_ensure_indexes()`` —
+    ~28 round trips, and an index build over the whole graph when one is
+    missing). That cost scales with graph size, so a large, fully-reachable
+    org (9,019 entities) timed out during setup and reported
+    ``degraded``/``graph_size 0`` while ``tortoise_status`` worked. The tool
+    now passes the cold-start allowance it always pays for — it builds a
+    request-scoped SDK per call — while the platform liveness gate keeps the
+    tight fast-degrade bound. The allowance is resolved at CALL time
+    (``monitoring.probe_setup_timeout()``) so ``TORTOISE_PROBE_SETUP_TIMEOUT``
+    set in the repo-root ``.env`` — loaded after this module imports
+    ``tortoise.monitoring`` — is honoured instead of frozen at import."""
     # #236: route through _safe() so every tool is gated (defense-in-depth;
     # reachable only post-auth over HTTP).
-    return _safe(lambda: monitoring.metrics(sdk=_get_team_sdk()))
+    return _safe(lambda: monitoring.metrics(
+        sdk=_get_team_sdk(),
+        probe_setup_timeout=monitoring.probe_setup_timeout(),
+    ))
 
 
 def tortoise_session_context() -> dict:
