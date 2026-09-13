@@ -45,7 +45,7 @@
 | `GET /backups` payload → `graphs.js` grouping | entries carry `graph_id` + `created_at`; default bucket may arrive as `'default'` for a row whose own `graph_id` differs by lane | unit (`node --test`, `graphs.test.js`) + source tripwire | **identity-join**: index/positional or raw-`graph_id` wiring silently mis-attributes every row |
 | `backupsStatus` lifecycle (`loading`/`ok`/`error`) → cell state | error = terminal 503 (`hosted_api.py:19766`); must not render as "none" | unit + tripwire | **fail-open render**: unknown shown as a negative fact |
 | Graphs table structure (header × 1, empty-state rows × 4, data row) | 6 columns; four `colSpan` sites | source tripwire (`graphsBackupColumnTripwire.test.js`) | **multi-site edit**: the classic missed `colSpan` |
-| Committed `dist/` → Cloudflare Pages | CI never builds; `dashboard_e2e` runs against the committed bundle | e2e (`tests/e2e/test_graphs_management.py`, gated by `RUN_DASHBOARD_E2E=1`) + `npm run build` in the pre-flight | **stale artifact**: a src-only change ships the old bundle with a green suite (`ci.yml:193-201`) |
+| Committed `dist/` → Cloudflare Pages | CI never builds; `dashboard_e2e` runs against the committed bundle | `graphsBackupColumnTripwire.test.js` dist-sync case (reads the bundle `dist/index.html` references) + `npm run build` in the pre-flight | **stale artifact**: a src-only change ships the old bundle with a green suite (`ci.yml:193-201`) |
 | Team switch → state lifetime | `setBackupInfo(null)` wipe happens on switch/logout; a *separate* new state would leak the previous team's default row | unit (array lives inside `backupInfo`) + e2e | **cross-team leak**: the default row's bucket key `'default'` collides across teams |
 | `backupInfo.count` → the API-Keys `BackupsCard` | `count` semantics are untouched; the card still renders `count \|\| 'none'` | existing `tests/e2e/test_keys_table_mixed.py` assertions stay green | **silent consumer break**: the state shape changed, so the untouched consumer must be named |
 | `tests/e2e/test_keys_table_mixed.py` `/backups` fixtures | rows shaped `{id: …}` with neither `graph_id` nor `created_at` | unit (sentinel-bucket case) | **fabricated attribution**: keyless rows must credit no graph |
@@ -70,14 +70,15 @@
 ### Journey Test Map
 
 #### Journey: Owner checks whether their graphs are actually being backed up
-1. **Step:** Open `#/graphs` → **Acceptance:** each row shows a `Last backup` cell; a graph with a backup shows a relative time → **Test:** `graphs.test.js` (`graphBackupCellState` ok state), e2e graphs column test
+1. **Step:** Open `#/graphs` → **Acceptance:** each row shows a `Last backup` cell; a graph with a backup shows a relative time → **Test:** `graphBackups.test.js` (`graphBackupCellState` ok state), dist-sync tripwire case
 2. **Step:** Look at a brand-new graph → **Acceptance:** `None recorded`, not "never", no health claim → **Test:** `graphs.test.js` none state, `graphsBackupColumnTripwire.test.js`
 3. **Step:** Backups endpoint is down → **Acceptance:** every row reads `—` with an unavailability tooltip; no row claims "none" → **Test:** `graphs.test.js` unavailable state, tripwire (no "None recorded" on the non-ok branch)
 
 #### Failure Modes
 - Default row on a self-host (registry) deployment → **Expected:** still shows its real last backup (kind-based join) → **Test:** `graphs.test.js` registry-lane default case
-- Switch teams → **Expected:** no stale previous-team timestamp on the default row → **Test:** e2e two-team graphs test (extended) + state lives inside `backupInfo`
-- Forget the `dist/` rebuild → **Expected:** e2e graphs column test fails → **Test:** `tests/e2e/test_graphs_management.py`
+- Switch teams → **Expected:** no stale previous-team timestamp on the default row → **Test:** the unit kind-join + sentinel cases, plus the tripwire's assertion that the retained array lives inside `backupInfo` (whose `setBackupInfo(null)` wipe clears it)
+- Forget the `dist/` rebuild → **Expected:** the dist-sync tripwire case fails → **Test:** `graphsBackupColumnTripwire.test.js`
+- A transient 503 during a tab-entry refresh → **Expected:** a payload already held is NOT discarded (no flip to `—`) → **Test:** the tripwire asserts the error branch only transitions when nothing successful is held
 - Unparseable/absent `created_at` on the newest manifest → **Expected:** fall back to the newest *parseable* entry; if none, `—` → **Test:** `graphs.test.js` unparsed cases
 
 **Tech Stack:** React 19 + Vite (`website/apps/dashboard`), `node --test` for pure-module units, pytest + Playwright for the (opt-in) dashboard e2e, committed `dist/` served by Cloudflare Pages.
@@ -414,3 +415,23 @@ Cycle 1 dispatched 2 fresh reviewers (Structural & Efficiency; Integration) — 
 - `index.css`: `.graphs-table-wrap` scroller + `min-width: 560px` (mirrors the keys-table #2246 fix).
 - Tests: `graphBackups.test.js` (22 pure cases) + `graphsBackupColumnTripwire.test.js` (9 structural cases incl. the dist-sync guard). Full dashboard suite: **323 pass / 0 fail**.
 - No server file touched. `dist/` rebuilt and committed.
+
+## Code Review Gate (code-review v3.2.0 — PR #3344)
+
+Three fresh reviewers ran on the diff (Bug-Scan Deep; Integration/Architecture; UX/Accessibility). **No P0/P1.** 13 P2s: the substantive ones were fixed in-cycle, three deferred with reasons.
+
+| # | Finding | Resolution |
+|---|---------|------------|
+| 1 | The tab refetch plus `switchTeam`'s own load produced **two concurrent `/backups` reads** on a team switch made while the Graphs tab is open (same-team responses can land out of order) | The effect fires on the tab **transition** only (`prevTabForBackupsRef`) and reads the team from `teamIdRef`; the dep omission is documented (adding `loadBackups` would refetch after its own setState) |
+| 2 | A failed **refresh** destroyed a good payload — the catch unconditionally nulled `backupInfo` + set `error`, so a 503 on tab entry flipped the column **and** the API-Keys `BackupsCard` to `—` | The catch now transitions to `error` only when nothing successful is held; switch/logout still wipe first, so their `—` behaviour is unchanged |
+| 3 | `graphBackupSummary` used a plain object as a map keyed by server input — `__proto__`/`constructor` would write through `Object.prototype` (pollution + the graph's manifests silently unbucketed) | `Object.create(null)`; a unit case feeds both keys and asserts `Object.prototype` is untouched |
+| 4 | The **dist-sync guard could not detect drift** (merged every `index-*.js`, immutable markers) | It now reads only the bundle `dist/index.html` references, requires exactly one bundle, and derives expected copy from the **live module** — proven by watching it fail on the stale bundle |
+| 5 | `unknown` and `unavailable` shared one `—` glyph | `unknown` renders `No timestamp`; a unit case asserts they never share a glyph |
+| 6 | The tooltip's raw ISO is ambiguous to a non-UTC reader | Title is `Last backup: <localized> (<ISO>)` (the keys-table Last-used precedent) |
+| 7 | The tooltip held the only absolute time, unreachable for keyboard/AT users on a non-focusable `<td>` | The cell exposes `aria-label={state.title}` |
+| 8 | Known-empty `None recorded` was `dim` like the non-answers | `ok` and `none` render non-dim (the #2426 precedent) |
+| 9 | `GraphBackupCell` was inserted between the `#1728` doc comment and `function MemorySources`, orphaning that comment | Moved above the `#1728` block so MemorySources keeps its documentation |
+| 10 | Plan doc still named browser-e2e tests that the as-built change does not add | Rewritten to name the tests that exist |
+| 11 | Test comment claimed a `null` `created_at` sorts last (the sort key is `str(...)`, so `"None"` sorts first) | Corrected in `graphs.js` + the test file |
+
+**Deferred (filed as a follow-up issue, not silently dropped):** (a) a free/anon team's graphs can only read `None recorded`, never "backups aren't enabled for this team" — the per-team `backup_enabled` flag is not exposed to the dashboard, and `tier` alone cannot distinguish a paid-but-disabled team, so a cheap wrong-claim fix was rejected; (b) the loading state renders `…` with no 15s floor, diverging from the `BackupsCard`'s terminal `—` (#1923) on a hung load; (c) one 30s ticker per row (`GraphBackupCell`) rather than a shared `useNowTick`/single section-level `now` — negligible cost at the graphs-per-team scale, and extracting a hook would touch the unrelated `MemorySources` surface in this PR.

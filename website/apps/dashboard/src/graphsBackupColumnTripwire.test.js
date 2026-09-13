@@ -12,9 +12,14 @@
 // bundle with a green suite. That case fails until `npm run build` is run.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync, readdirSync } from 'node:fs'
+import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+
+import {
+  graphBackupCellState,
+  graphBackupSummary,
+} from './graphs.js'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const mainJsx = readFileSync(join(HERE, 'main.jsx'), 'utf8')
@@ -106,12 +111,44 @@ test('#2784 tripwire: the Graphs table is wrapped in the mobile scroller', () =>
   assert.ok(open !== -1 && close !== -1 && close > open, 'wrapper opens before and closes after the table')
 })
 
-test('#2784 tripwire: the committed dist bundle contains the new column (rebuild guard)', () => {
-  const assetsDir = join(HERE, '..', 'dist', 'assets')
-  const bundles = readdirSync(assetsDir).filter((f) => /^index-.*\.js$/.test(f))
-  assert.ok(bundles.length > 0, 'a built index-*.js bundle exists')
-  const bundle = bundles.map((f) => readFileSync(join(assetsDir, f), 'utf8')).join('\n')
-  assert.match(bundle, /Last backup/, 'the built bundle ships the Last backup column — run `npm run build`')
-  assert.match(bundle, /graph-backup/, 'the built bundle ships the cell')
-  assert.match(bundle, /None recorded/, 'the built bundle ships the neutral empty copy')
+test('#2784 tripwire: the cell carries an accessible name (its explanation lives in a tooltip)', () => {
+  assert.match(cellBody, /aria-label=\{state\.title\}/,
+    'the td must expose the state explanation as an accessible name — a non-focusable title tooltip is unreachable for keyboard/AT users')
+  assert.match(cellBody, /title=\{state\.title\}/, 'the hover tooltip stays')
+})
+
+test('#2784 tripwire: the committed dist bundle ships the CURRENT column copy (rebuild guard)', () => {
+  // Structural artifact checks (dist/index.html's entry chunk exists, every
+  // referenced asset is committed, no orphaned index-*.js) already live in
+  // `distBundle.test.js` (#2865) — do not duplicate them here. This case adds
+  // only what that guard cannot know: whether the shipped bundle carries THIS
+  // column's current copy. The expected strings come from the live module, so
+  // changing a label in source without `npm run build` fails here.
+  const distDir = join(HERE, '..', 'dist')
+  const html = readFileSync(join(distDir, 'index.html'), 'utf8')
+  const ref = html.match(/assets\/(index-[A-Za-z0-9_-]+\.js)/)
+  assert.ok(ref, 'dist/index.html references an index-*.js bundle')
+  const bundle = readFileSync(join(distDir, 'assets', ref[1]), 'utf8')
+
+  const now = Date.now()
+  const row = { graph_id: 'g_x', kind: 'custom' }
+  const literals = [
+    // Labels come from the live module, so a copy change without a rebuild fails.
+    graphBackupCellState(row, {}, 'ok', now).label,                                    // 'None recorded'
+    graphBackupCellState(row, {}, 'loading', now).label,                               // '…'
+    graphBackupCellState(row, {}, 'error', now).label,                                 // '—'
+    graphBackupCellState(row, graphBackupSummary([{ ...row, created_at: 'garbage' }]), 'ok', now).label,  // 'No timestamp'
+    // Titles: only the STATIC fragments ship (a computed title carries
+    // interpolated values that never appear in a bundle).
+    'Loading backup status…',
+    'Backup list unavailable — retry in a moment.',
+    'Last backup: ',
+    'No readable backup timestamp for this graph',
+  ]
+  for (const l of literals) {
+    assert.ok(bundle.includes(l),
+      `bundle must ship the current copy ${JSON.stringify(l)} — run \`npm run build\``)
+  }
+  assert.match(bundle, /Last backup/, 'the bundle ships the column header')
+  assert.match(bundle, /graph-backup/, 'the bundle ships the cell class')
 })

@@ -87,15 +87,19 @@ export function graphBackupBucketKey(m) {
 }
 
 // Group the /backups array into per-graph buckets. The newest PARSEABLE
-// created_at wins: `list_backups` sorts newest-first, but a manifest whose
-// created_at is missing/unreadable sorts LAST rather than being rejected
-// (hosted_backup.list_backups), so input order is never trusted for recency.
-// Unreadable manifests are skipped server-side with only a logger.warning,
-// so a bucket can legitimately exist with no parseable timestamp — that is
-// the 'unknown' state, never 'none'.
+// created_at wins: `list_backups` sorts newest-first, but a manifest with no
+// created_at key sorts LAST (the sort key is `str(m.get("created_at", ""))`)
+// while an explicit null sorts first ("None") — either way input order is
+// never trusted for recency. Unreadable manifests are skipped server-side with
+// only a logger.warning, so a bucket can legitimately exist with no parseable
+// timestamp — that is the 'unknown' state, never 'none'.
 // Shape: { [bucketKey]: { key, lastBackupAt, count } }
+// The map has NO prototype (review: a server-supplied graph_id of `__proto__`
+// or `constructor` would otherwise resolve through Object.prototype and mutate
+// a shared object instead of creating a bucket — prototype pollution from
+// payload content, plus the graph's real manifests silently unbucketed).
 export function graphBackupSummary(backups) {
-  const out = {}
+  const out = Object.create(null)
   for (const m of Array.isArray(backups) ? backups : []) {
     if (!m || typeof m !== 'object') continue
     const key = graphBackupBucketKey(m)
@@ -141,7 +145,7 @@ export function graphBackupCellState(g, summary, backupsStatus, nowMs) {
   }
   if (!b.lastBackupAt) {
     return {
-      kind: 'unknown', label: '—',
+      kind: 'unknown', label: 'No timestamp',
       title: `No readable backup timestamp for this graph (${b.count} on record).`,
       at: null, count: b.count,
     }
@@ -149,7 +153,10 @@ export function graphBackupCellState(g, summary, backupsStatus, nowMs) {
   return {
     kind: 'ok',
     label: formatRelativeTime(b.lastBackupAt, nowMs) || b.lastBackupAt,
-    title: `Last backup: ${b.lastBackupAt}`,
+    // Localized for reading + the wire value in parentheses (lane-dependent
+    // serialization: 'Z' vs '+00:00' — a raw ISO alone reads as ambiguous to
+    // a non-UTC user). The keys-table Last-used cell sets this precedent.
+    title: `Last backup: ${new Date(Date.parse(b.lastBackupAt)).toLocaleString()} (${b.lastBackupAt})`,
     at: b.lastBackupAt,
     count: b.count,
   }

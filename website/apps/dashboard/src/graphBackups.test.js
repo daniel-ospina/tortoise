@@ -95,21 +95,35 @@ test('#2784 summary: an entry with NO graph_id is never credited to a real graph
 })
 
 test('#2784 summary: null / non-array / junk-safe', () => {
-  assert.deepEqual(graphBackupSummary(null), {})
-  assert.deepEqual(graphBackupSummary(undefined), {})
-  assert.deepEqual(graphBackupSummary('nope'), {})
-  assert.deepEqual(graphBackupSummary([null, 1, 'x']), {})
+  // Spread: the map has no prototype (Object.create(null)), so a strict deep
+  // compare against {} would fail on the prototype, not on the contents.
+  assert.deepEqual({ ...graphBackupSummary(null) }, {})
+  assert.deepEqual({ ...graphBackupSummary(undefined) }, {})
+  assert.deepEqual({ ...graphBackupSummary('nope') }, {})
+  assert.deepEqual({ ...graphBackupSummary([null, 1, 'x']) }, {})
+})
+
+test('#2784 summary: a prototype-named graph_id cannot pollute Object.prototype', () => {
+  const s = graphBackupSummary([
+    { graph_id: '__proto__', kind: 'custom', created_at: '2026-09-11T00:00:00Z' },
+    { graph_id: 'constructor', kind: 'custom', created_at: '2026-09-11T00:00:00Z' },
+  ])
+  assert.equal(s['__proto__'].count, 1)
+  assert.equal(s.constructor.count, 1)
+  assert.equal(({}).count, undefined, 'Object.prototype must be untouched')
 })
 
 // ── graphBackupCellState ────────────────────────────────────────────────
 
-test('#2784 cell: a backed-up graph renders the relative time + ISO title', () => {
+test('#2784 cell: a backed-up graph renders the relative time + a localized/ISO title', () => {
   const s = graphBackupSummary([{ graph_id: 'g_prod', kind: 'custom', created_at: '2026-09-11T22:00:00Z' }])
   const st = graphBackupCellState({ graph_id: 'g_prod', kind: 'custom' }, s, 'ok', NOW)
   assert.equal(st.kind, 'ok')
   assert.equal(st.label, '2 hr ago')
-  assert.match(st.title, /2026-09-11T22:00:00Z/)
   assert.equal(st.at, '2026-09-11T22:00:00Z')
+  // Localized for reading, wire value in parentheses (the keys-table
+  // Last-used precedent — a bare ISO reads as ambiguous to a non-UTC user).
+  assert.match(st.title, /^Last backup: .+\(2026-09-11T22:00:00Z\)$/)
 })
 
 test('#2784 cell: ≥24h degrades to an absolute date (the retained-pool case)', () => {
@@ -163,11 +177,13 @@ test('#2784 cell: a graph with no bucket reads empty even when another graph has
   assert.equal(graphBackupCellState({ graph_id: 'g_prod', kind: 'custom' }, s, 'ok', NOW).kind, 'none')
 })
 
-test('#2784 cell: a bucket with no parseable timestamp is unknown (not none, not a bare "—" without reason)', () => {
+test('#2784 cell: a bucket with no parseable timestamp gets its OWN label, not the unavailable dash', () => {
   const s = graphBackupSummary([{ graph_id: 'g_prod', kind: 'custom', created_at: 'garbage' }])
   const st = graphBackupCellState({ graph_id: 'g_prod', kind: 'custom' }, s, 'ok', NOW)
   assert.equal(st.kind, 'unknown')
-  assert.equal(st.label, '—')
+  assert.equal(st.label, 'No timestamp')
+  assert.notEqual(st.label, graphBackupCellState({ graph_id: 'g_prod', kind: 'custom' }, {}, 'error', NOW).label,
+    'unknown and unavailable must not render the same glyph')
   assert.equal(st.count, 1)
   assert.match(st.title, /1 on record/)
 })

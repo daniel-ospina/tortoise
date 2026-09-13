@@ -5230,14 +5230,19 @@ function claimIntentInFlight() {
         : { count: 0, backups: [] })
       setBackupsStatus('ok')
     } catch {
-      // #1923: a transient 503/network failure is TERMINAL — the Backups card
-      // flips to '—' immediately (no eternal skeleton) and the Overview loaded
-      // announce still fires. Guard on the at-call team: a stale failure from a
-      // previous team must not land under the new one. Clear any stale data too
-      // — the '—' card must never read as a previous team's count.
+      // #1923: a transient 503/network failure is TERMINAL on a first load —
+      // the Backups card flips to '—' immediately (no eternal skeleton) and the
+      // Overview loaded announce still fires. Guard on the at-call team: a
+      // stale failure from a previous team must not land under the new one.
+      // #2784 review: but a FAILED REFRESH must not destroy a payload we
+      // already hold — the Graphs-tab refetch can 503 after a good load, and
+      // blanking here would flip the Last-backup column AND the untouched
+      // API-Keys card to '—' on a blip. So the error transition only applies
+      // when nothing successful is held (switchTeam/logout already wipe first,
+      // so their '—' behaviour is unchanged).
       if (teamIdRef.current === _teamAtCall) {
-        setBackupInfo(null)
-        setBackupsStatus('error')
+        setBackupsStatus((s) => (s === 'ok' ? s : 'error'))
+        setBackupInfo((prev) => (prev && prev.backups ? prev : null))
       }
     }
   }
@@ -5751,12 +5756,19 @@ function claimIntentInFlight() {
     () => graphBackupSummary(backupInfo && backupInfo.backups), [backupInfo])
 
   // #2784: entering the Graphs tab refreshes the pool, so the Last-backup
-  // column is not stale from login. /backups is one list read + M manifest
-  // GETs and is not polled; the effect is keyed to the tab, so it fires once
-  // per visit (not per render).
+  // column is not stale from login. Fires on the tab TRANSITION only — two
+  // reasons this is not keyed on `[tab, currentTeamId]` (review): (1) a team
+  // switch while this tab is open would otherwise fire a second concurrent
+  // /backups read alongside switchTeam's own load, and the two same-team
+  // responses can land out of order; (2) loadBackups is re-created every
+  // render, so listing it in the deps would refetch after its own setState —
+  // an infinite loop. The team is read from the ref at call time.
+  const prevTabForBackupsRef = React.useRef(tab)
   React.useEffect(() => {
-    if (tab === 'graphs' && currentTeamId) loadBackups('').catch(() => {})
-  }, [tab, currentTeamId])
+    const entered = prevTabForBackupsRef.current !== 'graphs' && tab === 'graphs'
+    prevTabForBackupsRef.current = tab
+    if (entered && teamIdRef.current) loadBackups('').catch(() => {})
+  }, [tab])
 
   if (checking) {
     return (
@@ -8692,19 +8704,13 @@ function claimIntentInFlight() {
   )
 }
 
-// #1728 Slice 3 (Tasks 16-17): the ONE shared Memory-sources surface — rendered
-// on the wizard step-1 AND the dashboard Overview panel (same component, same
-// toggle set + state machine). Three toggles (issues / docs / sessions)
-// reuse role="switch"/aria-checked; row failures render under the row with
-// role="alert" (never the global 402-upgrade banner); status regions carry
-// aria-live="polite". #1927: the misled-user re-ask pane (exactly-once gate)
-// was removed with the consent gate — sessions are default-ON (ToS-covered)
-// and the sessions toggle here is the quiet off-switch.
 // #2784: per-graph "last backup". Its own 30s ticker (the #1894 pattern)
 // keeps the relative label true on a long-lived session; never an App-scope
 // interval — App already declares `now`, and a second interval there would
 // re-render the whole dashboard every 30s. The label text comes only from
-// graphBackupCellState: this component never invents a state claim.
+// graphBackupCellState: this component never invents a state claim. The cell
+// carries its own aria-label because the state's full explanation lives in the
+// tooltip, which is unreachable for keyboard/AT users on a non-focusable cell.
 function GraphBackupCell({ g, summary, status }) {
   const [now, setNow] = React.useState(Date.now())
   React.useEffect(() => {
@@ -8713,12 +8719,22 @@ function GraphBackupCell({ g, summary, status }) {
   }, [])
   const state = graphBackupCellState(g, summary, status, now)
   return (
-    <td className="graph-backup" title={state.title}>
-      <span className={state.kind === 'ok' ? 'small' : 'dim small'}>{state.label}</span>
+    <td className="graph-backup" title={state.title} aria-label={state.title}>
+      <span className={state.kind === 'ok' || state.kind === 'none' ? 'small' : 'dim small'}>
+        {state.label}
+      </span>
     </td>
   )
 }
 
+// #1728 Slice 3 (Tasks 16-17): the ONE shared Memory-sources surface — rendered
+// on the wizard step-1 AND the dashboard Overview panel (same component, same
+// toggle set + state machine). Three toggles (issues / docs / sessions)
+// reuse role="switch"/aria-checked; row failures render under the row with
+// role="alert" (never the global 402-upgrade banner); status regions carry
+// aria-live="polite". #1927: the misled-user re-ask pane (exactly-once gate)
+// was removed with the consent gate — sessions are default-ON (ToS-covered)
+// and the sessions toggle here is the quiet off-switch.
 function MemorySources(props) {
   const {
     state, loading, wizardHarness, github,
