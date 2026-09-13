@@ -29,7 +29,7 @@ from battery.recall.prepass import (
     CapturedRetriever,
     build_matched_recall_block,
     capture_factual_recall,
-    question_scenario_map,
+    probes_by_id,
 )
 
 __all__ = [
@@ -49,6 +49,6 @@ __all__ = [
     "capture_factual_recall",
     "default_probes",
     "match_recall",
-    "question_scenario_map",
+    "probes_by_id",
     "scenario_probes",
 ]

@@ -24,7 +24,7 @@ profile.json and never re-interpreted post-hoc).
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field  # noqa: F401
+from dataclasses import dataclass, field
 from typing import Any, Mapping, Protocol, Sequence  # noqa: UP035
 
 #: Factual top-K used for the recall match (plan §2 W2).
@@ -32,7 +32,7 @@ TOP_K = 5
 #: Any arm within this F1 delta of the corpus-best is "matched".
 #: Amendment (2026-09-12, #3327): read over the trigger population
 #: {a1, a2, a2b, a3, a4} — a0 is EXCLUDED (see module docstring).
-#: Wiring is tracked by #3327; no trigger_population constant exists yet.
+#: The population is the ``TRIGGER_POPULATION`` constant defined below.
 F1_TOLERANCE = 0.10
 #: Balanced-subset floor — below this fraction of probes the verdict is
 #: INCONCLUSIVE (matching is not meaningful).
@@ -60,11 +60,34 @@ EXCLUDED_CONTROL_REASON = (
 
 @dataclass(frozen=True)
 class FactualProbe:
-    """One factual question with its gold answer (self-contained)."""
+    """One factual question with its gold answer and its corpus scenario.
+
+    The probe is keyed by its STABLE ``id`` everywhere — the capture map,
+    the ``Retriever`` protocol and the ``AgentContext`` — NEVER by
+    ``question`` text. The shipped ``battery/config/corpus.yaml`` holds four
+    groups of scenarios (8 of 140) whose ``question`` text is IDENTICAL but
+    whose gold differs (e.g. ``d-001``/``wv-001``); a question-keyed index
+    silently collapses each group onto one scenario and scores the other
+    member's gold against the wrong scenario's context — a fabricated
+    retrieval miss inside the measurement itself (#3327 review).
+
+    ``scenario`` is the harness-side corpus handle, carried ON the probe so
+    the retriever builds the arm's ``AgentContext`` from the probe's OWN
+    scenario instead of re-deriving one from question text. ``gold`` stays
+    harness-side: the matcher reads it, and it is never placed in the
+    ``AgentContext`` handed to an arm (sealed-gold boundary, scope DD2).
+    """
 
     id: str
     question: str
     gold: str
+    #: Corpus scenario handle (harness-side). ``None`` only for probes built
+    #: without a corpus (hand-written fixtures); the retriever REFUSES such
+    #: a probe rather than fabricating a retrieval. Excluded from equality
+    #: and hashing (``compare=False``): the handle is opaque and may be
+    #: unhashable (``Scenario`` carries dict fields), while probe identity
+    #: is the ``id``.
+    scenario: Any = field(default=None, compare=False)
 
 
 @dataclass(frozen=True)
@@ -88,9 +111,13 @@ class RecallResult:
 
 class Retriever(Protocol):
     """An arm's factual retrieval surface (recall matcher only needs the
-    top-K retrieval — not the full ArmAdapter protocol)."""
+    top-K retrieval — not the full ArmAdapter protocol).
 
-    def retrieve_factual(self, question: str, k: int = TOP_K) -> list[str]: ...
+    Keyed by the probe's STABLE ``id`` — never by ``question`` text, which
+    is not unique across the shipped corpus (see ``FactualProbe``).
+    """
+
+    def retrieve_factual(self, probe_id: str, k: int = TOP_K) -> list[str]: ...
 
 
 def default_probes() -> list[FactualProbe]:
@@ -124,10 +151,13 @@ def scenario_probes(scenarios: Sequence[Any], *,
     never legitimately fire. Probe question = the scenario's authored
     ``question``; gold = the scenario's sealed gold text, read HERE on the
     harness side only (the arm receives the question, never the gold — the
-    sealed-gold boundary is preserved). Scenarios lacking a question or a
-    gold answer are SKIPPED (counted by the caller, never fabricated into a
-    probe). Order is corpus order and deterministic; ``limit`` caps the
-    subset for cost.
+    sealed-gold boundary is preserved). The SOURCING scenario is carried on
+    the probe (harness-side handle) so downstream retrieval keys by the
+    probe's ``id`` and builds the context from the probe's OWN scenario, not
+    from question text — the corpus has duplicate questions with different
+    gold (#3327 review). Scenarios lacking a question or a gold answer are
+    SKIPPED (counted by the caller, never fabricated into a probe). Order is
+    corpus order and deterministic; ``limit`` caps the subset for cost.
     """
     probes: list[FactualProbe] = []
     for sc in scenarios:
@@ -140,7 +170,8 @@ def scenario_probes(scenarios: Sequence[Any], *,
         gold = " ".join(str(g).strip() for g in golds if str(g).strip())
         if not gold:
             continue
-        probes.append(FactualProbe(id=sid, question=question, gold=gold))
+        probes.append(FactualProbe(id=sid, question=question, gold=gold,
+                                   scenario=sc))
         if limit is not None and len(probes) >= limit:
             break
     return probes
@@ -205,7 +236,7 @@ def match_recall(probes: Sequence[FactualProbe],
     for aid, retriever in retrievers.items():
         hits = sum(
             1 for p in probes
-            if _f1_at_k(retriever.retrieve_factual(p.question, top_k),
+            if _f1_at_k(retriever.retrieve_factual(p.id, top_k),
                         p.gold, top_k) > 0.0)
         f1[aid] = hits / len(probes) if probes else 0.0
 
@@ -227,8 +258,8 @@ def match_recall(probes: Sequence[FactualProbe],
     kept = [
         p for p in probes
         if _f1_at_k(retrievers[best_arm].retrieve_factual(
-            p.question, top_k), p.gold, top_k) > 0.0
-        and all(_f1_at_k(retrievers[a].retrieve_factual(p.question, top_k),
+            p.id, top_k), p.gold, top_k) > 0.0
+        and all(_f1_at_k(retrievers[a].retrieve_factual(p.id, top_k),
                          p.gold, top_k) > 0.0 for a in divergent)
     ]
 
@@ -246,7 +277,7 @@ def match_recall(probes: Sequence[FactualProbe],
     for aid, retriever in retrievers.items():
         hits = sum(
             1 for p in kept
-            if _f1_at_k(retriever.retrieve_factual(p.question, top_k),
+            if _f1_at_k(retriever.retrieve_factual(p.id, top_k),
                         p.gold, top_k) > 0.0)
         f1_sub[aid] = hits / len(kept) if kept else 0.0
     return RecallResult(f1_by_arm=f1_sub, trigger_fired=True,

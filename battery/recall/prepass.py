@@ -40,28 +40,49 @@ from battery.recall.matcher import (
 )
 
 
-def question_scenario_map(
+def probes_by_id(
         probes: Sequence[FactualProbe],
-        scenarios: Sequence[Any]) -> dict[str, Any]:
-    """Map each probe's question text to the corpus scenario that sourced
-    it (probe.id == scenario.id). The arm needs an ``AgentContext`` — the
-    scenario handle — not just the question string."""
-    by_id = {str(getattr(sc, "id", "")): sc for sc in scenarios}
-    out: dict[str, Any] = {}
+        scenarios: Sequence[Any] = ()) -> dict[str, FactualProbe]:
+    """Index the run's probes by their STABLE ``id``.
+
+    The key is ``probe.id`` — NEVER ``probe.question``. The shipped
+    ``battery/config/corpus.yaml`` has duplicate question text across
+    scenarios with DIFFERENT gold (4 groups / 8 scenarios, e.g.
+    ``d-001``/``wv-001``), so a question-keyed index drops one member of
+    each group, collapses it onto its sibling's retrieval and scores its
+    sealed gold against the sibling's scenario context — a fabricated
+    retrieval miss inside the measurement itself (#3327 review).
+
+    Each probe carries its own corpus ``scenario`` handle (attached by
+    ``scenario_probes``), so the retriever never re-derives a scenario from
+    question text. ``scenarios`` is the by-id fallback for hand-built probes
+    that carry no handle; it is never used to re-key a probe. A probe whose
+    scenario can be resolved by NEITHER path keeps ``scenario=None`` and the
+    retriever refuses it (fail closed, never a fabricated retrieval).
+    """
+    corpus_by_id = {str(getattr(sc, "id", "")): sc for sc in scenarios}
+    out: dict[str, FactualProbe] = {}
     for p in probes:
-        sc = by_id.get(p.id)
-        if sc is not None:
-            out.setdefault(p.question, sc)
+        if p.scenario is not None:
+            out[p.id] = p
+        else:
+            sc = corpus_by_id.get(p.id)
+            out[p.id] = (
+                p if sc is None
+                else FactualProbe(id=p.id, question=p.question, gold=p.gold,
+                                  scenario=sc))
     return out
 
 
 class ArmFactualRetriever:
     """Adapt one ``ArmAdapter`` onto the matcher's ``Retriever`` protocol.
 
-    ``retrieve_factual(question, k)`` builds the minimal agent context for
-    the probe's scenario and reads the arm's memory through the SAME
+    ``retrieve_factual(probe_id, k)`` builds the minimal agent context for
+    the probe's OWN scenario and reads the arm's memory through the SAME
     ``ArmAdapter.retrieve`` surface the battery uses, returning the top-k
-    memory contents. ``ArmUnavailable`` is deliberately NOT caught — a
+    memory contents. The lookup key is the probe's stable ``id``, never its
+    question text (the corpus has duplicate questions with different gold —
+    #3327 review). ``ArmUnavailable`` is deliberately NOT caught — a
     vendor/key failure must surface as an unavailable arm, never as a
     fabricated empty retrieval (distinct from a genuine empty read).
 
@@ -75,11 +96,11 @@ class ArmFactualRetriever:
     documented mock contract stays usable.
     """
 
-    def __init__(self, arm: Any, scenario_for_question: Mapping[str, Any],
+    def __init__(self, arm: Any, probes_by_id: Mapping[str, FactualProbe],
                  *, require_vendor_credentials: bool = False,
                  episode_seed: int = 0):
         self._arm = arm
-        self._scenario_for_question = dict(scenario_for_question)
+        self._probes_by_id = dict(probes_by_id)
         self._require_vendor_credentials = require_vendor_credentials
         self._episode_seed = episode_seed
 
@@ -100,18 +121,24 @@ class ArmFactualRetriever:
                 f"environment — refusing to measure the seeded in-process "
                 f"mock store as a real factual F1 (#2633)")
 
-    def retrieve_factual(self, question: str, k: int = TOP_K) -> list[str]:
+    def retrieve_factual(self, probe_id: str, k: int = TOP_K) -> list[str]:
         from battery.arms.base import AgentContext, ArmUnavailable
         self._assert_credentials()
-        scenario = self._scenario_for_question.get(question)
+        probe = self._probes_by_id.get(probe_id)
+        if probe is None:
+            raise ArmUnavailable(
+                f"recall pre-pass: no corpus probe for id {probe_id!r} — "
+                f"refusing rather than fabricating a retrieval")
+        scenario = probe.scenario
         if scenario is None:
             raise ArmUnavailable(
-                f"recall pre-pass: no corpus scenario for probe question "
-                f"{question!r} — refusing rather than fabricating a "
-                f"retrieval")
+                f"recall pre-pass: probe {probe_id!r} carries no corpus "
+                f"scenario — refusing rather than fabricating a retrieval")
+        # user_message is the probe QUESTION (agent-visible); the sealed gold
+        # is deliberately NOT placed in the context handed to the arm.
         context = AgentContext(
             scenario=scenario, episode_seed=self._episode_seed,
-            prior_memories=(), user_message=question)
+            prior_memories=(), user_message=probe.question)
         memories = self._arm.retrieve(context)
         return [str(getattr(m, "content", "")) for m in memories][:k]
 
@@ -125,7 +152,7 @@ class A0StubRetriever:
     population: its constant 0.0 must never drive ``trigger_fired``.
     """
 
-    def retrieve_factual(self, question: str, k: int = TOP_K) -> list[str]:
+    def retrieve_factual(self, probe_id: str, k: int = TOP_K) -> list[str]:
         return []
 
 
@@ -135,28 +162,37 @@ class CapturedRetriever:
     The balanced-subset rerun inside ``match_recall`` queries each arm
     again; replaying the capture keeps that deterministic and avoids
     repeated live vendor/graph reads (and any chance the subset rerun sees
-    a different memory state)."""
+    a different memory state). Keyed by the probe's stable ``id``."""
 
-    def __init__(self, by_question: Mapping[str, Sequence[str]]):
-        self._by_question = {q: list(r) for q, r in by_question.items()}
+    def __init__(self, by_probe_id: Mapping[str, Sequence[str]]):
+        self._by_probe_id = {pid: list(r) for pid, r in by_probe_id.items()}
 
-    def retrieve_factual(self, question: str, k: int = TOP_K) -> list[str]:
-        return list(self._by_question.get(question, ()))[:k]
+    def retrieve_factual(self, probe_id: str, k: int = TOP_K) -> list[str]:
+        return list(self._by_probe_id.get(probe_id, ()))[:k]
 
 
 def capture_factual_recall(arm: Any, probes: Sequence[FactualProbe],
                            scenarios: Sequence[Any], *,
                            run_mode: str = "mock",
                            top_k: int = TOP_K) -> dict[str, list[str]]:
-    """Retrieve every probe from one arm; return ``{question: [contents]}``.
+    """Retrieve every probe from one arm; return ``{probe_id: [contents]}``.
+
+    Keyed by the probe's STABLE ``id`` — NEVER its ``question`` text, which
+    is not unique across the shipped corpus (4 duplicate-question groups /
+    8 scenarios). A question-keyed capture silently collapses each group
+    onto one retrieval and scores the sibling's gold against the wrong
+    scenario's context (fabricated miss, #3327 review). Each probe carries
+    its own corpus scenario, so the ``AgentContext`` is built from the
+    probe's OWN scenario; ``scenarios`` is only the by-id fallback for
+    hand-built probes (see ``probes_by_id``).
 
     Propagates ``ArmUnavailable`` — the caller records the arm as
     unavailable rather than substituting an empty (fabricated) retrieval.
     """
     retriever = ArmFactualRetriever(
-        arm, question_scenario_map(probes, scenarios),
+        arm, probes_by_id(probes, scenarios),
         require_vendor_credentials=(run_mode == "real"))
-    return {p.question: retriever.retrieve_factual(p.question, top_k)
+    return {p.id: retriever.retrieve_factual(p.id, top_k)
             for p in probes}
 
 
@@ -187,8 +223,8 @@ def build_matched_recall_block(
     retrievers: dict[str, Any] = {}
     if include_a0:
         retrievers["a0"] = A0StubRetriever()
-    for arm_id, by_question in captures.items():
-        retrievers[arm_id] = CapturedRetriever(by_question)
+    for arm_id, by_probe_id in captures.items():
+        retrievers[arm_id] = CapturedRetriever(by_probe_id)
     if not any(a in TRIGGER_POPULATION for a in retrievers):
         return None
 

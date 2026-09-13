@@ -18,17 +18,15 @@ from battery.recall.matcher import (  # noqa: I001
 
 
 class _Ret:
-    """Deterministic retriever: returns gold for a subset of questions."""
+    """Deterministic retriever: returns gold for a subset of probe ids."""
 
     def __init__(self, gold_ids: set[str]):
         self._gold_ids = gold_ids
+        self._gold_by_id = {p.id: p.gold for p in default_probes()}
 
-    def retrieve_factual(self, question: str, k: int = 5) -> list[str]:
-        # Map question back to probe id via gold-token matching.
-        for p in default_probes():
-            if p.question == question:
-                return [p.gold] if p.id in self._gold_ids else []
-        return []
+    def retrieve_factual(self, probe_id: str, k: int = 5) -> list[str]:
+        # The retriever is keyed by the probe's stable id (#3327 review).
+        return [self._gold_by_id[probe_id]] if probe_id in self._gold_ids else []
 
 
 def _arms(gold_ids: dict[str, set[str]]):
