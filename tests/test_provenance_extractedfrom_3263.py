@@ -187,6 +187,15 @@ def test_dedup_hit_does_not_leave_prop_only_provenance(prov):
     reported as having provenance by ``list_drafts``, which reads the prop),
     while a rebuild dropped the prop entirely — so ``live != rebuild`` for the
     very property this fix introduced.
+
+    SCOPE OF THE PARITY ASSERTION BELOW: ``_provenance`` reads the EDGE surface
+    ``(point, source url, sourceKind)``. That is exactly the surface this fix
+    touches, and it must agree. It is deliberately NOT a blanket
+    live==rebuild guarantee for the dedup path: the OTHER props the dedup hit
+    forwards (``session_id``, ``content_hash``, ``ep_dirty``) are still written
+    by ``update_point`` and still not replayed — the pre-existing divergence
+    tracked by #2946. Stating it here so a reader does not infer a clean-parity
+    guarantee the test does not make.
     """
     sdk, events = prov
     content = "identical claim text"
@@ -295,3 +304,42 @@ def test_non_scalar_session_id_does_not_invent_a_source(prov):
     invented = sdk._get_proj().g.query(
         "MATCH (s:Source) WHERE s.url CONTAINS \"['\" RETURN s.url").result_set
     assert invented == [], f"invented Source minted: {invented}"
+
+
+# ── re-review P1: the bundle write path must resolve LIST refs too ────────
+
+
+def test_bundle_extractedfrom_list_of_local_refs_links_the_real_sources(prov):
+    """The bundle write path resolved only a SCALAR ``extractedFrom`` local ref.
+
+    A LIST of local refs was therefore left unresolved and reached
+    ``_link_source`` as the raw strings, so Sources were minted named after the
+    LOCAL refs (``s1``, ``s2``) while the real bundle Sources went unlinked —
+    inventing exactly the provenance this fix forbids. ``canonical`` already
+    resolves list refs element-wise; this mirrors it.
+    """
+    sdk, _events = prov
+    bundle = {
+        "points": [
+            {"ref": "p1", "kind": "claim",
+             "content": "bought the couch in March",
+             "extractedFrom": ["s1", "s2"]},
+        ],
+        "sources": [
+            {"ref": "s1", "url": "https://real.example/one",
+             "sourceKind": "report"},
+            {"ref": "s2", "url": "https://real.example/two",
+             "sourceKind": "report"},
+        ],
+        "connections": [],
+    }
+    sdk.ingest(bundle)
+    proj = sdk._get_proj()
+
+    urls = {url for (_pid, url, _kind) in _provenance(proj)}
+    assert urls == {"https://real.example/one", "https://real.example/two"}, \
+        f"bundle list refs did not resolve to the real Sources: {urls}"
+
+    invented = proj.g.query(
+        "MATCH (s:Source) WHERE s.url IN ['s1', 's2'] RETURN s.url").result_set
+    assert invented == [], f"invented Sources minted from local refs: {invented}"

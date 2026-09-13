@@ -22,6 +22,21 @@ doc_status: live
 >   not yet implemented** (the compositional read path ships separately).
 > - §1/§4.3/§6: core-subclass enumerations extended with `Problem`.
 >
+> **Changelog v3.11 (2026-09-12, issue #3263 — provenance written by construction):**
+> - §3.3: `extractedFrom` cardinality amended **`many→1` → `many→many`**. The
+>   edge is written per source; a claim extracted from several sessions carries
+>   one `extractedFrom` edge each, with no upper bound. (`create_point` now
+>   infers `session:<session_id>` from the write context and accepts a sequence
+>   of refs; the scalar node property is a query convenience only — the edges
+>   are authoritative, and for multi-source Points the property holds an array,
+>   which is NOT equality-matchable.)
+> - §4.6: `session:<id>` Sources are minted with `sourceKind: agentSession`
+>   (already the registered value — this removes the need for the in-place
+>   upgrade `_materialize_session_source` performed). NOTE: `agentSession` is
+>   still registered tier-neutral, so `inherited-from-source` calibration is
+>   NOT yet satisfiable; assigning the tier is a calibration-policy decision,
+>   tracked separately.
+>
 > **Changelog v3.9 (2026-09-02, issue #2101 / epic #2080 — §5 response-contract vocabulary, W4 why-layer DM-12):**
 > - §5: new Response-Contract Vocabulary section — additive response-contract
 >   labels (dig_deeper kinds/labels, why-block sections, conflict severity,
@@ -230,7 +245,7 @@ Per-type edges (chosen over single polymorphic edge — FalkorDB matrix-per-type
 
 | Predicate | From → To | Direction | Cardinality | Standard alignment | Meaning |
 |-----------|-----------|-----------|-------------|--------------------|---------|
-| `extractedFrom` | Point → Source | unidirectional | many→many | `pav:retrievedFrom` (inverse) | This claim was extracted from this source. One source backs many Points, **and one Point may be backed by several sources** (amended v3.7, #3263: the edge is written per source — a claim extracted from several sessions carries one `extractedFrom` edge each; there is no upper bound). |
+| `extractedFrom` | Point → Source | unidirectional | many→many | `pav:retrievedFrom` (inverse) | This claim was extracted from this source. One source backs many Points, **and one Point may be backed by several sources** (amended v3.11, #3263: the edge is written per source — a claim extracted from several sessions carries one `extractedFrom` edge each; there is no upper bound). |
 
 ### §3.4 Source → Entity (Provenance)
 

@@ -2409,10 +2409,15 @@ class TortoiseSDK:
             if isinstance(_session_id, str) and _session_id.strip():
                 props["extractedFrom"] = f"session:{_session_id}"
             elif _session_id:
+                # Covers non-str scalars (123) and blank strings alike — the
+                # contract is "a non-empty string can name a Source", so say
+                # THAT rather than mislabelling an int as non-scalar (review
+                # P2/#3263). A falsy id ('' / None) is a deliberate absence, not
+                # an error, and stays silent.
                 _logger.warning(
-                    "create_point: non-scalar session_id=%r — provenance not "
-                    "inferred (pass extractedFrom explicitly); refusing to mint "
-                    "an invented Source (#3263)",
+                    "create_point: session_id=%r is not a non-empty string — "
+                    "provenance not inferred (pass extractedFrom explicitly); "
+                    "refusing to mint an invented Source (#3263)",
                     _session_id,
                 )
         from datetime import datetime, timezone
@@ -2552,13 +2557,20 @@ class TortoiseSDK:
                 # The Point already exists: if it was created with a session
                 # context it already carries the edge. Retrofitting provenance
                 # onto an existing Point needs a journaled path, which does not
-                # exist yet — tracked separately (#3340).
+                # exist yet — tracked separately (#3292).
                 if props.pop("extractedFrom", None) is not None:
-                    _logger.debug(
+                    # WARNING, not DEBUG: the commit-level claim is that this is
+                    # not a silent no-op, and at the shipped default (WARNING)
+                    # a debug line is invisible. The adjacent, strictly-less-
+                    # consequential credibility skip on this same branch also
+                    # warns — match it (review P2/#3263).
+                    _logger.warning(
                         "create_point dedup hit on %s: extractedFrom not applied "
                         "— update_point cannot wire the Source edge and the value "
                         "is not replayed, so applying it would diverge live from "
-                        "rebuild (#3263)",
+                        "rebuild. Retrofitting provenance onto an existing Point "
+                        "needs a journaled path (#3292); pass the ref on the "
+                        "FIRST write, or re-create the Point",
                         pid,
                     )
                 if props:
@@ -4190,12 +4202,13 @@ class TortoiseSDK:
         """Materialize the typed session Source (#1352).
 
         The M2 extraction projection auto-creates a Source stub at
-        ``session:{session_id}`` via ``_link_source`` with the DEFAULT
-        ``sourceKind: 'document'`` (title=url, empty contentHash, no capture
-        metadata) — but the ontology v3.6 §4.6 registers the session source
-        kind as ``agentSession``. This MERGE upgrades the stub IN PLACE
-        (sourceKind, contentHash of the stored transcript, cheap summary +
-        topics, sessionId, capturedAt, eventId) and wires
+        ``session:{session_id}`` via ``_link_source`` (title=url, empty
+        contentHash, no capture metadata). ``_link_source``'s default is now
+        ref-appropriate — ``agentSession`` for ``session:`` refs (ontology
+        §4.6 + #909 §4.3 #6 register it as the session source kind), else
+        ``document`` (#3263) — so this MERGE now mainly upgrades LEGACY stubs
+        minted before that change, plus: contentHash of the stored transcript,
+        cheap summary + topics, sessionId, capturedAt, eventId. It wires
         ``(Source)-[:references]->(sessionCaptured Event)`` — parity with the
         ``_session_event_write`` agentSession pattern and the backfill's
         references edge (test_backfill_sources.py).
@@ -5750,6 +5763,10 @@ class TortoiseSDK:
                 "id": props.get("id"),
                 "content": props.get("content"),
                 "pointKind": props.get("pointKind"),
+                # #3263: str for a single source, list[str] when the Point was
+                # extracted from several (many→many). The EDGES are the
+                # authoritative surface — this is the raw node prop, so callers
+                # must not assume a string.
                 "provenance": props.get("provenance")
                 or props.get("extractedFrom"),
                 "dedup_context": dedup_context,
@@ -7521,10 +7538,22 @@ class TortoiseSDK:
             if viols:
                 raise Phase2Error(viols[0]["message"], batch_id=batch_id)
             content = item.pop("content", None)
-            # extractedFrom may address a bundle source by its local ref
-            if isinstance(item.get("extractedFrom"), str) \
-                    and item["extractedFrom"] in source_refs:
-                item["extractedFrom"] = refs[item["extractedFrom"]]
+            # extractedFrom may address a bundle source by its local ref.
+            # #3263: many-to-many — resolve a LIST element-wise, mirroring
+            # canonical._resolve_ref_field (whose list branch also precedes its
+            # str branch). Handling only the scalar case left a list of local
+            # refs unresolved, so _link_source minted Sources named after the
+            # LOCAL refs ('s1', 's2') and the real bundle Sources were never
+            # linked — inventing exactly the provenance this fix forbids.
+            # Already-resolved ids/urls stay literal (refs.get(x, x) semantics).
+            _ef = item.get("extractedFrom")
+            if isinstance(_ef, str) and _ef in source_refs:
+                item["extractedFrom"] = refs[_ef]
+            elif isinstance(_ef, list):
+                item["extractedFrom"] = [
+                    refs[r] if isinstance(r, str) and r in source_refs else r
+                    for r in _ef
+                ]
             existed = proj.g.query(
                 "MATCH (n:Point {content_hash:$ch}) "
                 "WHERE n.is_operator = false "
