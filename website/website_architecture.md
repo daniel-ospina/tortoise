@@ -45,6 +45,7 @@ Host routing lives in `website/functions/_middleware.ts`:
 | --- | --- | --- |
 | Company | `website/index.html` | Premise Labs brand page, waitlist form |
 | Product | `website/product.html` | Tortoise marketing: features, pricing (Free/Solo/Pro/Team), self-hosted section |
+| Self-hosted | `website/self-hosted.html` | Self-hosted setup guide at `/self-hosted` (install, MCP config, export); guarded by `test_website_static.py` |
 | Blog | `website/functions/blog/[[path]].ts` (SSR at `/blog` + `/blog/:slug`) · `sitemap.xml.ts` (`/blog/sitemap.xml`) · `feed.xml.ts` (`/blog/feed.xml`) · `api/posts.ts` (agent publish/edit, `/blog/api/posts`) · `website/blog/` (favicon, og-image) | Tortoise blog: server-rendered markdown posts (Supabase `blog_posts`), agent-published with review queue, PostHog + consent |
 | Docs | `website/docs.html` | Static docs: what/how/quickstart/MCP/API |
 | FAQ | `website/faq.html` | Design-objection FAQ at `/faq`: why relationships are stored, how EP confidence is computed, and pointers to pricing/legal for the commercial questions. Defers mechanism detail to `/docs` rather than restating it |
@@ -208,7 +209,7 @@ Rules:
   verify-legal poll + `tests/e2e/test_legal_pages.py` + `test_welcome_page.py`
   were updated to the new contract in the same change).
 - **Canonical tags:** all indexable pages carry `<link rel="canonical">` — `index.html` → `https://premiselabs.co/`, `product.html` → `https://tortoise.premiselabs.co/` (served at `/`), plus docs/faq/self-hosted/auth. Legal pages already had them.
-- **Auth-gated pages** (`welcome.html`, `invite-accept.html`) are `noindex,nofollow` and excluded from sitemaps. Signin/signup stay indexable (legit entry points). Keep `.html` auth URLs as-is — OAuth `redirectTo` and invite emails reference them directly.
+- **Auth-gated pages** (`welcome.html`, `invite-accept.html`) are `noindex,nofollow` and excluded from sitemaps. Signup stays indexable (a redirect-free alias of `/auth`); the legacy `/signin` URLs 301 → `/auth`. Keep `.html` auth URLs as-is — OAuth `redirectTo` and invite emails reference them directly.
 - **Middleware** (runs before `_redirects`) 301s `/product`, `/product.html`, `/index.html` → `/` on the tortoise host (dedupe of the root rewrite); the company host keeps the 404 for `/product*`.
 - **Search Console submission:** add all four sitemap URLs from robots.txt as separate properties (one per host).
 

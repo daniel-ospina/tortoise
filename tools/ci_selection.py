@@ -84,12 +84,15 @@ SOURCE_PATTERNS = {
     "battery": ("battery/",),
     "onboarding": ("tortoise/onboarding/", "website/welcome.html",
                    "website/self-hosted.html", "website/product.html",
-                   # #3332: the public docs + FAQ surfaces are pinned by
-                   # test_website_docs_consistency.py, which lives in this
-                   # surface. product.html is pinned by test_website_static.py
-                   # (the PRICING data-mirror guard). Listing a path here is what
-                   # makes a docs-/FAQ-only PR select this surface at all —
-                   # otherwise the guard written for that file never runs.
+                   "website/index.html", "website/signup.html",
+                   "website/signin.html", "website/privacy.html",
+                   # #3332: the public pages that own a guard test in this surface.
+                   # docs.html + faq.html -> test_website_docs_consistency.py;
+                   # product.html -> test_website_static.py;
+                   # index.html + privacy.html -> test_waitlist_form.py;
+                   # signup.html + signin.html -> test_signup_form_safety.py.
+                   # Listing a path is what makes a change to it select this
+                   # surface at all — otherwise its guard test never runs.
                    "website/docs.html", "website/faq.html"),
     "ep": ("tortoise/decide.py", "tortoise/dream.py", "tortoise/analyze.py",
            "tortoise/ranking.py"),

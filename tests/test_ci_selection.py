@@ -45,10 +45,10 @@ def test_public_site_surface_change_selects_onboarding_and_skips_slow():
 
     Each path listed in SOURCE_PATTERNS is a file some guard test in the
     onboarding surface reads — most importantly test_website_docs_consistency.py
-    (pins docs.html against faq.html and against POINT_STATUS_VALUES in
-    tortoise/sdk.py) and test_website_static.py (pins product.html's pricing
-    surface). Before #3332 every `website/` path was filtered out by
-    NON_PYTHON_PREFIXES *before* SOURCE_PATTERNS was consulted, so
+    (checks each public page against its canonical source: POINT_STATUS_VALUES in
+    tortoise/sdk.py, the EP mechanism, the ontology link) and test_website_static.py
+    (pins product.html's pricing surface). Before #3332 every `website/` path was
+    filtered out by NON_PYTHON_PREFIXES *before* SOURCE_PATTERNS was consulted, so
     changed == [] -> tier-1 smoke: those guard tests never ran for the files
     they guard.
 
@@ -57,7 +57,9 @@ def test_public_site_surface_change_selects_onboarding_and_skips_slow():
     """
     for changed in (["website/docs.html"], ["website/faq.html"],
                     ["website/welcome.html"], ["website/self-hosted.html"],
-                    ["website/product.html"],
+                    ["website/product.html"], ["website/index.html"],
+                    ["website/signup.html"], ["website/signin.html"],
+                    ["website/privacy.html"],
                     ["docs/README.md", "website/self-hosted.html"]):
         r = _sel(changed)
         assert r["surfaces"] == ["onboarding"], changed
@@ -69,29 +71,28 @@ def test_public_site_surface_change_selects_onboarding_and_skips_slow():
 
 
 def test_every_source_pattern_is_selectable():
-    """The ratchet: every SOURCE_PATTERNS entry must actually reach `select()`.
+    """The ratchet: every SOURCE_PATTERNS entry must reach `select()`.
 
     This is the invariant whose absence let the same bug ship twice — #1349 for
     `tools/` (patched with the TOOL_CARVEOUTS mirror) and #3332 for `website/`
-    (where the SOURCE_PATTERNS entries for welcome.html and self-hosted.html
-    were dead on arrival, and a hand-maintained mirror caught only 4 of the
-    paths). A pattern that a NON_PYTHON_PREFIXES prefix would filter out must be
-    re-included by `select()`'s `_selection_relevant` rule. Derived from
-    SOURCE_PATTERNS rather than enumerated, so a future entry cannot be added
-    and silently not run — prior review (#2994) rejected an enumerated guard for
-    exactly this reason.
+    (where the SOURCE_PATTERNS entries for welcome.html and self-hosted.html were
+    dead on arrival, and the hand-maintained mirror that replaced them caught only
+    4 of the 10 guarded paths). A pattern that a NON_PYTHON_PREFIXES prefix would
+    filter out must be re-included by `select()`'s `_selection_relevant` rule.
+    Derived from SOURCE_PATTERNS rather than enumerated, so a future entry cannot
+    be added and silently not run — prior review (#2994) rejected an enumerated
+    guard for exactly this reason.
+
+    Direction: entry -> runs. This does NOT catch the reverse (a guarded page with
+    no SOURCE_PATTERNS entry at all) — that direction is tracked separately.
     """
-    m = load_manifest()
-    assert "onboarding" in m["surfaces"]
+    assert "onboarding" in load_manifest()["surfaces"]
     dead = []
     for surface, pats in SOURCE_PATTERNS.items():
         if surface == "core":
             continue
         for pat in pats:
-            if pat.endswith("/"):
-                continue  # directory prefixes are exercised via their members
-            r = _sel([pat])
-            if not r["surfaces"]:
+            if not _sel([pat])["surfaces"]:
                 dead.append((surface, pat))
     assert not dead, (
         f"SOURCE_PATTERNS entries that select NO surface (dead on arrival — the "
