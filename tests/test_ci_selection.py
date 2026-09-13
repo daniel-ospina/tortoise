@@ -637,13 +637,29 @@ def test_real_workflow_halves_are_consistent():
     # (space-joined matrix_* outputs) —
     # the #1266 discipline runs against the derivation. Verify the derived
     # halves carry every fast file exactly once and tilt is bounded.
+    # #3400: the tilt invariant is now DURATION, not count. The full-matrix
+    # halves are packed by measured weight (LPT), so a correct split is
+    # duration-balanced while carrying very different file counts — the real
+    # pool splits 185/315 at 26.3m/26.3m (one 855s file + ~130 sub-second
+    # files on one side). The old `abs(count_a - count_b) <= 3` assertion
+    # encoded the duration-blind parity split this issue exists to remove.
     from tools.ci_selection import (TESTS_DIR, push_legs,  # noqa: I001
-                                    workflow_halves_issues)
-    legs = push_legs(load_manifest())
+                                    workflow_halves_issues,
+                                    HALF_DURATION_IMBALANCE_RATIO)
+    m = load_manifest()
+    legs = push_legs(m)
     halves = {"a": set(legs["half_a"]), "b": set(legs["half_b"])}
-    issues = workflow_halves_issues(load_manifest(), halves, TESTS_DIR)
+    issues = workflow_halves_issues(m, halves, TESTS_DIR)
     assert issues == [], f"derived halves drift: {issues}"
-    assert abs(len(halves["a"]) - len(halves["b"])) <= 3, "tilt beyond ±3"
+    weights = {h: sum(m["durations"].get(f + ".py", 2.0) for f in fs)
+               for h, fs in halves.items()}
+    ratio = max(weights.values()) / min(weights.values())
+    assert ratio <= HALF_DURATION_IMBALANCE_RATIO, (
+        f"duration tilt beyond {HALF_DURATION_IMBALANCE_RATIO}x: "
+        f"{ {h: round(w / 60, 1) for h, w in weights.items()} } min "
+        f"(ratio {ratio:.2f}x)")
+    # every fast file rides exactly one half (no coverage hole, no double-run)
+    assert not (halves["a"] & halves["b"]), "leg overlap"
 
 
 def test_push_legs_partitions_every_classified_file():
@@ -737,6 +753,130 @@ def test_duration_integrity():
     bad2 = dict(m)
     bad2["durations"] = {"not_a_real_file.py": 10.0}
     assert duration_issues(bad2) != []
+
+
+# ── #3400: duration-balanced full-matrix halves + durations coverage ──────
+# The push halves used to be index-parity (`fast[0::2]` / `fast[1::2]`) —
+# duration-blind, so half (b) collected the slow files by luck (39.8m vs
+# 12.7m on main) and blew the 55m watchdog. These pin the LPT pack (#1473)
+# on the full-matrix path and the coverage floor that keeps the `durations`
+# map from rotting back to a handful of entries.
+
+
+def _duration_manifest(heavy: dict[str, float],
+                       tiny_count: int) -> dict:
+    """A synthetic full-matrix manifest: a few heavy files + many 2s files,
+    all in one freshly-named surface so nothing touches the real pool."""
+    tiny = [f"test_tiny_{i:04d}.py" for i in range(tiny_count)]
+    files = [*heavy.keys(), *tiny]
+    durations = {**heavy, **{f: 2.0 for f in tiny}}
+    return {"surfaces": {"core": files}, "tier1": [], "slow_files": [],
+            "carve_out": [], "push_extra": [], "durations": durations}
+
+
+def test_full_matrix_split_is_duration_balanced():
+    """#3400: the full-matrix (push) halves are packed by measured duration.
+
+    Four heavy files + many 2s files: parity can cluster the heavies on one
+    half; LPT must not.  The assertion is the *duration* ratio, not a count
+    ratio — the correct duration split of the real pool is 185/315 files.
+    """
+    from tools.ci_selection import HALF_DURATION_IMBALANCE_RATIO, push_legs
+    heavy = {"test_h0.py": 850.0, "test_h1.py": 700.0,
+             "test_h2.py": 650.0, "test_h3.py": 600.0}
+    m = _duration_manifest(heavy, tiny_count=200)
+    legs = push_legs(m)
+    a, b = set(legs["half_a"]), set(legs["half_b"])
+    assert not (a & b), "leg overlap"
+    assert a | b == {f[:-3] for f in m["surfaces"]["core"]}, "coverage hole"
+    weights = {h: sum(m["durations"][f + ".py"] for f in fs)
+               for h, fs in (("a", a), ("b", b))}
+    ratio = max(weights.values()) / min(weights.values())
+    assert ratio <= HALF_DURATION_IMBALANCE_RATIO, (
+        f"parity-style tilt survived: { {h: round(w / 60, 1) for h, w in weights.items()} }"
+        f" min (ratio {ratio:.2f}x)")
+    # the heavy files must be SPREAD — the 850s file must not sit with every
+    # other heavy file on one half while the other side carries only 2s files.
+    a_heavy = {f for f in heavy if f[:-3] in a}
+    b_heavy = {f for f in heavy if f[:-3] in b}
+    assert a_heavy and b_heavy, (
+        f"heavy files clustered on one half: a={sorted(a_heavy)} b={sorted(b_heavy)}")
+    assert len(a_heavy) < len(heavy) and len(b_heavy) < len(heavy)
+    # and the OLD parity split of the same pool is the thing being fixed
+    order = sorted(m["surfaces"]["core"])
+    p_a, p_b = order[0::2], order[1::2]
+    p_wa = sum(m["durations"][f] for f in p_a)
+    p_wb = sum(m["durations"][f] for f in p_b)
+    parity_ratio = max(p_wa, p_wb) / min(p_wa, p_wb)
+    assert parity_ratio > ratio, (
+        f"fixture does not exercise the defect: parity {parity_ratio:.2f}x "
+        f"vs LPT {ratio:.2f}x")
+
+
+def test_push_legs_is_deterministic():
+    """#3400: same manifest -> byte-identical halves, repeated calls."""
+    from tools.ci_selection import push_legs
+    m = _duration_manifest({"test_h0.py": 850.0, "test_h1.py": 700.0}, 50)
+    first = push_legs(m)
+    assert push_legs(m) == first
+    assert push_legs(m) == first
+    real = load_manifest()
+    assert push_legs(real) == push_legs(real)
+
+
+def test_halves_duration_imbalance_flagged():
+    """#3400: a heavy file dumped on one half reds even when counts look even."""
+    from tools.ci_selection import workflow_halves_issues
+    m = _duration_manifest({"test_big.py": 600.0}, tiny_count=10)
+    # 5 vs 6 files — a count-balanced split, duration-lopsided
+    halves = {"a": ["test_big", "test_tiny_0000", "test_tiny_0002",
+                     "test_tiny_0004", "test_tiny_0006"],
+              "b": ["test_tiny_0001", "test_tiny_0003", "test_tiny_0005",
+                     "test_tiny_0007", "test_tiny_0008", "test_tiny_0009"]}
+    issues = workflow_halves_issues(m, halves)
+    assert any("duration-imbalanced" in i for i in issues), issues
+
+
+def test_duration_coverage_guard_fires_when_low():
+    """#3400: 15 weights for 100 fast files is the rot this guard forbids."""
+    from tools.ci_selection import duration_coverage_issues
+    m = _duration_manifest({}, tiny_count=0)
+    m["surfaces"]["core"] = [f"test_cov_{i:03d}.py" for i in range(100)]
+    m["durations"] = {f: 2.0 for f in m["surfaces"]["core"][:15]}
+    issues = duration_coverage_issues(m)
+    assert issues, "guard did not bite at 15% coverage"
+    assert any("15.0%" in i and "floor" in i for i in issues), issues
+
+
+def test_duration_coverage_guard_boundary_and_realistic():
+    """#3400: the floor is inclusive; realistic coverage is silent."""
+    from tools.ci_selection import duration_coverage_issues, load_manifest
+    files = [f"test_cov_{i:03d}.py" for i in range(100)]
+    below = {"surfaces": {"core": files}, "tier1": [], "slow_files": [],
+             "durations": {f: 2.0 for f in files[:89]}}
+    at = {"surfaces": {"core": files}, "tier1": [], "slow_files": [],
+          "durations": {f: 2.0 for f in files[:90]}}
+    above = {"surfaces": {"core": files}, "tier1": [], "slow_files": [],
+             "durations": {f: 2.0 for f in files[:95]}}
+    assert duration_coverage_issues(below) != [], "89% must fire"
+    assert duration_coverage_issues(at) == [], "90% is at the floor, not below"
+    assert duration_coverage_issues(above) == [], "95% must be silent"
+    # the real map: 498/500 fast files measured (99.6%)
+    assert duration_coverage_issues(load_manifest()) == []
+
+
+def test_duration_coverage_guard_backwards_compatible():
+    """#3400: an absent/empty durations map is never a hard failure."""
+    from tools.ci_selection import duration_coverage_issues
+    files = [f"test_cov_{i:03d}.py" for i in range(100)]
+    base = {"surfaces": {"core": files}, "tier1": [], "slow_files": []}
+    assert duration_coverage_issues(base) == []              # key absent
+    assert duration_coverage_issues({**base, "durations": {}}) == []   # empty
+    assert duration_coverage_issues({**base, "durations": None}) == []  # null
+    # a repo with no fast files at all must not divide by zero
+    assert duration_coverage_issues(
+        {"surfaces": {}, "tier1": [], "slow_files": [],
+         "durations": {"x.py": 1.0}}) == []
 
 
 # ── #1668: the P2 flip's workflow-wiring pins (epic #1647 Task 6) ─────────
