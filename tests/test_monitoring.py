@@ -8,6 +8,14 @@ import pytest
 
 from tortoise import monitoring
 
+#: Generous wall-clock tolerance (seconds) for the retry-total behavioural test.
+#: ``time.sleep`` can OVERSHOOT its duration on a shared/loaded box, so the
+#: upper-bound assertion needs SECONDS of headroom — the old version compared
+#: against ``PROBE_DB_TOTAL_TIMEOUT`` with only ~40-60ms and did genuinely
+#: flake (3.1827s > 3.1s). A flaky guard in a registered CI surface is worse
+#: than no guard.
+RETRY_TOTAL_TIMING_TOLERANCE_S = 2.0
+
 
 class FakeSDK:
     """Minimal SDK stub for testing health checks."""
@@ -132,6 +140,90 @@ class TestProbeDb:
         assert result["ok"] is False
         assert calls["n"] == 2  # retried once, then still degraded
         assert "NXDOMAIN" in result["error"]
+
+    def test_retry_total_is_bounded_by_probe_db_total_timeout(self, monkeypatch):
+        """#2988: ``probe_db``'s real ceiling is TWO attempt bounds plus the
+        retry delay — ``PROBE_DB_TOTAL_TIMEOUT`` — not the bare per-attempt
+        ``PROBE_TIMEOUT``.
+
+        That total is the number a coordinator's outer bound is aligned above.
+        The previous version of this test slept ``0.98 * PROBE_TIMEOUT`` per
+        attempt and compared the wall clock against the 3.1s total with only
+        ~40-60ms of headroom; it genuinely failed once (3.1827s > 3.1s under a
+        cold daemon-thread start). A flaky guard in a registered CI surface is
+        worse than no guard.
+
+        FIX — determinism over the knife-edge: the per-attempt bound and the
+        retry delay are MONKEYPATCHED DOWN so the measured total is small and
+        the margin is SECONDS, not milliseconds, and the SDK fails well INSIDE
+        the (small) attempt bound so nothing races the worker's own timeout.
+        The LOWER bound is safe because ``time.sleep`` can overshoot but never
+        undershoot; the UPPER bound carries a generous NAMED tolerance. The
+        SHIPPED ``PROBE_DB_TOTAL_TIMEOUT`` is pinned separately, because the
+        monkeypatched behavioural run cannot pin it.
+        """
+        import time
+
+        import redis.exceptions as redis_exc
+
+        # Shipped constants, captured BEFORE the patch — the drift guard at the
+        # end pins these, so shrinking them for the behavioural run cannot hide
+        # a drift in the shipped formula.
+        shipped_timeout = monitoring.PROBE_TIMEOUT
+        shipped_delay = monitoring.PROBE_RETRY_DELAY
+        shipped_total = monitoring.PROBE_DB_TOTAL_TIMEOUT
+
+        attempt_bound = 0.4
+        retry_delay = 0.15
+        # 8x headroom under ``attempt_bound``. This was 0.3 (100ms of slack),
+        # which is a knife-edge of the SAME class this test was de-flaked for:
+        # if the sleep overshoots, ``_probe_once`` hits its own per-attempt
+        # timeout, and a TIMEOUT is never retried (only transient connect
+        # errors are), so ``calls['n']`` becomes 1 and the retry assertion
+        # fails. Measured 45% failure under load at 0.3; 0.05 leaves 8x.
+        per_attempt_work = 0.05
+        monkeypatch.setattr(monitoring, "PROBE_TIMEOUT", attempt_bound)
+        monkeypatch.setattr(monitoring, "PROBE_RETRY_DELAY", retry_delay)
+        expected_total = 2 * attempt_bound + retry_delay
+
+        calls = {"n": 0}
+
+        class SlowTransientSDK:
+            def _get_proj(self):
+                calls["n"] += 1
+                # Fail transiently well INSIDE the per-attempt bound, so the
+                # elapsed time really is two attempts plus the delay rather
+                # than a same-tick error or a worker timeout.
+                time.sleep(per_attempt_work)
+                raise redis_exc.ConnectionError("transient connect refused")
+
+        start = time.monotonic()
+        result = monitoring.probe_db(SlowTransientSDK())
+        elapsed = time.monotonic() - start
+
+        assert calls["n"] == 2, "the transient retry did not happen"
+        assert result["ok"] is False
+        # SAFE lower bound: both attempts' work plus the inter-attempt delay
+        # really elapsed, so this run exercises the retry path.
+        assert elapsed >= 2 * per_attempt_work + retry_delay, (
+            f"probe_db returned in {elapsed:.3f}s — below two attempts "
+            f"({per_attempt_work}s each) plus the {retry_delay}s delay, so this "
+            "measurement is not exercising the retry path"
+        )
+        # UPPER bound with a GENEROUS NAMED TOLERANCE (seconds of headroom, not
+        # the ~40ms the old assertion had).
+        assert elapsed <= expected_total + RETRY_TOTAL_TIMING_TOLERANCE_S, (
+            f"probe_db took {elapsed:.3f}s — above two attempts plus one delay "
+            f"({expected_total}s) plus the {RETRY_TOTAL_TIMING_TOLERANCE_S}s "
+            "tolerance; probe_db's structure is no longer two bounded attempts "
+            "plus PROBE_RETRY_DELAY"
+        )
+        # Drift guard, NOT a bound: the SHIPPED total must stay exactly two
+        # attempt bounds plus one retry delay.
+        assert shipped_total == 2 * shipped_timeout + shipped_delay, (
+            "PROBE_DB_TOTAL_TIMEOUT drifted from the structure it describes "
+            "(2 x PROBE_TIMEOUT + PROBE_RETRY_DELAY)"
+        )
 
     def test_never_raises_on_hung_connection(self, monkeypatch):
         """A dead socket must not hang the handler — the worker thread is
@@ -431,6 +523,54 @@ class TestHealthProbe:
             time.sleep(0.06)
         assert calls["n"] <= 1 + 2, f"supersede cap breached: {calls['n']} probes"
         assert probe.info()["supersedes"] <= 2
+
+    def test_supersede_budget_resets_after_a_live_completion(self):
+        """#2850: ``_run`` resets ``_supersedes`` to 0 on a live completion.
+
+        The reset is load-bearing for the layered-timeout rationale: the cap
+        bounds ONE wedge EPISODE, not the process lifetime. Delete
+        ``self._supersedes = 0`` in ``HealthProbe._run`` and this test fails —
+        the counter would stay exhausted after the first episode, so a SECOND
+        wedge could never be superseded.
+
+        ``timeout`` is deliberately 1.0s, NOT a value close to
+        ``stale_after``: the live completion is served by a freshly started
+        daemon thread, so a tight bound races the SCHEDULER rather than the
+        logic (measured 83% failure under load at timeout=0.05, always on
+        "the live completion was not served"). Staleness is still driven by
+        the small ``stale_after``, so this costs ~1s per wedged call, not
+        fidelity.
+        """
+        import asyncio
+        import time
+
+        calls = {"n": 0}
+
+        def _fn():
+            calls["n"] += 1
+            if calls["n"] in (1, 3, 4):  # generations that wedge forever
+                time.sleep(600)
+            return {"ok": True, "latency_ms": 1.0, "error": None}
+
+        probe = monitoring.HealthProbe(_fn, timeout=1.0, stale_after=0.05,
+                                       max_supersedes=1)
+        # Episode 1: wedge generation 1, supersede it with generation 2, which
+        # COMPLETES (the live completion that must reset the counter).
+        assert asyncio.run(probe.run())["ok"] is False
+        time.sleep(0.06)
+        assert asyncio.run(probe.run())["ok"] is True, (
+            "the live completion was not served")
+        assert probe.info()["supersedes"] == 0, (
+            "a live completion must reset the supersede counter")
+        # Episode 2: a fresh wedge must be able to reach the cap AGAIN.
+        time.sleep(0.06)
+        asyncio.run(probe.run())  # starts generation 3 (wedged)
+        time.sleep(0.06)
+        asyncio.run(probe.run())  # supersedes it with generation 4
+        assert calls["n"] == 4, (
+            f"only {calls['n']} probe generations ran — the supersede budget did "
+            "not reset, so the second wedge episode could never supersede")
+        assert probe.info()["supersedes"] == 1
 
     def test_healthy_probe_returns_result_immediately(self):
         import asyncio

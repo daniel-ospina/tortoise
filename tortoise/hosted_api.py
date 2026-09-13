@@ -61,6 +61,7 @@ from tortoise.hosted_backup import (
 )
 from tortoise.mcp_server import create_http_app
 from tortoise.monitoring import (  # #2850/2953 liveness-readiness decouple
+    PROBE_HARD_TIMEOUT,
     PROBE_STALE_AFTER,
     HealthProbe,
     event_retention_interval,
@@ -648,7 +649,7 @@ async def _health_probe_loop() -> None:
 
     ``/health`` must be answerable from memory alone, so freshness has to be
     somebody else's job — this task. It is single-flight and hard-bounded
-    (``HealthProbe.run`` returns within PROBE_HARD_TIMEOUT even against a
+    (``HealthProbe.run`` returns within ``DB_PROBE_HARD_TIMEOUT`` even against a
     black-holed DB), never touches the app's shared default executor, and can
     never die: a raise here would freeze the reported DB verdict forever.
     """
@@ -2117,11 +2118,15 @@ def _probe_sdk() -> TortoiseSDK:
 
     The per-request ``_make_sdk`` contract (a FRESH SDK per call, mutable
     in-memory state) does not apply here: the health probes are single-flight
-    coordinators (``_HEALTH_PROBE`` / ``_READY_PROBE`` each run at most one
-    probe at a time) and the actual ``_get_proj().g.query`` always executes on
-    the ONE shared probe worker (``monitoring._PROBE_WORKER``), so this handle
-    is never touched concurrently. One shared handle is exactly what stops the
-    per-check connection leak.
+    for their CALLERS — concurrent checks JOIN the in-flight probe, and a
+    second probe starts only by superseding a WEDGED one (capped per episode;
+    see the guarantee summary at ``monitoring.PROBE_MAX_SUPERSEDES``). In the
+    steady state the actual ``_get_proj().g.query`` executes on the ONE shared
+    probe worker (``monitoring._PROBE_WORKER``), which is exactly what stops
+    the per-check connection leak. NOTE the supersede window briefly overlaps a
+    wedged worker with its replacement, so this handle is not strictly
+    single-touch during a supersede; the wedged worker is by definition not
+    making progress, and the window is bounded by the supersede cap.
 
     Both cache mutation and construction are serialized on
     ``_PROBE_SDK_LOCK``, so concurrent coordinators can race for the handle but
@@ -2148,10 +2153,19 @@ def _probe_db() -> dict:
     """Deep-check the graph DB through the reused probe connection (#1384).
 
     Reports ``{"ok": bool, "latency_ms": float, "error": str|None}`` via
-    monitoring.probe_db — never raises, caller-bounded by ``PROBE_TIMEOUT``
-    per attempt. The probe target is ``_make_sdk(namespace=None)``: the
-    default-graph connection shares the DB server with every team/registry
-    endpoint, so a stopped FalkorDB (NXDOMAIN, #1381) fails it too.
+    monitoring.probe_db — never raises. ``probe_db`` itself is statically
+    bounded at ``PROBE_DB_TOTAL_TIMEOUT`` (2 x ``PROBE_TIMEOUT`` + the retry
+    delay, ~3.1s, because a transient connect failure is retried once). The
+    ``_probe_sdk()`` prefix that runs BEFORE it is only NOMINALLY charged at
+    ``PROBE_SDK_ACQUISITION_BUDGET`` — that is the redis CONNECT leg, and on
+    the embedded path the acquisition runs real queries bounded by the redis
+    READ timeout (10s default, clampable to 60s) with redis-py's default 10
+    retries, which the budget does not cover. ``DB_PROBE_HARD_TIMEOUT`` below
+    is therefore the best-effort bound a caller should clear, NOT a proof that
+    it exceeds this worker's real total. The probe target is
+    ``_make_sdk(namespace=None)``: the default-graph connection shares the DB
+    server with every team/registry endpoint, so a stopped FalkorDB (NXDOMAIN,
+    #1381) fails it too.
 
     #669: NEVER probe the registry namespace — FalkorDB auto-creates the
     graph on select, so a registry-namespaced probe RECREATES a deleted
@@ -2166,6 +2180,28 @@ def _probe_db() -> dict:
     return probe_db(sdk)
 
 
+# The FalkorDB-backed probes' bound. DERIVED, not restated: it is the shared
+# ``monitoring.PROBE_HARD_TIMEOUT`` (``PROBE_DB_TOTAL_TIMEOUT`` +
+# ``PROBE_SDK_ACQUISITION_BUDGET`` + a strict-above margin), so a
+# ``PROBE_TIMEOUT`` change propagates. ``probe_db`` retries one transient
+# connect failure, so its statically-known ceiling is
+# ``PROBE_DB_TOTAL_TIMEOUT`` (~3.1s) — NOT ``PROBE_TIMEOUT`` (1.5s); reading
+# only the per-attempt figure is what inverted the ordering in the
+# #2850/#2988 merge. Two honest caveats:
+#   * the ``_probe_sdk()`` prefix that runs BEFORE ``probe_db`` is charged at
+#     ``PROBE_SDK_ACQUISITION_BUDGET`` (the redis CONNECT leg). In URI mode
+#     that prefix is ~free (lazy projection, connect happens inside
+#     ``probe_db``'s own per-attempt bound); on the EMBEDDED path it runs real
+#     queries bounded by the redis READ timeout (10s default, clampable to
+#     60s) with redis-py's default 10 retries, which the budget does NOT cover;
+#   * ``TORTOISE_FALKORDB_CONNECT_TIMEOUT_S`` can raise even the connect leg
+#     the budget models (clamped at ``projection._DB_TIMEOUT_MAX_S`` = 60s).
+# So this is a best-effort ALIGNMENT that reduces how often a worker is
+# stranded; it is not a proof that the outer bound exceeds the worker's real
+# total. See the guarantee summary at ``monitoring.PROBE_MAX_SUPERSEDES``.
+DB_PROBE_HARD_TIMEOUT = PROBE_HARD_TIMEOUT
+
+
 # #2850: the single-flight, hard-bounded coordinator BOTH health endpoints
 # read. The lambda resolves ``_probe_db`` at CALL time, so the existing
 # monkeypatch seams (tests patch ha_mod._probe_db) keep working.
@@ -2175,6 +2211,7 @@ def _probe_db() -> dict:
 # operator set the period anywhere in 0.5-15s — with a 15s period, ``/health``
 # started a duplicate DB probe once per cycle (age 11s > 10s gate).
 _HEALTH_PROBE = HealthProbe(lambda: _probe_db(),
+                            timeout=DB_PROBE_HARD_TIMEOUT,
                             refresh_budget=lambda: _health_probe_interval())
 
 
@@ -2193,10 +2230,23 @@ def _probe_control_plane() -> dict:
     """
     start = time.monotonic()
     try:
+        import httpx
+
         from tortoise.supabase_control import get_control_plane
         # Minimal control-plane probe — a 1-row teams read exercises the
-        # PostgREST path without depending on any tenant data.
-        get_control_plane().query("teams", select=["id"], limit=1)
+        # PostgREST path without depending on any tenant data. The explicit
+        # PER-REQUEST timeout NARROWS the overrun window (the client's 5.0s
+        # default is PER PHASE, not a total — see
+        # ``CONTROL_PLANE_PROBE_TOTAL_S``) so the request normally finishes
+        # inside ``CONTROL_PLANE_HARD_TIMEOUT``. It does NOT bound the
+        # request: httpx's ``read`` timeout applies PER READ OPERATION, so a
+        # slowly-dribbling server can outlive the sum of the phases
+        # indefinitely. The coordinator's outer bound is the safety net; a
+        # request that outruns it strands a worker until that request
+        # completes on its own.
+        get_control_plane().query(
+            "teams", select=["id"], limit=1,
+            timeout=httpx.Timeout(**CONTROL_PLANE_PROBE_PHASES))
     except Exception as exc:  # never raise, always report
         return {"ok": False,
                 "latency_ms": round((time.monotonic() - start) * 1000, 1),
@@ -2206,10 +2256,46 @@ def _probe_control_plane() -> dict:
             "error": None}
 
 
-# The control plane's probe bound — deliberately ABOVE SupabaseControlPlane's
-# 5.0s httpx timeout. See the LAYERED TIMEOUT note below for why that ordering
-# is load-bearing rather than arbitrary.
-CONTROL_PLANE_HARD_TIMEOUT = 6.0
+# ── the control plane's composed per-request timeout ────────────────────
+#
+# ``httpx.Timeout(5.0)`` — ``SupabaseControlPlane``'s constructor default
+# (tortoise/supabase_control.py: ``httpx.Client(timeout=self._timeout)``) —
+# applies PER PHASE (connect / read / write / pool), NOT as a total deadline.
+# A request that stalls in more than one phase can therefore run up to the SUM
+# of the phases (~15-20s), far above any sane coordinator bound: a 6.0s outer
+# bound would abandon a LIVE worker thread (CPython #87185 cannot cancel it).
+# The health probe therefore asks for its OWN composed timeout.
+CONTROL_PLANE_PROBE_PHASES: dict[str, float] = {
+    "connect": 2.0,
+    "read": 2.0,
+    "write": 0.5,
+    "pool": 0.5,
+}
+#: The requested per-phase budget — ``connect`` + ``write`` + ``pool`` plus
+#: ONE ``read`` operation. This is NOT the probe request's worst case: httpx
+#: has no total-deadline concept AND its ``read`` timeout applies PER READ
+#: OPERATION, so a slowly-dribbling server can outlive this sum indefinitely
+#: (a reviewer measured a response surviving 5.3x the configured ``read``
+#: phase). What it really is: the composed timeout the probe ASKS FOR, which
+#: narrows the overrun window versus the client's per-phase default. It does
+#: NOT bound the request; ``CONTROL_PLANE_HARD_TIMEOUT`` is the safety net and
+#: a request that outruns it strands a worker until the request completes on
+#: its own.
+CONTROL_PLANE_PROBE_TOTAL_S = sum(CONTROL_PLANE_PROBE_PHASES.values())
+
+#: Safety margin between the probe request's composed total and the
+#: coordinator's outer bound — room for the worker to unwind and record its
+#: result after the client's own timeout fires. NAMED so the gap is not a
+#: silent magic number.
+CONTROL_PLANE_BOUND_MARGIN_S = 1.0
+
+# The control plane's probe bound — DERIVED from the probe request's composed
+# total, deliberately ABOVE it so a phase timeout normally fires first and the
+# worker returns by itself. Best-effort, not provable: the ``read`` phase is
+# PER READ and a dribbling server can outrun this bound; the bound is then the
+# safety net that unblocks the loop, and the worker is stranded until its
+# request completes. See the LAYERED TIMEOUT note below.
+CONTROL_PLANE_HARD_TIMEOUT = CONTROL_PLANE_PROBE_TOTAL_S + CONTROL_PLANE_BOUND_MARGIN_S
 
 
 # Separate coordinator instance from the FalkorDB one: the two planes fail
@@ -2220,22 +2306,31 @@ CONTROL_PLANE_HARD_TIMEOUT = 6.0
 # 200 from a verdict older than its own read budget (review P1). See the
 # ``_READY_PROBE`` note below.
 #
-# LAYERED TIMEOUT (the #2988 invariant, restored here PER-PLANE). The outer
-# bound MUST exceed this plane's own client timeout. ``HealthProbe.run()``
+# LAYERED TIMEOUT (the #2988 alignment, restored here PER-PLANE). The outer
+# bound is kept ABOVE the plane's statically-known inner TOTAL. ``HealthProbe.run()``
 # abandons a probe that outlives ``timeout`` — and abandoning it does NOT stop
 # the worker thread, which stays parked in its socket read (CPython #87185:
 # ``wait_for(to_thread(...))``'s worker "is never cancelled and continues
 # running forever despite the timeout error"; the Python docs likewise say
 # ``wait_for`` cancels the AWAITABLE, not the thread). If the outer bound can
-# win that race, every timeout strands a thread. So: 6.0s outer vs 5.0s inner
-# means the client times out on its own, the worker returns by itself, and the
-# coordinator's bound stays what it is meant to be — a safety net for a probe
-# that never self-bounds — rather than the thing that abandons the thread.
+# win that race, the timeout strands a thread. The control-plane probe
+# therefore carries its OWN composed request timeout (phases summing to
+# ``CONTROL_PLANE_PROBE_TOTAL_S`` = 5.0s) so a phase timeout normally fires
+# first and the coordinator's bound stays what it is meant to be — a safety
+# net for a probe that never self-bounds. This NARROWS the overrun window; it
+# does not bound the request (httpx's ``read`` is per-read — see
+# ``CONTROL_PLANE_PROBE_TOTAL_S``).
 #
-# This is why the two planes carry DIFFERENT bounds: the ordering is relative
-# to each plane's inner timeout (FalkorDB's ``_probe_db`` self-bounds at
-# ``PROBE_TIMEOUT`` = 1.5s, so the 2.0s ``PROBE_HARD_TIMEOUT`` default already
-# satisfies it), not a single global number.
+# This is why the planes carry DIFFERENT bounds: the alignment is relative to
+# each plane's statically-known inner TOTAL, not a single global number.
+# FalkorDB's ``probe_db`` retries one transient failure, so the bound that CAN
+# be computed is ``PROBE_DB_TOTAL_TIMEOUT`` (~3.1s = 2 x PROBE_TIMEOUT +
+# PROBE_RETRY_DELAY) plus the nominal SDK-acquisition budget plus a
+# strict-above margin — hence ``DB_PROBE_HARD_TIMEOUT`` =
+# ``PROBE_HARD_TIMEOUT`` (5.6s), not the superseded 2.0s bare default. The embedded acquisition prefix is NOT covered
+# by that computation, so this ordering is a best-effort alignment that
+# reduces how often a worker is stranded — see the guarantee summary at
+# ``monitoring.PROBE_MAX_SUPERSEDES``.
 _CONTROL_PLANE_PROBE = HealthProbe(
     lambda: _probe_control_plane(),
     timeout=CONTROL_PLANE_HARD_TIMEOUT,
@@ -2249,19 +2344,24 @@ _CONTROL_PLANE_PROBE = HealthProbe(
 # request time — sharing the refresher's coordinator meant a readiness call
 # could JOIN a probe that started before the failure and report the stale
 # "ok" (#1384's whole point inverted). Its own coordinator is still
-# single-flight and hard-bounded, so concurrent readiness checks cannot pile
-# work up. Safe to run concurrently with ``_HEALTH_PROBE``: the actual
+# single-flight for its CALLERS and hard-bounded, so concurrent readiness
+# checks JOIN the in-flight probe rather than piling work up (a wedged probe
+# can still be superseded, capped per episode; see
+# ``monitoring.PROBE_MAX_SUPERSEDES``). Safe to run concurrently with
+# ``_HEALTH_PROBE``: the actual
 # ``_get_proj().g.query`` executes on the single shared probe worker
 # (monitoring._PROBE_WORKER), never concurrently.
 #
 # ``fresh_only=True`` (review P1): /health may serve "stale but honest"
 # last-known-good, but a readiness read must not. Without this flag a probe
-# that began after an outage could exhaust its 2s budget and ``run()`` would
+# that began after an outage could exhaust its own budget and ``run()`` would
 # return the coordinator's last completed ``{ok: True}`` — which stays within
-# ``stale_after`` (30s), so /health/ready answered 200 "connected" for ~5s
-# while the control plane (5s httpx timeout) or FalkorDB was already dead, and
-# deploy-hosted.yml asserts readiness LAST as its strongest post-deploy signal.
-_READY_PROBE = HealthProbe(lambda: _probe_db(), fresh_only=True)
+# ``stale_after`` (30s), so /health/ready could answer 200 "connected" for as
+# long as that window while the control plane or FalkorDB was already dead,
+# and deploy-hosted.yml asserts readiness LAST as its strongest post-deploy
+# signal.
+_READY_PROBE = HealthProbe(
+    lambda: _probe_db(), timeout=DB_PROBE_HARD_TIMEOUT, fresh_only=True)
 
 
 @app.get("/health")
@@ -2339,8 +2439,13 @@ async def health_ready():
     request, not just this one. A stalled probe now reads as not-ready (503),
     fail-closed, without ever blocking the loop.
     """
-    # Data plane. Reuses /health's probe: itself hard-bounded (~1.5s) and it
-    # never raises, so a dead DB degrades the result instead of the process.
+    # Data plane. Runs its OWN coordinator (``_READY_PROBE`` — deliberately
+    # NOT the liveness refresher's, so a readiness call cannot join a probe
+    # started before the outage), hard-bounded at ``DB_PROBE_HARD_TIMEOUT``
+    # (a best-effort alignment: the ~3.1s ``probe_db`` TOTAL plus the nominal
+    # SDK-acquisition budget; the embedded acquisition prefix is not covered),
+    # and it never raises, so a dead DB degrades the result instead of the
+    # process.
     # #669 post-flip: NEVER a registry-namespaced probe — FalkorDB
     # auto-creates the graph on select, so a registry-namespaced probe
     # RECREATED the deleted registry_control_plane on every health check

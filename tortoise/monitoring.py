@@ -31,9 +31,13 @@ _start = time.monotonic()
 _last_ingest: float | None = None
 _sdk = None  # set by register()
 
-# Hard bound on the deep DB probe (#1384): a stopped FalkorDB (incident
+# Per-ATTEMPT bound on the deep DB probe (#1384): a stopped FalkorDB (incident
 # #1381 — NXDOMAIN with /health staying ok) must flip /health to degraded
-# within a sub-second-to-1.5s window, never hang the handler.
+# within a sub-second-to-1.5s window, never hang the handler. This bounds ONE
+# attempt only: ``probe_db`` retries a transient connect failure once, so the
+# module's worst case is ``PROBE_DB_TOTAL_TIMEOUT`` (~3.1s), NOT 1.5s. Quoting
+# this figure as the flip bound is the trap that produced an inverted
+# coordinator ordering in the #2850/#2988 merge.
 PROBE_TIMEOUT = 1.5
 
 # ── #2850 (P0 liveness/readiness decouple) ────────────────────────────────
@@ -54,14 +58,56 @@ PROBE_TIMEOUT = 1.5
 #      a worker for the redis socket timeout (5s connect + 10s read); once
 #      enough were occupied, /health queued behind them and blew the 15s.
 #
-# `PROBE_HARD_TIMEOUT` is the caller-side bound `/health` enforces on itself
-# (well under Fly's 15s), `PROBE_STALE_AFTER` is when an in-flight probe is
-# presumed wedged and its last good result must stop being reported as live.
-PROBE_HARD_TIMEOUT = 2.0
+# `PROBE_STALE_AFTER` is when an in-flight probe is presumed wedged and its
+# last good result must stop being reported as live. `PROBE_HARD_TIMEOUT` —
+# the ``HealthProbe`` constructor DEFAULT — is defined below next to
+# ``PROBE_DB_TOTAL_TIMEOUT``, because the default is DERIVED from the DB
+# probes' statically-known inner total rather than chosen independently (the
+# pre-#2988 2.0s literal sat below the 3.1s total — see PROBE_HARD_TIMEOUT).
+# Deriving it lifts the default above the part of the inner path that IS
+# statically bound; it does NOT make the outer>inner ordering provable (see
+# the guarantee summary at ``PROBE_MAX_SUPERSEDES``).
 PROBE_STALE_AFTER = 30.0
-# A wedged probe worker may be superseded at most this many times for the
-# whole process lifetime — enough to notice a genuine recovery, hard-bounded
-# so a permanent black hole can never grow threads without limit.
+# A wedged probe worker may be superseded at most this many times per WEDGE
+# EPISODE — enough to notice a genuine recovery. NOT a process-lifetime cap:
+# ``HealthProbe._run`` resets the counter to 0 on any live completion (a
+# completion proves the wedge cleared), so a backend that wedges, recovers and
+# wedges again can strand up to this many threads per episode, without limit
+# over the process lifetime.
+#
+# WHAT THIS DESIGN ACTUALLY GUARANTEES — stated ONCE here; everything else
+# cross-references it rather than restating it:
+#   (a) the outer COORDINATOR bound caps how long the event loop / a readiness
+#       verdict WAITS. This is the load-bearing property, and it holds.
+#   (b) each coordinator is SINGLE-FLIGHT for its CALLERS: concurrent
+#       run()/snapshot() calls JOIN the one in-flight probe instead of
+#       starting their own. The SOLE way a second probe starts is an explicit
+#       SUPERSEDE of a wedged one, capped by (d) — so "at most one probe runs
+#       at a time" is FALSE while a wedge is being superseded (verified: 2-3
+#       probes run concurrently during successive supersedes).
+#   (c) a worker that outlives the outer bound is STRANDED only until its
+#       underlying call returns on its own. Its own socket timeouts / retry
+#       exhaustion bound that IN PRACTICE, not by design.
+#   (d) ``PROBE_MAX_SUPERSEDES`` caps supersede STARTS per wedge episode (the
+#       counter resets on any live completion). It does NOT bound how many
+#       threads are stranded SIMULTANEOUSLY: a completion resets the counter
+#       but does not un-strand workers already abandoned, so they accumulate
+#       across episodes until each one's underlying call returns per (c). Nor
+#       is it a process-lifetime cap.
+#
+# The INNER worst case is NOT statically bounded, so "outer above inner"
+# cannot be PROVEN — only approximated. httpx's ``read`` timeout applies PER
+# READ OPERATION (a slowly-dribbling server can outlive the sum of the phases
+# indefinitely; a reviewer measured a response surviving 5.3x the configured
+# ``read`` phase), and the embedded SDK-acquisition prefix runs real queries
+# bounded by the redis READ timeout (10s default, clampable to 60s) with
+# redis-py's default 10 retries (a reviewer measured ~26.8s for one such
+# query). The LAYERED TIMEOUT — keep a coordinator's ``timeout`` ABOVE the
+# probe function's own statically-known TOTAL bound (see
+# ``PROBE_DB_TOTAL_TIMEOUT``) — is therefore a BEST-EFFORT ALIGNMENT that
+# reduces how often a worker is stranded. It is NOT, and cannot be, a
+# guarantee. Do not add another constant or another margin trying to make it
+# one. Abandoning a probe does not stop its thread (CPython #87185).
 PROBE_MAX_SUPERSEDES = 4
 PROBE_POLL_INTERVAL = 0.02
 
@@ -71,6 +117,83 @@ PROBE_POLL_INTERVAL = 0.02
 # outage (NXDOMAIN, stopped FalkorDB) fails the retry identically and still
 # reports degraded ~0.1s later — the retry never masks a persistent failure.
 PROBE_RETRY_DELAY = 0.1
+
+#: The statically-known worst-case wall time of :func:`probe_db` ITSELF: the
+#: bound a DB-plane coordinator must sit ABOVE for the layered-timeout
+#: alignment to be meaningful. It does NOT cover the wrapper's SDK-acquisition
+#: prefix (see ``PROBE_SDK_ACQUISITION_BUDGET`` and the guarantee summary at
+#: ``PROBE_MAX_SUPERSEDES``). ``PROBE_TIMEOUT`` bounds ONE attempt, but a
+#: transient connect failure retries once after ``PROBE_RETRY_DELAY``, so the
+#: function's real ceiling is two attempts plus the delay. Reading only
+#: ``PROBE_TIMEOUT`` here
+#: is the trap that produced an inverted ordering in the #2850/#2988 merge:
+#: a 2.0s coordinator bound looks safely above a "1.5s" inner bound while in
+#: fact sitting below the 3.1s total. Derive it rather than restating it.
+PROBE_DB_TOTAL_TIMEOUT = 2 * PROBE_TIMEOUT + PROBE_RETRY_DELAY
+
+#: #2850/#2988: the CONNECT leg of acquiring an SDK before :func:`probe_db`
+#: can run — the redis client's DEFAULT ``socket_connect_timeout``, i.e.
+#: ``projection._DB_CONNECT_TIMEOUT_DEFAULT`` (2.0s, the ``connect`` leg of
+#: ``projection._socket_timeouts()``). A test pins this literal to that
+#: default so the two cannot drift silently.
+#:
+#: ⚠️ This is NOT an upper bound on the whole acquisition prefix, and the
+#: comment must not be read as one:
+#:   * URI mode (``TORTOISE_DB_URI`` set — the hosted steady state):
+#:     ``_make_sdk(namespace=None)`` returns an SDK whose projection is LAZY,
+#:     so the prefix is ~free and the connect happens INSIDE ``probe_db``'s
+#:     own per-attempt worker bound. The 2.0s charge is just the nominal
+#:     connect leg.
+#:   * EMBEDDED mode: the anchor path connects EAGERLY and runs real queries
+#:     (auto-health-recover, version probe, index creation) bounded by the
+#:     redis READ timeout — 10s by default and clampable to 60s via
+#:     ``TORTOISE_FALKORDB_SOCKET_TIMEOUT_S`` — with redis-py's default 10
+#:     retries. A reviewer measured ~26.8s for one such query. This constant
+#:     does NOT bound that prefix, so on the embedded path no outer bound can
+#:     be shown to exceed the worker's real total. See the guarantee summary
+#:     at ``PROBE_MAX_SUPERSEDES``.
+#:
+#: The env override ``TORTOISE_FALKORDB_CONNECT_TIMEOUT_S`` can also raise the
+#: connect leg itself (clamped at ``projection._DB_TIMEOUT_MAX_S`` = 60s), so
+#: even the leg this constant models is only bounded at the DEFAULT setting.
+PROBE_SDK_ACQUISITION_BUDGET = 2.0
+
+#: Safety margin so a DB coordinator's outer bound sits STRICTLY above the
+#: statically-known inner total. A bound EXACTLY equal to that total is still
+#: a race — the worker's own timeout and the coordinator's deadline fire at
+#: the same instant — and after the inner bound fires the worker still needs a
+#: moment to store and notify its result. 0.5s is ~25x ``PROBE_POLL_INTERVAL``
+#: and ample for scheduler jitter on a loaded box. NOTE it is a margin against
+#: the bound that CAN be computed, not evidence that the outer bound exceeds
+#: the worker's real worst case — the acquisition prefix is unbounded (see
+#: ``PROBE_SDK_ACQUISITION_BUDGET``).
+PROBE_DB_BOUND_MARGIN_S = 0.5
+
+#: The ``HealthProbe`` constructor DEFAULT — a safety net for any future
+#: ``HealthProbe(fn)`` that omits ``timeout``. It is DERIVED from the DB
+#: probes' statically-known inner total: ``PROBE_DB_TOTAL_TIMEOUT`` PLUS the
+#: acquisition budget PLUS a strict-above margin — NOT the bare
+#: ``PROBE_TIMEOUT`` (1.5s). The pre-#2988 literal was 2.0s: it LOOKED safely
+#: above a "1.5s" inner bound while actually sitting below the 3.1s total,
+#: so any ``HealthProbe(lambda: _probe_db())`` built without an explicit
+#: timeout was stranded a worker thread on every timeout (CPython #87185 —
+#: ``asyncio.wait_for`` cancels the awaitable, not the thread).
+#:
+#: What this does and does not buy: it lifts the default above the part of
+#: the path that IS statically bound, so a DB-backed probe's inner bound
+#: normally fires first. It does NOT make that ordering provable — the
+#: acquisition prefix is unbounded on the embedded path and the env override
+#: can raise the connect leg (see ``PROBE_SDK_ACQUISITION_BUDGET`` and the
+#: guarantee summary at ``PROBE_MAX_SUPERSEDES``).
+#:
+#: Note this constant is now used as a real bound by NO production
+#: coordinator: every hosted coordinator (``_HEALTH_PROBE`` / ``_READY_PROBE``
+#: / ``_CONTROL_PLANE_PROBE``) passes ``timeout=`` explicitly. It is DERIVED
+#: rather than restated so a ``PROBE_TIMEOUT`` change propagates, and
+#: ``hosted_api.DB_PROBE_HARD_TIMEOUT`` aliases it (single source of truth for
+#: the DB plane).
+PROBE_HARD_TIMEOUT = (PROBE_DB_TOTAL_TIMEOUT + PROBE_SDK_ACQUISITION_BUDGET
+                      + PROBE_DB_BOUND_MARGIN_S)
 
 #: Default period for the event-retention sweep (seconds). Shared by the
 #: hosted retention loop and the SDK lazy purge so both fall back identically.
@@ -323,9 +446,16 @@ def probe_db(sdk) -> dict:
 
     Runs a trivial ``RETURN 1`` on the SAME connection graph-touching
     endpoints use (the SDK's projection — registry/shared or default graph
-    depending on caller), hard-bounded by a 1.5s worker-thread timeout: the
-    redis client's own socket_connect_timeout is 5s, far too slow for a
-    health poll, so a dead URI would otherwise hang the handler.
+    depending on caller), hard-bounded by a 1.5s worker-thread timeout PER
+    ATTEMPT: the redis client's own socket_connect_timeout is 2s
+    (``projection._DB_CONNECT_TIMEOUT_DEFAULT``; 5s pre-#2850), still slower
+    than a health poll, so a dead URI would otherwise hang the handler. Note
+    the TOTAL bound of THIS FUNCTION is ``PROBE_DB_TOTAL_TIMEOUT`` (two
+    attempts plus the retry delay, ~3.1s) because of the #1565 retry below —
+    callers bounding it must clear the total, not the per-attempt figure. That
+    says nothing about the SDK-acquisition prefix that runs BEFORE this
+    function (see ``PROBE_SDK_ACQUISITION_BUDGET``), so an outer bound sized
+    against it is best-effort alignment, not a proven ordering.
 
     #1565: a single TRANSIENT connection-level failure (embedded redislite
     # server mid-startup / momentarily unreachable under parallel load —
@@ -359,13 +489,18 @@ class HealthProbe:
     P0 liveness/readiness decouple requires:
 
     1. **Hard-bounded reads.** ``run()`` returns within ``timeout`` (default
-       ``PROBE_HARD_TIMEOUT`` = 2s, well under Fly's 15s http_check) even if
+       ``PROBE_HARD_TIMEOUT``, itself derived from ``PROBE_DB_TOTAL_TIMEOUT`` +
+       the SDK-acquisition budget; production coordinators pass explicit
+       per-plane bounds) even if
        the probe never returns. It never waits on the DB directly and never
        touches the shared asyncio default executor — nothing a stalled DB
        does can queue behind or exhaust it.
-    2. **No accumulation.** At most ONE probe runs at a time. A probe that is
-       already in flight is joined, never duplicated — a 15s-interval checker
-       cannot grow the work in flight.
+    2. **No accumulation from callers.** Concurrent ``run()``/``snapshot()``
+       callers JOIN an in-flight probe, so a 15s-interval checker cannot grow
+       the work in flight. A second probe starts ONLY by explicitly superseding
+       a wedged one, capped per episode (item 3) — so "at most ONE probe runs
+       at a time" does not hold while a wedge is being superseded. See the
+       guarantee summary at ``PROBE_MAX_SUPERSEDES``.
     3. **No per-check thread leak.** Exactly one daemon thread per in-flight
        probe; a wedged probe is superseded at most ``max_supersedes`` times
        per WEDGE EPISODE, never once per check. NOT a process-lifetime cap:
@@ -374,10 +509,14 @@ class HealthProbe:
        that wedges, recovers and wedges again can strand up to
        ``max_supersedes`` threads per episode. What keeps the steady state
        bounded in practice is the caller's LAYERED TIMEOUT — keep ``timeout``
-       ABOVE the probe function's own client/socket timeout so the inner
-       timeout fires first and the worker returns by itself, making
-       abandonment the exception instead of the norm. Abandoning a probe does
-       not stop its thread (CPython #87185).
+       ABOVE the probe function's own statically-known TOTAL bound (stated in
+       full once, at ``PROBE_DB_TOTAL_TIMEOUT``; the per-attempt figure is
+       NEVER the right one) so the inner timeout normally fires first and the
+       worker returns by itself, making abandonment the exception instead of
+       the norm. This is a BEST-EFFORT ALIGNMENT, not a proven ordering — the
+       inner worst case is unbounded; see the guarantee summary at
+       ``PROBE_MAX_SUPERSEDES``. Abandoning a probe does not stop its thread
+       (CPython #87185).
     4. **Honest staleness.** While a probe is wedged, the last *good* result
        stops being reported as live once it is older than ``stale_after``
        (or once a superseded probe has been in flight that long) — /health
@@ -1608,10 +1747,12 @@ def metrics(sdk=None) -> dict:
     a broken DB, so reporting degraded there is the lie #2202 removes.
 
     ``graph_size`` is counted ONLY on a successful probe (review fix, #2202):
-    a dead/hung DB must degrade fast (the bounded RETURN-1 probe, ~1.5s) and
-    never drag an extra unbounded taxonomy round-trip onto the health call,
-    and its failure must not inflate the very ``errors`` field this response
-    reports. A degraded report carries graph_size 0 with the probe error.
+    a dead/hung DB must degrade fast (the bounded RETURN-1 probe —
+    ``PROBE_TIMEOUT`` per attempt, ``PROBE_DB_TOTAL_TIMEOUT`` as the worst-case
+    total) and never drag an extra unbounded taxonomy round-trip onto the
+    health call, and its failure must not inflate the very ``errors`` field
+    this response reports. A degraded report carries graph_size 0 with the
+    probe error.
     """
     target = sdk if sdk is not None else _sdk
     if target is None:
