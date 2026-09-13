@@ -1921,6 +1921,77 @@ class TestClientConstruction:
             server.server_close()
 
 
+class TestPerRequestTimeout:
+    """#2850/#2988: ``query(timeout=...)`` must reach the outgoing httpx call.
+
+    The health probe passes an explicit composed ``httpx.Timeout`` because the
+    client-level timeout is applied PER PHASE (connect/read/write/pool), not as
+    a total deadline. Without this coverage, deleting the forwarding from any
+    call site left the whole suite green while the client silently kept its
+    per-phase default — the exact regression the plumbing exists to prevent.
+    """
+
+    @staticmethod
+    def _plane():
+        from tortoise.supabase_control import SupabaseControlPlane
+
+        plane = SupabaseControlPlane(url="https://proj.supabase.co",
+                                     service_key="svc")
+        calls: list[dict] = []
+
+        class _Resp:
+            status_code = 200
+            content = b"[]"
+
+            @staticmethod
+            def json():
+                return []
+
+        class _StubHttp:
+            def __getattr__(self, method):
+                def _call(url, **kwargs):
+                    calls.append({"method": method, "url": url,
+                                  "kwargs": kwargs})
+                    return _Resp()
+                return _call
+
+        plane._http = _StubHttp()
+        return plane, calls
+
+    def test_supplied_timeout_is_forwarded_to_the_request(self):
+        import httpx
+
+        plane, calls = self._plane()
+        composed = httpx.Timeout(connect=1.0, read=2.0, write=3.0, pool=4.0)
+        plane.query("teams", select=["id"], timeout=composed)
+        assert calls and calls[-1]["kwargs"].get("timeout") is composed, (
+            "the per-request timeout was not forwarded — the client silently "
+            "kept its per-phase default (the regression this seam prevents)"
+        )
+
+    def test_supplied_timeout_is_forwarded_for_every_method(self):
+        import httpx
+
+        plane, calls = self._plane()
+        composed = httpx.Timeout(1.0)
+        for method in ("GET", "PATCH", "POST", "DELETE"):
+            plane.query("teams", method=method, json_body={}, timeout=composed)
+        assert len(calls) == 4
+        assert all(c["kwargs"].get("timeout") is composed for c in calls), (
+            f"not every method forwarded the timeout: {calls}"
+        )
+
+    def test_none_timeout_is_not_forwarded(self):
+        """``httpx`` reads ``timeout=None`` as "disable timeouts", so the
+        default (and an explicit ``None``) must OMIT the kwarg entirely — the
+        code comment says that is deliberate; this pins it."""
+        plane, calls = self._plane()
+        plane.query("teams", select=["id"])
+        assert "timeout" not in calls[-1]["kwargs"]
+        plane.query("teams", select=["id"], timeout=None)
+        assert "timeout" not in calls[-1]["kwargs"]
+
+
 # ── Metering (post-#669 flip — PR #911) ─────────────────────────────────────
 
 class TestMeteringSeam:
@@ -3001,7 +3072,7 @@ class _InterleaveLoserFake(FakeControlPlane):
 
     def query(self, table: str, *, select=None, filters=None,
               method: str = "GET", json_body=None, order=None,
-              limit=None):
+              limit=None, timeout=None):
         is_claim = (table == "invitations" and method == "PATCH"
                     and (json_body or {}).get("accepted_at") is not None
                     and filters
@@ -3015,7 +3086,7 @@ class _InterleaveLoserFake(FakeControlPlane):
                     self._commit_winner(f[2])
         return super().query(table, select=select, filters=filters,
                              method=method, json_body=json_body,
-                             order=order, limit=limit)
+                             order=order, limit=limit, timeout=timeout)
 
 
 class _ResendRaceFake(FakeControlPlane):
@@ -3035,7 +3106,7 @@ class _ResendRaceFake(FakeControlPlane):
 
     def query(self, table: str, *, select=None, filters=None,
               method: str = "GET", json_body=None, order=None,
-              limit=None):
+              limit=None, timeout=None):
         is_rotate = (table == "invitations" and method == "PATCH"
                      and (json_body or {}).get("lookup_hash") is not None
                      and filters
@@ -3054,7 +3125,7 @@ class _ResendRaceFake(FakeControlPlane):
                                 "accepted_at": now})
         return super().query(table, select=select, filters=filters,
                              method=method, json_body=json_body,
-                             order=order, limit=limit)
+                             order=order, limit=limit, timeout=timeout)
 
 
 class TestConcurrentAcceptSingleUseSupabase:
