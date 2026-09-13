@@ -6916,17 +6916,108 @@ class TortoiseSDK:
         return out
 
     def _find_terminal_dedup_hit(self, content: str, kind: str) -> str | None:
-        """Read-only NFC-keyed dedup MATCH (mirrors create_point's dedup key)
-        restricted to TERMINAL hits — the Phase-1 mechanism behind the
-        bundle-local-refs-resolving-to-terminal-points guard (cycle-17/18)."""
+        """Read-only content-hash-keyed dedup MATCH (mirrors create_point's
+        dedup key) restricted to TERMINAL hits — the Phase-1 mechanism behind the
+        bundle-local-refs-resolving-to-terminal-points guard (cycle-17/18).
+
+        #2971: the content-hash MATCH alone is not enough. After a
+        ``rebuild_all`` the journal replay leaves every Point with
+        ``content_hash = NULL`` (``_upsert_point_props``'s fixed SET list
+        omits it and ``_emit_event`` strips it), so the hash MATCH misses for
+        EVERY point and this guard silently stops matching. The bundle is then
+        rejected only late, at Phase-2 ``_check_endpoint_race`` — a mid-write
+        raise AFTER the points loop has committed earlier items (verified:
+        point count 1 -> 2, an orphan left behind), which is exactly the
+        partial-mutation class the Phase-1 guard exists to prevent. On the
+        hash miss, fall back to the SAME hash-less ``content+kind`` scan
+        ``create_point`` / the ``ingest_bundle`` points loop use (the A10
+        fallback, whose own ``create_point`` comment dates it to cycle-17/18 /
+        E2E-6.4; #2892 is the sibling bug, not the fallback's origin), scoped
+        by the identical terminal-status + ``coalesce(outdated,false)`` filter
+        so the fallback resolves the points the hash path would have resolved
+        were the hash present.
+
+        The non-operator predicate is the WRITE PATH's dedup predicate —
+        ``n.is_operator = false`` (``create_point``'s hash + A10 dedup, and
+        ``ingest_bundle``'s ``existed`` short-circuit) — and deliberately NOT
+        the counting form ``(n.is_operator IS NULL OR n.is_operator = false)
+        AND n.op_type IS NULL`` used by ``summarize_structure`` /
+        ``list_pointkinds`` / ``ep.py::_graph_claim_count``. The guard exists
+        to catch a bundle-local ref that will DEDUP onto a terminal point, so
+        its watch set must equal the write path's dedup set exactly. Widening
+        it to the counting form would falsely reject legacy property-absent
+        plain Points (which ``create_point`` does not dedup); narrowing the
+        hash branch with ``op_type IS NULL`` would MISS the reachable
+        ``is_operator=false + op_type`` hybrid that ``create_point`` DOES
+        dedup, turning Phase 1 into a Phase-2 mid-write raise (review of
+        #2971 caught both). When #2949 lands, ``create_point``'s dedup adopts
+        the shared ``_find_point_by_content`` helper, whose predicate is the
+        inclusive ``(n.is_operator IS NULL OR n.is_operator = false) AND
+        n.op_type IS NULL`` form — so this guard's predicate must widen to
+        that exact form at the same time (the ``is_operator=false + op_type``
+        hybrid then stops being a dedup target, so continuing to match it
+        here would become a false rejection). Until then the guard mirrors
+        the CURRENT write path's bare ``n.is_operator = false``.
+
+        The fallback is gated on the WRITER's own hash-first condition (see
+        the query below): it runs only when the UNFILTERED
+        ``content_hash + kind + is_operator=false`` lookup is EMPTY, because
+        that is the only state in which ``create_point`` / ``ingest_bundle``
+        ever reach their A10 fallback — a hash-present sibling is what the
+        writer resolves to, so a hash-less sibling must not be consulted.
+        Running it on the terminal-filtered miss alone would falsely reject a
+        bundle whose ref the writer dedups onto a LIVE hash-present sibling.
+        When several hash-LESS duplicates share the content+kind the write
+        path's own pick among them is unspecified (its A10 fallback carries
+        no ORDER BY), so the guard is deliberately conservative and rejects
+        if ANY candidate is terminal — over-rejecting an ambiguous duplicate
+        pair is the safe direction.
+
+        Residual gap (pre-existing, tracked in #3142): the terminal filter is
+        ``status IN $terminal AND coalesce(outdated,false) = false``, so a
+        point superseded through ``supersede_point`` (which stamps BOTH
+        ``status='superseded'`` and ``outdated=true``) is not matched — the
+        guard never fired for canonically-superseded points even with the
+        hash present, and Phase-2 ``_check_endpoint_race`` is what catches
+        them. Aligning the filter with that check (``status IN $terminal OR
+        outdated = true``) is follow-up #3142, deliberately out of this
+        fix's scope."""
         proj = self._get_proj()
+        terminal = sorted(self._INGEST_TERMINAL_STATUSES)
         rows = proj.g.query(
             "MATCH (n:Point {content_hash:$ch}) WHERE n.is_operator = false "
             "AND n.pointKind = $kind AND n.status IN $terminal "
             "AND coalesce(n.outdated, false) = false RETURN n.id LIMIT 1",
             params={"ch": _content_hash(content), "kind": kind,
-                    "terminal": sorted(self._INGEST_TERMINAL_STATUSES)},
+                    "terminal": terminal},
         ).result_set
+        if not rows:
+            # #2971 A10 CONTENT+KIND FALLBACK SCAN, gated on the WRITER's own
+            # hash-first ordering: `create_point` and `ingest_bundle` reach
+            # their A10 fallback ONLY when the unfiltered content_hash+kind
+            # lookup finds NOTHING — a hash-present sibling (live or terminal)
+            # means the writer resolves there and never consults a hash-less
+            # point. Running this fallback on the terminal-filtered miss alone
+            # would falsely reject a bundle whose edge legally lands on a LIVE
+            # hash-present duplicate (review of #2971 caught it). The
+            # post-rebuild steady state this fixes has NO hash anywhere, so
+            # `any_hash` is empty and the fallback still fires. `any_hash`
+            # mirrors create_point's hash dedup query exactly.
+            any_hash = proj.g.query(
+                "MATCH (n:Point {content_hash:$ch}) WHERE n.is_operator = false "
+                "AND n.pointKind = $kind RETURN n.id LIMIT 1",
+                params={"ch": _content_hash(content), "kind": kind},
+            ).result_set
+            if not any_hash:
+                rows = proj.g.query(
+                    "MATCH (n:Point) WHERE n.is_operator = false "
+                    "AND n.pointKind = $kind AND n.content_hash IS NULL "
+                    "AND n.content = $content AND n.status IN $terminal "
+                    "AND coalesce(n.outdated, false) = false "
+                    "RETURN n.id LIMIT 1",
+                    params={"kind": kind, "content": content,
+                            "terminal": terminal},
+                ).result_set
         return rows[0][0] if rows else None
 
     def _check_endpoints(self, bundle: dict, violations: list[dict]) -> None:

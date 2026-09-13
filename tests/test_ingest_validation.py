@@ -553,3 +553,130 @@ class TestTerminalStatusGuard:
         assert any("terminal" in v["message"] for v in viols), viols
         with pytest.raises(ValueError):
             sdk.ingest(bundle)
+
+    def test_bundle_local_terminal_dedup_after_rebuild(self, sdk):
+        # #2971: after a `rebuild_all` the journal replay leaves EVERY Point
+        # with `content_hash = NULL` (`_upsert_point_props`'s fixed SET list
+        # omits it, `_emit_event` strips it), so the content-hash MATCH the
+        # guard used missed for every point and the cycle-17/18 guard silently
+        # stopped matching. The bundle is then rejected only at Phase-2
+        # `_check_endpoint_race` — a mid-write raise AFTER earlier bundle
+        # items committed (verified on origin/main: point count 1 -> 2, an
+        # orphan left behind), the exact partial-mutation class the Phase-1
+        # guard exists to prevent. Simulate that post-rebuild state (clear the
+        # terminal point's `content_hash`) and assert the guard rejects the
+        # direct edge in Phase 1 via the hash-less content+kind fallback.
+        #
+        # Scope note: this simulates the TERMINAL-STATUS state the guard
+        # matches (`status='superseded'`, `outdated` unset). A point superseded
+        # through `supersede_point` also carries `outdated=true` and is NOT
+        # matched by the guard's filter — a pre-existing gap orthogonal to
+        # #2971, tracked in #3142.
+        terminal = sdk.create_point("statement", "same content",
+                                    status="superseded")
+        _query(sdk, "MATCH (n:Point {id:$id}) REMOVE n.content_hash",
+               {"id": terminal["id"]})
+        # The precondition is asserted FIRST so a hash-preserving regression
+        # cannot pass this leg vacuously.
+        assert _query(
+            sdk, "MATCH (n:Point {id:$id}) RETURN n.content_hash",
+            {"id": terminal["id"]})[0][0] is None
+        bundle = {
+            "points": [
+                {"ref": "p1", "kind": "statement", "content": "other"},
+                {"ref": "pT", "kind": "statement", "content": "same content"},
+            ],
+            "connections": [{"from": "p1", "to": "pT", "operator": "IMPL"}],
+        }
+        viols = sdk._validate_bundle(bundle)
+        assert any("terminal" in v["message"] for v in viols), viols
+        with pytest.raises(ValueError):
+            sdk.ingest(bundle)
+
+    def test_terminal_dedup_hit_mirrors_create_point_dedup_predicate(self, sdk):
+        # #2971 predicate leg: the guard exists to catch a bundle-local ref
+        # that will DEDUP onto a terminal point, so its watch set must equal
+        # `create_point`'s dedup set — the WRITE PATH predicate
+        # `n.is_operator = false`, NOT the counting form
+        # `(n.is_operator IS NULL OR n.is_operator = false) AND n.op_type IS NULL`
+        # (`summarize_structure` / `list_pointkinds` / `ep.py::_graph_claim_count`).
+        # The counting form diverges both ways: it FALSELY rejects legacy
+        # property-absent plain Points (which create_point does NOT dedup, so
+        # no terminal edge would ever be wired) and, with `op_type IS NULL`, it
+        # MISSES the reachable `is_operator=false + op_type` hybrid that
+        # create_point DOES dedup — turning the Phase-1 guard into a Phase-2
+        # mid-write raise. Both halves are pinned below.
+        g = sdk._get_proj().g
+        # reachable hybrid: modern is_operator=false PLUS a caller-supplied
+        # op_type; create_point's dedup (bare `is_operator = false`) matches it
+        sdk.create_point("statement", "hybrid content", op_type="IMPL",
+                         status="superseded")
+        # legacy property-absent plain Point — create_point does NOT dedup it
+        g.query("CREATE (n:Point {id:'legacy-plain', "
+                "content:'legacy content', pointKind:'statement', "
+                "status:'superseded'})")
+        # legacy operator (op_type set, is_operator ABSENT) — a :Point node,
+        # but never a plain-Point dedup target (create_point does NOT dedup it)
+        g.query("CREATE (o:Point {id:'legacy-op', op_type:'IMPL', "
+                "content:'operator content', pointKind:'statement', "
+                "status:'superseded'})")
+        assert sdk._find_terminal_dedup_hit(
+            "hybrid content", "statement") is not None
+        assert sdk._find_terminal_dedup_hit(
+            "legacy content", "statement") is None
+        assert sdk._find_terminal_dedup_hit(
+            "operator content", "statement") is None
+
+    def test_terminal_dedup_fallback_gated_on_writer_hash_state(self, sdk):
+        # #2971 gating leg: `create_point` / `ingest_bundle` reach their A10
+        # fallback ONLY when the UNFILTERED content_hash+kind lookup is empty —
+        # a hash-present sibling means the writer resolves there and never
+        # consults a hash-less point. The guard must mirror that ordering, or
+        # it FALSELY rejects a bundle whose edge legally lands on a LIVE
+        # hash-present duplicate (review of #2971 caught it). The post-rebuild
+        # steady state has no hash anywhere, so the fallback still fires there.
+        term = sdk.create_point("statement", "same content",
+                                status="superseded")
+        _query(sdk, "MATCH (n:Point {id:$id}) REMOVE n.content_hash",
+               {"id": term["id"]})
+        # legal duplicate: same content+kind, LIVE, hash present (dedup off)
+        live = sdk.create_point("statement", "same content", status="live",
+                                dedup=False)
+        assert _query(
+            sdk, "MATCH (n:Point {id:$id}) RETURN n.content_hash",
+            {"id": live["id"]})[0][0] is not None
+        # the writer resolves to the live sibling, so the guard must NOT hit
+        assert sdk._find_terminal_dedup_hit("same content", "statement") is None
+        bundle = {
+            "points": [
+                {"ref": "p1", "kind": "statement", "content": "other"},
+                {"ref": "pT", "kind": "statement", "content": "same content"},
+            ],
+            "connections": [{"from": "p1", "to": "pT", "operator": "IMPL"}],
+        }
+        assert sdk._validate_bundle(bundle) == []
+        res = sdk.ingest(bundle)
+        assert res["created"]["connections"] == 1
+
+    def test_terminal_dedup_fallback_is_conservative_on_hashless_duplicates(
+            self, sdk):
+        # #2971 ambiguity pin: with several HASH-LESS duplicates sharing the
+        # content+kind, the write path's own pick is unspecified (its A10
+        # fallback carries no ORDER BY), so the guard is deliberately
+        # conservative — a terminal candidate rejects. Over-rejecting an
+        # ambiguous duplicate pair is the safe direction (wiring to a terminal
+        # point is the failure this guard exists to prevent). This is a
+        # stronger form of the gating leg above: there the live sibling had a
+        # hash (so the writer provably never reaches the fallback); here it
+        # does not.
+        term = sdk.create_point("statement", "same content",
+                                status="superseded")
+        _query(sdk, "MATCH (n:Point {id:$id}) REMOVE n.content_hash",
+               {"id": term["id"]})
+        live = sdk.create_point("statement", "same content", status="live",
+                                dedup=False)
+        _query(sdk, "MATCH (n:Point {id:$id}) REMOVE n.content_hash",
+               {"id": live["id"]})
+        # both are hash-less; the guard stays on the safe side
+        assert sdk._find_terminal_dedup_hit(
+            "same content", "statement") == term["id"]
