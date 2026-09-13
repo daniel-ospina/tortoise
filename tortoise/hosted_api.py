@@ -1467,11 +1467,32 @@ async def _dream_worker(team_id: str, key: str | None = None) -> None:
             sdk.dream(dirty_only=True, mode="local")
         finally:
             sdk.close()
-    except Exception:
+    except Exception as exc:
         import logging
-        logging.getLogger("tortoise.api").exception(
-            "dream worker failed for tenant %s graph %s", team_id, key
-        )
+        _log = logging.getLogger("tortoise.api")
+        # #3139 (review P2): a DreamNoOpError means the pass reported
+        # convergence while writing ZERO belief state. Swallowing it here made
+        # the loud failure silent again on the hosted write path — the only
+        # evidence was a log line, and `dream_health_check` is served from a
+        # FRESH per-request SDK whose `_dream_metrics` is per-instance, so
+        # `/v1/dream/health` could never see `no_op_reason` or the failure
+        # bump. Log at ERROR with an alertable marker so the condition is
+        # greppable/alertable rather than indistinguishable from any other
+        # worker hiccup.
+        from .exceptions import DreamNoOpError
+        if isinstance(exc, DreamNoOpError):
+            _log.error(
+                "DREAM_NO_OP tenant=%s graph=%s mode=%s eligible_factors=%s: "
+                "the pass reported convergence while writing zero belief "
+                "state (#3139). The usual cause is a dropped boolean "
+                "is_operator index (GRAPH.COPY, #3154).",
+                team_id, key, getattr(exc, "mode", "?"),
+                getattr(exc, "eligible_factors", "?"),
+            )
+        else:
+            _log.exception(
+                "dream worker failed for tenant %s graph %s", team_id, key
+            )
     finally:
         # Reschedule if more roots arrived during the drain.
         if not q.empty():

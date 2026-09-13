@@ -1884,6 +1884,15 @@ class TortoiseSDK:
             "last_pass_at": None,
             "last_pass_output": 0,
             "last_pass_mode": None,
+            # #3139: why the last pass did no EP work — None (work done),
+            # "no_ep_factors" (legitimately empty window), "no_dirty_roots",
+            # "budget_zero", "stale_run_guard", or "silent_no_op" (the pass
+            # raised DreamNoOpError). A silent no-op raises instead of
+            # landing in a success shape.
+            "last_pass_no_op_reason": None,
+            # #3139 (review P1): belief state written by the last pass, as
+            # distinct from ``last_pass_output`` (which counts stamps).
+            "last_belief_write_count": None,
             "per_mode_counts": {},
             "pass_count": 0,
             "failure_count": 0,
@@ -9692,18 +9701,73 @@ class TortoiseSDK:
         backlog = len(self._dirty_roots)
         last_output = self._dream_metrics.get("last_pass_output", 0)
         last_pass_at = self._dream_metrics.get("last_pass_at")
-        alarm = (backlog > 0 and last_output == 0
-                 and last_pass_at is not None)
+        # #3139 (review P1): the previous alarm was
+        #     backlog > 0 and last_output == 0 and last_pass_at is not None
+        # which stayed FALSE in BOTH dishonest states the issue measured.
+        #
+        #  (a) A graph that had never run a pass has `last_pass_at is None`,
+        #      so it reported `alarm_verdict: False, alarm_reason: 'ok'` with a
+        #      live backlog and 0% coverage — literally the state the issue
+        #      recorded.
+        #  (b) A silent no-op still trivially stamps operator-less claims, so
+        #      `affected_claims` (→ last_pass_output) is NON-zero even though no
+        #      belief state was written; and `coverage_pct` counts STAMPS too,
+        #      so it RISES. Keying the alarm on stamps cannot see a
+        #      belief-state no-op — the health surface got *more* reassuring
+        #      the worse the failure was.
+        #
+        # So the alarm now also keys on the two belief-state signals: the
+        # proven silent no-op, and a live backlog with no coverage at all.
+        #
+        # But it must NOT contradict the guard's own classification of a
+        # LEGITIMATE no-op. `_guard_dream_progress` says of the #1163
+        # stale-run stand-down "Zero writes is correct here" — yet the
+        # backlog terms below would page on it, because the stand-down
+        # deliberately retains the dirty root. Excuse the reasons the guard
+        # calls legitimate instead of false-paging on them.
+        no_op_reason = self._dream_metrics.get("last_pass_no_op_reason")
+        coverage = self._metrics_coverage()
+        _LEGITIMATE_NO_OP = {
+            "stale_run_guard", "budget_zero", "no_dirty_roots",
+            "no_ep_factors",
+        }
+        if no_op_reason in _LEGITIMATE_NO_OP:
+            alarm = False
+        else:
+            alarm = bool(
+                no_op_reason == "silent_no_op"
+                or (backlog > 0 and last_output == 0)
+                or (backlog > 0 and coverage == 0.0)
+            )
+        # Derive the reason FROM the verdict: a reason without an alarm would
+        # report a failure that `alarm_verdict` denies (and would leak a
+        # backlog-terms reason on a deliberately excused legitimate no-op).
+        if not alarm:
+            alarm_reason = "ok"
+        elif no_op_reason == "silent_no_op":
+            alarm_reason = "silent_no_op"
+        elif backlog > 0 and last_output == 0:
+            alarm_reason = "zero_output_with_backlog"
+        else:
+            alarm_reason = "zero_coverage_with_backlog"
         state = self.dream_health_state()
         stale_backlog = sum(  # noqa: F841
             1 for _ in self._dirty_roots)  # non-empty check below
         return {
             "alarm_verdict": alarm,
-            "alarm_reason": (
-                "zero_output_with_backlog" if alarm else "ok"),
+            "alarm_reason": alarm_reason,
             "stale_backlog": backlog,
             "last_pass_at": last_pass_at,
             "last_pass_output": last_output,
+            # #3139 (review P1): belief state WRITTEN — as distinct from
+            # `last_pass_output`, which counts stamps. Their divergence is
+            # exactly what a silent no-op looks like on this surface.
+            "last_belief_write_count": self._dream_metrics.get(
+                "last_belief_write_count"),
+            # #3139: legitimate-no-op vs silent-no-op is a difference the
+            # caller must be able to see. The silent case raised
+            # DreamNoOpError; this reports the proven-empty case.
+            "no_op_reason": self._dream_metrics.get("last_pass_no_op_reason"),
             "coverage_pct": self._metrics_coverage(),
             "failure_rate": (
                 self._dream_metrics["failure_count"]
@@ -9744,8 +9808,22 @@ class TortoiseSDK:
         from datetime import datetime, timezone
         self._dream_metrics["last_pass_at"] = datetime.now(
             timezone.utc).isoformat()  # noqa: UP017
-        self._dream_metrics["last_pass_output"] = len(
-            result.get("affected_claims", []))
+        # #3139: full mode reports ``total_affected`` (a count) instead of an
+        # ``affected_claims`` list — reading the absent key recorded 0 output
+        # for a pass that DID write belief state, so the zero-output alarm
+        # fired on healthy full passes.
+        affected_claims = result.get("affected_claims")
+        if affected_claims is None:
+            last_output = int(result.get("total_affected", 0) or 0)
+        else:
+            last_output = len(affected_claims)
+        self._dream_metrics["last_pass_output"] = last_output
+        # #3139 (review P1): record belief writes alongside the stamp count so
+        # the health surface can distinguish "wrote beliefs" from "stamped
+        # claims" — the difference a silent no-op hides behind.
+        _dw = getattr(self._get_dreamer(), "_last_belief_write_count", None)
+        if _dw is not None:
+            self._dream_metrics["last_belief_write_count"] = int(_dw)
         self._dream_metrics["last_pass_mode"] = result.get("mode", mode)
         counts = self._dream_metrics["per_mode_counts"]
         counts[mode] = counts.get(mode, 0) + 1
@@ -10182,6 +10260,14 @@ class TortoiseSDK:
         "budget=0 → no-op result (not an error)"). No EP, no stamps;
         converged flags are vacuously True (matches dream_window's budget=0
         contract)."""
+        # #3139: an explicit budget=0 is a legitimate no-op — report why.
+        self._dream_metrics["last_pass_no_op_reason"] = "budget_zero"
+        # #3139 (review P2): this pass wrote no belief state, so the belief
+        # count must not survive from a previous pass — a field documented as
+        # "beliefs written by the LAST pass" reporting a stale non-zero value
+        # on a no-op pass is the same class of quiet lie this change set
+        # exists to remove.
+        self._dream_metrics["last_belief_write_count"] = 0
         if mode == "local":
             return {"mode": "local", "iterations": 0, "converged": True,
                     "affected_claims": [], "budget_used": 0, "coverage": 0.0}
@@ -10192,6 +10278,147 @@ class TortoiseSDK:
         return {"mode": "full", "batches": 0, "total_affected": 0,
                 "converged_all": True, "budget_used": 0, "coverage": 0.0,
                 "scanned_count": 0}
+
+    def _count_ep_factors(self, window: list[str] | None) -> int:
+        """Index-independent count of EP factors reachable in ``window``
+        (#3139).
+
+        Counts the two factor families the dream/EP path propagates:
+        DERIVED-LIVE operators (>=2 live non-operator endpoints — the
+        GATE-2 Q3 participation rule) and operator-less direct IMPL|NAND
+        edges between two live plain Points. ``window=None`` = graph-wide
+        (full mode); a list scopes the probe to the pass's window/closure.
+
+        Deliberately avoids the bare ``X.is_operator = false`` spelling:
+        that predicate is served by the boolean range index, and a
+        GRAPH.COPY'd graph has every ``false`` entry dropped from it
+        (#3154) — the probe would then lie in exactly the case it exists to
+        detect. The ``IS NULL OR = false`` form is index-independent
+        (verified against a GRAPH.COPY'd graph).
+        """
+        from .live import _live_only
+        proj = self._get_proj()
+        live_op = f"AND {_live_only('op.status')}"
+        live_t = f"AND {_live_only('t.status')}"
+        live_u = f"AND {_live_only('u.status')}"
+        live_a = f"AND {_live_only('a.status')}"
+        live_b = f"AND {_live_only('b.status')}"
+        params: dict = {}
+        scope_op = ""
+        if window is not None:
+            params["ids"] = list(window)
+            # Candidate stage: >=1 live endpoint in the window. The selector
+            # finds an operator from a SINGLE frontier endpoint — the other
+            # endpoint only has to be live ANYWHERE in the graph — so the
+            # window filter must NOT gate the derived-liveness count.
+            scope_op = "AND t.id IN $ids "
+        op_rows = proj.g.query(
+            # Candidate stage is DIRECTED (op -> endpoint), exactly as
+            # `_bfs_select_operators` selects operators: an edge *into* an
+            # operator (legacy/imported data) can never be selected, so it
+            # must not count as an eligible factor here.
+            "MATCH (op:Point {is_operator:true})-[:IMPL|NAND]->(t:Point) "
+            "WHERE (t.is_operator IS NULL OR t.is_operator = false) "
+            "AND t.op_type IS NULL "
+            f"{live_op} "
+            f"{live_t} "
+            f"{scope_op}"
+            "WITH DISTINCT op "
+            # Derived-liveness stage: >=2 live non-operator endpoints,
+            # GRAPH-WIDE — mirrors `_derived_live_operators` exactly.
+            "MATCH (op)-[:IMPL|NAND]-(u:Point) "
+            "WHERE (u.is_operator IS NULL OR u.is_operator = false) "
+            "AND u.op_type IS NULL "
+            f"{live_u} "
+            "WITH op, count(DISTINCT u) AS live_conn "
+            "WHERE live_conn >= 2 "
+            "RETURN count(op)",
+            params=params,
+        ).result_set
+        # Direction-aware, mirroring `_bfs_select_operators`'s direct-edge
+        # walk (analyze.py): forward from a window member (a.id IN $ids)
+        # ALWAYS; backward into a window member (b.id IN $ids) ONLY for NAND
+        # or a non-unidirectional IMPL edge. A pass over just the TARGET of a
+        # unidirectional direct IMPL edge legitimately selects nothing — a
+        # direction-blind probe would false-fire the guard (and, via the
+        # lazy read path, break get_confidence). The directed match + count(r)
+        # gives one row per factor.
+        if window is None:
+            dir_scope = ""
+        else:
+            dir_scope = (
+                "AND (a.id IN $ids OR (b.id IN $ids AND "
+                "(type(r) = 'NAND' OR "
+                "coalesce(r.direction, 'bidirectional') <> 'unidirectional'))) "
+            )
+        dir_rows = proj.g.query(
+            "MATCH (a:Point)-[r:IMPL|NAND]->(b:Point) "
+            "WHERE (a.is_operator IS NULL OR a.is_operator = false) "
+            "AND a.op_type IS NULL "
+            "AND (b.is_operator IS NULL OR b.is_operator = false) "
+            "AND b.op_type IS NULL "
+            f"{live_a} {live_b}"
+            f"{dir_scope}"
+            "RETURN count(r)",
+            params=params,
+        ).result_set
+        n_ops = int(op_rows[0][0]) if op_rows else 0
+        n_dir = int(dir_rows[0][0]) if dir_rows else 0
+        return n_ops + n_dir
+
+    def _guard_dream_progress(self, dreamer, mode: str, result: dict,
+                              *, window: list[str] | None) -> None:
+        """Refuse a success-shaped pass that wrote ZERO belief state while EP
+        factors exist in its window (#3139).
+
+        Every mode's result shape reports ``converged``/``converged_all:
+        True`` with ``budget_used: 0`` when the selector silently returns
+        nothing — indistinguishable from a legitimately empty graph. This
+        guard makes the distinction explicit:
+
+        - zero EP factors in the window → legitimate no-op; returns normally
+          and records ``no_op_reason`` for the health surface;
+        - factors present but zero belief-state writes → the silent no-op;
+          raises ``DreamNoOpError`` (before any dirty-root sweep, so the
+          failed pass cannot erase its own backlog).
+
+        Callers MUST run this before mutating dirty-root state.
+        """
+        if getattr(dreamer, "_last_flush_skipped", False):
+            # #1163 stale-run guard: a concurrent write advanced the epoch
+            # and the pass stood down. Zero writes is correct here.
+            self._dream_metrics["last_pass_no_op_reason"] = "stale_run_guard"
+            return
+        if not result.get("converged", result.get("converged_all", False)):
+            self._dream_metrics["last_pass_no_op_reason"] = None
+            return
+        wrote = getattr(dreamer, "_last_belief_write_count", 0) or 0
+        # #3139 (review P1): expose belief writes on the health surface, in
+        # the same units as the guard — `last_pass_output` counts stamps, so a
+        # no-op that stamped operator-less claims looks productive there.
+        self._dream_metrics["last_belief_write_count"] = wrote
+        if wrote > 0:
+            self._dream_metrics["last_pass_no_op_reason"] = None
+            return
+        eligible = self._count_ep_factors(window)
+        if eligible > 0:
+            from .exceptions import DreamNoOpError
+            self._dream_metrics["last_pass_no_op_reason"] = "silent_no_op"
+            # Record the failed pass BEFORE raising so the C7 health surface
+            # (failure_rate / zero-output alarm / last_pass_at) reflects it —
+            # otherwise a silent no-op is invisible to every metric except
+            # no_op_reason.
+            self._record_dream_metrics(result, mode)
+            self._dream_metrics["failure_count"] += 1
+            raise DreamNoOpError(
+                f"dream(mode={mode!r}) reported convergence but wrote zero "
+                f"belief state while {eligible} EP factor(s) are reachable "
+                f"from its window — refusing the silent no-op (#3139). The "
+                f"usual cause is a dropped boolean is_operator index "
+                f"(GRAPH.COPY, #3154); repair the index or report this graph.",
+                mode=mode, eligible_factors=eligible,
+            )
+        self._dream_metrics["last_pass_no_op_reason"] = "no_ep_factors"
 
     def _dream_local(self, dreamer, max_hops: int, stamp_dreamed_at: bool,
                      budget: int | None, warm_start: bool = True) -> dict:
@@ -10204,6 +10431,10 @@ class TortoiseSDK:
         """
         anchors = list(self._dirty_roots)
         if not anchors:
+            self._dream_metrics["last_pass_no_op_reason"] = "no_dirty_roots"
+            # #3139 (review P2): no beliefs written by THIS pass — see the
+            # note in _dream_noop; a stale count would misdescribe the pass.
+            self._dream_metrics["last_belief_write_count"] = 0
             return {"mode": "local", "iterations": 0, "converged": True,
                     "affected_claims": [], "budget_used": 0, "coverage": 0.0}
         result = dreamer.dream(
@@ -10213,6 +10444,9 @@ class TortoiseSDK:
             warm_start=warm_start,
         )
         affected = set(result.get("affected_claims", []))
+        # #3139: fail closed BEFORE any dirty-root mutation — a silent no-op
+        # that swept its own backlog would leave the graph permanently stale.
+        self._guard_dream_progress(dreamer, "local", result, window=anchors)
         # Epic 903-C5 (#1243) — W4 retention (the A2-bug fix): affected
         # claim-roots are cleared ONLY when the run CONVERGED. A failed run
         # keeps them dirty (retry) and registers the attempt — the old
@@ -10261,6 +10495,9 @@ class TortoiseSDK:
                                      warm_start=warm_start)
         window = getattr(dreamer, "_last_window", []) or []
         affected = set(result.get("affected_claims", []))
+        # #3139: fail closed before the dirty-root sweep (see _dream_local).
+        self._guard_dream_progress(dreamer, "stale-first", result,
+                                   window=window)
         if result.get("converged") and not getattr(
                 dreamer, "_last_flush_skipped", False):
             # #1163: guarded sweep (a concurrent process's newer marking
@@ -10294,6 +10531,9 @@ class TortoiseSDK:
             max_hops=max_hops, stamp_dreamed_at=stamp_dreamed_at,
             budget=budget, warm_start=warm_start,
         )
+        # #3139: fail closed before the dirty-root sweep — a full pass that
+        # scanned zero anchors over a populated graph must not report success.
+        self._guard_dream_progress(dreamer, "full", result, window=None)
         # P2-review (#1243): a CONVERGED full pass resolves every reachable
         # region — clear the affected roots' retry state so a later failed
         # window pass cannot surface an already-converged region as
@@ -10302,7 +10542,12 @@ class TortoiseSDK:
         # concurrent process re-marked dirty mid-pass).
         if result.get("converged_all", False) and not getattr(
                 dreamer, "_last_flush_skipped", False):
-            affected = set(result.get("affected_claims", []))
+            # #3139: the full pass returns a COUNT (pinned I1 key-set), so the
+            # reachable-affected set comes from the Dreamer; reading
+            # ``result["affected_claims"]`` (absent in full mode) swept an
+            # empty set and left the whole backlog dirty forever.
+            affected = set(getattr(
+                dreamer, "_last_affected_claims", set()) or set())
             self._sweep_dirty_roots(
                 affected, run_ep=getattr(dreamer, "_last_run_ep_version", None))
             self._prune_nonexistent_dirty_roots()
@@ -10367,8 +10612,12 @@ class TortoiseSDK:
                     "WHERE a.id IN $ids AND b.id <> a.id "
                     "AND (a.status IS NULL OR a.status <> 'draft') "
                     "AND (b.status IS NULL OR b.status <> 'draft') "
-                    "AND a.is_operator = false AND a.op_type IS NULL "
-                    "AND b.is_operator = false AND b.op_type IS NULL "
+                    # #3139/#3154: index-independent non-operator predicate
+                    # (the `= false` form is emptied by a GRAPH.COPY'd index).
+                    "AND (a.is_operator IS NULL OR a.is_operator = false) "
+                    "AND a.op_type IS NULL "
+                    "AND (b.is_operator IS NULL OR b.is_operator = false) "
+                    "AND b.op_type IS NULL "
                     "RETURN DISTINCT a.id, b.id",
                     params={"ids": frontier},
                 ).result_set
