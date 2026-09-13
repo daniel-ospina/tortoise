@@ -16,7 +16,9 @@
 #   (b) marker whose sha AND diff= both mismatch → FAIL
 #   (c) legacy marker (no diff=) with sha == head → PASS
 #   (d) `diff=` present but the live diff hash is UNAVAILABLE → FAIL CLOSED
-#       (and the sha-match path still works in that state)
+#       for a STALE sha (d), while the sha-match path still works in that state
+#       for a legacy marker (d2) AND for a HEAD-BOUND `diff=` marker (d3) —
+#       whose head binding does not consult the live diff at all
 #   (e) tampered `diff=` breaks the signature → FAIL
 #   (f) unsigned marker → FAIL
 #   (g) PR-body source: the REST fetch wins over the env var, falls back on
@@ -272,6 +274,22 @@ assert_contains "(d) says the live hash was unavailable" "live diff hash could n
 legacy_marker "$HEAD" > "$T/body-d2"
 STUB_DIFF_FILE="$DIFF_FILE" STUB_DIFF_FAIL=1 run_gate "$T/body-d2"
 assert_rc 0 "(d2) sha-match still passes without a live diff hash"
+# d3: the same holds for a HEAD-BOUND `diff=` marker. Rule (a) matches on the
+#     sha ALONE — the live diff hash is never consulted — so a diff= segment
+#     cannot make rule (a) fail closed. The marker here carries DH2, a hash
+#     that does NOT match the live diff: the pass can only come from the sha
+#     binding, which is the intentional pre-#2982 behaviour. Pinned
+#     deliberately: a "restore fail-closed" edit that gates rule (a) on
+#     `[ -n "$live_diff_hash" ]` would break the normal path in production,
+#     and must fail HERE instead.
+diff_marker "$HEAD" "$DH2" > "$T/body-d3"
+STUB_DIFF_FILE="$DIFF_FILE" STUB_DIFF_FAIL=1 run_gate "$T/body-d3"
+assert_rc 0 "(d3) a head-bound diff= marker passes when the live diff fetch fails"
+if printf '%s' "$GATE_OUT" | grep -qF "passed via diff match"; then
+    bad "(d3) head-bound pass must not claim the diff path"
+else
+    ok "(d3) head-bound pass does not claim the diff path"
+fi
 
 echo "── (e) tampered diff= breaks the signature → fail ─────────────"
 # Sign over diff=DH2, then swap in the live diff=DH without re-signing.

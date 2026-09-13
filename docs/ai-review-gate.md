@@ -46,8 +46,12 @@ green.
   `~/.pi/agent/.ai-review-gate-key`). A marker is accepted when EITHER its
   signed `@ <sha>` is the PR's current head, OR its signed `diff=<sha256>`
   equals the diff hash the gate computes live from the GitHub REST API for
-  this PR. The check fails closed: if the live diff hash cannot be computed
-  (API blip, missing `gh`/`openssl`), a `diff=` marker is not accepted.
+  this PR. The diff-match arm fails closed: if the live diff hash cannot be
+  computed (API blip, missing `gh`/`openssl`), a *stale-sha* `diff=` marker is
+  not accepted. A marker whose `@ <sha>` matches the current head still passes
+  on the sha-match path regardless — that binding is the stronger, pre-#2982
+  claim, so its `diff=` field (if present) is never matched against the live
+  diff.
 
 ## Why the diff, not just the head sha (#2982)
 

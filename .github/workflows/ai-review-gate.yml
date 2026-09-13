@@ -37,11 +37,20 @@ name: ai-review-gate
 # either field. A marker without a valid signature cannot pass, so the gate
 # cannot be satisfied by editing the PR body.
 #
-# Fail closed: if the live diff hash cannot be computed (API blip, missing
-# gh/openssl, empty diff) a `diff=` marker is NOT accepted — only the
-# sha-match path remains usable. A network failure never becomes a pass.
-# Explicitly: a marker with diff= must never be accepted when live_diff_hash
-# is empty.
+# Fail closed — scoped to the DIFF-MATCH arm: if the live diff hash cannot be
+# computed (API blip, missing gh/openssl, empty diff) a STALE-SHA `diff=`
+# marker is NOT accepted via rule (b) — only the sha-match path remains
+# usable. A network failure never becomes a pass. Explicitly: a marker with
+# diff= must never be accepted VIA THE DIFF-MATCH PATH when live_diff_hash is
+# empty.
+#
+# This does NOT gate rule (a): a HEAD-BOUND `diff=` marker (`@ sha` ==
+# expected) passes on the sha-match path with live_diff_hash empty, because
+# the sha binding alone is the stronger claim and is the pre-#2982 baseline
+# (pinned by tests/test_ai_review_gate_contract.py::
+# test_gate_accepts_diff_bearing_marker and harness case (d3)). Do NOT gate
+# rule (a) on `[ -n "$live_diff_hash" ]` to "restore fail-closed": that would
+# silently kill the normal path.
 #
 # Delegation, stated plainly: rule (b) cannot tell WHICH revision the reviewer
 # saw. It verifies only that the marker is signed and that the signed `diff=`
@@ -216,9 +225,11 @@ jobs:
           # Keep only markers acceptable by EITHER rule:
           #   (a) recorded sha == current head (legacy + normal case) — the
           #       exact sha_ok_re shape, or
-          #   (b) a signed diff=<hash> equal to the live diff hash. A diff=
-          #       marker is never kept when live_diff_hash is empty (fail
-          #       closed: an API blip must not become a bypass).
+          #   (b) a signed diff=<hash> equal to the live diff hash. A
+          #       STALE-SHA diff= marker is never kept via THIS rule when
+          #       live_diff_hash is empty (fail closed: an API blip must not
+          #       become a bypass). Rule (a) above is unaffected — a
+          #       HEAD-BOUND diff= marker still passes with no live hash.
           # The HMAC is verified separately, below, before any is accepted.
           candidates=""
           if [ -n "$all_markers" ]; then
@@ -260,7 +271,7 @@ jobs:
             # sha256 prefixes of both candidate reconstructions (hashes only —
             # no secret material) so the operator can tell WHICH, instead of
             # guessing between "fix the key" and "fix the marker shape".
-            echo "::error::AI review marker HMAC mismatch — the signature of every well-formed evidence marker for the current head does not verify against AI_REVIEW_GATE_KEY."
+            echo "::error::AI review marker HMAC mismatch — the signature of every candidate evidence marker (head-bound or diff-matched) does not verify against AI_REVIEW_GATE_KEY."
             while IFS= read -r line; do
               [ -z "$line" ] && continue
               text="${line% sig=*}"
