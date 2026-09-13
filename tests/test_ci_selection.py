@@ -20,7 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from tools.ci_selection import (  # noqa: I001
     SOURCE_PATTERNS, load_manifest, select, integrity, slow_file_issues,  # noqa: F401
     unlisted_tests, register_tests, register, classify_test_file,  # noqa: F401
-    surface_audit, render_surface_audit,
+    surface_audit, render_surface_audit, duplicate_entries,
 )
 
 
@@ -1934,15 +1934,12 @@ def test_surface_audit_tolerates_null_surface_value(tmp_path):
 
 def test_real_manifest_has_no_duplicate_entries():
     # #3381: two files were each registered twice — one entry added by two
-    # different PRs fixing the same drift independently. A duplicate entry is
-    # invisible to select() (the surface's member set dedupes) and surfaced
-    # only as a warning from `--integrity`, so pin its absence here where CI
-    # will actually see it.
-    m = load_manifest()
-    dupes = {}
-    for surface, entries in m["surfaces"].items():
-        entries = entries or []
-        seen = sorted({e for e in entries if entries.count(e) > 1})
-        if seen:
-            dupes[surface] = seen
-    assert dupes == {}, f"duplicate manifest entries: {dupes}"
+    # different PRs fixing the same drift independently. A same-surface
+    # duplicate is invisible to select() (surfaces are unioned) and reported
+    # non-fatally by `--integrity` and `--surface-audit` — never as a gate
+    # failure — so pin its absence here where CI will actually see it.
+    # Call the production detector rather than reimplementing it, so this pin
+    # cannot drift from the real semantics (e.g. cross-surface dual
+    # registration is deliberate and must stay allowed).
+    dupes = duplicate_entries(load_manifest())
+    assert dupes == [], f"duplicate manifest entries: {dupes}"

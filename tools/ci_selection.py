@@ -233,8 +233,8 @@ TOOL_CARVEOUTS = (
     # entirely.
     # No SOURCE_PATTERNS entry matches it, so like tools/ci_selection.py
     # it lands in the unknown-path branch -> FULL matrix (fail closed).
-    # A narrower TOOL_CORE_CARVEOUTS mapping is possible but not needed:
-    # a collision-check change is rare and fail-closed is the safe default.
+    # A narrower core-only mapping is possible but not needed: a
+    # collision-check change is rare and fail-closed is the safe default.
     "tools/collision_preflight.py",
 )
 
