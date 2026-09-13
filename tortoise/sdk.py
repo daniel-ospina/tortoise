@@ -2388,6 +2388,72 @@ class TortoiseSDK:
         props = _sanitize_props(props)
         # R2 (#1541) D3: search_keys is stored flat (see _flatten_search_keys_prop).
         _flatten_search_keys_prop(props)
+        # #3263: provenance is INFERRED from the write context, never demanded.
+        # A write that carries a session context has a derivable Source — the
+        # same `session:<id>` ref the capture path wires explicitly (#1350).
+        # Without this, every session-context write that did not hand-supply
+        # `extractedFrom` (the eval ingest paths, session_continuity, ...)
+        # landed as an orphan Point, leaving source-tier calibration
+        # unsatisfiable BY CONSTRUCTION (issues #3263/#3139). The inferred ref
+        # flows through the SAME `extractedFrom` prop path as an explicit one,
+        # so it is journaled on PointAdded and replayed by _upsert_point_edges
+        # (live == rebuild). An explicit `extractedFrom` always wins.
+        #
+        # #3263 (review P2): only a non-empty SCALAR session id can name a
+        # Source. A non-scalar would stringify into a bogus ref
+        # (`session:['s1', 's2']`) and mint a corrupt Source — an invented
+        # source is worse than none (design contract #3), so we skip and say so
+        # rather than fabricate.
+        _session_id = props.get("session_id")
+        # #3263 (cycle-4 P2): validate the ref SHAPE before any write. A
+        # non-string scalar (123) previously reached _link_source, whose
+        # fan-out does list(source_ref) — raising TypeError AFTER the Point was
+        # CREATEd but BEFORE PointAdded was journaled, so the graph gained an
+        # orphan that a rebuild would drop (live != rebuild). Fail closed here,
+        # pre-write, matching the bundle Phase-1 contract.
+        _ef_in = props.get("extractedFrom")
+        if _ef_in is not None:
+            if isinstance(_ef_in, str):
+                if not _ef_in.strip():
+                    # explicit "no provenance" == absent (the bundle contract
+                    # allows an empty list for the same reason), so session
+                    # inference may still apply below.
+                    props.pop("extractedFrom", None)
+            elif isinstance(_ef_in, (list, tuple)):
+                _clean = [r for r in _ef_in
+                          if isinstance(r, str) and r.strip()]
+                if len(_clean) != len(_ef_in):
+                    raise ValueError(
+                        "create_point: extractedFrom must be a non-empty "
+                        f"string or a list of non-empty strings (got {_ef_in!r})"
+                    )
+                if _clean:
+                    props["extractedFrom"] = _clean
+                else:
+                    props.pop("extractedFrom", None)
+            else:
+                raise ValueError(
+                    "create_point: extractedFrom must be a non-empty string "
+                    f"or a list of non-empty strings (got {_ef_in!r}); a "
+                    "non-string scalar would mint a corrupt Source, and raised "
+                    "after the write would leave an un-journaled Point (#3263)"
+                )
+        if not props.get("extractedFrom"):
+            # #3263: branch on TYPE, not truthiness. The contract is "a
+            # non-empty string can name a Source", so anything else that is
+            # present is a caller error worth surfacing — `0`, `0.0` and
+            # `False` are neither strings nor absence, and keying on truthiness
+            # silently skipped them (re-review P2). `None` alone means "no
+            # session context" and stays silent.
+            if isinstance(_session_id, str) and _session_id.strip():
+                props["extractedFrom"] = f"session:{_session_id}"
+            elif _session_id is not None:
+                _logger.warning(
+                    "create_point: session_id=%r is not a non-empty string — "
+                    "provenance not inferred (pass extractedFrom explicitly); "
+                    "refusing to mint an invented Source (#3263)",
+                    _session_id,
+                )
         from datetime import datetime, timezone
         now = datetime.now(timezone.utc).isoformat()  # noqa: UP017
         proj = self._get_proj()
@@ -2513,6 +2579,56 @@ class TortoiseSDK:
                     _logger.warning(
                         "credibility=%r ignored — point %s already exists and dedup=True",
                         credibility, pid)
+                # #3263 (review P1): `extractedFrom` must NOT ride the
+                # update_point prop path on a dedup hit. update_point writes the
+                # node property but never calls _link_source, so the Point would
+                # end up carrying `extractedFrom` with NO `:Source` edge — still
+                # an orphan — and `list_drafts` reads that prop, so it would
+                # report provenance that does not exist as an edge. It is not
+                # replayed either (_revise_point restores content/embedding
+                # only), so the rebuilt graph drops the prop entirely and
+                # live != rebuild for the very property this path introduced.
+                # The Point already exists: if it was created with a session
+                # context it already carries the edge. Retrofitting provenance
+                # onto an existing Point needs a journaled path, which does not
+                # exist yet — tracked separately (#3292).
+                _dropped_ef = props.pop("extractedFrom", None)
+                if _dropped_ef is not None:
+                    # #3263 (re-review P2): decide per REF, not per call. Two
+                    # coarse predicates were wrong: `is not None` also matched
+                    # an explicit empty list (so a caller who supplied NO ref
+                    # got a warning on every idempotent re-ingest), and "any
+                    # edge exists" treated a CHANGED ref as present — silently
+                    # discarding the new one. Normalise to the supplied non-empty
+                    # refs, then warn only for those genuinely absent from the
+                    # Point's edges. No refs supplied => nothing to report.
+                    _supplied = (
+                        [_dropped_ef] if isinstance(_dropped_ef, str)
+                        else [r for r in _dropped_ef if r]
+                    )
+                    if _supplied:
+                        _present = {
+                            row[0] for row in proj.g.query(
+                                "MATCH (p:Point {id:$id})-[:extractedFrom]->"
+                                "(s:Source) WHERE s.url IN $refs "
+                                "RETURN DISTINCT s.url",
+                                params={"id": pid,
+                                        "refs": _supplied}).result_set
+                        }
+                        _missing = [r for r in _supplied
+                                    if r not in _present]
+                        if _missing:
+                            _logger.warning(
+                                "create_point dedup hit on %s: extractedFrom %r "
+                                "not applied — those refs are absent from the "
+                                "Point's Source edges, and update_point cannot "
+                                "wire one (the value is not replayed, so "
+                                "applying it would diverge live from rebuild). "
+                                "Retrofitting provenance onto an existing "
+                                "Point needs a journaled path (#3292); pass the "
+                                "ref on the FIRST write, or re-create the Point",
+                                pid, _missing,
+                            )
                 if props:
                     # Only touch the existing point when the caller passed
                     # other props — a pure dedup hit (no props) must not bump
@@ -4142,12 +4258,13 @@ class TortoiseSDK:
         """Materialize the typed session Source (#1352).
 
         The M2 extraction projection auto-creates a Source stub at
-        ``session:{session_id}`` via ``_link_source`` with the DEFAULT
-        ``sourceKind: 'document'`` (title=url, empty contentHash, no capture
-        metadata) — but the ontology v3.6 §4.6 registers the session source
-        kind as ``agentSession``. This MERGE upgrades the stub IN PLACE
-        (sourceKind, contentHash of the stored transcript, cheap summary +
-        topics, sessionId, capturedAt, eventId) and wires
+        ``session:{session_id}`` via ``_link_source`` (title=url, empty
+        contentHash, no capture metadata). ``_link_source``'s default is now
+        ref-appropriate — ``agentSession`` for ``session:`` refs (ontology
+        §4.6 + #909 §4.3 #6 register it as the session source kind), else
+        ``document`` (#3263) — so this MERGE now mainly upgrades LEGACY stubs
+        minted before that change, plus: contentHash of the stored transcript,
+        cheap summary + topics, sessionId, capturedAt, eventId. It wires
         ``(Source)-[:references]->(sessionCaptured Event)`` — parity with the
         ``_session_event_write`` agentSession pattern and the backfill's
         references edge (test_backfill_sources.py).
@@ -5702,6 +5819,14 @@ class TortoiseSDK:
                 "id": props.get("id"),
                 "content": props.get("content"),
                 "pointKind": props.get("pointKind"),
+                # #3263: a str when a single string is passed (this includes
+                # the inference path, and an explicit scalar); a list whenever a
+                # SEQUENCE is passed — even a one-element one, which is NOT
+                # collapsed. So `extractedFrom='x'` → str, `['x']` → ['x'].
+                # Arrays are not equality-matchable (see entities.py), so a
+                # caller wanting `WHERE n.extractedFrom = '<url>'` must pass the
+                # scalar. The EDGES are the authoritative surface either way —
+                # this is the raw node prop, so callers must not assume a str.
                 "provenance": props.get("provenance")
                 or props.get("extractedFrom"),
                 "dedup_context": dedup_context,
@@ -6570,6 +6695,34 @@ class TortoiseSDK:
                                f"calibrated-pipeline-write-only — ingest never "
                                f"writes calibrated confidence",
                 })
+            # #3263 (re-review P2): every provenance ref must be a non-empty
+            # string. Validated HERE because Phase 1 rejection is free, whereas
+            # reaching Phase 2 with a non-string element either raises a raw
+            # ResponseError AFTER earlier sections committed (partial write —
+            # the same zero-mutation invariant the content check above
+            # protects) or silently mints a Source whose url is an array.
+            # An empty LIST is allowed (explicit "no provenance" == absent).
+            ef = item.get("extractedFrom")
+            if ef is not None:
+                # NB: a distinct sentinel, not ``None`` — ``None`` is itself a
+                # bad element, so ``next(gen, None)`` cannot tell "found the bad
+                # value None" from "found nothing", and let ["s1", None]
+                # through to a raw ResponseError.
+                _no_bad = object()
+                if isinstance(ef, (list, tuple)):
+                    bad_ef = next(
+                        (x for x in ef
+                         if not (isinstance(x, str) and x.strip())), _no_bad)
+                else:
+                    bad_ef = (_no_bad if (isinstance(ef, str) and ef.strip())
+                              else ef)
+                if bad_ef is not _no_bad:
+                    violations.append({
+                        "section": section, "index": index,
+                        "message": f"ingest: points[{index}] extractedFrom must "
+                                   f"be a non-empty string or a list of "
+                                   f"non-empty strings (got {ef!r})",
+                    })
         elif section == "sources":
             url = item.get("url")
             if not url or not isinstance(url, str):
@@ -7473,10 +7626,22 @@ class TortoiseSDK:
             if viols:
                 raise Phase2Error(viols[0]["message"], batch_id=batch_id)
             content = item.pop("content", None)
-            # extractedFrom may address a bundle source by its local ref
-            if isinstance(item.get("extractedFrom"), str) \
-                    and item["extractedFrom"] in source_refs:
-                item["extractedFrom"] = refs[item["extractedFrom"]]
+            # extractedFrom may address a bundle source by its local ref.
+            # #3263: many-to-many — resolve a LIST element-wise, mirroring
+            # canonical._resolve_ref_field (whose list branch also precedes its
+            # str branch). Handling only the scalar case left a list of local
+            # refs unresolved, so _link_source minted Sources named after the
+            # LOCAL refs ('s1', 's2') and the real bundle Sources were never
+            # linked — inventing exactly the provenance this fix forbids.
+            # Already-resolved ids/urls stay literal (refs.get(x, x) semantics).
+            _ef = item.get("extractedFrom")
+            if isinstance(_ef, str) and _ef in source_refs:
+                item["extractedFrom"] = refs[_ef]
+            elif isinstance(_ef, list):
+                item["extractedFrom"] = [
+                    refs[r] if isinstance(r, str) and r in source_refs else r
+                    for r in _ef
+                ]
             existed = proj.g.query(
                 "MATCH (n:Point {content_hash:$ch}) "
                 "WHERE n.is_operator = false "
@@ -7722,18 +7887,33 @@ class TortoiseSDK:
                 if rel == "extractedFrom":
                     # (Point)-[:extractedFrom]->(Source) — MERGE-based, so
                     # re-ingest is safe. Source side resolves by url/ref.
-                    existed = proj.g.query(
-                        "MATCH (n:Point {id:$pid})-[:extractedFrom]->"
-                        "(s:Source {url:$url}) RETURN count(*)",
-                        params={"pid": src, "url": dsts[0]},
-                    ).result_set
-                    if not existed or not existed[0][0]:
-                        proj._link_source(src, dsts[0])
-                        created["connections"] += 1
-                    else:
-                        deduped["connections"] += 1
-                    conn_result = {"relation": rel, "from": src, "to": dsts[0],
-                                   "deduped": bool(existed and existed[0][0])}
+                    # #3263 (re-review P2): `to` may be multi-valued — a claim
+                    # extracted from several sources. Fan out over EVERY target;
+                    # handling only dsts[0] silently dropped the rest and
+                    # undercounted created/deduped, on the surface this change
+                    # set amended to many→many.
+                    first_existed = None
+                    for dst in dsts:
+                        existed = proj.g.query(
+                            "MATCH (n:Point {id:$pid})-[:extractedFrom]->"
+                            "(s:Source {url:$url}) RETURN count(*)",
+                            params={"pid": src, "url": dst},
+                        ).result_set
+                        hit = bool(existed and existed[0][0])
+                        if hit:
+                            deduped["connections"] += 1
+                        else:
+                            proj._link_source(src, dst)
+                            created["connections"] += 1
+                        if first_existed is None:
+                            first_existed = hit
+                    # Preserve the historical shape for the scalar case so
+                    # existing consumers/tests see an unchanged `to`.
+                    conn_result = {
+                        "relation": rel, "from": src,
+                        "to": dsts[0] if len(dsts) == 1 else list(dsts),
+                        "deduped": bool(first_existed),
+                    }
                 else:
                     existed = proj.g.query(
                         f"MATCH (a)-[r:{rel}]->(b) "
