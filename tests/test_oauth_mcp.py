@@ -808,15 +808,20 @@ class TestRedirectUriMatches:
         assert m("http://localhost/cb", "http://localhost:abc/cb")
         assert m("http://localhost/cb", "http://localhost:99999/cb")
 
-    def test_parser_differential_inputs_never_match(self):
+    def test_unsafe_bytes_never_match(self):
         """REVIEW P0 — Python's `urlsplit` and the browser's WHATWG parser end
         the authority at different places for a raw backslash, so
         `http://evil.example\\@localhost/cb` is host `localhost` to us and
         `evil.example` to the browser. The code is delivered by navigating the
-        browser to the raw string, so the old predicate validated it as loopback
-        and then handed the authorization code to the attacker. Confirmed fixed
-        here; the registration-side rejection is covered by
-        `TestRedirectUriParserDifferential`."""
+        browser to the RAW string, so the old predicate validated it as loopback
+        and then handed the authorization code to the attacker.
+
+        NOTE the assertions below fall into two groups and only the first proves
+        the guard: the backslash cases are genuine parser differentials, while
+        the control characters are refused as defence in depth — `urlsplit`
+        strips \\t \\r \\n just as a browser does, so they are NOT differentials
+        (review round 2 falsified the earlier comment that said they were).
+        """
         from tortoise.oauth import _redirect_uri_matches as m
         attack = "http://evil.example:8443\\@127.0.0.1/callback"
         assert not m("http://127.0.0.1/callback", attack)
@@ -824,12 +829,36 @@ class TestRedirectUriMatches:
                      "http://evil.example:8443\\@localhost/callback")
         assert not m("http://localhost/callback",
                      "http://evil.example\\@localhost:3118/callback")
-        # C0 controls / DEL are stripped by the browser but kept by urlsplit.
+        # The load-bearing case: the EXACT-match short-circuit must also be
+        # gated, or a differential string already in a client row bypasses the
+        # guard entirely. With the guard removed this returns True (verified by
+        # mutation), which is why it is asserted rather than assumed.
+        assert not m(attack, attack)
+        assert not m("http://evil.example\\@localhost/callback",
+                     "http://evil.example\\@localhost/callback")
+        # Same backslash, userinfo equal on both sides — so the userinfo
+        # comparison cannot be what refuses it; only the byte gate can.
+        assert not m("http://evil.example:8443@127.0.0.1/callback",
+                     "http://evil.example:8443\\@127.0.0.1/callback")
+        # A backslash anywhere is refused, including on the registered side.
+        assert not m("http://localhost\\cb", "http://localhost:3118\\cb")
+        # Defence in depth (NOT differentials — see the docstring above).
         assert not m("http://localhost/cb", "http://localhost\t:3118/cb")
         assert not m("http://localhost/cb", "http://local\x00host:3118/cb")
         assert not m("http://localhost/cb", "http://localhost\x7f:3118/cb")
-        # A backslash anywhere is refused, including on the registered side.
-        assert not m("http://localhost\\cb", "http://localhost:3118\\cb")
+
+    def test_differential_uris_are_refused_even_on_exact_match(self):
+        """The broad rejection is DELIBERATE, not an oversight: a byte we refuse
+        to reason about is refused before the exact-match short-circuit, so a URI
+        that registered before this gate existed stops matching. A raw backslash
+        is not legal in a URI (RFC 3986), so nothing legitimate is lost, and
+        fail-closed is the only safe direction on input that decides where a
+        credential is sent. Pinned so a future loosening is a decision."""
+        from tortoise.oauth import _redirect_uri_matches as m
+        assert not m("https://app.example.com/cb?q=C:\\Users\\x",
+                     "https://app.example.com/cb?q=C:\\Users\\x")
+        assert not m("https://app.example.com/cb?a=1\x7fb",
+                     "https://app.example.com/cb?a=1\x7fb")
 
 
 class TestRedirectUriParserDifferential:

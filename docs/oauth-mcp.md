@@ -51,11 +51,14 @@ needs no client_id paste.
    registration; Claude Code CLI depends on this). Scheme, host, path, query,
    fragment and userinfo must still match exactly, and every **non-loopback**
    URI keeps strict exact-string matching. Host is never relaxed:
-   `localhost` and `127.0.0.1` are different hosts. URIs containing a raw
-   backslash or a control character are refused at registration **and** at
-   validation — Python's `urlsplit` and the browser's WHATWG parser end the
-   authority at different places for those, and the code is delivered by
-   navigating the browser to the raw string.
+   `localhost` and `127.0.0.1` are different hosts. A URI containing a raw
+   backslash is refused at registration **and** at validation: WHATWG ends the
+   authority at a backslash for special schemes but `urlsplit` does not, so the
+   two parsers disagree about the host, and the code is delivered by navigating
+   the browser to the raw string. Control characters are refused too, as defence
+   in depth rather than because they are differential — `urlsplit` strips
+   `\t`/`\r`/`\n` just as a browser does, and a browser refuses or
+   percent-encodes the others.
 3. The branded consent page (D2 — one custom HTML page reusing the
    signup/signin pattern) signs the user in via supabase-js and confirms.
    The browser session JWT is verified server-side with the **existing JWKS

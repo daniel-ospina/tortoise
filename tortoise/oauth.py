@@ -224,24 +224,40 @@ def _is_loopback(hostname: str) -> bool:
         return False
 
 
-# Characters Python's `urlsplit` and the browser's WHATWG URL parser disagree
-# about. The authorization code is delivered by NAVIGATING THE BROWSER to the
-# raw `redirect_uri` (see `redirectBack` in the consent page), so the browser's
-# parse — never ours — is what decides where the code actually goes. A URI the
-# two can disagree about must therefore never be matched, registered, or echoed.
+# Bytes we refuse to reason about in a redirect URI, checked BEFORE any
+# comparison or echo. The authorization code is delivered by NAVIGATING THE
+# BROWSER to the raw `redirect_uri` (see `redirectBack` in the consent page), so
+# the browser's parse — never ours — is what decides where the code actually goes.
 #
-#   * `\`  — WHATWG ends the authority at a backslash for special schemes
-#            (http/https); `urlsplit` does not. So
-#            `http://evil.example\@localhost/cb` has host `localhost` to us and
-#            `evil.example` to the browser: validated as loopback, then
-#            navigated off-device carrying the code. Review P0, reproduced in
-#            Chromium — the attacker's listener received `?code=...`, and PKCE
-#            does not help because the attacker authored the authorize request
-#            and therefore holds the verifier.
-#   * C0 controls (0x00-0x1F) and DEL — stripped by the browser, kept by
-#            `urlsplit`.
-def _has_parser_differential(uri: str) -> bool:
-    """True when the AS and the user agent can disagree about this URI."""
+#   * `\` is a GENUINE parser differential and the reason this gate exists.
+#     WHATWG ends the authority at a backslash for special schemes (http/https);
+#     `urlsplit` does not. So `http://evil.example\@localhost/cb` has host
+#     `localhost` to us and `evil.example` to the browser: validated as loopback,
+#     then navigated off-device carrying the code. Found in review; reproduced in
+#     Chromium with the attacker's listener receiving `?code=...`. PKCE does not
+#     help — the attacker authors the authorize request and holds the verifier.
+#
+#   * C0 controls (0x00-0x1F) and DEL are NOT a differential, and this comment
+#     claimed they were until review falsified it. `urlsplit` strips \t \r \n
+#     too (`urllib.parse._UNSAFE_URL_BYTES_TO_REMOVE`), and a browser either
+#     refuses the URL outright (NUL, VT, FF, 0x1F) or percent-encodes DEL — none
+#     of which moves the authority boundary. They are refused anyway, as defence
+#     in depth: no legitimate redirect URI contains a control character, so the
+#     conservative direction costs nothing real. It does mean a URI registered
+#     before this gate existed stops matching — deliberate, and pinned by
+#     `test_differential_uris_are_refused_even_on_exact_match`.
+#
+# Refusing the bytes outright is preferred to modelling WHATWG: a whitelist of
+# "URIs both parsers agree on" cannot be kept correct, and fail-closed is the
+# only safe direction on the input that decides where a credential is sent.
+def _unsafe_redirect_uri_bytes(uri: str) -> bool:
+    """True when a redirect URI holds bytes we refuse to reason about.
+
+    Conservative by design: ``\\`` is a real parser differential between
+    ``urlsplit`` and the browser, the control characters are
+    belt-and-suspenders. See the comment above — do not describe this as a
+    precise differential detector, which is what the previous wording got wrong.
+    """
     return any(ch == "\\" or ord(ch) < 0x20 or ord(ch) == 0x7F for ch in uri)
 
 
@@ -249,10 +265,10 @@ def _valid_redirect_uri(uri: str) -> bool:
     """A registration-acceptable redirect URI: https, or http only when the
     host is loopback (RFC 8252 native-app pattern used by MCP clients).
 
-    Parse-differential inputs are refused here too, so a URI the browser would
-    read differently can never be registered in the first place.
+    URIs holding bytes we refuse to reason about are rejected here too, so a
+    string the browser might read differently can never enter a client row.
     """
-    if _has_parser_differential(uri):
+    if not isinstance(uri, str) or _unsafe_redirect_uri_bytes(uri):
         return False
     try:
         parsed = urlparse(uri)
@@ -290,13 +306,13 @@ def _redirect_uri_matches(registered: str | None,
     Host is NOT relaxed: ``localhost`` and ``127.0.0.1`` are distinct hosts,
     even though both are loopback. Only the port varies.
 
-    Inputs where Python's and the browser's parsers can disagree are refused
-    outright see ``_has_parser_differential`` — this function's own parse is
-    never the one that decides where the code actually goes.
+    Inputs holding bytes we refuse to reason about are refused outright (see
+    ``_unsafe_redirect_uri_bytes``) — this function's own parse is never the one
+    that decides where the code actually goes.
     """
     if not isinstance(registered, str) or not isinstance(presented, str):
         return False
-    if _has_parser_differential(registered) or _has_parser_differential(presented):
+    if _unsafe_redirect_uri_bytes(registered) or _unsafe_redirect_uri_bytes(presented):
         return False
     if registered == presented:
         return True
