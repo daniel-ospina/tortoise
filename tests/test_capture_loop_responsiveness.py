@@ -445,7 +445,7 @@ def test_capture_admission_is_reserved_before_the_extraction(client, monkeypatch
     entered = threading.Event()
     release = threading.Event()
 
-    async def _parked_impl(body, request, team, slot=None):
+    async def _parked_impl(body, request, team, slot=None, state=None):
         entered.set()
         await asyncio.to_thread(release.wait, 30)
         return {"ok": True}
@@ -873,6 +873,194 @@ def test_in_flight_session_key_outlives_the_extraction(client, monkeypatch):
     assert ha_mod._CAPTURE_SESSIONS == {}, ha_mod._CAPTURE_SESSIONS
 
 
+def test_cancelled_after_extraction_marks_the_attempt_failed(client, monkeypatch):
+    """#3129 (reviewer P1, cycle 3): abandonment covers the WHOLE attempt.
+
+    The first version of this guard hooked only the extraction await, so a
+    cancellation delivered at the two post-extraction awaits (`_async_audit`,
+    `_abuse_record_points` — both real `asyncio.to_thread` suspensions before
+    the `capture_ok` write) fell outside it. The reviewer measured the
+    consequence end-to-end: the session stayed at `capture_ok = NULL`, the key
+    drained, and the next same-session POST returned 200 +
+    `extraction_mode=replayed` + `extracted=0`, permanently. This is that exact
+    scenario — the extraction COMPLETES, the cancel lands in the audit, and the
+    outcome must still be recorded.
+    """
+    import tortoise.hosted_api as ha_mod
+    from tortoise.hosted_api import app
+
+    extraction_entered = threading.Event()
+    extraction_release = threading.Event()
+    audit_entered = threading.Event()
+    audit_release = threading.Event()
+
+    def _stalled_extract(_self, windowed, session_id, now, **kw):
+        extraction_entered.set()
+        extraction_release.wait(timeout=30)
+        return [], {}
+
+    async def _stalled_audit(*_a, **_kw):
+        audit_entered.set()
+        await asyncio.to_thread(audit_release.wait, 30)
+
+    monkeypatch.setattr(TortoiseSDK, "_extract_session_v2", _stalled_extract)
+    monkeypatch.setattr(ha_mod, "_async_audit", _stalled_audit)
+    payload = {"conversation": _CONV, "session_id": "s-postextract-cancel-3129",
+               "harness": _HARNESS}
+
+    async def _run():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport,
+                                     base_url="http://test") as ac:
+            task = asyncio.create_task(ac.post("/v1/sessions", json=payload))
+            for _ in range(400):
+                if extraction_entered.is_set():
+                    break
+                await asyncio.sleep(0.05)
+            assert extraction_entered.is_set(), "capture never reached the extraction"
+            extraction_release.set()
+            for _ in range(400):
+                if audit_entered.is_set():
+                    break
+                await asyncio.sleep(0.05)
+            assert audit_entered.is_set(), (
+                "the capture never reached its post-extraction audit — the "
+                "window this test pins was not reached")
+            task.cancel()  # client goes away AFTER the extraction returned
+            with suppress(asyncio.CancelledError):
+                await task
+            audit_release.set()
+            await asyncio.sleep(0.2)
+            for _ in range(400):  # the abandoned request's teardown releases
+                if not ha_mod._CAPTURE_SESSIONS:
+                    break
+                await asyncio.sleep(0.05)
+            return list(ha_mod._CAPTURE_SESSIONS)
+
+    drained = asyncio.run(_run())
+    assert drained == [], drained
+
+    rows = ha_mod._make_sdk(namespace=TEST_TEAM_ID)._get_proj().g.query(
+        "MATCH (s:Session {id:$sid}) RETURN s.capture_ok, s.capture_extractor",
+        params={"sid": "s-postextract-cancel-3129"}).result_set
+    assert rows, "the capture never merged its Session row"
+    capture_ok, lane = rows[0][0], rows[0][1]
+    assert capture_ok is False, (
+        f"a capture cancelled at the post-extraction audit left the session at "
+        f"capture_ok={capture_ok!r} — NULL is read by the replay rule as "
+        f"\"presumed captured\", so the next same-session request gets 200 + a "
+        f"success receipt with 0 turns extracted, permanently (#3129)")
+    assert lane == "v2", lane
+
+
+def test_session_key_is_held_until_the_marker_write_lands(client, monkeypatch):
+    """#3129 (reviewer P2): the marker write is OFF-loop and the key outlives it.
+
+    Two properties of the abandonment marker, neither visible from the state
+    assertions: the write must not run on the event loop (it is a teardown-path
+    graph call, and the projection's socket timeout is 10s — the #3060 shape on
+    the liveness path), and the session's in-flight key must stay held until it
+    lands, or a retry admitted in the gap would be served exactly the
+    NULL→replay payload the marker exists to prevent.
+    """
+    import tortoise.hosted_api as ha_mod
+    from tortoise.hosted_api import app
+
+    entered = threading.Event()
+    release = threading.Event()
+    marker_entered = threading.Event()
+    marker_release = threading.Event()
+    marker_threads: list = []
+
+    def _stalled(_self, windowed, session_id, now, **kw):
+        entered.set()
+        release.wait(timeout=30)
+        return [], {}
+
+    def _slow_marker(_proj, session_id, lane):
+        # Stands in for the graph write: it must be running OFF the loop thread.
+        marker_threads.append(threading.current_thread().name)
+        marker_entered.set()
+        marker_release.wait(timeout=30)
+
+    monkeypatch.setattr(TortoiseSDK, "_extract_session_v2", _stalled)
+    monkeypatch.setattr(ha_mod, "_capture_abandoned_marker", _slow_marker)
+    payload = {"conversation": _CONV, "session_id": "s-marker-hold-3129",
+               "harness": _HARNESS}
+    key = "team-001:default:s-marker-hold-3129"
+
+    async def _run():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport,
+                                     base_url="http://test") as ac:
+            # Independent ticker: proves the loop keeps running while the
+            # marker is parked in its worker thread (the #3060 invariant).
+            ticks = {"n": 0}
+
+            async def _ticker():
+                while True:
+                    ticks["n"] += 1
+                    await asyncio.sleep(0.02)
+
+            ticker = asyncio.create_task(_ticker())
+            task = asyncio.create_task(ac.post("/v1/sessions", json=payload))
+            for _ in range(200):
+                if entered.is_set():
+                    break
+                await asyncio.sleep(0.05)
+            assert entered.is_set(), "the capture never reached the extraction"
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
+            release.set()  # the parked worker finishes (its result is discarded)
+            for _ in range(200):
+                if marker_entered.is_set():
+                    break
+                await asyncio.sleep(0.05)
+            assert marker_entered.is_set(), (
+                "the abandonment marker never ran — an abandoned capture leaves "
+                "the session at capture_ok=NULL and the next same-session "
+                "request replays it (#3129)")
+            held = list(ha_mod._CAPTURE_SESSIONS)
+            before = ticks["n"]
+            await asyncio.sleep(0.3)  # the marker is still parked
+            grew = ticks["n"] - before
+            try:
+                while_marker_pending = await asyncio.wait_for(
+                    ac.post("/v1/sessions", json=payload), timeout=10.0)
+            except TimeoutError:
+                while_marker_pending = None
+            marker_release.set()
+            for _ in range(400):
+                if not ha_mod._CAPTURE_SESSIONS:
+                    break
+                await asyncio.sleep(0.05)
+            ticker.cancel()
+            with suppress(asyncio.CancelledError):
+                await ticker
+            return (grew, held, while_marker_pending,
+                    list(ha_mod._CAPTURE_SESSIONS))
+
+    grew, held, pending, drained = asyncio.run(_run())
+
+    assert marker_threads and "capture-marker" in marker_threads[0], (
+        f"the abandonment marker ran on {marker_threads} — it must run on the "
+        f"dedicated off-loop pool, not the event loop (#3129 / #3060)")
+    assert grew >= 5, (
+        f"the event loop managed only {grew} ticks in 0.3s while the "
+        f"abandonment marker was parked — the graph write is running on the "
+        f"loop (#3060's shape; the marker must be off-loop)")
+    assert held == [key], (
+        f"the session key was released while the abandonment marker was still "
+        f"pending (registry={held!r}) — a retry admitted in that gap is served "
+        f"the NULL→replay payload the marker prevents (#3129)")
+    assert pending is not None and pending.status_code == 409, (
+        f"a same-session request while the marker was pending returned "
+        f"{getattr(pending, 'status_code', 'a timeout')} (#3129)")
+    assert drained == [], drained
+    assert ha_mod._CAPTURE_IN_FLIGHT == 0, ha_mod._CAPTURE_IN_FLIGHT
+
+
 def test_cancelled_capture_keeps_the_key_and_leaves_a_retryable_attempt(
         client, monkeypatch):
     """#3129 (reviewer P1 + P2): an ABANDONED capture must not become a replay.
@@ -889,9 +1077,10 @@ def test_cancelled_capture_keeps_the_key_and_leaves_a_retryable_attempt(
        reads as "legacy, presumed captured". The next same-session request was
        then served 200 + a success receipt with 0 turns extracted, permanently
        (reviewer-measured end-to-end via the retry's own response). The
-       abandonment marker (`_capture_abandoned_marker`, wired through
-       `_run_capture_bounded(on_abandon=...)`) makes it a FAILED attempt
-       instead, so that retry takes the #2335 TRUE-retry lane.
+       endpoint's cancellation handler + `_capture_abandoned_marker` make it a
+       FAILED attempt instead, so that retry takes the #2335 TRUE-retry lane
+       (the sibling test above pins the post-extraction window; this one pins
+       the cancellation DURING the extraction).
 
        Deliberately NOT extended to failures: a raise-shaped capture keeps its
        documented NULL→legacy-replay shape

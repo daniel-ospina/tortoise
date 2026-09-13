@@ -3087,12 +3087,16 @@ def tortoise_session_capture(conversation: list[dict],
         model = sanitize_attribution_field(model, max_length=128)
 
     from tortoise.hosted_api import (
+        _CAPTURE_MARKER_EXECUTOR,
         _CAPTURE_SESSION_IN_FLIGHT_DETAIL,
         SessionRequest,
+        _capture_abandoned_marker,
+        _capture_lane,
         _capture_session_impl,
         _capture_session_key,
         _record_capture_last_error,
         _reserve_capture_slot,
+        _submit_off_loop,
     )
     limits = _current_team_limits.get() or {}
     team = {"team_id": team_id, "tier": limits.get("tier", "free"),
@@ -3131,9 +3135,27 @@ def tortoise_session_capture(conversation: list[dict],
         # the session_id goes with it, so a duplicate in-flight capture of the
         # same session is refused on this surface too (scoped to this tenant).
         slot = _reserve_capture_slot(_capture_session_key(team, session_id))
+        # #3129: parity with the REST endpoint — a cancellation between the
+        # attempt starting and its outcome being recorded would leave the
+        # Session at `capture_ok=NULL`, which the replay rule reads as
+        # "presumed captured" (see hosted_api._capture_abandoned_marker).
+        _state: dict = {}
         try:
             return asyncio.run(_capture_session_impl(body, None, team,
-                                                     slot=slot))
+                                                     slot=slot,
+                                                     state=_state))
+        except asyncio.CancelledError:
+            if _state.get("attempted") and not _state.get("finalized"):
+                # Off-loop, key held until it lands (see the REST endpoint and
+                # hosted_api._CaptureSlot.hold_until).
+                try:
+                    slot.hold_until(_submit_off_loop(
+                        _CAPTURE_MARKER_EXECUTOR, _capture_abandoned_marker,
+                        _state.get("proj"), session_id,
+                        _state.get("lane") or _capture_lane()))
+                except Exception:  # pragma: no cover - pool shut down
+                    _log.exception("abandoned-capture marker submit failed")
+            raise
         finally:
             slot.release()
     except Exception as e:
