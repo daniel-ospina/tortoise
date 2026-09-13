@@ -130,7 +130,18 @@ SHARED_MODULES = (
 SOURCE_PATTERNS = {
     "battery": ("battery/",),
     "onboarding": ("tortoise/onboarding/", "website/welcome.html",
-                   "website/self-hosted.html"),
+                   "website/self-hosted.html", "website/product.html",
+                   "website/index.html", "website/signup.html",
+                   "website/signin.html", "website/privacy.html",
+                   # #3332: the public pages that own a guard test in this surface.
+                   # docs.html + faq.html -> test_website_docs_consistency.py;
+                   # product.html + welcome.html -> test_website_static.py;
+                   # index.html + privacy.html -> test_waitlist_form.py;
+                   # signup.html + signin.html -> test_signup_form_safety.py;
+                   # self-hosted.html -> test_harness_mcp_config.py.
+                   # Listing a path is what makes a change to it select this
+                   # surface at all — otherwise its guard test never runs.
+                   "website/docs.html", "website/faq.html"),
     "ep": ("tortoise/decide.py", "tortoise/dream.py", "tortoise/analyze.py",
            "tortoise/ranking.py"),
     "sdk": ("tortoise/ids.py", "tortoise/models.py", "tortoise/crypto.py",
@@ -214,6 +225,22 @@ NON_PYTHON_PREFIXES = (
     "capability/", "services/", "integrations/", "apps/", "spike/", "tools/",
     ".ci-checks/", "supabase/",
 )
+
+# website/ paths that ARE selection-relevant (#3332).
+#
+# Superseded by the generic rule in select() (`_selection_relevant`): a path that
+# SOURCE_PATTERNS already matches is selection-relevant whatever prefix it sits
+# under, so it no longer needs a second hand-maintained tuple. Kept empty as a
+# documented tombstone rather than deleted, so the next reader finds the reason
+# instead of re-inventing the same broken mirror.
+#
+# Why the mirror was the wrong shape (twice: #1349 for tools/, #3332 for
+# website/): the mirror is only as complete as whoever last edited it, and a
+# missing entry fails SILENTLY — the path is filtered to `changed == []`, the PR
+# drops to tier-1 smoke, and the guard test written for that exact file never
+# runs. SOURCE_PATTERNS is the single source of truth; the ratchet that keeps
+# this true is tests/test_ci_selection.py::test_every_source_pattern_is_selectable.
+SITE_CARVEOUTS: tuple[str, ...] = ()
 
 # tools/ paths that ARE python-relevant for selection (#1349). The flat
 # NON_PYTHON_PREFIXES tuple above includes "tools/", which would swallow
@@ -356,11 +383,26 @@ def select(changed_files: list[str], event: str, manifest: dict) -> dict:
         return _full_selection(manifest, slow)
 
     tier1 = set(manifest.get("tier1", [])) - slow
-    # Filter out non-python-relevant paths, but RE-INCLUDE the tools carve-out
-    # paths so they reach SOURCE_PATTERNS (see TOOL_CARVEOUTS).
+    # Filter out non-python-relevant paths — but a path that a SOURCE_PATTERNS
+    # entry already matches is selection-relevant BY DEFINITION, whatever prefix
+    # it sits under (#3332). Mirroring those paths into a second hand-maintained
+    # tuple (the #1349 TOOL_CARVEOUTS shape, and this PR's own first attempt at
+    # SITE_CARVEOUTS) drifts: a missing entry is silent, and the guard test
+    # written for that exact file never runs. SOURCE_PATTERNS is the single
+    # source of truth; test_every_source_pattern_is_selectable is the ratchet.
+    def _selection_relevant(path: str) -> bool:
+        return any(
+            path.startswith(p)
+            for surface, pats in SOURCE_PATTERNS.items()
+            if surface != "core"
+            for p in pats
+        ) or path.startswith(CORE_ALSO)
+
     changed = [c for c in changed_files
                if c and (not c.startswith(NON_PYTHON_PREFIXES)
-                         or c.startswith(TOOL_CARVEOUTS))]
+                         or _selection_relevant(c)
+                         or c.startswith(TOOL_CARVEOUTS)
+                         or c.startswith(SITE_CARVEOUTS))]
     if not changed:
         # docs-only PR -> tier 1 (curated smoke) only; no slow/carve surface
         # is touched, so both diff-gated legs skip (#2147/#2148).

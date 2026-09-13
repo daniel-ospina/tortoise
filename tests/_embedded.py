@@ -94,6 +94,10 @@ TEST_NO_REDIRECT_STEMS: tuple[str, ...] = (
     "test_ops_safety",
     "test_per_session_census",
     "test_pre_migration_safety",
+    # #3350: the embedded lane's socket timeout / retry-bound assertions are
+    # embedded-only (a redirected construction would run against the docker
+    # server, where none of them mean anything).
+    "test_projection_embedded_socket_timeout",
     "test_projection_lifecycle",
     "test_reaper",
     "test_reaper_orphan",

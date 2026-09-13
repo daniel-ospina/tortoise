@@ -180,6 +180,47 @@ class SearchScores:
     rrf: float = 0.0
 
 
+# ── #3276: honest EP measurement state ──────────────────────────────────
+# ``has_ep`` must mean "EP has MEASURED this claim", not merely "a persisted
+# prior exists". The two came apart when #2199 began stamping a kind-derived
+# baseline (ep_alpha/ep_beta, baseline_set=true, baseline_source=
+# 'system-default') on decide parts at CREATE: every never-measured decision
+# then read has_ep=True at the prior mean (0.75), so the #2206 relevance gate
+# could not tell "we decided this" from "nobody measured this".
+#
+# A claim is EP-MEASURED when EP flushed a posterior (posterior_alpha — the
+# one column only a real EP run writes), or when it carries a persisted
+# ep_alpha that is NOT a #2199 baseline (legacy EP-prior back-compat).
+# PRIOR-ONLY (has_ep=False, baseline=True): a declared baseline prior — the
+# value is the prior mean, explicitly NOT a measured confidence. UNMEASURED
+# (has_ep=False, baseline=False): neutral Beta(1,1) mean 0.5.
+
+def ep_measured_cypher(alias: str) -> str:
+    """Cypher boolean: EP has MEASURED the :Point bound to ``alias`` (#3276)."""
+    return (f"({alias}.posterior_alpha IS NOT NULL "
+            f"OR ({alias}.ep_alpha IS NOT NULL "
+            f"AND NOT coalesce({alias}.baseline_set, false)))")
+
+
+def ep_baseline_cypher(alias: str) -> str:
+    """Cypher boolean: ``alias`` carries a #2199 baseline prior (#3276)."""
+    return f"coalesce({alias}.baseline_set, false)"
+
+
+def ep_measurement_state(*, posterior_alpha, ep_alpha,
+                         baseline_set: bool) -> str:
+    """Python twin of :func:`ep_measured_cypher`: 'measured' | 'baseline' |
+    'unmeasured' (#3276).
+
+    Pure measurement predicate — it does NOT know about the #2490 terminal
+    override, which each read surface applies on top (a terminal claim is
+    forced to has_ep=False/measured=False/baseline=False regardless of the
+    persisted columns)."""
+    if posterior_alpha is not None or (ep_alpha is not None and not baseline_set):
+        return "measured"
+    return "baseline" if baseline_set else "unmeasured"
+
+
 @dataclass
 class EpEvidence:
     impl_count: int = 0
@@ -215,10 +256,14 @@ class EpBreakdown:
     # as a first-class flag so agents treat the claim as disputed, not merely
     # high/low probability.
     contested: bool = False
-    # Whether this point has persisted EP data (posterior_alpha OR ep_alpha).
-    # True = EP has run on the claim (posterior) or a prior was persisted
-    # (baseline/evidence); False = unmeasured — confidence_mean is the neutral
-    # Beta(1,1) mean 0.5, which is NOT a signal of contestation.
+    # #3276: whether EP has MEASURED this point — True iff a real EP flush
+    # persisted a posterior (or a non-baseline legacy ep_alpha prior). A
+    # #2199 baseline prior alone does NOT set it: a never-measured decision
+    # with the kind-derived system-default baseline reads has_ep=False here
+    # (it used to read True at the 0.75 prior mean — the #3276 leak).
+    # False = not measured; confidence_mean is then the declared prior mean
+    # when ``baseline`` is True, else the neutral Beta(1,1) mean 0.5. Neither
+    # is a signal of contestation.
     # #2490 has_ep overload: TERMINAL claims (terminal vocab status OR the
     # legacy outdated=true flag) are also gated to False — their posterior
     # decays to vacuity at the terminalizing write, so a terminal claim's
@@ -226,6 +271,16 @@ class EpBreakdown:
     # include-terminal surfaces". Consumers (topic disputed-pair gate,
     # volunteer, mcp) must not read terminal=unmeasured.
     has_ep: bool = False
+    # #3276 aliases of the same measurement state, explicit and unambiguous:
+    #   measured=True                     → EP measured (has_ep True)
+    #   measured=False, baseline=True     → prior-only (declared baseline)
+    #   measured=False, baseline=False    → unmeasured (neutral 0.5)
+    # A TERMINAL claim (#2490 gate) reads measured=False, baseline=False even
+    # when it was measured-and-baseline'd pre-terminalization: its 0.5 is the
+    # decayed vacuity posterior, not the prior, so it is neither prior-only
+    # nor a live measurement (the per-row terminal flag owns that state).
+    measured: bool = False
+    baseline: bool = False
 
     def __post_init__(self):
         if self.evidence is None:
@@ -339,6 +394,156 @@ def _trace_entry(leg: str, *, ran: bool, degraded: bool,
                  reason: str | None, count: int) -> dict:
     return {"leg": leg, "ran": ran, "degraded": degraded,
             "reason": reason, "count": count}
+
+
+# ── (C) #2952: declared degraded reads ──────────────────────────────────────
+# The leg trace records WHAT each leg did; a consumer that would otherwise
+# label the result "hybrid" needs an explicit DECLARATION that the vector
+# (semantic) leg did not contribute. ``declared_degraded_read`` derives that
+# marker from the trace; ``require_hybrid_read`` turns it into a fail-loud
+# refusal for real-lane measurement (#2985 / PR #3005 posture). Both are
+# additive and opt-in: default callers (leg_trace=None) see byte-identical
+# behavior and never pay for either.
+
+#: (C) #2952 — marker key identifying a declared vector-leg-unavailable read.
+VECTOR_LEG_UNAVAILABLE = "vector_leg_unavailable"
+
+
+def _vector_leg_healthy(entries: list[dict]) -> bool:
+    """True when at least one vector entry did run, undegraded (#2952)."""
+    return any(
+        e.get("leg") == "vector" and e.get("ran") and not e.get("degraded")
+        for e in entries)
+
+
+def _degraded_read_marker(reason: str, entries: list[dict]) -> dict:
+    """The single marker shape (one construction site, #2952).
+
+    ``vector_leg_unavailable`` / ``missing_legs`` are derived from the
+    trace: a results-bearing TF-IDF fallback is a keyword-only read even
+    when a healthy-but-empty vector entry is present, so the marker must not
+    claim the embedder was unavailable (review P2 fix).
+    """
+    available = not _vector_leg_healthy(entries)
+    return {
+        "degraded_read": True,
+        "hybrid": False,
+        VECTOR_LEG_UNAVAILABLE: available,
+        "missing_legs": ["vector"] if available else [],
+        "reason": reason,
+        "leg_trace": entries,
+    }
+
+
+def _results_bearing_fallback(entries: list[dict]) -> dict | None:
+    """The TF-IDF fallback entry when it actually produced the rows (#2952).
+
+    ``tortoise_fts_query`` runs the fallback only when EVERY primary leg
+    returned zero rows, so a fallback entry with ``count > 0`` proves the
+    returned rows are keyword-only — the read is NOT hybrid even if a
+    vector entry recorded a healthy-but-empty run. ``count == 0``
+    (``no_fallback_applicable``) returns no rows and is not disqualifying.
+    """
+    for e in entries:
+        if e.get("leg") == "fallback" and (e.get("count") or 0) > 0:
+            return e
+    return None
+
+
+def declared_degraded_read(leg_trace: list[dict] | None) -> dict | None:
+    """(C1) #2952 — explicit single-leg (vector-unavailable) declaration.
+
+    Returns the marker dict when the trace shows a TEXT read whose vector
+    leg did not run (``ran=False``) or ran degraded (``degraded=True`` — e.g.
+    ``no_embedder``, ``encode_failed``, ``breaker_open``, ``query_failed``,
+    ``index_missing``, ``no_embeddings``, ``timeout``), else ``None``.
+
+    Shape: ``{"degraded_read": True, "hybrid": False,
+    "vector_leg_unavailable": <bool — False for a keyword-only fallback whose
+    vector entry ran healthy-but-empty>, "missing_legs": <["vector"] | []>,
+    "reason": <leg-trace reason | "leg_absent" | "leg_trace_unavailable" |
+    "tfidf_fallback">, "leg_trace": [...]}``.
+
+    ``leg_trace=None`` returns ``None`` — an absent trace is not a
+    declaration (a caller that wants the fail-closed treatment calls
+    :func:`require_hybrid_read`, which refuses on it). A structural-only
+    trace (no text leg — no fts/vector/fallback entry; e.g. a ``query=None``
+    full scan) is a single-leg read BY DESIGN and also returns ``None``; an
+    EMPTY trace, by contrast, reports nothing and is declared
+    ``leg_trace_unavailable`` (fail closed). A fallback-only (TF-IDF) trace
+    reports a text leg whose vector leg is absent → ``leg_absent``.
+    """
+    if leg_trace is None:
+        return None
+    entries = [e for e in leg_trace if isinstance(e, dict)]
+    # Positive structural evidence only: a trace whose ONLY leg is the
+    # structural kind-scan is a single-leg read BY DESIGN (query=None full
+    # scan). An unknown/malformed leg vocabulary does NOT earn this escape
+    # hatch — it falls through and is declared (C1/C2 consistency, review P2).
+    if entries and all(e.get("leg") == "structural" for e in entries):
+        return None
+    # A results-bearing TF-IDF fallback is definitive proof the rows are
+    # keyword-only — checked BEFORE the healthy-vector early return (a
+    # healthy-but-empty vector entry must not launder a fallback read).
+    if _results_bearing_fallback(entries) is not None:
+        return _degraded_read_marker("tfidf_fallback", entries)
+    vecs = [e for e in entries if e.get("leg") == "vector"]
+    # ``recall_state(object_centric=True)`` appends one entry per query
+    # (Point + Object), so a single healthy vector entry proves the leg ran.
+    # NOTE: stricter than the #3005 battery submission gate (ran AND NOT
+    # degraded) — a degraded vector leg contributes no semantic results.
+    if _vector_leg_healthy(entries):
+        return None
+    vec = vecs[0] if vecs else None
+    if vec is not None:
+        reason = vec.get("reason") or "leg_absent"
+    elif entries:
+        # a text leg exists (fts/fallback) but no vector entry was recorded
+        reason = "leg_absent"
+    else:
+        reason = "leg_trace_unavailable"
+    return _degraded_read_marker(reason, entries)
+
+
+def require_hybrid_read(leg_trace: list[dict] | None,
+                        *, lane: str | None = None) -> dict:
+    """(C2) #2952 — fail-loud gate: refuse to label a single-leg read hybrid.
+
+    Capability for real-lane measurement (aligns with the #2985 / PR #3005
+    fail-loud pattern): returns ``{"hybrid": True, "vector_leg_unavailable":
+    False}`` only when at least one NOT-degraded vector entry RAN, and raises
+    :class:`~tortoise.exceptions.HybridReadUnavailableError` otherwise —
+    including for ``leg_trace=None`` / empty / structural-only traces (a
+    surface that cannot positively prove the vector leg fails closed).
+
+    This proves the VECTOR (semantic) leg specifically — the #2952 failure
+    class: at least one vector entry RAN and was NOT degraded (a
+    ``degraded=True`` vector leg contributed no semantic results, so the
+    read is keyword-only). This is deliberately STRICTER than the #3005
+    battery capability gate, which asks only whether the vector strategy was
+    SUBMITTED (``ran`` regardless of ``degraded``); a battery lane that
+    records a score should delegate to this predicate so the two gates can
+    never disagree on the same trace. It is not a both-legs health check
+    (the fts leg's own degrade is surfaced separately in the trace).
+
+    Opt-in only: nothing in the product calls this by default, so healthy-
+    path ranking and default result bytes are unchanged.
+    """
+    from .exceptions import HybridReadUnavailableError
+    if leg_trace is None:
+        marker = _degraded_read_marker("leg_trace_unavailable", [])
+    else:
+        entries = [e for e in leg_trace if isinstance(e, dict)]
+        declared = declared_degraded_read(leg_trace)
+        if declared is not None:
+            marker = declared
+        elif _vector_leg_healthy(entries):
+            return {"hybrid": True, VECTOR_LEG_UNAVAILABLE: False}
+        else:
+            # Positive proof required: an absent marker on a non-hybrid trace
+            # (e.g. structural-only) must NOT pass as hybrid.
+            marker = _degraded_read_marker("leg_absent", entries)
+    raise HybridReadUnavailableError(marker, lane=lane)
 
 
 def run_fts_query(
@@ -1307,8 +1512,11 @@ def annotate_ep_batch(graph, point_ids: list[str]) -> dict[str, EpBreakdown]:
             "    ELSE 0.0 "
             "  END AS contention, "
             "  coalesce(n.posterior_alpha, n.ep_alpha, 1.0) AS alpha, coalesce(n.posterior_beta, n.ep_beta, 1.0) AS beta, "
-            "  (n.posterior_alpha IS NOT NULL OR n.ep_alpha IS NOT NULL) AS has_ep, "
-            "  n.status, coalesce(n.outdated, false) "
+            # #3276: has_ep == EP MEASURED (not merely "a prior exists").
+            # baseline_set plumbs the prior-only distinction to Python.
+            f"  {ep_measured_cypher('n')} AS has_ep, "
+            "  n.status, coalesce(n.outdated, false), "
+            f"  {ep_baseline_cypher('n')} AS baseline_set "
         )
         rows = graph.query(cypher, params={"ids": point_ids}).result_set
 
@@ -1319,8 +1527,13 @@ def annotate_ep_batch(graph, point_ids: list[str]) -> dict[str, EpBreakdown]:
             # as measured EP — has_ep=False + contested=False (the columns
             # are fetched so the terminal state is read, not guessed; the len
             # guard tolerates doubles mirroring the pre-#2490 7-col shape).
-            if len(row) > 8 and is_terminal_status(row[7], bool(row[8])):
+            terminal = len(row) > 8 and is_terminal_status(row[7], bool(row[8]))
+            if terminal:
                 has_ep = False
+            # #3276: baseline_set rides the tail (index 9) so the pre-#3276
+            # 7/9-col row shapes keep their index mapping under the len guard.
+            baseline_set = bool(row[9]) if len(row) > 9 else False
+            measured = bool(has_ep)
             total = impl + nand
             variance = _beta_variance(alpha, beta)
             breakdowns[pid] = EpBreakdown(
@@ -1333,8 +1546,16 @@ def annotate_ep_batch(graph, point_ids: list[str]) -> dict[str, EpBreakdown]:
                 # contested, it's unmeasured. (#2490: terminal claims are
                 # gated above, so their decayed (1,1) posterior never reads
                 # contested either.)
-                contested=bool(has_ep) and variance > CONTESTED_VARIANCE_THRESHOLD,
-                has_ep=bool(has_ep),
+                contested=measured and variance > CONTESTED_VARIANCE_THRESHOLD,
+                has_ep=measured,
+                measured=measured,
+                # prior-only: a declared #2199 baseline on a LIVE claim with
+                # no EP measurement — confidence_mean is the PRIOR mean, never
+                # a measured one. A TERMINAL claim is neither measured nor
+                # prior-only (its 0.5 is the #2490 decayed posterior), so the
+                # terminal gate above also clears `baseline` — see the
+                # EpBreakdown three-state note.
+                baseline=baseline_set and not measured and not terminal,
             )
 
         # Fill in defaults for IDs that are not Point nodes (defaults match
@@ -1548,7 +1769,7 @@ def get_relationships_bounded(
                 "  AND NOT (op)-[:mitigated_by]->(other) "
                 "  AND (type(r2) = 'NAND' "
                 f"       OR {_terminal_expression('other.status')} "
-                "       OR ((other.posterior_alpha IS NOT NULL OR other.ep_alpha IS NOT NULL) "
+                f"       OR ({ep_measured_cypher('other')} "
                 "           AND (coalesce(other.posterior_alpha, other.ep_alpha, 1.0) * coalesce(other.posterior_beta, other.ep_beta, 1.0)) "
                 "               / ((coalesce(other.posterior_alpha, other.ep_alpha, 1.0) + coalesce(other.posterior_beta, other.ep_beta, 1.0)) ^ 2 "
                 "                  * (coalesce(other.posterior_alpha, other.ep_alpha, 1.0) + coalesce(other.posterior_beta, other.ep_beta, 1.0) + 1)) > $contested_threshold)) "
@@ -1559,8 +1780,9 @@ def get_relationships_bounded(
                 # #2490: the aligned has_ep boolean — measured AND NOT terminal
                 # (a decayed terminal's (1,1) posterior is column-
                 # indistinguishable from a measured (1,1), so the status/flag
-                # gate lives INSIDE the projection).
-                f"  ((other.posterior_alpha IS NOT NULL OR other.ep_alpha IS NOT NULL) AND {_alive_flag('other.status')}), "
+                # gate lives INSIDE the projection). #3276: "measured" is
+                # ep_measured_cypher — a #2199 baseline prior is NOT measurement.
+                f"  ({ep_measured_cypher('other')} AND {_alive_flag('other.status')}), "
                 "  other.createdAt, coalesce(other.outdated, false) "
                 "LIMIT $raw_cap",
                 params={"op_ids": list(op_ids), "raw_cap": raw_cap,
@@ -1601,8 +1823,9 @@ def get_relationships_bounded(
                 "  coalesce(other.posterior_beta, other.ep_beta, 1.0), "
                 # #2490: aligned has_ep gate (see op_crit) — support peers are
                 # also terminal-gated so a terminal peer's decayed posterior
-                # never reads as measured EP in the assembly.
-                f"  ((other.posterior_alpha IS NOT NULL OR other.ep_alpha IS NOT NULL) AND {_alive_flag('other.status')}), "
+                # never reads as measured EP in the assembly. #3276: measured
+                # excludes the #2199 baseline prior (see ep_measured_cypher).
+                f"  ({ep_measured_cypher('other')} AND {_alive_flag('other.status')}), "
                 "  other.createdAt, coalesce(other.outdated, false)",
                 params={"op_ids": list(expand_ops), "per_op": per_op_cap},
                 timeout=_DECORATION_TIMEOUT_MS,
