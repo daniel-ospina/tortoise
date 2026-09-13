@@ -20,6 +20,18 @@ os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")
 # (signup 2/24h, session 5/hr, recovery) delenv RATE_LIMIT_DISABLED — those
 # read env at CALL time and stay live.
 os.environ.setdefault("RATE_LIMIT_DISABLED", "1")
+# #2850: the loop-stall watchdog exits the process (os._exit) when the event
+# loop stops ticking — that is the point in production, and catastrophic in a
+# test runner that DELIBERATELY stalls the loop (the /healthz staleness tests)
+# or that simply holds a GIL-heavy test for longer than the threshold. Tests
+# exercise the watchdog with an injected exit_fn; the real one stays disarmed
+# for the whole session.
+os.environ.setdefault("TORTOISE_LOOP_STALL_EXIT_S", "0")
+# #2850: the dedicated liveness listener defaults to the fixed 0.0.0.0:9090
+# deployment contract. An ephemeral port for the test session keeps parallel
+# test sessions on one host from fighting over it (and never exposes a
+# listener on a shared CI box); the 9090 contract is asserted directly.
+os.environ.setdefault("TORTOISE_HEALTHZ_PORT", "0")
 # #1686: TEST_MODE must be visible BEFORE tests._embedded imports tortoise.
 # projection (tests/_embedded.py:27 imports it) — the module-body
 # Thread.start stamp install is gated on TEST_MODE, and conftest's own
@@ -879,6 +891,20 @@ def _packs_env_isolation(monkeypatch):
     domain_loader._registry = None
     domain_loader._env_fallback_key = None
     domain_loader._PACKS_DIR = None
+
+
+@pytest.fixture(autouse=True)
+def _disable_embedder_autowarmup(monkeypatch):
+    """#2952: keep the engine-init embedder warm-up out of the test suite.
+
+    ``TortoiseSDK._get_proj`` starts a daemon warm-up thread (best-effort,
+    #2952 (B)). Unstubbed tests would otherwise trigger a real HF model load
+    in the background, and a failed load would emit WARNING noise into
+    ``caplog`` assertions. Tests that exercise the warm-up call it directly
+    (with a stubbed ``EmbeddingModel.get``).
+    """
+    monkeypatch.setenv("TORTOISE_EMBEDDER_WARMUP", "0")
+    yield
 
 
 @pytest.fixture

@@ -629,7 +629,14 @@ class FakeControlPlane:
     def query(self, table: str, *, select: list[str] | None = None,
               filters: list[tuple[str, str, object]] | None = None,
               method: str = "GET", json_body: dict | None = None,
-              order: str | None = None, limit: int | None = None) -> list[dict]:
+              order: str | None = None, limit: int | None = None,
+              timeout: object | None = None) -> list[dict]:
+        # ``timeout`` mirrors the real SupabaseControlPlane per-request
+        # override (#2850/#2988): the health probe passes a composed
+        # httpx.Timeout here. The fake performs no I/O, so it is accepted and
+        # ignored — but it MUST be accepted, or the probe's query would raise
+        # TypeError and /health/ready would 503 in tests.
+        _ = timeout
         fault = self._take_fault(table, method, select, filters)
         if fault is not None and not fault["after_mutation"]:
             raise fault["exc"]

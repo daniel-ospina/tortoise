@@ -69,9 +69,12 @@ printed for transparency but can never by itself produce a "do NOT dispatch"
 verdict. This is a live-bug fix: those two exact bodies produced a false
 COLLISION for #2745 and #2751 because every `#N` in prose was treated as work.
 
-Keywords are the issue title's distinctive tokens (length >= 5, minus a
-generic/process vocabulary); pass ``--keywords`` to override when ``gh`` cannot
-supply the title.
+Keywords are the issue title's DISTINCTIVE tokens (length >= 5, minus two
+excluded vocabularies: `_GENERIC` process words and `_COMMON_DOMAIN`
+cross-cutting engineering/product words); pass ``--keywords`` to override when
+``gh`` cannot supply the title. Excluding the cross-cutting tier is what keeps
+``graph`` + ``delete`` in two unrelated branch slugs from reading as shared work
+(#3325) while distinctive-term pairs still collide.
 
 Usage
 -----
@@ -172,6 +175,74 @@ _GENERIC = {
     "time", "times", "case", "cases", "value", "values", "type", "types",
     "name", "names", "todo", "note", "notes", "info", "misc", "miscellaneous",
 }
+
+# Cross-cutting ENGINEERING / PRODUCT vocabulary, excluded from title-derived
+# keywords alongside `_GENERIC` (#3325). `_GENERIC` covers process words
+# ("test", "fix", "update"); this set covers engineering/product words that
+# recur across UNRELATED workstreams. Two of them coinciding in a branch slug is
+# not evidence of shared work: the live bug was issue #3214 ("…graph minted …
+# the delete"), whose title cleared the >=2 gate against the unrelated
+# `feat/2701-graphs-rename-delete` branch purely because "graph" + "delete" are
+# common in this repo. A false COLLISION blocks legitimate dispatch, so the gate
+# must count DISTINCTIVE terms only.
+#
+# Measured document frequency over the repo's 3,375 issue+PR titles when this
+# set was curated (#3325): graph 7.3%, session 6.3%, hosted 6.3%, dashboard
+# 4.9%, signup 4.9%, welcome 4.4%, onboarding 4.0%, backup 3.6%, stale 3.4%,
+# monitor 3.2%, source 2.7%, deploy 2.7%, search 2.4%, error 1.9%, … .
+#
+# Curation rule — a token belongs here iff it is (a) cross-cutting across
+# unrelated workstreams AND (b) NOT the name of a subsystem/concept whose
+# identity the match is meant to reveal. Frequent but IDENTIFYING domain nouns
+# (battery, manifest, retrieval, operator, ontology, projection, parity, dedup,
+# falkordb, …) are deliberately absent: for those a keyword match IS the
+# sensitivity this dial exists to preserve. The mechanism is a static stoplist
+# rather than a corpus-derived IDF score precisely because this is a gate: the
+# same repo state must yield the same verdict, and an IDF threshold would make
+# the dial's strictness drift with unrelated PR traffic and with gh
+# availability. What this trades away is recall on stoplisted terms — a
+# distinctively-named branch whose only shared terms are generic is no longer a
+# keyword hit. Number matching (`<type>/<issue#>-<slug>`) and an explicit
+# `--keywords` override remain the escape hatches.
+#
+# Reproduce / re-curate with:
+#   gh pr list --state all --limit 5000 --json title > /tmp/prs.json
+#   gh issue list --state all --limit 5000 --json title > /tmp/issues.json
+#   python3 - <<'PY'
+#   import json, re, collections
+#   from tools.collision_preflight import _singular
+#   titles = [o["title"] for f in ("/tmp/prs.json", "/tmp/issues.json")
+#             for o in json.load(open(f))]
+#   df = collections.Counter()
+#   for t in titles:
+#       for s in {_singular(w) for w in re.findall(r"[a-z0-9]+", t.lower())}:
+#           df[s] += 1
+#   n = len(titles)
+#   for w, c in df.most_common(120):
+#       print(f"{w:16s} {c:5d} {c / n:6.2%}")
+#   PY
+_COMMON_DOMAIN = {
+    # storage/substrate work — the #3325 false-positive class
+    "graph", "graphs", "delete", "deletes", "deleted", "deleting", "deletion",
+    # web-product surfaces shared by unrelated features
+    "session", "sessions", "dashboard", "dashboards", "onboarding",
+    "signup", "signups", "welcome", "hosted", "stale",
+    # generic software-work verbs/nouns
+    "source", "sources", "server", "servers", "search", "searches",
+    "suite", "suites", "default", "defaults", "deploy", "deploys",
+    "deployed", "deploying", "deployment", "deployments", "merge", "merges",
+    "merged", "merging", "write", "writes", "wrote", "written", "writing",
+    "audit", "audits", "audited", "auditing", "event", "events",
+    "context", "contexts", "product", "products", "object", "objects",
+    "error", "errors", "fail", "fails", "failed", "failing", "failure",
+    "failures", "monitor", "monitors", "monitoring", "migrate", "migrates",
+    "migrated", "migrating", "migration", "migrations", "cache", "caches",
+    "cached", "caching", "backup", "backups",
+}
+
+# The full set of terms that may never count toward a keyword-only hit.
+# Explicit --keywords bypass this (explicit intent wins).
+_STOPLIST = _GENERIC | _COMMON_DOMAIN
 
 # Branch-type prefixes / structural path tokens never treated as keywords.
 _STRUCTURAL = {
@@ -290,8 +361,37 @@ def _singular(token: str) -> str:
     return token[:-1]      # surfaces -> surface, checks -> check
 
 
+def _classify_title(title: str) -> tuple[list[str], list[str]]:
+    """Split a title's candidate tokens into (distinctive, suppressed-generic).
+
+    "Distinctive" = length >= 5 after plural folding and NOT in `_STOPLIST`.
+    The suppressed list is informational only (it makes the precision dial
+    legible in the report); the distinctive list is what matching uses."""
+    kept: list[str] = []
+    dropped: list[str] = []
+    for tok in re.findall(r"[A-Za-z0-9]+", title):
+        low = tok.lower()
+        if low.isdigit() or len(low) < 5:
+            continue
+        sing = _singular(low)
+        if len(sing) < 5:
+            continue
+        generic = sing if sing in _STOPLIST else (low if low in _STOPLIST else None)
+        if generic is not None:
+            if generic not in dropped:
+                dropped.append(generic)
+            continue
+        if sing not in kept:
+            kept.append(sing)
+    return kept, dropped
+
+
 def derive_keywords(title: str | None, explicit: str | None = None) -> list[str]:
-    """Issue keywords: distinctive title tokens, or explicit --keywords."""
+    """Issue keywords: DISTINCTIVE title tokens, or explicit --keywords.
+
+    Generic/process vocabulary (`_STOPLIST`) is dropped so the `--min-keywords`
+    gate counts distinctive terms rather than common engineering nouns/verbs
+    (#3325). Explicit --keywords bypass that filter (explicit intent wins)."""
     out: list[str] = []
     if explicit:
         for raw in explicit.split(","):
@@ -301,16 +401,19 @@ def derive_keywords(title: str | None, explicit: str | None = None) -> list[str]
         return out
     if not title:
         return out
-    for tok in re.findall(r"[A-Za-z0-9]+", title):
-        low = tok.lower()
-        if low.isdigit() or len(low) < 5 or low in _GENERIC:
-            continue
-        sing = _singular(low)
-        if len(sing) < 5 or sing in _GENERIC:
-            continue
-        if sing not in out:
-            out.append(sing)
-    return out
+    kept, _ = _classify_title(title)
+    return kept
+
+
+def suppressed_keywords(title: str | None) -> list[str]:
+    """Title tokens dropped as generic/cross-cutting vocabulary (#3325).
+    Purely informational — surfaced in the report so a suppressed match is
+    never silent. Explicit --keywords are never suppressed, so this is only
+    meaningful for the gh-title path."""
+    if not title:
+        return []
+    _, dropped = _classify_title(title)
+    return dropped
 
 
 def keyword_matches(text: str, keywords: list[str]) -> list[str]:
@@ -522,11 +625,35 @@ def run_preflight(
         scan_issue_surface(surfaces[SURFACE_ISSUE], issue_data)
 
     keywords = derive_keywords(title, explicit_keywords)
+    suppressed = [] if explicit_keywords else suppressed_keywords(title)
     if keywords:
-        surfaces[SURFACE_KEYWORDS].note = (
+        note = (
             "source: " + ("--keywords" if explicit_keywords else "gh issue title")
             + f"; {len(keywords)} distinctive keyword(s)"
         )
+        if suppressed:
+            note += (
+                f"; {len(suppressed)} generic term(s) excluded from the gate "
+                f"({', '.join(suppressed)})"
+            )
+        surfaces[SURFACE_KEYWORDS].note = note
+    elif explicit_keywords:
+        surfaces[SURFACE_KEYWORDS].note = (
+            "source: --keywords; 0 usable keyword(s) after parsing"
+        )
+    elif title is not None:
+        # The title WAS fetched — it simply contains no distinctive term. That
+        # is an evaluated, empty keyword dimension (number matching still runs),
+        # NOT an unqueryable surface. Conflating the two turned a title like
+        # "fix graph delete" into a spurious INCOMPLETE (exit 2) once the
+        # cross-cutting stoplist was widened (#3325).
+        surfaces[SURFACE_KEYWORDS].note = (
+            "source: gh issue title; 0 distinctive keyword(s) — every title term "
+            "is generic/cross-cutting, so keyword-only matching has no signal "
+            "(number matching is unaffected)"
+        )
+        if suppressed:
+            surfaces[SURFACE_KEYWORDS].note += f"; excluded: {', '.join(suppressed)}"
     else:
         surfaces[SURFACE_KEYWORDS].incomplete(
             "keyword-source-unavailable: gh issue title could not be fetched and "
@@ -632,7 +759,7 @@ def format_report(
     lines.append(f"repo: {repo}")
     lines.append(f"title: {title or '(unavailable)'}")
     lines.append(f"keywords: {', '.join(keywords) if keywords else '(none)'}")
-    lines.append(f"keyword gate: >= {max(1, min_keywords)} distinct keyword(s) for a keyword-only hit")
+    lines.append(f"keyword gate: >= {max(1, min_keywords)} distinct DISTINCTIVE keyword(s) for a keyword-only hit")
     lines.append("")
     lines.append(f"{'SURFACE':<24} {'STATUS':<11} {'HITS':<5} NOTE")
     for surface in ordered:
@@ -724,8 +851,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--keywords", default=None,
                         help="comma-separated keyword override when gh cannot supply the title")
     parser.add_argument("--min-keywords", type=int, default=DEFAULT_MIN_KEYWORDS,
-                        help="distinct keywords required for a keyword-only hit "
-                             f"(default {DEFAULT_MIN_KEYWORDS}; 1 disables the precision gate)")
+                        help="distinct DISTINCTIVE keywords required for a keyword-only hit "
+                             f"(default {DEFAULT_MIN_KEYWORDS}; 1 disables the count gate)")
     parser.add_argument("--gh", default=os.environ.get("COLLISION_PREFLIGHT_GH", "gh"),
                         help="gh binary (env COLLISION_PREFLIGHT_GH)")
     parser.add_argument("--git", default=os.environ.get("COLLISION_PREFLIGHT_GIT", "git"),

@@ -34,6 +34,8 @@ import { isManagedKey, durableConnectKey } from './sessionKey.js'
 import {
   canManageGraphKeys,
   deleteTypedMatches,
+  graphBackupCellState,
+  graphBackupSummary,
   graphCanDelete,
   graphKeyPanelEmptyLine,
   graphKeysSuppressed,
@@ -5217,17 +5219,30 @@ function claimIntentInFlight() {
         : (key ? { headers: { Authorization: `Bearer ${key}` } } : {}))
       if (teamIdRef.current !== _teamAtCall) return // stale switch response
       const list = b.backups || []
-      setBackupInfo(list.length ? { latest: list[0], count: list.length } : { count: 0 })
+      // #2784: retain the whole array — the Graphs tab derives a per-graph
+      // "last backup" from it. Held INSIDE backupInfo so the team-switch and
+      // logout wipes clear it with the rest of the state: a separate state
+      // would leak the previous team's default row, whose bucket key is the
+      // literal 'default' in every team. `count` semantics are untouched
+      // (the API-Keys card still reads it).
+      setBackupInfo(list.length
+        ? { latest: list[0], count: list.length, backups: list }
+        : { count: 0, backups: [] })
       setBackupsStatus('ok')
     } catch {
-      // #1923: a transient 503/network failure is TERMINAL — the Backups card
-      // flips to '—' immediately (no eternal skeleton) and the Overview loaded
-      // announce still fires. Guard on the at-call team: a stale failure from a
-      // previous team must not land under the new one. Clear any stale data too
-      // — the '—' card must never read as a previous team's count.
+      // #1923: a transient 503/network failure is TERMINAL on a first load —
+      // the Backups card flips to '—' immediately (no eternal skeleton) and the
+      // Overview loaded announce still fires. Guard on the at-call team: a
+      // stale failure from a previous team must not land under the new one.
+      // #2784 review: but a FAILED REFRESH must not destroy a payload we
+      // already hold — the Graphs-tab refetch can 503 after a good load, and
+      // blanking here would flip the Last-backup column AND the untouched
+      // API-Keys card to '—' on a blip. So the error transition only applies
+      // when nothing successful is held (switchTeam/logout already wipe first,
+      // so their '—' behaviour is unchanged).
       if (teamIdRef.current === _teamAtCall) {
-        setBackupInfo(null)
-        setBackupsStatus('error')
+        setBackupsStatus((s) => (s === 'ok' ? s : 'error'))
+        setBackupInfo((prev) => (prev && prev.backups ? prev : null))
       }
     }
   }
@@ -5733,6 +5748,27 @@ function claimIntentInFlight() {
       return iso
     }
   }
+
+  // #2784: group the backup pool once per payload (O(pool)), not per row.
+  // Declared before App's first early return (:5734) so the hook runs on
+  // every render — hooks may not be skipped by a conditional return.
+  const graphBackups = React.useMemo(
+    () => graphBackupSummary(backupInfo && backupInfo.backups), [backupInfo])
+
+  // #2784: entering the Graphs tab refreshes the pool, so the Last-backup
+  // column is not stale from login. Fires on the tab TRANSITION only — two
+  // reasons this is not keyed on `[tab, currentTeamId]` (review): (1) a team
+  // switch while this tab is open would otherwise fire a second concurrent
+  // /backups read alongside switchTeam's own load, and the two same-team
+  // responses can land out of order; (2) loadBackups is re-created every
+  // render, so listing it in the deps would refetch after its own setState —
+  // an infinite loop. The team is read from the ref at call time.
+  const prevTabForBackupsRef = React.useRef(tab)
+  React.useEffect(() => {
+    const entered = prevTabForBackupsRef.current !== 'graphs' && tab === 'graphs'
+    prevTabForBackupsRef.current = tab
+    if (entered && teamIdRef.current) loadBackups('').catch(() => {})
+  }, [tab])
 
   if (checking) {
     return (
@@ -8074,13 +8110,14 @@ function claimIntentInFlight() {
                 {graphsMeter(sortedGraphRows(graphs), team && team.max_graphs).label}
               </p>
             )}
+            <div className="graphs-table-wrap">
             <table>
-              <thead><tr><th>Name</th><th>Kind</th><th>Status</th><th>Keys</th><th><span className="sr-only">Actions</span></th></tr></thead>
+              <thead><tr><th scope="col">Name</th><th scope="col">Kind</th><th scope="col">Status</th><th scope="col">Keys</th><th scope="col">Last backup</th><th scope="col"><span className="sr-only">Actions</span></th></tr></thead>
               <tbody>
-                {graphsStatus === 'loading' && authMode === 'session' && <tr><td colSpan="5" className="dim">Loading graphs…</td></tr>}
-                {graphsStatus === 'denied' && <tr><td colSpan="5" className="dim">Graph list is only visible to members.</td></tr>}
-                {graphsStatus === 'error' && <tr><td colSpan="5" className="dim">Couldn't load graphs — check your connection and try again.</td></tr>}
-                {graphsStatus === 'ok' && graphs.length === 0 && <tr><td colSpan="5" className="dim">No graphs yet — create your first one above.</td></tr>}
+                {graphsStatus === 'loading' && authMode === 'session' && <tr><td colSpan="6" className="dim">Loading graphs…</td></tr>}
+                {graphsStatus === 'denied' && <tr><td colSpan="6" className="dim">Graph list is only visible to members.</td></tr>}
+                {graphsStatus === 'error' && <tr><td colSpan="6" className="dim">Couldn't load graphs — check your connection and try again.</td></tr>}
+                {graphsStatus === 'ok' && graphs.length === 0 && <tr><td colSpan="6" className="dim">No graphs yet — create your first one above.</td></tr>}
                 {graphsStatus === 'ok' && sortedGraphRows(graphs).map((g) => (
                   <tr key={g.graph_id} className={confirmDeleteId === g.graph_id ? 'graph-delete-arm' : undefined}>
                     <td>
@@ -8145,6 +8182,7 @@ function claimIntentInFlight() {
                         g.key_count != null ? g.key_count : '—'
                       )}
                     </td>
+                    <GraphBackupCell g={g} summary={graphBackups} status={backupsStatus} />
                     <td className="graph-actions">
                       {canManageGraphKeys(g) && (
                         <button
@@ -8194,6 +8232,7 @@ function claimIntentInFlight() {
                 ))}
               </tbody>
             </table>
+            </div>
             {/* #2701: type-to-confirm delete modal. Open only for a
                 deletable (custom) row — the default graph's 🗑 is disabled.
                 The gate is the literal word 'delete' typed by hand
@@ -8662,6 +8701,29 @@ function claimIntentInFlight() {
 
               </main>
     </div>
+  )
+}
+
+// #2784: per-graph "last backup". Its own 30s ticker (the #1894 pattern)
+// keeps the relative label true on a long-lived session; never an App-scope
+// interval — App already declares `now`, and a second interval there would
+// re-render the whole dashboard every 30s. The label text comes only from
+// graphBackupCellState: this component never invents a state claim. The cell
+// carries its own aria-label because the state's full explanation lives in the
+// tooltip, which is unreachable for keyboard/AT users on a non-focusable cell.
+function GraphBackupCell({ g, summary, status }) {
+  const [now, setNow] = React.useState(Date.now())
+  React.useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 30_000)
+    return () => clearInterval(t)
+  }, [])
+  const state = graphBackupCellState(g, summary, status, now)
+  return (
+    <td className="graph-backup" title={state.title} aria-label={state.title}>
+      <span className={state.kind === 'ok' || state.kind === 'none' ? 'small' : 'dim small'}>
+        {state.label}
+      </span>
+    </td>
   )
 }
 

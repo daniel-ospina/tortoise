@@ -61,6 +61,14 @@ class _FakeGraph:
         self.fail_delete = fail_delete
 
     def query(self, q, *a, **k):
+        # #3214: a one-shot hook that fires at the FIRST real DETACH — the
+        # deterministic stand-in for "a peer session minted a graph while the
+        # sweep was already deleting earlier ones" (a real race is not
+        # reliably reproducible in CI).
+        hook = self._db.on_first_detach
+        if hook is not None:
+            self._db.on_first_detach = None
+            hook()
         self._db.detached.append(self._name)
         return types.SimpleNamespace(result_set=[])
 
@@ -76,8 +84,17 @@ class _FakeDb:
         self.deleted: list[str] = []
         self._fail_delete = set(fail_delete)
         self.graphs: list[str] = []
+        # #3214 deterministic window hooks (both one-shot, fired once):
+        # on_list_graphs — the peer mints just as the sweep ENUMERATES;
+        # on_first_detach — the peer mints after enumeration, mid-loop.
+        self.on_list_graphs = None
+        self.on_first_detach = None
 
     def list_graphs(self):
+        hook = self.on_list_graphs
+        if hook is not None:
+            self.on_list_graphs = None
+            hook()
         return list(self.graphs)
 
     def select_graph(self, name):
@@ -193,6 +210,112 @@ def test_wipe_server_global_scope_sweeps_own_session_graphs(monkeypatch,
     db.graphs = ["test_own_graph"]
     wipe_server(_FakeProj(db), scope=None)
     assert db.detached == ["test_own_graph"], db.detached
+
+
+# ── #3214: TOCTOU in the live-peer protection ──────────────────────────────
+
+def _peer_env(monkeypatch, tmp_path, peer_nonce):
+    """Wire a LIVE peer session whose journal is ``tmp_path/{nonce}.graphs.jsonl``.
+
+    Returns the journal path so a test can write it at a CHOSEN moment — the
+    deterministic stand-in for a peer minting a graph inside the window (a
+    real race is not reliably reproducible in CI).
+    """
+    journal = tmp_path / f"{peer_nonce}.graphs.jsonl"
+    monkeypatch.setenv("TORTOISE_TEST_SESSION", "000000000000")
+    monkeypatch.setattr(
+        "tortoise.embedded_reaper.ACTIVE_SUITES_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        "tortoise.embedded_reaper.active_suite_markers",
+        lambda: [{"token": f"{os.getpid()}-{peer_nonce}",
+                  "pid": os.getpid(), "start": None}])
+    return journal
+
+
+def test_wipe_server_toctou_peer_minted_during_enumeration_is_spared(
+        monkeypatch, tmp_path):
+    """#3214: the guard snapshotted the protected set BEFORE enumerating, so
+    a peer graph minted after the snapshot but visible by delete time was
+    still swept.
+
+    The window is forced deterministically: the peer journals
+    ``test_peer_toctou_new`` the moment the sweeper calls ``list_graphs()`` —
+    i.e. after the old up-front snapshot, and before any DETACH. Pre-fix the
+    name was outside the stale snapshot and got detached; post-fix the
+    per-graph re-read sees it and spares it. A real race is not reliably
+    reproducible in CI, so an ordered fake supplies the interleaving.
+    """
+    journal = _peer_env(monkeypatch, tmp_path, "peer00000001")
+    peer_graph = "test_peer_toctou_new"
+    db = _FakeDb()
+    db.graphs = ["test_toctou_own", peer_graph]
+    db.on_list_graphs = lambda: journal.write_text(peer_graph + "\n")
+    wipe_server(_FakeProj(db), scope=None)
+    assert peer_graph not in db.detached, (
+        "a peer graph minted after the protection snapshot but visible at "
+        f"delete time must survive the scope=None sweep; detached={db.detached}")
+    assert db.detached == ["test_toctou_own"], db.detached
+
+
+def test_wipe_server_toctou_peer_minted_mid_loop_is_spared(monkeypatch,
+                                                           tmp_path):
+    """#3214 (the discriminator): the peer graph is minted AFTER enumeration —
+    while the sweeper is already DETACHing earlier graphs — and must still
+    survive.
+
+    This is why the fix re-checks PER GRAPH rather than merely re-deriving
+    the protected set once after enumerating: the loop spans one server
+    round-trip per graph, so a post-enumeration snapshot still leaves every
+    graph after the first inside the window. Here the peer journals on the
+    first DETACH, so the name falls outside ANY up-front snapshot and only a
+    re-read immediately before that graph's own DETACH can see it.
+    """
+    journal = _peer_env(monkeypatch, tmp_path, "peer00000002")
+    peer_graph = "test_peer_mid_loop"
+    db = _FakeDb()
+    db.graphs = ["test_toctou_own", peer_graph]
+    db.on_first_detach = lambda: journal.write_text(peer_graph + "\n")
+    wipe_server(_FakeProj(db), scope=None)
+    assert db.detached == ["test_toctou_own"], (
+        "a peer graph minted mid-loop must survive — only a per-graph "
+        f"re-check can see it; detached={db.detached}")
+
+
+def test_wipe_server_scope_explicit_ignores_peer_protection(monkeypatch,
+                                                            tmp_path):
+    """#3214 do-not-over-fix: an EXPLICIT scope names the caller's OWN graphs
+    (the per-test scope is journal-derived from the caller's session), so the
+    peer protection must not apply to it. #3074's protection is peer-only and
+    reaches the scope=None (server-global) sweep alone — moving the check must
+    not quietly turn explicit scopes into no-ops."""
+    journal = _peer_env(monkeypatch, tmp_path, "peer00000003")
+    shared = "test_shared_name"
+    journal.write_text(shared + "\n")
+    db = _FakeDb()
+    db.graphs = [shared]
+    wipe_server(_FakeProj(db), scope={shared})
+    assert db.detached == [shared], (
+        "a scope-explicit wipe must stay untouched by the peer guard: the "
+        f"caller's own graph is always the caller's to sweep; got {db.detached}")
+
+
+def test_live_peer_session_graphs_is_the_peer_journal_union(monkeypatch,
+                                                            tmp_path):
+    """#3214: the ownership primitive is the union of the LIVE peers' journal
+    files, and it is composed of the two layers ``wipe_server`` now uses —
+    the marker scan (``_live_peer_journal_files``, run ONCE) and the journal
+    reads (``_peer_journaled_graphs``, re-run per graph)."""
+    from tests._embedded import (
+        _live_peer_journal_files,
+        _live_peer_session_graphs,
+        _peer_journaled_graphs,
+    )
+    journal = _peer_env(monkeypatch, tmp_path, "peer00000004")
+    journal.write_text("test_peer_a\ntest_peer_b\n")
+    paths = _live_peer_journal_files()
+    assert paths == [str(journal)]
+    assert _peer_journaled_graphs(paths) == {"test_peer_a", "test_peer_b"}
+    assert _live_peer_session_graphs() == {"test_peer_a", "test_peer_b"}
 
 
 def test_wipe_server_localhost_acceptance(uri_env):
@@ -562,6 +685,67 @@ def test_journal_writer_creates_parent_dir(monkeypatch, tmp_path):
     _journal_append_product("test_ws_parent_dir")
     assert journal.exists()
     assert journal.read_text() == "test_ws_parent_dir\n"
+
+
+def test_journal_append_failure_raises_instead_of_silently_nopping(monkeypatch,
+                                                                  tmp_path):
+    """#3214: the tests-side appender swallowed the OSError at DEBUG, leaving
+    the minted graph UNOWNED — invisible to every live peer's scope=None
+    sweep, which has no record of it and may therefore delete it (the exact
+    cross-session flake #3074 exists to stop). An unjournaled graph must
+    surface as a problem, so the appender now raises at the mint site.
+
+    The failure is forced portably: the journal's PARENT path is a regular
+    file, so ``os.makedirs(..., exist_ok=True)`` raises FileExistsError.
+    """
+    from tests._embedded import _journal_append
+    blocker = tmp_path / "blocker"
+    blocker.write_text("not a directory\n")
+    monkeypatch.setattr("tests._embedded._JOURNAL_FILE",
+                        str(blocker / "session.graphs.jsonl"))
+    with pytest.raises(RuntimeError, match="UNOWNED") as ei:
+        _journal_append("test_unowned_graph")
+    assert "test_unowned_graph" in str(ei.value), (
+        "the failure must name the graph it could not record: "
+        f"{ei.value}")
+
+
+def test_journal_append_no_path_configured_still_noops(monkeypatch):
+    """#3214 do-not-over-fix: with NO journal configured the appender stays a
+    silent no-op. There is no ownership file to fail to write, and test
+    modules are imported outside sessions — failing there would be noise, not
+    protection."""
+    from tests._embedded import _journal_append
+    monkeypatch.setattr("tests._embedded._JOURNAL_FILE", "")
+    monkeypatch.delenv("TORTOISE_TEST_JOURNAL_FILE", raising=False)
+    _journal_append("test_no_journal_configured")  # must not raise
+
+
+def test_journal_append_product_failure_raises(monkeypatch, tmp_path):
+    """#3214: the PRODUCT-side writer shares the contract — its silent no-op
+    left product mint sites (``team_*``/``registry_*``) unowned in exactly the
+    same way, so it raises too. The no-op gates (no path / not a test session)
+    are unchanged, so production mints are unaffected."""
+    import tortoise.projection as proj_mod
+    blocker = tmp_path / "blocker2"
+    blocker.write_text("not a directory\n")
+    monkeypatch.setattr(proj_mod, "_journal_file_path",
+                        lambda: str(blocker / "session.graphs.jsonl"))
+    monkeypatch.setattr(proj_mod, "_TEST_SESSION_ACTIVE", True)
+    with pytest.raises(RuntimeError, match="UNOWNED") as ei:
+        proj_mod._journal_append_product("team_unowned")
+    assert "team_unowned" in str(ei.value), ei.value
+
+
+def test_journal_append_product_outside_a_test_session_still_noops(
+        monkeypatch, tmp_path):
+    """#3214 do-not-over-fix: without a configured journal path the product
+    writer is inert (production mints are unjournaled BY DESIGN) — the new
+    failure policy must not reach production code paths."""
+    import tortoise.projection as proj_mod
+    monkeypatch.setattr(proj_mod, "_TEST_SESSION_ACTIVE", True)
+    monkeypatch.setattr(proj_mod, "_journal_file_path", lambda: None)
+    proj_mod._journal_append_product("team_prod_untouched")  # must not raise
 
 
 def test_from_uri_append_gated_on_test_frame(monkeypatch, tmp_path):

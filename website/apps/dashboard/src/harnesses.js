@@ -203,7 +203,12 @@ chmod +x .claude/hooks/session-start.sh .claude/hooks/session-end.sh
 2. Create or merge .mcp.json in this project with:
 ${JSON.stringify(PI_MCP_CONFIG_ENV, null, 2)}
 3. Run: curl -fsSL ${SKILLS_INSTALL_URL} | bash -s -- --harness pi
-4. Reload Pi (run "/reload" — tortoise connects eagerly at startup).
+4. Restart Pi from a NEW terminal — quit Pi fully, open a new terminal
+   window, and start Pi there. A "/reload" is NOT enough: Pi reads the key
+   from the environment of the shell that LAUNCHED it, so a reload (or a
+   restart in the same old terminal) silently keeps the stale or empty
+   value. You get a 401, or connect to a previous organization with no
+   warning at all.
    Then call tortoise_health — when it passes, tell me "Tortoise is
    connected". The first time you write a memory or file a decision,
    onboarding auto-completes (no separate ceremony needed).`,
@@ -475,7 +480,10 @@ bearer_token_env_var = "TORTOISE_API_KEY"
    env var, never the key):
 ${JSON.stringify(PI_MCP_CONFIG_ENV, null, 2)}
 3. Run: curl -fsSL ${SKILLS_INSTALL_URL} | bash -s -- --harness pi
-4. Reload Pi (run \"/reload\" — tortoise connects eagerly at startup).
+4. Restart Pi from a NEW terminal (quit Pi fully, open a new terminal
+   window, and start Pi there). A \"/reload\" is NOT enough — Pi reads the
+   key from the environment of the shell that launched it, so a reload
+   keeps the stale or empty value.
    Then call tortoise_health — when it passes, tell me "Tortoise is
    connected".`,
   // #2865: key-less OAuth. `key` is accepted (one signature for every harness)

@@ -358,14 +358,134 @@ class TimeConstraint:
     ``kind``: "interval" | "recency" | "ordering" | None
     ``start``: ISO date (interval) | day count (recency) | None
     ``end``: ISO date (interval) | None
+    ``anchors`` (#2976): the event/entity phrases the ordering/comparison
+    shape compares ("the dog bed for Max", "the training pads for Luna").
+    Additive — the pre-#2976 consumers read only kind/start/end, so every
+    existing shape is unchanged. An empty tuple means no comparison anchor
+    was recovered; the #2976 temporal leg REQUIRES a matched anchor and
+    stays inert in that case (it never promotes on date-spread alone).
     """
     kind: str | None
     start: str | None = None
     end: str | None = None
+    anchors: tuple[str, ...] = ()
 
 
 #: recency window unit map (D5): day=1, week=7, month=30.
 _UNIT_DAYS = {"day": 1, "week": 7, "month": 30}
+
+# ── #2976: event-referenced ordering/comparison shapes ──────────────────────
+# The measured defect (issue #2976): the TR class asks "which happened first,
+# the X or the Y" / "how many days passed between A and B" — questions that
+# reference EVENTS, not dates. The pre-#2976 detector only fired on numeric
+# "N days ago" / "last N weeks" (recency) and a few literal "how many days"
+# wordings, so 34/55 temporal questions were classified None and the whole
+# time machinery stayed inert. These are closed-form morphologies (research:
+# docs/research/2026-09-08-temporal-reasoning-decomposition-assembler.md §1
+# — TEQUILA constraint rewrite / TempQuestions templates), so they are
+# detectable without an LLM. The numeric recency and explicit-interval
+# checks keep precedence for THEIR shapes; note the deliberate exception
+# documented at the interval branch below (an explicit month/day bound that
+# ALSO carries an ordering cue now classifies as interval, where pre-#2976
+# the legacy ordering triggers won).
+_ORDERING_RE = re.compile(
+    # comparison / superlative ordering: "which/who … first|second|earlier".
+    # The `[^?]{0,80}?` spans are BOUNDED and lazy: an unbounded `[^?]*`
+    # in front of an alternation backtracks super-linearly on long text
+    # (review-caught: 3.6 KB → 0.56 s). Real questions are far shorter
+    # than 80 chars between the wh-word and the ordering cue.
+    r"\b(?:which|what|who)\b[^?]{0,80}?\b(?:first|second|third|earlier"
+    r"|earliest|later|latest|most recently|more recently)\b"
+    # "which … A or B" with no superlative word
+    r"|\bwhich\b[^?]{0,80}?\bor\b"
+    # explicit order requests
+    r"|\border of\b"
+    r"|\bfrom (?:earliest|first) to (?:latest|last)\b"
+    # duration / span shapes: "how many days passed between …",
+    # "how many days before X did I …". Deliberately NOT a bare
+    # "how many … did" branch: that fires on aggregative questions with no
+    # temporal shape and only produces junk anchors (the duration-UNIT
+    # branch below plus the relative branches cover the real shapes).
+    r"|\bhow (?:many|much)\b[^?]{0,80}?\b(?:passed|elapsed|between|before"
+    r"|after|since)\b"
+    # "how many weeks/months/years …" (duration units — no verb cue
+    # needed; the optional quantifier keeps the pre-#2976 tolerance for
+    # the ungrammatical "how days")
+    r"|\bhow\s+(?:many\s+|much\s+)?(?:days?|weeks?|months?|years?|hours?"
+    r"|minutes?)\b"
+    r"|\bhow (?:long|old)\b"
+    # relative anchors
+    r"|\bago\b"
+    r"|\bsince\b"
+    r"|\bbefore\b|\bafter\b"
+    r"|\blast (?:week|month|year|weekend|night|summer|spring|fall|autumn"
+    r"|winter|monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b"
+    r"|\b(?:last|this|next)\s+(?:monday|tuesday|wednesday|thursday|friday"
+    r"|saturday|sunday)\b"
+    r"|\bmost recently\b"
+    # calendar references: a month or a named holiday behind a preposition
+    # ("in March and April", "on Valentine's day") — these name an
+    # absolute window even without a numeric date.
+    r"|\b(?:in|on|during|by|around)\s+(?:january|february|march|april|may"
+    r"|june|july|august|september|october|november|december"
+    r"|valentine'?s day|christmas|thanksgiving|halloween|easter"
+    r"|new year'?s (?:day|eve))\b"
+)
+
+#: Anchor recovery for the co-present (ordering/comparison) class. The
+#: research (§1/§2) is explicit that ordering questions need BOTH compared
+#: instances in hand (RERC reader-per-side; Mem0 state_key co-retrieval), so
+#: the leg needs the two phrases, not just "ordering" as a kind. The lazy
+#: groups are BOUNDED (`.{3,120}?`) for the same reason `_ORDERING_RE`'s
+#: spans are: an unbounded `.+?` anchored to `$` is super-linear on long
+#: text (review-caught).
+_ANCHOR_OR_RE = re.compile(r"[,:]\s*(.{3,120}?)\s+or\s+(.{3,120}?)\s*[?.]?$")
+_ANCHOR_BETWEEN_RE = re.compile(
+    r"\bbetween\s+(?:the\s+)?(.{3,120}?)\s+and\s+(?:the\s+)?"
+    r"(.{3,120}?)\s*[?.]?$")
+_ANCHOR_BEFORE_RE = re.compile(
+    r"\bbefore\s+(?:the\s+)?(.{3,80}?)(?:\s+(?:did|when|do|does)\b|[?.]|$)")
+
+
+def _extract_anchors(t: str) -> tuple[str, ...]:
+    """Recover the compared event phrases from an ordering/comparison shape.
+
+    Best-effort and deterministic (no model call):
+
+    * ``which … first, A or B``   → (A, B)
+    * ``between A and B``         → (A, B)
+    * ``before X did …``          → (X,)
+
+    Anaphoric second sides ("…and the day I received it") reduce to a
+    single content token and are DROPPED — a one-token anchor is claimed by
+    any candidate carrying that word (noise). A phrase whose tokens are ALL
+    stopwords (deictics like "today") is dropped for the same reason.
+    Returns ``()`` when nothing usable remains — the leg then stays inert
+    (it requires a matched anchor; it never promotes on date-spread alone).
+    """
+    from tortoise.temporal_leg import content_tokens
+
+    def _clean(s: str) -> str:
+        if not content_tokens(s):
+            return ""  # deictic-only phrase → no anchor signal
+        return " ".join(s.strip(" .,:;'\"").split())
+
+    m = _ANCHOR_OR_RE.search(t)
+    if m:
+        a, b = _clean(m.group(1)), _clean(m.group(2))
+        if a and b:
+            return (a, b)
+    m = _ANCHOR_BETWEEN_RE.search(t)
+    if m:
+        a, b = _clean(m.group(1)), _clean(m.group(2))
+        if a and b:
+            return (a, b)
+    m = _ANCHOR_BEFORE_RE.search(t)
+    if m:
+        a = _clean(m.group(1))
+        if a:
+            return (a,)
+    return ()
 
 
 def detect_time_constraint(text: str, *,
@@ -380,7 +500,9 @@ def detect_time_constraint(text: str, *,
     | recency   | "N days/weeks/months ago", "last N …" (unit map              | hard filter on [qdate − N_days, qdate] |
     |           |  day=1/week=7/month=30)                                      | |
     | ordering  | "how many days", "how long", "when did", bare "ago" with     | no filter — the question needs the full |
-    |           |  no numeric bound                                             | dated set to compute a span/ordering |
+    |           |  no numeric bound; #2976 adds the event-referenced shapes       | dated set to compute a span/ordering |
+    |           |  "which … first, A or B", "order of", "how many days passed     | (the #2976 temporal leg consumes the |
+    |           |  between A and B", "most recently", "last <weekday>"           |  ``anchors`` additively) |
     | None      | no match                                                     | no filter, no reorder (pure date weight) |
 
     Degradation rule: an unparseable bound (bare "ago", "how many days"
@@ -399,29 +521,58 @@ def detect_time_constraint(text: str, *,
         n = int(m.group(1) or m.group(3))
         unit = (m.group(2) or m.group(4)).rstrip("s")
         return TimeConstraint("recency", start=str(n * _UNIT_DAYS[unit]))
-    # ordering shapes: the question needs the FULL dated set — "how many
-    # days ago" with no numeric bound, "how long", "when did", bare
-    # "ago" with no bound (D5: no hard filter, no false bounds).
-    if (re.search(r"\bago\b", t)
-            or re.search(r"\bhow\s+(many\s+)?days\b", t)
-            or re.search(r"\bhow\s+long\b", t)
-            or re.search(r"\bwhen\s+did\b", t)):
-        return TimeConstraint("ordering")
     # interval: "between <Month day> and <Month day>" (year from
     # ``default_year``) or ISO "YYYY-MM-DD" bounds — explicit window.
+    # Checked BEFORE the #2976 ordering shapes because an explicit date
+    # bound is the strongest signal and the ordering regexes' relative
+    # branches ("before"/"after"/"since") would otherwise swallow a
+    # sentence like "Between June 1 and June 15 … after the meeting" into
+    # ordering + garbage anchors. NOTE: this is a deliberate, documented
+    # kind change for the overlap class (pre-#2976 the legacy ordering
+    # triggers ran first, so "How many days elapsed between June 1 and
+    # June 15?" was ordering and is now interval). It cannot starve the
+    # reader: ``_apply_time_window`` returns [] when no dated hit falls in
+    # the window and the caller then keeps the unfiltered pool
+    # (``tr_window_fallback``).
     m = re.search(
         r"between\s+(\d{4}-\d{2}-\d{2})\s+and\s+(\d{4}-\d{2}-\d{2})", t)
     if m:
         return TimeConstraint("interval", start=m.group(1), end=m.group(2))
     m = re.search(
-        r"between\s+([a-z]+)\s+(\d{1,2})\s+and\s+([a-z]+)\s+(\d{1,2})", t)
+        r"between\s+("
+        r"january|february|march|april|may|june|july|august|september|october"
+        r"|november|december)\s+(\d{1,2})\s+and\s+("
+        r"january|february|march|april|may|june|july|august|september|october"
+        r"|november|december)\s+(\d{1,2})", t)
     if m:
-        def _iso(mon: str, day: str) -> str:
-            d = datetime.strptime(f"{mon} {day} {default_year or 2026}",
-                                  "%B %d %Y")
-            return d.date().isoformat()
-        return TimeConstraint("interval", start=_iso(m.group(1), m.group(2)),
-                              end=_iso(m.group(3), m.group(4)))
+        # Month names only (never a bare `word N`) — otherwise a non-date
+        # pair like "between level 1 and level 3" would reach strptime and
+        # raise (the review-caught crash path). An UNPARSEABLE but
+        # month-shaped bound ("february 30") must also degrade, never
+        # raise: fall through to the ordering check, whose no-filter
+        # semantics are the documented degradation rule.
+        try:
+            def _iso(mon: str, day: str) -> str:
+                d = datetime.strptime(f"{mon} {day} {default_year or 2026}",
+                                      "%B %d %Y")
+                return d.date().isoformat()
+
+            _start = _iso(m.group(1), m.group(2))
+            _end = _iso(m.group(3), m.group(4))
+        except ValueError:
+            pass
+        else:
+            return TimeConstraint("interval", start=_start, end=_end)
+    # ordering shapes: the question needs the FULL dated set — "how many
+    # days ago" with no numeric bound, "how long", "when did", bare
+    # "ago" with no bound (D5: no hard filter, no false bounds). #2976
+    # extends the trigger set to the event-referenced comparison/duration
+    # morphologies ("which … first, A or B", "how many days passed
+    # between …", "most recently", "last Saturday") and recovers the
+    # compared anchor phrases for the temporal leg. Still no hard filter —
+    # the leg is an additive rerank, never a window (research §2).
+    if _ORDERING_RE.search(t) or re.search(r"\bwhen\s+did\b", t):
+        return TimeConstraint("ordering", anchors=_extract_anchors(t))
     return TimeConstraint(None)
 
 
@@ -853,6 +1004,19 @@ def retrieve_for_question(
     tr_top_k: int = DEFAULT_TR_TOP_K,
     tr_date_weight: float = 0.5,
     tr_events: bool = True,
+    # #2976: the temporal retrieval leg — tri-state (True/False explicit,
+    # None = env ``TORTOISE_LME_TEMPORAL_LEG``; only 1/true/yes/on enables
+    # — fail-safe OFF, the #1745 default decision). An ADDITIVE rerank that
+    # fuses a temporal leg (anchor co-present coverage + date/session
+    # spread, ``tortoise.temporal_leg``) into the existing RRF for the
+    # event-referenced ordering/comparison TR class; the semantic leg still
+    # supplies the candidate membership (research §2: never pre-filter).
+    # ``temporal_leg_weight`` / ``temporal_leg_limit`` override the leg's
+    # fusion weight and depth (env ``TORTOISE_LME_TEMPORAL_LEG_WEIGHT`` /
+    # ``TORTOISE_LME_TEMPORAL_LEG_LIMIT``).
+    temporal_leg: bool | None = None,
+    temporal_leg_weight: float | None = None,
+    temporal_leg_limit: int | None = None,
     # R6 (#1545): rerank knobs — the post-fusion cross-encoder + MMR stage,
     # OFF by default (the V3 baseline path is byte-identical; no rerank keys
     # off-path, D2). ``rerank`` tri-state: True/False explicit, None = env
@@ -1177,6 +1341,120 @@ def retrieve_for_question(
                 annotated = windowed
             else:
                 tr_window_fallback = True  # keep the unfiltered pool
+
+    # ── #2976: the temporal retrieval leg — an ADDITIVE rerank of the
+    # event-referenced ordering/comparison TR class ("which happened first,
+    # the X or the Y", "how many days passed between A and B"). The
+    # diagnosis: gold evidence IS in the pool but at ranks 41–120 while the
+    # reader window holds ~12–24 pure-semantic RRF items; the pre-#2976
+    # machinery never fired because those questions name events, not dates.
+    # The leg (``tortoise.temporal_leg``, pure/deterministic) promotes the
+    # best content match for each comparison anchor AND fills the remaining
+    # budget with date/session-spread evidence, then FUSES into the existing
+    # RRF as one more leg (marked in the leg trace). It NEVER filters —
+    # membership stays the semantic pool's (research §2, Mem0 read side:
+    # additive rerank, "semantic relevance always dominates").
+    #
+    # WINDOW-TAIL PLACEMENT (the structural no-harm property):
+    # ``temporal_leg_fusion_order`` fuses ``[head ids] + [picks]`` with
+    # ``ceiling = effective_top_k − limit`` and passes that ceiling as the
+    # leg's ``head`` exclusion, so a pick enters at the TAIL of the reader
+    # window, is never double-counted in the leg list, and cannot displace
+    # the visible head. Placement is structural, not a measured win: the
+    # near-ceiling TF-IDF proxy in ``temporal_leg_replay.py`` scores the
+    # rank-0 counterfactual equal-or-better, so that A/B belongs to the
+    # eval lane against the real 0/52 base — see ``tortoise/temporal_leg.py``
+    # for the measured table and the argument.
+    #
+    # The arm is env/flag-driven from this harness (``TORTOISE_LME_TEMPORAL_LEG``
+    # or the explicit kwarg); ``tools/longmem_eval/run.py`` threads it via
+    # the environment and stamps the resolved value into the run fingerprint
+    # (``_build_fingerprint``) so a checkpoint cannot be resumed across arm
+    # states. CLI-flag threading is the documented follow-up.
+    #
+    # Fail-safe OFF: explicit flag > env ``TORTOISE_LME_TEMPORAL_LEG`` >
+    # OFF; a question with no temporal constraint, a non-TR question, or a
+    # pool with no dated/anchor-relevant candidates leaves the fused order
+    # byte-identical. ──
+    if temporal_leg is not None:
+        temporal_leg_on = temporal_leg
+    else:
+        from .rerank import _TRUTHY as _TL_TRUTHY
+        _tl_env = (os.environ.get("TORTOISE_LME_TEMPORAL_LEG") or "")
+        temporal_leg_on = _tl_env.strip().lower() in _TL_TRUTHY
+    # Resolve the weight BEFORE the gate so the telemetry field has ONE
+    # meaning across both shapes: "the weight the leg runs with", with 0.0
+    # meaning the arm is off (never "0.0 as a placeholder vs 1.0 as the
+    # real value" depending on which branch built the dict).
+    if temporal_leg_on:
+        from tortoise.temporal_leg import (
+            DEFAULT_TEMPORAL_LEG_WEIGHT as _TL_W_DEFAULT,
+        )
+
+        from .rerank import _env_float as _tl_env_float
+        _tl_weight = (
+            temporal_leg_weight if temporal_leg_weight is not None
+            else _tl_env_float("TORTOISE_LME_TEMPORAL_LEG_WEIGHT",
+                               _TL_W_DEFAULT))
+    else:
+        _tl_weight = 0.0
+    temporal_leg_stats: dict[str, Any] = {
+        "on": temporal_leg_on, "applied": False, "kind": None,
+        "anchors": [], "picks": 0, "dated": 0, "leg": [],
+        "ceiling": 0, "weight": _tl_weight,
+    }
+    if (temporal_leg_on and is_tr and annotated
+            and tr_constraint is not None and tr_constraint.kind):
+        from tortoise.temporal_leg import (
+            DEFAULT_TEMPORAL_LEG_BUCKET_CAP,
+            DEFAULT_TEMPORAL_LEG_LIMIT,
+            effective_promotion_budget,
+            temporal_leg_empty_reason,
+            temporal_leg_fusion_order,
+        )
+
+        from .rerank import _env_int
+        _tl_limit = (
+            temporal_leg_limit if temporal_leg_limit is not None
+            else _env_int("TORTOISE_LME_TEMPORAL_LEG_LIMIT",
+                          DEFAULT_TEMPORAL_LEG_LIMIT))
+        # report the CLAMPED budget the fused caller actually used (the
+        # stats block is the ON/OFF reconstruction surface — never report a
+        # knob value that was silently clamped away).
+        _tl_limit = effective_promotion_budget(effective_top_k, _tl_limit)
+        _tl_order, _tl_picks = temporal_leg_fusion_order(
+            annotated, anchors=tr_constraint.anchors,
+            window=effective_top_k, limit=_tl_limit,
+            bucket_cap=DEFAULT_TEMPORAL_LEG_BUCKET_CAP,
+            weight=_tl_weight)
+        _tl_dated = sum(1 for h in annotated if h.get("session_date"))
+        temporal_leg_stats = {
+            "on": True,
+            "applied": bool(_tl_picks),
+            "kind": tr_constraint.kind,
+            "anchors": list(tr_constraint.anchors),
+            "picks": len(_tl_picks),
+            "ceiling": max(effective_top_k - _tl_limit, 0),
+            "dated": _tl_dated,
+            "leg": list(_tl_picks),
+            "weight": _tl_weight,
+        }
+        if _tl_picks:
+            _tl_by_id = {h["id"]: h for h in annotated}
+            annotated = [_tl_by_id[pid] for pid in _tl_order
+                         if pid in _tl_by_id]
+            legs.append({"leg": "temporal", "ran": True, "degraded": False,
+                         "reason": None, "count": len(_tl_picks)})
+        else:
+            # honest trace reason — the five distinct empty-leg causes
+            # (never launder a budget/anchor/weight miss as "no dates").
+            legs.append({"leg": "temporal", "ran": True, "degraded": False,
+                         "reason": temporal_leg_empty_reason(
+                             dated=_tl_dated,
+                             anchors=len(tr_constraint.anchors),
+                             weight=_tl_weight,
+                             budget=_tl_limit),
+                         "count": 0})
 
     # ── deduped pool (the retrieval contract: ret["hits"] == pool) ──
     pool = _dedup_pool(annotated, max_chunks_per_session=max_chunks_per_session)
@@ -1697,6 +1975,11 @@ def retrieve_for_question(
         # (never starve the reader into abstention).
         "tr_constraint": tr_constraint.kind if tr_constraint else None,
         "tr_window_fallback": tr_window_fallback,
+        # #2976: the temporal retrieval leg arm — the resolved tri-state bool
+        # + per-outcome markers (kind / recovered anchor phrases / leg depth
+        # / dated-pool size) so the A/B is reconstructable per question
+        # (identical questions, leg ON vs OFF).
+        "temporal_leg_stats": temporal_leg_stats,
         # R3 (#1542) D3: write-time embedding coverage (observable dense leg).
         "points_total": total_pts,
         "points_embedded": embedded_pts,
