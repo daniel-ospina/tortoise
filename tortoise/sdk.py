@@ -12152,7 +12152,12 @@ class TortoiseSDK:
             decisions / EP-tagged claims ('we already decided this'). Hits must
             clear a relevance gate (measured belief >= 0.5, or >= 2 shared tokens
             with the query) — otherwise the stage reports no matches instead of
-            counting false positives.
+            counting false positives. Gate-passing hits are then re-ranked
+            (#3277) so an EP-confirmed claim WITH incoming evidence precedes
+            unmeasured lexical matches BEFORE `[:limit]` — the shipped default
+            limit=2 otherwise truncated the 'we already decided this' signal
+            away (see `_issue_insight_measured_ep`'s #3276 caveats: the
+            predicate does not prove measurement).
           * Repo (when repo= given): structural count of indexed GitHub
             observation points for that repo (source='github').
         Fail-closed: empty graph -> no_prior_knowledge; repo given + graph
@@ -12183,7 +12188,14 @@ class TortoiseSDK:
             semantic_hits = [
                 h for h in semantic_hits
                 if self._issue_insight_relevant(h, text)
-            ][:limit]
+            ]
+            # #3277: re-rank BEFORE truncating — retrieval order is
+            # mode-dependent (#3254/#2573), so two unmeasured lexical matches
+            # can precede a measured EP-confirmed claim and [:limit] at the
+            # shipped default (2) then drops the decision entirely. See
+            # _issue_insight_rank; the [:limit] cap still holds (reorder, not
+            # exempt), so `data_points <= limit` is preserved.
+            semantic_hits = self._issue_insight_rank(semantic_hits)[:limit]
 
         repo_points: list[dict] = []
         if repo:
@@ -12285,6 +12297,91 @@ class TortoiseSDK:
         q_tokens = set(self._ISSUE_INSIGHT_TOKEN_RE.findall(query_text.lower()))
         c_tokens = set(self._ISSUE_INSIGHT_TOKEN_RE.findall((hit.get("content") or "").lower()))
         return len(q_tokens & c_tokens) >= self._ISSUE_INSIGHT_MIN_SHARED_TOKENS
+
+    def _issue_insight_measured_ep(self, hit: dict) -> bool:
+        """#3277 — rank predicate: does this hit carry an EP belief signal AND
+        incoming structural evidence?
+
+        Deliberately STRICTER than `_issue_insight_relevant`'s first branch:
+        ``has_ep`` AND ``confidence_mean >= 0.5`` **plus** real incoming
+        IMPL/NAND evidence (``ep.evidence.total > 0``).
+
+        The evidence requirement is the #3276 guard, and its LIMITS must be
+        stated plainly (the ep payload carries no posterior-vs-prior flag):
+          * it rejects the EDGELESS kind-prior false positive — a never-measured
+            decision whose only signal is the kind-derived Beta(3,1) prior
+            reads ``has_ep=True`` at 0.75 with ``evidence.total == 0``, which
+            ``has_ep AND >= 0.5`` alone would count as 'we already decided
+            this';
+          * it does NOT prove measurement: an unmeasured decision that HAS an
+            incoming edge also clears it (``total > 0``). Distinguishing that
+            case from a genuinely measured claim requires #3276's
+            measurement-derived ``has_ep`` / a posterior flag — explicitly out
+            of scope here.
+        Behaviour vs #3276:
+          * pre-#3276  → edgeless kind-prior false positives are rejected; the
+            edge-having kind-prior case is NOT (undecidable from the payload);
+          * post-#3276 → ``has_ep`` becomes measurement-derived, so no kind
+            prior clears this predicate at all.
+        A genuinely measured claim whose belief came from an OUTGOING edge, or
+        an explicit edgeless EP seed, is NOT boosted (``evidence`` counts
+        incoming edges only). That is the deliberate fail-safe direction —
+        never invent a 'decided' signal. The residual BECOMES CLOSEABLE once
+        #3276 lands: with measurement-derived ``has_ep`` the evidence
+        requirement could then be relaxed (dropping it is the follow-up change
+        in this predicate), which would boost edgeless measured claims. It is
+        never dropped by the RANKING: the relevance gate still admits it on
+        lexical overlap, it just keeps retrieval order (and therefore remains
+        subject to `[:limit]`).
+        """
+        ep = hit.get("ep")
+        if ep is None or not ep.get("has_ep"):
+            return False
+        mean = ep.get("confidence_mean")
+        try:
+            if mean is None or float(mean) < self._ISSUE_INSIGHT_MIN_EP_CONFIDENCE:
+                return False
+        except (TypeError, ValueError):
+            return False
+        evidence = ep.get("evidence") or {}
+        try:
+            return int(evidence.get("total") or 0) > 0
+        except (TypeError, ValueError):
+            return False
+
+    def _issue_insight_rank(self, hits: list[dict]) -> list[dict]:
+        """#3277 — stable, deterministic re-rank: EP-confirmed claims first.
+
+        `tortoise_fts_query` returns hits in retrieval order, which is
+        mode-dependent (dense/RRF vs sparse lane with no dense leg —
+        #3254/#2573). This sort makes the head of the list mode-independent for
+        the confirmed claim and uses a total, deterministic key:
+
+          1. hits clearing `_issue_insight_measured_ep` (EP belief signal +
+             incoming structural evidence; see its #3276 caveats) come first;
+          2. among them, higher belief mean first (mode-independent);
+          3. the hit's original retrieval index — the deterministic tie-break,
+             so equal-belief confirmed hits and the whole unmeasured tail keep
+             their relevance order (never set/hash order).
+
+        Truncation happens AFTER this rank, so the documented
+        ``data_points <= limit`` contract is preserved (reorder, not exempt):
+        the highest-belief confirmed claim is index 0 in every EP-ANNOTATED
+        retrieval mode (dense leg present or absent), and therefore survives the
+        shipped default ``limit=2``. A lower-belief confirmed claim, and the
+        whole unmeasured tail, remain subject to the cap as before. In the true
+        ``ep=None`` TF-IDF fallback there is no EP-confirmed claim to rank, so
+        the predicate is inert and retrieval order is unchanged.
+        """
+        def _key(item: tuple[int, dict]):
+            idx, hit = item
+            if self._issue_insight_measured_ep(hit):
+                # `confidence_mean` is already a float here (the predicate
+                # float()-validated it), so no defensive branch is reachable.
+                return (0, -float((hit.get("ep") or {}).get("confidence_mean")), idx)
+            return (1, 0.0, idx)
+
+        return [hit for _, hit in sorted(enumerate(hits), key=_key)]
 
     # ── Ask-path hit annotation (#1987 Task 4) ──────────────────
 
