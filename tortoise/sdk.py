@@ -2406,14 +2406,15 @@ class TortoiseSDK:
         # rather than fabricate.
         _session_id = props.get("session_id")
         if not props.get("extractedFrom"):
+            # #3263: branch on TYPE, not truthiness. The contract is "a
+            # non-empty string can name a Source", so anything else that is
+            # present is a caller error worth surfacing — `0`, `0.0` and
+            # `False` are neither strings nor absence, and keying on truthiness
+            # silently skipped them (re-review P2). `None` alone means "no
+            # session context" and stays silent.
             if isinstance(_session_id, str) and _session_id.strip():
                 props["extractedFrom"] = f"session:{_session_id}"
-            elif _session_id:
-                # Covers non-str scalars (123) and blank strings alike — the
-                # contract is "a non-empty string can name a Source", so say
-                # THAT rather than mislabelling an int as non-scalar (review
-                # P2/#3263). A falsy id ('' / None) is a deliberate absence, not
-                # an error, and stays silent.
+            elif _session_id is not None:
                 _logger.warning(
                     "create_point: session_id=%r is not a non-empty string — "
                     "provenance not inferred (pass extractedFrom explicitly); "
@@ -2558,21 +2559,30 @@ class TortoiseSDK:
                 # context it already carries the edge. Retrofitting provenance
                 # onto an existing Point needs a journaled path, which does not
                 # exist yet — tracked separately (#3292).
-                if props.pop("extractedFrom", None) is not None:
-                    # WARNING, not DEBUG: the commit-level claim is that this is
-                    # not a silent no-op, and at the shipped default (WARNING)
-                    # a debug line is invisible. The adjacent, strictly-less-
-                    # consequential credibility skip on this same branch also
-                    # warns — match it (review P2/#3263).
-                    _logger.warning(
-                        "create_point dedup hit on %s: extractedFrom not applied "
-                        "— update_point cannot wire the Source edge and the value "
-                        "is not replayed, so applying it would diverge live from "
-                        "rebuild. Retrofitting provenance onto an existing Point "
-                        "needs a journaled path (#3292); pass the ref on the "
-                        "FIRST write, or re-create the Point",
-                        pid,
-                    )
+                _dropped_ef = props.pop("extractedFrom", None)
+                if _dropped_ef is not None:
+                    # #3263 (re-review P2): warn only when provenance is
+                    # ACTUALLY missing. On the advertised idempotent re-ingest
+                    # path (ingest always calls create_point(dedup=True, …)) the
+                    # dedup hit legitimately re-supplies the same ref and the
+                    # Point already carries the edge — warning there both floods
+                    # the log on every re-ingest and asserts the opposite of the
+                    # graph state. Stay silent when the invariant holds.
+                    _has_edge = bool(proj.g.query(
+                        "MATCH (p:Point {id:$id})-[:extractedFrom]->(:Source) "
+                        "RETURN count(*)",
+                        params={"id": pid}).result_set[0][0])
+                    if not _has_edge:
+                        _logger.warning(
+                            "create_point dedup hit on %s: extractedFrom not "
+                            "applied — the Point has NO Source edge, and "
+                            "update_point cannot wire one (the value is not "
+                            "replayed, so applying it would diverge live from "
+                            "rebuild). Retrofitting provenance onto an existing "
+                            "Point needs a journaled path (#3292); pass the ref "
+                            "on the FIRST write, or re-create the Point",
+                            pid,
+                        )
                 if props:
                     # Only touch the existing point when the caller passed
                     # other props — a pure dedup hit (no props) must not bump
@@ -5763,10 +5773,14 @@ class TortoiseSDK:
                 "id": props.get("id"),
                 "content": props.get("content"),
                 "pointKind": props.get("pointKind"),
-                # #3263: str for a single source, list[str] when the Point was
-                # extracted from several (many→many). The EDGES are the
-                # authoritative surface — this is the raw node prop, so callers
-                # must not assume a string.
+                # #3263: a str when a single string is passed (this includes
+                # the inference path, and an explicit scalar); a list whenever a
+                # SEQUENCE is passed — even a one-element one, which is NOT
+                # collapsed. So `extractedFrom='x'` → str, `['x']` → ['x'].
+                # Arrays are not equality-matchable (see entities.py), so a
+                # caller wanting `WHERE n.extractedFrom = '<url>'` must pass the
+                # scalar. The EDGES are the authoritative surface either way —
+                # this is the raw node prop, so callers must not assume a str.
                 "provenance": props.get("provenance")
                 or props.get("extractedFrom"),
                 "dedup_context": dedup_context,
@@ -6635,6 +6649,34 @@ class TortoiseSDK:
                                f"calibrated-pipeline-write-only — ingest never "
                                f"writes calibrated confidence",
                 })
+            # #3263 (re-review P2): every provenance ref must be a non-empty
+            # string. Validated HERE because Phase 1 rejection is free, whereas
+            # reaching Phase 2 with a non-string element either raises a raw
+            # ResponseError AFTER earlier sections committed (partial write —
+            # the same zero-mutation invariant the content check above
+            # protects) or silently mints a Source whose url is an array.
+            # An empty LIST is allowed (explicit "no provenance" == absent).
+            ef = item.get("extractedFrom")
+            if ef is not None:
+                # NB: a distinct sentinel, not ``None`` — ``None`` is itself a
+                # bad element, so ``next(gen, None)`` cannot tell "found the bad
+                # value None" from "found nothing", and let ["s1", None]
+                # through to a raw ResponseError.
+                _no_bad = object()
+                if isinstance(ef, (list, tuple)):
+                    bad_ef = next(
+                        (x for x in ef
+                         if not (isinstance(x, str) and x.strip())), _no_bad)
+                else:
+                    bad_ef = (_no_bad if (isinstance(ef, str) and ef.strip())
+                              else ef)
+                if bad_ef is not _no_bad:
+                    violations.append({
+                        "section": section, "index": index,
+                        "message": f"ingest: points[{index}] extractedFrom must "
+                                   f"be a non-empty string or a list of "
+                                   f"non-empty strings (got {ef!r})",
+                    })
         elif section == "sources":
             url = item.get("url")
             if not url or not isinstance(url, str):
@@ -7799,18 +7841,33 @@ class TortoiseSDK:
                 if rel == "extractedFrom":
                     # (Point)-[:extractedFrom]->(Source) — MERGE-based, so
                     # re-ingest is safe. Source side resolves by url/ref.
-                    existed = proj.g.query(
-                        "MATCH (n:Point {id:$pid})-[:extractedFrom]->"
-                        "(s:Source {url:$url}) RETURN count(*)",
-                        params={"pid": src, "url": dsts[0]},
-                    ).result_set
-                    if not existed or not existed[0][0]:
-                        proj._link_source(src, dsts[0])
-                        created["connections"] += 1
-                    else:
-                        deduped["connections"] += 1
-                    conn_result = {"relation": rel, "from": src, "to": dsts[0],
-                                   "deduped": bool(existed and existed[0][0])}
+                    # #3263 (re-review P2): `to` may be multi-valued — a claim
+                    # extracted from several sources. Fan out over EVERY target;
+                    # handling only dsts[0] silently dropped the rest and
+                    # undercounted created/deduped, on the surface this change
+                    # set amended to many→many.
+                    first_existed = None
+                    for dst in dsts:
+                        existed = proj.g.query(
+                            "MATCH (n:Point {id:$pid})-[:extractedFrom]->"
+                            "(s:Source {url:$url}) RETURN count(*)",
+                            params={"pid": src, "url": dst},
+                        ).result_set
+                        hit = bool(existed and existed[0][0])
+                        if hit:
+                            deduped["connections"] += 1
+                        else:
+                            proj._link_source(src, dst)
+                            created["connections"] += 1
+                        if first_existed is None:
+                            first_existed = hit
+                    # Preserve the historical shape for the scalar case so
+                    # existing consumers/tests see an unchanged `to`.
+                    conn_result = {
+                        "relation": rel, "from": src,
+                        "to": dsts[0] if len(dsts) == 1 else list(dsts),
+                        "deduped": bool(first_existed),
+                    }
                 else:
                     existed = proj.g.query(
                         f"MATCH (a)-[r:{rel}]->(b) "

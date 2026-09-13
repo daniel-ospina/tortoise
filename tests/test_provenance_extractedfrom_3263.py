@@ -19,6 +19,7 @@ FTS/vector leg needed).
 """
 from __future__ import annotations
 
+import logging
 import os
 import sys
 from pathlib import Path
@@ -343,3 +344,112 @@ def test_bundle_extractedfrom_list_of_local_refs_links_the_real_sources(prov):
     invented = proj.g.query(
         "MATCH (s:Source) WHERE s.url IN ['s1', 's2'] RETURN s.url").result_set
     assert invented == [], f"invented Sources minted from local refs: {invented}"
+
+
+# ── cycle-3: bundle validation, connection fan-out, warning gating ────────
+
+
+def test_bundle_rejects_non_string_extractedfrom_element(prov):
+    """Phase 1 must reject a malformed ``extractedFrom`` while rejection is
+    still free. A non-string element either raised a raw ResponseError from
+    Phase 2 AFTER earlier sections had committed (a partial write, violating
+    the zero-mutation invariant) or silently minted a Source whose url was an
+    array.
+    """
+    sdk, _events = prov
+    for bad in ([['s1']], ["s1", None], "   ", [""]):
+        bundle = {
+            "points": [{"ref": "p1", "kind": "claim", "content": "claim",
+                        "extractedFrom": bad}],
+            "sources": [{"ref": "s1", "url": "https://real.example/one",
+                         "sourceKind": "report"}],
+            "connections": [],
+        }
+        with pytest.raises(Exception, match="extractedFrom"):
+            sdk.ingest(bundle)
+    # And nothing was committed by the rejected bundles.
+    assert _provenance(sdk._get_proj()) == set()
+
+
+def test_bundle_empty_extractedfrom_list_is_allowed(prov):
+    """An empty list is explicit "no provenance" — equivalent to absent, not
+    an error (guards against the validation over-reaching)."""
+    sdk, _events = prov
+    bundle = {
+        "points": [{"ref": "p1", "kind": "claim", "content": "no prov",
+                    "extractedFrom": []}],
+        "sources": [], "connections": [],
+    }
+    sdk.ingest(bundle)
+    assert _provenance(sdk._get_proj()) == set()
+
+
+def test_bundle_connection_extractedfrom_fans_out_to_every_target(prov):
+    """The connection surface is the second documented way to express
+    provenance refs. With a multi-target ``to`` it linked only ``dsts[0]`` —
+    silently dropping the rest, with no error and no counter signal — on the
+    very surface this change set amended to many→many.
+    """
+    sdk, _events = prov
+    bundle = {
+        "points": [{"ref": "p1", "kind": "claim", "content": "couch claim"}],
+        "sources": [
+            {"ref": "s1", "url": "https://real.example/one",
+             "sourceKind": "report"},
+            {"ref": "s2", "url": "https://real.example/two",
+             "sourceKind": "report"},
+        ],
+        "connections": [
+            {"ref": "c1", "from": "p1", "to": ["s1", "s2"],
+             "relation": "extractedFrom"},
+        ],
+    }
+    res = sdk.ingest(bundle)
+    urls = {url for (_pid, url, _kind) in _provenance(sdk._get_proj())}
+    assert urls == {"https://real.example/one", "https://real.example/two"}, \
+        f"multi-target extractedFrom connection lost a source: {urls}"
+    assert res["created"]["connections"] == 2
+
+
+def test_reingest_does_not_warn_about_provenance(prov, caplog):
+    """Re-ingest is advertised as safe/MERGE-based. The dedup skip used to
+    WARN unconditionally — one false warning per Point per re-ingest (the eval
+    lane re-ingests corpora), asserting the opposite of the graph state, since
+    the Point already carries the edge.
+    """
+    sdk, _events = prov
+    bundle = {
+        "points": [{"ref": "p1", "kind": "claim", "content": "idempotent claim",
+                    "extractedFrom": "session:sess-re"}],
+        "sources": [], "connections": [],
+    }
+    sdk.ingest(bundle)
+    with caplog.at_level(logging.WARNING):
+        sdk.ingest(bundle)
+    noise = [r.getMessage() for r in caplog.records
+             if "extractedFrom not applied" in r.getMessage()]
+    assert noise == [], f"spurious provenance warning on re-ingest: {noise}"
+
+
+def test_dedup_hit_without_the_edge_DOES_warn(prov, caplog):
+    """The flip side: when the Point genuinely has no Source edge, the skip is
+    consequential and must be visible at the shipped default level."""
+    sdk, _events = prov
+    content = "warn-me claim"
+    sdk.create_point("statement", content, dedup=True)          # no source ctx
+    with caplog.at_level(logging.WARNING):
+        sdk.create_point("statement", content, session_id="sess-w",
+                         dedup=True)
+    hits = [r.getMessage() for r in caplog.records
+            if "extractedFrom not applied" in r.getMessage()]
+    assert hits, "missing-edge dedup skip must warn"
+
+
+def test_falsy_non_string_session_id_warns(prov, caplog):
+    """`0`/`False` are neither strings nor absence. Keying the guard on
+    truthiness silently skipped them, contradicting the stated rule."""
+    sdk, _events = prov
+    with caplog.at_level(logging.WARNING):
+        sdk.create_point("statement", "zero session id", session_id=0)
+    assert any("not a non-empty string" in r.getMessage()
+               for r in caplog.records), "falsy non-string session_id was silent"
