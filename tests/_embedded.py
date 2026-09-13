@@ -431,8 +431,10 @@ def _journal_append(name: str) -> None:
         raise RuntimeError(
             f"session journal append failed for {name!r} ({path!r}): {e!r} — "
             f"the graph is minted but UNOWNED: a live peer's scope=None "
-            f"sweep has no record of it and may delete it (#3214). Refusing "
-            f"to continue with an unprotected graph."
+            f"sweep has no record of it and may delete it (#3214). Stopping "
+            f"at the first mint whose ownership could not be recorded; the "
+            f"caller must drop any graph it already created (see #3390 for "
+            f"the write-ahead fix)."
         ) from e
 
 

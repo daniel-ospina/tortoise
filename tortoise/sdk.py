@@ -2058,7 +2058,7 @@ class TortoiseSDK:
                 registry_name = f"{ns}_control_plane"
             else:
                 registry_name = "control_plane"
-            self._registry_g = proj.db.select_graph(registry_name)
+            registry_graph = proj.db.select_graph(registry_name)
             # Epic #1647 (CI P2): the registry name derived from a TEST graph
             # is `{ns}_{test_graph}_control_plane` — NOT test-prefixed (starts
             # with registry_/ns_), so wipe_server's test-prefix filter skips
@@ -2069,6 +2069,13 @@ class TortoiseSDK:
             # outside a test session).
             from tortoise.projection import _journal_append_product
             _journal_append_product(registry_name)
+            # #3214 (review P2): cache the handle only AFTER the append
+            # succeeds. select_graph is client-side (no server call), so a
+            # raise above mints nothing — but caching first left a
+            # half-initialized handle whose next call would return it and skip
+            # both the journal and the indexes, minting the registry graph
+            # UNOWNED (the E2E-7 leak this append exists to stop).
+            self._registry_g = registry_graph
             self._ensure_registry_indexes()
         return self._registry_g
 
@@ -14657,7 +14664,28 @@ class TortoiseSDK:
             # longer accumulate on the docker. No-op outside test sessions
             # (journal env absent).
             from tortoise.projection import _journal_append_product
-            _journal_append_product(graph_name)
+            try:
+                _journal_append_product(graph_name)
+            except Exception:
+                # #3214 (review P2): the append raising means the team graph
+                # created immediately above cannot be recorded as this
+                # session's — no sweep can attribute it, so the raise must
+                # not itself leave an UNOWNED graph behind. Drop it (the
+                # same select_graph(...).delete() rollback the hosted mint
+                # paths use) before re-raising; the outer handler below rolls
+                # the registry Team node back. Best-effort: if the drop fails
+                # too (the backend fault that broke the append), the graph
+                # survives and is named in the WARNING. The general fix —
+                # journal BEFORE the CREATE at every mint site — is #3390.
+                try:
+                    team_graph.delete()
+                except Exception as _drop_err:  # noqa: BLE001, RUF100
+                    _logger.warning(
+                        "unjournalable team graph %s could not be dropped "
+                        "after the journal append failed — it is UNOWNED "
+                        "and must be removed manually: %r",
+                        graph_name, _drop_err)
+                raise
             # Graph node (team→graph 1:N, product ontology): the default graph
             self._graph_create(tid, "default", kind="default", namespace=graph_name)
             # #1748: the owner Membership for the session user — INSIDE the

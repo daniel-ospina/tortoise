@@ -458,6 +458,50 @@ def test_team_create_journals_minted_graph(tmp_path, monkeypatch):
         sdk.close()
 
 
+def test_team_create_drops_the_graph_when_the_journal_append_fails(
+        tmp_path, monkeypatch):
+    """#3214 (review P2): the journal append IS the ownership record, so its
+    failure must not leave the just-minted team graph behind — the raise is
+    only honest if it is not itself a leak.
+
+    The append is forced to fail for the TEAM graph only (the registry append
+    must succeed, or _get_registry would raise before anything is created —
+    that call site's own contract is that a raise there mints nothing). Then
+    assert: the raise propagated, the ``team_{name}`` graph is GONE (post-fix
+    the failure path calls ``team_graph.delete()``; pre-fix it survived with
+    no ownership record, and no sweep could attribute it), and the registry
+    Team node was rolled back by team_create's own handler.
+    """
+    import tortoise.projection as proj_mod
+    from tortoise.sdk import TortoiseSDK
+
+    journal = tmp_path / "team-create-fail.graphs.jsonl"
+    monkeypatch.setenv("TORTOISE_TEST_JOURNAL_FILE", str(journal))
+
+    real_append = proj_mod._journal_append_product
+
+    def _fail_team_only(graph_name):
+        if graph_name == "team_unjournalled":
+            raise RuntimeError(f"forced append failure for {graph_name!r}")
+        return real_append(graph_name)
+
+    monkeypatch.setattr(proj_mod, "_journal_append_product", _fail_team_only)
+    sdk = TortoiseSDK(str(tmp_path / "team-create-fail.db"))
+    try:
+        with pytest.raises(RuntimeError, match="forced append failure"):
+            sdk.team_create("unjournalled")
+        assert "team_unjournalled" not in (sdk._get_proj().db.list_graphs() or []), \
+            "team_create must DROP the graph whose ownership it could not record"
+        rows = sdk._get_registry().query(
+            "MATCH (t:Team {name:$n}) RETURN count(t)",
+            params={"n": "unjournalled"},
+        ).result_set
+        assert rows[0][0] == 0, \
+            "the registry Team node must be rolled back by team_create"
+    finally:
+        sdk.close()
+
+
 # ── Issue #2203: terminating signals must close embedded servers ─────────
 #
 # Regression tests for the #2203 fix (signal guard in embedded_lifecycle +
