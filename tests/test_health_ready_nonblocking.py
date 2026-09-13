@@ -191,8 +191,13 @@ def _fly_check_budget_proxy_s() -> float | None:
     # it times a KERNEL accept, not an application response, so borrowing it
     # as a /health/ready budget proxy would be a different quantity entirely
     # (and smaller than the ready worst case, so it cannot serve as a ceiling).
-    # There is consequently NO HTTP-check budget to compare against until the
-    # deferred top-level [checks.loop_liveness] lands (#2850 follow-up).
+    # There is consequently NO HTTP-check budget left to compare against here.
+    # The deferred top-level ``[checks.loop_liveness]`` does NOT restore one:
+    # it is a loop-liveness check (fly.toml documents its timeout as 5s, below
+    # the ~11.6s sum), it is a TOP-LEVEL ``[checks]`` entry rather than a
+    # ``services[0].http_checks`` one, and this reader does not consume it. The
+    # cross-endpoint bound now lives in ``READY_WORST_CASE_BUDGET_S``, and the
+    # caller's else branch fails closed if any top-level ``[checks]`` appears.
     if "http_checks" not in svc:
         return None
     try:
@@ -205,13 +210,15 @@ def _fly_check_budget_proxy_s() -> float | None:
         ) from exc
     try:
         raw_text = str(raw).strip()
-        # ``removesuffix``, not ``rstrip("s")``: rstrip strips a CHARACTER SET, so
-        # "15ss" -> "15" and "  15s" -> "  15" were silently ACCEPTED as valid
-        # durations. Only an exact single trailing unit is a Fly duration.
+        # Strip a SINGLE trailing unit; only an exact one is a Fly duration.
         if raw_text.endswith("s"):
             raw_text = raw_text[:-1]
-        # The numeric tail must be a plain decimal; float() alone also accepts
-        # "1_000", "1e3", "inf" and "nan".
+        # Reject anything that is not a plain decimal. The old
+        # ``float(str(raw).rstrip("s"))`` was far too lenient: ``rstrip`` strips
+        # a CHARACTER SET, so "15ss" -> "15", and ``float`` also accepts
+        # "1_000" and "1e3". Leading/trailing whitespace IS still trimmed
+        # before this check (deliberate normalization of a TOML string); the
+        # point of the regex is the numeric shape, not the padding.
         assert re.fullmatch(r"\d+(?:\.\d+)?", raw_text), (
             f"fly.toml http_check timeout {raw!r} is not a plain duration — the "
             "cross-endpoint ceiling is being silently disarmed"
@@ -335,14 +342,21 @@ def test_each_plane_bound_sits_above_its_own_client_timeout(monkeypatch):
     default — that is per-phase too, which is why the probe overrides it
     per-request rather than relying on it.)
 
-    2026-09-13 (#3458): the cross-endpoint ceiling
-    (``ready_worst_case < fly.toml's http_check timeout``) is now CONDITIONAL.
-    #2850 removed ``[[services.http_checks]]`` from fly.toml (the /health HTTP
-    check flapped and de-registered the sole machine), so the borrowed quantity
-    no longer exists. When it is absent the test asserts instead that its
-    documented replacement (``[[services.tcp_checks]]``) IS present — so the
-    branch is a positive assertion, never a silent skip — and the ceiling
-    re-arms automatically if an HTTP check budget ever returns.
+    2026-09-13 (#3458): the cross-endpoint ceiling is asserted in TWO parts.
+    (1) UNCONDITIONALLY, ``ready_worst_case < READY_WORST_CASE_BUDGET_S`` — a
+    repo-owned POLICY constant (15.0s, the budget fly.toml's old routing check
+    implied). This is the part that keeps the SUM bounded: the per-plane
+    asserts above each compare a bound to its own inner total, so without it a
+    change doubling ``CONTROL_PLANE_HARD_TIMEOUT`` would pass everything.
+    (2) Additionally, ``ready_worst_case < fly.toml's http_check timeout`` WHEN
+    fly.toml exposes one. #2850 removed ``[[services.http_checks]]`` (the
+    /health HTTP check flapped and de-registered the sole machine), so today
+    the only external bound is the TCP replacement — whose 5s timeout is
+    documented as headroom, not a latency budget, and cannot serve as a
+    ceiling. When no http_check budget exists the test asserts instead that the
+    documented replacement (``[[services.tcp_checks]]``) IS present and that no
+    top-level ``[checks]`` table has appeared — so removing or altering the
+    checks block reds here rather than silently passing.
     """
     import httpx
 
