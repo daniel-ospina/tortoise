@@ -2052,6 +2052,43 @@ def test_delete_of_two_id_sharing_objects_is_lossless_end_to_end(tmp_path):
 
 
 
+def test_unanchored_id_retraction_is_orphaned_but_a_rename_is_not_covered(tmp_path):
+    """#2977 review 5 (P2): pins the BOUNDARY of the name-branch guard, so the
+    ONTOLOGY durability claim is not read as broader than it is.
+
+    The guard requires the fold's `id` to be anchored NOWHERE. An Object that is
+    RENAMED through `update_entity(id, name=...)` is NOT in that class: the id
+    IS anchored (by the original registration), so the guard is INERT and the
+    fold proceeds against the new name — which replay never learned, because the
+    rename emits no event. Replay therefore resurrects the OLD name.
+
+    This is NOT a guard defect and NOT caused by #2977 (the base commit replays
+    this shape as `live` too, having no ObjectRetracted handling at all). It is
+    pinned here so that (a) the ONTOLOGY paragraph's qualification has a test
+    behind it, and (b) a future reader cannot mistake this for the guarded shape
+    and "fix" it by widening the guard — which would be wrong, since the id is
+    genuinely anchored and the real gap is the unjournaled rename.
+    """
+    events = tmp_path / "events"; events.mkdir(exist_ok=True)
+    log = EventLog(str(events / "events.jsonl"))
+    # The registration names the OLD name; the retraction names the NEW one.
+    log.append({"type": "ObjectRegistered", "id": "OID", "name": "OLDPHX"})
+    log.append({"type": "ObjectRetracted", "id": "OID", "name": "NEWPHX",
+                "ts": "T1"})
+    proj = _drive("rebuild_all", tmp_path, events, "OID")
+    try:
+        rows = {r[0]: r[1] for r in proj.g.query(
+            "MATCH (o:Object) RETURN o.name, o.status").result_set}
+        # PINNED KNOWN GAP (#3377) — the OLD name is resurrected because the
+        # rename is unjournaled. If this ever becomes `[]`, the rename got a
+        # journal lane and this pin should be inverted deliberately.
+        assert rows.get("OLDPHX") == "live", (
+            "the unjournaled-rename gap (#3377): replay re-materializes the OLD "
+            f"name. If the rename became durable, invert this pin. Got {rows}")
+    finally:
+        proj.close()
+
+
 def test_retraction_whose_id_is_anchored_nowhere_does_not_bury_the_name(tmp_path):
     """P0 REGRESSION (#2977 review 4) — the NAME branch's id-identity constraint,
     the exact MIRROR of the id branch's name constraint.
