@@ -15,9 +15,20 @@ Contract (mirrors the eval's degrade-to-current contract, D8):
     failure cache stops HF-hub hammering on a persistent outage).
   * **Score exception or length-mismatched scores** → degrade to the
     untouched pool (never a per-ask failure).
+  * **Reranked set exceeds the context budget** (issue #2976) → degrade to
+    the untouched (unreranked) pool and DECLARE the overrun in
+    ``degrade_reason`` / ``budget_tokens`` / ``budget_bytes``; the reranked
+    set is never silently truncated to fit.
   * **No embeddings** (no scorer without the extra; degraded env) → the
     gate is off by default, so nothing changes; when force-enabled, the
     scorer loads from the extra and MMR falls back to Jaccard per-pair.
+
+ONE implementation (issue #2976): this module is the single owner of the
+scoring logic (``CrossEncoderScorer`` / ``FakeScorer`` / ``mmr_select`` /
+``_pair_sim`` / ``rerank_hits`` / ``load_scorer``). The eval lane
+(``tools/longmem_eval/rerank.py``) imports and re-exports these names — it
+keeps only its own env namespace and gate adapter, so the product and the
+harness measure the SAME scorer and MMR code (no fork).
 
 The ``retrieval_degraded`` flag on the ask response is untouched by design
 (A2): a vector-leg-absent lane stays degraded and the rerank is never a
@@ -196,30 +207,56 @@ _RETRY_TTL_S = 60.0
 _NOW = time.monotonic
 
 
-def get_scorer(model: str | None = None) -> tuple[CrossEncoderScorer | None, str]:
-    """Load (cache) the cross-encoder; returns (scorer, reason). Successes are
-    cached forever; failures are cached with a short TTL (``_RETRY_TTL_S``) so
-    a persistent outage degrades quickly instead of hammering the HF hub.
+def load_scorer(
+    name: str,
+    *,
+    cls=None,
+    lock=None,
+    cache: dict | None = None,
+    fail_cache: dict | None = None,
+    now=None,
+    retry_ttl_s: float | None = None,
+) -> tuple[CrossEncoderScorer | None, str]:
+    """The ONE lazy-load + cache policy for the cross-encoder (issue #2976).
 
-    DOUBLE-CHECKED LOCKING: ``_scorer_lock`` is held ACROSS construction — a
+    Returns ``(scorer, reason)``; success is cached permanently, a load
+    failure is cached for ``retry_ttl_s`` (a persistent outage degrades
+    quickly instead of hammering the HF hub). ``cls`` / ``lock`` / ``cache``
+    / ``fail_cache`` / ``now`` are injectable so the eval lane can keep its
+    own env namespace and module-level test seams while sharing this body.
+
+    DOUBLE-CHECKED LOCKING: the lock is held ACROSS construction — a
     concurrent cache miss blocks until the first thread's constructor
     finishes, then returns the cached instance."""
-    name = model or _model_name()
-    with _scorer_lock:
-        if name in _scorer_cache:
-            return _scorer_cache[name], ""
-        if name in _fail_cache and _NOW() - _fail_cache[name] < _RETRY_TTL_S:
-            return None, f"{name}: load failed recently (retry in ~{_RETRY_TTL_S:.0f}s)"
+    cls = cls or CrossEncoderScorer
+    lock = lock if lock is not None else _scorer_lock
+    cache = cache if cache is not None else _scorer_cache
+    fail_cache = fail_cache if fail_cache is not None else _fail_cache
+    now = now or _NOW
+    ttl = _RETRY_TTL_S if retry_ttl_s is None else retry_ttl_s
+    with lock:
+        if name in cache:
+            return cache[name], ""
+        if name in fail_cache and now() - fail_cache[name] < ttl:
+            return None, (f"{name}: load failed recently "
+                          f"(retry in ~{ttl:.0f}s)")
         try:
-            sc = CrossEncoderScorer(name)      # constructed INSIDE the lock
+            sc = cls(name)                     # constructed INSIDE the lock
         except Exception as e:
-            logger.warning("cross-encoder %s unavailable — ask rerank degrades "
+            logger.warning("cross-encoder %s unavailable — rerank degrades "
                            "to the untouched pool: %s", name, e)
-            _fail_cache[name] = _NOW()
+            fail_cache[name] = now()
             return None, f"{name}: {e!r}"
-        _scorer_cache[name] = sc
-        _fail_cache.pop(name, None)
+        cache[name] = sc
+        fail_cache.pop(name, None)
         return sc, ""
+
+
+def get_scorer(model: str | None = None) -> tuple[CrossEncoderScorer | None, str]:
+    """Load (cache) the ask-lane cross-encoder via the shared
+    ``load_scorer`` policy; resolves the model name from
+    ``TORTOISE_ASK_RERANK_MODEL`` when not given."""
+    return load_scorer(model or _model_name())
 
 
 def _fetch_embeddings(proj, ids: list[str]) -> dict[str, list[float]]:
@@ -348,6 +385,35 @@ def rerank_hits(
     return out, stats
 
 
+def context_budget_overrun(
+    hits: list[dict],
+    *,
+    max_context_tokens: int | None = None,
+    max_context_bytes: int | None = None,
+    question_date: str | None = None,
+) -> tuple[list[str], int, int]:
+    """Check the rendered reranked set against the existing context caps.
+
+    Returns ``(reasons, tokens, nbytes)`` — ``reasons`` is empty when the
+    set fits. Pure; the caller decides how to degrade (the ask lane degrades
+    to the untouched pool — never a silent truncation of the reranked set).
+    """
+    from .retrieval import estimate_tokens, render_context
+    text = render_context(hits, question_date=question_date)
+    tokens = estimate_tokens(text)
+    nbytes = len(text.encode("utf-8"))
+    reasons: list[str] = []
+    if max_context_tokens is not None and tokens > max_context_tokens:
+        reasons.append(f"tokens {tokens} > {max_context_tokens}")
+    if max_context_bytes is not None and nbytes + 2 > max_context_bytes:
+        # +2 conservative framing allowance — assemble_context charges the
+        # block separator bytes too (and over-counts the last block by 2), so
+        # the guard must be at least as strict or a set that "fits" here could
+        # still lose its lowest-ranked hit at assembly (a silent truncation).
+        reasons.append(f"bytes {nbytes} (+2 framing) > {max_context_bytes}")
+    return reasons, tokens, nbytes
+
+
 def ask_lane_rerank(
     query: str,
     hits: list[dict],
@@ -355,6 +421,9 @@ def ask_lane_rerank(
     proj,
     top_k: int,
     enabled: bool | None = None,
+    max_context_tokens: int | None = None,
+    max_context_bytes: int | None = None,
+    question_date: str | None = None,
 ) -> tuple[list[dict], dict]:
     """A7 product entry: the ask lane's rerank stage, gated + degrade-safe.
 
@@ -364,6 +433,18 @@ def ask_lane_rerank(
     path returns ``(hits, stats)`` with ``applied: False`` + a reason — the
     caller keeps the untouched pool (degrade-to-current). Returns the
     rerank stats for logging; the response shape (12 fields) is unchanged.
+
+    Budget guard (issue #2976): the measured rerank lever costs ~6.6x
+    context, so when ``max_context_tokens`` / ``max_context_bytes`` are
+    supplied the reranked set is checked against them and the WHOLE PASS is
+    refused (degrade to the unreranked order, ``degrade_reason`` starting
+    ``reranked-set-exceeds-context-budget``) rather than silently truncated
+    to fit. The caps are the same ones ``assemble_context`` enforces (the
+    byte check adds the same +2 framing slack, so the guard is never less
+    strict than assembly), so the default path and the guard agree by
+    construction. The check runs BEFORE the A8 evidence package — which can
+    only shrink the pool — so it is deliberately conservative: it may
+    over-refuse, never under-refuse.
     """
     if not rerank_enabled(enabled):
         return list(hits), {"applied": False, "degrade_reason": "disabled"}
@@ -375,8 +456,44 @@ def ask_lane_rerank(
     cap = _env_int(ASK_RERANK_CAP_ENV, DEFAULT_ASK_RERANK_PER_SESSION_CAP)
     lambda_ = _env_float(ASK_RERANK_LAMBDA_ENV, DEFAULT_ASK_RERANK_LAMBDA)
     try:
-        return rerank_hits(
+        selected, stats = rerank_hits(
             query, hits, scorer=scorer, proj=proj,
             top_k=max(top_k, 1), per_session_cap=cap, lambda_=lambda_)
     except Exception as e:  # noqa: BLE001, RUF100 — degrade, never raise
         return list(hits), {"applied": False, "degrade_reason": f"{e!r}"}
+    if not stats.get("applied"):
+        return selected, stats          # already degraded (score failure)
+    # The budget guard is deliberately INSIDE the never-raise envelope: the
+    # rendering it performs touches hit properties the scorer path never
+    # reads, so a malformed hit (e.g. a non-dict ``superseded_by``) must
+    # degrade, never escape as an exception (the A7 contract).
+    if max_context_tokens is not None or max_context_bytes is not None:
+        try:
+            reasons, tokens, nbytes = context_budget_overrun(
+                selected, max_context_tokens=max_context_tokens,
+                max_context_bytes=max_context_bytes,
+                question_date=question_date)
+        except Exception as e:  # noqa: BLE001, RUF100 — degrade, never raise
+            logger.warning(
+                "ask rerank budget check failed (%r) — degrading to the "
+                "unreranked order", e)
+            return list(hits), {
+                "applied": False,
+                "degrade_reason": (
+                    f"reranked-set-context-check-failed: {e!r}"),
+            }
+        if reasons:
+            logger.warning(
+                "ask rerank refused (context budget): %s — degrading to the "
+                "unreranked order", "; ".join(reasons))
+            return list(hits), {
+                "applied": False,
+                "degrade_reason": (
+                    "reranked-set-exceeds-context-budget: "
+                    + "; ".join(reasons)),
+                "budget_tokens": tokens,
+                "budget_bytes": nbytes,
+                "max_context_tokens": max_context_tokens,
+                "max_context_bytes": max_context_bytes,
+            }
+    return selected, stats

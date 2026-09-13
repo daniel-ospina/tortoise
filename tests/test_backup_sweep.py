@@ -33,7 +33,7 @@ from tortoise.backup_sweep import (
     run_graph_purge,
     team_graph_name,
 )
-from tortoise.hosted_backup import MemoryStorage, list_backups
+from tortoise.hosted_backup import MemoryStorage, list_backups, source_dialect
 from tests._embedded import _wipe_or as wipe  # noqa: E402, RUF100
 from tortoise.projection import FalkorProjection
 
@@ -564,6 +564,10 @@ def test_team_sweep_no_eligible_teams_fires_alert(shared_proj):
         )
         assert res["status"] == "no_eligible_teams"
         assert res["teams_backed_up"] == 0
+        # #2823: every run result names the dialect it enumerated — including
+        # the eligible-team branch, which resolves the source through the same
+        # seam as the legacy all-teams branch.
+        assert res["source"] == "registry"
         # NO_ELIGIBLE_TEAMS incident is present.
         kinds = [i["kind"] for i in res["incidents"]]
         assert "NO_ELIGIBLE_TEAMS" in kinds
@@ -579,6 +583,8 @@ def test_team_sweep_no_eligible_teams_fires_alert(shared_proj):
         assert any(
             i["kind"] == "NO_ELIGIBLE_TEAMS" for i in res2["incidents"]
         )
+        # #2823: the no-op roll-up preserves the dialect across runs.
+        assert res2["source"] == "registry"
 
 
 def test_team_sweep_flag_off_backs_up_all_teams(shared_proj):
@@ -634,6 +640,11 @@ def test_team_sweep_enum_failure_when_enabled(shared_proj):
         )
         assert res["status"] == "enum_failed"
         assert "eligible-team enumeration failed" in res["error"]
+        # #2823: the ELIGIBLE branch returns `source` too — a regression here
+        # would surface as `source: unknown` for exactly the misconfigured
+        # team-sweep case the field exists to diagnose.
+        assert res["source"] == "registry"
+        assert res["teams_backed_up"] == 0
 
 # ── #661: registry-stream key separation + per-label DATA_LOSS thresholds ───
 
@@ -896,6 +907,157 @@ def test_enumerate_teams_supabase_fail_closed():
 def test_enumerate_eligible_teams_supabase_filters():
     """Supabase equivalent of the #655 predicate: tier != free AND backup_enabled."""
     assert sorted(enumerate_eligible_teams(_fake_teams())) == ["team_b", "team_c"]
+
+
+def test_enumerate_teams_refuses_registry_source_in_supabase_lane(monkeypatch):
+    """#2823 fail-closed (P0 regression tripwire): a registry-dialect source
+    under a configured Supabase lane is a MISCONFIGURATION, not an empty
+    deployment — it must raise, never return [] (which every caller reads as
+    the chronic NO_TEAMS state this seam's contract exists to prevent).
+
+    This is the shape the production sweep had from the #669 flip until
+    #2823: `_registry_sdk()._get_registry()` under a Supabase deployment
+    enumerated the DELETED `registry_control_plane` graph → 0 teams → the
+    benign `no_teams` that backed nothing up for 31 days.
+    """
+    class _Reg:
+        """Registry dialect (first `query` param named `q`), never queried."""
+
+        def query(self, q, params=None):
+            raise AssertionError("the guard must raise before any query runs")
+
+    monkeypatch.setattr("tortoise.supabase_control.is_supabase_enabled",
+                        lambda: True)
+    with pytest.raises(RuntimeError, match="dialect mismatch"):
+        enumerate_teams(_Reg())
+    with pytest.raises(RuntimeError, match="dialect mismatch"):
+        enumerate_eligible_teams(_Reg())
+    # The refusal rides the seam's documented RuntimeError contract, so the
+    # callers' `enum_failed` (loud) path handles it — not the `no_teams` path.
+    with pytest.raises(RuntimeError, match="team enumeration failed"):
+        enumerate_teams(_Reg())
+
+
+def test_enumerate_teams_registry_lane_accepts_registry_source(monkeypatch):
+    """#2823: the refusal is deliberately ONE-DIRECTIONAL. Registry mode
+    (selfhost, CI) hands the seam a FalkorDB handle by design, and a
+    Supabase-dialect source under registry mode (selfhost-under-test, fakes)
+    is legitimate too — neither is refused."""
+    monkeypatch.setattr("tortoise.supabase_control.is_supabase_enabled",
+                        lambda: False)
+
+    class _Reg:
+        def query(self, q, params=None):
+            from types import SimpleNamespace
+
+            return SimpleNamespace(result_set=[["t_reg"]])
+
+    assert enumerate_teams(_Reg()) == ["t_reg"]
+    assert enumerate_teams(_fake_teams())[0] == "team_a"
+    assert sorted(enumerate_eligible_teams(_fake_teams())) == ["team_b", "team_c"]
+
+
+def test_sweep_reports_resolved_source_in_ops_state(shared_proj):
+    """#2823: the run result + the ops/state roll-up both record WHICH control
+    plane the run enumerated, and a no-op run records its OWN dialect without
+    mislabelling the last real sweep's outcomes.
+
+    The no-op leg deliberately flips the lane (registry → supabase) so the
+    assertions are discriminating: the preserved ``source`` names the lane that
+    produced the preserved totals (``registry``), while ``last_run_source``
+    names this run's dialect (``supabase``). Collapsing the two — either by
+    overwriting ``source`` or by never recording this run's dialect — makes the
+    block claim the wrong lane for the numbers it shows (the pre-fix
+    ambiguity), so both halves are pinned here."""
+    if shared_proj is None:
+        # A silent `return` would make this test pass having asserted NOTHING —
+        # a green result read as coverage for the #2823 regression tripwire.
+        pytest.skip("shared_proj unavailable — no URI and no embedded backend")
+    proj = _make_env(None, shared_proj)
+    store = MemoryStorage()
+    reg = proj.db.select_graph(_REGISTRY_GRAPH)
+    res = run_backup_sweep(
+        db=proj.db, registry=reg, storage=store, config=_config(),
+    )
+    assert res["status"] == "backed_up"
+    assert res["source"] == "registry"
+    first = json.loads(store.download(OPS_STATE_KEY))
+    assert first["source"] == "registry"
+    # A REAL run's two provenance fields agree by definition.
+    assert first["last_run_source"] == "registry"
+    # The lane flips; the next run enumerates 0 teams FROM THE SUPABASE LANE.
+    empty_cp = FakeControlPlane().seed("teams", [])
+    assert source_dialect(empty_cp) == "supabase"
+    res2 = run_backup_sweep(
+        db=proj.db, registry=empty_cp, storage=store, config=_config(),
+    )
+    assert res2["status"] == "no_teams"
+    assert res2["source"] == "supabase"
+    rolled = json.loads(store.download(OPS_STATE_KEY))
+    # The no-op still preserves the last REAL run's outcome fields + dialect...
+    assert rolled["last_sweep_at"] == first["last_sweep_at"], rolled
+    assert rolled["graph_totals"]["backed_up"] == 1
+    assert rolled["source"] == "registry", rolled
+    # ...and records THIS run's dialect separately, so /status can answer both
+    # "which lane produced these totals?" and "which lane did the last run read?".
+    assert rolled["last_run_source"] == "supabase", rolled
+
+
+def test_sweep_wrong_dialect_is_loud_not_no_teams(shared_proj, monkeypatch):
+    """#2823 (P0 regression): a Supabase-lane run handed a registry-dialect
+    source fails LOUD — `enum_failed`, never the benign `no_teams` that let the
+    production sweep look healthy while backing nothing up for 31 days.
+
+    The registry here HOLDS a Team node: the guard must fire on the dialect
+    mismatch itself, not because the source happened to be empty."""
+    if shared_proj is None:
+        pytest.skip("shared_proj unavailable — no URI and no embedded backend")
+    proj = _make_env(None, shared_proj)  # seeds Team 'team_x' in the registry
+    store = MemoryStorage()
+    reg = proj.db.select_graph(_REGISTRY_GRAPH)
+    monkeypatch.setattr("tortoise.supabase_control.is_supabase_enabled",
+                        lambda: True)
+    res = run_backup_sweep(
+        db=proj.db, registry=reg, storage=store, config=_config(),
+    )
+    assert res["status"] == "enum_failed", res
+    assert "dialect mismatch" in res["error"]
+    assert res["source"] == "registry"
+    assert res["teams_backed_up"] == 0
+    # A refused run must not leave a healthy-looking roll-up behind: the
+    # enum_failed return precedes the ops-state write.
+    assert read_ops_state(store) == {}
+
+
+def test_enumerate_teams_empty_supabase_read_is_confirmed_empty(monkeypatch):
+    """#2823 boundary: an EMPTY read from the CORRECT lane is not a mismatch —
+    the guard must not turn a fresh deployment into a loud failure. The
+    regression signal for a deployment that HAD teams is the ENUM_DELTA guard
+    on the >0 → 0 transition (#2821), not a refusal here."""
+    monkeypatch.setattr("tortoise.supabase_control.is_supabase_enabled",
+                        lambda: True)
+    empty = FakeControlPlane().seed("teams", [])
+    assert enumerate_teams(empty) == []
+    assert enumerate_eligible_teams(empty) == []
+
+
+def test_real_supabase_control_plane_is_classified_supabase(monkeypatch):
+    """#2823: `_refuse_wrong_dialect` makes `_is_supabase_source` a FAIL-CLOSED
+    production gate — if the REAL PostgREST adapter were ever mis-classified,
+    every correctly-configured Supabase deployment would start failing
+    `enum_failed` with no way to run a backup. The fakes cannot cover that:
+    only the real adapter proves the dialect probe reads `query(table, …)`.
+    Construction opens no connection (the httpx client is lazy and unused
+    here), so there is nothing to close."""
+    from tortoise.supabase_control import SupabaseControlPlane
+
+    cp = SupabaseControlPlane(url="http://control-plane.invalid",
+                              service_key="service-role-key")
+    monkeypatch.setattr("tortoise.supabase_control.is_supabase_enabled",
+                        lambda: True)
+    assert source_dialect(cp) == "supabase"
+    # The refusal must be a no-op for the real adapter in its own lane.
+    backup_sweep._refuse_wrong_dialect(cp)
 
 
 def test_enumerate_eligible_teams_supabase_fail_closed():

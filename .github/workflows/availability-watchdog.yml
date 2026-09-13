@@ -1,0 +1,159 @@
+# availability-watchdog (#2850) — OUT-OF-BAND availability probe for the
+# hosted API, with rate-limited self-healing and DEDUPLICATED alerting.
+#
+# The 2026-09-10 outage (~19:10–19:55 UTC, ~45 min): https://api.premiselabs.co
+# was fully unreachable and nobody was paged. Sentry could not see it — Sentry
+# runs INSIDE the process, so a machine that is alive-but-not-serving raises no
+# exception and reports nothing; the Fly proxy just stops routing ("no known
+# healthy instances found for route tcp/443") and every public request hangs
+# until it times out. There is exactly one machine, so de-registration from
+# routing IS a total outage.
+#
+# This workflow is the missing OUT-OF-PROCESS observer: it runs on GitHub
+# Actions (a different failure domain than Fly), every 5 minutes, and asserts
+# the REAL USER PATH — `GET /v1/teams` with no auth, which must answer 401
+# (source-verified: tortoise/session_auth.py `verify_session_jwt` raises 401
+# "Missing session token" with zero network I/O when the Authorization header
+# is absent). A 2xx or a 401 both mean "the app answered"; a timeout, a 5xx or
+# a connection error mean it did not.
+#
+# It FAILS the workflow when the service is genuinely down (after retries), so
+# GitHub's own failure notifications fire — and it files/updates exactly ONE
+# GitHub issue per incident (title-keyed dedupe), never one per run. The
+# existing welcome-e2e-monitor.yml did the opposite (a new issue per failing
+# run, title carrying github.run_id → dozens of duplicates, all still open
+# (#2231 → present; 59 open at the 2026-09-11 census, still accumulating —
+# re-measure at cleanup time; #3014).
+#
+# Self-healing: when the service is confirmed down for a SUSTAINED period the
+# watchdog restarts the Fly machine, strictly rate limited (SUSTAINED_DOWN_
+# MINUTES / RESTART_COOLDOWN_MINUTES / MAX_RESTARTS_PER_HOUR) following the AWS
+# automated-remediation guidance to cap remediation velocity and escalate to a
+# human when the cap is hit. It needs the FLY_API_TOKEN repository secret (the
+# name already used by deploy-hosted.yml); absent → the restart step is skipped
+# with a clear log line and a comment naming the secret, and ALERTING STILL
+# WORKS. If the restart leg is ever the only thing broken, the watchdog says so
+# rather than going quiet.
+#
+# Operator runbook: docs/infra-runbook.md → "Out-of-band availability watchdog".
+# Harness: .github/scripts/availability-watchdog.test.sh (CI job
+# availability-watchdog; stubs curl/gh/flyctl, no network).
+#
+# Manual run / drill (disarms self-healing automatically): dispatch this
+# workflow with probe_url set to a non-production URL.
+name: availability-watchdog
+
+on:
+  schedule:
+    # Every 5 minutes — GitHub's minimum scheduled interval. Scheduled runs can
+    # be delayed under platform load, so treat every timestamp as approximate.
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+    inputs:
+      probe_url:
+        description: >-
+          Override the probe URL (drill/testing). Any value other than the
+          production endpoint DISARMS the self-healing restart leg, so a drill
+          can never restart production.
+        required: false
+        default: ''
+        type: string
+
+# Never overlap: two concurrent runs could both decide to restart (the state
+# lives in the incident issue body, so a race could double-count).
+concurrency:
+  group: availability-watchdog
+  cancel-in-progress: false
+
+# contents: read for actions/checkout, issues: write for the file/comment/close
+# calls. The repo's default token is restricted (#2140), so the scopes are
+# granted explicitly — without them the monitor is deaf while looking green.
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      # Left EMPTY on the scheduled path so the SCRIPT's single default applies
+      # (availability-watchdog.sh DEFAULT_PROBE_URL). Duplicating the production
+      # URL here would mean that changing one copy silently turns every
+      # production run into a drill — no restarts, [DRILL]-titled incidents —
+      # and the string comparison against DEFAULT_PROBE_URL is the ONLY thing
+      # distinguishing a drill from production.
+      PROBE_URL: ${{ inputs.probe_url }}
+      # Fly app. FLY_API_TOKEN is the established name (deploy-hosted.yml) and
+      # is passed at STEP level (see the probe step) — NOT here: a job-level
+      # env is exported to EVERY step, including actions/checkout and the
+      # third-party setup-flyctl action, which is exactly what this avoids.
+      # ABSENT IS OK: the watchdog skips the restart leg with a loud log line
+      # and a comment on the incident naming the secret to create.
+      FLY_APP: tortoise-y4mjjq
+      # The Telegram paging credentials are passed at STEP level (see the probe
+      # step) — NOT here (round 4, P3-6): a job-level env is exported to EVERY
+      # step, including actions/checkout and the third-party setup-flyctl
+      # action. A durable bot token is exactly the credential class that must
+      # not sit in a third party's environment.
+      # Probe politeness: a generous per-request timeout, and 3 attempts ~10s
+      # apart before declaring DOWN so a transient blip cannot fire an alarm.
+      PROBE_TIMEOUT_S: '25'
+      PROBE_CONNECT_TIMEOUT_S: '10'
+      PROBE_ATTEMPTS: '3'
+      PROBE_RETRY_SLEEP_S: '10'
+      # Self-healing limits (see the AWS velocity-cap discussion in the script
+      # header). 10 min of continuous failure before the first restart, 20 min
+      # between restarts, at most 2 per rolling hour — after which the watchdog
+      # stops and a human is asked to intervene.
+      SUSTAINED_DOWN_MINUTES: '10'
+      RESTART_COOLDOWN_MINUTES: '20'
+      MAX_RESTARTS_PER_HOUR: '2'
+      # Routine "still down" comments are throttled; the incident BODY count
+      # increments on every run regardless (the dedupe contract).
+      COMMENT_THROTTLE_MINUTES: '15'
+    steps:
+      # persist-credentials: false (round 4, P3-5): actions/checkout writes the
+      # workflow token into `.git/config` by DEFAULT, where a later step (the
+      # third-party setup-flyctl action) can read it — so moving GH_TOKEN to the
+      # probe step's env did NOT keep an `issues: write` token out of the
+      # checkout/setup-flyctl environment; the on-disk copy remained. This step
+      # only reads files and needs no git auth.
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      # Installs flyctl for the self-healing restart leg. It runs
+      # unconditionally — a step `if:` can no longer read the token (it moved to
+      # the probe step, which is the whole point), and this action does NOT need
+      # the token to install the binary. continue-on-error: without it a
+      # broken/unavailable setup-flyctl would abort the job BEFORE the probe
+      # step — i.e. a self-healing dependency would silence the ALERTING leg
+      # (the exact "deaf monitor" class this workflow exists to avoid).
+      # PINNED to a full commit SHA (v1 / master head at the time of writing):
+      # a mutable branch would let the action's owner change the code that runs
+      # next to the Fly token.
+      - name: Install flyctl (needed only by the self-healing restart leg)
+        continue-on-error: true
+        timeout-minutes: 3
+        uses: superfly/flyctl-actions/setup-flyctl@ed8efb33836e8b2096c7fd3ba1c8afe303ebbff1
+      - name: Probe the public endpoint (self-heal + deduplicated alert)
+        env:
+          # STEP-level (round 3, P3-11): BOTH tokens are exported ONLY to the
+          # step that runs the watchdog. At job level they would also be handed
+          # to actions/checkout and to the third-party setup-flyctl action —
+          # `GH_TOKEN` carries issues:write and `FLY_API_TOKEN` can restart the
+          # production machine, so neither belongs in the checkout step's env.
+          # Actions does NOT export GITHUB_TOKEN itself, so GH_TOKEN must be
+          # named explicitly here or the monitor is deaf (#2140 / registry-cron).
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # The restart token: passed to the step that runs `flyctl machine
+          # restart`. Absent → the restart leg is skipped with a loud log line
+          # and an incident comment naming the secret to create.
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          # The paging credentials moved here from the job-level env (round 4,
+          # P3-6): the same rationale that moved GH_TOKEN/Fly applies verbatim
+          # to a durable bot token — only the step running the watchdog gets it.
+          # Absent → the page is skipped with a log line.
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: bash .github/scripts/availability-watchdog.sh

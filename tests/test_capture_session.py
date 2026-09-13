@@ -381,13 +381,52 @@ def test_capture_session_creates_event(sdk):
         "MATCH ()-[r:aboutEvent]->(:Event {eventKind:'sessionCaptured'}) RETURN count(r)"
     ).result_set
     assert no_edges[0][0] == 0, "capture path must not mint aboutEvent provenance"
-    stamps = proj.g.query(
-        "MATCH (n:Point) WHERE n.eventId = $eid RETURN count(n)",
-        params={"eid": eid},
+    # #2552: the stamp now also covers the capture's reified operator Points,
+    # so a count-by-eventId can exceed ``extracted`` when operators exist.
+    # Gate on the EXTRACTED ids carrying the eventId (the actual predicate).
+    point_ids = [p["id"] for p in res["points"]]
+    rows = proj.g.query(
+        "MATCH (n:Point) WHERE n.id IN $ids RETURN n.eventId",
+        params={"ids": point_ids},
     ).result_set
-    assert stamps[0][0] == res["extracted"], (
+    assert len(rows) == len(point_ids)
+    assert all(r[0] == eid for r in rows), (
         "every extracted point must carry the sessionCaptured eventId"
     )
+
+
+def test_capture_session_stamps_operator_event_ids(sdk, monkeypatch):
+    """#2552 (layer-2 WIRE — the structural leg): the capture path stamps the
+    sessionCaptured eventId on the reified operator Points it writes,
+    mirroring the point path, so a committed operator node enters the
+    eventId-keyed retrievable memory layer (``WHERE p.eventId IN $eids``).
+    Pre-fix operators carried no eventId — the memory layer never admitted
+    them and ``operator_counts`` was silently ``{}`` on every real run."""
+    monkeypatch.setenv("TORTOISE_SESSION_EXTRACTOR", "m2")
+    conv = [
+        {"role": "user", "content": "The auth dead-end is the top issue "
+                                     "because it blocks every deploy."},
+        {"role": "assistant", "content": "Therefore we should ship serve "
+                                           "--http first."},
+    ]
+    res = sdk.capture_session(conv)
+    assert res["ok"] is True, res
+    proj = sdk._get_proj()
+    eid = proj.g.query(
+        "MATCH (e:Event {eventKind:'sessionCaptured'}) RETURN e.eventId"
+    ).result_set[0][0]
+    rows = proj.g.query(
+        "MATCH (o:Point {is_operator:true}) RETURN o.id, o.eventId, o.status"
+    ).result_set
+    assert rows, "the cue-word conversation must produce capture operators"
+    assert all(r[1] == eid for r in rows), (
+        f"every reified operator must carry the sessionCaptured eventId: {rows}")
+    # ... and the eventId-keyed memory layer admits them (retrievable).
+    n = proj.g.query(
+        "MATCH (p:Point) WHERE p.eventId = $eid AND p.is_operator = true "
+        "RETURN count(p)", params={"eid": eid},
+    ).result_set[0][0]
+    assert n == len(rows)
 
 
 def test_capture_session_source_is_agent_session(sdk):

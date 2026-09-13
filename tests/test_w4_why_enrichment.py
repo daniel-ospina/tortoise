@@ -1199,8 +1199,10 @@ def test_assemble_why_blocks_canonical_shape(w4_flag):
         block = blocks[g["claim"]]
         assert block["point_id"] == g["claim"]
         assert isinstance(block["support_chain"], list)
+        # #3276: measured/baseline are the additive explicit measurement state
+        # (has_ep == measured; baseline marks a prior-only declared baseline).
         assert set(block["ep"]) == {"confidence_mean", "variance", "contested",
-                                    "has_ep"}
+                                    "has_ep", "measured", "baseline"}
         assert block["ep"]["contested"] is True
         assert set(block["supersession"]) == {"status", "superseded_by",
                                               "supersedes", "successor_label"}

@@ -63,6 +63,8 @@ import os
 import uuid as _uuid
 from datetime import UTC, datetime, timezone
 
+import httpx
+
 _logger = logging.getLogger(__name__)
 
 # Env-var names: SUPABASE_SERVICE_ROLE_KEY is the canonical name (edge
@@ -266,12 +268,23 @@ class SupabaseControlPlane:
     def query(self, table: str, *, select: list[str] | None = None,
               filters: list[tuple[str, str, object]] | None = None,
               method: str = "GET", json_body: dict | None = None,
-              order: str | None = None, limit: int | None = None) -> list[dict]:
+              order: str | None = None, limit: int | None = None,
+              timeout: httpx.Timeout | float | None = None) -> list[dict]:
         """Run one PostgREST call. Returns row dicts; [] for PATCH/no rows.
 
         Filters: (column, op, value) with ops ``eq``, ``neq``, ``is``
         (value None → ``col=is.null``), ``gt``, ``lt``. Raises RuntimeError
         on any failure.
+
+        ``timeout`` (#2850/#2988): an optional PER-REQUEST override for the
+        httpx call. ``None`` (the default) keeps the client-level timeout —
+        i.e. today's behaviour for every normal caller. The health probe
+        passes an explicit composed ``httpx.Timeout`` here, because the
+        client's ``timeout=5.0`` is applied PER PHASE (connect / read / write
+        / pool) rather than as a total deadline, so a multi-phase stall could
+        outrun the coordinator's outer bound and strand the probe's worker
+        thread (CPython #87185). NOTE ``timeout=None`` on httpx means "no
+        timeout", so it is deliberately NOT forwarded.
         """
         url = f"{self._url}/rest/v1/{table}"
         params: dict[str, str] = {}
@@ -314,8 +327,12 @@ class SupabaseControlPlane:
             # the second would raise and kill every auth resolution. Direct
             # method calls on the persistent client are the documented pattern
             # (re-review P0, PR #851).
+            # A per-request timeout is forwarded ONLY when supplied — httpx
+            # reads ``timeout=None`` as "disable timeouts".
+            req_kwargs = {} if timeout is None else {"timeout": timeout}
             if method == "GET":
-                resp = self._http.get(url, params=params, headers=headers)
+                resp = self._http.get(url, params=params, headers=headers,
+                                      **req_kwargs)
             elif method == "PATCH":
                 headers["Content-Type"] = "application/json"
                 # return=representation when a select is given → the caller
@@ -325,17 +342,18 @@ class SupabaseControlPlane:
                 headers["Prefer"] = ("return=representation" if select
                                       else "return=minimal")
                 resp = self._http.patch(url, params=params, headers=headers,
-                                        json=json_body or {})
+                                        json=json_body or {}, **req_kwargs)
             elif method == "POST":
                 headers["Content-Type"] = "application/json"
                 headers["Prefer"] = "return=representation"
                 resp = self._http.post(url, params=params, headers=headers,
-                                       json=json_body or {})
+                                       json=json_body or {}, **req_kwargs)
             elif method == "DELETE":
                 # PostgREST row delete (service role). Only used by the
                 # post-grace hard-delete purge (#302) — soft paths PATCH.
                 headers["Prefer"] = "return=minimal"
-                resp = self._http.delete(url, params=params, headers=headers)
+                resp = self._http.delete(url, params=params, headers=headers,
+                                         **req_kwargs)
             else:
                 raise ValueError(f"unsupported method {method!r}")
         except RuntimeError:

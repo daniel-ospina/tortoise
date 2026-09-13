@@ -11,8 +11,12 @@ substrate, so a vacuous arm must be impossible to discover late):
   the THIRD object bookshelf is outside BOTH resolved subgraphs, so the
   assembled arm's B=0 is structurally reachable).
 * R9: flag-OFF legacy ask() at DEFAULT caps admits FEWER than 2 of the two
-  deep-rank golds (the 87-row pool ranks the golds ~56-57 — outside the
-  default rerank depth, inside a widened fetch).
+  deep-rank golds (the 87-row corpus ranks both golds BELOW the default
+  pool-40 cutoff and INSIDE a widened 120-row fetch). #3095 re-measurement
+  (post-#3018): the engine's opaque fulltext order moved while the corpus
+  was unchanged, so the golds are now both outside DEFAULT — the
+  order-independent statement of the same geometry. Indices are deliberately
+  NOT recorded: they are incidental to the engine's opaque sequence.
 
 Docker lane only (live FalkorDB — dedicated per-test graph with fulltext,
 deleted at teardown; the module probe verifies the FTS round-trip, not just
@@ -110,6 +114,13 @@ def _count(proj, cypher: str, **params) -> int:
 
 def _row(proj, cypher: str, **params):
     return proj.g.query(cypher, params=params).result_set
+
+
+def _n_rows(evidence: str) -> int:
+    """Number of evidence CHUNKS (header included) — the evidence-shape count
+    the R9 pool-depth bounds compare. Duplicates count as rows (the shared
+    ``ag.evidence_chunks`` parser is duplicate-aware by construction)."""
+    return len(ag.evidence_chunks(evidence))
 
 
 def _legacy_ask(sdk, monkeypatch, question: str, *, flag_off: bool = True):
@@ -297,34 +308,62 @@ def test_out_of_subgraph_gold_calibration(sdk, monkeypatch):
 
 
 def test_deep_rank_geometry_calibration(sdk, monkeypatch):
-    """R9 geometry calibration (Task 1): the honest, non-vacuous pool-40
-    mechanism, pinned NOW (Task 7 is forbidden from editing the substrate).
+    """R9 geometry calibration (Task 1): the pool-depth discriminator, pinned
+    NOW (Task 7 is forbidden from editing the substrate).
 
     Measured platform truth: this FalkorDB fulltext scores ties (0.0) — the
     result order is a deterministic internal order, not BM25 — and DEFAULT
-    evidence keeps the first ~40 rows. On this exact content set pDeepG1
-    (marker "fieldtrip") deterministically ranks INSIDE the default pool
-    (an honest in-pool same-subject evidence row) while pDeepG2 (marker
-    "almanac") ranks at 56/57 — OUTSIDE pool-40, INSIDE a widened 120
-    fetch. The calibration pins the delta Task 7's A-widened arm depends
-    on: DEFAULT admits G1 only; the widened arm must admit BOTH (G2 is the
-    discriminating row). Fails loudly if the deep gold ever leaks into
-    DEFAULT evidence (the pool stopped binding) or vanishes from widened
-    reach (the widened arm would be vacuous in the other direction)."""
+    evidence keeps the first ~40 rows.
+
+    #3095 RE-MEASUREMENT (post-#3018, `fix(retrieval): deterministic ranking
+    order for a static store`): the pre-#3018 calibration had pDeepG1
+    (marker "fieldtrip") INSIDE the default pool and pDeepG2 (marker
+    "almanac") deeper. #3018 removed the second post-CREATE write whose
+    fulltext index-statistic skew produced that opaque order, so the scan
+    order moved: on the SAME corpus (87 rows) BOTH golds now rank OUTSIDE
+    the default pool-40 and INSIDE a widened 120 fetch. The specific opaque
+    ranks are NOT pinned — they are incidental to the engine's sequence; only
+    the default-below / widened-above RELATIONSHIP is the contract.
+
+    The calibration pins the delta Task 7's A-widened arm depends on,
+    ORDER-INDEPENDENTLY: the DEFAULT window admits FEWER THAN 2 of the two
+    deep golds (post-#3018: 0; pre-#3018: 1) while the widened fetch reaches
+    BOTH. The DEFAULT window must also stay NON-EMPTY and BOUNDED (the pool
+    binds BELOW the golds, it does not starve and does not silently widen): a
+    known in-pool crowd row is asserted present and the row count is bounded.
+    Fails if a deep gold leaks into DEFAULT evidence (the pool stopped
+    binding) or vanishes from widened reach (the widened arm would be
+    vacuous in the other direction)."""
     d = ag.build_deep_rank_substrate(sdk)
     res = _legacy_ask(sdk, monkeypatch, d["question"])
     ev = res.get("evidence", "")
-    # G1 (in-pool): its marker MUST appear in DEFAULT evidence
-    assert "fieldtrip" in ev, (
-        "R9 geometry broken: the in-pool gold pDeepG1 is NOT admitted at "
-        "DEFAULT — the pool-40 rank contract changed. Evidence head: "
-        f"{ev[:200]}")
-    # G2 (deep): its marker MUST NOT appear — DEFAULT pool-40 binds below it
-    assert "almanac" not in ev, (
-        "R9 geometry broken: the deep gold pDeepG2 leaked into DEFAULT "
-        "evidence — the pool does not bind below rank 56 (Task 7's "
-        "A-widened arm would be vacuous). Evidence head: "
-        f"{ev[:200]}")
+    # ORDER-INDEPENDENT gold admission (the invariant this calibration
+    # owns): the DEFAULT window admits FEWER THAN 2 of the two deep golds.
+    # Measured post-#3018 = 0, pre-#3018 = 1 — both satisfy the contract, so
+    # a future engine re-order does not falsely fail here the way the
+    # pre-#3018 "G1 is in-pool" phrasing did.
+    n_gold_def = sum(m in ev for m in ("fieldtrip", "almanac"))
+    assert n_gold_def < 2, (
+        f"R9 geometry broken: the DEFAULT evidence admits {n_gold_def}/2 "
+        "deep golds — the pool-40 no longer binds above them, so Task 7's "
+        f"A-widened arm would be vacuous. Evidence head: {ev[:200]}")
+    # non-vacuity: the DEFAULT window still admits in-pool same-subject crowd
+    # rows — a starved/empty default arm must fail here, not pass silently.
+    # Depth is BOUNDED, not merely non-zero: the floor catches a pool that
+    # collapsed to a handful of rows (the gold-count assertion above would
+    # still hold) and the ceiling catches a DEFAULT window that silently
+    # widened toward the 120-row fetch.
+    assert "deep-subject milestone" in ev, (
+        "R9 geometry broken: the DEFAULT window admits no crowd row — the "
+        "pool-40 must bind below the golds, never starve. Evidence: "
+        f"{ev[:200]!r}")
+    n_def = _n_rows(ev)
+    assert 20 <= n_def <= 45, (
+        f"R9 geometry broken: the DEFAULT evidence window holds {n_def} "
+        "chunks — expected the pool-40 default (measured 41 chunks: 40 pool "
+        "rows + header; bounded 20..45). Too few = the pool collapsed; too "
+        "many = DEFAULT silently widened and the widen-vs-default "
+        "discriminator is gone.")
     # widened reach: a 120-deep FTS fetch must return BOTH golds (Task 7's
     # widened arm admits both ONLY if both are retrievable at that depth)
     hits = sdk.tortoise_fts_query(d["question"], entity_type="point",
