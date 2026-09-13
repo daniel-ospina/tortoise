@@ -16422,7 +16422,9 @@ class TortoiseSDK:
             # `is not None` guard, not a sibling of it — a sibling makes
             # `update_entity(oid, status=None)`, a working call today, hit
             # `None not in OBJECT_STATUS_VALUES` and raise.
-            if _is_object and _is_object[0][0]:
+            if _is_object and _is_object[0][0]:  # noqa: SIM102 — see the
+                # NESTING note above: merging these is exactly the sibling bug
+                # they exist to avoid.
                 if props.get("status") is not None:
                     if props["status"] == "retracted":
                         raise ValueError(
@@ -16493,7 +16495,7 @@ class TortoiseSDK:
             )
             n = (r.result_set[0][0] or 0) if r.result_set else 0
             total += n
-            if n and label != "Object":
+            if n and label != "Object":  # noqa: SIM102
                 # D-9: five labels remain non-durable. The public delete_entity
                 # contract is now label-inconsistent — warn rather than stay
                 # silent. Class-wide fix: #2296.
