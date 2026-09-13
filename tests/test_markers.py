@@ -444,6 +444,11 @@ def test_no_redirect_stems_registry_exact():
         # asserts are embedded-FalkorDBLite-only; moved to the carve-out
         # lane with the other eval_* suites.
         "test_longmem_runner",
+        # #3420 (36fce6431, "bound the embedded DB lane's socket timeout and
+        # retry multiplier"): its test module was added to
+        # TEST_NO_REDIRECT_STEMS but this pin was not updated, so the
+        # repo-wide markers gate red'd on every PR until reconciled here.
+        "test_projection_embedded_socket_timeout",
     })
     assert frozenset(TEST_NO_REDIRECT_STEMS) == expected, (
         "TEST_NO_REDIRECT_STEMS drifted from the pinned carve-out stems "
